@@ -1921,7 +1921,8 @@ const MAX_TARGET_CHECKS: usize = 32;
 /// `browser.open`); the domain of every recipient of a mail send, in `to`, `cc` and `bcc`
 /// (`execute_provider_action`); and each command a shell runs (`command_names`; `shell`, and
 /// `code_interpreter` in `sh`): the arguments a POSIX shell is given after `-c`, the command a wrapper program
-/// runs (`env`, `sudo`, `xargs` and the others in `WRAPPERS`), and the text `eval` runs. Empty for every
+/// runs (`env`, `sudo`, `xargs` and the others in `WRAPPERS`), the command of each `find -exec` predicate, the
+/// withheld command of a program in `WITHHELD_COMMANDS`, and the text `eval` runs. Empty for every
 /// other tool, and for an input that does not read. Each value is named once, in the order it appears;
 /// an empty value is the withheld one, which covers every value of its kind (see `mail_recipient_domains`).
 #[must_use]
@@ -2264,9 +2265,11 @@ fn is_redirection_ampersand(text: &str, index: usize) -> bool {
 }
 
 /// The segments of a shell text cut only where a separator counts: outside quotes and not escaped by a backslash, with
-/// the separators of `shell_segments`. So a quoted script, which a separator inside its quotes would cut, stays whole,
-/// and `command_words_names` reads its word quote-removed. The quotes and backslashes are read as `shell_tokens` reads
-/// them. The flag says the text ends inside an open quote, or with a backslash that escapes nothing: the text then
+/// the separators of `shell_segments`, except that a `|` right after an unquoted `>` or `>&` is the clobber mark of
+/// `>|` or `>&|`, and a `;` there is the sync mark of ksh's `>;`, which no separator is. So a quoted script, which a
+/// separator inside its quotes would cut, stays whole, and `command_words_names` reads its word quote-removed. The
+/// quotes and backslashes are read as `shell_tokens` reads them. The flag says the text ends inside an open quote, or
+/// with a backslash that escapes nothing: the text then
 /// goes on past the last segment, which is cut there. It also says the text holds an ANSI-C string (`$'...'`) outside
 /// quotes: bash reads its `\'` as an escaped quote, where dash, which has no such string, reads that quote as the end
 /// of one. The two readings part there, so the value is withheld rather than read one way. A `#` that begins a word,
@@ -2281,6 +2284,9 @@ fn quote_aware_segments(text: &str) -> (Vec<&str>, bool) {
     // Whether the next character begins a word, outside quotes, and whether a comment is open.
     let mut word_start = true;
     let mut comment = false;
+    // Whether the character just read is the `>` of a clobber operator, or the `&` of `>&`, so that a `|` right after it
+    // is the operator's mark.
+    let mut after_redirect = false;
     let mut chars = text.char_indices();
     while let Some((index, c)) = chars.next() {
         if comment {
@@ -2321,6 +2327,13 @@ fn quote_aware_segments(text: &str) -> (Vec<&str>, bool) {
                 comment = true;
                 false
             }
+            // The clobber mark of `>|` or `>&|` is part of its redirection, not a pipe: its target is the word after it.
+            // So is the sync mark of ksh's `>;` (and of `>>;`, `&>;`): no shell that runs `>;` reads its `;` as a
+            // separator.
+            '|' | ';' if after_redirect => {
+                word_start = false;
+                false
+            }
             ';' | '|' | '(' | ')' | '`' | '\n' | '\r' => {
                 word_start = true;
                 true
@@ -2344,6 +2357,7 @@ fn quote_aware_segments(text: &str) -> (Vec<&str>, bool) {
                 false
             }
         };
+        after_redirect = c == '>' || (c == '&' && after_redirect);
         if ends_command {
             segments.push(&text[start..index]);
             start = index + c.len_utf8();
@@ -2451,10 +2465,13 @@ enum ShellToken {
 }
 
 /// The tokens of one segment. Blanks split words, except inside quotes. An unquoted `<`, `>` or `&>` is
-/// a redirection, and a file-descriptor number right before one (`2>`) belongs to it, not to a word. The flag
-/// says the segment is cut: it ends inside a quote, or with a backslash that escapes the separator after it, so
-/// its text goes on in the next segment, or, as the last segment of a text, the text ends there.
-fn shell_tokens(segment: &str) -> (Vec<ShellToken>, bool) {
+/// a redirection, and a file-descriptor number right before one (`2>`) belongs to it, not to a word. So does the mark of
+/// a clobber operator, which ends in `>` or in the `&` of `>&`: a `|` (`>|`, `>&|`) and ksh's `;` (`>;`) in every
+/// shell, and, with `zsh_clobber`, a `!` (`>!`, `>&!`), which bash and dash read as the first character of the target
+/// instead. The word after the mark is the redirection's target either way. The flag says the segment is cut: it ends
+/// inside a quote, or with a backslash that escapes the separator after it, so its text goes on in the next segment,
+/// or, as the last segment of a text, the text ends there.
+fn shell_tokens(segment: &str, zsh_clobber: bool) -> (Vec<ShellToken>, bool) {
     let mut tokens = Vec::new();
     let mut word = String::new();
     let mut in_word = false;
@@ -2486,7 +2503,23 @@ fn shell_tokens(segment: &str) -> (Vec<ShellToken>, bool) {
             word.clear();
             in_word = false;
             tokens.push(ShellToken::Redirect);
-            while matches!(chars.peek(), Some(&('<' | '>' | '&'))) {
+            let mut last = c;
+            let mut has_gt = c == '>';
+            while let Some(&next) = chars.peek() {
+                if !matches!(next, '<' | '>' | '&') {
+                    break;
+                }
+                has_gt |= next == '>';
+                last = next;
+                chars.next();
+            }
+            // The operator is a clobber operator when it ends in `>` (`>`, `>>`, `&>`) or in the `&` of `>&`. Its mark is
+            // then one operator with no pipe or separator, so the word after it is the redirection's target: `|` and
+            // ksh's `;` are the mark in every shell that reads them, and `!` is the mark in zsh alone.
+            let clobber = last == '>' || (last == '&' && has_gt);
+            if clobber && matches!(chars.peek(), Some(&('|' | ';'))) {
+                chars.next();
+            } else if zsh_clobber && clobber && chars.peek() == Some(&'!') {
                 chars.next();
             }
         } else if c == '\'' || c == '"' {
@@ -2514,29 +2547,110 @@ fn shell_tokens(segment: &str) -> (Vec<ShellToken>, bool) {
     (tokens, quote.is_some() || escaped_at_end)
 }
 
-/// The command names of one shell segment: those of the command, which is the first word that is not a leading
-/// word (see `is_leading_word`) and not a redirection's target, and what that command runs (`command_words_names`).
-/// Empty when that word names nothing.
+/// The command names of one shell segment, read as each of its readings takes it (`segment_readings`): those of
+/// its commands (`command_positions`), each the first word that is not a leading word (see `is_leading_word`) and not
+/// a redirection's target, and what that command runs (`command_words_names`). Each reading names its own commands, so
+/// a command that one reading hides is named by the other. Empty when no reading's command names anything.
 fn command_prefix(segment: &str, depth: usize) -> Vec<String> {
-    let (tokens, cut) = shell_tokens(segment);
-    let words = segment_words(tokens);
-    let Some(start) = command_position(&words) else {
-        return Vec::new();
-    };
-    command_words_names(&words[start..], depth, cut)
+    let (readings, cut) = segment_readings(segment);
+    let mut names = Vec::new();
+    for words in &readings {
+        for start in command_positions(words) {
+            names.extend(command_words_names(&words[start..], depth, cut));
+        }
+    }
+    distinct(names)
 }
 
-/// The position of a segment's command word: the first word that is not a leading word (`is_leading_word`).
-fn command_position(words: &[String]) -> Option<usize> {
-    words.iter().position(|word| !is_leading_word(word))
+/// The words of a segment as each reading of its `!` takes them, each reading once. Bash and dash read a `!` after a
+/// clobber operator's `>` as the first character of the redirection's target, so the word after it is a command; zsh
+/// reads the `!` as the clobber mark, so the word after it is the target and the command is the one after that
+/// (`shell_tokens`). The flag says the segment is cut, which both readings share.
+fn segment_readings(segment: &str) -> (Vec<Vec<String>>, bool) {
+    let (bash_tokens, cut) = shell_tokens(segment, false);
+    let (zsh_tokens, _) = shell_tokens(segment, true);
+    let bash = segment_words(bash_tokens);
+    let zsh = segment_words(zsh_tokens);
+    let readings = if bash == zsh {
+        vec![bash]
+    } else {
+        vec![bash, zsh]
+    };
+    (readings, cut)
+}
+
+/// The positions of a segment's command words, in order: the first word that is not a leading word
+/// (`is_leading_word`) and not a name a keyword introduces. A `function` defines its body, and the command is in the
+/// body (`function_positions`, as in `function f { rm x; }`). `coproc` may take a NAME before a compound command
+/// (`coproc NAME { rm x; }`), which bash reads so, while zsh runs the word after `coproc` as the command: both
+/// readings are named, so each is checked.
+fn command_positions(words: &[String]) -> Vec<usize> {
+    let mut index = 0;
+    while let Some(word) = words.get(index) {
+        let rest = &words[index + 1..];
+        match word.as_str() {
+            "function" => return function_positions(words, index),
+            "coproc" if coproc_takes_name(rest) => {
+                let body = command_positions(&words[index + 2..]);
+                return std::iter::once(index + 1)
+                    .chain(body.into_iter().map(|at| at + index + 2))
+                    .collect();
+            }
+            "coproc" => index += 1,
+            word if is_leading_word(word) => index += 1,
+            _ => return vec![index],
+        }
+    }
+    Vec::new()
+}
+
+/// The positions of the commands a `function` keyword at `at` defines. The words before a body are the function's
+/// names, which run nothing (`function NAME { list }`, and zsh's `function [ -T ] word ... { list }`), so each
+/// compound-start word after the keyword may open the body, and the command each one opens is read
+/// (`command_positions`). A name may itself be a compound-start word (`function for { rm x; }` names `for`, and its
+/// body runs `rm`), so every one is read. A segment with no such word has no body in it, so each word after the
+/// keyword that is not a leading word is read as a command, since any of them may be one; with none, the keyword is.
+fn function_positions(words: &[String], at: usize) -> Vec<usize> {
+    let openers: Vec<usize> = (at + 1..words.len())
+        .filter(|&position| is_compound_start(&words[position]))
+        .collect();
+    if openers.is_empty() {
+        let names: Vec<usize> = (at + 1..words.len())
+            .filter(|&position| !is_leading_word(&words[position]))
+            .collect();
+        return if names.is_empty() { vec![at] } else { names };
+    }
+    openers
+        .into_iter()
+        .flat_map(|start| {
+            command_positions(&words[start..])
+                .into_iter()
+                .map(move |position| start + position)
+        })
+        .collect()
+}
+
+/// Whether a `function` keyword in the words has no compound-start word after it, so its body lies past the words:
+/// a cut segment may hide that body (`may_hide_a_command`).
+fn has_function_without_body(words: &[String]) -> bool {
+    words.iter().enumerate().any(|(at, word)| {
+        word == "function" && !words[at + 1..].iter().any(|word| is_compound_start(word))
+    })
+}
+
+/// Whether the `coproc` before `rest` takes a NAME: the first word after it is an identifier, and the second opens a
+/// compound command (`coproc NAME { rm x; }`). Otherwise the first word after `coproc` is the command.
+fn coproc_takes_name(rest: &[String]) -> bool {
+    rest.first().is_some_and(|name| is_identifier(name))
+        && rest.get(1).is_some_and(|word| is_compound_start(word))
 }
 
 /// Whether a cut segment of `text` may hide a command that the readings miss. The plain reading cuts at every
 /// separator, one inside quotes included, so a segment cut inside quotes ends where that separator stands. Where
 /// the quote-aware reading starts a segment at the same place, the readings agree there, and that quote-aware
 /// segment has read the rest of the command whole. Where it does not, the readings are out of step, and a segment
-/// whose words may hide a command (`may_hide_a_command`) is withheld. A plain command that runs nothing it is given
-/// (`make "a;b"`) hides none, so it is not.
+/// whose words may hide a command in either of its readings (`segment_readings`, `may_hide_a_command`) is withheld.
+/// A plain command that runs nothing it is given (`make "a;b"`) hides none, so it is not.
 fn cut_segment_out_of_step(text: &str, aware: &[&str]) -> bool {
     let base = text.as_ptr() as usize;
     let offset = |segment: &str| segment.as_ptr() as usize - base;
@@ -2545,7 +2659,7 @@ fn cut_segment_out_of_step(text: &str, aware: &[&str]) -> bool {
         if !segment.contains(['\'', '"', '\\']) {
             return false;
         }
-        let (tokens, cut) = shell_tokens(segment);
+        let (readings, cut) = segment_readings(segment);
         if !cut {
             return false;
         }
@@ -2553,23 +2667,26 @@ fn cut_segment_out_of_step(text: &str, aware: &[&str]) -> bool {
         let starts_here = aware
             .binary_search_by_key(&offset(segment), |quote_aware| offset(quote_aware))
             .is_ok();
-        !starts_here && may_hide_a_command(&segment_words(tokens))
+        !starts_here && readings.iter().any(|words| may_hide_a_command(words))
     })
 }
 
 /// Whether a segment's words may hide a command past where the segment is cut: they name no command, or name one
-/// that runs what it is given, a wrapper, `eval`, `busybox` or a POSIX shell (see `command_words_names`).
+/// that runs what it is given, a wrapper, `find`, `eval`, `trap`, `busybox`, `toybox`, a withheld program or a POSIX
+/// shell (see `command_words_names`).
 fn may_hide_a_command(words: &[String]) -> bool {
-    match command_position(words) {
-        None => true,
-        Some(position) => {
-            let word = words[position].as_str();
-            let base = command_basename(word);
-            wrapper_spec(base).is_some()
-                || matches!(base, "eval" | "busybox")
-                || is_posix_shell(word)
-        }
+    let positions = command_positions(words);
+    if positions.is_empty() || has_function_without_body(words) {
+        return true;
     }
+    positions.into_iter().any(|position| {
+        let word = words[position].as_str();
+        let base = command_basename(word);
+        wrapper_spec(base).is_some()
+            || matches!(base, "eval" | "trap" | "busybox" | "toybox" | "find")
+            || WITHHELD_COMMANDS.contains(&base)
+            || is_posix_shell(word)
+    })
 }
 
 /// Whether a substitution's body holds the word `case`. A `)` that ends a case pattern is no end of the substitution,
@@ -2618,7 +2735,8 @@ struct Wrapper {
     long_flags: &'static [&'static str],
     /// Long options that take a value: the next word, or the `=` form.
     long_values: &'static [&'static str],
-    /// Operands before the command that are not commands: `timeout`'s duration.
+    /// Operands before the command that are not commands: `timeout`'s duration. `chrt`'s priority is one only when it
+    /// is all digits, or a decimal number that util-linux before 2.41 reads as one (`wrapped_command_names`).
     operands_before_command: usize,
     /// The command run when none is given: `xargs` runs `echo`.
     default_command: Option<&'static str>,
@@ -2712,17 +2830,17 @@ const WRAPPERS: &[(&str, Wrapper)] = &[
         },
     ),
     (
-        // `-e` (sudoedit), `-h` (help) and `-s` (a shell given the words) are left out: their words are withheld.
+        // `-e` (sudoedit), `-h` (help), `-i` (`--login`: the command becomes shell text) and `-s` (a shell given the
+        // words) are left out, so their words are withheld.
         "sudo",
         Wrapper {
-            short_flags: "AbBEHiKklLnPSVv",
+            short_flags: "AbBEHKklLnPSVv",
             short_values: "CDgpRrtTUu",
             short_optional: "",
             long_flags: &[
                 "askpass",
                 "background",
                 "bell",
-                "login",
                 "non-interactive",
                 "preserve-env",
                 "preserve-groups",
@@ -2806,6 +2924,202 @@ const WRAPPERS: &[(&str, Wrapper)] = &[
             default_command: None,
         },
     ),
+    (
+        // zsh's precommand modifiers run the command after them and take no options of their own, so an option is
+        // withheld.
+        "noglob",
+        Wrapper {
+            short_flags: "",
+            short_values: "",
+            short_optional: "",
+            long_flags: &[],
+            long_values: &[],
+            operands_before_command: 0,
+            default_command: None,
+        },
+    ),
+    (
+        "nocorrect",
+        Wrapper {
+            short_flags: "",
+            short_values: "",
+            short_optional: "",
+            long_flags: &[],
+            long_values: &[],
+            operands_before_command: 0,
+            default_command: None,
+        },
+    ),
+    (
+        // zsh's `repeat COUNT command` runs the command after its count, and `repeat COUNT do list done` runs the list.
+        "repeat",
+        Wrapper {
+            short_flags: "",
+            short_values: "",
+            short_optional: "",
+            long_flags: &[],
+            long_values: &[],
+            operands_before_command: 1,
+            default_command: None,
+        },
+    ),
+    (
+        "setsid",
+        Wrapper {
+            short_flags: "cfwVh",
+            short_values: "",
+            short_optional: "",
+            long_flags: &["ctty", "fork", "wait", "version", "help"],
+            long_values: &[],
+            operands_before_command: 0,
+            default_command: None,
+        },
+    ),
+    (
+        "stdbuf",
+        Wrapper {
+            short_flags: "",
+            short_values: "ioe",
+            short_optional: "",
+            long_flags: &["help", "version"],
+            long_values: &["input", "output", "error"],
+            operands_before_command: 0,
+            default_command: None,
+        },
+    ),
+    (
+        // `-p`, `-P` and `-u` name the processes the call acts on, so they are left out and withhold the command.
+        "ionice",
+        Wrapper {
+            short_flags: "tVh",
+            short_values: "cn",
+            short_optional: "",
+            long_flags: &["ignore", "version", "help"],
+            long_values: &["class", "classdata"],
+            operands_before_command: 0,
+            default_command: None,
+        },
+    ),
+    (
+        // The priority is the operand before the command. util-linux 2.41 and later read it as the priority only when
+        // it is all digits, and any other word as the command, which `-o`, `-b`, `-i` and `-d` run (the other policies
+        // reject it). Before 2.41 a decimal number such as `+10` is the priority too, so such a word is read both ways
+        // (`wrapped_command_names`). `-p` names an existing process, and runs no command.
+        "chrt",
+        Wrapper {
+            short_flags: "abdfimoprRvhV",
+            short_values: "TPD",
+            short_optional: "",
+            long_flags: &[
+                "all-tasks",
+                "batch",
+                "deadline",
+                "fifo",
+                "idle",
+                "max",
+                "other",
+                "pid",
+                "rr",
+                "reset-on-fork",
+                "verbose",
+                "help",
+                "version",
+            ],
+            long_values: &["sched-runtime", "sched-period", "sched-deadline"],
+            operands_before_command: 1,
+            default_command: None,
+        },
+    ),
+    (
+        // The CPU mask or list is the operand before the command. `-p` names an existing process, and runs no command.
+        "taskset",
+        Wrapper {
+            short_flags: "acpVh",
+            short_values: "",
+            short_optional: "",
+            long_flags: &["all-tasks", "cpu-list", "pid", "help", "version"],
+            long_values: &[],
+            operands_before_command: 1,
+            default_command: None,
+        },
+    ),
+    (
+        // The lock file is the operand before the command. `-c` runs its text through a shell, so it is left out.
+        "flock",
+        Wrapper {
+            short_flags: "sxunoFvVh",
+            short_values: "wE",
+            short_optional: "",
+            long_flags: &[
+                "shared",
+                "exclusive",
+                "unlock",
+                "nb",
+                "nonblock",
+                "close",
+                "no-fork",
+                "verbose",
+                "version",
+                "help",
+            ],
+            long_values: &["timeout", "conflict-exit-code"],
+            operands_before_command: 1,
+            default_command: None,
+        },
+    ),
+    (
+        // `-s` runs a shell over the words it is given, so it is left out.
+        "doas",
+        Wrapper {
+            short_flags: "n",
+            short_values: "aCu",
+            short_optional: "",
+            long_flags: &[],
+            long_values: &[],
+            operands_before_command: 0,
+            default_command: None,
+        },
+    ),
+    (
+        // coreutils' `chroot` takes long options only, and its NEWROOT is the operand before the command.
+        "chroot",
+        Wrapper {
+            short_flags: "",
+            short_values: "",
+            short_optional: "",
+            long_flags: &["skip-chdir", "help", "version"],
+            long_values: &["userspec", "groups"],
+            operands_before_command: 1,
+            default_command: None,
+        },
+    ),
+];
+
+/// The programs whose command is withheld, because each runs the command it is given in a form no table reads. `ssh`
+/// runs its remote command as shell text; `su`, `runuser` and `script` run a `-c` text; `watch` and `parallel` take a
+/// shell text or a template; the others have options too many or too varied to table. Such a program names itself
+/// and the withheld value, which covers every command (`command_words_names`).
+const WITHHELD_COMMANDS: &[&str] = &[
+    "ssh",
+    "su",
+    "runuser",
+    "script",
+    "watch",
+    "parallel",
+    "unshare",
+    "nsenter",
+    "strace",
+    "ltrace",
+    "valgrind",
+    "setpriv",
+    "prlimit",
+    "numactl",
+    "runcon",
+    "pkexec",
+    "unbuffer",
+    "sg",
+    "sshpass",
+    "systemd-run",
 ];
 
 /// The wrapper program a command word names, from `WRAPPERS`.
@@ -2874,14 +3188,19 @@ fn option_arity(wrapper: &Wrapper, word: &str) -> Option<Arity> {
 /// The command names a wrapper runs, read from the words it is given (`args`, after its own name). Its options are
 /// read through its table: a flag or an attached value takes one word, a value takes the next word too, and `--`
 /// ends them. Each `NAME=VALUE` before the command sets a variable for it and names none. The operands the table
-/// lists come next (`timeout`'s duration) and are skipped. The word after them is the command, which
-/// `command_words_names` reads with its own arguments. Without one, a cut segment's command may lie past the cut, so
-/// the withheld value is named; otherwise the wrapper's default command, if it has one, runs.
+/// lists come next (`timeout`'s duration) and are skipped, but `chrt`'s priority is skipped only when it is all
+/// digits: any other word there is the command. A decimal number that is not all digits (`is_decimal_number`) is also
+/// the priority on util-linux before 2.41, which runs the word after it, so that word is named too. The word after the
+/// operands is the command, which `command_words_names` reads with its own arguments. Without one, a cut segment's
+/// command may lie past the cut, so the withheld value is named; otherwise the wrapper's default command, if it has
+/// one, runs. `program` is the wrapper's name: zsh's `repeat` is one whose count may be followed by a `do` that opens
+/// a list of commands (`list_names`).
 fn wrapped_command_names(
     wrapper: &Wrapper,
     args: &[String],
     depth: usize,
     cut: bool,
+    program: &str,
 ) -> Vec<String> {
     let mut operands_to_skip = wrapper.operands_before_command;
     let mut options_done = false;
@@ -2901,7 +3220,28 @@ fn wrapped_command_names(
         } else if is_assignment(word) {
             // A variable set for the command names no command.
         } else if operands_to_skip > 0 {
+            // `chrt` takes its priority only when the word is all digits. Any other word is the command, which the
+            // policies that take no priority run. A decimal number that is not all digits is the priority on util-linux
+            // before 2.41, which runs the word after it, so that word is named too.
+            if program == "chrt" && !is_digits(word) {
+                let mut names = command_words_names(&args[index - 1..], depth, cut);
+                if is_decimal_number(word) {
+                    if index < args.len() {
+                        names.extend(command_words_names(&args[index..], depth, cut));
+                    } else if cut {
+                        names.push(String::new());
+                    }
+                }
+                return names;
+            }
             operands_to_skip -= 1;
+            // The `do` that opens a `repeat` list runs no command, so the list after it is read instead.
+            if program == "repeat"
+                && operands_to_skip == 0
+                && args.get(index).map(String::as_str) == Some("do")
+            {
+                return list_names(&args[index + 1..], depth, cut);
+            }
         } else {
             return command_words_names(&args[index - 1..], depth, cut);
         }
@@ -2915,10 +3255,27 @@ fn wrapped_command_names(
         .unwrap_or_default()
 }
 
+/// The names the list of a zsh `repeat` runs, read as a segment's words are (`command_positions`), so the keywords the
+/// list opens with (`!`, `{`) are read past. A cut segment whose list has no command in its words may have that
+/// command past the cut, so the list is withheld.
+fn list_names(words: &[String], depth: usize, cut: bool) -> Vec<String> {
+    let positions = command_positions(words);
+    if positions.is_empty() && cut {
+        return vec![String::new()];
+    }
+    positions
+        .into_iter()
+        .flat_map(|at| command_words_names(&words[at..], depth, cut))
+        .collect()
+}
+
 /// The command names a command runs, read from its words: `words[0]` is the command word, quote-removed, and the
 /// rest are its arguments. The word's own name is named (`command_names`). Then, by what the word is: a wrapper runs
-/// the command it is given (`wrapped_command_names`); `eval` runs its arguments joined, as shell text; `busybox`
-/// runs the applet it is given; a POSIX shell reads its `-c` script. `cut` says the segment goes on past these words.
+/// the command it is given (`wrapped_command_names`); `find` runs the command of each `-exec` predicate
+/// (`find_command_names`); a program in `WITHHELD_COMMANDS` runs a command no table reads, so its value is withheld;
+/// `eval` runs its arguments joined, as shell text; `trap` runs its action as shell text (`trap_action`); `busybox` and
+/// `toybox` run the applet they are given; a POSIX shell reads its `-c` script. `cut` says the segment goes on past
+/// these words.
 fn command_words_names(words: &[String], depth: usize, cut: bool) -> Vec<String> {
     let Some((word, args)) = words.split_first() else {
         return Vec::new();
@@ -2932,15 +3289,28 @@ fn command_words_names(words: &[String], depth: usize, cut: bool) -> Vec<String>
     }
     let base = command_basename(word);
     if let Some(wrapper) = wrapper_spec(base) {
-        names.extend(wrapped_command_names(wrapper, args, depth + 1, cut));
+        names.extend(wrapped_command_names(wrapper, args, depth + 1, cut, base));
+    } else if base == "find" {
+        names.extend(find_command_names(args, depth + 1, cut));
+    } else if WITHHELD_COMMANDS.contains(&base) {
+        names.push(String::new());
     } else if base == "eval" {
         names.extend(command_prefixes_at(&args.join(" "), depth + 1));
         // The text `eval` runs is its joined arguments, and those go on past a cut.
         if cut {
             names.push(String::new());
         }
-    } else if base == "busybox" {
-        // The options before the applet are busybox's own, and the first word that is not one is the applet.
+    } else if base == "trap" {
+        // The action runs as shell text when the signal comes. A cut segment may end inside it, so it is withheld as
+        // `eval`'s is.
+        if let Some(action) = trap_action(args) {
+            names.extend(command_prefixes_at(action, depth + 1));
+        }
+        if cut {
+            names.push(String::new());
+        }
+    } else if matches!(base, "busybox" | "toybox") {
+        // The options before the applet are the binary's own, and the first word that is not one is the applet.
         match args.iter().position(|arg| !arg.starts_with('-')) {
             Some(applet) => names.extend(command_words_names(&args[applet..], depth + 1, cut)),
             None if cut => names.push(String::new()),
@@ -2953,6 +3323,47 @@ fn command_words_names(words: &[String], depth: usize, cut: bool) -> Vec<String>
         }
     }
     names
+}
+
+/// The commands `find` runs, read from the words after its own name: the words after each `-exec`, `-execdir`, `-ok`
+/// and `-okdir` predicate, up to the terminator that ends it (a `;`, or a `+` right after `{}`), each read as a
+/// command (`command_words_names`). No other word of `find`, a path or a test, is a command. A predicate whose command
+/// word lies past a cut has that word withheld, as any command word past a cut is.
+fn find_command_names(args: &[String], depth: usize, cut: bool) -> Vec<String> {
+    let mut names = Vec::new();
+    for (at, arg) in args.iter().enumerate() {
+        if !matches!(arg.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir") {
+            continue;
+        }
+        let command = &args[at + 1..];
+        let end = command
+            .iter()
+            .enumerate()
+            .position(|(index, word)| {
+                word == ";" || (word == "+" && index > 0 && command[index - 1] == "{}")
+            })
+            .unwrap_or(command.len());
+        if end == 0 && cut {
+            names.push(String::new());
+        }
+        names.extend(command_words_names(&command[..end], depth, cut));
+    }
+    names
+}
+
+/// The action a `trap` is given: its first operand after its options, where `--` ends them. A lone `-` is an operand,
+/// the action that resets a signal. `None` when there is no operand, as with `trap -l`.
+fn trap_action(args: &[String]) -> Option<&str> {
+    let mut options_done = false;
+    for arg in args {
+        let arg = arg.as_str();
+        if !options_done && arg == "--" {
+            options_done = true;
+        } else if options_done || arg == "-" || !arg.starts_with('-') {
+            return Some(arg);
+        }
+    }
+    None
 }
 
 /// The names a command word stands for. A word that holds an expansion runs as whatever the shell expands it
@@ -3023,6 +3434,21 @@ fn is_leading_word(word: &str) -> bool {
         )
 }
 
+/// Whether a word is a shell identifier, a letter or `_` and then letters, digits and `_`: the NAME of a `coproc` or
+/// a `function`.
+fn is_identifier(word: &str) -> bool {
+    word.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether a word opens a compound command, whose words run what they hold (`coproc NAME { rm x; }`).
+fn is_compound_start(word: &str) -> bool {
+    matches!(
+        word,
+        "{" | "if" | "while" | "until" | "for" | "case" | "select" | "[["
+    )
+}
+
 /// The values of `values`, each once, in their first order.
 fn distinct(values: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut seen = HashSet::new();
@@ -3039,6 +3465,20 @@ fn is_assignment(word: &str) -> bool {
     };
     let starts_as_name = name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_');
     starts_as_name && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether a word is a number written in decimal digits: one or more ASCII digits and nothing else.
+fn is_digits(word: &str) -> bool {
+    !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Whether `strtoimax` in base 10 reads a word whole: leading whitespace, an optional sign, then decimal digits and
+/// nothing after them. util-linux before 2.41 reads such a word as `chrt`'s priority (`wrapped_command_names`). The
+/// whitespace is read as Unicode whitespace, a superset of the C locale's, so a word that is read as a number is never
+/// missed.
+fn is_decimal_number(word: &str) -> bool {
+    let unsigned = word.trim_start();
+    is_digits(unsigned.strip_prefix(['+', '-']).unwrap_or(unsigned))
 }
 
 #[cfg(test)]
@@ -6425,6 +6865,777 @@ mod tests {
         let sent = state.evaluated.lock().unwrap();
         assert_eq!(sent.len(), 2, "one request per call, no extra checks");
         for request in sent.iter() {
+            assert_eq!(request.target_kind, "");
+            assert_eq!(request.target_value, "");
+        }
+    }
+
+    #[test]
+    fn xargs_names_the_command_it_runs_in_every_form() {
+        // The command xargs runs is the first word its options leave, whatever those options are, so every form of
+        // the call names `rm` beside `xargs`.
+        for text in [
+            "xargs rm",
+            "xargs -I{} rm {}",
+            "xargs -I {} rm {}",
+            "xargs -0 -I{} -n1 rm {}",
+            "xargs -n1 rm",
+            "xargs -P 4 -n 1 -0 rm",
+            "xargs -L1 -d, -- rm",
+            "xargs -iREP rm REP",
+            "xargs -a list -E END rm",
+            "xargs -r -t rm",
+            "xargs --max-args=1 --null rm",
+            "xargs --replace={} rm {}",
+        ] {
+            assert_eq!(command_prefixes(text), ["xargs", "rm"], "{text}");
+        }
+        // Wrappers nest, and the command each one runs is named as well.
+        assert_eq!(
+            command_prefixes("env xargs sudo -u root rm x"),
+            ["env", "xargs", "sudo", "rm"]
+        );
+        assert_eq!(
+            command_prefixes("env -i xargs -0 -I{} sudo -u root rm {}"),
+            ["env", "xargs", "sudo", "rm"]
+        );
+        assert_eq!(
+            command_prefixes("sudo xargs -I{} rm {}"),
+            ["sudo", "xargs", "rm"]
+        );
+        // A pipe feeds xargs, and the command after it is named.
+        assert_eq!(
+            command_prefixes("echo a | xargs -I{} rm {}"),
+            ["echo", "xargs", "rm"]
+        );
+    }
+
+    #[test]
+    fn a_xargs_with_no_command_names_the_default_echo_and_one_with_a_command_does_not() {
+        // xargs runs `echo` when it is given no command, so that default is named; once it is given one, it is not.
+        assert_eq!(command_prefixes("xargs"), ["xargs", "echo"]);
+        assert_eq!(command_prefixes("xargs -0 -I{}"), ["xargs", "echo"]);
+        assert_eq!(command_prefixes("xargs -0 rm"), ["xargs", "rm"]);
+    }
+
+    #[test]
+    fn a_clobber_redirect_is_no_pipe_so_the_command_after_its_target_is_named() {
+        // `>|` (overwrite even under noclobber) is one redirection: the word after it is its target, and the command is
+        // the word after that. A split at its `|` left xargs with no command, so only its default `echo` was named.
+        for text in [
+            "xargs >|x rm",
+            "xargs >| x rm",
+            "xargs 2>|x rm",
+            "xargs >|x >|y rm",
+            ">|x rm -rf y",
+            "echo >|out && rm -rf y",
+        ] {
+            let names = command_prefixes(text);
+            assert!(names.contains(&"rm".to_owned()), "{text}: {names:?}");
+        }
+        // A `|` that is a pipe still ends a command: after a `>` and a space, after an escaped `>`, or after a quote.
+        for text in ["echo > | rm", "echo \\>| rm", "echo '>' | rm"] {
+            let names = command_prefixes(text);
+            assert!(names.contains(&"rm".to_owned()), "{text}: {names:?}");
+        }
+    }
+
+    #[test]
+    fn a_zsh_clobber_spelling_names_the_command_after_its_target_and_the_one_bash_runs() {
+        // zsh reads `>!`, `>&!`, `>>!`, `>>&!`, `&>!` and `&>>!` as clobber operators: the `!` is part of the operator,
+        // so the word after it is the target and the command is the word after that. `>&|`, `>>&|` and `&>>|` are
+        // clobber operators with a `|`, as `>|` is. Bash and dash read the `!` as the first character of the target
+        // instead, and run the word after it, so each reading names the command it runs.
+        for text in [
+            "xargs >! x rm",
+            "xargs >&! x rm",
+            "xargs >>! x rm",
+            "xargs >>&! x rm",
+            "xargs &>! x rm",
+            "xargs &>>! x rm",
+            "xargs >&| x rm",
+            "xargs >>&| x rm",
+            "xargs &>>| x rm",
+            ">! x rm -rf y",
+            ">&| x rm -rf y",
+            "echo a >!b && rm -rf y",
+            "echo a >!b; rm -rf y",
+        ] {
+            let names = command_prefixes(text);
+            assert!(names.contains(&"rm".to_owned()), "{text}: {names:?}");
+        }
+        // The word after the `!` is the command bash and dash run, and the command zsh runs is named beside it.
+        assert_eq!(command_prefixes("xargs >! x rm"), ["xargs", "x", "rm"]);
+        assert_eq!(command_prefixes(">! x rm -rf y"), ["x", "rm"]);
+        // Read as zsh reads it, a target written against the `!` is a file, so it names no command.
+        assert_eq!(command_prefixes("echo hi >!out.txt"), ["echo"]);
+    }
+
+    #[tokio::test]
+    async fn a_denied_command_run_through_xargs_is_denied_whatever_its_form() {
+        for (tool, input) in [
+            ("shell", r#"{"program":"xargs","args":["rm"]}"#),
+            (
+                "shell",
+                r#"{"program":"xargs","args":["-0","-I","{}","-n1","rm","{}"]}"#,
+            ),
+            (
+                "shell",
+                r#"{"program":"env","args":["xargs","sudo","-u","root","rm","x"]}"#,
+            ),
+            ("shell", r#"{"program":"xargs >|x rm"}"#),
+            ("code_interpreter", r#"{"language":"sh","code":"xargs rm"}"#),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"xargs -I{} rm {}"}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"xargs >| x rm"}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"echo a >|b; >|x rm -rf y"}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"echo a >&!b; xargs >>! x rm"}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"xargs >&| x rm"}"#,
+            ),
+            ("shell", r#"{"program":"xargs >! x rm"}"#),
+            (
+                "shell",
+                r#"{"program":"zsh","args":["-c",">! x rm -rf y"]}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"xargs >;x rm -rf y"}"#,
+            ),
+            (
+                "shell",
+                r#"{"program":"zsh","args":["-c","noglob xargs rm x"]}"#,
+            ),
+        ] {
+            let (mut policy, state) = harness(ToolClassGate::Enforce).await;
+            policy.permission_rules = true;
+            state
+                .decision_by_target
+                .lock()
+                .unwrap()
+                .insert("rm".to_owned(), "deny".to_owned());
+            let evaluation = policy
+                .evaluate_tool_call_with_input(tool, input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("a deny is an evaluation, not an error");
+            assert_eq!(evaluation.decision, CapabilityDecision::Deny, "{input}");
+            let sent = state.evaluated.lock().unwrap();
+            assert!(
+                sent.iter().any(|request| {
+                    request.target_kind == "command_prefix" && request.target_value == "rm"
+                }),
+                "{input}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wrapper_and_its_command_are_each_checked_and_the_strictest_answer_decides() {
+        // The wrapper's own name is a target too: an ask on `xargs` asks the whole call, whatever command it runs.
+        let (mut policy, state) = harness(ToolClassGate::Enforce).await;
+        policy.permission_rules = true;
+        state
+            .decision_by_target
+            .lock()
+            .unwrap()
+            .insert("xargs".to_owned(), "ask".to_owned());
+        let evaluation = policy
+            .evaluate_tool_call_with_input(
+                "shell",
+                r#"{"program":"xargs","args":["rm"]}"#,
+                "run-a",
+                "org-a",
+                "user-a",
+                false,
+            )
+            .await
+            .expect("an ask is an evaluation, not an error");
+        assert_eq!(evaluation.decision, CapabilityDecision::Ask);
+        assert!(evaluation.ask_evidence_verified);
+        assert_eq!(
+            target_pairs(&state.evaluated.lock().unwrap()),
+            pairs(&[("command_prefix", "xargs"), ("command_prefix", "rm")])
+        );
+        // A bare `xargs` runs `echo`, so a deny on `echo` denies the call.
+        let (mut policy, state) = harness(ToolClassGate::Enforce).await;
+        policy.permission_rules = true;
+        state
+            .decision_by_target
+            .lock()
+            .unwrap()
+            .insert("echo".to_owned(), "deny".to_owned());
+        let evaluation = policy
+            .evaluate_tool_call_with_input(
+                "shell",
+                r#"{"program":"xargs"}"#,
+                "run-a",
+                "org-a",
+                "user-a",
+                false,
+            )
+            .await
+            .expect("a deny is an evaluation, not an error");
+        assert_eq!(evaluation.decision, CapabilityDecision::Deny);
+    }
+
+    #[tokio::test]
+    async fn with_the_permission_rules_off_a_zsh_clobber_names_no_command() {
+        // The switch is off, so no call names a command, whichever reading of its clobber mark a shell would take.
+        let (policy, state) = harness(ToolClassGate::Off).await;
+        for (tool, input) in [
+            (
+                "shell",
+                r#"{"program":"zsh","args":["-c",">! x rm -rf y"]}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"xargs >&| x rm"}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"xargs >! x rm"}"#,
+            ),
+        ] {
+            policy
+                .evaluate_tool_call_with_input(tool, input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("an allowed call evaluates");
+        }
+        let sent = state.evaluated.lock().unwrap();
+        assert_eq!(sent.len(), 3, "one request per call, no extra checks");
+        for request in sent.iter() {
+            assert_eq!(request.tool_name, "");
+            assert_eq!(request.user_id, "");
+            assert_eq!(request.target_kind, "");
+            assert_eq!(request.target_value, "");
+        }
+    }
+
+    #[tokio::test]
+    async fn with_the_permission_rules_off_an_xargs_call_names_no_command() {
+        let (policy, state) = harness(ToolClassGate::Off).await;
+        for (tool, input) in [
+            ("shell", r#"{"program":"xargs","args":["-I{}","rm","{}"]}"#),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"xargs >|x rm"}"#,
+            ),
+        ] {
+            policy
+                .evaluate_tool_call_with_input(tool, input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("an allowed call evaluates");
+        }
+        let sent = state.evaluated.lock().unwrap();
+        assert_eq!(sent.len(), 2, "one request per call, no extra checks");
+        for request in sent.iter() {
+            assert_eq!(request.tool_name, "");
+            assert_eq!(request.user_id, "");
+            assert_eq!(request.target_kind, "");
+            assert_eq!(request.target_value, "");
+        }
+    }
+
+    #[test]
+    fn a_coproc_names_the_command_it_runs_with_or_without_a_name() {
+        // `coproc` takes a NAME only before a compound command. Otherwise its next word is the command it runs.
+        for text in [
+            "coproc rm x",
+            "coproc { rm x; }",
+            "coproc NAME { rm x; }",
+            "coproc xargs rm",
+        ] {
+            let names = command_prefixes(text);
+            assert!(names.contains(&"rm".to_owned()), "{text}: {names:?}");
+        }
+        // zsh has no NAME, so the word after `coproc` is the command even before a brace: `coproc rm { x; }` runs rm.
+        assert!(command_prefixes("coproc rm { x; }").contains(&"rm".to_owned()));
+        // A NAME before a simple command is the command, as bash reads it: `coproc NAME rm x` runs NAME, not rm.
+        assert_eq!(command_prefixes("coproc NAME rm x"), ["NAME"]);
+    }
+
+    #[test]
+    fn a_function_keyword_reads_the_body_after_its_name() {
+        // `function NAME` names a function, which is not run: the body after it is the command that runs.
+        for text in [
+            "function f { rm x; }; f",
+            "function f { rm x; }",
+            "function f() { rm x; }",
+            "function f\n{ rm x; }\nf",
+            "function f { xargs rm; }",
+            // zsh's `function [ -T ] word ... { list }`: every word before the body is a name, and the body runs rm.
+            "function -T f { rm x; }; f",
+            "function a b { rm x; }; a",
+            "function f g h { rm x; }",
+            // A name may be a compound-start word, so the body after it is read too.
+            "function for { rm x; }",
+        ] {
+            let names = command_prefixes(text);
+            assert!(names.contains(&"rm".to_owned()), "{text}: {names:?}");
+        }
+        assert!(command_prefixes("function f { xargs rm; }").contains(&"xargs".to_owned()));
+        // With no body in the segment, each word after the keyword that is not a leading word is named, so a command
+        // among them is named. With none, the keyword is named, so the segment never names nothing.
+        assert!(command_prefixes("function f rm x").contains(&"rm".to_owned()));
+        assert!(!command_prefixes("function -T").is_empty());
+        // That body may lie past a cut, so a segment with a `function` and no compound-start word after it may hide
+        // a command.
+        let bodiless: Vec<String> = ["function", "f"].into_iter().map(str::to_owned).collect();
+        assert!(may_hide_a_command(&bodiless));
+    }
+
+    #[test]
+    fn a_trap_reads_its_action_as_shell_text() {
+        // The action runs as shell text when the signal comes, so each command it names is named, quoted or not.
+        for text in [
+            "trap 'rm -rf x' EXIT",
+            "trap \"rm -rf x\" EXIT",
+            "trap -- 'rm -rf x' EXIT",
+            "trap 'rm -rf x' INT TERM",
+            "trap rm EXIT",
+        ] {
+            let names = command_prefixes(text);
+            assert!(names.contains(&"rm".to_owned()), "{text}: {names:?}");
+        }
+        // `trap -l` takes no action, and an empty action runs nothing.
+        assert_eq!(command_prefixes("trap -l"), ["trap"]);
+        assert_eq!(command_prefixes("trap '' INT"), ["trap"]);
+        // An action that expands is withheld, as any command word that expands is.
+        assert!(command_prefixes("trap '$CMD' EXIT").contains(&String::new()));
+    }
+
+    #[test]
+    fn a_ksh_sync_mark_is_a_redirect_so_the_command_after_its_target_is_named() {
+        // ksh's `>;` writes its target and syncs it. The `;` is no separator, so `rm` is the command after the target.
+        for text in [
+            "xargs >;x rm",
+            "xargs >>;x rm",
+            "xargs >&;x rm",
+            "xargs 2>;x rm",
+            "xargs &>;x rm",
+            ">;x rm -rf y",
+        ] {
+            let names = command_prefixes(text);
+            assert!(names.contains(&"rm".to_owned()), "{text}: {names:?}");
+        }
+        assert!(command_prefixes("xargs >;x rm").contains(&"xargs".to_owned()));
+        // A `;` apart from its `>` still separates the commands on either side of it.
+        assert!(command_prefixes("echo a >; rm x").contains(&"rm".to_owned()));
+    }
+
+    #[test]
+    fn a_zsh_precommand_runs_the_command_after_it() {
+        // zsh's `noglob` and `nocorrect` run the command after them, and `repeat COUNT` runs the command after its
+        // count.
+        assert_eq!(
+            command_prefixes("noglob xargs rm"),
+            ["noglob", "xargs", "rm"]
+        );
+        assert_eq!(
+            command_prefixes("nocorrect xargs rm"),
+            ["nocorrect", "xargs", "rm"]
+        );
+        assert_eq!(command_prefixes("repeat 2 rm x"), ["repeat", "rm"]);
+        // `repeat COUNT do list done` opens its list with `do`, which runs no command: the list's command is named,
+        // past any keyword the list opens with.
+        assert_eq!(
+            command_prefixes("repeat 2 do rm x; done"),
+            ["repeat", "rm", "done"]
+        );
+        assert_eq!(command_prefixes("repeat 2 do ! rm x"), ["repeat", "rm"]);
+        // Only `repeat` opens a list after its count: after `timeout`'s duration, `do` is the command it names.
+        assert_eq!(command_prefixes("timeout 5 do rm x"), ["timeout", "do"]);
+        // They take no options of their own, so an option one is given is withheld.
+        assert!(command_prefixes("noglob -x rm").contains(&String::new()));
+    }
+
+    #[tokio::test]
+    async fn a_denied_command_behind_a_keyword_or_a_precommand_is_denied_in_every_shell() {
+        for (tool, input) in [
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"coproc rm x"}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"function f { rm x; }; f"}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"trap 'rm -rf x' EXIT"}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"xargs >;x rm -rf y"}"#,
+            ),
+            ("shell", r#"{"program":"bash","args":["-c","coproc rm x"]}"#),
+            (
+                "shell",
+                r#"{"program":"ksh","args":["-c","function f { rm x; }; f"]}"#,
+            ),
+            (
+                "shell",
+                r#"{"program":"zsh","args":["-c","trap 'rm -rf x' EXIT"]}"#,
+            ),
+            (
+                "shell",
+                r#"{"program":"zsh","args":["-c","repeat 2 rm x"]}"#,
+            ),
+            (
+                "shell",
+                r#"{"program":"zsh","args":["-c","function -T f { rm x; }; f"]}"#,
+            ),
+            (
+                "shell",
+                r#"{"program":"zsh","args":["-c","repeat 2 do rm x; done"]}"#,
+            ),
+        ] {
+            let (mut policy, state) = harness(ToolClassGate::Enforce).await;
+            policy.permission_rules = true;
+            state
+                .decision_by_target
+                .lock()
+                .unwrap()
+                .insert("rm".to_owned(), "deny".to_owned());
+            let evaluation = policy
+                .evaluate_tool_call_with_input(tool, input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("a deny is an evaluation, not an error");
+            assert_eq!(evaluation.decision, CapabilityDecision::Deny, "{input}");
+            let sent = state.evaluated.lock().unwrap();
+            assert!(
+                sent.iter().any(|request| {
+                    request.target_kind == "command_prefix" && request.target_value == "rm"
+                }),
+                "{input}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn with_the_permission_rules_off_a_keyword_or_a_precommand_names_no_command() {
+        let (policy, state) = harness(ToolClassGate::Off).await;
+        for (tool, input) in [
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"coproc rm x"}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"function f { rm x; }; f"}"#,
+            ),
+            (
+                "shell",
+                r#"{"program":"zsh","args":["-c","trap 'rm -rf x' EXIT"]}"#,
+            ),
+            (
+                "shell",
+                r#"{"program":"zsh","args":["-c","noglob xargs >;x rm"]}"#,
+            ),
+        ] {
+            policy
+                .evaluate_tool_call_with_input(tool, input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("an allowed call evaluates");
+        }
+        let sent = state.evaluated.lock().unwrap();
+        assert_eq!(sent.len(), 4, "one request per call, no extra checks");
+        for request in sent.iter() {
+            assert_eq!(request.tool_name, "");
+            assert_eq!(request.user_id, "");
+            assert_eq!(request.target_kind, "");
+            assert_eq!(request.target_value, "");
+        }
+    }
+
+    #[test]
+    fn find_names_the_command_of_each_exec_predicate() {
+        // `find` runs the command of each `-exec`, `-execdir`, `-ok` and `-okdir` predicate, up to the terminator
+        // that ends it: a `;`, or a `+` right after `{}`. Its paths and tests name nothing, and a `+` anywhere else
+        // is an argument.
+        for (text, expected) in [
+            ("find . -exec rm {} +", vec!["find", "rm"]),
+            ("find . -exec rm {} \\;", vec!["find", "rm"]),
+            ("find . -exec rm {} ;", vec!["find", "rm"]),
+            ("find . -execdir rm {} ;", vec!["find", "rm"]),
+            ("find . -ok rm {} ;", vec!["find", "rm"]),
+            ("find . -okdir rm {} ;", vec!["find", "rm"]),
+            ("find . -exec rm", vec!["find", "rm"]),
+            ("find . -name rm -print", vec!["find"]),
+            ("find . -exec env rm {} \\;", vec!["find", "env", "rm"]),
+            ("find . -exec xargs rm {} +", vec!["find", "xargs", "rm"]),
+            ("find . -exec sh -c 'rm {}' \\;", vec!["find", "sh", "rm"]),
+            (
+                "find . -exec rm {} + -exec ls \\;",
+                vec!["find", "rm", "ls"],
+            ),
+            ("find . -exec echo + rm \\;", vec!["find", "echo"]),
+            ("xargs find . -exec rm {} +", vec!["xargs", "find", "rm"]),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+        // A command word that expands is withheld, as any command word is.
+        assert_eq!(command_prefixes("find . -exec {} \\;"), ["find", ""]);
+        assert_eq!(command_prefixes("find . -exec $CMD {} +"), ["find", ""]);
+        // The shell tool's argv reads the same predicates.
+        assert_eq!(
+            targets_of(
+                "shell",
+                r#"{"program":"find","args":[".","-exec","rm","{}","+"]}"#
+            ),
+            pairs(&[("command_prefix", "find"), ("command_prefix", "rm")])
+        );
+    }
+
+    #[test]
+    fn the_programs_given_a_table_name_the_command_they_run_past_their_options() {
+        // Each table lists the options that take no value and those that take one, and the operands before the command.
+        for (text, expected) in [
+            ("setsid rm x", vec!["setsid", "rm"]),
+            ("setsid -f -w rm x", vec!["setsid", "rm"]),
+            ("setsid --fork rm x", vec!["setsid", "rm"]),
+            ("stdbuf -oL rm x", vec!["stdbuf", "rm"]),
+            ("stdbuf -o L -e 0 rm x", vec!["stdbuf", "rm"]),
+            ("stdbuf --output=L rm x", vec!["stdbuf", "rm"]),
+            ("ionice rm x", vec!["ionice", "rm"]),
+            ("ionice -c3 rm x", vec!["ionice", "rm"]),
+            ("ionice -c 3 -n 7 -t rm x", vec!["ionice", "rm"]),
+            ("ionice --class=3 --ignore rm x", vec!["ionice", "rm"]),
+            ("chrt -f 10 rm x", vec!["chrt", "rm"]),
+            ("chrt --rr 10 rm x", vec!["chrt", "rm"]),
+            ("chrt -R -T 100 10 rm x", vec!["chrt", "rm"]),
+            // The policies that take no priority (`-o`, `-b`, `-i`, `-d`) run the word after their options as the
+            // command, unless that word is all digits, which is the priority.
+            ("chrt -o rm x", vec!["chrt", "rm"]),
+            ("chrt --other rm x", vec!["chrt", "rm"]),
+            ("chrt --batch rm x", vec!["chrt", "rm"]),
+            ("chrt -i rm x", vec!["chrt", "rm"]),
+            ("chrt -d -T 1 -P 2 -D 3 rm x", vec!["chrt", "rm"]),
+            ("chrt -o -- rm x", vec!["chrt", "rm"]),
+            ("chrt -o 5 rm x", vec!["chrt", "rm"]),
+            // A word that is not a decimal number is no priority on any version: `0x10` is the command, and the
+            // earlier versions fail to read it.
+            ("chrt -o 0x10 rm x", vec!["chrt", "0x10"]),
+            // A decimal number that is not all digits is the priority on util-linux before 2.41, which runs the word
+            // after it, and the command on 2.41 and later: both are named. The quoted space is part of the word, which
+            // names no command.
+            ("chrt -f +10 rm x", vec!["chrt", "+10", "rm"]),
+            ("chrt +10 rm x", vec!["chrt", "+10", "rm"]),
+            ("chrt -o +0 rm x", vec!["chrt", "+0", "rm"]),
+            ("chrt -o -- -0 rm x", vec!["chrt", "-0", "rm"]),
+            ("chrt ' 10' rm x", vec!["chrt", "rm"]),
+            ("taskset 0x1 rm x", vec!["taskset", "rm"]),
+            ("taskset -c 0-3 rm x", vec!["taskset", "rm"]),
+            ("taskset --cpu-list 0 rm x", vec!["taskset", "rm"]),
+            ("flock /tmp/lock rm x", vec!["flock", "rm"]),
+            ("flock -w 5 -x /tmp/lock rm x", vec!["flock", "rm"]),
+            ("flock --timeout=5 /tmp/lock rm x", vec!["flock", "rm"]),
+            ("doas rm x", vec!["doas", "rm"]),
+            ("doas -n -u root rm x", vec!["doas", "rm"]),
+            ("doas -C conf.file -a style rm x", vec!["doas", "rm"]),
+            ("chroot /srv rm x", vec!["chroot", "rm"]),
+            ("chroot --userspec=0:0 /srv rm x", vec!["chroot", "rm"]),
+            (
+                "chroot --groups 0 --skip-chdir /srv rm x",
+                vec!["chroot", "rm"],
+            ),
+            ("xargs setsid -f rm x", vec!["xargs", "setsid", "rm"]),
+            ("toybox sh -c 'rm x'", vec!["toybox", "sh", "rm"]),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_program_that_runs_its_command_in_a_form_no_table_reads_names_the_withheld_value() {
+        // `ssh` runs its remote command as shell text, and `su`, `script`, `watch` and the others run theirs in a
+        // form no table reads: each names itself and the withheld value, which covers every command.
+        for (text, expected) in [
+            ("ssh host rm -rf x", vec!["ssh", ""]),
+            ("/usr/bin/ssh host rm", vec!["/usr/bin/ssh", "ssh", ""]),
+            ("su -c 'rm x' root", vec!["su", ""]),
+            ("script -c 'rm x' log.txt", vec!["script", ""]),
+            ("watch -n 1 rm x", vec!["watch", ""]),
+            ("parallel rm ::: x", vec!["parallel", ""]),
+            ("unshare -r rm x", vec!["unshare", ""]),
+            ("nsenter -t 1 -m rm x", vec!["nsenter", ""]),
+            ("strace -f rm x", vec!["strace", ""]),
+            ("valgrind --tool=memcheck rm x", vec!["valgrind", ""]),
+            ("runuser -u root -- rm x", vec!["runuser", ""]),
+            ("setpriv --reuid=0 rm x", vec!["setpriv", ""]),
+            ("xargs ssh host rm", vec!["xargs", "ssh", ""]),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+        // A remote command is withheld whatever shell text it holds.
+        assert!(command_prefixes("ssh host 'ls; rm x'").contains(&String::new()));
+        assert_eq!(
+            targets_of("shell", r#"{"program":"su","args":["-c","rm x","root"]}"#),
+            pairs(&[("command_prefix", "su"), ("command_prefix", "")])
+        );
+    }
+
+    #[test]
+    fn an_option_a_table_leaves_out_withholds_the_command() {
+        // An option a table does not list may take a value, or run its text as a command: `flock -c` and `sudo -i`
+        // (`--login`) run a shell text, so the command is withheld rather than read as `FOO` in `FOO=1 rm x`.
+        for (text, expected) in [
+            ("flock /tmp/lock -c 'rm x'", vec!["flock", ""]),
+            ("flock -c 'rm x' /tmp/lock", vec!["flock", ""]),
+            ("sudo -i 'FOO=1 rm x'", vec!["sudo", ""]),
+            ("sudo --login 'FOO=1 rm x'", vec!["sudo", ""]),
+            ("sudo -i rm x", vec!["sudo", ""]),
+            ("ionice -p 1 rm x", vec!["ionice", ""]),
+            ("doas -s rm x", vec!["doas", ""]),
+            ("setsid --unknown rm x", vec!["setsid", ""]),
+            ("chroot -x /srv rm x", vec!["chroot", ""]),
+            ("taskset -Z 0x1 rm x", vec!["taskset", ""]),
+            ("stdbuf -Z rm x", vec!["stdbuf", ""]),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_denied_command_run_by_find_or_by_a_table_program_is_denied_too() {
+        for (tool, input) in [
+            (
+                "shell",
+                r#"{"program":"find","args":[".","-exec","rm","{}","+"]}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"find . -exec rm {} \\;"}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"xargs find . -exec rm {} +"}"#,
+            ),
+            ("shell", r#"{"program":"setsid","args":["rm","x"]}"#),
+            ("shell", r#"{"program":"chrt","args":["-o","rm","x"]}"#),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"chrt -o rm x"}"#,
+            ),
+            ("shell", r#"{"program":"chrt","args":["+10","rm","x"]}"#),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"chrt -f +10 rm x"}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"chrt ' 10' rm x"}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"flock /tmp/l rm x"}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"chroot /srv rm x"}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"doas -n rm x"}"#,
+            ),
+        ] {
+            let (mut policy, state) = harness(ToolClassGate::Enforce).await;
+            policy.permission_rules = true;
+            state
+                .decision_by_target
+                .lock()
+                .unwrap()
+                .insert("rm".to_owned(), "deny".to_owned());
+            let evaluation = policy
+                .evaluate_tool_call_with_input(tool, input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("a deny is an evaluation, not an error");
+            assert_eq!(evaluation.decision, CapabilityDecision::Deny, "{input}");
+            let sent = state.evaluated.lock().unwrap();
+            assert!(
+                sent.iter().any(|request| {
+                    request.target_kind == "command_prefix" && request.target_value == "rm"
+                }),
+                "{input}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_withheld_command_is_denied_when_its_withheld_value_is_denied() {
+        for (tool, input) in [
+            ("shell", r#"{"program":"ssh","args":["host","rm","x"]}"#),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"flock /tmp/l -c 'rm x'"}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"sudo -i 'rm x'"}"#,
+            ),
+            ("shell", r#"{"program":"su","args":["-c","rm x","root"]}"#),
+        ] {
+            let (mut policy, state) = harness(ToolClassGate::Enforce).await;
+            policy.permission_rules = true;
+            state
+                .decision_by_target
+                .lock()
+                .unwrap()
+                .insert(String::new(), "deny".to_owned());
+            let evaluation = policy
+                .evaluate_tool_call_with_input(tool, input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("a deny is an evaluation, not an error");
+            assert_eq!(evaluation.decision, CapabilityDecision::Deny, "{input}");
+            let sent = state.evaluated.lock().unwrap();
+            assert!(
+                sent.iter().any(|request| {
+                    request.target_kind == "command_prefix" && request.target_value.is_empty()
+                }),
+                "{input}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn with_the_permission_rules_off_a_table_less_or_withheld_program_names_no_command() {
+        let (policy, state) = harness(ToolClassGate::Off).await;
+        for (tool, input) in [
+            (
+                "shell",
+                r#"{"program":"find","args":[".","-exec","rm","{}","+"]}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"ssh host rm x"}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"sudo -i 'rm x'"}"#,
+            ),
+        ] {
+            policy
+                .evaluate_tool_call_with_input(tool, input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("an allowed call evaluates");
+        }
+        let sent = state.evaluated.lock().unwrap();
+        assert_eq!(sent.len(), 3, "one request per call, no extra checks");
+        for request in sent.iter() {
+            assert_eq!(request.tool_name, "");
+            assert_eq!(request.user_id, "");
             assert_eq!(request.target_kind, "");
             assert_eq!(request.target_value, "");
         }
