@@ -170,11 +170,15 @@ func (s *pluginChildStore) CreateMCPServer(ctx context.Context, tx plugins.DB, w
 // revision trigger records the admin and the plugin as the reason (dropped under zero retention, where
 // the revision holds no text), and with bundle retention on the
 // skill's bundles go with it. A skill already deleted by hand changes nothing.
+//
+// The posture is resolved for orgID, not just read off ctx: a global plugin kill calls this once per
+// org a killed digest is installed in, all under one platform service principal's ctx, so ctx's own
+// posture only ever applies to orgID when they are the same org (see skillRetentionPostureForOrg).
 func (s *pluginChildStore) RemoveSkill(ctx context.Context, tx plugins.DB, orgID, id, actorID, reason string) error {
 	if s.skills == nil {
 		return errors.New("skills are not available in this deployment")
 	}
-	if _, err := tx.Exec(ctx, skillActorSQL, "user", actorID, reason, "", skillRetentionPosture(ctx)); err != nil {
+	if _, err := tx.Exec(ctx, skillActorSQL, "user", actorID, reason, "", skillRetentionPostureForOrg(ctx, orgID)); err != nil {
 		return err
 	}
 	result, err := tx.Exec(ctx, `DELETE FROM agent_skills WHERE id=$1 AND org_id=$2`, id, orgID)

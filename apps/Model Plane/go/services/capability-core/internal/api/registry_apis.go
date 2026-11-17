@@ -297,6 +297,22 @@ func skillRetentionPosture(ctx context.Context) string {
 	return "false"
 }
 
+// skillRetentionPostureForOrg is skillRetentionPosture for a write that removes a skill from orgID,
+// which is not always the verified principal's own org: a global plugin kill (plugin_catalog.go) walks
+// every org a killed digest is installed in under one platform service principal, so the principal's own
+// non-ZDR posture describes the platform's org, not orgID's. A verified non-ZDR posture is trusted only
+// for the principal's own org; for any other org, no posture is verified for it, so the answer is "true"
+// (content-free), the same fail-safe default an unverified principal gets. This keeps an org-scope kill
+// and a person's own uninstall unchanged (their orgID is always their own) and stops a global kill from
+// snapshotting a zero-retention org's skill text under the platform principal's own, unrelated posture.
+func skillRetentionPostureForOrg(ctx context.Context, orgID string) string {
+	principal, ok := authctx.PrincipalFromContext(ctx)
+	if !ok || principal.OrganizationID != orgID {
+		return "true"
+	}
+	return skillRetentionPosture(ctx)
+}
+
 // skillTxBeginner is the pool's transaction entry point. The registry's own
 // interface stays Exec/Query/QueryRow so fakes need not implement it; a skill
 // mutation needs it, and a database without it cannot mutate a skill at all.
