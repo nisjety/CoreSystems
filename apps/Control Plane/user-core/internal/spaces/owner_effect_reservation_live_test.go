@@ -175,7 +175,7 @@ func TestOwnerEffectReservationRepositoryRoundTripAgainstRealPostgres(t *testing
 		DecisionRef: "decision-owner-effect-" + suffix, RunID: "run-owner-effect-" + suffix,
 		ThreadID: "thread-owner-effect-" + suffix, OrgID: orgID, SpaceRef: spaceRef,
 		SubjectID: subjectID, ServiceAudience: ticketsCreateServiceAudience,
-		ActionID: "tickets.create", ActionSchemaHash: "sha256:" + strings.Repeat("a", 64),
+		ActionID: "tickets.create", ActionSchemaHash: ticketsCreateActionSchemaSHA256,
 		PayloadDigest: "sha256:" + strings.Repeat("b", 64), IdempotencyKey: "ticket-" + suffix,
 		RecipientAudienceRef: "personal:" + spaceRef + ":recipient:1", RecipientAudienceHash: audienceHash,
 		RecipientAudienceRevision: 1, PrivacyPolicyRef: "privacy-proof",
