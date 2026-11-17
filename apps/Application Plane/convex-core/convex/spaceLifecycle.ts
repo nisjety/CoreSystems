@@ -30,7 +30,7 @@ export type SpaceLifecycleEvent = Readonly<{
   spaceRef: string;
 }>;
 
-export type SpaceDeliveryState = 'pending' | 'claimed' | 'acknowledged' | 'failed' | 'rejected';
+export type SpaceDeliveryState = 'pending' | 'claimed' | 'acknowledged' | 'failed' | 'rejected' | 'blocked_legal_hold';
 
 export type SpaceLifecycleDelivery = Readonly<{
   attempts: number;
@@ -149,6 +149,49 @@ export function acknowledgeSpaceLifecycleDelivery(
     attempts: delivery.attempts,
     nextAttemptAt: now,
     state: 'acknowledged',
+  };
+}
+
+/**
+ * A typed legal-hold refusal from an owner is a definitive answer, not an
+ * outage. The claim parks in `blocked_legal_hold`, which
+ * `canClaimSpaceLifecycleDelivery` never selects, so the same refusal is not
+ * retried until `rearmSpaceLifecycleDeliveryAfterLegalHold` re-arms it.
+ */
+export function blockSpaceLifecycleDeliveryForLegalHold(
+  delivery: SpaceLifecycleDelivery,
+  workerId: string,
+  now: number,
+): SpaceLifecycleDelivery {
+  if (delivery.state !== 'claimed' || delivery.leaseOwner !== workerId) {
+    throw new Error('only the active delivery worker may record a legal hold');
+  }
+  return {
+    attempts: delivery.attempts,
+    nextAttemptAt: now,
+    state: 'blocked_legal_hold',
+  };
+}
+
+/**
+ * Re-arms a delivery that a legal hold parked, once the hold has been lifted: it
+ * is claimable again at `now`. The attempt count is kept, so the parked claim
+ * stays in the history. Nothing else leaves `blocked_legal_hold`.
+ */
+export function rearmSpaceLifecycleDeliveryAfterLegalHold(
+  delivery: SpaceLifecycleDelivery,
+  now: number,
+): SpaceLifecycleDelivery {
+  if (delivery.state !== 'blocked_legal_hold') {
+    throw new Error('only a delivery parked by a legal hold may be re-armed');
+  }
+  if (!Number.isSafeInteger(now) || now <= 0) {
+    throw new Error('delivery re-arm time must be a positive safe integer');
+  }
+  return {
+    attempts: delivery.attempts,
+    nextAttemptAt: now,
+    state: 'pending',
   };
 }
 

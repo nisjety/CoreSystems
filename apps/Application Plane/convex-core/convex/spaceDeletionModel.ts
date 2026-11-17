@@ -2,7 +2,8 @@
  * Application -> Model deletion adapter. The two credentials are Control-minted
  * service identities for different audiences; neither is an Application key or
  * a user bearer. A remote timeout remains a leased retry and never becomes a
- * successful deletion receipt.
+ * successful deletion receipt. A typed legal-hold refusal is a definitive answer,
+ * so it parks the delivery instead of retrying it.
  */
 import { v } from "convex/values";
 import { internalAction } from "./_generated/server";
@@ -26,6 +27,28 @@ export function modelDeletionReceipt(receipt: unknown, requestId: string): { sta
     receiptRef: `model:${requestId}`,
     detail: remaining.length > 0 ? `Model owner receipt: ${remaining.join(", ")}` : "Model owner receipt accepted",
   };
+}
+
+/**
+ * The gateway's typed refusal for an erase that a legal hold covers: the exact
+ * code with `details.retryable: false`. Only those fields are read. The upstream
+ * message is never read or stored, and any other body is not a hold.
+ */
+export function isModelLegalHoldRefusal(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false;
+  const error = (body as { error?: unknown }).error;
+  if (!error || typeof error !== "object") return false;
+  const { code, details } = error as { code?: unknown; details?: unknown };
+  if (code !== "erasure_blocked_legal_hold") return false;
+  return Boolean(details && typeof details === "object" && (details as { retryable?: unknown }).retryable === false);
+}
+
+async function isLegalHoldRefusal(response: Response): Promise<boolean> {
+  try {
+    return isModelLegalHoldRefusal(await response.json());
+  } catch {
+    return false;
+  }
 }
 
 function configurationError(): string | null {
@@ -56,6 +79,12 @@ export const deliverOne = internalAction({
       });
       return { status: "retry_scheduled" as const, retryAt };
     };
+    const blockByLegalHold = async () => {
+      await ctx.runMutation(internal.spaces.blockModelDeletionOwnerDeliveryForLegalHold, {
+        eventId: claimed.eventId, workerId: args.workerId, now: Date.now(),
+      });
+      return { eventId: claimed.eventId, status: "blocked_legal_hold" as const };
+    };
     const misconfigured = configurationError();
     if (misconfigured) return release(misconfigured);
     let response: Response;
@@ -78,7 +107,10 @@ export const deliverOne = internalAction({
     } catch {
       return release("Model Space deletion request failed");
     }
-    if (response.status !== 200) return release(`Model Space deletion returned HTTP ${response.status}`);
+    if (response.status !== 200) {
+      if (await isLegalHoldRefusal(response)) return blockByLegalHold();
+      return release(`Model Space deletion returned HTTP ${response.status}`);
+    }
     let receipt: unknown;
     try { receipt = await response.json(); } catch { return release("Model Space deletion returned an invalid receipt"); }
     const outcome = modelDeletionReceipt(receipt, claimed.request.requestId);

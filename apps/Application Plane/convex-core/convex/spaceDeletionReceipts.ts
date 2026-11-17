@@ -28,13 +28,42 @@ const TRANSITIONS: Readonly<Record<SpaceDeletionOwnerStatus, readonly SpaceDelet
   succeeded: [],
   partial: ["succeeded", "failed", "unknown"],
   failed: ["succeeded", "partial", "unknown"],
-  unknown: ["succeeded", "partial", "failed"],
+  unknown: ["succeeded", "partial", "failed", "blocked_legal_hold"],
 };
 
-export function assertReceiptTransition(from: SpaceDeletionOwnerStatus, to: SpaceDeletionOwnerStatus): void {
+/**
+ * Flag `SPACE_DELETION_HOLD_RELEASE` (Convex env, read at call time, off by
+ * default). Only the literal "true" turns it on. With it off a legal-hold block
+ * is terminal, exactly as before the flag existed.
+ */
+export function legalHoldReleaseEnabled(): boolean {
+  return process.env.SPACE_DELETION_HOLD_RELEASE === "true";
+}
+
+// Owner answers a blocked receipt may take once its hold is lifted. `pending` is
+// deliberately absent: a released receipt goes back to pending only through the
+// re-drive (`assertReceiptRearmAfterLegalHold`), which also re-arms the delivery.
+const LEGAL_HOLD_RELEASE_ANSWERS: readonly SpaceDeletionOwnerStatus[] = ["succeeded", "partial", "failed", "unknown"];
+
+export function assertReceiptTransition(
+  from: SpaceDeletionOwnerStatus,
+  to: SpaceDeletionOwnerStatus,
+  options: Readonly<{ legalHoldRelease?: boolean }> = {},
+): void {
   if (from === to) return;
-  if (!TRANSITIONS[from].includes(to)) {
-    throw new Error(`invalid Space deletion owner receipt transition: ${from} -> ${to}`);
+  if (TRANSITIONS[from].includes(to)) return;
+  if (options.legalHoldRelease === true && from === "blocked_legal_hold" && LEGAL_HOLD_RELEASE_ANSWERS.includes(to)) return;
+  throw new Error(`invalid Space deletion owner receipt transition: ${from} -> ${to}`);
+}
+
+/**
+ * The one edge out of a legal-hold block that is not an owner's answer: a
+ * re-drive after the hold is lifted returns the receipt to `pending`, in the same
+ * mutation that re-arms the owner's delivery.
+ */
+export function assertReceiptRearmAfterLegalHold(from: SpaceDeletionOwnerStatus): void {
+  if (from !== "blocked_legal_hold") {
+    throw new Error(`invalid Space deletion owner receipt transition: ${from} -> pending`);
   }
 }
 

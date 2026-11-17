@@ -150,6 +150,10 @@ set_convex_env "SPACE_ATTENTION_INGEST" "${SPACE_ATTENTION_INGEST:-0}"
 set_convex_env "SPACE_ATTENTION_OUT_OF_APP" "${SPACE_ATTENTION_OUT_OF_APP:-0}"
 set_convex_env "NOTIFICATION_CORE_URL" "${NOTIFICATION_CORE_URL:-}"
 set_convex_env "NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN" "${NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN:-}"
+# Space deletion re-drive flag SPACE_DELETION_HOLD_RELEASE: spaces:redriveModelDeletionAfterLegalHoldRelease
+# and the trusted receipt path may leave a legal-hold block. Off unless a compose file turns it on; read at
+# call time, so set 0 and `docker restart convex-gateway` to stop. With it off a hold stays terminal.
+set_convex_env "SPACE_DELETION_HOLD_RELEASE" "${SPACE_DELETION_HOLD_RELEASE:-0}"
 
 # ─────────────────────────────────────────────────────────────────────────
 # Force-deploy functions before starting dev mode.

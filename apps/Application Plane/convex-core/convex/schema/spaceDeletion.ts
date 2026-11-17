@@ -80,6 +80,9 @@ export const spaceDeletionTables = {
   // A separate leased delivery record for an owner-plane purge adapter. It is
   // not the owner receipt itself: only a parseable owner response can advance
   // the receipt, while a timeout/crash remains retryable and visibly pending.
+  // `blocked_legal_hold` is a typed, non-retryable owner refusal: no claim
+  // selects it until the re-drive re-arms it once the hold is lifted (flag
+  // SPACE_DELETION_HOLD_RELEASE, `spaces.ts`).
   spaceDeletionOwnerDeliveryEvents: defineTable({
     eventId: v.string(),
     requestId: v.string(),
@@ -87,7 +90,10 @@ export const spaceDeletionTables = {
       v.literal("application"), v.literal("control"), v.literal("data"),
       v.literal("ingestion"), v.literal("model"), v.literal("infra"),
     ),
-    deliveryState: v.union(v.literal("pending"), v.literal("claimed"), v.literal("acknowledged"), v.literal("failed")),
+    deliveryState: v.union(
+      v.literal("pending"), v.literal("claimed"), v.literal("acknowledged"), v.literal("failed"),
+      v.literal("blocked_legal_hold"),
+    ),
     deliveryAttempts: v.number(),
     leaseOwner: v.optional(v.string()),
     leaseExpiresAt: v.optional(v.number()),

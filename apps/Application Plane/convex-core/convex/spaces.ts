@@ -4,9 +4,11 @@ import { internal } from "./_generated/api";
 import { assertServiceKey, requireGatewayMember, requireViewerMembership } from "./authz";
 import {
   acknowledgeSpaceLifecycleDelivery,
+  blockSpaceLifecycleDeliveryForLegalHold,
   canClaimSpaceLifecycleDelivery,
   claimSpaceLifecycleDelivery,
   createSpaceLifecycleEvent,
+  rearmSpaceLifecycleDeliveryAfterLegalHold,
   releaseSpaceLifecycleDelivery,
   transitionSpaceLifecycle,
   type SpaceLifecycleDelivery,
@@ -29,7 +31,9 @@ import {
 import {
   SPACE_DELETION_OWNERS,
   aggregateDeletionReceipts,
+  assertReceiptRearmAfterLegalHold,
   assertReceiptTransition,
+  legalHoldReleaseEnabled,
   type SpaceDeletionOwner,
   type SpaceDeletionOwnerStatus,
 } from "./spaceDeletionReceipts";
@@ -1357,6 +1361,86 @@ export const releaseModelDeletionOwnerDelivery = internalMutation({
   },
 });
 
+// A typed legal-hold refusal from the Model owner is a definitive answer, not an
+// outage. The delivery parks in `blocked_legal_hold`, which no claim selects, so
+// the same refusal is not retried. The Model receipt shows the hold while it can
+// still move there (pending, or unknown after the deadline); an answer the owner
+// already gave is left as it is. The re-drive after a lifted hold is
+// `redriveModelDeletionAfterLegalHoldRelease`, behind SPACE_DELETION_HOLD_RELEASE.
+export const blockModelDeletionOwnerDeliveryForLegalHold = internalMutation({
+  args: { eventId: v.string(), workerId: v.string(), now: v.number() },
+  handler: async (ctx, args) => {
+    assertDeliveryWorker(args.workerId);
+    const event = await ctx.db.query("spaceDeletionOwnerDeliveryEvents")
+      .withIndex("by_event_id", (q: any) => q.eq("eventId", args.eventId)).first();
+    if (!event || event.ownerPlane !== "model") throw new Error("Model deletion delivery event not found");
+    const delivery = blockSpaceLifecycleDeliveryForLegalHold(deliveryFor(event), args.workerId, args.now);
+    await ctx.db.patch(event._id, { ...patchForDelivery(delivery), lastDeliveryError: "erasure_blocked_legal_hold" });
+    const receipt = await ctx.db.query("spaceDeletionOwnerReceipts")
+      .withIndex("by_request_and_owner", (q: any) => q.eq("requestId", event.requestId).eq("ownerPlane", "model"))
+      .first();
+    if (!receipt) throw new Error("Model deletion owner receipt is not expected");
+    if (receipt.status === "pending" || receipt.status === "unknown") {
+      assertReceiptTransition(receipt.status as SpaceDeletionOwnerStatus, "blocked_legal_hold");
+      await ctx.db.patch(receipt._id, {
+        status: "blocked_legal_hold",
+        detail: "A legal hold blocks the Model owner erasure until the hold is released",
+        updatedAt: args.now,
+      });
+    }
+    return { eventId: event.eventId, status: "blocked_legal_hold" as const };
+  },
+});
+
+/**
+ * Re-drive after a legal hold on a Model deletion has been lifted. The parked
+ * delivery is re-armed so `deliverOne` asks the Model owner again, and the
+ * receipt goes back to `pending` to wait for that answer. An ask that comes too
+ * early is refused again by the owner's own hold check, so nothing is erased.
+ *
+ * Off unless SPACE_DELETION_HOLD_RELEASE is the literal "true": with the flag off
+ * it refuses before any read or write. Nothing in this plane calls it. Who
+ * releases a hold, and whether a sweep re-asks on a schedule, are owner decisions.
+ */
+export const redriveModelDeletionAfterLegalHoldRelease = internalMutation({
+  args: { requestId: v.string(), now: v.number() },
+  handler: async (ctx, args) => {
+    if (!legalHoldReleaseEnabled()) throw new Error("legal_hold_release_disabled");
+    if (!Number.isSafeInteger(args.now) || args.now <= 0) throw new Error("legal hold re-drive time is invalid");
+    const request = await ctx.db.query("spaceDeletionRequests")
+      .withIndex("by_request_id", (q: any) => q.eq("requestId", args.requestId)).first();
+    if (!request || request.state !== "authorized") throw new Error("Model deletion re-drive lacks an authorized request");
+    const space = await getSpaceByRef(ctx, request.spaceRef);
+    if (!space || space.lifecycle !== "deleting") throw new Error("Model deletion re-drive Space is not fenced");
+    const eventId = deletionOwnerDeliveryEventId(args.requestId, "model");
+    const event = await ctx.db.query("spaceDeletionOwnerDeliveryEvents")
+      .withIndex("by_event_id", (q: any) => q.eq("eventId", eventId)).first();
+    if (!event || event.ownerPlane !== "model") throw new Error("Model deletion delivery event not found");
+    const receipt = await ctx.db.query("spaceDeletionOwnerReceipts")
+      .withIndex("by_request_and_owner", (q: any) => q.eq("requestId", args.requestId).eq("ownerPlane", "model"))
+      .first();
+    if (!receipt) throw new Error("Model deletion owner receipt is not expected");
+    assertReceiptRearmAfterLegalHold(receipt.status as SpaceDeletionOwnerStatus);
+    const delivery = rearmSpaceLifecycleDeliveryAfterLegalHold(deliveryFor(event), args.now);
+    await ctx.db.patch(event._id, { ...patchForDelivery(delivery), lastDeliveryError: undefined });
+    // The owner gets the same 7-day window an original request gets. The
+    // reconciler marks it unknown if the answer never comes.
+    await ctx.db.patch(receipt._id, {
+      status: "pending",
+      detail: "Legal hold lifted; the Model owner is asked again",
+      deadlineAt: args.now + SPACE_DELETION_OWNER_DEADLINE_MS,
+      updatedAt: args.now,
+    });
+    await ctx.scheduler.runAfter(SPACE_DELETION_OWNER_DEADLINE_MS, internal.spaceDeletionReceiptReconciler.reconcileOne, {
+      requestId: args.requestId,
+    });
+    await ctx.scheduler.runAfter(0, internal.spaceDeletionModel.deliverOne, {
+      workerId: `space-deletion-model:${eventId}:${crypto.randomUUID()}`,
+    });
+    return { eventId, status: "pending" as const };
+  },
+});
+
 async function finalizeDeletionWhenEveryOwnerSucceeded(ctx: any, requestId: string, now: number): Promise<boolean> {
   const receipts = await ctx.db.query("spaceDeletionOwnerReceipts")
     .withIndex("by_request", (q: any) => q.eq("requestId", requestId)).collect();
@@ -1540,7 +1624,9 @@ export const recordDeletionOwnerReceipt = internalMutation({
       .withIndex("by_request_and_owner", (q: any) => q.eq("requestId", args.requestId).eq("ownerPlane", args.ownerPlane))
       .first();
     if (!receipt) throw new Error("Space deletion owner receipt is not expected");
-    assertReceiptTransition(receipt.status as SpaceDeletionOwnerStatus, args.status as SpaceDeletionOwnerStatus);
+    assertReceiptTransition(receipt.status as SpaceDeletionOwnerStatus, args.status as SpaceDeletionOwnerStatus, {
+      legalHoldRelease: legalHoldReleaseEnabled(),
+    });
     await ctx.db.patch(receipt._id, {
       status: args.status,
       receiptRef: args.receiptRef?.trim() || undefined,
