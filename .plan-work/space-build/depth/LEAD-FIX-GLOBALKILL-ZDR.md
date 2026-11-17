@@ -1,0 +1,3 @@
+- P2 deviation: a global kill is now content-free for every affected org, ZDR or not, not just ZDR ones; capability-core has no live per-org posture oracle, so this is the safe default rather than a narrower ZDR-only one.
+- P1 test-gap: no Go test yet proves RemoveSkill's posture decision for orgID != ctx principal's own org (the exact global-kill shape); none existed before this fix either.
+- P3 follow-up: if a narrower (non-ZDR orgs keep their snapshot, ZDR orgs don't) behaviour is wanted later, capability-core would need a verified per-org posture source for a global kill (e.g. a Control-signed claim per affected org), which is a bigger design change than this fix.
