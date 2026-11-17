@@ -626,3 +626,635 @@ pub const fn profile_request_admitted(
 pub fn frames_visible_to(viewer_subject_id: &str, starter_subject_id: &str) -> bool {
     !starter_subject_id.is_empty() && viewer_subject_id == starter_subject_id
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
+    use ed25519_dalek::{Signer, SigningKey};
+    use serde_json::{json, Value};
+
+    /// Control's golden vectors, read at compile time. Control's copy is `browserRunPayloadDigest`.
+    const GOLDEN: &str = include_str!(
+        "../../../../../Control Plane/user-core/internal/spaces/testdata/space-browser-run-decision.golden.json"
+    );
+    /// The goal text the golden commits to, and its digest.
+    const GOAL: &str = "read the pricing page";
+    const GOAL_DIGEST: &str =
+        "sha256:e3eb81231b5a76dd873dfa95da2a0a0f0c576567a5fed957006fc51b68c405dc";
+    /// The key id the test Control key signs under.
+    const KEY_ID: &str = "control-space-decision-test";
+
+    fn at(instant: &str) -> DateTime<Utc> {
+        instant.parse().expect("a fixed instant")
+    }
+
+    /// Inside the decision's window (issued 10:00:00, expires 10:02:00).
+    fn now() -> DateTime<Utc> {
+        at("2026-11-17T10:00:30Z")
+    }
+
+    fn control_key() -> SigningKey {
+        SigningKey::from_bytes(&[7; 32])
+    }
+
+    fn trusted(signing: &SigningKey) -> ControlDecisionKey {
+        let encoded = URL_SAFE_NO_PAD.encode(signing.verifying_key().to_bytes());
+        ControlDecisionKey::from_config(Some(KEY_ID), Some(&encoded))
+            .expect("the test public key parses")
+    }
+
+    fn expectation(now: DateTime<Utc>) -> BrowserRunExpectation<'static> {
+        BrowserRunExpectation {
+            org_id: "org-1",
+            subject_id: "user-2",
+            space_ref: "space-room-1",
+            thread_id: "thread-room-1",
+            goal_digest: GOAL_DIGEST,
+            idempotency_key: "space-browser-1",
+            now,
+        }
+    }
+
+    /// The claims of a room run that names its thread: owner view, 20 steps, 300 seconds.
+    fn existing_claims() -> BrowserRunClaims {
+        BrowserRunClaims {
+            thread_id: "thread-room-1".to_owned(),
+            thread_mode: THREAD_MODE_EXISTING.to_owned(),
+            goal_digest: GOAL_DIGEST.to_owned(),
+            allowed_domains: vec!["docs.example.org".to_owned(), "fixture.test".to_owned()],
+            profile_scope: PROFILE_EPHEMERAL.to_owned(),
+            view_scope: VIEW_OWNER.to_owned(),
+            max_steps: 20,
+            max_runtime_s: 300,
+        }
+    }
+
+    /// The room policy applied to the existing-thread claims after one edit.
+    fn checked(edit: impl FnOnce(&mut BrowserRunClaims)) -> Result<(), BrowserRunRefusal> {
+        let mut claims = existing_claims();
+        edit(&mut claims);
+        check_claims(&claims)
+    }
+
+    /// The signed decision fields Control writes for the golden input. The refs are trimmed, as
+    /// `newEvidenceDecision` writes them. [`with_digest`] sets the digest.
+    fn decision_fields() -> Value {
+        json!({
+            "decision_ref": "decision-1",
+            "org_id": "org-1",
+            "space_ref": "space-room-1",
+            "subject_id": "user-2",
+            "service_audience": BROWSER_RUN_AUDIENCE,
+            "action_id": BROWSER_RUN_ACTION_ID,
+            "action_schema_hash": BROWSER_RUN_SCHEMA,
+            "payload_digest": "",
+            "idempotency_key": "space-browser-1",
+            "recipient_audience_ref": "audience:space-room-1:4",
+            "recipient_audience_hash": "sha256:audience-hash",
+            "privacy_policy_ref": "privacy:org-1:5",
+            "resource_authorization_ref": "control:space-room-1:browser-run:7",
+            "authority_revision": 7,
+            "membership_revision": 3,
+            "privacy_revision": 5,
+            "recipient_audience_revision": 4,
+            "entitlement_revision": 6,
+            "permissions": [PERMISSION_RUN],
+            "purpose": "ai_run",
+            "lawful_basis": "contract",
+            "privacy_class": "shared_space",
+            "retention_class": "ephemeral",
+            "residency": "eu",
+            "deletion_scope": "run",
+            "zero_data_retention": false,
+            "issued_at": "2026-11-17T10:00:00Z",
+            "expires_at": "2026-11-17T10:02:00Z",
+            "nonce": "nonce-1"
+        })
+    }
+
+    fn decision_of(fields: &Value) -> SignedDecision {
+        serde_json::from_value(fields.clone()).expect("the fields are a complete decision")
+    }
+
+    /// The fields with the payload digest Control would write over these claims.
+    fn with_digest(mut fields: Value, claims: &BrowserRunClaims) -> Value {
+        let digest = payload_digest(&decision_of(&fields), claims);
+        fields["payload_digest"] = json!(digest);
+        fields
+    }
+
+    /// The claims document Control returns beside the token.
+    fn claims_value(claims: &BrowserRunClaims) -> Value {
+        json!({
+            "thread_id": claims.thread_id,
+            "thread_mode": claims.thread_mode,
+            "goal_digest": claims.goal_digest,
+            "allowed_domains": claims.allowed_domains,
+            "profile_scope": claims.profile_scope,
+            "view_scope": claims.view_scope,
+            "max_steps": claims.max_steps,
+            "max_runtime_s": claims.max_runtime_s,
+        })
+    }
+
+    /// The envelope `v2.<key-id>.<payload>.<signature>`, Ed25519 over the first three segments.
+    fn envelope(signing: &SigningKey, key_id: &str, payload: &Value) -> String {
+        let signed = format!(
+            "v2.{}.{}",
+            URL_SAFE_NO_PAD.encode(key_id),
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(payload).expect("the payload serializes"))
+        );
+        let signature = signing.sign(signed.as_bytes());
+        format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()))
+    }
+
+    /// A decision the test Control key signs over the digest of these claims.
+    fn signed(fields: Value, claims: &BrowserRunClaims) -> String {
+        envelope(&control_key(), KEY_ID, &with_digest(fields, claims))
+    }
+
+    fn verify_with(
+        signing: &SigningKey,
+        token: &str,
+        claims: &Value,
+        now: DateTime<Utc>,
+    ) -> Result<VerifiedBrowserRun, BrowserRunRefusal> {
+        verify_browser_run_decision(
+            &trusted(signing),
+            token,
+            &claims.to_string(),
+            &expectation(now),
+        )
+    }
+
+    fn string_list(value: &Value) -> Vec<String> {
+        value
+            .as_array()
+            .expect("a list")
+            .iter()
+            .map(|item| item.as_str().expect("a string").to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn payload_digest_reproduces_every_control_golden_vector() {
+        let golden: Value = serde_json::from_str(GOLDEN).expect("the golden is JSON");
+        let input = &golden["input"];
+        let vectors = golden["vectors"].as_array().expect("the golden has vectors");
+        assert_eq!(
+            vectors.len(),
+            4,
+            "room_owner_view, room_shared_view, domains_listed_reversed and new_thread"
+        );
+        for vector in vectors {
+            let name = vector["name"].as_str().expect("a vector name");
+            let mut fields = decision_fields();
+            for (field, golden_field) in [
+                ("org_id", "org_id"),
+                ("subject_id", "user_id"),
+                ("space_ref", "space_id"),
+                ("recipient_audience_ref", "recipient_audience_ref"),
+                ("recipient_audience_hash", "recipient_audience_hash"),
+                ("privacy_policy_ref", "privacy_policy_ref"),
+                ("resource_authorization_ref", "resource_authorization_ref"),
+                ("authority_revision", "authority_revision"),
+                ("membership_revision", "membership_revision"),
+                ("privacy_revision", "privacy_revision"),
+                ("recipient_audience_revision", "recipient_audience_revision"),
+                ("entitlement_revision", "entitlement_revision"),
+            ] {
+                fields[field] = input[golden_field].clone();
+            }
+            fields["idempotency_key"] = vector["idempotency_key"].clone();
+            let claims = BrowserRunClaims {
+                thread_id: vector["thread_id"].as_str().expect("thread_id").to_owned(),
+                thread_mode: vector["thread_mode"].as_str().expect("thread_mode").to_owned(),
+                goal_digest: vector["goal_digest"].as_str().expect("goal_digest").to_owned(),
+                allowed_domains: string_list(&vector["canonical_allowed_domains"]),
+                profile_scope: PROFILE_EPHEMERAL.to_owned(),
+                view_scope: vector["view_scope"].as_str().expect("view_scope").to_owned(),
+                max_steps: u32::try_from(vector["max_steps"].as_u64().expect("max_steps"))
+                    .expect("max_steps fits a u32"),
+                max_runtime_s: u32::try_from(
+                    vector["max_runtime_s"].as_u64().expect("max_runtime_s"),
+                )
+                .expect("max_runtime_s fits a u32"),
+            };
+            assert_eq!(
+                goal_digest(vector["goal"].as_str().expect("goal")),
+                claims.goal_digest,
+                "{name}: the goal commitment"
+            );
+            assert_eq!(
+                check_claims(&claims),
+                Ok(()),
+                "{name}: the vector's claims meet the room policy"
+            );
+            assert_eq!(
+                payload_digest(&decision_of(&fields), &claims),
+                vector["payload_digest"].as_str().expect("payload_digest"),
+                "{name}"
+            );
+        }
+        assert_eq!(GOAL, golden["vectors"][0]["goal"].as_str().expect("goal"));
+    }
+
+    #[test]
+    fn a_control_signed_decision_verifies_and_yields_its_run() {
+        let signing = control_key();
+        let claims = existing_claims();
+        let token = signed(decision_fields(), &claims);
+        let verified = verify_with(&signing, &token, &claims_value(&claims), now())
+            .expect("a Control-signed decision verifies");
+        assert_eq!(verified.decision_ref, "decision-1");
+        assert_eq!(verified.recipient_audience_revision, 4);
+        assert_eq!(verified.expires_at, at("2026-11-17T10:02:00Z"));
+        assert_eq!(verified.claims, claims);
+    }
+
+    #[test]
+    fn forged_claims_are_refused_as_a_mismatch() {
+        let signing = control_key();
+        let claims = existing_claims();
+        let token = signed(decision_fields(), &claims);
+        let mut forged = claims_value(&claims);
+        forged["max_steps"] = json!(21);
+        assert_eq!(
+            verify_with(&signing, &token, &forged, now()),
+            Err(BrowserRunRefusal::Mismatch)
+        );
+    }
+
+    #[test]
+    fn a_decision_under_another_key_id_is_untrusted() {
+        let claims = existing_claims();
+        let token = envelope(
+            &control_key(),
+            "some-other-control-key",
+            &with_digest(decision_fields(), &claims),
+        );
+        assert_eq!(
+            verify_with(&control_key(), &token, &claims_value(&claims), now()),
+            Err(BrowserRunRefusal::Untrusted)
+        );
+    }
+
+    #[test]
+    fn a_decision_signed_by_another_key_is_untrusted() {
+        let claims = existing_claims();
+        let forger = SigningKey::from_bytes(&[9; 32]);
+        let token = envelope(&forger, KEY_ID, &with_digest(decision_fields(), &claims));
+        assert_eq!(
+            verify_with(&control_key(), &token, &claims_value(&claims), now()),
+            Err(BrowserRunRefusal::Untrusted)
+        );
+    }
+
+    #[test]
+    fn a_tampered_payload_is_untrusted() {
+        let claims = existing_claims();
+        let token = signed(decision_fields(), &claims);
+        let mut forged = decision_fields();
+        forged["org_id"] = json!("org-9");
+        let body = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&forged).expect("serializes"));
+        let segments: Vec<&str> = token.split('.').collect();
+        let tampered = [segments[0], segments[1], body.as_str(), segments[3]].join(".");
+        assert_eq!(
+            verify_with(&control_key(), &tampered, &claims_value(&claims), now()),
+            Err(BrowserRunRefusal::Untrusted)
+        );
+    }
+
+    #[test]
+    fn an_expired_or_far_future_decision_is_a_window_refusal() {
+        let signing = control_key();
+        let claims = existing_claims();
+        let token = signed(decision_fields(), &claims);
+        let doc = claims_value(&claims);
+        assert_eq!(
+            verify_with(&signing, &token, &doc, at("2026-11-17T10:02:00Z")),
+            Err(BrowserRunRefusal::Window),
+            "expired at its expiry instant"
+        );
+        assert_eq!(
+            verify_with(&signing, &token, &doc, at("2026-11-17T09:58:00Z")),
+            Err(BrowserRunRefusal::Window),
+            "issued more than a minute ahead"
+        );
+        assert!(
+            verify_with(&signing, &token, &doc, at("2026-11-17T09:59:00Z")).is_ok(),
+            "a minute ahead is the clock slack"
+        );
+    }
+
+    #[test]
+    fn a_zero_retention_decision_is_a_policy_refusal() {
+        let mut fields = decision_fields();
+        fields["zero_data_retention"] = json!(true);
+        let claims = existing_claims();
+        let token = signed(fields, &claims);
+        assert_eq!(
+            verify_with(&control_key(), &token, &claims_value(&claims), now()),
+            Err(BrowserRunRefusal::Policy)
+        );
+    }
+
+    #[test]
+    fn the_room_view_permission_must_agree_with_the_view_scope() {
+        let signing = control_key();
+        let owner = existing_claims();
+        let mut owner_with_room = decision_fields();
+        owner_with_room["permissions"] = json!([PERMISSION_RUN, PERMISSION_VIEW_ROOM]);
+        let token = signed(owner_with_room, &owner);
+        assert_eq!(
+            verify_with(&signing, &token, &claims_value(&owner), now()),
+            Err(BrowserRunRefusal::Policy),
+            "a room permission on an owner view"
+        );
+
+        let mut room = existing_claims();
+        room.view_scope = VIEW_ROOM.to_owned();
+        let token = signed(decision_fields(), &room);
+        assert_eq!(
+            verify_with(&signing, &token, &claims_value(&room), now()),
+            Err(BrowserRunRefusal::Policy),
+            "a room view without the permission"
+        );
+
+        let mut room_with_room = decision_fields();
+        room_with_room["permissions"] = json!([PERMISSION_RUN, PERMISSION_VIEW_ROOM]);
+        let token = signed(room_with_room, &room);
+        assert!(
+            verify_with(&signing, &token, &claims_value(&room), now()).is_ok(),
+            "a room view with its permission verifies"
+        );
+    }
+
+    #[test]
+    fn a_decision_without_its_zero_retention_flag_is_malformed() {
+        let claims = existing_claims();
+        let mut fields = with_digest(decision_fields(), &claims);
+        fields
+            .as_object_mut()
+            .expect("the fields are an object")
+            .remove("zero_data_retention");
+        let token = envelope(&control_key(), KEY_ID, &fields);
+        assert_eq!(
+            verify_with(&control_key(), &token, &claims_value(&claims), now()),
+            Err(BrowserRunRefusal::Malformed)
+        );
+    }
+
+    #[test]
+    fn claims_with_an_unknown_field_are_malformed() {
+        let claims = existing_claims();
+        let token = signed(decision_fields(), &claims);
+        let mut doc = claims_value(&claims);
+        doc["surprise"] = json!(true);
+        assert_eq!(
+            parse_claims(&doc.to_string()),
+            Err(BrowserRunRefusal::Malformed)
+        );
+        assert_eq!(
+            verify_with(&control_key(), &token, &doc, now()),
+            Err(BrowserRunRefusal::Malformed)
+        );
+    }
+
+    #[test]
+    fn a_control_decision_with_trimmed_refs_verifies_and_a_padded_ref_is_a_mismatch() {
+        let signing = control_key();
+        let claims = existing_claims();
+        // Control trims the evidence refs before it writes the decision and digests them, so the
+        // signed fields carry the trimmed values and the digest is over those.
+        let trimmed = with_digest(decision_fields(), &claims);
+        let token = envelope(&signing, KEY_ID, &trimmed);
+        assert!(
+            verify_with(&signing, &token, &claims_value(&claims), now()).is_ok(),
+            "the trimmed decision verifies end to end"
+        );
+        for field in [
+            "recipient_audience_ref",
+            "recipient_audience_hash",
+            "privacy_policy_ref",
+            "resource_authorization_ref",
+        ] {
+            let mut padded = trimmed.clone();
+            padded[field] = json!(format!(
+                "  {}  ",
+                trimmed[field].as_str().expect("a text ref")
+            ));
+            let token = envelope(&signing, KEY_ID, &padded);
+            assert_eq!(
+                verify_with(&signing, &token, &claims_value(&claims), now()),
+                Err(BrowserRunRefusal::Mismatch),
+                "a padded {field} is refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_thread_mode_must_agree_with_the_thread_id() {
+        assert_eq!(
+            checked(|claims| claims.thread_mode = THREAD_MODE_NEW.to_owned()),
+            Err(BrowserRunRefusal::Malformed),
+            "a new-mode run names no thread"
+        );
+        assert_eq!(
+            checked(|claims| claims.thread_id = String::new()),
+            Err(BrowserRunRefusal::Malformed),
+            "an existing-mode run names its thread"
+        );
+        assert_eq!(
+            checked(|claims| claims.thread_mode = "room".to_owned()),
+            Err(BrowserRunRefusal::Malformed),
+            "any other mode is refused"
+        );
+        assert_eq!(
+            checked(|claims| {
+                claims.thread_id = String::new();
+                claims.thread_mode = THREAD_MODE_NEW.to_owned();
+            }),
+            Ok(()),
+            "a new-thread run with no thread is valid"
+        );
+    }
+
+    #[test]
+    fn bind_refuses_a_thread_mode_that_disagrees_with_the_expected_thread() {
+        let mut new_run = existing_claims();
+        new_run.thread_id = String::new();
+        new_run.thread_mode = THREAD_MODE_NEW.to_owned();
+        let new_decision = decision_of(&with_digest(decision_fields(), &new_run));
+        let named = expectation(now());
+        let unnamed = BrowserRunExpectation {
+            thread_id: "",
+            ..expectation(now())
+        };
+        assert_eq!(
+            bind(&new_decision, &new_run, &named),
+            Err(BrowserRunRefusal::Mismatch),
+            "a new-mode decision when a thread is named"
+        );
+        assert_eq!(
+            bind(&new_decision, &new_run, &unnamed),
+            Ok(()),
+            "a new-mode decision when no thread is named"
+        );
+
+        let existing = existing_claims();
+        let existing_decision = decision_of(&with_digest(decision_fields(), &existing));
+        assert_eq!(
+            bind(&existing_decision, &existing, &unnamed),
+            Err(BrowserRunRefusal::Mismatch),
+            "an existing-mode decision when no thread is named"
+        );
+        assert_eq!(
+            bind(&existing_decision, &existing, &named),
+            Ok(()),
+            "an existing-mode decision when its thread is named"
+        );
+    }
+
+    #[test]
+    fn the_room_policy_bounds_steps_runtime_hosts_profile_and_view() {
+        assert_eq!(checked(|c| c.max_steps = 4), Err(BrowserRunRefusal::Policy));
+        assert_eq!(checked(|c| c.max_steps = 41), Err(BrowserRunRefusal::Policy));
+        assert_eq!(checked(|c| c.max_steps = 5), Ok(()));
+        assert_eq!(checked(|c| c.max_steps = 40), Ok(()));
+        assert_eq!(checked(|c| c.max_runtime_s = 29), Err(BrowserRunRefusal::Policy));
+        assert_eq!(checked(|c| c.max_runtime_s = 601), Err(BrowserRunRefusal::Policy));
+        assert_eq!(checked(|c| c.max_runtime_s = 30), Ok(()));
+        assert_eq!(checked(|c| c.max_runtime_s = 600), Ok(()));
+
+        let nine: Vec<String> = ('a'..='i')
+            .map(|letter| format!("{letter}.example.com"))
+            .collect();
+        assert_eq!(
+            checked(|c| c.allowed_domains = nine.clone()),
+            Err(BrowserRunRefusal::Policy),
+            "nine hosts"
+        );
+        assert_eq!(checked(|c| c.allowed_domains = nine[..8].to_vec()), Ok(()));
+        assert_eq!(
+            checked(|c| c.allowed_domains = vec!["a.example.com".to_owned(), "a.example.com".to_owned()]),
+            Err(BrowserRunRefusal::Policy),
+            "a duplicate host"
+        );
+        assert_eq!(
+            checked(|c| c.allowed_domains = vec!["b.example.com".to_owned(), "a.example.com".to_owned()]),
+            Err(BrowserRunRefusal::Policy),
+            "an unsorted host list"
+        );
+        assert_eq!(
+            checked(|c| c.profile_scope = "persistent".to_owned()),
+            Err(BrowserRunRefusal::Policy)
+        );
+        assert_eq!(
+            checked(|c| c.view_scope = "guest".to_owned()),
+            Err(BrowserRunRefusal::Policy)
+        );
+    }
+
+    #[test]
+    fn the_canonical_host_rules_accept_only_canonical_hosts() {
+        for host in ["docs.example.org", "fixture.test", "a-b.example.co"] {
+            assert!(valid_host(host), "{host} is canonical");
+        }
+        for host in [
+            "10.0.0.1",
+            "::1",
+            "[::1]",
+            "localhost",
+            "api.localhost",
+            "*.example.com",
+            "intranet",
+            "example.123",
+            "Example.com",
+            "https://example.com",
+            "example.com/path",
+            "example.com:443",
+            "",
+            "-bad.example.com",
+            "bad-.example.com",
+            "double..dot.com",
+        ] {
+            assert!(!valid_host(host), "{host:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn frames_go_to_the_starter_alone() {
+        assert!(frames_visible_to("user-2", "user-2"));
+        assert!(!frames_visible_to("user-3", "user-2"));
+        assert!(!frames_visible_to("", ""), "no starter, no frames");
+    }
+
+    #[test]
+    fn a_grant_lives_the_run_limit_plus_a_minute_and_at_most_ten_minutes() {
+        assert_eq!(room_grant_ttl_seconds(30), 90);
+        assert_eq!(room_grant_ttl_seconds(300), 360);
+        assert_eq!(room_grant_ttl_seconds(600), 600);
+        assert_eq!(room_grant_ttl_seconds(u32::MAX), 600);
+    }
+
+    #[test]
+    fn a_space_admits_a_room_run_only_below_its_limit() {
+        assert!(capacity_admits(0));
+        assert!(capacity_admits(1));
+        assert!(!capacity_admits(2));
+    }
+
+    #[test]
+    fn the_rollout_switch_is_on_only_for_an_on_word() {
+        for on in ["1", "true", "on", "yes", "enabled", " TRUE "] {
+            assert!(space_browser_run_api_enabled(Some(on)), "{on:?} switches on");
+        }
+        for off in [None, Some(""), Some("0"), Some("off"), Some("no"), Some("tru")] {
+            assert!(!space_browser_run_api_enabled(off), "{off:?} stays off");
+        }
+        assert_eq!(SPACE_BROWSER_RUN_API_ENV, "SPACE_BROWSER_RUN_API");
+    }
+
+    #[test]
+    fn the_control_key_names_the_variable_it_cannot_read() {
+        let raw = control_key().verifying_key().to_bytes();
+        let encoded = URL_SAFE_NO_PAD.encode(raw);
+        assert_eq!(
+            ControlDecisionKey::from_config(None, Some(&encoded)).err(),
+            Some(CONTROL_KEY_ID_ENV)
+        );
+        assert_eq!(
+            ControlDecisionKey::from_config(Some("  "), Some(&encoded)).err(),
+            Some(CONTROL_KEY_ID_ENV)
+        );
+        assert_eq!(
+            ControlDecisionKey::from_config(Some(KEY_ID), None).err(),
+            Some(CONTROL_PUBLIC_KEY_ENV)
+        );
+        assert_eq!(
+            ControlDecisionKey::from_config(Some(KEY_ID), Some("not a key!")).err(),
+            Some(CONTROL_PUBLIC_KEY_ENV)
+        );
+        let short = URL_SAFE_NO_PAD.encode(&raw[..16]);
+        assert_eq!(
+            ControlDecisionKey::from_config(Some(KEY_ID), Some(&short)).err(),
+            Some(CONTROL_PUBLIC_KEY_ENV)
+        );
+    }
+
+    #[test]
+    fn the_control_key_accepts_unpadded_padded_and_standard_base64() {
+        let raw = control_key().verifying_key().to_bytes();
+        for encoded in [
+            URL_SAFE_NO_PAD.encode(raw),
+            URL_SAFE.encode(raw),
+            STANDARD.encode(raw),
+        ] {
+            let key = ControlDecisionKey::from_config(Some(KEY_ID), Some(&encoded))
+                .expect("a Control key in any accepted encoding");
+            assert_eq!(key.id(), KEY_ID);
+        }
+    }
+}

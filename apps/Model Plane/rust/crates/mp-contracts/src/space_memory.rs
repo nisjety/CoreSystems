@@ -78,4 +78,33 @@ mod tests {
     fn the_variable_name_is_the_documented_one() {
         assert_eq!(MEMORY_SPACE_CONTAINMENT_ENV, "MEMORY_SPACE_CONTAINMENT");
     }
+
+    #[test]
+    fn audience_labels_are_on_only_for_1_true_or_on() {
+        for on in ["1", "true", "on"] {
+            assert!(audience_labels_enabled_from(Some(on)), "{on:?} switches labels on");
+        }
+    }
+
+    #[test]
+    fn the_audience_label_on_words_are_case_and_whitespace_insensitive() {
+        for on in ["TRUE", "True", "ON", "On", " 1 ", "\ttrue\n", "  ON  "] {
+            assert!(audience_labels_enabled_from(Some(on)), "{on:?} switches labels on");
+        }
+    }
+
+    #[test]
+    fn audience_labels_are_off_when_unset_or_any_other_value() {
+        assert!(!audience_labels_enabled_from(None), "unset is off");
+        for off in [
+            "", " ", "0", "false", "off", "yes", "enabled", "2", "tru", "oon", "1 2", "-1",
+        ] {
+            assert!(!audience_labels_enabled_from(Some(off)), "{off:?} keeps labels off");
+        }
+    }
+
+    #[test]
+    fn the_audience_label_variable_name_is_the_documented_one() {
+        assert_eq!(MEMORY_AUDIENCE_LABELS_ENV, "MEMORY_AUDIENCE_LABELS");
+    }
 }

@@ -67,3 +67,37 @@ pub fn render_for_model(role: &str, content: &str, state: &str) -> Option<(Strin
         _ => Some((role.to_owned(), content.to_owned())),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_deleted_message_becomes_the_static_system_line_whatever_its_text() {
+        let line = Some(("system".to_owned(), DELETED_MODEL_LINE.to_owned()));
+        assert_eq!(render_for_model("user", "the original text", STATE_DELETED), line);
+        assert_eq!(render_for_model("assistant", "", STATE_DELETED), line);
+    }
+
+    #[test]
+    fn an_edited_message_carries_its_effective_text_and_the_marker() {
+        assert_eq!(
+            render_for_model("user", "fixed text", STATE_EDITED),
+            Some(("user".to_owned(), format!("fixed text\n{EDITED_MODEL_MARKER}")))
+        );
+    }
+
+    #[test]
+    fn an_edited_message_with_no_text_sends_no_bare_marker() {
+        assert_eq!(render_for_model("user", "", STATE_EDITED), None);
+    }
+
+    #[test]
+    fn an_unrevised_message_is_unchanged_and_an_empty_one_is_left_out() {
+        assert_eq!(
+            render_for_model("assistant", "hello", ""),
+            Some(("assistant".to_owned(), "hello".to_owned()))
+        );
+        assert_eq!(render_for_model("user", "", ""), None);
+    }
+}

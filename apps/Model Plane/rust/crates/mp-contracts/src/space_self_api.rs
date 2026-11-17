@@ -355,3 +355,179 @@ pub fn session_core_enabled_from(value: Option<&str>) -> bool {
 pub fn session_core_enabled() -> bool {
     session_core_enabled_from(std::env::var(SESSION_CORE_ENV).ok().as_deref())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn golden() -> Value {
+        serde_json::from_str(REGISTRY_JSON).expect("the golden is JSON")
+    }
+
+    fn load_document(document: &Value) -> Result<Registry, RegistryError> {
+        load(&serde_json::to_string(document).expect("the document serializes"))
+    }
+
+    fn first_space_row(document: &mut Value) -> &mut Value {
+        document["rows"]
+            .as_array_mut()
+            .expect("the golden has rows")
+            .iter_mut()
+            .find(|row| {
+                row["action_id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("space."))
+            })
+            .expect("the golden has a space row")
+    }
+
+    #[test]
+    fn the_compiled_golden_loads_and_names_its_contract() {
+        let registry = registry().expect("the compiled golden is valid");
+        assert_eq!(registry.contract, REGISTRY_CONTRACT);
+        assert_eq!(registry.version, REGISTRY_VERSION);
+        assert!(registry.row(LEGACY_ACTION_ID).is_some(), "the legacy row is present");
+    }
+
+    #[test]
+    fn the_first_digest_vector_is_reproduced_by_the_key_and_the_payload_digest() {
+        let registry = registry().expect("the compiled golden is valid");
+        let vector = &registry.digest_vectors[0];
+        let text = |field: &str| vector[field].as_str().expect(field).to_owned();
+        let (action_id, run_id, org_id, step_id) = (
+            text("action_id"),
+            text("run_id"),
+            text("org_id"),
+            text("step_id"),
+        );
+        assert_eq!(
+            idempotency_key(&action_id, &run_id, &step_id),
+            text("idempotency_key")
+        );
+        let pairs: Vec<(String, String)> = vector["argument_pairs"]
+            .as_array()
+            .expect("argument_pairs is a list")
+            .iter()
+            .map(|pair| {
+                (
+                    pair[0].as_str().expect("an argument name").to_owned(),
+                    pair[1].as_str().expect("an argument value").to_owned(),
+                )
+            })
+            .collect();
+        let borrowed: Vec<(&str, &str)> = pairs
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        let digest = payload_digest(
+            &action_id,
+            &run_id,
+            &org_id,
+            &text("idempotency_key"),
+            &borrowed,
+        )
+        .expect("the vector frames");
+        assert_eq!(digest, text("payload_digest"));
+    }
+
+    #[test]
+    fn load_refuses_a_bad_header() {
+        for (field, value) in [("contract", json!("another-registry")), ("version", json!(2))] {
+            let mut document = golden();
+            document[field] = value;
+            assert_eq!(
+                load_document(&document).err(),
+                Some(RegistryError::Invalid("header".to_owned())),
+                "{field} is checked"
+            );
+        }
+    }
+
+    #[test]
+    fn load_refuses_a_repeated_action_id() {
+        let mut document = golden();
+        let first = document["rows"][0].clone();
+        document["rows"]
+            .as_array_mut()
+            .expect("the golden has rows")
+            .push(first);
+        match load_document(&document) {
+            Err(RegistryError::Invalid(detail)) => {
+                assert!(detail.ends_with("repeated action id"), "{detail}");
+            }
+            other => panic!("a repeated action id must be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_refuses_an_argument_that_names_a_forbidden_part() {
+        let mut document = golden();
+        let row = first_space_row(&mut document);
+        let parameters: Value = serde_json::from_str(
+            row["parameters_json"].as_str().expect("parameters_json is text"),
+        )
+        .expect("parameters_json is JSON");
+        let argument = parameters["properties"]
+            .as_object()
+            .expect("properties is an object")
+            .keys()
+            .next()
+            .expect("the row has an argument")
+            .clone();
+        let renamed = format!("user_{argument}");
+        let mut renamed_parameters = parameters.clone();
+        let properties = renamed_parameters["properties"]
+            .as_object_mut()
+            .expect("properties is an object");
+        let schema = properties.remove(&argument).expect("the property exists");
+        properties.insert(renamed.clone(), schema);
+        let text = renamed_parameters.to_string();
+        row["schema_sha256"] = json!(sha256_commitment(text.as_bytes()));
+        row["parameters_json"] = json!(text);
+        for name in row["argument_order"]
+            .as_array_mut()
+            .expect("argument_order is a list")
+        {
+            if name.as_str() == Some(argument.as_str()) {
+                *name = json!(renamed);
+            }
+        }
+        match load_document(&document) {
+            Err(RegistryError::Invalid(detail)) => {
+                assert!(
+                    detail.ends_with("argument repeats or names a forbidden part"),
+                    "{detail}"
+                );
+            }
+            other => panic!("a forbidden argument name must be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_refuses_a_reservation_on_a_space_row() {
+        let mut document = golden();
+        first_space_row(&mut document)["reservation"] = json!(true);
+        match load_document(&document) {
+            Err(RegistryError::Invalid(detail)) => {
+                assert!(
+                    detail.ends_with("reservation admits tickets.create only"),
+                    "{detail}"
+                );
+            }
+            other => panic!("a reservation on a space row must be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_session_core_switch_is_on_only_for_an_on_word() {
+        for on in ["1", "true", "TRUE", "on", "yes", "enabled", " enabled "] {
+            assert!(session_core_enabled_from(Some(on)), "{on:?} must switch on");
+        }
+        for off in [None, Some(""), Some("0"), Some("false"), Some("off"), Some("no"), Some("tru")]
+        {
+            assert!(!session_core_enabled_from(off), "{off:?} must stay off");
+        }
+        assert_eq!(SESSION_CORE_ENV, "SPACE_SELF_API_SESSION_CORE");
+    }
+}

@@ -1154,6 +1154,66 @@ fn typed_json() -> Value {
         }
     }
 
+    /// The refusal a catalogue entry stands for: a feature code gets each vocabulary key in turn.
+    fn refusals_for(entry: &Entry) -> Vec<Refusal> {
+        if entry.takes_feature {
+            FEATURES
+                .iter()
+                .map(|feature| Refusal::feature_not_supported(feature.key))
+                .collect()
+        } else {
+            vec![Refusal::new(entry.code, None).expect("a code that takes no feature builds without one")]
+        }
+    }
+
+    #[test]
+    fn every_catalogue_code_and_feature_round_trips_through_both_transports() {
+        for entry in ENTRIES {
+            for refusal in refusals_for(entry) {
+                assert_eq!(
+                    Refusal::from_body(&refusal.json_body()),
+                    Some(refusal),
+                    "json body of {}",
+                    refusal.code()
+                );
+                let status = refusal.grpc_status(Code::FailedPrecondition);
+                assert_eq!(status.message(), refusal.message(), "{}", refusal.code());
+                assert_eq!(
+                    Refusal::from_status(&status),
+                    Some(refusal),
+                    "grpc status of {}",
+                    refusal.code()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_json_envelope_carries_exactly_the_documented_fields() {
+        for entry in ENTRIES {
+            for refusal in refusals_for(entry) {
+                let body = refusal.json_body();
+                assert_eq!(
+                    body.as_object().expect("the body is one object").len(),
+                    1,
+                    "{}",
+                    refusal.code()
+                );
+                let error = body["error"]
+                    .as_object()
+                    .expect("the envelope holds one error object");
+                let mut keys: Vec<&str> = error.keys().map(String::as_str).collect();
+                keys.sort_unstable();
+                let mut expected = vec!["action", "code", "message", "retryable"];
+                if entry.takes_feature {
+                    expected.push("feature");
+                    expected.sort_unstable();
+                }
+                assert_eq!(keys, expected, "{}", refusal.code());
+            }
+        }
+    }
+
     #[test]
     fn the_committed_fixture_is_what_the_catalogue_produces() {
         let generated = catalogue_text();

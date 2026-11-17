@@ -3,7 +3,9 @@
 //! `approval_decide_decision_test.go` asserts for the same inputs; the hex was produced by an
 //! independent implementation of the documented byte layout. Change both together or neither.
 
-use mp_contracts::space_approvals::{decide_payload_digest, DECIDE_SCHEMA};
+use mp_contracts::space_approvals::{
+    decide_payload_digest, reroute_payload_digest, DECIDE_SCHEMA, REROUTE_SCHEMA,
+};
 
 const GOLDEN: &str = "sha256:686970f46c3e6ac25e6c62d8fbbcd5bc7bde610eac8e885a584495bd7d2ce025";
 
@@ -36,5 +38,23 @@ fn decide_payload_digest_binds_every_field() {
     ];
     for (index, variant) in variants.iter().enumerate() {
         assert_ne!(&base, variant, "field {index} is not bound by the digest");
+    }
+}
+
+#[test]
+fn reroute_payload_digest_binds_every_field() {
+    assert_eq!(REROUTE_SCHEMA, "sha256:approval-reroute-v1");
+    let base = reroute_payload_digest("o", "u", "a", "s", "d", "requester", "");
+    let variants = [
+        reroute_payload_digest("o2", "u", "a", "s", "d", "requester", ""),
+        reroute_payload_digest("o", "u2", "a", "s", "d", "requester", ""),
+        reroute_payload_digest("o", "u", "a2", "s", "d", "requester", ""),
+        reroute_payload_digest("o", "u", "a", "s2", "d", "requester", ""),
+        reroute_payload_digest("o", "u", "a", "s", "d2", "requester", ""),
+        reroute_payload_digest("o", "u", "a", "s", "d", "named", ""),
+        reroute_payload_digest("o", "u", "a", "s", "d", "requester", "subject-2"),
+    ];
+    for (index, variant) in variants.iter().enumerate() {
+        assert_ne!(&base, variant, "field {index} is not bound by the reroute digest");
     }
 }
