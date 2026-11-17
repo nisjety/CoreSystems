@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { featureModelId, featureThreadId } from './feature-thread'
 
 // The client action contract for a review as a run (F-t3-086): one read-only reviewer over one text. The browser parses
 // the request here before it sends anything, and the gateway's POST /api/v1/ai/review reads the same fields
@@ -58,6 +59,10 @@ const reviewRunFields = {
     .default(''),
   // The app's two languages. `no` is Norwegian Bokmål; Model Gateway reads any value other than `en` as Bokmål.
   locale: z.enum(['no', 'en']).default('no'),
+  // The thread the text belongs to and the model its connection serves (DEC-V-R8). Both are left out for a review that names
+  // no thread, which then runs on the platform chain as it always did. Model Gateway reads the model only on a connection thread.
+  threadId: featureThreadId.optional(),
+  model: featureModelId.optional(),
 }
 
 /** `review.run`: the target, the text, and the label, brief and locale that frame it. Any other field is refused. */

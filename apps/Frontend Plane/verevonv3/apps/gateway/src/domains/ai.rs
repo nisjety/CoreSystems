@@ -314,9 +314,53 @@ pub(crate) async fn proxy_speech(
     .await
 }
 
+/// The longest thread id or model id a side feature forwards, in characters.
+const FEATURE_NAME_MAX_CHARS: usize = 200;
+
+/// The thread and model a side feature names to Model Gateway (DEC-V-R8), trimmed. A blank one is no value and is left
+/// out, so the body is as it was before the feature named one. A value that holds a space or a control character, or is
+/// longer than [`FEATURE_NAME_MAX_CHARS`], is refused and never dropped: a dropped thread would be answered on the
+/// platform chain instead of the connection the thread is on.
+fn named_feature_field(raw: &str) -> Result<Option<String>, (StatusCode, Json<Value>)> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().count() > FEATURE_NAME_MAX_CHARS
+        || value.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "bad_request",
+                "A thread or model id is one identifier of at most 200 characters, with no spaces or control characters.",
+            )),
+        ));
+    }
+    Ok(Some(value.to_owned()))
+}
+
+/// The delegated session credential a request that names a thread carries (DEC-V-R8). Model Gateway reads that thread's
+/// connection through it, and refuses a named thread that comes without it with a typed 401, which the relay answers as
+/// unavailable. So a missing credential never moves the thread onto the platform chain. The mint is best effort, so a
+/// review or translation on a platform thread is not refused when Model Gateway would not read the credential anyway. A
+/// request that names no thread mints none and goes upstream as it did before.
+async fn thread_session_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    names_thread: bool,
+) -> Option<String> {
+    if !names_thread {
+        return None;
+    }
+    shared::session_token(state, user, headers).await
+}
+
 /// The review the browser asks for (F-t3-086): the text and the fields that frame it, and nothing else. An unknown field
-/// is refused, so a caller cannot name a posture, a model or a switch. The target and the limits are Model Gateway's to
-/// check, and its typed refusals pass through.
+/// is refused, so a caller cannot name a posture, a switch or a route the thread does not give. The target and the limits
+/// are Model Gateway's to check, and its typed refusals pass through. The thread and model are named only for a review
+/// of a thread (DEC-V-R8); Model Gateway serves the review on that thread's connection.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReviewRunRequest {
@@ -328,6 +372,12 @@ struct ReviewRunRequest {
     brief: String,
     #[serde(default)]
     locale: String,
+    /// The thread the text belongs to (DEC-V-R8). Blank when the review names none.
+    #[serde(default)]
+    thread_id: String,
+    /// The model the thread's connection serves. Model Gateway reads it only on a connection thread.
+    #[serde(default)]
+    model: String,
 }
 
 /// `POST /api/v1/ai/review`: one read-only review of a text, as a run (F-t3-086). Proxies to Model Gateway's
@@ -351,6 +401,15 @@ async fn review_run_answer(
     headers: &HeaderMap,
     request: ReviewRunRequest,
 ) -> (StatusCode, Json<Value>) {
+    // The thread and model are checked before any credential is minted, so a refused request reaches nothing.
+    let thread_id = match named_feature_field(&request.thread_id) {
+        Ok(thread_id) => thread_id,
+        Err(refusal) => return refusal,
+    };
+    let model = match named_feature_field(&request.model) {
+        Ok(model) => model,
+        Err(refusal) => return refusal,
+    };
     let token = match shared::model_token(state, user, headers).await {
         Some(token) if !token.trim().is_empty() => token,
         _ => {
@@ -376,8 +435,9 @@ async fn review_run_answer(
         }
         Err(detail) => return shared::delegated_auth_unavailable(detail),
     };
+    let session_token = thread_session_token(state, user, headers, thread_id.is_some()).await;
     // A one-way raise, as on every model route: the header's flag or the organisation's posture makes the review
-    // zero-retention. The body names only the fields the review reads.
+    // zero-retention. The body names only the fields the review reads, and the thread and model only when they are named.
     let mut body = json!({
         "target": request.target,
         "label": request.label,
@@ -386,15 +446,30 @@ async fn review_run_answer(
         "locale": request.locale,
         "zdr": request_zdr(headers, None),
     });
+    // The model is the one the thread's connection serves, so it goes only with the thread it names.
+    if let Some(thread_id) = thread_id {
+        body["thread_id"] = Value::String(thread_id);
+        if let Some(model) = model {
+            body["model"] = Value::String(model);
+        }
+    }
     shared::apply_org_zdr_posture(state, user, &mut body).await;
     let url = format!("{}/v1/ai/review", state.model_gateway_url);
-    let (status, Json(response)) = shared::proxy_model_json_with_inference(
+    let (status, Json(response)) = shared::proxy_model_json_with_delegations(
         state,
         Method::POST,
         &url,
         Some(body),
         Some(&token),
+        None,
+        None,
         Some(&inference_token),
+        None,
+        None,
+        session_token.as_deref(),
+        None,
+        None,
+        None,
         user,
     )
     .await;
@@ -458,6 +533,12 @@ async fn review_run_answer(
 struct ReasoningTranslateRequest {
     text: String,
     target_locale: String,
+    /// The thread the shown text belongs to (DEC-V-R8). Blank when the translation names none.
+    #[serde(default)]
+    thread_id: String,
+    /// The model the thread's connection serves. Model Gateway reads it only on a connection thread.
+    #[serde(default)]
+    model: String,
 }
 
 /// `POST /api/v1/ai/translate`: a reader's translation of one shown text (F-t3-098). Proxies to Model Gateway's
@@ -483,6 +564,15 @@ async fn reasoning_translate_answer(
     headers: &HeaderMap,
     request: ReasoningTranslateRequest,
 ) -> (StatusCode, Json<Value>) {
+    // The thread and model are checked before any credential is minted, so a refused request reaches nothing.
+    let thread_id = match named_feature_field(&request.thread_id) {
+        Ok(thread_id) => thread_id,
+        Err(refusal) => return refusal,
+    };
+    let model = match named_feature_field(&request.model) {
+        Ok(model) => model,
+        Err(refusal) => return refusal,
+    };
     let token = match shared::model_token(state, user, headers).await {
         Some(token) if !token.trim().is_empty() => token,
         _ => {
@@ -508,22 +598,39 @@ async fn reasoning_translate_answer(
         }
         Err(detail) => return shared::delegated_auth_unavailable(detail),
     };
+    let session_token = thread_session_token(state, user, headers, thread_id.is_some()).await;
     // A one-way raise, as on every model route: the header's flag or the organisation's posture makes the turn
-    // zero-retention, and Model Gateway then refuses to translate it. The body names only the fields the route reads.
+    // zero-retention, and Model Gateway then refuses to translate it. The body names only the fields the route reads, and
+    // the thread and model only when they are named.
     let mut body = json!({
         "text": request.text,
         "target_locale": request.target_locale,
         "zdr": request_zdr(headers, None),
     });
+    // The model is the one the thread's connection serves, so it goes only with the thread it names.
+    if let Some(thread_id) = thread_id {
+        body["thread_id"] = Value::String(thread_id);
+        if let Some(model) = model {
+            body["model"] = Value::String(model);
+        }
+    }
     shared::apply_org_zdr_posture(state, user, &mut body).await;
     let url = format!("{}/v1/ai/reasoning-translate", state.model_gateway_url);
-    let (status, Json(response)) = shared::proxy_model_json_with_inference(
+    let (status, Json(response)) = shared::proxy_model_json_with_delegations(
         state,
         Method::POST,
         &url,
         Some(body),
         Some(&token),
+        None,
+        None,
         Some(&inference_token),
+        None,
+        None,
+        session_token.as_deref(),
+        None,
+        None,
+        None,
         user,
     )
     .await;
@@ -591,6 +698,10 @@ struct CouncilRequest {
     allow_subscription: bool,
     #[serde(default)]
     estimate_only: bool,
+    /// The thread the question belongs to (DEC-V-R8). Blank when the council names none. Model Gateway serves every member
+    /// and the synthesis on that thread's connection, so the council names no model of its own.
+    #[serde(default)]
+    thread_id: String,
 }
 
 /// `POST /api/v1/ai/council`: one question answered by two to four models at once, then one synthesis of where they agree
@@ -615,6 +726,11 @@ async fn council_answer(
     headers: &HeaderMap,
     request: CouncilRequest,
 ) -> (StatusCode, Json<Value>) {
+    // The thread is checked before any credential is minted, so a refused request reaches nothing.
+    let thread_id = match named_feature_field(&request.thread_id) {
+        Ok(thread_id) => thread_id,
+        Err(refusal) => return refusal,
+    };
     let token = match shared::model_token(state, user, headers).await {
         Some(token) if !token.trim().is_empty() => token,
         _ => {
@@ -640,7 +756,9 @@ async fn council_answer(
         }
         Err(detail) => return shared::delegated_auth_unavailable(detail),
     };
-    // A one-way raise, as on every model route. The body names only the fields the council reads.
+    let session_token = thread_session_token(state, user, headers, thread_id.is_some()).await;
+    // A one-way raise, as on every model route. The body names only the fields the council reads, and the thread only when
+    // one is named.
     let mut body = json!({
         "question": request.question,
         "models": request.models,
@@ -650,6 +768,9 @@ async fn council_answer(
     });
     if let Some(synthesizer) = request.synthesizer_model {
         body["synthesizer_model"] = Value::String(synthesizer);
+    }
+    if let Some(thread_id) = thread_id {
+        body["thread_id"] = Value::String(thread_id);
     }
     shared::apply_org_zdr_posture(state, user, &mut body).await;
     let url = format!("{}/v1/ai/council", state.model_gateway_url);
@@ -664,7 +785,7 @@ async fn council_answer(
         Some(&inference_token),
         None,
         None,
-        None,
+        session_token.as_deref(),
         None,
         Some(COUNCIL_REQUEST_TIMEOUT),
         None,
@@ -825,7 +946,7 @@ mod tests {
     /// posture set.
     async fn upstreams() -> (MockServer, MockServer, MockServer) {
         let auth_core = MockServer::start().await;
-        for audience in ["model-plane", "inference-core"] {
+        for audience in ["model-plane", "inference-core", "session-core"] {
             Mock::given(method("GET"))
                 .and(path(format!("/api/{audience}/token")))
                 .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -1376,6 +1497,8 @@ mod tests {
                     material: "Hei, her er teksten.".to_owned(),
                     brief: String::new(),
                     locale: "nb-NO".to_owned(),
+                    thread_id: String::new(),
+                    model: String::new(),
                 },
             )
             .await;
@@ -1403,6 +1526,8 @@ mod tests {
                 super::ReasoningTranslateRequest {
                     text: "Hei".to_owned(),
                     target_locale: "en".to_owned(),
+                    thread_id: String::new(),
+                    model: String::new(),
                 },
             )
             .await;
@@ -1432,6 +1557,7 @@ mod tests {
                     synthesizer_model: None,
                     allow_subscription: false,
                     estimate_only: false,
+                    thread_id: String::new(),
                 },
             )
             .await;
@@ -1444,5 +1570,313 @@ mod tests {
                 "delegated_auth_unavailable",
             );
         }
+    }
+
+    /// The `x-session-authorization` header model-gateway got on the first call to `route`, if the call carried one.
+    async fn forwarded_session(model_gateway: &MockServer, route: &str) -> Option<String> {
+        model_gateway
+            .received_requests()
+            .await
+            .expect("model-gateway requests are recorded")
+            .into_iter()
+            .find(|request| request.url.path() == route)
+            .and_then(|request| {
+                request
+                    .headers
+                    .get("x-session-authorization")
+                    .map(|value| value.to_str().expect("an ASCII header").to_owned())
+            })
+    }
+
+    /// How many calls the token service of `server` got on `path`.
+    async fn token_calls(server: &MockServer, path: &str) -> usize {
+        server
+            .received_requests()
+            .await
+            .expect("token requests are recorded")
+            .iter()
+            .filter(|request| request.url.path() == path)
+            .count()
+    }
+
+    /// An auth-core that gives the model and inference tokens but refuses the session-core token, so a request that names a
+    /// thread cannot be given the credential Model Gateway reads the thread through.
+    async fn auth_core_refusing_a_session_token() -> MockServer {
+        let auth_core = MockServer::start().await;
+        for audience in ["model-plane", "inference-core"] {
+            Mock::given(method("GET"))
+                .and(path(format!("/api/{audience}/token")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "token": format!("{audience}-test-token"),
+                    "expiresInSeconds": 300,
+                })))
+                .mount(&auth_core)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/api/session-core/token"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&auth_core)
+            .await;
+        auth_core
+    }
+
+    fn review_request(thread_id: &str, model: &str) -> super::ReviewRunRequest {
+        super::ReviewRunRequest {
+            target: "artifact_revision".to_owned(),
+            label: "Tilbud v2".to_owned(),
+            material: "Prisen er 900 kr.".to_owned(),
+            brief: String::new(),
+            locale: "nb".to_owned(),
+            thread_id: thread_id.to_owned(),
+            model: model.to_owned(),
+        }
+    }
+
+    fn translate_request(thread_id: &str, model: &str) -> super::ReasoningTranslateRequest {
+        super::ReasoningTranslateRequest {
+            text: "Hei".to_owned(),
+            target_locale: "en".to_owned(),
+            thread_id: thread_id.to_owned(),
+            model: model.to_owned(),
+        }
+    }
+
+    fn council_request(thread_id: &str) -> super::CouncilRequest {
+        super::CouncilRequest {
+            question: "Hva er forskjellen?".to_owned(),
+            models: vec!["model-a".to_owned(), "model-b".to_owned()],
+            synthesizer_model: None,
+            allow_subscription: false,
+            estimate_only: false,
+            thread_id: thread_id.to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_review_names_its_thread_and_model_and_carries_the_session_credential() {
+        let (auth, org, model) = answering(
+            "/v1/ai/review",
+            200,
+            json!({ "data": { "run": { "runId": "run-1" } } }),
+        )
+        .await;
+        let state = state_for(&auth, &org, &model);
+        let (status, _) = super::review_run_answer(
+            &state,
+            &member_of("org-open"),
+            &HeaderMap::new(),
+            review_request(" thread-1 ", "gpt-5-codex"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // The thread is trimmed, as the caller sent it, and the model goes with it.
+        let bodies = forwarded_bodies(&model, "/v1/ai/review").await;
+        assert_eq!(bodies[0]["thread_id"], "thread-1");
+        assert_eq!(bodies[0]["model"], "gpt-5-codex");
+        assert_eq!(
+            forwarded_session(&model, "/v1/ai/review").await.as_deref(),
+            Some("Bearer session-core-test-token"),
+            "Model Gateway reads the thread through the caller's session credential"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_review_that_names_no_thread_goes_upstream_as_before() {
+        let (auth, org, model) = answering(
+            "/v1/ai/review",
+            200,
+            json!({ "data": { "run": { "runId": "run-1" } } }),
+        )
+        .await;
+        let state = state_for(&auth, &org, &model);
+        // A model with no thread goes nowhere: it is the thread's connection's model, and there is no thread.
+        let (status, _) = super::review_run_answer(
+            &state,
+            &member_of("org-open"),
+            &HeaderMap::new(),
+            review_request("  ", "gpt-5-codex"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let bodies = forwarded_bodies(&model, "/v1/ai/review").await;
+        assert_eq!(
+            bodies[0],
+            json!({
+                "target": "artifact_revision",
+                "label": "Tilbud v2",
+                "material": "Prisen er 900 kr.",
+                "brief": "",
+                "locale": "nb",
+                "zdr": false,
+            }),
+            "no thread: the body is the review's own fields, exactly as before"
+        );
+        assert_eq!(forwarded_session(&model, "/v1/ai/review").await, None);
+        // No session credential is minted for a request that names no thread.
+        assert_eq!(token_calls(&auth, "/api/session-core/token").await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_translation_names_its_thread_and_model_and_carries_the_session_credential() {
+        let (auth, org, model) = answering(
+            "/v1/ai/reasoning-translate",
+            200,
+            json!({ "data": { "text": "Hello" } }),
+        )
+        .await;
+        let state = state_for(&auth, &org, &model);
+        let (status, _) = super::reasoning_translate_answer(
+            &state,
+            &member_of("org-open"),
+            &HeaderMap::new(),
+            translate_request("thread-1", "gpt-5-codex"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let bodies = forwarded_bodies(&model, "/v1/ai/reasoning-translate").await;
+        assert_eq!(bodies[0]["thread_id"], "thread-1");
+        assert_eq!(bodies[0]["model"], "gpt-5-codex");
+        let session = forwarded_session(&model, "/v1/ai/reasoning-translate").await;
+        assert_eq!(session.as_deref(), Some("Bearer session-core-test-token"));
+    }
+
+    #[tokio::test]
+    async fn a_translation_that_names_no_thread_goes_upstream_as_before() {
+        let (auth, org, model) = answering(
+            "/v1/ai/reasoning-translate",
+            200,
+            json!({ "data": { "text": "Hello" } }),
+        )
+        .await;
+        let state = state_for(&auth, &org, &model);
+        let (status, _) = super::reasoning_translate_answer(
+            &state,
+            &member_of("org-open"),
+            &HeaderMap::new(),
+            translate_request("", "gpt-5-codex"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let bodies = forwarded_bodies(&model, "/v1/ai/reasoning-translate").await;
+        assert_eq!(
+            bodies[0],
+            json!({ "text": "Hei", "target_locale": "en", "zdr": false }),
+            "no thread: the body is the translation's own fields, exactly as before"
+        );
+        let session = forwarded_session(&model, "/v1/ai/reasoning-translate").await;
+        assert_eq!(session, None);
+        assert_eq!(token_calls(&auth, "/api/session-core/token").await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_council_names_its_thread_and_carries_the_session_credential() {
+        let (auth, org, model) =
+            answering("/v1/ai/council", 200, json!({ "data": { "members": [] } })).await;
+        let state = state_for(&auth, &org, &model);
+        let (status, _) = super::council_answer(
+            &state,
+            &member_of("org-open"),
+            &HeaderMap::new(),
+            council_request("thread-1"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let bodies = forwarded_bodies(&model, "/v1/ai/council").await;
+        assert_eq!(bodies[0]["thread_id"], "thread-1");
+        // A council names its member models in its own field, and no single model.
+        assert!(bodies[0].get("model").is_none());
+        assert_eq!(
+            forwarded_session(&model, "/v1/ai/council").await.as_deref(),
+            Some("Bearer session-core-test-token"),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_council_that_names_no_thread_goes_upstream_as_before() {
+        let (auth, org, model) =
+            answering("/v1/ai/council", 200, json!({ "data": { "members": [] } })).await;
+        let state = state_for(&auth, &org, &model);
+        let (status, _) = super::council_answer(
+            &state,
+            &member_of("org-open"),
+            &HeaderMap::new(),
+            council_request(""),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let bodies = forwarded_bodies(&model, "/v1/ai/council").await;
+        assert_eq!(
+            bodies[0],
+            json!({
+                "question": "Hva er forskjellen?",
+                "models": ["model-a", "model-b"],
+                "allow_subscription": false,
+                "estimate_only": false,
+                "zdr": false,
+            }),
+            "no thread: the body is the council's own fields, exactly as before"
+        );
+        assert_eq!(forwarded_session(&model, "/v1/ai/council").await, None);
+        assert_eq!(token_calls(&auth, "/api/session-core/token").await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_missing_session_credential_is_refused_by_model_gateway_not_the_platform() {
+        // The credential cannot be minted, so the thread goes upstream without one. Model Gateway refuses a named thread that
+        // comes without it, with a typed 401, and the relay answers that as unavailable: nothing is answered on the platform.
+        let (_, org, _) = upstreams().await;
+        let auth = auth_core_refusing_a_session_token().await;
+        let (_, _, model) = answering(
+            "/v1/ai/review",
+            401,
+            json!({ "error": { "code": "delegated_credential_required", "message": "", "details": {} } }),
+        )
+        .await;
+        let state = state_for(&auth, &org, &model);
+        let (status, body) = super::review_run_answer(
+            &state,
+            &member_of("org-open"),
+            &HeaderMap::new(),
+            review_request("thread-1", "gpt-5-codex"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0["error"]["code"], "delegated_auth_unavailable");
+        let bodies = forwarded_bodies(&model, "/v1/ai/review").await;
+        assert_eq!(bodies[0]["thread_id"], "thread-1");
+        // No credential could be given, so none is forwarded.
+        let session = forwarded_session(&model, "/v1/ai/review").await;
+        assert_eq!(session, None);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_thread_or_model_is_refused_before_any_credential_or_call() {
+        // A malformed name is refused, never dropped: a dropped thread would run on the platform chain.
+        let (auth, org, model) = upstreams().await;
+        let state = state_for(&auth, &org, &model);
+        let (status, body) = super::review_run_answer(
+            &state,
+            &member_of("org-open"),
+            &HeaderMap::new(),
+            review_request("thread 1", ""),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body.0["error"]["code"], "bad_request");
+        let (status, body) = super::reasoning_translate_answer(
+            &state,
+            &member_of("org-open"),
+            &HeaderMap::new(),
+            translate_request("thread-1", "gpt\u{7}-5"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body.0["error"]["code"], "bad_request");
+        assert!(forwarded_bodies(&model, "/v1/ai/review").await.is_empty());
+        let translations = forwarded_bodies(&model, "/v1/ai/reasoning-translate").await;
+        assert!(translations.is_empty());
+        // No credential is minted for a refused request.
+        assert_eq!(token_calls(&auth, "/api/model-plane/token").await, 0);
     }
 }

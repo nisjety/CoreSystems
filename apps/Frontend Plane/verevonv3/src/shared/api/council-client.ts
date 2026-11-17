@@ -119,7 +119,10 @@ export async function runCouncil(input: CouncilRunInput): Promise<CouncilRun> {
   return runOf(raw)
 }
 
-/** The body as the gateway reads it: its own field names, and the synthesizer only when one is named. */
+/**
+ * The body as the gateway reads it: its own field names, the synthesizer only when one is named, and the thread only when
+ * the question is asked on one (DEC-V-R8).
+ */
 function councilWireBody(request: CouncilRunRequest, estimateOnly: boolean) {
   return {
     question: request.question,
@@ -127,6 +130,7 @@ function councilWireBody(request: CouncilRunRequest, estimateOnly: boolean) {
     ...(request.synthesizerModel ? { synthesizer_model: request.synthesizerModel } : {}),
     allow_subscription: request.allowSubscription,
     estimate_only: estimateOnly,
+    ...(request.threadId ? { thread_id: request.threadId } : {}),
   }
 }
 

@@ -516,7 +516,7 @@ Separate support stack (own compose); no first-party API in-repo. v3 = none. (v2
 
 ### 5.1 model-gateway — HTTP :8080 (sole public boundary), gRPC :9090
 
-JWT Bearer via JWKS from auth-core on all non-health routes; rate-limited; dev bypass `MODEL_GATEWAY_AUTH_DEV_BYPASS=1`. verevon-gateway-rs mints the user's `model-plane` audience token and forwards it.
+JWT Bearer via JWKS from auth-core on all non-health routes; rate-limited; dev bypass `MODEL_GATEWAY_AUTH_DEV_BYPASS=true` (with `ALLOW_INSECURE_DEV_DEFAULTS=1`). verevon-gateway-rs mints the user's `model-plane` audience token and forwards it.
 
 | Method | Path | Purpose | Auth | Transport | v3 |
 |---|---|---|---|---|---|

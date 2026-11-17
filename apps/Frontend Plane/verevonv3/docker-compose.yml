@@ -332,7 +332,8 @@ services:
       # the SPA feature flags the room context reports. Rollout controls only: Control's decision and
       # Session Core's member gate decide who may post, and a Zero Data Retention org is refused regardless.
       # SPACE_HUMAN_POSTS_API must match model-gateway's flag of the same name, which gates the same call.
-      SPACE_HUMAN_POSTS_API: ${SPACE_HUMAN_POSTS_API:-true}
+      # Off by default in every environment (as model-gateway's base compose is); only the literal true enables it.
+      SPACE_HUMAN_POSTS_API: ${SPACE_HUMAN_POSTS_API:-false}
       SPACE_THREAD_PANE_UI: ${SPACE_THREAD_PANE_UI:-true}
       SPACE_SEND_IDEMPOTENCY_API: ${SPACE_SEND_IDEMPOTENCY_API:-true}
       SPACE_CONNECTIVITY_BANNER_UI: ${SPACE_CONNECTIVITY_BANNER_UI:-true}
@@ -376,7 +377,8 @@ services:
       # WS13-S3: permission-checked message search + entry addresses (relayed to model-gateway, which has
       # its own SPACE_MESSAGE_SEARCH_API) and the feature report for the search, link, palette and fork UIs.
       # Rollout controls only; Control's per-request read decision and Session Core's audience predicates decide.
-      SPACE_MESSAGE_SEARCH_API: ${SPACE_MESSAGE_SEARCH_API:-true}
+      # Off by default in every environment (as model-gateway's base compose is); only the literal true enables it.
+      SPACE_MESSAGE_SEARCH_API: ${SPACE_MESSAGE_SEARCH_API:-false}
       SPACE_MESSAGE_SEARCH_UI: ${SPACE_MESSAGE_SEARCH_UI:-true}
       SPACE_ENTRY_LINKS_UI: ${SPACE_ENTRY_LINKS_UI:-true}
       SPACE_COMMAND_PALETTE_UI: ${SPACE_COMMAND_PALETTE_UI:-true}
@@ -420,6 +422,7 @@ services:
       # WS09: agent work in the room. Rollout controls only (never authorization): the owner plane
       # re-authorizes every steer, attach and stop. OWNER_STEER lets the person who started a run type
       # into it; LIVE_VIEW, LIVE_TEXT and MANAGER_STOP are read by later WS09 slices. Production: off.
+      # Those three default off in every environment, as model-gateway's base compose does (only the literal true enables).
       SPACE_RUN_OWNER_STEER: ${SPACE_RUN_OWNER_STEER:-true}
       # WS16-S8: the personal sidebar layout (GET/PUT /api/v1/spaces/sidebar; 404 when off, which the SPA reads
       # as "use the legacy panel"). A rollout control only; a Zero Data Retention org gets zdr_local / 412 regardless.
@@ -431,7 +434,8 @@ services:
       # WS12-S7: edit and delete a message (PATCH/DELETE .../threads/{id}/messages/{message_id}; 404
       # space_message_revise_disabled when off). Rollout control only; Control's model.thread.revise decision
       # and Session Core decide, ZDR orgs get the typed 412. Needs model-gateway SPACE_MESSAGE_REVISE_API.
-      SPACE_MESSAGE_REVISE_API: ${SPACE_MESSAGE_REVISE_API:-true}
+      # Off by default in every environment (as model-gateway's base compose is); only the literal true enables it.
+      SPACE_MESSAGE_REVISE_API: ${SPACE_MESSAGE_REVISE_API:-false}
       # WS12-S8: message reactions (PUT/DELETE .../messages/{message_id}/reactions/{emoji}; 404
       # space_reactions_disabled when off). Rollout control only; the live room role, Control's read decision
       # and Session Core's message check decide, ZDR orgs get the typed 412. Needs Convex SPACE_REACTIONS and
@@ -441,9 +445,9 @@ services:
       # spaces.join_room / spaces.update_room_settings (404 feature_disabled when off). Rollout control
       # only; Control's per-org space_directory_policies row (absent = off) and the room's visibility decide.
       SPACE_ROOM_DIRECTORY_API: ${SPACE_ROOM_DIRECTORY_API:-true}
-      SPACE_RUN_LIVE_VIEW: ${SPACE_RUN_LIVE_VIEW:-true}
-      SPACE_RUN_LIVE_TEXT: ${SPACE_RUN_LIVE_TEXT:-true}
-      SPACE_RUN_MANAGER_STOP: ${SPACE_RUN_MANAGER_STOP:-true}
+      SPACE_RUN_LIVE_VIEW: ${SPACE_RUN_LIVE_VIEW:-false}
+      SPACE_RUN_LIVE_TEXT: ${SPACE_RUN_LIVE_TEXT:-false}
+      SPACE_RUN_MANAGER_STOP: ${SPACE_RUN_MANAGER_STOP:-false}
     ports:
       - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:3185:3185"
     networks:

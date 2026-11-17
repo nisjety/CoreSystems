@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { featureModelId, featureThreadId } from './feature-thread'
 
 // The client action contract for a reader's translation of one shown text (F-t3-098, W5-098-c). The browser checks the
 // text and the target here before it sends anything, and the gateway's POST /api/v1/ai/translate reads the same two
@@ -27,8 +28,9 @@ export function reasoningTranslateLocaleOf(locale: 'no' | 'en'): ReasoningTransl
 
 /**
  * The translation request: the text, and the language it is to be read in. Any other field is refused, so a caller cannot
- * name a posture, a model or a switch. The zero-retention flag comes from the request's header and the organisation's
- * posture, never from the body.
+ * name a posture, a switch or a route the thread does not give. The zero-retention flag comes from the request's header and
+ * the organisation's posture, never from the body. The thread and the model its connection serves are named only for a
+ * translation of a thread's text (DEC-V-R8), and both are optional.
  */
 export const reasoningTranslateInput = z
   .object({
@@ -40,6 +42,8 @@ export const reasoningTranslateInput = z
         'The text is over 12000 characters.',
       ),
     targetLocale: z.enum(REASONING_TRANSLATE_LOCALES),
+    threadId: featureThreadId.optional(),
+    model: featureModelId.optional(),
   })
   .strict()
 

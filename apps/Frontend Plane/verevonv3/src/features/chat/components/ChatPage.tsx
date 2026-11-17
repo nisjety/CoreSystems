@@ -281,6 +281,15 @@ export default function ChatPage() {
     }
   })
   const artifactTemporary = () => temporaryChat() || isActiveThreadTemporary()
+  // The thread a side feature (a review, a reasoning translation) names to the gateway, and the model its connection serves
+  // (DEC-V-R8). A temporary or Space thread names neither. Model Gateway refuses a Space thread named for a side feature, and
+  // a Space thread's turns can be written under a connection, so with the BYO gateway switch on the review and the translation
+  // are not offered on a Space thread at all (`sideFeaturesWithheldOnSpace`), as side chat is hidden there. With the switch
+  // off a Space thread names nothing and runs on the platform, as before.
+  const sideFeatureThreadId = () => (state.threadId && !artifactTemporary() && !spaceScoped() ? state.threadId : undefined)
+  const sideFeatureConnectionModel = createMemo(() =>
+    sideFeatureThreadId() ? sideChatConnectionModel(state.turns) : null,
+  )
   // The run on screen, for the feedback widget's problem report (VITE_REPORT_PROBLEM). A temporary or zero-retention chat
   // offers none. With the switch off nothing is read and nothing is published.
   useSupportRunContext({
@@ -1375,6 +1384,9 @@ export default function ChatPage() {
                   onSaved: foldSavedArtifactRevision,
                 }}
                 onAskAboutSelection={askAboutArtifactSelection}
+                reviewThreadId={sideFeatureThreadId()}
+                connectionModel={sideFeatureConnectionModel()}
+                spaceThread={spaceScoped()}
               />
             </DeckTemplateContext>
           </Show>
@@ -1596,6 +1608,8 @@ export default function ChatPage() {
         threadId={state.threadId}
         temporaryChat={readAloudBlocked()}
         spaceScoped={spaceScoped()}
+        featureThreadId={sideFeatureThreadId()}
+        connectionModel={sideFeatureConnectionModel()}
         // QF-20: the crawl-plan approval card never mounts in a foreign-origin or Support read-only thread.
         crawlPlanCardAllowed={!isForeignOriginThread() && !isSupportChatThread(state.threadId ?? undefined)}
         connectorSuggestion={{

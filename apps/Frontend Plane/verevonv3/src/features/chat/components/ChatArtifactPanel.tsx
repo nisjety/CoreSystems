@@ -124,6 +124,7 @@ import {
   uploadChatDocument,
 } from '@/shared/api/chat-client'
 import { REVIEW_LABEL_MAX_CHARS } from '@/shared/actions/chat-review'
+import { sideFeaturesWithheldOnSpace } from '@/features/chat/lib/space-side-features'
 import { sandboxHtmlDocument } from '@/shared/lib/sandbox-html'
 import { useI18n } from '@/shared/i18n'
 import { type ViewerSurface, viewerActivationKey, viewerFor } from '@/shared/artifacts/viewer-registry'
@@ -201,6 +202,12 @@ export function ArtifactsPanel(props: {
   editing?: ArtifactEditing
   /** Sends one selection edit as a normal turn (EP-3 S6). Absent, the panel offers no "Ask for a change". */
   onAskAboutSelection?: (request: ArtifactSelectionRequest) => Promise<unknown> | void
+  /** The thread a review names to the gateway (DEC-V-R8). Absent for a thread that names none, which then reviews as before. */
+  reviewThreadId?: string
+  /** The model the open thread's connection serves (DEC-V-R8), named with a review that names the thread. */
+  connectionModel?: string | null
+  /** A Space thread. With the BYO gateway switch on, no review is offered there (DEC-V-R8). */
+  spaceThread?: boolean
 }) {
   const i18n = useI18n()
   const [requestedId, setRequestedId] = createSignal<string | null>(null)
@@ -257,8 +264,15 @@ export function ArtifactsPanel(props: {
     return items.find((item) => item.artifact.id === requested) ?? items[items.length - 1]
   })
 
-  /** A chat thread that is not temporary may ask for a review. A room and a temporary thread never do (F-t3-086). */
-  const reviewable = () => (props.surface ?? 'chat') === 'chat' && props.history != null && !props.history.temporary
+  /**
+   * A chat thread that is not temporary may ask for a review. A room and a temporary thread never do (F-t3-086), and a Space
+   * thread does not while the BYO gateway switch is on (DEC-V-R8).
+   */
+  const reviewable = () =>
+    (props.surface ?? 'chat') === 'chat' &&
+    props.history != null &&
+    !props.history.temporary &&
+    !sideFeaturesWithheldOnSpace(props.spaceThread)
 
   return (
     <Show
@@ -296,6 +310,8 @@ export function ArtifactsPanel(props: {
               selectionEdit={selectionEditOn()}
               onAskAboutSelection={props.onAskAboutSelection}
               reviewable={reviewable()}
+              reviewThreadId={props.reviewThreadId}
+              connectionModel={props.connectionModel}
             />
           )}
         </Show>
@@ -360,6 +376,10 @@ export function ArtifactViewer(props: {
   onAskAboutSelection?: (request: ArtifactSelectionRequest) => Promise<unknown> | void
   /** Set only for a chat thread that is not temporary: the panel may offer Review on a text revision (F-t3-086). */
   reviewable?: boolean
+  /** The thread the review names to the gateway (DEC-V-R8). Absent, the review runs on the platform chain as before. */
+  reviewThreadId?: string
+  /** The model the open thread's connection serves, named with a review of that thread (DEC-V-R8). */
+  connectionModel?: string | null
 }) {
   const i18n = useI18n()
   const surface = (): ViewerSurface => props.surface ?? 'chat'
@@ -576,6 +596,8 @@ export function ArtifactViewer(props: {
         material: shown.content,
         brief: '',
         locale: i18n.locale(),
+        threadId: props.reviewThreadId,
+        model: props.connectionModel ?? undefined,
       })
       if (generation !== reviewGeneration) return
       setFocusLines(null)

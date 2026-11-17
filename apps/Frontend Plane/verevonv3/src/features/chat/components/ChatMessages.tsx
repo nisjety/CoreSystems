@@ -103,6 +103,7 @@ import { readerPolishOn } from '../lib/reader-polish'
 import { listConversations, type LiveTicket } from '@/shared/api/inbox-client'
 import { listNotifications, type Notification } from '@/shared/api/notifications-client'
 import { MIN_PLAN_JUSTIFICATION_CHARS, translateText } from '@/shared/api/chat-client'
+import { sideFeaturesWithheldOnSpace } from '@/features/chat/lib/space-side-features'
 import {
   REASONING_TRANSLATE_MAX_CHARS,
   reasoningTranslateChars,
@@ -342,6 +343,13 @@ export function MessageBlock(props: {
    * is not offered there (EP-12 D8).
    */
   spaceScoped?: boolean
+  /**
+   * The thread a reasoning translation names to the gateway (DEC-V-R8). Absent for a temporary or Space thread, which then
+   * translates as before.
+   */
+  featureThreadId?: string
+  /** The model the thread's connection serves, named with a translation of that thread (DEC-V-R8). */
+  connectionModel?: string | null
   /**
    * False where the crawl-plan approval card must not mount (QF-20): the page sets it for a foreign-origin or
    * Support read-only thread, and the fence then renders as its plain code block. Absent means allowed; a
@@ -692,6 +700,10 @@ export function AssistantMessage(props: {
   temporaryChat?: boolean
   /** See `MessageBlock`'s doc: a Space thread's export is not offered. */
   spaceScoped?: boolean
+  /** See `MessageBlock`'s doc: the thread a reasoning translation names (DEC-V-R8). */
+  featureThreadId?: string
+  /** See `MessageBlock`'s doc: the model the thread's connection serves (DEC-V-R8). */
+  connectionModel?: string | null
   /** See `MessageBlock`'s doc: a foreign-origin or Support read-only thread never mounts the crawl-plan card (QF-20). */
   crawlPlanCardAllowed?: boolean
   /** See `MessageBlock`'s doc. */
@@ -1359,7 +1371,13 @@ export function AssistantMessage(props: {
               ]}
             />
             <MessageMetricsBadge message={props.message} />
-            <ReasoningPopover message={props.message} temporaryChat={props.temporaryChat} />
+            <ReasoningPopover
+              message={props.message}
+              temporaryChat={props.temporaryChat}
+              featureThreadId={props.featureThreadId}
+              connectionModel={props.connectionModel}
+              spaceThread={props.spaceScoped}
+            />
           </div>
           <Show when={processingNote()}>
             {(note) => (
@@ -2333,7 +2351,16 @@ export function likelyReasoningLanguage(text: string): 'no' | 'en' | undefined {
 /** A translation the popover holds: the reasoning it answers, the locale it reads in, and the text. */
 type ReasoningTranslation = { source: string; target: ReasoningTranslateLocale; text: string }
 
-export function ReasoningPopover(props: { message: ChatTurn; temporaryChat?: boolean }) {
+export function ReasoningPopover(props: {
+  message: ChatTurn
+  temporaryChat?: boolean
+  /** The thread the translation names to the gateway (DEC-V-R8). Absent, the translation runs as it did before. */
+  featureThreadId?: string
+  /** The model the thread's connection serves, named with a translation of that thread (DEC-V-R8). */
+  connectionModel?: string | null
+  /** A Space thread. With the BYO gateway switch on, no translation is offered there (DEC-V-R8). */
+  spaceThread?: boolean
+}) {
   const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
   const [tab, setTab] = createSignal('general')
@@ -2347,6 +2374,8 @@ export function ReasoningPopover(props: { message: ChatTurn; temporaryChat?: boo
   // Offered on a settled turn that keeps its content, when the text fits the route and reads in the other language from the reader's.
   const translatable = createMemo(() => {
     if (!reasoningTranslateEnabled() || props.temporaryChat || props.message.streaming) return false
+    // A Space thread's turns may be written under a connection, so its translation is not offered while the BYO switch is on.
+    if (sideFeaturesWithheldOnSpace(props.spaceThread)) return false
     const text = props.message.reasoning ?? ''
     if (text.trim() === '' || reasoningTranslateChars(text) > REASONING_TRANSLATE_MAX_CHARS) return false
     const language = likelyReasoningLanguage(text)
@@ -2367,7 +2396,10 @@ export function ReasoningPopover(props: { message: ChatTurn; temporaryChat?: boo
     setTranslating(true)
     setTranslateFailure(null)
     try {
-      const text = await translateText(source, target)
+      const text = await translateText(source, target, {
+        threadId: props.featureThreadId,
+        model: props.connectionModel ?? undefined,
+      })
       if (text === null) {
         setTranslateFailure('unavailable')
       } else if (source === props.message.reasoning) {

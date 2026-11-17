@@ -440,8 +440,12 @@ mod tests {
                 .strip_prefix(":-")?
                 .strip_suffix('}')
         }
-        // The values `env_bool` reads as on.
-        fn reads_on(raw: &str) -> bool {
+        // The values `space_flag` reads as on: the exact word `true` for a Model Plane mirror, the
+        // `env_bool` words for every other Space switch.
+        fn reads_on(key: &str, raw: &str) -> bool {
+            if crate::config::MODEL_PLANE_EXACT_TRUE_SWITCHES.contains(&key) {
+                return raw == "true";
+            }
             matches!(
                 raw.to_ascii_lowercase().as_str(),
                 "1" | "true" | "yes" | "on"
@@ -456,12 +460,15 @@ mod tests {
         let dev_default_on: Vec<&str> = compose_gateway_env(&base)
             .into_iter()
             .filter(|&(key, value)| {
-                space_keys.contains(key) && compose_default(key, value).is_some_and(reads_on)
+                space_keys.contains(key)
+                    && compose_default(key, value).is_some_and(|raw| reads_on(key, raw))
             })
             .map(|(key, _)| key)
             .collect();
+        // V3c-bff-3-rel1: the six Model Plane mirrors now default off, so 36 remain. The floor only
+        // catches a scan that finds next to nothing.
         assert!(
-            dev_default_on.len() >= 40,
+            dev_default_on.len() >= 30,
             "only {} dev-default-on space_flag switches in the base gateway block: \
              the scan is broken",
             dev_default_on.len()
@@ -482,6 +489,29 @@ mod tests {
             "docker-compose.production.yml does not force these dev-default-on space_flag \
              switches to \"false\" in the gateway block: {unpinned:?}"
         );
+    }
+
+    /// V3c-bff-3-rel1: the Space switches that Model Plane also reads
+    /// (`MODEL_PLANE_EXACT_TRUE_SWITCHES`) default OFF in the base compose, as Model Plane's base
+    /// compose does. Its dev override turns them on. A dev stack without that override must not
+    /// advertise a route Model Plane refuses, so no `${KEY:-true}` default may stand here.
+    #[test]
+    fn model_plane_mirrored_space_switches_default_off_in_the_base_compose() {
+        let base = include_str!("../../../docker-compose.yml").replace("\r\n", "\n");
+        let gateway = compose_gateway_env(&base);
+        for key in crate::config::MODEL_PLANE_EXACT_TRUE_SWITCHES {
+            let declared: Vec<&str> = gateway
+                .iter()
+                .filter(|(name, _)| *name == key)
+                .map(|(_, value)| *value)
+                .collect();
+            let off = format!("${{{key}:-false}}");
+            assert_eq!(
+                declared,
+                vec![off.as_str()],
+                "docker-compose.yml must declare {key} once, defaulting off"
+            );
+        }
     }
 
     /// V3-bff-4-rel2: the base compose passes `GATEWAY_ZDR_LOG_FILTER` and `GATEWAY_RATE_CLASSES`

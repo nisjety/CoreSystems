@@ -35,6 +35,7 @@ use axum::{
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::{future::Future, time::Duration};
 
 use super::{denial, space_lifecycle_by_ref};
 use crate::{
@@ -318,35 +319,96 @@ pub(in crate::domains) async fn delete_core(
     .await
 }
 
+/// The closed reasons a revocation erase did not complete (V3-sc-1). The two typed hold answers of
+/// model-gateway stay apart: a legal hold is final until the hold is released, a hold-check outage is
+/// retryable. Every other answer is `upstream`. Never an id, a count or content.
+const REASON_LEGAL_HOLD: &str = "legal_hold";
+const REASON_HOLD_CHECK: &str = "hold_check_unavailable";
+const REASON_UPSTREAM: &str = "upstream";
+
+/// The pause before the one retry of a revocation erase whose hold check was unavailable (V3c-bff-2-rel1).
+const ERASE_OUTAGE_RETRY_DELAY: Duration = Duration::from_secs(1);
+
 /// Counts one failed revocation erase under its closed reason. Never an id, a count or content.
 fn record_erase_failure(reason: &'static str) {
     metrics::counter!("verevon_space_agent_erase_failures_total", "reason" => reason).increment(1);
 }
 
-/// Best-effort erase of one named agent's memory once its binding is revoked (EP-6 P3, EP-8 S10).
-///
-/// The caller runs this only when `GATEWAY_SPACE_MEMORY_UI` is on (`SpaceFeatureFlags::memory_ui`,
-/// dark by default). It runs after the revocation has landed and never changes the revoke's answer:
-/// any failure here is logged by status only, counted under a closed reason, and the revoke still
-/// succeeds. Session Core is the authority: it verifies the fresh Control decision issued for THIS
-/// agent and erases that agent's rows in this Space, whatever its own agent switch says. Allowed
-/// under every retention posture: the call removes rows and carries ids, never content, and only a
-/// row count is logged.
-pub(super) async fn erase_agent_memory_after_revocation(
+/// The closed reason of a failed revocation erase, read from the upstream's typed code only (V3-sc-1).
+/// Only the two fixed hold codes are read; the upstream message and every other field are ignored.
+fn erase_failure_reason(response: &Value) -> &'static str {
+    let code = response
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match code {
+        "erasure_blocked_legal_hold" => REASON_LEGAL_HOLD,
+        "erasure_hold_check_unavailable" => REASON_HOLD_CHECK,
+        _ => REASON_UPSTREAM,
+    }
+}
+
+/// Counts and logs one failed revocation erase by its upstream status and closed reason only. The
+/// revoke's answer does not change.
+fn note_erase_failure(status: StatusCode, reason: &'static str) {
+    record_erase_failure(reason);
+    tracing::warn!(%status, reason, "revoked agent memory erase did not complete");
+}
+
+/// How one pass of a revocation erase ended (V3c-bff-2-rel1). A skip (no Control decision, no
+/// delegated credentials) is counted where it happens and is never retried. A refused erase carries
+/// its closed reason to the caller, which decides whether the erase runs again.
+#[derive(Debug, PartialEq, Eq)]
+enum ErasePass {
+    /// The erase ran; the count is the rows removed.
+    Erased(u64),
+    /// The erase did not run, and its skip was counted under its own reason.
+    Skipped,
+    /// Model-gateway refused the erase under a closed reason.
+    Refused {
+        status: StatusCode,
+        reason: &'static str,
+    },
+}
+
+impl ErasePass {
+    /// A hold check that could not be made: nothing was erased, and the upstream says to try again.
+    fn is_hold_check_outage(&self) -> bool {
+        matches!(self, ErasePass::Refused { reason, .. } if *reason == REASON_HOLD_CHECK)
+    }
+}
+
+/// Runs one erase pass, and runs it once more after [`ERASE_OUTAGE_RETRY_DELAY`] when its hold check
+/// was unavailable (V3c-bff-2-rel1). The typed `erasure_hold_check_unavailable` says nothing was
+/// erased, so the retry is safe, and the pass runs again whole so the retry mints a fresh Control
+/// decision. A legal hold is never retried: it stands until it is released. Every other refusal and
+/// every skip is final.
+async fn run_erase_with_outage_retry<F, Fut>(delay: Duration, mut pass: F) -> ErasePass
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = ErasePass>,
+{
+    let first = pass().await;
+    if !first.is_hold_check_outage() {
+        return first;
+    }
+    tracing::info!("revoked agent memory erase retried once after a hold-check outage");
+    tokio::time::sleep(delay).await;
+    pass().await
+}
+
+/// One pass of a revocation erase: a fresh Control decision for THIS agent, the delegated
+/// credentials, then model-gateway's erase route. Each pass mints its own decision, since a decision
+/// is never cached.
+async fn erase_agent_memory_pass(
     state: &AppState,
     user: &AuthenticatedUser,
     headers: &HeaderMap,
     org_id: &str,
     space_ref: &str,
     agent_subject_id: &str,
-) {
-    let space_ref = space_ref.trim();
-    let agent_subject_id = agent_subject_id.trim();
-    if org_id.trim().is_empty() || !valid_space_ref(space_ref) || !valid_memory_id(agent_subject_id) {
-        tracing::warn!("revoked agent memory erase skipped: no valid Space or agent subject");
-        record_erase_failure("invalid_input");
-        return;
-    }
+) -> ErasePass {
     let (decision_ref, token) = match space_memory_decision(
         state,
         user,
@@ -361,16 +423,18 @@ pub(super) async fn erase_agent_memory_after_revocation(
         Err((status, _)) => {
             tracing::warn!(%status, "revoked agent memory erase skipped: Control gave no decision");
             record_erase_failure("control_decision");
-            return;
+            return ErasePass::Skipped;
         }
     };
     let session_token =
         match crate::domains::chat::shared::required_session_token(state, user, headers).await {
             Ok(token) => token,
             Err(_) => {
-                tracing::warn!("revoked agent memory erase skipped: delegated credentials unavailable");
+                tracing::warn!(
+                    "revoked agent memory erase skipped: delegated credentials unavailable"
+                );
                 record_erase_failure("credentials");
-                return;
+                return ErasePass::Skipped;
             }
         };
     let model_token = crate::domains::chat::shared::model_token(state, user, headers).await;
@@ -396,11 +460,57 @@ pub(super) async fn erase_agent_memory_after_revocation(
     if status.is_success() {
         // A count only, never content.
         let erased = response.get("erased").and_then(Value::as_u64).unwrap_or(0);
-        tracing::info!(erased, "revoked agent memory erased");
-    } else {
-        record_erase_failure("upstream");
-        tracing::warn!(%status, "revoked agent memory erase failed");
+        return ErasePass::Erased(erased);
     }
+    ErasePass::Refused {
+        status,
+        reason: erase_failure_reason(&response),
+    }
+}
+
+/// Counts and logs the final outcome of one revocation erase. A success logs its row count only.
+fn settle_erase_pass(pass: ErasePass) {
+    match pass {
+        ErasePass::Erased(erased) => tracing::info!(erased, "revoked agent memory erased"),
+        ErasePass::Skipped => {}
+        ErasePass::Refused { status, reason } => note_erase_failure(status, reason),
+    }
+}
+
+/// Best-effort erase of one named agent's memory once its binding is revoked (EP-6 P3, EP-8 S10).
+///
+/// The caller runs this only when `GATEWAY_SPACE_MEMORY_UI` is on (`SpaceFeatureFlags::memory_ui`,
+/// dark by default). It runs after the revocation has landed and never changes the revoke's answer:
+/// any failure here is logged by status only, counted under a closed reason, and the revoke still
+/// succeeds. A legal hold (`erasure_blocked_legal_hold`) is counted under its own reason and is not
+/// retried: it stands until it is released. A hold-check outage (`erasure_hold_check_unavailable`) is
+/// retried once after [`ERASE_OUTAGE_RETRY_DELAY`] and counted only if the retry fails too. Repeating
+/// the revoke runs this erase again, the other retry path. Nothing is recorded durably: a held or
+/// still-failing erase is counted and logged only. Session Core is the authority: it verifies the
+/// fresh Control decision issued for THIS agent and erases that agent's rows in this Space, whatever
+/// its own agent switch says. Allowed under every retention posture: the call removes rows and
+/// carries ids, never content, and only a row count is logged.
+pub(super) async fn erase_agent_memory_after_revocation(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    org_id: &str,
+    space_ref: &str,
+    agent_subject_id: &str,
+) {
+    let space_ref = space_ref.trim();
+    let agent_subject_id = agent_subject_id.trim();
+    if org_id.trim().is_empty() || !valid_space_ref(space_ref) || !valid_memory_id(agent_subject_id)
+    {
+        tracing::warn!("revoked agent memory erase skipped: no valid Space or agent subject");
+        record_erase_failure("invalid_input");
+        return;
+    }
+    let pass = run_erase_with_outage_retry(ERASE_OUTAGE_RETRY_DELAY, || {
+        erase_agent_memory_pass(state, user, headers, org_id, space_ref, agent_subject_id)
+    })
+    .await;
+    settle_erase_pass(pass);
 }
 
 /// Asks Control for the `model.space.memory.manage` decision of this call. A refusal (a member
@@ -640,5 +750,223 @@ mod tests {
         assert!(body["error"]["details"].is_object() || body["error"].get("details").is_none());
         let (status, _) = relay_answer(StatusCode::BAD_GATEWAY, &json!({}), OPERATION_DELETE, "m1");
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn a_revocation_erase_failure_classifies_by_its_typed_code() {
+        // The typed code decides. The upstream message is never read, whatever it says.
+        let held = json!({"error": {
+            "code": "erasure_blocked_legal_hold",
+            "message": "hold lh_0123 on org-9",
+            "details": {"retryable": false},
+        }});
+        let outage = json!({"error": {
+            "code": "erasure_hold_check_unavailable",
+            "message": "org-core down",
+            "details": {"retryable": true},
+        }});
+        assert_eq!(erase_failure_reason(&held), REASON_LEGAL_HOLD);
+        assert_eq!(erase_failure_reason(&outage), REASON_HOLD_CHECK);
+        // Every other answer is the generic reason, whatever its status and words.
+        for other in [
+            json!({"error": {"code": "space_memory_not_authorized", "message": "denied"}}),
+            json!({"error": {"code": "memory_not_found", "message": "gone"}}),
+            json!({"error": {
+                "code": "space_memory_unavailable",
+                "message": "erasure_blocked_legal_hold",
+            }}),
+            json!({"error": "erasure_blocked_legal_hold"}),
+            json!({"error": {"message": "erasure_hold_check_unavailable"}}),
+            json!({}),
+        ] {
+            assert_eq!(erase_failure_reason(&other), REASON_UPSTREAM, "{other}");
+        }
+    }
+
+    #[test]
+    fn a_held_erase_and_an_outage_are_counted_apart() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let held = json!({"error": {"code": "erasure_blocked_legal_hold", "message": "held"}});
+        let outage =
+            json!({"error": {"code": "erasure_hold_check_unavailable", "message": "down"}});
+        note_erase_failure(StatusCode::CONFLICT, erase_failure_reason(&held));
+        note_erase_failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            erase_failure_reason(&outage),
+        );
+        for (status, body) in [
+            (
+                StatusCode::FORBIDDEN,
+                json!({"error": {"code": "space_memory_not_authorized"}}),
+            ),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({"error": {"code": "space_memory_unavailable"}}),
+            ),
+            (
+                StatusCode::GATEWAY_TIMEOUT,
+                json!({"error": {"code": "model_request_timeout"}}),
+            ),
+        ] {
+            note_erase_failure(status, erase_failure_reason(&body));
+        }
+        let rendered = handle.render();
+        let row = |reason: &str, count: u64| {
+            format!("verevon_space_agent_erase_failures_total{{reason=\"{reason}\"}} {count}")
+        };
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line == row(REASON_LEGAL_HOLD, 1)),
+            "{rendered}"
+        );
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line == row(REASON_HOLD_CHECK, 1)),
+            "{rendered}"
+        );
+        assert!(
+            rendered.lines().any(|line| line == row(REASON_UPSTREAM, 3)),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_revocation_erase_failure_logs_only_fixed_words() {
+        let capture = crate::zdr_log::test_capture::Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_ansi(false)
+            .finish();
+        let held = json!({"error": {
+            "code": "erasure_blocked_legal_hold",
+            "message": "hold lh_0123 on org-9",
+        }});
+        let outage = json!({"error": {
+            "code": "erasure_hold_check_unavailable",
+            "message": "org-core down",
+        }});
+        tracing::subscriber::with_default(subscriber, || {
+            note_erase_failure(StatusCode::CONFLICT, erase_failure_reason(&held));
+            note_erase_failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                erase_failure_reason(&outage),
+            );
+        });
+        let log = capture.text();
+        assert!(log.contains("legal_hold"), "{log}");
+        assert!(log.contains("hold_check_unavailable"), "{log}");
+        assert!(log.contains("409 Conflict"), "{log}");
+        assert!(log.contains("503 Service Unavailable"), "{log}");
+        for upstream_words in ["lh_0123", "org-9", "org-core"] {
+            assert!(
+                !log.contains(upstream_words),
+                "upstream text reached the log: {log}"
+            );
+        }
+    }
+
+    /// A hold-check outage: nothing was erased, and the upstream says to try again.
+    fn outage_pass() -> ErasePass {
+        ErasePass::Refused {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            reason: REASON_HOLD_CHECK,
+        }
+    }
+
+    /// A legal hold: final until the hold is released.
+    fn held_pass() -> ErasePass {
+        ErasePass::Refused {
+            status: StatusCode::CONFLICT,
+            reason: REASON_LEGAL_HOLD,
+        }
+    }
+
+    /// Any other refusal, which is final.
+    fn other_refusal_pass() -> ErasePass {
+        ErasePass::Refused {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            reason: REASON_UPSTREAM,
+        }
+    }
+
+    /// Runs the retry rule over scripted passes, each answering with the next script entry. A call past
+    /// the script panics, so each test also pins how many passes ran. Returns the outcome and that count.
+    async fn run_scripted(script: Vec<ErasePass>) -> (ErasePass, usize) {
+        let calls = std::cell::Cell::new(0_usize);
+        let script = std::cell::RefCell::new(script.into_iter());
+        let outcome = run_erase_with_outage_retry(Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            let next = script
+                .borrow_mut()
+                .next()
+                .expect("no erase pass beyond the script");
+            std::future::ready(next)
+        })
+        .await;
+        (outcome, calls.get())
+    }
+
+    #[tokio::test]
+    async fn a_hold_check_outage_is_retried_once_and_the_retry_is_the_answer() {
+        let (outcome, passes) = run_scripted(vec![outage_pass(), ErasePass::Erased(2)]).await;
+        assert_eq!(outcome, ErasePass::Erased(2));
+        assert_eq!(passes, 2);
+    }
+
+    #[tokio::test]
+    async fn an_outage_that_persists_is_retried_only_once() {
+        let (outcome, passes) = run_scripted(vec![outage_pass(), outage_pass()]).await;
+        assert_eq!(outcome, outage_pass());
+        assert_eq!(passes, 2);
+    }
+
+    #[tokio::test]
+    async fn a_legal_hold_is_never_retried() {
+        let (outcome, passes) = run_scripted(vec![held_pass()]).await;
+        assert_eq!(outcome, held_pass());
+        assert_eq!(passes, 1);
+    }
+
+    #[tokio::test]
+    async fn a_skip_or_any_other_refusal_is_never_retried() {
+        let (outcome, passes) = run_scripted(vec![ErasePass::Skipped]).await;
+        assert_eq!(outcome, ErasePass::Skipped);
+        assert_eq!(passes, 1);
+        let (outcome, passes) = run_scripted(vec![other_refusal_pass()]).await;
+        assert_eq!(outcome, other_refusal_pass());
+        assert_eq!(passes, 1);
+    }
+
+    #[tokio::test]
+    async fn a_retried_outage_is_counted_only_by_its_final_answer() {
+        // The first outage is not counted: only the answer that stands is.
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let (held_after_outage, _) = run_scripted(vec![outage_pass(), held_pass()]).await;
+        settle_erase_pass(held_after_outage);
+        let (erased_after_outage, _) =
+            run_scripted(vec![outage_pass(), ErasePass::Erased(1)]).await;
+        settle_erase_pass(erased_after_outage);
+        let rendered = handle.render();
+        let row = |reason: &str, count: u64| {
+            format!("verevon_space_agent_erase_failures_total{{reason=\"{reason}\"}} {count}")
+        };
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line == row(REASON_LEGAL_HOLD, 1)),
+            "{rendered}"
+        );
+        assert!(
+            !rendered
+                .lines()
+                .any(|line| line.contains(REASON_HOLD_CHECK)),
+            "{rendered}"
+        );
     }
 }

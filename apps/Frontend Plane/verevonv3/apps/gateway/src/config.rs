@@ -709,14 +709,35 @@ impl SpaceFeatureFlags {
     }
 }
 
-/// One Space flag: `1|true|yes|on` turns it on; unset falls back to ON in development and OFF
-/// when `APP_ENV` is production. Same rule as every other dev-defaulted gateway flag.
+/// Space switches that Model Plane also reads, by the same name. Model Plane turns each one on only
+/// for the exact literal `true` (`switch_from` in mp-contracts), so the gateway reads these the same
+/// way. Read leniently here, a `1`, `yes` or `on` would show a route in the UI that Model Plane
+/// refuses. Model Plane's base compose defaults them off (only its dev override turns them on), so an
+/// unset value is off here in every environment too. Every other Space flag keeps the lenient reading
+/// (see [`space_flag`]).
+pub(crate) const MODEL_PLANE_EXACT_TRUE_SWITCHES: [&str; 7] = [
+    "SPACE_HUMAN_POSTS_API",
+    "SPACE_MESSAGE_SEARCH_API",
+    "SPACE_MESSAGE_REVISE_API",
+    "SPACE_TIMELINE_API",
+    "SPACE_RUN_LIVE_VIEW",
+    "SPACE_RUN_LIVE_TEXT",
+    "SPACE_RUN_MANAGER_STOP",
+];
+
+/// One Space flag. A name in [`MODEL_PLANE_EXACT_TRUE_SWITCHES`] is on only for the exact literal
+/// `true`: not trimmed, not case-folded. An UNSET variable is OFF for those names in every
+/// environment, with no development default, as in Model Plane's base compose. Every other Space
+/// flag is on for `1|true|yes|on`, and an UNSET variable falls back to ON in development and OFF when
+/// `APP_ENV` is production, the same dev default as every other dev-defaulted gateway flag.
 #[allow(dead_code, reason = "first consumer is the next Space slice that adds a flag")]
 pub(crate) fn space_flag(key: &str) -> bool {
-    env_bool(
-        key,
-        dev_flags_allowed(&env::var("APP_ENV").unwrap_or_default()),
-    )
+    if MODEL_PLANE_EXACT_TRUE_SWITCHES.contains(&key) {
+        // `var_os`, not `var`: only a set value that is exactly `true` turns the switch on.
+        return env::var_os(key).is_some_and(|value| value.to_str() == Some("true"));
+    }
+    let fallback = dev_flags_allowed(&env::var("APP_ENV").unwrap_or_default());
+    env_bool(key, fallback)
 }
 
 #[cfg(test)]
@@ -1063,7 +1084,7 @@ fn internal_api_key() -> Result<String> {
             // Fail loudly unless the operator explicitly opts into insecure dev
             // defaults, so a misconfigured key surfaces at boot, not as a fleet of
             // mysterious 401s once requests start flowing.
-            if !trimmed.is_empty() && env_bool("ALLOW_INSECURE_DEV_DEFAULTS", false) {
+            if !trimmed.is_empty() && insecure_dev_defaults_enabled() {
                 eprintln!(
                     "WARN: INTERNAL_API_KEY is a `change-me*` placeholder; internal-key \
                      calls to cores WILL 401 (running anyway: ALLOW_INSECURE_DEV_DEFAULTS=1)"
@@ -1078,7 +1099,7 @@ fn internal_api_key() -> Result<String> {
         Err(_) => {
             // No INTERNAL_API_KEY at all: keep prior dev ergonomics — a debug build
             // (or explicit opt-in) boots with the canonical fake key.
-            if cfg!(debug_assertions) || env_bool("ALLOW_INSECURE_DEV_DEFAULTS", false) {
+            if cfg!(debug_assertions) || insecure_dev_defaults_enabled() {
                 return Ok("change-me".into());
             }
             anyhow::bail!("INTERNAL_API_KEY must be set and cannot be a change-me* placeholder");
@@ -1375,6 +1396,20 @@ fn env_bool(key: &str, fallback: bool) -> bool {
             )
         })
         .unwrap_or(fallback)
+}
+
+/// `ALLOW_INSECURE_DEV_DEFAULTS`, read exactly as Model Plane reads it: only the literal `1`
+/// opens the insecure-default gate (Model Plane's `insecure_dev_defaults_from`, model-gateway
+/// auth.rs). `true`, `TRUE`, `yes` and `on` leave it closed here too, so the BFF and Model
+/// Plane never disagree about the one bypass they share (V3c-bff-3-rel2). Unset, empty, `0`
+/// and padded values are closed as well.
+fn insecure_dev_defaults_from(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+/// Reads `ALLOW_INSECURE_DEV_DEFAULTS` through [`insecure_dev_defaults_from`].
+fn insecure_dev_defaults_enabled() -> bool {
+    insecure_dev_defaults_from(env::var("ALLOW_INSECURE_DEV_DEFAULTS").ok().as_deref())
 }
 
 /// Optional setting: empty string when unset. Trailing slashes are stripped so
@@ -1816,6 +1851,133 @@ mod tests").next().unwrap_or(&config);
         });
     }
 
+    /// Model Plane reads each name in `MODEL_PLANE_EXACT_TRUE_SWITCHES` as the exact literal
+    /// `true` (`switch_from`), so the gateway does too: `1`, `yes`, `on`, `TRUE`, a padded `true`
+    /// and an empty value are off in every environment. An unset value is off everywhere as well
+    /// (V3c-bff-3-rel1): Model Plane's base compose defaults these off, so there is no dev default.
+    #[test]
+    fn model_plane_mirrored_space_switches_are_on_only_for_the_exact_literal_true() {
+        for key in super::MODEL_PLANE_EXACT_TRUE_SWITCHES {
+            let read = |app_env: &str, value: Option<&str>| {
+                let vars = [("APP_ENV", Some(app_env)), (key, value)];
+                with_env(&vars, || super::space_flag(key))
+            };
+            assert!(!read("development", None), "{key} unset in development");
+            assert!(!read("production", None), "{key} unset in production");
+            assert!(read("production", Some("true")), "{key} set to true");
+            assert!(
+                read("development", Some("true")),
+                "{key} set to true in development"
+            );
+            for value in ["", "1", "yes", "on", "TRUE", "True", " true", "true "] {
+                assert!(!read("development", Some(value)), "{key}={value:?}");
+                assert!(!read("production", Some(value)), "{key}={value:?}");
+            }
+        }
+    }
+
+    /// V3c-bff-3-rel1: each Space flag that mirrors a Model Plane switch reads its own variable,
+    /// is OFF when that variable is unset in development as well as production, and is on only for
+    /// the literal `true`. The development default that used to show these routes is gone.
+    #[test]
+    fn model_plane_mirrored_space_flags_are_off_in_development_when_unset() {
+        let cases: [(&str, fn(&super::SpaceFeatureFlags) -> bool); 7] = [
+            ("SPACE_HUMAN_POSTS_API", |flags| flags.human_posts_api),
+            ("SPACE_MESSAGE_SEARCH_API", |flags| flags.message_search_api),
+            ("SPACE_MESSAGE_REVISE_API", |flags| flags.message_revise_api),
+            ("SPACE_TIMELINE_API", |flags| flags.timeline_api),
+            ("SPACE_RUN_LIVE_VIEW", |flags| flags.run_live_view),
+            ("SPACE_RUN_LIVE_TEXT", |flags| flags.run_live_text),
+            ("SPACE_RUN_MANAGER_STOP", |flags| flags.run_manager_stop),
+        ];
+        for (key, read) in cases {
+            let flag = |app_env: &str, value: Option<&str>| {
+                with_env(&[("APP_ENV", Some(app_env)), (key, value)], || {
+                    read(&super::SpaceFeatureFlags::from_env())
+                })
+            };
+            assert!(!flag("development", None), "{key} unset in development");
+            assert!(!flag("production", None), "{key} unset in production");
+            assert!(
+                flag("development", Some("true")),
+                "{key} true in development"
+            );
+            assert!(flag("production", Some("true")), "{key} true in production");
+            assert!(
+                !flag("development", Some("1")),
+                "{key}=1 is not the literal true"
+            );
+        }
+    }
+
+    /// The Space flags outside `MODEL_PLANE_EXACT_TRUE_SWITCHES` are not Model Plane switches, so
+    /// they keep the lenient `env_bool` words. The exact-literal rule does not spread to them.
+    #[test]
+    fn other_space_flags_keep_the_lenient_reading() {
+        let key = "SPACE_SIDEBAR_API";
+        assert!(!super::MODEL_PLANE_EXACT_TRUE_SWITCHES.contains(&key));
+        for value in ["1", "yes", "on", "TRUE"] {
+            let vars = [("APP_ENV", Some("production")), (key, Some(value))];
+            with_env(&vars, || assert!(super::space_flag(key), "{value:?}"));
+        }
+    }
+
+    /// V3c-bff-3-rel2: `ALLOW_INSECURE_DEV_DEFAULTS` is shared with Model Plane, whose
+    /// `insecure_dev_defaults_from` opens its gate only for the literal `1`. The BFF reads it the
+    /// same way, so `true`, `TRUE`, `yes`, `on`, a padded `1`, `0`, an empty value and an unset
+    /// variable all leave the insecure-default gate closed.
+    #[test]
+    fn insecure_dev_defaults_opens_only_for_the_exact_literal_one() {
+        assert!(super::insecure_dev_defaults_from(Some("1")));
+        for value in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("true"),
+            Some("TRUE"),
+            Some("True"),
+            Some("yes"),
+            Some("on"),
+            Some(" 1 "),
+            Some("1 "),
+            Some(" 1"),
+        ] {
+            assert!(!super::insecure_dev_defaults_from(value), "{value:?}");
+        }
+    }
+
+    /// V3c-bff-3-rel2: a `change-me*` `INTERNAL_API_KEY` boots only when the flag is exactly `1`.
+    /// `true` and the other spellings the lenient reader used to accept leave the refusal in
+    /// place, as does an unset flag.
+    #[test]
+    fn placeholder_internal_api_key_boots_only_when_the_flag_is_exactly_one() {
+        let placeholder = "change-me-internal-service-secret";
+        for flag in [
+            None,
+            Some("0"),
+            Some("true"),
+            Some("TRUE"),
+            Some("yes"),
+            Some("on"),
+        ] {
+            let vars = [
+                ("INTERNAL_API_KEY", Some(placeholder)),
+                ("ALLOW_INSECURE_DEV_DEFAULTS", flag),
+            ];
+            with_env(&vars, || {
+                assert!(super::internal_api_key().is_err(), "{flag:?}");
+            });
+        }
+        let vars = [
+            ("INTERNAL_API_KEY", Some(placeholder)),
+            ("ALLOW_INSECURE_DEV_DEFAULTS", Some("1")),
+        ];
+        with_env(&vars, || {
+            assert_eq!(super::internal_api_key().unwrap(), placeholder);
+        });
+    }
+
     /// WS14.S7: `VEREVON_GATEWAY_CRAWL_ROBOTS_OVERRIDE` is off unless it is exactly `true`, in every
     /// environment, development included, and is read into `SpaceFeatureFlags` rather than per request.
     #[test]
@@ -1903,9 +2065,11 @@ mod tests").next().unwrap_or(&config);
         with_env(&vars("development", Some("false")), || assert_eq!(read(), [false; 4]));
     }
 
-    /// WS10-S4 / WS13-S3 / WS14-S7 / WS15-S7: the approval-scope, message-search, entry-link,
-    /// command-palette, thread-fork, room-file and timeline flags default OFF, are OFF under
-    /// `APP_ENV=production` when unset, ON in dev, and an explicit value wins.
+    /// WS10-S4 / WS13-S3 / WS14-S7 / WS15-S7 / WS15-S11: the approval-scope, message-search UI,
+    /// entry-link, command-palette, thread-fork, room-file, turn-attachment and system-entry flags
+    /// default OFF, are OFF under `APP_ENV=production` when unset, ON in dev, and an explicit value
+    /// wins. The message-search API and timeline switches mirror Model Plane, so they are off in
+    /// development too; see `model_plane_mirrored_space_flags_are_off_in_development_when_unset`.
     #[test]
     fn ws10_ws13_ws14_ws15_gateway_flags_default_off_and_follow_their_variables() {
         let default = super::SpaceFeatureFlags::default();
@@ -1922,7 +2086,6 @@ mod tests").next().unwrap_or(&config);
         assert!(!default.system_entries_api);
         let keys = [
             "SPACE_APPROVAL_SCOPES_ENABLED",
-            "SPACE_MESSAGE_SEARCH_API",
             "SPACE_MESSAGE_SEARCH_UI",
             "SPACE_ENTRY_LINKS_UI",
             "SPACE_COMMAND_PALETTE_UI",
@@ -1930,7 +2093,6 @@ mod tests").next().unwrap_or(&config);
             "SPACE_ROOM_FILES_API",
             "SPACE_ROOM_FILES_UI",
             "SPACE_TURN_ATTACHMENTS_UI",
-            "SPACE_TIMELINE_API",
             "SPACE_SYSTEM_ENTRIES_API",
         ];
         let vars = |env: &'static str, value: Option<&'static str>| {
@@ -1942,7 +2104,6 @@ mod tests").next().unwrap_or(&config);
             let flags = super::SpaceFeatureFlags::from_env();
             [
                 flags.approval_scopes,
-                flags.message_search_api,
                 flags.message_search_ui,
                 flags.entry_links_ui,
                 flags.command_palette_ui,
@@ -1950,14 +2111,17 @@ mod tests").next().unwrap_or(&config);
                 flags.room_files_api,
                 flags.room_files_ui,
                 flags.turn_attachments_ui,
-                flags.timeline_api,
                 flags.system_entries_api,
             ]
         };
-        with_env(&vars("production", None), || assert_eq!(read(), [false; 11]));
-        with_env(&vars("development", None), || assert_eq!(read(), [true; 11]));
-        with_env(&vars("production", Some("true")), || assert_eq!(read(), [true; 11]));
-        with_env(&vars("development", Some("false")), || assert_eq!(read(), [false; 11]));
+        with_env(&vars("production", None), || assert_eq!(read(), [false; 9]));
+        with_env(&vars("development", None), || assert_eq!(read(), [true; 9]));
+        with_env(&vars("production", Some("true")), || {
+            assert_eq!(read(), [true; 9])
+        });
+        with_env(&vars("development", Some("false")), || {
+            assert_eq!(read(), [false; 9])
+        });
     }
 
     /// WS07-S6: `CSP_REPORT_LOG_HOSTS` is a dev-only flag: it follows its variable outside
@@ -1979,13 +2143,13 @@ mod tests").next().unwrap_or(&config);
         });
     }
 
-    /// WS01-S5 and WS03-S4: the human-post, thread-pane, send-idempotency, connectivity-banner and
-    /// policy-admin flags are off in production when their variable is unset, on in development,
-    /// and honour an explicit value.
+    /// WS01-S5 and WS03-S4: the thread-pane, send-idempotency, connectivity-banner, policy-admin and
+    /// realtime-stream flags are off in production when their variable is unset, on in development,
+    /// and honour an explicit value. The human-post switch mirrors Model Plane, so it is off in
+    /// development too; see `model_plane_mirrored_space_flags_are_off_in_development_when_unset`.
     #[test]
     fn ws01_and_ws03_flags_follow_the_space_flag_rule() {
         let keys = [
-            "SPACE_HUMAN_POSTS_API",
             "SPACE_THREAD_PANE_UI",
             "SPACE_SEND_IDEMPOTENCY_API",
             "SPACE_CONNECTIVITY_BANNER_UI",
@@ -1999,7 +2163,6 @@ mod tests").next().unwrap_or(&config);
         };
         with_env(&unset("production"), || {
             let flags = super::SpaceFeatureFlags::from_env();
-            assert!(!flags.human_posts_api);
             assert!(!flags.thread_pane_ui);
             assert!(!flags.send_idempotency_api);
             assert!(!flags.connectivity_banner_ui);
@@ -2008,7 +2171,6 @@ mod tests").next().unwrap_or(&config);
         });
         with_env(&unset("development"), || {
             let flags = super::SpaceFeatureFlags::from_env();
-            assert!(flags.human_posts_api);
             assert!(flags.thread_pane_ui);
             assert!(flags.send_idempotency_api);
             assert!(flags.connectivity_banner_ui);
@@ -2021,7 +2183,7 @@ mod tests").next().unwrap_or(&config);
         with_env(&explicit, || {
             let flags = super::SpaceFeatureFlags::from_env();
             assert!(flags.policy_admin_api, "explicit true wins in production");
-            assert!(!flags.human_posts_api, "the others stay off");
+            assert!(!flags.thread_pane_ui, "the others stay off");
         });
         let mut explicit_off = unset("development");
         explicit_off.retain(|(key, _)| *key != "SPACE_POLICY_ADMIN_API");

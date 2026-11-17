@@ -46,11 +46,13 @@ import {
   REVIEW_TARGETS,
   parseReviewRunInput,
   type ReviewRunInput,
+  type ReviewRunRequest,
   type ReviewTarget,
 } from '@/shared/actions/chat-review'
 import {
   parseReasoningTranslateInput,
   type ReasoningTranslateLocale,
+  type ReasoningTranslateRequest,
 } from '@/shared/actions/chat-reasoning-translate'
 import type { ThreadGoalStatus } from './thread-goal-client'
 import { waivedContinuationFields, type WaivedRunConnection } from './waived-continuation'
@@ -4024,12 +4026,27 @@ function normalizeReviewCard(value: unknown): ReviewCard | null {
 }
 
 /**
+ * The review as the gateway reads it: its own field names, and the thread and model only when the caller names them
+ * (DEC-V-R8). A review that names neither is the same body it was before the feature named a thread.
+ */
+function reviewWireBody(request: ReviewRunRequest): Record<string, unknown> {
+  const { threadId, model, ...fields } = request
+  // The model is the thread's connection's model, so it is sent only with the thread it names.
+  if (!threadId) return { ...fields }
+  return { ...fields, thread_id: threadId, ...(model ? { model } : {}) }
+}
+
+/**
  * Runs one read-only review of a text (F-t3-086) and returns its card. The request is checked against the action
  * contract before anything is sent, and the card goes back to the caller only: nothing is stored. Resolves to `null`
  * while the gateway's review switch is off (404 `review_run_disabled`). Other refusals reject with the server's typed
  * `ApiError`: a text the gateway will not take (a `review_` code on 400 or 413), a zero-retention refusal, and
  * `delegated_auth_unavailable` while the model's credentials are unavailable. A request the contract refuses rejects
  * with a `ReviewRunContractError`, and nothing is sent.
+ *
+ * `threadId` names the thread the text belongs to, and `model` the model that thread's connection serves (DEC-V-R8). The
+ * thread is sent only when given, with the model when one is named, and a review on a connection thread is answered on
+ * that connection.
  */
 export async function runReview(input: ReviewRunInput): Promise<ReviewCard | null> {
   const request = parseReviewRunInput(input)
@@ -4037,15 +4054,27 @@ export async function runReview(input: ReviewRunInput): Promise<ReviewCard | nul
   try {
     raw = await requestJson<unknown>('/api/v1/ai/review', {
       method: 'POST',
-      body: JSON.stringify(request),
+      body: JSON.stringify(reviewWireBody(request)),
     })
   } catch (error) {
     if (error instanceof ApiError && error.status === 404 && error.code === 'review_run_disabled') return null
     throw error
   }
-  const card = normalizeReviewCard(objectValue(objectValue(raw)?.data)?.run)
+  // `requestJson` has already unwrapped the gateway's `{ data }` envelope, so the card is read from `raw.run`.
+  const card = normalizeReviewCard(objectValue(raw)?.run)
   if (!card) throw new ApiError('The review did not return a card.', 502, 'review_no_card')
   return card
+}
+
+/** The translation as the gateway reads it, with the thread and model only when the caller names them (DEC-V-R8). */
+function translateWireBody(request: ReasoningTranslateRequest): Record<string, unknown> {
+  const body: Record<string, unknown> = { text: request.text, target_locale: request.targetLocale }
+  // The model is the thread's connection's model, so it is sent only with the thread it names.
+  if (request.threadId) {
+    body.thread_id = request.threadId
+    if (request.model) body.model = request.model
+  }
+  return body
 }
 
 /**
@@ -4055,14 +4084,22 @@ export async function runReview(input: ReviewRunInput): Promise<ReviewCard | nul
  * stored, and the caller holds it in a component signal, never in the turn, a history cache or a composer. Resolves to
  * `null` while the gateway's reasoning-translation switch is off (404) and for a zero-retention turn (412). Other refusals
  * reject with the server's typed `ApiError`, such as `delegated_auth_unavailable` while the model's credentials are down.
+ *
+ * `thread` names the thread the shown text belongs to and the model its connection serves (DEC-V-R8). The thread is sent
+ * only when given, with the model when one is named, and a translation of a connection thread's text is answered on that
+ * connection.
  */
-export async function translateText(text: string, targetLocale: ReasoningTranslateLocale): Promise<string | null> {
-  const request = parseReasoningTranslateInput({ text, targetLocale })
+export async function translateText(
+  text: string,
+  targetLocale: ReasoningTranslateLocale,
+  thread: { threadId?: string; model?: string } = {},
+): Promise<string | null> {
+  const request = parseReasoningTranslateInput({ text, targetLocale, threadId: thread.threadId, model: thread.model })
   let raw: unknown
   try {
     raw = await requestJson<unknown>('/api/v1/ai/translate', {
       method: 'POST',
-      body: JSON.stringify({ text: request.text, target_locale: request.targetLocale }),
+      body: JSON.stringify(translateWireBody(request)),
     })
   } catch (error) {
     if (error instanceof ApiError && (error.status === 404 || error.status === 412)) return null

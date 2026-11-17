@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { featureThreadId } from './feature-thread'
 
 // The client action contract for the model council (F-t3-092): two to four catalogue models answer one question with no
 // tools, then one synthesis reads where they agree and disagree. The browser parses the request here before it sends
@@ -61,8 +62,9 @@ const councilModels = z
 
 /**
  * `council.run`: one question, the models that answer it, the synthesizer if one is named, and the allowance for
- * subscription models. The same fields serve the estimate, which differs only in not asking any model. Any other field
- * is refused.
+ * subscription models. The same fields serve the estimate, which differs only in not asking any model. The thread is
+ * named only for a question asked on a thread (DEC-V-R8): Model Gateway then serves every member and the synthesis on that
+ * thread's connection, and the models named here are the ones that connection serves. Any other field is refused.
  */
 export const councilRunInput = z
   .object({
@@ -70,6 +72,7 @@ export const councilRunInput = z
     models: councilModels,
     synthesizerModel: councilModelId.optional(),
     allowSubscription: z.boolean().default(false),
+    threadId: featureThreadId.optional(),
   })
   .strict()
 
