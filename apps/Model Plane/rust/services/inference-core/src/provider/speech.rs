@@ -426,8 +426,8 @@ impl OpenAiSpeechProvider {
         // the US. Gate it behind an explicit opt-in so the EU default
         // (`AZURE_OPENAI_ENDPOINT`, Sweden Central) is used unless an operator
         // accepts the cross-region transfer via `MODEL_PLANE_ALLOW_NON_EU_TTS`.
-        let allow_non_eu_tts = env_nonempty("MODEL_PLANE_ALLOW_NON_EU_TTS")
-            .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"));
+        let allow_non_eu_tts =
+            non_eu_tts_opted_in(env_nonempty("MODEL_PLANE_ALLOW_NON_EU_TTS").as_deref());
         if !allow_non_eu_tts && env_nonempty("AZURE_OPENAI_TTS_ENDPOINT").is_some() {
             warn!(
                 "AZURE_OPENAI_TTS_ENDPOINT set but MODEL_PLANE_ALLOW_NON_EU_TTS is off; \
@@ -912,6 +912,12 @@ fn env_nonempty(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|value| !value.is_empty())
 }
 
+/// Whether `MODEL_PLANE_ALLOW_NON_EU_TTS` admits the non-EU TTS endpoint. Only the exact
+/// literal `true` does: `1`, ` true ` and `TRUE` keep the EU default in place.
+fn non_eu_tts_opted_in(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
 fn nonempty_or(value: String, fallback: &str) -> String {
     if value.trim().is_empty() {
         fallback.to_owned()
@@ -1059,6 +1065,27 @@ mod tests {
             .iter()
             .any(|voice| voice.id == "nb-NO-PernilleNeural"));
         assert!(voices.iter().all(|voice| voice.language.starts_with("nb")));
+    }
+
+    #[test]
+    fn non_eu_tts_opt_in_is_on_only_for_the_exact_literal_true() {
+        assert!(non_eu_tts_opted_in(Some("true")));
+        for raw in [
+            None,
+            Some(""),
+            Some("1"),
+            Some(" true "),
+            Some("TRUE"),
+            Some("on"),
+            Some("yes"),
+            Some("false"),
+            Some("0"),
+        ] {
+            assert!(
+                !non_eu_tts_opted_in(raw),
+                "{raw:?} must not admit the non-EU TTS endpoint"
+            );
+        }
     }
 
     #[test]

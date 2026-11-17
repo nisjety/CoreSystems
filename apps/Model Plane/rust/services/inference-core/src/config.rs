@@ -1,11 +1,13 @@
 //! Provider configuration and model catalog loaded from environment variables.
 
+use std::ffi::OsStr;
+
 use anyhow::{Context, Result};
 
 use mp_contracts::model_entitlement::Mode;
 
 use crate::metrics;
-use crate::provider::zdr::{ZdrAttestation, ZdrResolution};
+use crate::provider::zdr::{ZdrAttestation, ZdrAttestationError, ZdrResolution};
 use crate::provider::{Bearer, Residency};
 
 /// Top-level configuration for inference-core.
@@ -310,7 +312,7 @@ impl InferenceConfig {
         let allow_global_deployment = truthy_env("MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT");
         let allow_global_residency_providers = truthy_env("MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY");
 
-        // Deny-by-default: only an explicit truthy opt-in disables the EU
+        // Deny-by-default: only the exact literal `true` disables the EU
         // embedding residency gate. Mirrors the speech.rs MODEL_PLANE_ALLOW_NON_EU_TTS
         // shape but the embedding gate REJECTS rather than warn-and-fallback.
         let allow_non_eu_embedding = truthy_env("MODEL_PLANE_ALLOW_NON_EU_EMBEDDING");
@@ -396,7 +398,10 @@ impl InferenceConfig {
 /// `*_ZDR_CONFIRMED` boolean is still read, but only so an operator who asserted
 /// ZDR without supplying the attestation fails boot: silently dropping the claim
 /// would leave them believing ZDR is on while requests fail later with
-/// `ZdrUnavailable`, far from the change that caused it.
+/// `ZdrUnavailable`, far from the change that caused it. Only the exact literal `true`
+/// asserts it. Unset, empty, `false` and `0` make no claim, and any other value (`1`,
+/// `TRUE`, ` true `, `yes`) fails boot as unreadable rather than being read as off, because
+/// reading it as off is the same silent drop. See [`legacy_zdr_asserted`].
 ///
 /// An approval outside its in-force window is the one thing that does not fail
 /// boot (DEC-33 D6): the surface boots without ZDR, so ZDR turns refuse with the
@@ -409,9 +414,8 @@ fn resolve_zdr(
     legacy_var: &'static str,
     today: chrono::NaiveDate,
 ) -> Result<Option<ZdrAttestation>> {
-    let legacy_confirmed = std::env::var(legacy_var)
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
-        .unwrap_or(false);
+    let legacy_confirmed =
+        legacy_zdr_asserted(legacy_var, std::env::var_os(legacy_var).as_deref())?;
     let resolution = ZdrAttestation::resolve_lenient(prefix, legacy_var, legacy_confirmed, today)?;
     if let Some(attestation) = resolution.attestation() {
         metrics::record_zdr_attestation_review_by(surface, attestation.review_by());
@@ -496,11 +500,36 @@ fn trimmed_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// A deny-by-default boolean flag: only an explicit `1`/`true` enables it.
+/// A deny-by-default boolean flag: only the exact literal `true` enables it. No trimming
+/// and no case folding, so `1`, ` true ` and `TRUE` leave it off, as does an unset value.
 fn truthy_env(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true"))
-        .unwrap_or(false)
+    std::env::var(name).ok().as_deref() == Some("true")
+}
+
+/// Whether the legacy `*_ZDR_CONFIRMED` boolean asserts ZDR. `value` is the variable as read, or
+/// `None` when it is unset.
+///
+/// Unset, empty, `false` and `0` make no claim. Only the exact literal `true` asserts one, and
+/// [`ZdrAttestation::resolve_lenient`] refuses that without an attestation behind it. Any other
+/// value is refused rather than read as off, so `1`, `TRUE`, ` true ` and a value that is not UTF-8
+/// cannot boot without the claim the operator may have meant. As with the other switch readers
+/// here, there is no trimming and no case folding.
+///
+/// # Errors
+///
+/// [`ZdrAttestationError::UnreadableLegacyBoolean`] for any value other than those.
+fn legacy_zdr_asserted(
+    legacy_var: &'static str,
+    value: Option<&OsStr>,
+) -> Result<bool, ZdrAttestationError> {
+    let Some(raw) = value else {
+        return Ok(false);
+    };
+    match raw.to_str() {
+        Some("true") => Ok(true),
+        Some("" | "0" | "false") => Ok(false),
+        _ => Err(ZdrAttestationError::UnreadableLegacyBoolean { legacy_var }),
+    }
 }
 
 fn csv_env(name: &str, default: &[&str]) -> Vec<String> {
@@ -565,13 +594,13 @@ impl VertexGeminiConfig {
 /// The strict reading of `INFERENCE_BYO_GATEWAY_ENABLED`: only the literal `true` enables it, as it does
 /// for the Vertex switch. Anything else, including `1`, `TRUE` and an empty value, leaves it off.
 fn byo_gateway_switch_on(raw: Option<&str>) -> bool {
-    raw.is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// The strict reading of `VERTEX_GEMINI_ENABLED`: only the literal `true` enables it.
 /// Anything else, including `1`, `TRUE` and an empty value, leaves the provider off.
 fn vertex_switch_on(raw: Option<&str>) -> bool {
-    raw.is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// The Vertex locations that keep processing in the EU: the EU multi-region, and the
@@ -641,12 +670,12 @@ mod tests {
     #[test]
     fn vertex_switch_is_on_only_for_the_literal_true() {
         assert!(vertex_switch_on(Some("true")));
-        assert!(vertex_switch_on(Some(" true ")));
         for raw in [
             None,
             Some(""),
             Some("1"),
             Some("TRUE"),
+            Some(" true "),
             Some("yes"),
             Some("on"),
         ] {

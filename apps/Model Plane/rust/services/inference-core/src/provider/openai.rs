@@ -24,7 +24,7 @@ const REASONING_EFFORT_ENV: &str = "INFERENCE_CORE_OPENAI_REASONING_EFFORT";
 /// unit-testable without touching the process environment; a stray `1` or `on`
 /// must not start spending reasoning allowance.
 fn parse_enabled(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// Switch for sending `prompt_cache_key` to the first-party `OpenAI` endpoint.
@@ -1942,8 +1942,7 @@ mod tests {
         #[test]
         fn only_the_literal_true_enables_the_switch() {
             assert!(parse_enabled(Some("true")));
-            assert!(parse_enabled(Some(" true ")));
-            for off in ["1", "on", "yes", "TRUE", "enabled", ""] {
+            for off in ["1", "on", "yes", "TRUE", " true ", "enabled", ""] {
                 assert!(!parse_enabled(Some(off)), "{off:?} must leave it off");
             }
             assert!(!parse_enabled(None));

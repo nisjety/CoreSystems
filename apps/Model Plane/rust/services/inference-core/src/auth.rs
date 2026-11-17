@@ -34,7 +34,7 @@ const API_KEY_INVOKE_SCOPE: &str = "agent:runs";
 /// `INFERENCE_API_KEY_PRINCIPAL`: admit the `api_key` principal type (EP-12 S6). Only the literal
 /// `true` enables it; off, an `api_key` token is `unauthenticated` exactly as before.
 fn api_key_principal_enabled(raw: Option<&str>) -> bool {
-    raw.is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// Verifies independently signed user and workload credentials before a
@@ -1547,8 +1547,14 @@ mod tests {
     #[test]
     fn api_key_principal_parser_takes_only_literal_true() {
         assert!(api_key_principal_enabled(Some("true")));
-        assert!(api_key_principal_enabled(Some(" true ")));
-        for raw in [None, Some(""), Some("TRUE"), Some("1"), Some("false")] {
+        for raw in [
+            None,
+            Some(""),
+            Some("TRUE"),
+            Some(" true "),
+            Some("1"),
+            Some("false"),
+        ] {
             assert!(!api_key_principal_enabled(raw), "{raw:?}");
         }
     }

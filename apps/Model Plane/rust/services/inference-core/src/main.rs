@@ -5,6 +5,7 @@
 use anyhow::Result;
 use inference_core::{
     auth::JwtVerifier, config, grpc, http_health, metrics, provider, readiness::GrpcReadiness,
+    switch_spellings,
 };
 use tracing::info;
 
@@ -12,6 +13,7 @@ use tracing::info;
 async fn main() -> Result<()> {
     let _otel_guard = mp_telemetry::init("inference-core")?;
     info!("inference-core starting");
+    switch_spellings::warn_former_spellings();
 
     // Installed before anything can count a request, and fatal when it cannot
     // be: a failed install would leave `/metrics` empty while every counter went

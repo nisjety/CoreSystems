@@ -12,3 +12,4 @@ pub mod provider;
 pub mod readiness;
 pub mod request_capture;
 pub mod streaming;
+pub mod switch_spellings;

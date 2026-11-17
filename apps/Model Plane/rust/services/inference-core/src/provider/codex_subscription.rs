@@ -208,7 +208,7 @@ fn speed_tier_split_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         let raw = std::env::var(SPEED_TIER_SPLIT_ENV).ok();
-        raw.as_deref().map(str::trim) == Some("true")
+        mp_contracts::loop_fold::switch_from(raw.as_deref())
     })
 }
 

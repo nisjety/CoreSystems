@@ -392,7 +392,7 @@ fn catalogue_overlay_refusal(policy: &RoutingPolicy, catalogue: &[ModelInfo]) ->
 const PROMOTION_REQUIRED_ENV: &str = "ROUTING_POLICY_PROMOTION_REQUIRED";
 
 fn promotion_required_from(raw: Option<&str>) -> bool {
-    raw.is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 fn promotion_required() -> bool {
@@ -478,8 +478,15 @@ mod tests {
     #[test]
     fn promotion_switch_reads_only_the_literal_true() {
         assert!(promotion_required_from(Some("true")));
-        assert!(promotion_required_from(Some(" true ")));
-        for raw in [None, Some(""), Some("1"), Some("TRUE"), Some("yes"), Some("false")] {
+        for raw in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some(" true "),
+            Some("yes"),
+            Some("false"),
+        ] {
             assert!(!promotion_required_from(raw), "{raw:?}");
         }
     }

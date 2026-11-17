@@ -64,7 +64,7 @@ const MAX_CACHED_TOKENS: usize = 1_024;
 /// The strict reading of [`CAPTURE_ENV`].
 #[must_use]
 pub fn capture_enabled_from(raw: Option<&str>) -> bool {
-    raw.is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// Whether a call may be snapshotted at all. A ZDR call, a waived caller and a
@@ -518,11 +518,19 @@ mod tests {
 
     #[test]
     fn capture_off_sends_nothing() {
-        // Only the literal `true` turns capture on; anything else leaves the
+        // Only the exact literal `true` turns capture on; anything else leaves the
         // handlers without a capture handle at all.
-        for raw in [None, Some(""), Some("1"), Some("on"), Some("TRUE "), Some("yes"), Some("false")] {
-            let expected = raw.is_some_and(|value| value.trim() == "true");
-            assert_eq!(capture_enabled_from(raw), expected, "{raw:?}");
+        for raw in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("on"),
+            Some("TRUE "),
+            Some(" true"),
+            Some("yes"),
+            Some("false"),
+        ] {
+            assert!(!capture_enabled_from(raw), "{raw:?}");
         }
         assert!(capture_enabled_from(Some("true")));
         assert!(!capture_enabled_from(Some("TRUE")));

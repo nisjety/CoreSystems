@@ -284,7 +284,7 @@ fn is_alias_id(alias: &str) -> bool {
 /// Whether an explicit env value turns the overlay on. Pure, so the reading can be
 /// tested without the process environment.
 fn catalogue_overlay_enabled_from(raw: Option<&str>) -> bool {
-    raw.is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// Whether the overlay is on for this process, read once from
@@ -424,7 +424,7 @@ impl OrgOverlay {
 /// Whether an explicit env value turns the organisation overlay on. Pure, so the reading can be tested without
 /// the process environment.
 fn org_overlay_enabled_from(raw: Option<&str>) -> bool {
-    raw.is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// Whether the organisation overlay is on for this process, read once from `INFERENCE_ORG_OVERLAY`.

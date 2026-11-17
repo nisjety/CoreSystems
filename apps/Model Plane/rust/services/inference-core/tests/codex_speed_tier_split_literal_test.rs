@@ -1,10 +1,10 @@
 //! `INFERENCE_SPEED_TIER_SPLIT` is on only for the literal `true` (verification plan 3.4).
 //!
 //! The switch is read once per process, so this binary sets a value that is not the
-//! literal (`True`) before the first call. Every test here must then see the off
+//! literal (` true `, padded) before the first call. Every test here must then see the off
 //! behaviour, byte for byte the same as with the switch unset: Quick implies the
 //! priority tier on a priority-capable model, and `speed_tier` alone asks for nothing.
-//! (Surrounding whitespace is trimmed, as every inference-core switch reader does.)
+//! The reader is exact, so a padded value such as ` true ` leaves it off too.
 
 use std::sync::Once;
 
@@ -16,7 +16,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn switch_not_literal() {
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| std::env::set_var("INFERENCE_SPEED_TIER_SPLIT", "True"));
+    ONCE.call_once(|| std::env::set_var("INFERENCE_SPEED_TIER_SPLIT", " true "));
 }
 
 async fn broker(model: &str) -> MockServer {

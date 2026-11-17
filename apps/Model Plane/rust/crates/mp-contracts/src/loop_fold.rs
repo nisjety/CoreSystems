@@ -354,6 +354,22 @@ pub fn switch_from_any_case(value: Option<&str>) -> bool {
     value.is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
 }
 
+/// Whether `value` is a spelling that a retired lenient reader took as on, and that the exact
+/// reader does not take: `1`, `on`, `yes`, `enabled`, or `true` in another case or with
+/// surrounding whitespace. `literal` is the one value the switch takes (`true` for most). It is
+/// for a startup report only: it flags a live value that now reads as off, and it never turns a
+/// switch on.
+#[must_use]
+pub fn former_spelling(literal: &str, value: Option<&str>) -> bool {
+    value.is_some_and(|raw| {
+        raw != literal
+            && matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "1" | "on" | "yes" | "enabled" | "true"
+            )
+    })
+}
+
 /// The environment switch for the in-place resume of a paused Do loop (build plan WS03
 /// S7). Default off; parsed by [`switch_from`] (the exact literal `true`, nothing else).
 ///
@@ -1392,6 +1408,35 @@ mod tests {
             Some("truee"),
         ] {
             assert!(!switch_from_any_case(not_on), "{not_on:?} must stay off");
+        }
+    }
+
+    #[test]
+    fn a_former_on_spelling_is_reported_and_never_read_as_on() {
+        // Each spelling a retired lenient reader took as on is reported against the exact literal.
+        for former in ["1", "on", "ON", "yes", "enabled", "TRUE", " true ", "True"] {
+            assert!(former_spelling("true", Some(former)), "{former:?}");
+        }
+        // The exact literal is not reported. Neither is an off word, a near miss or no value.
+        assert!(!former_spelling("true", Some("true")));
+        for quiet in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("off"),
+            Some("no"),
+            Some("truee"),
+            Some("maybe"),
+        ] {
+            assert!(!former_spelling("true", quiet), "{quiet:?}");
+        }
+        // A switch whose literal is `1` reports `true`, and does not report `1` itself.
+        assert!(former_spelling("1", Some("true")));
+        assert!(!former_spelling("1", Some("1")));
+        // The report only flags: the exact reader still reads each former spelling as off.
+        for former in ["1", "on", "TRUE", " true "] {
+            assert!(!switch_from(Some(former)), "{former:?}");
         }
     }
 

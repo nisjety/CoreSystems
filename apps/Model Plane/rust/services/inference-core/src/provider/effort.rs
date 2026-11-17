@@ -437,7 +437,7 @@ pub const BUDGET_CLAMP_ENV: &str = "INFERENCE_CORE_EFFORT_BUDGET_CLAMP";
 /// unit-testable without touching the process environment; a stray `1` or `on`
 /// must not start overriding what the user asked for.
 fn parse_enabled(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// Whether the budget clamp is on for this process.
@@ -655,8 +655,7 @@ mod tests {
     #[test]
     fn only_the_literal_true_enables_the_budget_clamp() {
         assert!(parse_enabled(Some("true")));
-        assert!(parse_enabled(Some(" true ")));
-        for off in ["1", "on", "TRUE", "yes", "false", ""] {
+        for off in ["1", "on", "TRUE", " true ", "yes", "false", ""] {
             assert!(!parse_enabled(Some(off)), "{off:?} must leave it off");
         }
         assert!(!parse_enabled(None));

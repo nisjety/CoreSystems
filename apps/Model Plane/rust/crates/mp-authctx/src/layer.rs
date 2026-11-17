@@ -50,6 +50,10 @@ impl Config {
             .unwrap_or_else(|_| "http://auth-core:3011/api/convex-auth/jwks".to_owned());
         let expected_issuer = env::var("AUTH_CORE_ISSUER")
             .unwrap_or_else(|_| "http://auth-core:3011/api/convex-auth".to_owned());
+        // Documented exception to the exact-literal rule (this reader does not use
+        // `switch_from`): the name is shared with the Data Plane, whose documents-api-go
+        // enforces by default and whose compose sets `AUTHCTX_ENFORCE: "1"`, so `1`,
+        // `true`, `yes` and `on` keep enforcing here.
         let enforce = matches!(
             env::var("AUTHCTX_ENFORCE")
                 .unwrap_or_default()

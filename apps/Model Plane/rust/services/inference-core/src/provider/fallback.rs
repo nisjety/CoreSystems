@@ -137,7 +137,7 @@ const ROUTE_NOTE_ENV: &str = "INFERENCE_ROUTE_NOTE";
 /// Whether an explicit env value turns the route note on. Pure so the policy is unit-testable without
 /// touching the process environment.
 fn route_note_enabled_from(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// Whether the route note is on for this process.
@@ -1049,7 +1049,7 @@ impl FallbackChain {
                          residency claim, and MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT is off. \
                          Refusing to boot. Re-deploy the model as DataZoneStandard (EU) or a \
                          regional Standard deployment, or set \
-                         MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT=1 to explicitly accept worldwide \
+                         MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT=true to explicitly accept worldwide \
                          processing."
                     );
                     warn!(
@@ -1085,7 +1085,7 @@ impl FallbackChain {
                  non-EU={endpoint_is_non_eu}) and MODEL_PLANE_ALLOW_NON_EU_EMBEDDING is off. \
                  Refusing to boot a non-EU embedding path. Point AZURE_OPENAI_ENDPOINT/\
                  AZURE_OPENAI_REGION at an EU deployment (e.g. swedencentral), or set \
-                 MODEL_PLANE_ALLOW_NON_EU_EMBEDDING=1 to explicitly accept the cross-region \
+                 MODEL_PLANE_ALLOW_NON_EU_EMBEDDING=true to explicitly accept the cross-region \
                  transfer."
             );
         }
@@ -1189,7 +1189,7 @@ impl FallbackChain {
                     "provider declares NO residency commitment: traffic to it may be processed \
                      outside the EU/EEA. Set its region (AZURE_OPENAI_REGION / \
                      AZURE_ANTHROPIC_REGION) to an EU region, or set \
-                     MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY=1 to record this as accepted."
+                     MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY=true to record this as accepted."
                 );
             }
         }
@@ -3583,8 +3583,14 @@ mod resolution_tests {
     #[test]
     fn route_note_switch_is_on_only_for_the_literal_true() {
         assert!(route_note_enabled_from(Some("true")));
-        assert!(route_note_enabled_from(Some(" true ")));
-        for raw in [None, Some(""), Some("1"), Some("on"), Some("TRUE")] {
+        for raw in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("on"),
+            Some("TRUE"),
+            Some(" true "),
+        ] {
             assert!(
                 !route_note_enabled_from(raw),
                 "{raw:?} must not turn the route note on"
