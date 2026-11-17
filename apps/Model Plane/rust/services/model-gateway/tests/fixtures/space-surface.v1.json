@@ -3734,6 +3734,23 @@
       "reason": "Shares one personal memory into a room under Control declassify decision; a zero-retention caller is refused first (typed 412)."
     },
     {
+      "id": "mg:POST:/v1/memories/:memory_id/restore",
+      "kind": "route",
+      "plane": "model",
+      "service": "model-gateway",
+      "method": "POST",
+      "path": "/v1/memories/:memory_id/restore",
+      "handler": "http_routes.rs::restore_memory_entry",
+      "decision_type": "token_posture",
+      "min_role": "authenticated",
+      "zdr_class": "refuse",
+      "basis": "guard:require_non_zdr_durable_mutation",
+      "idempotency": "unspecified",
+      "flag": null,
+      "payload_allow_list": [],
+      "reason": "The signed-in owner restores one withheld legacy memory row; a zero-retention caller is refused first (typed 412), same as declassify (WS17 D9, W3-DEC-KIND's optional space_kind_evidence rides in the body and is forwarded, not checked here)."
+    },
+    {
       "id": "mg:POST:/v1/memories/profile/rebuild",
       "kind": "route",
       "plane": "model",
