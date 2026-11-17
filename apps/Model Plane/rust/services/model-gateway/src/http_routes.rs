@@ -11634,7 +11634,8 @@ mod approval_rule_tests {
         assert!(!approval_cause::rule_proposals_from(None));
         assert!(!approval_cause::rule_proposals_from(Some("1")));
         assert!(!approval_cause::rule_proposals_from(Some("yes")));
-        assert!(approval_cause::rule_proposals_from(Some(" TRUE ")));
+        assert!(approval_cause::rule_proposals_from(Some("true")));
+        assert!(!approval_cause::rule_proposals_from(Some(" TRUE ")));
         let literal: DecideApprovalBody = serde_json::from_value(json!({
             "decision": "approve",
             "promote": true,
@@ -16214,7 +16215,7 @@ async fn delete_space_threads_for_deletion_coordinator(
             &bearer,
         )?)
         .await
-        .map_err(|error| session_thread_error("session-core delete_space_threads failed", &error))?
+        .map_err(|error| thread_erase_error("session-core delete_space_threads failed", &error))?
         .into_inner();
 
     let cron_url = format!(
@@ -17305,10 +17306,14 @@ fn space_memory_fields(space_id: &str, body: &SpaceMemoryBody) -> Option<(String
 
 /// Session Core's refusal of a Space memory call in fixed words. A permission refusal is one code
 /// whatever its cause (no decision, another role, a revoked member), so nothing about the Space leaks.
-/// A typed ZDR refusal (`named_agent`, EP-6 P3) keeps its catalogue body, as every gateway route does.
+/// A typed ZDR refusal (`named_agent`, EP-6 P3) keeps its catalogue body, as every gateway route does,
+/// and a legal-hold refusal of an erase keeps its typed code (V3-mg-5-rel1, see [`erasure_hold_refusal`]).
 fn space_memory_error(status: &tonic::Status) -> HttpJsonError {
     if let Some(refusal) = mp_contracts::zdr_refusal::Refusal::from_status(status) {
         return crate::zdr_posture::http(&refusal);
+    }
+    if let Some(hold) = erasure_hold_refusal(status) {
+        return hold;
     }
     let (code, http, message) = match status.code() {
         tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => (
@@ -17336,6 +17341,40 @@ fn space_memory_error(status: &tonic::Status) -> HttpJsonError {
         http,
         Json(json!({"error": {"code": code, "message": message, "details": {}}})),
     )
+}
+
+/// EP-9 C4 (V3-mg-5-rel1): an agent erase that a legal hold refuses, or whose hold check could not be made,
+/// keeps the typed code that session-core puts on the `x-mp-error-code` trailer. Without it both read as the
+/// generic `space_memory_unavailable`, so a held erase looked like a retryable outage. The answer is rebuilt in
+/// fixed words, as the BFF's erasure refusals are, so no upstream text crosses. `None` for every other refusal,
+/// which keeps its generic answer.
+fn erasure_hold_refusal(status: &tonic::Status) -> Option<HttpJsonError> {
+    let trailer = status.metadata().get("x-mp-error-code")?.to_str().ok()?;
+    let (http, code, message, retryable) = match trailer {
+        "erasure_blocked_legal_hold" => (
+            StatusCode::CONFLICT,
+            "erasure_blocked_legal_hold",
+            "A legal hold covers this data, so nothing was erased. It can be erased once the hold is released.",
+            false,
+        ),
+        "erasure_hold_check_unavailable" => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "erasure_hold_check_unavailable",
+            "Legal holds could not be checked, so nothing was erased. Try again shortly.",
+            true,
+        ),
+        _ => return None,
+    };
+    Some((
+        http,
+        Json(json!({
+            "error": {
+                "code": code,
+                "message": message,
+                "details": {"retryable": retryable},
+            }
+        })),
+    ))
 }
 
 #[derive(Debug, Serialize)]
@@ -17531,6 +17570,165 @@ mod space_memory_route_tests {
         assert!(!body.to_string().contains("space-1"), "upstream text never crosses");
         let (status, _) = space_memory_error(&tonic::Status::internal("db down"));
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// A Session Core refusal carrying the `x-mp-error-code` trailer, as the erase RPC sends a legal hold.
+    fn coded(mut status: tonic::Status, code: &'static str) -> tonic::Status {
+        status.metadata_mut().insert(
+            "x-mp-error-code",
+            tonic::metadata::MetadataValue::from_static(code),
+        );
+        status
+    }
+
+    /// V3-mg-5-rel1: a legal hold on an agent erase is a typed, non-retryable 409, and a hold check that could not
+    /// be made is a typed, retryable 503. Neither collapses into `space_memory_unavailable`; a refusal without the
+    /// trailer keeps that generic answer, and no upstream text crosses.
+    #[test]
+    fn space_memory_erase_hold_refusals_keep_their_typed_codes() {
+        let (status, Json(held)) = space_memory_error(&coded(
+            tonic::Status::failed_precondition("upstream-hold-detail"),
+            "erasure_blocked_legal_hold",
+        ));
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(held["error"]["code"], "erasure_blocked_legal_hold");
+        assert_eq!(held["error"]["details"]["retryable"], false);
+
+        let (status, Json(outage)) = space_memory_error(&coded(
+            tonic::Status::unavailable("upstream-check-detail"),
+            "erasure_hold_check_unavailable",
+        ));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(outage["error"]["code"], "erasure_hold_check_unavailable");
+        assert_eq!(outage["error"]["details"]["retryable"], true);
+
+        let (status, Json(plain)) =
+            space_memory_error(&tonic::Status::unavailable("upstream-check-detail"));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(plain["error"]["code"], "space_memory_unavailable");
+
+        let text = format!("{held}{outage}");
+        assert!(
+            !text.contains("upstream-"),
+            "upstream text never crosses: {text}"
+        );
+    }
+
+    type MemoryRequest = tonic::codegen::http::Request<tonic::body::BoxBody>;
+    type MemoryResponse = tonic::codegen::http::Response<tonic::body::BoxBody>;
+
+    /// A stand-in Memory service that answers every RPC with one refusal, so the erase route sees what
+    /// Session Core's `erase_agent_memory` sends back for a held or unverifiable erase, trailer and all.
+    #[derive(Clone)]
+    struct RefusingMemory(tonic::Status);
+
+    impl tonic::server::NamedService for RefusingMemory {
+        const NAME: &'static str = "model_plane.v1.MemoryService";
+    }
+
+    impl tower::Service<MemoryRequest> for RefusingMemory {
+        type Response = MemoryResponse;
+        type Error = std::convert::Infallible;
+        type Future = std::future::Ready<Result<MemoryResponse, std::convert::Infallible>>;
+
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _: MemoryRequest) -> Self::Future {
+            std::future::ready(Ok(self.0.clone().into_http()))
+        }
+    }
+
+    fn erase_claims() -> Claims {
+        Claims {
+            key_id: None,
+            acting_user_id: None,
+            sub: "user-a".to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr: false,
+            sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
+
+    /// The erase route's HTTP answer when Session Core refuses the erase with `refusal` over the wire.
+    async fn erase_route_answer(refusal: tonic::Status) -> HttpJsonError {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind memory stand-in");
+        let address = listener.local_addr().expect("memory stand-in address");
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(RefusingMemory(refusal))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .expect("memory stand-in endpoint")
+            .connect()
+            .await
+            .expect("connect memory stand-in");
+        let mut state = AppState::new();
+        state.memory_client =
+            mp_contracts::model_plane::v1::memory_service_client::MemoryServiceClient::new(channel);
+        erase_space_agent_memory(
+            State(state),
+            Extension(erase_claims()),
+            VerifiedModelBearer::for_test("session-core-token"),
+            Path(("space-a".to_owned(), "agent-a".to_owned())),
+            Json(body("ref-a", "tok-a", "")),
+        )
+        .await
+        .expect_err("a refused erase must not answer ok")
+    }
+
+    /// V3-mg-5-rel1: the erase route answers a legal hold with the typed 409 that session-core sent on the wire.
+    #[tokio::test]
+    async fn space_agent_erase_keeps_a_legal_hold_typed_and_non_retryable() {
+        let (status, Json(answer)) = erase_route_answer(coded(
+            tonic::Status::failed_precondition("upstream-hold-detail"),
+            "erasure_blocked_legal_hold",
+        ))
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(answer["error"]["code"], "erasure_blocked_legal_hold");
+        assert_eq!(answer["error"]["details"]["retryable"], false);
+        assert!(
+            !answer.to_string().contains("upstream-hold-detail"),
+            "upstream text never crosses"
+        );
+    }
+
+    /// V3-mg-5-rel1: the erase route answers an unanswered hold check with the retryable 503 that session-core sent.
+    #[tokio::test]
+    async fn space_agent_erase_keeps_a_hold_check_outage_typed_and_retryable() {
+        let (status, Json(answer)) = erase_route_answer(coded(
+            tonic::Status::unavailable("upstream-check-detail"),
+            "erasure_hold_check_unavailable",
+        ))
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(answer["error"]["code"], "erasure_hold_check_unavailable");
+        assert_eq!(answer["error"]["details"]["retryable"], true);
+        assert!(
+            !answer.to_string().contains("upstream-check-detail"),
+            "upstream text never crosses"
+        );
     }
 }
 
@@ -18319,12 +18517,12 @@ async fn invoke(
         return Err(crate::zdr_posture::http(&mp_contracts::zdr_refusal::Refusal::WAIVER_ROUTE_MISMATCH).into());
     }
 
-    // A regenerate or an edit of a turn that was served on one of the caller's customer-gateway connections
-    // is served on it again (W4-BYO, GAP-W4-BYO-1). The thread is read here, without moving anything, for
-    // the connection id the source turn holds; it is set on the request before the request is normalized,
-    // so every rule of a connection turn applies to it, and a request that names a platform provider is
-    // refused typed instead of reaching the platform chain. A zero-retention or waived turn keeps no thread
-    // to read. The plan is applied below, so the thread is read once.
+    // A regenerate or an edit of a turn that was served on one of the caller's own connections, a customer gateway
+    // (W4-BYO, GAP-W4-BYO-1) or their ChatGPT subscription (DEC-V-R8), is served on it again. The thread is read here,
+    // without moving anything, for the connection ids the source turn holds; they are set on the request before the
+    // request is normalized, so every rule of a connection turn applies to it, and a request that names a platform
+    // provider is refused typed instead of reaching the platform chain. A zero-retention or waived turn keeps no
+    // thread to read. The plan is applied below, so the thread is read once.
     let mut posture = posture;
     let mut version_plan: Option<session_flow::VersionPlan> = None;
     if let Some(replay_turn) = normalize::version_turn(&req).ok().flatten() {
@@ -18339,7 +18537,11 @@ async fn invoke(
             )
             .await
             .map_err(|error| branch_thread_error(&error))?;
-            if normalize::replay_stored_connection(&mut req, &plan.model_connection_id)? {
+            if normalize::replay_stored_connections(
+                &mut req,
+                &plan.model_connection_id,
+                &plan.subscription_connection_id,
+            )? {
                 // The turn now names a connection, so the posture is decided again for that route.
                 let replay_route = crate::zdr_posture::Route::named(
                     req.provider.as_deref(),
@@ -19819,6 +20021,119 @@ mod capability_contract_tests {
             .as_str()
             .unwrap_or_default()
             .contains("capability deletion bearer"));
+    }
+
+    type SessionRequest = tonic::codegen::http::Request<tonic::body::BoxBody>;
+    type SessionResponse = tonic::codegen::http::Response<tonic::body::BoxBody>;
+
+    /// A stand-in Session Core that answers every RPC with one refusal. The coordinator then sees
+    /// what session-core's `delete_space_threads` sends back for a held or unverifiable erase: the
+    /// typed status, with its `x-mp-error-code` trailer carried as a response header.
+    #[derive(Clone)]
+    struct RefusingSessionCore(tonic::Status);
+
+    impl tonic::server::NamedService for RefusingSessionCore {
+        const NAME: &'static str = "model_plane.v1.SessionCore";
+    }
+
+    impl tower::Service<SessionRequest> for RefusingSessionCore {
+        type Response = SessionResponse;
+        type Error = std::convert::Infallible;
+        type Future = std::future::Ready<Result<SessionResponse, std::convert::Infallible>>;
+
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _: SessionRequest) -> Self::Future {
+            std::future::ready(Ok(self.0.clone().into_http()))
+        }
+    }
+
+    /// Runs the coordinator's erase against a loopback Session Core that refuses with `refusal`,
+    /// and returns the HTTP answer the coordinator receives.
+    async fn coordinator_answer_to_session_refusal(refusal: tonic::Status) -> HttpJsonError {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind session-core stand-in");
+        let address = listener
+            .local_addr()
+            .expect("session-core stand-in address");
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(RefusingSessionCore(refusal))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .expect("session-core stand-in endpoint")
+            .connect()
+            .await
+            .expect("connect session-core stand-in");
+        let mut state = AppState::new();
+        state.session_client =
+            mp_contracts::model_plane::v1::session_core_client::SessionCoreClient::new(channel);
+
+        delete_space_threads_for_deletion_coordinator(
+            State(state),
+            Extension(proxy_claims(false)),
+            crate::auth::VerifiedSessionBearer::for_test("session-core-bearer"),
+            Some(Extension(VerifiedCapabilityBearer::for_test(
+                "capability-bearer",
+            ))),
+            Json(DeleteSpaceThreadsRequestBody {
+                org_id: "org-a".to_owned(),
+                space_id: "space-a".to_owned(),
+                owner_principal_id: "user-a".to_owned(),
+                deletion_request_id: "delete-a".to_owned(),
+            }),
+        )
+        .await
+        .expect_err("a refused erase must not reach the schedule step")
+    }
+
+    /// A legal hold is a typed, non-retryable refusal. The coordinator must not retry it, so the
+    /// `erasure_blocked_legal_hold` code and `retryable: false` must survive the route instead of
+    /// the generic `thread_persistence_not_permitted` 412.
+    #[tokio::test]
+    async fn space_deletion_keeps_a_legal_hold_typed_and_non_retryable() {
+        let mut refusal = tonic::Status::failed_precondition(
+            "a legal hold covers this organisation, so nothing was deleted",
+        );
+        refusal.metadata_mut().insert(
+            "x-mp-error-code",
+            tonic::metadata::MetadataValue::from_static("erasure_blocked_legal_hold"),
+        );
+
+        let (status, Json(body)) = coordinator_answer_to_session_refusal(refusal).await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "erasure_blocked_legal_hold");
+        assert_eq!(body["error"]["details"]["retryable"], false);
+    }
+
+    /// A hold check that could not be made is a retryable outage. The coordinator may retry the same
+    /// erase, so `erasure_hold_check_unavailable` and `retryable: true` must survive the route
+    /// instead of collapsing into a generic 502.
+    #[tokio::test]
+    async fn space_deletion_keeps_a_hold_check_outage_typed_and_retryable() {
+        let mut refusal = tonic::Status::unavailable(
+            "legal holds could not be checked, so nothing was deleted; try again shortly",
+        );
+        refusal.metadata_mut().insert(
+            "x-mp-error-code",
+            tonic::metadata::MetadataValue::from_static("erasure_hold_check_unavailable"),
+        );
+
+        let (status, Json(body)) = coordinator_answer_to_session_refusal(refusal).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "erasure_hold_check_unavailable");
+        assert_eq!(body["error"]["details"]["retryable"], true);
     }
 }
 

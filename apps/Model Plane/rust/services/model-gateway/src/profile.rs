@@ -305,9 +305,10 @@ mod tests {
     #[test]
     fn the_agent_mode_switch_is_strict_and_off_reads_no_choice() {
         assert!(agent_modes_from(Some("true")));
-        assert!(agent_modes_from(Some("  TRUE ")));
         for off in [
             None,
+            Some("  TRUE "),
+            Some(" true "),
             Some(""),
             Some("false"),
             Some("1"),

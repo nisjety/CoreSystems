@@ -3054,11 +3054,11 @@ pub async fn invoke_stream_sse(
         Ok(turn_posture) => turn_posture,
         Err(refusal) => return zdr_refusal_stream(&request_id, refusal),
     };
-    // A regenerate or an edit of a turn that was served on one of the caller's customer-gateway connections
-    // is served on it again (W4-BYO, GAP-W4-BYO-1). The thread is read here, without moving anything, for
-    // the connection id the source turn holds, and that id is set on the request before it is normalized,
-    // so every rule of a connection turn applies to it; a request that names a platform provider is refused
-    // typed, before anything is moved or written, and never reaches the platform chain. A zero-retention or
+    // A regenerate or an edit of a turn that was served on one of the caller's own connections, a customer gateway
+    // (W4-BYO, GAP-W4-BYO-1) or their ChatGPT subscription (DEC-V-R8), is served on it again. The thread is read
+    // here, without moving anything, for the connection ids the source turn holds, and they are set on the request
+    // before it is normalized, so every rule of a connection turn applies to it; a request that names a platform
+    // provider is refused typed, before anything is moved or written, and never reaches the platform chain. A zero-retention or
     // waived turn keeps no thread to read (the durable-mutation refusal below answers it). The plan is
     // applied at the branch move below, so the thread is read once. The posture above stays: a ZDR or waived
     // turn is never replayed, and a turn that holds an id is never reclassified as ZDR.
@@ -3069,7 +3069,11 @@ pub async fn invoke_stream_sse(
             match crate::session_flow::plan_version_move(&state, &claims.org_id, &replay_thread, &replay_turn, &model_bearer).await {
                 Ok(plan) => {
                     if let Err((_, axum::Json(refusal))) =
-                        crate::normalize::replay_stored_connection(&mut req, &plan.model_connection_id)
+                        crate::normalize::replay_stored_connections(
+                            &mut req,
+                            &plan.model_connection_id,
+                            &plan.subscription_connection_id,
+                        )
                     {
                         let code = refusal.get("code").and_then(Value::as_str).unwrap_or("invalid_request");
                         let message = refusal
@@ -27956,8 +27960,7 @@ mod approve_then_execute_tests {
     #[test]
     fn the_switch_takes_only_the_literal_true() {
         assert!(plan_execute_on_approve_from(Some("true")));
-        assert!(plan_execute_on_approve_from(Some(" true ")));
-        for value in [None, Some(""), Some("false"), Some("1"), Some("yes"), Some("on")] {
+        for value in [None, Some(""), Some("false"), Some("1"), Some("yes"), Some("on"), Some(" true "), Some("TRUE")] {
             assert!(!plan_execute_on_approve_from(value), "{value:?} must not enable the path");
         }
     }

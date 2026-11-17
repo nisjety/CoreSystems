@@ -3,7 +3,8 @@
 //! A thread whose turns were written under a connection is answered on that connection and never on the platform
 //! chain. The connection is the stored `messages.model_connection_id` (one of the caller's customer-gateway
 //! connections) or `messages.subscription_connection_id` (the caller's ChatGPT subscription), read from Session Core
-//! over the thread's newest turns. A thread whose turns name no connection is served on the platform chain as before.
+//! over every turn of the thread's active path, a page at a time, so a connection named by an older turn still binds
+//! the thread. A thread whose turns name no connection is served on the platform chain as before.
 //! A thread whose turns name two or more connections, of either kind, has no one route that can serve its whole
 //! transcript, so it is refused. With `MODEL_GATEWAY_BYO_GATEWAY` not the literal `true` no turn names a connection.
 //!
@@ -29,8 +30,9 @@ use crate::state::AppState;
 
 /// The provider a customer-gateway call names, as `normalize` names it for a customer-gateway turn.
 pub(crate) const CUSTOMER_GATEWAY_PROVIDER: &str = "customer-gateway";
-/// The newest turns the connection read asks Session Core for. A side feature reads the connection of the newest turns.
-pub(crate) const READ_TURNS: u32 = 40;
+/// The turns each page of the connection read asks Session Core for. The read pages through the thread's whole active
+/// path, newest first, so a turn outside the newest page still names the thread's connection.
+pub(crate) const READ_PAGE_TURNS: u32 = 40;
 
 fn typed(status: StatusCode, code: &str, message: &str) -> HttpJsonError {
     (
@@ -267,6 +269,19 @@ pub(crate) async fn read_active_path(
     thread_id: &str,
     limit: u32,
 ) -> Result<(Vec<SessionMessage>, bool), HttpJsonError> {
+    read_active_path_page(state, claims, session_bearer, thread_id, "", limit).await
+}
+
+/// One page of the thread's active path: the newest `limit` turns, or, with `before_message_id`, the newest turns strictly
+/// older than it. The page is in conversation order, and the flag says whether older turns exist.
+async fn read_active_path_page(
+    state: &AppState,
+    claims: &Claims,
+    session_bearer: &VerifiedSessionBearer,
+    thread_id: &str,
+    before_message_id: &str,
+    limit: u32,
+) -> Result<(Vec<SessionMessage>, bool), HttpJsonError> {
     let response = state
         .session_client
         .clone()
@@ -276,6 +291,7 @@ pub(crate) async fn read_active_path(
                 thread_id: thread_id.to_owned(),
                 include_inactive: false,
                 limit,
+                before_message_id: before_message_id.to_owned(),
                 include_human_posts: false,
                 ..Default::default()
             },
@@ -285,6 +301,71 @@ pub(crate) async fn read_active_path(
         .map_err(|e| session_thread_error("session-core list_conversation failed", &e))?
         .into_inner();
     Ok((response.messages, response.has_more))
+}
+
+/// Whether a turn names a connection of either kind. Only such a turn can change which connection a thread is on.
+fn names_a_connection(message: &SessionMessage) -> bool {
+    !message.model_connection_id.trim().is_empty()
+        || !message.subscription_connection_id.trim().is_empty()
+}
+
+/// The cursor of the page older than `page`: the oldest turn the page holds, which the next read names as its
+/// `before_message_id`. A page is in conversation order, so its first turn is its oldest. A page with no turn to name,
+/// or one whose oldest turn is the cursor it was read with, cannot be stepped past, so it is refused typed rather than
+/// read again or taken as the thread's first page.
+fn older_page_cursor(page: &[SessionMessage], before: &str) -> Result<String, HttpJsonError> {
+    let oldest = page
+        .first()
+        .map_or("", |message| message.message_id.as_str());
+    if oldest.is_empty() || oldest == before {
+        return Err(typed(
+            StatusCode::BAD_GATEWAY,
+            "thread_history_unreadable",
+            "the thread's older turns could not be read, so its connection cannot be told",
+        ));
+    }
+    Ok(oldest.to_owned())
+}
+
+/// The connection a thread's turns were written under, read over every turn of its active path (DEC-V-R8). A connection
+/// names the thread wherever its turn sits, so the active path is read a page at a time, from the newest turn back to the
+/// oldest, and the answer is `thread_connection` over the turns that name a connection. With the switch off nothing is
+/// read and no connection is named, as `thread_connection` answers.
+pub(crate) async fn thread_connection_over_active_path(
+    byo_enabled: bool,
+    state: &AppState,
+    claims: &Claims,
+    session_bearer: &VerifiedSessionBearer,
+    thread_id: &str,
+) -> Result<Option<ThreadConnection>, HttpJsonError> {
+    if !byo_enabled {
+        return Ok(None);
+    }
+    // Only a turn that names a connection can change the answer, so the other turns are dropped as each page arrives.
+    let mut naming: Vec<SessionMessage> = Vec::new();
+    let mut before = String::new();
+    loop {
+        let (page, has_more) = read_active_path_page(
+            state,
+            claims,
+            session_bearer,
+            thread_id,
+            &before,
+            READ_PAGE_TURNS,
+        )
+        .await?;
+        let next = if has_more {
+            Some(older_page_cursor(&page, &before)?)
+        } else {
+            None
+        };
+        naming.extend(page.into_iter().filter(names_a_connection));
+        let Some(next) = next else {
+            break;
+        };
+        before = next;
+    }
+    thread_connection(true, &naming)
 }
 
 /// Refuses a thread a side feature may not read, before its transcript is read (DEC-06, DEC-32). Session Core's
@@ -388,9 +469,8 @@ pub(crate) async fn feature_connection_with(
     }
     let session_bearer = require_session_bearer(session_bearer)?;
     refuse_unavailable_thread(state, claims, session_bearer, thread_id, feature).await?;
-    let (messages, _) =
-        read_active_path(state, claims, session_bearer, thread_id, READ_TURNS).await?;
-    let connection = thread_connection(true, &messages)?;
+    let connection =
+        thread_connection_over_active_path(true, state, claims, session_bearer, thread_id).await?;
     if let Some(connection) = &connection {
         connection_posture(claims, connection, explicit_zdr)?;
     }
@@ -803,11 +883,14 @@ mod tests {
                 "/model_plane.v1.SessionCore/ListConversation" => Box::pin(async move {
                     Ok(serve_unary(
                         request,
-                        move |_: tonic::Request<ListConversationRequest>| async move {
+                        move |read: tonic::Request<ListConversationRequest>| async move {
                             this.conversations.fetch_add(1, Ordering::SeqCst);
+                            let read = read.into_inner();
+                            let (messages, has_more) =
+                                page_of(&this.messages, &read.before_message_id, read.limit)?;
                             Ok(tonic::Response::new(ListConversationResponse {
-                                messages: this.messages,
-                                has_more: false,
+                                messages,
+                                has_more,
                                 ..Default::default()
                             }))
                         },
@@ -864,6 +947,39 @@ mod tests {
             holds_retention_run,
             ..Default::default()
         }
+    }
+
+    /// The page Session Core answers for a read of `limit` turns, clamped to 1..=200 as Session Core clamps it: the newest
+    /// turns, or with `before` the turns strictly older than it, in conversation order, and whether older turns remain. A
+    /// `before` that names no turn of the thread is refused, as Session Core refuses it.
+    fn page_of(
+        messages: &[SessionMessage],
+        before: &str,
+        limit: u32,
+    ) -> Result<(Vec<SessionMessage>, bool), tonic::Status> {
+        let end = if before.is_empty() {
+            messages.len()
+        } else {
+            messages
+                .iter()
+                .position(|message| message.message_id == before)
+                .ok_or_else(|| tonic::Status::invalid_argument("before_message_id names no turn"))?
+        };
+        let limit = usize::try_from(limit.clamp(1, 200)).unwrap_or(200);
+        let start = end.saturating_sub(limit);
+        Ok((messages[start..end].to_vec(), start > 0))
+    }
+
+    /// A thread of `turns` platform turns, oldest first, each with its own message id: `turn-0` is the oldest.
+    fn platform_thread(turns: usize) -> Vec<SessionMessage> {
+        (0..turns)
+            .map(|index| SessionMessage {
+                role: "user".to_owned(),
+                content: "Hei".to_owned(),
+                message_id: format!("turn-{index}"),
+                ..Default::default()
+            })
+            .collect()
     }
 
     /// The reads made so far: the thread summary, then the transcript.
@@ -1039,6 +1155,209 @@ mod tests {
         )
         .await
         .expect("the switch-off path makes no read and refuses nothing");
+        assert_eq!(connection, None);
+        assert_eq!(reads_made(&counted), (0, 0));
+    }
+
+    #[test]
+    fn the_cursor_steps_to_the_oldest_turn_of_a_page_and_refuses_a_page_it_cannot_step_past() {
+        let page = platform_thread(3);
+        assert_eq!(
+            older_page_cursor(&page, "").expect("the oldest turn is the cursor"),
+            "turn-0"
+        );
+        let error = older_page_cursor(&[], "").expect_err("an empty page names no cursor");
+        assert_eq!(error.0, StatusCode::BAD_GATEWAY);
+        assert_eq!(refusal_code(&error), "thread_history_unreadable");
+        let unnamed = vec![SessionMessage {
+            role: "user".to_owned(),
+            ..Default::default()
+        }];
+        assert!(
+            older_page_cursor(&unnamed, "").is_err(),
+            "a turn with no id names no cursor"
+        );
+        let error =
+            older_page_cursor(&page, "turn-0").expect_err("a cursor that does not move is refused");
+        assert_eq!(refusal_code(&error), "thread_history_unreadable");
+    }
+
+    #[tokio::test]
+    async fn a_connection_named_only_by_a_turn_older_than_the_newest_page_binds_the_thread() {
+        // The newest page names no connection, and only the oldest turn was written on the customer gateway. Read as
+        // the newest page alone, this thread would be served on the platform chain. The older page is read, so the
+        // connection binds the thread and it is not answered on the platform.
+        let turns = READ_PAGE_TURNS as usize + 20;
+        let mut messages = platform_thread(turns);
+        messages[0].model_connection_id = "conn-a".to_owned();
+        let (state, counted) = gate_state(SessionReads {
+            threads: vec![summary("thread-1", "", false)],
+            messages,
+            ..Default::default()
+        })
+        .await;
+        let connection = feature_connection_with(
+            true,
+            &state,
+            &claims(false, None),
+            Some(&session_bearer()),
+            "thread-1",
+            false,
+            "a council",
+        )
+        .await
+        .expect("the older turn's connection binds the thread");
+        assert_eq!(connection, Some(gateway_connection()));
+        assert_eq!(
+            reads_made(&counted),
+            (1, turns.div_ceil(READ_PAGE_TURNS as usize)),
+            "the summary, then every page of the active path"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_connection_named_by_the_oldest_turn_of_a_long_thread_binds_it_across_every_page() {
+        let turns = READ_PAGE_TURNS as usize * 5 + 7;
+        let mut messages = platform_thread(turns);
+        messages[0].subscription_connection_id = "conn_sub".to_owned();
+        let (state, counted) = gate_state(SessionReads {
+            threads: vec![summary("thread-1", "", false)],
+            messages,
+            ..Default::default()
+        })
+        .await;
+        let connection = feature_connection_with(
+            true,
+            &state,
+            &claims(false, None),
+            Some(&session_bearer()),
+            "thread-1",
+            false,
+            "a review",
+        )
+        .await
+        .expect("the subscription named by the oldest turn binds the thread");
+        assert_eq!(
+            connection,
+            Some(ThreadConnection::Subscription("conn_sub".to_owned()))
+        );
+        assert_eq!(
+            reads_made(&counted),
+            (1, turns.div_ceil(READ_PAGE_TURNS as usize))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_platform_thread_longer_than_a_page_stays_on_the_platform() {
+        let turns = READ_PAGE_TURNS as usize * 2 + 5;
+        let (state, counted) = gate_state(SessionReads {
+            threads: vec![summary("thread-1", "", false)],
+            messages: platform_thread(turns),
+            ..Default::default()
+        })
+        .await;
+        let connection = feature_connection_with(
+            true,
+            &state,
+            &claims(false, None),
+            Some(&session_bearer()),
+            "thread-1",
+            false,
+            "a council",
+        )
+        .await
+        .expect("a platform thread is not refused");
+        assert_eq!(connection, None);
+        assert_eq!(
+            reads_made(&counted),
+            (1, turns.div_ceil(READ_PAGE_TURNS as usize))
+        );
+    }
+
+    #[tokio::test]
+    async fn two_connections_on_different_pages_are_ambiguous_and_neither_is_served() {
+        let turns = READ_PAGE_TURNS as usize * 2 + 3;
+        let mut messages = platform_thread(turns);
+        messages[0].subscription_connection_id = "conn_sub".to_owned();
+        messages[turns - 1].model_connection_id = "conn-a".to_owned();
+        let (state, counted) = gate_state(SessionReads {
+            threads: vec![summary("thread-1", "", false)],
+            messages,
+            ..Default::default()
+        })
+        .await;
+        let error = feature_connection_with(
+            true,
+            &state,
+            &claims(false, None),
+            Some(&session_bearer()),
+            "thread-1",
+            false,
+            "reasoning translation",
+        )
+        .await
+        .expect_err("two connections, whichever pages they sit on, have no one route");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(refusal_code(&error), "connection_ambiguous");
+        assert_eq!(
+            reads_made(&counted),
+            (1, turns.div_ceil(READ_PAGE_TURNS as usize))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_thread_whose_older_turns_cannot_be_paged_is_refused_not_served_on_the_platform() {
+        // Without an id on the newest page's oldest turn, the older page cannot be named, so the connection cannot be
+        // told. The thread is refused typed; it is not served on the platform chain on a guess.
+        let mut messages = platform_thread(READ_PAGE_TURNS as usize + 20);
+        for message in &mut messages {
+            message.message_id.clear();
+        }
+        messages[0].model_connection_id = "conn-a".to_owned();
+        let (state, counted) = gate_state(SessionReads {
+            threads: vec![summary("thread-1", "", false)],
+            messages,
+            ..Default::default()
+        })
+        .await;
+        let error = feature_connection_with(
+            true,
+            &state,
+            &claims(false, None),
+            Some(&session_bearer()),
+            "thread-1",
+            false,
+            "a review",
+        )
+        .await
+        .expect_err("the older turns cannot be read, so the thread is refused");
+        assert_eq!(error.0, StatusCode::BAD_GATEWAY);
+        assert_eq!(refusal_code(&error), "thread_history_unreadable");
+        assert_eq!(
+            reads_made(&counted),
+            (1, 1),
+            "the summary, then the one page that cannot be stepped past"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_the_switch_off_the_active_path_is_not_read_for_a_connection() {
+        let mut messages = platform_thread(READ_PAGE_TURNS as usize + 20);
+        messages[0].model_connection_id = "conn-a".to_owned();
+        let (state, counted) = gate_state(SessionReads {
+            messages,
+            ..Default::default()
+        })
+        .await;
+        let connection = thread_connection_over_active_path(
+            false,
+            &state,
+            &claims(false, None),
+            &session_bearer(),
+            "thread-1",
+        )
+        .await
+        .expect("the switch-off path reads nothing and refuses nothing");
         assert_eq!(connection, None);
         assert_eq!(reads_made(&counted), (0, 0));
     }

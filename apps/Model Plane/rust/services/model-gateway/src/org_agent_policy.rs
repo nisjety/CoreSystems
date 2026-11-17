@@ -1656,6 +1656,269 @@ mod tests {
         );
     }
 
+    /// Runs one enforced standalone-run admission against a registry that answers `body` for `org`, with nothing held.
+    async fn enforced_standalone_run(org: &str, body: Value) -> Result<(), &'static str> {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(ORG_AGENT_POLICY_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(document(org, 1, body)))
+            .mount(&server)
+            .await;
+        admit_standalone_run(
+            PolicyMode::Enforce,
+            &OrgPolicyCache::new(),
+            &reqwest::Client::new(),
+            &server.uri(),
+            org,
+            "token",
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_off_admits_a_standalone_run_unread_and_shadow_refuses_nothing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(ORG_AGENT_POLICY_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(document(
+                "org-run-off",
+                8,
+                json!({"agents.paused": true, "mode_cap": "lockdown"}),
+            )))
+            .mount(&server)
+            .await;
+        let cache = OrgPolicyCache::new();
+        let client = reqwest::Client::new();
+        assert_eq!(
+            admit_standalone_run(
+                PolicyMode::Off,
+                &cache,
+                &client,
+                &server.uri(),
+                "org-run-off",
+                "token"
+            )
+            .await,
+            Ok(())
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "off makes no call to the registry"
+        );
+        assert!(cache.policy("org-run-off").is_none(), "off holds nothing");
+        assert_eq!(
+            admit_standalone_run(
+                PolicyMode::Shadow,
+                &cache,
+                &client,
+                &server.uri(),
+                "org-run-off",
+                "token"
+            )
+            .await,
+            Ok(()),
+            "shadow would refuse this org and refuses nothing"
+        );
+        assert!(
+            cache.policy("org-run-off").is_some(),
+            "shadow still reads the policy"
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap_or_default().len(),
+            1,
+            "shadow reads the registry once"
+        );
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_shadow_admits_a_standalone_run_when_the_policy_cannot_be_read() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(ORG_AGENT_POLICY_PATH))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        assert_eq!(
+            admit_standalone_run(
+                PolicyMode::Shadow,
+                &OrgPolicyCache::new(),
+                &reqwest::Client::new(),
+                &server.uri(),
+                "org-run-shadow-unread",
+                "token"
+            )
+            .await,
+            Ok(()),
+            "shadow never refuses a standalone run, even when the policy cannot be read"
+        );
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_enforced_standalone_run_refuses_a_paused_org_whatever_its_cap() {
+        assert_eq!(
+            enforced_standalone_run("org-run-paused", json!({"agents.paused": true})).await,
+            Err(AGENTS_PAUSED_CODE)
+        );
+        // The pause is the reason first: a paused org is refused as paused whatever its cap.
+        assert_eq!(
+            enforced_standalone_run(
+                "org-run-paused-lockdown",
+                json!({"agents.paused": true, "mode_cap": "lockdown"})
+            )
+            .await,
+            Err(AGENTS_PAUSED_CODE)
+        );
+        assert_eq!(
+            enforced_standalone_run(
+                "org-run-paused-read-only",
+                json!({"agents.paused": true, "mode_cap": "read_only"})
+            )
+            .await,
+            Err(AGENTS_PAUSED_CODE)
+        );
+        // A pause this build cannot read pauses the org, so a malformed value can only narrow it.
+        assert_eq!(
+            enforced_standalone_run("org-run-paused-odd", json!({"agents.paused": "maybe"})).await,
+            Err(AGENTS_PAUSED_CODE)
+        );
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_enforced_standalone_run_refuses_a_lockdown_or_read_only_cap() {
+        // A browser run clicks and types, so a read-only cap cannot hold it: the cap forbids it.
+        for (org, body) in [
+            ("org-run-lockdown", json!({"mode_cap": "lockdown"})),
+            (
+                "org-run-bundle",
+                json!({"mode_cap": "auto", "lockdown": true}),
+            ),
+            ("org-run-read-only", json!({"mode_cap": "read_only"})),
+            // A cap this build cannot read is the strictest one.
+            ("org-run-odd-cap", json!({"mode_cap": "full_access"})),
+        ] {
+            assert_eq!(
+                enforced_standalone_run(org, body.clone()).await,
+                Err(agent_mode::LOCKDOWN_CODE),
+                "{org} {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_enforced_standalone_run_admits_ask_first_auto_and_default_orgs() {
+        for (org, body) in [
+            ("org-run-ask-first", json!({"mode_cap": "ask_first"})),
+            ("org-run-auto", json!({"mode_cap": "auto"})),
+            ("org-run-default", json!({})),
+        ] {
+            assert_eq!(
+                enforced_standalone_run(org, body.clone()).await,
+                Ok(()),
+                "{org} {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_enforced_standalone_run_fails_closed_when_the_policy_is_unreadable() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(ORG_AGENT_POLICY_PATH))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        assert_eq!(
+            admit_standalone_run(
+                PolicyMode::Enforce,
+                &OrgPolicyCache::new(),
+                &client,
+                &server.uri(),
+                "org-run-unread",
+                "token"
+            )
+            .await,
+            Err(POLICY_UNAVAILABLE_CODE),
+            "a registry outage refuses the standalone run"
+        );
+        assert_eq!(
+            admit_standalone_run(
+                PolicyMode::Enforce,
+                &OrgPolicyCache::new(),
+                &client,
+                &server.uri(),
+                "org-run-unread",
+                ""
+            )
+            .await,
+            Err(POLICY_UNAVAILABLE_CODE),
+            "a standalone run with no bearer cannot read the policy either"
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap_or_default().len(),
+            1,
+            "a run with no bearer is refused before any call to the registry"
+        );
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_enforced_standalone_run_refuses_a_bearer_the_registry_refuses() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(ORG_AGENT_POLICY_PATH))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let cache = OrgPolicyCache::new();
+        assert_eq!(
+            admit_standalone_run(
+                PolicyMode::Enforce,
+                &cache,
+                &reqwest::Client::new(),
+                &server.uri(),
+                "org-run-refused",
+                "bad-token"
+            )
+            .await,
+            Err(POLICY_UNAVAILABLE_CODE),
+            "a refused bearer leaves no policy to run under, so the run is refused"
+        );
+        assert!(
+            cache.policy("org-run-refused").is_none(),
+            "nothing is held for a refused caller"
+        );
+    }
+
+    #[test]
+    fn org_agent_policy_refusal_answers_403_for_a_pause_or_mode_cap_and_503_otherwise() {
+        assert_eq!(
+            refusal_answer(AGENTS_PAUSED_CODE),
+            (StatusCode::FORBIDDEN, AGENTS_PAUSED_MESSAGE)
+        );
+        assert_eq!(
+            refusal_answer(agent_mode::LOCKDOWN_CODE),
+            (StatusCode::FORBIDDEN, MODE_CAP_REFUSED_MESSAGE)
+        );
+        assert_eq!(
+            refusal_answer(POLICY_UNAVAILABLE_CODE),
+            (StatusCode::SERVICE_UNAVAILABLE, POLICY_UNAVAILABLE_MESSAGE)
+        );
+        // Any other code answers as an unreadable policy does: 503, with the same words.
+        assert_eq!(
+            refusal_answer("org_policy_some_future_code"),
+            (StatusCode::SERVICE_UNAVAILABLE, POLICY_UNAVAILABLE_MESSAGE)
+        );
+        // The pause and the mode cap are both 403: the words tell a person which one refused.
+        assert_ne!(
+            refusal_answer(AGENTS_PAUSED_CODE).1,
+            refusal_answer(agent_mode::LOCKDOWN_CODE).1
+        );
+    }
+
     /// The builtin tools an Ask turn starts from, with a client's declared copy of the code interpreter added last.
     fn ask_turn_tools_with_a_declared_copy() -> Vec<ToolDefinition> {
         let mut tools = crate::tool_loop::builtin_tool_defs_with(false);

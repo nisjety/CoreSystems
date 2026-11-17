@@ -1425,11 +1425,18 @@ fn project(requested: &str, data: &Value) -> ScrapeResult {
     let content_type = string_field(&obj, "content_type");
     let fingerprint = string_field(&obj, "fingerprint");
 
+    // The edge's `url` is the `UrlTriple` it serialises: `requested` beside `final_url`, the address the page ended
+    // on. `final` is the older spelling, read only when `final_url` is absent or not a string. A blank address stays
+    // blank, not the requested URL: that would pass the same-host check in `final_url_refusal` unread. There a blank
+    // final URL is judged on the requested host instead.
     let final_url = obj
         .get("url")
         .and_then(Value::as_object)
-        .and_then(|u| u.get("final"))
-        .and_then(Value::as_str)
+        .and_then(|u| {
+            u.get("final_url")
+                .and_then(Value::as_str)
+                .or_else(|| u.get("final").and_then(Value::as_str))
+        })
         .unwrap_or(requested)
         .to_string();
 
@@ -2386,6 +2393,90 @@ mod tests {
         assert_eq!(r.final_url, "https://example.com"); // falls back to requested
         assert!(r.markdown.is_empty());
         assert!(r.title.is_empty());
+    }
+
+    /// The edge's real `/v1/scrape` shape: `url` is the `UrlTriple` it serialises, with the address the page ended on
+    /// as `final_url` beside `requested`. A page that redirected onto another host must report that host.
+    #[test]
+    fn project_reads_the_final_url_the_edge_serialises() {
+        let requested = "https://allowed.example/a";
+        let data = serde_json::json!({
+            "run_id": "run_01X",
+            "status": 200,
+            "url": {"requested": requested, "final_url": "https://blocked.example/landing"},
+            "markdown": "# landed",
+        });
+        let r = project(requested, &data);
+        assert_eq!(r.url, requested);
+        assert_eq!(r.final_url, "https://blocked.example/landing");
+        assert_eq!(r.markdown, "# landed");
+    }
+
+    #[test]
+    fn project_reads_the_legacy_final_key_only_when_final_url_is_absent() {
+        let requested = "https://allowed.example/a";
+        let legacy = serde_json::json!({"url": {"final": "https://legacy.example/b"}});
+        assert_eq!(
+            project(requested, &legacy).final_url,
+            "https://legacy.example/b"
+        );
+        let both = serde_json::json!({
+            "url": {
+                "requested": requested,
+                "final_url": "https://blocked.example/landing",
+                "final": "https://legacy.example/b",
+            }
+        });
+        assert_eq!(
+            project(requested, &both).final_url,
+            "https://blocked.example/landing"
+        );
+    }
+
+    /// A blank final URL is no final URL. It must not be replaced by the requested URL, which `final_url_refusal` would
+    /// take for an unread same-host page.
+    #[test]
+    fn project_keeps_a_blank_final_url_blank_instead_of_the_requested_url() {
+        let requested = "https://allowed.example/a";
+        for blank in ["", "   "] {
+            let data = serde_json::json!({"url": {"requested": requested, "final_url": blank}});
+            let r = project(requested, &data);
+            assert!(
+                r.final_url.trim().is_empty(),
+                "{blank:?} -> {:?}",
+                r.final_url
+            );
+            assert_ne!(r.final_url, requested, "{blank:?}");
+        }
+    }
+
+    /// The same edge answer read over HTTP: `scrape` reports the page's final URL, not the echo of the request.
+    #[tokio::test]
+    async fn scrape_reports_the_final_url_of_a_redirected_page() {
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "run_id": "run_01X",
+                    "status": 200,
+                    "url": {
+                        "requested": "https://allowed.example/a",
+                        "final_url": "https://blocked.example/landing",
+                    },
+                    "markdown": "# landed",
+                }
+            })))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+
+        let result = test_client(quarry.uri())
+            .scrape("https://allowed.example/a", "org-a", None, false, false)
+            .await
+            .expect("scrape succeeds");
+        assert_eq!(result.url, "https://allowed.example/a");
+        assert_eq!(result.final_url, "https://blocked.example/landing");
     }
 
     #[test]

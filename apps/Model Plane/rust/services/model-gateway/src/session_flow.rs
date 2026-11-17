@@ -1071,6 +1071,9 @@ pub struct VersionPlan {
     /// regenerate answers again, or the user turn an edit replaces. Empty for a platform turn and
     /// for a turn written before the id was kept. An opaque id, never a key.
     pub model_connection_id: String,
+    /// The subscription connection id stored on the same turn (DEC-V-R8), read the same way. Empty for
+    /// a turn on another route and for a turn written before the id was kept. An opaque id, never a key.
+    pub subscription_connection_id: String,
     parent_message_id: String,
     expected_leaf_message_id: String,
 }
@@ -1092,7 +1095,6 @@ pub async fn plan_version_move(
     turn: &crate::normalize::VersionTurn,
     bearer: &VerifiedSessionBearer,
 ) -> Result<VersionPlan, tonic::Status> {
-    use crate::normalize::VersionTurn;
     use mp_contracts::model_plane::v1::ListConversationRequest;
 
     let mut session_client = state.session_client.clone();
@@ -1116,6 +1118,20 @@ pub async fn plan_version_move(
         .await?
         .into_inner()
         .messages;
+    plan_from_turns(&turns, turn)
+}
+
+/// The move a regenerate or an edit makes, read from the thread's turns as Session Core returns them with the inactive
+/// branches (see [`plan_version_move`]). The same checks and the same plan, with no read, so a test can state a thread
+/// and the move made on it.
+///
+/// # Errors
+/// As [`plan_version_move`].
+pub(crate) fn plan_from_turns(
+    turns: &[mp_contracts::model_plane::v1::SessionMessage],
+    turn: &crate::normalize::VersionTurn,
+) -> Result<VersionPlan, tonic::Status> {
+    use crate::normalize::VersionTurn;
 
     let refused = || tonic::Status::failed_precondition(VERSION_TURN_REFUSED);
     let (message_id, role) = match turn {
@@ -1150,6 +1166,11 @@ pub async fn plan_version_move(
         VersionTurn::Regenerate { .. } => parent.model_connection_id.trim().to_owned(),
         VersionTurn::Edit { .. } => message.model_connection_id.trim().to_owned(),
     };
+    // The same turn, the same rule, for the subscription connection (DEC-V-R8).
+    let subscription_connection_id = match turn {
+        VersionTurn::Regenerate { .. } => parent.subscription_connection_id.trim().to_owned(),
+        VersionTurn::Edit { .. } => message.subscription_connection_id.trim().to_owned(),
+    };
     let expected_leaf_message_id = turns
         .iter()
         .rev()
@@ -1160,6 +1181,7 @@ pub async fn plan_version_move(
     Ok(VersionPlan {
         goal,
         model_connection_id,
+        subscription_connection_id,
         parent_message_id: parent.message_id.clone(),
         expected_leaf_message_id,
     })

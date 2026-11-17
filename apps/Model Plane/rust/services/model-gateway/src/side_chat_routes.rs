@@ -21,7 +21,8 @@
 //! gives (required: 400 `side_chat_model_required` without it), and a thread whose turns name two or more
 //! connections, of either kind, is refused 409 `connection_ambiguous`. A turn written before those columns
 //! existed names no connection, so such a thread is answered as before. With `MODEL_GATEWAY_BYO_GATEWAY` not
-//! the literal `true` every thread is answered as before. The resolution is `thread_connection`, shared with the
+//! the literal `true` every thread is answered as before. The connection is read over every turn of the thread's active
+//! path, a page at a time, not only the snapshot's newest turns. The resolution is `thread_connection`, shared with the
 //! other side features that run on a thread (reasoning translation, the model council, the review run).
 
 use axum::{
@@ -43,7 +44,7 @@ use crate::state::AppState;
 use crate::subscription_failure::{FailureContext, SubscriptionFailure};
 use crate::thread_connection::{
     answer_basis, connection_posture, read_active_path, refuse_unavailable_thread, side_route,
-    thread_connection, SideRoute, ThreadConnection,
+    thread_connection_over_active_path, SideRoute, ThreadConnection,
 };
 
 /// The opt-in switch. Only the literal `true` turns it on.
@@ -369,7 +370,15 @@ pub(crate) async fn side_chat_with(
     )
     .await?;
     let transcript = newest_transcript(&messages, has_more);
-    let connection = thread_connection(crate::normalize::byo_gateway_enabled(), &messages)?;
+    // The connection is named by any turn of the thread, so it is read over the whole active path, not the snapshot above.
+    let connection = thread_connection_over_active_path(
+        crate::normalize::byo_gateway_enabled(),
+        &state,
+        &claims,
+        &session_bearer,
+        thread_id,
+    )
+    .await?;
     let zdr = match &connection {
         Some(connection) => {
             connection_posture(&claims, connection, req.zdr)?;
@@ -441,7 +450,7 @@ mod tests {
     use super::*;
     use crate::auth::ZdrWaiverClaim;
     use crate::pricing::CostBasis;
-    use crate::thread_connection::CUSTOMER_GATEWAY_PROVIDER;
+    use crate::thread_connection::{thread_connection, CUSTOMER_GATEWAY_PROVIDER};
     use mp_contracts::agentic_subscription::PROVIDER_ID;
     use mp_contracts::zdr_refusal::code;
 

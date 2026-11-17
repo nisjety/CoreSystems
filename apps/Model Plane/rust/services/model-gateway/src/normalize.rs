@@ -213,29 +213,58 @@ pub fn connection_named_by(req: &InvokeRequest) -> Option<&str> {
         .or_else(|| non_blank(req.model_connection_id.as_deref()))
 }
 
-/// The replay of a stored customer-gateway connection on a regenerate or an edit (W4-BYO, GAP-W4-BYO-1).
+/// The replay of the connection a turn was served on, on a regenerate or an edit (W4-BYO, GAP-W4-BYO-1; DEC-V-R8).
 ///
-/// `stored` is the connection id Session Core holds on the source turn (empty for a platform turn). A turn
-/// that was served on one of the caller's own connections is served on it again, or refused typed: it never
-/// falls through to the platform chain, where a platform provider could serve it under the stored model id.
+/// `stored_gateway` is the customer-gateway id and `stored_subscription` the subscription id that Session Core holds on
+/// the source turn; both are empty for a platform turn. A turn that was served on one of the caller's own connections is
+/// served on it again, or refused typed: it never falls through to the platform chain, where a platform provider could
+/// serve it under the stored model id. Each kind is replayed the same way, by [`replay_stored_gateway`] and
+/// [`replay_stored_subscription`].
 ///
-/// - `stored` empty: nothing to replay, the request is left as it is.
-/// - The deployment's `MODEL_GATEWAY_BYO_GATEWAY` switch off: refused, `customer_gateway_disabled`, the answer
-///   an id on a fresh request gets.
-/// - The request names a platform route (a platform `provider`, or a subscription connection): refused,
-///   `connection_replay_platform_refused`, before anything is moved or written.
-/// - The request names a connection itself: left as it is. Normalization checks that one, and a person
-///   regenerating on another of their own connections is still a customer-gateway turn.
-/// - Otherwise the stored id is set on the request, and normalization then applies every rule of a connection
-///   turn to it (shape, text-only, no ZDR), exactly as if the client had sent the id.
-///
-/// Returns `Ok(true)` when the request now carries the stored id. Call it before the posture decision and
-/// before [`normalize`], so both see the connection; a ZDR or waived turn is refused before it gets here, and
-/// a turn that holds an id is never reclassified as ZDR.
+/// Returns `Ok(true)` when the request now carries a stored id. Call it before the posture decision and before
+/// [`normalize`], so both see the connection; a ZDR or waived turn is refused before it gets here, and a turn that holds
+/// an id is never reclassified as ZDR.
 ///
 /// # Errors
-/// The typed refusals above.
-pub fn replay_stored_connection(
+/// The typed refusals of the two replays.
+pub fn replay_stored_connections(
+    req: &mut InvokeRequest,
+    stored_gateway: &str,
+    stored_subscription: &str,
+) -> Result<bool, (StatusCode, Json<serde_json::Value>)> {
+    replay_stored_connections_with(
+        byo_gateway_enabled(),
+        req,
+        stored_gateway,
+        stored_subscription,
+    )
+}
+
+/// [`replay_stored_connections`] with the switch passed in, so a test decides it without the environment variable.
+pub(crate) fn replay_stored_connections_with(
+    byo_enabled: bool,
+    req: &mut InvokeRequest,
+    stored_gateway: &str,
+    stored_subscription: &str,
+) -> Result<bool, (StatusCode, Json<serde_json::Value>)> {
+    let gateway = replay_stored_gateway(byo_enabled, req, stored_gateway)?;
+    let subscription = replay_stored_subscription(byo_enabled, req, stored_subscription)?;
+    Ok(gateway || subscription)
+}
+
+/// The customer-gateway replay (W4-BYO, GAP-W4-BYO-1), one half of [`replay_stored_connections`].
+///
+/// - `stored` empty: nothing to replay, the request is left as it is.
+/// - The deployment's `MODEL_GATEWAY_BYO_GATEWAY` switch off: refused, `customer_gateway_disabled`, the answer an id on a
+///   fresh request gets.
+/// - The request names a platform route (a platform `provider`, or a subscription connection): refused,
+///   `connection_replay_platform_refused`, before anything is moved or written.
+/// - The request names a customer-gateway connection itself: left as it is. Normalization checks that one, and a person
+///   regenerating on another of their own connections is still a customer-gateway turn.
+/// - Otherwise the stored id is set on the request, and normalization then applies every rule of a connection turn to
+///   it (shape, text-only, no ZDR), exactly as if the client had sent the id.
+fn replay_stored_gateway(
+    byo_enabled: bool,
     req: &mut InvokeRequest,
     stored: &str,
 ) -> Result<bool, (StatusCode, Json<serde_json::Value>)> {
@@ -243,7 +272,7 @@ pub fn replay_stored_connection(
     if stored.is_empty() {
         return Ok(false);
     }
-    if !byo_gateway_enabled() {
+    if !byo_enabled {
         return Err((
             StatusCode::NOT_IMPLEMENTED,
             Json(json!({
@@ -269,6 +298,41 @@ pub fn replay_stored_connection(
         return Ok(false);
     }
     req.model_connection_id = Some(stored.to_owned());
+    Ok(true)
+}
+
+/// The subscription replay (DEC-V-R8, verification finding R8-rel1), the other half of [`replay_stored_connections`].
+/// The same rules as [`replay_stored_gateway`], for the caller's own ChatGPT subscription connection: a turn served on it
+/// is served on it again, so the request names the subscription provider and the stored id, and normalization then
+/// applies every rule of a subscription turn to it. With the switch off nothing is replayed and nothing is refused, so a
+/// deployment with the switch off serves a subscription turn exactly as it did before (no turn is recorded under a
+/// subscription id while the switch is off).
+fn replay_stored_subscription(
+    byo_enabled: bool,
+    req: &mut InvokeRequest,
+    stored: &str,
+) -> Result<bool, (StatusCode, Json<serde_json::Value>)> {
+    let stored = stored.trim();
+    if stored.is_empty() || !byo_enabled {
+        return Ok(false);
+    }
+    let provider = req.provider.as_deref().map(str::trim).unwrap_or_default();
+    let names_platform_route = (!provider.is_empty() && !is_codex_subscription_hint(provider))
+        || non_blank(req.model_connection_id.as_deref()).is_some();
+    if names_platform_route {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "this turn was served on a subscription connection, so it cannot be regenerated or edited on a platform provider or another connection",
+                "code": "connection_replay_platform_refused",
+            })),
+        ));
+    }
+    if non_blank(req.subscription_connection_id.as_deref()).is_some() {
+        return Ok(false);
+    }
+    req.provider = Some(mp_contracts::agentic_subscription::PROVIDER_ID.to_owned());
+    req.subscription_connection_id = Some(stored.to_owned());
     Ok(true)
 }
 
@@ -1316,5 +1380,207 @@ mod tests {
             assert_eq!(body["code"], "feature_not_supported");
             assert_eq!(body["error"], CUSTOMER_GATEWAY_TEXT_ONLY_REFUSAL);
         }
+    }
+
+    use mp_contracts::agentic_subscription::PROVIDER_ID;
+    use mp_contracts::model_plane::v1::SessionMessage;
+
+    /// A thread as a regenerate or an edit reads it: a first exchange, then a second question written under `gateway`
+    /// and `subscription` (each empty for a platform turn) and its answer. Every turn is on the active path.
+    fn thread_with_second_question(gateway: &str, subscription: &str) -> Vec<SessionMessage> {
+        let turn = |id: &str, role: &str, parent: &str| SessionMessage {
+            message_id: id.to_owned(),
+            role: role.to_owned(),
+            content: format!("{role} {id}"),
+            parent_message_id: parent.to_owned(),
+            on_active_path: true,
+            ..Default::default()
+        };
+        let mut question = turn("q-2", "user", "a-1");
+        question.model_connection_id = gateway.to_owned();
+        question.subscription_connection_id = subscription.to_owned();
+        vec![
+            turn("q-1", "user", ""),
+            turn("a-1", "assistant", "q-1"),
+            question,
+            turn("a-2", "assistant", "q-2"),
+        ]
+    }
+
+    /// The two moves made on [`thread_with_second_question`]: a regenerate of its answer (`edit` false) or an edit of
+    /// its question (`edit` true), as the target id names them.
+    const MOVES: [(bool, &str); 2] = [(false, "a-2"), (true, "q-2")];
+
+    /// The move a request makes on `target`, and the request that names it.
+    fn move_of(edit: bool, target: &str) -> (VersionTurn, InvokeRequest) {
+        if edit {
+            (
+                VersionTurn::Edit {
+                    message_id: target.to_owned(),
+                },
+                version_request(None, Some(target)),
+            )
+        } else {
+            (
+                VersionTurn::Regenerate {
+                    message_id: target.to_owned(),
+                },
+                version_request(Some(target), None),
+            )
+        }
+    }
+
+    /// What the call sites do on a move: read the plan off the thread, then replay the connections it stored.
+    fn replay_move(
+        byo_enabled: bool,
+        thread: &[SessionMessage],
+        turn: &VersionTurn,
+        req: &mut InvokeRequest,
+    ) -> Result<bool, (StatusCode, Json<serde_json::Value>)> {
+        let plan = crate::session_flow::plan_from_turns(thread, turn).expect("the move is valid");
+        replay_stored_connections_with(
+            byo_enabled,
+            req,
+            &plan.model_connection_id,
+            &plan.subscription_connection_id,
+        )
+    }
+
+    #[test]
+    fn a_regenerate_or_an_edit_of_a_subscription_answer_keeps_the_subscription_connection() {
+        let thread = thread_with_second_question("", "conn_sub");
+        for (edit, target) in MOVES {
+            let (turn, mut req) = move_of(edit, target);
+            assert!(
+                replay_move(true, &thread, &turn, &mut req).expect("replayed"),
+                "edit={edit}"
+            );
+            assert_eq!(req.provider.as_deref(), Some(PROVIDER_ID));
+            assert_eq!(req.subscription_connection_id.as_deref(), Some("conn_sub"));
+            // Normalization keeps the connection, as it would for a client that sent the id.
+            let normalized = normalize(&req).expect("a subscription turn normalizes");
+            assert_eq!(normalized.provider_hint, PROVIDER_ID);
+            assert_eq!(normalized.subscription_connection_id, "conn_sub");
+            assert!(normalized.model_connection_id.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_regenerate_or_an_edit_of_a_customer_gateway_answer_is_replayed_on_the_gateway_as_before() {
+        let thread = thread_with_second_question("conn_gw", "");
+        for (edit, target) in MOVES {
+            let (turn, mut req) = move_of(edit, target);
+            assert!(
+                replay_move(true, &thread, &turn, &mut req).expect("replayed"),
+                "edit={edit}"
+            );
+            // Only the customer-gateway id is named: the subscription replay leaves the route alone.
+            assert_eq!(req.model_connection_id.as_deref(), Some("conn_gw"));
+            assert!(req.provider.is_none());
+            assert!(req.subscription_connection_id.is_none());
+            // With the switch off the gateway answer is refused, as it always was.
+            let (turn, mut off) = move_of(edit, target);
+            let (status, Json(body)) = replay_move(false, &thread, &turn, &mut off)
+                .expect_err("refused with the switch off");
+            assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+            assert_eq!(body["code"], "customer_gateway_disabled");
+        }
+    }
+
+    #[test]
+    fn a_regenerate_or_an_edit_of_a_platform_answer_replays_nothing() {
+        let thread = thread_with_second_question("", "");
+        for (edit, target) in MOVES {
+            let (turn, mut req) = move_of(edit, target);
+            assert!(
+                !replay_move(true, &thread, &turn, &mut req).expect("nothing to replay"),
+                "edit={edit}"
+            );
+            assert!(req.provider.is_none());
+            assert!(req.model_connection_id.is_none());
+            assert!(req.subscription_connection_id.is_none());
+            let normalized = normalize(&req).expect("a platform turn normalizes as before");
+            assert!(normalized.provider_hint.is_empty());
+            assert!(normalized.model_connection_id.is_empty());
+            assert!(normalized.subscription_connection_id.is_empty());
+        }
+    }
+
+    #[test]
+    fn with_the_switch_off_a_subscription_answer_is_served_as_before_and_refused_nothing() {
+        let thread = thread_with_second_question("", "conn_sub");
+        for (edit, target) in MOVES {
+            let (turn, mut req) = move_of(edit, target);
+            assert!(
+                !replay_move(false, &thread, &turn, &mut req)
+                    .expect("the switch off refuses nothing"),
+                "edit={edit}"
+            );
+            assert!(req.provider.is_none());
+            assert!(req.subscription_connection_id.is_none());
+            let normalized = normalize(&req).expect("served as a platform turn, as before");
+            assert!(normalized.subscription_connection_id.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_request_naming_its_own_subscription_connection_keeps_it() {
+        let thread = thread_with_second_question("", "conn_sub");
+        for (edit, target) in MOVES {
+            let (turn, mut req) = move_of(edit, target);
+            req.provider = Some(PROVIDER_ID.to_owned());
+            req.subscription_connection_id = Some("conn_named".to_owned());
+            assert!(
+                !replay_move(true, &thread, &turn, &mut req).expect("kept as named"),
+                "edit={edit}"
+            );
+            assert_eq!(
+                req.subscription_connection_id.as_deref(),
+                Some("conn_named")
+            );
+            let normalized = normalize(&req).expect("the named connection normalizes");
+            assert_eq!(normalized.subscription_connection_id, "conn_named");
+        }
+    }
+
+    #[test]
+    fn a_subscription_alias_is_the_same_route_and_is_replayed_on_the_canonical_provider() {
+        let thread = thread_with_second_question("", "conn_sub");
+        let (turn, mut req) = move_of(false, "a-2");
+        req.provider = Some(" chatgpt-codex ".to_owned());
+        assert!(replay_move(true, &thread, &turn, &mut req).expect("replayed"));
+        assert_eq!(req.provider.as_deref(), Some(PROVIDER_ID));
+        assert_eq!(req.subscription_connection_id.as_deref(), Some("conn_sub"));
+    }
+
+    #[test]
+    fn a_subscription_answer_refuses_a_request_that_names_another_route_typed() {
+        let thread = thread_with_second_question("", "conn_sub");
+        let other_routes: [(Option<&str>, Option<&str>); 3] = [
+            (Some("azure-openai"), None),
+            (Some("customer-gateway"), None),
+            (None, Some("conn_gw_named")),
+        ];
+        for (provider, gateway) in other_routes {
+            let (turn, mut req) = move_of(false, "a-2");
+            req.provider = provider.map(str::to_owned);
+            req.model_connection_id = gateway.map(str::to_owned);
+            let (status, Json(body)) =
+                replay_move(true, &thread, &turn, &mut req).expect_err("refused typed");
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body["code"], "connection_replay_platform_refused");
+        }
+    }
+
+    #[test]
+    fn a_customer_gateway_answer_still_refuses_a_request_that_names_a_subscription_route() {
+        let thread = thread_with_second_question("conn_gw", "");
+        let (turn, mut req) = move_of(false, "a-2");
+        req.provider = Some(PROVIDER_ID.to_owned());
+        req.subscription_connection_id = Some("conn_sub_named".to_owned());
+        let (status, Json(body)) =
+            replay_move(true, &thread, &turn, &mut req).expect_err("refused typed");
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "connection_replay_platform_refused");
     }
 }

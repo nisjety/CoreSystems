@@ -1,12 +1,13 @@
 //! F-f10-04 / FU-29: the org's web domain rules apply to the page a web call ENDED on. org-core (wiremock) allows
 //! `example.org` and denies `blocked.example`. `final_url_refusal` refuses a final URL on the blocked host under
-//! `enforce` only, passes the same host and an empty final URL without asking org-core, and reads but refuses
-//! nothing under `shadow`. The inline `fetch_url` tool drops the redirected page unread: the model gets the typed
+//! `enforce` only, passes the same host without asking org-core, and reads but refuses nothing under `shadow`. An
+//! empty or blank final URL is no final URL: under `enforce` the requested host is read in its place, and under `off`
+//! and `shadow` nothing is read. The inline `fetch_url` tool drops the redirected page unread: the model gets the typed
 //! refusal and none of the page's text, while `off` and `shadow` read the page as before.
 
 use mp_contracts::model_plane::v1::ToolCall;
 use mp_contracts::site_policy::WebDomainPolicyMode;
-use serde_json::json;
+use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -39,6 +40,15 @@ fn owner(base: &str) -> SiteOwner<'_> {
         base_url: base,
         service_id: "model-gateway",
         service_token: "test-token",
+    }
+}
+
+/// An owner whose org-core is not configured (no service token), so no host's answer can be read.
+fn unconfigured(base: &str) -> SiteOwner<'_> {
+    SiteOwner {
+        base_url: base,
+        service_id: "model-gateway",
+        service_token: "",
     }
 }
 
@@ -108,7 +118,7 @@ async fn final_url_on_a_denied_host_is_refused_under_enforce_only() {
 }
 
 #[tokio::test]
-async fn same_host_empty_final_url_and_off_ask_org_core_nothing() {
+async fn same_host_final_url_and_off_ask_org_core_nothing() {
     let server = org_core("org-f1004-pass").await;
     let base = server.uri();
     for (mode, requested, final_url) in [
@@ -117,8 +127,6 @@ async fn same_host_empty_final_url_and_off_ask_org_core_nothing() {
             "https://example.org/a",
             "https://EXAMPLE.org/b",
         ),
-        (WebDomainPolicyMode::Enforce, "https://example.org/a", ""),
-        (WebDomainPolicyMode::Enforce, "https://example.org/a", "   "),
         (
             WebDomainPolicyMode::Off,
             "https://example.org/a",
@@ -138,6 +146,137 @@ async fn same_host_empty_final_url_and_off_ask_org_core_nothing() {
         assert_eq!(refusal, None, "{mode:?} {requested} -> {final_url:?}");
     }
     assert_eq!(requests(&server).await, 0, "none of these needs org-core");
+}
+
+#[tokio::test]
+async fn a_blank_final_url_judges_the_requested_host_under_enforce() {
+    let server = org_core("org-f1004-blank").await;
+    let base = server.uri();
+    for final_url in ["", "   ", "\t\n"] {
+        let before = requests(&server).await;
+        let refusal = final_url_refusal(
+            WebDomainPolicyMode::Enforce,
+            &SiteChecker::default(),
+            &owner(&base),
+            "org-f1004-blank",
+            "https://example.org/a",
+            final_url,
+            "fetch_url",
+        )
+        .await;
+        assert_eq!(
+            refusal, None,
+            "an allowed requested host passes: {final_url:?}"
+        );
+        assert_eq!(
+            requests(&server).await,
+            before + 1,
+            "the requested host is read once: {final_url:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_blank_final_url_on_a_denied_requested_host_is_refused_under_enforce() {
+    let server = org_core("org-f1004-blank-deny").await;
+    let base = server.uri();
+    for final_url in ["", "  "] {
+        let refusal = final_url_refusal(
+            WebDomainPolicyMode::Enforce,
+            &SiteChecker::default(),
+            &owner(&base),
+            "org-f1004-blank-deny",
+            "https://blocked.example/start?q=secret",
+            final_url,
+            "extract_structured",
+        )
+        .await
+        .expect("the requested host is denied, so the page is refused");
+        assert!(refusal.starts_with(SITE_BLOCKED_CODE), "{refusal}");
+        assert!(
+            refusal.contains("blocked.example"),
+            "names the requested host: {refusal}"
+        );
+        assert!(
+            !refusal.contains("secret"),
+            "no query in the refusal: {refusal}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_blank_final_url_is_refused_when_the_requested_host_cannot_be_read() {
+    let server = org_core("org-f1004-blank-unread").await;
+    let base = server.uri();
+    let refusal = final_url_refusal(
+        WebDomainPolicyMode::Enforce,
+        &SiteChecker::default(),
+        &unconfigured(&base),
+        "org-f1004-blank-unread",
+        "https://example.org/a",
+        "",
+        "fetch_url",
+    )
+    .await
+    .expect("an answer that cannot be read refuses the page (fail closed)");
+    assert!(refusal.starts_with(SITE_BLOCKED_CODE), "{refusal}");
+    assert!(refusal.contains("cannot be read"), "{refusal}");
+    assert_eq!(
+        requests(&server).await,
+        0,
+        "org-core is not configured, so it is not asked"
+    );
+}
+
+#[tokio::test]
+async fn a_blank_final_url_for_a_requested_url_with_no_host_is_refused_under_enforce() {
+    let server = org_core("org-f1004-blank-nohost").await;
+    let base = server.uri();
+    let refusal = final_url_refusal(
+        WebDomainPolicyMode::Enforce,
+        &SiteChecker::default(),
+        &owner(&base),
+        "org-f1004-blank-nohost",
+        "not a url",
+        "",
+        "fetch_url",
+    )
+    .await
+    .expect("a page with no host the rules can name is refused");
+    assert!(refusal.starts_with(SITE_BLOCKED_CODE), "{refusal}");
+    assert!(refusal.contains("cannot be checked"), "{refusal}");
+    assert_eq!(requests(&server).await, 0, "no host, so nothing is asked");
+}
+
+#[tokio::test]
+async fn a_blank_final_url_is_not_read_under_off_or_shadow() {
+    let server = org_core("org-f1004-blank-quiet").await;
+    let base = server.uri();
+    for mode in [WebDomainPolicyMode::Off, WebDomainPolicyMode::Shadow] {
+        for (requested, final_url) in [
+            ("https://example.org/a", ""),
+            ("https://example.org/a", "  "),
+            ("https://blocked.example/a", ""),
+            ("not a url", ""),
+        ] {
+            let refusal = final_url_refusal(
+                mode,
+                &SiteChecker::default(),
+                &owner(&base),
+                "org-f1004-blank-quiet",
+                requested,
+                final_url,
+                "fetch_url",
+            )
+            .await;
+            assert_eq!(refusal, None, "{mode:?} {requested} -> {final_url:?}");
+        }
+    }
+    assert_eq!(
+        requests(&server).await,
+        0,
+        "off and shadow ask org-core nothing for a blank final URL"
+    );
 }
 
 #[tokio::test]
@@ -165,13 +304,19 @@ async fn a_final_url_with_no_host_is_refused_under_enforce() {
 /// The gateway with Quarry and org-core on mock servers; Quarry's page asked for `example.org` and ended on
 /// `final_url`.
 async fn fetch_state(org: &MockServer, final_url: &str) -> (AppState, MockServer) {
+    fetch_state_with_url(org, json!({"final": final_url})).await
+}
+
+/// The same gateway, with Quarry's reply carrying `url` as given: `{"final": ""}` for a blank final URL, `{}` for one
+/// with no final URL at all.
+async fn fetch_state_with_url(org: &MockServer, url: Value) -> (AppState, MockServer) {
     let quarry = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/scrape"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": {
                 "status": 200,
-                "url": {"final": final_url},
+                "url": url,
                 "title": "Landing",
                 "formats": {"markdown": format!("Page text {MARKER} with enough words to be readable prose here.")}
             }
@@ -261,5 +406,52 @@ async fn fetch_url_reads_the_page_under_shadow_and_off() {
         } else {
             assert!(requests(&org).await > 0, "shadow reads the rules");
         }
+    }
+}
+
+/// Quarry's `url` field for a page with no final URL: absent (`{}`), blank, or whitespace-only. Each case gets an org id
+/// named for `tag`, so the process-wide verdict cache cannot carry one test's answers into another.
+fn no_final_url_replies(tag: &str) -> Vec<(String, Value)> {
+    vec![
+        (format!("org-f1004-{tag}-absent"), json!({})),
+        (format!("org-f1004-{tag}-blank"), json!({"final": ""})),
+        (format!("org-f1004-{tag}-spaces"), json!({"final": "   "})),
+    ]
+}
+
+#[tokio::test]
+async fn fetch_url_reads_a_page_with_an_absent_or_blank_final_url_under_enforce() {
+    let _mode = test_seam::set(WebDomainPolicyMode::Enforce);
+    for (org_id, url) in no_final_url_replies("enforce") {
+        let org = org_core(&org_id).await;
+        let (state, _quarry) = fetch_state_with_url(&org, url).await;
+        let outcome = fetch_url(&state, &org_id).await;
+        assert!(outcome.error.is_none(), "{org_id}: {:?}", outcome.error);
+        assert!(
+            outcome.output.contains(MARKER),
+            "{org_id}: {}",
+            outcome.output
+        );
+    }
+}
+
+#[tokio::test]
+async fn fetch_url_reads_a_page_with_an_absent_or_blank_final_url_under_off() {
+    let _mode = test_seam::set(WebDomainPolicyMode::Off);
+    for (org_id, url) in no_final_url_replies("off") {
+        let org = org_core(&org_id).await;
+        let (state, _quarry) = fetch_state_with_url(&org, url).await;
+        let outcome = fetch_url(&state, &org_id).await;
+        assert!(outcome.error.is_none(), "{org_id}: {:?}", outcome.error);
+        assert!(
+            outcome.output.contains(MARKER),
+            "{org_id}: {}",
+            outcome.output
+        );
+        assert_eq!(
+            requests(&org).await,
+            0,
+            "{org_id}: off asks org-core nothing"
+        );
     }
 }

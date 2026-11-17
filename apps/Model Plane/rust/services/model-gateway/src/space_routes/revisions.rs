@@ -25,7 +25,9 @@
 //! `space_read_not_authorized`, 404 `space_message_revise_disabled` / `message_not_found` /
 //! `thread_not_found`, 409 `message_already_deleted` / `thread_run_active` /
 //! `idempotency_key_conflict` / `space_authority_stale` / `revision_limit` /
-//! `message_state_conflict`, 412 the typed ZDR refusal, 503 `session_unavailable`.
+//! `message_state_conflict` / `erasure_blocked_legal_hold` (a legal hold, `retryable: false`),
+//! 412 the typed ZDR refusal, 503 `session_unavailable` / `erasure_hold_check_unavailable`
+//! (a hold check that could not be made, `retryable: true`).
 
 use axum::{
     body::Bytes,
@@ -176,12 +178,46 @@ fn upstream_code(status: &tonic::Status) -> Option<&'static str> {
     .find(|known| *known == raw)
 }
 
+/// EP-9 C4 (V3-sc-1, V3-mg-5-rel2): a destructive revision that a legal hold refuses, or whose hold check could not
+/// be made, keeps the typed erasure code that Session Core puts on the `x-mp-error-code` trailer, as the thread erase
+/// route does (`thread_erase_error`). Without it the hold reads as the generic 409 `message_state_conflict`, the
+/// outage as the generic 503 `session_unavailable`, and the retryable flag is lost. The answer is in fixed words, so
+/// no upstream text crosses. `None` for every other refusal, which keeps its generic answer.
+fn erasure_hold_error(status: &tonic::Status) -> Option<Response> {
+    let trailer = status.metadata().get(ERROR_CODE_TRAILER)?.to_str().ok()?;
+    let (http, code, message, retryable) = match trailer {
+        "erasure_blocked_legal_hold" => (
+            StatusCode::CONFLICT,
+            "erasure_blocked_legal_hold",
+            "A legal hold covers this data, so nothing was changed. The change can be made once the hold is released.",
+            false,
+        ),
+        "erasure_hold_check_unavailable" => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "erasure_hold_check_unavailable",
+            "Legal holds could not be checked, so nothing was changed. Try again shortly.",
+            true,
+        ),
+        _ => return None,
+    };
+    Some(error_response(
+        http,
+        code,
+        message,
+        json!({ "retryable": retryable }),
+    ))
+}
+
 /// The HTTP form of a Session Core refusal of a revise or target call. Messages are fixed words,
-/// never the upstream text. A typed ZDR refusal keeps its catalogue code and status (412).
-/// `read` is true for the target route, whose denial is a read denial.
+/// never the upstream text. A typed ZDR refusal keeps its catalogue code and status (412), and a
+/// typed legal-hold refusal keeps its erasure code (409 or 503). `read` is true for the target
+/// route, whose denial is a read denial.
 pub(crate) fn session_revise_error(status: &tonic::Status, read: bool) -> Response {
     if let Some(refusal) = mp_contracts::zdr_refusal::Refusal::from_status(status) {
         return (StatusCode::PRECONDITION_FAILED, Json(refusal.json_body())).into_response();
+    }
+    if let Some(hold) = erasure_hold_error(status) {
+        return hold;
     }
     let code = upstream_code(status);
     match status.code() {
@@ -532,5 +568,201 @@ async fn resolve_target(
             tracing::warn!(grpc_code = ?status.code(), "space message target refused");
             session_revise_error(&status, true)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use mp_contracts::model_plane::v1::message_revision_service_client as revision_client;
+
+    async fn parts(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    /// A Session Core refusal carrying the `x-mp-error-code` trailer, as the revise RPC sends a legal hold.
+    fn coded(mut status: tonic::Status, code: &'static str) -> tonic::Status {
+        status.metadata_mut().insert(
+            ERROR_CODE_TRAILER,
+            tonic::metadata::MetadataValue::from_static(code),
+        );
+        status
+    }
+
+    fn context_json() -> Value {
+        json!({
+            "space_id": "space-room-1",
+            "space_decision_ref": "decision-1",
+            "recipient_audience_ref": "audience:space-room-1:4",
+            "recipient_audience_revision": 4,
+            "recipient_audience_hash": "sha256:audience-hash",
+            "privacy_policy_ref": "privacy:org-1:5",
+            "authority_revision": 7,
+            "resource_authorization_ref": "control:space-room-1:message-revise:7",
+            "space_decision_token": "token",
+            "action_schema_hash": "sha256:thread-revise-v1",
+            "payload_digest": "sha256:digest",
+            "idempotency_key": "message-delete:1"
+        })
+    }
+
+    /// V3-mg-5-rel2: a legal hold on a destructive revision is the typed, non-retryable 409, and a hold check that
+    /// could not be made is the typed, retryable 503. A refusal without the trailer keeps its generic answer, as a
+    /// refusal from a Session Core that never sends the trailer (the hold switch off) does, and no upstream text crosses.
+    #[tokio::test]
+    async fn destructive_revision_holds_keep_their_typed_codes() {
+        let (held_status, held) = parts(session_revise_error(
+            &coded(
+                tonic::Status::failed_precondition("upstream-hold-detail"),
+                "erasure_blocked_legal_hold",
+            ),
+            false,
+        ))
+        .await;
+        assert_eq!(held_status, StatusCode::CONFLICT);
+        assert_eq!(held["error"]["code"], "erasure_blocked_legal_hold");
+        assert_eq!(held["error"]["details"]["retryable"], false);
+
+        let (outage_status, outage) = parts(session_revise_error(
+            &coded(
+                tonic::Status::unavailable("upstream-check-detail"),
+                "erasure_hold_check_unavailable",
+            ),
+            false,
+        ))
+        .await;
+        assert_eq!(outage_status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(outage["error"]["code"], "erasure_hold_check_unavailable");
+        assert_eq!(outage["error"]["details"]["retryable"], true);
+
+        let (plain_status, plain) = parts(session_revise_error(
+            &tonic::Status::failed_precondition("upstream-hold-detail"),
+            false,
+        ))
+        .await;
+        assert_eq!(plain_status, StatusCode::CONFLICT);
+        assert_eq!(plain["error"]["code"], "message_state_conflict");
+        assert_eq!(plain["error"]["details"], json!({}));
+
+        let (plain_outage_status, plain_outage) = parts(session_revise_error(
+            &tonic::Status::unavailable("upstream-check-detail"),
+            false,
+        ))
+        .await;
+        assert_eq!(plain_outage_status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(plain_outage["error"]["code"], "session_unavailable");
+        assert_eq!(plain_outage["error"]["details"], json!({}));
+
+        let text = format!("{held}{outage}{plain}{plain_outage}");
+        assert!(
+            !text.contains("upstream-"),
+            "upstream text never crosses: {text}"
+        );
+    }
+
+    type RevisionRequest = tonic::codegen::http::Request<tonic::body::BoxBody>;
+    type RevisionResponse = tonic::codegen::http::Response<tonic::body::BoxBody>;
+
+    /// A stand-in Session Core that answers every message revision RPC with one refusal, trailer and all, so the
+    /// route sees what `revise_message` sends back for a held or unverifiable destructive revision.
+    #[derive(Clone)]
+    struct RefusingRevision(tonic::Status);
+
+    impl tonic::server::NamedService for RefusingRevision {
+        const NAME: &'static str = "model_plane.v1.MessageRevisionService";
+    }
+
+    impl tower::Service<RevisionRequest> for RefusingRevision {
+        type Response = RevisionResponse;
+        type Error = std::convert::Infallible;
+        type Future = std::future::Ready<Result<RevisionResponse, std::convert::Infallible>>;
+
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _: RevisionRequest) -> Self::Future {
+            std::future::ready(Ok(self.0.clone().into_http()))
+        }
+    }
+
+    /// The route's HTTP answer to a delete that Session Core refuses with `refusal` over the wire.
+    async fn delete_answer_to_session_refusal(refusal: tonic::Status) -> Response {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind revision stand-in");
+        let address = listener.local_addr().expect("revision stand-in address");
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(RefusingRevision(refusal))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .expect("revision stand-in endpoint")
+            .connect()
+            .await
+            .expect("connect revision stand-in");
+        let mut state = AppState::new();
+        state.message_revision_client = revision_client::MessageRevisionServiceClient::new(channel);
+        let context: ReviseContext =
+            serde_json::from_value(context_json()).expect("a decision envelope");
+        let request = revise_request(
+            "org-a",
+            "thread-a".to_owned(),
+            "message-a".to_owned(),
+            rev::ACTION_DELETE,
+            String::new(),
+            String::new(),
+            context,
+        );
+        send_revision(
+            &state,
+            &VerifiedSessionBearer::for_test("session-core-token"),
+            request,
+        )
+        .await
+    }
+
+    /// V3-mg-5-rel2: a legal hold on a delete survives the wire and answers with the typed, non-retryable 409.
+    #[tokio::test]
+    async fn a_delete_refused_by_a_legal_hold_keeps_its_typed_code_over_the_wire() {
+        let response = delete_answer_to_session_refusal(coded(
+            tonic::Status::failed_precondition("upstream-hold-detail"),
+            "erasure_blocked_legal_hold",
+        ))
+        .await;
+        let (status, body) = parts(response).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "erasure_blocked_legal_hold");
+        assert_eq!(body["error"]["details"]["retryable"], false);
+        assert!(!body.to_string().contains("upstream-hold-detail"));
+    }
+
+    /// V3-mg-5-rel2: a hold check that could not be made survives the wire and answers with the typed, retryable 503.
+    #[tokio::test]
+    async fn a_delete_whose_hold_check_failed_keeps_its_typed_retryable_code_over_the_wire() {
+        let response = delete_answer_to_session_refusal(coded(
+            tonic::Status::unavailable("upstream-check-detail"),
+            "erasure_hold_check_unavailable",
+        ))
+        .await;
+        let (status, body) = parts(response).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "erasure_hold_check_unavailable");
+        assert_eq!(body["error"]["details"]["retryable"], true);
+        assert!(!body.to_string().contains("upstream-check-detail"));
     }
 }
