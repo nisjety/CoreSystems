@@ -21,7 +21,7 @@
 #   RUN_ID                            the run that owns APPROVAL_ID
 #   THREAD_ID                         the thread of RUN_ID (S6 grant list)
 #   DECIDE=1                          make the decisions: S3 (approve, then replay), S5, S6
-#   APPROVAL_AUDIT_EVENTS_ENABLED=1   the stack runs with the audit switch on (S3 audit row)
+#   APPROVAL_AUDIT_EVENTS_ENABLED=true   the stack runs with the audit switch on (S3 audit row)
 #   STEP_UP_ENFORCE=1                 the gateway runs with APPROVAL_STEP_UP_ENFORCED=enforce (S5)
 #   STEP_UP_APPROVAL_ID               a pending high-risk pause for S5 (a pause you are willing to approve)
 #   MP_STEP_UP_BEARER                 optional: the owner's bearer after a fresh step-up (S5 granted path)
@@ -188,7 +188,7 @@ s3_provenance() {
   else
     fail "S3 the decision records source '$decided_source', expected user"
   fi
-  if [[ "${APPROVAL_AUDIT_EVENTS_ENABLED:-0}" == 1 ]]; then
+  if [[ "${APPROVAL_AUDIT_EVENTS_ENABLED:-0}" == true ]]; then
     after="$(db "SELECT count(*) FROM session_audit_outbox WHERE payload->>'event' = 'approval_decided' AND payload->>'resource_id' = '$APPROVAL_ID'")"
     if [[ "$after" == "$((before + 1))" ]]; then
       pass "S3 the decision enqueued one approval_decided audit row"
@@ -203,7 +203,7 @@ s3_provenance() {
       fail "S3 the replay answered HTTP $replay_status and left $after audit rows"
     fi
   else
-    skip "S3 the audit row: APPROVAL_AUDIT_EVENTS_ENABLED=1 says the stack records it"
+    skip "S3 the audit row: APPROVAL_AUDIT_EVENTS_ENABLED=true says the stack records it"
   fi
 }
 

@@ -594,7 +594,7 @@ test('human_browse is off by default in the broker and in the production overlay
   assert.match(read('apps/Model Plane/go/services/browser-broker/internal/grant/humanbrowse.go'), /DefaultMaxAttachDomains = 8/);
 
   const dev = composeService(read('apps/Model Plane/deploy/docker-compose.yml'), 'browser-broker');
-  assert.match(dev, /BROWSER_BROKER_HUMAN_BROWSE_ENABLED: \$\{BROWSER_BROKER_HUMAN_BROWSE_ENABLED:-1\}/);
+  assert.match(dev, /BROWSER_BROKER_HUMAN_BROWSE_ENABLED: \$\{BROWSER_BROKER_HUMAN_BROWSE_ENABLED:-true\}/);
   assert.match(dev, /BROWSER_BROKER_HUMAN_ABSOLUTE_TTL_SECONDS: \$\{BROWSER_BROKER_HUMAN_ABSOLUTE_TTL_SECONDS:-14400\}/);
   assert.match(dev, /BROWSER_BROKER_DENY_SUFFIXES: \$\{BROWSER_BROKER_DENY_SUFFIXES:-\}/);
   assert.match(dev, /BROWSER_BROKER_MAX_ATTACH_DOMAINS: \$\{BROWSER_BROKER_MAX_ATTACH_DOMAINS:-8\}/);

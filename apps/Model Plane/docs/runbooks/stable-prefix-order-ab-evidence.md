@@ -43,7 +43,7 @@ Run the driver from `apps/Model Plane/python/eval-lab-py` as `python -m eval_lab
 
 **Step 2, arm on.**
 
-1. Set `MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER=1` in the environment compose reads. Recreate model-gateway with the same command and confirm the container shows `1`.
+1. Set `MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER=true` in the environment compose reads. Recreate model-gateway with the same command and confirm the container shows `true`.
 2. Drive and capture with `--arm on`. `drive` refuses an arm folder that already holds a drive, so a repeat needs a new evidence root.
 3. Run the eval suite three times into `<root>/on/eval/rerun-N`.
 
@@ -81,7 +81,7 @@ Decided by: ____  Date: ____
 
 ## Rollback
 
-Unset `MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER`, or set it to anything other than `1`, `on`, `true`, `yes` or `enabled`. Recreate model-gateway and confirm the container value. The flag only shapes the prompt on pinned routes, and nothing is migrated.
+Unset `MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER`, or set it to anything other than the exact literal `true`. Recreate model-gateway and confirm the container value. The flag only shapes the prompt on pinned routes, and nothing is migrated.
 
 ## Privacy
 

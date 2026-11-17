@@ -24,7 +24,7 @@
 #   2. The gateway's dev bypass, which accepts an unverified bearer. It needs
 #      BOTH gates and it disables authentication for the whole gateway, so it
 #      is a deliberate, temporary, local-only act — never leave it on:
-#        ./scripts/compose.sh up -d --no-deps -e MODEL_GATEWAY_AUTH_DEV_BYPASS=1 \
+#        ./scripts/compose.sh up -d --no-deps -e MODEL_GATEWAY_AUTH_DEV_BYPASS=true \
 #            -e ALLOW_INSECURE_DEV_DEFAULTS=1 model-gateway
 #        MP_TOKEN=dev ./scripts/tests/reachability-live-proof.sh
 #        ./scripts/compose.sh up -d --no-deps --force-recreate model-gateway

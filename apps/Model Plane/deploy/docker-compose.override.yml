@@ -11,7 +11,7 @@ services:
       RATE_LIMIT_RPM: "1000"
       ALLOWED_MODELS: ""
       # Wave 7 — dev profile enables fine-tuning routes; production keeps off.
-      FINETUNE_ENABLED: "1"
+      FINETUNE_ENABLED: "true"
       SPACE_RUN_WORK_SUMMARY: "true"
       SPACE_RUN_LIVE_VIEW: "true"
       SPACE_RUN_LIVE_TEXT: "true"

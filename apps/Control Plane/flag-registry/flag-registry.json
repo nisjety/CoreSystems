@@ -753,8 +753,7 @@
       "source": "compose",
       "default": "0",
       "purpose": "Dreaming LLM extraction, which sends chat transcripts to a model to propose memories.",
-      "codeDefault": "true",
-      "driftReason": "Code is on when unset (env_flag default true). Compose ships 0 because extraction would send user chats to a paid model on this stack. Owner decision: keep one side or the other.",
+      "codeDefault": "0",
       "declarations": [
         { "service": "session-core", "env": "DREAMING_LLM_EXTRACTION", "default": "0" }
       ]
@@ -929,6 +928,18 @@
       ]
     },
     {
+      "name": "EXECUTION_CORE_SPACE_APPROVAL_GATE",
+      "kind": "choice",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "enforce",
+      "values": ["off", "shadow", "enforce"],
+      "purpose": "WS10-S3: the Space approval gate. off keeps today's behaviour, shadow reads Control's tool levels and only counts, enforce folds them in. Unset is off in the code; dev compose defaults to enforce, production and release set off.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_CORE_SPACE_APPROVAL_GATE", "default": "enforce" }
+      ]
+    },
+    {
       "name": "EXECUTION_CUSTOM_REST_TOOLS",
       "kind": "switch",
       "owner": "model-plane",
@@ -1024,7 +1035,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "0",
-      "purpose": "Fine-tuning routes master switch. Only the exact value 1 enables it.",
+      "purpose": "Fine-tuning routes master switch. Only the exact literal true enables it.",
       "codeDefault": "false",
       "declarations": [
         { "service": "model-gateway", "env": "FINETUNE_ENABLED", "default": "0" }
@@ -1360,6 +1371,19 @@
       "codeDefault": "false",
       "declarations": [
         { "service": "session-core", "env": "MEMORY_GROUNDING_ENABLED", "default": "0" }
+      ]
+    },
+    {
+      "name": "MODEL_ACTION_ADMISSION",
+      "kind": "choice",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "",
+      "values": ["", "table"],
+      "purpose": "WS24-S6/S8: the agent action admission table. Only the literal table admits named actions and the owner listing, never on retention-bound runs. Unset is off: tickets.create only. With Spaces, enable OWNER_LIST_SPACE_REFUSE first.",
+      "declarations": [
+        { "service": "capability-core", "env": "MODEL_ACTION_ADMISSION", "default": "" },
+        { "service": "execution-core", "env": "MODEL_ACTION_ADMISSION", "default": "" }
       ]
     },
     {
@@ -1757,6 +1781,17 @@
       "codeDefault": "false",
       "declarations": [
         { "service": "orchestrator-core", "env": "ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "ORG_AGENT_POLICY_API",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "WS25-S7: the org agent policy API. Off, every route answers 404 and the table is not read. Only the literal true enables it.",
+      "declarations": [
+        { "service": "capability-core", "env": "ORG_AGENT_POLICY_API", "default": "false" }
       ]
     },
     {
@@ -2631,6 +2666,18 @@
       "codeDefault": "true",
       "declarations": [
         { "service": "execution-core", "env": "WIDE_RESEARCH_FAN_OUT_ENABLED", "default": "true" }
+      ]
+    },
+    {
+      "name": "WORKSPACE_TOOLS",
+      "kind": "choice",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "off",
+      "values": ["off", "read", "all"],
+      "purpose": "WS24-S3/S4: the Space workspace tools for Do runs. off offers none, read the four read tools, all also the two overlay writes. Only the literal read or all turns them on; ZDR and non-Space runs never get them.",
+      "declarations": [
+        { "service": "execution-core", "env": "WORKSPACE_TOOLS", "default": "off" }
       ]
     },
     {

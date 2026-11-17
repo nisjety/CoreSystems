@@ -74,6 +74,14 @@ jobs:
           bash "apps/Model Plane/scripts/tests/acceptance-thresholds-test.sh"
           bash "apps/Model Plane/scripts/tests/acceptance-thresholds-test.sh" --self-test
 
+      # WS04-S11: the history floor's compose declarations (strict literal true, default false). Reads
+      # compose files only; a 1, yes or on in the compose file would leave the floor off.
+      - name: Session Core history floor compose contract
+        run: |
+          set -euo pipefail
+          bash "apps/Model Plane/scripts/tests/session-history-floor-compose-test.sh"
+          bash "apps/Model Plane/scripts/tests/session-history-floor-compose-test.sh" --self-test
+
       - name: Conformance gate and artifact contract
         run: bash scripts/tests/coresystem-conformance-artifact-test.sh
 

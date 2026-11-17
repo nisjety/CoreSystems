@@ -52,6 +52,6 @@ services:
       RUST_LOG: debug
       RATE_LIMIT_RPM: "1000"
       ALLOWED_MODELS: ""
-      FINETUNE_ENABLED: "1"
+      FINETUNE_ENABLED: "true"
       FINETUNE_ORG_BUDGET_USD: "50"
       FINETUNE_PER_JOB_BUDGET_USD: "20"

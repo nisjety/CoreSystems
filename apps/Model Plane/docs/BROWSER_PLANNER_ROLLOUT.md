@@ -17,7 +17,7 @@ Every "measured" cell below is empty on purpose until a live (Tier C) run fills 
 3. The org's flag, written into `tool_input.planner_flag` by model-gateway from the
    org-core quota row `browser_agent_llm_planner` (limit `1` = on, `2` = off, anything
    else = unset). The gateway reads it only when
-   `MODEL_GATEWAY_BROWSER_PLANNER_QUOTAS` is `on`; a client-supplied `planner_flag`
+   `MODEL_GATEWAY_BROWSER_PLANNER_QUOTAS` is exactly `true`; a client-supplied `planner_flag`
    is ignored. A read that fails becomes `unavailable` (fail closed).
 
 Order of rules (first match wins): mode `off` with no legacy variable -> `mode_off`;
