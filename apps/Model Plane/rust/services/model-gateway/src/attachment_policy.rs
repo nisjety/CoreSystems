@@ -177,9 +177,13 @@ impl AttachmentPolicy {
             max_files: positive(get, MAX_FILES_VAR, DEFAULT_MAX_FILES),
             max_file_bytes: positive(get, MAX_FILE_BYTES_VAR, DEFAULT_MAX_FILE_BYTES),
             max_total_bytes: positive(get, MAX_TOTAL_BYTES_VAR, DEFAULT_MAX_TOTAL_BYTES),
-            sandbox_files: get(SANDBOX_FILES_VAR).is_some_and(|value| value.trim() == "true"),
-            vision_as_parts: get(VISION_AS_PARTS_VAR).is_some_and(|value| value.trim() == "true"),
-            do_attachments: get(DO_ATTACHMENTS_VAR).is_some_and(|value| value.trim() == "true"),
+            sandbox_files: mp_contracts::loop_fold::switch_from(get(SANDBOX_FILES_VAR).as_deref()),
+            vision_as_parts: mp_contracts::loop_fold::switch_from(
+                get(VISION_AS_PARTS_VAR).as_deref(),
+            ),
+            do_attachments: mp_contracts::loop_fold::switch_from(
+                get(DO_ATTACHMENTS_VAR).as_deref(),
+            ),
         }
     }
 
@@ -824,8 +828,8 @@ mod tests {
         let do_run = modes(&[(DO_ATTACHMENTS_VAR, "true")]);
         assert!(do_run.do_attachments && !do_run.vision_as_parts);
         assert!(
-            modes(&[(DO_ATTACHMENTS_VAR, " true ")]).do_attachments,
-            "the value is trimmed"
+            !modes(&[(DO_ATTACHMENTS_VAR, " true ")]).do_attachments,
+            "a padded value is off: the reader is exact"
         );
         for value in ["1", "yes", "on", "TRUE", ""] {
             assert!(

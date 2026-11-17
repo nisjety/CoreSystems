@@ -83,7 +83,7 @@ const TOTAL_TOKEN_CAP: i32 = 32_768;
 /// not start spending reasoning allowance.
 #[must_use]
 pub fn parse_ladder(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// Whether the ladder is on for this process.
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn only_the_literal_true_turns_the_ladder_on() {
         assert!(parse_ladder(Some("true")));
-        assert!(parse_ladder(Some(" true ")));
+        assert!(!parse_ladder(Some(" true ")));
         for raw in [None, Some(""), Some("1"), Some("on"), Some("TRUE"), Some("yes")] {
             assert!(!parse_ladder(raw), "{raw:?} must not enable the ladder");
         }

@@ -42,7 +42,7 @@ pub const ZDR_FEATURE: &str = "context_references";
 /// Whether the switch is on, from its raw value.
 #[must_use]
 pub fn parse_enabled(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// The switch as this process reads it.
@@ -442,7 +442,7 @@ mod tests {
     #[test]
     fn the_switch_reads_only_the_literal_true() {
         assert!(parse_enabled(Some("true")));
-        assert!(parse_enabled(Some(" true ")));
+        assert!(!parse_enabled(Some(" true ")));
         for value in [None, Some(""), Some("1"), Some("TRUE"), Some("yes"), Some("on")] {
             assert!(!parse_enabled(value), "{value:?}");
         }

@@ -238,9 +238,9 @@ pub fn message_for_turn(user_text: &str) -> Option<ChatMessage> {
     message_for_turn_with(user_text, false)
 }
 
-/// `MODEL_GATEWAY_WIDGET_GUIDANCE`: only the literal `true`, after trimming, turns it on.
+/// `MODEL_GATEWAY_WIDGET_GUIDANCE`: only the exact literal `true` turns it on.
 fn widget_guidance_enabled_from(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// Whether this gateway may write the widget notice (EP-4 S2). Read once per process, so it cannot
@@ -500,7 +500,7 @@ mod tests {
         assert!(!widget_guidance_enabled_from(Some("1")));
         assert!(!widget_guidance_enabled_from(Some("TRUE")));
         assert!(widget_guidance_enabled_from(Some("true")));
-        assert!(widget_guidance_enabled_from(Some(" true ")));
+        assert!(!widget_guidance_enabled_from(Some(" true ")));
     }
 
     #[test]

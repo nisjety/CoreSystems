@@ -62,18 +62,15 @@ const MAX_TOOL_DATA_CHARS: usize = 12_000;
 
 const FLAG_ENV: &str = "MODEL_GATEWAY_EXTRACT_TOOL";
 
-/// Whether the chat tool loop offers `extract_structured`. Off unless the variable is exactly `1`,
-/// `true` or `on` (any case, trimmed).
+/// Whether the chat tool loop offers `extract_structured`. Off unless the variable is exactly the
+/// literal `true` (no trimming, no case folding).
 #[must_use]
 pub fn extract_tool_enabled() -> bool {
     flag_value_enables(std::env::var(FLAG_ENV).ok().as_deref())
 }
 
 fn flag_value_enables(value: Option<&str>) -> bool {
-    value.is_some_and(|raw| {
-        let raw = raw.trim();
-        raw == "1" || raw.eq_ignore_ascii_case("true") || raw.eq_ignore_ascii_case("on")
-    })
+    mp_contracts::loop_fold::switch_from(value)
 }
 
 /// What to produce from each page.
@@ -1845,11 +1842,12 @@ mod tests {
     #[test]
     fn the_flag_enables_only_on_the_literals() {
         assert!(!flag_value_enables(None));
-        for off in ["", "0", "false", "off", "yes", "2", "enabled"] {
+        assert!(flag_value_enables(Some("true")));
+        for off in [
+            "", "0", "false", "off", "yes", "1", "2", "enabled", "on", "TRUE", " on ", " true ",
+            "On",
+        ] {
             assert!(!flag_value_enables(Some(off)), "{off}");
-        }
-        for on in ["1", "true", "TRUE", " on ", "On"] {
-            assert!(flag_value_enables(Some(on)), "{on}");
         }
     }
 

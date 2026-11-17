@@ -34,7 +34,7 @@ pub fn sandbox_staging_enabled() -> bool {
 }
 
 fn enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
-    get(SANDBOX_FILES_VAR).is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(get(SANDBOX_FILES_VAR).as_deref())
 }
 
 /// The validated file attachments of one turn. Empty for every turn without

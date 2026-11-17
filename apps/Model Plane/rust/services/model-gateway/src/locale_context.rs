@@ -34,7 +34,7 @@ pub fn enabled() -> bool {
 /// [`enabled`] with the environment passed in, so the parser can be tested without it.
 #[must_use]
 pub fn enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
-    get(USER_LOCALE_CONTEXT_VAR).is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(get(USER_LOCALE_CONTEXT_VAR).as_deref())
 }
 
 /// The browser's clock for one turn, after the checks in [`local_clock`]. The zone is kept only in
@@ -222,7 +222,7 @@ mod tests {
             enabled_with(&|key| (key == USER_LOCALE_CONTEXT_VAR).then(|| value.to_owned()))
         };
         assert!(with("true"));
-        assert!(with(" true "));
+        assert!(!with(" true "));
         for off in ["1", "yes", "TRUE", "false", ""] {
             assert!(!with(off), "{off:?}");
         }

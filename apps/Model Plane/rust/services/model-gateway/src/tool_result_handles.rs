@@ -85,7 +85,7 @@ pub fn extended_enabled() -> bool {
 /// Only the literal `true` enables; `1`, `on` and anything else stay off.
 #[must_use]
 pub fn parse_extended(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// Whether external content reached the model without a real scan: the trust
@@ -847,7 +847,7 @@ mod tests {
     #[test]
     fn only_the_literal_true_enables_extended_parking() {
         assert!(parse_extended(Some("true")));
-        assert!(parse_extended(Some(" true ")));
+        assert!(!parse_extended(Some(" true ")));
         for raw in [
             None,
             Some(""),

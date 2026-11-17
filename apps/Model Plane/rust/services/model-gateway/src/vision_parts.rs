@@ -45,7 +45,7 @@ pub fn enabled() -> bool {
 }
 
 fn enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
-    get(ENABLED_VAR).is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(get(ENABLED_VAR).as_deref())
 }
 
 /// A typed refusal: a stable code for the client and a sentence for the person.
@@ -382,7 +382,7 @@ mod tests {
         assert!(!with(Some("TRUE")));
         assert!(!with(Some("yes")));
         assert!(with(Some("true")));
-        assert!(with(Some(" true ")));
+        assert!(!with(Some(" true ")));
     }
 
     #[test]

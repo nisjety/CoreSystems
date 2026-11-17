@@ -1671,7 +1671,7 @@ pub fn plan_turn_enabled() -> bool {
 }
 
 fn plan_turn_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
-    get(DEEP_RESEARCH_PLAN_TURN_ENV).is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(get(DEEP_RESEARCH_PLAN_TURN_ENV).as_deref())
 }
 
 /// Clarifying questions one plan may ask (D7). They live in the plan card, not the WS14 question
@@ -3526,7 +3526,7 @@ pub fn second_pass_enabled() -> bool {
 /// Only the literal `true` enables; `1`, `on` and anything else stay off.
 #[must_use]
 pub fn parse_second_pass(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// The ledger schema version this gateway writes and accepts (D2). A ledger that names another
@@ -8878,7 +8878,7 @@ mod tests {
         #[test]
         fn the_switch_reads_only_the_literal_true() {
             assert!(parse_second_pass(Some("true")));
-            assert!(parse_second_pass(Some(" true ")));
+            assert!(!parse_second_pass(Some(" true ")));
             for raw in [None, Some(""), Some("1"), Some("on"), Some("TRUE"), Some("yes")] {
                 assert!(!parse_second_pass(raw), "{raw:?}");
             }

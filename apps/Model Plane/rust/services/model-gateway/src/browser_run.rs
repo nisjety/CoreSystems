@@ -322,7 +322,7 @@ struct BrowserRunStartRequest {
     zdr: bool,
     /// Plan mode (WS7.L): the run may read but not type, interact, upload or
     /// download. Expanded here into the four `disable` keys of the ask. Needs
-    /// `MODEL_GATEWAY_BROWSER_POLICY_ASK=on`, else the start is refused.
+    /// `MODEL_GATEWAY_BROWSER_POLICY_ASK=true`, else the start is refused.
     #[serde(default)]
     plan_mode: Option<bool>,
     /// A tighten-only ask (WS7.L), e.g. a Space restriction the caller
@@ -414,22 +414,19 @@ struct RunPolicyAsk {
     allow_domains: Option<Vec<String>>,
 }
 
-/// `MODEL_GATEWAY_BROWSER_POLICY_ASK`: only `on` lets a start carry a policy
+/// `MODEL_GATEWAY_BROWSER_POLICY_ASK`: only the exact literal `true` lets a start carry a policy
 /// ask or plan mode. Off (the default) refuses such a start rather than run it
 /// without the restriction, so an older Quarry can never drop it silently.
 fn policy_ask_flag(value: Option<&str>) -> bool {
     budget_claim_flag(value)
 }
 
-/// `MODEL_GATEWAY_BROWSER_ATTACH` (WS8.G): only `1`, `true` or `on` lets a start
+/// `MODEL_GATEWAY_BROWSER_ATTACH` (WS8.G): only the exact literal `true` lets a start
 /// carry `attach_session_id`. Off (the default) refuses such a start 400
 /// `browser_attach_unavailable` before any grant, thread or run write, so a stack
 /// whose broker or Quarry has attach dark never half-runs one.
 fn attach_flag(value: Option<&str>) -> bool {
-    value.is_some_and(|value| {
-        let value = value.trim();
-        value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("on")
-    })
+    mp_contracts::loop_fold::switch_from(value)
 }
 
 /// Longest attach session id this route forwards (the broker bounds a resource
@@ -1241,7 +1238,7 @@ const BUDGET_SOURCE_ORG_DEFAULT: &str = "org_default";
 /// whether broker-returned claims are in force at all.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct BudgetMint {
-    /// `MODEL_GATEWAY_BROWSER_BUDGET_CLAIM=on`. Off: no claim is sent, none
+    /// `MODEL_GATEWAY_BROWSER_BUDGET_CLAIM=true`. Off: no claim is sent, none
     /// is read back, and the run parameters are exactly the request's.
     enabled: bool,
     /// The claim to mint, when the request or the organization bounds
@@ -1249,10 +1246,11 @@ struct BudgetMint {
     minted: Option<(BudgetClaim, &'static str)>,
 }
 
-/// `MODEL_GATEWAY_BROWSER_BUDGET_CLAIM`: only `on` turns it on, so a misspelt
-/// value is off, never a silent half-on.
+/// `MODEL_GATEWAY_BROWSER_BUDGET_CLAIM`: only the exact literal `true` turns it on, so a misspelt
+/// value is off, never a silent half-on. The same reader serves `MODEL_GATEWAY_BROWSER_POLICY_ASK`
+/// and `MODEL_GATEWAY_BROWSER_PLANNER_QUOTAS`.
 fn budget_claim_flag(value: Option<&str>) -> bool {
-    value.is_some_and(|value| value.trim().eq_ignore_ascii_case("on"))
+    mp_contracts::loop_fold::switch_from(value)
 }
 
 /// The claim for a run: `min(request, org per-run ceiling)` for cost, the
@@ -1371,9 +1369,9 @@ fn bounded_run_params_with_planner_tokens(
     )
 }
 
-/// `MODEL_GATEWAY_BROWSER_PLANNER_QUOTAS`: only `on` makes a browser run start read the org's
-/// planner quota keys (the token ceiling and the planner switch). Off: nothing is read, the
-/// ceiling is the request's own and no `planner_flag` is written. Off by default.
+/// `MODEL_GATEWAY_BROWSER_PLANNER_QUOTAS`: only the exact literal `true` makes a browser run start
+/// read the org's planner quota keys (the token ceiling and the planner switch). Off: nothing is
+/// read, the ceiling is the request's own and no `planner_flag` is written. Off by default.
 fn planner_quotas_flag(value: Option<&str>) -> bool {
     budget_claim_flag(value)
 }
@@ -4253,11 +4251,22 @@ mod tests {
     }
 
     #[test]
-    fn the_attach_flag_is_off_unless_one_true_or_on() {
-        for on in [Some("1"), Some("true"), Some("on"), Some("ON"), Some(" True ")] {
-            assert!(attach_flag(on), "{on:?}");
-        }
-        for off in [None, Some(""), Some("0"), Some("off"), Some("yes"), Some("enabled")] {
+    fn the_attach_flag_is_off_unless_the_exact_literal_true() {
+        assert!(attach_flag(Some("true")));
+        for off in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("off"),
+            Some("1"),
+            Some("on"),
+            Some("ON"),
+            Some("yes"),
+            Some("TRUE"),
+            Some(" True "),
+            Some(" true "),
+            Some("enabled"),
+        ] {
             assert!(!attach_flag(off), "{off:?}");
         }
     }
@@ -4383,7 +4392,7 @@ mod tests {
     /// The handler reads the flag from the process environment; every test that
     /// needs it on sets the same value, and none sets it off.
     fn attach_flag_on() {
-        std::env::set_var("MODEL_GATEWAY_BROWSER_ATTACH", "1");
+        std::env::set_var("MODEL_GATEWAY_BROWSER_ATTACH", "true");
     }
 
     // Plan name: derive_failure_creates_no_thread_or_run (attach variant; the
@@ -4530,10 +4539,20 @@ mod tests {
     }
 
     #[test]
-    fn only_on_turns_the_claim_flag_on() {
-        assert!(budget_claim_flag(Some("on")));
-        assert!(budget_claim_flag(Some(" ON ")));
-        for off in [None, Some(""), Some("off"), Some("true"), Some("1"), Some("onn")] {
+    fn only_the_exact_literal_true_turns_the_claim_flag_on() {
+        assert!(budget_claim_flag(Some("true")));
+        for off in [
+            None,
+            Some(""),
+            Some("off"),
+            Some("on"),
+            Some("ON"),
+            Some(" ON "),
+            Some("1"),
+            Some("TRUE"),
+            Some(" true "),
+            Some("onn"),
+        ] {
             assert!(!budget_claim_flag(off), "{off:?}");
         }
     }
@@ -4576,9 +4595,16 @@ mod tests {
     }
 
     #[test]
-    fn only_on_turns_the_planner_quota_read_on() {
-        assert!(planner_quotas_flag(Some("on")));
-        for off in [None, Some(""), Some("off"), Some("1"), Some("true")] {
+    fn only_the_exact_literal_true_turns_the_planner_quota_read_on() {
+        assert!(planner_quotas_flag(Some("true")));
+        for off in [
+            None,
+            Some(""),
+            Some("off"),
+            Some("on"),
+            Some("1"),
+            Some("TRUE"),
+        ] {
             assert!(!planner_quotas_flag(off), "{off:?}");
         }
         // Off: no ceiling, no flag, so nothing is written for an org that never opted in.
@@ -4713,9 +4739,17 @@ mod tests {
     }
 
     #[test]
-    fn policy_ask_flag_is_off_unless_literally_on() {
-        assert!(policy_ask_flag(Some("on")));
-        for off in [None, Some(""), Some("off"), Some("1"), Some("true")] {
+    fn policy_ask_flag_is_off_unless_the_exact_literal_true() {
+        assert!(policy_ask_flag(Some("true")));
+        for off in [
+            None,
+            Some(""),
+            Some("off"),
+            Some("on"),
+            Some("1"),
+            Some("TRUE"),
+            Some(" true "),
+        ] {
             assert!(!policy_ask_flag(off), "{off:?}");
         }
     }
@@ -6844,7 +6878,7 @@ mod tests {
         /// reaches execution-core is that grant and the session id, with no profile.
         #[tokio::test]
         async fn attach_tool_input_carries_attach_grant_and_session_id() {
-            std::env::set_var("MODEL_GATEWAY_BROWSER_ATTACH", "1");
+            std::env::set_var("MODEL_GATEWAY_BROWSER_ATTACH", "true");
             let broker = session_broker(
                 &["example.com"],
                 Ok(DeriveRunGrantResponse {

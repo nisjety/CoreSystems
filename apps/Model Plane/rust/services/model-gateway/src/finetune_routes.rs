@@ -308,11 +308,12 @@ const fn should_refresh_job_from_provider(zdr: bool, needs_refresh: bool) -> boo
 /// Pure predicate over the env-var value. Lifted from `require_feature_enabled`
 /// so it can be unit-tested without mutating process env (workspace forbids
 /// `unsafe_code` and `std::env::set_var` is `unsafe` in current toolchains).
+/// Only the exact literal `true` enables it (`mp_contracts::loop_fold::switch_from`).
 fn feature_enabled(env_value: Option<&str>) -> bool {
-    env_value == Some("1")
+    mp_contracts::loop_fold::switch_from(env_value)
 }
 
-/// Master kill-switch. Compose ships `FINETUNE_ENABLED=1` in the dev profile.
+/// Master kill-switch. Compose ships `FINETUNE_ENABLED=true` in the dev profile.
 fn require_feature_enabled() -> Result<(), HttpJsonError> {
     if feature_enabled(std::env::var(FEATURE_ENV).ok().as_deref()) {
         Ok(())
@@ -321,7 +322,7 @@ fn require_feature_enabled() -> Result<(), HttpJsonError> {
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
                 "error": "fine-tuning is disabled in this environment",
-                "hint": format!("set {FEATURE_ENV}=1 to enable"),
+                "hint": format!("set {FEATURE_ENV}=true to enable"),
             })),
         ))
     }
@@ -1481,12 +1482,20 @@ mod tests {
     }
 
     #[test]
-    fn feature_enabled_only_truthy_on_one() {
-        assert!(feature_enabled(Some("1")));
-        assert!(!feature_enabled(Some("0")));
-        assert!(!feature_enabled(Some("true")));
-        assert!(!feature_enabled(Some("")));
-        assert!(!feature_enabled(None));
+    fn feature_enabled_only_the_exact_literal_true() {
+        assert!(feature_enabled(Some("true")));
+        for off in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("1"),
+            Some("TRUE"),
+            Some(" true "),
+            Some("yes"),
+            Some("on"),
+        ] {
+            assert!(!feature_enabled(off), "{off:?}");
+        }
     }
 
     #[test]

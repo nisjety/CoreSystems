@@ -80,7 +80,7 @@ pub const REGIONS_NEED_VISION_MESSAGE: &str =
 /// Whether the switch is on, from its raw value.
 #[must_use]
 pub fn parse_enabled(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// The switch as this process reads it.

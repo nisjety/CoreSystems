@@ -136,8 +136,12 @@ async fn off_keeps_every_search_hit_and_asks_org_core_nothing() {
 }
 
 /// The gateway with Quarry and org-core on mock servers and every gRPC downstream (inference included) offline.
-/// Quarry's page ends on `final_url`.
-async fn extract_state(org: &MockServer, final_url: &str) -> (AppState, MockServer) {
+/// Quarry's page was asked for `requested` and ended on `final_url`, in the edge's `UrlTriple` shape.
+async fn extract_state(
+    org: &MockServer,
+    requested: &str,
+    final_url: &str,
+) -> (AppState, MockServer) {
     std::env::set_var("WEB_DOMAIN_POLICY_MODE", "enforce");
     std::env::set_var("MODEL_GATEWAY_EXTRACT_TOOL", "true");
     let quarry = MockServer::start().await;
@@ -146,7 +150,7 @@ async fn extract_state(org: &MockServer, final_url: &str) -> (AppState, MockServ
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": {
                 "status": 200,
-                "url": {"final": final_url},
+                "url": {"requested": requested, "final_url": final_url},
                 "title": "Landing",
                 "formats": {"markdown": format!("Page text {MARKER} with enough words to be readable prose here.")}
             }
@@ -207,7 +211,12 @@ async fn extract(
 #[tokio::test]
 async fn extract_structured_refuses_a_url_on_a_denied_host_before_reading_it() {
     let org = org_core("org-fu29-asked").await;
-    let (state, quarry) = extract_state(&org, "https://blocked.example/landing").await;
+    let (state, quarry) = extract_state(
+        &org,
+        "https://blocked.example/landing",
+        "https://blocked.example/landing",
+    )
+    .await;
     let outcome = extract(&state, "org-fu29-asked", "https://blocked.example/landing").await;
     let error = outcome.error.clone().expect("the URL is refused");
     assert!(error.starts_with(SITE_BLOCKED_CODE), "{error}");
@@ -222,7 +231,12 @@ async fn extract_structured_refuses_a_url_on_a_denied_host_before_reading_it() {
 #[tokio::test]
 async fn extract_structured_drops_a_page_that_redirected_onto_a_denied_host() {
     let org = org_core("org-fu29-redirect").await;
-    let (state, quarry) = extract_state(&org, "https://blocked.example/landing").await;
+    let (state, quarry) = extract_state(
+        &org,
+        "https://example.org/start",
+        "https://blocked.example/landing",
+    )
+    .await;
     let outcome = extract(&state, "org-fu29-redirect", "https://example.org/start").await;
     let error = outcome
         .error
@@ -242,7 +256,12 @@ async fn extract_structured_drops_a_page_that_redirected_onto_a_denied_host() {
 #[tokio::test]
 async fn extract_structured_on_an_allowed_page_passes_the_rules() {
     let org = org_core("org-fu29-allowed").await;
-    let (state, quarry) = extract_state(&org, "https://example.org/landing").await;
+    let (state, quarry) = extract_state(
+        &org,
+        "https://example.org/start",
+        "https://example.org/landing",
+    )
+    .await;
     let outcome = extract(&state, "org-fu29-allowed", "https://example.org/start").await;
     // The extraction goes on to its inference call, which the offline client fails: not a domain refusal, and not a
     // refusal of the arguments either (the page was read).

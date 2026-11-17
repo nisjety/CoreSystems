@@ -136,6 +136,7 @@ pub mod sse_events;
 pub mod state;
 pub mod stream_buffer;
 pub mod subscription_failure;
+pub mod switch_spellings;
 pub mod teach_routes;
 pub mod thinking;
 pub mod thread_connection;

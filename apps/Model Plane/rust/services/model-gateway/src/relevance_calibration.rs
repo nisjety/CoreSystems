@@ -71,8 +71,8 @@ pub enum CalibrationError {
          unfitted; the switch is refused until QB-T14 knots are committed"
     )]
     SwitchWithoutCalibration,
-    /// The switch is set to a value that is neither on nor off.
-    #[error("VEREVON_RELEVANCE_CROSS_ENCODER_SCORES must be on or off, not {0:?}")]
+    /// The switch is set to a value that is neither `true` nor an off value.
+    #[error("VEREVON_RELEVANCE_CROSS_ENCODER_SCORES must be true or false, not {0:?}")]
     UnreadableSwitch(String),
 }
 
@@ -232,19 +232,22 @@ fn verify_pin(bytes: &str, pin: &str) -> Result<(), CalibrationError> {
     Ok(())
 }
 
-/// Read the switch value. Unset, empty or an explicit off value is off; an explicit on value is on.
-/// Anything else is refused, so a typo cannot silently leave the feature in the wrong state.
+/// Read the switch value. Unset, empty or an explicit off value (`0`, `false`, `off`, `no`) is off;
+/// only the exact literal `true` is on. Anything else is refused, so a typo cannot silently leave
+/// the feature in the wrong state: `1`, `on`, `yes`, `TRUE` and ` true ` are refused, not read.
 ///
 /// # Errors
 ///
-/// [`CalibrationError::UnreadableSwitch`] for a value that is neither on nor off.
+/// [`CalibrationError::UnreadableSwitch`] for a value that is neither `true` nor an off value.
 pub fn parse_switch(value: Option<&str>) -> Result<bool, CalibrationError> {
     let Some(raw) = value else {
         return Ok(false);
     };
+    if raw == "true" {
+        return Ok(true);
+    }
     match raw.trim().to_ascii_lowercase().as_str() {
         "" | "0" | "false" | "off" | "no" => Ok(false),
-        "1" | "true" | "on" | "yes" => Ok(true),
         _ => Err(CalibrationError::UnreadableSwitch(raw.to_owned())),
     }
 }
@@ -497,8 +500,11 @@ mod tests {
 
     #[test]
     fn the_switch_is_refused_at_boot_while_the_table_is_unfitted() {
-        assert_eq!(parse_switch(Some("1")), Ok(true));
-        assert_eq!(parse_switch(Some(" TRUE ")), Ok(true));
+        assert_eq!(parse_switch(Some("true")), Ok(true));
+        assert_eq!(
+            parse_switch(Some(" TRUE ")),
+            Err(CalibrationError::UnreadableSwitch(" TRUE ".to_owned()))
+        );
         assert_eq!(
             calibration_for_switch(true, &Artefact::Unfitted),
             Err(CalibrationError::SwitchWithoutCalibration)
@@ -511,6 +517,14 @@ mod tests {
             parse_switch(Some("ture")),
             Err(CalibrationError::UnreadableSwitch("ture".to_owned()))
         );
+        // The other on-words are refused, never read as on.
+        for other in ["1", "on", "yes", "TRUE", " true "] {
+            assert_eq!(
+                parse_switch(Some(other)),
+                Err(CalibrationError::UnreadableSwitch(other.to_owned())),
+                "{other:?}"
+            );
+        }
     }
 
     #[test]
@@ -578,9 +592,14 @@ mod tests {
             "an explicit off is off"
         );
         assert_eq!(
-            from_switch_value(Some("on")),
+            from_switch_value(Some("true")),
             Err(CalibrationError::SwitchWithoutCalibration),
-            "on against the unfitted table stops the boot"
+            "true against the unfitted table stops the boot"
+        );
+        assert_eq!(
+            from_switch_value(Some("on")),
+            Err(CalibrationError::UnreadableSwitch("on".to_owned())),
+            "on is not the literal true, so it is refused as unreadable"
         );
         assert_eq!(
             from_switch_value(Some("onn")),

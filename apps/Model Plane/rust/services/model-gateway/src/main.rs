@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use model_gateway::{
     auth, capability_consumer, doc_indexed_consumer, drain, finetune_poller, gateway_metrics, grpc,
-    http_routes, readiness::GrpcReadiness, state,
+    http_routes, readiness::GrpcReadiness, state, switch_spellings,
 };
 use tracing::{info, warn};
 
@@ -22,6 +22,7 @@ const CONNECTION_CLOSE_BOUND: Duration = Duration::from_secs(5);
 async fn main() -> Result<()> {
     let _otel_guard = mp_telemetry::init("model-gateway")?;
     info!("model-gateway starting");
+    switch_spellings::warn_former_spellings();
     auth::validate_startup()?;
     auth::warm_jwks().await?;
 

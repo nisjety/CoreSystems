@@ -90,7 +90,7 @@ async fn rejects_non_bearer_scheme() {
 #[tokio::test]
 #[serial_test::serial]
 async fn dev_bypass_injects_stub_claims() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
 
     let app = test_router();
     let res = app
@@ -115,22 +115,30 @@ async fn dev_bypass_injects_stub_claims() {
 
 #[tokio::test]
 #[serial_test::serial]
-async fn dev_bypass_accepts_true_case_insensitive() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "TRUE");
+async fn dev_bypass_refuses_every_spelling_but_the_exact_literal_true() {
+    // Only the literal `true` opens the bypass. `TRUE`, `1` and a padded `true` leave the bearer
+    // to real verification, which admits nothing here because no JWKS is configured.
+    for spelling in ["TRUE", "1", " true "] {
+        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", spelling);
 
-    let app = test_router();
-    let res = app
-        .oneshot(
-            Request::builder()
-                .uri("/protected")
-                .header(AUTHORIZATION, "Bearer x")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+        let app = test_router();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header(AUTHORIZATION, "Bearer x")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-    assert_eq!(res.status(), StatusCode::OK);
+        assert_ne!(
+            res.status(),
+            StatusCode::OK,
+            "{spelling:?} must not open the bypass"
+        );
+    }
 
     std::env::remove_var("MODEL_GATEWAY_AUTH_DEV_BYPASS");
 }

@@ -933,9 +933,9 @@ pub(crate) fn retrieval_http_base_url() -> String {
         .to_owned()
 }
 
-/// `MODEL_GATEWAY_GRAPH_SPACE_SCOPE`: only the literal `true`, after trimming, turns it on.
+/// `MODEL_GATEWAY_GRAPH_SPACE_SCOPE`: only the exact literal `true` turns it on.
 fn graph_space_scope_enabled_from(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// Whether graph grounding carries the Space read decision of a scoped turn (WS18-S2). Read once per

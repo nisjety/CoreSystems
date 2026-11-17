@@ -309,10 +309,10 @@ pub fn decide_content_route(
 /// `true` turns it on; off is today's behaviour, byte for byte.
 pub const TYPED_REFUSALS_ENV: &str = "ZDR_TYPED_REFUSALS_ENABLED";
 
-/// Whether the switch is on, from its raw value: the strict literal `true`, trimmed, nothing else.
+/// Whether the switch is on, from its raw value: the exact literal `true`, nothing else.
 #[must_use]
 pub fn parse_typed_refusals(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// The switch as this process reads it.

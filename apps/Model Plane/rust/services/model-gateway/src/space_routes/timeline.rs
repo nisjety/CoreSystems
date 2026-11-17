@@ -145,8 +145,10 @@ fn summary_json(thread: &ThreadSummary) -> Value {
     item
 }
 
+/// `include_pinned`, a wire boolean the BFF sends as `1`: only the exact literals `1` or `true`,
+/// with no surrounding whitespace and no other spelling.
 fn flag_on(raw: Option<&str>) -> bool {
-    matches!(raw.map(str::trim), Some("1" | "true"))
+    matches!(raw, Some("1" | "true"))
 }
 
 /// The ids of a `refresh` parameter: at most 30, each a bounded id.
@@ -237,4 +239,27 @@ async fn list_space_timeline(
         "total_posts": response.total_posts,
     }))
     .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flag_on;
+
+    #[test]
+    fn include_pinned_is_on_only_for_the_exact_wire_literals() {
+        assert!(flag_on(Some("1")));
+        assert!(flag_on(Some("true")));
+        for off in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("on"),
+            Some("yes"),
+            Some("TRUE"),
+            Some(" 1 "),
+            Some(" true "),
+        ] {
+            assert!(!flag_on(off), "{off:?}");
+        }
+    }
 }

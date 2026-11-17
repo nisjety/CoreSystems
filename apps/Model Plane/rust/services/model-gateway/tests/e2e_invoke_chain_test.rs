@@ -3161,7 +3161,7 @@ async fn invoke_with_versions(
 #[tokio::test]
 #[serial_test::serial]
 async fn regenerate_sets_leaf_to_parent_and_skips_user_append() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let (mock_session, session_handles) = MockSessionCore::new();
     seed_thread(
@@ -3202,7 +3202,7 @@ async fn regenerate_sets_leaf_to_parent_and_skips_user_append() {
 #[tokio::test]
 #[serial_test::serial]
 async fn edit_creates_sibling_user_turn() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let (mock_session, session_handles) = MockSessionCore::new();
     seed_thread(
@@ -3252,7 +3252,7 @@ async fn edit_creates_sibling_user_turn() {
 #[tokio::test]
 #[serial_test::serial]
 async fn do_turn_with_regenerate_is_refused() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let (mock_session, session_handles) = MockSessionCore::new();
     seed_thread(
@@ -3280,7 +3280,7 @@ async fn do_turn_with_regenerate_is_refused() {
 #[tokio::test]
 #[serial_test::serial]
 async fn version_turn_is_refused_while_the_switch_is_off() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let (mock_session, session_handles) = MockSessionCore::new();
     seed_thread(
@@ -3502,7 +3502,7 @@ async fn route_status(
 #[tokio::test]
 #[serial_test::serial]
 async fn ai_unary_routes_forward_request_zdr_to_chat_and_embeddings() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     let captured = CapturedZdrRequests::default();
     let client = spawn_mock(MockOk::capturing_zdr(captured.clone())).await;
     let (mock_session, _) = MockSessionCore::new();
@@ -3643,7 +3643,7 @@ async fn service_token_is_denied_on_user_delegated_retrieval_and_session_routes(
 #[tokio::test]
 #[serial_test::serial]
 async fn ai_images_routes_forward_to_inference_core() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, _) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
@@ -3788,7 +3788,7 @@ async fn ai_images_routes_forward_to_inference_core() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_emits_ingress_and_usage_on_success() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -3837,7 +3837,7 @@ async fn invoke_emits_ingress_and_usage_on_success() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_fails_closed_before_provider_when_initial_managed_heartbeat_is_unavailable() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let inference_calls = Arc::new(AtomicUsize::new(0));
     let client = spawn_mock(MockOk::counting(Arc::clone(&inference_calls))).await;
@@ -3899,7 +3899,7 @@ async fn invoke_fails_closed_before_provider_when_initial_managed_heartbeat_is_u
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_returns_502_when_inference_unavailable() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockDown).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -3943,7 +3943,7 @@ async fn invoke_returns_502_when_inference_unavailable() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_emits_stream_and_usage_on_success() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -3987,7 +3987,7 @@ async fn invoke_stream_emits_stream_and_usage_on_success() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_never_presents_or_replays_done_before_terminal_receipt() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -4112,7 +4112,7 @@ async fn invoke_stream_never_presents_or_replays_done_before_terminal_receipt() 
 #[serial_test::serial]
 async fn invoke_stream_completes_and_persists_after_the_client_disconnects_mid_stream() {
     use futures::StreamExt as _;
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -4274,7 +4274,7 @@ async fn invoke_stream_completes_and_persists_after_the_client_disconnects_mid_s
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_done_cursor_follows_every_buffered_frame() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, _session_handles) = MockSessionCore::new();
@@ -4384,7 +4384,7 @@ fn sse_frames(body: &str) -> Vec<(Option<u64>, String, serde_json::Value)> {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_sends_turn_timing_just_before_done_and_replays_it() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, _session_handles) = MockSessionCore::new();
@@ -4552,7 +4552,7 @@ async fn invoke_stream_sends_turn_timing_just_before_done_and_replays_it() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_sends_turn_timing_before_a_failed_tool_phase_error() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let quarry = MockServer::start().await;
     Mock::given(method("POST"))
@@ -4623,7 +4623,7 @@ async fn invoke_stream_sends_turn_timing_before_a_failed_tool_phase_error() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_reports_the_cost_basis_of_its_route() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     for (body, basis, cost) in [
         (
@@ -4691,7 +4691,7 @@ async fn invoke_stream_reports_the_cost_basis_of_its_route() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_terminalizes_prepared_run_when_grounding_bearer_is_missing() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -4729,7 +4729,7 @@ async fn invoke_stream_terminalizes_prepared_run_when_grounding_bearer_is_missin
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_agentic_reuses_the_prepared_session_run() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -4839,7 +4839,7 @@ async fn invoke_stream_agentic_reuses_the_prepared_session_run() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_agentic_on_the_subscription_pins_the_route_on_run_agent() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("true"));
     let _effects = EnvGuard::set("AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS", None);
@@ -4905,7 +4905,7 @@ async fn invoke_stream_agentic_on_the_subscription_pins_the_route_on_run_agent()
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_agentic_on_the_subscription_is_refused_when_the_switch_is_off() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     // Unset, and also each spelling that must read as off: only the literal true turns it on.
     for off in [
@@ -4971,7 +4971,7 @@ async fn invoke_stream_agentic_on_the_subscription_is_refused_when_the_switch_is
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_agentic_off_the_subscription_pins_no_route_even_with_the_switch_on() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("true"));
     let client = spawn_mock(MockOk::default()).await;
@@ -5014,7 +5014,7 @@ async fn invoke_stream_agentic_off_the_subscription_pins_no_route_even_with_the_
 #[tokio::test]
 #[serial_test::serial]
 async fn agentic_dispatch_forwards_the_space_retrieval_decision_only_when_scoped() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
 
     async fn retrieval_headers_for(switch: Option<&str>, body: String) -> Vec<Option<String>> {
@@ -5131,7 +5131,7 @@ async fn run_agent_request_for_turn(subscription: bool) -> mpv1::RunAgentRequest
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_agentic_resolves_the_run_budget_on_the_server_per_route() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("true"));
     let _effects = EnvGuard::set("AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS", None);
@@ -5195,7 +5195,7 @@ async fn run_agentic_turn_answered_with(
     request_body: &'static str,
     response: mpv1::RunAgentResponse,
 ) -> (String, MockSessionHandles) {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -5436,7 +5436,7 @@ async fn run_followed_agentic_turn(
     run_delay: Duration,
     script: Vec<(Duration, mpv1::OrchestrationEvent)>,
 ) -> FollowedTurn {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, handles) = MockSessionCore::new();
@@ -5611,7 +5611,7 @@ async fn an_agent_run_past_the_deadline_is_left_alone_and_named_in_the_error() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_rejects_agentic_combined_with_a_restrictive_retrieval_scope() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -5659,7 +5659,7 @@ async fn invoke_stream_rejects_agentic_combined_with_a_restrictive_retrieval_sco
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_agentic_leaves_an_ambiguous_dispatch_alone() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -5722,7 +5722,7 @@ async fn invoke_stream_agentic_leaves_an_ambiguous_dispatch_alone() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_agentic_terminalizes_on_confirmed_dispatch_rejection() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -5819,7 +5819,7 @@ async fn execute_turn_with_resume(
     seed: impl FnOnce(&model_gateway::coordinator::PlanModeStore),
     body: &'static str,
 ) -> ExecuteTurnOutcome {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let _floor = EnvGuard::set("HARNESS_POSTURE_FLOOR", None);
     let client = spawn_mock(MockOk::default()).await;
@@ -6046,7 +6046,7 @@ async fn invoke_stream_execute_granted_invalid_combinations_never_prepare_a_run(
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_recovers_when_client_thread_id_is_not_durable_yet() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -6113,7 +6113,7 @@ async fn invoke_stream_recovers_when_client_thread_id_is_not_durable_yet() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_includes_thread_history_and_persists_assistant() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
     let client = spawn_mock(MockOk::capturing(captured_messages.clone())).await;
@@ -6183,7 +6183,7 @@ async fn invoke_stream_includes_thread_history_and_persists_assistant() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_uses_context_assembly_segments_before_inference() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
     let client = spawn_mock(MockOk::capturing(captured_messages.clone())).await;
@@ -6310,7 +6310,7 @@ async fn invoke_stream_uses_context_assembly_segments_before_inference() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_search_turn_keeps_prior_user_name_context() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
 
     let quarry = MockServer::start().await;
@@ -6422,7 +6422,7 @@ async fn invoke_stream_search_turn_keeps_prior_user_name_context() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_browse_web_flag_forces_search_without_tool_array() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
 
     let quarry = MockServer::start().await;
@@ -6514,7 +6514,7 @@ async fn invoke_stream_browse_web_flag_forces_search_without_tool_array() {
 #[serial_test::serial]
 async fn invoke_stream_opens_the_response_before_the_tool_phase_finishes() {
     use futures::StreamExt as _;
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
 
     // A deliberately slow tool phase. The handler used to await the whole phase
@@ -6600,7 +6600,7 @@ async fn invoke_stream_opens_the_response_before_the_tool_phase_finishes() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_fails_closed_when_tool_audit_intent_cannot_be_persisted() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
 
     let quarry = MockServer::start().await;
@@ -6675,7 +6675,7 @@ async fn invoke_stream_fails_closed_when_tool_audit_intent_cannot_be_persisted()
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_leaves_a_durable_reservation_when_tool_audit_finalization_fails() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
 
     let quarry = MockServer::start().await;
@@ -6753,7 +6753,7 @@ async fn invoke_stream_leaves_a_durable_reservation_when_tool_audit_finalization
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_generate_image_emits_attachment_and_persists() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -6800,7 +6800,7 @@ async fn invoke_stream_generate_image_emits_attachment_and_persists() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_runs_search_image_followup_sequence_with_context() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
 
     let quarry = MockServer::start().await;
@@ -6968,7 +6968,7 @@ async fn invoke_stream_runs_search_image_followup_sequence_with_context() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_falls_back_to_infer_when_stream_unavailable() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     // InferStream is unavailable but non-streaming Infer works: the endpoint
     // must reveal Infer's real content in chunks and close with a real `done`
@@ -7025,7 +7025,7 @@ async fn invoke_stream_falls_back_to_infer_when_stream_unavailable() {
 #[serial_test::serial]
 async fn invoke_stream_fallback_detaches_on_disconnect_and_persists_the_answer() {
     use futures::StreamExt as _;
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockStreamDown).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -7166,7 +7166,7 @@ async fn invoke_stream_fallback_detaches_on_disconnect_and_persists_the_answer()
 #[serial_test::serial]
 async fn invoke_stream_stop_before_publication_persists_nothing() {
     use futures::StreamExt as _;
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockStreamDown).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -7272,7 +7272,7 @@ async fn invoke_stream_stop_before_publication_persists_nothing() {
 #[serial_test::serial]
 async fn invoke_stream_stops_when_its_run_is_cancelled_durably() {
     use futures::StreamExt as _;
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockStreamDown).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -7356,7 +7356,7 @@ async fn invoke_stream_stops_when_its_run_is_cancelled_durably() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_does_not_save_onto_a_run_that_ended_before_the_save() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -7432,7 +7432,7 @@ async fn invoke_stream_does_not_save_onto_a_run_that_ended_before_the_save() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_reports_a_provider_stream_that_ends_without_its_final_chunk() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk {
         stream_without_final: true,
@@ -7493,7 +7493,7 @@ async fn invoke_stream_reports_a_provider_stream_that_ends_without_its_final_chu
 #[tokio::test]
 #[serial_test::serial]
 async fn a_failed_search_keeps_the_fixed_completion_text_of_a_revised_document() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let quarry = MockServer::start().await;
     Mock::given(method("POST"))
@@ -7692,7 +7692,7 @@ async fn run_note_thread_turn_capturing(
     may_end_in_error: bool,
 ) -> ConversationTurn {
     let NoteThreadTurn { levers, author_guidance, review_proposal_rule, content, artifacts, rounds, queued_during_first_review, follow_ups } = turn;
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let offers: CapturedOffers = Arc::new(Mutex::new(Vec::new()));
     // The state, and so its queue, exists only after the mock is spawned.
@@ -9728,7 +9728,7 @@ async fn with_the_prefetch_off_a_scoped_revision_gets_the_model_decided_read() {
 #[serial_test::serial]
 async fn invoke_resume_follows_a_live_producer_that_has_buffered_nothing_yet() {
     use futures::StreamExt as _;
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
 
     let quarry = MockServer::start().await;
@@ -9857,7 +9857,7 @@ async fn invoke_resume_follows_a_live_producer_that_has_buffered_nothing_yet() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_emits_error_when_inference_fully_unavailable() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     // Both InferStream and the Infer fallback are down: emit an honest `error`
     // event (chat-parity §20), never a fake successful `done`, and publish no
@@ -9904,7 +9904,7 @@ async fn invoke_stream_emits_error_when_inference_fully_unavailable() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_replay_determinism() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -9945,7 +9945,7 @@ async fn invoke_replay_determinism() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_propagates_thread_id() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -9979,7 +9979,7 @@ async fn invoke_propagates_thread_id() {
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_reuses_existing_thread() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -10031,7 +10031,7 @@ async fn run_direct_turn<S: InferenceCore>(
     MockSessionHandles,
     model_gateway::stream_buffer::StreamBufferStore,
 ) {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(inference).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -10443,7 +10443,7 @@ async fn invoke_stream_never_routes_a_refused_completion_around_session_core() {
 #[tokio::test]
 #[serial_test::serial]
 async fn every_tool_round_opts_out_of_the_inference_response_cache() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let seen: CapturedCacheControl = Arc::new(Mutex::new(Vec::new()));
     let client = spawn_mock(MockOk {
@@ -10864,7 +10864,7 @@ async fn run_source_bound_subscription_turn(
     inference: MockOk,
     prompt: &str,
 ) -> (String, MockSessionHandles) {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(inference).await;
     let (mock_session, handles) = MockSessionCore::new();
@@ -10976,7 +10976,7 @@ async fn an_overlong_subscription_tool_round_owing_a_document_is_prompt_too_long
 #[tokio::test]
 #[serial_test::serial]
 async fn a_subscription_refusal_during_the_source_review_is_not_blamed_on_the_draft() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let offers: CapturedOffers = Arc::new(Mutex::new(Vec::new()));
     let client = spawn_mock(MockOk {
@@ -11095,7 +11095,7 @@ async fn a_subscription_refusal_during_the_source_review_is_not_blamed_on_the_dr
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_answers_a_subscription_refusal_with_its_status_body_and_retry_after() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let resets_at = (chrono::Utc::now() + chrono::TimeDelta::hours(2))
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -11174,7 +11174,7 @@ async fn invoke_answers_a_subscription_refusal_with_its_status_body_and_retry_af
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_answers_a_subscription_overflow_as_prompt_too_long() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk {
         refusal: Some(MockRefusal {
@@ -11233,7 +11233,7 @@ async fn run_note_thread_turn_with_scripted_review(
     content: &str,
     rounds: Vec<Vec<mpv1::ToolCall>>,
 ) -> ConversationTurn {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let offers: CapturedOffers = Arc::new(Mutex::new(Vec::new()));
     let client = spawn_mock(MockOk {
@@ -11418,7 +11418,7 @@ async fn read_sse_until(response: &mut reqwest::Response, seen: &mut String, nee
 /// trigger is the one `main` builds (`drain::shutdown_trigger`) and the server
 /// stops on it through `serve_on`, as `serve` does.
 async fn catch_a_turn_in_flight_with_a_shutdown_signal(window: Duration) -> DrainObservation {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
     let client = spawn_mock(MockOk {
@@ -12867,7 +12867,7 @@ fn part_of(
 #[tokio::test]
 #[serial_test::serial]
 async fn agentic_dispatch_carries_the_composed_run_context() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let _history = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS", None);
     let off = {
@@ -12946,7 +12946,7 @@ async fn agentic_dispatch_carries_the_composed_run_context() {
 #[tokio::test]
 #[serial_test::serial]
 async fn agentic_run_context_in_instructions_mode_reads_no_history_or_memory() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", Some("instructions"));
     let turn = run_context_turn(RUN_CONTEXT_TURN).await;
@@ -12968,7 +12968,7 @@ async fn agentic_run_context_in_instructions_mode_reads_no_history_or_memory() {
 #[tokio::test]
 #[serial_test::serial]
 async fn agentic_run_context_skips_memory_for_a_trivial_prompt_and_keeps_history() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", Some("full"));
     let turn = run_context_turn(
@@ -12996,7 +12996,7 @@ async fn agentic_run_context_skips_memory_for_a_trivial_prompt_and_keeps_history
 #[tokio::test]
 #[serial_test::serial]
 async fn agentic_run_context_on_the_pinned_subscription_route_is_instructions_only() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", Some("full"));
     let _route = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("true"));
@@ -13034,7 +13034,7 @@ async fn agentic_run_context_on_the_pinned_subscription_route_is_instructions_on
 #[tokio::test]
 #[serial_test::serial]
 async fn agentic_run_context_off_is_byte_identical_and_makes_no_extra_call() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let baseline = {
         let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", None);
@@ -13070,7 +13070,7 @@ async fn agentic_run_context_off_is_byte_identical_and_makes_no_extra_call() {
 #[tokio::test]
 #[serial_test::serial]
 async fn agentic_run_context_dispatches_when_the_persona_read_never_returns() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let _history = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS", None);
     let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", Some("full"));
@@ -13125,7 +13125,7 @@ const RUN_CONTEXT_PII_TURN: &str = r#"{"content":"mail anna@example.com about th
 #[tokio::test]
 #[serial_test::serial]
 async fn agentic_run_context_memory_query_is_redacted_exactly_when_the_policy_requires() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", Some("full"));
 
@@ -13164,7 +13164,7 @@ async fn agentic_run_context_memory_query_is_redacted_exactly_when_the_policy_re
 #[tokio::test]
 #[serial_test::serial]
 async fn agentic_dispatch_carries_the_space_layer_after_org_and_before_persona() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let _history = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS", None);
     let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", Some("full"));
@@ -13244,7 +13244,7 @@ async fn a_zdr_turn_never_reaches_run_context_composition() {
 #[tokio::test]
 #[serial_test::serial]
 async fn an_ordinary_agentic_turn_makes_each_read_the_zdr_guard_counts() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let _history = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS", None);
     let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", Some("full"));
@@ -13902,7 +13902,7 @@ async fn the_effort_a_turn_asks_for_is_lowered_to_the_policys_ceiling_and_never_
 #[serial_test::serial]
 async fn the_catalogue_carries_the_policys_meta_as_a_sibling_field_or_nothing() {
     async fn models(access: Option<mpv1::ModelAccessMeta>) -> serde_json::Value {
-        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
         let client = spawn_mock(MockOk { catalogue_access: access, ..MockOk::default() }).await;
         let (mock_session, _handles) = MockSessionCore::new();
         let session_client = spawn_session_mock(mock_session).await;
@@ -13962,7 +13962,7 @@ async fn the_catalogue_carries_the_policys_meta_as_a_sibling_field_or_nothing() 
 #[tokio::test]
 #[serial_test::serial]
 async fn recall_frames_and_flags_an_earlier_message_that_carries_an_injection_marker() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let _switch = EnvGuard::set("MODEL_GATEWAY_RECALL_CONVERSATIONS_ENABLED", Some("true"));
     let rounds = vec![vec![mpv1::ToolCall {
@@ -14111,7 +14111,7 @@ fn append_response(sequence: u64, message_id: &str, deduplicated: bool) -> Resul
 async fn space_post_app(
     script: Vec<Result<AppendMessageResponse, Status>>,
 ) -> (Router, MockSessionHandles, wiremock::MockServer) {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, handles) = MockSessionCore::new();
     handles.append_script.lock().unwrap().extend(script);
@@ -14485,7 +14485,7 @@ impl mpv1::space_room_read_service_server::SpaceRoomReadService for MockSpaceRoo
 /// A router whose Session Core `SpaceEvents` and `SpaceRoomReadService` are the given mocks,
 /// authenticated through the dev bypass as a persistent user.
 async fn space_read_app(events: MockSpaceEvents, room: MockSpaceRoomRead) -> (Router, wiremock::MockServer) {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, _) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
@@ -14846,7 +14846,7 @@ async fn space_artifacts_route_maps_refusals_and_fails_a_bad_space_before_upstre
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_thread_run_active_is_an_error_frame_and_makes_no_inference_call() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let infer_calls = Arc::new(AtomicUsize::new(0));
     let client = spawn_mock(MockOk {

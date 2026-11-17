@@ -5204,12 +5204,17 @@ mod tests {
             .await;
     }
 
-    /// A Quarry scrape whose page ended at `final_url`. `scrapes` is how many scrapes the test expects.
-    async fn scrape_page(quarry: &MockServer, final_url: &str, scrapes: u64) {
+    /// A Quarry scrape of `requested` whose page ended at `final_url`, in the edge's `UrlTriple` shape. `scrapes` is how
+    /// many scrapes the test expects.
+    async fn scrape_page(quarry: &MockServer, requested: &str, final_url: &str, scrapes: u64) {
         Mock::given(method("POST"))
             .and(path("/v1/scrape"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "data": {"status": 200, "url": {"final": final_url}, "formats": {"markdown": "Price 5"}}
+                "data": {
+                    "status": 200,
+                    "url": {"requested": requested, "final_url": final_url},
+                    "formats": {"markdown": "Price 5"}
+                }
             })))
             .expect(scrapes)
             .mount(quarry)
@@ -5265,7 +5270,13 @@ mod tests {
         let org_core = MockServer::start().await;
         org_rules(&org_core, "org_c09_fetch_host", 1).await;
         let quarry = MockServer::start().await;
-        scrape_page(&quarry, "https://blocked.c09.example/a", 0).await;
+        scrape_page(
+            &quarry,
+            "https://blocked.c09.example/a",
+            "https://blocked.c09.example/a",
+            0,
+        )
+        .await;
         let (service, _) = site_policy_service(&org_core, &quarry).await;
 
         let status = service
@@ -5297,7 +5308,13 @@ mod tests {
         // One answer for the requested host, which is allowed, and one for the host the page ended on, which is not.
         org_rules(&org_core, "org_c09_fetch_final", 2).await;
         let quarry = MockServer::start().await;
-        scrape_page(&quarry, "https://blocked.c09.example/landing", 1).await;
+        scrape_page(
+            &quarry,
+            "https://allowed.c09.example/a",
+            "https://blocked.c09.example/landing",
+            1,
+        )
+        .await;
         let (service, _) = site_policy_service(&org_core, &quarry).await;
 
         let status = service
@@ -5328,7 +5345,13 @@ mod tests {
         let org_core = MockServer::start().await;
         org_rules(&org_core, "org_c09_fetch_off", 0).await;
         let quarry = MockServer::start().await;
-        scrape_page(&quarry, "https://blocked.c09.example/a", 1).await;
+        scrape_page(
+            &quarry,
+            "https://blocked.c09.example/a",
+            "https://blocked.c09.example/a",
+            1,
+        )
+        .await;
         let (service, _) = site_policy_service(&org_core, &quarry).await;
 
         let reply = service
@@ -5352,7 +5375,13 @@ mod tests {
         let org_core = MockServer::start().await;
         org_rules(&org_core, "org_c09_extract_host", 1).await;
         let quarry = MockServer::start().await;
-        scrape_page(&quarry, "https://blocked.c09.example/a", 0).await;
+        scrape_page(
+            &quarry,
+            "https://blocked.c09.example/a",
+            "https://blocked.c09.example/a",
+            0,
+        )
+        .await;
         let (service, publisher) = site_policy_service(&org_core, &quarry).await;
 
         let status = service
@@ -5380,7 +5409,13 @@ mod tests {
         let org_core = MockServer::start().await;
         org_rules(&org_core, "org_c09_extract_final", 2).await;
         let quarry = MockServer::start().await;
-        scrape_page(&quarry, "https://blocked.c09.example/landing", 1).await;
+        scrape_page(
+            &quarry,
+            "https://allowed.c09.example/a",
+            "https://blocked.c09.example/landing",
+            1,
+        )
+        .await;
         let (service, publisher) = site_policy_service(&org_core, &quarry).await;
 
         let status = service
@@ -5413,7 +5448,13 @@ mod tests {
         let org_core = MockServer::start().await;
         org_rules(&org_core, "org_c09_extract_off", 0).await;
         let quarry = MockServer::start().await;
-        scrape_page(&quarry, "https://blocked.c09.example/a", 1).await;
+        scrape_page(
+            &quarry,
+            "https://blocked.c09.example/a",
+            "https://blocked.c09.example/a",
+            1,
+        )
+        .await;
         let (service, publisher) = site_policy_service(&org_core, &quarry).await;
 
         let reply = service

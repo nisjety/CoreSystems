@@ -16,7 +16,7 @@
 //! - `AUTH_CORE_JWT_LEEWAY_SECS`     — optional; default 30s. Clock-skew
 //!   tolerance applied to `exp` and `nbf` validation.
 //! - `MODEL_GATEWAY_AUTH_DEV_BYPASS` — accepts an unverified bearer only when
-//!   this and `ALLOW_INSECURE_DEV_DEFAULTS` are both explicitly enabled.
+//!   this is the literal `true` and `ALLOW_INSECURE_DEV_DEFAULTS` is the literal `1`.
 
 use std::fmt;
 use std::sync::{Arc, LazyLock};
@@ -1028,9 +1028,23 @@ fn dev_bypass_enabled() -> bool {
     // the executable opens a listener. Keeping this helper single-purpose
     // also lets middleware unit tests exercise the bypass without booting the
     // entire service.
-    std::env::var("MODEL_GATEWAY_AUTH_DEV_BYPASS")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    dev_bypass_from(
+        std::env::var("MODEL_GATEWAY_AUTH_DEV_BYPASS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// `MODEL_GATEWAY_AUTH_DEV_BYPASS`, read exactly: only the literal `true` requests the bypass.
+/// `1`, `TRUE`, ` true ` and every other value leave it off.
+fn dev_bypass_from(value: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(value)
+}
+
+/// `ALLOW_INSECURE_DEV_DEFAULTS`, read exactly: only `1` opens the second gate, the spelling the
+/// Data Plane readers use for the same name. `true`, `TRUE` and `on` leave it closed.
+fn insecure_dev_defaults_from(value: Option<&str>) -> bool {
+    value == Some("1")
 }
 
 fn validate_startup_values(
@@ -1044,7 +1058,7 @@ fn validate_startup_values(
         return if insecure_development {
             Ok(())
         } else {
-            Err("MODEL_GATEWAY_AUTH_DEV_BYPASS requires ALLOW_INSECURE_DEV_DEFAULTS")
+            Err("MODEL_GATEWAY_AUTH_DEV_BYPASS=true requires ALLOW_INSECURE_DEV_DEFAULTS=1")
         };
     }
     let configured = |value: Option<&str>| value.is_some_and(|value| !value.trim().is_empty());
@@ -1068,12 +1082,9 @@ fn validate_startup_values(
 /// Returns an error when verification material is incomplete or when the
 /// unverified development bypass is requested without its second explicit gate.
 pub fn validate_startup() -> anyhow::Result<()> {
-    let bypass_requested = std::env::var("MODEL_GATEWAY_AUTH_DEV_BYPASS")
-        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let insecure_development = std::env::var("ALLOW_INSECURE_DEV_DEFAULTS")
-        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let bypass_requested = dev_bypass_enabled();
+    let insecure_development =
+        insecure_dev_defaults_from(std::env::var("ALLOW_INSECURE_DEV_DEFAULTS").ok().as_deref());
     validate_startup_values(
         std::env::var("AUTH_CORE_JWKS_URL").ok().as_deref(),
         std::env::var("AUTH_CORE_ISSUER").ok().as_deref(),
@@ -1939,7 +1950,8 @@ pub const GOAL_JUDGE_TURN_PATH: &str = "/internal/v1/goals/:goal_id/judge-turn";
 /// `scope` and, if `service` is set, is exactly that service. `service: None` means any service
 /// holding the scope.
 ///
-/// `flag` (E3.6-8) names an environment switch that must be `1`, `true` or `on` for the SERVICE
+/// `flag` (E3.6-8) names an environment switch that must be the exact literal `true` for the
+/// SERVICE
 /// lane of this route to exist: while it is off the gateway answers a service that holds the
 /// scope with `404`, as if the row were not there. The route itself, and what users may do with
 /// it, are unchanged by the switch.
@@ -2055,9 +2067,10 @@ fn service_route_allowed(claims: &Claims, method: &str, path: &str) -> bool {
     })
 }
 
-/// Whether a switch value turns a flag on: only the literals `1`, `true` and `on`.
+/// Whether a switch value turns a flag on: only the exact literal `true` (the strict reader of
+/// `mp_contracts::loop_fold::switch_from`; no trimming, no case folding, no `1` and no `on`).
 fn service_flag_on(value: Option<&str>) -> bool {
-    matches!(value.map(str::trim), Some("1" | "true" | "on"))
+    mp_contracts::loop_fold::switch_from(value)
 }
 
 /// Whether `claims` holds a row for `method path` whose switch is OFF, so the route does not
@@ -2509,7 +2522,7 @@ mod tests {
 
         clear_env();
         // Serialised via #[serial]; cleared by clear_env on next test.
-        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
         std::env::set_var("ALLOW_INSECURE_DEV_DEFAULTS", "1");
 
         let app = Router::new()
@@ -2548,7 +2561,7 @@ mod tests {
         }
 
         clear_env();
-        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
         std::env::set_var("ALLOW_INSECURE_DEV_DEFAULTS", "1");
 
         // Same order as `http_routes.rs`: the LAST `.layer` is outermost, so
@@ -2586,7 +2599,7 @@ mod tests {
         }
 
         clear_env();
-        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
         std::env::set_var("ALLOW_INSECURE_DEV_DEFAULTS", "1");
 
         let app = Router::new()
@@ -2620,7 +2633,7 @@ mod tests {
         }
 
         clear_env();
-        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
         std::env::set_var("ALLOW_INSECURE_DEV_DEFAULTS", "1");
 
         let app = Router::new()
@@ -4178,7 +4191,7 @@ mod tests {
         }
 
         clear_env();
-        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
         let app = Router::new()
             .route("/", get(requires_verified_bearer))
             .layer(middleware::from_fn(require_auth));
@@ -4978,7 +4991,7 @@ mod tests {
     async fn dev_bypass_refuses_a_zdr_delegate_it_cannot_match() {
         let kid = "test-kid-bypass-posture";
         let _server = configure_real_verification(kid).await;
-        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
         std::env::set_var("ALLOW_INSECURE_DEV_DEFAULTS", "1");
         // The bypass asserts no retention posture of its own; it is the
         // persistent posture, so a ZDR delegate for the same identity is refused.
@@ -5184,14 +5197,58 @@ mod service_route_table_tests {
     }
 
     #[test]
-    fn a_service_switch_is_on_only_for_the_three_literals() {
-        for on in ["1", "true", "on", " 1 "] {
-            assert!(service_flag_on(Some(on)), "{on:?}");
+    fn a_service_switch_is_on_only_for_the_exact_literal_true() {
+        assert!(service_flag_on(Some("true")));
+        for off in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("off"),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+            Some("TRUE"),
+            Some(" true "),
+            Some("enabled"),
+            Some("2"),
+        ] {
+            assert!(!service_flag_on(off), "{off:?}");
         }
-        for off in ["", "0", "false", "off", "yes", "TRUE", "enabled", "2"] {
-            assert!(!service_flag_on(Some(off)), "{off:?}");
+    }
+
+    #[test]
+    fn the_dev_bypass_pair_reads_only_its_exact_literals() {
+        // The bypass needs the literal `true`; the insecure gate needs `1`, the spelling the
+        // Data Plane readers use. Neither accepts the other's on-word, a case change or whitespace.
+        assert!(dev_bypass_from(Some("true")));
+        for off in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("1"),
+            Some("TRUE"),
+            Some("True"),
+            Some(" true "),
+            Some("on"),
+            Some("yes"),
+        ] {
+            assert!(!dev_bypass_from(off), "{off:?}");
         }
-        assert!(!service_flag_on(None));
+        assert!(insecure_dev_defaults_from(Some("1")));
+        for off in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("true"),
+            Some("TRUE"),
+            Some(" 1 "),
+            Some("on"),
+            Some("yes"),
+        ] {
+            assert!(!insecure_dev_defaults_from(off), "{off:?}");
+        }
     }
 
     #[test]
@@ -5199,7 +5256,7 @@ mod service_route_table_tests {
         let svc = service("service:quarry-edge", &["models:invoke"]);
         let unset = |_: &str| None;
         let only = |name: &'static str| {
-            move |asked: &str| (asked == name).then(|| "1".to_owned())
+            move |asked: &str| (asked == name).then(|| "true".to_owned())
         };
         for path in ["/v1/ai/language/pii", "/v1/ai/documents/layout"] {
             assert!(service_route_switched_off(&svc, "POST", path, &unset), "{path}");
@@ -5255,7 +5312,14 @@ mod service_route_table_tests {
         assert_eq!(status_of(svc.clone(), "/v1/ai/chat").await, StatusCode::OK);
         assert_eq!(status_of(no_scope, "/v1/ai/language/pii").await, StatusCode::FORBIDDEN);
 
-        std::env::set_var(SERVICE_FLAG_AI_PII, "1");
+        std::env::set_var(SERVICE_FLAG_AI_PII, "true");
+        // A value that is not the literal `true` leaves the route closed, `1` included.
+        std::env::set_var(SERVICE_FLAG_AI_LAYOUT, "1");
+        assert_eq!(
+            status_of(svc.clone(), "/v1/ai/documents/layout").await,
+            StatusCode::NOT_FOUND
+        );
+        std::env::remove_var(SERVICE_FLAG_AI_LAYOUT);
         assert_eq!(status_of(svc.clone(), "/v1/ai/language/pii").await, StatusCode::OK);
         assert_eq!(status_of(svc.clone(), "/v1/ai/documents/layout").await, StatusCode::NOT_FOUND);
         std::env::set_var(SERVICE_FLAG_AI_LAYOUT, "true");

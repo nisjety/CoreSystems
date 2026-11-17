@@ -120,10 +120,7 @@ fn input_refusal(error: InputError) -> HttpJsonError {
 /// Whether side chat is on in this process. Read at each call, as the other turn switches are.
 #[must_use]
 pub fn enabled() -> bool {
-    std::env::var(ENABLED_ENV)
-        .ok()
-        .as_deref()
-        .is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
 }
 
 /// The switch first, so a deployment without the feature answers the same for every caller.

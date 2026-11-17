@@ -57,10 +57,7 @@ const MAX_REF_CHARS: usize = 128;
 /// Whether event triggers are on in this process. Read at each call, as the other turn switches are.
 #[must_use]
 pub fn enabled() -> bool {
-    std::env::var(ENABLED_ENV)
-        .ok()
-        .as_deref()
-        .is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
 }
 
 /// The routes, merged into the authed router beside `thread_goal_routes::router()`.

@@ -608,7 +608,7 @@ impl OfficeDelivery {
 /// file delivered.
 #[must_use]
 fn enforce_from(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// The report the verifier made of the file `name`, if it made one. A report that does not parse is no check at
@@ -1875,7 +1875,7 @@ pub fn web_search_batch_enabled() -> bool {
 }
 
 fn parse_web_search_batch(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// The references one chat turn has issued: `w1`, `w2`, and so on, each standing for the URL of one search hit.
@@ -15455,7 +15455,7 @@ mod tests {
     #[test]
     fn only_the_literal_true_switches_enforcement_on() {
         assert!(enforce_from(Some("true")));
-        assert!(enforce_from(Some(" true ")));
+        assert!(!enforce_from(Some(" true ")));
         for off in [None, Some(""), Some("TRUE"), Some("1"), Some("yes"), Some("false")] {
             assert!(!enforce_from(off), "{off:?} must not switch enforcement on");
         }
@@ -16109,9 +16109,9 @@ mod tests {
             .await;
     }
 
-    /// A Quarry scrape whose page ended at `final_url`. Its prose quotes the question and carries a marker, and its
-    /// structured harvest carries a price figure; only that page holds either. `scrapes` is how many scrapes the test
-    /// expects.
+    /// A Quarry scrape of the kept hit, `https://allowed.rel1.example/strompris`, whose page ended at `final_url`, in the
+    /// edge's `UrlTriple` shape. Its prose quotes the question and carries a marker, and its structured harvest carries a
+    /// price figure; only that page holds either. `scrapes` is how many scrapes the test expects.
     async fn grounding_scrape(quarry: &wiremock::MockServer, final_url: &str, scrapes: u64) {
         let markdown = "Strømpris i Norge REL1-MARKER-7f3a for uke 46 følger kraftbørsen time for time. Prisen \
                         varierer mellom prisområdene i Norge gjennom døgnet, og oversikten over strømpris i Norge \
@@ -16119,7 +16119,10 @@ mod tests {
         let body = serde_json::json!({
             "data": {
                 "status": 200,
-                "url": {"final": final_url},
+                "url": {
+                    "requested": "https://allowed.rel1.example/strompris",
+                    "final_url": final_url
+                },
                 "formats": {"markdown": markdown},
                 "structured": {"figures": [{
                     "label": "Strømpris",
@@ -17852,7 +17855,7 @@ mod tests {
     fn batched_search_switch_reads_only_the_literal_true() {
         assert_eq!(WEB_SEARCH_BATCH_ENV, "MODEL_GATEWAY_WEB_SEARCH_BATCH");
         assert!(parse_web_search_batch(Some("true")));
-        assert!(parse_web_search_batch(Some(" true ")));
+        assert!(!parse_web_search_batch(Some(" true ")));
         for off in [
             None,
             Some(""),

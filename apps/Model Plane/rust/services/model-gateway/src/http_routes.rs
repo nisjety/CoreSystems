@@ -5450,9 +5450,9 @@ enum AiChatMetering {
 }
 
 impl AiChatMetering {
-    /// Anything other than the literal `service` or `all` is `off`.
+    /// Anything other than the exact literal `service` or `all` is `off`: no trimming, no case folding.
     fn parse(raw: Option<&str>) -> Self {
-        match raw.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+        match raw {
             Some("service") => Self::Service,
             Some("all") => Self::All,
             _ => Self::Off,
@@ -12955,7 +12955,7 @@ pub fn wide_research_entry_enabled() -> bool {
 }
 
 fn wide_research_entry_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
-    get(WIDE_RESEARCH_ENTRY_ENV).is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(get(WIDE_RESEARCH_ENTRY_ENV).as_deref())
 }
 
 /// The most items one wide-research run fans out: the hard maximum of the org policy key and of
@@ -13338,6 +13338,8 @@ mod wide_research_tests {
             (Some("false"), false),
             (Some("1"), false),
             (Some("TRUE"), false),
+            (Some(" true "), false),
+            (Some("true "), false),
             (Some("true"), true),
         ] {
             let get = |_: &str| value.map(str::to_owned);
@@ -15281,9 +15283,9 @@ fn named_agent_threads_enabled() -> bool {
 }
 
 /// [`named_agent_threads_enabled`] over an injected lookup, so the parsing is testable. Only the
-/// literal `true`, with surrounding whitespace ignored, turns it on.
+/// exact literal `true` turns it on (`switch_from`): a padded or cased value stays off.
 fn named_agent_threads_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
-    get(NAMED_AGENT_THREADS_ENV).is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(get(NAMED_AGENT_THREADS_ENV).as_deref())
 }
 
 #[cfg(test)]
@@ -15299,6 +15301,9 @@ mod named_agent_threads_switch_tests {
             Some("yes"),
             Some("TRUE"),
             Some("True"),
+            Some(" true"),
+            Some("true "),
+            Some(" true "),
         ] {
             let get = |_: &str| value.map(str::to_owned);
             assert!(!named_agent_threads_enabled_with(&get), "{value:?}");
@@ -16472,6 +16477,12 @@ fn is_thread_message_cursor(raw: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
+/// The `include_first` query flag of the thread-messages read (WS15-S6), a wire boolean: only the
+/// exact literals `1` (what the BFF sends) or `true`, with no surrounding whitespace.
+fn include_first_requested(raw: Option<&str>) -> bool {
+    matches!(raw, Some("1" | "true"))
+}
+
 async fn list_thread_messages(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -16507,10 +16518,7 @@ async fn list_thread_messages(
     let include_first = limit > 0
         && before.is_empty()
         && mp_contracts::space_timeline::api_enabled()
-        && query
-            .include_first
-            .as_deref()
-            .is_some_and(|raw| matches!(raw.trim(), "1" | "true"));
+        && include_first_requested(query.include_first.as_deref());
     // A shared-Space read (it carries a Control decision) sees only the
     // allowlisted metadata keys (WS07-S9a); the owner's Chat read is unchanged.
     let space_read_decision_ref = query.space_read_decision_ref.unwrap_or_default();
@@ -25058,7 +25066,29 @@ mod ai_chat_lane_tests {
         assert_eq!(AiChatMetering::parse(Some("1")), AiChatMetering::Off);
         assert_eq!(AiChatMetering::parse(Some("off")), AiChatMetering::Off);
         assert_eq!(AiChatMetering::parse(Some("service")), AiChatMetering::Service);
-        assert_eq!(AiChatMetering::parse(Some(" ALL ")), AiChatMetering::All);
+        assert_eq!(AiChatMetering::parse(Some("all")), AiChatMetering::All);
+        for other in ["ALL", " all ", "Service", "all\n"] {
+            assert_eq!(
+                AiChatMetering::parse(Some(other)),
+                AiChatMetering::Off,
+                "{other:?}"
+            );
+        }
+
+        // The `include_first` wire flag of the thread-messages read: the exact literals `1` or `true`.
+        assert!(include_first_requested(Some("1")));
+        assert!(include_first_requested(Some("true")));
+        for other in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("on"),
+            Some("TRUE"),
+            Some(" 1 "),
+            Some(" true "),
+        ] {
+            assert!(!include_first_requested(other), "{other:?}");
+        }
 
         let inference = SpeechInference::default();
         inference.answering(reply());

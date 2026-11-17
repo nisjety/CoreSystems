@@ -72,7 +72,7 @@ const UNSUPPORTED: SelectionRefusal = SelectionRefusal {
 /// Whether the switch is on, from its raw value.
 #[must_use]
 pub fn parse_enabled(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// Whether a selection edit is admitted in this process: the switch is on, artifact revisions are `on`, and
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn the_switch_reads_only_the_literal_true() {
         assert!(parse_enabled(Some("true")));
-        assert!(parse_enabled(Some(" true ")));
+        assert!(!parse_enabled(Some(" true ")));
         for value in [None, Some(""), Some("1"), Some("TRUE"), Some("on"), Some("yes")] {
             assert!(!parse_enabled(value), "{value:?}");
         }

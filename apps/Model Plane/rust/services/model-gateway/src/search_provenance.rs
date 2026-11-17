@@ -16,7 +16,7 @@ pub fn enabled() -> bool {
 }
 
 fn parse_enabled(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// The providers the line can name: Quarry's id, the closed id the frame carries, and the label it shows.
@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn the_switch_is_on_only_for_the_literal_true() {
         assert!(parse_enabled(Some("true")));
-        assert!(parse_enabled(Some(" true ")));
+        assert!(!parse_enabled(Some(" true ")));
         for raw in [
             None,
             Some(""),

@@ -74,16 +74,16 @@ impl ReviewProposalRule {
     /// Both settings, off first.
     pub const ALL: [Self; 2] = [Self::Off, Self::On];
 
-    /// The operator's setting: `off` or `on`, ignoring case and surrounding
-    /// whitespace. Unset, empty or anything else is off, so a mistyped value
-    /// (`1`, `true` and `yes` included) never selects the unvalidated rule.
+    /// The operator's setting: exactly `off` or `on`, with no case folding and no surrounding
+    /// whitespace. Unset, empty or anything else is off, so a mistyped value (`1`, `true`, `yes`
+    /// and `ON` included) never selects the unvalidated rule.
     #[must_use]
     pub fn parse(value: Option<&str>) -> Self {
         value.and_then(Self::recognise).unwrap_or_default()
     }
 
     fn recognise(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
+        match value {
             "off" => Some(Self::Off),
             "on" => Some(Self::On),
             _ => None,
@@ -158,14 +158,14 @@ mod tests {
     fn the_switch_is_off_unless_it_says_on() {
         assert_eq!(ReviewProposalRule::default(), ReviewProposalRule::Off);
         assert_eq!(ReviewProposalRule::parse(None), ReviewProposalRule::Off);
-        for on in ["on", "ON", "On", " on\n", "\ton "] {
-            assert_eq!(
-                ReviewProposalRule::parse(Some(on)),
-                ReviewProposalRule::On,
-                "{on:?}"
-            );
-        }
-        for off in ["off", "OFF", " off ", "", " ", "\n"] {
+        assert_eq!(
+            ReviewProposalRule::parse(Some("on")),
+            ReviewProposalRule::On
+        );
+        // Case and surrounding whitespace are not folded: these leave the rule off.
+        for off in [
+            "ON", "On", " on\n", "\ton ", "off", "OFF", " off ", "", " ", "\n",
+        ] {
             assert_eq!(
                 ReviewProposalRule::parse(Some(off)),
                 ReviewProposalRule::Off,

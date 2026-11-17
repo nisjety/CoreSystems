@@ -178,7 +178,7 @@ pub fn citation_passages_enabled() -> bool {
 /// Only the literal `true` enables; `1`, `on` and anything else stay off.
 #[must_use]
 pub fn parse_citation_passages(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// Longest quote a citation carries. A quote is the passage the source contributed, not the
@@ -4906,7 +4906,7 @@ mod citation_passage_tests {
     #[test]
     fn citation_passages_switch_reads_only_the_literal_true() {
         assert!(parse_citation_passages(Some("true")));
-        assert!(parse_citation_passages(Some(" true ")));
+        assert!(!parse_citation_passages(Some(" true ")));
         for raw in [None, Some(""), Some("1"), Some("on"), Some("TRUE"), Some("yes")] {
             assert!(!parse_citation_passages(raw), "{raw:?} must stay off");
         }

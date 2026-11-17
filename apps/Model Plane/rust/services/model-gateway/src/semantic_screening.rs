@@ -147,7 +147,7 @@ pub const DEFAULT_MAX_CALLS_PER_RUN: usize = 6;
 /// Only the literal `true` enables the inline pass.
 #[must_use]
 pub fn parse_inline(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// A deadline from 100 ms to 10 s. Anything else keeps the default.
@@ -2297,7 +2297,7 @@ mod tests {
     #[test]
     fn the_inline_switch_and_knobs_parse_strictly_with_safe_defaults() {
         assert!(parse_inline(Some("true")));
-        assert!(parse_inline(Some(" true ")));
+        assert!(!parse_inline(Some(" true ")));
         for raw in ["1", "on", "TRUE", "yes", ""] {
             assert!(!parse_inline(Some(raw)), "{raw:?} must not enable the pass");
         }

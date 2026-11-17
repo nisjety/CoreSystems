@@ -25,7 +25,7 @@ use mp_contracts::prompt_tier::{plan_of, PromptTier, PromptTierPlan};
 
 /// Operator switch for [`PromptOrder::StablePrefix`], the conditional tools
 /// moved to the end of the tool list, and the final answer resending the tool
-/// rounds' tools. Off unless set to `1`, `on`, `true`, `yes` or `enabled`.
+/// rounds' tools. Off unless set to the exact literal `true`.
 pub const STABLE_PROMPT_ORDER_ENV: &str = "MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER";
 
 /// Operator switch for token-budget compaction: the budget in estimated
@@ -162,15 +162,10 @@ impl CacheOptions {
     }
 }
 
+/// The strict reader of the two cache switches: only the exact literal `true` is on. `1`, `on`,
+/// `yes`, `enabled`, `TRUE` and surrounding whitespace leave the switch off.
 fn enabled(value: Option<&str>) -> bool {
-    matches!(
-        value
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "on" | "true" | "yes" | "enabled"
-    )
+    mp_contracts::loop_fold::switch_from(value)
 }
 
 fn token_budget(value: Option<&str>) -> Option<usize> {
@@ -1072,11 +1067,13 @@ mod tests {
             CacheOptions::default()
         );
         assert_eq!(CacheOptions::default().prompt_order(), PromptOrder::Legacy);
-        for off in ["", "0", "off", "false", "no", "maybe"] {
+        for off in [
+            "", "0", "off", "false", "no", "maybe", "1", "on", "yes", "enabled", "TRUE", " true ",
+        ] {
             let parsed = CacheOptions::parse(Some(off), Some("0"), Some(off));
             assert_eq!(parsed, CacheOptions::default(), "{off:?}");
         }
-        let all = CacheOptions::parse(Some(" ON "), Some("12000"), Some("1"));
+        let all = CacheOptions::parse(Some("true"), Some("12000"), Some("true"));
         assert_eq!(
             all,
             CacheOptions {

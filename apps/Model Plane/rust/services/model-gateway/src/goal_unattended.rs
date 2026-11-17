@@ -55,10 +55,10 @@ pub fn enabled() -> bool {
     enabled_with(&|key| std::env::var(key).ok())
 }
 
-/// [`enabled`] over an injected lookup, so the parsing is testable. Only the literal `true`, with
-/// surrounding whitespace ignored, turns it on; `TRUE`, `True` and `1` leave it off.
+/// [`enabled`] over an injected lookup, so the parsing is testable. Only the exact literal `true`
+/// turns it on; `TRUE`, `True`, `1` and a padded ` true ` leave it off.
 fn enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
-    get(ENABLED_ENV).is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(get(ENABLED_ENV).as_deref())
 }
 
 /// Whether a goal can be set to keep working while away on this deployment: this switch, the
@@ -570,7 +570,7 @@ mod tests {
         let get = |_: &str| Some("true".to_owned());
         assert!(enabled_with(&get));
         let get = |_: &str| Some(" true ".to_owned());
-        assert!(enabled_with(&get));
+        assert!(!enabled_with(&get));
     }
 
     #[test]

@@ -18,7 +18,7 @@ pub const ROLE_MODEL_ID: &str = "verevon-role";
 /// Whether an explicit env value turns role routing on. Pure, so the parser is
 /// testable without the process environment.
 fn role_routing_enabled_from(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// Whether role routing is on for this process.
@@ -49,7 +49,7 @@ mod tests {
     #[test]
     fn only_the_literal_true_turns_role_routing_on() {
         assert!(role_routing_enabled_from(Some("true")));
-        assert!(role_routing_enabled_from(Some(" true ")));
+        assert!(!role_routing_enabled_from(Some(" true ")));
         for value in [None, Some(""), Some("1"), Some("TRUE"), Some("yes"), Some("on")] {
             assert!(
                 !role_routing_enabled_from(value),

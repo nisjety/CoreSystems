@@ -168,7 +168,7 @@ pub fn tone_presets_enabled() -> bool {
 /// [`tone_presets_enabled`] with the environment passed in, so the parser can be tested without it.
 #[must_use]
 pub fn tone_presets_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
-    get(TONE_PRESETS_VAR).is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(get(TONE_PRESETS_VAR).as_deref())
 }
 
 /// The tone a turn asks for, from its `persona_tone`: `None` while the switch is off, and for
@@ -202,7 +202,7 @@ pub fn user_profile_prefix_enabled() -> bool {
 /// [`user_profile_prefix_enabled`] with the environment passed in, so the parser can be tested without it.
 #[must_use]
 pub fn user_profile_prefix_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
-    get(USER_PROFILE_PREFIX_VAR).is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(get(USER_PROFILE_PREFIX_VAR).as_deref())
 }
 
 /// The frame the profile is sent in. The text is the person's own, so it is stated as context about them,

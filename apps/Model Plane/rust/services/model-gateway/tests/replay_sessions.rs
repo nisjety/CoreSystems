@@ -1455,7 +1455,7 @@ fn sse_frames(body: &str) -> Vec<(Option<u64>, String, serde_json::Value)> {
 #[tokio::test]
 #[serial_test::serial]
 async fn plain_answer_streams_its_cassette_and_completes_the_run() {
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     // The cassette records the self-consistency draws, so an operator's "off" must not drop them.
     std::env::set_var("MODEL_GATEWAY_SELF_CONSISTENCY", "on");

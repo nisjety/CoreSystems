@@ -16,7 +16,7 @@
 //! single Azure flake never stalls the worker.
 //!
 //! Disabled when:
-//!   * `FINETUNE_ENABLED != "1"` (matches the route gate), or
+//!   * `FINETUNE_ENABLED` is not the exact literal `true` (matches the route gate), or
 //!   * `AzureFinetuneClient` is `None` (no creds configured).
 //!
 //! Every tick presents session-core with a freshly minted `aud=session-core`
@@ -496,7 +496,7 @@ pub(crate) async fn run(
 
         // Honour the runtime kill switch — if an operator flips the flag off
         // mid-deploy we stop poking Azure on the next tick.
-        if std::env::var(FEATURE_ENV).ok().as_deref() != Some("1") {
+        if !mp_contracts::loop_fold::switch_from(std::env::var(FEATURE_ENV).ok().as_deref()) {
             continue;
         }
 

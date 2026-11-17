@@ -7,17 +7,18 @@
 //! configuration and a restart, without a rebuild.
 //!
 //! The one exception is an OPT-IN lever ([`LatencyLevers::dated_post_section_only`]):
-//! it is off unless its variable is set to `1`, `on`, `true`, `yes` or
-//! `enabled`, so an unset, empty or unrecognised value keeps it off. It is not
+//! it is off unless its variable is set to the exact literal `true`, so an unset,
+//! empty or unrecognised value (`1`, `on`, `yes` included) keeps it off. It is not
 //! part of [`LatencyLevers::ALL_ON`], which stays the set of levers that are
-//! on by default in code. The shipped compose file sets it to `1` (Q16h,
+//! on by default in code. The shipped compose file sets it to `true` (Q16h,
 //! 2026-09-29), so a deployment runs with it unless
 //! `MODEL_GATEWAY_DATED_POST_SECTION_ONLY=0` is set. The same holds for the
 //! second opt-in lever, [`LatencyLevers::finer_review_batches`], which the
-//! compose file sets to `1` since the A/B of 2026-09-30
+//! compose file sets to `true` since the A/B of 2026-09-30
 //! (`MODEL_GATEWAY_FINER_REVIEW_BATCHES=0` turns it off). The code reads an
-//! empty value as off, but the compose file's `:-1` fills an empty value in
-//! with `1`, so in a deployment only an explicit `0` turns either one off.
+//! empty value as off, but the compose file's `:-true` fills an empty value in
+//! with `true`, so in a deployment only an explicit value other than `true`
+//! (`0`, for one) turns either one off.
 //! The third opt-in lever, [`LatencyLevers::speed_tier`], is off in the compose
 //! file (`MODEL_GATEWAY_SPEED_TIER:-false`). Only the exact literal `true` turns it on;
 //! `TRUE`, `1`, `on`, `yes` and every other value leave it off.
@@ -332,18 +333,12 @@ fn switched_on(value: Option<&str>) -> bool {
     )
 }
 
-/// The opt-in counterpart of [`switched_on`]: on only for an explicit on
-/// word. Unset, empty, an off word or anything unrecognised keeps it off, so
-/// an empty passthrough from the deployment file is off, not on.
+/// The opt-in counterpart of [`switched_on`]: on only for the exact literal `true`, read by
+/// `mp_contracts::loop_fold::switch_from` (no trimming, no case folding, no `1`, `on` or `yes`).
+/// Unset, empty, an off word or anything unrecognised keeps it off, so an empty passthrough from
+/// the deployment file is off, not on.
 fn switched_on_explicitly(value: Option<&str>) -> bool {
-    matches!(
-        value
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "on" | "true" | "yes" | "enabled"
-    )
+    mp_contracts::loop_fold::switch_from(value)
 }
 
 /// The strict reader for the speed-tier switch: on only for the exact literal
@@ -391,16 +386,41 @@ mod tests {
     #[test]
     fn the_section_only_lever_is_opt_in() {
         assert!(!LatencyLevers::default().dated_post_section_only);
-        assert!(!LatencyLevers::ALL_ON.dated_post_section_only, "ALL_ON is the default set, not everything");
+        assert!(
+            !LatencyLevers::ALL_ON.dated_post_section_only,
+            "ALL_ON is the default set, not everything"
+        );
         assert!(!LatencyLevers::ALL_OFF.dated_post_section_only);
-        for off in [None, Some(""), Some("  "), Some("0"), Some("off"), Some("false"), Some("no"), Some("disabled"), Some("sometimes"), Some("2")] {
+        for off in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("0"),
+            Some("off"),
+            Some("false"),
+            Some("no"),
+            Some("disabled"),
+            Some("sometimes"),
+            Some("2"),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+            Some("enabled"),
+            Some(" ON "),
+            Some("True"),
+            Some("YES\n"),
+            Some("TRUE"),
+            Some(" true "),
+        ] {
             assert_eq!(
-                LatencyLevers::parse(None, None, None, None, None, None, None, None, None, off, None, None),
+                LatencyLevers::parse(
+                    None, None, None, None, None, None, None, None, None, off, None, None
+                ),
                 LatencyLevers::ALL_ON,
                 "{off:?}"
             );
         }
-        for on in ["1", "on", "true", "yes", "enabled", " ON ", "True", "YES\n"] {
+        for on in ["true"] {
             assert_eq!(
                 LatencyLevers::parse(None, None, None, None, None, None, None, None, None, Some(on), None, None),
                 LatencyLevers { dated_post_section_only: true, ..LatencyLevers::ALL_ON },
@@ -420,16 +440,41 @@ mod tests {
     #[test]
     fn the_finer_batches_lever_is_opt_in_and_independent() {
         assert!(!LatencyLevers::default().finer_review_batches);
-        assert!(!LatencyLevers::ALL_ON.finer_review_batches, "ALL_ON is the default set, not everything");
+        assert!(
+            !LatencyLevers::ALL_ON.finer_review_batches,
+            "ALL_ON is the default set, not everything"
+        );
         assert!(!LatencyLevers::ALL_OFF.finer_review_batches);
-        for off in [None, Some(""), Some("  "), Some("0"), Some("off"), Some("false"), Some("no"), Some("disabled"), Some("sometimes"), Some("2")] {
+        for off in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("0"),
+            Some("off"),
+            Some("false"),
+            Some("no"),
+            Some("disabled"),
+            Some("sometimes"),
+            Some("2"),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+            Some("enabled"),
+            Some(" ON "),
+            Some("True"),
+            Some("YES\n"),
+            Some("TRUE"),
+            Some(" true "),
+        ] {
             assert_eq!(
-                LatencyLevers::parse(None, None, None, None, None, None, None, None, None, None, off, None),
+                LatencyLevers::parse(
+                    None, None, None, None, None, None, None, None, None, None, off, None
+                ),
                 LatencyLevers::ALL_ON,
                 "{off:?}"
             );
         }
-        for on in ["1", "on", "true", "yes", "enabled", " ON ", "True", "YES\n"] {
+        for on in ["true"] {
             assert_eq!(
                 LatencyLevers::parse(None, None, None, None, None, None, None, None, None, None, Some(on), None),
                 LatencyLevers { finer_review_batches: true, ..LatencyLevers::ALL_ON },
@@ -512,8 +557,6 @@ mod tests {
         assert_eq!(
             beside_others,
             LatencyLevers {
-                dated_post_section_only: true,
-                finer_review_batches: true,
                 speed_tier: true,
                 ..LatencyLevers::ALL_ON
             }

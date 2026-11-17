@@ -128,7 +128,7 @@ fn do_attachments_enabled() -> bool {
 }
 
 fn do_attachments_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
-    get(DO_ATTACHMENTS_VAR).is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(get(DO_ATTACHMENTS_VAR).as_deref())
 }
 
 /// The switch that lets a scoped thread's follow-up turns retrieve under the Space decision the BFF
@@ -224,7 +224,7 @@ fn subagent_role_catalogue_enabled() -> bool {
 }
 
 fn subagent_role_catalogue_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
-    get(SUBAGENT_ROLE_CATALOGUE_VAR).is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(get(SUBAGENT_ROLE_CATALOGUE_VAR).as_deref())
 }
 
 /// At most this many roles reach a run; later entries are left out.
@@ -13135,7 +13135,7 @@ fn zdr_stream_cost_enabled() -> bool {
 }
 
 fn zdr_stream_cost_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
-    get(ZDR_STREAM_COST_VAR).is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(get(ZDR_STREAM_COST_VAR).as_deref())
 }
 
 /// The switch that puts a ZDR turn's spend in the usage ledger (DEF-Z-06b). Opt-in: only
@@ -13145,7 +13145,7 @@ fn zdr_stream_cost_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
 const ZDR_LEDGER_ROWS_VAR: &str = "MODEL_GATEWAY_ZDR_LEDGER_ROWS";
 
 fn zdr_ledger_rows_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
-    get(ZDR_LEDGER_ROWS_VAR).is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(get(ZDR_LEDGER_ROWS_VAR).as_deref())
 }
 
 /// The switch as this process's environment states it. The ZDR branch and the ledger
@@ -22199,17 +22199,34 @@ mod zdr_provenance_tests {
         assert_eq!(usage["cost_basis"], "metered", "{usage}");
     }
 
-    /// The cost switch is on only for the literal `true`, surrounding whitespace aside.
+    /// The cost switch is on only for the exact literal `true`: a padded or cased value stays off.
     #[test]
     fn zdr_stream_cost_is_on_only_for_the_literal_true() {
         let on = |raw: &'static str| super::zdr_stream_cost_enabled_with(&|_| Some(raw.to_owned()));
         assert!(on("true"));
-        assert!(on(" true\n"));
-        for off in ["", "TRUE", "True", "1", "on", "yes", "enabled", "false"] {
+        for off in [
+            "", " true\n", " true ", "true ", "TRUE", "True", "1", "on", "yes", "enabled", "false",
+        ] {
             assert!(!on(off), "{off:?} must not enable the switch");
         }
         assert!(
             !super::zdr_stream_cost_enabled_with(&|_| None),
+            "unset is off"
+        );
+    }
+
+    /// The ledger switch is on only for the exact literal `true`: a padded or cased value stays off.
+    #[test]
+    fn zdr_ledger_rows_is_on_only_for_the_literal_true() {
+        let on = |raw: &'static str| super::zdr_ledger_rows_enabled_with(&|_| Some(raw.to_owned()));
+        assert!(on("true"));
+        for off in [
+            "", " true\n", " true ", "true ", "TRUE", "True", "1", "on", "yes", "false",
+        ] {
+            assert!(!on(off), "{off:?} must not enable the ledger rows");
+        }
+        assert!(
+            !super::zdr_ledger_rows_enabled_with(&|_| None),
             "unset is off"
         );
     }
@@ -28998,12 +29015,21 @@ mod do_attachment_tests {
 
     #[test]
     fn the_do_attachments_switch_is_off_unless_the_value_is_literally_true() {
-        for value in [None, Some(""), Some("1"), Some("TRUE"), Some("yes"), Some("false")] {
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some("yes"),
+            Some("false"),
+            Some(" true "),
+            Some("true "),
+        ] {
             let value = value.map(str::to_owned);
             assert!(!do_attachments_enabled_with(&|_| value.clone()), "{value:?}");
         }
         assert!(do_attachments_enabled_with(&|key| {
-            (key == "CHAT_DO_ATTACHMENTS_ENABLED").then(|| " true ".to_owned())
+            (key == "CHAT_DO_ATTACHMENTS_ENABLED").then(|| "true".to_owned())
         }));
     }
 
@@ -29446,7 +29472,15 @@ mod agent_role_catalogue_tests {
             })
         };
         assert!(with(Some("true")));
-        for off in [None, Some(""), Some("1"), Some("TRUE"), Some("yes")] {
+        for off in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some("yes"),
+            Some(" true "),
+            Some("true "),
+        ] {
             assert!(!with(off), "{off:?} must not enable the catalogue");
         }
     }

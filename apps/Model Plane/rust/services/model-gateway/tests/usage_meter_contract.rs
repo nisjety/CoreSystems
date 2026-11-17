@@ -723,7 +723,7 @@ async fn start_gateway_with(rounds: Vec<Vec<mpv1::ToolCall>>, pricing_url: Optio
     // four, signed for the identity the bypass gives its ingress bearer. An allowlist
     // from the developer's environment would make the model name in the request depend
     // on the machine.
-    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
     std::env::remove_var("ALLOWED_MODELS");
     let jwks = serve_auth_core_jwks().await;
     let bearers = sign_delegated_bearers();

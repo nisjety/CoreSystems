@@ -23,7 +23,7 @@ pub fn enabled() -> bool {
 }
 
 fn enabled_from(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// The longest one listing waits for its catalogue. A cost-core that is down or
@@ -129,7 +129,7 @@ mod tests {
             assert!(!enabled_from(Some(raw)), "{raw:?}");
         }
         assert!(enabled_from(Some("true")));
-        assert!(enabled_from(Some(" true ")));
+        assert!(!enabled_from(Some(" true ")));
     }
 
     /// A cost-core stand-in that serves `body` on `/api/v1/pricing` and counts the fetches.

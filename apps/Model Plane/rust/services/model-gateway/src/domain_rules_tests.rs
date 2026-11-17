@@ -301,14 +301,17 @@ async fn a_final_url_with_no_host_is_refused_under_enforce() {
     );
 }
 
-/// The gateway with Quarry and org-core on mock servers; Quarry's page asked for `example.org` and ended on
-/// `final_url`.
+/// The URL `fetch_url` asks Quarry for in these tests.
+const REQUESTED: &str = "https://example.org/start";
+
+/// The gateway with Quarry and org-core on mock servers; Quarry's page was asked for [`REQUESTED`] and ended on
+/// `final_url`, in the edge's `UrlTriple` shape (`url.requested` beside `url.final_url`).
 async fn fetch_state(org: &MockServer, final_url: &str) -> (AppState, MockServer) {
-    fetch_state_with_url(org, json!({"final": final_url})).await
+    fetch_state_with_url(org, json!({"requested": REQUESTED, "final_url": final_url})).await
 }
 
-/// The same gateway, with Quarry's reply carrying `url` as given: `{"final": ""}` for a blank final URL, `{}` for one
-/// with no final URL at all.
+/// The same gateway, with Quarry's reply carrying `url` as given. A test names the keys it means: `final_url`, the
+/// legacy `final`, or neither.
 async fn fetch_state_with_url(org: &MockServer, url: Value) -> (AppState, MockServer) {
     let quarry = MockServer::start().await;
     Mock::given(method("POST"))
@@ -338,7 +341,7 @@ async fn fetch_url(state: &AppState, org_id: &str) -> crate::tool_loop::ToolOutc
     let call = ToolCall {
         id: "call-1".to_owned(),
         name: "fetch_url".to_owned(),
-        arguments_json: json!({ "url": "https://example.org/start" }).to_string(),
+        arguments_json: json!({ "url": REQUESTED }).to_string(),
     };
     crate::tool_loop::dispatch_tool(
         state,
@@ -385,6 +388,90 @@ async fn fetch_url_drops_a_page_that_ended_on_a_denied_host_under_enforce() {
     assert!(!error.contains(MARKER));
 }
 
+/// An edge that predates `final_url` answers with the legacy `final` key alone. That key still names where the page
+/// ended, so a page that ended on a denied host is refused. This is the one refusal test that reads only the legacy key.
+#[tokio::test]
+async fn fetch_url_refuses_a_legacy_final_key_naming_a_denied_host() {
+    let _mode = test_seam::set(WebDomainPolicyMode::Enforce);
+    let org = org_core("org-f1004-legacy").await;
+    let (state, _quarry) = fetch_state_with_url(
+        &org,
+        json!({"requested": REQUESTED, "final": "https://blocked.example/landing"}),
+    )
+    .await;
+    let outcome = fetch_url(&state, "org-f1004-legacy").await;
+    let error = outcome
+        .error
+        .clone()
+        .expect("the legacy key names a denied host, so the page is refused");
+    assert!(error.starts_with(SITE_BLOCKED_CODE), "{error}");
+    assert!(error.contains("blocked.example"), "{error}");
+    assert!(
+        !outcome.output.contains(MARKER),
+        "the page text reached the model: {}",
+        outcome.output
+    );
+}
+
+/// `final_url` is the edge's key and wins over the legacy `final` when both are present. The two name different hosts,
+/// so each verdict shows which key was read: the denied host refuses the page, and the allowed host reads it.
+#[tokio::test]
+async fn fetch_url_judges_final_url_before_the_legacy_final_key_under_enforce() {
+    let _mode = test_seam::set(WebDomainPolicyMode::Enforce);
+    let org = org_core("org-f1004-precedence-deny").await;
+    let (state, _quarry) = fetch_state_with_url(
+        &org,
+        json!({
+            "requested": REQUESTED,
+            "final_url": "https://blocked.example/landing",
+            "final": "https://example.org/ok",
+        }),
+    )
+    .await;
+    let outcome = fetch_url(&state, "org-f1004-precedence-deny").await;
+    let error = outcome
+        .error
+        .clone()
+        .expect("final_url names a denied host, so the page is refused");
+    assert!(error.starts_with(SITE_BLOCKED_CODE), "{error}");
+    assert!(error.contains("blocked.example"), "{error}");
+    assert!(!outcome.output.contains(MARKER), "{}", outcome.output);
+
+    let org = org_core("org-f1004-precedence-allow").await;
+    let (state, _quarry) = fetch_state_with_url(
+        &org,
+        json!({
+            "requested": REQUESTED,
+            "final_url": "https://example.org/landing",
+            "final": "https://blocked.example/landing",
+        }),
+    )
+    .await;
+    let outcome = fetch_url(&state, "org-f1004-precedence-allow").await;
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert!(outcome.output.contains(MARKER), "{}", outcome.output);
+}
+
+/// A blank `final_url` is no final URL, and it stays blank: the legacy `final` beside it is not read. The requested host
+/// (allowed) is judged in its place, so the page is read. A `final` naming a denied host would refuse it if it were read.
+#[tokio::test]
+async fn fetch_url_keeps_a_blank_final_url_blank_and_never_reads_the_legacy_final_key() {
+    let _mode = test_seam::set(WebDomainPolicyMode::Enforce);
+    let org = org_core("org-f1004-blank-legacy").await;
+    let (state, _quarry) = fetch_state_with_url(
+        &org,
+        json!({
+            "requested": REQUESTED,
+            "final_url": "",
+            "final": "https://blocked.example/landing",
+        }),
+    )
+    .await;
+    let outcome = fetch_url(&state, "org-f1004-blank-legacy").await;
+    assert!(outcome.error.is_none(), "{:?}", outcome.error);
+    assert!(outcome.output.contains(MARKER), "{}", outcome.output);
+}
+
 #[tokio::test]
 async fn fetch_url_reads_the_page_under_shadow_and_off() {
     for (mode, org_id) in [
@@ -409,13 +496,24 @@ async fn fetch_url_reads_the_page_under_shadow_and_off() {
     }
 }
 
-/// Quarry's `url` field for a page with no final URL: absent (`{}`), blank, or whitespace-only. Each case gets an org id
-/// named for `tag`, so the process-wide verdict cache cannot carry one test's answers into another.
+/// Quarry's `url` object for a page with no final URL: `final_url` absent, blank, or whitespace-only, or no keys at all.
+/// Each case gets an org id named for `tag`, so the process-wide verdict cache cannot carry one test's answers into
+/// another.
 fn no_final_url_replies(tag: &str) -> Vec<(String, Value)> {
     vec![
-        (format!("org-f1004-{tag}-absent"), json!({})),
-        (format!("org-f1004-{tag}-blank"), json!({"final": ""})),
-        (format!("org-f1004-{tag}-spaces"), json!({"final": "   "})),
+        (
+            format!("org-f1004-{tag}-absent"),
+            json!({"requested": REQUESTED}),
+        ),
+        (format!("org-f1004-{tag}-empty"), json!({})),
+        (
+            format!("org-f1004-{tag}-blank"),
+            json!({"requested": REQUESTED, "final_url": ""}),
+        ),
+        (
+            format!("org-f1004-{tag}-spaces"),
+            json!({"requested": REQUESTED, "final_url": "   "}),
+        ),
     ]
 }
 

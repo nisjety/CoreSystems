@@ -52,7 +52,7 @@ pub fn goal_judge_enabled() -> bool {
 /// [`goal_judge_enabled`] over an injected lookup, so the parsing is testable.
 #[must_use]
 pub fn goal_judge_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
-    get(GOAL_JUDGE_ENABLED_VAR).is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(get(GOAL_JUDGE_ENABLED_VAR).as_deref())
 }
 
 /// Whether a settled goal turn is judged. Only a `completed` run has an answer to
@@ -405,7 +405,7 @@ mod tests {
         assert!(!with(Some("TRUE")));
         assert!(!with(Some("yes")));
         assert!(with(Some("true")));
-        assert!(with(Some(" true\n")));
+        assert!(!with(Some(" true\n")));
     }
 
     #[test]

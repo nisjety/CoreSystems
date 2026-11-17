@@ -28,7 +28,7 @@ pub fn enabled() -> bool {
 /// Only the literal `true` enables; `1`, `on` and anything else stay off.
 #[must_use]
 pub fn parse_enabled(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// The passage count a `find_in_page` call asks for: the model's `max_passages`, clamped to
@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn the_reader_switch_is_read_only_from_the_literal_true() {
         assert!(parse_enabled(Some("true")));
-        assert!(parse_enabled(Some(" true ")));
+        assert!(!parse_enabled(Some(" true ")));
         for raw in [
             None,
             Some(""),

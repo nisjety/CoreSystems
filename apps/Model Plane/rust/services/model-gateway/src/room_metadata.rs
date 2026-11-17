@@ -12,7 +12,7 @@
 //! therefore invisible to the room until its owner adds it here. The owner's
 //! own Chat read (no decision ref) is unchanged.
 //!
-//! Kill switch: `SPACE_ROOM_METADATA_LEGACY_PASSTHROUGH=1` restores the old
+//! Kill switch: `SPACE_ROOM_METADATA_LEGACY_PASSTHROUGH=true` restores the old
 //! pass-through for every reader. It is an operational rollback, never an
 //! authorization input: the Space read decision is still verified by
 //! session-core before any message is returned.
@@ -35,12 +35,11 @@ pub const ROOM_VISIBLE_METADATA_KEYS: &[&str] = &[
 /// artifact (provenance, hashes, internal flags) is dropped.
 const ROOM_VISIBLE_ARTIFACT_FIELDS: &[&str] = &["id", "kind", "title", "content", "version"];
 
-/// Whether the kill switch is on. Only an explicit `1` or `true` (any case)
-/// restores pass-through; unset, empty or any other value keeps the allowlist.
+/// Whether the kill switch is on. Only the exact literal `true` restores pass-through; unset, empty
+/// or any other value (`1`, `TRUE` and surrounding whitespace included) keeps the allowlist.
 #[must_use]
 pub fn legacy_passthrough(raw: Option<&str>) -> bool {
-    raw.map(str::trim)
-        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// Whether this request is a shared-Space room read: it carries a non-empty
@@ -218,11 +217,23 @@ mod tests {
     }
 
     #[test]
-    fn legacy_passthrough_accepts_one_and_true_only() {
-        for on in [Some("1"), Some("true"), Some("TRUE"), Some("True"), Some(" 1 "), Some(" true ")] {
-            assert!(legacy_passthrough(on), "{on:?}");
-        }
-        for off in [None, Some(""), Some("0"), Some("false"), Some("yes"), Some("on"), Some("2"), Some("enabled")] {
+    fn legacy_passthrough_accepts_only_the_exact_literal_true() {
+        assert!(legacy_passthrough(Some("true")));
+        for off in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("1"),
+            Some("TRUE"),
+            Some("True"),
+            Some(" 1 "),
+            Some(" true "),
+            Some("yes"),
+            Some("on"),
+            Some("2"),
+            Some("enabled"),
+        ] {
             assert!(!legacy_passthrough(off), "{off:?}");
         }
     }

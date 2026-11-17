@@ -358,15 +358,10 @@ const BROKER_REASON_KEY_BUDGET_CEILING: &str = "API_KEY_BUDGET_CEILING";
 const BROKER_REASON_SITE_DENIED: &str = "BROWSER_SITE_DENIED";
 const ERROR_INFO_TYPE_URL: &str = "type.googleapis.com/google.rpc.ErrorInfo";
 
-/// `MODEL_GATEWAY_BROWSER_KEY_GRANTS`: only `1`, `true` or `on` (any case)
-/// turns the key-grant routes on. Anything else, and unset, is off.
+/// `MODEL_GATEWAY_BROWSER_KEY_GRANTS`: only the exact literal `true` turns the key-grant routes
+/// on. Anything else, and unset, is off.
 fn key_grants_flag(value: Option<&str>) -> bool {
-    value.is_some_and(|value| {
-        let value = value.trim();
-        ["1", "true", "on"]
-            .iter()
-            .any(|on| value.eq_ignore_ascii_case(on))
-    })
+    mp_contracts::loop_fold::switch_from(value)
 }
 
 fn key_grants_enabled(state: &AppState) -> bool {
@@ -1465,13 +1460,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn key_grants_flag_defaults_off_and_only_the_literals_enable_it() {
-        for off in [None, Some(""), Some("0"), Some("off"), Some("false"), Some("yes"), Some("enabled")] {
+    async fn key_grants_flag_defaults_off_and_only_the_exact_literal_true_enables_it() {
+        for off in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("off"),
+            Some("false"),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+            Some("TRUE"),
+            Some(" On "),
+            Some(" true "),
+            Some("enabled"),
+        ] {
             assert!(!key_grants_flag(off), "{off:?}");
         }
-        for on in ["1", "true", "TRUE", "on", " On "] {
-            assert!(key_grants_flag(Some(on)), "{on}");
-        }
+        assert!(key_grants_flag(Some("true")));
         assert_eq!(AppState::new().browser_key_grants, None, "production reads the env, default off");
     }
 
