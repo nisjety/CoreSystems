@@ -45,6 +45,24 @@ func TestConfigFromLookupAcceptsBoundedHTTPSDefaults(t *testing.T) {
 	}
 }
 
+func TestConfigFromLookupInsecureLoopbackIsTheExactLiteralTrue(t *testing.T) {
+	t.Parallel()
+
+	values := map[string]string{
+		"LETTA_TOOL_SEARCH_ENABLED": "true",
+		"LETTA_TOOL_SEARCH_URL":     "http://127.0.0.1:8283/v1/tools/search",
+		"LETTA_API_KEY":             "secret-value",
+	}
+	values["LETTA_TOOL_SEARCH_ALLOW_INSECURE_LOOPBACK"] = "true"
+	config, err := ConfigFromLookup(func(name string) string { return values[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !config.AllowInsecureLoopback {
+		t.Fatal(`LETTA_TOOL_SEARCH_ALLOW_INSECURE_LOOPBACK="true" must allow loopback HTTP`)
+	}
+}
+
 func TestConfigFromLookupValidatesEnabledTransportAndBounds(t *testing.T) {
 	t.Parallel()
 
@@ -54,6 +72,10 @@ func TestConfigFromLookupValidatesEnabledTransportAndBounds(t *testing.T) {
 		wantErr string
 	}{
 		{name: "invalid enabled flag", values: map[string]string{"LETTA_TOOL_SEARCH_ENABLED": "yes"}, wantErr: "LETTA_TOOL_SEARCH_ENABLED"},
+		{name: "padded enabled flag is not the literal", values: map[string]string{"LETTA_TOOL_SEARCH_ENABLED": " true "}, wantErr: "LETTA_TOOL_SEARCH_ENABLED"},
+		{name: "upper-case enabled flag is not the literal", values: map[string]string{"LETTA_TOOL_SEARCH_ENABLED": "TRUE"}, wantErr: "LETTA_TOOL_SEARCH_ENABLED"},
+		{name: "numeric enabled flag is not the literal", values: map[string]string{"LETTA_TOOL_SEARCH_ENABLED": "1"}, wantErr: "LETTA_TOOL_SEARCH_ENABLED"},
+		{name: "insecure loopback flag must be the exact literal", values: map[string]string{"LETTA_TOOL_SEARCH_ENABLED": "true", "LETTA_TOOL_SEARCH_URL": "http://127.0.0.1:8283/v1/tools/search", "LETTA_API_KEY": "secret", "LETTA_TOOL_SEARCH_ALLOW_INSECURE_LOOPBACK": "TRUE"}, wantErr: "LETTA_TOOL_SEARCH_ALLOW_INSECURE_LOOPBACK"},
 		{name: "missing endpoint", values: map[string]string{"LETTA_TOOL_SEARCH_ENABLED": "true", "LETTA_API_KEY": "secret"}, wantErr: "LETTA_TOOL_SEARCH_URL"},
 		{name: "missing key", values: map[string]string{"LETTA_TOOL_SEARCH_ENABLED": "true", "LETTA_TOOL_SEARCH_URL": "https://api.letta.example/v1/tools/search"}, wantErr: "LETTA_API_KEY"},
 		{name: "remote plaintext", values: map[string]string{"LETTA_TOOL_SEARCH_ENABLED": "true", "LETTA_TOOL_SEARCH_URL": "http://letta.example/v1/tools/search", "LETTA_API_KEY": "secret"}, wantErr: "HTTPS"},

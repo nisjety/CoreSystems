@@ -3489,7 +3489,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:6beed4d1983ae6887344e411ebf197c3f480313f6ef5b1c14c4420321aa5cf4a",
+      "schemaHash": "sha256:ea150df4adf96cec44c0d13525cc86a40adf1edfcb10782adeca8aadd82242a7",
       "zdr_allowed": false
     },
     {

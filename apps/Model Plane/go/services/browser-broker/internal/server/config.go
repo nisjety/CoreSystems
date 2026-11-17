@@ -47,17 +47,17 @@ const (
 	EnvHumanAbsoluteTTLSeconds = "BROWSER_BROKER_HUMAN_ABSOLUTE_TTL_SECONDS"
 	EnvDenySuffixes            = "BROWSER_BROKER_DENY_SUFFIXES"
 	EnvMaxAttachDomains        = "BROWSER_BROKER_MAX_ATTACH_DOMAINS"
-	// INNH-10: API-key grants. Off unless the switch is exactly 1, true or on.
+	// INNH-10: API-key grants. Off unless the switch is exactly the literal true.
 	EnvKeyGrantsEnabled      = "BROWSER_BROKER_KEY_GRANTS_ENABLED"
 	EnvKeyGrantTTLSeconds    = "BROWSER_BROKER_KEY_GRANT_TTL_SECONDS"
 	EnvMaxActiveGrantsPerKey = "BROWSER_BROKER_MAX_ACTIVE_GRANTS_PER_KEY"
-	// E3.2-e1 (OD13): origin-extension grants. Off unless exactly 1, true or on.
+	// E3.2-e1 (OD13): origin-extension grants. Off unless exactly the literal true.
 	EnvOriginExtensionEnabled = "BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED"
 	// Q3-E3.1-b1-c (ADR-2a): fill_otp sensitive approvals. Off unless exactly
-	// 1, true or on.
+	// the literal true.
 	EnvFillOtpEnabled = "BROWSER_BROKER_FILL_OTP_ENABLED"
 	// WS7.K: the org web-policy snapshot a grant carries. Strict: unset, 0 or
-	// false is off, 1 or true is on, anything else stops the broker.
+	// false is off, the literal true is on, anything else stops the broker.
 	EnvWebPolicySnapshot = "BROWSER_BROKER_WEB_POLICY_SNAPSHOT"
 )
 
@@ -199,29 +199,26 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	return cfg, nil
 }
 
-// boolEnv reads a switch: unset or empty is off, "1" or "true" is on, "0" or
-// "false" is off, anything else is an error (a typo must stop the broker, not
-// silently turn open-web browsing on or off).
+// boolEnv reads a switch: unset or empty is off, the exact literal "true" is on,
+// "0" or "false" is off, anything else is an error (a typo must stop the broker,
+// not silently turn open-web browsing on or off). The match is exact: no
+// trimming and no case folding, so "1", "on" and " true " are errors too.
 func boolEnv(getenv func(string) string, name string) (bool, error) {
-	switch strings.ToLower(strings.TrimSpace(getenv(name))) {
+	switch getenv(name) {
 	case "", "0", "false":
 		return false, nil
-	case "1", "true":
+	case "true":
 		return true, nil
 	default:
-		return false, fmt.Errorf("%s must be 1, 0, true or false", name)
+		return false, fmt.Errorf("%s must be true or false", name)
 	}
 }
 
-// switchOn reads a default-off switch: exactly 1, true or on (any case) turns
-// it on; anything else, a typo included, leaves it off.
+// switchOn reads a default-off switch: exactly the literal true turns it on;
+// anything else, a typo included, leaves it off. The match is exact: no
+// trimming and no case folding.
 func switchOn(raw string) bool {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "1", "true", "on":
-		return true
-	default:
-		return false
-	}
+	return raw == "true"
 }
 
 func positiveInt(getenv func(string) string, name string) (int, bool, error) {

@@ -3,8 +3,9 @@ package main
 import "testing"
 
 // TestAcceptsPublishOnlyDispatch covers AUTO-3's opt-in acknowledgment gate:
-// only an exact "true" (case-insensitive) counts as a deployment explicitly
-// declaring it runs its own consumer of mp.v1.capability.task.dispatched.
+// only the exact literal "true" (no trimming, no case folding) counts as a
+// deployment explicitly declaring it runs its own consumer of
+// mp.v1.capability.task.dispatched.
 // Every other value — unset, empty, or anything else — must default to
 // false, so NatsDispatcher's publish-then-fail safety net stays armed unless
 // a deployment opts in on purpose.
@@ -18,8 +19,9 @@ func TestAcceptsPublishOnlyDispatch(t *testing.T) {
 		{name: "unset defaults to false", set: false, want: false},
 		{name: "empty string is false", value: "", set: true, want: false},
 		{name: "true enables it", value: "true", set: true, want: true},
-		{name: "case-insensitive TRUE enables it", value: "TRUE", set: true, want: true},
-		{name: "whitespace-padded true enables it", value: "  true  ", set: true, want: true},
+		{name: "TRUE is not the literal, so it stays false", value: "TRUE", set: true, want: false},
+		{name: "whitespace-padded true is not the literal, so it stays false", value: "  true  ", set: true, want: false},
+		{name: "1 stays false", value: "1", set: true, want: false},
 		{name: "false stays false", value: "false", set: true, want: false},
 		{name: "garbage value stays false", value: "yes-please", set: true, want: false},
 	}
@@ -54,6 +56,11 @@ func TestTaskExecutorEnabled(t *testing.T) {
 		{name: "false always wins even when workflow backed", envValue: "false", envSet: true, workflowBacked: true, want: false},
 		{name: "true forces on even without workflow dispatcher", envValue: "true", envSet: true, workflowBacked: false, want: true},
 		{name: "true stays on when workflow backed too", envValue: "true", envSet: true, workflowBacked: true, want: true},
+		{name: "TRUE is not the literal, so unset rules apply (off without a workflow dispatcher)", envValue: "TRUE", envSet: true, workflowBacked: false, want: false},
+		{name: "TRUE is not the literal, so unset rules apply (on when workflow backed)", envValue: "TRUE", envSet: true, workflowBacked: true, want: true},
+		{name: "padded true is not the literal (off without a workflow dispatcher)", envValue: " true ", envSet: true, workflowBacked: false, want: false},
+		{name: "1 is neither switch position (unset rules apply)", envValue: "1", envSet: true, workflowBacked: true, want: true},
+		{name: "FALSE still turns it off (kill switch is matched leniently)", envValue: "FALSE", envSet: true, workflowBacked: true, want: false},
 	}
 
 	for _, test := range tests {

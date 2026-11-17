@@ -44,6 +44,15 @@ func TestNATSAuthOptionsUseOrchestratorCoreInbox(t *testing.T) {
 	}
 }
 
+func TestCompatAdapterOnlyTheExactLiteralEnablesIt(t *testing.T) {
+	for _, value := range []string{"TRUE", " true ", "1", "yes", "on"} {
+		t.Setenv("ENABLE_COMPAT_ADAPTER", value)
+		if compatAdapterEnabled() {
+			t.Fatalf("compat adapter enabled for %q; only the exact literal true enables it", value)
+		}
+	}
+}
+
 func TestCompatAdapterDisabledUnlessExplicitlyEnabled(t *testing.T) {
 	t.Setenv("ENABLE_COMPAT_ADAPTER", "")
 	if compatAdapterEnabled() {

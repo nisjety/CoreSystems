@@ -20,6 +20,18 @@ func TestDurableLedgerIsRequiredUnlessEphemeralModeIsExplicit(t *testing.T) {
 	}
 }
 
+// COST_CORE_ALLOW_EPHEMERAL opens the in-memory ledger, which is lost on restart,
+// so only the exact literal "true" may enable it.
+func TestAllowEphemeralLedgerIsTheExactLiteralTrue(t *testing.T) {
+	cases := map[string]bool{"true": true, "": false, "TRUE": false, " true ": false, "1": false, "yes": false}
+	for value, want := range cases {
+		t.Setenv("COST_CORE_ALLOW_EPHEMERAL", value)
+		if got := allowEphemeralLedger(); got != want {
+			t.Errorf("COST_CORE_ALLOW_EPHEMERAL=%q: allowEphemeralLedger() = %v, want %v", value, got, want)
+		}
+	}
+}
+
 func TestUsageEnvelopeMustMatchAuthenticatedSubjectScope(t *testing.T) {
 	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
 	valid := []byte(`{

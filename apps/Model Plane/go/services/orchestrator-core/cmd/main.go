@@ -505,6 +505,8 @@ func natsAuthOptions() []nats.Option {
 	return append(options, nats.Token(token))
 }
 
+// compatAdapterEnabled reads ENABLE_COMPAT_ADAPTER. Only the exact literal "true"
+// enables it: no trimming and no case folding.
 func compatAdapterEnabled() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("ENABLE_COMPAT_ADAPTER")), "true")
+	return os.Getenv("ENABLE_COMPAT_ADAPTER") == "true"
 }

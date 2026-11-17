@@ -229,10 +229,11 @@ const (
 // policy is on, the org-core client. Enforce and shadow both refuse to start
 // without the client: a broker that cannot ask org-core must not run as if it had.
 func serverOptionsFromEnv(getenv func(string) string) (bbserver.Options, error) {
-	assistantTaskGrants := strings.ToLower(strings.TrimSpace(getenv(envAssistantTaskGrants)))
+	// The assistant task grants switch reads the exact literal "true" only: no
+	// trimming, no case folding, and no "1" or "on".
 	options := bbserver.Options{
 		SitePolicy:                 sitepolicy.ParseMode(getenv(envSitePolicy)),
-		AssistantTaskGrantsEnabled: assistantTaskGrants == "1" || assistantTaskGrants == "true" || assistantTaskGrants == "on",
+		AssistantTaskGrantsEnabled: getenv(envAssistantTaskGrants) == "true",
 	}
 	maxTTL, err := grantMaxTTLFromEnv(getenv)
 	if err != nil {

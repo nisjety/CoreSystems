@@ -12,10 +12,12 @@ import (
 // the wake gate in internal/eventtrigger/wakegate_switch_test.go, and the starter's absence is the switch's whole effect.
 func TestInlineSwitchesAreReadAsTheLiteralTrue(t *testing.T) {
 	sources := map[string][]string{
-		"CRON_RUN_NOW_ENABLED":            {"main.go"},
-		"EVENT_TRIGGER_FIRE_ENABLED":      {"main.go"},
-		"EVENT_TRIGGER_RUN_ENABLED":       {"event_trigger_fire.go"},
-		"EVENT_TRIGGER_WAKE_GATE_ENABLED": {"main.go", "event_trigger_fire.go"},
+		"CAPABILITY_CORE_ALLOW_UNSIGNED_DECISIONS":   {"main.go"},
+		"CRON_RUN_NOW_ENABLED":                       {"main.go"},
+		"EVENT_TRIGGER_FIRE_ENABLED":                 {"main.go"},
+		"EVENT_TRIGGER_RUN_ENABLED":                  {"event_trigger_fire.go"},
+		"EVENT_TRIGGER_WAKE_GATE_ENABLED":            {"main.go", "event_trigger_fire.go"},
+		"TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH": {"main.go"},
 	}
 	for name, files := range sources {
 		anyRead := regexp.MustCompile(`os\.Getenv\("` + name + `"\)`)

@@ -628,13 +628,31 @@ func TestHumanBrowseGrantsLogNoHostAndNoOrg(t *testing.T) {
 	}
 }
 
+// BROWSER_BROKER_WEB_POLICY_SNAPSHOT reads the exact literal true. "1", "TRUE" and
+// a padded value are typos that stop the broker at boot, not silent switches.
+func TestConfigFromEnv_WebPolicySnapshotIsTheExactLiteralTrue(t *testing.T) {
+	cfg, err := ConfigFromEnv(envOf(map[string]string{EnvWebPolicySnapshot: "true"}))
+	if err != nil || !cfg.WebPolicySnapshot {
+		t.Fatalf("true: snapshot=%v err=%v", cfg.WebPolicySnapshot, err)
+	}
+	cfg, err = ConfigFromEnv(envOf(map[string]string{EnvWebPolicySnapshot: "0"}))
+	if err != nil || cfg.WebPolicySnapshot {
+		t.Fatalf("0: snapshot=%v err=%v, want off", cfg.WebPolicySnapshot, err)
+	}
+	for _, value := range []string{"1", "TRUE", " true "} {
+		if _, err := ConfigFromEnv(envOf(map[string]string{EnvWebPolicySnapshot: value})); err == nil {
+			t.Fatalf("%q: a value that is not the literal was accepted", value)
+		}
+	}
+}
+
 func TestConfigFromEnv_HumanBrowse(t *testing.T) {
 	cfg, err := ConfigFromEnv(envOf(nil))
 	if err != nil || cfg.HumanBrowseEnabled || cfg.HumanAbsoluteTTL != 4*time.Hour || cfg.MaxAttachDomains != 8 || len(cfg.DenySuffixes) != 0 {
 		t.Fatalf("defaults = %#v, %v; human browse must be off, the cap 4h, the attach bound 8", cfg, err)
 	}
 	cfg, err = ConfigFromEnv(envOf(map[string]string{
-		"BROWSER_BROKER_HUMAN_BROWSE_ENABLED":       "1",
+		"BROWSER_BROKER_HUMAN_BROWSE_ENABLED":       "true",
 		"BROWSER_BROKER_HUMAN_ABSOLUTE_TTL_SECONDS": "7200",
 		"BROWSER_BROKER_MAX_ATTACH_DOMAINS":         "3",
 		"BROWSER_BROKER_DENY_SUFFIXES":              ".Corp, intranet.example",
@@ -649,6 +667,8 @@ func TestConfigFromEnv_HumanBrowse(t *testing.T) {
 	// A typo must stop the broker, not turn open-web browsing on or off.
 	for name, env := range map[string]map[string]string{
 		"switch":      {"BROWSER_BROKER_HUMAN_BROWSE_ENABLED": "yes"},
+		"switch 1":    {"BROWSER_BROKER_HUMAN_BROWSE_ENABLED": "1"},
+		"switch TRUE": {"BROWSER_BROKER_HUMAN_BROWSE_ENABLED": "TRUE"},
 		"cap":         {"BROWSER_BROKER_HUMAN_ABSOLUTE_TTL_SECONDS": "four hours"},
 		"cap zero":    {"BROWSER_BROKER_HUMAN_ABSOLUTE_TTL_SECONDS": "0"},
 		"attach":      {"BROWSER_BROKER_MAX_ATTACH_DOMAINS": "-1"},

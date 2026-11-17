@@ -48,6 +48,21 @@ func TestFillOtp_SwitchOffValidatesAnIssuedApprovalAsRevoked(t *testing.T) {
 	}
 }
 
+// BROWSER_BROKER_FILL_OTP_ENABLED reads the exact literal true only: a "1" or "on"
+// leaves the switch off, so the fill_otp path stays dark.
+func TestFillOtpSwitchIsReadAsTheExactLiteralTrue(t *testing.T) {
+	cfg, err := ConfigFromEnv(envOf(map[string]string{EnvFillOtpEnabled: "true"}))
+	if err != nil || !cfg.FillOtpEnabled {
+		t.Fatalf("true: enabled=%v err=%v", cfg.FillOtpEnabled, err)
+	}
+	for _, value := range []string{"1", "on", "TRUE", " true "} {
+		cfg, err := ConfigFromEnv(envOf(map[string]string{EnvFillOtpEnabled: value}))
+		if err != nil || cfg.FillOtpEnabled {
+			t.Fatalf("%q: enabled=%v err=%v, want off", value, cfg.FillOtpEnabled, err)
+		}
+	}
+}
+
 // The switch gates fill_otp only: another sensitive approval under the same
 // parent still validates while the fill_otp switch is off.
 func TestFillOtp_SwitchOffLeavesOtherApprovalsValid(t *testing.T) {

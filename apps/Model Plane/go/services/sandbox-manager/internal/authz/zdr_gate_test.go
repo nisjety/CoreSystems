@@ -147,9 +147,9 @@ func TestZDRGateRefusesAMissingPrincipalFailClosed(t *testing.T) {
 	}
 }
 
-func TestRequireRetentionClaimFromEnvIsOffUnlessExactlyOn(t *testing.T) {
+func TestRequireRetentionClaimFromEnvIsOffUnlessExactlyTrue(t *testing.T) {
 	t.Parallel()
-	cases := map[string]bool{"on": true, " on ": true, "ON": false, "true": false, "1": false, "": false, "off": false}
+	cases := map[string]bool{"true": true, " true ": false, "TRUE": false, "on": false, " on ": false, "ON": false, "1": false, "": false, "off": false}
 	for value, want := range cases {
 		got := RequireRetentionClaimFromEnv(func(name string) string {
 			if name != RequireRetentionClaimEnv {

@@ -10,15 +10,16 @@ import (
 )
 
 // RequireRetentionClaimEnv switches on refusing a token that carries no
-// retention claim at all. Exact match: only the literal "on" enables it.
+// retention claim at all. Exact match: only the literal "true" enables it.
 const RequireRetentionClaimEnv = "SANDBOX_MANAGER_REQUIRE_RETENTION_CLAIM"
 
-// RequireRetentionClaimFromEnv reads the switch. Anything but "on" is off.
+// RequireRetentionClaimFromEnv reads the switch. Anything but the exact literal
+// "true" is off: no trimming and no case folding.
 func RequireRetentionClaimFromEnv(getenv func(string) string) bool {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	return strings.TrimSpace(getenv(RequireRetentionClaimEnv)) == "on"
+	return getenv(RequireRetentionClaimEnv) == "true"
 }
 
 // ZDRGate refuses every sandbox-manager method (Health excepted) for a caller
@@ -33,7 +34,7 @@ func RequireRetentionClaimFromEnv(getenv func(string) string) bool {
 //
 // An absent retention claim (a token minted before the claim existed) is
 // refused the same way only when SANDBOX_MANAGER_REQUIRE_RETENTION_CLAIM is
-// "on"; it stays off until Auth Core's real mint for this audience is shown to
+// "true"; it stays off until Auth Core's real mint for this audience is shown to
 // carry zdr:false for both registered callers.
 func ZDRGate() grpc.UnaryServerInterceptor {
 	return zdrGate(RequireRetentionClaimFromEnv(os.Getenv))

@@ -240,8 +240,11 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// parseOptionalBool reads a switch that is unset (the default), the exact literal
+// true, or the exact literal false. The match is exact, with no trimming and no
+// case folding, as the flag registry documents: any other value is an error.
 func parseOptionalBool(name, raw string, defaultValue bool) (bool, error) {
-	switch strings.TrimSpace(raw) {
+	switch raw {
 	case "":
 		return defaultValue, nil
 	case "true":

@@ -205,7 +205,7 @@ func main() {
 	store, err := buildLedgerFromConfig(
 		ctx,
 		strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		strings.EqualFold(strings.TrimSpace(os.Getenv("COST_CORE_ALLOW_EPHEMERAL")), "true"),
+		allowEphemeralLedger(),
 	)
 	if err != nil {
 		slog.Error("durable cost ledger unavailable", "error", err)
@@ -338,6 +338,13 @@ func splitAudiences(raw string) []string {
 		}
 	}
 	return audiences
+}
+
+// allowEphemeralLedger reads COST_CORE_ALLOW_EPHEMERAL, the explicit local-test
+// opt-in for the in-memory ledger. Only the exact literal "true" enables it: no
+// trimming and no case folding.
+func allowEphemeralLedger() bool {
+	return os.Getenv("COST_CORE_ALLOW_EPHEMERAL") == "true"
 }
 
 // buildLedgerFromConfig selects the durable Postgres ledger. Ephemeral storage

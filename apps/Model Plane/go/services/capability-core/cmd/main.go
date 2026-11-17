@@ -576,7 +576,7 @@ func main() {
 		// code_interpreter dispatch failed as "capability policy unavailable"
 		// for three days). Fail at startup instead; the only way to run
 		// unsigned is to say so explicitly.
-		if strings.EqualFold(strings.TrimSpace(os.Getenv("CAPABILITY_CORE_ALLOW_UNSIGNED_DECISIONS")), "true") {
+		if unsignedDecisionsAllowed() {
 			slog.Warn("capability decision evidence signer unavailable; running UNSIGNED because CAPABILITY_CORE_ALLOW_UNSIGNED_DECISIONS=true — execution-core will deny allows if it verifies evidence", "error", signerErr)
 		} else {
 			slog.Error("capability decision evidence signer unavailable; refusing to start. Set CAPABILITY_CORE_DECISION_SIGNING_KEY (see deploy/.env.generated-secrets) or, for a deliberately unsigned dev run, CAPABILITY_CORE_ALLOW_UNSIGNED_DECISIONS=true", "error", signerErr)
@@ -849,31 +849,44 @@ func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher, fireA
 	return dispatcher, true
 }
 
+// unsignedDecisionsAllowed reads CAPABILITY_CORE_ALLOW_UNSIGNED_DECISIONS, the
+// explicit dev-run opt-in that lets capability-core start without a decision
+// evidence signer. The switch relaxes security, so only the exact literal "true"
+// enables it: no trimming and no case folding.
+func unsignedDecisionsAllowed() bool {
+	return os.Getenv("CAPABILITY_CORE_ALLOW_UNSIGNED_DECISIONS") == "true"
+}
+
 // acceptsPublishOnlyDispatch reports whether this deployment has explicitly
 // acknowledged that it runs its own consumer of
 // mp.v1.capability.task.dispatched, so NatsDispatcher's publish-then-fail
 // safety net (see its doc comment) should stand down and let a published
 // task remain `running` for that consumer to complete. Defaults to false:
 // this repository ships no such consumer, so the safe default is to fail a
-// task loudly rather than assume one exists.
+// task loudly rather than assume one exists. Only the exact literal "true"
+// counts: no trimming and no case folding.
 func acceptsPublishOnlyDispatch() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH")), "true")
+	return os.Getenv("TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH") == "true"
 }
 
 // taskExecutorEnabled resolves the executor's on/off decision.
 //
 // Unset defaults to the safe answer: on only when the dispatcher can complete a
-// hand-off. "false" always wins. An explicit "true" is honoured even without the
+// hand-off. "false" always wins, and it is matched leniently (any case, any
+// padding) because it is the kill switch: a stray spelling must never leave the
+// executor on. Only the exact literal "true" forces it on, even without the
 // workflow dispatcher, because a deployment may run its own consumer of
 // mp.v1.capability.task.dispatched — but that combination is logged loudly
 // because, absent TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH=true, every claimed
 // task will now fail immediately (with a clear reason) rather than execute or
-// silently strand.
+// silently strand. Any other value is neither switch position and takes the
+// unset default.
 func taskExecutorEnabled(workflowBacked bool) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("TASK_EXECUTOR_ENABLED"))) {
-	case "false":
+	raw := os.Getenv("TASK_EXECUTOR_ENABLED")
+	if strings.EqualFold(strings.TrimSpace(raw), "false") {
 		return false
-	case "true":
+	}
+	if raw == "true" {
 		if !workflowBacked && !acceptsPublishOnlyDispatch() {
 			slog.Error("TASK_EXECUTOR_ENABLED=true without a workflow dispatcher and without " +
 				"TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH=true: the executor will start, but every " +
@@ -881,9 +894,12 @@ func taskExecutorEnabled(workflowBacked bool) bool {
 				"repository ships no consumer of mp.v1.capability.task.dispatched")
 		}
 		return true
-	default:
-		return workflowBacked
 	}
+	if raw != "" {
+		slog.Warn("TASK_EXECUTOR_ENABLED is neither the literal true nor the literal false; using the unset default",
+			"workflow_backed", workflowBacked)
+	}
+	return workflowBacked
 }
 
 // learningReviewEnabledEnv is the kill switch for the G7 learning review. The

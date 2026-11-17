@@ -47,6 +47,32 @@ func TestSitePolicyOnBuildsTheClientWhenConfigured(t *testing.T) {
 	}
 }
 
+// BROWSER_BROKER_ASSISTANT_TASK_GRANTS_ENABLED reads the exact literal "true" only.
+// With the site policy off and no org-core client, a value that is not the
+// literal must leave the switch off and still let the broker start.
+func TestAssistantTaskGrantsSwitchIsTheExactLiteralTrue(t *testing.T) {
+	for _, value := range []string{"1", "on", "TRUE", " true "} {
+		options, err := serverOptionsFromEnv(envOf(map[string]string{envAssistantTaskGrants: value}))
+		if err != nil {
+			t.Fatalf("%q: serverOptionsFromEnv: %v", value, err)
+		}
+		if options.AssistantTaskGrantsEnabled {
+			t.Fatalf("%q: assistant task grants enabled; only the exact literal true enables it", value)
+		}
+	}
+	options, err := serverOptionsFromEnv(envOf(map[string]string{
+		envAssistantTaskGrants: "true",
+		envOrgCoreURL:          "http://org-core:8080",
+		envOrgCoreToken:        "test-token",
+	}))
+	if err != nil {
+		t.Fatalf("serverOptionsFromEnv: %v", err)
+	}
+	if !options.AssistantTaskGrantsEnabled {
+		t.Fatal(`BROWSER_BROKER_ASSISTANT_TASK_GRANTS_ENABLED="true" must enable assistant task grants`)
+	}
+}
+
 func TestGrantMaxTTLDefaultsAndClamps(t *testing.T) {
 	cases := []struct {
 		raw     string

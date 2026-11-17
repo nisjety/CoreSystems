@@ -71,7 +71,7 @@ func TestOriginExtension_DefaultConfigIsOff(t *testing.T) {
 		t.Fatalf("unset switch: enabled=%v err=%v", cfg.OriginExtensionEnabled, err)
 	}
 	for raw, want := range map[string]bool{
-		"1": true, "true": true, "on": true, "TRUE": true, " on ": true,
+		"true": true, "1": false, "on": false, "TRUE": false, " on ": false,
 		"0": false, "false": false, "off": false, "yes": false, "2": false, "tru": false, "": false,
 	} {
 		cfg, err := ConfigFromEnv(envOf(map[string]string{EnvOriginExtensionEnabled: raw}))
