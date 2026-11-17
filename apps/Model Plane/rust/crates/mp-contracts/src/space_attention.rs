@@ -2,7 +2,7 @@
 //!
 //! The switch is a rollout control, never an authorization input: Control's per-Space read
 //! decisions and Session Core's SQL predicates decide what a caller may count or see. It is ON
-//! only for an explicit on-word, so an unset, empty or mistyped value keeps the RPC closed.
+//! only for the literal `true`, so an unset, empty or mistyped value keeps the RPC closed.
 
 use crate::agentic_subscription::switch_value_is_on;
 

@@ -291,8 +291,8 @@ impl WakeFlags {
     }
 
     fn switch(&self, records: bool, wake: bool) {
-        env::set_var(sm::RECORDS_CORE_ENV, if records { "1" } else { "0" });
-        env::set_var(sm::WAKE_CORE_ENV, if wake { "1" } else { "0" });
+        env::set_var(sm::RECORDS_CORE_ENV, if records { "true" } else { "0" });
+        env::set_var(sm::WAKE_CORE_ENV, if wake { "true" } else { "0" });
     }
 }
 

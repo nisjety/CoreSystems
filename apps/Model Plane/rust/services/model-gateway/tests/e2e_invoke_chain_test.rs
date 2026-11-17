@@ -4841,7 +4841,7 @@ async fn invoke_stream_agentic_reuses_the_prepared_session_run() {
 async fn invoke_stream_agentic_on_the_subscription_pins_the_route_on_run_agent() {
     std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
     std::env::remove_var("ALLOWED_MODELS");
-    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("1"));
+    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("true"));
     let _effects = EnvGuard::set("AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS", None);
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
@@ -4907,8 +4907,18 @@ async fn invoke_stream_agentic_on_the_subscription_pins_the_route_on_run_agent()
 async fn invoke_stream_agentic_on_the_subscription_is_refused_when_the_switch_is_off() {
     std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
     std::env::remove_var("ALLOWED_MODELS");
-    // Unset, and also each spelling that must read as off.
-    for off in [None, Some(""), Some("0"), Some("false"), Some("off"), Some("disabled")] {
+    // Unset, and also each spelling that must read as off: only the literal true turns it on.
+    for off in [
+        None,
+        Some(""),
+        Some("0"),
+        Some("1"),
+        Some("yes"),
+        Some("TRUE"),
+        Some("false"),
+        Some("off"),
+        Some("disabled"),
+    ] {
         let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", off);
         let client = spawn_mock(MockOk::default()).await;
         let (mock_session, session_handles) = MockSessionCore::new();
@@ -4963,7 +4973,7 @@ async fn invoke_stream_agentic_on_the_subscription_is_refused_when_the_switch_is
 async fn invoke_stream_agentic_off_the_subscription_pins_no_route_even_with_the_switch_on() {
     std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
     std::env::remove_var("ALLOWED_MODELS");
-    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("1"));
+    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("true"));
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, _session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
@@ -5123,7 +5133,7 @@ async fn run_agent_request_for_turn(subscription: bool) -> mpv1::RunAgentRequest
 async fn invoke_stream_agentic_resolves_the_run_budget_on_the_server_per_route() {
     std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
     std::env::remove_var("ALLOWED_MODELS");
-    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("1"));
+    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("true"));
     let _effects = EnvGuard::set("AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS", None);
 
     // Nothing set: today's literals, on both routes.
@@ -5238,7 +5248,7 @@ fn usage_limit_run_response() -> mpv1::RunAgentResponse {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_subscription_agent_run_that_hits_the_usage_limit_says_so_and_the_thread_agrees() {
-    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("1"));
+    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("true"));
     let (body, handles) =
         run_agentic_turn_answered_with(SUBSCRIPTION_AGENTIC_TURN, usage_limit_run_response()).await;
 
@@ -5284,7 +5294,7 @@ async fn a_subscription_agent_run_that_hits_the_usage_limit_says_so_and_the_thre
 #[tokio::test]
 #[serial_test::serial]
 async fn every_typed_agent_run_failure_is_a_subscription_frame_with_its_retryability() {
-    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("1"));
+    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("true"));
     for (code, retryable) in [
         ("subscription_usage_limit", false),
         ("subscription_reauth_required", false),
@@ -5334,7 +5344,7 @@ async fn every_typed_agent_run_failure_is_a_subscription_frame_with_its_retryabi
 #[tokio::test]
 #[serial_test::serial]
 async fn an_untyped_or_unknown_agent_run_failure_stays_the_generic_failure() {
-    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("1"));
+    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("true"));
     for code in ["", "execution_failed", "a_code_from_a_newer_execution_core"] {
         let (body, handles) = run_agentic_turn_answered_with(
             SUBSCRIPTION_AGENTIC_TURN,
@@ -5367,7 +5377,7 @@ async fn an_untyped_or_unknown_agent_run_failure_stays_the_generic_failure() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_subscription_code_on_a_turn_off_the_subscription_stays_the_generic_failure() {
-    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("1"));
+    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("true"));
     let (body, handles) = run_agentic_turn_answered_with(
         r#"{"content":"plan this safely","model":"m","features":["agentic"]}"#,
         usage_limit_run_response(),
@@ -12989,7 +12999,7 @@ async fn agentic_run_context_on_the_pinned_subscription_route_is_instructions_on
     std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
     std::env::remove_var("ALLOWED_MODELS");
     let _switch = EnvGuard::set("MODEL_GATEWAY_RUN_CONTEXT", Some("full"));
-    let _route = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("1"));
+    let _route = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("true"));
     let _effects = EnvGuard::set("AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS", None);
     let turn = run_context_turn(
         r#"{"content":"what is my project codename?","model":"gpt-5.6-terra","provider":"chatgpt-codex","subscription_connection_id":"conn_1","thread_id":"thread-existing","features":["agentic"],"plan_mode":true,"org_instructions":"Org rule."}"#,
@@ -14143,7 +14153,7 @@ async fn space_post_call(
 #[tokio::test]
 #[serial_test::serial]
 async fn post_route_appends_post_and_never_starts_a_run() {
-    let _flag = EnvGuard::set("SPACE_HUMAN_POSTS_API", Some("1"));
+    let _flag = EnvGuard::set("SPACE_HUMAN_POSTS_API", Some("true"));
     let (app, handles, _jwks) = space_post_app(vec![
         append_response(1, "msg-1", false),
         append_response(1, "msg-1", true),
@@ -14235,7 +14245,7 @@ async fn post_route_refuses_zdr_with_catalogue_code() {
 #[tokio::test]
 #[serial_test::serial]
 async fn post_route_maps_session_core_errors() {
-    let _flag = EnvGuard::set("SPACE_HUMAN_POSTS_API", Some("1"));
+    let _flag = EnvGuard::set("SPACE_HUMAN_POSTS_API", Some("true"));
     let mut typed = Status::failed_precondition("zero retention");
     typed.metadata_mut().insert(
         mp_contracts::zdr_refusal::KIND_TRAILER,
@@ -14279,7 +14289,7 @@ async fn post_route_maps_session_core_errors() {
 #[tokio::test]
 #[serial_test::serial]
 async fn post_route_reports_a_lost_append_after_create_with_the_thread_id() {
-    let _flag = EnvGuard::set("SPACE_HUMAN_POSTS_API", Some("1"));
+    let _flag = EnvGuard::set("SPACE_HUMAN_POSTS_API", Some("true"));
     // The thread is created, the append reply is lost: 502 names the thread so a retry with
     // the same keys lands on it; a definite refusal after create is said as what it was.
     let (app, handles, _jwks) = space_post_app(vec![
@@ -14303,7 +14313,7 @@ async fn post_route_reports_a_lost_append_after_create_with_the_thread_id() {
 #[tokio::test]
 #[serial_test::serial]
 async fn post_route_rejects_forged_authority_fields_and_non_post_kind() {
-    let _flag = EnvGuard::set("SPACE_HUMAN_POSTS_API", Some("1"));
+    let _flag = EnvGuard::set("SPACE_HUMAN_POSTS_API", Some("true"));
     let (app, handles, _jwks) = space_post_app(Vec::new()).await;
     let append_uri = "/v1/threads/thread-9/messages";
     let with = |mut base: serde_json::Value, key: &str, value: serde_json::Value| {
@@ -14368,7 +14378,7 @@ async fn post_route_is_off_by_default_and_closed_to_service_principals() {
         clear_model_auth_env();
     }
     // A service principal is refused whatever the flag says.
-    let _flag = EnvGuard::set("SPACE_HUMAN_POSTS_API", Some("1"));
+    let _flag = EnvGuard::set("SPACE_HUMAN_POSTS_API", Some("true"));
     let (_jwks, token) = signed_service_model_token(&["models:invoke"]).await;
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, handles) = MockSessionCore::new();

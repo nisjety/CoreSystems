@@ -1,7 +1,7 @@
 //! Space human-post switches (build plan WS01-S3).
 //!
 //! Both switches are rollout controls, never authorization inputs: Control's signed decision and
-//! Session Core's member gate decide who may post. Each is ON only for an explicit on-word, so an
+//! Session Core's member gate decide who may post. Each is ON only for the literal `true`, so an
 //! unset, empty or mistyped value keeps the member path closed.
 
 use crate::agentic_subscription::switch_value_is_on;
@@ -35,12 +35,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn enabled_from_is_on_only_for_an_explicit_on_word() {
-        for on in ["1", "true", "TRUE", "on", "yes", "enabled", " true ", "Enabled"] {
-            assert!(enabled_from(Some(on)), "{on:?} must turn the switch on");
-        }
-        // Unset, empty and mistyped values keep the member path closed.
-        for off in [None, Some(""), Some("  "), Some("0"), Some("false"), Some("off"), Some("tru"), Some("yess"), Some("2")] {
+    fn enabled_from_is_on_only_for_the_literal_true() {
+        assert!(
+            enabled_from(Some("true")),
+            "the literal true turns the switch on"
+        );
+        // Unset, empty, mistyped and every other on-word keep the member path closed.
+        for off in [
+            None,
+            Some(""),
+            Some("  "),
+            Some(" true "),
+            Some("TRUE"),
+            Some("Enabled"),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+            Some("enabled"),
+            Some("0"),
+            Some("false"),
+            Some("off"),
+            Some("tru"),
+            Some("yess"),
+            Some("2"),
+        ] {
             assert!(!enabled_from(off), "{off:?} must keep the switch off");
         }
     }

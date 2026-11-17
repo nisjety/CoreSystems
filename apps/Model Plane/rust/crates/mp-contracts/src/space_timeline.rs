@@ -1,8 +1,8 @@
 //! Space room timeline switches (build plan WS15-S6).
 //!
 //! Both switches are rollout controls, never authorization inputs: Control's per-Space read
-//! decision and Session Core's SQL predicates decide what a caller may see. Each is ON only for an
-//! explicit on-word, so an unset, empty or mistyped value keeps the feature closed. The thread
+//! decision and Session Core's SQL predicates decide what a caller may see. Each is ON only for the
+//! literal `true`, so an unset, empty or mistyped value keeps the feature closed. The thread
 //! activity trigger and backfill (migration 0078) always run, inert until read.
 
 use crate::agentic_subscription::switch_value_is_on;

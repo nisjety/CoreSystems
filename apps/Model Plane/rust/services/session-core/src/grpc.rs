@@ -23259,7 +23259,7 @@ mod tests {
                 "CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64",
                 Some(URL_SAFE_NO_PAD.encode(signing_key.verifying_key().to_bytes()).as_str()),
             ),
-            ("SPACE_HUMAN_POSTS_CORE", flag_on.then_some("1")),
+            ("SPACE_HUMAN_POSTS_CORE", flag_on.then_some("true")),
         ])
     }
 

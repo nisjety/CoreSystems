@@ -256,11 +256,12 @@ fn routing_guidance_enabled_from(value: Option<&str>) -> bool {
     value == Some("true")
 }
 
-/// Kill switch for the public-web guidance (E4.3 slice 1). Default OFF: only a literal `1`, `true`
-/// or `on` enables it, as for [`ROUTING_GUIDANCE_ENV`]. When on, the prompt gains [`SNIPPET_WEB`]
-/// whenever web search or web fetch is offered, and the four public-web tools carry the longer
-/// descriptions from [`web_tool_description`]. Only prompt and description text changes: no
-/// parameter schema, no dispatch, nothing stored or sent, so it is ZDR-neutral. It is read per
+/// Switch for the public-web guidance (E4.3 slice 1). Default OFF: only the exact literal `true`
+/// enables it, with no trimming and no case folding, as for [`ROUTING_GUIDANCE_ENV`]. When on, the
+/// prompt gains [`SNIPPET_WEB`] whenever web search or web fetch is offered, and the four
+/// public-web tools carry the longer descriptions from [`web_tool_description`]. Only prompt and
+/// description text changes: no parameter schema, no dispatch, nothing stored or sent, so it is
+/// ZDR-neutral. It is read per
 /// prompt composition and per tool-list build, so a flip takes effect for the next run. It is
 /// process-level: it must not change between a park and its resume, because the resume rebuilds the
 /// tool-list digest from those descriptions. There is no flag-registry row: this is an
@@ -273,12 +274,11 @@ pub(crate) fn web_guidance_enabled() -> bool {
     web_guidance_enabled_from(std::env::var(WEB_GUIDANCE_ENV).ok().as_deref())
 }
 
+/// Only the exact literal `true` enables the public-web guidance: `1`, `on`, `yes`, a cased or a
+/// padded `true` stay off.
 #[must_use]
 fn web_guidance_enabled_from(value: Option<&str>) -> bool {
-    matches!(
-        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
-        Some("1" | "true" | "on")
-    )
+    value == Some("true")
 }
 
 fn offered_among<'a>(offered: &'a BTreeSet<String>, names: &[&'static str]) -> Vec<&'a str> {
@@ -9179,7 +9179,8 @@ mod system_prompt_composition {
 mod routing_guidance {
     use super::{
         compose_system_prompt, compose_system_prompt_with, routing_guidance_enabled_from,
-        routing_snippet, RoutingFirstTool, ROUTING_GUIDANCE_ENV,
+        routing_snippet, web_guidance_enabled_from, RoutingFirstTool, ROUTING_GUIDANCE_ENV,
+        WEB_GUIDANCE_ENV,
     };
     use std::collections::BTreeSet;
 
@@ -9199,6 +9200,21 @@ mod routing_guidance {
             assert!(!routing_guidance_enabled_from(Some(off)), "{off:?}");
         }
         assert!(routing_guidance_enabled_from(Some("true")));
+    }
+
+    /// The public-web guidance switch reads the same exact literal as the routing guidance one:
+    /// `1`, `on`, `yes` and any cased or padded `true` leave it off.
+    #[test]
+    fn web_guidance_is_off_by_default_and_for_any_other_value() {
+        assert_eq!(WEB_GUIDANCE_ENV, "EXECUTION_CORE_WEB_GUIDANCE");
+        assert!(!web_guidance_enabled_from(None));
+        for off in [
+            "", " ", "0", "1", "false", "off", "on", "ON", "no", "yes", "enabled", "TRUE", "True",
+            " true", "true ", " true\n",
+        ] {
+            assert!(!web_guidance_enabled_from(Some(off)), "{off:?}");
+        }
+        assert!(web_guidance_enabled_from(Some("true")));
     }
 
     /// With the switch off (the default) the prompt is byte-identical to what it was before the

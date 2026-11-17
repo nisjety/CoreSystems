@@ -299,8 +299,9 @@ pub fn probe() -> ProbeOutcome {
     }
 }
 
-/// Whether `CODE_INTERPRETER_OFFICE_VERIFY` asks for the render layer. Strict, as
-/// the verifier's own parser is: only the named value counts.
+/// Whether `CODE_INTERPRETER_OFFICE_VERIFY` asks for the render layer. Strict, as the
+/// verifier's own parser is: only the exact word `render` counts, with no trimming and no case
+/// folding.
 fn render_requested() -> bool {
     render_requested_in(
         std::env::var("CODE_INTERPRETER_OFFICE_VERIFY")
@@ -310,7 +311,7 @@ fn render_requested() -> bool {
 }
 
 fn render_requested_in(raw: Option<&str>) -> bool {
-    raw.is_some_and(|value| value.trim().eq_ignore_ascii_case("render"))
+    raw == Some("render")
 }
 
 /// Whether the LibreOffice converter starts, measured by its version. This is
@@ -2653,7 +2654,10 @@ mod tests {
             .find(|row| row.capability_id == SANDBOX_CAPABILITY)
             .expect("the sandbox is attested from its own probes");
         assert_eq!(sandbox.reason_code, "code_runtime_probed");
-        assert!(render_requested_in(Some(" Render ")));
+        assert!(render_requested_in(Some("render")));
+        assert!(!render_requested_in(Some(" Render ")));
+        assert!(!render_requested_in(Some("Render")));
+        assert!(!render_requested_in(Some(" render")));
         assert!(!render_requested_in(Some("true")));
         assert!(!render_requested_in(Some("structural")));
         assert!(!render_requested_in(None));

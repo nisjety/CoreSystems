@@ -13,14 +13,15 @@
 //!   composer follows instead of hard-coding the provider.
 //!
 //! All three read the same variable through this module, with the same
-//! spelling of "on", so a deployment cannot have one service enabled and
+//! reading of "on", so a deployment cannot have one service enabled and
 //! another silently disabled by a typo in a single `if`.
 //!
 //! # Off by default
 //!
-//! Only an explicit on-word (`1`, `true`, `on`, `yes`, `enabled`, any case)
-//! turns the switch on. Unset, empty and unrecognised values are off, like
-//! `MODEL_GATEWAY_DATED_POST_SECTION_ONLY`. Compose passes
+//! Only the exact literal `true` turns the switch on: no trimming and no case
+//! folding, so `1`, `on`, `yes`, `enabled` and `TRUE` leave it off. The reader
+//! is the one strict parser, [`crate::loop_fold::switch_from`]. Unset, empty
+//! and unrecognised values are off. Compose passes
 //! `${AGENTIC_SUBSCRIPTION_ENABLED:-false}` to all three services.
 //!
 //! # Why the order of a rollout matters
@@ -37,11 +38,11 @@
 //! process never changes its environment, so the two are the same in
 //! production.
 
-/// Master switch. Off unless set to an explicit on-word.
+/// Master switch. Off unless set to the literal `true`.
 pub const ENABLED_ENV: &str = "AGENTIC_SUBSCRIPTION_ENABLED";
 
 /// Second switch: whether a subscription run may act, that is, run without
-/// plan mode. Off unless set to an explicit on-word, and it grants nothing
+/// plan mode. Off unless set to the literal `true`, and it grants nothing
 /// while [`ENABLED_ENV`] is off. Until the plan-approval flow is connected a
 /// subscription run is read-only by construction (plan mode is required).
 pub const ALLOW_EFFECTS_ENV: &str = "AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS";
@@ -60,15 +61,15 @@ pub const DISABLED_CODE: &str = "agentic_subscription_disabled";
 /// served by the subscription route it was pinned to.
 pub const ROUTE_UNAVAILABLE_CODE: &str = "subscription_route_unavailable";
 
-/// Whether `raw` (the value of an environment variable, if set) is an explicit
-/// on-word. Surrounding whitespace and case are ignored.
+/// Whether `raw` (the value of an environment variable, if set) is the exact
+/// literal `true`. This is the strict reader, [`crate::loop_fold::switch_from`]:
+/// surrounding whitespace and case are NOT ignored, so ` true `, `TRUE`, `1`,
+/// `on`, `yes` and `enabled` are all off. Every switch that reads through this
+/// function (the Space switches, the Space run switches and
+/// `SESSION_CORE_SPACE_HISTORY_FLOOR` included) is off for anything but `true`.
 #[must_use]
 pub fn switch_value_is_on(raw: Option<&str>) -> bool {
-    raw.map(str::trim).is_some_and(|value| {
-        ["1", "true", "on", "yes", "enabled"]
-            .iter()
-            .any(|on| value.eq_ignore_ascii_case(on))
-    })
+    crate::loop_fold::switch_from(raw)
 }
 
 /// Both switches, as one value a pure function can take instead of reading the
@@ -140,17 +141,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_an_explicit_on_word_turns_a_switch_on() {
-        for on in ["1", "true", "on", "yes", "enabled", " TRUE ", "Enabled", "On"] {
-            assert!(switch_value_is_on(Some(on)), "{on:?} must be on");
-        }
+    fn only_the_literal_true_turns_a_switch_on() {
+        assert!(switch_value_is_on(Some("true")), "the literal true is on");
+        // Every other spelling is off, including the ones the old lenient reader
+        // accepted: padding, another case, and the other on-words.
         for off in [
-            "", " ", "0", "false", "off", "no", "disabled", "2", "y", "tru", "enable",
-            "yes please", "null",
+            "",
+            " ",
+            " true ",
+            "true\n",
+            "TRUE",
+            "True",
+            "1",
+            "0",
+            "on",
+            "On",
+            "yes",
+            "enabled",
+            "Enabled",
+            "false",
+            "off",
+            "no",
+            "disabled",
+            "2",
+            "y",
+            "tru",
+            "enable",
+            "yes please",
+            "null",
         ] {
             assert!(!switch_value_is_on(Some(off)), "{off:?} must be off");
         }
         assert!(!switch_value_is_on(None), "an unset variable is off");
+    }
+
+    #[test]
+    fn the_module_reads_through_the_one_strict_reader() {
+        // The Space switches, the Space run switches and SESSION_CORE_SPACE_HISTORY_FLOOR
+        // call this function, so it must agree with loop_fold::switch_from on every value.
+        for raw in [
+            None,
+            Some(""),
+            Some("true"),
+            Some(" true "),
+            Some("TRUE"),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+        ] {
+            assert_eq!(
+                switch_value_is_on(raw),
+                crate::loop_fold::switch_from(raw),
+                "{raw:?}"
+            );
+        }
     }
 
     #[test]
@@ -159,21 +203,36 @@ mod tests {
         assert_eq!(Switches::default(), Switches::OFF);
         assert!(!Switches::OFF.effects_permitted());
 
-        let enabled = Switches::from_values(Some("1"), None);
+        let enabled = Switches::from_values(Some("true"), None);
         assert!(enabled.enabled);
         assert!(
             !enabled.effects_permitted(),
             "enabling the route does not allow effects"
         );
 
-        let effects_only = Switches::from_values(None, Some("1"));
+        let effects_only = Switches::from_values(None, Some("true"));
         assert!(
             !effects_only.effects_permitted(),
             "the effects switch grants nothing while the master switch is off"
         );
 
-        let both = Switches::from_values(Some("true"), Some("yes"));
+        let both = Switches::from_values(Some("true"), Some("true"));
         assert!(both.enabled && both.effects_permitted());
+    }
+
+    #[test]
+    fn the_effects_switch_grants_effects_only_on_the_literal_true() {
+        // ALLOW_EFFECTS lets a subscription run act, so a lenient "1" or "yes" here
+        // would be the widest switch in the module. Only the literal true, with the
+        // master switch on, grants effects.
+        for effects in ["1", "yes", "on", "enabled", "TRUE", " true "] {
+            assert!(
+                !Switches::from_values(Some("true"), Some(effects)).effects_permitted(),
+                "{effects:?} must not grant effects"
+            );
+        }
+        assert!(!Switches::from_values(Some("1"), Some("true")).effects_permitted());
+        assert!(Switches::from_values(Some("true"), Some("true")).effects_permitted());
     }
 
     #[test]

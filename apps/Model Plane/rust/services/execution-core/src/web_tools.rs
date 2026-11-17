@@ -141,10 +141,11 @@ pub fn attribution_enabled() -> bool {
     attribution_enabled_from(std::env::var(ATTRIBUTION_ENV).ok().as_deref())
 }
 
-/// Only the literal `true` enables; `1`, `on` and anything else stay off.
+/// Only the exact literal `true` enables it: no trimming and no case folding. `1`, `on`, `yes` and
+/// a padded value such as ` true` stay off.
 #[must_use]
 pub fn attribution_enabled_from(value: Option<&str>) -> bool {
-    value.map(str::trim) == Some("true")
+    value == Some("true")
 }
 
 impl WebToolsClient {
@@ -1178,14 +1179,18 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_attribution_switch_is_off_unless_the_literal_true_is_set() {
+    fn the_attribution_switch_is_off_unless_the_exact_literal_true_is_set() {
         assert_eq!(ATTRIBUTION_ENV, "EXECUTION_CORE_QUARRY_ATTRIBUTION");
         assert!(attribution_enabled_from(Some("true")));
-        assert!(attribution_enabled_from(Some(" true ")));
         for raw in [
             None,
             Some(""),
+            Some(" "),
             Some("TRUE"),
+            Some("True"),
+            Some(" true"),
+            Some("true "),
+            Some(" true "),
             Some("1"),
             Some("on"),
             Some("yes"),

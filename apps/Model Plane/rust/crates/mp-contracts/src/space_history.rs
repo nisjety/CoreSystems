@@ -1,8 +1,8 @@
 //! Space message search switches (build plan WS13-S1).
 //!
 //! Both switches are rollout controls, never authorization inputs: Control's signed read decision
-//! and Session Core's SQL predicates decide who may read what. Each is ON only for an explicit
-//! on-word, so an unset, empty or mistyped value keeps search closed.
+//! and Session Core's SQL predicates decide who may read what. Each is ON only for the literal
+//! `true`, so an unset, empty or mistyped value keeps search closed.
 
 use crate::agentic_subscription::switch_value_is_on;
 

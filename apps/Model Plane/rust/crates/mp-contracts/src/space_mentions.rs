@@ -138,11 +138,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn switches_are_on_only_for_an_on_word() {
+    fn switches_are_on_only_for_the_literal_true() {
         assert!(!enabled_from(None));
         assert!(!enabled_from(Some("")));
         assert!(!enabled_from(Some("0")));
-        assert!(enabled_from(Some(" TRUE ")));
+        assert!(!enabled_from(Some("1")));
+        assert!(!enabled_from(Some(" TRUE ")));
+        assert!(enabled_from(Some("true")));
     }
 
     #[test]

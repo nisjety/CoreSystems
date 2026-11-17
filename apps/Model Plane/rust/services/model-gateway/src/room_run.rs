@@ -34,23 +34,23 @@ use crate::stream_buffer::{BufferedEvent, Replay, StreamDone};
 /// Version of the room frame vocabulary and of the stored `metadata.work` object.
 pub const FRAME_VERSION: u64 = 1;
 
-/// Environment variable of the durable summary writer (`space_run_work_summary`). Off unless an
-/// explicit on word; a rollout control, never an authorization input.
+/// Environment variable of the durable summary writer (`space_run_work_summary`). Off unless the
+/// literal `true`; a rollout control, never an authorization input.
 pub const WORK_SUMMARY_ENV: &str = "SPACE_RUN_WORK_SUMMARY";
 
 /// The metadata key the summary is stored under.
 pub const WORK_KEY: &str = "work";
 
-/// Environment variable of the member live view (`space_run_live_view`). Off unless an explicit on
-/// word; a rollout control, never an authorization input.
+/// Environment variable of the member live view (`space_run_live_view`). Off unless the literal
+/// `true`; a rollout control, never an authorization input.
 pub const LIVE_VIEW_ENV: &str = "SPACE_RUN_LIVE_VIEW";
 
 /// Environment variable that lets the live view carry the answer text (`space_run_live_text`). Off
 /// means step classes and `text_progress` only.
 pub const LIVE_TEXT_ENV: &str = "SPACE_RUN_LIVE_TEXT";
 
-/// Environment variable of the room manager's Stop route (`space_run_manager_stop`). Off unless an
-/// explicit on word; a rollout control, never an authorization input (Session Core verifies the
+/// Environment variable of the room manager's Stop route (`space_run_manager_stop`). Off unless the
+/// literal `true`; a rollout control, never an authorization input (Session Core verifies the
 /// Control `model.run.control` decision on every stop).
 pub const MANAGER_STOP_ENV: &str = "SPACE_RUN_MANAGER_STOP";
 
@@ -1623,8 +1623,16 @@ mod tests {
     fn the_policy_is_off_unless_switched_on_and_text_needs_the_live_view() {
         assert_eq!(SpaceRunPolicy::from_values(None, None, None, None), SpaceRunPolicy::OFF);
         assert_eq!(SpaceRunPolicy::default(), SpaceRunPolicy::OFF);
-        let on = SpaceRunPolicy::from_values(Some("true"), Some("1"), Some("on"), Some("yes"));
+        let on =
+            SpaceRunPolicy::from_values(Some("true"), Some("true"), Some("true"), Some("true"));
         assert!(on.work_summary && on.live_view && on.live_text && on.manager_stop);
+        // Only the literal true turns a run switch on: these on-words are all off.
+        let lenient = SpaceRunPolicy::from_values(Some("1"), Some("on"), Some("yes"), Some("TRUE"));
+        assert_eq!(
+            lenient,
+            SpaceRunPolicy::OFF,
+            "1, on, yes and TRUE are not the literal true"
+        );
         let text_alone = SpaceRunPolicy::from_values(None, Some("false"), Some("true"), None);
         assert!(!text_alone.live_view && !text_alone.live_text, "text never rides without the live view");
         let garbage = SpaceRunPolicy::from_values(Some("maybe"), Some(""), None, Some("0"));

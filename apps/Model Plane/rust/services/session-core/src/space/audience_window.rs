@@ -11,8 +11,8 @@
 
 use crate::grpc::VerifiedSpaceRead;
 
-/// Session Core switch: honour the signed `history_floor_revision` claim. ON only for an explicit
-/// on-word, so an unset, empty or mistyped value shows full history.
+/// Session Core switch: honour the signed `history_floor_revision` claim. ON only for the literal
+/// `true`, so an unset, empty or mistyped value shows full history.
 pub(crate) const HISTORY_FLOOR_ENV: &str = "SESSION_CORE_SPACE_HISTORY_FLOOR";
 
 /// Pure form of [`history_floor_enabled`]: `value` is the raw variable, `None` when unset.

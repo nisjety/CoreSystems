@@ -297,12 +297,12 @@ pub enum ShellLeaseMode {
 }
 
 impl ShellLeaseMode {
-    /// `enforce` (case-insensitive, exact) is the only way to turn the rule on;
-    /// a missing or unrecognised value is `observe`, never a truthiness guess.
+    /// Only the exact literal `enforce` turns the rule on: no trimming and no case folding. A
+    /// missing or unrecognised value is `observe`, never a truthiness guess.
     #[must_use]
     pub fn from_raw(raw: Option<&str>) -> Self {
-        match raw.map(str::trim) {
-            Some(value) if value.eq_ignore_ascii_case("enforce") => Self::Enforce,
+        match raw {
+            Some("enforce") => Self::Enforce,
             _ => Self::Observe,
         }
     }
@@ -475,12 +475,33 @@ mod tests {
     }
 
     #[test]
-    fn shell_lease_mode_only_enforce_enforces() {
-        for raw in ["enforce", "ENFORCE", "  Enforce  "] {
-            assert_eq!(ShellLeaseMode::from_raw(Some(raw)), ShellLeaseMode::Enforce, "{raw:?}");
+    fn shell_lease_mode_only_the_exact_enforce_enforces() {
+        assert_eq!(
+            ShellLeaseMode::from_raw(Some("enforce")),
+            ShellLeaseMode::Enforce
+        );
+        for raw in ["ENFORCE", "Enforce", " enforce", "enforce ", "  Enforce  "] {
+            assert_eq!(
+                ShellLeaseMode::from_raw(Some(raw)),
+                ShellLeaseMode::Observe,
+                "{raw:?}"
+            );
         }
-        for raw in [None, Some(""), Some("garbage"), Some("true"), Some("1"), Some("on"), Some("observe"), Some("enforced")] {
-            assert_eq!(ShellLeaseMode::from_raw(raw), ShellLeaseMode::Observe, "{raw:?}");
+        for raw in [
+            None,
+            Some(""),
+            Some("garbage"),
+            Some("true"),
+            Some("1"),
+            Some("on"),
+            Some("observe"),
+            Some("enforced"),
+        ] {
+            assert_eq!(
+                ShellLeaseMode::from_raw(raw),
+                ShellLeaseMode::Observe,
+                "{raw:?}"
+            );
         }
     }
 }

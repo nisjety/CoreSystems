@@ -342,7 +342,11 @@ mod tests {
         // Whatever the switches say, a run that names no route resolves as it
         // always did: the environment model if set, else the requested model,
         // and no provider or connection on any round.
-        for switches in [Switches::OFF, ON, Switches::from_values(Some("1"), Some("1"))] {
+        for switches in [
+            Switches::OFF,
+            ON,
+            Switches::from_values(Some("true"), Some("true")),
+        ] {
             let route = ModelRoute::resolve(&plain_request(), switches, None, &persistent_caller())
                 .expect("valid");
             assert_eq!(route.model(), "gpt-4o-mini");
@@ -395,8 +399,8 @@ mod tests {
     fn a_route_is_refused_with_the_switch_off_never_run_on_the_default() {
         for switches in [
             Switches::OFF,
-            Switches::from_values(None, Some("1")),
-            Switches::from_values(Some("0"), Some("1")),
+            Switches::from_values(None, Some("true")),
+            Switches::from_values(Some("0"), Some("true")),
         ] {
             let error = ModelRoute::resolve(
                 &subscription_request(),
@@ -503,16 +507,23 @@ mod tests {
         acting.plan_mode = false;
         let caller = persistent_caller();
         assert!(validate_run_route(&acting, ON, &caller).is_err());
+        let effects_only = Switches::from_values(None, Some("true"));
         assert!(
-            validate_run_route(&acting, Switches::from_values(None, Some("1")), &caller).is_err(),
+            validate_run_route(&acting, effects_only, &caller).is_err(),
             "the effects switch grants nothing on its own"
         );
         assert!(validate_run_route(
             &acting,
-            Switches::from_values(Some("1"), Some("1")),
+            Switches::from_values(Some("true"), Some("true")),
             &caller
         )
         .is_ok());
+        // The strict reader: 1 is not the literal true, on either switch.
+        let lenient = Switches::from_values(Some("1"), Some("1"));
+        assert!(
+            validate_run_route(&acting, lenient, &caller).is_err(),
+            "1 must not switch the route or its effects on"
+        );
         // Plan mode never needed the second switch.
         assert!(validate_run_route(&subscription_request(), ON, &caller).is_ok());
     }

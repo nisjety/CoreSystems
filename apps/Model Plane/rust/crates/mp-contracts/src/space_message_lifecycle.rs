@@ -2,7 +2,7 @@
 //!
 //! Both switches are rollout controls, never authorization inputs: Control's signed
 //! `model.thread.revise` decision and Session Core's revise gate decide who may edit or delete.
-//! Each is ON only for an explicit on-word, so an unset, empty or mistyped value keeps the path
+//! Each is ON only for the literal `true`, so an unset, empty or mistyped value keeps the path
 //! closed. The READ side (the fold of revisions into every transcript, context and Dreaming
 //! read) has no switch: it is inert until a revision exists and must never be turned off while
 //! one does, or a deleted message would reappear.

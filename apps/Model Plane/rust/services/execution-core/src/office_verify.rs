@@ -115,13 +115,11 @@ struct RenderedFiles {
     thumbs: Vec<Vec<u8>>,
 }
 
-/// The strict parser: an unset or unknown value is off, and an unknown one says
-/// so in the log rather than silently meaning something else.
+/// The strict parser: only the exact words `structural` and `render` turn a layer on, with no
+/// trimming and no case folding. An unset or unknown value (` render `, `Render` included) is off,
+/// and an unknown one says so in the log rather than silently meaning something else.
 fn parse_mode(raw: Option<&str>) -> Mode {
-    match raw
-        .map(|value| value.trim().to_ascii_lowercase())
-        .as_deref()
-    {
+    match raw {
         None | Some("" | "off") => Mode::Off,
         Some("structural") => Mode::Structural,
         Some("render") => Mode::Render,
@@ -577,8 +575,23 @@ sys.stdout.buffer.write(data)
         assert_eq!(parse_mode(None), Mode::Off);
         assert_eq!(parse_mode(Some("")), Mode::Off);
         assert_eq!(parse_mode(Some("off")), Mode::Off);
-        assert_eq!(parse_mode(Some(" Structural ")), Mode::Structural);
+        assert_eq!(parse_mode(Some("structural")), Mode::Structural);
         assert_eq!(parse_mode(Some("render")), Mode::Render);
+        for padded_or_cased in [
+            " Structural ",
+            " structural",
+            "Structural",
+            "RENDER",
+            " render ",
+            "Render",
+            "render\n",
+        ] {
+            assert_eq!(
+                parse_mode(Some(padded_or_cased)),
+                Mode::Off,
+                "{padded_or_cased:?} is not the exact word, so the layer stays off"
+            );
+        }
         assert_eq!(
             parse_mode(Some("true")),
             Mode::Off,

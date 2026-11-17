@@ -291,8 +291,9 @@ fn the_strict_parser_switches_take_true_and_nothing_else() {
     ];
     for (name, parse) in parsers {
         assert!(!parse(None), "{name}: unset is off");
-        for on in ["true", " true ", "TRUE"] {
-            assert!(parse(Some(on)), "{name}: {on:?}");
+        assert!(parse(Some("true")), "{name}: the exact literal is on");
+        for off in [" true ", "TRUE", "True", "truee"] {
+            assert!(!parse(Some(off)), "{name}: {off:?} is not the literal and stays off");
         }
         for off in OFF_WORDS {
             assert!(!parse(Some(off)), "{name}: {off:?} must leave it off");
