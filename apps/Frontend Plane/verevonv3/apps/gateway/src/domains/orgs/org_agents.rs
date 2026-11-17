@@ -200,3 +200,207 @@ pub(crate) async fn retire_org_agent(
     )
     .await
 }
+
+
+#[cfg(test)]
+mod tests {
+    //! W3-DEC-ORGAGENT (D19) through the real router: the org-admin gate and the body shape run before
+    //! any Control call, and the revision reaches Control on each lifecycle change (retire carries its
+    //! body on DELETE).
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+    use wiremock::matchers::{body_json, method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const SUBJECT: &str = "agent-abc123";
+
+    struct Fixture {
+        state: crate::config::AppState,
+        user_core: MockServer,
+        _auth: MockServer,
+    }
+
+    /// A session in org-1 whose organisation role is `role` (the gate reads it from session-context).
+    async fn fixture(role: &str) -> Fixture {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for slug in ["session-core", "capability-core"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{slug}/token")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})),
+                )
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": role, "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        Fixture {
+            state,
+            user_core,
+            _auth: auth,
+        }
+    }
+
+    async fn call(
+        state: crate::config::AppState,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (u16, Vec<u8>) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", "better-auth.session_token=session-1");
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let request = builder
+            .body(Body::from(body.map(|value| value.to_string()).unwrap_or_default()))
+            .unwrap();
+        let response = crate::build_router(state)
+            .oneshot(request)
+            .await
+            .expect("the router answers");
+        let status = response.status().as_u16();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("a body")
+            .to_bytes()
+            .to_vec();
+        (status, bytes)
+    }
+
+    fn json_of(bytes: &[u8]) -> Value {
+        serde_json::from_slice(bytes).unwrap_or(Value::Null)
+    }
+
+    async fn control_calls(user_core: &MockServer) -> usize {
+        user_core
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| request.url.path().contains("/internal/agents/org-subjects"))
+            .count()
+    }
+
+    fn suspend_uri(subject: &str) -> String {
+        format!("/api/v1/orgs/org-1/agents/{subject}/suspend")
+    }
+
+    #[tokio::test]
+    async fn a_non_admin_is_refused_before_any_control_call() {
+        let fixture = fixture("member").await;
+        let (status, body) = call(
+            fixture.state.clone(),
+            "PUT",
+            &suspend_uri(SUBJECT),
+            Some(json!({"expected_revision": 3})),
+        )
+        .await;
+        assert_eq!(status, 403);
+        assert_eq!(json_of(&body)["error"]["code"], "forbidden");
+        assert_eq!(control_calls(&fixture.user_core).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_agent_id_is_404_before_any_control_call() {
+        let fixture = fixture("admin").await;
+        let (status, body) = call(
+            fixture.state.clone(),
+            "PUT",
+            &suspend_uri("agent-x"),
+            Some(json!({"expected_revision": 3})),
+        )
+        .await;
+        assert_eq!(status, 404);
+        assert_eq!(json_of(&body)["error"]["code"], "agent_not_found");
+        assert_eq!(control_calls(&fixture.user_core).await, 0);
+    }
+
+    #[tokio::test]
+    async fn an_extra_field_or_a_bad_revision_is_400_before_any_control_call() {
+        let fixture = fixture("owner").await;
+        for body in [
+            json!({"expected_revision": 3, "role": "owner"}),
+            json!({}),
+            json!({"expected_revision": -1}),
+            json!([1]),
+        ] {
+            let (status, reply) = call(
+                fixture.state.clone(),
+                "PUT",
+                &suspend_uri(SUBJECT),
+                Some(body.clone()),
+            )
+            .await;
+            assert_eq!(status, 400, "body {body}");
+            assert_eq!(json_of(&reply)["error"]["code"], "invalid_request", "body {body}");
+        }
+        assert_eq!(control_calls(&fixture.user_core).await, 0);
+    }
+
+    #[tokio::test]
+    async fn the_revision_reaches_control_on_suspend_reactivate_and_retire() {
+        let fixture = fixture("admin").await;
+        for tail in ["suspend", "reactivate"] {
+            Mock::given(wm_method("PUT"))
+                .and(wm_path(format!(
+                    "/api/v1/internal/agents/org-subjects/{SUBJECT}/{tail}"
+                )))
+                .and(body_json(json!({"expected_revision": 3})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    json!({"data": {"agent_subject_id": SUBJECT, "revision": 4}}),
+                ))
+                .expect(1)
+                .mount(&fixture.user_core)
+                .await;
+        }
+        Mock::given(wm_method("DELETE"))
+            .and(wm_path(format!("/api/v1/internal/agents/org-subjects/{SUBJECT}")))
+            .and(body_json(json!({"expected_revision": 3})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"data": {"agent_subject_id": SUBJECT, "retired": true}}),
+            ))
+            .expect(1)
+            .mount(&fixture.user_core)
+            .await;
+
+        for (method, uri) in [
+            ("PUT", suspend_uri(SUBJECT)),
+            ("PUT", format!("/api/v1/orgs/org-1/agents/{SUBJECT}/reactivate")),
+            ("DELETE", format!("/api/v1/orgs/org-1/agents/{SUBJECT}")),
+        ] {
+            let (status, body) = call(
+                fixture.state.clone(),
+                method,
+                &uri,
+                Some(json!({"expected_revision": 3})),
+            )
+            .await;
+            assert_eq!(status, 200, "{method} {uri}: {}", json_of(&body));
+        }
+        fixture.user_core.verify().await;
+    }
+}
