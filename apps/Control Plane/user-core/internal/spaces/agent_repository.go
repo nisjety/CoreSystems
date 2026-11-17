@@ -966,13 +966,16 @@ func insertAdmissionEvent(ctx context.Context, tx pgx.Tx, spaceRef, agentID, eve
 
 // deactivateAgentMemberships deactivates the service membership of each agent in a room,
 // revokes its standing approval rules (WS10-S2) and returns the agents whose membership
-// was active. The caller advances the room's revisions.
+// was active. The caller advances the room's revisions. A direct message's roster is fixed
+// at registration (WS12-S1), so the update never touches a dm or group_dm Space.
 func deactivateAgentMemberships(ctx context.Context, tx pgx.Tx, spaceRef string, agentIDs []string, reason string) ([]string, error) {
 	var deactivated []string
 	for _, agentID := range agentIDs {
 		tag, err := tx.Exec(ctx, `
 			UPDATE space_memberships SET active=FALSE, revision=revision+1, updated_at=NOW()
-			WHERE space_ref=$1 AND subject_type='service' AND subject_id=$2 AND active=TRUE`,
+			WHERE space_ref=$1 AND subject_type='service' AND subject_id=$2 AND active=TRUE
+			  AND NOT EXISTS (SELECT 1 FROM registered_spaces s
+			                  WHERE s.space_ref=$1 AND s.space_kind IN ('dm', 'group_dm'))`,
 			spaceRef, agentID)
 		if err != nil {
 			return nil, fmt.Errorf("deactivate agent membership: %w", err)

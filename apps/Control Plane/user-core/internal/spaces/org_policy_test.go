@@ -22,10 +22,12 @@ func allEntitlements(value bool) map[string]bool {
 
 // explicitOnlyEntitlements are the catalogue bits no preset turns on: each is a
 // standing deny-by-default power an org admin enables on its own (WS09-S7 run
-// control, WS11 approval grants, WS12 DMs and message revision), so agent_computer
-// is "every bit the presets cover", not "every bit".
+// control, WS11 approval grants, WS12 DMs and message revision, WS17 personal
+// agents, memory declassify and the personal-memory turn, WS19 canvas, WS20
+// browser), so agent_computer is "every bit the presets cover", not "every bit".
 var explicitOnlyEntitlements = []string{
 	"run_control", "approval_grant", "dm_create", "message_revise", "message_moderate",
+	"personal_agent_admit", "memory_declassify", "canvas", "browser", "memory_personal_turn",
 }
 
 func presetCoveredEntitlements() map[string]bool {
@@ -209,7 +211,9 @@ func TestBuildOrgPolicyViewNotProvisionedShape(t *testing.T) {
 		if row.Enabled || row.Effective || row.ZDRBlocked {
 			t.Errorf("%s is on or blocked in a not-provisioned org: %+v", row.Key, row)
 		}
-		if len(row.Decisions) == 0 {
+		// A no-decision key (personal_agent_admit: admission is checked by
+		// AdmitDenial, not by an Issue* function) lists none by design.
+		if _, noDecision := noDecisionEntitlements[row.Key]; len(row.Decisions) == 0 && !noDecision {
 			t.Errorf("%s lists no decisions", row.Key)
 		}
 	}
@@ -304,6 +308,51 @@ func TestBuildOrgPolicyViewMatchesPreset(t *testing.T) {
 	custom := provisionedPolicy()
 	custom.ImportWriteEntitled = true
 	check("custom", custom, "")
+}
+
+// The W3 rows (WS17-S4, WS17-S7, WS19-S2, WS20-S1, W3-DEC-CTL1) in the admin view
+// and the writer: off by default and in no preset; under Space ZDR the four
+// ZDR-inert rows cannot be newly enabled, while personal_agent_admit (admission is
+// configuration and issues no decision) still can.
+func TestOrgPolicyViewAndValidatorCarryTheW3Rows(t *testing.T) {
+	inert := []string{"memory_declassify", "canvas", "browser", "memory_personal_turn"}
+	w3 := append([]string{"personal_agent_admit"}, inert...)
+
+	policy := provisionedPolicy()
+	policy.ZeroDataRetention = true
+	view := BuildOrgPolicyView("org-1", &policy, OrgPolicyRevisions{Policy: 1, Entitlement: 1}, nil, 0, nil)
+	byKey := map[string]OrgPolicyEntitlementView{}
+	for _, row := range view.Entitlements {
+		byKey[row.Key] = row
+	}
+	for _, key := range w3 {
+		row, ok := byKey[key]
+		spec, _ := EntitlementSpecByKey(key)
+		if !ok || row.Enabled || row.Effective || row.ZDR != spec.ZDR || !reflect.DeepEqual(row.Decisions, spec.Decisions) {
+			t.Errorf("%s view row = %+v, want off with the catalogue decisions and class", key, row)
+		}
+		if blocked := key != "personal_agent_admit"; row.ZDRBlocked != blocked {
+			t.Errorf("%s zdr_blocked = %v under ZDR, want %v", key, row.ZDRBlocked, blocked)
+		}
+		for _, preset := range view.Presets {
+			if preset.Entitlements[key] {
+				t.Errorf("preset %s turns %s on", preset.ID, key)
+			}
+		}
+	}
+	if view.MatchesPreset == nil || *view.MatchesPreset != PresetLocked {
+		t.Fatalf("an all-off ZDR policy matches %v, want locked", view.MatchesPreset)
+	}
+
+	// Newly enabling the inert rows under ZDR is refused, naming each in catalogue order.
+	policyErr := asOrgPolicyError(t, ValidateEntitlementChange(policy, withKeys(w3...)))
+	if policyErr.Code != OrgPolicyCodeZDRConflict || policyErr.Details["reason"] != OrgPolicyReasonZDRInert ||
+		!reflect.DeepEqual(policyErr.Details["keys"], inert) {
+		t.Fatalf("W3 rows under ZDR = %+v", policyErr)
+	}
+	if err := ValidateEntitlementChange(policy, withKeys("personal_agent_admit")); err != nil {
+		t.Fatalf("personal_agent_admit refused under ZDR: %v", err)
+	}
 }
 
 func TestOrgPolicyRequestDigestBindsOneExactRequest(t *testing.T) {

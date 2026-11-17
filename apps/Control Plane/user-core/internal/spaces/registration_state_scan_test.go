@@ -61,6 +61,9 @@ func TestOnlyTheReadSurfacesResolveAnArchivedRoom(t *testing.T) {
 		// started before the archive must still be stoppable).
 		"ResolveSharedRunControlDecisionEvidence",
 		"ResolveSharedThreadReadDecisionEvidence",
+		// WS19-S2: a canvas read resolves an archived room; a canvas write takes
+		// active only (pinned in TestArchivedStateSetsInTheReadSurfacesAreExact).
+		"ResolveSharedCanvasDecisionEvidence",
 		"fenceActiveSpaces",
 	}
 	var got []string
@@ -99,6 +102,12 @@ func TestArchivedStateSetsInTheReadSurfacesAreExact(t *testing.T) {
 	}
 	if strings.Contains(resolver, `"archived"`) || strings.Contains(resolver, "'archived'") {
 		t.Error("resolveUserMembership must not hardcode the archived state; only ResolveReadableUserMembership passes it")
+	}
+	// The canvas resolver widens its read only: a write narrows the set to active.
+	canvas := funcs["ResolveSharedCanvasDecisionEvidence"]
+	if !strings.Contains(canvas, "registration_state = ANY($4::text[])") ||
+		!regexp.MustCompile(`if write \{\s*states = \[\]string\{"active"\}\s*\}`).MatchString(canvas) {
+		t.Error("ResolveSharedCanvasDecisionEvidence must resolve a canvas write in an active room only")
 	}
 }
 
@@ -145,6 +154,15 @@ func TestWriteClassResolversKeepTheActiveOnlyFilter(t *testing.T) {
 			t.Errorf("%s must not resolve an archived room", name)
 		}
 	}
+	// A widened state filter (IN, ANY, <>, NOT IN) must name archived, so it is one
+	// of the read surfaces pinned above; one that does not would let an archived
+	// room through unnoticed.
+	widened := regexp.MustCompile(`(?i)registration_state\s*(in\s*\(|=\s*any\s*\(|<>|!=|not\s+in\b)`)
+	for name, body := range funcs {
+		if widened.MatchString(body) && !strings.Contains(body, "archived") {
+			t.Errorf("%s widens the registration_state filter without naming archived", name)
+		}
+	}
 	// Register replay keeps an archived room archived through the constant,
 	// never through a literal that this scan would miss.
 	register := funcs["Register"]
@@ -153,9 +171,19 @@ func TestWriteClassResolversKeepTheActiveOnlyFilter(t *testing.T) {
 	}
 }
 
-// The gateway reaches the readable resolver only from the two read routes
-// (the ?readable=1 membership read and the room-state decision helper).
+// The gateway reaches the readable resolver only from read routes. Each http
+// file that takes it is listed with why that use is a read; a write route keeps
+// the strict active-only resolver.
 func TestReadableResolverIsOnlyUsedByTheReadRoutes(t *testing.T) {
+	readRoutes := map[string]string{
+		// Known gap left to the approval lane: revokeApprovalGrant and the policy
+		// PUT (through elevatedMembership) are writes that take it as well.
+		"approval_grants.go":            "WS10 rule list and GET approval policy read an archived room",
+		"routes_space_kind_evidence.go": "W3-DEC-KIND signs only the kind of a Space the caller can read, no effect on it",
+		"space_room_state.go":           "resolveReadKindEvidence serves the read decisions (retrieval, canvas read)",
+		"spaces.go":                     "GET /spaces/{ref}/membership?readable=1 (WS04-S7)",
+		"tool_policy.go":                "WS10-S5a GET tool policy; its PUT takes the active-only resolver",
+	}
 	httpDir := filepath.Join("..", "http")
 	entries, err := os.ReadDir(httpDir)
 	if err != nil {
@@ -176,9 +204,12 @@ func TestReadableResolverIsOnlyUsedByTheReadRoutes(t *testing.T) {
 		}
 	}
 	sort.Strings(users)
-	// WS10 read routes (approval grants list/decide, tool policy) also read an
-	// archived room by design.
-	if strings.Join(users, ",") != "approval_grants.go,space_room_state.go,spaces.go,tool_policy.go" {
-		t.Fatalf("ResolveReadableUserMembership is used by %v", users)
+	want := make([]string, 0, len(readRoutes))
+	for name := range readRoutes {
+		want = append(want, name)
+	}
+	sort.Strings(want)
+	if strings.Join(users, ",") != strings.Join(want, ",") {
+		t.Fatalf("ResolveReadableUserMembership is used by %v; only the read routes %v may take it", users, want)
 	}
 }

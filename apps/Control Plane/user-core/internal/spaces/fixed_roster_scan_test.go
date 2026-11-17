@@ -59,6 +59,8 @@ func TestEveryMembershipWriterRefusesOrIsAKnownDMPath(t *testing.T) {
 		"AddMember":        {"beginRoomOp("},
 		"ChangeMemberRole": {"beginRoomOp("},
 		"RemoveMember":     {"beginRoomOp("},
+		// WS17-S4 agent seat deactivation: its UPDATE excludes the DM kinds in SQL.
+		"deactivateAgentMemberships": {"NOT EXISTS", "s.space_kind IN ('dm', 'group_dm')"},
 	}
 
 	files, err := filepath.Glob("*.go")

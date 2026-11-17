@@ -68,6 +68,8 @@ func TestEntitlementCatalogueIsWellFormedAndOrdered(t *testing.T) {
 		"agent_action", "schedule_fire", "sandbox_capability", "process_registry",
 		// W2 rows, appended in build order.
 		"run_control", "approval_grant", "dm_create", "message_revise", "message_moderate",
+		// W3 rows, appended in build order (WS17-S4, WS19-S2, WS20-S1, W3-DEC-CTL1).
+		"personal_agent_admit", "memory_declassify", "canvas", "browser", "memory_personal_turn",
 	}
 	var gotOrder []string
 	seenKeys := map[string]bool{}
@@ -80,8 +82,12 @@ func TestEntitlementCatalogueIsWellFormedAndOrdered(t *testing.T) {
 		if spec.Column != spec.Key+"_entitled" {
 			t.Errorf("key %q column %q: column must be key + _entitled", spec.Key, spec.Column)
 		}
-		if len(spec.Decisions) == 0 {
+		_, noDecision := noDecisionEntitlements[spec.Key]
+		if len(spec.Decisions) == 0 && !noDecision {
 			t.Errorf("key %q gates no decision type", spec.Key)
+		}
+		if len(spec.Decisions) != 0 && noDecision {
+			t.Errorf("key %q gates %v but is listed as gating no decision type", spec.Key, spec.Decisions)
 		}
 		switch spec.ZDR {
 		case ZDRCompatible, ZDRInert, ZDRUnproven:
@@ -138,7 +144,7 @@ func TestEntitlementValuesDiffAndColumnLists(t *testing.T) {
 	}
 
 	list := entitlementColumnList()
-	if !strings.HasPrefix(list, "thread_create_entitled, ") || !strings.HasSuffix(list, ", message_moderate_entitled") {
+	if !strings.HasPrefix(list, "thread_create_entitled, ") || !strings.HasSuffix(list, ", memory_personal_turn_entitled") {
 		t.Fatalf("entitlementColumnList = %q", list)
 	}
 	full := effectPolicyColumnList()
@@ -265,7 +271,75 @@ func zdrProbes() map[string]zdrProbe {
 			decision, err := IssueThreadReviseDecision(evidence, ThreadReviseDecisionRequest{}, now)
 			return err == nil, err, decision
 		},
+		// WS17-S7: declassifying stores a room copy of a personal memory.
+		"memory_declassify": func(t *testing.T) (bool, error, Decision) {
+			evidence := validSharedThreadReadEvidence()
+			evidence.Membership.Role = "editor"
+			evidence.MemoryDeclassifyEntitled = true
+			evidence.ResourceAuthorizationRef = "control:room-1:memory-declassify:7"
+			evidence.Privacy.ZeroDataRetention = true
+			decision, err := IssueMemoryDeclassifyDecision(evidence, MemoryDeclassifyDecisionRequest{
+				DecisionRef: "d", Operation: MemoryDeclassifyOperationDeclassify, MemoryID: "memory-1",
+				ContentDigest: "sha256:" + strings.Repeat("a", 64), IdempotencyKey: "i", Nonce: "n",
+			}, now)
+			return err == nil, err, decision
+		},
+		// WS19-S2: ZDR refuses every canvas decision, so even a read is refused.
+		"canvas": func(t *testing.T) (bool, error, Decision) {
+			evidence := validSharedThreadReadEvidence()
+			evidence.CanvasEntitled = true
+			evidence.ResourceAuthorizationRef = "control:room-1:canvas:7"
+			evidence.Privacy.ZeroDataRetention = true
+			decision, err := IssueCanvasDecision(evidence, CanvasDecisionRequest{
+				DecisionRef: "d", Op: CanvasOpRead, IdempotencyKey: "i", Nonce: "n",
+			}, now)
+			return err == nil, err, decision
+		},
+		// WS20-S1: a room browser run writes a result turn.
+		"browser": func(t *testing.T) (bool, error, Decision) {
+			evidence := validSharedThreadReadEvidence()
+			evidence.Membership.Role = "editor"
+			evidence.BrowserEntitled = true
+			evidence.ResourceAuthorizationRef = "control:room-1:browser-run:7"
+			evidence.Privacy.ZeroDataRetention = true
+			decision, _, err := IssueBrowserRunDecision(evidence, BrowserRunDecisionRequest{
+				DecisionRef: "d", GoalDigest: "sha256:" + strings.Repeat("b", 64), AllowedDomains: []string{"example.com"},
+				ViewScope: BrowserViewOwner, MaxSteps: 20, MaxRuntimeS: 300, IdempotencyKey: "i", Nonce: "n",
+			}, now)
+			return err == nil, err, decision
+		},
+		// W3-DEC-CTL1 (WS17-S8, D12): a personal-memory turn in a room has its own bit.
+		"memory_personal_turn": func(t *testing.T) (bool, error, Decision) {
+			evidence := validSharedThreadReadEvidence()
+			evidence.Membership.Role = "editor"
+			evidence.MemoryPersonalTurnEntitled = true
+			evidence.ResourceAuthorizationRef = "control:room-1:memory-personal-context:7"
+			evidence.Privacy.ZeroDataRetention = true
+			decision, err := IssueMemoryPersonalContextDecision(evidence, MemoryPersonalContextDecisionRequest{
+				DecisionRef: "d", ThreadID: "thread-1", IdempotencyKey: "i", Nonce: "n",
+			}, now)
+			return err == nil, err, decision
+		},
 	}
+}
+
+// noDecisionEntitlements are catalogue keys that gate no Control decision type,
+// so no Issue* function exists to probe. Each maps to the real check that reads
+// the bit instead, called with the bit on or off; it reports whether the effect
+// is allowed. personal_agent_admit: room admission is ids-only configuration,
+// checked by AdmitDenial (WS17-S4), which takes no ZDR input (D-7), so the bit
+// lists no decisions and must be classed compatible.
+var noDecisionEntitlements = map[string]func(on bool) bool{
+	"personal_agent_admit": func(on bool) bool {
+		return AdmitDenial(AgentAdmitFacts{
+			SpaceActive: true, SpaceKind: KindRoom, ActorRoomRole: "manager",
+			Agent: AgentSubject{
+				OrgID: "org-1", AgentSubjectID: "agent-personal-1", OwnerUserID: "user-1",
+				Visibility: AgentVisibilityOwner, AddPolicy: AgentAddPolicyOwnerOnly, Lifecycle: AgentLifecycleActive,
+			},
+			ActorIsOwner: true, OwnerActiveInRoom: true, OrgPersonalAdmit: on,
+		}) == ""
+	},
 }
 
 // zdrDBOnlyEntitlements are catalogue keys whose ZDR refusal is a database
@@ -280,6 +354,16 @@ func TestEntitlementZDRClassIsBoundToTheRealIssueFunctions(t *testing.T) {
 		if _, dbOnly := zdrDBOnlyEntitlements[spec.Key]; dbOnly {
 			if spec.ZDR != ZDRInert {
 				t.Errorf("%s ZDR refusal lives in the DM eligibility query and must be classed zdr_inert", spec.Key)
+			}
+			continue
+		}
+		if allowed, noDecision := noDecisionEntitlements[spec.Key]; noDecision {
+			// No decision is issued, so Control never refuses it under ZDR.
+			if spec.ZDR != ZDRCompatible {
+				t.Errorf("%s gates no decision type and must be classed compatible, not %q", spec.Key, spec.ZDR)
+			}
+			if !allowed(true) || allowed(false) {
+				t.Errorf("%s: the check that reads the bit does not follow it", spec.Key)
 			}
 			continue
 		}
@@ -319,6 +403,11 @@ func TestEntitlementZDRClassIsBoundToTheRealIssueFunctions(t *testing.T) {
 	for key := range probes {
 		if _, ok := EntitlementSpecByKey(key); !ok {
 			t.Errorf("probe %q has no catalogue row", key)
+		}
+	}
+	for key := range noDecisionEntitlements {
+		if _, ok := EntitlementSpecByKey(key); !ok {
+			t.Errorf("no-decision key %q has no catalogue row", key)
 		}
 	}
 }
@@ -374,5 +463,63 @@ func TestCatalogueIncludesTheMessageLifecycleBitsAsZDRInert(t *testing.T) {
 	byKey["message_moderate"].Set(&policy, true)
 	if policy.MessageReviseEntitled || !policy.MessageModerateEntitled {
 		t.Errorf("moderate must not imply revise: %+v", policy)
+	}
+}
+
+// The W3 rows (WS17-S4, WS17-S7, WS19-S2, WS20-S1, W3-DEC-CTL1): each is its own
+// deny-by-default bit in no preset, with the column, decision types and ZDR class
+// its issuer binds, and every column is an EffectPolicy json tag and in the SQL list.
+func TestW3CatalogueRowsAreDenyByDefaultAndExplicitOnly(t *testing.T) {
+	rows := []struct {
+		key, column string
+		decisions   []string
+		zdr         ZDRClass
+	}{
+		{"personal_agent_admit", "personal_agent_admit_entitled", nil, ZDRCompatible},
+		{"memory_declassify", "memory_declassify_entitled", []string{"model.memory.declassify"}, ZDRInert},
+		{"canvas", "canvas_entitled", []string{"data.canvas.read", "data.canvas.write"}, ZDRInert},
+		{"browser", "browser_entitled", []string{"model.space.browser_run"}, ZDRInert},
+		{"memory_personal_turn", "memory_personal_turn_entitled", []string{"model.memory.personal_context"}, ZDRInert},
+	}
+	jsonTags := entitledJSONFields(t)
+	columnList := ", " + entitlementColumnList() + ", "
+	for _, row := range rows {
+		spec, ok := EntitlementSpecByKey(row.key)
+		if !ok {
+			t.Errorf("catalogue lacks %s", row.key)
+			continue
+		}
+		if spec.Column != row.column || !reflect.DeepEqual(spec.Decisions, row.decisions) || spec.ZDR != row.zdr {
+			t.Errorf("%s row = column %q decisions %v zdr %q, want %q %v %q",
+				row.key, spec.Column, spec.Decisions, spec.ZDR, row.column, row.decisions, row.zdr)
+		}
+		if _, ok := jsonTags[row.column]; !ok {
+			t.Errorf("%s column %q is not a json tag of EffectPolicy", row.key, row.column)
+		}
+		if !strings.Contains(columnList, ", "+row.column+", ") {
+			t.Errorf("%s column %q is missing from the SQL column list", row.key, row.column)
+		}
+		var policy EffectPolicy
+		if spec.Get(policy) {
+			t.Errorf("%s must default off", row.key)
+		}
+		spec.Set(&policy, true)
+		for _, other := range EntitlementCatalog() {
+			if other.Get(policy) != (other.Key == row.key) {
+				t.Errorf("setting %s changed %s", row.key, other.Key)
+			}
+		}
+		for _, preset := range OrgPolicyPresets() {
+			for _, key := range preset.Keys {
+				if key == row.key {
+					t.Errorf("%s is explicit-only but preset %s turns it on", row.key, preset.ID)
+				}
+			}
+		}
+	}
+	// WS08-S1: a run wake rides the thread_create bit.
+	if spec, _ := EntitlementSpecByKey("thread_create"); !reflect.DeepEqual(spec.Decisions,
+		[]string{"model.thread.create", "model.thread.append", "model.run.wake"}) {
+		t.Errorf("thread_create decisions = %v", spec.Decisions)
 	}
 }
