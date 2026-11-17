@@ -542,3 +542,438 @@ fn relay_stop_answer(status: StatusCode, response: &Value, run_id: &str) -> Repl
         "Run control is temporarily unavailable.",
     )
 }
+
+#[cfg(test)]
+mod tests {
+    //! WS09-S4 (the live view) and WS09-S8 (the manager stop) through the real router. The session,
+    //! Control, org-core, Convex and model-gateway are doubles, so each refusal order and the
+    //! decision's path (POST body only, never a URL or an answer) is checked on the wire.
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const LIVE: &str = "/api/v1/spaces/space-room/runs/run-1/live";
+    const STOP: &str = "/api/v1/spaces/space-room/runs/run-1/stop";
+    const READ_TOKEN: &str = "read-token-secret-xyz";
+    const STOP_TOKEN: &str = "stop-token-secret-xyz";
+
+    struct Fixture {
+        state: crate::config::AppState,
+        user_core: MockServer,
+        model_gateway: MockServer,
+        _others: Vec<MockServer>,
+    }
+
+    /// `org` is the organisation read the Zero Data Retention guard makes; `read_decision` and
+    /// `control_decision` are Control's answers to the live read and the stop. The session is the
+    /// default one: a user with `role` in org-1.
+    async fn fixture(
+        role: &str,
+        org: ResponseTemplate,
+        read_decision: ResponseTemplate,
+        control_decision: ResponseTemplate,
+    ) -> Fixture {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for slug in ["session-core", "capability-core"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{slug}/token")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})),
+                )
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": role, "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-read-decision"))
+            .respond_with(read_decision)
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/run-control-decision"))
+            .respond_with(control_decision)
+            .mount(&user_core)
+            .await;
+        let org_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(org)
+            .mount(&org_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef": "space-room", "name": "Room", "kind": "room", "lifecycle": "active"}
+            ]})))
+            .mount(&application)
+            .await;
+        let model_gateway = MockServer::start().await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.org_core_url = org_core.uri();
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.model_gateway_url = model_gateway.uri();
+        Fixture {
+            state,
+            user_core,
+            model_gateway,
+            _others: vec![auth, org_core, application],
+        }
+    }
+
+    fn org_record(zdr: bool) -> ResponseTemplate {
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}}))
+    }
+
+    fn granted_read() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"data": {
+            "decision": {"decision_ref": "read-ref-1"},
+            "token": READ_TOKEN
+        }}))
+    }
+
+    fn granted_stop() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"data": {
+            "decision": {"decision_ref": "stop-ref-1"},
+            "token": STOP_TOKEN
+        }}))
+    }
+
+    fn declined() -> ResponseTemplate {
+        ResponseTemplate::new(403).set_body_json(json!({"error": {"code": "forbidden"}}))
+    }
+
+    async fn call(
+        state: crate::config::AppState,
+        method: &str,
+        uri: &str,
+        extra: &[(&str, &str)],
+        body: Option<Value>,
+    ) -> (u16, axum::http::HeaderMap, Vec<u8>) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", "better-auth.session_token=session-1");
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        for (name, value) in extra {
+            builder = builder.header(*name, *value);
+        }
+        let request = builder
+            .body(Body::from(body.map(|value| value.to_string()).unwrap_or_default()))
+            .unwrap();
+        let response = crate::build_router(state)
+            .oneshot(request)
+            .await
+            .expect("the router answers");
+        let status = response.status().as_u16();
+        let headers = response.headers().clone();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("a body")
+            .to_bytes()
+            .to_vec();
+        (status, headers, bytes)
+    }
+
+    fn json_of(bytes: &[u8]) -> Value {
+        serde_json::from_slice(bytes).unwrap_or(Value::Null)
+    }
+
+    async fn calls_to(server: &MockServer, path_part: &str) -> Vec<wiremock::Request> {
+        server
+            .received_requests()
+            .await
+            .expect("request recording")
+            .into_iter()
+            .filter(|request| request.url.path().contains(path_part))
+            .collect()
+    }
+
+    // ---- WS09-S4: the live view -------------------------------------------------------------
+
+    #[tokio::test]
+    async fn the_live_view_is_404_and_calls_nothing_while_its_flag_is_off() {
+        let fixture = fixture("member", org_record(false), granted_read(), declined()).await;
+        let (status, _, body) = call(fixture.state.clone(), "GET", LIVE, &[], None).await;
+        assert_eq!(status, 404);
+        assert_eq!(json_of(&body)["error"]["code"], "feature_unavailable");
+        assert!(calls_to(&fixture.user_core, "thread-read-decision").await.is_empty());
+        assert!(fixture.model_gateway.received_requests().await.unwrap_or_default().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_zdr_org_is_refused_with_the_typed_agent_run_refusal_before_any_control_call() {
+        let mut fixture = fixture("member", org_record(true), granted_read(), declined()).await;
+        fixture.state.space_features.run_live_view = true;
+        let (status, _, body) = call(fixture.state.clone(), "GET", LIVE, &[], None).await;
+        assert_eq!(status, 403);
+        assert_eq!(json_of(&body)["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(json_of(&body)["error"]["feature"], "agent_run");
+        assert!(calls_to(&fixture.user_core, "thread-read-decision").await.is_empty());
+        assert!(fixture.model_gateway.received_requests().await.unwrap_or_default().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_org_posture_is_503_before_any_control_call() {
+        let mut fixture = fixture(
+            "member",
+            ResponseTemplate::new(503),
+            granted_read(),
+            declined(),
+        )
+        .await;
+        fixture.state.space_features.run_live_view = true;
+        let (status, _, body) = call(fixture.state.clone(), "GET", LIVE, &[], None).await;
+        assert_eq!(status, 503);
+        assert_eq!(json_of(&body)["error"]["code"], "zdr_decision_unavailable");
+        assert!(calls_to(&fixture.user_core, "thread-read-decision").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn control_declining_the_read_is_space_read_not_authorized() {
+        let mut fixture = fixture("member", org_record(false), declined(), declined()).await;
+        fixture.state.space_features.run_live_view = true;
+        let (status, _, body) = call(fixture.state.clone(), "GET", LIVE, &[], None).await;
+        assert_eq!(status, 403);
+        assert_eq!(json_of(&body)["error"]["code"], "space_read_not_authorized");
+        assert!(fixture.model_gateway.received_requests().await.unwrap_or_default().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_read_decision_rides_in_the_post_body_and_forged_headers_never_reach_the_model() {
+        let mut fixture = fixture("member", org_record(false), granted_read(), declined()).await;
+        fixture.state.space_features.run_live_view = true;
+        let live_answer = "event: step\ndata: {\"ok\":true}\n\n";
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/spaces/space-room/runs/run-1/live"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(live_answer),
+            )
+            .mount(&fixture.model_gateway)
+            .await;
+        let (status, _, body) = call(
+            fixture.state.clone(),
+            "GET",
+            LIVE,
+            &[
+                ("x-space-read-decision-token", "forged-token"),
+                ("x-space-read-decision-ref", "forged-ref"),
+            ],
+            None,
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(String::from_utf8_lossy(&body), live_answer, "the stream is relayed byte for byte");
+        assert!(!String::from_utf8_lossy(&body).contains(READ_TOKEN));
+
+        let sent = calls_to(&fixture.model_gateway, "/runs/run-1/live").await;
+        assert_eq!(sent.len(), 1, "one model call");
+        let request = &sent[0];
+        assert_eq!(request.method.as_str(), "POST");
+        assert!(!request.url.as_str().contains(READ_TOKEN), "the decision is never in a URL");
+        assert!(!request.url.as_str().contains("read-ref-1"), "the decision ref is never in a URL");
+        let sent_body: Value = serde_json::from_slice(&request.body).expect("a JSON body");
+        assert_eq!(sent_body["space_read_decision_token"], READ_TOKEN);
+        assert_eq!(sent_body["space_read_decision_ref"], "read-ref-1");
+        assert!(request.headers.get("x-space-read-decision-token").is_none(), "forged header dropped");
+        assert!(request.headers.get("x-space-read-decision-ref").is_none(), "forged header dropped");
+    }
+
+    #[tokio::test]
+    async fn a_relayed_model_refusal_keeps_its_fixed_words_and_an_unknown_one_is_model_error() {
+        let mut fixture = fixture("member", org_record(false), granted_read(), declined()).await;
+        fixture.state.space_features.run_live_view = true;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/spaces/space-room/runs/run-1/live"))
+            .respond_with(ResponseTemplate::new(410).set_body_json(json!({
+                "error": {"code": "run_stream_expired", "message": "upstream words"}
+            })))
+            .up_to_n_times(1)
+            .mount(&fixture.model_gateway)
+            .await;
+        let (status, _, body) = call(fixture.state.clone(), "GET", LIVE, &[], None).await;
+        assert_eq!(status, 410);
+        assert_eq!(json_of(&body)["error"]["code"], "run_stream_expired");
+        assert_eq!(
+            json_of(&body)["error"]["message"],
+            "The live view of this run has ended."
+        );
+
+        fixture.model_gateway.reset().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/spaces/space-room/runs/run-1/live"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+                "error": {"code": "stack_internal_detail", "message": "secret internals"}
+            })))
+            .mount(&fixture.model_gateway)
+            .await;
+        let (_, _, body) = call(fixture.state.clone(), "GET", LIVE, &[], None).await;
+        let text = String::from_utf8_lossy(&body).to_string();
+        assert_eq!(json_of(&body)["error"]["code"], "model_error", "{text}");
+        assert!(!text.contains("secret internals"), "upstream text never crosses: {text}");
+        assert!(!text.contains("stack_internal_detail"), "unknown codes never cross: {text}");
+    }
+
+    // ---- WS09-S8: the manager stop ----------------------------------------------------------
+
+    #[tokio::test]
+    async fn the_stop_is_404_and_calls_nothing_while_its_flag_is_off() {
+        let fixture = fixture("admin", org_record(false), declined(), granted_stop()).await;
+        let (status, _, body) =
+            call(fixture.state.clone(), "POST", STOP, &[], Some(json!({}))).await;
+        assert_eq!(status, 404);
+        assert_eq!(json_of(&body)["error"]["code"], "feature_unavailable");
+        assert!(calls_to(&fixture.user_core, "run-control-decision").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_zdr_org_gets_412_before_any_control_call() {
+        let mut fixture = fixture("admin", org_record(true), declined(), granted_stop()).await;
+        fixture.state.space_features.run_manager_stop = true;
+        let (status, _, body) =
+            call(fixture.state.clone(), "POST", STOP, &[], Some(json!({}))).await;
+        assert_eq!(status, 412);
+        assert_eq!(json_of(&body)["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert!(calls_to(&fixture.user_core, "run-control-decision").await.is_empty());
+        assert!(fixture.model_gateway.received_requests().await.unwrap_or_default().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_control_refusal_or_a_missing_control_route_is_403_and_carries_no_token() {
+        for refusal in [403_u16, 404] {
+            let mut fixture = fixture(
+                "member",
+                org_record(false),
+                declined(),
+                ResponseTemplate::new(refusal)
+                    .set_body_json(json!({"error": {"code": "forbidden"}})),
+            )
+            .await;
+            fixture.state.space_features.run_manager_stop = true;
+            let (status, _, body) =
+                call(fixture.state.clone(), "POST", STOP, &[], Some(json!({}))).await;
+            let text = String::from_utf8_lossy(&body).to_string();
+            assert_eq!(status, 403, "control {refusal}");
+            assert_eq!(json_of(&body)["error"]["code"], "space_run_control_not_authorized");
+            assert!(!text.contains(STOP_TOKEN), "no token in the answer: {text}");
+            assert!(fixture.model_gateway.received_requests().await.unwrap_or_default().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn the_stop_decision_rides_in_the_model_body_and_the_answer_is_the_fixed_receipt() {
+        let mut fixture = fixture("admin", org_record(false), declined(), granted_stop()).await;
+        fixture.state.space_features.run_manager_stop = true;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/spaces/space-room/runs/run-1/stop"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "cancelled", "cancelled": true, "receipt_id": "rcpt-1"
+            })))
+            .mount(&fixture.model_gateway)
+            .await;
+        let (status, _, body) = call(
+            fixture.state.clone(),
+            "POST",
+            STOP,
+            &[("x-space-control-decision-token", "forged-token")],
+            Some(json!({"idempotency_key": "stop-key-1"})),
+        )
+        .await;
+        let text = String::from_utf8_lossy(&body).to_string();
+        assert_eq!(status, 200, "{text}");
+        assert_eq!(
+            json_of(&body)["data"],
+            json!({"run_id": "run-1", "status": "cancelled", "cancelled": true, "receipt_id": "rcpt-1"})
+        );
+        assert!(!text.contains(STOP_TOKEN) && !text.contains("stop-ref-1"), "decision stays off the answer");
+
+        let sent = calls_to(&fixture.model_gateway, "/runs/run-1/stop").await;
+        assert_eq!(sent.len(), 1);
+        let request = &sent[0];
+        assert!(!request.url.as_str().contains(STOP_TOKEN), "the decision is never in a URL");
+        let sent_body: Value = serde_json::from_slice(&request.body).expect("a JSON body");
+        assert_eq!(sent_body["space_control_decision_token"], STOP_TOKEN);
+        assert_eq!(sent_body["space_control_decision_ref"], "stop-ref-1");
+        assert_eq!(sent_body["idempotency_key"], "stop-key-1");
+        assert!(request.headers.get("x-space-control-decision-token").is_none(), "forged header dropped");
+    }
+
+    #[tokio::test]
+    async fn relayed_stop_codes_keep_fixed_words_and_anything_else_is_run_control_unavailable() {
+        let mut fixture = fixture("admin", org_record(false), declined(), granted_stop()).await;
+        fixture.state.space_features.run_manager_stop = true;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/spaces/space-room/runs/run-1/stop"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "error": {"code": "run_not_found", "message": "internal row id 42"}
+            })))
+            .up_to_n_times(1)
+            .mount(&fixture.model_gateway)
+            .await;
+        let (status, _, body) =
+            call(fixture.state.clone(), "POST", STOP, &[], Some(json!({}))).await;
+        assert_eq!(status, 404);
+        assert_eq!(json_of(&body)["error"]["code"], "run_not_found");
+        assert_eq!(json_of(&body)["error"]["message"], "The run is not available.");
+
+        fixture.model_gateway.reset().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/spaces/space-room/runs/run-1/stop"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+                "error": {"code": "db_secret_detail", "message": "connection string"}
+            })))
+            .mount(&fixture.model_gateway)
+            .await;
+        let (status, _, body) =
+            call(fixture.state.clone(), "POST", STOP, &[], Some(json!({}))).await;
+        let text = String::from_utf8_lossy(&body).to_string();
+        assert_eq!(status, 503, "{text}");
+        assert_eq!(json_of(&body)["error"]["code"], "run_control_unavailable");
+        assert!(!text.contains("db_secret_detail") && !text.contains("connection string"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn an_invalid_idempotency_key_is_400_before_any_control_call() {
+        let mut fixture = fixture("admin", org_record(false), declined(), granted_stop()).await;
+        fixture.state.space_features.run_manager_stop = true;
+        let (status, _, body) = call(
+            fixture.state.clone(),
+            "POST",
+            STOP,
+            &[],
+            Some(json!({"idempotency_key": "not a key!"})),
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(json_of(&body)["error"]["code"], "invalid_idempotency_key");
+        assert!(calls_to(&fixture.user_core, "run-control-decision").await.is_empty());
+    }
+}

@@ -269,3 +269,253 @@ async fn scim_edge(
     }
     response
 }
+
+#[cfg(test)]
+mod tests {
+    //! WS05-S8 at the SCIM edge. The edge is session-less, so these drive the real router with no
+    //! cookie against an org-core double. The double sees only what the edge forwards: its own
+    //! principal, the identity provider's bearer and the allow-listed query.
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use serde_json::Value;
+    use tower::ServiceExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+    use crate::config::ScimEdgeConfig;
+
+    const EDGE_TOKEN: &str = "scim-edge-token-0123456789abcdef0123456789";
+    const IDP_BEARER: &str = "Bearer idp-bearer-token-abcdefghijklmnop";
+
+    fn armed_state(org_core: &MockServer) -> AppState {
+        let mut state = crate::tests::test_state(false);
+        state.org_core_url = org_core.uri();
+        state.space_features.scim_edge = ScimEdgeConfig {
+            enabled: true,
+            token: EDGE_TOKEN.to_owned(),
+        };
+        state
+    }
+
+    async fn org_core_serving_users() -> MockServer {
+        let org_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/internal/scim/v2/Users"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "Resources": [],
+                "totalResults": 0
+            })))
+            .mount(&org_core)
+            .await;
+        org_core
+    }
+
+    async fn send(state: AppState, request: Request<Body>) -> (u16, axum::http::HeaderMap, Vec<u8>) {
+        let response = crate::build_router(state)
+            .oneshot(request)
+            .await
+            .expect("the router answers");
+        let status = response.status().as_u16();
+        let headers = response.headers().clone();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("a body")
+            .to_bytes()
+            .to_vec();
+        (status, headers, body)
+    }
+
+    async fn upstream_calls(org_core: &MockServer) -> Vec<wiremock::Request> {
+        org_core.received_requests().await.expect("request recording")
+    }
+
+    #[test]
+    fn the_path_and_method_table_forwards_only_the_scim_surface() {
+        let get = Method::GET;
+        assert_eq!(
+            classify(&get, "ServiceProviderConfig"),
+            Route::Forward("ServiceProviderConfig".to_owned())
+        );
+        assert_eq!(classify(&get, "ResourceTypes"), Route::Forward("ResourceTypes".to_owned()));
+        assert_eq!(classify(&get, "Schemas"), Route::Forward("Schemas".to_owned()));
+        assert_eq!(
+            classify(&Method::POST, "ServiceProviderConfig"),
+            Route::MethodNotAllowed
+        );
+        assert_eq!(classify(&get, "Users"), Route::Forward("Users".to_owned()));
+        assert_eq!(classify(&Method::POST, "Users"), Route::Forward("Users".to_owned()));
+        assert_eq!(classify(&Method::PUT, "Users"), Route::MethodNotAllowed);
+        for method in [Method::GET, Method::PUT, Method::PATCH, Method::DELETE] {
+            assert_eq!(
+                classify(&method, "Users/abc-123"),
+                Route::Forward("Users/abc-123".to_owned())
+            );
+        }
+        assert_eq!(classify(&Method::POST, "Users/abc-123"), Route::MethodNotAllowed);
+        assert_eq!(classify(&get, "Groups"), Route::Groups);
+        assert_eq!(classify(&Method::POST, "Groups/abc-123"), Route::Groups);
+        assert_eq!(classify(&get, "Users/bad%20id"), Route::NotFound);
+        assert_eq!(classify(&get, "Users/a/b"), Route::NotFound);
+        assert_eq!(classify(&get, "Bulk"), Route::NotFound);
+        assert_eq!(classify(&get, ""), Route::NotFound);
+    }
+
+    #[test]
+    fn only_the_list_parameters_are_forwarded_and_each_value_is_bounded() {
+        assert_eq!(
+            forwarded_query(Some(
+                "filter=userName%20eq%20%22a%22&startIndex=1&count=20&attributes=secret&evil=1"
+            )),
+            "?filter=userName%20eq%20%22a%22&startIndex=1&count=20"
+        );
+        assert_eq!(forwarded_query(Some("attributes=secret&evil=1")), "");
+        assert_eq!(forwarded_query(None), "");
+        let too_long = "x".repeat(MAX_QUERY_VALUE_LEN + 1);
+        assert_eq!(forwarded_query(Some(&format!("filter={too_long}"))), "");
+        let at_the_limit = "x".repeat(MAX_QUERY_VALUE_LEN);
+        assert_eq!(
+            forwarded_query(Some(&format!("count={at_the_limit}"))),
+            format!("?count={at_the_limit}")
+        );
+    }
+
+    #[test]
+    fn the_identity_providers_bearer_is_taken_verbatim_or_refused() {
+        let mut headers = HeaderMap::new();
+        assert!(bearer_header(&headers).is_none());
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Basic dXNlcjpwYXNz"),
+        );
+        assert!(bearer_header(&headers).is_none());
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer "));
+        assert!(bearer_header(&headers).is_none());
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("bearer idp-token-1"),
+        );
+        assert_eq!(
+            bearer_header(&headers).expect("a bearer").to_str().unwrap(),
+            "bearer idp-token-1"
+        );
+        let oversized = format!("Bearer {}", "t".repeat(MAX_BEARER_LEN));
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&oversized).unwrap(),
+        );
+        assert!(bearer_header(&headers).is_none());
+    }
+
+    #[tokio::test]
+    async fn the_edge_is_501_and_calls_nothing_while_off_or_unarmed() {
+        let org_core = org_core_serving_users().await;
+        for (enabled, token) in [(false, EDGE_TOKEN), (true, "")] {
+            let mut state = armed_state(&org_core);
+            state.space_features.scim_edge = ScimEdgeConfig {
+                enabled,
+                token: token.to_owned(),
+            };
+            let request = Request::builder()
+                .method("GET")
+                .uri("/api/v1/scim/v2/Users")
+                .header("authorization", IDP_BEARER)
+                .body(Body::empty())
+                .unwrap();
+            let (status, _, body) = send(state, request).await;
+            assert_eq!(status, 501, "enabled={enabled} token_set={}", !token.is_empty());
+            let body: Value = serde_json::from_slice(&body).expect("a SCIM error");
+            assert_eq!(body["status"], "501");
+        }
+        assert!(
+            upstream_calls(&org_core).await.is_empty(),
+            "nothing is forwarded while the edge is not armed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_without_an_idp_bearer_is_401_and_calls_nothing() {
+        let org_core = org_core_serving_users().await;
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/scim/v2/Users")
+            .body(Body::empty())
+            .unwrap();
+        let (status, headers, body) = send(armed_state(&org_core), request).await;
+        assert_eq!(status, 401);
+        let text = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
+        assert_eq!(text("www-authenticate").as_deref(), Some("Bearer realm=\"scim\""));
+        assert_eq!(text("content-type").as_deref(), Some(SCIM_CONTENT_TYPE));
+        assert_eq!(text("cache-control").as_deref(), Some("no-store"));
+        let body: Value = serde_json::from_slice(&body).expect("a SCIM error");
+        assert_eq!(body["schemas"][0], SCIM_ERROR_SCHEMA);
+        assert!(upstream_calls(&org_core).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_upstream_request_carries_only_the_edge_identity_and_the_idp_bearer() {
+        let org_core = org_core_serving_users().await;
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/scim/v2/Users?filter=userName%20eq%20%22a%22&attributes=secret")
+            .header("authorization", IDP_BEARER)
+            .header("x-org-id", "org-attacker")
+            .header("x-service-id", "verevon-gateway")
+            .header("x-service-token", "forged-service-token")
+            .header("x-user-id", "user-forged")
+            .header("cookie", "better-auth.session_token=session-1")
+            .body(Body::empty())
+            .unwrap();
+        let (status, _, _) = send(armed_state(&org_core), request).await;
+        assert_eq!(status, 200);
+        let calls = upstream_calls(&org_core).await;
+        assert_eq!(calls.len(), 1, "exactly one upstream call");
+        let sent = &calls[0];
+        let header = |name: &str| {
+            sent.headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        assert_eq!(header("x-service-id").as_deref(), Some("verevon-scim-edge"));
+        assert_eq!(header("x-service-token").as_deref(), Some(EDGE_TOKEN));
+        assert_eq!(header("authorization").as_deref(), Some(IDP_BEARER));
+        for forged in ["x-org-id", "x-user-id", "cookie"] {
+            assert!(header(forged).is_none(), "{forged} must never reach org-core");
+        }
+        assert_eq!(sent.url.query(), Some("filter=userName%20eq%20%22a%22"));
+    }
+
+    #[tokio::test]
+    async fn groups_are_answered_here_and_never_forwarded() {
+        let org_core = org_core_serving_users().await;
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/scim/v2/Groups")
+            .header("authorization", IDP_BEARER)
+            .body(Body::empty())
+            .unwrap();
+        let (status, _, body) = send(armed_state(&org_core), request).await;
+        assert_eq!(status, 501);
+        let body: Value = serde_json::from_slice(&body).expect("a SCIM error");
+        assert_eq!(body["detail"], "Groups are not supported.");
+        assert!(upstream_calls(&org_core).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_body_over_64_kib_is_refused_before_any_upstream_call() {
+        let org_core = org_core_serving_users().await;
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/scim/v2/Users")
+            .header("authorization", IDP_BEARER)
+            .header("content-type", "application/json")
+            .body(Body::from(vec![b' '; MAX_BODY_BYTES + 1]))
+            .unwrap();
+        let (status, _, _) = send(armed_state(&org_core), request).await;
+        assert_eq!(status, 413);
+        assert!(upstream_calls(&org_core).await.is_empty());
+    }
+}
