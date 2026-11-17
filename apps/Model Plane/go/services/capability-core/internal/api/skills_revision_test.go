@@ -101,8 +101,8 @@ func TestPatchWritesRevisionWithActor(t *testing.T) {
 		t.Fatalf("actor statements = %d, want one before the update", len(database.actorCalls))
 	}
 	args := database.actorCalls[0].args
-	if len(args) != 4 || args[0] != "user" || args[1] != "user-a" || args[2] != "" || args[3] != "" {
-		t.Fatalf("actor args = %#v, want the verified user and no decision", args)
+	if len(args) != 5 || args[0] != "user" || args[1] != "user-a" || args[2] != "" || args[3] != "" || args[4] != "false" {
+		t.Fatalf("actor args = %#v, want the verified user, no decision and the non-ZDR posture", args)
 	}
 	if len(database.execs) != 1 || !strings.Contains(database.execs[0].query, "UPDATE agent_skills") {
 		t.Fatalf("the update must run once, inside the transaction: %#v", database.execs)

@@ -149,16 +149,15 @@ func TestModelActionViewTicketsCreateIsByteIdenticalUnderV2(t *testing.T) {
 	if err := json.Unmarshal(table.Body.Bytes(), &tableView); err != nil {
 		t.Fatal(err)
 	}
-	legacyActions, err := json.Marshal(legacyView.Data.Actions)
-	if err != nil {
-		t.Fatal(err)
+	if len(legacyView.Data.Actions) != 1 || len(tableView.Data.Actions) != 1 {
+		t.Fatalf("want one tickets.create under each view: v1 = %d, v2 = %d", len(legacyView.Data.Actions), len(tableView.Data.Actions))
 	}
-	tableActions, err := json.Marshal(tableView.Data.Actions)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(legacyView.Data.Actions) != 1 || string(legacyActions) != string(tableActions) {
-		t.Fatalf("tickets.create definition differs:\nv1 tickets_only = %s\nv2 table       = %s", legacyActions, tableActions)
+	// level and autonomy_rung are new under v2 by design (WS18-S2), so the definition is compared field by field: the
+	// name, description, parameters, hash and approval the Model sees must not change.
+	v1, v2 := legacyView.Data.Actions[0], tableView.Data.Actions[0]
+	if v1.Name != v2.Name || v1.Description != v2.Description || v1.ParametersJSON != v2.ParametersJSON ||
+		v1.ActionSchemaHash != v2.ActionSchemaHash || v1.RequiresApproval != v2.RequiresApproval {
+		t.Fatalf("tickets.create definition differs:\nv1 tickets_only = %#v\nv2 table       = %#v", v1, v2)
 	}
 }
 
