@@ -821,3 +821,86 @@ async fn zdr_refusal_record_run_output_is_durable_mutation_forbidden() {
         Some(zdr_code::DURABLE_MUTATION_FORBIDDEN)
     );
 }
+
+// ---- WS04-S11: a signed history floor is honoured only behind the literal switch -------------
+
+/// Serialises the tests that set `SESSION_CORE_SPACE_HISTORY_FLOOR`; clears the variable on drop.
+static HISTORY_FLOOR_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct HistoryFloorEnv {
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl HistoryFloorEnv {
+    fn set(value: Option<&str>) -> Self {
+        let guard = HISTORY_FLOOR_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match value {
+            Some(value) => env::set_var(crate::space::audience_window::HISTORY_FLOOR_ENV, value),
+            None => env::remove_var(crate::space::audience_window::HISTORY_FLOOR_ENV),
+        }
+        Self { _guard: guard }
+    }
+}
+
+impl Drop for HistoryFloorEnv {
+    fn drop(&mut self) {
+        env::remove_var(crate::space::audience_window::HISTORY_FLOOR_ENV);
+    }
+}
+
+#[test]
+fn signed_history_floor_is_honoured_only_while_the_switch_is_the_literal_true() {
+    // A `since_join` read decision: the floor is outside the payload digest, so the signature and
+    // digest stay valid whatever the switch says.
+    let token = mint(
+        CONTROL_SPACE_DECISION_AUDIENCE,
+        &["thread:read"],
+        false,
+        |claims| claims["history_floor_revision"] = json!(7),
+        false,
+    );
+    let verify = || {
+        verify_thread_read_space_decision_with_key(
+            &token,
+            DECISION_REF,
+            "org-1",
+            "user-1",
+            "space-room",
+            KEY_ID,
+            &signing_key().verifying_key(),
+            now(),
+        )
+        .expect("the signed read decision verifies")
+    };
+    {
+        let _env = HistoryFloorEnv::set(Some("true"));
+        let verified = verify();
+        assert_eq!(
+            verified.history_floor,
+            Some(7),
+            "the signed floor is honoured when the switch is on"
+        );
+        assert_eq!(
+            verified.recipient_audience_revision, 4,
+            "the ceiling is unchanged"
+        );
+    }
+    for value in [
+        None,
+        Some(""),
+        Some("1"),
+        Some("yes"),
+        Some("on"),
+        Some("TRUE"),
+        Some(" true "),
+    ] {
+        let _env = HistoryFloorEnv::set(value);
+        assert_eq!(
+            verify().history_floor,
+            None,
+            "{value:?} leaves the signed floor unhonoured, so full history shows"
+        );
+    }
+}

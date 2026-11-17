@@ -234,8 +234,8 @@ fn a_resume_question_must_name_its_own_input_pause() {
 }
 
 // Verification plan 3.4: the parsers of the switches this branch added to session-core. Each is
-// off for anything but `true`; the strict repo parser (`switch_from`) also takes surrounding space
-// and any case, the two literal readers take only the exact word.
+// on only for the exact literal `true`: no trimming and no case folding, so surrounding space and
+// any other case leave it off, as `switch_from` does.
 
 const OFF_WORDS: [&str; 9] = ["", "1", "yes", "on", "false", "0", "ture", "true1", "t rue"];
 
@@ -253,13 +253,14 @@ fn the_resume_question_switch_takes_only_the_exact_literal_true() {
 }
 
 #[test]
-fn the_proof_walkthrough_switch_takes_only_true_with_surrounding_space() {
+fn the_proof_walkthrough_switch_takes_only_the_exact_literal_true() {
     assert_eq!(PROOF_WALKTHROUGH_ENV, "SESSION_PROOF_WALKTHROUGH_ENABLED");
     assert!(!proof_walkthrough_switch_from(None));
-    for on in ["true", " true", "true\n"] {
-        assert!(proof_walkthrough_switch_from(Some(on)), "{on:?}");
-    }
-    for off in OFF_WORDS.into_iter().chain(["TRUE", "True"]) {
+    assert!(proof_walkthrough_switch_from(Some("true")));
+    for off in OFF_WORDS
+        .into_iter()
+        .chain(["TRUE", "True", " true", "true\n"])
+    {
         assert!(
             !proof_walkthrough_switch_from(Some(off)),
             "{off:?} must leave it off"

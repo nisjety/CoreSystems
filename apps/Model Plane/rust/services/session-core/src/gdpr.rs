@@ -521,10 +521,10 @@ pub(crate) fn erasure_hold_gate() -> &'static ErasureHoldGate {
 /// The switch for erasing thread-bound memory in a user erasure (OD-59), off by default.
 pub(crate) const THREAD_MEMORY_ERASURE_ENV: &str = "SESSION_CORE_GDPR_THREAD_MEMORY_ERASURE";
 
-/// Whether `value` of [`THREAD_MEMORY_ERASURE_ENV`] turns the switch on: only the trimmed literal
-/// `true`; `1`, `yes`, `TRUE`, an empty value and an unset one are all off.
+/// Whether `value` of [`THREAD_MEMORY_ERASURE_ENV`] turns the switch on: only the exact literal
+/// `true`, with no trimming. `1`, `yes`, `TRUE`, `" true "`, an empty value and an unset one are all off.
 fn thread_memory_erasure_switch(value: Option<&str>) -> bool {
-    value.is_some_and(|raw| raw.trim() == "true")
+    mp_contracts::loop_fold::switch_from(value)
 }
 
 /// Whether a user erasure also erases the memory learned in the person's own threads and their part

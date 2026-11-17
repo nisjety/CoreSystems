@@ -51,10 +51,10 @@ pub(crate) enum Mode {
 }
 
 impl Mode {
-    /// Only the exact words `report` and `enforce` turn the policy on. Anything
-    /// else, including an unset variable, leaves it off.
+    /// Only the exact words `report` and `enforce` turn the policy on. Nothing is trimmed or
+    /// case-folded: a padded or differently cased word, and an unset variable, leave it off.
     pub(crate) fn from_env_value(value: Option<&str>) -> Self {
-        match value.map(str::trim) {
+        match value {
             Some("report") => Self::Report,
             Some("enforce") => Self::Enforce,
             _ => Self::Off,
@@ -511,7 +511,8 @@ mod tests {
         assert_eq!(Mode::from_env_value(Some("")), Mode::Off);
         assert_eq!(Mode::from_env_value(Some("true")), Mode::Off);
         assert_eq!(Mode::from_env_value(Some("ENFORCE")), Mode::Off);
-        assert_eq!(Mode::from_env_value(Some(" report ")), Mode::Report);
+        assert_eq!(Mode::from_env_value(Some(" report ")), Mode::Off);
+        assert_eq!(Mode::from_env_value(Some("report")), Mode::Report);
         assert_eq!(Mode::from_env_value(Some("enforce")), Mode::Enforce);
     }
 

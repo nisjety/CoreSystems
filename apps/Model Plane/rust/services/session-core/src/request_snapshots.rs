@@ -55,17 +55,13 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 pub(crate) const SWEEP_BATCH: i64 = 500;
 
 /// The strict reading of a switch: only the exact literal `true` enables it, with no trimming
-/// and no case folding. This is the same rule as `mp_contracts::loop_fold::switch_from`.
-fn switch_from(raw: Option<&str>) -> bool {
-    raw == Some("true")
-}
-
+/// and no case folding. The one reader is `mp_contracts::loop_fold::switch_from`.
 pub(crate) fn enabled() -> bool {
-    switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
+    mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
 }
 
 pub(crate) fn sweep_enabled() -> bool {
-    switch_from(std::env::var(SWEEP_ENABLED_ENV).ok().as_deref())
+    mp_contracts::loop_fold::switch_from(std::env::var(SWEEP_ENABLED_ENV).ok().as_deref())
 }
 
 /// The retention in days: the default when unset or unreadable, clamped to 1-30 otherwise.
@@ -497,9 +493,9 @@ mod tests {
             Some(" true"),
             Some("True"),
         ] {
-            assert!(!switch_from(raw), "{raw:?}");
+            assert!(!mp_contracts::loop_fold::switch_from(raw), "{raw:?}");
         }
-        assert!(switch_from(Some("true")));
+        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
     }
 
     #[test]

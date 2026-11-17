@@ -27,7 +27,7 @@ use sqlx::PgPool;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
-/// Env switch for writing log rows. Off unless exactly `true` or `1`.
+/// Env switch for writing log rows. Off unless exactly `true`.
 pub(crate) const EMIT_ENV: &str = "SPACE_REALTIME_EMIT";
 /// Retention window of the log, in days.
 pub(crate) const RETENTION_DAYS_ENV: &str = "SPACE_EVENT_LOG_RETENTION_DAYS";
@@ -37,12 +37,10 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const SWEEP_BATCH: i64 = 5000;
 const WAKE_CAPACITY: usize = 1024;
 
-/// Whether the log is written. Off by default (release artifacts); compose dev sets it.
+/// Whether the log is written. Off by default (release artifacts); compose dev sets it. Only the
+/// exact literal `true` turns it on: `1`, `TRUE` and a padded value leave it off.
 pub(crate) fn emit_enabled_from_env() -> bool {
-    std::env::var(EMIT_ENV).is_ok_and(|value| {
-        let value = value.trim();
-        value.eq_ignore_ascii_case("true") || value == "1"
-    })
+    mp_contracts::loop_fold::switch_from(std::env::var(EMIT_ENV).ok().as_deref())
 }
 
 /// Retention window in days, at least one.
@@ -566,9 +564,10 @@ mod tests {
         assert!(!emit_enabled_from_env(), "unset means off");
         for (value, expected) in [
             ("true", true),
-            ("TRUE", true),
-            ("1", true),
-            (" 1 ", true),
+            ("TRUE", false),
+            ("1", false),
+            (" 1 ", false),
+            (" true ", false),
             ("yes", false),
             ("on", false),
             ("0", false),

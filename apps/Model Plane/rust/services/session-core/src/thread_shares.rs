@@ -61,7 +61,7 @@ use crate::grpc::{record_metrics, to_proto_timestamp};
 use crate::run_phase::ERROR_CODE_TRAILER;
 
 /// The environment switch for the snapshot store. Default off, read by the strict parser the
-/// other switches share, so only `true`, in any case, turns it on.
+/// other switches share, so only the exact literal `true` turns it on.
 pub(crate) const ENABLED_ENV: &str = "SESSION_THREAD_SHARES_ENABLED";
 
 /// What every RPC answers while the switch is off; the gateway maps it to its own 404.

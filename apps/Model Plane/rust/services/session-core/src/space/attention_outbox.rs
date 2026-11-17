@@ -17,16 +17,14 @@ use anyhow::Result;
 use sqlx::PgPool;
 use tracing::{info, warn};
 
-/// Env switch for writing attention outbox rows. Off unless exactly `true` or `1`.
+/// Env switch for writing attention outbox rows. Off unless exactly `true`.
 pub(crate) const EMIT_ENV: &str = "SPACE_ATTENTION_EMIT";
 
 /// Whether attention outbox rows are requested. Off by default (release artifacts); compose
-/// dev sets it.
+/// dev sets it. Only the exact literal `true` turns it on: `1`, `TRUE` and a padded value leave
+/// it off.
 pub(crate) fn emit_enabled_from_env() -> bool {
-    std::env::var(EMIT_ENV).is_ok_and(|value| {
-        let value = value.trim();
-        value.eq_ignore_ascii_case("true") || value == "1"
-    })
+    mp_contracts::loop_fold::switch_from(std::env::var(EMIT_ENV).ok().as_deref())
 }
 
 /// Writes the flag into `space_attention_settings` and returns the value now stored.

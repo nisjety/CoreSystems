@@ -18,8 +18,8 @@ use tonic::Status;
 use crate::grpc::to_proto_timestamp;
 use crate::retention_receipt::RetentionClass;
 
-/// The environment switch of the attention surfaces. Only the literal `true` (any case, surrounding
-/// whitespace allowed) turns it on, through the same parser as the other durable-store switches.
+/// The environment switch of the attention surfaces. Only the exact literal `true` turns it on (no
+/// trimming, no case folding), through the same parser as the other durable-store switches.
 pub(crate) const ENABLED_ENV: &str = "SESSION_CORE_ATTENTION_ENABLED";
 
 /// The thread goals switch of EP-7 S1. While it is off no goal is read here, so the derivation and

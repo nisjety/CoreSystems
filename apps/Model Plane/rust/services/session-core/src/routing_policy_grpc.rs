@@ -144,9 +144,10 @@ fn require_policy_admin(caller: &crate::auth::VerifiedIdentity) -> Result<(), St
     ))
 }
 
-/// The strict reading of `SESSION_CORE_ROUTING_CANDIDATES_ENABLED`: only the literal `true` enables it.
+/// The strict reading of `SESSION_CORE_ROUTING_CANDIDATES_ENABLED`: only the exact literal `true`
+/// enables it, with no trimming.
 fn candidates_enabled_from(raw: Option<&str>) -> bool {
-    raw.is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// With the switch off the candidate RPCs refuse, so a deployment that never turns it on keeps exactly the
@@ -262,9 +263,10 @@ fn empty_org_overlay(org_id: &str) -> pb::OrgRoutingOverlayMessage {
     }
 }
 
-/// The strict reading of `SESSION_ORG_ROUTING_OVERLAY`: only the literal `true` enables it.
+/// The strict reading of `SESSION_ORG_ROUTING_OVERLAY`: only the exact literal `true` enables it,
+/// with no trimming.
 fn org_overlay_enabled_from(raw: Option<&str>) -> bool {
-    raw.is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// With the switch off both overlay RPCs answer UNAVAILABLE, so a deployment that never turns it on behaves as
@@ -865,7 +867,6 @@ mod tests {
     #[test]
     fn candidates_switch_reads_only_the_literal_true() {
         assert!(candidates_enabled_from(Some("true")));
-        assert!(candidates_enabled_from(Some(" true ")));
         for raw in [
             None,
             Some(""),
@@ -873,8 +874,25 @@ mod tests {
             Some("TRUE"),
             Some("yes"),
             Some("false"),
+            Some(" true "),
         ] {
             assert!(!candidates_enabled_from(raw), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn org_overlay_switch_reads_only_the_literal_true() {
+        assert!(org_overlay_enabled_from(Some("true")));
+        for raw in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some("yes"),
+            Some("false"),
+            Some(" true "),
+        ] {
+            assert!(!org_overlay_enabled_from(raw), "{raw:?}");
         }
     }
 

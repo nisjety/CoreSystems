@@ -383,8 +383,10 @@ fn approval_audit_events_enabled() -> bool {
 
 const APPROVAL_AUDIT_EVENTS_ENV: &str = "APPROVAL_AUDIT_EVENTS_ENABLED";
 
+/// The strict reading of the switch: only the exact literal `true`, with no trimming and no case
+/// folding.
 fn approval_audit_switch_from(value: Option<&str>) -> bool {
-    value.is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+    mp_contracts::loop_fold::switch_from(value)
 }
 
 /// Standing approval scopes may act only with the approval audit events on (build plan K3-2): every
@@ -1803,9 +1805,9 @@ fn proof_walkthrough_enabled() -> bool {
     proof_walkthrough_switch_from(std::env::var(PROOF_WALKTHROUGH_ENV).ok().as_deref())
 }
 
-/// The strict reading of the switch: the literal `true`, with surrounding space ignored.
+/// The strict reading of the switch: only the exact literal `true`, with no trimming.
 fn proof_walkthrough_switch_from(value: Option<&str>) -> bool {
-    value.is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(value)
 }
 
 /// Why a run's proof bundle omits its browser walkthrough, or `None` when it may carry one. The
@@ -6642,11 +6644,15 @@ mod tests {
     #[test]
     fn the_approval_audit_switch_is_on_only_for_the_literal_true() {
         assert!(!approval_audit_switch_from(None));
-        for value in ["", "1", "yes", "on", "false"] {
-            assert!(!approval_audit_switch_from(Some(value)), "{value:?} must not enable it");
+        for value in [
+            "", "1", "yes", "on", "false", "TRUE", " TRUE ", " true ", "true\n",
+        ] {
+            assert!(
+                !approval_audit_switch_from(Some(value)),
+                "{value:?} must not enable it"
+            );
         }
         assert!(approval_audit_switch_from(Some("true")));
-        assert!(approval_audit_switch_from(Some(" TRUE ")));
     }
 
     fn create_with_cause(code: &str) -> proto::CreateApprovalRequest {

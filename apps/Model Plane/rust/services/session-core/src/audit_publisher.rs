@@ -612,23 +612,22 @@ pub fn build_approval_requested_body(signal: &ApprovalRequestedSignal<'_>) -> se
     })
 }
 
-/// Whether the authorization-decision audit is on: only `1`, `true` or `on` (default off).
+/// Whether the authorization-decision audit is on: only the exact literal `true` (default off).
 #[must_use]
 pub fn authz_decision_audit_enabled() -> bool {
     flag_on(std::env::var("SESSION_CORE_AUTHZ_DECISION_AUDIT").ok().as_deref())
 }
 
-/// Whether the approval-requested signal is on: only `1`, `true` or `on` (default off).
+/// Whether the approval-requested signal is on: only the exact literal `true` (default off).
 #[must_use]
 pub fn approval_notify_enabled() -> bool {
     flag_on(std::env::var("SESSION_CORE_APPROVAL_NOTIFY").ok().as_deref())
 }
 
+/// The strict reading of an audit switch: only the exact literal `true`, with no trimming and no
+/// case folding. `1`, `on` and `yes` leave it off.
 fn flag_on(value: Option<&str>) -> bool {
-    matches!(
-        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
-        Some("1" | "true" | "on")
-    )
+    mp_contracts::loop_fold::switch_from(value)
 }
 
 /// Publish one model tool-action audit event and require the transport's
@@ -1231,14 +1230,15 @@ mod tests {
     }
 
     #[test]
-    fn both_switches_are_off_unless_explicitly_on() {
+    fn both_switches_are_off_unless_the_exact_literal_true() {
         assert!(!flag_on(None));
-        for off in ["", "0", "false", "off", "no", "2", "yes"] {
+        for off in [
+            "", "0", "false", "off", "no", "2", "yes", "1", "on", "TRUE", "True", " true ",
+            "true\n",
+        ] {
             assert!(!flag_on(Some(off)), "{off:?}");
         }
-        for on in ["1", "true", "TRUE", "on", " On "] {
-            assert!(flag_on(Some(on)), "{on:?}");
-        }
+        assert!(flag_on(Some("true")));
     }
 
     #[test]

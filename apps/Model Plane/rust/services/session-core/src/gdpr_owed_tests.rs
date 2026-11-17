@@ -14,12 +14,8 @@
 use super::*;
 
 #[test]
-fn the_thread_memory_switch_takes_only_true() {
+fn the_thread_memory_switch_takes_only_the_exact_literal_true() {
     assert!(thread_memory_erasure_switch(Some("true")));
-    assert!(
-        thread_memory_erasure_switch(Some(" true ")),
-        "surrounding whitespace is trimmed"
-    );
     for off in [
         None,
         Some(""),
@@ -28,6 +24,8 @@ fn the_thread_memory_switch_takes_only_true() {
         Some("on"),
         Some("TRUE"),
         Some("True"),
+        Some(" true "),
+        Some("true\n"),
         Some("false"),
     ] {
         assert!(!thread_memory_erasure_switch(off), "{off:?}");

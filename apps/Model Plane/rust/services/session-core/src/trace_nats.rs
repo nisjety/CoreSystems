@@ -20,7 +20,7 @@
 //! consumer's `MaxDeliver` is spent; everything the message itself got wrong is terminated; a
 //! database error is NAKed.
 //!
-//! The consumer is off unless `SESSION_CORE_TRACE_CONSUMER` is `1`, `true` or `on`. The retention
+//! The consumer is off unless `SESSION_CORE_TRACE_CONSUMER` is the exact literal `true`. The retention
 //! sweeper at the bottom runs regardless: it only deletes rows older than
 //! `SESSION_CORE_TRACE_RETENTION_DAYS` (default 30), and there are none unless the consumer ran.
 
@@ -50,7 +50,7 @@ pub const TRACE_EVENT_TYPES: [&str; 7] = [
     "BROWSER_ARTIFACT_RECORDED",
 ];
 
-/// The consumer switch. Anything but `1`, `true` or `on` leaves it off.
+/// The consumer switch. Anything but the exact literal `true` leaves it off.
 pub const CONSUMER_ENV: &str = "SESSION_CORE_TRACE_CONSUMER";
 /// Days a trace row is kept. Unset, zero or unparseable means [`DEFAULT_RETENTION_DAYS`].
 pub const RETENTION_DAYS_ENV: &str = "SESSION_CORE_TRACE_RETENTION_DAYS";
@@ -69,10 +69,11 @@ const MAX_RESOURCE_REF_LEN: usize = 256;
 const RETRY_DELAY: Duration = Duration::from_secs(2);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(3600);
 
-/// Whether the consumer switch value enables it.
+/// Whether the consumer switch value enables it: only the exact literal `true`, with no trimming and
+/// no case folding. `1` and `on` leave it off.
 #[must_use]
 pub fn flag_enabled(value: Option<&str>) -> bool {
-    matches!(value.map(str::trim), Some("1" | "true" | "on"))
+    mp_contracts::loop_fold::switch_from(value)
 }
 
 /// Whether `SESSION_CORE_TRACE_CONSUMER` enables the consumer.
@@ -849,14 +850,14 @@ mod tests {
     }
 
     #[test]
-    fn the_trace_consumer_is_off_unless_the_switch_is_one_true_or_on() {
+    fn the_trace_consumer_is_off_unless_the_switch_is_the_exact_literal_true() {
         assert!(!flag_enabled(None));
-        for off in ["", "0", "false", "off", "yes", "TRUE", "2", "enabled"] {
+        for off in [
+            "", "0", "false", "off", "yes", "on", "1", "TRUE", " true ", "2", "enabled",
+        ] {
             assert!(!flag_enabled(Some(off)), "{off:?}");
         }
-        for on in ["1", "true", "on", " 1 "] {
-            assert!(flag_enabled(Some(on)), "{on:?}");
-        }
+        assert!(flag_enabled(Some("true")));
     }
 
     #[test]

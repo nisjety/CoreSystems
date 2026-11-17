@@ -477,7 +477,7 @@ pub(crate) async fn run_expiry_sweep(pool: PgPool) -> anyhow::Result<()> {
 // (`session:write`, as every durable write does); a ZDR or waived run is stored with `zdr = true` and keeps no content.
 // ---------------------------------------------------------------------------------------------------------------------
 
-/// The switch. Only the literal `true` (case-insensitive, surrounding whitespace allowed) turns the service on.
+/// The switch. Only the exact literal `true` turns the service on (no trimming, no case folding).
 pub(crate) const ENABLED_ENV: &str = "RESEARCH_RUNS_ENABLED";
 /// Why every RPC answers `unavailable` while the switch is off.
 const DISABLED: &str = "research_runs_disabled";

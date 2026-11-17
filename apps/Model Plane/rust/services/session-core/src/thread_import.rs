@@ -50,7 +50,7 @@ use crate::thread_export::ERROR_REASON_TRAILER;
 use crate::thread_import_foreign::{self, ForeignSource};
 
 /// The environment switch for the import. Default off, read by the strict parser the other
-/// switches share, so only `true`, in any case, turns it on.
+/// switches share, so only the exact literal `true` turns it on.
 pub(crate) const ENABLED_ENV: &str = "SESSION_THREAD_IMPORT_ENABLED";
 
 /// The largest file an import reads (D11). The gateway holds its body to the same limit.

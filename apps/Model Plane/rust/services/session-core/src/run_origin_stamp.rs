@@ -22,8 +22,8 @@ use crate::auth::VerifiedIdentity;
 /// The switch that makes a child run inherit its parent's origin. Default off.
 pub(crate) const INHERIT_ENV: &str = "SESSION_RUN_ORIGIN_INHERIT";
 
-/// Whether the inherit switch is on. The repo's strict parser reads it: only the
-/// literal `true`, in any case and with surrounding whitespace, enables it.
+/// Whether the inherit switch is on. The repo's strict parser reads it: only the exact
+/// literal `true` enables it; any other case or surrounding whitespace leaves it off.
 #[must_use]
 pub(crate) fn inherit_enabled(raw: Option<&str>) -> bool {
     mp_contracts::loop_fold::switch_from(raw)

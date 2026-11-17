@@ -71,9 +71,9 @@ pub(crate) fn enabled() -> bool {
     enabled_from(std::env::var(SPACE_MEMORY_ENABLED_ENV).ok().as_deref())
 }
 
-/// The strict reading: only the literal `true` enables it.
+/// The strict reading: only the exact literal `true` enables it, with no trimming and no case folding.
 fn enabled_from(raw: Option<&str>) -> bool {
-    raw.is_some_and(|value| value.trim() == "true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// Whether an `IndexMemory` topic asks for the room's memory. Read only with the switch on, so
@@ -1073,8 +1073,16 @@ mod tests {
     #[test]
     fn enabled_only_by_the_literal_true() {
         assert!(enabled_from(Some("true")));
-        assert!(enabled_from(Some(" true ")));
-        for off in [None, Some(""), Some("1"), Some("TRUE"), Some("yes"), Some("on"), Some("false")] {
+        for off in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some("yes"),
+            Some("on"),
+            Some("false"),
+            Some(" true "),
+        ] {
             assert!(!enabled_from(off), "{off:?} must leave Space memory off");
         }
     }

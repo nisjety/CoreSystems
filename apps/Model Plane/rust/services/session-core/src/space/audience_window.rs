@@ -61,3 +61,61 @@ pub(crate) fn audience_window(read: Option<VerifiedSpaceRead>) -> AudienceWindow
         None => AudienceWindow::default(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The one switch where ON is the restrictive direction, pinned at this call site. Only the
+    /// literal `true` turns the floor on; every other value, unset included, shows full history.
+    #[test]
+    fn history_floor_is_on_only_for_the_exact_literal_true() {
+        assert!(
+            history_floor_enabled_from(Some("true")),
+            "the literal true is on"
+        );
+        for off in [
+            "", " ", " true ", "true\n", "TRUE", "True", "1", "0", "yes", "on", "enabled", "false",
+            "off", "no",
+        ] {
+            assert!(
+                !history_floor_enabled_from(Some(off)),
+                "{off:?} must leave the floor off, so full history shows"
+            );
+        }
+        assert!(
+            !history_floor_enabled_from(None),
+            "an unset variable leaves the floor off"
+        );
+    }
+
+    /// With the switch on, a signed floor narrows the read to rows from the claimed revision on,
+    /// and the ceiling Control signed is kept. An absent claim (0) is no floor.
+    #[test]
+    fn a_signed_floor_is_honoured_when_the_switch_is_on() {
+        let on = history_floor_enabled_from(Some("true"));
+        let read = VerifiedSpaceRead {
+            recipient_audience_revision: 9,
+            history_floor: history_floor_from_claim(7, on),
+        };
+        assert_eq!(
+            audience_window(Some(read)),
+            AudienceWindow::new(Some(9), Some(7))
+        );
+        assert_eq!(history_floor_from_claim(0, on), None);
+    }
+
+    /// With the switch off the same signed claim is ignored: full history, as before the claim.
+    #[test]
+    fn a_signed_floor_is_ignored_while_the_switch_is_off() {
+        let off = history_floor_enabled_from(Some("1"));
+        let read = VerifiedSpaceRead {
+            recipient_audience_revision: 9,
+            history_floor: history_floor_from_claim(7, off),
+        };
+        assert_eq!(
+            audience_window(Some(read)),
+            AudienceWindow::new(Some(9), None)
+        );
+    }
+}

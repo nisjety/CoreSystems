@@ -28,9 +28,10 @@ const MIN_AGE_SECONDS: f64 = 900.0;
 /// The most reservations one pass closes.
 const BATCH: i64 = 100;
 
-/// Whether the sweep is switched on. Off by default.
+/// Whether the sweep is switched on. Off by default; only the exact literal `true` turns it on,
+/// with no trimming and no case folding.
 pub(crate) fn enabled() -> bool {
-    std::env::var(ENABLED_ENV).is_ok_and(|value| value.trim().eq_ignore_ascii_case("true"))
+    mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
 }
 
 fn internal(error: impl std::fmt::Display) -> Status {
@@ -237,12 +238,14 @@ mod tests {
     use mp_contracts::model_plane::v1 as pb;
 
     #[test]
-    fn the_sweep_is_off_unless_the_switch_is_true() {
+    fn the_sweep_is_off_unless_the_switch_is_the_exact_literal_true() {
         std::env::remove_var(ENABLED_ENV);
         assert!(!enabled());
         std::env::set_var(ENABLED_ENV, "false");
         assert!(!enabled());
         std::env::set_var(ENABLED_ENV, " True ");
+        assert!(!enabled(), "a padded or cased true leaves the sweep off");
+        std::env::set_var(ENABLED_ENV, "true");
         assert!(enabled());
         std::env::remove_var(ENABLED_ENV);
     }

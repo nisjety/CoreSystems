@@ -343,7 +343,7 @@ impl DreamExtractor {
     /// phrase matcher while an operator believes extraction is on is the
     /// failure mode this whole audit keeps finding.
     pub(crate) fn from_env() -> Option<Self> {
-        if !env_flag("DREAMING_LLM_EXTRACTION", true) {
+        if !llm_extraction_enabled_from(std::env::var(LLM_EXTRACTION_ENV).ok().as_deref()) {
             debug!("Dreaming LLM extraction disabled by configuration");
             return None;
         }
@@ -769,15 +769,17 @@ fn optional_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn env_flag(name: &str, default: bool) -> bool {
-    match std::env::var(name) {
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" => false,
-            _ => default,
-        },
-        Err(_) => default,
-    }
+/// The Dreaming LLM extraction switch. Extraction sends conversation text to a paid model, so it
+/// is opt-in: default **OFF**, and only the exact literal `true` turns it on. Unset and every other
+/// value (`1`, `yes`, `on`, `TRUE`, a padded `true`) keep it off, which is what the compose default
+/// (`DREAMING_LLM_EXTRACTION:-0`) and the flag registry declare.
+const LLM_EXTRACTION_ENV: &str = "DREAMING_LLM_EXTRACTION";
+
+/// Pure gate resolution, so the default-OFF contract is testable without mutating process env.
+/// The reader is [`mp_contracts::loop_fold::switch_from`], the strict reader that the default-off
+/// session-core switches share.
+fn llm_extraction_enabled_from(value: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(value)
 }
 
 #[cfg(test)]
@@ -1146,21 +1148,27 @@ mod tests {
     #[test]
     fn extraction_is_off_without_an_inference_address() {
         let _guard = env_lock();
+        // Switched on, so the missing address is the only reason the extractor is off.
+        std::env::set_var("DREAMING_LLM_EXTRACTION", "true");
         std::env::remove_var("INFERENCE_CORE_ADDR");
         std::env::remove_var("INFERENCE_CORE_URL");
         assert!(DreamExtractor::from_env().is_none());
+        std::env::remove_var("DREAMING_LLM_EXTRACTION");
     }
 
     /// Configured-but-broken must not silently look like not-configured.
     #[test]
     fn extraction_is_off_when_its_credential_is_missing() {
         let _guard = env_lock();
+        // Switched on, so the missing credential is the only reason the extractor is off.
+        std::env::set_var("DREAMING_LLM_EXTRACTION", "true");
         std::env::set_var("INFERENCE_CORE_ADDR", "http://inference-core:9092");
         std::env::set_var("AUTH_CORE_URL", "http://auth-core:3011");
         std::env::set_var("SESSION_CORE_SERVICE_ID", "session-core");
         std::env::remove_var("SESSION_CORE_SERVICE_API_KEY");
         assert!(DreamExtractor::from_env().is_none());
         std::env::remove_var("INFERENCE_CORE_ADDR");
+        std::env::remove_var("DREAMING_LLM_EXTRACTION");
     }
 
     #[test]
@@ -1171,6 +1179,77 @@ mod tests {
         assert!(DreamExtractor::from_env().is_none());
         std::env::remove_var("DREAMING_LLM_EXTRACTION");
         std::env::remove_var("INFERENCE_CORE_ADDR");
+    }
+
+    /// Default OFF and exact: unset and every other spelling keep the paid extractor off, which is
+    /// what compose (`:-0`) and the flag registry declare. The reader this replaced was on when
+    /// unset and accepted `1`, `yes`, `on` and any casing.
+    #[test]
+    fn llm_extraction_is_off_unless_the_exact_literal_true() {
+        assert!(!llm_extraction_enabled_from(None), "unset must be off");
+        assert!(llm_extraction_enabled_from(Some("true")));
+        for raw in [
+            "", " ", "1", "yes", "on", "TRUE", "True", " true ", "0", "false", "no", "off",
+        ] {
+            assert!(
+                !llm_extraction_enabled_from(Some(raw)),
+                "{raw:?} must not turn the paid extractor on"
+            );
+        }
+    }
+
+    /// The env path reads the same gate: with a complete configuration, a truthy word that is not
+    /// the literal `true` builds no extractor. Before the fix, `1` built one here.
+    #[tokio::test]
+    async fn extraction_stays_off_for_a_truthy_word_with_a_full_config() {
+        let _guard = env_lock();
+        set_full_extraction_config();
+        let mut built = Vec::new();
+        for raw in ["1", "yes", "on", "TRUE", " true "] {
+            std::env::set_var("DREAMING_LLM_EXTRACTION", raw);
+            if DreamExtractor::from_env().is_some() {
+                built.push(raw);
+            }
+        }
+        clear_extraction_config();
+        assert!(
+            built.is_empty(),
+            "these must not enable extraction: {built:?}"
+        );
+    }
+
+    /// The exact literal still builds one, so the fix does not switch extraction off for good.
+    #[tokio::test]
+    async fn extraction_is_on_with_the_exact_literal_true_and_a_full_config() {
+        let _guard = env_lock();
+        set_full_extraction_config();
+        std::env::set_var("DREAMING_LLM_EXTRACTION", "true");
+        let built = DreamExtractor::from_env().is_some();
+        clear_extraction_config();
+        assert!(built, "the exact literal true must build the extractor");
+    }
+
+    /// A complete configuration, so the switch alone decides whether the extractor is built.
+    fn set_full_extraction_config() {
+        std::env::set_var("INFERENCE_CORE_ADDR", "http://inference-core:9092");
+        std::env::set_var("AUTH_CORE_URL", "http://auth-core:3011");
+        std::env::set_var("SESSION_CORE_SERVICE_ID", "session-core");
+        std::env::set_var(
+            "SESSION_CORE_SERVICE_API_KEY",
+            "fixture-key-aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+    }
+
+    fn clear_extraction_config() {
+        for name in [
+            "DREAMING_LLM_EXTRACTION",
+            "INFERENCE_CORE_ADDR",
+            "AUTH_CORE_URL",
+            "SESSION_CORE_SERVICE_ID",
+            "SESSION_CORE_SERVICE_API_KEY",
+        ] {
+            std::env::remove_var(name);
+        }
     }
 
     /// `std::env` is process-global; these tests must not interleave.

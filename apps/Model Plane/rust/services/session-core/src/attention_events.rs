@@ -62,8 +62,8 @@ pub(crate) fn enabled() -> bool {
     enabled_from(std::env::var(ENABLED_ENV).ok().as_deref())
 }
 
-/// The switch's value through the one strict parser of the durable-loop switches: `true`, in any case
-/// and with surrounding whitespace, and nothing else.
+/// The switch's value through the one strict parser of the durable-loop switches: only the exact
+/// literal `true`, with no trimming and no case folding, and nothing else.
 fn enabled_from(value: Option<&str>) -> bool {
     mp_contracts::loop_fold::switch_from(value)
 }

@@ -81,18 +81,16 @@ use tonic::{
 };
 use tracing::warn;
 
-/// Kill switch / opt-in for the whole grounding pipeline. Default **OFF**,
-/// unlike `dream_extractor`'s `DREAMING_LLM_EXTRACTION` (default on): that
-/// flag guards a component this service already shipped and trusts; this one
-/// guards a new write path that flips `is_latest` on existing rows, and a
-/// change of that shape earns an explicit opt-in rather than an implicit one,
-/// per the design doc's rollout requirement (§6 below).
+/// Kill switch / opt-in for the whole grounding pipeline. Default **OFF**: it
+/// guards a new write path that flips `is_latest` on existing rows, and a change
+/// of that shape earns an explicit opt-in rather than an implicit one, per the
+/// design doc's rollout requirement (§6 below). `dream_extractor`'s
+/// `DREAMING_LLM_EXTRACTION` is default-off too and reads the same exact literal.
 pub(crate) const GROUNDING_ENABLED_ENV: &str = "MEMORY_GROUNDING_ENABLED";
 
-/// `true` only when [`GROUNDING_ENABLED_ENV`] is explicitly set to a truthy
-/// value. Mirrors `dream_extractor::env_flag`'s truthy/falsey vocabulary for a
-/// single caller-facing flag, but default-OFF end-to-end: an unset or
-/// unrecognised value both resolve to `false`.
+/// `true` only when [`GROUNDING_ENABLED_ENV`] is set to the exact literal `true`. Default-OFF
+/// end-to-end: an unset value and every other value (`1`, `yes`, `on`, `TRUE`, a padded `true`)
+/// resolve to `false`. The strict reader is [`mp_contracts::loop_fold::switch_from`].
 pub(crate) fn memory_grounding_enabled() -> bool {
     is_enabled(std::env::var(GROUNDING_ENABLED_ENV).ok())
 }
@@ -100,14 +98,7 @@ pub(crate) fn memory_grounding_enabled() -> bool {
 /// Pure gate resolution, so the default-OFF contract is testable without
 /// mutating process env — mirrors `learning_events::enabled_from_env`.
 pub(crate) fn is_enabled(env_value: Option<String>) -> bool {
-    env_value.is_some_and(|value| is_truthy(&value))
-}
-
-fn is_truthy(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+    mp_contracts::loop_fold::switch_from(env_value.as_deref())
 }
 
 const INFERENCE_AUDIENCE: &str = "inference-core";
@@ -746,16 +737,22 @@ mod tests {
     }
 
     #[test]
-    fn grounding_recognises_truthy_spellings() {
-        for value in ["1", "true", "TRUE", "yes", "on", " on "] {
-            assert!(is_enabled(Some(value.to_owned())), "{value:?} should enable grounding");
-        }
+    fn grounding_is_on_only_for_the_exact_literal_true() {
+        assert!(
+            is_enabled(Some("true".to_owned())),
+            "the exact literal enables grounding"
+        );
     }
 
     #[test]
-    fn grounding_recognises_falsey_spellings_as_off() {
-        for value in ["0", "false", "no", "off"] {
-            assert!(!is_enabled(Some(value.to_owned())), "{value:?} should leave grounding off");
+    fn grounding_recognises_falsey_and_lenient_spellings_as_off() {
+        for value in [
+            "0", "false", "no", "off", "1", "yes", "on", " on ", "TRUE", "True", " true ", "true\n",
+        ] {
+            assert!(
+                !is_enabled(Some(value.to_owned())),
+                "{value:?} should leave grounding off"
+            );
         }
     }
 

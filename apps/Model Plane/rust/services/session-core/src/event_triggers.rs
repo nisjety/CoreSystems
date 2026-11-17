@@ -33,7 +33,7 @@ use tonic::{Request, Response, Status};
 use crate::auth::{authorize_operation, identity, VerifiedIdentity};
 use crate::grpc::{record_metrics, to_proto_timestamp};
 
-/// The switch. Only the literal `true` (case-insensitive) turns the store on.
+/// The switch. Only the exact literal `true` turns the store on (no trimming, no case folding).
 pub(crate) const ENABLED_ENV: &str = "EVENT_TRIGGERS_ENABLED";
 const DISABLED: &str = "event_triggers_disabled";
 /// The refusal codes a caller can act on. Strings, as the other session-core refusals are.

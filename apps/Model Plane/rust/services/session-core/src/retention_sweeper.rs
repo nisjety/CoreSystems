@@ -184,10 +184,10 @@ pub(crate) enum Mode {
 const RECORDED_DRY_RUN: &str = "dry_run";
 const RECORDED_ENFORCE: &str = "enforce";
 
-/// Reads the switch. Unset, empty or `off` is off; `dry_run` and `enforce` are
-/// themselves; anything else is `dry_run`, never `enforce` (see the module docs).
+/// Reads the switch exactly, with no trimming. Unset, empty or `off` is off; `enforce` is enforce;
+/// anything else, padding included, is `dry_run`, never `enforce` (see the module docs).
 pub(crate) fn mode_from(raw: Option<&str>) -> Mode {
-    match raw.map(str::trim) {
+    match raw {
         None | Some("" | "off") => Mode::Off,
         Some("enforce") => Mode::Enforce,
         Some(_) => Mode::DryRun,
@@ -1081,14 +1081,19 @@ mod tests {
 
     #[test]
     fn retention_sweep_switch_unknown_is_dry_run_never_enforce() {
-        for raw in [None, Some(""), Some("  "), Some("off"), Some(" off ")] {
+        for raw in [None, Some(""), Some("off")] {
             assert_eq!(mode_from(raw), Mode::Off, "{raw:?}");
         }
         assert_eq!(mode_from(Some("dry_run")), Mode::DryRun);
         assert_eq!(mode_from(Some("enforce")), Mode::Enforce);
-        assert_eq!(mode_from(Some(" enforce ")), Mode::Enforce);
+        // Padding is not trimmed: a padded word is another value, so it is dry_run, never enforce.
+        for raw in [" enforce ", " off ", "  "] {
+            assert_eq!(mode_from(Some(raw)), Mode::DryRun, "{raw:?}");
+        }
         // A typo, another casing or a boolean must never become enforce.
-        for raw in ["Enforce", "ENFORCE", "enforced", "true", "1", "on", "dry-run", "Off", "false"] {
+        for raw in [
+            "Enforce", "ENFORCE", "enforced", "true", "1", "on", "dry-run", "Off", "false",
+        ] {
             assert_eq!(mode_from(Some(raw)), Mode::DryRun, "{raw}");
         }
     }
