@@ -2167,6 +2167,8 @@ services:
       # organisation-wide listing); only the literal `true`. Switch it on before MODEL_ACTION_ADMISSION=table in any
       # Space-capable deployment.
       OWNER_LIST_SPACE_REFUSE: ${OWNER_LIST_SPACE_REFUSE:-false}
+      # WS24-S6/S8: the admission table (named actions, owner listing). Unset is off; only the literal "table" enables it.
+      MODEL_ACTION_ADMISSION: ${MODEL_ACTION_ADMISSION:-}
       # D2-771: the direct ExecuteStep RPC searches the organisation for a Space-scoped knowledge_search today. With this on
       # such a step is withheld (typed PROJECT_KNOWLEDGE_UNAVAILABLE, before any Data Plane call) unless the caller forwards
       # x-space-retrieval-authorization. Off by default; only the literal `true`.
@@ -2486,6 +2488,8 @@ services:
       CAPABILITY_CORE_AUTH_AUDIENCE: ${CAPABILITY_CORE_AUTH_AUDIENCE:-capability-core}
       CAPABILITY_CORE_DECISION_SIGNING_KEY: ${CAPABILITY_CORE_DECISION_SIGNING_KEY:-}
       CAPABILITY_CORE_DECISION_SIGNING_KID: ${CAPABILITY_CORE_DECISION_SIGNING_KID:-capability-decision-v1}
+      # WS24-S6: the agent action admission table. Unset is off (tickets.create only); only the literal "table" enables it.
+      MODEL_ACTION_ADMISSION: ${MODEL_ACTION_ADMISSION:-}
       # WS25-S7: org agent policy API (routes answer 404 while off). Only the literal `true` enables it.
       ORG_AGENT_POLICY_API: ${ORG_AGENT_POLICY_API:-false}
       # WS25-S9: hide and deny MCP servers and tools outside the org's allow-list (org_extension_not_allowed). Only the

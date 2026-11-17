@@ -63,6 +63,8 @@ services:
       # goal_judge_unavailable. That switch is not turned on in production yet.
       MODEL_GATEWAY_GOAL_JUDGE_SERVICE_ID: ""
       MODEL_GATEWAY_GOAL_JUDGE_SERVICE_API_KEY: ""
+      # WS18-S5: Do-run Space retrieval, read by model-gateway alone. Unset is off; only the literal "true" enables it.
+      AGENTIC_SPACE_RETRIEVAL_ENABLED: ${AGENTIC_SPACE_RETRIEVAL_ENABLED:-false}
       # C-05 (D2-769, D2-774): the one switch for the Space listing refusal, the same name execution-core reads.
       # Interpolated, not pinned, so a deployment turns it on in its runtime environment; it must be on before
       # MODEL_ACTION_ADMISSION=table with Spaces. Unset is off; only the literal "true" enables it.
@@ -116,6 +118,8 @@ services:
       # C-05 (D2-769): the Space listing refusal for a Do run, the same switch model-gateway reads. Interpolated, not
       # pinned, so a deployment turns it on in its runtime environment. Unset is off; only the literal "true" enables it.
       OWNER_LIST_SPACE_REFUSE: ${OWNER_LIST_SPACE_REFUSE:-false}
+      # WS24-S6/S8: the admission table (named actions, owner listing). Unset is off; only the literal "table" enables it.
+      MODEL_ACTION_ADMISSION: ${MODEL_ACTION_ADMISSION:-}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
       EXECUTION_CORE_AUTH_AUDIENCE: ${EXECUTION_CORE_AUTH_AUDIENCE:?EXECUTION_CORE_AUTH_AUDIENCE is required}
@@ -136,6 +140,8 @@ services:
       DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
       CAPABILITY_CORE_DECISION_SIGNING_KEY: ${CAPABILITY_CORE_DECISION_SIGNING_KEY:?CAPABILITY_CORE_DECISION_SIGNING_KEY is required}
       CAPABILITY_CORE_DECISION_SIGNING_KID: ${CAPABILITY_CORE_DECISION_SIGNING_KID:-capability-decision-v1}
+      # WS24-S6: the agent action admission table. Unset is off (tickets.create only); only the literal "table" enables it.
+      MODEL_ACTION_ADMISSION: ${MODEL_ACTION_ADMISSION:-}
   sandbox-manager:
     <<: *hardened-service
     ports: !reset []
