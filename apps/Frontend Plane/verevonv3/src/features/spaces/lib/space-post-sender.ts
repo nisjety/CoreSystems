@@ -28,6 +28,9 @@ import { newSpaceSendId } from './space-send-pipeline'
 /** How long an accepted entry may outlive its acceptance if the room's projection never shows it. */
 const ACCEPTED_TTL_MS = 30_000
 
+/** The typed refusal of a durable write under zero data retention: the workspace's answer, never a transient one. */
+const ZDR_DURABLE_REFUSAL = 'zdr_durable_mutation_forbidden'
+
 /** Codes where repeating the same send under its own key can succeed. */
 const RETRYABLE_CODES: ReadonlySet<string> = new Set([
   'space_decision_unavailable',
@@ -138,7 +141,7 @@ export function createSpacePostSender(options: SpacePostSenderOptions): SpacePos
     } catch (error) {
       if (!journal.get(sendId)) return
       const failure = classify(error, options.describeError)
-      if (error instanceof ApiError && error.code === 'zdr_durable_mutation_forbidden') options.onZdrRefused?.()
+      if (error instanceof ApiError && error.code === ZDR_DURABLE_REFUSAL) options.onZdrRefused?.()
       if (failure.code === 'network') noteSendTransportLost()
       journal.update(sendId, { stage: 'failed', failure })
     }
@@ -160,6 +163,12 @@ export function createSpacePostSender(options: SpacePostSenderOptions): SpacePos
       && prior.content === content
       && sameMentions(prior.mentions, input.mentions)
       && (kind === 'post_new' || prior.threadId === input.replyThreadId)
+    // A zero-retention refusal is not a transient failure: the same words to the same place get the same refusal, so
+    // a repeated Send does not go to the server again. The refusal is surfaced once more, and the entry stays.
+    if (prior && sameSend && prior.failure?.code === ZDR_DURABLE_REFUSAL) {
+      options.onZdrRefused?.()
+      return
+    }
     if (prior && !sameSend) journal.remove(prior.sendId)
     const entry = sameSend && prior
       ? prior

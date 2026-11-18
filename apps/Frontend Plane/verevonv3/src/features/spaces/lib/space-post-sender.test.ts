@@ -232,6 +232,17 @@ describe('space post sender (WS01-S6)', () => {
       expect(localStorage.length).toBe(0)
       expect(sessionStorage.length).toBe(0)
     })
+
+    it('the same words sent again after a zero-retention refusal are not sent again, and the refusal shows again', async () => {
+      createSpacePost.mockRejectedValue(apiError(412, 'zdr_durable_mutation_forbidden'))
+      const h = harness()
+      await send(h, { content: 'hello' })
+      await send(h, { content: 'hello' })
+      expect(createSpacePost).toHaveBeenCalledTimes(1)
+      expect(h.onZdrRefused).toHaveBeenCalledTimes(2)
+      expect(h.journal.entries()).toHaveLength(1)
+      expect(h.sender.current()?.failure).toMatchObject({ code: 'zdr_durable_mutation_forbidden', retryable: false })
+    })
   })
 
   describe('retry and the send id', () => {
