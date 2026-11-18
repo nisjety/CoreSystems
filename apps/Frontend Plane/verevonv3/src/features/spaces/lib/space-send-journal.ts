@@ -73,6 +73,18 @@ export interface SpaceSendJournal {
   ) => void
 }
 
+/**
+ * Whether a thread's `updated_at` has moved forward past the baseline a reply was sent against, so the reply is in
+ * the record. Forward, as instants: a listing that answers with an older stamp, or with none, does not show the reply
+ * yet, and an unparsable stamp is no evidence either way.
+ */
+function movedForward(updatedAt: string | undefined, baseline: string | undefined): boolean {
+  const now = Date.parse(updatedAt ?? '')
+  if (Number.isNaN(now)) return false
+  const then = Date.parse(baseline ?? '')
+  return Number.isNaN(then) || now > then
+}
+
 export function createSpaceSendJournal(): SpaceSendJournal {
   const [entries, setEntries] = createSignal<readonly SpaceJournalEntry[]>([])
   const forSpace = (spaceRef: string) => entries().filter((entry) => entry.spaceRef === spaceRef)
@@ -120,7 +132,7 @@ export function createSpaceSendJournal(): SpaceSendJournal {
         const thread = byId.get(entry.threadId)
         if (!thread) return true
         if (entry.kind === 'post_new') return false
-        return (thread.updated_at ?? '') === (entry.baselineUpdatedAt ?? '')
+        return !movedForward(thread.updated_at, entry.baselineUpdatedAt)
       })
       return next.length === current.length ? current : next
     })

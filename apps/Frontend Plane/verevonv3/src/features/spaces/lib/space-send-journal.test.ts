@@ -152,6 +152,51 @@ describe('space send journal (WS01-S6)', () => {
       expect(journal.get('s1')).toBeUndefined()
     })
 
+    it('keeps an accepted post_reply when the thread updated_at moves back, not forward', () => {
+      const journal = makeJournal()
+      journal.begin({
+        sendId: 's1',
+        kind: 'post_reply',
+        spaceRef: 'room',
+        threadId: 'thr_1',
+        content: 'a',
+        baselineUpdatedAt: '2026-10-27T10:00:00Z',
+      })
+      journal.update('s1', { stage: 'accepted' })
+      journal.reconcile('room', [{ thread_id: 'thr_1', updated_at: '2026-10-27T09:00:00Z' }])
+      expect(journal.get('s1')).toBeDefined()
+    })
+
+    it('keeps an accepted post_reply while the listing gives its thread no updated_at', () => {
+      const journal = makeJournal()
+      journal.begin({
+        sendId: 's1',
+        kind: 'post_reply',
+        spaceRef: 'room',
+        threadId: 'thr_1',
+        content: 'a',
+        baselineUpdatedAt: '2026-10-27T10:00:00Z',
+      })
+      journal.update('s1', { stage: 'accepted' })
+      journal.reconcile('room', [{ thread_id: 'thr_1' }])
+      expect(journal.get('s1')).toBeDefined()
+    })
+
+    it('compares the two stamps as instants: the same moment in another spelling is not progress', () => {
+      const journal = makeJournal()
+      journal.begin({
+        sendId: 's1',
+        kind: 'post_reply',
+        spaceRef: 'room',
+        threadId: 'thr_1',
+        content: 'a',
+        baselineUpdatedAt: '2026-10-27T10:00:00Z',
+      })
+      journal.update('s1', { stage: 'accepted' })
+      journal.reconcile('room', [{ thread_id: 'thr_1', updated_at: '2026-10-27T10:00:00.000Z' }])
+      expect(journal.get('s1')).toBeDefined()
+    })
+
     it('treats a reply with no baseline and no updated_at as not yet shown', () => {
       const journal = makeJournal()
       journal.begin({ sendId: 's1', kind: 'post_reply', spaceRef: 'room', threadId: 'thr_1', content: 'a' })
