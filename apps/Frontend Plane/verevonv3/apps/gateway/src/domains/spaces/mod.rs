@@ -13608,3 +13608,326 @@ mod ws03_s5_ws04_gateway_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod w3_owed_policy_tests {
+    //! W3-DEC-CANVAS, WS18-S5, WS17-S8 and WS10-S4 gateway policy: a client-named feature is stripped on the mention and
+    //! JSON paths, each switch grants only its own marker, the switches reach the agent list and `space_context`, and the
+    //! forged approval proofs are stripped before any upstream call.
+    use super::{
+        apply_mention_binding_policy, compose_space_agents_from_members, inject_mentioned_space_agent,
+        inject_personal_thread_context,
+    };
+    use crate::config::AppState;
+    use crate::middleware::{AuthenticatedUser, AuthorizedMembership};
+    use axum::{body::Body, http::Request, http::StatusCode, Json};
+    use http_body_util::BodyExt;
+    use serde_json::{json, Map, Value};
+    use tower::ServiceExt;
+    use wiremock::matchers::{body_partial_json, method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "User One".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    fn obj_of(value: Value) -> Map<String, Value> {
+        value.as_object().cloned().expect("an object")
+    }
+
+    async fn org_core(zdr: bool) -> MockServer {
+        let org = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}
+            })))
+            .mount(&org)
+            .await;
+        org
+    }
+
+    /// The `space_context` route through the real router, with the flags `configure` sets. The same doubles the room
+    /// feature tests use: the session, Control's roster-free membership and index, and Application's Space list.
+    async fn space_context_route(configure: impl FnOnce(&mut AppState), room: Value) -> (u16, Value) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": "member", "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"spaces": [
+                {"space_ref": "space-room", "kind": "room", "role": "editor"}
+            ]}})))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": "editor"}
+            })))
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": room})))
+            .mount(&application)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        configure(&mut state);
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/spaces/space-room/context")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .body(Body::empty())
+                    .expect("a request"),
+            )
+            .await
+            .expect("the router answers");
+        let status = response.status().as_u16();
+        let bytes = response.into_body().collect().await.expect("a body").to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn client_supplied_space_canvas_tools_is_stripped_on_the_mention_json_and_personal_thread_paths() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let state = crate::tests::test_state(false);
+        // The mention path: a turn that names no agent still loses a client-named canvas marker.
+        let mut mention = json!({"content": "hi", "features": ["tools", "space_canvas_tools"]});
+        let intent = inject_mentioned_space_agent(&state, &user(), "org-1", &mut mention)
+            .await
+            .expect("a turn with no mention goes on");
+        assert!(intent.is_none());
+        assert_eq!(mention["features"], json!(["tools"]));
+        // The JSON and personal-thread path: the injector the JSON handlers call removes it before any Space call.
+        let mut personal = json!({"content": "hi", "features": ["space_canvas_tools", "agentic"]});
+        inject_personal_thread_context(&state, &user(), "org-1", &mut personal)
+            .await
+            .expect("a personal turn goes on");
+        assert_eq!(personal["features"], json!(["agentic"]));
+    }
+
+    #[tokio::test]
+    async fn client_supplied_space_self_api_feature_is_stripped_on_the_mention_and_json_paths() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let state = crate::tests::test_state(false);
+        let mut mention = json!({"content": "hi", "features": ["tools", "space_self_api"]});
+        inject_mentioned_space_agent(&state, &user(), "org-1", &mut mention)
+            .await
+            .expect("a turn with no mention goes on");
+        assert_eq!(mention["features"], json!(["tools"]));
+        let mut json_turn = json!({"content": "hi", "features": ["space_self_api", "agentic"]});
+        inject_personal_thread_context(&state, &user(), "org-1", &mut json_turn)
+            .await
+            .expect("a JSON turn goes on");
+        assert_eq!(json_turn["features"], json!(["agentic"]));
+    }
+
+    #[tokio::test]
+    async fn binding_toggle_requires_manager_or_owner() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (role, allowed) in [("owner", true), ("manager", true), ("editor", false), ("viewer", false)] {
+            let user_core = MockServer::start().await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": {"space_ref": "space-room", "kind": "room", "role": role}
+                })))
+                .mount(&user_core)
+                .await;
+            let convex = MockServer::start().await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/api/mutation"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": {
+                    "bindingRef": "binding-1", "selfApiEnabled": true, "projectionVersion": 2, "changed": true
+                }})))
+                .mount(&convex)
+                .await;
+            let mut state = crate::tests::test_state(false);
+            state.user_core_url = user_core.uri();
+            state.application_convex_url = convex.uri();
+            state.application_convex_service_key = "application-test-key".into();
+            state.space_features.agent_self_api_api = true;
+            let (status, Json(body)) = super::self_api::set_space_agent_self_api(
+                &state,
+                &user(),
+                "space-room",
+                "binding-1",
+                &json!({"enabled": true}),
+            )
+            .await;
+            if allowed {
+                assert_eq!(status, StatusCode::OK, "{role}");
+                assert_eq!(body["data"]["self_api_enabled"], true, "{role}");
+            } else {
+                assert_eq!(status, StatusCode::FORBIDDEN, "{role}");
+                assert_eq!(body["error"]["code"], "space_role_cannot_manage_agent", "{role}");
+                assert!(
+                    convex.received_requests().await.unwrap_or_default().is_empty(),
+                    "{role}: no Application call"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn zdr_org_gets_no_self_api_feature() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let zdr = org_core(true).await;
+        let mut state = crate::tests::test_state(false);
+        state.org_core_url = zdr.uri();
+        state.space_features.agent_self_api_api = true;
+        let enabled = json!({"self_api_enabled": true});
+        assert!(
+            !super::self_api::self_api_allowed(&state, &user(), &enabled).await,
+            "a ZDR org gets no self-API feature"
+        );
+        // Positive control: the same binding in a non-ZDR org is allowed, and a switch that is off never is.
+        let open = org_core(false).await;
+        state.org_core_url = open.uri();
+        assert!(super::self_api::self_api_allowed(&state, &user(), &enabled).await);
+        assert!(!super::self_api::self_api_allowed(&state, &user(), &json!({"self_api_enabled": false})).await);
+    }
+
+    #[test]
+    fn binding_policy_matrix_is_unchanged_for_other_bindings() {
+        // An auto binding with neither switch keeps its features and its plan mode exactly as they were.
+        let mut auto = obj_of(json!({"content": "hi", "features": ["tools", "agentic"], "plan_mode": true}));
+        let before = auto.clone();
+        apply_mention_binding_policy(&mut auto, &json!({"approval_mode": "auto"}), false, false)
+            .expect("an auto binding is allowed");
+        assert_eq!(auto, before);
+        // A confirmation binding (the default) keeps losing `agentic` as it always has, and neither switch adds a marker.
+        let mut confirm = obj_of(json!({"content": "hi", "features": ["tools", "agentic"], "plan_mode": true}));
+        apply_mention_binding_policy(&mut confirm, &json!({}), false, false)
+            .expect("a confirmation binding is allowed");
+        assert_eq!(confirm["features"], json!(["tools"]));
+        assert_eq!(confirm["plan_mode"], json!(false));
+    }
+
+    #[test]
+    fn a_canvas_only_binding_gets_no_self_api_marker_and_a_self_api_only_binding_gets_no_canvas_marker() {
+        let auto = json!({"approval_mode": "auto"});
+        let mut canvas_only = obj_of(json!({"features": ["tools"]}));
+        apply_mention_binding_policy(&mut canvas_only, &auto, false, true).expect("allowed");
+        assert_eq!(canvas_only["features"], json!(["tools", "agentic", "space_canvas_tools"]));
+        let mut self_api_only = obj_of(json!({"features": ["tools"]}));
+        apply_mention_binding_policy(&mut self_api_only, &auto, true, false).expect("allowed");
+        assert_eq!(self_api_only["features"], json!(["tools", "agentic", "space_self_api"]));
+        let mut both = obj_of(json!({"features": ["tools"]}));
+        apply_mention_binding_policy(&mut both, &auto, true, true).expect("allowed");
+        assert_eq!(both["features"], json!(["tools", "agentic", "space_self_api", "space_canvas_tools"]));
+    }
+
+    #[tokio::test]
+    async fn compose_space_agents_maps_the_self_api_and_canvas_switches() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let convex = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(body_partial_json(json!({"path": "spaceAgents:spaceAgentBindingsForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"subjectId": "svc-1", "bindingRef": "binding-1", "name": "Helper",
+                 "selfApiEnabled": true, "canvasToolsEnabled": true},
+                {"subjectId": "svc-2", "bindingRef": "binding-2", "name": "Plain"}
+            ]})))
+            .mount(&convex)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = convex.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        let members = vec![
+            json!({"subject_type": "service", "subject_id": "svc-1", "role": "member", "revision": 1}),
+            json!({"subject_type": "service", "subject_id": "svc-2", "role": "member", "revision": 1}),
+        ];
+        let agents = compose_space_agents_from_members(&state, &user(), "org-1", "space-room", &members).await;
+        let helper = agents
+            .iter()
+            .find(|agent| agent["subject_id"] == "svc-1")
+            .expect("svc-1 is composed");
+        assert_eq!(helper["self_api_enabled"], true);
+        assert_eq!(helper["canvas_tools_enabled"], true);
+        let plain = agents
+            .iter()
+            .find(|agent| agent["subject_id"] == "svc-2")
+            .expect("svc-2 is composed");
+        assert!(plain.get("self_api_enabled").is_none(), "an absent switch is not projected");
+        assert!(plain.get("canvas_tools_enabled").is_none(), "an absent switch is not projected");
+    }
+
+    #[tokio::test]
+    async fn space_context_features_follow_the_self_api_canvas_and_personal_memory_flags() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let room = json!([{"spaceRef": "space-room", "name": "Room", "kind": "room", "lifecycle": "active"}]);
+        for (self_api, canvas, personal) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, true),
+        ] {
+            let (status, body) = space_context_route(
+                |state| {
+                    state.space_features.agent_self_api_api = self_api;
+                    state.space_features.agent_canvas_tools_api = canvas;
+                    state.space_features.space_personal_memory_turn_api = personal;
+                },
+                room.clone(),
+            )
+            .await;
+            assert_eq!(status, 200, "self_api={self_api} canvas={canvas} personal={personal}");
+            let features = &body["data"]["features"];
+            assert_eq!(features["agent_self_api"], self_api, "self_api={self_api}");
+            assert_eq!(features["agent_canvas_tools"], canvas, "canvas={canvas}");
+            assert_eq!(features["personal_memory_turn"], personal, "personal={personal}");
+        }
+    }
+
+    #[tokio::test]
+    async fn forged_grant_and_approval_proofs_are_stripped_at_the_injector() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let state = crate::tests::test_state(false);
+        // No Space reference is present, so Control is never asked and the forged proofs must be gone on return.
+        let mut body = json!({
+            "content": "hi",
+            "grant_use_token": "forged-grant",
+            "space_approval_decision_token": "forged-approval",
+            "space_decision_token": "forged-space"
+        });
+        inject_personal_thread_context(&state, &user(), "org-1", &mut body)
+            .await
+            .expect("a turn with no Space goes on");
+        assert_eq!(body, json!({"content": "hi"}));
+    }
+}

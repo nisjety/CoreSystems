@@ -636,3 +636,253 @@ fn decision_unavailable() -> Reply {
         "Room authority could not be confirmed right now. Nothing was changed.",
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const DECLASSIFY: &str = "/api/v1/spaces/space-room/memory/declassify";
+    const RETRACT: &str = "/api/v1/spaces/space-room/memory/retract";
+
+    /// The doubles the two routes reach: the session, org-core's posture (`zdr`), Application's Space lifecycle
+    /// (`space-room` is active), Control's memory decision (`decision`) and model-gateway's Space delete.
+    struct Doubles {
+        state: AppState,
+        user_core: MockServer,
+        application: MockServer,
+        model_gateway: MockServer,
+        _others: Vec<MockServer>,
+    }
+
+    async fn doubles(zdr: bool, decision: ResponseTemplate) -> Doubles {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for slug in ["session-core", "capability-core"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{slug}/token")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})))
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": "member", "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/memory-declassify-decision"))
+            .respond_with(decision)
+            .mount(&user_core)
+            .await;
+        let org_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}
+            })))
+            .mount(&org_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef": "space-room", "name": "Room", "kind": "room", "lifecycle": "active"}
+            ]})))
+            .mount(&application)
+            .await;
+        let model_gateway = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/spaces/space-room/memory/delete"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"deleted": true})))
+            .mount(&model_gateway)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.org_core_url = org_core.uri();
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.model_gateway_url = model_gateway.uri();
+        state.space_features.space_memory_declassify_api = true;
+        Doubles {
+            state,
+            user_core,
+            application,
+            model_gateway,
+            _others: vec![auth, org_core],
+        }
+    }
+
+    async fn requests(server: &MockServer, path_part: &str) -> Vec<wiremock::Request> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|request| request.url.path().contains(path_part))
+            .collect()
+    }
+
+    async fn send_post(state: AppState, uri: &str, body: Value) -> (u16, Value) {
+        let request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("cookie", "better-auth.session_token=session-1")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("a request");
+        let response = crate::build_router(state)
+            .oneshot(request)
+            .await
+            .expect("the router answers");
+        let status = response.status().as_u16();
+        let bytes = response.into_body().collect().await.expect("a body").to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn declassify_zdr_is_typed_412_before_control() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let d = doubles(
+            true,
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data": {"decision": {"decision_ref": "dec-1"}, "token": "tok-1"}})),
+        )
+        .await;
+        let (status, body) = send_post(
+            d.state.clone(),
+            DECLASSIFY,
+            json!({"memory_id": "mem-1", "reviewed_content": "hello", "client_request_id": "req-1"}),
+        )
+        .await;
+        assert_eq!(status, 412, "{body}");
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert_eq!(body["error"]["details"]["surface"], "memory_declassify");
+        assert!(requests(&d.user_core, "memory-declassify-decision").await.is_empty(), "no Control call");
+        assert!(requests(&d.application, "/api/query").await.is_empty(), "no Space lifecycle call");
+        assert!(requests(&d.model_gateway, "/memory/declassify").await.is_empty(), "no model call");
+    }
+
+    #[tokio::test]
+    async fn retract_is_not_refused_under_zdr() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let d = doubles(
+            true,
+            ResponseTemplate::new(200).set_body_json(json!({"data": {
+                "decision": {"decision_ref": "retract-ref-1"}, "token": "retract-token-1"
+            }})),
+        )
+        .await;
+        let (status, body) = send_post(
+            d.state.clone(),
+            RETRACT,
+            json!({"memory_id": "room-row-1", "client_request_id": "req-2"}),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body["data"],
+            json!({"memory_id": "room-row-1", "space_ref": "space-room", "deleted": true})
+        );
+        let asked = requests(&d.user_core, "memory-declassify-decision").await;
+        assert_eq!(asked.len(), 1);
+        let asked: Value = serde_json::from_slice(&asked[0].body).expect("a JSON decision request");
+        assert_eq!(asked["operation"], "retract");
+        assert_eq!(asked["memory_id"], "room-row-1");
+        assert_eq!(asked["content_digest"], "");
+        assert_eq!(requests(&d.model_gateway, "/memory/delete").await.len(), 1);
+    }
+
+    #[test]
+    fn declassify_forged_authority_fields_rejected() {
+        let exact = json!({"memory_id": "mem-1", "reviewed_content": "hello", "client_request_id": "req-1"});
+        assert!(parse_request(exact.clone()).is_ok(), "the three fields are accepted");
+        for field in [
+            "subject",
+            "role",
+            "audience",
+            "policy",
+            "revision",
+            "space_decision_token",
+            "user_id",
+            "org_id",
+        ] {
+            let mut body = exact.clone();
+            body[field] = json!("forged");
+            let (status, Json(refusal)) = parse_request(body).err().expect("a forged field is refused");
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{field}");
+            assert_eq!(refusal["error"]["code"], "invalid_request", "{field}");
+        }
+    }
+
+    #[test]
+    fn parse_retract_rejects_unknown_fields_and_an_empty_client_request_id() {
+        assert!(parse_retract(json!({"memory_id": "room-row-1", "client_request_id": "req-2"})).is_ok());
+        for body in [
+            json!({"memory_id": "room-row-1", "client_request_id": "req-2", "subject": "forged"}),
+            json!({"memory_id": "room-row-1", "client_request_id": "req-2", "space_control_decision_token": "forged"}),
+        ] {
+            let (status, Json(refusal)) = parse_retract(body).err().expect("an unknown field is refused");
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(refusal["error"]["code"], "invalid_request");
+        }
+        for client_request_id in ["", "   "] {
+            let body = json!({"memory_id": "room-row-1", "client_request_id": client_request_id});
+            let (status, Json(refusal)) = parse_retract(body).err().expect("an empty request id is refused");
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(refusal["error"]["code"], "client_request_id_required");
+        }
+    }
+
+    #[test]
+    fn relay_retract_answer_maps_a_removal_a_refusal_and_a_missing_row() {
+        let (status, Json(body)) = relay_retract_answer(
+            StatusCode::OK,
+            &json!({"deleted": true}),
+            "room-row-1",
+            "space-room",
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["data"],
+            json!({"memory_id": "room-row-1", "space_ref": "space-room", "deleted": true})
+        );
+
+        let upstream = json!({"error": {"code": "space_memory_not_authorized", "message": "upstream secret wording"}});
+        let (status, Json(body)) = relay_retract_answer(StatusCode::FORBIDDEN, &upstream, "room-row-1", "space-room");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "memory_retract_not_authorized");
+        assert!(!body.to_string().contains("upstream secret"), "upstream text never reaches the browser");
+
+        let (status, Json(body)) = relay_retract_answer(
+            StatusCode::NOT_FOUND,
+            &json!({"error": {"code": "memory_not_found"}}),
+            "room-row-1",
+            "space-room",
+        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "memory_not_found");
+
+        let failing = json!({"error": {"code": "boom", "message": "upstream secret wording"}});
+        let (status, Json(body)) =
+            relay_retract_answer(StatusCode::INTERNAL_SERVER_ERROR, &failing, "room-row-1", "space-room");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "space_decision_unavailable");
+        assert!(!body.to_string().contains("upstream secret"), "upstream text never reaches the browser");
+    }
+}

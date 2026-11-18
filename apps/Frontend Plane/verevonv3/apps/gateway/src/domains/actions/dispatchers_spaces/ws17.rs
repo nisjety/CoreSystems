@@ -157,3 +157,108 @@ pub(in crate::domains::actions) async fn dispatch_memory_retract_from_space(
     let (status, Json(payload)) = retract_memory_core(state, user, headers, space_ref, body).await;
     owner_json_response_to_envelope("memory.retract_from_space", user, status, payload)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::middleware::AuthorizedMembership;
+    use axum::http::StatusCode;
+    use http_body_util::BodyExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "User One".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    async fn read(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = response.into_body().collect().await.expect("a body").to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    /// `memory.declassify_to_space` reads camelCase inputs and hands the core the route's snake_case body: Control is
+    /// asked for this memory, this Space and the exact bytes of the reviewed text (never trimmed).
+    #[tokio::test]
+    async fn the_declassify_arm_reads_camel_case_inputs_and_asks_control_for_the_exact_text() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"metadata": {"interactiveRetention": {"zdr": false}}}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef": "space-room", "name": "Room", "kind": "room", "lifecycle": "active"}
+            ]})))
+            .mount(&server)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/memory-declassify-decision"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": "refused"})))
+            .mount(&server)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.org_core_url = server.uri();
+        state.user_core_url = server.uri();
+        state.application_convex_url = server.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.space_features.space_memory_declassify_api = true;
+
+        let input = json!({
+            "spaceRef": "space-room",
+            "memoryId": "mem-1",
+            "reviewedContent": "  hello  ",
+            "clientRequestId": "req-1"
+        });
+        let (status, body) =
+            read(dispatch_memory_declassify_to_space(&state, &user(), &HeaderMap::new(), &input).await).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["error"]["code"], "memory_declassify_not_authorized");
+
+        let received = server.received_requests().await.unwrap_or_default();
+        let asked = received
+            .into_iter()
+            .find(|request| request.url.path().ends_with("memory-declassify-decision"))
+            .expect("Control was asked");
+        let asked: Value = serde_json::from_slice(&asked.body).expect("a JSON decision request");
+        assert_eq!(asked["operation"], "declassify");
+        assert_eq!(asked["space_ref"], "space-room");
+        assert_eq!(asked["memory_id"], "mem-1");
+        assert_eq!(asked["idempotency_key"], "req-1");
+        let digest = format!(
+            "sha256:{}",
+            hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"  hello  "))
+        );
+        assert_eq!(asked["content_digest"], digest);
+
+        // The arm reads only the camelCase names: the snake_case spelling reaches the core as null and is refused as a
+        // request shape before any Control call.
+        let snake = json!({
+            "spaceRef": "space-room",
+            "memory_id": "mem-1",
+            "reviewed_content": "hello",
+            "client_request_id": "req-1"
+        });
+        let (status, body) =
+            read(dispatch_memory_declassify_to_space(&state, &user(), &HeaderMap::new(), &snake).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["code"], "invalid_request");
+    }
+}

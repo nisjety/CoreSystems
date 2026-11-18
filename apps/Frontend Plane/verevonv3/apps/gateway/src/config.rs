@@ -1835,6 +1835,23 @@ mod tests").next().unwrap_or(&config);
         assert!(!flags.thread_pane_ui);
     }
 
+    /// W3-DEC-CANVAS: `SPACE_AGENT_CANVAS_TOOLS_API` is off by default and in production when unset, honours an explicit
+    /// `true`, and is on in development when unset, like the other Space switches.
+    #[test]
+    fn w3_dec_canvas_tools_flag_is_off_by_default_and_in_production_when_unset() {
+        assert!(!super::SpaceFeatureFlags::default().agent_canvas_tools_api);
+        let key = "SPACE_AGENT_CANVAS_TOOLS_API";
+        with_env(&[("APP_ENV", Some("production")), (key, None)], || {
+            assert!(!super::SpaceFeatureFlags::from_env().agent_canvas_tools_api);
+        });
+        with_env(&[("APP_ENV", Some("production")), (key, Some("true"))], || {
+            assert!(super::SpaceFeatureFlags::from_env().agent_canvas_tools_api);
+        });
+        with_env(&[("APP_ENV", Some("development")), (key, None)], || {
+            assert!(super::SpaceFeatureFlags::from_env().agent_canvas_tools_api);
+        });
+    }
+
     /// WS10.S6 (GW-2): `RUN_TRACE_API` is off unless it is `1`, `true`, `yes` or `on`, in every
     /// environment, development included, so the run-trace route ships dark.
     #[test]

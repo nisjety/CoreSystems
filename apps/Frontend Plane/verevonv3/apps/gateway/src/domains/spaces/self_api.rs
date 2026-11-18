@@ -282,3 +282,249 @@ pub(crate) fn grant_self_api_feature(object: &mut Map<String, Value>) {
     object.insert("features".to_owned(), Value::Array(features));
     object.insert("plan_mode".to_owned(), json!(false));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::middleware::AuthorizedMembership;
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const SWITCH: &str = "/api/v1/spaces/space-room/agents/binding-1/self-api";
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "User One".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    /// The refusal a parse gave, as the browser sees it.
+    fn refused(result: Result<bool, Reply>) -> (StatusCode, Value) {
+        let (status, Json(body)) = result.err().expect("the request is refused");
+        (status, body)
+    }
+
+    fn mutation_ok(enabled: bool) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"value": {
+            "bindingRef": "binding-1",
+            "selfApiEnabled": enabled,
+            "projectionVersion": 3,
+            "changed": true
+        }}))
+    }
+
+    /// The doubles the switch reaches: the session, Control's Space membership (`space_role`), org-core and
+    /// Application's mutation answer.
+    struct Doubles {
+        state: AppState,
+        user_core: MockServer,
+        convex: MockServer,
+        _others: Vec<MockServer>,
+    }
+
+    async fn doubles(space_role: &str, mutation: ResponseTemplate) -> Doubles {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": "member", "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": space_role}
+            })))
+            .mount(&user_core)
+            .await;
+        let convex = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .respond_with(mutation)
+            .mount(&convex)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.application_convex_url = convex.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        Doubles {
+            state,
+            user_core,
+            convex,
+            _others: vec![auth],
+        }
+    }
+
+    async fn requests(server: &MockServer, path_part: &str) -> Vec<wiremock::Request> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|request| request.url.path().contains(path_part))
+            .collect()
+    }
+
+    async fn send_put(state: AppState, uri: &str, body: Value) -> (u16, Value) {
+        let request = Request::builder()
+            .method("PUT")
+            .uri(uri)
+            .header("cookie", "better-auth.session_token=session-1")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("a request");
+        let response = crate::build_router(state)
+            .oneshot(request)
+            .await
+            .expect("the router answers");
+        let status = response.status().as_u16();
+        let bytes = response.into_body().collect().await.expect("a body").to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[test]
+    fn parse_enabled_takes_only_a_boolean_enabled_field() {
+        assert_eq!(parse_enabled(&json!({"enabled": true})).ok(), Some(true));
+        assert_eq!(parse_enabled(&json!({"enabled": false})).ok(), Some(false));
+        for body in [
+            json!({"enabled": "true"}),
+            json!({"enabled": 1}),
+            json!({"enabled": null}),
+            json!({}),
+        ] {
+            let (status, value) = refused(parse_enabled(&body));
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(value["error"]["code"], "invalid_self_api_request", "{body}");
+            assert_eq!(value["error"]["details"]["reason"], "enabled_required", "{body}");
+        }
+        let (status, value) = refused(parse_enabled(&json!({"enabled": true, "space_id": "room-1"})));
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(value["error"]["code"], "invalid_self_api_request");
+        assert_eq!(value["error"]["details"]["field"], "space_id");
+        let (_, value) = refused(parse_enabled(&json!(true)));
+        assert_eq!(value["error"]["details"]["reason"], "body_not_an_object");
+    }
+
+    #[test]
+    fn a_failed_switch_maps_each_stable_message_to_its_typed_status() {
+        for (message, status, code) in [
+            (Some("agent_binding_not_found"), 404, "agent_binding_not_found"),
+            (Some("Error: agent_binding_not_active in this room"), 409, "agent_binding_not_active"),
+            (Some("invalid_self_api_request"), 400, "invalid_self_api_request"),
+            (Some("a failure Application did not name"), 503, "space_registry_unavailable"),
+            (None, 503, "space_registry_unavailable"),
+        ] {
+            let (got, Json(body)) = map_self_api_failure(message);
+            assert_eq!(got.as_u16(), status, "{message:?}");
+            assert_eq!(body["error"]["code"], code, "{message:?}");
+        }
+    }
+
+    #[test]
+    fn strip_removes_only_the_self_api_marker() {
+        let mut object = json!({"features": ["tools", "space_self_api", "agentic", "space_canvas_tools"]})
+            .as_object()
+            .cloned()
+            .unwrap();
+        strip_self_api_feature(&mut object);
+        assert_eq!(object["features"], json!(["tools", "agentic", "space_canvas_tools"]));
+    }
+
+    #[test]
+    fn grant_adds_agentic_and_the_self_api_marker_once_and_turns_plan_mode_off() {
+        let mut object = json!({"features": ["space_self_api", "tools"], "plan_mode": true})
+            .as_object()
+            .cloned()
+            .unwrap();
+        grant_self_api_feature(&mut object);
+        grant_self_api_feature(&mut object);
+        assert_eq!(object["features"], json!(["tools", "agentic", "space_self_api"]));
+        assert_eq!(object["plan_mode"], json!(false));
+        let mut bare = json!({}).as_object().cloned().unwrap();
+        grant_self_api_feature(&mut bare);
+        assert_eq!(bare["features"], json!(["agentic", "space_self_api"]));
+        assert_eq!(bare["plan_mode"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn the_switch_is_404_and_calls_nothing_while_its_flag_is_off() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let d = doubles("owner", mutation_ok(true)).await;
+        let (status, body) = send_put(d.state.clone(), SWITCH, json!({"enabled": true})).await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "feature_disabled");
+        assert!(requests(&d.user_core, "/membership").await.is_empty());
+        assert!(requests(&d.convex, "/api/mutation").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_editor_is_refused_before_any_convex_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut d = doubles("editor", mutation_ok(true)).await;
+        d.state.space_features.agent_self_api_api = true;
+        let (status, body) = send_put(d.state.clone(), SWITCH, json!({"enabled": true})).await;
+        assert_eq!(status, 403);
+        assert_eq!(body["error"]["code"], "space_role_cannot_manage_agent");
+        assert!(requests(&d.convex, "/api/mutation").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_owner_or_manager_sets_the_switch_and_gets_the_projection() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for role in ["owner", "manager"] {
+            let mut d = doubles(role, mutation_ok(true)).await;
+            d.state.space_features.agent_self_api_api = true;
+            let (status, body) = send_put(d.state.clone(), SWITCH, json!({"enabled": true})).await;
+            assert_eq!(status, 200, "{role}");
+            assert_eq!(body["data"]["binding_ref"], "binding-1", "{role}");
+            assert_eq!(body["data"]["self_api_enabled"], true, "{role}");
+            let sent = requests(&d.convex, "/api/mutation").await;
+            assert_eq!(sent.len(), 1, "{role}");
+            let sent: Value = serde_json::from_slice(&sent[0].body).expect("a JSON mutation");
+            assert_eq!(sent["path"], "spaceAgents:setSpaceAgentSelfApiForGateway", "{role}");
+            assert_eq!(sent["args"]["externalOrgId"], "org-1", "{role}");
+            assert_eq!(sent["args"]["spaceRef"], "space-room", "{role}");
+            assert_eq!(sent["args"]["bindingRef"], "binding-1", "{role}");
+            assert_eq!(sent["args"]["enabled"], true, "{role}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_inactive_binding_answers_409() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut d = doubles(
+            "owner",
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"status": "error", "errorMessage": "agent_binding_not_active"})),
+        )
+        .await;
+        d.state.space_features.agent_self_api_api = true;
+        let (status, body) = send_put(d.state.clone(), SWITCH, json!({"enabled": true})).await;
+        assert_eq!(status, 409);
+        assert_eq!(body["error"]["code"], "agent_binding_not_active");
+    }
+}
