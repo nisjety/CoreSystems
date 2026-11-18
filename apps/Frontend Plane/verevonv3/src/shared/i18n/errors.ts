@@ -1389,6 +1389,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   room_file_no_extractable_text: { no: 'Fant ingen tekst i filen. Skannede dokumenter støttes ikke ennå.', en: 'No text could be read from the file. Scanned documents are not supported yet.' },
   room_file_text_too_long: { no: 'Teksten i filen er for lang til å lagres i rommet.', en: 'The text in the file is too long to keep in the room.' },
   room_file_too_large: { no: 'Filen er for stor til å lagres i rommet.', en: 'The file is too large to keep in the room.' },
+  room_file_type_not_allowed: { no: 'Denne filtypen er ikke tillatt i rommet.', en: 'This file type is not allowed in the room.' },
   room_file_type_unsupported: { no: 'Denne filtypen kan ikke lagres i rommet.', en: 'This file type cannot be kept in the room.' },
   room_files_disabled: { no: 'Romfiler er ikke slått på ennå.', en: 'Room files are not turned on yet.' },
   room_files_quota_exceeded: { no: 'Rommet har nådd grensen for lagrede filer. Fjern noen først.', en: 'The room has reached its limit of kept files. Remove some first.' },
