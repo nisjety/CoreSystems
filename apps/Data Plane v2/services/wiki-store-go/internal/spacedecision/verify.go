@@ -118,6 +118,10 @@ type Claims struct {
 	ExpiresAt                 time.Time `json:"expires_at"`
 	Nonce                     string    `json:"nonce"`
 	SpaceKind                 string    `json:"space_kind,omitempty"`
+	// HistoryFloorAt (D18) is the instant the member's history window starts at. Control sets it only when the member has a
+	// per-member window (Decision.HistoryFloorAt). A verifier that ignores it shows the whole canvas, so this one reads it:
+	// the canvas repository windows the read with it (canvas.Floor).
+	HistoryFloorAt *time.Time `json:"history_floor_at,omitempty"`
 }
 
 // Verify checks the envelope, its key id, the Ed25519 signature, the payload's completeness and its life. It binds no
@@ -179,6 +183,10 @@ func (c Claims) validate(now time.Time) error {
 		c.RecipientAudienceRevision <= 0 || c.EntitlementRevision <= 0 {
 		return refuse(CodeDecisionInvalid, "the Space decision revisions are not positive")
 	}
+	// A floor narrows a read, so a malformed one must not read as no floor: a negative revision or a zero instant is refused.
+	if c.HistoryFloorRevision < 0 || (c.HistoryFloorAt != nil && c.HistoryFloorAt.IsZero()) {
+		return refuse(CodeDecisionInvalid, "the Space decision history floor is not valid")
+	}
 	if c.IssuedAt.IsZero() || c.ExpiresAt.IsZero() || !c.ExpiresAt.After(c.IssuedAt) {
 		return refuse(CodeDecisionInvalid, "the Space decision window is not valid")
 	}
@@ -193,8 +201,8 @@ func (c Claims) validate(now time.Time) error {
 
 // CheckCanvas binds a verified decision to the canvas request it arrives with. The caller's org and subject, the path's
 // Space, the canvas audience, the read or write action, schema and permission, and the Space kind must all match. A
-// decision issued under zero data retention is refused. So is one that carries a history floor: canvas text has no
-// history window yet, so a since_join member is refused rather than shown text written before the join.
+// decision issued under zero data retention is refused. A history floor is not a refusal here: a read under one is
+// windowed by the canvas repository (canvas.Floor), and the handler refuses the writes a floor forbids.
 func (c Claims) CheckCanvas(orgID, subjectID, spaceRef string, write bool) error {
 	action, schema, permission := ActionCanvasRead, SchemaCanvasRead, PermissionCanvasRead
 	if write {
@@ -216,8 +224,6 @@ func (c Claims) CheckCanvas(orgID, subjectID, spaceRef string, write bool) error
 		return mismatch("the Space decision lacks the canvas permission")
 	case c.ZeroDataRetention:
 		return mismatch("the Space decision is issued under zero data retention")
-	case c.HistoryFloorRevision > 0:
-		return refuse(CodeHistoryFloor, "this room's history window does not apply to the canvas")
 	}
 	switch c.SpaceKind {
 	case "personal", "room", "project", "case":

@@ -65,6 +65,9 @@ type RunClaims struct {
 	IssuedAt                   time.Time `json:"issued_at"`
 	ExpiresAt                  time.Time `json:"expires_at"`
 	Nonce                      string    `json:"nonce"`
+	// HistoryFloorAt (D18) is set only on a canvas read whose member has a timestamp window. Control refuses a revision floor
+	// on a run action, so there is no revision claim here: an unknown field refuses the envelope, as Control's own decoder does.
+	HistoryFloorAt *time.Time `json:"history_floor_at,omitempty"`
 }
 
 // RunArgument is one flattened argument of an agent call, in the row's argument_order. Absent optional text flattens to the
@@ -135,6 +138,9 @@ func (c RunClaims) validate(now time.Time) error {
 	if c.AuthorityRevision <= 0 || c.RecipientAudienceRevision <= 0 {
 		return refuse(CodeDecisionInvalid, "the Space decision revisions are not positive")
 	}
+	if c.HistoryFloorAt != nil && c.HistoryFloorAt.IsZero() {
+		return refuse(CodeDecisionInvalid, "the Space decision history floor is not valid")
+	}
 	if c.IssuedAt.IsZero() || c.ExpiresAt.IsZero() || !c.ExpiresAt.After(c.IssuedAt) {
 		return refuse(CodeDecisionInvalid, "the Space decision window is not valid")
 	}
@@ -149,7 +155,8 @@ func (c RunClaims) validate(now time.Time) error {
 
 // CheckCanvas binds a verified agent decision to the canvas route it arrives with: the caller's org and subject, the path's
 // Space, the canvas audience, the golden action, schema and permission for read or write, and no zero data retention. An
-// agent decision carries no Space kind and no history floor, so those checks have no claim to read here (see the depth notes).
+// agent decision carries no Space kind. A timestamp floor on a canvas read is a window the repository applies (canvas.Floor),
+// and a floor on a write is refused by the handler, so neither is a refusal here.
 func (c RunClaims) CheckCanvas(orgID, subjectID, spaceRef string, write bool) error {
 	action, schema, permission := ActionRunCanvasRead, SchemaRunCanvasRead, PermissionCanvasRead
 	if write {

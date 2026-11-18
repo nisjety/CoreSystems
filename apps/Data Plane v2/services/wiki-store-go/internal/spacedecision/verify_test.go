@@ -423,17 +423,6 @@ func TestCheckCanvasRefusesADecisionForAnotherCaller(t *testing.T) {
 			},
 			code: CodeDecisionMismatch,
 		},
-		"history floor": {
-			claims: func() Claims {
-				c := wellFormedClaims(now)
-				c.HistoryFloorRevision = 3
-				return c
-			},
-			check: func(c Claims) error {
-				return c.CheckCanvas("org-1", "user-2", "space-room-1", false)
-			},
-			code: CodeHistoryFloor,
-		},
 		"dm kind": {
 			claims: func() Claims {
 				c := wellFormedClaims(now)

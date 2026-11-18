@@ -383,13 +383,13 @@ func TestCanvasIdsFromAnotherOrgOrSpaceAreNotFound(t *testing.T) {
 	mine := createCanvas(ctx, t, repo, "org-a", "space-a", "alpha")
 	other := createCanvas(ctx, t, repo, "org-b", "space-b", "bravo")
 
-	_, err := repo.GetVersion(ctx, "org-a", "space-a", other.Version.VersionID)
+	_, err := repo.GetVersion(ctx, "org-a", "space-a", other.Version.VersionID, Floor{})
 	requireCanvasError(t, err, CodeVersionNotFound)
-	_, err = repo.GetVersion(ctx, "org-a", "space-b", other.Version.VersionID)
+	_, err = repo.GetVersion(ctx, "org-a", "space-b", other.Version.VersionID, Floor{})
 	requireCanvasError(t, err, CodeVersionNotFound)
-	_, err = repo.GetVersion(ctx, "org-b", "space-a", mine.Version.VersionID)
+	_, err = repo.GetVersion(ctx, "org-b", "space-a", mine.Version.VersionID, Floor{})
 	requireCanvasError(t, err, CodeVersionNotFound)
-	_, err = repo.Head(ctx, "org-b", "space-a", nil)
+	_, err = repo.Head(ctx, "org-b", "space-a", nil, Floor{})
 	requireCanvasError(t, err, CodeCanvasNotFound)
 
 	// A restore may copy only from a version of the canvas it names.
@@ -460,7 +460,7 @@ func TestCanvasRowsAreIsolatedByOrg(t *testing.T) {
 	if n := countScoped(ctx, t, pool, "org-b", `SELECT count(*) FROM space_canvas_versions`); n != 1 {
 		t.Fatalf("org-b sees %d versions, want its 1", n)
 	}
-	_, err := repo.GetVersion(ctx, "org-a", "space-b", other.Version.VersionID)
+	_, err := repo.GetVersion(ctx, "org-a", "space-b", other.Version.VersionID, Floor{})
 	requireCanvasError(t, err, CodeVersionNotFound)
 }
 

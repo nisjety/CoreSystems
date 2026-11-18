@@ -73,6 +73,35 @@ func (c canvasCaller) author() canvas.Author {
 	return canvasUserAuthor(c.user)
 }
 
+// floor is the history floor the verified decision carries, as the canvas repository applies it. A human decision carries a
+// WS04-S11 revision floor, a D18 timestamp floor, or both. An agent decision carries a timestamp floor on a canvas read only:
+// Control refuses a revision floor on a run action, and the agent reader refuses any claim it does not name.
+func (c canvasCaller) floor() canvas.Floor {
+	if c.agent {
+		return canvas.Floor{At: c.run.HistoryFloorAt}
+	}
+	return canvas.Floor{At: c.user.HistoryFloorAt, Revision: c.user.HistoryFloorRevision}
+}
+
+// floored reports whether the decision's member has a history window that windows the canvas.
+func (c canvasCaller) floored() bool { return c.floor().Set() }
+
+// refuseWriteUnderFloor refuses a write that a history floor forbids. Control issues a floored decision for a create only: a
+// create writes new text, and a canvas that does not exist holds no pre-floor text. A save or a restore under a floor is refused,
+// because a save answers a head-moved or unchanged result that names the head, and a restore makes an older version the head.
+// An agent write under any floor is refused, because Control never issues one. create is false for a restore and for a save
+// over an existing canvas.
+func (c canvasCaller) refuseWriteUnderFloor(create bool) *canvasRefusal {
+	if !c.floored() {
+		return nil
+	}
+	if c.agent || !create {
+		return refusalOf(http.StatusForbidden, spacedecision.CodeHistoryFloor,
+			"a canvas save or restore is not available under this member's history window")
+	}
+	return nil
+}
+
 // provenance is the decision a write was made under. It is provenance, not authority.
 func (c canvasCaller) provenance() canvas.Provenance {
 	if c.agent {

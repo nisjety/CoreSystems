@@ -101,7 +101,7 @@ func (h *CanvasHandler) GetCanvas(w http.ResponseWriter, r *http.Request) {
 		digestRefusal.write(w)
 		return
 	}
-	view, err := h.repo.Head(r.Context(), bearer.OrgID, spaceRef, known)
+	view, err := h.repo.Head(r.Context(), bearer.OrgID, spaceRef, known, caller.floor())
 	if err != nil {
 		writeCanvasStoreError(w, err)
 		return
@@ -148,16 +148,16 @@ func (h *CanvasHandler) ListVersions(w http.ResponseWriter, r *http.Request) {
 		}
 		before = &n
 	}
-	claims, refused := h.authorize(r, bearer, spaceRef, false)
+	caller, refused := h.authorizeCaller(r, bearer, spaceRef, false, false)
 	if refused != nil {
 		refused.write(w)
 		return
 	}
-	if digestRefusal := checkCanvasDigest(claims, readOp(claims)); digestRefusal != nil {
+	if digestRefusal := checkCanvasDigest(caller.user, readOp(caller.user)); digestRefusal != nil {
 		digestRefusal.write(w)
 		return
 	}
-	page, err := h.repo.ListVersions(r.Context(), bearer.OrgID, spaceRef, before, limit)
+	page, err := h.repo.ListVersions(r.Context(), bearer.OrgID, spaceRef, before, limit, caller.floor())
 	if err != nil {
 		writeCanvasStoreError(w, err)
 		return
@@ -184,16 +184,16 @@ func (h *CanvasHandler) GetVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	spaceRef := chi.URLParam(r, "space_ref")
 	versionID := chi.URLParam(r, "version_id")
-	claims, refused := h.authorize(r, bearer, spaceRef, false)
+	caller, refused := h.authorizeCaller(r, bearer, spaceRef, false, false)
 	if refused != nil {
 		refused.write(w)
 		return
 	}
-	if digestRefusal := checkCanvasDigest(claims, readOp(claims)); digestRefusal != nil {
+	if digestRefusal := checkCanvasDigest(caller.user, readOp(caller.user)); digestRefusal != nil {
 		digestRefusal.write(w)
 		return
 	}
-	v, err := h.repo.GetVersion(r.Context(), bearer.OrgID, spaceRef, versionID)
+	v, err := h.repo.GetVersion(r.Context(), bearer.OrgID, spaceRef, versionID, caller.floor())
 	if err != nil {
 		writeCanvasStoreError(w, err)
 		return
@@ -227,6 +227,13 @@ func (h *CanvasHandler) SaveVersion(w http.ResponseWriter, r *http.Request) {
 		refused.write(w)
 		return
 	}
+	// An agent write under a floor is refused before the store is read: Control never issues one.
+	if caller.agent {
+		if floorRefusal := caller.refuseWriteUnderFloor(false); floorRefusal != nil {
+			floorRefusal.write(w)
+			return
+		}
+	}
 	// The head read below returns no content and feeds only the operation and canvas id that the digest binds. Save runs
 	// after the digest matches, and it refuses unless the canvas it finds under the Space lock is this same canvas (WS19-S8).
 	activeID, err := h.repo.ActiveCanvasID(r.Context(), bearer.OrgID, spaceRef)
@@ -237,6 +244,11 @@ func (h *CanvasHandler) SaveVersion(w http.ResponseWriter, r *http.Request) {
 	if activeID == "" && body.ExpectedVersionID != nil {
 		writeCanvasError(w, http.StatusConflict, canvas.CodeHeadMoved, "the canvas head moved since you opened it",
 			map[string]any{"head": nil})
+		return
+	}
+	// A save over an existing canvas is refused under a floor. A create is allowed: no canvas exists to hold pre-floor text.
+	if floorRefusal := caller.refuseWriteUnderFloor(activeID == ""); floorRefusal != nil {
+		floorRefusal.write(w)
 		return
 	}
 	op := spacedecision.CanvasOp{
@@ -266,7 +278,8 @@ func (h *CanvasHandler) SaveVersion(w http.ResponseWriter, r *http.Request) {
 		Provenance:        caller.provenance(),
 	})
 	if err != nil {
-		writeCanvasStoreError(w, err)
+		// A floored caller is a create, whose head-moved answer must name no head (see writeCanvasStoreErrorAs).
+		writeCanvasStoreErrorAs(w, err, caller.floored())
 		return
 	}
 	writeCanvasWrite(w, res)
@@ -288,11 +301,17 @@ func (h *CanvasHandler) RestoreVersion(w http.ResponseWriter, r *http.Request) {
 		writeCanvasStoreError(w, err)
 		return
 	}
-	claims, refused := h.authorize(r, bearer, spaceRef, true)
+	caller, refused := h.authorizeCaller(r, bearer, spaceRef, true, false)
 	if refused != nil {
 		refused.write(w)
 		return
 	}
+	// A restore makes an older version the head, so no windowed member may restore.
+	if floorRefusal := caller.refuseWriteUnderFloor(false); floorRefusal != nil {
+		floorRefusal.write(w)
+		return
+	}
+	claims := caller.user
 	activeID, err := h.repo.ActiveCanvasID(r.Context(), bearer.OrgID, spaceRef)
 	if err != nil {
 		writeCanvasStoreError(w, err)
@@ -343,13 +362,6 @@ type saveBody struct {
 type restoreBody struct {
 	ExpectedVersionID *string `json:"expected_version_id"`
 	IdempotencyKey    string  `json:"idempotency_key"`
-}
-
-// authorize verifies the Control decision a canvas request carries and binds it to the route. It checks the header, the
-// signature and the life of the decision, then the claims against the caller and the path. It runs before any repository call.
-func (h *CanvasHandler) authorize(r *http.Request, bearer *authctx.Claims, spaceRef string, write bool) (spacedecision.Claims, *canvasRefusal) {
-	caller, refused := h.authorizeCaller(r, bearer, spaceRef, write, false)
-	return caller.user, refused
 }
 
 // canvasRefusal is one typed refusal of a canvas request: the HTTP status, the wire code and the message. zdr marks the Model
@@ -476,6 +488,13 @@ func bearerOf(w http.ResponseWriter, r *http.Request) (*authctx.Claims, bool) {
 // writeCanvasStoreError maps a repository refusal to its typed answer. Any other error is a store failure and is answered
 // 503 canvas_unavailable without detail.
 func writeCanvasStoreError(w http.ResponseWriter, err error) {
+	writeCanvasStoreErrorAs(w, err, false)
+}
+
+// writeCanvasStoreErrorAs is writeCanvasStoreError for a caller whose history window applies to the Space. A head-moved answer
+// then names no head: the head's version number and time are state the window hides, so the caller learns only that it moved.
+// A hidden canvas is the typed 403 space_history_floor_unsupported, never a store failure.
+func writeCanvasStoreErrorAs(w http.ResponseWriter, err error, windowed bool) {
 	var typed *canvas.Error
 	if !errors.As(err, &typed) {
 		writeCanvasError(w, http.StatusServiceUnavailable, "canvas_unavailable", "the canvas store is unavailable", nil)
@@ -487,7 +506,13 @@ func writeCanvasStoreError(w http.ResponseWriter, err error) {
 	case canvas.CodeVersionNotFound:
 		writeCanvasError(w, http.StatusNotFound, typed.Code, "the version is not in this canvas", nil)
 	case canvas.CodeHeadMoved:
-		writeCanvasError(w, http.StatusConflict, typed.Code, typed.Message, map[string]any{"head": headRefDTO(typed.Head)})
+		var head any
+		if !windowed {
+			head = headRefDTO(typed.Head)
+		}
+		writeCanvasError(w, http.StatusConflict, typed.Code, typed.Message, map[string]any{"head": head})
+	case canvas.CodeHistoryFloor:
+		writeCanvasError(w, http.StatusForbidden, typed.Code, typed.Message, nil)
 	case canvas.CodeIdempotencyKeyConflict:
 		writeCanvasError(w, http.StatusConflict, typed.Code, typed.Message, nil)
 	case canvas.CodeTooLarge:
