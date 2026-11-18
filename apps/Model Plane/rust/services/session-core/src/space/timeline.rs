@@ -15,7 +15,11 @@
 //! else the thread's own revision, else 0) is at or below the ceiling, and the thread's own stamp
 //! is too: fail closed, so a count or a recent-author list never reveals a row the reader could
 //! not open. Title and preview are read under the same ceiling and the revision fold (a deleted
-//! message reads as empty). Nothing is written. A ZDR caller reads no row and gets an empty window.
+//! message reads as empty). The verified read's history floors (WS04-S11 revision floor, D18
+//! timestamp floor; see `space::audience_window`) narrow the same message rows: under a floor a
+//! thread is listed only when it holds a message the reader may see, and no stored title or preview
+//! is shown, only the text of the visible messages. Nothing is written. A ZDR caller reads no row
+//! and gets an empty window.
 //! Until the summary backfill has finished the RPC refuses with
 //! `failed_precondition("summary_backfill_pending")` and the BFF serves the legacy listing.
 
@@ -30,6 +34,7 @@ use crate::grpc::{
     compact_thread_text, to_proto_timestamp, verify_thread_read_space_decision,
     THREAD_PREVIEW_MAX_CHARS, THREAD_TITLE_MAX_CHARS,
 };
+use crate::space::audience_window::{audience_window, AudienceWindow};
 
 const MAX_SPACE_ID_BYTES: usize = 128;
 const MAX_THREAD_ID_BYTES: usize = 128;
@@ -103,9 +108,48 @@ const ELIGIBLE_SQL: &str = "t.org_id = $1 AND t.space_id = $2 AND t.archived_at 
       AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $3)
       AND COALESCE(t.activity_max_audience_revision, t.recipient_audience_revision, 0) <= $3";
 
+/// The two history floors of one page query, as the placeholders it names them by (the revision
+/// floor, then the D18 timestamp floor). A query binds its own parameters first and the floors
+/// after them: none (`$4`, `$5`), the two cursors (`$6`, `$7`), or the ids (`$5`, `$6`).
+const FLOOR_NO_EXTRA: (&str, &str) = ("$4", "$5");
+const FLOOR_AFTER_CURSORS: (&str, &str) = ("$6", "$7");
+const FLOOR_AFTER_IDS: (&str, &str) = ("$5", "$6");
+
+/// Whether either floor is set. A floored read shows no stored title or preview.
+fn has_floor_sql((floor_rev, floor_at): (&str, &str)) -> String {
+    format!("({floor_rev}::BIGINT IS NOT NULL OR {floor_at}::TIMESTAMPTZ IS NOT NULL)")
+}
+
+/// The floors on one message row `m`, the predicates the conversation reads apply (WS04-S11, D18):
+/// a NULL-stamped row passes the revision floor, and the timestamp floor hides a row created before
+/// the instant.
+fn message_floor_sql((floor_rev, floor_at): (&str, &str)) -> String {
+    format!(
+        "({floor_rev}::BIGINT IS NULL OR m.recipient_audience_revision IS NULL
+                 OR m.recipient_audience_revision >= {floor_rev}::BIGINT)
+         AND ({floor_at}::TIMESTAMPTZ IS NULL OR m.created_at >= {floor_at}::TIMESTAMPTZ)"
+    )
+}
+
+/// Under a floor a thread is listed only when it holds a message the reader may see (the ceiling and
+/// the floors, on the active path). A thread that predates the floor then shows neither its text
+/// nor its owner, authors or activity. Without a floor the EXISTS is never read.
+fn thread_floor_sql(floor: (&str, &str)) -> String {
+    format!(
+        "AND (NOT {has_floor} OR EXISTS (
+            SELECT 1 FROM messages m
+            WHERE m.thread_id = t.id AND m.on_active_path
+              AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $3)
+              AND {visible}))",
+        has_floor = has_floor_sql(floor),
+        visible = message_floor_sql(floor),
+    )
+}
+
 /// The page query: `extra` narrows the eligible set, `order` is the inner (indexed) order, `limit`
-/// an integer literal, `outer_order` the order of the answer. Lateral joins run on page rows only.
-fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str) -> String {
+/// an integer literal, `outer_order` the order of the answer, and `floor` the placeholders of the
+/// two history floors. Lateral joins run on page rows only.
+fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str, floor: (&str, &str)) -> String {
     format!(
         "WITH page AS (
             SELECT t.id, t.created_at, t.presentation_title, t.presentation_preview, t.pinned_at,
@@ -113,13 +157,13 @@ fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str) -> String {
                    t.last_author_subject_id, t.recent_author_subject_ids, t.user_id, t.origin,
                    t.persona_enabled, t.title_source, t.pinned_source
             FROM threads t
-            WHERE {eligible} {extra}
+            WHERE {eligible} {extra} {thread_floor}
             ORDER BY {order}
             LIMIT {limit}
          )
          SELECT page.id, page.created_at,
-                COALESCE(page.presentation_title, fu.content) AS title,
-                COALESCE(page.presentation_preview, lm.content) AS preview,
+                COALESCE(CASE WHEN {has_floor} THEN NULL ELSE page.presentation_title END, fu.content) AS title,
+                COALESCE(CASE WHEN {has_floor} THEN NULL ELSE page.presentation_preview END, lm.content) AS preview,
                 page.pinned_at, page.last_activity_at, page.last_message_seq, page.turn_count,
                 page.last_role, page.last_author_subject_id, page.recent_author_subject_ids,
                 page.user_id AS owner_subject_id, page.origin, page.persona_enabled,
@@ -133,6 +177,7 @@ fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str) -> String {
             {fold_join}
             WHERE m.thread_id = page.id AND m.role = 'user' AND m.on_active_path
               AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $3)
+              AND {visible}
             ORDER BY m.sequence ASC
             LIMIT 1
          ) fu ON TRUE
@@ -142,6 +187,7 @@ fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str) -> String {
             {fold_join}
             WHERE m.thread_id = page.id AND m.on_active_path
               AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $3)
+              AND {visible}
             ORDER BY m.sequence DESC
             LIMIT 1
          ) lm ON TRUE
@@ -157,9 +203,13 @@ fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str) -> String {
             FROM messages m
             WHERE m.thread_id = page.id AND m.on_active_path
               AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $3)
+              AND {visible}
          ) rc ON TRUE
          ORDER BY {outer_order}",
         eligible = ELIGIBLE_SQL,
+        thread_floor = thread_floor_sql(floor),
+        has_floor = has_floor_sql(floor),
+        visible = message_floor_sql(floor),
         fold_content = crate::space::revisions::FOLD_CONTENT_SQL,
         fold_join = crate::space::revisions::fold_join_sql("$3::BIGINT"),
         run_phase = crate::run_phase::run_phase_sql!("r"),
@@ -243,6 +293,7 @@ async fn fetch_rows(
     space_id: &str,
     ceiling: i64,
     extra: Extra<'_>,
+    audience: AudienceWindow,
 ) -> Result<Vec<TimelineRow>, Status> {
     let query = sqlx::query_as::<_, TimelineRow>(sql)
         .bind(org_id)
@@ -253,10 +304,16 @@ async fn fetch_rows(
         Extra::Cursors(before, after) => query.bind(before).bind(after),
         Extra::Ids(ids) => query.bind(ids.to_vec()),
     };
-    query.fetch_all(pool).await.map_err(|error| {
-        warn!(error = %error, "list_space_timeline failed");
-        Status::unavailable("Space timeline is unavailable")
-    })
+    // The two history floors come last, in the order `page_sql` names them.
+    query
+        .bind(audience.floor)
+        .bind(audience.floor_at)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| {
+            warn!(error = %error, "list_space_timeline failed");
+            Status::unavailable("Space timeline is unavailable")
+        })
 }
 
 /// The whole `ListSpaceTimeline` read; the service impl delegates here.
@@ -290,6 +347,7 @@ pub(crate) async fn list_space_timeline(
     )?
     .ok_or_else(|| Status::permission_denied("a Space read decision is required"))?;
     let ceiling = read.recipient_audience_revision;
+    let audience = audience_window(Some(read));
     let window = window_from(&req)?;
     let ids = refresh_ids(&req.refresh_thread_ids)?;
 
@@ -315,6 +373,7 @@ pub(crate) async fn list_space_timeline(
             "t.last_message_seq ASC",
             window.limit + 1,
             "page.last_message_seq ASC",
+            FLOOR_AFTER_CURSORS,
         )
     } else if window.before.is_some() {
         page_sql(
@@ -323,6 +382,7 @@ pub(crate) async fn list_space_timeline(
             "t.last_message_seq DESC",
             window.limit + 1,
             "page.last_message_seq DESC",
+            FLOOR_AFTER_CURSORS,
         )
     } else {
         page_sql(
@@ -330,6 +390,7 @@ pub(crate) async fn list_space_timeline(
             "t.last_message_seq DESC",
             window.limit + 1,
             "page.last_message_seq DESC",
+            FLOOR_NO_EXTRA,
         )
     };
     let extra = if window.is_first_page() {
@@ -337,7 +398,7 @@ pub(crate) async fn list_space_timeline(
     } else {
         Extra::Cursors(window.before, window.after)
     };
-    let mut rows = fetch_rows(pool, &sql, &req.org_id, &space_id, ceiling, extra).await?;
+    let mut rows = fetch_rows(pool, &sql, &req.org_id, &space_id, ceiling, extra, audience).await?;
     let page_size = usize::try_from(window.limit).unwrap_or(usize::MAX);
     let has_more = rows.len() > page_size;
     rows.truncate(page_size);
@@ -360,18 +421,22 @@ pub(crate) async fn list_space_timeline(
                 "t.pinned_at DESC, t.id DESC",
                 i64::try_from(MAX_PINNED).unwrap_or(10),
                 "page.pinned_at DESC, page.id DESC",
+                FLOOR_NO_EXTRA,
             );
-            pinned = fetch_rows(pool, &sql, &req.org_id, &space_id, ceiling, Extra::None)
+            pinned = fetch_rows(pool, &sql, &req.org_id, &space_id, ceiling, Extra::None, audience)
                 .await?
                 .into_iter()
                 .map(|row| summary_from_row(row, &space_id))
                 .collect();
         }
-        let sql = format!("SELECT count(*) FROM threads t WHERE {ELIGIBLE_SQL}");
+        let thread_floor = thread_floor_sql(FLOOR_NO_EXTRA);
+        let sql = format!("SELECT count(*) FROM threads t WHERE {ELIGIBLE_SQL} {thread_floor}");
         let total: i64 = sqlx::query_scalar(&sql)
             .bind(&req.org_id)
             .bind(&space_id)
             .bind(ceiling)
+            .bind(audience.floor)
+            .bind(audience.floor_at)
             .fetch_one(pool)
             .await
             .map_err(|error| {
@@ -390,8 +455,9 @@ pub(crate) async fn list_space_timeline(
             "t.last_message_seq DESC",
             i64::try_from(MAX_REFRESH_IDS).unwrap_or(30),
             "page.last_message_seq DESC",
+            FLOOR_AFTER_IDS,
         );
-        fetch_rows(pool, &sql, &req.org_id, &space_id, ceiling, Extra::Ids(&ids))
+        fetch_rows(pool, &sql, &req.org_id, &space_id, ceiling, Extra::Ids(&ids), audience)
             .await?
             .into_iter()
             .map(|row| summary_from_row(row, &space_id))
@@ -417,6 +483,7 @@ mod tests {
     use crate::space::test_support::{clean_space, connect, seed_space_message, seed_space_thread};
     use chrono::TimeZone as _;
     use serde_json::json;
+    use std::collections::BTreeSet;
 
     // ---- pure ---------------------------------------------------------------------------------
 
@@ -513,6 +580,51 @@ mod tests {
         assert_eq!(refresh_ids(&doubled).expect("deduplicated first").len(), MAX_REFRESH_IDS);
     }
 
+    /// The `$n` placeholders a statement names, as numbers.
+    fn placeholders(sql: &str) -> BTreeSet<usize> {
+        let mut found = BTreeSet::new();
+        let mut rest = sql;
+        while let Some(at) = rest.find('$') {
+            rest = &rest[at + 1..];
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            if let Ok(number) = digits.parse::<usize>() {
+                found.insert(number);
+            }
+            rest = &rest[digits.len()..];
+        }
+        found
+    }
+
+    #[test]
+    fn every_page_query_names_exactly_the_binds_it_carries() {
+        // The org, space and ceiling, the query's own binds, then the two floors: a bind that no
+        // clause names, or a clause that names an unbound parameter, fails at run time.
+        let cursors = page_sql(
+            "AND ($4::BIGINT IS NULL OR t.last_message_seq < $4) AND ($5::BIGINT IS NULL OR t.last_message_seq > $5)",
+            "t.last_message_seq ASC",
+            3,
+            "page.last_message_seq ASC",
+            FLOOR_AFTER_CURSORS,
+        );
+        let first = page_sql("", "t.last_message_seq DESC", 3, "page.last_message_seq DESC", FLOOR_NO_EXTRA);
+        let refresh = page_sql(
+            "AND t.id = ANY($4::TEXT[])",
+            "t.last_message_seq DESC",
+            30,
+            "page.last_message_seq DESC",
+            FLOOR_AFTER_IDS,
+        );
+        let count = format!("SELECT count(*) FROM threads t WHERE {ELIGIBLE_SQL} {}", thread_floor_sql(FLOOR_NO_EXTRA));
+        for (case, sql, binds) in [
+            ("cursors", cursors, 7),
+            ("first page", first, 5),
+            ("refresh", refresh, 6),
+            ("count", count, 5),
+        ] {
+            assert_eq!(placeholders(&sql), (1..=binds).collect::<BTreeSet<usize>>(), "{case}");
+        }
+    }
+
     // ---- real Postgres (every test is `#[ignore]`d) -----------------------------------------
     //
     // `cargo test -p session-core --bin session-core space::timeline -- --ignored --test-threads=1`
@@ -524,7 +636,7 @@ mod tests {
     /// The decision's audience ceiling; every seeded thread and message is stamped at revision 1.
     const CEILING: i64 = 4;
 
-    fn read_token(org: &str, user: &str, space: &str) -> String {
+    fn read_token(org: &str, user: &str, space: &str, floor_at: Option<chrono::DateTime<chrono::Utc>>) -> String {
         mint(
             crate::grpc::CONTROL_SPACE_DECISION_AUDIENCE,
             &["thread:read"],
@@ -534,6 +646,9 @@ mod tests {
                 claims["subject_id"] = json!(user);
                 claims["space_ref"] = json!(space);
                 claims["recipient_audience_revision"] = json!(CEILING);
+                if let Some(at) = floor_at {
+                    claims["history_floor_at"] = json!(at.to_rfc3339());
+                }
                 claims["issued_at"] = json!(chrono::Utc::now().to_rfc3339());
                 claims["expires_at"] = json!((chrono::Utc::now() + chrono::Duration::minutes(2)).to_rfc3339());
             },
@@ -547,11 +662,22 @@ mod tests {
         space: &str,
         edit: impl FnOnce(&mut pb::ListSpaceTimelineRequest),
     ) -> pb::ListSpaceTimelineResponse {
+        timeline_as(pool, org, space, None, edit).await
+    }
+
+    /// The same read by a member whose decision carries the D18 timestamp floor `floor_at`.
+    async fn timeline_as(
+        pool: &PgPool,
+        org: &str,
+        space: &str,
+        floor_at: Option<chrono::DateTime<chrono::Utc>>,
+        edit: impl FnOnce(&mut pb::ListSpaceTimelineRequest),
+    ) -> pb::ListSpaceTimelineResponse {
         let mut message = pb::ListSpaceTimelineRequest {
             org_id: org.to_owned(),
             space_id: space.to_owned(),
             space_read_decision_ref: DECISION_REF.to_owned(),
-            space_read_decision_token: read_token(org, VIEWER, space),
+            space_read_decision_token: read_token(org, VIEWER, space, floor_at),
             ..Default::default()
         };
         edit(&mut message);
@@ -696,6 +822,60 @@ mod tests {
         .await;
         assert_eq!(ids_of(&newest.posts), [t1.as_str(), t5.as_str()]);
         assert!(!newest.has_more);
+        clean_space(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn since_join_floor_hides_pre_join_posts_titles_previews_pins_and_counts() {
+        let Some(pool) = connect().await else { return };
+        let _keys = StreamKeysEnv::publish();
+        let suffix = mp_ids::new_ulid();
+        let (org, space) = (format!("org-fl-{suffix}"), format!("space-fl-{suffix}"));
+        let before_join = format!("thread-before-{suffix}");
+        let after_join = format!("thread-after-{suffix}");
+        post(&pool, &org, &space, &before_join).await;
+        post(&pool, &org, &space, &after_join).await;
+        // The pre-join post: its message predates the join, and it carries a stored title, a stored
+        // preview and a pin. The post-join post carries a stored title too.
+        sqlx::query("UPDATE messages SET created_at = now() - interval '2 hours' WHERE thread_id = $1")
+            .bind(&before_join)
+            .execute(&pool)
+            .await
+            .expect("age the pre-join message");
+        sqlx::query(
+            "UPDATE threads SET presentation_title = 'Pre-join title', presentation_preview = 'Pre-join preview', \
+             pinned_at = now() WHERE id = $1",
+        )
+        .bind(&before_join)
+        .execute(&pool)
+        .await
+        .expect("the pre-join post carries stored text and a pin");
+        sqlx::query("UPDATE threads SET presentation_title = 'Stored title' WHERE id = $1")
+            .bind(&after_join)
+            .execute(&pool)
+            .await
+            .expect("the post-join post carries a stored title");
+        let join = chrono::Utc::now() - chrono::Duration::hours(1);
+
+        // A member who joined an hour ago sees the post-join post, and nothing of the other.
+        let answer = timeline_as(&pool, &org, &space, Some(join), |request| request.include_pinned = true).await;
+        assert_eq!(ids_of(&answer.posts), [after_join.as_str()], "{NEEDS_DB}");
+        assert_eq!(answer.posts[0].title, "canary body", "the visible text, never the stored title");
+        assert_eq!(answer.posts[0].preview, "canary body");
+        assert!(answer.pinned.is_empty(), "a pin on a thread that predates the join is not shown");
+        assert_eq!(answer.total_posts, 1, "the count is of the posts this reader can see");
+
+        // Without a floor the room is whole, and the stored text reads as before.
+        let whole = timeline(&pool, &org, &space, |request| request.include_pinned = true).await;
+        assert_eq!(whole.total_posts, 2);
+        assert_eq!(whole.pinned.len(), 1);
+        let older = whole
+            .posts
+            .iter()
+            .find(|summary| summary.thread_id == before_join)
+            .expect("the pre-join post");
+        assert_eq!(older.title, "Pre-join title");
         clean_space(&pool, &org, &space).await;
     }
 }

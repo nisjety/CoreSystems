@@ -8,6 +8,13 @@
 //!   only narrows what a verified member sees, so an unset or off switch shows full history
 //!   (fail-open on a presentation rule, never on authority). The switch is a rollout control,
 //!   never an authorization input.
+//! - The timestamp floor (`floor_at`, D18) is the optional `history_floor_at` Control signs for a
+//!   per-member history window (a `since_date` window, or a member's join). Rows created BEFORE
+//!   that instant are hidden. Control signs it only for a member's own row, and it is honoured
+//!   WITHOUT the switch above: a hide must never depend on a rollout control. It is still a
+//!   narrowing only, and a row stays visible only when every floor that is set admits it.
+
+use chrono::{DateTime, Utc};
 
 use crate::grpc::VerifiedSpaceRead;
 
@@ -34,22 +41,43 @@ pub(crate) fn history_floor_from_claim(claim: u64, enabled: bool) -> Option<i64>
     i64::try_from(claim).ok()
 }
 
-/// The two revision bounds one read applies to message rows; `None` means unbounded on that side.
+/// The bounds one read applies to message rows: the revision ceiling and the two floors. `None`
+/// means unbounded on that side. A row is visible when it is at or below the ceiling, at or above
+/// the revision floor, and created at or after the timestamp floor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct AudienceWindow {
     pub(crate) ceiling: Option<i64>,
     pub(crate) floor: Option<i64>,
+    /// D18: the instant before which no row is visible (a per-member since_date window, or a
+    /// member's join). `None` means no timestamp floor.
+    pub(crate) floor_at: Option<DateTime<Utc>>,
 }
 
 impl AudienceWindow {
     pub(crate) fn new(ceiling: Option<i64>, floor: Option<i64>) -> Self {
-        Self { ceiling, floor }
+        Self {
+            ceiling,
+            floor,
+            floor_at: None,
+        }
+    }
+
+    /// The same window with a timestamp floor (D18). `None` leaves the window unchanged.
+    pub(crate) fn with_floor_at(mut self, floor_at: Option<DateTime<Utc>>) -> Self {
+        self.floor_at = floor_at;
+        self
+    }
+
+    /// Whether this read hides any row by a floor (either form). A read with a floor shows no
+    /// presentation fallback that could carry pre-floor content (a stored title or preview).
+    pub(crate) fn has_floor(&self) -> bool {
+        self.floor.is_some() || self.floor_at.is_some()
     }
 
     /// A window with no history floor (owner reads and callers that predate the floor).
     #[cfg(test)]
     pub(crate) fn ceiling_only(ceiling: Option<i64>) -> Self {
-        Self { ceiling, floor: None }
+        Self::new(ceiling, None)
     }
 }
 
@@ -57,7 +85,10 @@ impl AudienceWindow {
 /// owner-bound read.
 pub(crate) fn audience_window(read: Option<VerifiedSpaceRead>) -> AudienceWindow {
     match read {
-        Some(read) => AudienceWindow::new(Some(read.recipient_audience_revision), read.history_floor),
+        Some(read) => {
+            AudienceWindow::new(Some(read.recipient_audience_revision), read.history_floor)
+                .with_floor_at(read.history_floor_at)
+        }
         None => AudienceWindow::default(),
     }
 }
@@ -108,19 +139,39 @@ mod tests {
     fn the_window_is_unbounded_for_an_owner_read_and_bounded_by_a_verified_one() {
         assert_eq!(
             audience_window(None),
-            AudienceWindow { ceiling: None, floor: None },
-            "an owner-bound read has neither bound"
+            AudienceWindow { ceiling: None, floor: None, floor_at: None },
+            "an owner-bound read has no bound"
         );
         let both = audience_window(Some(VerifiedSpaceRead {
             recipient_audience_revision: 7,
             history_floor: Some(3),
+            history_floor_at: None,
         }));
         assert_eq!(both, AudienceWindow::new(Some(7), Some(3)));
         let ceiling_only = audience_window(Some(VerifiedSpaceRead {
             recipient_audience_revision: 7,
             history_floor: None,
+            history_floor_at: None,
         }));
         assert_eq!(ceiling_only, AudienceWindow::ceiling_only(Some(7)));
         assert_eq!(ceiling_only.floor, None, "no floor claim: full history up to the ceiling");
+        assert!(!ceiling_only.has_floor());
+    }
+
+    #[test]
+    fn a_timestamp_floor_rides_the_window_without_the_revision_switch() {
+        // D18: a per-member instant is carried on the window whether or not the revision claim is
+        // honoured, so a since_date member is never shown the rows before the date.
+        let at = DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z").expect("rfc3339").with_timezone(&Utc);
+        let windowed = audience_window(Some(VerifiedSpaceRead {
+            recipient_audience_revision: 7,
+            history_floor: None,
+            history_floor_at: Some(at),
+        }));
+        assert_eq!(windowed.ceiling, Some(7));
+        assert_eq!(windowed.floor, None, "no revision floor was signed");
+        assert_eq!(windowed.floor_at, Some(at));
+        assert!(windowed.has_floor(), "a timestamp floor is a floor for the presentation fallbacks");
+        assert_eq!(windowed, AudienceWindow::new(Some(7), None).with_floor_at(Some(at)));
     }
 }

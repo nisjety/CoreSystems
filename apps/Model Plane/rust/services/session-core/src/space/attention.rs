@@ -451,6 +451,15 @@ impl SpaceAttentionGrpc {
                     &user_id,
                     &query.space_id,
                 ) {
+                    // D18: a member with a history window (a floor of either form) reads a room the
+                    // attention queries do not window yet (their titles, first messages and latest
+                    // authors would reach pre-floor content). Hold the attention back: no query runs.
+                    Ok(Some(read))
+                        if crate::space::audience_window::audience_window(Some(read))
+                            .has_floor() =>
+                    {
+                        None
+                    }
                     Ok(Some(read)) => Some(Reach { ceiling: read.recipient_audience_revision }),
                     Ok(None) | Err(_) => None,
                 }

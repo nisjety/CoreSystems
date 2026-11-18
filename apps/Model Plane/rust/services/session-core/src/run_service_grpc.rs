@@ -983,6 +983,7 @@ impl RunService for RunServiceImpl {
                        AND ($8::BIGINT IS NULL
                             OR r.recipient_audience_revision IS NULL
                             OR r.recipient_audience_revision >= $8)
+                       AND ($9::TIMESTAMPTZ IS NULL OR r.created_at >= $9::TIMESTAMPTZ)
                        AND ($1 = '' OR r.thread_id = $1)",
                 );
             } else {
@@ -1002,7 +1003,8 @@ impl RunService for RunServiceImpl {
                     .bind(caller.org_id())
                     .bind(&req.space_id)
                     .bind(ceiling)
-                    .bind(audience.floor);
+                    .bind(audience.floor)
+                    .bind(audience.floor_at);
             }
             let rows: Vec<RunRow> = sql
                 .fetch_all(&self.pool)

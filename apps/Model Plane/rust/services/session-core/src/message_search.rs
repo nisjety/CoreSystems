@@ -62,7 +62,10 @@ const QUERY_CANCELED: &str = "57014";
 pub(crate) const SEARCH_SQL: &str = "
 WITH candidates AS (
     SELECT m.id AS message_id, m.thread_id, m.role, m.content, m.created_at,
-           t.session_key, t.presentation_title, t.space_id, t.archived_at
+           t.session_key,
+           CASE WHEN $15::BIGINT IS NOT NULL OR $16::TIMESTAMPTZ IS NOT NULL
+                THEN NULL ELSE t.presentation_title END AS presentation_title,
+           t.space_id, t.archived_at
     FROM messages m
     JOIN threads t ON t.id = m.thread_id
     WHERE m.role IN ('user', 'assistant')
@@ -80,6 +83,8 @@ WITH candidates AS (
       AND (NULLIF($6, '') IS NULL OR t.origin = $6)
       AND (NULLIF($7, '') IS NULL OR t.id = $7)
       AND (NULLIF($8, '') IS NULL OR t.id <> $8)
+      AND ($15::BIGINT IS NULL OR m.recipient_audience_revision IS NULL OR m.recipient_audience_revision >= $15::BIGINT)
+      AND ($16::TIMESTAMPTZ IS NULL OR m.created_at >= $16::TIMESTAMPTZ)
       AND ($10 = 'all' OR (($10 = 'archived') = (t.archived_at IS NOT NULL)))
       AND (NOT $9::BOOLEAN OR NOT EXISTS (
             SELECT 1 FROM runs r
@@ -275,6 +280,8 @@ impl MessageSearchGrpc {
             &req.space_id,
         )?;
         let audience_ceiling = space_read.map(|read| read.recipient_audience_revision);
+        // D18: the same history floor the transcript reads apply, so a hidden message is never a hit.
+        let window = crate::space::audience_window::audience_window(space_read);
         let archive_state = match pb::ArchiveFilter::try_from(req.archived) {
             Ok(pb::ArchiveFilter::Unspecified) => "active",
             Ok(pb::ArchiveFilter::Archived) => "archived",
@@ -316,6 +323,8 @@ impl MessageSearchGrpc {
             .bind(cursor.as_ref().map(|position| position.message_id.clone()))
             .bind(page_size + 1)
             .bind(CANDIDATE_LIMIT)
+            .bind(window.floor)
+            .bind(window.floor_at)
             .fetch_all(&mut *tx)
             .await
             .map_err(map_search_error)?;

@@ -353,6 +353,7 @@ async fn conversation_cursor_sequence(
            AND ($6::BIGINT IS NULL
                 OR m.recipient_audience_revision IS NULL
                 OR m.recipient_audience_revision >= $6)
+           AND ($7::TIMESTAMPTZ IS NULL OR m.created_at >= $7::TIMESTAMPTZ)
            AND ($5 OR m.post_kind <> 'post')",
     )
     .bind(message_id)
@@ -361,6 +362,7 @@ async fn conversation_cursor_sequence(
     .bind(audience.ceiling)
     .bind(include_human_posts)
     .bind(audience.floor)
+    .bind(audience.floor_at)
     .fetch_optional(pool)
     .await
     .map_err(|error| Status::internal(error.to_string()))?;
@@ -433,6 +435,7 @@ async fn conversation_rows_ordered(
            AND ($8::BIGINT IS NULL
                 OR m.recipient_audience_revision IS NULL
                 OR m.recipient_audience_revision >= $8)
+           AND ($9::TIMESTAMPTZ IS NULL OR m.created_at >= $9::TIMESTAMPTZ)
            AND ($4::BIGINT IS NULL OR m.sequence < $4)
            AND ($6 OR m.on_active_path)
            AND ($7 OR m.post_kind <> 'post')
@@ -455,6 +458,7 @@ async fn conversation_rows_ordered(
         .bind(include_inactive)
         .bind(include_human_posts)
         .bind(audience.floor)
+        .bind(audience.floor_at)
         .fetch_all(pool)
         .await
         .map_err(|error| {
@@ -493,7 +497,8 @@ async fn conversation_count_before(
            AND ($6 OR m.post_kind <> 'post')
            AND ($7::BIGINT IS NULL
                 OR m.recipient_audience_revision IS NULL
-                OR m.recipient_audience_revision >= $7)",
+                OR m.recipient_audience_revision >= $7)
+           AND ($8::TIMESTAMPTZ IS NULL OR m.created_at >= $8::TIMESTAMPTZ)",
     )
     .bind(thread_id)
     .bind(org_id)
@@ -502,6 +507,7 @@ async fn conversation_count_before(
     .bind(include_inactive)
     .bind(include_human_posts)
     .bind(audience.floor)
+    .bind(audience.floor_at)
     .fetch_one(pool)
     .await
     .map_err(|error| {
@@ -1258,6 +1264,11 @@ struct ControlSpaceDecisionClaims {
     // payload digest; honoured only behind SESSION_CORE_SPACE_HISTORY_FLOOR.
     #[serde(default)]
     history_floor_revision: u64,
+    // D18: the instant a per-member history window starts at (a since_date window, or the member's
+    // join). Absent (None) on every other decision. Honoured WITHOUT SESSION_CORE_SPACE_HISTORY_FLOOR:
+    // a hide must never depend on a rollout switch. Not part of any payload digest.
+    #[serde(default)]
+    history_floor_at: Option<DateTime<Utc>>,
     // Absent on every decision issued without a stored-consent contract.
     #[serde(default)]
     contract_digest: Option<String>,
@@ -4045,6 +4056,9 @@ pub(crate) struct VerifiedSpaceRead {
     /// WS04-S11: rows stamped with an OLDER revision are hidden from a `since_join` reader.
     /// `None` when the claim is absent or SESSION_CORE_SPACE_HISTORY_FLOOR is off (full history).
     pub(crate) history_floor: Option<i64>,
+    /// D18: rows created BEFORE this instant are hidden from the reader. `None` when the claim is
+    /// absent. Honoured without the SESSION_CORE_SPACE_HISTORY_FLOOR switch (see the claim field).
+    pub(crate) history_floor_at: Option<DateTime<Utc>>,
 }
 
 /// Recompute Control's `model.thread.read` payload digest from the claims.
@@ -4208,6 +4222,7 @@ fn verify_thread_read_claims_with_key(
             claims.history_floor_revision,
             crate::space::audience_window::history_floor_enabled(),
         ),
+        history_floor_at: claims.history_floor_at,
     })
 }
 
@@ -4222,6 +4237,8 @@ pub(crate) struct VerifiedReadClaims {
     pub(crate) zero_data_retention: bool,
     /// WS04-S11: see [`VerifiedSpaceRead::history_floor`]; always `None` on non-read decisions.
     pub(crate) history_floor: Option<i64>,
+    /// D18: see [`VerifiedSpaceRead::history_floor_at`]; always `None` on non-read decisions.
+    pub(crate) history_floor_at: Option<DateTime<Utc>>,
 }
 
 /// The existing `model.thread.read` verifier: audience `model-plane`, answering only the
@@ -4252,6 +4269,7 @@ fn verify_thread_read_space_decision_with_key(
     Ok(VerifiedSpaceRead {
         recipient_audience_revision: verified.recipient_audience_revision,
         history_floor: verified.history_floor,
+        history_floor_at: verified.history_floor_at,
     })
 }
 
@@ -4510,6 +4528,7 @@ fn verify_run_control_space_decision_with_key(
         expires_at: claims.expires_at,
         zero_data_retention: claims.zero_data_retention,
         history_floor: None,
+        history_floor_at: None,
     })
 }
 
@@ -11335,7 +11354,8 @@ impl SessionCore for SessionService {
                                       WHERE em.thread_id = t.id
                                         AND ($13::BIGINT IS NULL
                                              OR em.recipient_audience_revision IS NULL
-                                             OR em.recipient_audience_revision >= $13)))
+                                             OR em.recipient_audience_revision >= $13)
+                                        AND ($15::TIMESTAMPTZ IS NULL OR em.created_at >= $15::TIMESTAMPTZ)))
                       AND (NULLIF($4, '') IS NULL OR t.space_id = $4)
                       AND (NULLIF($5, '') IS NULL OR t.origin = $5)
                       AND (NULLIF($7, '') IS NULL OR t.id = $7)
@@ -11354,8 +11374,8 @@ impl SessionCore for SessionService {
                     page.id,
                     page.session_key,
                     page.created_at,
-                    COALESCE(page.presentation_title, first_user.content) AS title,
-                    COALESCE(page.presentation_preview, last_message.content) AS preview,
+                    COALESCE(CASE WHEN $13::BIGINT IS NOT NULL OR $15::TIMESTAMPTZ IS NOT NULL THEN NULL ELSE page.presentation_title END, first_user.content) AS title,
+                    COALESCE(CASE WHEN $13::BIGINT IS NOT NULL OR $15::TIMESTAMPTZ IS NOT NULL THEN NULL ELSE page.presentation_preview END, last_message.content) AS preview,
                     page.pinned_at,
                     page.last_activity_at,
                     page.space_id,
@@ -11379,6 +11399,7 @@ impl SessionCore for SessionService {
                     SELECT content
                     FROM messages
                     WHERE thread_id = page.id AND role = 'user' AND on_active_path
+                      AND ($15::TIMESTAMPTZ IS NULL OR created_at >= $15::TIMESTAMPTZ)
                       AND ($13::BIGINT IS NULL
                            OR recipient_audience_revision IS NULL
                            OR recipient_audience_revision >= $13)
@@ -11389,6 +11410,7 @@ impl SessionCore for SessionService {
                     SELECT content
                     FROM messages
                     WHERE thread_id = page.id AND on_active_path
+                      AND ($15::TIMESTAMPTZ IS NULL OR created_at >= $15::TIMESTAMPTZ)
                       AND ($13::BIGINT IS NULL
                            OR recipient_audience_revision IS NULL
                            OR recipient_audience_revision >= $13)
@@ -11415,6 +11437,7 @@ impl SessionCore for SessionService {
                               AND ($13::BIGINT IS NULL
                                    OR lm.recipient_audience_revision IS NULL
                                    OR lm.recipient_audience_revision >= $13)
+                              AND ($15::TIMESTAMPTZ IS NULL OR lm.created_at >= $15::TIMESTAMPTZ)
                             ORDER BY lm.sequence DESC
                             LIMIT 1) AS last_author
                     FROM messages m
@@ -11426,6 +11449,7 @@ impl SessionCore for SessionService {
                       AND ($13::BIGINT IS NULL
                            OR m.recipient_audience_revision IS NULL
                            OR m.recipient_audience_revision >= $13)
+                      AND ($15::TIMESTAMPTZ IS NULL OR m.created_at >= $15::TIMESTAMPTZ)
                  ) reply_stats ON TRUE
                  ORDER BY (page.pinned_at IS NOT NULL) DESC, page.last_activity_at DESC, page.id DESC"),
             )
@@ -11443,6 +11467,7 @@ impl SessionCore for SessionService {
             .bind(req.starred_only)
             .bind(history_floor)
             .bind(&req.agent_subject_id)
+            .bind(audience.floor_at)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| {
@@ -28735,6 +28760,63 @@ mod conversation_page_db_tests {
         assert_eq!(unfloored_first.omitted_before, 1);
 
         cleanup(&pool, &[thread.as_str()]).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn the_timestamp_floor_hides_rows_created_before_it_on_the_conversation_read_against_real_pg() {
+        // D18: a per-member window's instant hides every row created before it, whatever its revision stamp
+        // says. The revision floor alone would show the old row (its stamp is 1) and the NULL-stamped row.
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let suffix = new_ulid();
+        let org = format!("conv-at-{suffix}");
+        let thread = format!("conv-at-thread-{suffix}");
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, 'owner')",
+        )
+        .bind(&thread)
+        .bind(&org)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let ids: Vec<String> = ["old", "legacy", "new"]
+            .iter()
+            .map(|name| format!("{thread}-{name}"))
+            .collect();
+        for (id, revision) in ids.iter().zip([Some(1_i64), None, Some(1)]) {
+            seed_audience_turn(&pool, &thread, id, revision).await;
+        }
+        // Created three hours ago, one hour ago, and now.
+        sqlx::query("UPDATE messages SET created_at = NOW() - INTERVAL '3 hours' WHERE id = $1")
+            .bind(&ids[0])
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE messages SET created_at = NOW() - INTERVAL '1 hour' WHERE id = $1")
+            .bind(&ids[1])
+            .execute(&pool)
+            .await
+            .unwrap();
+        let [old, legacy, new] = [0, 1, 2].map(|index| ids[index].as_str());
+        // The instant sits ninety minutes ago: the three-hour-old row is before it, the rest are after.
+        let floor_at = Utc::now() - chrono::Duration::minutes(90);
+        let open = AudienceWindow::new(Some(1), Some(1));
+        let windowed = open.with_floor_at(Some(floor_at));
+
+        let unpaged = |window: AudienceWindow| {
+            let (pool, org, thread) = (pool.clone(), org.clone(), thread.clone());
+            async move {
+                let mut rows = conversation_page_rows(
+                    &pool, &org, &thread, window, true, None, i64::MAX, false,
+                )
+                .await
+                .expect("unpaged rows");
+                rows.reverse();
+                rows.into_iter().map(|row| row.id).collect::<Vec<String>>()
+            }
+        };
+        assert_eq!(unpaged(open).await, [old, legacy, new], "the revision floor alone shows all three");
+        assert_eq!(unpaged(windowed).await, [legacy, new], "the instant hides the row before it");
     }
 
     /// The floor travels on the signed read decision and is honoured only with
