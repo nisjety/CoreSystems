@@ -71,11 +71,16 @@ function view(row: any) {
   };
 }
 
-async function pendingOf(ctx: any, externalAuthId: string, externalOrgId: string, limit: number): Promise<any[]> {
+/**
+ * The member's pending rows in this organization. The index is per member, not per organization, so a
+ * bounded `take` could be filled by another organization's rows and hide this one's; the pending rows
+ * are read whole and filtered (at most 50 per organization, by the create cap).
+ */
+async function pendingOf(ctx: any, externalAuthId: string, externalOrgId: string): Promise<any[]> {
   const rows = await ctx.db
     .query("spaceReminders")
     .withIndex("by_subject_and_state", (q: any) => q.eq("externalAuthId", externalAuthId).eq("state", "pending"))
-    .take(limit);
+    .collect();
   return rows.filter((row: any) => row.externalOrgId === externalOrgId);
 }
 
@@ -109,7 +114,7 @@ export const createReminderForGateway = mutation({
       .first();
     if (!space || space.externalOrgId !== args.externalOrgId) throw new Error("space_not_found");
 
-    const pending = await pendingOf(ctx, args.externalAuthId, args.externalOrgId, MAX_PENDING_REMINDERS + 1);
+    const pending = await pendingOf(ctx, args.externalAuthId, args.externalOrgId);
     const same = pending.find(
       (row) =>
         row.spaceRef === spaceRef &&
@@ -156,8 +161,8 @@ export const listPendingRemindersForGateway = query({
   handler: async (ctx, args) => {
     assertServiceKey(args.serviceKey);
     await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
-    const rows = await pendingOf(ctx, args.externalAuthId, args.externalOrgId, MAX_PENDING_REMINDERS);
-    return rows.sort((a, b) => a.remindAt - b.remindAt).map(view);
+    const rows = await pendingOf(ctx, args.externalAuthId, args.externalOrgId);
+    return rows.sort((a, b) => a.remindAt - b.remindAt).slice(0, MAX_PENDING_REMINDERS).map(view);
   },
 });
 

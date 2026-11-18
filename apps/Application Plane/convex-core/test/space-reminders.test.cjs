@@ -150,13 +150,22 @@ test('create refuses a bad time, bad ids, an unknown space and another org\'s sp
   assert.deepEqual(log.inserts, []);
 });
 
+test('another organization\'s pending reminders cannot hide this organization\'s from the cap or the list', async (t) => {
+  withServiceKey(t);
+  const others = Array.from({ length: 51 }, (_, i) => pendingRow(i, { externalOrgId: 'org_other' }));
+  const mine = Array.from({ length: 50 }, (_, i) => pendingRow(100 + i));
+  const { ctx } = makeCtx(world({ spaceReminders: [...others, ...mine] }));
+  assert.equal((await listPendingRemindersForGateway._handler(ctx, base)).length, 50);
+  await rejectsWith(createReminderForGateway._handler(ctx, { ...create, remindAt: Date.now() + 2 * DAY }), 'too_many_reminders');
+});
+
 test('create and list need the service key and an organization member', async (t) => {
   withServiceKey(t);
   const { ctx } = makeCtx(world());
   const remindAt = Date.now() + 60_000;
-  await assert.rejects(createReminderForGateway._handler(ctx, { ...create, serviceKey: 'wrong', remindAt }));
+  await rejectsWith(createReminderForGateway._handler(ctx, { ...create, serviceKey: 'wrong', remindAt }), 'Unauthorized');
   await rejectsWith(createReminderForGateway._handler(ctx, { ...create, externalAuthId: 'stranger', remindAt }), 'Unauthorized');
-  await assert.rejects(listPendingRemindersForGateway._handler(ctx, { ...base, serviceKey: 'wrong' }));
+  await rejectsWith(listPendingRemindersForGateway._handler(ctx, { ...base, serviceKey: 'wrong' }), 'Unauthorized');
 });
 
 test('list returns only the caller\'s pending reminders, soonest first', async (t) => {
