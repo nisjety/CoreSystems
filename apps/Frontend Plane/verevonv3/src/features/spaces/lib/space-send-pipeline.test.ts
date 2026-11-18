@@ -157,6 +157,83 @@ describe('space send pipeline (P-SPA2)', () => {
     })
   })
 
+  describe('live artifacts (WS07-S11)', () => {
+    const art = (over: Record<string, unknown> = {}) => ({
+      id: 'a1',
+      kind: 'document',
+      title: 'Plan',
+      content: 'body',
+      version: 1,
+      ...over,
+    })
+
+    it('calls onArtifact with the gated artifact and the live thread id', async () => {
+      const { pipeline, host } = pipelineWith()
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onConnected?.({ requestId: 'req_1', threadId: 'thr_live' } as never)
+        handlers.onArtifact?.(art({ kind: 'code', version: 2 }) as never)
+        handlers.onDone?.({} as never)
+      })
+      await pipeline.send(input())
+      expect(host.onArtifact).toHaveBeenCalledTimes(1)
+      expect(host.onArtifact).toHaveBeenCalledWith(
+        { id: 'a1', kind: 'code', title: 'Plan', content: 'body', version: 2 },
+        'thr_live',
+      )
+    })
+
+    it('names a reply by the thread it was sent to, before the stream says anything', async () => {
+      const { pipeline, host } = pipelineWith()
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onArtifact?.(art() as never)
+        handlers.onDone?.({} as never)
+      })
+      await pipeline.send(input({ replyThreadId: 'thr_7' }))
+      expect(host.onArtifact).toHaveBeenCalledWith(expect.objectContaining({ id: 'a1' }), 'thr_7')
+    })
+
+    it('holds an artifact of a new thread until the stream has named the thread', async () => {
+      const { pipeline, host } = pipelineWith()
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onConnected?.({ requestId: 'req_1' } as never)
+        handlers.onArtifact?.(art() as never)
+        handlers.onDone?.({} as never)
+      })
+      await pipeline.send(input())
+      expect(host.onArtifact).not.toHaveBeenCalled()
+    })
+
+    it('ignores pdf and image events', async () => {
+      const { pipeline, host } = pipelineWith()
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onConnected?.({ requestId: 'req_1', threadId: 'thr_live' } as never)
+        handlers.onArtifact?.(art({ id: 'p', kind: 'pdf' }) as never)
+        handlers.onArtifact?.(art({ id: 'i', kind: 'image' }) as never)
+        handlers.onDone?.({} as never)
+      })
+      await pipeline.send(input())
+      expect(host.onArtifact).not.toHaveBeenCalled()
+    })
+
+    it('is a no-op without a host.onArtifact and the exchange still settles', async () => {
+      const pipeline = createSpaceSendPipeline({
+        host: { spaceRef: 'room' },
+        resolveTier: async () => ({ tier: undefined, source: 'intent-mode' }),
+        describeError: (event) => `described:${event.code ?? 'unknown'}`,
+        sendIdempotency: () => false,
+      })
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onConnected?.({ requestId: 'req_1', threadId: 'thr_live' } as never)
+        handlers.onArtifact?.(art() as never)
+        handlers.onMessage?.({ content: 'Hi' } as never)
+        handlers.onDone?.({} as never)
+      })
+      await pipeline.send(input())
+      flush()
+      expect(pipeline.exchange()).toMatchObject({ assistantContent: 'Hi', status: 'done' })
+    })
+  })
+
   describe('stages', () => {
     it('emits started, accepted on connected, settled in order', async () => {
       const { pipeline, stages } = pipelineWith()

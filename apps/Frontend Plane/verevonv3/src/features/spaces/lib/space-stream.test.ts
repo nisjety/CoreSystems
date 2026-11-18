@@ -750,3 +750,57 @@ describe('refusals at the door', () => {
     expect(controller?.state()).toBe('live')
   })
 })
+
+describe('reconnect backoff is full jitter (WS02-S5)', () => {
+  it('reconnects after a wait drawn from the injected random, never under the 1 s floor', async () => {
+    make({ random: () => 0.99 }).start()
+    // First failure: the cap is 1 s; 0.99 of it is 990 ms, lifted to the 1 s floor.
+    calls[0]?.onError(new Error('network'))
+    await advance(999)
+    expect(calls).toHaveLength(1)
+    await advance(1)
+    expect(calls).toHaveLength(2)
+    // Second failure: the cap doubles to 2 s; 0.99 of it is 1_980 ms.
+    calls[1]?.onError(new Error('network'))
+    await advance(1_979)
+    expect(calls).toHaveLength(2)
+    await advance(1)
+    expect(calls).toHaveLength(3)
+  })
+})
+
+describe('zero retention: the stream fails closed (WS02-S5)', () => {
+  // Under ZDR the server serves no rows over the stream, so the page's own poll is the only read.
+  // Nothing the stream does afterwards may reconnect, re-read or come back live.
+  async function everyResumePath(): Promise<void> {
+    setVisible(false)
+    setVisible(true)
+    window.dispatchEvent(new Event('focus'))
+    window.dispatchEvent(new Event('online'))
+    controller?.rearm()
+    await advance(120_000)
+  }
+
+  it('a poll_only connection is permanently unavailable: no re-read, no reconnect, on any path', async () => {
+    make().start()
+    connectedFrame(calls[0], { mode: 'poll_only' })
+    expect(controller?.state()).toBe('unavailable')
+    expect(calls[0]?.init.signal?.aborted).toBe(true)
+    await everyResumePath()
+    expect(calls).toHaveLength(1)
+    expect(controller?.state()).toBe('unavailable')
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('a zdr_poll_only close stays unavailable even when the server asks for a reconnect', async () => {
+    make().start()
+    connectedFrame(calls[0], { resumed: true })
+    emit(calls[0], 'closing', { code: 'zdr_poll_only', reconnect: true, retry_after_ms: 0 }, 'g1.5')
+    expect(controller?.state()).toBe('unavailable')
+    expect(calls[0]?.init.signal?.aborted).toBe(true)
+    await everyResumePath()
+    expect(calls).toHaveLength(1)
+    expect(controller?.state()).toBe('unavailable')
+    expect(onChange).not.toHaveBeenCalled()
+  })
+})

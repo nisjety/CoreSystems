@@ -213,6 +213,25 @@ describe('space post sender (WS01-S6)', () => {
       await send(h, { content: 'hello' })
       expect(h.onZdrRefused).not.toHaveBeenCalled()
     })
+
+    it('a zero-retention refusal is not retryable: retry and coming back online send nothing', async () => {
+      createSpacePost.mockRejectedValue(apiError(412, 'zdr_durable_mutation_forbidden'))
+      const h = harness()
+      await send(h, { content: 'hello' })
+      expect(h.sender.current()?.failure).toMatchObject({ code: 'zdr_durable_mutation_forbidden', retryable: false })
+      await h.sender.retry()
+      window.dispatchEvent(new Event('online'))
+      await Promise.resolve()
+      flush()
+      expect(createSpacePost).toHaveBeenCalledTimes(1)
+      expect(h.sender.current()?.stage).toBe('failed')
+      expect(h.onAccepted).not.toHaveBeenCalled()
+      // The server answered, so this is not a transport failure and the room is not marked unreachable.
+      expect(spaceConnectivity()).not.toBe('unreachable')
+      // Nothing about the refused post reaches browser storage (zero retention).
+      expect(localStorage.length).toBe(0)
+      expect(sessionStorage.length).toBe(0)
+    })
   })
 
   describe('retry and the send id', () => {
