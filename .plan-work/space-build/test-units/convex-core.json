@@ -1,0 +1,42 @@
+{
+  "area": "convex-core",
+  "status": "partial",
+  "commit": "d6c790891 (tests); bbb7f77bf (reminders cap fix)",
+  "files": [
+    "apps/Application Plane/convex-core/convex/spaceReminders.ts",
+    "apps/Application Plane/convex-core/test/space-reminders.test.cjs",
+    "apps/Application Plane/convex-core/convex/spaceDeletionData.test.ts",
+    "apps/Application Plane/convex-core/test/fixtures/participant-set-vectors.v1.json",
+    "apps/Application Plane/convex-core/test/fixtures/participant-set-vectors.v1.json.sha256",
+    "apps/Application Plane/convex-core/test/personal-agents.test.cjs",
+    "apps/Application Plane/convex-core/test/space-agent-admission-confirm.test.cjs",
+    "apps/Application Plane/convex-core/test/space-agent-canvas-tools.test.cjs",
+    "apps/Application Plane/convex-core/test/space-agent-self-api.test.cjs",
+    "apps/Application Plane/convex-core/test/space-attention-api.test.cjs",
+    "apps/Application Plane/convex-core/test/space-private-panels.test.cjs",
+    "apps/Application Plane/convex-core/test/space-agent-registry.test.cjs",
+    "apps/Application Plane/convex-core/test/space-attention-rules.test.cjs",
+    "apps/Application Plane/convex-core/test/space-audience-reconcile.test.cjs",
+    "apps/Application Plane/convex-core/test/space-dm.test.cjs",
+    "apps/Application Plane/convex-core/test/space-org-room-sync.test.cjs",
+    "apps/Application Plane/convex-core/test/space-reactions.test.cjs",
+    "apps/Application Plane/convex-core/test/space-room-details.test.cjs",
+    "apps/Application Plane/convex-core/test/space-room-notices.test.cjs",
+    "apps/Application Plane/convex-core/test/space-sidebar.test.cjs",
+    "apps/Application Plane/convex-core/test/space-status.test.cjs"
+  ],
+  "run_command": "cd \"apps/Application Plane/convex-core\" && npm test && npx tsc --noEmit",
+  "result": "21 files (9 new; 12 changed, one of them the source fix in convex/spaceReminders.ts). npm test 556 pass, 0 fail (baseline 470 pass). tsc --noEmit clean. Owed in-area tests all run and pass; partial only because the live-stack checks are not-run.",
+  "bugs_fixed": [
+    "WS11-S11: convex/spaceReminders.ts pendingOf read a bounded window across all orgs before filtering by org, so the 50-per-org reminder cap could be bypassed and the list could show 0 in-org rows; now reads the member's pending rows and filters, list capped at 50 (P2, regression case in space-reminders.test.cjs failed before the fix)"
+  ],
+  "not_run": [
+    "convex/_generated/api.d.ts and new tables/indexes (WS11-S3, WS11-S10, WS11-S11, WS16-S7, WS12-S2, WS04-S5): needs a live stack (codegen and convex-gateway restart)",
+    "docker restart convex-gateway shows 'Convex functions ready!' (P-CX1, WS04-S1, WS04-S5, WS04-S12, WS11-S10, WS12-S2, WS16-S11): needs a live stack",
+    "live cron runs in convex/crons.ts (WS04-S1 org-room roster, WS04-S5 audience reconcile, WS16-S11 sidebar orphan sweep): needs a live stack",
+    "WS04-S1 F1 live roster flow and WS04-S5 live audience flow: needs a live stack",
+    "WS12-S2 concurrent DM opens under real Convex OCC: needs a live Convex deployment",
+    "apps/Application Plane/convex-core/.github/workflows/convex-core.yml entry under M0-CI (path is .github/workflows/convex-core.yml, outside this area): needs a real pull request, owned by the CI area"
+  ],
+  "notes": "Five helpers wrote the tests by file ownership, and the lead verified: full suite run, tsc, trivial-assert scan, byte-identity of the participant-set vector copy with Control's file (sha256 pin matches), and review of the reminders fix. Commits are path-limited; the other builder's staged e2e specs were committed by that builder as f8f5a2167, not by this commit. Owed items outside this area (Go notification-core courier vector test, Data Plane canvas purge and migration tests, Control plane-service-principals contract spec, SPA and gateway tests) were skipped and belong to their builders. The scratchpad extract-owed.js was replaced by a different e2e script during the run; not used and not reverted."
+}

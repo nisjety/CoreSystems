@@ -1,0 +1,10 @@
+- P1 blocked: `model.approval.reroute` has no golden vector shared with Control, so Go and Rust could drift on the reroute digest undetected until the Control S6 reroute leg adds one (owner: Control user-core).
+- P2 follow-up: `space_browser.rs` reads Control's golden through a cross-plane `include_str!` (test-only), so a container build that copies only `rust/` and `proto/` cannot compile this test target; vendor the golden into `mp-contracts/contracts/` as the registry is.
+- P2 follow-up: the ZDR refusal envelope is `{error:{code,message,retryable,action,feature?}}` with no `details` member, pinned by `zdr-refusals.json`, which differs from the generic envelope in CLAUDE.md; the new test locks the real shape and nothing was changed.
+- P2 test-gap: the "no ZDR variant left out of a route" property is enforced only by each service's `untyped_zdr_refusal_lines` inventory test (session-core, model-gateway, execution-core, inference-core), which I did not run.
+- P2 follow-up: `space_approvals_digest_golden` and `proto_wire_parity` are integration targets that `--lib` skips; both pass (3/3 and 5/5), so the gate needs a `--test` run.
+- P2 follow-up: the browser envelope check duplicates session-core's v2 envelope check, as the WS20-S2 depth note says, and still needs consolidation; not touched here.
+- P3 pre-existing: owed entries already covered by inline or integration tests (WS01-S3, WS06-S2, WS06-S3, WS08-S2, WS17-S1, the WS10-S7.ctl decide golden) were verified and not duplicated.
+- P3 pre-existing: W3-FIX-5 needs no verifier change, because Control trims refs before hashing; a padded ref in a re-signed decision is refused as mismatch, and a test pins that.
+- P3 follow-up: the `space-surface.v1.json` schema test was listed as "mp-contracts or model-gateway" and is left to the model-gateway builder, which owns `zdr_posture.rs`.
+- P3 follow-up: the WS12-S4 buf lint and buf breaking checks are tooling and were not run in this crate.

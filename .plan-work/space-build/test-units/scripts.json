@@ -1,0 +1,23 @@
+{
+  "area": "scripts",
+  "status": "partial",
+  "commit": "ac50f7316 5b4b49f54",
+  "files": [
+    "scripts/tests/space-self-api-registry-sync.test.sh",
+    "scripts/tests/space-self-api-registry-check.mjs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/scripts/action-surface-contract.test.mjs"
+  ],
+  "run_command": "bash scripts/tests/space-self-api-registry-sync.test.sh && bash scripts/tests/space-self-api-registry-sync.test.sh --self-test && node --test \"apps/Frontend Plane/verevonv3/apps/gateway/scripts/action-surface-contract.test.mjs\" && bash scripts/tests/zdr-contract-sync.test.sh && bash scripts/tests/zdr-contract-sync.test.sh --self-test && REQUIRE_CONTRACT=1 bash scripts/tests/zdr-contract-sync.test.sh && bash scripts/tests/space-contract-vectors-sync.test.sh && bash scripts/tests/space-contract-vectors-sync.test.sh --self-test && bash scripts/lint-resource-taxonomy.sh && bash scripts/gates/space-baseline-compare.sh --self-test && bash scripts/gates/space-changed-areas.sh --self-test && node --test scripts/tests/baseline-tooling.test.mjs && bash \"apps/Control Plane/scripts/control-train-repin-test.sh\" && bash \"apps/Model Plane/scripts/tests/room-run-frames-contract.test.sh\" && bash \"apps/Model Plane/scripts/tests/room-run-frames-contract.test.sh\" --self-test && PATH=<scratch rg shim>:$PATH bash \"apps/Model Plane/scripts/tests/capability-promotion-ledger-test.sh\" && bash scripts/tests/principal-registry-parity.test.sh (stopped during section 3)",
+  "result": "3 files written or extended: registry sync test 14/14 and its --self-test 12/12 (new), W3-DEC-CANVAS action-surface assertion 18/18; the other owed checks green (zdr 204/0 default and --self-test, vectors 5/0, train-repin 37/0, taxonomy, gate self-tests, baseline-tooling 28/28, room-run-frames, existing action-surface 17/17); capability ledger red on 11 pre-existing non-Space ids; principal parity partial, blocked on principal train; 7 items not run",
+  "bugs_fixed": [],
+  "not_run": [
+    "scripts/tests/space-event-log-postgres-test.sh: needs a live Postgres (the script starts a container with docker run; not started) (WS02-S1)",
+    "scripts/verify-deprovision.sh --apply: needs the local stack, a verified test domain and a SCIM token (WS05-S9)",
+    "scripts/space-e2e-seed.sh --apply: needs the dev stack (M0-T0)",
+    "docs/plans/evidence/baseline-<date>/ committed capture: needs a full baseline run of the suites against a clean base SHA (M0-T0, M0-CI committed-baseline leg)",
+    "apps/Model Plane/scripts/tests/space-self-api-proof.sh: needs its cargo, go, pnpm and docker layers (WS18-S10); its registry-sync step now has the test it names",
+    ".github/workflows/space-gate.yml and convex-core.yml: needs a real pull request on ubuntu-latest (M0-CI)",
+    "scripts/tests/principal-registry-parity.test.sh: blocked on the principal train (execution-core scopes); stopped during section 3 (bootstrap, three ledgers) after the shadow launcher step ran about six minutes, so the result covers sections 1 and 2 only (P-CFG, WS10-S2, WS14-S2, WS18-S2)"
+  ],
+  "notes": "Registry sync test written: golden pinned, four copies byte-identical (Control, capability-core, mp-contracts, SPA) plus SPA pin, structural rules in space-self-api-registry-check.mjs; --self-test proves 8 tampers fail their own rule.\nprincipal-registry-parity: 7 ok, 6 not ok, all six from one refusal: execution-core scopesByAudience has capability:owner-action:health:write and session:run-thread-action:probe that the flat scopes list lacks (WS18-S2 aca539d6c); policy not edited.\ncapability-promotion-ledger-test: 11 non-Space ids seeded by capability-core migrations are absent from the ledger (pre-existing, since 830bc475c); the 7 cap.tool.space ids match exactly and are source_only with dash evidence.\nzdr REQUIRE_CONTRACT=1: 204 passed, 10 failed, all pending consumers in other areas; default run 204/0.\nrg is a shell function here; the ledger test was run with a scratch shim outside the repo.\nNo code defect in this area was fixed; the two red results are data owned by other areas."
+}

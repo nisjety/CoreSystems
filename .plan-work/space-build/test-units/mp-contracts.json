@@ -1,0 +1,21 @@
+{
+  "area": "mp-contracts",
+  "status": "partial",
+  "commit": "a29201260",
+  "files": [
+    "apps/Model Plane/rust/crates/mp-contracts/src/message_revision.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/space_browser.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/space_memory.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/space_self_api.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/tests/space_approvals_digest_golden.rs"
+  ],
+  "run_command": "cd 'apps/Model Plane/rust' && cargo test -p mp-contracts --lib ; cargo test -p mp-contracts --test space_approvals_digest_golden --test proto_wire_parity",
+  "result": "39 new tests written, all passing (lib 497 passed, 0 failed; integration proto_wire_parity 5 passed, space_approvals_digest_golden 3 passed); reroute Control golden and space-surface schema test not run",
+  "bugs_fixed": [],
+  "not_run": [
+    "apps/Model Plane/rust/crates/mp-contracts/src/space_approvals.rs: needs the Control S6 reroute leg's golden vector for model.approval.reroute (a self-binding test is written and passes)",
+    "apps/Model Plane/api/contracts/space-surface.v1.json: schema test path is 'mp-contracts or model-gateway'; needs the model-gateway builder, which owns zdr_posture.rs"
+  ],
+  "notes": "1. space_browser.rs tests read Control's golden through a cross-plane include_str! (cfg(test) only); a Docker test build that copies only rust/ and proto/ cannot compile this target.\n2. The ZDR refusal envelope is {error:{code,message,retryable,action,feature?}} with no details member; tests lock that shape (zdr-refusals.json), not CLAUDE.md's generic envelope.\n3. W3-FIX-5 needs no verifier change: Control trims refs before hashing; a padded ref in a re-signed decision is refused as mismatch.\n4. One unused-import warning in my own new test was removed before the commit; the final lib run has no warnings.\n5. --lib skips space_approvals_digest_golden and proto_wire_parity; both were run with --test and pass.\n6. ZDR route coverage is enforced by each service's untyped_zdr_refusal_lines inventory test; those were not run here."
+}

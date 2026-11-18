@@ -1,0 +1,47 @@
+{
+  "area": "verevonv3-e2e",
+  "status": "partial",
+  "commit": "f8f5a2167",
+  "files": [
+    "apps/Frontend Plane/verevonv3/tests/e2e/audit-role-gate.spec.ts",
+    "apps/Frontend Plane/verevonv3/tests/e2e/org-identity-admin.spec.ts",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-approvals.spec.ts",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-policy-admin.spec.ts",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-thread-pane.spec.ts",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-addressed-wake.spec.ts",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-canvas.spec.ts",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-files.spec.ts",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-run-live.mock.spec.ts",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-search.spec.ts",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-sidebar.spec.ts",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-timeline.spec.ts",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-ui-baseline.spec.ts"
+  ],
+  "run_command": "cd 'apps/Frontend Plane/verevonv3' && node --test tests/e2e/space-fixtures.test.ts ; ./node_modules/.bin/tsc6 -p <scratchpad>/tsconfig.e2e-w3.json ; node node_modules/@playwright/test/cli.js test --list --project=space ; node node_modules/@playwright/test/cli.js test --project=space --reporter=list <gated non-mock space specs>",
+  "result": "21 owed in-area entries: 1 passing (M0-T0, node --test 30/30), 2 fixme (WS10-S4 standing rule, WS10-S8 quarantine: Control-side gaps), 18 not-run (needs live stack or seeded fixtures); 9 owed entries are Rust or Control tests outside this area. tsc6 on the e2e specs: 0 diagnostics. playwright --list --project=space: 40 tests in 16 files load.",
+  "bugs_fixed": [
+    "WS03-S6, WS05-S1, WS05-S6: three gated specs built browser contexts without baseURL, so their relative request and goto calls would throw; they now use E2E_BASE_URL (default http://localhost:5199)."
+  ],
+  "not_run": [
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-human-posts.spec.ts (WS01-S6, WS01-S7b): needs a live stack, E2E_SPACE_REF and seeded storage states A-C",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-thread-pane.spec.ts (WS01-S7a): needs a live stack, storage states A, C, E and E2E_SPACE_VIEWER_RESTRICTED_THREAD_ID for the new viewer case",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-realtime.spec.ts (WS02-S5): needs a live stack, seeded members A, B, F, E2E_SPACE_REF_ZDR and the session-core stop and start commands",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-policy-admin.spec.ts (WS03-S6): needs a live stack and E2E_ADMIN_STORAGE_STATE; the write case also needs E2E_SPACE_POLICY_ORG_OK=1 on a dedicated org",
+    "apps/Frontend Plane/verevonv3/tests/e2e/audit-role-gate.spec.ts (WS05-S1): needs a live stack and E2E_ADMIN_STORAGE_STATE plus E2E_MEMBER_STORAGE_STATE from one org",
+    "apps/Frontend Plane/verevonv3/tests/e2e/org-identity-admin.spec.ts (WS05-S6): needs a live stack, admin and member states, E2E_ORG_ID, ORG_IDENTITY_ADMIN_API on and a stub DNS resolver",
+    "apps/Frontend Plane/verevonv3/tests/e2e/org-identity-admin.spec.ts (WS05-S8, SCIM): needs the same, plus E2E_SCIM_EMAIL_DOMAIN (a verified domain) and SCIM_EDGE_ENABLED with ORG_CORE_SCIM_EDGE_TOKEN",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-addressed-wake.spec.ts (WS08-S6): needs a live stack, E2E_SPACE_AGENT_X_NAME, _Y_NAME, _MANAGERS_ONLY_NAME and an explicit non-Verevon E2E_SPACE_MODEL",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-run-live.mock.spec.ts (WS09-S5): mocked; needs a Vite server at E2E_BASE_URL (the config has no webServer for mocked specs)",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-approvals.spec.ts (WS10-S4 standing-rule flow): test.fixme, app gap (standing rule answers not_recorded); also needs a live stack",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-approvals.spec.ts (WS10-S8 quarantine): test.fixme, app gap (quarantine never fires); also needs a live stack",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-search.spec.ts (WS13-S5): needs a live stack with message_search, thread_pane and entry_links on, and E2E_SPACE_REF",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-files.spec.ts (WS14-S9): needs a live stack with room_files on, the file-text pipeline and seeded members A, B, C",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-timeline.spec.ts (WS15-S1, WS15-S8): mocked; needs a Vite server at E2E_BASE_URL (the config has no webServer for mocked specs)",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-ui-baseline.spec.ts (WS16-S5): needs a live stack, E2E_SPACE_CRITICAL_ATTENTION=1 and a Chromium that emulates forced colors (U1)",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-sidebar.spec.ts (WS16-S9): needs a live stack, seeded members A and F, and E2E_SPACE_REF_ZDR",
+    "apps/Frontend Plane/verevonv3/tests/e2e/space-canvas.spec.ts (WS19-S6, WS19-S7): needs a live stack with features.canvas, E2E_SPACE_REF_NO_CANVAS and a canvas holding two versions",
+    "wrong area, not written here: WS01-S1, WS01-S4, WS02-S3, WS06-S1, WS08-S3, WS09-S1, WS13-S2, WS15-S6, WS15-S9 (Model Plane model-gateway and session-core Rust tests)",
+    "all browser-launching specs: the Chromium binary is not installed (browserType.launch fails); npx playwright install chromium is a download and needs owner approval"
+  ],
+  "notes": "space-fixtures.test.ts is node --test, not Vitest, and passes 30/30 with no stack. The space project needs E2E_SPACE_REF and seeded storage states from scripts/space-e2e-seed.sh, which I did not run. Mock specs (space-timeline, space-run-live.mock) take payload shapes from timeline.ts and space-run-live-client.ts and are unverified live. The gated browser runs errored at launch, so their skip paths were not exercised; the 5 skips were the fixme and describe-level gates. No spec selects a Verevon, budget or genius model; agent runs use spaceTestModel. Pre-existing: real-authority-knowledge.spec.ts throws at load without REAL_AUTHORITY_FIXTURE_FILE, so playwright --list on the e2e project fails."
+}

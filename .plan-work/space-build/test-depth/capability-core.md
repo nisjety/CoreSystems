@@ -1,0 +1,9 @@
+- P1 blocked: the 0047 post_card DB test (internal/api/space_post_card_admission_integration_test.go, -tags integration) compiles but was not run, because it needs Docker for testcontainers and assumes 0022 and 0045 apply on the base schema.
+- P2 test-gap: the global-kill end-to-end test proves the posture each skill removal sets, which is the input session-core 0134 reads; the content-free revision row itself is only checked by session-core's Rust tests, which were not run here.
+- P2 follow-up: TestPatchWritesRevisionWithActor was stale after W3-DEC-ZDRSKILL added the posture argument and now asserts five actor settings; it is a test fix, not a code bug.
+- P2 follow-up: loader.go authorize documents removing a child as "persists nothing new", which is wrong for skill children because their hard DELETE writes a skill_revisions row; the owner's decision on that comment is still open, so it is unchanged.
+- P2 deviation: a global kill is content-free for every affected org, including a non-ZDR one, because capability-core has no per-org posture oracle; the end-to-end test pins that accepted behaviour.
+- P2 pre-existing: the plugin, cron and skill delete handlers accept an unvalidated raw path id, so an encoded-slash id reaches them for non-ZDR principals; not tested here, and it belongs in its own slice.
+- P2 test-gap: the owner lane's admitted path for the room canvas rows needs a wiki-store principal that does not exist yet, so only refusals for the existing callers are proven.
+- P3 follow-up: cron_run_now_test.go lines 183-184 say the router refuses every non-read request from a ZDR principal, which is stale now that six removals are admitted; left unedited.
+- P3 follow-up: WS11-S9 owes no tests inside capability-core (its entries are in notification-core, convex-core and the SPA), so nothing was written for it here.
