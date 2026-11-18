@@ -1258,8 +1258,10 @@ mod tests {
     /// appear without being routed through it: the three entry points (inline
     /// and Dreaming persist, grounded persist, manual index) each name the gate
     /// in their own body, every call to a low-level writer sits inside one of
-    /// them, and every write statement sits inside the low-level blocks. A new
-    /// writer elsewhere fails here and has to join the gate first.
+    /// them, and every write statement sits inside the low-level blocks or inside
+    /// an entry point's own body (the room label `UPDATE` of the manual index,
+    /// WS17-S3, follows the gate there). A new writer elsewhere fails here and
+    /// has to join the gate first.
     #[test]
     fn every_agent_memory_writer_calls_the_gate() {
         let source = include_str!("dreaming.rs");
@@ -1339,14 +1341,12 @@ mod tests {
         ] {
             for (index, _) in production.match_indices(statement) {
                 assert!(
-                    low_level
-                        .iter()
-                        .any(|(from, to, _)| (*from..*to).contains(&index))
+                    inside(index)
                         || (production
                             .find("pub(crate) async fn delete_user_memory(")
                             .unwrap()..)
                             .contains(&index),
-                    "{statement} appears outside the gated low-level writers"
+                    "{statement} appears outside the gated writers"
                 );
             }
         }

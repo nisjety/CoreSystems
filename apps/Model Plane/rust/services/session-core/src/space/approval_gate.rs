@@ -19,9 +19,10 @@
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Duration, Utc};
-use ed25519_dalek::{Signature, Verifier};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::Deserialize;
 use serde_json::{json, Value as JsonValue};
+use std::collections::BTreeMap;
 use tonic::Status;
 
 use crate::store::Pool;
@@ -194,6 +195,19 @@ pub(crate) fn verify_grant_use_token(
     tool_key: &str,
     now: DateTime<Utc>,
 ) -> Result<GrantUseClaims, Status> {
+    let claims = open_signed_claims(token, crate::grpc::configured_control_space_decision_keys)?;
+    check_claims(&claims, org_id, user_id, run_id, run_space_id, tool_key, now)?;
+    Ok(claims)
+}
+
+/// The envelope, key and signature half of [`verify_grant_use_token`]. The trusted key set comes
+/// from `load_keys`, which runs only once the envelope and key id have parsed (the order the
+/// refusals were always given in), so a test can supply keys without the process environment.
+#[allow(clippy::result_large_err)]
+fn open_signed_claims(
+    token: &str,
+    load_keys: impl FnOnce() -> Result<BTreeMap<String, VerifyingKey>, Status>,
+) -> Result<GrantUseClaims, Status> {
     if token.len() > MAX_TOKEN_BYTES {
         return Err(Status::invalid_argument("approval grant proof is too large"));
     }
@@ -207,7 +221,7 @@ pub(crate) fn verify_grant_use_token(
         .and_then(|raw| String::from_utf8(raw).ok())
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
-    let keys = crate::grpc::configured_control_space_decision_keys()?;
+    let keys = load_keys()?;
     let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
     let payload = URL_SAFE_NO_PAD
         .decode(parts[2])
@@ -222,10 +236,8 @@ pub(crate) fn verify_grant_use_token(
         &signature,
     )
     .map_err(|_| Status::permission_denied("invalid approval grant proof signature"))?;
-    let claims: GrantUseClaims = serde_json::from_slice(&payload)
-        .map_err(|_| Status::permission_denied("invalid approval grant proof claims"))?;
-    check_claims(&claims, org_id, user_id, run_id, run_space_id, tool_key, now)?;
-    Ok(claims)
+    serde_json::from_slice(&payload)
+        .map_err(|_| Status::permission_denied("invalid approval grant proof claims"))
 }
 
 /// The claim checks, separate from the signature so they can be exercised without keys.
@@ -405,6 +417,8 @@ pub(crate) async fn claim_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::run_phase::ERROR_CODE_TRAILER;
+    use ed25519_dalek::{Signer, SigningKey};
 
     fn claims() -> GrantUseClaims {
         let now = Utc::now();
@@ -469,5 +483,652 @@ mod tests {
         assert!(validate_gate_context("bad key!", "", "", false).is_err());
         assert!(validate_gate_context("shell", "short", "", false).is_err());
         assert!(validate_gate_context("shell", "", "weird", false).is_err());
+    }
+
+    #[test]
+    fn origin_is_direct_reads_a_missing_origin_as_a_persons_own_turn() {
+        for origin in [None, Some(""), Some("  "), Some("direct"), Some(" direct ")] {
+            assert!(origin_is_direct(origin), "{origin:?}");
+        }
+        for origin in [Some("ambient"), Some("automation"), Some(" automation "), Some("Direct"), Some("weird")] {
+            assert!(!origin_is_direct(origin), "{origin:?} is not a person's own turn");
+        }
+    }
+
+    #[test]
+    fn a_runs_own_non_direct_origin_wins_over_the_one_the_creator_states() {
+        let stated = |origin: &str| Some(origin.to_owned());
+        // A creator can never present an ambient or automation turn as direct.
+        assert_eq!(effective_turn_origin(Some("ambient"), stated("direct")), stated("ambient"));
+        assert_eq!(effective_turn_origin(Some("automation"), None), stated("automation"));
+        assert_eq!(effective_turn_origin(Some("automation"), stated("ambient")), stated("automation"));
+        assert_eq!(
+            effective_turn_origin(Some(" ambient "), stated("direct")),
+            stated("ambient"),
+            "the run's claim is trimmed"
+        );
+        // A direct run, or one with no claim, keeps what the creator stated (even a lesser origin).
+        assert_eq!(effective_turn_origin(Some("direct"), stated("ambient")), stated("ambient"));
+        assert_eq!(effective_turn_origin(None, stated("automation")), stated("automation"));
+        assert_eq!(effective_turn_origin(Some(""), stated("direct")), stated("direct"));
+        assert_eq!(effective_turn_origin(Some("direct"), None), None);
+        assert_eq!(effective_turn_origin(None, None), None);
+    }
+
+    #[test]
+    fn a_standing_rule_decision_names_the_rule_and_waives_one_prompt() {
+        assert_eq!(
+            standing_rule_decision("rule-7"),
+            json!({ "source": "standing_grant", "scope": "once", "rule_id": "rule-7" })
+        );
+    }
+
+    fn fixed_now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-11-17T12:00:00Z")
+            .expect("fixed time")
+            .with_timezone(&Utc)
+    }
+
+    fn live_claims(now: DateTime<Utc>) -> GrantUseClaims {
+        GrantUseClaims {
+            issued_at: now,
+            expires_at: now + Duration::seconds(120),
+            ..claims()
+        }
+    }
+
+    #[test]
+    fn a_proof_is_timely_only_inside_its_lifetime_and_the_issue_skew() {
+        let now = fixed_now();
+        let secs = Duration::seconds;
+        let check = |issued: Duration, expires: Duration| {
+            let claims = GrantUseClaims {
+                issued_at: now + issued,
+                expires_at: now + expires,
+                ..claims()
+            };
+            check_claims(&claims, "org-1", "user-1", "run-1", "space-1", "mcp__srv__tool", now)
+        };
+        // (issued, expires, both as offsets from now; accepted; why)
+        for (issued, expires, accepted, name) in [
+            (secs(0), secs(120), true, "issued now for the full 120 s"),
+            (secs(-100), secs(20), true, "issued earlier and still live"),
+            (secs(-120), secs(0), false, "expires exactly now"),
+            (secs(-100), secs(-1), false, "expired a second ago"),
+            (secs(60), secs(180), true, "issued at the 60 s skew"),
+            (secs(61), secs(181), false, "issued beyond the skew"),
+            (secs(10), secs(10), false, "zero lifetime"),
+            (secs(10), secs(5), false, "expires before it was issued"),
+            (secs(0), secs(121), false, "121 s lifetime"),
+        ] {
+            assert_eq!(check(issued, expires).is_ok(), accepted, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_proof_missing_a_field_or_an_authority_revision_is_refused() {
+        let now = fixed_now();
+        let check = |claims: &GrantUseClaims| {
+            check_claims(claims, "org-1", "user-1", "run-1", "space-1", "mcp__srv__tool", now)
+        };
+        assert!(check(&live_claims(now)).is_ok());
+        for edit in [
+            |c: &mut GrantUseClaims| c.token_ref.clear(),
+            |c: &mut GrantUseClaims| c.rule_id = "  ".into(),
+            |c: &mut GrantUseClaims| c.space_ref.clear(),
+            |c: &mut GrantUseClaims| c.agent_subject_id.clear(),
+            |c: &mut GrantUseClaims| c.action_key.clear(),
+            |c: &mut GrantUseClaims| c.action_schema_hash.clear(),
+            |c: &mut GrantUseClaims| c.nonce.clear(),
+            |c: &mut GrantUseClaims| c.authority_revision = 0,
+            |c: &mut GrantUseClaims| c.authority_revision = -1,
+        ] {
+            let mut claims = live_claims(now);
+            edit(&mut claims);
+            assert!(check(&claims).is_err());
+        }
+        // A run outside any Space has no Space a standing rule could belong to.
+        assert!(
+            check_claims(&live_claims(now), "org-1", "user-1", "run-1", "", "mcp__srv__tool", now).is_err()
+        );
+    }
+
+    const KEY_ID: &str = "grant-test-key";
+
+    fn key_set(signing: &SigningKey) -> BTreeMap<String, VerifyingKey> {
+        BTreeMap::from([(KEY_ID.to_owned(), signing.verifying_key())])
+    }
+
+    fn payload(now: DateTime<Utc>) -> JsonValue {
+        json!({
+            "token_ref": "tok",
+            "rule_id": "rule-1",
+            "scope": "always",
+            "run_id": "run-1",
+            "org_id": "org-1",
+            "space_ref": "space-1",
+            "subject_id": "user-1",
+            "agent_subject_id": "agent-1",
+            "tool_key": "mcp__srv__tool",
+            "action_key": "mcp__srv__tool",
+            "action_schema_hash": "a".repeat(64),
+            "authority_revision": 3,
+            "audience": "model-plane",
+            "issued_at": now,
+            "expires_at": now + Duration::seconds(120),
+            "nonce": "n",
+        })
+    }
+
+    /// A proof as Control issues it: version, key id, claims, then the signature over the first
+    /// three parts.
+    fn sign(signing: &SigningKey, key_id: &str, payload: &JsonValue) -> String {
+        let signed = format!(
+            "{APPROVAL_GRANT_USE_VERSION}.{}.{}",
+            URL_SAFE_NO_PAD.encode(key_id),
+            URL_SAFE_NO_PAD.encode(payload.to_string())
+        );
+        let signature = signing.sign(signed.as_bytes());
+        format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()))
+    }
+
+    fn open(token: &str, keys: BTreeMap<String, VerifyingKey>) -> Result<GrantUseClaims, Status> {
+        open_signed_claims(token, || Ok(keys))
+    }
+
+    fn assert_denied(result: Result<GrantUseClaims, Status>, message: &str, case: &str) {
+        let status = result.expect_err(case);
+        assert_eq!(status.code(), tonic::Code::PermissionDenied, "{case}");
+        assert_eq!(status.message(), message, "{case}");
+    }
+
+    #[test]
+    fn a_proof_signed_by_the_trusted_key_opens_and_every_other_form_is_refused() {
+        let trusted = SigningKey::from_bytes(&[41_u8; 32]);
+        let forger = SigningKey::from_bytes(&[42_u8; 32]);
+        let now = fixed_now();
+        let good = sign(&trusted, KEY_ID, &payload(now));
+        let opened = open(&good, key_set(&trusted)).expect("a proof signed by the trusted key opens");
+        assert_eq!((opened.rule_id.as_str(), opened.run_id.as_str()), ("rule-1", "run-1"));
+
+        // Forged: another key signs under the trusted key id.
+        assert_denied(
+            open(&sign(&forger, KEY_ID, &payload(now)), key_set(&trusted)),
+            "invalid approval grant proof signature",
+            "forged signature",
+        );
+        // Tampered: the claims change after they were signed.
+        let parts: Vec<String> = good.split('.').map(str::to_owned).collect();
+        let mut other_claims = payload(now);
+        other_claims["tool_key"] = json!("mcp__other__tool");
+        let mut tampered = parts.clone();
+        tampered[2] = URL_SAFE_NO_PAD.encode(other_claims.to_string());
+        assert_denied(
+            open(&tampered.join("."), key_set(&trusted)),
+            "invalid approval grant proof signature",
+            "tampered claims",
+        );
+        let mut truncated = parts.clone();
+        truncated[3] = URL_SAFE_NO_PAD.encode([0_u8; 8]);
+        assert_denied(
+            open(&truncated.join("."), key_set(&trusted)),
+            "invalid approval grant proof signature",
+            "a signature of the wrong length",
+        );
+
+        // A key id this service does not trust, or one that cannot be read at all.
+        let untrusted = "untrusted Control Space decision key";
+        assert_denied(
+            open(&sign(&trusted, "rotated-away", &payload(now)), key_set(&trusted)),
+            untrusted,
+            "unknown key id",
+        );
+        for (name, key_part) in [("undecodable", "!!!".to_owned()), ("blank", URL_SAFE_NO_PAD.encode("  "))] {
+            let mut broken = parts.clone();
+            broken[1] = key_part;
+            assert_denied(open(&broken.join("."), key_set(&trusted)), untrusted, name);
+        }
+
+        // The envelope: only this version, in four parts.
+        let envelope = "invalid approval grant proof envelope";
+        for (name, token) in [
+            (
+                "a thread decision's version word",
+                good.replacen(APPROVAL_GRANT_USE_VERSION, "v1", 1),
+            ),
+            ("too few parts", parts[..3].join(".")),
+            ("too many parts", format!("{good}.extra")),
+            ("empty", String::new()),
+        ] {
+            assert_denied(open(&token, key_set(&trusted)), envelope, name);
+        }
+        let too_large = open(&"x".repeat(MAX_TOKEN_BYTES + 1), key_set(&trusted)).expect_err("oversize");
+        assert_eq!(too_large.code(), tonic::Code::InvalidArgument);
+
+        // Claims Control does not issue: an unknown claim, a missing one, or not claims at all.
+        let claims_refusal = "invalid approval grant proof claims";
+        let mut with_extra = payload(now);
+        with_extra["extra"] = json!(true);
+        let mut without_nonce = payload(now);
+        without_nonce.as_object_mut().expect("object").remove("nonce");
+        for (name, claims) in [
+            ("an unknown claim", with_extra),
+            ("a missing claim", without_nonce),
+            ("not claims", json!("not claims")),
+        ] {
+            assert_denied(open(&sign(&trusted, KEY_ID, &claims), key_set(&trusted)), claims_refusal, name);
+        }
+    }
+
+    #[test]
+    fn the_key_set_is_loaded_only_after_the_envelope_parses() {
+        // A malformed proof is refused as malformed even when no key is configured.
+        let malformed = open_signed_claims("not a proof", || Err(Status::failed_precondition("keys unavailable")))
+            .expect_err("envelope");
+        assert_eq!(malformed.code(), tonic::Code::PermissionDenied);
+        // A well-formed one reaches the key load and reports that failure.
+        let trusted = SigningKey::from_bytes(&[41_u8; 32]);
+        let good = sign(&trusted, KEY_ID, &payload(fixed_now()));
+        let unconfigured = open_signed_claims(&good, || Err(Status::failed_precondition("keys unavailable")))
+            .expect_err("keys");
+        assert_eq!(unconfigured.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[test]
+    fn a_signed_proof_for_another_run_tool_or_time_is_refused() {
+        let trusted = SigningKey::from_bytes(&[41_u8; 32]);
+        let now = fixed_now();
+        // The two halves `verify_grant_use_token` runs, with the trusted key passed in.
+        let verify = |token: &str, run_id: &str, tool_key: &str, at: DateTime<Utc>| {
+            let claims = open_signed_claims(token, || Ok(key_set(&trusted)))?;
+            check_claims(&claims, "org-1", "user-1", run_id, "space-1", tool_key, at)?;
+            Ok::<_, Status>(claims)
+        };
+        let token = sign(&trusted, KEY_ID, &payload(now));
+        verify(&token, "run-1", "mcp__srv__tool", now).expect("the call the rule was issued for");
+        for (name, run_id, tool_key, at) in [
+            ("another run", "run-2", "mcp__srv__tool", now),
+            ("another tool", "run-1", "mcp__other__tool", now),
+            ("a tool that is not an MCP tool", "run-1", "shell", now),
+            ("after it expired", "run-1", "mcp__srv__tool", now + Duration::seconds(121)),
+            ("before it was issued, beyond the skew", "run-1", "mcp__srv__tool", now - Duration::seconds(61)),
+        ] {
+            let status = verify(&token, run_id, tool_key, at).expect_err(name);
+            assert_eq!(status.code(), tonic::Code::PermissionDenied, "{name}");
+            assert_eq!(status.message(), "approval grant proof does not match this call", "{name}");
+        }
+    }
+
+    fn lazy_pool() -> Pool {
+        sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://unreachable.invalid/session")
+            .expect("lazy pool")
+    }
+
+    #[tokio::test]
+    async fn a_once_decision_is_never_refused_and_never_reads_the_row() {
+        // The pool reaches nothing, so the call would fail if it queried at all.
+        refuse_wide_scope_for_origin(&lazy_pool(), "appr_1", "org-1", "once")
+            .await
+            .expect("a once decision passes on any origin");
+    }
+
+    const TOOL_KEY: &str = "shell";
+
+    fn call_digest() -> String {
+        "ab".repeat(32)
+    }
+
+    async fn seed_thread(pool: &Pool, org: &str, user: &str, thread: &str) {
+        sqlx::query("INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)")
+            .bind(thread)
+            .bind(org)
+            .bind(user)
+            .execute(pool)
+            .await
+            .expect("seed thread");
+    }
+
+    async fn seed_plain_run(pool: &Pool, org: &str, user: &str, thread: &str, run: &str) {
+        sqlx::query("INSERT INTO runs (id, thread_id, goal, org_id, user_id) VALUES ($1, $2, 'goal', $3, $4)")
+            .bind(run)
+            .bind(thread)
+            .bind(org)
+            .bind(user)
+            .execute(pool)
+            .await
+            .expect("seed run");
+    }
+
+    async fn drop_org_rows(pool: &Pool, org: &str) {
+        for sql in [
+            "DELETE FROM approvals WHERE org_id = $1",
+            "DELETE FROM runs WHERE org_id = $1",
+            "DELETE FROM threads WHERE org_id = $1",
+        ] {
+            sqlx::query(sql).bind(org).execute(pool).await.ok();
+        }
+    }
+
+    async fn try_claim(pool: &Pool, org: &str, user: &str, run: &str, tool: &str, digest: &str) -> Option<String> {
+        claim_once(pool, org, user, run, tool, digest).await.expect("claim")
+    }
+
+    /// One org with a thread, the run that raised an approval, the run that retries the call, and
+    /// the granted once-approval of user-1 for that exact call: the row `claim_once` is meant to
+    /// find (card `resume_class` none, no continuation mode, a person's own turn).
+    struct Gate {
+        org: String,
+        thread: String,
+        retry_run: String,
+        approval: String,
+    }
+
+    impl Gate {
+        async fn seed(pool: &Pool, tag: &str) -> Self {
+            let sfx = mp_ids::new_ulid();
+            let gate = Self {
+                org: format!("org-gate-{tag}-{sfx}"),
+                thread: format!("thr-gate-{tag}-{sfx}"),
+                retry_run: format!("run-retry-{tag}-{sfx}"),
+                approval: format!("appr-gate-{tag}-{sfx}"),
+            };
+            let raised_by = format!("run-raised-{tag}-{sfx}");
+            seed_thread(pool, &gate.org, "user-1", &gate.thread).await;
+            seed_plain_run(pool, &gate.org, "user-1", &gate.thread, &raised_by).await;
+            seed_plain_run(pool, &gate.org, "user-1", &gate.thread, &gate.retry_run).await;
+            sqlx::query(
+                "INSERT INTO approvals (id, run_id, kind, status, org_id, user_id, metadata, decided_at, \
+                 tool_key, action_digest) \
+                 VALUES ($1, $2, 'tool_call', 'granted', $3, 'user-1', $4, now(), $5, $6)",
+            )
+            .bind(&gate.approval)
+            .bind(&raised_by)
+            .bind(&gate.org)
+            .bind(json!({ "card": { "resume_class": "none" } }))
+            .bind(TOOL_KEY)
+            .bind(call_digest())
+            .execute(pool)
+            .await
+            .expect("seed approval");
+            gate
+        }
+
+        async fn claim(&self, pool: &Pool) -> Option<String> {
+            try_claim(pool, &self.org, "user-1", &self.retry_run, TOOL_KEY, &call_digest()).await
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn approval_scope_two_concurrent_claim_once_calls_have_one_winner() {
+        let Some(pool) = crate::space::test_support::connect().await else {
+            return;
+        };
+        let gate = Gate::seed(&pool, "race").await;
+        let claims: Vec<_> = (0..8)
+            .map(|_| {
+                let (pool, org, run) = (pool.clone(), gate.org.clone(), gate.retry_run.clone());
+                tokio::spawn(async move { claim_once(&pool, &org, "user-1", &run, TOOL_KEY, &call_digest()).await })
+            })
+            .collect();
+        let mut winners = Vec::new();
+        for claim in claims {
+            if let Some(id) = claim.await.expect("task").expect("claim") {
+                winners.push(id);
+            }
+        }
+        assert_eq!(winners, [gate.approval.clone()], "exactly one retry spends the grant");
+        assert_eq!(gate.claim(&pool).await, None, "a spent grant is not found again");
+        let spent: bool = sqlx::query_scalar("SELECT consumed_at IS NOT NULL FROM approvals WHERE id = $1")
+            .bind(&gate.approval)
+            .fetch_one(&pool)
+            .await
+            .expect("row");
+        assert!(spent);
+        drop_org_rows(&pool, &gate.org).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn approval_scope_claim_once_needs_the_same_thread_person_tool_digest_and_org() {
+        let Some(pool) = crate::space::test_support::connect().await else {
+            return;
+        };
+        let gate = Gate::seed(&pool, "match").await;
+        let sfx = mp_ids::new_ulid();
+        // Another thread: a run of the same person on a thread of its own.
+        let (other_thread, other_run) = (format!("thr-other-{sfx}"), format!("run-other-{sfx}"));
+        seed_thread(&pool, &gate.org, "user-1", &other_thread).await;
+        seed_plain_run(&pool, &gate.org, "user-1", &other_thread, &other_run).await;
+        // Another person: their own run on the approval's thread.
+        let stranger_run = format!("run-stranger-{sfx}");
+        seed_plain_run(&pool, &gate.org, "user-2", &gate.thread, &stranger_run).await;
+
+        let digest = call_digest();
+        let org = gate.org.as_str();
+        let retry = gate.retry_run.as_str();
+        assert_eq!(try_claim(&pool, org, "user-1", &other_run, TOOL_KEY, &digest).await, None, "another thread");
+        assert_eq!(try_claim(&pool, org, "user-2", &stranger_run, TOOL_KEY, &digest).await, None, "another person");
+        assert_eq!(try_claim(&pool, org, "user-1", retry, TOOL_KEY, &"cd".repeat(32)).await, None, "another digest");
+        assert_eq!(try_claim(&pool, org, "user-1", retry, "other_tool", &digest).await, None, "another tool");
+        assert_eq!(try_claim(&pool, "another-org", "user-1", retry, TOOL_KEY, &digest).await, None, "another org");
+        assert_eq!(try_claim(&pool, org, "user-1", "run-missing", TOOL_KEY, &digest).await, None, "an unknown run");
+        // None of those spent it: the exact call does, whatever case the digest is stated in.
+        assert_eq!(
+            try_claim(&pool, org, "user-1", retry, TOOL_KEY, &digest.to_ascii_uppercase()).await,
+            Some(gate.approval.clone())
+        );
+        assert_eq!(gate.claim(&pool).await, None);
+        drop_org_rows(&pool, &gate.org).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn approval_scope_claim_once_never_spends_a_row_it_may_not() {
+        let Some(pool) = crate::space::test_support::connect().await else {
+            return;
+        };
+        // Each edit takes the baseline approval out of the retry's reach; `$1` is the approval.
+        let edits: [(&str, &str); 11] = [
+            ("expired", "UPDATE approvals SET expires_at = now() - interval '1 minute' WHERE id = $1"),
+            ("already spent", "UPDATE approvals SET consumed_at = now() WHERE id = $1"),
+            ("requested, not granted", "UPDATE approvals SET status = 'requested' WHERE id = $1"),
+            ("denied", "UPDATE approvals SET status = 'denied' WHERE id = $1"),
+            ("untrusted content", "UPDATE approvals SET kind = 'untrusted_content' WHERE id = $1"),
+            (
+                "a worker continuation",
+                r#"UPDATE approvals SET metadata = '{"card":{"resume_class":"action_continuation"}}'::jsonb WHERE id = $1"#,
+            ),
+            (
+                "a live poll",
+                r#"UPDATE approvals SET metadata = '{"card":{"resume_class":"live_poll"}}'::jsonb WHERE id = $1"#,
+            ),
+            ("no card at all", "UPDATE approvals SET metadata = '{}'::jsonb WHERE id = $1"),
+            ("a loop continuation", "UPDATE approvals SET continuation_mode = 'loop' WHERE id = $1"),
+            ("an ambient turn", "UPDATE approvals SET turn_origin = 'ambient' WHERE id = $1"),
+            (
+                "an automation run",
+                "UPDATE runs SET turn_origin = 'automation' WHERE id = (SELECT run_id FROM approvals WHERE id = $1)",
+            ),
+        ];
+        for (name, edit) in edits {
+            let gate = Gate::seed(&pool, "edit").await;
+            sqlx::query(edit)
+                .bind(&gate.approval)
+                .execute(&pool)
+                .await
+                .expect("edit the approval");
+            assert_eq!(gate.claim(&pool).await, None, "{name}");
+            drop_org_rows(&pool, &gate.org).await;
+        }
+        // The unedited baseline is spent, so the refusals above are the edits and not the setup.
+        let control = Gate::seed(&pool, "control").await;
+        assert_eq!(control.claim(&pool).await, Some(control.approval.clone()));
+        drop_org_rows(&pool, &control.org).await;
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct StoredGrant {
+        status: String,
+        decided_by: String,
+        decision_reason: String,
+        requested_by: String,
+        tool_key: Option<String>,
+        action_digest: Option<String>,
+        turn_origin: Option<String>,
+        grant_ref: Option<String>,
+        decided: bool,
+        unspent: bool,
+        decision_source: Option<String>,
+        decision_scope: Option<String>,
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn approval_scope_a_standing_rule_pass_is_recorded_granted_with_no_delivery() {
+        let Some(pool) = crate::space::test_support::connect().await else {
+            return;
+        };
+        let sfx = mp_ids::new_ulid();
+        let (org, thread, run) = (
+            format!("org-rule-{sfx}"),
+            format!("thr-rule-{sfx}"),
+            format!("run-rule-{sfx}"),
+        );
+        seed_thread(&pool, &org, "user-1", &thread).await;
+        seed_plain_run(&pool, &org, "user-1", &thread, &run).await;
+        let claims = GrantUseClaims {
+            rule_id: "rule-7".into(),
+            run_id: run.clone(),
+            org_id: org.clone(),
+            ..claims()
+        };
+        let context = validate_gate_context("mcp__srv__tool", &call_digest(), "direct", false).expect("context");
+        let metadata = json!({ "decision": standing_rule_decision(&claims.rule_id) });
+        let first_id = format!("appr-rule-{sfx}");
+        let approval = GrantedApproval {
+            id: &first_id,
+            run_id: &run,
+            kind: "tool_call",
+            requested_by: "agent-1",
+            org_id: &org,
+            user_id: "user-1",
+            idempotency_key: "idem-1",
+            metadata: &metadata,
+            expires_at: None,
+            context: &context,
+            claims: &claims,
+        };
+        let created = insert_granted_by_rule(&pool, &approval).await.expect("insert");
+        assert_eq!(created.as_deref(), Some(first_id.as_str()));
+
+        let stored: StoredGrant = sqlx::query_as(
+            "SELECT status, decided_by, decision_reason, requested_by, tool_key, action_digest, \
+             turn_origin, grant_ref, (decided_at IS NOT NULL) AS decided, (consumed_at IS NULL) AS unspent, \
+             metadata #>> '{decision,source}' AS decision_source, \
+             metadata #>> '{decision,scope}' AS decision_scope \
+             FROM approvals WHERE id = $1",
+        )
+        .bind(&first_id)
+        .fetch_one(&pool)
+        .await
+        .expect("the approval row");
+        assert_eq!(stored.status, "granted");
+        assert_eq!(stored.decided_by, "grant:rule-7");
+        assert_eq!(stored.decision_reason, "standing rule rule-7");
+        assert_eq!(stored.requested_by, "agent-1");
+        assert_eq!(stored.grant_ref.as_deref(), Some("rule-7"));
+        assert_eq!(stored.tool_key.as_deref(), Some("mcp__srv__tool"));
+        assert_eq!(stored.action_digest.as_deref(), Some(call_digest().as_str()));
+        assert_eq!(stored.turn_origin.as_deref(), Some("direct"));
+        assert!(stored.decided && stored.unspent);
+        assert_eq!(stored.decision_source.as_deref(), Some("standing_grant"));
+        assert_eq!(stored.decision_scope.as_deref(), Some("once"));
+        let deliveries: i64 = sqlx::query_scalar("SELECT count(*) FROM approval_delivery_outbox WHERE approval_id = $1")
+            .bind(&first_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(deliveries, 0, "a pass carries no descriptor, so no worker is queued");
+
+        // The same step again (same idempotency key) writes nothing and says so.
+        let second_id = format!("appr-rule-again-{sfx}");
+        let again = GrantedApproval { id: &second_id, ..approval };
+        assert_eq!(insert_granted_by_rule(&pool, &again).await.expect("insert"), None);
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM approvals WHERE org_id = $1")
+            .bind(&org)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(rows, 1);
+        drop_org_rows(&pool, &org).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn approval_scope_wide_decisions_are_refused_only_on_turns_nobody_watched() {
+        let Some(pool) = crate::space::test_support::connect().await else {
+            return;
+        };
+        let sfx = mp_ids::new_ulid();
+        let (org, thread, run) = (
+            format!("org-origin-{sfx}"),
+            format!("thr-origin-{sfx}"),
+            format!("run-origin-{sfx}"),
+        );
+        seed_thread(&pool, &org, "user-1", &thread).await;
+        seed_plain_run(&pool, &org, "user-1", &thread, &run).await;
+        let id = |name: &str| format!("appr-origin-{name}-{sfx}");
+        // (name, stored turn origin, a wide scope is refused)
+        let origins = [
+            ("ambient", Some("ambient"), true),
+            ("automation", Some("automation"), true),
+            ("direct", Some("direct"), false),
+            ("legacy", None, false),
+        ];
+        for (name, origin, _) in origins {
+            sqlx::query(
+                "INSERT INTO approvals (id, run_id, kind, status, org_id, user_id, turn_origin) \
+                 VALUES ($1, $2, 'tool_call', 'requested', $3, 'user-1', $4)",
+            )
+            .bind(id(name))
+            .bind(&run)
+            .bind(&org)
+            .bind(origin)
+            .execute(&pool)
+            .await
+            .expect("seed approval");
+        }
+        for scope in ["thread", "run"] {
+            for (name, _, refused) in origins {
+                let result = refuse_wide_scope_for_origin(&pool, &id(name), &org, scope).await;
+                if refused {
+                    let status = result.expect_err("a wide scope on a turn nobody watched");
+                    assert_eq!(status.code(), tonic::Code::PermissionDenied, "{name} {scope}");
+                    assert_eq!(status.message(), SCOPE_NOT_PERMITTED, "{name} {scope}");
+                    assert_eq!(
+                        status
+                            .metadata()
+                            .get(ERROR_CODE_TRAILER)
+                            .and_then(|value| value.to_str().ok()),
+                        Some(SCOPE_NOT_PERMITTED),
+                        "{name} {scope}"
+                    );
+                } else {
+                    result.unwrap_or_else(|status| panic!("{name} {scope} passes: {status:?}"));
+                }
+            }
+        }
+        // A once decision passes on every origin, and an approval that is not found passes too.
+        for (name, _, _) in origins {
+            refuse_wide_scope_for_origin(&pool, &id(name), &org, "once")
+                .await
+                .expect("once passes");
+        }
+        refuse_wide_scope_for_origin(&pool, "appr-unknown", &org, "thread")
+            .await
+            .expect("an unknown approval passes");
+        drop_org_rows(&pool, &org).await;
     }
 }

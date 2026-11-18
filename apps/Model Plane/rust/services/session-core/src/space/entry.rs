@@ -302,3 +302,612 @@ pub(crate) fn entry_from_stored(stored: &Value) -> Option<pb::MessageEntry> {
     check_entry(&entry, None).ok()?;
     Some(entry)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone as _;
+
+    const URL_REFUSED: &str = "entry link preview url must be an http or https link without credentials";
+    const FINAL_URL_REFUSED: &str = "entry link preview final_url must be an http or https link without credentials";
+
+    fn now() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 11, 1, 12, 0, 0).single().expect("test time")
+    }
+
+    fn stamp(at: DateTime<Utc>) -> prost_types::Timestamp {
+        prost_types::Timestamp {
+            seconds: at.timestamp(),
+            nanos: i32::try_from(at.timestamp_subsec_nanos()).unwrap_or(0),
+        }
+    }
+
+    /// A valid preview of `url`, fetched a minute before [`now`].
+    fn preview(url: &str) -> pb::LinkPreview {
+        pb::LinkPreview {
+            url: url.to_owned(),
+            final_url: String::new(),
+            host: String::new(),
+            title: "A title".to_owned(),
+            description: "A description".to_owned(),
+            site_name: "Example".to_owned(),
+            fetched_at: Some(stamp(now() - Duration::minutes(1))),
+        }
+    }
+
+    fn entry_of(previews: Vec<pb::LinkPreview>) -> pb::MessageEntry {
+        pb::MessageEntry {
+            kind: KIND_LINK_PREVIEWS.to_owned(),
+            version: 1,
+            link_previews: previews,
+            agent_card: None,
+        }
+    }
+
+    fn accepted(preview: pb::LinkPreview) -> Value {
+        validate_entry(&entry_of(vec![preview]), now()).expect("the entry must be accepted")
+    }
+
+    fn refusal_of(entry: &pb::MessageEntry) -> &'static str {
+        validate_entry(entry, now()).expect_err("the entry must be refused")
+    }
+
+    fn refusal(preview: pb::LinkPreview) -> &'static str {
+        refusal_of(&entry_of(vec![preview]))
+    }
+
+    // ---- validate_entry: the write rule -----------------------------------------------------
+
+    #[test]
+    fn a_valid_entry_is_stored_with_its_host_recomputed_and_its_time_in_microseconds() {
+        let mut sent = preview("https://Example.COM/a/b?q=1#frag");
+        sent.host = "client-sent.example".to_owned();
+        assert_eq!(
+            accepted(sent),
+            json!({
+                "kind": "link_previews",
+                "version": 1,
+                "link_previews": [{
+                    "url": "https://Example.COM/a/b?q=1#frag",
+                    "final_url": "https://Example.COM/a/b?q=1#frag",
+                    "host": "example.com",
+                    "title": "A title",
+                    "description": "A description",
+                    "site_name": "Example",
+                    "fetched_at": "2026-11-01T11:59:00.000000Z",
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn one_to_three_previews_are_accepted_and_zero_or_four_or_more_are_refused() {
+        for count in [1_usize, 2, 3] {
+            let previews = (0..count).map(|n| preview(&format!("https://example.com/{n}"))).collect();
+            let stored = validate_entry(&entry_of(previews), now()).expect("accepted");
+            assert_eq!(stored["link_previews"].as_array().map(Vec::len), Some(count), "{count} previews");
+        }
+        for count in [0_usize, 4, 10] {
+            let previews = (0..count).map(|n| preview(&format!("https://example.com/{n}"))).collect();
+            assert_eq!(
+                refusal_of(&entry_of(previews)),
+                "entry carries one to three link previews",
+                "{count} previews"
+            );
+        }
+        // Every preview is held to the rules, not only the first.
+        let previews = vec![
+            preview("https://example.com/1"),
+            preview("https://example.com/2"),
+            preview("ftp://example.com/3"),
+        ];
+        assert_eq!(refusal_of(&entry_of(previews)), URL_REFUSED);
+    }
+
+    #[test]
+    fn only_the_link_previews_kind_at_version_one_is_a_human_entry() {
+        for kind in ["", "agent_card", "link_preview", "LINK_PREVIEWS", " link_previews", "poll"] {
+            let mut entry = entry_of(vec![preview("https://example.com/")]);
+            entry.kind = kind.to_owned();
+            assert_eq!(refusal_of(&entry), "entry kind is not supported", "kind {kind:?}");
+        }
+        for version in [0, 2, 3, u32::MAX] {
+            let mut entry = entry_of(vec![preview("https://example.com/")]);
+            entry.version = version;
+            assert_eq!(refusal_of(&entry), "entry version is not supported", "version {version}");
+        }
+    }
+
+    #[test]
+    fn a_human_post_can_never_carry_an_agent_card() {
+        let card = pb::AgentCard {
+            title: "Done".to_owned(),
+            tone: "done".to_owned(),
+            fields: Vec::new(),
+        };
+        let entry = pb::MessageEntry {
+            kind: KIND_AGENT_CARD.to_owned(),
+            version: AGENT_CARD_VERSION,
+            link_previews: Vec::new(),
+            agent_card: Some(card),
+        };
+        assert_eq!(refusal_of(&entry), "entry kind is not supported");
+        // Link previews riding along under the card's kind do not make it a human entry either.
+        let mut with_previews = entry.clone();
+        with_previews.link_previews = vec![preview("https://example.com/")];
+        assert_eq!(refusal_of(&with_previews), "entry kind is not supported");
+    }
+
+    #[test]
+    fn only_http_and_https_links_are_accepted_whatever_the_case() {
+        for url in [
+            "ftp://example.com/x",
+            "javascript:alert(1)",
+            "data:text/html,hi",
+            "file:///etc/passwd",
+            "mailto:a@b.example",
+            "//example.com/x",
+            "example.com/x",
+            "httpx://example.com",
+            "https:/example.com",
+            "https//example.com",
+            "",
+            "   ",
+        ] {
+            assert_eq!(refusal(preview(url)), URL_REFUSED, "{url:?}");
+        }
+        for (url, host) in [
+            ("http://example.com", "example.com"),
+            ("https://example.com", "example.com"),
+            ("HTTP://EXAMPLE.COM/x", "example.com"),
+            ("Https://Example.com:8443/x?y=1#z", "example.com"),
+            ("https://sub.example.co.uk/path", "sub.example.co.uk"),
+            ("https://[::1]:8080/x", "[::1]"),
+            ("https://example.com?x=a@b", "example.com"),
+            ("https://example.com/path@x", "example.com"),
+            ("https://example.com#a@b", "example.com"),
+        ] {
+            let stored = accepted(preview(url));
+            assert_eq!(stored["link_previews"][0]["host"], host, "{url:?}");
+        }
+    }
+
+    #[test]
+    fn a_link_with_userinfo_is_refused_and_the_refusal_never_repeats_it() {
+        for url in [
+            "https://user:pass@example.com/",
+            "https://user@example.com",
+            "http://@example.com",
+            "https://a:b@[::1]/",
+            "https://example.com\\@evil.example/",
+            "https://evil.example\\.example.com/",
+        ] {
+            assert_eq!(refusal(preview(url)), URL_REFUSED, "{url:?}");
+        }
+        let message = refusal(preview("https://user:CANARY-SECRET@example.com/"));
+        assert!(!message.contains("CANARY"), "the refusal is a closed sentence: {message}");
+    }
+
+    #[test]
+    fn a_link_without_a_host_is_refused() {
+        for url in [
+            "https://",
+            "http://",
+            "https:///path",
+            "http://:80/",
+            "https://?q=1",
+            "https://#frag",
+            "https://[]/",
+            "https://[/",
+        ] {
+            assert_eq!(refusal(preview(url)), URL_REFUSED, "{url:?}");
+        }
+    }
+
+    #[test]
+    fn a_link_is_at_most_2048_bytes() {
+        let stem = "https://example.com/";
+        let at_cap = format!("{stem}{}", "a".repeat(MAX_URL_BYTES - stem.len()));
+        assert_eq!(at_cap.len(), MAX_URL_BYTES);
+        accepted(preview(&at_cap));
+        let over = format!("{at_cap}a");
+        assert_eq!(refusal(preview(&over)), URL_REFUSED);
+        // The final URL is held to the same cap, with its own sentence.
+        let mut long_final = preview("https://example.com/");
+        long_final.final_url = over;
+        assert_eq!(refusal(long_final), FINAL_URL_REFUSED);
+    }
+
+    #[test]
+    fn a_link_with_whitespace_or_a_control_character_inside_is_refused_but_the_ends_are_trimmed() {
+        for url in [
+            "https://exa mple.com/",
+            "https://example.com/a b",
+            "https://example.com/\tx",
+            "https://example.com/\nx",
+            "https://example.com/\u{0}",
+            "https://example.com/\u{7f}",
+            "https://example.com/\u{a0}x",
+            "https://example.com/\u{2003}x",
+        ] {
+            assert_eq!(refusal(preview(url)), URL_REFUSED, "{url:?}");
+        }
+        let stored = accepted(preview(" \thttps://example.com/ok\t "));
+        assert_eq!(stored["link_previews"][0]["url"], "https://example.com/ok");
+    }
+
+    #[test]
+    fn the_host_is_recomputed_from_the_final_url_and_a_client_host_is_ignored() {
+        let mut moved = preview("https://short.example/a");
+        moved.final_url = "  https://Final.Example.ORG:8443/landing  ".to_owned();
+        moved.host = "evil.example".to_owned();
+        let stored = accepted(moved);
+        let first = &stored["link_previews"][0];
+        assert_eq!(first["host"], "final.example.org");
+        assert_eq!(first["url"], "https://short.example/a");
+        assert_eq!(first["final_url"], "https://Final.Example.ORG:8443/landing");
+
+        // A blank final URL means the URL itself.
+        let mut blank = preview("https://Short.Example/a");
+        blank.final_url = "   ".to_owned();
+        blank.host = "evil.example".to_owned();
+        let stored = accepted(blank);
+        let first = &stored["link_previews"][0];
+        assert_eq!(first["host"], "short.example");
+        assert_eq!(first["final_url"], "https://Short.Example/a");
+
+        // A final URL that is not an acceptable link is refused with its own sentence.
+        for final_url in ["ftp://final.example/", "https://user:pw@final.example/", "javascript:alert(1)", "final.example"] {
+            let mut bad = preview("https://short.example/a");
+            bad.final_url = final_url.to_owned();
+            assert_eq!(refusal(bad), FINAL_URL_REFUSED, "{final_url:?}");
+        }
+    }
+
+    #[test]
+    fn title_description_and_site_name_are_capped_at_200_400_and_80_characters() {
+        let cases: [(&str, usize, &str); 3] = [
+            ("title", MAX_TITLE_CHARS, "entry link preview title is too long"),
+            ("description", MAX_DESCRIPTION_CHARS, "entry link preview description is too long"),
+            ("site_name", MAX_SITE_NAME_CHARS, "entry link preview site_name is too long"),
+        ];
+        assert_eq!((MAX_TITLE_CHARS, MAX_DESCRIPTION_CHARS, MAX_SITE_NAME_CHARS), (200, 400, 80));
+        for (field, max, message) in cases {
+            let set = |preview: &mut pb::LinkPreview, text: String| match field {
+                "title" => preview.title = text,
+                "description" => preview.description = text,
+                _ => preview.site_name = text,
+            };
+            // Characters are counted, not bytes: the cap holds for two-byte letters too.
+            let mut at_cap = preview("https://example.com/");
+            set(&mut at_cap, "\u{e9}".repeat(max));
+            accepted(at_cap);
+            let mut over = preview("https://example.com/");
+            set(&mut over, "\u{e9}".repeat(max + 1));
+            assert_eq!(refusal(over), message, "{field} over {max}");
+        }
+    }
+
+    #[test]
+    fn control_characters_are_removed_before_the_length_rule_and_the_ends_are_trimmed() {
+        let mut messy = preview("https://example.com/");
+        messy.title = "  He\u{0}llo\nWor\tld\u{7}  ".to_owned();
+        messy.description = "\u{1b}[31mred\u{1b}[0m".to_owned();
+        messy.site_name = "\r\nSite\r\n".to_owned();
+        let stored = accepted(messy);
+        let first = &stored["link_previews"][0];
+        assert_eq!(first["title"], "HelloWorld", "control characters are removed, not replaced");
+        assert_eq!(first["description"], "[31mred[0m");
+        assert_eq!(first["site_name"], "Site");
+
+        // Removed characters do not count toward the cap.
+        let mut padded = preview("https://example.com/");
+        padded.title = format!("{}{}", "a".repeat(MAX_TITLE_CHARS), "\u{0}".repeat(50));
+        let stored = accepted(padded);
+        assert_eq!(stored["link_previews"][0]["title"].as_str().map(str::len), Some(MAX_TITLE_CHARS));
+
+        // Inner spaces are kept as written.
+        let mut spaced = preview("https://example.com/");
+        spaced.title = "Two  words".to_owned();
+        assert_eq!(accepted(spaced)["link_previews"][0]["title"], "Two  words");
+    }
+
+    #[test]
+    fn fetched_at_is_required_and_may_be_at_most_five_minutes_ahead() {
+        let mut missing = preview("https://example.com/");
+        missing.fetched_at = None;
+        assert_eq!(refusal(missing), "entry link preview fetched_at is required");
+
+        // A negative nanosecond field is not a time.
+        let mut bad_nanos = preview("https://example.com/");
+        bad_nanos.fetched_at = Some(prost_types::Timestamp { seconds: now().timestamp(), nanos: -1 });
+        assert_eq!(refusal(bad_nanos), "entry link preview fetched_at is required");
+
+        // Five minutes of clock skew between planes is allowed, one second more is not.
+        let mut edge = preview("https://example.com/");
+        edge.fetched_at = Some(stamp(now() + Duration::minutes(5)));
+        accepted(edge);
+        let mut future = preview("https://example.com/");
+        future.fetched_at = Some(stamp(now() + Duration::minutes(5) + Duration::seconds(1)));
+        assert_eq!(refusal(future), "entry link preview fetched_at is in the future");
+
+        // The past has no limit.
+        let mut old = preview("https://example.com/");
+        old.fetched_at = Some(stamp(now() - Duration::days(3650)));
+        accepted(old);
+    }
+
+    // ---- entry_from_stored: the read rule ---------------------------------------------------
+
+    fn stored_entry() -> Value {
+        accepted(preview("https://Example.com/a"))
+    }
+
+    /// The stored entry with `field` of its first preview replaced by `value`.
+    fn with_first(field: &str, value: Value) -> Value {
+        let mut stored = stored_entry();
+        stored["link_previews"][0][field] = value;
+        stored
+    }
+
+    #[test]
+    fn a_stored_entry_reads_back_as_the_typed_entry() {
+        let mut sent = preview("https://short.example/a");
+        sent.final_url = "https://final.example/b".to_owned();
+        sent.host = "ignored.example".to_owned();
+        let read = entry_from_stored(&accepted(sent)).expect("a stored entry reads back");
+        assert_eq!((read.kind.as_str(), read.version), ("link_previews", 1));
+        assert!(read.agent_card.is_none());
+        assert_eq!(read.link_previews.len(), 1);
+        let first = &read.link_previews[0];
+        assert_eq!(first.url, "https://short.example/a");
+        assert_eq!(first.final_url, "https://final.example/b");
+        assert_eq!(first.host, "final.example");
+        assert_eq!(first.title, "A title");
+        assert_eq!(first.description, "A description");
+        assert_eq!(first.site_name, "Example");
+        assert_eq!(first.fetched_at, Some(stamp(now() - Duration::minutes(1))));
+    }
+
+    #[test]
+    fn an_unknown_kind_or_a_newer_version_reads_as_kind_and_version_only() {
+        assert_eq!(
+            entry_from_stored(&json!({"kind": "poll", "version": 3, "options": ["secret one", "secret two"]})),
+            Some(pb::MessageEntry {
+                kind: "poll".to_owned(),
+                version: 3,
+                link_previews: Vec::new(),
+                agent_card: None,
+            }),
+            "the payload of an unknown kind never leaves the column"
+        );
+        // A newer version of a known kind is neutral too: this build cannot vouch for its payload.
+        let newer = json!({
+            "kind": "link_previews",
+            "version": 2,
+            "link_previews": [{"url": "https://example.com/", "title": "secret"}],
+        });
+        assert_eq!(
+            entry_from_stored(&newer),
+            Some(pb::MessageEntry {
+                kind: "link_previews".to_owned(),
+                version: 2,
+                link_previews: Vec::new(),
+                agent_card: None,
+            })
+        );
+        let zero = entry_from_stored(&json!({"kind": "link_previews", "version": 0})).expect("neutral");
+        assert_eq!((zero.kind.as_str(), zero.version, zero.link_previews.len()), ("link_previews", 0, 0));
+    }
+
+    #[test]
+    fn an_unknown_kind_is_echoed_only_when_it_is_a_short_lowercase_word() {
+        let longest = "a".repeat(MAX_UNKNOWN_KIND_CHARS);
+        for kind in ["a", "poll", "poll_2", "x9", longest.as_str()] {
+            let read = entry_from_stored(&json!({"kind": kind, "version": 1})).expect(kind);
+            assert_eq!(read.kind, kind);
+        }
+        let too_long = "a".repeat(MAX_UNKNOWN_KIND_CHARS + 1);
+        for kind in ["", "Poll", "po ll", "poll!", "poll-x", "p\u{f6}ll", too_long.as_str()] {
+            assert_eq!(entry_from_stored(&json!({"kind": kind, "version": 1})), None, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_value_this_writer_could_not_have_stored_reads_as_nothing() {
+        let four: Vec<Value> = (0..4)
+            .map(|n| {
+                let mut one = stored_entry()["link_previews"][0].clone();
+                one["url"] = json!(format!("https://example.com/{n}"));
+                one
+            })
+            .collect();
+        let long_title = "t".repeat(MAX_TITLE_CHARS + 1);
+        let cases: Vec<(&str, Value)> = vec![
+            ("a string", json!("link_previews")),
+            ("null", Value::Null),
+            ("an array", json!([])),
+            ("no kind", json!({"version": 1})),
+            ("a kind that is not text", json!({"kind": 5, "version": 1})),
+            ("no version", json!({"kind": "poll"})),
+            ("a version that is not a number", json!({"kind": "poll", "version": "1"})),
+            ("a negative version", json!({"kind": "poll", "version": -1})),
+            ("a version beyond u32", json!({"kind": "poll", "version": 4_294_967_296_u64})),
+            ("previews missing", json!({"kind": "link_previews", "version": 1})),
+            ("previews that are not an array", json!({"kind": "link_previews", "version": 1, "link_previews": "x"})),
+            ("an empty list of previews", json!({"kind": "link_previews", "version": 1, "link_previews": []})),
+            ("four previews", json!({"kind": "link_previews", "version": 1, "link_previews": four})),
+            ("a preview that is not an object", json!({"kind": "link_previews", "version": 1, "link_previews": ["x"]})),
+            ("a preview without fetched_at", with_first("fetched_at", Value::Null)),
+            ("a preview with an unparseable fetched_at", with_first("fetched_at", json!("yesterday"))),
+            ("a preview with a non-http url", with_first("url", json!("javascript:alert(1)"))),
+            ("a preview with credentials in its url", with_first("url", json!("https://u:p@example.com/"))),
+            ("a preview whose final_url has credentials", with_first("final_url", json!("https://u:p@example.com/"))),
+            ("a preview with an over-long title", with_first("title", json!(long_title))),
+        ];
+        for (why, stored) in cases {
+            assert_eq!(entry_from_stored(&stored), None, "{why}");
+        }
+    }
+
+    #[test]
+    fn the_read_side_has_no_clock_rule() {
+        // A preview fetched "in the future" by this process's clock still reads: the clock rule is a write rule.
+        let read = entry_from_stored(&with_first("fetched_at", json!("2999-01-01T00:00:00Z"))).expect("reads");
+        assert_eq!(read.link_previews.len(), 1);
+    }
+
+    // ---- WS18-S7: the agent card ------------------------------------------------------------
+
+    #[test]
+    fn plain_card_text_refuses_blank_over_long_control_and_link_text() {
+        // (case, text, min, max, multiline, plain)
+        let table: Vec<(&str, String, usize, usize, bool, bool)> = vec![
+            ("ordinary text", "Build finished".to_owned(), 1, 120, false, true),
+            ("exactly the minimum", "ab".to_owned(), 2, 120, false, true),
+            ("under the minimum", "a".to_owned(), 2, 120, false, false),
+            ("exactly the maximum", "a".repeat(120), 1, 120, false, true),
+            ("over the maximum", "a".repeat(121), 1, 120, false, false),
+            ("the maximum counts characters, not bytes", "\u{e9}".repeat(120), 1, 120, false, true),
+            ("one character over in multi-byte text", "\u{e9}".repeat(121), 1, 120, false, false),
+            ("empty", String::new(), 1, 120, false, false),
+            ("only spaces", "    ".to_owned(), 1, 120, false, false),
+            ("only line breaks in a body", "\n\n".to_owned(), 1, 2000, true, false),
+            ("a tab", "a\tb".to_owned(), 1, 120, false, false),
+            ("a bell", "a\u{7}b".to_owned(), 1, 120, false, false),
+            ("a NUL", "a\u{0}b".to_owned(), 1, 120, false, false),
+            ("an escape", "\u{1b}[31mred".to_owned(), 1, 120, false, false),
+            ("a next-line control", "a\u{85}b".to_owned(), 1, 120, false, false),
+            ("a line break in a title", "a\nb".to_owned(), 1, 120, false, false),
+            ("a line break in a body", "line one\nline two".to_owned(), 1, 2000, true, true),
+            ("a carriage return in a body", "line one\r\nline two".to_owned(), 1, 2000, true, false),
+            ("a NUL in a body", "a\u{0}b".to_owned(), 1, 2000, true, false),
+            ("a tab in a body", "a\tb".to_owned(), 1, 2000, true, false),
+            ("a scheme link", "see https://example.com".to_owned(), 1, 120, false, false),
+            ("a scheme link in capitals", "see HTTP://EXAMPLE.COM".to_owned(), 1, 120, false, false),
+            ("any scheme link", "ftp://host".to_owned(), 1, 120, false, false),
+            ("a www link", "see www.example.com".to_owned(), 1, 120, false, false),
+            ("a www link in capitals", "WWW.Example.com".to_owned(), 1, 120, false, false),
+            ("a www link inside a word", "awww.x".to_owned(), 1, 120, false, false),
+            ("a link on the second line of a body", "first\nsee https://example.com".to_owned(), 1, 2000, true, false),
+            ("www without a dot", "www is fine".to_owned(), 1, 120, false, true),
+            ("a colon and slashes that are not a scheme", "ratio 3/4: done // ok".to_owned(), 1, 120, false, true),
+        ];
+        for (case, text, min, max, multiline, plain) in table {
+            assert_eq!(plain_card_text(&text, min, max, multiline), plain, "{case}: {text:?}");
+        }
+    }
+
+    fn card_fields(fields: &[(&str, &str)]) -> Vec<(String, String)> {
+        fields.iter().map(|(label, value)| ((*label).to_owned(), (*value).to_owned())).collect()
+    }
+
+    #[test]
+    fn an_agent_card_round_trips_through_its_stored_json() {
+        let fields = card_fields(&[("Branch", "main"), ("Tests", "42 passed")]);
+        let stored = agent_card_json("Build finished", "done", &fields);
+        assert_eq!(
+            stored,
+            json!({
+                "kind": "agent_card",
+                "version": 1,
+                "title": "Build finished",
+                "tone": "done",
+                "fields": [
+                    {"label": "Branch", "value": "main"},
+                    {"label": "Tests", "value": "42 passed"},
+                ],
+            })
+        );
+        assert_eq!(
+            entry_from_stored(&stored),
+            Some(pb::MessageEntry {
+                kind: "agent_card".to_owned(),
+                version: 1,
+                link_previews: Vec::new(),
+                agent_card: Some(pb::AgentCard {
+                    title: "Build finished".to_owned(),
+                    tone: "done".to_owned(),
+                    fields: vec![
+                        pb::AgentCardField { label: "Branch".to_owned(), value: "main".to_owned() },
+                        pb::AgentCardField { label: "Tests".to_owned(), value: "42 passed".to_owned() },
+                    ],
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn every_tone_and_the_largest_card_survive_the_round_trip() {
+        assert_eq!(CARD_TONES, ["info", "progress", "done", "blocked"]);
+        for tone in CARD_TONES {
+            let read = entry_from_stored(&agent_card_json("T", tone, &[])).expect("reads");
+            let card = read.agent_card.expect("a card with no fields");
+            assert_eq!((card.title.as_str(), card.tone.as_str(), card.fields.len()), ("T", tone, 0));
+        }
+        // The largest card the write rules admit: 8 fields, a 120 character title, 40 and 200 character parts.
+        let fields: Vec<(String, String)> = (0..CARD_FIELDS_MAX)
+            .map(|_| ("l".repeat(CARD_FIELD_LABEL_MAX_CHARS), "v".repeat(CARD_FIELD_VALUE_MAX_CHARS)))
+            .collect();
+        let title = "t".repeat(CARD_TITLE_MAX_CHARS);
+        let read = entry_from_stored(&agent_card_json(&title, "blocked", &fields)).expect("reads");
+        let card = read.agent_card.expect("the largest card still reads");
+        assert_eq!((card.title.chars().count(), card.fields.len()), (CARD_TITLE_MAX_CHARS, CARD_FIELDS_MAX));
+    }
+
+    #[test]
+    fn a_bad_card_payload_or_a_newer_version_reads_as_kind_and_version_only() {
+        let nine: Vec<Value> = (1..=9).map(|n| json!({"label": format!("L{n}"), "value": "v"})).collect();
+        let card = |title: Value, tone: Value, fields: Value| {
+            json!({"kind": "agent_card", "version": 1, "title": title, "tone": tone, "fields": fields})
+        };
+        let cases: Vec<(&str, Value, u32)> = vec![
+            ("a tone outside the closed set", card(json!("T"), json!("urgent"), json!([])), 1),
+            ("a tone in capitals", card(json!("T"), json!("INFO"), json!([])), 1),
+            ("a blank title", card(json!("   "), json!("info"), json!([])), 1),
+            ("a title with a link", card(json!("see https://example.com"), json!("info"), json!([])), 1),
+            ("a title with a control character", card(json!("a\u{7}b"), json!("info"), json!([])), 1),
+            ("a title over 120 characters", card(json!("t".repeat(CARD_TITLE_MAX_CHARS + 1)), json!("info"), json!([])), 1),
+            ("a title that is not text", card(json!(7), json!("info"), json!([])), 1),
+            ("fields that are not an array", card(json!("T"), json!("info"), json!("x")), 1),
+            ("nine fields", card(json!("T"), json!("info"), json!(nine)), 1),
+            ("a field without a value", card(json!("T"), json!("info"), json!([{"label": "L"}])), 1),
+            ("a field with a blank label", card(json!("T"), json!("info"), json!([{"label": " ", "value": "v"}])), 1),
+            (
+                "a field label over 40 characters",
+                card(json!("T"), json!("info"), json!([{"label": "l".repeat(CARD_FIELD_LABEL_MAX_CHARS + 1), "value": "v"}])),
+                1,
+            ),
+            (
+                "a field value over 200 characters",
+                card(json!("T"), json!("info"), json!([{"label": "L", "value": "v".repeat(CARD_FIELD_VALUE_MAX_CHARS + 1)}])),
+                1,
+            ),
+            (
+                "a field value with a link",
+                card(json!("T"), json!("info"), json!([{"label": "L", "value": "www.example.com"}])),
+                1,
+            ),
+            ("a field that is not an object", card(json!("T"), json!("info"), json!(["x"])), 1),
+            ("no title at all", json!({"kind": "agent_card", "version": 1, "tone": "info", "fields": []}), 1),
+            ("no tone at all", json!({"kind": "agent_card", "version": 1, "title": "T", "fields": []}), 1),
+            ("no fields at all", json!({"kind": "agent_card", "version": 1, "title": "T", "tone": "info"}), 1),
+            (
+                "a newer version carries no payload",
+                json!({"kind": "agent_card", "version": 2, "title": "T", "tone": "info", "fields": []}),
+                2,
+            ),
+            (
+                "version zero carries no payload",
+                json!({"kind": "agent_card", "version": 0, "title": "T", "tone": "info", "fields": []}),
+                0,
+            ),
+        ];
+        for (why, stored, version) in cases {
+            let read = entry_from_stored(&stored).unwrap_or_else(|| panic!("{why}: the kind and version are kept"));
+            assert_eq!((read.kind.as_str(), read.version), ("agent_card", version), "{why}");
+            assert!(read.agent_card.is_none(), "{why}: no payload");
+            assert!(read.link_previews.is_empty(), "{why}");
+        }
+    }
+}

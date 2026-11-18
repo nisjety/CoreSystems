@@ -408,3 +408,294 @@ pub(crate) async fn list_space_timeline(
         total_posts,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::VerifiedIdentity;
+    use crate::grpc::space_w1_tests::{mint, StreamKeysEnv, DECISION_REF};
+    use crate::space::test_support::{clean_space, connect, seed_space_message, seed_space_thread};
+    use chrono::TimeZone as _;
+    use serde_json::json;
+
+    // ---- pure ---------------------------------------------------------------------------------
+
+    fn row(title_source: &str, pinned_source: &str) -> TimelineRow {
+        TimelineRow {
+            id: "thread-1".to_owned(),
+            created_at: chrono::Utc.with_ymd_and_hms(2026, 11, 1, 12, 0, 0).single().expect("time"),
+            title: Some("A post".to_owned()),
+            preview: Some("The newest words".to_owned()),
+            pinned_at: None,
+            last_activity_at: chrono::Utc.with_ymd_and_hms(2026, 11, 1, 12, 5, 0).single().expect("time"),
+            last_message_seq: 42,
+            turn_count: 3,
+            last_role: Some("assistant".to_owned()),
+            last_author_subject_id: Some("user-2".to_owned()),
+            recent_author_subject_ids: vec!["user-2".to_owned(), "user-1".to_owned()],
+            owner_subject_id: "user-1".to_owned(),
+            origin: "space".to_owned(),
+            persona_enabled: true,
+            latest_run_id: Some("run-1".to_owned()),
+            latest_run_status: Some("completed".to_owned()),
+            latest_run_updated_at: None,
+            reply_count: Some(2),
+            title_source: title_source.to_owned(),
+            pinned_source: pinned_source.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_summary_carries_the_title_and_pin_provenance_as_stored() {
+        for (title_source, pinned_source) in [("owner", "owner"), ("agent", "owner"), ("owner", "agent"), ("agent", "agent")] {
+            let summary = summary_from_row(row(title_source, pinned_source), "space-1");
+            assert_eq!(
+                (summary.title_source.as_str(), summary.pinned_source.as_str()),
+                (title_source, pinned_source)
+            );
+        }
+        // The rest of the row maps across, and the internal session key never does.
+        let summary = summary_from_row(row("owner", "owner"), "space-1");
+        assert_eq!(summary.thread_id, "thread-1");
+        assert_eq!(summary.session_key, "");
+        assert_eq!(summary.space_id, "space-1");
+        assert_eq!(summary.last_message_seq, 42);
+        assert_eq!(summary.turn_count, 3);
+        assert_eq!(summary.reply_count, 2);
+        assert_eq!(summary.last_role, "assistant");
+        assert_eq!(summary.recent_author_subject_ids, ["user-2", "user-1"]);
+        assert!(!summary.pinned, "no pinned_at, not pinned");
+        let mut pinned = row("owner", "agent");
+        pinned.pinned_at = Some(chrono::Utc::now());
+        assert!(summary_from_row(pinned, "space-1").pinned);
+    }
+
+    fn request(limit: u32, before_seq: u64, after_seq: u64) -> pb::ListSpaceTimelineRequest {
+        pb::ListSpaceTimelineRequest { limit, before_seq, after_seq, ..Default::default() }
+    }
+
+    #[test]
+    fn the_window_defaults_clamps_and_refuses_combined_or_out_of_range_cursors() {
+        let default = window_from(&request(0, 0, 0)).expect("defaults");
+        assert_eq!(default, Window { limit: i64::from(DEFAULT_LIMIT), before: None, after: None });
+        assert!(default.is_first_page());
+        assert_eq!(window_from(&request(1, 0, 0)).expect("one").limit, 1);
+        assert_eq!(window_from(&request(MAX_LIMIT, 0, 0)).expect("the most").limit, i64::from(MAX_LIMIT));
+        assert_eq!(window_from(&request(u32::MAX, 0, 0)).expect("clamped").limit, i64::from(MAX_LIMIT));
+        let before = window_from(&request(5, 7, 0)).expect("before");
+        assert_eq!((before.before, before.after, before.is_first_page()), (Some(7), None, false));
+        let after = window_from(&request(5, 0, 9)).expect("after");
+        assert_eq!((after.before, after.after, after.is_first_page()), (None, Some(9), false));
+        for (why, bad) in [
+            ("both cursors", request(5, 7, 9)),
+            ("a before cursor beyond i64", request(5, u64::MAX, 0)),
+            ("an after cursor beyond i64", request(5, 0, u64::MAX)),
+        ] {
+            let status = window_from(&bad).expect_err(why);
+            assert_eq!(status.code(), tonic::Code::InvalidArgument, "{why}");
+        }
+    }
+
+    #[test]
+    fn refresh_ids_are_non_empty_bounded_deduplicated_and_at_most_thirty() {
+        assert_eq!(refresh_ids(&[]).expect("none"), Vec::<String>::new());
+        let named = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+        assert_eq!(refresh_ids(&named(&["a", "b", "a", "c", "b"])).expect("deduplicated"), named(&["a", "b", "c"]));
+        for bad in [named(&["a", ""]), vec!["x".repeat(MAX_THREAD_ID_BYTES + 1)]] {
+            assert_eq!(refresh_ids(&bad).expect_err("an invalid id").code(), tonic::Code::InvalidArgument);
+        }
+        assert_eq!(refresh_ids(&["x".repeat(MAX_THREAD_ID_BYTES)]).expect("at the id cap").len(), 1);
+        let many = |count: usize| (0..count).map(|n| format!("thread-{n}")).collect::<Vec<_>>();
+        assert_eq!(refresh_ids(&many(MAX_REFRESH_IDS)).expect("at the cap").len(), MAX_REFRESH_IDS);
+        assert_eq!(refresh_ids(&many(MAX_REFRESH_IDS + 1)).expect_err("over the cap").code(), tonic::Code::InvalidArgument);
+        // Duplicates are collapsed before the count, so thirty distinct ids may be sent twice over.
+        let doubled: Vec<String> = many(MAX_REFRESH_IDS).into_iter().chain(many(MAX_REFRESH_IDS)).collect();
+        assert_eq!(refresh_ids(&doubled).expect("deduplicated first").len(), MAX_REFRESH_IDS);
+    }
+
+    // ---- real Postgres (every test is `#[ignore]`d) -----------------------------------------
+    //
+    // `cargo test -p session-core --bin session-core space::timeline -- --ignored --test-threads=1`
+    // with `DATABASE_URL` pointing at a disposable Postgres whose database name contains `test`.
+
+    const NEEDS_DB: &str = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)";
+    const OWNER: &str = "owner-1";
+    const VIEWER: &str = "viewer-1";
+    /// The decision's audience ceiling; every seeded thread and message is stamped at revision 1.
+    const CEILING: i64 = 4;
+
+    fn read_token(org: &str, user: &str, space: &str) -> String {
+        mint(
+            crate::grpc::CONTROL_SPACE_DECISION_AUDIENCE,
+            &["thread:read"],
+            false,
+            |claims| {
+                claims["org_id"] = json!(org);
+                claims["subject_id"] = json!(user);
+                claims["space_ref"] = json!(space);
+                claims["recipient_audience_revision"] = json!(CEILING);
+                claims["issued_at"] = json!(chrono::Utc::now().to_rfc3339());
+                claims["expires_at"] = json!((chrono::Utc::now() + chrono::Duration::minutes(2)).to_rfc3339());
+            },
+            false,
+        )
+    }
+
+    async fn timeline(
+        pool: &PgPool,
+        org: &str,
+        space: &str,
+        edit: impl FnOnce(&mut pb::ListSpaceTimelineRequest),
+    ) -> pb::ListSpaceTimelineResponse {
+        let mut message = pb::ListSpaceTimelineRequest {
+            org_id: org.to_owned(),
+            space_id: space.to_owned(),
+            space_read_decision_ref: DECISION_REF.to_owned(),
+            space_read_decision_token: read_token(org, VIEWER, space),
+            ..Default::default()
+        };
+        edit(&mut message);
+        let mut request = Request::new(message);
+        request.extensions_mut().insert(VerifiedIdentity::user_for_test(org, VIEWER));
+        list_space_timeline(pool, true, request).await.expect("the timeline answers").into_inner()
+    }
+
+    /// A Space thread with one user message, so it has a summary and is listed.
+    async fn post(pool: &PgPool, org: &str, space: &str, thread: &str) {
+        seed_space_thread(pool, org, space, thread, OWNER).await;
+        seed_space_message(pool, space, thread, &format!("first-{thread}"), "user", Some(OWNER)).await;
+    }
+
+    fn ids_of(answer_rows: &[pb::ThreadSummary]) -> Vec<&str> {
+        answer_rows.iter().map(|summary| summary.thread_id.as_str()).collect()
+    }
+
+    fn sources(rows: &[pb::ThreadSummary], thread: &str) -> (String, String) {
+        let summary = rows
+            .iter()
+            .find(|summary| summary.thread_id == thread)
+            .unwrap_or_else(|| panic!("{thread} is not among {:?}", ids_of(rows)));
+        (summary.title_source.clone(), summary.pinned_source.clone())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn list_space_timeline_returns_title_source_and_pinned_source_on_posts_pinned_and_refreshed_rows() {
+        let Some(pool) = connect().await else { return };
+        let _keys = StreamKeysEnv::publish();
+        let suffix = mp_ids::new_ulid();
+        let (org, space) = (format!("org-ts-{suffix}"), format!("space-ts-{suffix}"));
+        let untouched = format!("thread-untouched-{suffix}");
+        let renamed = format!("thread-renamed-{suffix}");
+        let agent_pinned = format!("thread-agent-pinned-{suffix}");
+        let owner_pinned = format!("thread-owner-pinned-{suffix}");
+        for thread in [&untouched, &renamed, &agent_pinned, &owner_pinned] {
+            post(&pool, &org, &space, thread).await;
+        }
+        sqlx::query("UPDATE threads SET presentation_title = 'Agent title', title_source = 'agent' WHERE id = $1")
+            .bind(&renamed)
+            .execute(&pool)
+            .await
+            .expect("an agent renames a thread");
+        sqlx::query("UPDATE threads SET pinned_at = now(), pinned_source = 'agent' WHERE id = $1")
+            .bind(&agent_pinned)
+            .execute(&pool)
+            .await
+            .expect("an agent pins a thread");
+        sqlx::query("UPDATE threads SET pinned_at = now() WHERE id = $1")
+            .bind(&owner_pinned)
+            .execute(&pool)
+            .await
+            .expect("the owner pins a thread");
+
+        let answer = timeline(&pool, &org, &space, |request| {
+            request.include_pinned = true;
+            request.refresh_thread_ids = vec![renamed.clone(), agent_pinned.clone()];
+        })
+        .await;
+
+        // The window: an untouched thread reads owner for both, a renamed one agent for the title only.
+        let owner = || "owner".to_owned();
+        let agent = || "agent".to_owned();
+        assert_eq!(sources(&answer.posts, &untouched), (owner(), owner()), "{NEEDS_DB}");
+        assert_eq!(sources(&answer.posts, &renamed), (agent(), owner()));
+        assert_eq!(sources(&answer.posts, &agent_pinned), (owner(), agent()));
+        assert_eq!(sources(&answer.posts, &owner_pinned), (owner(), owner()));
+        // The pinned shelf carries the same provenance.
+        assert_eq!(answer.pinned.len(), 2, "{:?}", ids_of(&answer.pinned));
+        assert_eq!(sources(&answer.pinned, &agent_pinned), (owner(), agent()));
+        assert_eq!(sources(&answer.pinned, &owner_pinned), (owner(), owner()));
+        // So do the refreshed rows.
+        assert_eq!(answer.refreshed.len(), 2, "{:?}", ids_of(&answer.refreshed));
+        assert_eq!(sources(&answer.refreshed, &renamed), (agent(), owner()));
+        assert_eq!(sources(&answer.refreshed, &agent_pinned), (owner(), agent()));
+        clean_space(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn window_orders_by_last_message_seq_and_has_more_probe() {
+        let Some(pool) = connect().await else { return };
+        let _keys = StreamKeysEnv::publish();
+        let suffix = mp_ids::new_ulid();
+        let (org, space) = (format!("org-tw-{suffix}"), format!("space-tw-{suffix}"));
+        let threads: Vec<String> = (1..=5).map(|n| format!("thread-{n}-{suffix}")).collect();
+        for thread in &threads {
+            post(&pool, &org, &space, thread).await;
+        }
+        // A reply bumps the first post to the newest end (bump-on-reply).
+        seed_space_message(&pool, &space, &threads[0], &format!("reply-{suffix}"), "assistant", None).await;
+        let (t1, t2, t3, t4, t5) = (&threads[0], &threads[1], &threads[2], &threads[3], &threads[4]);
+
+        // The newest page: newest last_message_seq first, with the one-row probe saying more exists.
+        let first = timeline(&pool, &org, &space, |request| request.limit = 2).await;
+        assert_eq!(ids_of(&first.posts), [t1.as_str(), t5.as_str()], "{NEEDS_DB}");
+        assert!(first.has_more, "a third row exists past the page of two");
+        assert_eq!(first.total_posts, 5, "the count is answered on the first page");
+        assert_eq!(first.newest_seq, first.posts[0].last_message_seq);
+        assert_eq!(first.oldest_seq, first.posts[1].last_message_seq);
+        assert!(first.newest_seq > first.oldest_seq);
+
+        // before_seq keyset: strictly older than the cursor, same order, no overlap and no skip.
+        let second = timeline(&pool, &org, &space, |request| {
+            request.limit = 2;
+            request.before_seq = first.oldest_seq;
+        })
+        .await;
+        assert_eq!(ids_of(&second.posts), [t4.as_str(), t3.as_str()]);
+        assert!(second.has_more);
+        assert_eq!(second.total_posts, 0, "the count is first page only");
+        let third = timeline(&pool, &org, &space, |request| {
+            request.limit = 2;
+            request.before_seq = second.oldest_seq;
+        })
+        .await;
+        assert_eq!(ids_of(&third.posts), [t2.as_str()]);
+        assert!(!third.has_more, "the last page has no probe row");
+
+        // A page exactly as long as the list has no more.
+        let all = timeline(&pool, &org, &space, |request| request.limit = 5).await;
+        assert_eq!(ids_of(&all.posts), [t1.as_str(), t5.as_str(), t4.as_str(), t3.as_str(), t2.as_str()]);
+        assert!(!all.has_more);
+
+        // after_seq: the nearest newer rows are read oldest first and answered newest first.
+        let t3_seq = second.posts[1].last_message_seq;
+        let newer = timeline(&pool, &org, &space, |request| {
+            request.limit = 2;
+            request.after_seq = t3_seq;
+        })
+        .await;
+        assert_eq!(ids_of(&newer.posts), [t5.as_str(), t4.as_str()], "the two nearest newer, newest first");
+        assert!(newer.has_more, "t1 is newer still");
+        assert_eq!(newer.total_posts, 0);
+        let t4_seq = second.posts[0].last_message_seq;
+        let newest = timeline(&pool, &org, &space, |request| {
+            request.limit = 10;
+            request.after_seq = t4_seq;
+        })
+        .await;
+        assert_eq!(ids_of(&newest.posts), [t1.as_str(), t5.as_str()]);
+        assert!(!newest.has_more);
+        clean_space(&pool, &org, &space).await;
+    }
+}

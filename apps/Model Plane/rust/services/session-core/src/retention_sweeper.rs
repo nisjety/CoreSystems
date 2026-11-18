@@ -169,6 +169,7 @@ pub(crate) const THREAD_BOUND_TABLES: &[&str] = &[
     "thread_goals",
     "thread_share_snapshots",
     "research_runs",
+    "run_thread_action_receipts",
 ];
 
 /// What the switch asks for.

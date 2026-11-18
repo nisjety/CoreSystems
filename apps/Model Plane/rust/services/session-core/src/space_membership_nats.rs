@@ -354,4 +354,195 @@ mod tests {
             "an active=true event must clear the revocation row, not leave it in place"
         );
     }
+
+    /// W3-DEC-ORDER: a stale `active=true` delivered after a newer removal must not reopen the
+    /// room the removal closed; the stored ordering stays at the removal's revision.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn a_stale_active_true_delivered_after_a_newer_removal_leaves_the_revocation_in_place() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+
+        let sfx = format!("{}-{}", std::process::id(), mp_ids::new_ulid());
+        let (space_ref, org_id, subject_id) = (
+            format!("smn-stale-space-{sfx}"),
+            format!("smn-stale-org-{sfx}"),
+            format!("smn-stale-subject-{sfx}"),
+        );
+
+        apply_membership_change(
+            &pool,
+            &MembershipChangedEvent {
+                space_ref: space_ref.clone(),
+                org_id: org_id.clone(),
+                subject_id: subject_id.clone(),
+                active: false,
+                space_seq: Some(2),
+            },
+        )
+        .await
+        .expect("removal at space_seq 2");
+
+        // A reordered, stale active=true at space_seq 1 (older than the stored 2) must change
+        // nothing: the revocation row stays and the stored ordering does not move backwards.
+        apply_membership_change(
+            &pool,
+            &MembershipChangedEvent {
+                space_ref: space_ref.clone(),
+                org_id: org_id.clone(),
+                subject_id: subject_id.clone(),
+                active: true,
+                space_seq: Some(1),
+            },
+        )
+        .await
+        .expect("stale fact is a no-op, not an error");
+
+        let (still_revoked,): (bool,) = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM space_membership_revocations WHERE space_ref = $1 AND subject_id = $2)",
+        )
+        .bind(&space_ref)
+        .bind(&subject_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read revocation row");
+        assert!(still_revoked, "a stale re-add must not clear a newer removal's revocation");
+
+        let stored_seq: Option<i64> = sqlx::query_scalar(
+            "SELECT space_seq FROM space_membership_fact_order WHERE space_ref = $1 AND subject_id = $2",
+        )
+        .bind(&space_ref)
+        .bind(&subject_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read stored ordering");
+        assert_eq!(stored_seq, Some(2), "the stale fact must not move the stored ordering");
+    }
+
+    /// W3-DEC-ORDER: a repeat delivery at the same `space_seq` as the one already stored is also a
+    /// no-op (the consumer skips a fact no newer than the stored one, not only a strictly older one).
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn a_repeat_fact_at_the_same_space_seq_writes_no_revocation_row() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+
+        let sfx = format!("{}-{}", std::process::id(), mp_ids::new_ulid());
+        let (space_ref, org_id, subject_id) = (
+            format!("smn-repeat-space-{sfx}"),
+            format!("smn-repeat-org-{sfx}"),
+            format!("smn-repeat-subject-{sfx}"),
+        );
+
+        // A clear (active=true) at space_seq 3 with nothing stored yet: applies and advances.
+        apply_membership_change(
+            &pool,
+            &MembershipChangedEvent {
+                space_ref: space_ref.clone(),
+                org_id: org_id.clone(),
+                subject_id: subject_id.clone(),
+                active: true,
+                space_seq: Some(3),
+            },
+        )
+        .await
+        .expect("first clear at space_seq 3");
+
+        // A repeat of the exact same fact (redelivery) must not re-run the write path in a way
+        // that would matter: active=true writes no revocation row either way, so assert the
+        // ordering itself did not move past 3 (it has nothing newer to move to).
+        apply_membership_change(
+            &pool,
+            &MembershipChangedEvent {
+                space_ref: space_ref.clone(),
+                org_id: org_id.clone(),
+                subject_id: subject_id.clone(),
+                active: true,
+                space_seq: Some(3),
+            },
+        )
+        .await
+        .expect("repeat fact is a no-op, not an error");
+
+        let stored_seq: Option<i64> = sqlx::query_scalar(
+            "SELECT space_seq FROM space_membership_fact_order WHERE space_ref = $1 AND subject_id = $2",
+        )
+        .bind(&space_ref)
+        .bind(&subject_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read stored ordering");
+        assert_eq!(stored_seq, Some(3), "a repeat at the stored revision does not move it");
+
+        let (revoked,): (bool,) = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM space_membership_revocations WHERE space_ref = $1 AND subject_id = $2)",
+        )
+        .bind(&space_ref)
+        .bind(&subject_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read revocation row");
+        assert!(!revoked, "active=true, repeated or not, must never leave a revocation row");
+    }
+
+    /// W3-DEC-ORDER: a fact with no `space_seq` (an older producer) applies unordered, exactly as it
+    /// did before this slice, and leaves `space_membership_fact_order` untouched for that subject.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn a_fact_without_space_seq_applies_unordered_and_leaves_the_order_table_untouched() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+
+        let sfx = format!("{}-{}", std::process::id(), mp_ids::new_ulid());
+        let (space_ref, org_id, subject_id) = (
+            format!("smn-unordered-space-{sfx}"),
+            format!("smn-unordered-org-{sfx}"),
+            format!("smn-unordered-subject-{sfx}"),
+        );
+
+        apply_membership_change(
+            &pool,
+            &MembershipChangedEvent {
+                space_ref: space_ref.clone(),
+                org_id: org_id.clone(),
+                subject_id: subject_id.clone(),
+                active: false,
+                space_seq: None,
+            },
+        )
+        .await
+        .expect("unordered revoke");
+
+        let (revoked,): (bool,) = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM space_membership_revocations WHERE space_ref = $1 AND subject_id = $2)",
+        )
+        .bind(&space_ref)
+        .bind(&subject_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read revocation row");
+        assert!(revoked, "an unordered fact still applies its revocation, as before this slice");
+
+        let stored_seq: Option<i64> = sqlx::query_scalar(
+            "SELECT space_seq FROM space_membership_fact_order WHERE space_ref = $1 AND subject_id = $2",
+        )
+        .bind(&space_ref)
+        .bind(&subject_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read stored ordering");
+        assert_eq!(stored_seq, None, "a fact with no space_seq never writes the ordering table");
+    }
 }

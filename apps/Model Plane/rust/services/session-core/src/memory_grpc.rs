@@ -3939,4 +3939,400 @@ mod tests {
             assert_eq!(trailer(&failed), None);
         }
     }
+
+    /// W3-DEC-KIND / W3-DEC-NOTES: `restore_verdict` (the pure rule over a withheld row's linked
+    /// threads) and `verify_space_kind_evidence` (the Control claim that lets `restore_verdict`
+    /// stamp a NULL-kind thread as the caller's personal Space).
+    mod restore_space_kind {
+        use super::*;
+        use crate::grpc::space_w1_tests::{signing_key, StreamKeysEnv, KEY_ID};
+        use ed25519_dalek::Signer as _;
+
+        fn thread(id: &str, space_id: Option<&str>, space_kind: Option<&str>) -> LinkedThread {
+            LinkedThread {
+                id: id.to_owned(),
+                space_id: space_id.map(str::to_owned),
+                space_kind: space_kind.map(str::to_owned),
+            }
+        }
+
+        // ---- restore_verdict (WS17 D9 base table, extended by W3-DEC-KIND) ------------------------
+
+        #[test]
+        fn a_personal_space_less_or_recorded_personal_thread_is_allowed() {
+            let personal_space_thread = thread("t-a", Some("space-a"), Some("personal"));
+            assert_eq!(
+                restore_verdict(&["t-a".to_owned()], &[personal_space_thread], None),
+                Ok(vec![]),
+                "a thread already stamped personal needs no claim"
+            );
+            let space_less = thread("t-b", None, None);
+            assert_eq!(
+                restore_verdict(&["t-b".to_owned()], &[space_less], None),
+                Ok(vec![]),
+                "a thread outside any Space is allowed"
+            );
+        }
+
+        #[test]
+        fn a_room_kind_is_refused_even_with_an_attestation_for_that_space() {
+            let room = thread("t-room", Some("space-a"), Some("room"));
+            assert_eq!(
+                restore_verdict(&["t-room".to_owned()], &[room], Some("space-a")),
+                Err(RestoreRefusal::ThreadIsSharedRoom),
+                "a claim never overrides a recorded non-personal kind"
+            );
+        }
+
+        #[test]
+        fn a_null_kind_thread_is_unknown_without_a_matching_attestation_and_stamped_with_one() {
+            assert_eq!(
+                restore_verdict(&["t-null".to_owned()], &[thread("t-null", Some("space-a"), None)], None),
+                Err(RestoreRefusal::ThreadKindUnknown),
+                "no attestation leaves a NULL-kind thread unknown"
+            );
+            assert_eq!(
+                restore_verdict(
+                    &["t-null".to_owned()],
+                    &[thread("t-null", Some("space-a"), None)],
+                    Some("space-b")
+                ),
+                Err(RestoreRefusal::ThreadKindUnknown),
+                "a claim for another Space never attests this thread's Space"
+            );
+            assert_eq!(
+                restore_verdict(
+                    &["t-null".to_owned()],
+                    &[thread("t-null", Some("space-a"), None)],
+                    Some("space-a")
+                ),
+                Ok(vec!["t-null".to_owned()]),
+                "a claim naming this thread's own Space is returned for stamping"
+            );
+        }
+
+        #[test]
+        fn a_missing_thread_or_no_linked_thread_at_all_is_unknown() {
+            assert_eq!(
+                restore_verdict(&["t-missing".to_owned()], &[], None),
+                Err(RestoreRefusal::ThreadKindUnknown)
+            );
+            assert_eq!(restore_verdict(&[], &[], None), Err(RestoreRefusal::ThreadKindUnknown));
+        }
+
+        #[test]
+        fn a_room_among_several_linked_threads_wins_over_an_unknown_one() {
+            let room = thread("t-room", Some("space-a"), Some("room"));
+            let unknown = thread("t-unknown", Some("space-b"), None);
+            assert_eq!(
+                restore_verdict(&["t-unknown".to_owned(), "t-room".to_owned()], &[unknown, room], None),
+                Err(RestoreRefusal::ThreadIsSharedRoom)
+            );
+        }
+
+        // ---- verify_space_kind_evidence (W3-DEC-KIND) -------------------------------------------
+
+        fn now() -> DateTime<Utc> {
+            DateTime::parse_from_rfc3339("2026-11-01T00:00:00Z")
+                .expect("test time")
+                .with_timezone(&Utc)
+        }
+
+        fn kind_claims(org: &str, space: &str, subject: &str, kind: &str, now: DateTime<Utc>) -> serde_json::Value {
+            serde_json::json!({
+                "org_id": org,
+                "space_ref": space,
+                "subject_id": subject,
+                "kind": kind,
+                "issued_at": now.to_rfc3339(),
+                "expires_at": (now + chrono::Duration::minutes(2)).to_rfc3339(),
+            })
+        }
+
+        /// Signs `claims` under `key_id` with the version tag `version` and the configured test key.
+        fn signed(version: &str, key_id: &str, claims: &serde_json::Value) -> String {
+            let key_part = URL_SAFE_NO_PAD.encode(key_id.as_bytes());
+            let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).expect("claims"));
+            let signing_input = format!("{version}.{key_part}.{payload}");
+            format!(
+                "{signing_input}.{}",
+                URL_SAFE_NO_PAD.encode(signing_key().sign(signing_input.as_bytes()).to_bytes())
+            )
+        }
+
+        fn kind_token(claims: &serde_json::Value) -> String {
+            signed(SPACE_KIND_EVIDENCE_VERSION, KEY_ID, claims)
+        }
+
+        #[test]
+        fn a_valid_claim_signed_with_the_configured_key_is_accepted() {
+            let _keys = StreamKeysEnv::publish();
+            let token = kind_token(&kind_claims("org-1", "space-a", "user-1", "personal", now()));
+            assert_eq!(
+                verify_space_kind_evidence(&token, "org-1", "user-1", now()),
+                Ok("space-a".to_owned())
+            );
+        }
+
+        #[test]
+        fn a_decision_version_token_is_refused_as_malformed() {
+            let _keys = StreamKeysEnv::publish();
+            // A different envelope tag than "space-kind-v1" (as a Control Space decision carries):
+            // it must never verify as a kind claim.
+            let token = signed(
+                "model-plane-space-decision-v1",
+                KEY_ID,
+                &kind_claims("org-1", "space-a", "user-1", "personal", now()),
+            );
+            assert_eq!(verify_space_kind_evidence(&token, "org-1", "user-1", now()), Err("malformed"));
+        }
+
+        #[test]
+        fn a_tampered_payload_fails_the_signature() {
+            let _keys = StreamKeysEnv::publish();
+            let token = kind_token(&kind_claims("org-1", "space-a", "user-1", "personal", now()));
+            let mut parts: Vec<String> = token.split('.').map(str::to_owned).collect();
+            parts[2] = URL_SAFE_NO_PAD.encode(
+                serde_json::to_vec(&kind_claims("org-1", "space-a", "user-1", "room", now())).expect("claims"),
+            );
+            assert_eq!(
+                verify_space_kind_evidence(&parts.join("."), "org-1", "user-1", now()),
+                Err("bad_signature")
+            );
+        }
+
+        #[test]
+        fn an_unknown_key_id_is_refused() {
+            let _keys = StreamKeysEnv::publish();
+            let token = signed(
+                SPACE_KIND_EVIDENCE_VERSION,
+                "some-other-key",
+                &kind_claims("org-1", "space-a", "user-1", "personal", now()),
+            );
+            assert_eq!(verify_space_kind_evidence(&token, "org-1", "user-1", now()), Err("untrusted_key"));
+        }
+
+        #[test]
+        fn a_wrong_org_or_subject_is_refused() {
+            let _keys = StreamKeysEnv::publish();
+            let token = kind_token(&kind_claims("org-1", "space-a", "user-1", "personal", now()));
+            assert_eq!(verify_space_kind_evidence(&token, "org-2", "user-1", now()), Err("wrong_subject"));
+            assert_eq!(verify_space_kind_evidence(&token, "org-1", "user-2", now()), Err("wrong_subject"));
+        }
+
+        #[test]
+        fn kind_room_is_refused_as_not_personal() {
+            let _keys = StreamKeysEnv::publish();
+            let token = kind_token(&kind_claims("org-1", "space-a", "user-1", "room", now()));
+            assert_eq!(verify_space_kind_evidence(&token, "org-1", "user-1", now()), Err("not_personal"));
+        }
+
+        #[test]
+        fn an_expired_claim_and_one_issued_in_the_future_are_both_refused_as_expired() {
+            let _keys = StreamKeysEnv::publish();
+            let mut expired = kind_claims("org-1", "space-a", "user-1", "personal", now());
+            expired["expires_at"] = serde_json::json!(now().to_rfc3339());
+            let token = kind_token(&expired);
+            assert_eq!(verify_space_kind_evidence(&token, "org-1", "user-1", now()), Err("expired"));
+
+            let mut future = kind_claims("org-1", "space-a", "user-1", "personal", now());
+            future["issued_at"] = serde_json::json!((now() + chrono::Duration::minutes(5)).to_rfc3339());
+            let token = kind_token(&future);
+            assert_eq!(verify_space_kind_evidence(&token, "org-1", "user-1", now()), Err("expired"));
+        }
+
+        // ---- the full restore flow (DB) ----------------------------------------------------------
+
+        fn restore_request(org: &str, user: &str, memory_id: &str, evidence: &str) -> RestoreMemoryRequest {
+            RestoreMemoryRequest {
+                org_id: org.to_owned(),
+                user_id: user.to_owned(),
+                memory_id: memory_id.to_owned(),
+                space_kind_evidence: evidence.to_owned(),
+            }
+        }
+
+        async fn seed_withheld_row(pool: &PgPool, org: &str, owner: &str, id: &str, thread: &str) {
+            let links = vec![format!("thread:{thread}")];
+            sqlx::query(
+                "INSERT INTO agent_memory (id, org_id, owner, scope, key, content, origin_kind, source_links) \
+                 VALUES ($1, $2, $3, 'user', $1, 'withheld content', 'room_unverified', $4)",
+            )
+            .bind(id)
+            .bind(org)
+            .bind(owner)
+            .bind(&links)
+            .execute(pool)
+            .await
+            .expect("seed withheld row");
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+        async fn restore_memory_stamps_the_attested_space_and_refuses_a_claim_for_another_one() {
+            use crate::space::test_support::{connect, seed_space_thread};
+            let Some(pool) = connect().await else {
+                return;
+            };
+            let _keys = StreamKeysEnv::publish();
+            let org = format!("restore-kind-org-{}", mp_ids::new_ulid());
+            let (space_a, space_b) = (
+                format!("restore-kind-space-a-{}", mp_ids::new_ulid()),
+                format!("restore-kind-space-b-{}", mp_ids::new_ulid()),
+            );
+            let owner = "owner-kind-1";
+            let (thread_a, thread_b) = (
+                format!("t-kind-a-{}", mp_ids::new_ulid()),
+                format!("t-kind-b-{}", mp_ids::new_ulid()),
+            );
+            seed_space_thread(&pool, &org, &space_a, &thread_a, owner).await;
+            seed_space_thread(&pool, &org, &space_b, &thread_b, owner).await;
+            let (memory_a, memory_b) = (
+                format!("mem-kind-a-{}", mp_ids::new_ulid()),
+                format!("mem-kind-b-{}", mp_ids::new_ulid()),
+            );
+            seed_withheld_row(&pool, &org, owner, &memory_a, &thread_a).await;
+            seed_withheld_row(&pool, &org, owner, &memory_b, &thread_b).await;
+
+            let caller = || VerifiedIdentity::user_for_test(&org, owner);
+            let evidence_for_a = kind_token(&kind_claims(&org, &space_a, owner, "personal", Utc::now()));
+
+            let service = MemoryGrpc::new(pool.clone(), None);
+            let restored = service
+                .restore_memory(request(
+                    restore_request(&org, owner, &memory_a, &evidence_for_a),
+                    caller(),
+                ))
+                .await
+                .expect("an attested NULL-kind thread in the claimed Space is restored")
+                .into_inner();
+            assert!(restored.restored);
+
+            let kind_a: Option<String> = sqlx::query_scalar("SELECT space_kind FROM threads WHERE id = $1")
+                .bind(&thread_a)
+                .fetch_one(&pool)
+                .await
+                .expect("thread_a kind");
+            assert_eq!(kind_a, Some("personal".to_owned()), "the attested thread is stamped personal");
+            let origin_a: String = sqlx::query_scalar("SELECT origin_kind FROM agent_memory WHERE id = $1")
+                .bind(&memory_a)
+                .fetch_one(&pool)
+                .await
+                .expect("memory_a origin");
+            assert_eq!(origin_a, "personal");
+
+            // The same claim (for space_a) cannot restore memory_b, whose thread sits in space_b.
+            let refused = service
+                .restore_memory(request(
+                    restore_request(&org, owner, &memory_b, &evidence_for_a),
+                    caller(),
+                ))
+                .await
+                .expect_err("a claim for another Space restores nothing");
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+            let kind_b: Option<String> = sqlx::query_scalar("SELECT space_kind FROM threads WHERE id = $1")
+                .bind(&thread_b)
+                .fetch_one(&pool)
+                .await
+                .expect("thread_b kind");
+            assert_eq!(kind_b, None, "an unattested thread is never stamped");
+            let origin_b: String = sqlx::query_scalar("SELECT origin_kind FROM agent_memory WHERE id = $1")
+                .bind(&memory_b)
+                .fetch_one(&pool)
+                .await
+                .expect("memory_b origin");
+            assert_eq!(origin_b, "room_unverified", "the refused row stays withheld");
+
+            // A ZDR caller is refused before any claim is read, even one that would otherwise verify.
+            let zdr_refused = service
+                .restore_memory(request(
+                    restore_request(&org, owner, &memory_b, &evidence_for_a),
+                    VerifiedIdentity::user_for_test_with_zdr(&org, owner, true),
+                ))
+                .await
+                .expect_err("a ZDR caller is refused before any claim or row is read");
+            assert_eq!(zdr_refused.code(), tonic::Code::FailedPrecondition);
+            let origin_b_after_zdr: String = sqlx::query_scalar("SELECT origin_kind FROM agent_memory WHERE id = $1")
+                .bind(&memory_b)
+                .fetch_one(&pool)
+                .await
+                .expect("memory_b origin unchanged");
+            assert_eq!(origin_b_after_zdr, "room_unverified");
+        }
+
+        /// W3-DEC-NOTES: the base cases of `restore_withheld_row` that need no claim at all -- an
+        /// already-personal row is `not_withheld`, a room thread is `thread_is_shared_room`, and
+        /// another owner's row is `not_found` (never a different code that would leak its existence).
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+        async fn restore_memory_base_cases_need_no_claim() {
+            use crate::space::test_support::{connect, seed_space_thread};
+            let Some(pool) = connect().await else {
+                return;
+            };
+            let org = format!("restore-notes-org-{}", mp_ids::new_ulid());
+            let owner = "owner-notes-1";
+            let other_owner = "owner-notes-2";
+
+            // A personal row (origin_kind already 'personal') is not withheld.
+            let already_personal = format!("mem-notes-personal-{}", mp_ids::new_ulid());
+            sqlx::query(
+                "INSERT INTO agent_memory (id, org_id, owner, scope, key, content, origin_kind) \
+                 VALUES ($1, $2, $3, 'user', $1, 'ordinary memory', 'personal')",
+            )
+            .bind(&already_personal)
+            .bind(&org)
+            .bind(owner)
+            .execute(&pool)
+            .await
+            .expect("seed personal row");
+            let not_withheld = service_for(&pool)
+                .restore_memory(request(
+                    restore_request(&org, owner, &already_personal, ""),
+                    VerifiedIdentity::user_for_test(&org, owner),
+                ))
+                .await
+                .expect_err("an already-personal row is not withheld");
+            assert_eq!(not_withheld.message(), "memory_restore_refused:not_withheld");
+
+            // A row linked to a room thread is refused, never restored.
+            let room_space = format!("restore-notes-space-{}", mp_ids::new_ulid());
+            let room_thread = format!("t-notes-room-{}", mp_ids::new_ulid());
+            seed_space_thread(&pool, &org, &room_space, &room_thread, owner).await;
+            sqlx::query("UPDATE threads SET space_kind = 'room' WHERE id = $1")
+                .bind(&room_thread)
+                .execute(&pool)
+                .await
+                .expect("stamp room kind");
+            let room_memory = format!("mem-notes-room-{}", mp_ids::new_ulid());
+            seed_withheld_row(&pool, &org, owner, &room_memory, &room_thread).await;
+            let room_refused = service_for(&pool)
+                .restore_memory(request(
+                    restore_request(&org, owner, &room_memory, ""),
+                    VerifiedIdentity::user_for_test(&org, owner),
+                ))
+                .await
+                .expect_err("a row linked to a room thread is refused");
+            assert_eq!(room_refused.message(), "memory_restore_refused:thread_is_shared_room");
+
+            // Another owner's row: not found, the same answer a missing id would give.
+            let foreign_space = format!("restore-notes-space2-{}", mp_ids::new_ulid());
+            let foreign_thread = format!("t-notes-foreign-{}", mp_ids::new_ulid());
+            seed_space_thread(&pool, &org, &foreign_space, &foreign_thread, other_owner).await;
+            let foreign_memory = format!("mem-notes-foreign-{}", mp_ids::new_ulid());
+            seed_withheld_row(&pool, &org, other_owner, &foreign_memory, &foreign_thread).await;
+            let not_found = service_for(&pool)
+                .restore_memory(request(
+                    restore_request(&org, owner, &foreign_memory, ""),
+                    VerifiedIdentity::user_for_test(&org, owner),
+                ))
+                .await
+                .expect_err("another owner's row is not this caller's to restore");
+            assert_eq!(not_found.code(), tonic::Code::NotFound);
+        }
+
+        fn service_for(pool: &PgPool) -> MemoryGrpc {
+            MemoryGrpc::new(pool.clone(), None)
+        }
+    }
 }

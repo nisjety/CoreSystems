@@ -2036,6 +2036,94 @@ mod tests {
         assert_ne!(thread, Partition::new("org-a", None, "thread", ""));
     }
 
+    /// WS17-S3: `Partition::labelled` keeps room rows apart from personal rows and from other
+    /// Spaces, so a SUPERSEDE or EXTEND never crosses a room boundary; `Partition::new` is the
+    /// personal partition exactly as it was.
+    #[test]
+    fn labelled_partitions_separate_room_rows_by_origin_and_space() {
+        let personal = Partition::new("org-a", None, "user", "user-a");
+        assert_eq!(personal.origin_kind, "personal");
+        assert_eq!(personal.space_ref, None);
+        assert_eq!(
+            personal,
+            Partition::labelled("org-a", None, "user", "user-a", "personal", None),
+            "`new` is the personal label and no Space"
+        );
+
+        // A room row never shares a partition with a personal row of the same org, scope and owner.
+        let room_a = Partition::labelled("org-a", None, "space", "", "room", Some("space-a"));
+        let room_a_as_personal = Partition::labelled("org-a", None, "space", "", "personal", None);
+        assert_ne!(room_a, room_a_as_personal);
+        assert_ne!(
+            Partition::labelled("org-a", None, "user", "user-a", "room", Some("space-a")),
+            personal,
+            "a room label alone separates two rows that agree on org, scope and owner"
+        );
+
+        // Two rooms never share one, and neither do two origins within one Space.
+        let room_b = Partition::labelled("org-a", None, "space", "", "room", Some("space-b"));
+        assert_ne!(room_a, room_b);
+        assert_eq!(room_a, Partition::labelled("org-a", None, "space", "", "room", Some("space-a")));
+        let declassified_a = Partition::labelled("org-a", None, "space", "", "declassified", Some("space-a"));
+        assert_ne!(room_a, declassified_a, "room and declassified rows of one Space are different partitions");
+        let unverified = Partition::labelled("org-a", None, "space", "", "room_unverified", Some("space-a"));
+        assert_ne!(room_a, unverified);
+        assert_ne!(declassified_a, unverified);
+
+        // The label does not disturb the index partition: a thread-bound row still ignores its owner.
+        assert_eq!(
+            Partition::labelled("org-a", Some("thread-1"), "thread", "", "room", Some("space-a")),
+            Partition::labelled("org-a", Some("thread-1"), "thread", "someone", "room", Some("space-a")),
+        );
+        assert_ne!(
+            Partition::labelled("org-a", Some("thread-1"), "thread", "", "room", Some("space-a")),
+            Partition::labelled("org-a", Some("thread-1"), "thread", "", "room", Some("space-b")),
+        );
+    }
+
+    /// A row's own partition is its label: personal rows land where they always did, room rows by
+    /// origin and Space.
+    #[test]
+    fn a_memory_row_partitions_by_its_label() {
+        let personal = row("p1", "User prefers drafts only.", 1, &[]);
+        assert_eq!(personal.partition(), Partition::new("org-a", None, "user", "user-a"));
+
+        let mut room = row("r1", "Room prefers drafts only.", 2, &[]);
+        room.origin_kind = "room".to_owned();
+        room.space_ref = Some("space-a".to_owned());
+        assert_ne!(room.partition(), personal.partition());
+        assert_eq!(
+            room.partition(),
+            Partition::labelled("org-a", None, "user", "user-a", "room", Some("space-a"))
+        );
+
+        let mut other_space = room.clone();
+        other_space.space_ref = Some("space-b".to_owned());
+        assert_ne!(room.partition(), other_space.partition());
+    }
+
+    /// A plan serialised before the labels existed has no label fields; it reads as the personal
+    /// partition, the one `Partition::new` builds.
+    #[test]
+    fn an_older_serialised_partition_reads_as_personal() {
+        let legacy = serde_json::json!({
+            "org_id": "org-a",
+            "scope": "user",
+            "session_id": null,
+            "owner": "user-a",
+        });
+        let read: Partition = serde_json::from_value(legacy).expect("an older partition still reads");
+        assert_eq!(read, Partition::new("org-a", None, "user", "user-a"));
+        assert_eq!(read.origin_kind, "personal");
+        assert_eq!(read.space_ref, None);
+
+        // A labelled partition survives a round trip.
+        let room = Partition::labelled("org-a", None, "space", "", "room", Some("space-a"));
+        let again: Partition = serde_json::from_value(serde_json::to_value(&room).expect("serialise"))
+            .expect("round trip");
+        assert_eq!(again, room);
+    }
+
     // ---- lexical scoring ----
 
     #[test]

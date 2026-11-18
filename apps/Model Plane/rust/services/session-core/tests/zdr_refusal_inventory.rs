@@ -55,6 +55,31 @@ fn src_path(file: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(file)
 }
 
+/// The production part of `source`: everything before its first test module. A `#[cfg(test)]` on
+/// a helper function earlier in the file (as `auth.rs` has at line 381) does not end it.
+fn production_code(source: &str) -> &str {
+    const MARK: &str = "#[cfg(test)]";
+    let mut from = 0;
+    while let Some(offset) = source[from..].find(MARK) {
+        let at = from + offset;
+        let mut after = source[at + MARK.len()..].trim_start();
+        if let Some(path_attribute) = after.strip_prefix("#[path") {
+            after = path_attribute
+                .split_once(']')
+                .map_or(path_attribute, |(_, rest)| rest)
+                .trim_start();
+        }
+        if ["mod ", "pub mod ", "pub(crate) mod "]
+            .iter()
+            .any(|module| after.starts_with(module))
+        {
+            return &source[..at];
+        }
+        from = at + MARK.len();
+    }
+    source
+}
+
 #[test]
 fn every_zdr_refusal_in_session_core_carries_a_catalogue_kind() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -116,10 +141,7 @@ fn the_pre_typing_messages_are_gone_from_the_named_files() {
         ("terminalization.rs", "ZDR managed runs require a fresh metadata-only thread"),
     ] {
         let source = std::fs::read_to_string(src_path(file)).expect("a named site's file exists");
-        let code = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("split always yields a head");
+        let code = production_code(&source);
         assert!(
             !code.contains(message),
             "{file} still carries the untyped refusal text {message:?}"

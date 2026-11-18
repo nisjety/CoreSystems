@@ -1382,6 +1382,213 @@ mod tests {
         assert!(check_outbox_authority(OutboxRoute::Audit, "evt-1", &audit).is_ok());
     }
 
+    // --- WS11-S5: the Space attention route (`mp.v1.space.<space_ref>.event`) --------------------
+
+    const SPACE_EVENT_ID: &str = "space:org-1:space-abc:1:7";
+
+    /// An envelope shaped as migration 0080's trigger writes it, for the room `space_ref`.
+    fn space_event_envelope(space_ref: &str) -> serde_json::Value {
+        serde_json::json!({
+            "event_id": SPACE_EVENT_ID,
+            "event_type": "SPACE_MESSAGE_APPENDED",
+            "producer": "session-core",
+            "org_id": "org-1",
+            "resource_ref": format!("space:{space_ref}"),
+            "payload": { "space_ref": space_ref, "space_seq": 7, "kind": "message.appended" },
+            "zdr": false,
+        })
+    }
+
+    /// The Space route's verdict on an envelope that is accepted but for `edit`.
+    fn space_event_verdict(edit: impl FnOnce(&mut serde_json::Value)) -> Result<(), String> {
+        let mut envelope = space_event_envelope("space-abc");
+        edit(&mut envelope);
+        check_outbox_authority(
+            OutboxRoute::SpaceEvent {
+                space_ref: "space-abc",
+            },
+            SPACE_EVENT_ID,
+            &envelope,
+        )
+    }
+
+    #[test]
+    fn space_event_subject_is_one_token_and_authority_checked() {
+        // The classifier admits exactly one subject token between the family prefix and `.event`.
+        for space_ref in ["space-abc", "01J9ZXYZ", "s_1:2", "a-b_c", "Room9"] {
+            let subject = format!("mp.v1.space.{space_ref}.event");
+            assert_eq!(
+                classify_outbox_subject(&subject),
+                Some(OutboxRoute::SpaceEvent { space_ref }),
+                "{subject}"
+            );
+        }
+        // A ref that adds a token, a wildcard or whitespace would widen the single-token grant
+        // `mp.v1.space.*.event`, so it is refused rather than classified.
+        for subject in [
+            "mp.v1.space..event",
+            "mp.v1.space.a.b.event",
+            "mp.v1.space.*.event",
+            "mp.v1.space.>.event",
+            "mp.v1.space.a*.event",
+            "mp.v1.space.a>b.event",
+            "mp.v1.space.a b.event",
+            "mp.v1.space.a\tb.event",
+            "mp.v1.space.a\nb.event",
+            "mp.v1.space.abc.command",
+            "mp.v1.space.abc",
+            "mp.v1.space.event",
+            "mp.v1.space.",
+        ] {
+            assert_eq!(
+                classify_outbox_subject(subject),
+                None,
+                "{subject:?} must be refused"
+            );
+        }
+
+        // A matching envelope passes, whatever SPACE_ event type it carries.
+        assert!(space_event_verdict(|_| {}).is_ok());
+        for event_type in ["SPACE_RUN_STATE_CHANGED", "SPACE_THREAD_DELETED"] {
+            assert!(
+                space_event_verdict(|e| e["event_type"] = serde_json::json!(event_type)).is_ok(),
+                "{event_type}"
+            );
+        }
+
+        // Every refusal changes exactly one thing in an envelope that is otherwise accepted.
+        let refusals: [(&str, Box<dyn Fn(&mut serde_json::Value)>); 15] = [
+            (
+                "resource_ref names another room",
+                Box::new(|e| e["resource_ref"] = serde_json::json!("space:other-room")),
+            ),
+            (
+                "resource_ref names a run, not a room",
+                Box::new(|e| e["resource_ref"] = serde_json::json!("run:space-abc")),
+            ),
+            (
+                "payload.space_ref names another room",
+                Box::new(|e| e["payload"]["space_ref"] = serde_json::json!("other-room")),
+            ),
+            (
+                "payload.space_ref is absent",
+                Box::new(|e| {
+                    e["payload"]
+                        .as_object_mut()
+                        .expect("payload object")
+                        .remove("space_ref");
+                }),
+            ),
+            (
+                "event_type is not a SPACE_ event",
+                Box::new(|e| e["event_type"] = serde_json::json!("RUN_COMPLETED")),
+            ),
+            (
+                "event_type is lower case",
+                Box::new(|e| e["event_type"] = serde_json::json!("space_message_appended")),
+            ),
+            (
+                "event_type is empty",
+                Box::new(|e| e["event_type"] = serde_json::json!("")),
+            ),
+            (
+                "org_id is empty",
+                Box::new(|e| e["org_id"] = serde_json::json!("")),
+            ),
+            (
+                "org_id is absent",
+                Box::new(|e| {
+                    e.as_object_mut().expect("object").remove("org_id");
+                }),
+            ),
+            (
+                "zdr is true",
+                Box::new(|e| e["zdr"] = serde_json::json!(true)),
+            ),
+            (
+                "zdr is absent",
+                Box::new(|e| {
+                    e.as_object_mut().expect("object").remove("zdr");
+                }),
+            ),
+            (
+                "zdr is not a boolean",
+                Box::new(|e| e["zdr"] = serde_json::json!("false")),
+            ),
+            (
+                "producer is another service",
+                Box::new(|e| e["producer"] = serde_json::json!("model-gateway")),
+            ),
+            (
+                "event_id differs from the row's",
+                Box::new(|e| e["event_id"] = serde_json::json!("space:org-1:space-abc:1:8")),
+            ),
+            (
+                "producer is absent",
+                Box::new(|e| {
+                    e.as_object_mut().expect("object").remove("producer");
+                }),
+            ),
+        ];
+        for (why, edit) in &refusals {
+            assert!(
+                space_event_verdict(|e| edit(e)).is_err(),
+                "an envelope whose {why} must be refused"
+            );
+        }
+
+        // The subject and the envelope are tied: the room a row is stored under is the room its
+        // envelope names, so one room's row cannot be published under another room's subject.
+        assert!(check_outbox_authority(
+            OutboxRoute::SpaceEvent {
+                space_ref: "other-room"
+            },
+            SPACE_EVENT_ID,
+            &space_event_envelope("space-abc"),
+        )
+        .is_err());
+
+        // A Space row is published on the subject it was stored under.
+        let subject = "mp.v1.space.space-abc.event";
+        assert_eq!(
+            resolve_wire_subject(
+                OutboxRoute::SpaceEvent {
+                    space_ref: "space-abc"
+                },
+                subject,
+                &space_event_envelope("space-abc"),
+            ),
+            Ok(subject.to_owned())
+        );
+    }
+
+    #[test]
+    fn outbox_subject_class_names_a_space_event_without_the_room() {
+        assert_eq!(
+            outbox_subject_class("mp.v1.space.space-secret-42.event"),
+            "space_event"
+        );
+        // The per-class gauge loop sets every class in SUBJECT_CLASSES, so the Space class must be
+        // listed or its stuck rows would never be reported.
+        assert!(SUBJECT_CLASSES.contains(&"space_event"));
+        // The label is a fixed word: the room id never reaches a metric label or a log line.
+        assert!(!outbox_subject_class("mp.v1.space.space-secret-42.event").contains("secret"));
+        // A ref that does not classify is not counted as a Space event.
+        for subject in [
+            "mp.v1.space.a.b.event",
+            "mp.v1.space..event",
+            "mp.v1.space.*.event",
+            "mp.v1.space.a b.event",
+        ] {
+            assert_eq!(outbox_subject_class(subject), "unclassified", "{subject:?}");
+        }
+        // The other classes are unchanged by the new family.
+        assert_eq!(
+            outbox_subject_class("mp.v1.run.run-secret-42.event"),
+            "run_event"
+        );
+    }
+
     #[test]
     fn audit_outbox_retry_delay_is_bounded() {
         assert_eq!(

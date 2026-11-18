@@ -175,3 +175,494 @@ pub(crate) async fn cancel_run_as_room_manager(
         owner_user_id: row.owner_user_id,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    //! `room_stop_*` (WS09-S8). The refusals that come before the first query run against a lazy
+    //! pool nothing ever reaches; the tests that read or write rows are `#[ignore]`d and need a
+    //! disposable Postgres (`space::test_support::connect`).
+    use super::*;
+    use crate::grpc::space_w1_tests::{mint, signing_key, StreamKeysEnv, DECISION_REF, KEY_ID};
+    use crate::space::test_support;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use ed25519_dalek::Signer as _;
+    use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
+
+    /// The Control `model.run.control` payload digest over `claims`, bound to `run_id` and
+    /// `operation`. Written out here rather than called from `grpc.rs`, so the contract is pinned
+    /// from the outside: the positive control in each test fails if either side drifts.
+    fn run_control_digest(claims: &Value, run_id: &str, operation: &str) -> String {
+        let text = |key: &str| claims[key].as_str().unwrap_or_default().to_owned();
+        let mut digest = Sha256::new();
+        digest.update(b"model.run.control\0v1\0");
+        for (name, value) in [
+            ("org_id", text("org_id")),
+            ("user_id", text("subject_id")),
+            ("space_id", text("space_ref")),
+            ("space_decision_ref", text("decision_ref")),
+            ("recipient_audience_ref", text("recipient_audience_ref")),
+            ("recipient_audience_hash", text("recipient_audience_hash")),
+            ("privacy_policy_ref", text("privacy_policy_ref")),
+            ("resource_authorization_ref", text("resource_authorization_ref")),
+            ("run_id", run_id.to_owned()),
+            ("operation", operation.to_owned()),
+            ("action_schema_hash", "sha256:run-control-v1".to_owned()),
+            ("idempotency_key", text("idempotency_key")),
+        ] {
+            digest.update(name.as_bytes());
+            digest.update([0]);
+            digest.update((value.len() as u64).to_be_bytes());
+            digest.update(value.as_bytes());
+        }
+        digest.update(b"authority_revision\0");
+        digest.update(claims["authority_revision"].as_u64().expect("revision").to_be_bytes());
+        digest.update(b"recipient_audience_revision\0");
+        digest.update(
+            claims["recipient_audience_revision"]
+                .as_u64()
+                .expect("revision")
+                .to_be_bytes(),
+        );
+        format!("sha256:{:x}", digest.finalize())
+    }
+
+    /// A Control `model.run.control` decision for `user` in `space` under idempotency key `key`,
+    /// valid now for two minutes, with its digest bound to `bound` = (run id, operation). `edit`
+    /// changes a claim before the digest is computed.
+    fn control_token(
+        org: &str,
+        user: &str,
+        space: &str,
+        key: &str,
+        bound: (&str, &str),
+        edit: impl FnOnce(&mut Value),
+    ) -> String {
+        let now = Utc::now();
+        let mut claims = json!({
+            "decision_ref": DECISION_REF,
+            "org_id": org,
+            "space_ref": space,
+            "subject_id": user,
+            "service_audience": crate::grpc::CONTROL_SPACE_DECISION_AUDIENCE,
+            "action_id": "model.run.control",
+            "action_schema_hash": "sha256:run-control-v1",
+            "payload_digest": "",
+            "idempotency_key": key,
+            "recipient_audience_ref": "audience:space-room:4",
+            "recipient_audience_hash": "sha256:test-audience",
+            "privacy_policy_ref": "privacy:org-1:5",
+            "resource_authorization_ref": "control:space-room:run-control:7",
+            "purpose": "assistant_collaboration",
+            "lawful_basis": "contract",
+            "privacy_class": "internal",
+            "third_party_processing_allowed": false,
+            "retention_class": "standard",
+            "residency": "swedencentral",
+            "deletion_scope": "space",
+            "zero_data_retention": false,
+            "nonce": "nonce-1",
+            "authority_revision": 7,
+            "membership_revision": 4,
+            "privacy_revision": 5,
+            "recipient_audience_revision": 4,
+            "entitlement_revision": 3,
+            "permissions": ["run:cancel"],
+            "issued_at": now.to_rfc3339(),
+            "expires_at": (now + chrono::Duration::minutes(2)).to_rfc3339(),
+        });
+        edit(&mut claims);
+        claims["payload_digest"] = json!(run_control_digest(&claims, bound.0, bound.1));
+        let key_part = URL_SAFE_NO_PAD.encode(KEY_ID.as_bytes());
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims"));
+        let signing_input = format!(
+            "{}.{key_part}.{payload}",
+            crate::grpc::CONTROL_SPACE_DECISION_VERSION
+        );
+        let signature = signing_key().sign(signing_input.as_bytes());
+        format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(signature.to_bytes())
+        )
+    }
+
+    fn stop_request(run: &str, space: &str, key: &str, token: String) -> pb::CancelRunAsRoomManagerRequest {
+        pb::CancelRunAsRoomManagerRequest {
+            run_id: run.to_owned(),
+            space_id: space.to_owned(),
+            space_control_decision_ref: DECISION_REF.to_owned(),
+            space_control_decision_token: token,
+            idempotency_key: key.to_owned(),
+            reason: String::new(),
+        }
+    }
+
+    fn lazy_pool() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://unreachable.invalid/session")
+            .expect("lazy pool")
+    }
+
+    fn manager() -> VerifiedIdentity {
+        VerifiedIdentity::user_for_test("org-1", "manager-1")
+    }
+
+    fn assert_durable_mutation_refusal(status: &Status) {
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{status:?}");
+        assert_eq!(
+            Refusal::from_status(status),
+            Some(Refusal::DURABLE_MUTATION_FORBIDDEN),
+            "{status:?}"
+        );
+    }
+
+    /// The control every refusal below is measured against: the well-formed decision verifies for
+    /// the manager, the Space, the run and the key it was issued for.
+    fn assert_well_formed_decision_verifies() {
+        let good = control_token("org-1", "manager-1", "space-1", "stop-1", ("run-1", "cancel"), |_| {});
+        crate::grpc::verify_run_control_space_decision(
+            &good,
+            DECISION_REF,
+            "org-1",
+            "manager-1",
+            "space-1",
+            "run-1",
+            "stop-1",
+            Utc::now(),
+        )
+        .expect("a well-formed run-control decision verifies");
+    }
+
+    /// The reason on the receipt is a short closed token, never free text, so a person's words
+    /// never reach a durable event; the receipt's `acting_as` word is the one the plan names.
+    #[test]
+    fn room_stop_the_receipt_reason_is_a_closed_token_and_never_free_text() {
+        assert_eq!(ACTING_AS_ROOM_MANAGER, "room_manager");
+        assert_eq!(receipt_reason(""), "room_manager_stop");
+        assert_eq!(receipt_reason("   "), "room_manager_stop");
+        assert_eq!(receipt_reason("wrong_room"), "wrong_room");
+        assert_eq!(receipt_reason("  wrong_room  "), "wrong_room");
+        assert_eq!(receipt_reason("stop_2"), "stop_2");
+        for free_text in ["Wrong Room", "wrong-room", "this person's message said x", "ÆØÅ", "a\nb"] {
+            assert_eq!(receipt_reason(free_text), "room_manager_stop", "{free_text:?}");
+        }
+        let longest = "a".repeat(40);
+        assert_eq!(receipt_reason(&longest), longest);
+        assert_eq!(receipt_reason(&"a".repeat(41)), "room_manager_stop");
+    }
+
+    #[tokio::test]
+    async fn room_stop_a_zero_retention_credential_is_refused_with_the_durable_mutation_refusal() {
+        let zdr = VerifiedIdentity::user_for_test_with_zdr("org-1", "manager-1", true);
+        let refused = cancel_run_as_room_manager(
+            &lazy_pool(),
+            &zdr,
+            &stop_request("run-1", "space-1", "stop-1", String::new()),
+        )
+        .await
+        .expect_err("a stop writes a durable receipt, so zero retention is refused");
+        assert_durable_mutation_refusal(&refused);
+    }
+
+    #[tokio::test]
+    async fn room_stop_a_decision_with_the_zero_retention_claim_is_refused_with_the_durable_mutation_refusal() {
+        let _keys = StreamKeysEnv::publish();
+        assert_well_formed_decision_verifies();
+        let token = control_token("org-1", "manager-1", "space-1", "stop-1", ("run-1", "cancel"), |claims| {
+            claims["zero_data_retention"] = json!(true);
+        });
+        let refused = cancel_run_as_room_manager(
+            &lazy_pool(),
+            &manager(),
+            &stop_request("run-1", "space-1", "stop-1", token),
+        )
+        .await
+        .expect_err("a decision that names zero retention stops nothing");
+        assert_durable_mutation_refusal(&refused);
+    }
+
+    #[tokio::test]
+    async fn room_stop_expired_foreign_subject_wrong_run_wrong_operation_and_other_permission_decisions_are_refused()
+    {
+        let _keys = StreamKeysEnv::publish();
+        assert_well_formed_decision_verifies();
+        let now = Utc::now();
+        let minute = chrono::Duration::minutes(1);
+        let does_not_authorize = "Control Space decision does not authorize this run control";
+        let cases = [
+            (
+                "an expired decision",
+                control_token("org-1", "manager-1", "space-1", "stop-1", ("run-1", "cancel"), |claims| {
+                    claims["issued_at"] = json!((now - minute * 10).to_rfc3339());
+                    claims["expires_at"] = json!((now - minute * 5).to_rfc3339());
+                }),
+                "Control Space run-control decision is expired or incomplete",
+            ),
+            (
+                "another member's decision",
+                control_token("org-1", "someone-else", "space-1", "stop-1", ("run-1", "cancel"), |_| {}),
+                does_not_authorize,
+            ),
+            (
+                "a decision whose digest is bound to another run",
+                control_token("org-1", "manager-1", "space-1", "stop-1", ("run-other", "cancel"), |_| {}),
+                does_not_authorize,
+            ),
+            (
+                "a decision whose digest is bound to another operation",
+                control_token("org-1", "manager-1", "space-1", "stop-1", ("run-1", "delete"), |_| {}),
+                does_not_authorize,
+            ),
+            (
+                "a read decision (thread:read)",
+                mint(
+                    crate::grpc::CONTROL_SPACE_DECISION_AUDIENCE,
+                    &["thread:read"],
+                    false,
+                    |claims| {
+                        claims["org_id"] = json!("org-1");
+                        claims["subject_id"] = json!("manager-1");
+                        claims["space_ref"] = json!("space-1");
+                        claims["idempotency_key"] = json!("stop-1");
+                        claims["issued_at"] = json!(now.to_rfc3339());
+                        claims["expires_at"] = json!((now + minute * 2).to_rfc3339());
+                    },
+                    false,
+                ),
+                does_not_authorize,
+            ),
+            (
+                "a control decision that also carries a thread permission",
+                control_token("org-1", "manager-1", "space-1", "stop-1", ("run-1", "cancel"), |claims| {
+                    claims["permissions"] = json!(["run:cancel", "thread:append"]);
+                }),
+                does_not_authorize,
+            ),
+        ];
+        for (what, token, message) in cases {
+            let refused = cancel_run_as_room_manager(
+                &lazy_pool(),
+                &manager(),
+                &stop_request("run-1", "space-1", "stop-1", token),
+            )
+            .await
+            .expect_err(what);
+            assert_eq!(refused.code(), tonic::Code::PermissionDenied, "{what}");
+            assert_eq!(refused.message(), message, "{what}");
+        }
+    }
+
+    /// One Space thread with one persistent root run, in fresh org and Space ids.
+    struct Room {
+        pool: PgPool,
+        org: String,
+        space: String,
+        thread: String,
+        run: String,
+    }
+
+    async fn room(tag: &str) -> Option<Room> {
+        let pool = test_support::connect().await?;
+        let sfx = mp_ids::new_ulid();
+        let (org, space) = (format!("rs-{tag}-org-{sfx}"), format!("rs-{tag}-space-{sfx}"));
+        let (thread, run) = (format!("rs-{tag}-thread-{sfx}"), format!("rs-{tag}-run-{sfx}"));
+        test_support::seed_space_thread(&pool, &org, &space, &thread, "owner-1").await;
+        test_support::seed_space_run(&pool, &org, &space, &thread, &run, "queued", "persistent").await;
+        Some(Room {
+            pool,
+            org,
+            space,
+            thread,
+            run,
+        })
+    }
+
+    /// The manager's stop of `run`, under a decision bound to that run, in `space`.
+    async fn stop(room: &Room, org: &str, space: &str, run: &str) -> Result<pb::CancelRunAsRoomManagerResponse, Status> {
+        let token = control_token(org, "manager-1", space, "stop-1", (run, "cancel"), |_| {});
+        cancel_run_as_room_manager(
+            &room.pool,
+            &VerifiedIdentity::user_for_test(org, "manager-1"),
+            &stop_request(run, space, "stop-1", token),
+        )
+        .await
+    }
+
+    async fn status_of(pool: &PgPool, run: &str) -> String {
+        sqlx::query_scalar("SELECT status FROM runs WHERE id = $1")
+            .bind(run)
+            .fetch_one(pool)
+            .await
+            .expect("run status")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn room_stop_wrong_space_foreign_org_beyond_ceiling_and_child_run_are_not_found() {
+        let Some(room) = room("nf").await else {
+            return;
+        };
+        let _keys = StreamKeysEnv::publish();
+        // A run that is not in the decision's Space.
+        let other_space = format!("{}-other", room.space);
+        let wrong_space = stop(&room, &room.org, &other_space, &room.run)
+            .await
+            .expect_err("another Space's decision reaches no run of this one");
+        // A member of another org, holding that org's own decision.
+        let foreign_org = stop(&room, "org-elsewhere", &room.space, &room.run)
+            .await
+            .expect_err("another org reaches no run of this one");
+        // A thread whose audience is newer than the decision's ceiling (the decision is at revision 4).
+        let (late_thread, late_run) = (format!("{}-late", room.thread), format!("{}-late", room.run));
+        test_support::seed_space_thread(&room.pool, &room.org, &room.space, &late_thread, "owner-1").await;
+        test_support::seed_space_run(&room.pool, &room.org, &room.space, &late_thread, &late_run, "queued", "persistent")
+            .await;
+        sqlx::query("UPDATE threads SET recipient_audience_revision = 9 WHERE id = $1")
+            .bind(&late_thread)
+            .execute(&room.pool)
+            .await
+            .expect("a newer audience");
+        let beyond_ceiling = stop(&room, &room.org, &room.space, &late_run)
+            .await
+            .expect_err("a thread beyond the audience ceiling is not visible");
+        // A child run: only a root run is stopped through the room.
+        let child_run = format!("{}-child", room.run);
+        test_support::seed_space_run(&room.pool, &room.org, &room.space, &room.thread, &child_run, "queued", "persistent")
+            .await;
+        sqlx::query("UPDATE runs SET parent_run_id = $1 WHERE id = $2")
+            .bind(&room.run)
+            .bind(&child_run)
+            .execute(&room.pool)
+            .await
+            .expect("make it a child run");
+        let child = stop(&room, &room.org, &room.space, &child_run)
+            .await
+            .expect_err("a child run is not stopped through the room");
+
+        for (what, refused) in [
+            ("wrong space", wrong_space),
+            ("foreign org", foreign_org),
+            ("beyond the ceiling", beyond_ceiling),
+            ("child run", child),
+        ] {
+            assert_eq!(refused.code(), tonic::Code::NotFound, "{what}");
+            assert_eq!(refused.message(), "run not found", "{what}: no oracle for the run id");
+        }
+        for run in [&room.run, &late_run, &child_run] {
+            assert_eq!(status_of(&room.pool, run).await, "queued", "nothing was cancelled");
+        }
+        test_support::clean_space(&room.pool, &room.org, &room.space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn room_stop_a_revoked_member_is_refused() {
+        let Some(room) = room("rv").await else {
+            return;
+        };
+        let _keys = StreamKeysEnv::publish();
+        sqlx::query(
+            "INSERT INTO space_membership_revocations (space_ref, org_id, subject_id) VALUES ($1, $2, $3) \
+             ON CONFLICT (space_ref, subject_id) DO UPDATE SET revoked_at = NOW()",
+        )
+        .bind(&room.space)
+        .bind(&room.org)
+        .bind("manager-1")
+        .execute(&room.pool)
+        .await
+        .expect("remove the member");
+        // The decision is still inside its window, and the removed member stops nothing.
+        let refused = stop(&room, &room.org, &room.space, &room.run)
+            .await
+            .expect_err("a removed member stops nothing");
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+        assert_eq!(refused.message(), "Space membership required for this run");
+        assert_eq!(status_of(&room.pool, &room.run).await, "queued");
+
+        sqlx::query("DELETE FROM space_membership_revocations WHERE space_ref = $1")
+            .bind(&room.space)
+            .execute(&room.pool)
+            .await
+            .ok();
+        test_support::clean_space(&room.pool, &room.org, &room.space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn room_stop_zero_retention_and_waived_runs_are_refused_with_the_durable_mutation_refusal() {
+        let Some(room) = room("zr").await else {
+            return;
+        };
+        let _keys = StreamKeysEnv::publish();
+        let (zdr_run, waived_run) = (format!("{}-zdr", room.run), format!("{}-waived", room.run));
+        test_support::seed_space_run(&room.pool, &room.org, &room.space, &room.thread, &zdr_run, "queued", "zdr").await;
+        test_support::seed_space_run(&room.pool, &room.org, &room.space, &room.thread, &waived_run, "queued", "zdr_waived")
+            .await;
+        for run in [&zdr_run, &waived_run] {
+            let refused = stop(&room, &room.org, &room.space, run)
+                .await
+                .expect_err("a run that keeps no state is not stopped through the room");
+            assert_durable_mutation_refusal(&refused);
+            assert_eq!(status_of(&room.pool, run).await, "queued", "nothing was cancelled");
+        }
+        test_support::clean_space(&room.pool, &room.org, &room.space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn room_stop_a_valid_stop_cancels_once_and_records_who_stopped_it_on_whose_authority() {
+        let Some(room) = room("ok").await else {
+            return;
+        };
+        let _keys = StreamKeysEnv::publish();
+        let manager = VerifiedIdentity::user_for_test(&room.org, "manager-1");
+        let token = control_token(&room.org, "manager-1", &room.space, "stop-1", (&room.run, "cancel"), |_| {});
+        let mut request = stop_request(&room.run, &room.space, "stop-1", token);
+        request.reason = "wrong_room".to_owned();
+
+        let first = cancel_run_as_room_manager(&room.pool, &manager, &request)
+            .await
+            .expect("a manager stops the run");
+        assert!(first.cancelled);
+        assert!(!first.receipt_id.is_empty());
+        // The run owner's identity comes back so the caller can stop the owner's live producer.
+        assert_eq!(first.owner_org_id, room.org);
+        assert_eq!(first.owner_user_id, "owner-1");
+        assert_eq!(status_of(&room.pool, &room.run).await, "cancelled");
+
+        // The receipt names who stopped the run, as whom, and on which decision.
+        let payload: Value = sqlx::query_scalar("SELECT payload FROM events WHERE id = $1")
+            .bind(&first.receipt_id)
+            .fetch_one(&room.pool)
+            .await
+            .expect("the RUN_CANCELLED receipt");
+        assert_eq!(
+            payload,
+            json!({
+                "run_id": room.run,
+                "reason": "wrong_room",
+                "cancelled_by": "manager-1",
+                "acting_as": "room_manager",
+                "decision_ref": DECISION_REF,
+            })
+        );
+
+        // The same stop again changes nothing and answers the same receipt.
+        let second = cancel_run_as_room_manager(&room.pool, &manager, &request)
+            .await
+            .expect("a repeated stop is idempotent");
+        assert!(!second.cancelled);
+        assert_eq!(second.receipt_id, first.receipt_id);
+        assert_eq!(second.owner_org_id, room.org);
+        assert_eq!(second.owner_user_id, "owner-1");
+        let receipts: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE run_id = $1 AND event_type = 'RUN_CANCELLED'",
+        )
+        .bind(&room.run)
+        .fetch_one(&room.pool)
+        .await
+        .expect("count receipts");
+        assert_eq!(receipts, 1, "one receipt for one stop");
+        test_support::clean_space(&room.pool, &room.org, &room.space).await;
+    }
+}

@@ -248,3 +248,392 @@ fn record_retraction(deleted: u64, reason: &'static str, org_id: &str, space_id:
         "declassified memory retracted for a removed or demoted member"
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::space::memory_declassify::{declassify_into_room, DeclassifyInput};
+    use crate::space_membership_nats::{advance_fact_order, lock_fact_order};
+
+    // ---- parse_fact (pure, no DB) ----------------------------------------------------------------
+
+    #[test]
+    fn parse_fact_decodes_the_outbox_payload_with_and_without_role() {
+        let removal = parse_fact(
+            br#"{"space_ref":"room-1","org_id":"org-1","subject_id":"user-1","active":false}"#,
+        )
+        .expect("a removal decodes with no role field");
+        assert!(!removal.active);
+        assert_eq!(removal.role, "", "role defaults to empty for a removal");
+
+        let demotion = parse_fact(
+            br#"{"space_ref":"room-1","org_id":"org-1","subject_id":"user-1","active":true,"role":"viewer"}"#,
+        )
+        .expect("an active fact with a role decodes");
+        assert!(demotion.active);
+        assert_eq!(demotion.role, "viewer");
+    }
+
+    #[test]
+    fn parse_fact_reads_space_seq_as_absent_or_an_integer() {
+        let unordered = parse_fact(
+            br#"{"space_ref":"room-1","org_id":"org-1","subject_id":"user-1","active":false}"#,
+        )
+        .expect("a fact with no space_seq decodes");
+        assert_eq!(unordered.space_seq, None);
+
+        let ordered = parse_fact(
+            br#"{"space_ref":"room-1","org_id":"org-1","subject_id":"user-1","active":false,"space_seq":7}"#,
+        )
+        .expect("a fact with space_seq decodes");
+        assert_eq!(ordered.space_seq, Some(7));
+    }
+
+    #[test]
+    fn retraction_required_table_matches_what_the_consumer_acts_on() {
+        // The gate the consumer calls before retracting at all (re-exported from memory_declassify;
+        // the table itself is proven in that module's own tests).
+        assert!(retraction_required(false, ""));
+        assert!(retraction_required(true, "viewer"));
+        assert!(!retraction_required(true, "editor"));
+    }
+
+    // ---- DB-tier fixtures -------------------------------------------------------------------------
+
+    async fn seed_personal_memory(pool: &Pool, org: &str, owner: &str, id: &str, key: &str) {
+        sqlx::query(
+            "INSERT INTO agent_memory (id, org_id, owner, scope, key, content, kind, confidence, review_state, is_latest) \
+             VALUES ($1, $2, $3, 'user', $4, 'retract test content', 'fact', 1.0, 'accepted', true)",
+        )
+        .bind(id)
+        .bind(org)
+        .bind(owner)
+        .bind(key)
+        .execute(pool)
+        .await
+        .expect("seed personal memory");
+    }
+
+    fn digest(tag: u8) -> String {
+        format!("sha256:{}", (0..32).map(|_| format!("{tag:02x}")).collect::<String>())
+    }
+
+    async fn share(pool: &Pool, org: &str, user: &str, space: &str, source_id: &str, tag: u8, authority_revision: i64) -> String {
+        let decision_ref = format!("decision-{}", mp_ids::new_ulid());
+        declassify_into_room(
+            pool,
+            DeclassifyInput {
+                org_id: org,
+                user_id: user,
+                space_id: space,
+                source_memory_id: source_id,
+                reviewed_content: "reviewed text",
+                content_digest: &digest(tag),
+                decision_ref: &decision_ref,
+                idempotency_key: &decision_ref,
+                audience_hash: "sha256:test-audience",
+                audience_revision: 1,
+                authority_revision,
+            },
+        )
+        .await
+        .expect("share")
+        .memory_id
+    }
+
+    async fn room_row_exists(pool: &Pool, memory_id: &str) -> bool {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM agent_memory WHERE id = $1")
+            .bind(memory_id)
+            .fetch_one(pool)
+            .await
+            .expect("count room row")
+            > 0
+    }
+
+    async fn is_revoked(pool: &Pool, space: &str, subject: &str) -> bool {
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM space_membership_revocations WHERE space_ref = $1 AND subject_id = $2)",
+        )
+        .bind(space)
+        .bind(subject)
+        .fetch_one(pool)
+        .await
+        .expect("read revocation row")
+    }
+
+    async fn clean_world(pool: &Pool, org: &str, space: &str) {
+        for sql in [
+            "DELETE FROM memory_declassifications WHERE org_id = $1 AND space_ref = $2",
+            "DELETE FROM space_membership_retract_marks WHERE org_id = $1 AND space_ref = $2",
+            "DELETE FROM space_membership_revocations WHERE space_ref = $2",
+            "DELETE FROM space_membership_fact_order WHERE space_ref = $2",
+            "DELETE FROM agent_memory WHERE org_id = $1",
+        ] {
+            sqlx::query(sql).bind(org).bind(space).execute(pool).await.ok();
+        }
+    }
+
+    /// Seeds exactly what `space_membership_nats::apply_membership_change` would have committed
+    /// for one fact, through the same `lock_fact_order`/`advance_fact_order` primitives, so these
+    /// tests can set up "the membership consumer already applied this" without reaching into that
+    /// module's private event type.
+    async fn seed_membership_fact(
+        pool: &Pool,
+        space: &str,
+        org: &str,
+        subject: &str,
+        active: bool,
+        space_seq: Option<i64>,
+    ) {
+        let mut tx = pool.begin().await.expect("begin seed fact");
+        lock_fact_order(&mut tx, org, space, subject).await.expect("lock fact order");
+        if let Some(seq) = space_seq {
+            advance_fact_order(&mut tx, org, space, subject, seq).await.expect("advance fact order");
+        }
+        if active {
+            sqlx::query("DELETE FROM space_membership_revocations WHERE space_ref = $1 AND subject_id = $2")
+                .bind(space)
+                .bind(subject)
+                .execute(&mut *tx)
+                .await
+                .expect("clear revocation");
+        } else {
+            sqlx::query(
+                "INSERT INTO space_membership_revocations (space_ref, org_id, subject_id) VALUES ($1, $2, $3) \
+                 ON CONFLICT (space_ref, subject_id) DO UPDATE SET org_id = EXCLUDED.org_id, revoked_at = NOW()",
+            )
+            .bind(space)
+            .bind(org)
+            .bind(subject)
+            .execute(&mut *tx)
+            .await
+            .expect("seed revocation");
+        }
+        tx.commit().await.expect("commit seed fact");
+    }
+
+    async fn connect() -> Option<Pool> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        if !url.to_ascii_lowercase().contains("test") {
+            eprintln!("skipping: DATABASE_URL must name a *test* database");
+            return None;
+        }
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        Some(pool)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres with session-core migrations"]
+    async fn retract_if_current_on_a_removal_below_the_stored_space_seq_does_nothing() {
+        let Some(pool) = connect().await else { return };
+        let org = format!("retract-org-{}", mp_ids::new_ulid());
+        let space = format!("retract-space-{}", mp_ids::new_ulid());
+        let subject = "member-1";
+        let source = format!("mem-{}", mp_ids::new_ulid());
+        seed_personal_memory(&pool, &org, subject, &source, "pref-1").await;
+        let room_id = share(&pool, &org, subject, &space, &source, 1, 1).await;
+
+        // The membership consumer has already applied a newer fact (the re-add) at space_seq 9.
+        seed_membership_fact(&pool, &space, &org, subject, true, Some(9)).await;
+
+        // A removal fact at space_seq 3 (older than the stored 9) arrives late.
+        let fact = MembershipFact {
+            space_ref: space.clone(),
+            org_id: org.clone(),
+            subject_id: subject.to_owned(),
+            active: false,
+            role: String::new(),
+            space_seq: Some(3),
+        };
+        let deleted = retract_if_current(&pool, &fact, true).await.expect("retract_if_current");
+        // The removal is superseded for revocation purposes, but its retraction still runs against
+        // shares authorised below its own revision (3): the share at revision 1 is below it.
+        assert_eq!(deleted, 1);
+        assert!(!room_row_exists(&pool, &room_id).await, "the pre-removal share is still retracted");
+        assert!(!is_revoked(&pool, &space, subject).await, "a superseded removal must not write a revocation row");
+
+        clean_world(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres with session-core migrations"]
+    async fn a_removal_superseded_by_a_later_re_add_retracts_old_shares_and_spares_new_ones() {
+        let Some(pool) = connect().await else { return };
+        let org = format!("retract-order2-org-{}", mp_ids::new_ulid());
+        let space = format!("retract-order2-space-{}", mp_ids::new_ulid());
+        let subject = "member-2";
+        let old_source = format!("mem-old-{}", mp_ids::new_ulid());
+        let new_source = format!("mem-new-{}", mp_ids::new_ulid());
+        seed_personal_memory(&pool, &org, subject, &old_source, "pref-old").await;
+        seed_personal_memory(&pool, &org, subject, &new_source, "pref-new").await;
+
+        // A share made before the removal (authority revision 3).
+        let old_room = share(&pool, &org, subject, &space, &old_source, 2, 3).await;
+
+        // The membership consumer applies the removal (space_seq 5), then the re-add (space_seq
+        // 10), exactly as it would if both were delivered before the retraction consumer got to
+        // the removal fact at all.
+        seed_membership_fact(&pool, &space, &org, subject, false, Some(5)).await;
+        seed_membership_fact(&pool, &space, &org, subject, true, Some(10)).await;
+
+        // A share made after the re-add (authority revision 10).
+        let new_room = share(&pool, &org, subject, &space, &new_source, 3, 10).await;
+
+        // The retraction consumer finally processes the original removal fact (space_seq 5),
+        // delivered out of order relative to the re-add the membership consumer already applied.
+        let fact = MembershipFact {
+            space_ref: space.clone(),
+            org_id: org.clone(),
+            subject_id: subject.to_owned(),
+            active: false,
+            role: String::new(),
+            space_seq: Some(5),
+        };
+        let deleted = retract_if_current(&pool, &fact, true).await.expect("retract_if_current");
+        assert_eq!(deleted, 1, "only the pre-removal share (revision 3 < 5) is retracted");
+        assert!(!room_row_exists(&pool, &old_room).await, "the old share is retracted");
+        assert!(room_row_exists(&pool, &new_room).await, "the share made after the re-add survives");
+        assert!(
+            !is_revoked(&pool, &space, subject).await,
+            "the re-add already cleared the revocation; the stale removal must not reinstate it"
+        );
+
+        clean_world(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres with session-core migrations"]
+    async fn retract_while_revoked_is_a_noop_once_a_newer_fact_has_cleared_the_revocation() {
+        let Some(pool) = connect().await else { return };
+        let org = format!("retract-sweep-org-{}", mp_ids::new_ulid());
+        let space = format!("retract-sweep-space-{}", mp_ids::new_ulid());
+        let subject = "member-3";
+        let source = format!("mem-{}", mp_ids::new_ulid());
+        seed_personal_memory(&pool, &org, subject, &source, "pref-1").await;
+        let room_id = share(&pool, &org, subject, &space, &source, 4, 1).await;
+
+        seed_membership_fact(&pool, &space, &org, subject, false, Some(1)).await;
+        seed_membership_fact(&pool, &space, &org, subject, true, Some(2)).await;
+
+        // The sweep catches up on this subject after the revocation has already been cleared.
+        let outcome = retract_while_revoked(&pool, &org, &space, subject).await.expect("retract_while_revoked");
+        assert_eq!(outcome, None, "a cleared revocation means the sweep does nothing for this subject");
+        assert!(room_row_exists(&pool, &room_id).await, "the sweep must not touch a live share once cleared");
+
+        clean_world(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres with session-core migrations"]
+    async fn retract_while_revoked_deletes_the_live_shares_of_a_still_revoked_subject() {
+        let Some(pool) = connect().await else { return };
+        let org = format!("retract-sweep2-org-{}", mp_ids::new_ulid());
+        let space = format!("retract-sweep2-space-{}", mp_ids::new_ulid());
+        let subject = "member-4";
+        let source = format!("mem-{}", mp_ids::new_ulid());
+        seed_personal_memory(&pool, &org, subject, &source, "pref-1").await;
+        let room_id = share(&pool, &org, subject, &space, &source, 5, 1).await;
+
+        seed_membership_fact(&pool, &space, &org, subject, false, Some(1)).await;
+
+        let outcome = retract_while_revoked(&pool, &org, &space, subject).await.expect("retract_while_revoked");
+        assert_eq!(outcome, Some(1), "a still-revoked subject's live share is retracted");
+        assert!(!room_row_exists(&pool, &room_id).await);
+
+        clean_world(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres with session-core migrations"]
+    async fn a_demotion_retracts_live_shares_and_writes_no_revocation_row() {
+        let Some(pool) = connect().await else { return };
+        let org = format!("retract-demote-org-{}", mp_ids::new_ulid());
+        let space = format!("retract-demote-space-{}", mp_ids::new_ulid());
+        let subject = "member-5";
+        let source = format!("mem-{}", mp_ids::new_ulid());
+        seed_personal_memory(&pool, &org, subject, &source, "pref-1").await;
+        let room_id = share(&pool, &org, subject, &space, &source, 6, 1).await;
+
+        // A demotion: active=true with a role below editor, space_seq 4.
+        let fact = MembershipFact {
+            space_ref: space.clone(),
+            org_id: org.clone(),
+            subject_id: subject.to_owned(),
+            active: true,
+            role: "viewer".to_owned(),
+            space_seq: Some(4),
+        };
+        assert!(retraction_required(fact.active, &fact.role), "a viewer must be retracted");
+        let deleted = retract_if_current(&pool, &fact, false).await.expect("retract_if_current (demotion)");
+        assert_eq!(deleted, 1);
+        assert!(!room_row_exists(&pool, &room_id).await, "the demoted member's share is retracted");
+        assert!(!is_revoked(&pool, &space, subject).await, "a demotion never writes a revocation row");
+
+        clean_world(&pool, &org, &space).await;
+    }
+
+    /// W3-DEC-ORDER / W3-DEC-ORDER2: `sqlx::migrate!` reads only the top-level `migrations/` dir, so
+    /// 0132's and 0133's down scripts (`migrations/revert/`) are never applied by it and must be run
+    /// by hand; each states it is safe to run twice. Run inside an uncommitted transaction (as the
+    /// 0045 revert test does, `grpc.rs`) so this never leaves the shared test database without the
+    /// tables every other test in this file relies on.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres with session-core migrations"]
+    async fn the_0132_and_0133_down_migrations_apply_and_are_idempotent() {
+        let Some(pool) = connect().await else { return };
+        let strip = |script: &str| {
+            script
+                .lines()
+                .filter(|line| !matches!(line.trim().to_ascii_uppercase().as_str(), "BEGIN;" | "COMMIT;"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // 0133 reverts before 0132 (the later migration first): 0133 drops a column 0132 does not touch.
+        let revert_0133 = strip(include_str!(
+            "../migrations/revert/0133_declassify_retraction_order.down.sql"
+        ));
+        let revert_0132 = strip(include_str!(
+            "../migrations/revert/0132_space_membership_fact_order.down.sql"
+        ));
+
+        let mut tx = pool.begin().await.expect("begin");
+        for _ in 0..2 {
+            sqlx::raw_sql(&revert_0133).execute(&mut *tx).await.expect("0133 down applies, twice over");
+        }
+        for _ in 0..2 {
+            sqlx::raw_sql(&revert_0132).execute(&mut *tx).await.expect("0132 down applies, twice over");
+        }
+        let marks_gone: bool = sqlx::query_scalar(
+            "SELECT NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'space_membership_retract_marks')",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .expect("check marks table");
+        assert!(marks_gone, "0133's down drops space_membership_retract_marks");
+        let column_gone: bool = sqlx::query_scalar(
+            "SELECT NOT EXISTS (SELECT 1 FROM information_schema.columns \
+             WHERE table_name = 'memory_declassifications' AND column_name = 'authority_revision')",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .expect("check authority_revision column");
+        assert!(column_gone, "0133's down drops memory_declassifications.authority_revision");
+        let fact_order_gone: bool = sqlx::query_scalar(
+            "SELECT NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'space_membership_fact_order')",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .expect("check fact order table");
+        assert!(fact_order_gone, "0132's down drops space_membership_fact_order");
+        tx.rollback().await.expect("rolled back: the shared test database keeps every table");
+
+        let kept: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'space_membership_fact_order')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check fact order table after rollback");
+        assert!(kept, "the rolled-back transaction leaves the table in place for every other test");
+    }
+}

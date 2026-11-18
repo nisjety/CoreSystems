@@ -291,10 +291,10 @@ fn the_strict_parser_switches_take_true_and_nothing_else() {
     ];
     for (name, parse) in parsers {
         assert!(!parse(None), "{name}: unset is off");
-        for on in ["true", " true ", "TRUE"] {
-            assert!(parse(Some(on)), "{name}: {on:?}");
-        }
-        for off in OFF_WORDS {
+        // `mp_contracts::loop_fold::switch_from` (26e8f9dc3): the exact literal, no trimming and no
+        // case folding.
+        assert!(parse(Some("true")), "{name}: the exact literal is on");
+        for off in OFF_WORDS.into_iter().chain([" true ", "TRUE", "True", "true\n"]) {
             assert!(!parse(Some(off)), "{name}: {off:?} must leave it off");
         }
     }

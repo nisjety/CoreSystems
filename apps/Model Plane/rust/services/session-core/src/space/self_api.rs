@@ -1063,3 +1063,1176 @@ impl SpaceRunActions for SpaceRunActionsGrpc {
         probe(&caller, self.enabled).map(Response::new)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests of the decision reader, the claim binding, the argument digest and the refusals that are
+    //! answered before any row is read (no database: the pool is lazy and never connects) and, marked
+    //! `--ignored`, the real-Postgres proof of the whole call. The DB tests mint their own Control
+    //! `run-action-v1` decisions with the test key and clean up after themselves.
+
+    use super::*;
+    use crate::grpc::space_w1_tests::{signing_key, StreamKeysEnv, KEY_ID};
+    use crate::run_phase::ERROR_CODE_TRAILER;
+    use crate::space::test_support::{clean_space, connect, seed_space_run, seed_space_thread};
+    use ed25519_dalek::{Signer as _, SigningKey};
+    use mp_contracts::zdr_refusal::code as zdr_code;
+    use serde_json::{json, Value};
+
+    type Args = pb::apply_run_thread_action_request::Args;
+
+    fn trailer(status: &Status) -> Option<String> {
+        status
+            .metadata()
+            .get(ERROR_CODE_TRAILER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    }
+
+    fn lazy_pool() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://unreachable.invalid/session")
+            .expect("lazy pool")
+    }
+
+    fn registry_row(action: &str) -> sa::RegistryRow {
+        golden()
+            .expect("the golden registry loads")
+            .row(action)
+            .expect("the golden registry names the action")
+            .clone()
+    }
+
+    fn now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-11-02T10:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc)
+    }
+
+    /// The 29 claims of a decision for a rename of `thread-1` by `run-1` of `org-1`, issued ten seconds
+    /// before `now()` and valid for sixty more.
+    fn claims_json() -> Value {
+        json!({
+            "decision_ref": "decision-1",
+            "run_id": "run-1",
+            "thread_id": "thread-1",
+            "org_id": "org-1",
+            "space_ref": "space-1",
+            "subject_id": "owner-1",
+            "service_audience": SESSION_CORE_AUDIENCE,
+            "action_id": RENAME_ACTION,
+            "action_schema_hash": registry_row(RENAME_ACTION).schema_sha256,
+            "payload_digest": "sha256:digest-1",
+            "idempotency_key": "key-1",
+            "recipient_audience_ref": "audience-1",
+            "recipient_audience_hash": "sha256:audience-1",
+            "recipient_audience_revision": 3,
+            "privacy_policy_ref": "privacy-1",
+            "run_context_authorization_ref": "resource-1",
+            "authority_revision": 7,
+            "permissions": [SPACE_ACTION_PERMISSION],
+            "purpose": "assistant_collaboration",
+            "lawful_basis": "contract",
+            "privacy_class": "internal",
+            "third_party_processing_allowed": false,
+            "retention_class": "standard",
+            "residency": "swedencentral",
+            "deletion_scope": "space",
+            "zero_data_retention": false,
+            "issued_at": (now() - Duration::seconds(10)).to_rfc3339(),
+            "expires_at": (now() + Duration::seconds(60)).to_rfc3339(),
+            "nonce": "nonce-1",
+        })
+    }
+
+    /// Signs `payload` as Control signs a decision: the signature covers the first three segments.
+    fn sign_raw(key: &SigningKey, kid: &str, payload: &[u8]) -> String {
+        let signing_input = format!(
+            "{DECISION_VERSION}.{}.{}",
+            URL_SAFE_NO_PAD.encode(kid.as_bytes()),
+            URL_SAFE_NO_PAD.encode(payload)
+        );
+        format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(key.sign(signing_input.as_bytes()).to_bytes())
+        )
+    }
+
+    fn sign_with(key: &SigningKey, kid: &str, claims: &Value) -> String {
+        sign_raw(key, kid, &serde_json::to_vec(claims).expect("claims serialize"))
+    }
+
+    // ---- verify_decision ---------------------------------------------------------------------
+
+    #[test]
+    fn verify_decision_refuses_a_bad_envelope_key_signature_size_and_any_claim_outside_the_29() {
+        let key = SigningKey::from_bytes(&[7_u8; 32]);
+        let other = SigningKey::from_bytes(&[8_u8; 32]);
+        let keys: BTreeMap<String, VerifyingKey> =
+            BTreeMap::from([("kid-1".to_owned(), key.verifying_key())]);
+        let claims = claims_json();
+        assert_eq!(claims.as_object().expect("an object").len(), 29, "Control's RunActionDecision has 29 claims");
+        let good = sign_with(&key, "kid-1", &claims);
+        let refused = |token: &str, why: &str| {
+            let status = verify_decision(token, &keys).expect_err(why);
+            assert_eq!(status.code(), tonic::Code::PermissionDenied, "{why}");
+            assert_eq!(trailer(&status).as_deref(), Some("not_authorized"), "{why}");
+        };
+
+        // The control: a well-formed decision verifies and carries what it was signed with.
+        let verified = verify_decision(&good, &keys).expect("a well-formed decision verifies");
+        assert_eq!(
+            (verified.run_id.as_str(), verified.org_id.as_str(), verified.action_id.as_str()),
+            ("run-1", "org-1", RENAME_ACTION)
+        );
+        assert_eq!(verified.permissions, [SPACE_ACTION_PERMISSION]);
+        assert_eq!(verified.recipient_audience_revision, 3);
+        assert!(!verified.zero_data_retention);
+
+        // A bad envelope: another version, too few or too many segments, nothing at all.
+        refused(&good.replacen(DECISION_VERSION, "run-action-v2", 1), "another version");
+        refused(&good.replacen(DECISION_VERSION, "v2", 1), "the read decision's version");
+        refused(&format!("{good}.extra"), "five segments");
+        refused(good.rsplit_once('.').expect("a signature").0, "three segments");
+        refused("", "an empty token");
+        refused("a.b.c.d", "four segments that are not a decision");
+
+        // A missing or unknown key id.
+        let signed_for = |kid: &str| sign_with(&key, kid, &claims);
+        refused(&signed_for(""), "an empty key id");
+        refused(&signed_for("  "), "a blank key id");
+        refused(&signed_for("kid-unknown"), "a key id that is not configured");
+        refused(&good.replacen(&URL_SAFE_NO_PAD.encode("kid-1"), "!!!!", 1), "a key id that is not base64");
+
+        // A bad signature: another key's, a tampered payload under the old signature, no signature at all.
+        refused(&sign_with(&other, "kid-1", &claims), "another key's signature");
+        let parts: Vec<&str> = good.split('.').collect();
+        let mut tampered = claims.clone();
+        tampered["run_id"] = json!("run-2");
+        let tampered_payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&tampered).expect("claims"));
+        refused(
+            &format!("{}.{}.{}.{}", parts[0], parts[1], tampered_payload, parts[3]),
+            "a payload changed after it was signed",
+        );
+        refused(&format!("{}.{}.{}.", parts[0], parts[1], parts[2]), "an empty signature");
+        refused(&format!("{}.{}.{}.!!!!", parts[0], parts[1], parts[2]), "a signature that is not base64");
+        refused(
+            &format!("{}.{}.{}.{}", parts[0], parts[1], parts[2], URL_SAFE_NO_PAD.encode([1_u8; 32])),
+            "a signature of the wrong length",
+        );
+
+        // A signed payload that is not a decision.
+        refused(&sign_raw(&key, "kid-1", b"not json"), "a payload that is not JSON");
+        refused(&sign_raw(&key, "kid-1", b"[1, 2]"), "a payload that is not an object");
+
+        // A token over 16 KiB is refused on its size alone: the same claims with a short nonce verify.
+        let mut huge = claims.clone();
+        huge["nonce"] = json!("n".repeat(MAX_DECISION_TOKEN_BYTES));
+        let oversized = sign_with(&key, "kid-1", &huge);
+        assert!(oversized.len() > MAX_DECISION_TOKEN_BYTES);
+        refused(&oversized, "a token over 16 KiB");
+
+        // deny_unknown_fields: a 30th claim, even a real one of the read decision, is refused...
+        for extra in ["history_floor_revision", "membership_revision", "unknown_claim"] {
+            let mut widened = claims.clone();
+            widened[extra] = json!(1);
+            refused(&sign_with(&key, "kid-1", &widened), extra);
+        }
+        // ...and so is a decision that lacks any one of the 29.
+        for name in claims.as_object().expect("an object").keys() {
+            let mut narrowed = claims.clone();
+            narrowed.as_object_mut().expect("an object").remove(name);
+            refused(&sign_with(&key, "kid-1", &narrowed), name);
+        }
+    }
+
+    // ---- check_decision_binding --------------------------------------------------------------
+
+    /// A decision, the call it must bind, the run row and the registry row, all agreeing.
+    struct Fixture {
+        claims: Value,
+        run: RunRow,
+        row: sa::RegistryRow,
+        org: String,
+        run_id: String,
+        action: String,
+        key: String,
+        digest: String,
+        owner: String,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            Self {
+                claims: claims_json(),
+                run: RunRow {
+                    run_id: "run-1".into(),
+                    org_id: "org-1".into(),
+                    subject_id: "owner-1".into(),
+                    thread_id: "thread-1".into(),
+                    run_status: "queued".into(),
+                    retention_class: "persistent".into(),
+                    parent_run_id: None,
+                    space_id: Some("space-1".into()),
+                    recipient_audience_ref: Some("audience-1".into()),
+                    recipient_audience_revision: Some(3),
+                    recipient_audience_hash: Some("sha256:audience-1".into()),
+                    privacy_policy_ref: Some("privacy-1".into()),
+                    resource_authorization_ref: Some("resource-1".into()),
+                    authority_revision: Some(7),
+                },
+                row: registry_row(RENAME_ACTION),
+                org: "org-1".into(),
+                run_id: "run-1".into(),
+                action: RENAME_ACTION.into(),
+                key: "key-1".into(),
+                digest: "sha256:digest-1".into(),
+                owner: "owner-1".into(),
+            }
+        }
+
+        fn verdict(&self) -> Result<(), Status> {
+            let claims: RunActionClaims =
+                serde_json::from_value(self.claims.clone()).expect("a decision of the 29 claims");
+            let asked = Asked {
+                org_id: &self.org,
+                run_id: &self.run_id,
+                action_id: &self.action,
+                idempotency_key: &self.key,
+                digest: &self.digest,
+                owner: &self.owner,
+            };
+            check_decision_binding(&claims, &asked, &self.run, &self.row, now())
+        }
+    }
+
+    fn at(offset_seconds: i64) -> String {
+        (now() + Duration::seconds(offset_seconds)).to_rfc3339()
+    }
+
+    #[test]
+    fn check_decision_binding_accepts_the_matching_decision_and_its_edges() {
+        assert!(Fixture::new().verdict().is_ok());
+        // Two minutes is the longest life, and a decision issued up to a minute ahead of this clock is tolerated.
+        let mut longest = Fixture::new();
+        longest.claims["issued_at"] = json!(at(-60));
+        longest.claims["expires_at"] = json!(at(60));
+        assert!(longest.verdict().is_ok());
+        let mut ahead = Fixture::new();
+        ahead.claims["issued_at"] = json!(at(60));
+        ahead.claims["expires_at"] = json!(at(120));
+        assert!(ahead.verdict().is_ok());
+    }
+
+    #[test]
+    fn check_decision_binding_refuses_one_case_per_claim_mismatch() {
+        let cases: &[(&str, fn(&mut Fixture))] = &[
+            // The audience, the action and what the registry row says about both.
+            ("the audience claim", |f| f.claims["service_audience"] = json!("model-plane")),
+            ("the registry row's audience", |f| {
+                f.row.service_audience = "application-plane-conversation-core".into();
+            }),
+            ("the action claim", |f| f.claims["action_id"] = json!(PIN_ACTION)),
+            ("the action asked", |f| f.action = PIN_ACTION.into()),
+            ("the schema hash claim", |f| f.claims["action_schema_hash"] = json!("sha256:another-schema")),
+            // The digest and the key the call binds.
+            ("the digest claim", |f| f.claims["payload_digest"] = json!("sha256:another-digest")),
+            ("the digest asked", |f| f.digest = "sha256:another-digest".into()),
+            ("the idempotency key claim", |f| f.claims["idempotency_key"] = json!("key-2")),
+            ("the idempotency key asked", |f| f.key = "key-2".into()),
+            // The permission set is exactly the one registry permission.
+            ("no permission", |f| f.claims["permissions"] = json!([])),
+            ("an extra permission", |f| {
+                f.claims["permissions"] = json!([SPACE_ACTION_PERMISSION, "thread:append"]);
+            }),
+            ("a write permission instead", |f| f.claims["permissions"] = json!(["thread:append"])),
+            ("another registry permission", |f| f.claims["permissions"] = json!(["owner-action:execute"])),
+            ("the registry row's permission", |f| {
+                f.row.permission = "owner-action:execute".into();
+            }),
+            // The org, the run, the thread, the subject.
+            ("the org claim", |f| f.claims["org_id"] = json!("org-2")),
+            ("the org asked", |f| f.org = "org-2".into()),
+            ("the run row's org", |f| f.run.org_id = "org-2".into()),
+            ("the run claim", |f| f.claims["run_id"] = json!("run-2")),
+            ("the run asked", |f| f.run_id = "run-2".into()),
+            ("the run row's id", |f| f.run.run_id = "run-2".into()),
+            ("the thread claim", |f| f.claims["thread_id"] = json!("thread-2")),
+            ("the run row's thread", |f| f.run.thread_id = "thread-2".into()),
+            ("the subject claim", |f| f.claims["subject_id"] = json!("member-2")),
+            ("the owner asked", |f| f.owner = "member-2".into()),
+            ("the run row's subject", |f| f.run.subject_id = "member-2".into()),
+            // The Space and the audience the run was stamped with.
+            ("the Space claim", |f| f.claims["space_ref"] = json!("space-2")),
+            ("the run row's Space", |f| f.run.space_id = Some("space-2".into())),
+            ("a run row with no Space", |f| f.run.space_id = None),
+            ("the recipient ref claim", |f| f.claims["recipient_audience_ref"] = json!("audience-2")),
+            ("the run row's recipient ref", |f| f.run.recipient_audience_ref = Some("audience-2".into())),
+            ("a run row with no recipient ref", |f| f.run.recipient_audience_ref = None),
+            ("the recipient hash claim", |f| f.claims["recipient_audience_hash"] = json!("sha256:audience-2")),
+            ("the run row's recipient hash", |f| {
+                f.run.recipient_audience_hash = Some("sha256:audience-2".into());
+            }),
+            ("a run row with no recipient hash", |f| f.run.recipient_audience_hash = None),
+            ("the recipient revision claim", |f| f.claims["recipient_audience_revision"] = json!(4)),
+            ("the run row's recipient revision", |f| f.run.recipient_audience_revision = Some(4)),
+            ("a run row with no recipient revision", |f| f.run.recipient_audience_revision = None),
+            ("the privacy ref claim", |f| f.claims["privacy_policy_ref"] = json!("privacy-2")),
+            ("the run row's privacy ref", |f| f.run.privacy_policy_ref = Some("privacy-2".into())),
+            ("a run row with no privacy ref", |f| f.run.privacy_policy_ref = None),
+            ("the run context ref claim", |f| f.claims["run_context_authorization_ref"] = json!("resource-2")),
+            ("the run row's run context ref", |f| {
+                f.run.resource_authorization_ref = Some("resource-2".into());
+            }),
+            ("a run row with no run context ref", |f| f.run.resource_authorization_ref = None),
+            ("the authority revision claim", |f| f.claims["authority_revision"] = json!(8)),
+            ("the run row's authority revision", |f| f.run.authority_revision = Some(8)),
+            ("a run row with no authority revision", |f| f.run.authority_revision = None),
+        ];
+        for (why, edit) in cases {
+            let mut fixture = Fixture::new();
+            edit(&mut fixture);
+            let status = fixture.verdict().expect_err(why);
+            assert_eq!(status.code(), tonic::Code::PermissionDenied, "{why}");
+            assert_eq!(trailer(&status).as_deref(), Some("not_authorized"), "{why}");
+            assert!(
+                status.message().contains("does not authorize"),
+                "{why} is a binding refusal, not a freshness one: {}",
+                status.message()
+            );
+        }
+    }
+
+    #[test]
+    fn check_decision_binding_refuses_a_zero_retention_claim_with_the_typed_refusal() {
+        let mut fixture = Fixture::new();
+        fixture.claims["zero_data_retention"] = json!(true);
+        let status = fixture.verdict().expect_err("a zero-retention decision cannot mutate");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            Refusal::from_status(&status).map(|refusal| refusal.code()),
+            Some(zdr_code::DURABLE_MUTATION_FORBIDDEN)
+        );
+        // The ZDR refusal wins over a stale or incomplete decision: it names the real reason.
+        fixture.claims["expires_at"] = json!(at(-5));
+        fixture.claims["nonce"] = json!("");
+        let status = fixture.verdict().expect_err("still refused");
+        assert_eq!(
+            Refusal::from_status(&status).map(|refusal| refusal.code()),
+            Some(zdr_code::DURABLE_MUTATION_FORBIDDEN)
+        );
+        // A binding mismatch is still the first refusal.
+        fixture.claims["org_id"] = json!("org-2");
+        assert_eq!(
+            trailer(&fixture.verdict().expect_err("a mismatch")).as_deref(),
+            Some("not_authorized")
+        );
+    }
+
+    #[test]
+    fn check_decision_binding_refuses_an_expired_long_or_incomplete_decision() {
+        let cases: &[(&str, fn(&mut Fixture))] = &[
+            ("a decision that expired a second ago", |f| f.claims["expires_at"] = json!(at(-1))),
+            ("a decision that expires exactly now", |f| f.claims["expires_at"] = json!(at(0))),
+            ("a decision issued over a minute ahead", |f| {
+                f.claims["issued_at"] = json!(at(61));
+                f.claims["expires_at"] = json!(at(100));
+            }),
+            ("a decision with no life", |f| {
+                f.claims["issued_at"] = json!(at(30));
+                f.claims["expires_at"] = json!(at(30));
+            }),
+            ("a decision that expires before it was issued", |f| {
+                f.claims["issued_at"] = json!(at(20));
+                f.claims["expires_at"] = json!(at(10));
+            }),
+            ("a decision that lasts over two minutes", |f| {
+                f.claims["issued_at"] = json!(at(-30));
+                f.claims["expires_at"] = json!(at(91));
+            }),
+            ("an empty purpose", |f| f.claims["purpose"] = json!("")),
+            ("a blank purpose", |f| f.claims["purpose"] = json!("   ")),
+            ("an empty lawful basis", |f| f.claims["lawful_basis"] = json!("")),
+            ("an empty privacy class", |f| f.claims["privacy_class"] = json!("")),
+            ("an empty retention class", |f| f.claims["retention_class"] = json!("")),
+            ("an empty residency", |f| f.claims["residency"] = json!("")),
+            ("an empty deletion scope", |f| f.claims["deletion_scope"] = json!("")),
+            ("an empty nonce", |f| f.claims["nonce"] = json!("")),
+            ("an empty recipient ref (agreed by the run row)", |f| {
+                f.claims["recipient_audience_ref"] = json!("");
+                f.run.recipient_audience_ref = Some(String::new());
+            }),
+            ("a zero recipient revision (agreed by the run row)", |f| {
+                f.claims["recipient_audience_revision"] = json!(0);
+                f.run.recipient_audience_revision = Some(0);
+            }),
+            ("a negative recipient revision (agreed by the run row)", |f| {
+                f.claims["recipient_audience_revision"] = json!(-1);
+                f.run.recipient_audience_revision = Some(-1);
+            }),
+            ("a zero authority revision (agreed by the run row)", |f| {
+                f.claims["authority_revision"] = json!(0);
+                f.run.authority_revision = Some(0);
+            }),
+        ];
+        for (why, edit) in cases {
+            let mut fixture = Fixture::new();
+            edit(&mut fixture);
+            let status = fixture.verdict().expect_err(why);
+            assert_eq!(status.code(), tonic::Code::PermissionDenied, "{why}");
+            assert_eq!(trailer(&status).as_deref(), Some("not_authorized"), "{why}");
+            assert!(
+                status.message().contains("expired or incomplete"),
+                "{why} is a freshness refusal, not a binding one: {}",
+                status.message()
+            );
+        }
+    }
+
+    // ---- the arguments and their digest ------------------------------------------------------
+
+    fn pair(name: &str, value: &str) -> (String, String) {
+        (name.to_owned(), value.to_owned())
+    }
+
+    fn card(fields: &[(&str, &str)]) -> Arguments {
+        Arguments::PostCard {
+            title: "T".to_owned(),
+            body: "B".to_owned(),
+            tone: "info".to_owned(),
+            fields: fields
+                .iter()
+                .map(|(label, value)| ((*label).to_owned(), (*value).to_owned()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn argument_pairs_flatten_fields_to_len_label_and_value_and_an_absent_list_to_len_zero() {
+        // Rename and pin are one pair each; the values are digested untrimmed.
+        assert_eq!(
+            argument_pairs(&Arguments::Rename { title: " Weekly  plan ".to_owned() }),
+            [pair("title", " Weekly  plan ")]
+        );
+        assert_eq!(argument_pairs(&Arguments::Pin { pinned: true }), [pair("pinned", "true")]);
+        assert_eq!(argument_pairs(&Arguments::Pin { pinned: false }), [pair("pinned", "false")]);
+
+        // A card with no fields is `fields.len` = 0 and nothing after it.
+        let none = [pair("title", "T"), pair("body", "B"), pair("tone", "info"), pair("fields.len", "0")];
+        assert_eq!(argument_pairs(&card(&[])), none);
+        // Fields flatten in place, in order, as `fields.<i>.label` and `fields.<i>.value`.
+        assert_eq!(
+            argument_pairs(&card(&[("Owner", "Ima"), ("Due", "Friday")])),
+            [
+                pair("title", "T"),
+                pair("body", "B"),
+                pair("tone", "info"),
+                pair("fields.len", "2"),
+                pair("fields.0.label", "Owner"),
+                pair("fields.0.value", "Ima"),
+                pair("fields.1.label", "Due"),
+                pair("fields.1.value", "Friday"),
+            ]
+        );
+        // The wire has no "absent" list apart from the empty one: both reach the same pairs and the same digest.
+        let absent = parse_arguments(
+            POST_CARD_ACTION,
+            Some(Args::PostCard(pb::PostCardArgs {
+                title: "T".to_owned(),
+                body: "B".to_owned(),
+                tone: "info".to_owned(),
+                fields: Vec::new(),
+            })),
+        )
+        .expect("a card without fields is valid");
+        assert_eq!(argument_pairs(&absent), none);
+        let digest_of = |arguments: &Arguments| {
+            argument_digest(POST_CARD_ACTION, "run-1", "org-1", "key-1", arguments).expect("the digest frames")
+        };
+        assert_eq!(digest_of(&absent), digest_of(&card(&[])));
+        assert_ne!(digest_of(&card(&[("a", "1")])), digest_of(&card(&[("a", "2")])));
+        // A value cannot forge a boundary: moving text from a label to a value changes the digest.
+        assert_ne!(digest_of(&card(&[("ab", "c")])), digest_of(&card(&[("a", "bc")])));
+    }
+
+    #[test]
+    fn the_flattening_follows_the_golden_argument_order_of_every_served_action() {
+        for (action, arguments) in [
+            (RENAME_ACTION, Arguments::Rename { title: "T".to_owned() }),
+            (PIN_ACTION, Arguments::Pin { pinned: true }),
+            (POST_CARD_ACTION, card(&[("a", "1"), ("b", "2")])),
+        ] {
+            let order = registry_row(action).argument_order;
+            // The constant this build serves from is the golden's order, or the service refuses to serve.
+            let served: Vec<String> = expected_arguments(action)
+                .expect("the action is served")
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect();
+            assert_eq!(served, order, "{action}");
+            // And the flattened names, with `.len` and `.<i>.<part>` folded back, are that order.
+            let mut names: Vec<String> = Vec::new();
+            for (name, _) in argument_pairs(&arguments) {
+                let base = name.split('.').next().expect("a name").to_owned();
+                if names.last() != Some(&base) {
+                    names.push(base);
+                }
+            }
+            assert_eq!(names, order, "{action}");
+        }
+        assert_eq!(expected_arguments("space.canvas.read"), None, "an action of another service");
+        assert_eq!(expected_arguments("tickets.create"), None);
+    }
+
+    #[test]
+    fn the_rename_digest_equals_the_golden_vector() {
+        let registry = golden().expect("the golden registry loads");
+        let vector = &registry.digest_vectors[0];
+        let text = |field: &str| {
+            vector[field]
+                .as_str()
+                .unwrap_or_else(|| panic!("the first vector names {field}"))
+                .to_owned()
+        };
+        // The vector is the one the plan names: space.thread.rename, run-1, org-1, step-1, "Weekly plan".
+        assert_eq!(text("action_id"), RENAME_ACTION);
+        assert_eq!(text("run_id"), "run-1");
+        assert_eq!(text("org_id"), "org-1");
+        assert_eq!(text("step_id"), "step-1");
+        assert_eq!(vector["argument_pairs"], json!([["title", "Weekly plan"]]));
+
+        let key = sa::idempotency_key(RENAME_ACTION, "run-1", "step-1");
+        assert_eq!(key, text("idempotency_key"));
+        let rename = |title: &str| Arguments::Rename { title: title.to_owned() };
+        let digest = argument_digest(RENAME_ACTION, "run-1", "org-1", &key, &rename("Weekly plan"))
+            .expect("the digest frames");
+        assert_eq!(digest, text("payload_digest"), "Session Core computes the digest the golden pins");
+        // Every input is part of it: the title (untrimmed), the run, the org and the key.
+        for other in [
+            argument_digest(RENAME_ACTION, "run-1", "org-1", &key, &rename("Weekly plan ")),
+            argument_digest(RENAME_ACTION, "run-2", "org-1", &key, &rename("Weekly plan")),
+            argument_digest(RENAME_ACTION, "run-1", "org-2", &key, &rename("Weekly plan")),
+            argument_digest(RENAME_ACTION, "run-1", "org-1", "another-key", &rename("Weekly plan")),
+        ] {
+            assert_ne!(other.expect("the digest frames"), digest);
+        }
+    }
+
+    // ---- refusals answered before any row is read ---------------------------------------------
+
+    fn rename_request(org: &str) -> pb::ApplyRunThreadActionRequest {
+        pb::ApplyRunThreadActionRequest {
+            org_id: org.to_owned(),
+            run_id: "run-1".to_owned(),
+            action_id: RENAME_ACTION.to_owned(),
+            idempotency_key: "key-1".to_owned(),
+            control_decision_token: "not-a-token".to_owned(),
+            args: Some(Args::Rename(pb::RenameThreadArgs { title: "Weekly plan".to_owned() })),
+        }
+    }
+
+    #[tokio::test]
+    async fn zdr_caller_refused() {
+        let pool = lazy_pool();
+        let caller = VerifiedIdentity::user_for_test_with_zdr("org-1", "owner-1", true);
+        // The refusal is typed, and it comes first: with the switch off it is still this refusal.
+        for enabled in [true, false] {
+            let status = apply_run_thread_action(&pool, enabled, &caller, rename_request("org-1"))
+                .await
+                .expect_err("a zero-retention credential cannot mutate");
+            assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(
+                Refusal::from_status(&status).map(|refusal| refusal.code()),
+                Some(zdr_code::DURABLE_MUTATION_FORBIDDEN),
+                "switch {enabled}"
+            );
+        }
+        assert_eq!(pool.size(), 0, "no row was read");
+    }
+
+    #[tokio::test]
+    async fn feature_disabled_when_switch_off() {
+        let pool = lazy_pool();
+        let caller = VerifiedIdentity::user_for_test("org-1", "owner-1");
+        let status = apply_run_thread_action(&pool, false, &caller, rename_request("org-1"))
+            .await
+            .expect_err("the switch is off");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(trailer(&status).as_deref(), Some("feature_disabled"));
+        // The switch answers before the decision is looked at: the token above is not even a token.
+        assert_eq!(pool.size(), 0, "no row was read");
+        // With the switch on, the same call gets past it and is refused for what it is.
+        let status = apply_run_thread_action(&pool, true, &caller, rename_request("org-2"))
+            .await
+            .expect_err("another tenant");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        assert_ne!(trailer(&status).as_deref(), Some("feature_disabled"));
+        assert_eq!(pool.size(), 0);
+    }
+
+    #[test]
+    fn probe_answers_only_execution_core_holding_the_probe_scope() {
+        let _keys = StreamKeysEnv::publish();
+        let execution_core = VerifiedIdentity::service_for_test_as("org-1", PROBE_CALLER, &[PROBE_SCOPE], false);
+        let on = probe(&execution_core, true).expect("execution-core may probe");
+        assert!(on.verifier_configured && on.schema_present && on.flag_on);
+        let off = probe(&execution_core, false).expect("the probe reports the switch");
+        assert!(off.verifier_configured && off.schema_present && !off.flag_on);
+        // Nobody else: another service with the scope, the right service without it or with the apply
+        // scope only, and a user principal.
+        for (why, caller) in [
+            (
+                "another service",
+                VerifiedIdentity::service_for_test_as("org-1", "service:model-gateway", &[PROBE_SCOPE], false),
+            ),
+            (
+                "no scope",
+                VerifiedIdentity::service_for_test_as("org-1", PROBE_CALLER, &[], false),
+            ),
+            (
+                "the apply scope only",
+                VerifiedIdentity::service_for_test_as("org-1", PROBE_CALLER, &[APPLY_SCOPE], false),
+            ),
+            ("a user", VerifiedIdentity::user_for_test("org-1", "owner-1")),
+        ] {
+            let status = probe(&caller, true).expect_err(why);
+            assert_eq!(status.code(), tonic::Code::PermissionDenied, "{why}");
+        }
+    }
+
+    // ---- against a disposable database (`--ignored`) ------------------------------------------
+
+    /// The owner `seed_space_thread` and `seed_space_run` give their rows.
+    const OWNER: &str = "owner-1";
+
+    /// A Space thread with one persistent run of its owner, and the test key published as Control's.
+    struct Room {
+        pool: PgPool,
+        org: String,
+        space: String,
+        thread: String,
+        run: String,
+        _keys: StreamKeysEnv,
+    }
+
+    impl Room {
+        async fn new(prefix: &str) -> Option<Self> {
+            let pool = connect().await?;
+            let suffix = mp_ids::new_ulid();
+            let room = Self {
+                pool,
+                org: format!("org-{prefix}-{suffix}"),
+                space: format!("space-{prefix}-{suffix}"),
+                thread: format!("thread-{suffix}"),
+                run: format!("run-{suffix}"),
+                _keys: StreamKeysEnv::publish(),
+            };
+            seed_space_thread(&room.pool, &room.org, &room.space, &room.thread, OWNER).await;
+            seed_space_run(&room.pool, &room.org, &room.space, &room.thread, &room.run, "queued", "persistent").await;
+            Some(room)
+        }
+
+        /// Another run of the owner in the same thread, so a test can use an action more often than one run may.
+        async fn add_run(&self, name: &str) -> String {
+            let run = format!("run-{name}-{}", self.thread);
+            seed_space_run(&self.pool, &self.org, &self.space, &self.thread, &run, "queued", "persistent").await;
+            run
+        }
+
+        fn owner(&self) -> VerifiedIdentity {
+            VerifiedIdentity::user_for_test(&self.org, OWNER)
+        }
+
+        async fn finish(self) {
+            sqlx::query("DELETE FROM events WHERE org_id = $1")
+                .bind(&self.org)
+                .execute(&self.pool)
+                .await
+                .ok();
+            // The receipts go with the thread (their foreign key cascades).
+            clean_space(&self.pool, &self.org, &self.space).await;
+        }
+    }
+
+    fn rename(title: &str) -> Args {
+        Args::Rename(pb::RenameThreadArgs { title: title.to_owned() })
+    }
+
+    fn pin(pinned: bool) -> Args {
+        Args::Pin(pb::PinThreadArgs { pinned })
+    }
+
+    fn action_of(args: &Args) -> &'static str {
+        match args {
+            Args::Rename(_) => RENAME_ACTION,
+            Args::Pin(_) => PIN_ACTION,
+            Args::PostCard(_) => POST_CARD_ACTION,
+        }
+    }
+
+    /// The Control decision for `run` applying `action` under `key`, which binds `digest`: valid for 90 seconds.
+    fn decision_for(room: &Room, run: &str, action: &str, key: &str, digest: &str) -> Value {
+        let mut claims = claims_json();
+        claims["decision_ref"] = json!(format!("decision-{key}"));
+        claims["run_id"] = json!(run);
+        claims["thread_id"] = json!(room.thread);
+        claims["org_id"] = json!(room.org);
+        claims["space_ref"] = json!(room.space);
+        claims["subject_id"] = json!(OWNER);
+        claims["action_id"] = json!(action);
+        claims["action_schema_hash"] = json!(registry_row(action).schema_sha256);
+        claims["payload_digest"] = json!(digest);
+        claims["idempotency_key"] = json!(key);
+        // The audience context `seed_space_thread` and `seed_space_run` stamp.
+        claims["recipient_audience_ref"] = json!("audience-1");
+        claims["recipient_audience_hash"] = json!("sha256:audience-1");
+        claims["recipient_audience_revision"] = json!(1);
+        claims["privacy_policy_ref"] = json!("privacy-1");
+        claims["run_context_authorization_ref"] = json!("resource-1");
+        claims["authority_revision"] = json!(1);
+        claims["issued_at"] = json!(Utc::now().to_rfc3339());
+        claims["expires_at"] = json!((Utc::now() + Duration::seconds(90)).to_rfc3339());
+        claims
+    }
+
+    /// One call of `caller` for `run`, with a decision minted for exactly these arguments and `step`'s key.
+    async fn apply_as(
+        room: &Room,
+        run: &str,
+        caller: &VerifiedIdentity,
+        step: &str,
+        args: Args,
+    ) -> Result<pb::ApplyRunThreadActionResponse, Status> {
+        let action = action_of(&args);
+        let key = sa::idempotency_key(action, run, step);
+        let arguments = parse_arguments(action, Some(args.clone()))?;
+        let digest = argument_digest(action, run, &room.org, &key, &arguments)?;
+        let token = sign_with(&signing_key(), KEY_ID, &decision_for(room, run, action, &key, &digest));
+        apply_run_thread_action(
+            &room.pool,
+            true,
+            caller,
+            pb::ApplyRunThreadActionRequest {
+                org_id: room.org.clone(),
+                run_id: run.to_owned(),
+                action_id: action.to_owned(),
+                idempotency_key: key,
+                control_decision_token: token,
+                args: Some(args),
+            },
+        )
+        .await
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct Presentation {
+        title: Option<String>,
+        title_source: String,
+        pinned: bool,
+        pinned_source: String,
+    }
+
+    async fn presentation(room: &Room) -> Presentation {
+        let (title, title_source, pinned, pinned_source): (Option<String>, String, bool, String) = sqlx::query_as(
+            "SELECT presentation_title, title_source, pinned_at IS NOT NULL, pinned_source FROM threads WHERE id = $1",
+        )
+        .bind(&room.thread)
+        .fetch_one(&room.pool)
+        .await
+        .expect("read the thread");
+        Presentation { title, title_source, pinned, pinned_source }
+    }
+
+    /// `(action, outcome)` of the receipts of `run`, oldest first.
+    async fn receipts(room: &Room, run: &str) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "SELECT action_id, outcome FROM run_thread_action_receipts WHERE org_id = $1 AND run_id = $2
+             ORDER BY created_at, receipt_id",
+        )
+        .bind(&room.org)
+        .bind(run)
+        .fetch_all(&room.pool)
+        .await
+        .expect("read receipts")
+    }
+
+    /// `(event_type, payload)` of the events written for the thread, oldest first.
+    async fn thread_events(room: &Room) -> Vec<(String, Value)> {
+        sqlx::query_as(
+            "SELECT event_type, payload FROM events WHERE org_id = $1 AND resource_ref = $2 ORDER BY ts, id",
+        )
+        .bind(&room.org)
+        .bind(format!("thread:{}", room.thread))
+        .fetch_all(&room.pool)
+        .await
+        .expect("read events")
+    }
+
+    fn count_of(events: &[(String, Value)], event_type: &str) -> usize {
+        events.iter().filter(|(kind, _)| kind == event_type).count()
+    }
+
+    fn applied() -> i32 {
+        pb::RunActionOutcome::Applied as i32
+    }
+
+    fn noop() -> i32 {
+        pb::RunActionOutcome::Noop as i32
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn rename_refuses_human_title() {
+        let Some(room) = Room::new("human").await else { return };
+        sqlx::query("UPDATE threads SET presentation_title = 'Chosen by a person' WHERE id = $1")
+            .bind(&room.thread)
+            .execute(&room.pool)
+            .await
+            .expect("a person titles the thread");
+        let status = apply_as(&room, &room.run, &room.owner(), "step-1", rename("Agent title"))
+            .await
+            .expect_err("a person's title stands");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(trailer(&status).as_deref(), Some("title_owned_by_human"));
+        assert_eq!(
+            presentation(&room).await,
+            Presentation {
+                title: Some("Chosen by a person".to_owned()),
+                title_source: "owner".to_owned(),
+                pinned: false,
+                pinned_source: "owner".to_owned(),
+            }
+        );
+        assert!(receipts(&room, &room.run).await.is_empty(), "a refused call leaves no receipt");
+        assert!(thread_events(&room).await.is_empty(), "and no event");
+        room.finish().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn rename_overwrites_own_agent_title() {
+        let Some(room) = Room::new("agent").await else { return };
+        let first = apply_as(&room, &room.run, &room.owner(), "step-1", rename("First title"))
+            .await
+            .expect("an unset title may be set by the agent");
+        assert_eq!(first.outcome, applied());
+        assert_eq!(first.thread_id, room.thread);
+        assert_eq!(first.message_id, "", "a rename writes no message");
+        assert!(!first.receipt_id.is_empty());
+        let after_first = presentation(&room).await;
+        assert_eq!(after_first.title.as_deref(), Some("First title"));
+        assert_eq!(after_first.title_source, "agent");
+
+        let second = apply_as(&room, &room.run, &room.owner(), "step-2", rename("Second title"))
+            .await
+            .expect("the agent may overwrite its own title");
+        assert_eq!(second.outcome, applied());
+        assert_ne!(second.receipt_id, first.receipt_id);
+        let after_second = presentation(&room).await;
+        assert_eq!(after_second.title.as_deref(), Some("Second title"));
+        assert_eq!(after_second.title_source, "agent");
+        assert_eq!(
+            receipts(&room, &room.run).await,
+            [
+                (RENAME_ACTION.to_owned(), "applied".to_owned()),
+                (RENAME_ACTION.to_owned(), "applied".to_owned())
+            ]
+        );
+
+        // An agent cannot clear a title: blank after trimming is refused and nothing is written.
+        let blank_run = room.add_run("blank").await;
+        let status = apply_as(&room, &blank_run, &room.owner(), "step-1", rename("   "))
+            .await
+            .expect_err("a blank title");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(trailer(&status).as_deref(), Some("invalid_arguments"));
+        assert_eq!(presentation(&room).await.title.as_deref(), Some("Second title"));
+        assert!(receipts(&room, &blank_run).await.is_empty());
+        room.finish().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn rename_identical_title_is_noop() {
+        let Some(room) = Room::new("same").await else { return };
+        let first = apply_as(&room, &room.run, &room.owner(), "step-1", rename("Same title"))
+            .await
+            .expect("the first rename applies");
+        assert_eq!(first.outcome, applied());
+        // The same title, however it is spaced, is already there: a receipt records the call, nothing changes.
+        let second = apply_as(&room, &room.run, &room.owner(), "step-2", rename("  Same   title "))
+            .await
+            .expect("an identical title is not an error");
+        assert_eq!(second.outcome, noop());
+        assert_ne!(second.receipt_id, first.receipt_id);
+        assert_eq!(presentation(&room).await.title.as_deref(), Some("Same title"));
+        assert_eq!(
+            receipts(&room, &room.run).await,
+            [
+                (RENAME_ACTION.to_owned(), "applied".to_owned()),
+                (RENAME_ACTION.to_owned(), "noop".to_owned())
+            ],
+            "only `applied` and `noop` are ever stored"
+        );
+        let events = thread_events(&room).await;
+        assert_eq!(count_of(&events, "THREAD_PRESENTATION_UPDATED"), 1, "a no-op changes no presentation");
+        assert_eq!(count_of(&events, RUN_THREAD_ACTION_EVENT), 2, "but both calls are recorded");
+        room.finish().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn pin_unpin_rules() {
+        let Some(room) = Room::new("pin").await else { return };
+        // Run A: the agent pins an unpinned thread, then unpins its own pin.
+        let pinned = apply_as(&room, &room.run, &room.owner(), "step-1", pin(true))
+            .await
+            .expect("pin");
+        assert_eq!(pinned.outcome, applied());
+        let state = presentation(&room).await;
+        assert!(state.pinned);
+        assert_eq!(state.pinned_source, "agent");
+        let unpinned = apply_as(&room, &room.run, &room.owner(), "step-2", pin(false))
+            .await
+            .expect("the agent may unpin its own pin");
+        assert_eq!(unpinned.outcome, applied());
+        let state = presentation(&room).await;
+        assert!(!state.pinned);
+        assert_eq!(state.pinned_source, "agent");
+
+        // Run B: unpinning what is not pinned is a no-op; a pin a person set is not the agent's to remove.
+        let run_b = room.add_run("b").await;
+        let nothing = apply_as(&room, &run_b, &room.owner(), "step-1", pin(false))
+            .await
+            .expect("unpin of an unpinned thread");
+        assert_eq!(nothing.outcome, noop());
+        sqlx::query("UPDATE threads SET pinned_at = now(), pinned_source = 'owner' WHERE id = $1")
+            .bind(&room.thread)
+            .execute(&room.pool)
+            .await
+            .expect("a person pins the thread");
+        let stands = apply_as(&room, &run_b, &room.owner(), "step-2", pin(false))
+            .await
+            .expect("the person's pin stands");
+        assert_eq!(stands.outcome, noop());
+        let state = presentation(&room).await;
+        assert!(state.pinned, "the agent did not unpin it");
+        assert_eq!(state.pinned_source, "owner");
+
+        // Run C: pinning what is already pinned is a no-op and does not take the pin over.
+        let run_c = room.add_run("c").await;
+        let already = apply_as(&room, &run_c, &room.owner(), "step-1", pin(true))
+            .await
+            .expect("pin of a pinned thread");
+        assert_eq!(already.outcome, noop());
+        assert_eq!(presentation(&room).await.pinned_source, "owner");
+
+        // Only the two changes of run A moved the presentation: pinned true, then false.
+        let presentation_events: Vec<Value> = thread_events(&room)
+            .await
+            .into_iter()
+            .filter(|(kind, _)| kind == "THREAD_PRESENTATION_UPDATED")
+            .map(|(_, payload)| payload["pinned"].clone())
+            .collect();
+        assert_eq!(presentation_events, [json!(true), json!(false)]);
+        room.finish().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn replay_returns_receipt_and_conflict_on_changed_digest() {
+        let Some(room) = Room::new("replay").await else { return };
+        let first = apply_as(&room, &room.run, &room.owner(), "step-1", rename("Replay title"))
+            .await
+            .expect("the first call applies");
+        assert_eq!(first.outcome, applied());
+
+        // The same key and digest again (with a fresh decision): the receipt comes back, nothing is written twice.
+        let replay = apply_as(&room, &room.run, &room.owner(), "step-1", rename("Replay title"))
+            .await
+            .expect("a replay is served");
+        assert_eq!(replay.outcome, pb::RunActionOutcome::Replayed as i32);
+        assert_eq!(replay.receipt_id, first.receipt_id);
+        assert_eq!(replay.thread_id, room.thread);
+        assert_eq!(receipts(&room, &room.run).await.len(), 1);
+        let events = thread_events(&room).await;
+        assert_eq!(count_of(&events, RUN_THREAD_ACTION_EVENT), 1);
+        assert_eq!(count_of(&events, "THREAD_PRESENTATION_UPDATED"), 1);
+
+        // The same key with other arguments is not a replay: it conflicts, and the thread is untouched.
+        let status = apply_as(&room, &room.run, &room.owner(), "step-1", rename("Another title"))
+            .await
+            .expect_err("a changed digest under the same key");
+        assert_eq!(status.code(), tonic::Code::AlreadyExists);
+        assert_eq!(trailer(&status).as_deref(), Some("idempotency_key_reused"));
+        assert_eq!(presentation(&room).await.title.as_deref(), Some("Replay title"));
+        assert_eq!(receipts(&room, &room.run).await.len(), 1);
+        room.finish().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn per_run_cap() {
+        let Some(room) = Room::new("cap").await else { return };
+        // The golden allows two renames per run.
+        assert_eq!(registry_row(RENAME_ACTION).max_per_run, 2);
+        for (step, title) in [("step-1", "A"), ("step-2", "B")] {
+            let done = apply_as(&room, &room.run, &room.owner(), step, rename(title)).await.expect("within the cap");
+            assert_eq!(done.outcome, applied());
+        }
+        let status = apply_as(&room, &room.run, &room.owner(), "step-3", rename("C"))
+            .await
+            .expect_err("a third rename is over the cap");
+        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+        assert_eq!(trailer(&status).as_deref(), Some("limit_reached"));
+        assert_eq!(presentation(&room).await.title.as_deref(), Some("B"));
+        assert_eq!(receipts(&room, &room.run).await.len(), 2);
+
+        // A replay of an earlier call is still served at the cap; the cap counts what a run applied.
+        let replay = apply_as(&room, &room.run, &room.owner(), "step-1", rename("A"))
+            .await
+            .expect("a replay is not a new application");
+        assert_eq!(replay.outcome, pb::RunActionOutcome::Replayed as i32);
+        // The cap is per run: another run of the owner has its own.
+        let other = room.add_run("other").await;
+        let fresh = apply_as(&room, &other, &room.owner(), "step-1", rename("D"))
+            .await
+            .expect("another run's cap");
+        assert_eq!(fresh.outcome, applied());
+        // And per action: this run may still pin.
+        let pinned = apply_as(&room, &room.run, &room.owner(), "step-4", pin(true)).await.expect("pin");
+        assert_eq!(pinned.outcome, applied());
+        room.finish().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn receipts_cascade_on_thread_delete() {
+        let Some(room) = Room::new("cascade").await else { return };
+        apply_as(&room, &room.run, &room.owner(), "step-1", rename("Doomed"))
+            .await
+            .expect("a rename");
+        apply_as(&room, &room.run, &room.owner(), "step-2", pin(true))
+            .await
+            .expect("a pin");
+        let held: i64 = sqlx::query_scalar("SELECT count(*) FROM run_thread_action_receipts WHERE org_id = $1")
+            .bind(&room.org)
+            .fetch_one(&room.pool)
+            .await
+            .expect("count receipts");
+        assert_eq!(held, 2);
+        // The thread goes (its runs first: they reference it), and its receipts go with it.
+        sqlx::query("DELETE FROM runs WHERE thread_id = $1")
+            .bind(&room.thread)
+            .execute(&room.pool)
+            .await
+            .expect("delete the runs");
+        sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(&room.thread)
+            .execute(&room.pool)
+            .await
+            .expect("delete the thread");
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM run_thread_action_receipts WHERE org_id = $1")
+            .bind(&room.org)
+            .fetch_one(&room.pool)
+            .await
+            .expect("count receipts");
+        assert_eq!(left, 0, "the receipts' foreign key cascades");
+        room.finish().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn zdr_run_refused() {
+        let Some(room) = Room::new("zdrrun").await else { return };
+        // A run that is zero-retention, or held under a waiver, cannot mutate the thread, whatever its decision says.
+        for class in ["zdr", "zdr_waived"] {
+            let run = format!("run-{class}-{}", room.thread);
+            seed_space_run(&room.pool, &room.org, &room.space, &room.thread, &run, "queued", class).await;
+            let status = apply_as(&room, &run, &room.owner(), "step-1", rename("Never written"))
+                .await
+                .expect_err(class);
+            assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{class}");
+            assert_eq!(
+                Refusal::from_status(&status).map(|refusal| refusal.code()),
+                Some(zdr_code::DURABLE_MUTATION_FORBIDDEN),
+                "{class}"
+            );
+            assert!(receipts(&room, &run).await.is_empty(), "{class}");
+        }
+        assert_eq!(presentation(&room).await.title, None);
+        room.finish().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn non_owner_run_is_not_found() {
+        let Some(room) = Room::new("owner").await else { return };
+        // Another member of the same org calls with the owner's run id: the owner predicate is in the lookup,
+        // so the run is simply not found, exactly as a run that does not exist is. There is no oracle.
+        let member = VerifiedIdentity::user_for_test(&room.org, "member-2");
+        let status = apply_as(&room, &room.run, &member, "step-1", rename("Not yours"))
+            .await
+            .expect_err("another member's run");
+        assert_eq!(status.code(), tonic::Code::NotFound);
+        let missing = apply_as(&room, "run-never-existed", &room.owner(), "step-1", rename("Not there"))
+            .await
+            .expect_err("a run that does not exist");
+        assert_eq!(missing.code(), status.code());
+        assert_eq!(missing.message(), status.message());
+        assert_eq!(presentation(&room).await.title, None);
+        assert!(receipts(&room, &room.run).await.is_empty());
+        room.finish().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn events_carry_ids_only() {
+        let Some(room) = Room::new("events").await else { return };
+        apply_as(&room, &room.run, &room.owner(), "step-1", rename("Quarterly canary plan"))
+            .await
+            .expect("a rename");
+        apply_as(&room, &room.run, &room.owner(), "step-2", pin(true))
+            .await
+            .expect("a pin");
+        let events = thread_events(&room).await;
+        assert_eq!(count_of(&events, "THREAD_PRESENTATION_UPDATED"), 2);
+        assert_eq!(count_of(&events, RUN_THREAD_ACTION_EVENT), 2);
+        assert_eq!(events.len(), 4);
+        for (event_type, payload) in &events {
+            let keys: Vec<&str> = payload.as_object().expect("an object").keys().map(String::as_str).collect();
+            let mut keys = keys;
+            keys.sort_unstable();
+            if event_type == RUN_THREAD_ACTION_EVENT {
+                assert_eq!(keys, ["action_id", "message_id", "outcome", "receipt_id", "run_id", "thread_id"]);
+                assert_eq!(payload["thread_id"], room.thread.as_str());
+                assert_eq!(payload["run_id"], room.run.as_str());
+                assert_eq!(payload["outcome"], "applied");
+            } else {
+                // The human path's presentation event: ids and flags, no title.
+                assert_eq!(
+                    keys,
+                    [
+                        "archived", "memory_mode", "persona_enabled", "pinned", "preview_overridden", "starred",
+                        "thread_id", "title_overridden", "unread"
+                    ]
+                );
+                assert_eq!(payload["thread_id"], room.thread.as_str());
+            }
+        }
+        // No title text reaches an event or a receipt.
+        let everything: String = events.iter().map(|(_, payload)| payload.to_string()).collect();
+        assert!(!everything.contains("canary"), "{everything}");
+        let stored: String = sqlx::query_scalar(
+            "SELECT concat_ws('|', receipt_id, action_id, payload_digest, decision_ref, subject_id, thread_id, outcome, message_id)
+               FROM run_thread_action_receipts WHERE org_id = $1 ORDER BY created_at LIMIT 1",
+        )
+        .bind(&room.org)
+        .fetch_one(&room.pool)
+        .await
+        .expect("read a receipt");
+        assert!(!stored.contains("canary"), "{stored}");
+        assert!(stored.contains("sha256:"), "the receipt holds the digest only: {stored}");
+        room.finish().await;
+    }
+}

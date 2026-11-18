@@ -821,6 +821,168 @@ mod tests {
         );
     }
 
+    // ---- WS12-S4: who may revise what (pure) ------------------------------------------------
+
+    /// One revision attempt as plain values; `owner` is the thread owner.
+    fn attempt<'a>(
+        is_delete: bool,
+        target_role: &'a str,
+        target_author: &'a str,
+        caller: &'a str,
+        thread_owner: &'a str,
+        moderate_permission: bool,
+    ) -> ClassFacts<'a> {
+        ClassFacts {
+            is_delete,
+            target_role,
+            target_author,
+            caller,
+            thread_owner,
+            moderate_permission,
+        }
+    }
+
+    /// The class table of [`revise_class`]: an author edits or deletes their own user message, the
+    /// thread owner deletes an assistant answer, a moderator deletes (never edits), and everything
+    /// else is `message_revise_forbidden` (`None`).
+    #[test]
+    fn revise_class_follows_the_table() {
+        use ReviseClass::{AgentOwner, Author, Moderator};
+        // (case, facts, expected class)
+        let table: Vec<(&str, ClassFacts<'_>, Option<ReviseClass>)> = vec![
+            // The author of a user message.
+            ("author edits their own message", attempt(false, "user", "bob", "bob", "owner", false), Some(Author)),
+            ("author deletes their own message", attempt(true, "user", "bob", "bob", "owner", false), Some(Author)),
+            (
+                "the author class wins over the moderator class on a delete",
+                attempt(true, "user", "bob", "bob", "owner", true),
+                Some(Author),
+            ),
+            (
+                "the author class wins over the owner class when the owner wrote the message",
+                attempt(true, "user", "owner", "owner", "owner", false),
+                Some(Author),
+            ),
+            // The thread owner and an assistant answer.
+            (
+                "agent owner deletes an assistant answer",
+                attempt(true, "assistant", "", "owner", "owner", false),
+                Some(AgentOwner),
+            ),
+            (
+                "agent owner deletes an assistant answer that names an agent author",
+                attempt(true, "assistant", "agent-7", "owner", "owner", false),
+                Some(AgentOwner),
+            ),
+            (
+                "the owner class wins over the moderator class on an assistant delete",
+                attempt(true, "assistant", "", "owner", "owner", true),
+                Some(AgentOwner),
+            ),
+            (
+                "a member who is not the owner does not delete an assistant answer",
+                attempt(true, "assistant", "", "carol", "owner", false),
+                None,
+            ),
+            // Nobody edits an assistant row.
+            ("the owner cannot edit an assistant answer", attempt(false, "assistant", "", "owner", "owner", false), None),
+            (
+                "a moderator cannot edit an assistant answer",
+                attempt(false, "assistant", "", "carol", "owner", true),
+                None,
+            ),
+            (
+                "an assistant row that names the caller as author is still not editable",
+                attempt(false, "assistant", "carol", "carol", "owner", false),
+                None,
+            ),
+            (
+                "an assistant row that names the caller as author is not the author class on a delete",
+                attempt(true, "assistant", "carol", "carol", "owner", false),
+                None,
+            ),
+            // System and tool rows are never revisable.
+            ("a system row is never edited", attempt(false, "system", "owner", "owner", "owner", true), None),
+            ("a system row is never deleted", attempt(true, "system", "owner", "owner", "owner", true), None),
+            ("a tool row is never edited", attempt(false, "tool", "owner", "owner", "owner", true), None),
+            ("a tool row is never deleted", attempt(true, "tool", "owner", "owner", "owner", true), None),
+            ("an unknown role is never revisable", attempt(true, "developer", "owner", "owner", "owner", true), None),
+            ("an empty role is never revisable", attempt(true, "", "owner", "owner", "owner", true), None),
+            // The moderator deletes, never edits.
+            (
+                "a moderator deletes another member's user message",
+                attempt(true, "user", "bob", "carol", "owner", true),
+                Some(Moderator),
+            ),
+            (
+                "a moderator deletes an assistant answer they do not own",
+                attempt(true, "assistant", "", "carol", "owner", true),
+                Some(Moderator),
+            ),
+            (
+                "a moderator cannot edit another member's message",
+                attempt(false, "user", "bob", "carol", "owner", true),
+                None,
+            ),
+            // A member against someone else's message.
+            (
+                "a member cannot edit another member's message",
+                attempt(false, "user", "bob", "carol", "owner", false),
+                None,
+            ),
+            (
+                "a member cannot delete another member's message",
+                attempt(true, "user", "bob", "carol", "owner", false),
+                None,
+            ),
+            (
+                "the thread owner is not a moderator of another member's user message",
+                attempt(true, "user", "bob", "owner", "owner", false),
+                None,
+            ),
+            // A row written before the author column existed reads as the thread owner's.
+            (
+                "a legacy row (author is the owner) is the owner's own message to edit",
+                attempt(false, "user", "owner", "owner", "owner", false),
+                Some(Author),
+            ),
+            (
+                "a legacy row (author is the owner) is the owner's own message to delete",
+                attempt(true, "user", "owner", "owner", "owner", false),
+                Some(Author),
+            ),
+            (
+                "a legacy row (author is the owner) is not another member's to edit",
+                attempt(false, "user", "owner", "carol", "owner", false),
+                None,
+            ),
+            (
+                "a legacy row (author is the owner) is not another member's to delete without moderation",
+                attempt(true, "user", "owner", "carol", "owner", false),
+                None,
+            ),
+            // An empty identity never matches another empty identity.
+            ("an empty author never matches an empty caller", attempt(true, "user", "", "", "owner", false), None),
+            ("an empty author never matches an empty caller on an edit", attempt(false, "user", "", "", "", false), None),
+            (
+                "an empty owner never matches an empty caller on an assistant delete",
+                attempt(true, "assistant", "", "", "", false),
+                None,
+            ),
+        ];
+        for (case, facts, expected) in table {
+            assert_eq!(revise_class(&facts), expected, "{case}: {facts:?}");
+        }
+    }
+
+    /// The class words are the closed `actor_class` values the revision row and the audit carry.
+    #[test]
+    fn revise_class_words_are_the_closed_actor_classes() {
+        assert_eq!(ReviseClass::Author.as_str(), "author");
+        assert_eq!(ReviseClass::AgentOwner.as_str(), "agent_owner");
+        assert_eq!(ReviseClass::Moderator.as_str(), "moderator");
+    }
+
     // ---- DB tier: `#[ignore]`d, needs DATABASE_URL to a disposable `*test*` Postgres ----------
 
     /// The org, the Space, and the one person who owns the threads and wrote the message.
@@ -1095,5 +1257,866 @@ mod tests {
             text, SEEDED_TEXT,
             "a retained delete keeps the original text"
         );
+    }
+
+    // ---- WS12-S4: the request rules and the source scan (pure) ------------------------------
+
+    fn edit_request(content: &str) -> pb::ReviseMessageRequest {
+        pb::ReviseMessageRequest {
+            org_id: ORG.to_owned(),
+            thread_id: "thread-1".to_owned(),
+            message_id: "message-1".to_owned(),
+            action: rev::ACTION_EDIT.to_owned(),
+            content: content.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_request_holds_an_edit_to_text_and_a_delete_to_none() {
+        validate_request(&edit_request("new words")).expect("a plain edit");
+        let at_cap = "a".repeat(rev::MAX_EDIT_BYTES);
+        validate_request(&edit_request(&at_cap)).expect("an edit at the byte cap");
+        for (why, req) in [
+            ("an empty edit", edit_request("")),
+            ("a blank edit", edit_request("  \n ")),
+            ("an edit over the byte cap", edit_request(&"a".repeat(rev::MAX_EDIT_BYTES + 1))),
+        ] {
+            let status = validate_request(&req).expect_err(why);
+            assert_eq!(status.code(), tonic::Code::InvalidArgument, "{why}");
+            assert_eq!(
+                status.metadata().get(ERROR_CODE_TRAILER).and_then(|code| code.to_str().ok()),
+                Some("invalid_message"),
+                "{why}"
+            );
+        }
+        let delete = pb::ReviseMessageRequest {
+            action: rev::ACTION_DELETE.to_owned(),
+            content: String::new(),
+            ..edit_request("")
+        };
+        validate_request(&delete).expect("a delete without text");
+        let delete_with_text = pb::ReviseMessageRequest { content: "text".to_owned(), ..delete.clone() };
+        assert_eq!(validate_request(&delete_with_text).expect_err("a delete carries no text").code(), tonic::Code::InvalidArgument);
+        let other = pb::ReviseMessageRequest { action: "restore".to_owned(), ..delete };
+        assert_eq!(validate_request(&other).expect_err("an unknown action").code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn validate_request_needs_every_id_and_a_closed_moderation_reason() {
+        for blank in ["org_id", "thread_id", "message_id"] {
+            let mut req = edit_request("new words");
+            match blank {
+                "org_id" => req.org_id = "  ".to_owned(),
+                "thread_id" => req.thread_id = String::new(),
+                _ => req.message_id = String::new(),
+            }
+            assert_eq!(validate_request(&req).expect_err(blank).code(), tonic::Code::InvalidArgument, "{blank}");
+        }
+        for reason in rev::MODERATION_REASONS {
+            let req = pb::ReviseMessageRequest { moderation_reason: reason.to_owned(), ..edit_request("new words") };
+            validate_request(&req).unwrap_or_else(|status| panic!("{reason}: {status:?}"));
+        }
+        let unknown = pb::ReviseMessageRequest { moderation_reason: "because".to_owned(), ..edit_request("new words") };
+        assert_eq!(validate_request(&unknown).expect_err("outside the closed set").code(), tonic::Code::InvalidArgument);
+    }
+
+    fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read the source directory") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// The only production write that changes what a message says is the purge in this file: every other
+    /// `UPDATE messages` sets presentation, tree or provenance columns. The scan is scoped to writes that
+    /// set `content` or `metadata`, in production code (test files and the part of a file after its first
+    /// `#[cfg(test)]` are not production).
+    #[test]
+    fn update_messages_only_in_message_revision_rs() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_files(&root, &mut files);
+        assert!(files.len() > 20, "the scan found the source tree");
+        let mut writers = Vec::new();
+        for path in files {
+            let stem = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+            if stem.ends_with("_tests") || stem == "tests" {
+                continue;
+            }
+            let name = path.strip_prefix(&root).expect("under src").to_string_lossy().replace('\\', "/");
+            let source = std::fs::read_to_string(&path).expect("read a source file");
+            let mut rest = production_source(&source);
+            while let Some(at) = rest.find("UPDATE messages") {
+                let statement = &rest[at..];
+                // The SQL string ends at the closing quote of its Rust literal.
+                let statement = &statement[..statement.find('"').unwrap_or(statement.len())];
+                let set_clause = statement.split("WHERE").next().unwrap_or(statement);
+                if set_clause.contains("content =") || set_clause.contains("content=") || set_clause.contains("metadata =") {
+                    writers.push(name.clone());
+                    break;
+                }
+                rest = &rest[at + "UPDATE messages".len()..];
+            }
+        }
+        assert_eq!(writers, ["space/revisions.rs"], "a content-blanking write on messages outside the revision path");
+        // And it is the purge branch of `revise_message`, guarded by the retention rule.
+        let revise = production_fn(production_source(include_str!("revisions.rs")), "\nasync fn revise_message(");
+        let write = at(revise, "UPDATE messages SET content");
+        assert!(at(revise, "if verified.purge_original {") < write, "the write sits inside the purge branch");
+    }
+
+    // ---- WS12-S4: the DB tier ---------------------------------------------------------------
+    //
+    // Every test is `#[ignore]`d. Run with `DATABASE_URL` pointing at a disposable Postgres whose database
+    // name contains `test`: `cargo test -p session-core --bin session-core space::revisions -- --ignored
+    // --test-threads=1`. They share one org, Space and person (the constants above), each with a thread
+    // of its own, and remove what they wrote.
+
+    mod db_tests {
+        use super::*;
+        use crate::grpc::space_w1_tests::{mint, signing_key, StreamKeysEnv, DECISION_REF, KEY_ID};
+        use crate::space::test_support::{connect, seed_space_run, seed_space_thread};
+        use mp_contracts::zdr_refusal::Refusal;
+
+        const NEEDS_DB: &str = "requires DATABASE_URL to a disposable Postgres with session-core migrations";
+
+        /// How one revision decision is signed (everything else is fixed, as in `sign_revise`).
+        struct Spec<'a> {
+            caller: &'a str,
+            key: &'a str,
+            audience_revision: u64,
+            purge: bool,
+            moderate: bool,
+            moderation_reason: &'a str,
+        }
+
+        fn spec(key: &str) -> Spec<'_> {
+            Spec {
+                caller: PERSON,
+                key,
+                audience_revision: 4,
+                purge: false,
+                moderate: false,
+                moderation_reason: "",
+            }
+        }
+
+        /// The decision of an org whose retention rule purges the original text.
+        fn purging(key: &str) -> Spec<'_> {
+            Spec { purge: true, ..spec(key) }
+        }
+
+        /// Fills in and signs the Control `model.thread.revise` decision of `req` with the shared test key.
+        fn signed(mut req: pb::ReviseMessageRequest, spec: &Spec<'_>) -> pb::ReviseMessageRequest {
+            req.space_id = SPACE.to_owned();
+            req.space_decision_ref = format!("revise-decision-{}", spec.key);
+            req.recipient_audience_ref = "audience:space-1:4".to_owned();
+            req.recipient_audience_hash = "sha256:revise-audience".to_owned();
+            req.privacy_policy_ref = "privacy:org-1:5".to_owned();
+            req.resource_authorization_ref = "control:space-1:thread-revise:7".to_owned();
+            req.action_schema_hash = rev::DECISION_SCHEMA.to_owned();
+            req.idempotency_key = spec.key.to_owned();
+            req.authority_revision = 7;
+            req.recipient_audience_revision = spec.audience_revision;
+            req.moderation_reason = spec.moderation_reason.to_owned();
+            req.payload_digest = thread_revise_payload_digest(&req, ORG, spec.caller);
+            let mut permissions = vec![
+                rev::PERMISSION_REVISE,
+                if spec.purge { rev::PERMISSION_PURGE_ORIGINAL } else { rev::PERMISSION_RETAIN_ORIGINAL },
+            ];
+            if spec.moderate {
+                permissions.push(rev::PERMISSION_MODERATE);
+            }
+            let now = Utc::now();
+            let claims = serde_json::json!({
+                "decision_ref": req.space_decision_ref,
+                "org_id": ORG,
+                "space_ref": SPACE,
+                "subject_id": spec.caller,
+                "service_audience": "model-plane",
+                "action_id": rev::DECISION_ACTION_ID,
+                "action_schema_hash": rev::DECISION_SCHEMA,
+                "payload_digest": req.payload_digest,
+                "idempotency_key": req.idempotency_key,
+                "recipient_audience_ref": req.recipient_audience_ref,
+                "recipient_audience_revision": req.recipient_audience_revision,
+                "recipient_audience_hash": req.recipient_audience_hash,
+                "privacy_policy_ref": req.privacy_policy_ref,
+                "resource_authorization_ref": req.resource_authorization_ref,
+                "purpose": "assistant_collaboration",
+                "lawful_basis": "contract",
+                "privacy_class": "internal",
+                "third_party_processing_allowed": false,
+                "retention_class": "standard",
+                "residency": "swedencentral",
+                "deletion_scope": "space",
+                "zero_data_retention": false,
+                "nonce": format!("nonce-{}", spec.key),
+                "authority_revision": req.authority_revision,
+                "membership_revision": 4,
+                "privacy_revision": 5,
+                "entitlement_revision": 3,
+                "permissions": permissions,
+                "issued_at": now.to_rfc3339(),
+                "expires_at": (now + chrono::Duration::minutes(1)).to_rfc3339(),
+            });
+            let signed = format!(
+                "v2.{}.{}",
+                URL_SAFE_NO_PAD.encode(KEY_ID.as_bytes()),
+                URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims")),
+            );
+            let signature = signing_key().sign(signed.as_bytes());
+            req.space_decision_token = format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()));
+            req
+        }
+
+        /// A thread of the shared Space with its owner [`PERSON`], and the helpers every test shares.
+        struct Room {
+            pool: PgPool,
+            thread: String,
+            nonce: String,
+        }
+
+        type Revised = (pb::ReviseMessageResponse, Vec<crate::memory_erasure::ErasedMemory>);
+
+        impl Room {
+            async fn new() -> Option<Self> {
+                let pool = connect().await?;
+                let nonce = mp_ids::new_ulid();
+                let thread = format!("revise-thread-{nonce}");
+                sqlx::query("DELETE FROM space_membership_revocations WHERE space_ref = $1 AND subject_id = $2")
+                    .bind(SPACE)
+                    .bind(PERSON)
+                    .execute(&pool)
+                    .await
+                    .ok();
+                seed_space_thread(&pool, ORG, SPACE, &thread, PERSON).await;
+                Some(Self { pool, thread, nonce })
+            }
+
+            /// A message of the thread, stamped at audience `revision`, with a metadata marker.
+            async fn message(&self, name: &str, role: &str, author: Option<&str>, content: &str, revision: i64) -> String {
+                let id = format!("revise-{name}-{}", self.nonce);
+                sqlx::query(
+                    "INSERT INTO messages (id, thread_id, role, content, space_id, recipient_audience_ref, \
+                     recipient_audience_revision, recipient_audience_hash, authority_revision, \
+                     resource_authorization_ref, author_subject_id, metadata) \
+                     VALUES ($1, $2, $3, $4, $5, 'audience-1', $6, 'sha256:audience-1', 1, 'resource-1', $7, \
+                             '{\"keep\": true}'::jsonb)",
+                )
+                .bind(&id)
+                .bind(&self.thread)
+                .bind(role)
+                .bind(content)
+                .bind(SPACE)
+                .bind(revision)
+                .bind(author)
+                .execute(&self.pool)
+                .await
+                .expect("seed a message");
+                id
+            }
+
+            fn request(&self, message: &str, action: &str, content: &str) -> pb::ReviseMessageRequest {
+                pb::ReviseMessageRequest {
+                    org_id: ORG.to_owned(),
+                    thread_id: self.thread.clone(),
+                    message_id: message.to_owned(),
+                    action: action.to_owned(),
+                    content: content.to_owned(),
+                    ..Default::default()
+                }
+            }
+
+            async fn revise(&self, req: &pb::ReviseMessageRequest, caller: &str) -> Result<Revised, Status> {
+                revise_message(&self.pool, req, caller, &crate::gdpr::ErasureHoldGate::Off).await
+            }
+
+            async fn edit(&self, message: &str, content: &str, spec: &Spec<'_>) -> Revised {
+                let req = signed(self.request(message, rev::ACTION_EDIT, content), spec);
+                self.revise(&req, spec.caller).await.expect("an edit")
+            }
+
+            async fn delete(&self, message: &str, spec: &Spec<'_>) -> Revised {
+                let req = signed(self.request(message, rev::ACTION_DELETE, ""), spec);
+                self.revise(&req, spec.caller).await.expect("a delete")
+            }
+
+            /// `(revision_no, action, content, original_retention, actor_class)` of each revision, oldest first.
+            async fn revisions(&self, message: &str) -> Vec<(i32, String, Option<String>, String, String)> {
+                sqlx::query_as(
+                    "SELECT revision_no, action, content, original_retention, actor_class \
+                     FROM message_revisions WHERE message_id = $1 ORDER BY revision_no",
+                )
+                .bind(message)
+                .fetch_all(&self.pool)
+                .await
+                .expect("read the revisions")
+            }
+
+            async fn content_of(&self, message: &str) -> String {
+                sqlx::query_scalar("SELECT content FROM messages WHERE id = $1")
+                    .bind(message)
+                    .fetch_one(&self.pool)
+                    .await
+                    .expect("read the message")
+            }
+
+            async fn metadata_of(&self, message: &str) -> serde_json::Value {
+                sqlx::query_scalar("SELECT metadata FROM messages WHERE id = $1")
+                    .bind(message)
+                    .fetch_one(&self.pool)
+                    .await
+                    .expect("read the metadata")
+            }
+
+            async fn xmin(&self, message: &str) -> String {
+                sqlx::query_scalar("SELECT xmin::text FROM messages WHERE id = $1")
+                    .bind(message)
+                    .fetch_one(&self.pool)
+                    .await
+                    .expect("read xmin")
+            }
+
+            /// A live root run on the thread that holds it (a direct run, open and unexpired).
+            async fn start_run(&self, name: &str) -> String {
+                let run = format!("revise-run-{name}-{}", self.nonce);
+                seed_space_run(&self.pool, ORG, SPACE, &self.thread, &run, "running", "persistent").await;
+                sqlx::query(
+                    "INSERT INTO managed_run_terminalization_outbox \
+                     (run_id, org_id, user_id, start_key, configured_source, configured_terminal_step_id, zdr, deadline_at) \
+                     VALUES ($1, $2, 'owner-1', $3, 'gateway_direct', 'model-gateway-direct-inference-final', false, \
+                             now() + interval '15 minutes')",
+                )
+                .bind(&run)
+                .bind(ORG)
+                .bind(format!("sk-{run}"))
+                .execute(&self.pool)
+                .await
+                .expect("seed the start obligation");
+                run
+            }
+
+            async fn finish(&self) {
+                for sql in [
+                    "DELETE FROM agent_memory WHERE session_id = $1",
+                    "DELETE FROM events WHERE run_id = $1",
+                    "DELETE FROM session_audit_outbox WHERE payload->'details'->>'thread_id' = $1",
+                    "DELETE FROM managed_run_terminalization_outbox WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1)",
+                    "DELETE FROM runs WHERE thread_id = $1",
+                    "DELETE FROM messages WHERE thread_id = $1",
+                    "DELETE FROM threads WHERE id = $1",
+                ] {
+                    sqlx::query(sql).bind(&self.thread).execute(&self.pool).await.ok();
+                }
+                sqlx::query("DELETE FROM space_membership_revocations WHERE space_ref = $1 AND subject_id = $2")
+                    .bind(SPACE)
+                    .bind(PERSON)
+                    .execute(&self.pool)
+                    .await
+                    .ok();
+            }
+        }
+
+        fn shown(rows: &[(i32, String, Option<String>, String, String)]) -> Vec<(i32, &str, Option<&str>, &str, &str)> {
+            rows.iter()
+                .map(|(no, action, content, retention, class)| {
+                    (*no, action.as_str(), content.as_deref(), retention.as_str(), class.as_str())
+                })
+                .collect()
+        }
+
+        fn code_of(status: &Status) -> Option<&str> {
+            status.metadata().get(ERROR_CODE_TRAILER).and_then(|code| code.to_str().ok())
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+        async fn revise_inserts_revision_and_never_updates_message_in_retain_mode() {
+            let Some(room) = Room::new().await else { return };
+            let _keys = StreamKeysEnv::publish();
+            let message = room.message("m1", "user", Some(PERSON), "original words", 1).await;
+            let before = room.xmin(&message).await;
+
+            let (first, erased) = room.edit(&message, "first edit", &spec("k1")).await;
+            assert_eq!(
+                (first.revision_no, first.revision_state.as_str(), first.actor_class.as_str(), first.deduplicated),
+                (1, "edited", "author", false),
+                "{NEEDS_DB}"
+            );
+            assert!(erased.is_empty(), "a retained edit retires nothing");
+            let (second, _) = room.edit(&message, "second edit", &spec("k2")).await;
+            assert_eq!(second.revision_no, 2);
+
+            let rows = room.revisions(&message).await;
+            assert_eq!(
+                shown(&rows),
+                [(1, "edited", Some("first edit"), "retain", "author"), (2, "edited", Some("second edit"), "retain", "author")]
+            );
+            let prev: Vec<String> = sqlx::query_scalar("SELECT prev_content_digest FROM message_revisions WHERE message_id = $1 ORDER BY revision_no")
+                .bind(&message)
+                .fetch_all(&room.pool)
+                .await
+                .expect("read the digests");
+            assert_eq!(prev, [digest_of("original words"), digest_of("first edit")], "each revision names the text it replaced");
+            assert_eq!(room.content_of(&message).await, "original words", "retain mode keeps the original");
+            assert_eq!(room.xmin(&message).await, before, "the message row was never updated");
+            room.finish().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+        async fn purge_mode_blanks_original_and_prior_revisions() {
+            let Some(room) = Room::new().await else { return };
+            let _keys = StreamKeysEnv::publish();
+            let message = room.message("m1", "user", Some(PERSON), "original words", 1).await;
+            room.edit(&message, "first edit", &spec("k1")).await;
+
+            // An edit under purge blanks the original and the text of every older revision.
+            let (second, _) = room.edit(&message, "second edit", &purging("k2")).await;
+            assert_eq!(second.revision_no, 2, "{NEEDS_DB}");
+            assert_eq!(room.content_of(&message).await, "", "the original text is gone");
+            assert_eq!(room.metadata_of(&message).await, serde_json::json!({"keep": true}), "an edit leaves the metadata");
+            let rows = room.revisions(&message).await;
+            assert_eq!(
+                shown(&rows),
+                [(1, "edited", None, "retain", "author"), (2, "edited", Some("second edit"), "purge", "author")],
+                "only the newest text survives"
+            );
+
+            // A delete under purge also clears the metadata and the newest edit's text.
+            let (third, _) = room.delete(&message, &purging("k3")).await;
+            assert_eq!((third.revision_no, third.revision_state.as_str()), (3, "deleted"));
+            assert_eq!(room.content_of(&message).await, "");
+            assert_eq!(room.metadata_of(&message).await, serde_json::json!({}), "a delete clears the metadata");
+            let rows = room.revisions(&message).await;
+            assert_eq!(
+                shown(&rows),
+                [(1, "edited", None, "retain", "author"), (2, "edited", None, "purge", "author"), (3, "deleted", None, "purge", "author")]
+            );
+            room.finish().await;
+        }
+
+        /// The fold of every read: the same fragments `ListConversation`, the model context and Dreaming splice in.
+        async fn fold(room: &Room, ceiling: Option<i64>) -> Vec<(String, String, String, Option<serde_json::Value>, bool, bool)> {
+            let sql = format!(
+                "SELECT m.id, {content} AS content, {state} AS state, {metadata} AS metadata, \
+                 {followed} AS followed_up, ({live}) AS live \
+                 FROM messages m {join} WHERE m.thread_id = $1 ORDER BY m.sequence",
+                content = FOLD_CONTENT_SQL,
+                state = FOLD_STATE_SQL,
+                metadata = FOLD_METADATA_SQL,
+                followed = FOLD_FOLLOWED_UP_SQL,
+                live = FOLD_NOT_DELETED_SQL,
+                join = fold_join_sql("$2::BIGINT"),
+            );
+            sqlx::query_as(&sql)
+                .bind(&room.thread)
+                .bind(ceiling)
+                .fetch_all(&room.pool)
+                .await
+                .expect("fold")
+        }
+
+        /// A revision row written directly, so a test controls its audience stamp.
+        async fn put_revision(room: &Room, message: &str, no: i32, action: &str, content: Option<&str>, audience_revision: i64) {
+            sqlx::query(
+                "INSERT INTO message_revisions (revision_id, org_id, thread_id, message_id, revision_no, action, \
+                 actor_subject_id, actor_class, content, content_digest, prev_content_digest, original_retention, \
+                 idempotency_hash, space_id, recipient_audience_revision, authority_revision, resource_authorization_ref) \
+                 VALUES ($1, $2, $3, $4, $5, $6, 'owner-1', 'author', $7, 'sha256:new', 'sha256:old', 'retain', $8, $9, $10, 1, 'resource-1')",
+            )
+            .bind(format!("rev-{message}-{no}"))
+            .bind(ORG)
+            .bind(&room.thread)
+            .bind(message)
+            .bind(no)
+            .bind(action)
+            .bind(content)
+            .bind(format!("idem-{message}-{no}"))
+            .bind(SPACE)
+            .bind(audience_revision)
+            .execute(&room.pool)
+            .await
+            .expect("seed a revision");
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+        async fn fold_returns_effective_content_in_the_reads_that_splice_it() {
+            let Some(room) = Room::new().await else { return };
+            let plain = room.message("plain", "user", Some(PERSON), "plain words", 1).await;
+            let edited = room.message("edited", "user", Some(PERSON), "old words", 1).await;
+            let deleted = room.message("deleted", "user", Some(PERSON), "doomed words", 1).await;
+            let answer = room.message("answer", "assistant", None, "an answer", 1).await;
+            let late = room.message("late", "user", Some(PERSON), "late words", 1).await;
+            put_revision(&room, &edited, 1, "edited", Some("new words"), 1).await;
+            put_revision(&room, &deleted, 1, "deleted", None, 1).await;
+            put_revision(&room, &late, 1, "deleted", None, 1).await;
+
+            let marker = Some(serde_json::json!({"keep": true}));
+            let rows = fold(&room, None).await;
+            let by_id = |id: &str| rows.iter().find(|row| row.0 == id).unwrap_or_else(|| panic!("{id} is not read"));
+            let row = by_id(&plain);
+            assert_eq!((row.1.as_str(), row.2.as_str(), &row.3, row.4, row.5), ("plain words", "", &marker, false, true), "{NEEDS_DB}");
+            let row = by_id(&edited);
+            assert_eq!((row.1.as_str(), row.2.as_str(), &row.3, row.4, row.5), ("new words", "edited", &marker, false, true));
+            let row = by_id(&deleted);
+            assert_eq!((row.1.as_str(), row.2.as_str(), &row.3, row.4, row.5), ("", "deleted", &None, true, false), "an answer followed the deleted message");
+            let row = by_id(&answer);
+            assert_eq!((row.1.as_str(), row.2.as_str(), row.4, row.5), ("an answer", "", false, true));
+            let row = by_id(&late);
+            assert_eq!((row.1.as_str(), row.2.as_str(), row.4, row.5), ("", "deleted", false, false), "no answer followed the last message");
+            room.finish().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+        async fn deleted_applies_above_audience_ceiling() {
+            let Some(room) = Room::new().await else { return };
+            let message = room.message("m1", "user", Some(PERSON), "doomed words", 1).await;
+            // The delete was made under audience revision 9; a reader at 4 must still not see the text.
+            put_revision(&room, &message, 1, "deleted", None, 9).await;
+            for ceiling in [Some(1), Some(4), Some(9), None] {
+                let rows = fold(&room, ceiling).await;
+                let row = &rows[0];
+                assert_eq!((row.1.as_str(), row.2.as_str(), row.5), ("", "deleted", false), "ceiling {ceiling:?}, {NEEDS_DB}");
+                assert_eq!(row.3, None, "a deleted message carries no metadata at ceiling {ceiling:?}");
+            }
+            room.finish().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+        async fn edit_under_newer_audience_hidden_from_older_ceiling() {
+            let Some(room) = Room::new().await else { return };
+            let message = room.message("m1", "user", Some(PERSON), "original words", 1).await;
+            put_revision(&room, &message, 1, "edited", Some("edit under two"), 2).await;
+            put_revision(&room, &message, 2, "edited", Some("edit under nine"), 9).await;
+            let text = |rows: &[(String, String, String, Option<serde_json::Value>, bool, bool)]| (rows[0].1.clone(), rows[0].2.clone());
+            let own = |content: &str, state: &str| (content.to_owned(), state.to_owned());
+            // The newest edit a reader's ceiling allows is the one it sees.
+            assert_eq!(text(&fold(&room, None).await), own("edit under nine", "edited"), "{NEEDS_DB}");
+            assert_eq!(text(&fold(&room, Some(9)).await), own("edit under nine", "edited"));
+            assert_eq!(text(&fold(&room, Some(4)).await), own("edit under two", "edited"));
+            assert_eq!(text(&fold(&room, Some(2)).await), own("edit under two", "edited"));
+            // Below every edit the reader sees the original, as if it had never been edited.
+            assert_eq!(text(&fold(&room, Some(1)).await), own("original words", ""));
+            room.finish().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+        async fn delete_retires_derived_memory_and_events_carry_thread_id() {
+            let Some(room) = Room::new().await else { return };
+            let _keys = StreamKeysEnv::publish();
+            let doomed = room.message("doomed", "user", Some(PERSON), "doomed words", 1).await;
+            let kept = room.message("kept", "user", Some(PERSON), "kept words", 1).await;
+            let memory = |name: &str| format!("revise-memory-{name}-{}", room.nonce);
+            for (name, message) in [("doomed", &doomed), ("kept", &kept)] {
+                sqlx::query(
+                    "INSERT INTO agent_memory (id, org_id, session_id, scope, key, content, owner, source_links) \
+                     VALUES ($1, $2, $3, 'thread', $1, 'remembered', $4, $5)",
+                )
+                .bind(memory(name))
+                .bind(ORG)
+                .bind(&room.thread)
+                .bind(PERSON)
+                .bind(vec![format!("message:{message}")])
+                .execute(&room.pool)
+                .await
+                .expect("seed a derived memory row");
+            }
+
+            let (response, erased) = room.delete(&doomed, &spec("k1")).await;
+            assert_eq!(response.revision_state, "deleted", "{NEEDS_DB}");
+            assert_eq!(
+                erased,
+                vec![crate::memory_erasure::ErasedMemory { memory_id: memory("doomed"), owner: PERSON.to_owned() }],
+                "the rows that cite the deleted message are retired"
+            );
+            let remaining: Vec<String> = sqlx::query_scalar("SELECT id FROM agent_memory WHERE session_id = $1")
+                .bind(&room.thread)
+                .fetch_all(&room.pool)
+                .await
+                .expect("read memory");
+            assert_eq!(remaining, [memory("kept")], "a row that cites another message stays");
+
+            // The event is keyed by the thread, so deleting the thread erases it.
+            let payload: serde_json::Value = sqlx::query_scalar(
+                "SELECT payload FROM events WHERE run_id = $1 AND event_type = 'MESSAGE_REVISED'",
+            )
+            .bind(&room.thread)
+            .fetch_one(&room.pool)
+            .await
+            .expect("the revision event, found by thread id");
+            assert_eq!(payload["thread_id"], room.thread.as_str());
+            assert_eq!(payload["message_id"], doomed.as_str());
+            assert_eq!((payload["action"].as_str(), payload["revision_no"].as_i64()), (Some("deleted"), Some(1)));
+            room.finish().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+        async fn revision_dedupe_replay_and_conflict() {
+            let Some(room) = Room::new().await else { return };
+            let _keys = StreamKeysEnv::publish();
+            let message = room.message("m1", "user", Some(PERSON), "original words", 1).await;
+            let (first, _) = room.edit(&message, "first edit", &spec("k1")).await;
+            assert!(!first.deduplicated, "{NEEDS_DB}");
+
+            // The same key, action and text is answered with the stored row, never applied twice.
+            let (replay, erased) = room.edit(&message, "first edit", &spec("k1")).await;
+            assert!(replay.deduplicated);
+            assert_eq!((replay.revision_no, replay.revision_state.as_str(), replay.actor_class.as_str()), (1, "edited", "author"));
+            assert_eq!(
+                replay.revised_at.map(|time| time.seconds),
+                first.revised_at.map(|time| time.seconds),
+                "the stored time, not a new one"
+            );
+            assert!(erased.is_empty());
+            assert_eq!(room.revisions(&message).await.len(), 1);
+
+            // The same key with other text, or another action, is a conflict.
+            for (why, req) in [
+                ("other text", signed(room.request(&message, rev::ACTION_EDIT, "another edit"), &spec("k1"))),
+                ("another action", signed(room.request(&message, rev::ACTION_DELETE, ""), &spec("k1"))),
+            ] {
+                let status = room.revise(&req, PERSON).await.expect_err(why);
+                assert_eq!(status.code(), tonic::Code::AlreadyExists, "{why}");
+                assert_eq!(code_of(&status), Some("idempotency_key_conflict"), "{why}");
+            }
+            assert_eq!(room.revisions(&message).await.len(), 1, "a conflict writes nothing");
+            // Another key is another revision.
+            let (second, _) = room.edit(&message, "second edit", &spec("k2")).await;
+            assert_eq!((second.revision_no, second.deduplicated), (2, false));
+            // An edit that changes nothing is refused as a no-op.
+            let same = signed(room.request(&message, rev::ACTION_EDIT, "second edit"), &spec("k3"));
+            let status = room.revise(&same, PERSON).await.expect_err("nothing changes");
+            assert_eq!(code_of(&status), Some("revision_noop"));
+            room.finish().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+        async fn revoked_member_cannot_revise() {
+            let Some(room) = Room::new().await else { return };
+            let _keys = StreamKeysEnv::publish();
+            let message = room.message("m1", "user", Some(PERSON), "original words", 1).await;
+            room.edit(&message, "while a member", &spec("k1")).await;
+            sqlx::query("INSERT INTO space_membership_revocations (space_ref, org_id, subject_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING")
+                .bind(SPACE)
+                .bind(ORG)
+                .bind(PERSON)
+                .execute(&room.pool)
+                .await
+                .expect("revoke the member");
+            let req = signed(room.request(&message, rev::ACTION_EDIT, "after the revocation"), &spec("k2"));
+            let status = room.revise(&req, PERSON).await.expect_err("revoked");
+            assert_eq!(status.code(), tonic::Code::PermissionDenied, "{NEEDS_DB}");
+            assert_eq!(room.revisions(&message).await.len(), 1, "the refused revision wrote nothing");
+            room.finish().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+        async fn stale_decision_rejected() {
+            let Some(room) = Room::new().await else { return };
+            let _keys = StreamKeysEnv::publish();
+            let message = room.message("m1", "user", Some(PERSON), "original words", 1).await;
+            sqlx::query("UPDATE threads SET recipient_audience_revision = 6 WHERE id = $1")
+                .bind(&room.thread)
+                .execute(&room.pool)
+                .await
+                .expect("the thread has seen audience 6");
+            // A decision made against audience 4 predates a roster change the thread already reflects.
+            let stale = signed(room.request(&message, rev::ACTION_EDIT, "stale edit"), &spec("k1"));
+            let status = room.revise(&stale, PERSON).await.expect_err("stale");
+            assert_eq!(status.code(), tonic::Code::Aborted, "{NEEDS_DB}");
+            assert_eq!(code_of(&status), Some("space_authority_stale"));
+            assert!(room.revisions(&message).await.is_empty());
+            // The same revision under a decision of audience 6 is current.
+            let current = Spec { audience_revision: 6, ..spec("k2") };
+            let (response, _) = room.edit(&message, "current edit", &current).await;
+            assert_eq!(response.revision_no, 1);
+            room.finish().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+        async fn revise_blocked_while_run_active() {
+            let Some(room) = Room::new().await else { return };
+            let _keys = StreamKeysEnv::publish();
+            let older = room.message("older", "user", Some(PERSON), "an older question", 1).await;
+            let latest = room.message("latest", "user", Some(PERSON), "the question being answered", 1).await;
+            let run = room.start_run("live").await;
+
+            // The message the live run is answering cannot change under it.
+            let blocked = signed(room.request(&latest, rev::ACTION_EDIT, "changed under the run"), &spec("k1"));
+            let status = room.revise(&blocked, PERSON).await.expect_err("a run is answering this message");
+            assert_eq!(status.code(), tonic::Code::Aborted, "{NEEDS_DB}");
+            assert_eq!(code_of(&status), Some(crate::run_phase::THREAD_RUN_ACTIVE_CODE));
+            assert_eq!(
+                status.metadata().get(crate::run_phase::ACTIVE_RUN_TRAILER).and_then(|id| id.to_str().ok()),
+                Some(run.as_str()),
+                "the refusal names the run"
+            );
+            assert!(room.revisions(&latest).await.is_empty());
+            // An earlier question is not the one being answered.
+            let (response, _) = room.edit(&older, "an older question, reworded", &spec("k2")).await;
+            assert_eq!(response.revision_no, 1);
+            // Once the run has ended the latest message can be revised.
+            sqlx::query("UPDATE runs SET status = 'completed' WHERE id = $1")
+                .bind(&run)
+                .execute(&room.pool)
+                .await
+                .expect("end the run");
+            let (response, _) = room.edit(&latest, "changed after the run", &spec("k3")).await;
+            assert_eq!(response.revision_no, 1);
+            room.finish().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+        async fn message_revised_audit_body_has_no_content() {
+            let Some(room) = Room::new().await else { return };
+            let _keys = StreamKeysEnv::publish();
+            let message = room.message("m1", "user", Some(PERSON), "CANARY-ORIGINAL-TEXT", 1).await;
+            room.edit(&message, "CANARY-REPLACEMENT-TEXT", &spec("k1")).await;
+
+            let audit: Vec<serde_json::Value> = sqlx::query_scalar(
+                "SELECT payload FROM session_audit_outbox WHERE payload->'details'->>'thread_id' = $1",
+            )
+            .bind(&room.thread)
+            .fetch_all(&room.pool)
+            .await
+            .expect("read the audit rows");
+            assert_eq!(audit.len(), 1, "one audit row per revision, {NEEDS_DB}");
+            let body = &audit[0];
+            assert_eq!((body["event"].as_str(), body["outcome"].as_str(), body["plane"].as_str()), (Some("message_revised"), Some("success"), Some("model")));
+            assert_eq!(body["resource_id"], message.as_str());
+            let mut keys: Vec<&str> = body["details"].as_object().expect("details").keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                ["action", "actor_class", "moderation_reason", "original_retention", "revision_no", "space_id", "target_role", "thread_id"],
+                "ids and enums only"
+            );
+            // Neither the audit row nor the event carries any text of the message.
+            let event: serde_json::Value = sqlx::query_scalar("SELECT payload FROM events WHERE run_id = $1 AND event_type = 'MESSAGE_REVISED'")
+                .bind(&room.thread)
+                .fetch_one(&room.pool)
+                .await
+                .expect("the revision event");
+            for (what, text) in [("audit", body.to_string()), ("event", event.to_string())] {
+                assert!(!text.contains("CANARY"), "the {what} body carries message text: {text}");
+                assert!(!text.contains("\"content\""), "the {what} body names a content field: {text}");
+            }
+            room.finish().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+        async fn zdr_credential_cannot_revise() {
+            let Some(room) = Room::new().await else { return };
+            let _keys = StreamKeysEnv::publish();
+            let message = room.message("m1", "user", Some(PERSON), "original words", 1).await;
+            let req = signed(room.request(&message, rev::ACTION_EDIT, "an edit"), &spec("k1"));
+            let mut request = Request::new(req);
+            request.extensions_mut().insert(crate::auth::VerifiedIdentity::user_for_test_with_zdr(ORG, PERSON, true));
+            let status = MessageRevisionGrpc::new(room.pool.clone(), None)
+                .revise_message(request)
+                .await
+                .expect_err("a zero-retention credential writes nothing durable");
+            assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{NEEDS_DB}");
+            assert_eq!(Refusal::from_status(&status), Some(Refusal::DURABLE_MUTATION_FORBIDDEN), "{status:?}");
+            assert!(room.revisions(&message).await.is_empty(), "nothing was written");
+            assert_eq!(room.content_of(&message).await, "original words");
+            room.finish().await;
+        }
+
+        fn read_token(user: &str, revision: i64) -> String {
+            mint(
+                crate::grpc::CONTROL_SPACE_DECISION_AUDIENCE,
+                &["thread:read"],
+                false,
+                |claims| {
+                    claims["org_id"] = serde_json::json!(ORG);
+                    claims["subject_id"] = serde_json::json!(user);
+                    claims["space_ref"] = serde_json::json!(SPACE);
+                    claims["recipient_audience_revision"] = serde_json::json!(revision);
+                    claims["issued_at"] = serde_json::json!(Utc::now().to_rfc3339());
+                    claims["expires_at"] = serde_json::json!((Utc::now() + chrono::Duration::minutes(2)).to_rfc3339());
+                },
+                false,
+            )
+        }
+
+        async fn resolve(room: &Room, message: &str, ceiling: Option<i64>) -> Result<pb::ResolveMessageTargetResponse, Status> {
+            let (decision_ref, token) = match ceiling {
+                Some(revision) => (DECISION_REF.to_owned(), read_token(PERSON, revision)),
+                None => (String::new(), String::new()),
+            };
+            let mut request = Request::new(pb::ResolveMessageTargetRequest {
+                org_id: ORG.to_owned(),
+                thread_id: room.thread.clone(),
+                message_id: message.to_owned(),
+                space_id: SPACE.to_owned(),
+                space_read_decision_ref: decision_ref,
+                space_read_decision_token: token,
+                ..Default::default()
+            });
+            request.extensions_mut().insert(crate::auth::VerifiedIdentity::user_for_test(ORG, PERSON));
+            MessageRevisionGrpc::new(room.pool.clone(), None)
+                .resolve_message_target(request)
+                .await
+                .map(Response::into_inner)
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+        async fn resolve_message_target_respects_ceiling() {
+            let Some(room) = Room::new().await else { return };
+            let _keys = StreamKeysEnv::publish();
+            let visible = room.message("visible", "user", Some(PERSON), "visible words", 1).await;
+            let newer = room.message("newer", "user", Some(PERSON), "newer words", 6).await;
+            let edited = room.message("edited", "user", Some(PERSON), "edited words", 1).await;
+            let deleted = room.message("deleted", "assistant", None, "deleted words", 1).await;
+            put_revision(&room, &edited, 1, "edited", Some("later edit"), 9).await;
+            put_revision(&room, &deleted, 1, "deleted", None, 9).await;
+
+            // A read decision must be present: there is no owner-bound fallback.
+            let status = resolve(&room, &visible, None).await.expect_err("no decision");
+            assert_eq!(status.code(), tonic::Code::PermissionDenied, "{NEEDS_DB}");
+
+            let target = resolve(&room, &visible, Some(4)).await.expect("a message inside the ceiling");
+            assert_eq!((target.role.as_str(), target.revision_state.as_str()), ("user", ""));
+            // A message newer than the ceiling is not found, as is one that does not exist.
+            for (why, id) in [("above the ceiling", newer.as_str()), ("missing", "revise-missing")] {
+                let status = resolve(&room, id, Some(4)).await.expect_err(why);
+                assert_eq!(status.code(), tonic::Code::NotFound, "{why}");
+                assert_eq!(code_of(&status), Some("message_not_found"), "{why}");
+            }
+            // The same message is found by a reader whose ceiling reaches it.
+            resolve(&room, &newer, Some(6)).await.expect("a ceiling that reaches the message");
+            // An edit under a newer audience is not shown to an older reader; a deletion always applies.
+            assert_eq!(resolve(&room, &edited, Some(4)).await.expect("edited").revision_state, "");
+            assert_eq!(resolve(&room, &edited, Some(9)).await.expect("edited").revision_state, "edited");
+            assert_eq!(resolve(&room, &deleted, Some(4)).await.expect("deleted").revision_state, "deleted");
+            // A thread stamped above the ceiling hides every message in it.
+            sqlx::query("UPDATE threads SET recipient_audience_revision = 8 WHERE id = $1")
+                .bind(&room.thread)
+                .execute(&room.pool)
+                .await
+                .expect("restamp the thread");
+            let status = resolve(&room, &visible, Some(4)).await.expect_err("the thread is above the ceiling");
+            assert_eq!(status.code(), tonic::Code::NotFound);
+            room.finish().await;
+        }
     }
 }

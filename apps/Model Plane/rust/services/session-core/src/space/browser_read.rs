@@ -379,8 +379,14 @@ pub(crate) fn host_of(raw: &str) -> String {
         .next()
         .unwrap_or_default()
         .to_ascii_lowercase();
+    // A dotted-quad IPv4 literal is not a hostname: its last label is all digits, and no hostname ends in a numeric label.
+    let last_label_numeric = host
+        .rsplit('.')
+        .next()
+        .is_some_and(|label| label.bytes().all(|byte| byte.is_ascii_digit()));
     let hostname = !host.is_empty()
         && host.len() <= 253
+        && !last_label_numeric
         && host
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.');
@@ -842,4 +848,1088 @@ async fn room_run_facts(
             Status::unavailable("browser runs are unavailable")
         })?;
     Ok(fold_run_facts(&rows))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ---- host_of ----------------------------------------------------------------------------
+
+    #[test]
+    fn host_of_keeps_only_the_lowercase_host() {
+        for (raw, expected) in [
+            ("https://example.com/a/b?q=1#frag", "example.com"),
+            ("http://EXAMPLE.com", "example.com"),
+            ("https://Example.COM:8443/x", "example.com"),
+            ("ftp://files.example.org/x", "files.example.org"),
+            ("https://sub.example.co.uk/path", "sub.example.co.uk"),
+            ("https://xn--bcher-kva.example/", "xn--bcher-kva.example"),
+            ("https://a-b.example/", "a-b.example"),
+            // A bare host name, with or without a port or a path.
+            ("example.com", "example.com"),
+            ("EXAMPLE.com:80", "example.com"),
+            ("example.com/path?q=1", "example.com"),
+            ("Handoff.Example.net:9000", "handoff.example.net"),
+            // Nothing past the authority survives, whatever it looks like.
+            ("https://example.com?q=a@b", "example.com"),
+            ("https://example.com#a@b", "example.com"),
+            ("https://example.com/path@evil.example", "example.com"),
+            ("https://example.com:80:90/", "example.com"),
+        ] {
+            assert_eq!(host_of(raw), expected, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn host_of_drops_the_userinfo_so_a_credential_never_rides_in_the_host() {
+        for (raw, expected) in [
+            ("https://user:pass@example.com/x", "example.com"),
+            ("https://user@example.com", "example.com"),
+            ("https://user:pass@example.com:8080/x", "example.com"),
+            ("https://a@b@example.com/", "example.com"),
+            // The host a browser would reach is the one after the last `@`.
+            ("https://evil.example@example.com/", "example.com"),
+            ("http://@example.com", "example.com"),
+        ] {
+            let host = host_of(raw);
+            assert_eq!(host, expected, "{raw:?}");
+            assert!(!host.contains('@') && !host.contains(':'), "{raw:?} -> {host:?}");
+        }
+    }
+
+    #[test]
+    fn host_of_yields_empty_for_a_bracketed_or_bare_ipv6_literal() {
+        for raw in [
+            "https://[::1]/",
+            "https://[::1]:8080/x",
+            "https://[2001:db8::1]/a",
+            "http://user@[::1]/",
+            "[::1]",
+            "[2001:db8::1]:443",
+            // Bare, an IPv6 literal splits at its first colon and leaves nothing.
+            "::1",
+            "https://::1/",
+        ] {
+            assert_eq!(host_of(raw), "", "{raw:?}");
+        }
+    }
+
+    /// The doc comment of `host_of` says an IP literal yields empty (and `site_policy::canonical_host` refuses a
+    /// host whose last label is all digits). A dotted IPv4 literal is made only of hostname bytes, so it passes.
+    #[test]
+    fn host_of_yields_empty_for_an_ipv4_literal() {
+        for raw in [
+            "https://10.0.0.1/",
+            "http://192.168.1.5:8080/admin",
+            "https://127.0.0.1",
+            "93.184.216.34",
+            "https://user:pw@169.254.169.254/latest/meta-data",
+        ] {
+            assert_eq!(host_of(raw), "", "an IP literal must not ride out as a host: {raw:?}");
+        }
+    }
+
+    #[test]
+    fn host_of_yields_empty_for_spaces_and_bytes_that_are_not_hostname_bytes() {
+        for raw in [
+            "exa mple.com",
+            "https://exa mple.com/x",
+            " example.com",
+            "example.com ",
+            "https://example.com\t/x",
+            "example.com\n",
+            "exa_mple.com",
+            "ex%61mple.com",
+            "ex*mple.com",
+            "exam,ple.com",
+            "example.com;rm",
+            "example.com\\evil",
+            "ex\u{e4}mple.com",
+            "exa\u{0}mple.com",
+            "\u{202e}example.com",
+        ] {
+            assert_eq!(host_of(raw), "", "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn host_of_yields_empty_for_nothing_and_for_an_oversize_host() {
+        for raw in ["", "https://", "http:///path", "https://:8080/", "https://?q=1", "https://#frag", "://"] {
+            assert_eq!(host_of(raw), "", "{raw:?}");
+        }
+        let longest = format!("{}.com", "a".repeat(249));
+        assert_eq!(longest.len(), 253);
+        assert_eq!(host_of(&format!("https://{longest}/")), longest);
+        let too_long = format!("{}.com", "a".repeat(250));
+        assert_eq!(too_long.len(), 254);
+        assert_eq!(host_of(&format!("https://{too_long}/")), "");
+    }
+
+    // ---- project_event ----------------------------------------------------------------------
+
+    /// A payload that carries every field any event kind reads, and every field the room must never see.
+    fn payload() -> Value {
+        json!({
+            "action_id": "act-7",
+            "action_type": "click",
+            "url": "https://Example.com:8443/secret/path?token=CANARY-URL#frag",
+            "page_url": "https://pages.example.org/inbox?msg=CANARY-PAGE",
+            "page_title": "CANARY-TITLE",
+            "title": "CANARY-TITLE",
+            "reason": "CANARY-REASON",
+            "rationale": "CANARY-RATIONALE",
+            "selector": "#CANARY-SELECTOR",
+            "dom_ref": "CANARY-DOM",
+            "decided_by": "CANARY-SUBJECT",
+            "decision": "approved",
+            "approval_id": "appr-1",
+            "risk_category": "financial",
+            "status": "loaded",
+            "screenshot_ref": "shot-1",
+            "kind": "login",
+            "host": "Handoff.Example.net:9000",
+            "outcome": "resolved",
+            "goal": "CANARY-GOAL",
+            "frame": "CANARY-FRAME",
+        })
+    }
+
+    fn projected(kind: &'static str) -> ProjectedEvent {
+        ProjectedEvent { kind, ..ProjectedEvent::default() }
+    }
+
+    /// The projector goldens: each event type of [`PROJECTED_EVENT_TYPES`] keeps its closed fields and
+    /// nothing else, whatever else the payload carries.
+    #[test]
+    fn project_event_keeps_only_the_closed_fields_of_each_kind() {
+        let payload = payload();
+        let goldens: Vec<(&str, ProjectedEvent)> = vec![
+            (
+                "BROWSER_ACTION_DISPATCHED",
+                ProjectedEvent {
+                    step: "act-7".to_owned(),
+                    action_type: "click".to_owned(),
+                    host: "example.com".to_owned(),
+                    ..projected("action")
+                },
+            ),
+            (
+                "BROWSER_OBSERVATION_RECEIVED",
+                ProjectedEvent {
+                    step: "act-7".to_owned(),
+                    status: "loaded".to_owned(),
+                    host: "pages.example.org".to_owned(),
+                    evidence_id: "shot-1".to_owned(),
+                    ..projected("observation")
+                },
+            ),
+            ("BROWSER_RUN_PAUSED", projected("paused")),
+            ("BROWSER_RUN_RESUMED", projected("resumed")),
+            (
+                "BROWSER_ACTION_APPROVAL_REQUIRED",
+                ProjectedEvent {
+                    step: "act-7".to_owned(),
+                    action_type: "click".to_owned(),
+                    host: "example.com".to_owned(),
+                    risk_category: "financial".to_owned(),
+                    approval_id: "appr-1".to_owned(),
+                    ..projected("approval_required")
+                },
+            ),
+            (
+                "BROWSER_ACTION_DECIDED",
+                ProjectedEvent {
+                    step: "act-7".to_owned(),
+                    approval_id: "appr-1".to_owned(),
+                    decision: "approved".to_owned(),
+                    ..projected("approval_decided")
+                },
+            ),
+            (
+                "BROWSER_HANDOFF_REQUESTED",
+                ProjectedEvent {
+                    approval_id: "appr-1".to_owned(),
+                    handoff_kind: "login".to_owned(),
+                    host: "handoff.example.net".to_owned(),
+                    ..projected("handoff_requested")
+                },
+            ),
+            (
+                "BROWSER_HANDOFF_RESOLVED",
+                ProjectedEvent {
+                    approval_id: "appr-1".to_owned(),
+                    outcome: "resolved".to_owned(),
+                    ..projected("handoff_resolved")
+                },
+            ),
+            (
+                "RUN_COMPLETED",
+                ProjectedEvent { outcome: "completed".to_owned(), ..projected("result") },
+            ),
+            (
+                "RUN_FAILED",
+                ProjectedEvent { outcome: "failed".to_owned(), ..projected("result") },
+            ),
+        ];
+        assert_eq!(goldens.len(), PROJECTED_EVENT_TYPES.len(), "every projected type has a golden");
+        for (event_type, golden) in goldens {
+            assert!(PROJECTED_EVENT_TYPES.contains(&event_type), "{event_type} is not in the shared list");
+            let row = project_event(event_type, &payload).unwrap_or_else(|| panic!("{event_type} must project"));
+            assert_eq!(row, golden, "{event_type}");
+            // The projection is built from closed fields, so nothing of the payload's private content survives.
+            let shown = format!("{row:?}");
+            for private in ["CANARY", "secret", "token=", "://", "8443", "#frag"] {
+                assert!(!shown.contains(private), "{event_type} leaked {private:?}: {shown}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_action_never_yields_the_reason_or_a_full_url_and_a_decision_never_yields_who_decided() {
+        let payload = payload();
+        let action = project_event("BROWSER_ACTION_DISPATCHED", &payload).expect("projects");
+        assert_eq!(action.host, "example.com", "the host only");
+        let shown = format!("{action:?}");
+        for private in ["CANARY-REASON", "CANARY-RATIONALE", "CANARY-URL", "secret/path", "https://"] {
+            assert!(!shown.contains(private), "{private}: {shown}");
+        }
+        let decided = project_event("BROWSER_ACTION_DECIDED", &payload).expect("projects");
+        assert_eq!(decided.decision, "approved");
+        assert!(!format!("{decided:?}").contains("CANARY-SUBJECT"), "decided_by never leaves the plane");
+        // An observation never carries the page title, the DOM reference or the page URL.
+        let observed = project_event("BROWSER_OBSERVATION_RECEIVED", &payload).expect("projects");
+        let shown = format!("{observed:?}");
+        for private in ["CANARY-TITLE", "CANARY-DOM", "CANARY-PAGE", "inbox"] {
+            assert!(!shown.contains(private), "{private}: {shown}");
+        }
+    }
+
+    #[test]
+    fn project_event_returns_none_for_a_type_the_room_never_sees() {
+        for event_type in [
+            "BROWSER_FRAME_CAPTURED",
+            "BROWSER_DOM_SNAPSHOT",
+            "RUN_STARTED",
+            "RUN_CANCELLED",
+            "TOOL_CALLED",
+            "MESSAGE_REVISED",
+            "",
+            "browser_action_dispatched",
+            "BROWSER_ACTION_DISPATCHED ",
+        ] {
+            assert_eq!(project_event(event_type, &payload()), None, "{event_type:?}");
+        }
+    }
+
+    #[test]
+    fn project_event_tolerates_an_empty_or_odd_payload() {
+        for payload in [json!({}), Value::Null, json!([]), json!("text"), json!({"url": 5, "action_id": null})] {
+            let row = project_event("BROWSER_ACTION_DISPATCHED", &payload).expect("projects");
+            assert_eq!(row, projected("action"), "{payload}");
+        }
+        assert_eq!(
+            project_event("RUN_FAILED", &Value::Null),
+            Some(ProjectedEvent { outcome: "failed".to_owned(), ..projected("result") }),
+            "the outcome of a result row comes from its event type, not its payload"
+        );
+        assert_eq!(
+            project_event("RUN_COMPLETED", &json!({"outcome": "CANARY-OUTCOME"})),
+            Some(ProjectedEvent { outcome: "completed".to_owned(), ..projected("result") })
+        );
+    }
+
+    // ---- fold_run_facts ---------------------------------------------------------------------
+
+    const DISPATCHED: &str = "BROWSER_ACTION_DISPATCHED";
+    const OBSERVED: &str = "BROWSER_OBSERVATION_RECEIVED";
+
+    fn acting(run: &str, event_type: &str, url: Option<&str>, page_url: Option<&str>) -> ActingRow {
+        ActingRow {
+            run_id: run.to_owned(),
+            event_type: event_type.to_owned(),
+            url: url.map(str::to_owned),
+            page_url: page_url.map(str::to_owned),
+        }
+    }
+
+    fn hosts(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn fold_run_facts_counts_only_dispatched_actions_as_steps() {
+        let rows = vec![
+            acting("run-a", DISPATCHED, Some("https://a.example/x"), None),
+            acting("run-a", OBSERVED, None, Some("https://a.example/y")),
+            acting("run-a", DISPATCHED, Some("https://a.example/z"), None),
+            acting("run-a", OBSERVED, None, Some("https://a.example/w")),
+            acting("run-a", OBSERVED, None, None),
+        ];
+        let facts = fold_run_facts(&rows);
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts["run-a"], RunFacts { steps: 2, hosts: hosts(&["a.example"]) });
+
+        // A run with observations only has no steps.
+        let observed_only = fold_run_facts(&[acting("run-b", OBSERVED, None, Some("https://b.example/"))]);
+        assert_eq!(observed_only["run-b"], RunFacts { steps: 0, hosts: hosts(&["b.example"]) });
+    }
+
+    #[test]
+    fn fold_run_facts_keeps_distinct_hosts_first_seen_first() {
+        let rows = vec![
+            acting("run-a", DISPATCHED, Some("https://b.example/1"), None),
+            acting("run-a", OBSERVED, None, Some("https://a.example/1")),
+            acting("run-a", DISPATCHED, Some("https://B.example/2"), None),
+            acting("run-a", DISPATCHED, Some("https://c.example/3"), None),
+            acting("run-a", OBSERVED, None, Some("https://a.example/4")),
+        ];
+        assert_eq!(
+            fold_run_facts(&rows)["run-a"],
+            RunFacts { steps: 3, hosts: hosts(&["b.example", "a.example", "c.example"]) }
+        );
+    }
+
+    #[test]
+    fn fold_run_facts_keeps_at_most_eight_hosts_but_counts_every_step() {
+        assert_eq!(MAX_ROW_HOSTS, 8);
+        let rows: Vec<ActingRow> = (1..=12)
+            .map(|n| acting("run-a", DISPATCHED, Some(&format!("https://h{n}.example/")), None))
+            .collect();
+        let facts = &fold_run_facts(&rows)["run-a"];
+        assert_eq!(facts.steps, 12, "the step count is not capped");
+        assert_eq!(
+            facts.hosts,
+            hosts(&["h1.example", "h2.example", "h3.example", "h4.example", "h5.example", "h6.example", "h7.example", "h8.example"]),
+            "the first eight hosts seen, in order"
+        );
+    }
+
+    #[test]
+    fn fold_run_facts_reads_the_page_url_before_the_url_and_skips_what_is_no_host() {
+        let rows = vec![
+            // page_url wins over url when it is present and not empty.
+            acting("run-a", OBSERVED, Some("https://url.example/"), Some("https://page.example/")),
+            // An empty page_url falls back to url.
+            acting("run-a", OBSERVED, Some("https://fallback.example/"), Some("")),
+            // Neither names a host: nothing is added, and a dispatched row still counts as a step.
+            acting("run-a", DISPATCHED, Some("not a url with spaces"), None),
+            acting("run-a", DISPATCHED, None, None),
+            acting("run-a", DISPATCHED, Some("https://[::1]/"), None),
+        ];
+        assert_eq!(
+            fold_run_facts(&rows)["run-a"],
+            RunFacts { steps: 3, hosts: hosts(&["page.example", "fallback.example"]) }
+        );
+    }
+
+    #[test]
+    fn fold_run_facts_keeps_each_run_apart_and_answers_nothing_for_no_rows() {
+        assert!(fold_run_facts(&[]).is_empty());
+        let rows = vec![
+            acting("run-a", DISPATCHED, Some("https://a.example/"), None),
+            acting("run-b", DISPATCHED, Some("https://b.example/"), None),
+            acting("run-a", DISPATCHED, Some("https://a2.example/"), None),
+        ];
+        let facts = fold_run_facts(&rows);
+        assert_eq!(facts["run-a"], RunFacts { steps: 2, hosts: hosts(&["a.example", "a2.example"]) });
+        assert_eq!(facts["run-b"], RunFacts { steps: 1, hosts: hosts(&["b.example"]) });
+    }
+
+    // ---- the capacity refusal, the count and the page rules ---------------------------------
+
+    #[test]
+    fn the_capacity_refusal_is_resource_exhausted_with_the_message_and_the_trailer() {
+        assert_eq!(BROWSER_CAPACITY_CODE, "browser_capacity");
+        let status = browser_capacity_status();
+        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+        assert_eq!(status.message(), "browser_capacity");
+        assert_eq!(
+            status.metadata().get(ERROR_CODE_TRAILER).and_then(|value| value.to_str().ok()),
+            Some("browser_capacity")
+        );
+    }
+
+    #[test]
+    fn the_cap_counts_only_in_flight_gateway_browser_runs_of_one_space() {
+        let sql = COUNT_ACTIVE_ROOM_BROWSER_RUNS_SQL.split_whitespace().collect::<Vec<_>>().join(" ");
+        for fragment in [
+            "r.org_id = $1",
+            "r.space_id = $2",
+            "o.configured_source = 'gateway_browser'",
+            "r.status NOT IN ('completed', 'failed', 'cancelled')",
+            "($3 = '' OR o.start_key <> $3)",
+        ] {
+            assert!(sql.contains(fragment), "the count lacks {fragment:?}: {sql}");
+        }
+        assert_eq!(mp_contracts::space_browser::ROOM_RUNS_PER_SPACE, 2);
+        assert!(capacity_admits(0) && capacity_admits(1) && !capacity_admits(2) && !capacity_admits(u32::MAX));
+    }
+
+    #[test]
+    fn the_page_limit_defaults_and_refuses_what_is_over_the_most() {
+        assert_eq!(page_limit(0, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT).expect("default"), 20);
+        assert_eq!(page_limit(1, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT).expect("one"), 1);
+        assert_eq!(page_limit(50, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT).expect("the most"), 50);
+        assert_eq!(page_limit(0, DEFAULT_TIMELINE_LIMIT, MAX_TIMELINE_LIMIT).expect("default"), 50);
+        assert_eq!(page_limit(200, DEFAULT_TIMELINE_LIMIT, MAX_TIMELINE_LIMIT).expect("the most"), 200);
+        for over in [(51, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT), (201, DEFAULT_TIMELINE_LIMIT, MAX_TIMELINE_LIMIT)] {
+            let status = page_limit(over.0, over.1, over.2).expect_err("over the most");
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        }
+    }
+
+    #[test]
+    fn ids_are_trimmed_and_bounded() {
+        assert_eq!(bounded_id("  run-1  ", "run_id is required").expect("trimmed"), "run-1");
+        for bad in ["", "   ", &"r".repeat(MAX_ID_BYTES + 1)] {
+            let status = bounded_id(bad, "run_id is required").expect_err("refused");
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        }
+        assert_eq!(bounded_id(&"r".repeat(MAX_ID_BYTES), "x").expect("at the cap").len(), MAX_ID_BYTES);
+        assert_eq!(optional_id("   ").expect("blank stays empty"), "");
+        assert_eq!(optional_id(" evt-1 ").expect("trimmed"), "evt-1");
+        assert_eq!(
+            optional_id(&"e".repeat(MAX_ID_BYTES + 1)).expect_err("too long").code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+
+    // ---- real Postgres (every test is `#[ignore]`d) -----------------------------------------
+    //
+    // Run with `DATABASE_URL` pointing at a disposable Postgres whose database name contains `test`:
+    // `cargo test -p session-core --bin session-core space::browser_read -- --ignored --test-threads=1`
+
+    mod db_tests {
+        use super::*;
+        use crate::grpc::space_w1_tests::{mint, StreamKeysEnv, DECISION_REF};
+        use crate::space::test_support::{clean_space, connect, seed_space_run, seed_space_thread};
+        use mp_contracts::space_browser::ROOM_RUNS_PER_SPACE;
+
+        const NEEDS_DB: &str = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)";
+        /// The person who owns every thread and starts every run (`seed_space_run` names this owner).
+        const OWNER: &str = "owner-1";
+        /// A member who reads the room.
+        const VIEWER: &str = "viewer-1";
+
+        fn ids(prefix: &str) -> (String, String, String) {
+            let suffix = mp_ids::new_ulid();
+            (format!("org-{prefix}-{suffix}"), format!("space-{prefix}-{suffix}"), suffix)
+        }
+
+        /// The Space's decision ceiling: every seeded thread and run is stamped at revision 1.
+        const CEILING: i64 = 4;
+
+        // ---- seeding ----
+
+        /// A run in `status` on `thread`, started through `source` (`gateway_browser` is a room browser run).
+        async fn seed_run(pool: &PgPool, org: &str, space: &str, thread: &str, run: &str, status: &str, source: &str) {
+            seed_space_run(pool, org, space, thread, run, status, "persistent").await;
+            let step = match source {
+                "gateway_browser" => "model-gateway-browser-agent-final",
+                "execution_agent" => "execution-core-agent-final",
+                "execution_browser" => "execution-core-browser-final",
+                _ => "model-gateway-direct-inference-final",
+            };
+            sqlx::query(
+                "INSERT INTO managed_run_terminalization_outbox \
+                 (run_id, org_id, user_id, start_key, configured_source, configured_terminal_step_id, zdr, deadline_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, false, now() + interval '15 minutes')",
+            )
+            .bind(run)
+            .bind(org)
+            .bind(OWNER)
+            .bind(format!("sk-{run}"))
+            .bind(source)
+            .bind(step)
+            .execute(pool)
+            .await
+            .expect("seed the start obligation");
+        }
+
+        /// One event of `run`; a higher `order` is later. Returns the event id.
+        async fn seed_event(pool: &PgPool, org: &str, run: &str, event_type: &str, order: i32, payload: Value) -> String {
+            let id = format!("evt-{order:03}-{}", mp_ids::new_ulid());
+            sqlx::query(
+                "INSERT INTO events (id, event_type, run_id, payload, ts, org_id) \
+                 VALUES ($1, $2, $3, $4, now() - make_interval(secs => $5), $6)",
+            )
+            .bind(&id)
+            .bind(event_type)
+            .bind(run)
+            .bind(payload)
+            .bind(f64::from(1000 - order))
+            .bind(org)
+            .execute(pool)
+            .await
+            .expect("seed event");
+            id
+        }
+
+        async fn cleanup(pool: &PgPool, org: &str, space: &str) {
+            for sql in [
+                "DELETE FROM plans WHERE run_id IN (SELECT id FROM runs WHERE org_id = $1)",
+                "DELETE FROM events WHERE org_id = $1",
+                "DELETE FROM managed_run_terminalization_outbox WHERE org_id = $1",
+                "DELETE FROM space_membership_revocations WHERE org_id = $1",
+            ] {
+                sqlx::query(sql).bind(org).execute(pool).await.ok();
+            }
+            clean_space(pool, org, space).await;
+            sqlx::query("DELETE FROM threads WHERE org_id = $1").bind(org).execute(pool).await.ok();
+        }
+
+        // ---- the start path ----
+
+        fn browser_start(org: &str, user: &str, thread: &str, key: &str) -> pb::StartManagedRunRequest {
+            pb::StartManagedRunRequest {
+                wake: None,
+                thread_id: thread.to_owned(),
+                parent_run_id: String::new(),
+                agent_id: "room-browser-agent".to_owned(),
+                goal: "open the page".to_owned(),
+                mode: "execute".to_owned(),
+                org_id: org.to_owned(),
+                user_id: user.to_owned(),
+                start_key: key.to_owned(),
+                terminal_source: pb::ManagedRunSource::GatewayBrowser as i32,
+                agent_version_pin: None,
+            }
+        }
+
+        async fn start(
+            pool: &PgPool,
+            org: &str,
+            user: &str,
+            thread: &str,
+            key: &str,
+        ) -> Result<crate::terminalization::ManagedRunStart, Status> {
+            crate::terminalization::start_managed_run_inner(pool, browser_start(org, user, thread, key), false).await
+        }
+
+        fn cap() -> usize {
+            usize::try_from(ROOM_RUNS_PER_SPACE).expect("a small cap")
+        }
+
+        /// Starts `count` room browser runs, each on a thread of its own, and returns the start keys.
+        async fn fill_space(pool: &PgPool, org: &str, space: &str, suffix: &str, count: usize) -> Vec<(String, String)> {
+            let mut started = Vec::new();
+            for n in 0..count {
+                let thread = format!("thread-{n}-{suffix}");
+                let key = format!("start-{n}-{suffix}");
+                seed_space_thread(pool, org, space, &thread, OWNER).await;
+                let run = start(pool, org, OWNER, &thread, &key).await.expect("admitted under the cap");
+                assert!(!run.already_started);
+                started.push((thread, key));
+            }
+            started
+        }
+
+        fn assert_browser_capacity(status: &Status) {
+            assert_eq!(status.code(), tonic::Code::ResourceExhausted, "{status:?}");
+            assert_eq!(status.message(), "browser_capacity");
+            assert_eq!(
+                status.metadata().get(ERROR_CODE_TRAILER).and_then(|value| value.to_str().ok()),
+                Some("browser_capacity"),
+                "the typed trailer names the refusal"
+            );
+        }
+
+        async fn count(pool: &PgPool, sql: &str, first: &str, second: &str) -> i64 {
+            sqlx::query_scalar(sql).bind(first).bind(second).fetch_one(pool).await.expect("count")
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+        async fn a_browser_start_at_the_cap_is_resource_exhausted_and_writes_neither_a_run_nor_an_outbox_row() {
+            let Some(pool) = connect().await else { return };
+            let (org, space, suffix) = ids("cap");
+            fill_space(&pool, &org, &space, &suffix, cap()).await;
+
+            let thread = format!("thread-over-{suffix}");
+            let key = format!("start-over-{suffix}");
+            seed_space_thread(&pool, &org, &space, &thread, OWNER).await;
+            let refusal = start(&pool, &org, OWNER, &thread, &key).await.expect_err("the Space is at its cap");
+            assert_browser_capacity(&refusal);
+
+            let runs = count(&pool, "SELECT count(*) FROM runs WHERE org_id = $1 AND thread_id = $2", &org, &thread).await;
+            assert_eq!(runs, 0, "the refused start wrote no run, {NEEDS_DB}");
+            let outbox = count(
+                &pool,
+                "SELECT count(*) FROM managed_run_terminalization_outbox WHERE org_id = $1 AND start_key = $2",
+                &org,
+                &key,
+            )
+            .await;
+            assert_eq!(outbox, 0, "the refused start wrote no outbox row");
+            let in_space = count(&pool, "SELECT count(*) FROM runs WHERE org_id = $1 AND space_id = $2", &org, &space).await;
+            assert_eq!(in_space, i64::from(ROOM_RUNS_PER_SPACE), "only the admitted runs exist");
+            cleanup(&pool, &org, &space).await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+        async fn two_concurrent_browser_starts_with_one_free_slot_admit_exactly_one() {
+            let Some(pool) = connect().await else { return };
+            let (org, space, suffix) = ids("race");
+            fill_space(&pool, &org, &space, &suffix, cap() - 1).await;
+            let (thread_a, thread_b) = (format!("thread-a-{suffix}"), format!("thread-b-{suffix}"));
+            seed_space_thread(&pool, &org, &space, &thread_a, OWNER).await;
+            seed_space_thread(&pool, &org, &space, &thread_b, OWNER).await;
+            let (key_a, key_b) = (format!("start-a-{suffix}"), format!("start-b-{suffix}"));
+
+            let (first, second) = tokio::join!(
+                start(&pool, &org, OWNER, &thread_a, &key_a),
+                start(&pool, &org, OWNER, &thread_b, &key_b),
+            );
+            let results = [first, second];
+            assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1, "exactly one start is admitted, {NEEDS_DB}");
+            let loser = results.into_iter().find_map(Result::err).expect("the other start is refused");
+            assert_browser_capacity(&loser);
+            let in_space = count(
+                &pool,
+                "SELECT count(*) FROM managed_run_terminalization_outbox o JOIN runs r ON r.id = o.run_id \
+                 WHERE r.org_id = $1 AND r.space_id = $2 AND o.configured_source = 'gateway_browser'",
+                &org,
+                &space,
+            )
+            .await;
+            assert_eq!(in_space, i64::from(ROOM_RUNS_PER_SPACE), "the Space holds exactly its cap of runs");
+            cleanup(&pool, &org, &space).await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+        async fn a_replay_of_an_admitted_start_key_is_already_started_at_the_cap_and_never_refused() {
+            let Some(pool) = connect().await else { return };
+            let (org, space, suffix) = ids("replay");
+            let started = fill_space(&pool, &org, &space, &suffix, cap()).await;
+
+            let (thread, key) = &started[0];
+            let first_run: String = sqlx::query_scalar(
+                "SELECT o.run_id FROM managed_run_terminalization_outbox o WHERE o.org_id = $1 AND o.start_key = $2",
+            )
+            .bind(&org)
+            .bind(key)
+            .fetch_one(&pool)
+            .await
+            .expect("the admitted run");
+            let replay = start(&pool, &org, OWNER, thread, key).await.expect("a replay is never refused");
+            assert!(replay.already_started, "{NEEDS_DB}");
+            assert_eq!(replay.run_id, first_run);
+            let runs = count(&pool, "SELECT count(*) FROM runs WHERE org_id = $1 AND space_id = $2", &org, &space).await;
+            assert_eq!(runs, i64::from(ROOM_RUNS_PER_SPACE), "a replay writes nothing new");
+            cleanup(&pool, &org, &space).await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+        async fn a_start_on_a_thread_outside_any_space_or_on_another_users_thread_is_not_capped_here() {
+            let Some(pool) = connect().await else { return };
+            let (org, space, suffix) = ids("scope");
+            fill_space(&pool, &org, &space, &suffix, cap()).await;
+
+            // A thread in no Space is admitted by the cap check and then starts normally.
+            let plain = format!("thread-plain-{suffix}");
+            sqlx::query("INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)")
+                .bind(&plain)
+                .bind(&org)
+                .bind(OWNER)
+                .execute(&pool)
+                .await
+                .expect("seed an ordinary chat thread");
+            let mut tx = pool.begin().await.expect("begin");
+            ensure_room_browser_capacity(&mut tx, &org, OWNER, &plain).await.expect("no Space, no cap");
+            tx.rollback().await.ok();
+            let started = start(&pool, &org, OWNER, &plain, &format!("start-plain-{suffix}"))
+                .await
+                .expect("a start outside any Space is not capped");
+            assert!(!started.already_started, "{NEEDS_DB}");
+
+            // Another user's Space thread is not capped here either: the start's own insert refuses it.
+            let theirs = format!("thread-theirs-{suffix}");
+            seed_space_thread(&pool, &org, &space, &theirs, "owner-2").await;
+            let mut tx = pool.begin().await.expect("begin");
+            ensure_room_browser_capacity(&mut tx, &org, OWNER, &theirs)
+                .await
+                .expect("the cap check passes another user's thread through");
+            tx.rollback().await.ok();
+            let refusal = start(&pool, &org, OWNER, &theirs, &format!("start-theirs-{suffix}"))
+                .await
+                .expect_err("the insert refuses a thread that is not the caller's");
+            assert_eq!(refusal.code(), tonic::Code::NotFound, "{refusal:?}");
+            assert_ne!(refusal.message(), "browser_capacity");
+
+            // A thread that does not exist passes the cap check too.
+            let mut tx = pool.begin().await.expect("begin");
+            ensure_room_browser_capacity(&mut tx, &org, OWNER, "thread-missing").await.expect("nothing to cap");
+            tx.rollback().await.ok();
+
+            // The caller's own Space thread is still refused at the cap.
+            let mine = format!("thread-mine-{suffix}");
+            seed_space_thread(&pool, &org, &space, &mine, OWNER).await;
+            let mut tx = pool.begin().await.expect("begin");
+            let refusal = ensure_room_browser_capacity(&mut tx, &org, OWNER, &mine).await.expect_err("at the cap");
+            tx.rollback().await.ok();
+            assert_browser_capacity(&refusal);
+            cleanup(&pool, &org, &space).await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+        async fn terminal_runs_and_runs_of_other_sources_are_not_counted() {
+            let Some(pool) = connect().await else { return };
+            let (org, space, suffix) = ids("count");
+            let thread = format!("thread-{suffix}");
+            seed_space_thread(&pool, &org, &space, &thread, OWNER).await;
+            let in_flight = |pool: PgPool, org: String, space: String, exclude: String| async move {
+                sqlx::query_scalar::<_, i64>(COUNT_ACTIVE_ROOM_BROWSER_RUNS_SQL)
+                    .bind(org)
+                    .bind(space)
+                    .bind(exclude)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("count")
+            };
+
+            // Browser runs that ended, and in-flight runs of every other source, are not counted.
+            for (n, status) in ["completed", "failed", "cancelled"].into_iter().enumerate() {
+                seed_run(&pool, &org, &space, &thread, &format!("run-done-{n}-{suffix}"), status, "gateway_browser").await;
+            }
+            for (n, (status, source)) in [("running", "execution_agent"), ("queued", "gateway_direct"), ("running", "execution_browser")]
+                .into_iter()
+                .enumerate()
+            {
+                seed_run(&pool, &org, &space, &thread, &format!("run-other-{n}-{suffix}"), status, source).await;
+            }
+            assert_eq!(in_flight(pool.clone(), org.clone(), space.clone(), String::new()).await, 0, "{NEEDS_DB}");
+            let mut tx = pool.begin().await.expect("begin");
+            ensure_room_browser_capacity(&mut tx, &org, OWNER, &thread).await.expect("nothing in flight");
+            tx.rollback().await.ok();
+
+            // Live browser runs are counted, queued or running, and the cap bites at ROOM_RUNS_PER_SPACE.
+            seed_run(&pool, &org, &space, &thread, &format!("run-live-0-{suffix}"), "running", "gateway_browser").await;
+            assert_eq!(in_flight(pool.clone(), org.clone(), space.clone(), String::new()).await, 1);
+            let mut tx = pool.begin().await.expect("begin");
+            ensure_room_browser_capacity(&mut tx, &org, OWNER, &thread).await.expect("one free slot");
+            tx.rollback().await.ok();
+            seed_run(&pool, &org, &space, &thread, &format!("run-live-1-{suffix}"), "queued", "gateway_browser").await;
+            assert_eq!(in_flight(pool.clone(), org.clone(), space.clone(), String::new()).await, 2);
+            let mut tx = pool.begin().await.expect("begin");
+            let refusal = ensure_room_browser_capacity(&mut tx, &org, OWNER, &thread).await.expect_err("at the cap");
+            tx.rollback().await.ok();
+            assert_browser_capacity(&refusal);
+
+            // The exclusion leaves one start key out of the count, and another Space is a count of its own.
+            let excluded = format!("sk-run-live-0-{suffix}");
+            assert_eq!(in_flight(pool.clone(), org.clone(), space.clone(), excluded).await, 1);
+            assert_eq!(in_flight(pool.clone(), org.clone(), format!("{space}-other"), String::new()).await, 0);
+            assert_eq!(in_flight(pool.clone(), format!("{org}-other"), space.clone(), String::new()).await, 0);
+            cleanup(&pool, &org, &space).await;
+        }
+
+        // ---- the three room reads (WS20-S4) ----
+
+        fn read_token(org: &str, user: &str, space: &str, revision: i64) -> String {
+            mint(
+                crate::grpc::CONTROL_SPACE_DECISION_AUDIENCE,
+                &["thread:read"],
+                false,
+                |claims| {
+                    claims["org_id"] = json!(org);
+                    claims["subject_id"] = json!(user);
+                    claims["space_ref"] = json!(space);
+                    claims["recipient_audience_revision"] = json!(revision);
+                    claims["issued_at"] = json!(Utc::now().to_rfc3339());
+                    claims["expires_at"] = json!((Utc::now() + chrono::Duration::minutes(2)).to_rfc3339());
+                },
+                false,
+            )
+        }
+
+        fn request_for<T>(message: T, org: &str, user: &str) -> Request<T> {
+            let mut request = Request::new(message);
+            request.extensions_mut().insert(VerifiedIdentity::user_for_test(org, user));
+            request
+        }
+
+        async fn list_runs(pool: &PgPool, org: &str, user: &str, space: &str, thread: &str) -> Result<pb::ListRoomBrowserRunsResponse, Status> {
+            let request = pb::ListRoomBrowserRunsRequest {
+                space_id: space.to_owned(),
+                thread_id: thread.to_owned(),
+                limit: 0,
+                before_run_id: String::new(),
+                space_read_decision_ref: DECISION_REF.to_owned(),
+                space_read_decision_token: read_token(org, user, space, CEILING),
+            };
+            SpaceBrowserReadGrpc::new(pool.clone())
+                .list_room_browser_runs(request_for(request, org, user))
+                .await
+                .map(Response::into_inner)
+        }
+
+        async fn read_timeline(pool: &PgPool, org: &str, user: &str, space: &str, run: &str) -> Result<pb::ReadRoomBrowserTimelineResponse, Status> {
+            let request = pb::ReadRoomBrowserTimelineRequest {
+                space_id: space.to_owned(),
+                run_id: run.to_owned(),
+                after_event_id: String::new(),
+                limit: 0,
+                space_read_decision_ref: DECISION_REF.to_owned(),
+                space_read_decision_token: read_token(org, user, space, CEILING),
+            };
+            SpaceBrowserReadGrpc::new(pool.clone())
+                .read_room_browser_timeline(request_for(request, org, user))
+                .await
+                .map(Response::into_inner)
+        }
+
+        async fn authorize_evidence(
+            pool: &PgPool,
+            org: &str,
+            user: &str,
+            space: &str,
+            run: &str,
+            evidence: &str,
+        ) -> Result<pb::AuthorizeRoomBrowserEvidenceResponse, Status> {
+            let request = pb::AuthorizeRoomBrowserEvidenceRequest {
+                space_id: space.to_owned(),
+                run_id: run.to_owned(),
+                evidence_id: evidence.to_owned(),
+                space_read_decision_ref: DECISION_REF.to_owned(),
+                space_read_decision_token: read_token(org, user, space, CEILING),
+            };
+            SpaceBrowserReadGrpc::new(pool.clone())
+                .authorize_room_browser_evidence(request_for(request, org, user))
+                .await
+                .map(Response::into_inner)
+        }
+
+        /// A browser run with one action, its observation and a screenshot reference, on a new thread.
+        async fn seed_observed_run(pool: &PgPool, org: &str, space: &str, name: &str, shot: &str) -> (String, String) {
+            let thread = format!("thread-{name}");
+            let run = format!("run-{name}");
+            seed_space_thread(pool, org, space, &thread, OWNER).await;
+            seed_run(pool, org, space, &thread, &run, "running", "gateway_browser").await;
+            seed_event(pool, org, &run, "BROWSER_ACTION_DISPATCHED", 1, json!({"action_id": "a1", "action_type": "navigate", "url": "https://example.com/"})).await;
+            seed_event(
+                pool,
+                org,
+                &run,
+                "BROWSER_OBSERVATION_RECEIVED",
+                2,
+                json!({"action_id": "a1", "status": "loaded", "page_url": "https://example.com/", "screenshot_ref": shot}),
+            )
+            .await;
+            (thread, run)
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+        async fn projector_drops_reason_title_selector_and_full_url_through_the_three_rpcs() {
+            let Some(pool) = connect().await else { return };
+            let _keys = StreamKeysEnv::publish();
+            let (org, space, suffix) = ids("proj");
+            let (thread, run) = (format!("thread-{suffix}"), format!("run-{suffix}"));
+            seed_space_thread(&pool, &org, &space, &thread, OWNER).await;
+            seed_run(&pool, &org, &space, &thread, &run, "running", "gateway_browser").await;
+            let events = [
+                (
+                    "BROWSER_ACTION_DISPATCHED",
+                    json!({"action_id": "a1", "action_type": "navigate", "url": "https://Example.com/secret?token=CANARY-URL",
+                           "reason": "CANARY-REASON", "selector": "#CANARY-SELECTOR", "title": "CANARY-TITLE"}),
+                ),
+                (
+                    "BROWSER_OBSERVATION_RECEIVED",
+                    json!({"action_id": "a1", "status": "loaded", "page_url": "https://pages.example.org/inbox?m=CANARY-URL",
+                           "page_title": "CANARY-TITLE", "screenshot_ref": "shot-1", "dom_ref": "CANARY-DOM"}),
+                ),
+                (
+                    "BROWSER_ACTION_APPROVAL_REQUIRED",
+                    json!({"action_id": "a2", "action_type": "click", "url": "https://pay.example.com/checkout?CANARY-URL",
+                           "selector": "#CANARY-SELECTOR", "reason": "CANARY-REASON", "risk_category": "financial", "approval_id": "appr-1"}),
+                ),
+                (
+                    "BROWSER_ACTION_DECIDED",
+                    json!({"action_id": "a2", "approval_id": "appr-1", "decision": "approved", "decided_by": "CANARY-SUBJECT"}),
+                ),
+                ("BROWSER_FRAME_CAPTURED", json!({"frame": "CANARY-FRAME"})),
+                ("RUN_COMPLETED", json!({})),
+            ];
+            for (order, (event_type, payload)) in (1..).zip(events) {
+                seed_event(&pool, &org, &run, event_type, order, payload).await;
+            }
+
+            let listed = list_runs(&pool, &org, VIEWER, &space, "").await.expect("the list answers");
+            assert_eq!(listed.runs.len(), 1, "{NEEDS_DB}");
+            assert_eq!(listed.runs[0].run_id, run);
+            assert_eq!(listed.runs[0].started_by_subject_id, OWNER);
+            assert_eq!(listed.runs[0].hosts, ["example.com", "pages.example.org"]);
+            assert_eq!(listed.runs[0].step_count, 1);
+
+            let timeline = read_timeline(&pool, &org, VIEWER, &space, &run).await.expect("the timeline answers");
+            let shown: Vec<(&str, &str, &str, &str, &str)> = timeline
+                .events
+                .iter()
+                .map(|event| (event.kind.as_str(), event.step.as_str(), event.host.as_str(), event.evidence_id.as_str(), event.decision.as_str()))
+                .collect();
+            assert_eq!(
+                shown,
+                [
+                    ("action", "a1", "example.com", "", ""),
+                    ("observation", "a1", "pages.example.org", "shot-1", ""),
+                    ("approval_required", "a2", "pay.example.com", "", ""),
+                    ("approval_decided", "a2", "", "", "approved"),
+                    ("result", "", "", "", ""),
+                ],
+                "the unknown frame event is not projected"
+            );
+            assert_eq!(timeline.events[2].risk_category, "financial");
+            assert_eq!(timeline.events[2].approval_id, "appr-1");
+            assert_eq!(timeline.events[4].outcome, "completed");
+            assert_eq!(timeline.run.as_ref().map(|header| header.run_id.as_str()), Some(run.as_str()));
+
+            let authorized = authorize_evidence(&pool, &org, VIEWER, &space, &run, "shot-1").await.expect("the evidence is authorized");
+            assert_eq!(authorized.artifact_id, "shot-1");
+
+            // Nothing private reaches any of the three answers.
+            let everything = format!("{listed:?}{timeline:?}{authorized:?}");
+            for private in ["CANARY", "token=", "://", "secret", "checkout", "inbox"] {
+                assert!(!everything.contains(private), "{private:?} leaked: {everything}");
+            }
+            cleanup(&pool, &org, &space).await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+        async fn foreign_run_is_not_found_on_all_three_reads() {
+            let Some(pool) = connect().await else { return };
+            let _keys = StreamKeysEnv::publish();
+            let (org, space, suffix) = ids("foreign");
+            let other_org = format!("{org}-other");
+            let other_space = format!("{space}-other");
+
+            // The run the viewer may see.
+            let (_, visible) = seed_observed_run(&pool, &org, &space, &format!("visible-{suffix}"), "shot-visible").await;
+            // A run of another Space of the same org.
+            let (_, other_space_run) = seed_observed_run(&pool, &org, &other_space, &format!("space-{suffix}"), "shot-space").await;
+            // A run of another org that wears the same Space id.
+            let (_, other_org_run) = seed_observed_run(&pool, &other_org, &space, &format!("org-{suffix}"), "shot-org").await;
+            // A run on a thread stamped beyond the decision's audience ceiling.
+            let (beyond_thread, beyond_run) = seed_observed_run(&pool, &org, &space, &format!("beyond-{suffix}"), "shot-beyond").await;
+            sqlx::query("UPDATE threads SET recipient_audience_revision = $2 WHERE id = $1")
+                .bind(&beyond_thread)
+                .bind(CEILING + 1)
+                .execute(&pool)
+                .await
+                .expect("restamp the thread above the ceiling");
+            // A run that did not come from the room's browser source.
+            let agent_thread = format!("thread-agent-{suffix}");
+            seed_space_thread(&pool, &org, &space, &agent_thread, OWNER).await;
+            let agent_run = format!("run-agent-{suffix}");
+            seed_run(&pool, &org, &space, &agent_thread, &agent_run, "running", "execution_agent").await;
+            seed_event(&pool, &org, &agent_run, "BROWSER_OBSERVATION_RECEIVED", 1, json!({"screenshot_ref": "shot-agent"})).await;
+
+            // The one the viewer may see reads normally.
+            read_timeline(&pool, &org, VIEWER, &space, &visible).await.expect("the visible run reads");
+            authorize_evidence(&pool, &org, VIEWER, &space, &visible, "shot-visible").await.expect("its evidence reads");
+
+            // Every other run, and one that does not exist, is NotFound on the timeline and the evidence check.
+            for (why, run, shot) in [
+                ("another Space", other_space_run.as_str(), "shot-space"),
+                ("another org", other_org_run.as_str(), "shot-org"),
+                ("a thread beyond the audience ceiling", beyond_run.as_str(), "shot-beyond"),
+                ("a run of another source", agent_run.as_str(), "shot-agent"),
+                ("a run that does not exist", "run-missing", "shot-x"),
+            ] {
+                let status = read_timeline(&pool, &org, VIEWER, &space, run).await.expect_err(why);
+                assert_eq!(status.code(), tonic::Code::NotFound, "timeline, {why}: {status:?}");
+                let status = authorize_evidence(&pool, &org, VIEWER, &space, run, shot).await.expect_err(why);
+                assert_eq!(status.code(), tonic::Code::NotFound, "evidence, {why}: {status:?}");
+            }
+
+            // The list has no run id to ask for: the same runs are simply absent, by Space, org, ceiling and source.
+            let listed = list_runs(&pool, &org, VIEWER, &space, "").await.expect("the list answers");
+            let listed_ids: Vec<&str> = listed.runs.iter().map(|run| run.run_id.as_str()).collect();
+            assert_eq!(listed_ids, [visible.as_str()], "{NEEDS_DB}");
+            // A thread filter that names a foreign thread lists nothing; it never widens the Space.
+            for foreign_thread in [format!("thread-space-{suffix}"), format!("thread-org-{suffix}"), beyond_thread, agent_thread] {
+                let listed = list_runs(&pool, &org, VIEWER, &space, &foreign_thread).await.expect("the list answers");
+                assert!(listed.runs.is_empty(), "{foreign_thread}: {listed:?}");
+            }
+            cleanup(&pool, &org, &space).await;
+            cleanup(&pool, &org, &other_space).await;
+            cleanup(&pool, &other_org, &space).await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+        async fn revoked_member_denied_on_all_three_reads() {
+            let Some(pool) = connect().await else { return };
+            let _keys = StreamKeysEnv::publish();
+            let (org, space, suffix) = ids("revoked");
+            let (_, run) = seed_observed_run(&pool, &org, &space, &format!("run-{suffix}"), "shot-1").await;
+
+            let all_three = |viewer: &'static str| {
+                let (pool, org, space, run) = (pool.clone(), org.clone(), space.clone(), run.clone());
+                async move {
+                    (
+                        list_runs(&pool, &org, viewer, &space, "").await.map(|_| ()),
+                        read_timeline(&pool, &org, viewer, &space, &run).await.map(|_| ()),
+                        authorize_evidence(&pool, &org, viewer, &space, &run, "shot-1").await.map(|_| ()),
+                    )
+                }
+            };
+            let (list, timeline, evidence) = all_three(VIEWER).await;
+            list.expect("a member lists");
+            timeline.expect("a member reads the timeline");
+            evidence.expect("a member reads the evidence");
+
+            sqlx::query("INSERT INTO space_membership_revocations (space_ref, org_id, subject_id) VALUES ($1, $2, $3)")
+                .bind(&space)
+                .bind(&org)
+                .bind(VIEWER)
+                .execute(&pool)
+                .await
+                .expect("revoke the member");
+            let (list, timeline, evidence) = all_three(VIEWER).await;
+            for (read, result) in [("list", list), ("timeline", timeline), ("evidence", evidence)] {
+                let status = result.expect_err(read);
+                assert_eq!(status.code(), tonic::Code::PermissionDenied, "{read}: {status:?}, {NEEDS_DB}");
+            }
+
+            // Another member of the Space is unaffected, and so is the revoked member in another Space.
+            let (list, timeline, evidence) = all_three("viewer-2").await;
+            list.expect("another member lists");
+            timeline.expect("another member reads the timeline");
+            evidence.expect("another member reads the evidence");
+            cleanup(&pool, &org, &space).await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+        async fn evidence_id_must_belong_to_run() {
+            let Some(pool) = connect().await else { return };
+            let _keys = StreamKeysEnv::publish();
+            let (org, space, suffix) = ids("evidence");
+            let (_, first) = seed_observed_run(&pool, &org, &space, &format!("first-{suffix}"), "shot-first").await;
+            let (_, second) = seed_observed_run(&pool, &org, &space, &format!("second-{suffix}"), "shot-second").await;
+
+            let own = authorize_evidence(&pool, &org, VIEWER, &space, &first, "shot-first").await.expect("its own screenshot");
+            assert_eq!(own.artifact_id, "shot-first");
+            // A screenshot reference of another run of the same Space is not this run's evidence.
+            let status = authorize_evidence(&pool, &org, VIEWER, &space, &first, "shot-second").await.expect_err("another run's");
+            assert_eq!(status.code(), tonic::Code::NotFound, "{status:?}, {NEEDS_DB}");
+            let status = authorize_evidence(&pool, &org, VIEWER, &space, &second, "shot-first").await.expect_err("the other way round");
+            assert_eq!(status.code(), tonic::Code::NotFound, "{status:?}");
+            // An unknown reference is the same answer.
+            let status = authorize_evidence(&pool, &org, VIEWER, &space, &first, "shot-unknown").await.expect_err("unknown");
+            assert_eq!(status.code(), tonic::Code::NotFound, "{status:?}");
+            // So is a reference that only an action row (not an observation) carries.
+            seed_event(&pool, &org, &first, "BROWSER_ACTION_DISPATCHED", 3, json!({"action_id": "a2", "screenshot_ref": "shot-from-action"})).await;
+            let status = authorize_evidence(&pool, &org, VIEWER, &space, &first, "shot-from-action").await.expect_err("not an observation");
+            assert_eq!(status.code(), tonic::Code::NotFound, "{status:?}");
+            cleanup(&pool, &org, &space).await;
+        }
+    }
 }

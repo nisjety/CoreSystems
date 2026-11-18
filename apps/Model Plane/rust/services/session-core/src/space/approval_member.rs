@@ -39,7 +39,13 @@ fn coded(status: Status, code: &'static str) -> Status {
 /// The refusal while `SESSION_CORE_APPROVAL_MEMBER_DECIDE` is off.
 #[allow(clippy::result_large_err)]
 pub(crate) fn require_enabled() -> Result<(), Status> {
-    if sa::member_decide_core_enabled() {
+    require_enabled_from(sa::member_decide_core_enabled())
+}
+
+/// The answer for a given switch state, so the refusal can be checked without the environment.
+#[allow(clippy::result_large_err)]
+fn require_enabled_from(enabled: bool) -> Result<(), Status> {
+    if enabled {
         Ok(())
     } else {
         Err(coded(
@@ -564,4 +570,207 @@ fn project_authority(approval_id: &str, row: AuthorityRow) -> Option<pb::Resolve
         thread_resource_authorization_ref,
         authority_revision,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::run_phase::ERROR_CODE_TRAILER;
+    use mp_contracts::model_plane::v1::AddresseeKind as Kind;
+
+    fn stated(kind: Kind, subject: &str) -> pb::Addressee {
+        pb::Addressee {
+            kind: kind as i32,
+            subject_id: subject.to_owned(),
+        }
+    }
+
+    fn stored(kind: &'static str, subject: Option<&str>) -> Option<StoredAddressee> {
+        Some(StoredAddressee {
+            kind,
+            subject_id: subject.map(str::to_owned),
+        })
+    }
+
+    fn trailer(status: &Status) -> Option<&str> {
+        status
+            .metadata()
+            .get(ERROR_CODE_TRAILER)
+            .and_then(|value| value.to_str().ok())
+    }
+
+    #[test]
+    fn an_unstated_or_unspecified_addressee_is_the_requester_as_before() {
+        assert_eq!(addressee_from_request(None).expect("none"), None);
+        assert_eq!(
+            addressee_from_request(Some(&stated(Kind::Unspecified, ""))).expect("unspecified"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_stated_addressee_is_validated_and_stored_as_a_kind_word() {
+        let ok = |kind: Kind, subject: &str| {
+            addressee_from_request(Some(&stated(kind, subject))).expect("a valid addressee")
+        };
+        assert_eq!(ok(Kind::Requester, ""), stored("requester", None));
+        assert_eq!(ok(Kind::AnyEditor, ""), stored("any_editor", None));
+        assert_eq!(ok(Kind::AnyManager, ""), stored("any_manager", None));
+        assert_eq!(ok(Kind::Named, "user-2"), stored("named", Some("user-2")));
+        assert_eq!(
+            ok(Kind::Named, "  user-2  "),
+            stored("named", Some("user-2")),
+            "the subject is stored trimmed"
+        );
+        let longest = "a".repeat(128);
+        assert_eq!(ok(Kind::Named, &longest), stored("named", Some(&longest)), "128 characters is allowed");
+    }
+
+    #[test]
+    fn a_named_addressee_needs_a_valid_subject_and_no_other_kind_carries_one() {
+        let refused = |kind: i32, subject: &str| {
+            addressee_from_request(Some(&pb::Addressee {
+                kind,
+                subject_id: subject.to_owned(),
+            }))
+            .expect_err("the addressee is refused")
+        };
+        let too_long = "a".repeat(129);
+        for (name, kind, subject) in [
+            ("named without a subject", Kind::Named as i32, ""),
+            ("named with a blank subject", Kind::Named as i32, "   "),
+            ("named with a space in it", Kind::Named as i32, "has space"),
+            ("named with a leading dash", Kind::Named as i32, "-lead"),
+            ("named with 129 characters", Kind::Named as i32, too_long.as_str()),
+            ("requester with a subject", Kind::Requester as i32, "user-2"),
+            ("any editor with a subject", Kind::AnyEditor as i32, "user-2"),
+            ("any manager with a subject", Kind::AnyManager as i32, "user-2"),
+            ("unspecified with a subject", Kind::Unspecified as i32, "user-2"),
+            ("a kind nobody defined", 99, ""),
+            ("a negative kind", -1, ""),
+        ] {
+            let status = refused(kind, subject);
+            assert_eq!(status.code(), tonic::Code::InvalidArgument, "{name}");
+            assert_eq!(trailer(&status), Some("approval_addressee_invalid"), "{name}");
+        }
+    }
+
+    fn addressing(kind: &str, requester: &str, named: Option<&str>) -> Addressing {
+        Addressing {
+            user_id: requester.to_owned(),
+            addressee_kind: kind.to_owned(),
+            addressee_subject_id: named.map(str::to_owned),
+            space_id: "space-1".to_owned(),
+            retention_class: "persistent".to_owned(),
+        }
+    }
+
+    #[test]
+    fn check_addressed_table() {
+        // (addressee kind, run owner, named subject, caller, addressed)
+        let cases = [
+            ("requester", "owner-1", None, "owner-1", true),
+            ("requester", "owner-1", None, "member-2", false),
+            // A stale subject on a requester row names nobody.
+            ("requester", "owner-1", Some("member-2"), "member-2", false),
+            ("named", "owner-1", Some("member-2"), "member-2", true),
+            ("named", "owner-1", Some("member-2"), "owner-1", false),
+            ("named", "owner-1", Some("member-2"), "member-3", false),
+            ("named", "owner-1", None, "member-2", false),
+            // Control decided the role of an editor or a manager; nothing here narrows it.
+            ("any_editor", "owner-1", None, "member-2", true),
+            ("any_manager", "owner-1", None, "member-2", true),
+            ("any_editor", "owner-1", None, "owner-1", true),
+            // A kind this code does not know fails closed.
+            ("owner", "owner-1", None, "owner-1", false),
+            ("", "owner-1", None, "owner-1", false),
+        ];
+        for (kind, requester, named, caller, addressed) in cases {
+            let result = check_addressed(&addressing(kind, requester, named), caller);
+            assert_eq!(result.is_ok(), addressed, "{kind:?} for {caller}");
+            if let Err(status) = result {
+                assert_eq!(status.code(), tonic::Code::PermissionDenied, "{kind:?} for {caller}");
+                assert_eq!(status.message(), NOT_ADDRESSED);
+                assert_eq!(trailer(&status), Some(NOT_ADDRESSED));
+            }
+        }
+    }
+
+    #[test]
+    fn a_turn_nobody_watched_defaults_its_addressee_to_any_manager() {
+        let manager = stored("any_manager", None);
+        for origin in [Some("ambient"), Some("automation"), Some(" ambient ")] {
+            assert_eq!(default_addressee_for_origin(None, origin), manager, "{origin:?}");
+        }
+        // A person's own turn, or a run with no claim, stays with the requester as before.
+        for origin in [None, Some(""), Some("direct")] {
+            assert_eq!(default_addressee_for_origin(None, origin), None, "{origin:?}");
+        }
+        // What the creator stated is kept on every origin.
+        for origin in [None, Some("direct"), Some("ambient"), Some("automation")] {
+            assert_eq!(
+                default_addressee_for_origin(stored("named", Some("member-2")), origin),
+                stored("named", Some("member-2")),
+                "{origin:?}"
+            );
+            assert_eq!(
+                default_addressee_for_origin(stored("requester", None), origin),
+                stored("requester", None),
+                "{origin:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn member_decide_answers_approval_member_decide_disabled_while_the_switch_is_off() {
+        let refusal = require_enabled_from(false).expect_err("the switch is off");
+        assert_eq!(refusal.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(refusal.message(), "approval_member_decide_disabled");
+        assert_eq!(refusal.message(), sa::MEMBER_DECIDE_DISABLED);
+        assert_eq!(trailer(&refusal), Some("approval_member_decide_disabled"));
+        assert!(require_enabled_from(true).is_ok());
+        // Only an on-word turns it on.
+        assert!(!sa::enabled_from(None));
+        assert!(!sa::enabled_from(Some("0")));
+        assert!(sa::enabled_from(Some("true")));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn a_revoked_member_is_refused_space_authority_stale() {
+        let Some(pool) = crate::space::test_support::connect().await else {
+            return;
+        };
+        let sfx = mp_ids::new_ulid();
+        let (org, space, elsewhere) = (
+            format!("org-rev-{sfx}"),
+            format!("space-rev-{sfx}"),
+            format!("space-rev-other-{sfx}"),
+        );
+        sqlx::query(
+            "INSERT INTO space_membership_revocations (space_ref, org_id, subject_id) VALUES ($1, $2, 'member-2')",
+        )
+        .bind(&space)
+        .bind(&org)
+        .execute(&pool)
+        .await
+        .expect("seed revocation");
+        refuse_if_revoked(&pool, "member-3", &space)
+            .await
+            .expect("a member nobody removed");
+        refuse_if_revoked(&pool, "member-2", &elsewhere)
+            .await
+            .expect("removed from another Space only");
+        let refusal = refuse_if_revoked(&pool, "member-2", &space)
+            .await
+            .expect_err("removed from this Space");
+        assert_eq!(refusal.code(), tonic::Code::PermissionDenied);
+        assert_eq!(refusal.message(), "space_authority_stale");
+        assert_eq!(trailer(&refusal), Some("space_authority_stale"));
+        sqlx::query("DELETE FROM space_membership_revocations WHERE space_ref = $1")
+            .bind(&space)
+            .execute(&pool)
+            .await
+            .ok();
+    }
 }

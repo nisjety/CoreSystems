@@ -1015,15 +1015,7 @@ impl RunService for RunServiceImpl {
             let runs: Vec<pb::RunDetail> = rows
                 .into_iter()
                 .take(usize::try_from(limit).unwrap_or(usize::MAX))
-                .map(|row| {
-                    let owner = row.owner_user_id.clone();
-                    let mut detail = row_to_detail(row, store_enabled, &caller);
-                    // The owner id rides only on the Space branch (WS09-S4).
-                    if via_space {
-                        detail.owner_subject_id = owner;
-                    }
-                    detail
-                })
+                .map(|row| list_row_to_detail(row, store_enabled, &caller, via_space))
                 .collect();
 
             Ok(Response::new(pb::ListRunsResponse { runs, has_more }))
@@ -1243,6 +1235,22 @@ impl RunService for RunServiceImpl {
         record_metrics("resolve_approval_authority", started, result.is_ok());
         result
     }
+}
+
+/// One listed run as the caller reads it. The owner id rides only on the Space branch (WS09-S4): the
+/// owner's own listing leaves it empty, and a member's listing of the Space names who started the run.
+fn list_row_to_detail(
+    row: RunRow,
+    store_enabled: bool,
+    viewer: &VerifiedIdentity,
+    via_space: bool,
+) -> pb::RunDetail {
+    let owner = row.owner_user_id.clone();
+    let mut detail = row_to_detail(row, store_enabled, viewer);
+    if via_space {
+        detail.owner_subject_id = owner;
+    }
+    detail
 }
 
 /// Clamp a wire `limit` (0 = caller left it unset) into `[1, MAX_LIST_LIMIT]`.
@@ -3267,6 +3275,393 @@ mod tests {
                 .bind(thread_id)
                 .execute(&pool)
                 .await;
+        }
+    }
+
+    // -- Room run views (WS09-S4, WS09-S8, WS10-S6) -------------------------------------------
+
+    fn run_row_owned_by(owner: &str) -> RunRow {
+        let mut row = fold_row("running", "persistent", None, None, None, None);
+        row.owner_user_id = owner.to_owned();
+        row
+    }
+
+    /// WS09-S4: the Space branch of `ListRuns` names who started each run; the owner's own
+    /// listing, and every other read of a run, leaves the field empty.
+    #[test]
+    fn list_runs_space_branch_sets_owner_subject_id_and_the_owner_path_leaves_it_empty() {
+        let member = VerifiedIdentity::user_for_test("org_1", "member_2");
+        let via_space = list_row_to_detail(run_row_owned_by("owner_1"), true, &member, true);
+        assert_eq!(via_space.owner_subject_id, "owner_1");
+
+        let owner_path = list_row_to_detail(run_row_owned_by("owner_1"), true, &owner_viewer(), false);
+        assert_eq!(owner_path.owner_subject_id, "");
+
+        // One flag apart, nothing else about the detail differs.
+        let mut without_owner = via_space.clone();
+        without_owner.owner_subject_id.clear();
+        assert_eq!(without_owner, owner_path);
+
+        // `GetRun` builds its detail without the owner id too.
+        assert_eq!(
+            row_to_detail(run_row_owned_by("owner_1"), true, &member).owner_subject_id,
+            ""
+        );
+    }
+
+    /// WS09-S8: the owner's own cancel writes the receipt it always wrote, with no authority
+    /// claim; a room manager's cancel adds exactly `acting_as` and the decision reference.
+    #[test]
+    fn cancelled_payload_names_its_authority_only_for_an_acting_cancel() {
+        let owner = cancelled_payload("run-1", "user_stop", "user-1", None);
+        assert_eq!(
+            owner,
+            serde_json::json!({"run_id": "run-1", "reason": "user_stop", "cancelled_by": "user-1"}),
+            "the owner path payload is the three original keys and nothing more"
+        );
+        let owner_keys = owner.as_object().expect("an object");
+        assert!(!owner_keys.contains_key("acting_as"));
+        assert!(!owner_keys.contains_key("decision_ref"));
+
+        let acting = ActingAs {
+            acting_as: "room_manager",
+            decision_ref: "decision-7",
+        };
+        let manager = cancelled_payload("run-1", "room_manager_stop", "manager-1", Some(&acting));
+        assert_eq!(
+            manager,
+            serde_json::json!({
+                "run_id": "run-1",
+                "reason": "room_manager_stop",
+                "cancelled_by": "manager-1",
+                "acting_as": "room_manager",
+                "decision_ref": "decision-7",
+            })
+        );
+    }
+
+    /// WS09-S8: `CancelRun` is unchanged by the room-manager path: it still terminalizes through
+    /// the shared transaction and still states no `acting_as`, so an owner's stop can never read as
+    /// a manager's. (The behavioural proof is the existing park-cancel DB tests and
+    /// `cancel_run_owner_receipt_payload_has_no_acting_as`.)
+    #[test]
+    fn the_owners_cancel_run_handler_passes_no_acting_as() {
+        let source = include_str!("run_service_grpc.rs").replace("\r\n", "\n");
+        let start = source
+            .find("    async fn cancel_run(")
+            .expect("the owner's handler is present");
+        let rest = &source[start..];
+        let handler = &rest[..rest
+            .find("record_metrics(\"cancel_run\"")
+            .expect("the end of the handler")];
+        let flat = handler.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flat.contains("cancel_run_terminalize("), "{flat}");
+        assert!(flat.contains("cancelled_by, None"), "the owner path states no authority: {flat}");
+        assert!(!flat.contains("ActingAs") && !flat.contains("acting"), "{flat}");
+    }
+
+    /// WS10-S6: `ResolveApprovalAuthority` answers only Control's action-authorizer identity (its
+    /// exact principal and its scope, never zero-retention), and it validates the request before it
+    /// reads anything. The pool is lazy and unreachable: no case here reaches it.
+    #[tokio::test]
+    async fn resolve_approval_authority_resolves_only_for_the_control_authorizer_identity() {
+        use crate::auth::{RUN_ACTION_AUTHORITY_SCOPE, RUN_ACTION_AUTHORITY_SERVICE};
+        let (service, lookup) = service_with_thread_owner_result(Ok(true));
+        let ask = |caller: VerifiedIdentity, approval_id: &str, org_id: &str| {
+            service.resolve_approval_authority(identity_request(
+                pb::ResolveApprovalAuthorityRequest {
+                    approval_id: approval_id.to_owned(),
+                    org_id: org_id.to_owned(),
+                },
+                caller,
+            ))
+        };
+        let authorizer = |zdr: bool| {
+            VerifiedIdentity::service_for_test_as(
+                "org-1",
+                RUN_ACTION_AUTHORITY_SERVICE,
+                &[RUN_ACTION_AUTHORITY_SCOPE],
+                zdr,
+            )
+        };
+
+        // A person, another service that holds the scope, and the authorizer without its scope.
+        let not_the_authorizer =
+            "only the Control action-authorizer may resolve run action authority";
+        for (caller, message) in [
+            (VerifiedIdentity::user_for_test("org-1", "user-1"), not_the_authorizer),
+            (
+                VerifiedIdentity::service_for_test_as(
+                    "org-1",
+                    "service:orchestrator-core",
+                    &[RUN_ACTION_AUTHORITY_SCOPE],
+                    false,
+                ),
+                not_the_authorizer,
+            ),
+            (
+                VerifiedIdentity::service_for_test_as(
+                    "org-1",
+                    RUN_ACTION_AUTHORITY_SERVICE,
+                    &["session:read"],
+                    false,
+                ),
+                "service scope required",
+            ),
+        ] {
+            let refused = ask(caller.clone(), "appr_1", "org-1")
+                .await
+                .expect_err("only Control's action-authorizer resolves approval authority");
+            assert_eq!(refused.code(), tonic::Code::PermissionDenied, "{caller:?}");
+            assert_eq!(refused.message(), message, "{caller:?}");
+        }
+
+        // The authorizer in zero retention is refused with the typed `agent_run` refusal.
+        let zdr = ask(authorizer(true), "appr_1", "org-1")
+            .await
+            .expect_err("a zero-retention authorizer resolves nothing");
+        assert_eq!(zdr.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            mp_contracts::zdr_refusal::Refusal::from_status(&zdr),
+            Some(mp_contracts::zdr_refusal::Refusal::feature_not_supported("agent_run"))
+        );
+
+        // The authorizer passes the identity gate, so the request itself is judged next: an empty
+        // approval is invalid and another tenant's org is refused, both before any lookup.
+        let invalid = ask(authorizer(false), "", "org-1")
+            .await
+            .expect_err("an approval id is required");
+        assert_eq!(invalid.code(), tonic::Code::InvalidArgument);
+        let tenant = ask(authorizer(false), "appr_1", "org-2")
+            .await
+            .expect_err("the org is the credential's own");
+        assert_eq!(tenant.code(), tonic::Code::PermissionDenied);
+        assert_eq!(tenant.message(), "tenant access denied");
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 0, "nothing was read");
+    }
+
+    /// WS09-S8: through the real `CancelRun`, the owner's receipt carries `run_id`, `reason` and
+    /// `cancelled_by` and no `acting_as`, as it did before the room-manager path existed.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn cancel_run_owner_receipt_payload_has_no_acting_as() {
+        let Some(pool) = crate::space::test_support::connect().await else {
+            return;
+        };
+        let (run_id, org, user) = started_managed_run(&pool, "owner-payload").await;
+        assert!(cancel_as_owner(&pool, &run_id, &org, &user).await.cancelled);
+        let payload: serde_json::Value = sqlx::query_scalar(
+            "SELECT payload FROM events WHERE run_id = $1 AND event_type = 'RUN_CANCELLED'",
+        )
+        .bind(&run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("the receipt");
+        assert_eq!(
+            payload,
+            serde_json::json!({"run_id": run_id, "reason": "test", "cancelled_by": user})
+        );
+    }
+
+    /// WS09-S4: over the real tables, a member's Space listing names the owner of each run and the
+    /// owner's own thread listing leaves it empty.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn list_runs_over_the_tables_names_the_owner_on_the_space_branch_only() {
+        use crate::grpc::space_w1_tests::{mint, StreamKeysEnv, DECISION_REF};
+        use crate::space::test_support::{clean_space, connect, seed_space_run, seed_space_thread};
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let _keys = StreamKeysEnv::publish();
+        let sfx = new_ulid();
+        let org = format!("lr-org-{sfx}");
+        let space = format!("lr-space-{sfx}");
+        let (thread, run) = (format!("lr-thread-{sfx}"), format!("lr-run-{sfx}"));
+        seed_space_thread(&pool, &org, &space, &thread, "owner-1").await;
+        seed_space_run(&pool, &org, &space, &thread, &run, "queued", "persistent").await;
+        let service = RunServiceImpl::new(pool.clone());
+
+        // The owner path: the owner names the thread, and no owner id rides back.
+        let owned = service
+            .list_runs(identity_request(
+                pb::ListRunsRequest {
+                    thread_id: thread.clone(),
+                    limit: 10,
+                    ..Default::default()
+                },
+                VerifiedIdentity::user_for_test(&org, "owner-1"),
+            ))
+            .await
+            .expect("the owner lists their own thread")
+            .into_inner();
+        assert_eq!(owned.runs.len(), 1);
+        assert_eq!(owned.runs[0].owner_subject_id, "");
+
+        // The Space branch: another member lists the Space's runs under a verified read decision.
+        let token = mint(
+            crate::grpc::CONTROL_SPACE_DECISION_AUDIENCE,
+            &["thread:read"],
+            false,
+            |claims| {
+                claims["org_id"] = serde_json::json!(org);
+                claims["subject_id"] = serde_json::json!("member-2");
+                claims["space_ref"] = serde_json::json!(space);
+                claims["issued_at"] = serde_json::json!(Utc::now().to_rfc3339());
+                claims["expires_at"] =
+                    serde_json::json!((Utc::now() + chrono::Duration::minutes(2)).to_rfc3339());
+            },
+            false,
+        );
+        let listed = service
+            .list_runs(identity_request(
+                pb::ListRunsRequest {
+                    space_id: space.clone(),
+                    space_read_decision_ref: DECISION_REF.to_owned(),
+                    space_read_decision_token: token,
+                    limit: 10,
+                    ..Default::default()
+                },
+                VerifiedIdentity::user_for_test(&org, "member-2"),
+            ))
+            .await
+            .expect("a member lists the Space's runs under a verified read decision")
+            .into_inner();
+        assert_eq!(listed.runs.len(), 1);
+        assert_eq!(listed.runs[0].run_id, run);
+        assert_eq!(listed.runs[0].owner_subject_id, "owner-1");
+        clean_space(&pool, &org, &space).await;
+    }
+
+    /// WS10-S6: over the real tables, a persistent Space run's approval resolves to its content-free
+    /// bindings, and a zero-retention run, a run outside any Space and a service-owned run resolve
+    /// to nothing.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn resolve_approval_authority_is_unresolved_for_zdr_non_space_and_service_owned_runs() {
+        use crate::auth::{RUN_ACTION_AUTHORITY_SCOPE, RUN_ACTION_AUTHORITY_SERVICE};
+        use crate::space::test_support::{clean_space, connect, seed_space_run, seed_space_thread};
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let sfx = new_ulid();
+        let org = format!("ap-org-{sfx}");
+        let space = format!("ap-space-{sfx}");
+        let thread = format!("ap-thread-{sfx}");
+        let (ok_run, zdr_run) = (format!("ap-run-ok-{sfx}"), format!("ap-run-zdr-{sfx}"));
+        seed_space_thread(&pool, &org, &space, &thread, "owner-1").await;
+        seed_space_run(&pool, &org, &space, &thread, &ok_run, "queued", "persistent").await;
+        seed_space_run(&pool, &org, &space, &thread, &zdr_run, "queued", "zdr").await;
+        // A service-owned run in a Space, and a person's run outside any Space.
+        let (service_thread, service_run) = (format!("ap-st-{sfx}"), format!("ap-sr-{sfx}"));
+        seed_system_thread_and_run(&pool, &org, &service_thread, &service_run, Some(&space), "scheduled").await;
+        let (plain_thread, plain_run) = (format!("ap-pt-{sfx}"), format!("ap-pr-{sfx}"));
+        sqlx::query("INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, 'owner-1')")
+            .bind(&plain_thread)
+            .bind(&org)
+            .execute(&pool)
+            .await
+            .expect("seed plain thread");
+        sqlx::query("INSERT INTO runs (id, thread_id, goal, org_id, user_id) VALUES ($1, $2, 'g', $3, 'owner-1')")
+            .bind(&plain_run)
+            .bind(&plain_thread)
+            .bind(&org)
+            .execute(&pool)
+            .await
+            .expect("seed plain run");
+
+        // One requested approval per run, raised by the run's owner.
+        let mut approval_of = std::collections::BTreeMap::new();
+        for (run, owner) in [
+            (&ok_run, "owner-1"),
+            (&zdr_run, "owner-1"),
+            (&service_run, "service:orchestrator-core"),
+            (&plain_run, "owner-1"),
+        ] {
+            let id = format!("appr_{}", new_ulid());
+            crate::orchestration_store::request_approval(
+                &pool,
+                &id,
+                run,
+                None,
+                "tool_call",
+                owner,
+                &org,
+                owner,
+                "",
+                &serde_json::json!({}),
+                None,
+                Some(Utc::now() + chrono::Duration::minutes(5)),
+                "",
+            )
+            .await
+            .expect("request approval")
+            .expect("inserted");
+            approval_of.insert(run.clone(), id);
+        }
+
+        let service = RunServiceImpl::new(pool.clone());
+        let resolve = |approval_id: String| {
+            service.resolve_approval_authority(identity_request(
+                pb::ResolveApprovalAuthorityRequest {
+                    approval_id,
+                    org_id: org.clone(),
+                },
+                VerifiedIdentity::service_for_test_as(
+                    &org,
+                    RUN_ACTION_AUTHORITY_SERVICE,
+                    &[RUN_ACTION_AUTHORITY_SCOPE],
+                    false,
+                ),
+            ))
+        };
+
+        let resolved = resolve(approval_of[&ok_run].clone())
+            .await
+            .expect("the authorizer asks")
+            .into_inner();
+        assert!(resolved.resolved);
+        assert_eq!(resolved.approval_id, approval_of[&ok_run]);
+        assert_eq!(resolved.run_id, ok_run);
+        assert_eq!(resolved.org_id, org);
+        assert_eq!(resolved.requester_subject_id, "owner-1");
+        assert_eq!(resolved.thread_id, thread);
+        assert_eq!(resolved.space_id, space);
+        assert_eq!(resolved.approval_status, "requested");
+        assert_eq!(resolved.addressee_kind, "requester");
+        assert_eq!(resolved.recipient_audience_revision, 1);
+        assert_eq!(resolved.authority_revision, 1);
+
+        for (what, run) in [
+            ("a zero-retention run", &zdr_run),
+            ("a service-owned run", &service_run),
+            ("a run outside any Space", &plain_run),
+        ] {
+            let unresolved = resolve(approval_of[run].clone())
+                .await
+                .expect("an unresolvable approval is an answer, not an error")
+                .into_inner();
+            assert_eq!(
+                unresolved,
+                pb::ResolveApprovalAuthorityResponse::default(),
+                "{what} resolves to nothing"
+            );
+        }
+        let unknown = resolve(format!("appr_{}", new_ulid()))
+            .await
+            .expect("an unknown approval is unresolved")
+            .into_inner();
+        assert!(!unknown.resolved);
+
+        sqlx::query("DELETE FROM approvals WHERE org_id = $1")
+            .bind(&org)
+            .execute(&pool)
+            .await
+            .ok();
+        clean_space(&pool, &org, &space).await;
+        for (thread_id, run_id) in [(&service_thread, &service_run), (&plain_thread, &plain_run)] {
+            sqlx::query("DELETE FROM runs WHERE id = $1").bind(run_id).execute(&pool).await.ok();
+            sqlx::query("DELETE FROM threads WHERE id = $1").bind(thread_id).execute(&pool).await.ok();
         }
     }
 }

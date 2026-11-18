@@ -450,3 +450,416 @@ pub(crate) async fn revoked_live_shares(
     .fetch_all(pool)
     .await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::space::test_support::connect;
+
+    // ---- W3-DEC-RETRACT: retraction_required (pure) --------------------------------------------
+
+    #[test]
+    fn retraction_required_is_true_for_active_false_with_any_role_and_for_active_true_below_editor() {
+        for role in ["viewer", "manager", "owner", "editor", "", "unknown"] {
+            assert!(
+                retraction_required(false, role),
+                "an inactive member must retract whatever role the fact carries ({role:?})"
+            );
+        }
+        for role in ["viewer", "", "   ", "unknown", "VIEWER", "Editor"] {
+            assert!(
+                retraction_required(true, role),
+                "an active member below editor (or an unknown/blank role) must retract ({role:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn retraction_required_is_false_for_active_true_with_editor_manager_or_owner() {
+        for role in ["editor", "manager", "owner"] {
+            assert!(
+                !retraction_required(true, role),
+                "an active {role} keeps declassify rights"
+            );
+        }
+    }
+
+    // ---- DB-tier fixtures ------------------------------------------------------------------------
+
+    /// A 64-hex-character `sha256:` digest, the only shape `memory_declassifications.content_digest`
+    /// and `declassify_into_room`'s `content_digest` field accept.
+    fn digest(tag: u8) -> String {
+        format!("sha256:{}", hex::encode([tag; 32]))
+    }
+
+    mod hex {
+        /// A tiny lowercase-hex encoder so the DB-tier tests below need no extra dependency.
+        pub(super) fn encode(bytes: [u8; 32]) -> String {
+            bytes.iter().map(|b| format!("{b:02x}")).collect()
+        }
+    }
+
+    async fn seed_personal_memory(pool: &PgPool, org: &str, owner: &str, id: &str, key: &str) {
+        sqlx::query(
+            "INSERT INTO agent_memory (id, org_id, owner, scope, key, content, kind, confidence, review_state, is_latest) \
+             VALUES ($1, $2, $3, 'user', $4, 'declassify test content', 'fact', 1.0, 'accepted', true)",
+        )
+        .bind(id)
+        .bind(org)
+        .bind(owner)
+        .bind(key)
+        .execute(pool)
+        .await
+        .expect("seed personal memory");
+    }
+
+    fn share<'a>(
+        org: &'a str,
+        user: &'a str,
+        space: &'a str,
+        source_memory_id: &'a str,
+        content_digest: &'a str,
+        decision_ref: &'a str,
+        idempotency_key: &'a str,
+        authority_revision: i64,
+    ) -> DeclassifyInput<'a> {
+        DeclassifyInput {
+            org_id: org,
+            user_id: user,
+            space_id: space,
+            source_memory_id,
+            reviewed_content: "reviewed text",
+            content_digest,
+            decision_ref,
+            idempotency_key,
+            audience_hash: "sha256:test-audience",
+            audience_revision: 1,
+            authority_revision,
+        }
+    }
+
+    /// Removes everything a declassify test created, across every table this module writes
+    /// (`space::test_support::clean_space` does not reach these).
+    async fn clean_declassify_world(pool: &PgPool, org: &str, space: &str) {
+        for sql in [
+            "DELETE FROM memory_declassifications WHERE org_id = $1 AND space_ref = $2",
+            "DELETE FROM space_membership_retract_marks WHERE org_id = $1 AND space_ref = $2",
+            "DELETE FROM space_membership_revocations WHERE org_id = $1 AND space_ref = $2",
+            "DELETE FROM agent_memory WHERE org_id = $1",
+        ] {
+            sqlx::query(sql).bind(org).bind(space).execute(pool).await.ok();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn a_share_replays_on_its_decision_or_key_and_writes_one_ledger_row() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let org = format!("declassify-org-{}", mp_ids::new_ulid());
+        let space = format!("declassify-space-{}", mp_ids::new_ulid());
+        let user = "owner-1";
+        let source_id = format!("mem-{}", mp_ids::new_ulid());
+        seed_personal_memory(&pool, &org, user, &source_id, "pref-1").await;
+
+        let decision_ref = format!("decision-{}", mp_ids::new_ulid());
+        let text_digest = digest(1);
+        let first = declassify_into_room(
+            &pool,
+            share(&org, user, &space, &source_id, &text_digest, &decision_ref, "idem-1", 1),
+        )
+        .await
+        .expect("first share");
+        assert!(!first.deduplicated);
+
+        // A replay of the same decision_ref (the client retried) returns the same row and writes
+        // nothing new, even though every other field is given again.
+        let replay = declassify_into_room(
+            &pool,
+            share(&org, user, &space, &source_id, &text_digest, &decision_ref, "idem-1", 1),
+        )
+        .await
+        .expect("replay");
+        assert!(replay.deduplicated);
+        assert_eq!(replay.memory_id, first.memory_id);
+
+        let ledger_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM memory_declassifications WHERE org_id = $1 AND space_ref = $2",
+        )
+        .bind(&org)
+        .bind(&space)
+        .fetch_one(&pool)
+        .await
+        .expect("count ledger rows");
+        assert_eq!(ledger_rows, 1, "a replay must never write a second ledger row");
+
+        clean_declassify_world(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn a_revoked_subject_is_refused_before_any_row_is_written() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let org = format!("declassify-org-{}", mp_ids::new_ulid());
+        let space = format!("declassify-space-{}", mp_ids::new_ulid());
+        let user = "owner-2";
+        let source_id = format!("mem-{}", mp_ids::new_ulid());
+        seed_personal_memory(&pool, &org, user, &source_id, "pref-1").await;
+        sqlx::query(
+            "INSERT INTO space_membership_revocations (space_ref, org_id, subject_id) VALUES ($1, $2, $3)",
+        )
+        .bind(&space)
+        .bind(&org)
+        .bind(user)
+        .execute(&pool)
+        .await
+        .expect("seed revocation");
+
+        let decision_ref = format!("decision-{}", mp_ids::new_ulid());
+        let refused = declassify_into_room(
+            &pool,
+            share(&org, user, &space, &source_id, &digest(2), &decision_ref, "idem-1", 1),
+        )
+        .await
+        .expect_err("a revoked subject must be refused");
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM memory_declassifications WHERE org_id = $1 AND space_ref = $2",
+        )
+        .bind(&org)
+        .bind(&space)
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(rows, 0, "a refused share must write no ledger row");
+
+        clean_declassify_world(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn a_decision_below_the_retract_mark_is_refused_and_one_at_or_above_it_is_not() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let org = format!("declassify-org-{}", mp_ids::new_ulid());
+        let space = format!("declassify-space-{}", mp_ids::new_ulid());
+        let user = "owner-3";
+        let source_id = format!("mem-{}", mp_ids::new_ulid());
+        seed_personal_memory(&pool, &org, user, &source_id, "pref-1").await;
+        sqlx::query(
+            "INSERT INTO space_membership_retract_marks (space_ref, subject_id, org_id, retract_seq) \
+             VALUES ($1, $2, $3, 5)",
+        )
+        .bind(&space)
+        .bind(user)
+        .bind(&org)
+        .execute(&pool)
+        .await
+        .expect("seed retract mark");
+
+        let below = declassify_into_room(
+            &pool,
+            share(&org, user, &space, &source_id, &digest(3), "decision-below", "idem-below", 3),
+        )
+        .await
+        .expect_err("a decision below the retract mark must be refused");
+        assert_eq!(below.code(), tonic::Code::PermissionDenied);
+
+        // At the mark (not strictly above it) the decision is not refused by this check.
+        let at_mark = declassify_into_room(
+            &pool,
+            share(&org, user, &space, &source_id, &digest(4), "decision-at-mark", "idem-at-mark", 5),
+        )
+        .await
+        .expect("a decision at the retract mark is not refused by it");
+        assert!(!at_mark.deduplicated);
+
+        clean_declassify_world(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn retract_removed_subject_stamps_only_shares_below_the_revision_and_keeps_the_rest_live() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let org = format!("declassify-org-{}", mp_ids::new_ulid());
+        let space = format!("declassify-space-{}", mp_ids::new_ulid());
+        let user = "owner-4";
+        let old_source = format!("mem-old-{}", mp_ids::new_ulid());
+        let new_source = format!("mem-new-{}", mp_ids::new_ulid());
+        seed_personal_memory(&pool, &org, user, &old_source, "pref-old").await;
+        seed_personal_memory(&pool, &org, user, &new_source, "pref-new").await;
+
+        // One share authorised before the removal (revision 1) and one authorised after a later
+        // re-add (revision 10); the removal below retracts revision 10 at the (not-inclusive) bound.
+        let old_share = declassify_into_room(
+            &pool,
+            share(&org, user, &space, &old_source, &digest(5), "decision-old", "idem-old", 1),
+        )
+        .await
+        .expect("old share");
+        let new_share = declassify_into_room(
+            &pool,
+            share(&org, user, &space, &new_source, &digest(6), "decision-new", "idem-new", 10),
+        )
+        .await
+        .expect("new share (after the re-add)");
+
+        let mut tx = pool.begin().await.expect("begin");
+        let retracted = retract_removed_subject(&mut tx, &org, &space, user, true, Some(5))
+            .await
+            .expect("retract removed subject");
+        tx.commit().await.expect("commit");
+        assert_eq!(retracted, 1, "only the share below revision 5 is retracted");
+
+        let old_room: i64 = sqlx::query_scalar("SELECT count(*) FROM agent_memory WHERE id = $1")
+            .bind(&old_share.memory_id)
+            .fetch_one(&pool)
+            .await
+            .expect("old room row count");
+        assert_eq!(old_room, 0, "the pre-removal share's room row is deleted");
+
+        let new_room: i64 = sqlx::query_scalar("SELECT count(*) FROM agent_memory WHERE id = $1")
+            .bind(&new_share.memory_id)
+            .fetch_one(&pool)
+            .await
+            .expect("new room row count");
+        assert_eq!(new_room, 1, "the share made after the re-add survives");
+
+        let retracted_at_new: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT retracted_at FROM memory_declassifications WHERE org_id = $1 AND subject_id = $2 \
+               AND room_memory_id = $3",
+        )
+        .bind(&org)
+        .bind(user)
+        .bind(&new_share.memory_id)
+        .fetch_one(&pool)
+        .await
+        .expect("new ledger row");
+        assert!(retracted_at_new.is_none(), "the surviving share's ledger row stays live");
+
+        // A repeat retraction finds no live share below the revision and changes nothing.
+        let mut tx = pool.begin().await.expect("begin repeat");
+        let repeat = retract_removed_subject(&mut tx, &org, &space, user, false, Some(5))
+            .await
+            .expect("repeat retract");
+        tx.commit().await.expect("commit repeat");
+        assert_eq!(repeat, 0, "a repeat retraction changes nothing");
+
+        clean_declassify_world(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn retract_removed_subject_deletes_the_room_row_only_when_no_live_share_remains() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let org = format!("declassify-org-{}", mp_ids::new_ulid());
+        let space = format!("declassify-space-{}", mp_ids::new_ulid());
+        let subject_a = "owner-5a";
+        let subject_b = "owner-5b";
+        let source_a = format!("mem-a-{}", mp_ids::new_ulid());
+        let source_b = format!("mem-b-{}", mp_ids::new_ulid());
+        seed_personal_memory(&pool, &org, subject_a, &source_a, "pref-a").await;
+        seed_personal_memory(&pool, &org, subject_b, &source_b, "pref-b").await;
+
+        // Both subjects share the same reviewed text into the same room: one room row, two ledger
+        // rows (the room key is the Space and the text digest, never the subject).
+        let text_digest = digest(7);
+        let shared = declassify_into_room(
+            &pool,
+            share(&org, subject_a, &space, &source_a, &text_digest, "decision-a", "idem-a", 1),
+        )
+        .await
+        .expect("subject a shares");
+        let also_shared = declassify_into_room(
+            &pool,
+            share(&org, subject_b, &space, &source_b, &text_digest, "decision-b", "idem-b", 1),
+        )
+        .await
+        .expect("subject b shares the same text");
+        assert_eq!(shared.memory_id, also_shared.memory_id, "one room row for one text in one Space");
+
+        let mut tx = pool.begin().await.expect("begin a");
+        retract_removed_subject(&mut tx, &org, &space, subject_a, true, None)
+            .await
+            .expect("retract subject a");
+        tx.commit().await.expect("commit a");
+
+        let still_live: i64 = sqlx::query_scalar("SELECT count(*) FROM agent_memory WHERE id = $1")
+            .bind(&shared.memory_id)
+            .fetch_one(&pool)
+            .await
+            .expect("room row after a's retraction");
+        assert_eq!(still_live, 1, "subject b's live share keeps the room row");
+
+        let mut tx = pool.begin().await.expect("begin b");
+        retract_removed_subject(&mut tx, &org, &space, subject_b, true, None)
+            .await
+            .expect("retract subject b");
+        tx.commit().await.expect("commit b");
+
+        let gone: i64 = sqlx::query_scalar("SELECT count(*) FROM agent_memory WHERE id = $1")
+            .bind(&shared.memory_id)
+            .fetch_one(&pool)
+            .await
+            .expect("room row after both retractions");
+        assert_eq!(gone, 0, "the room row is deleted once no live share references it");
+
+        clean_declassify_world(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn revoked_live_shares_returns_only_shares_of_a_subject_holding_a_revocation() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let org = format!("declassify-org-{}", mp_ids::new_ulid());
+        let space = format!("declassify-space-{}", mp_ids::new_ulid());
+        let revoked_subject = "owner-6-revoked";
+        let live_subject = "owner-6-live";
+        let revoked_source = format!("mem-r-{}", mp_ids::new_ulid());
+        let live_source = format!("mem-l-{}", mp_ids::new_ulid());
+        seed_personal_memory(&pool, &org, revoked_subject, &revoked_source, "pref-r").await;
+        seed_personal_memory(&pool, &org, live_subject, &live_source, "pref-l").await;
+        declassify_into_room(
+            &pool,
+            share(&org, revoked_subject, &space, &revoked_source, &digest(8), "decision-r", "idem-r", 1),
+        )
+        .await
+        .expect("revoked subject shares");
+        declassify_into_room(
+            &pool,
+            share(&org, live_subject, &space, &live_source, &digest(9), "decision-l", "idem-l", 1),
+        )
+        .await
+        .expect("live subject shares");
+        sqlx::query(
+            "INSERT INTO space_membership_revocations (space_ref, org_id, subject_id) VALUES ($1, $2, $3)",
+        )
+        .bind(&space)
+        .bind(&org)
+        .bind(revoked_subject)
+        .execute(&pool)
+        .await
+        .expect("seed revocation");
+
+        let rows = revoked_live_shares(&pool, 1000).await.expect("revoked_live_shares");
+        let matches: Vec<_> = rows
+            .iter()
+            .filter(|(row_org, row_space, _)| row_org == &org && row_space == &space)
+            .collect();
+        assert_eq!(matches.len(), 1, "only the revoked subject's share is returned");
+        assert_eq!(matches[0].2, revoked_subject);
+
+        clean_declassify_world(&pool, &org, &space).await;
+    }
+}

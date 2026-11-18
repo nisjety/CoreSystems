@@ -593,6 +593,59 @@ mod tests {
             None => std::env::remove_var(RETENTION_DAYS_ENV),
         }
     }
+
+    /// `space_event_emit` refuses a `refs` key outside its allowlist by raising, and the trigger that called it
+    /// swallows and counts the error. The list is SQL, so this pins it, as text, to the golden's ref keys and to the
+    /// keys the stream copies onto the wire: a key added to one and not the others fails here. The refusal itself runs in
+    /// `space_event_refs_allowlist_rejects_an_unknown_key` (DB).
+    #[test]
+    fn refs_allowlist_is_one_list_in_sql_the_golden_and_the_stream() {
+        use std::collections::BTreeSet;
+
+        let migration = include_str!("../../migrations/0072_space_event_log.sql");
+        let marker = "k.key NOT IN (";
+        let start = migration.find(marker).expect("the allowlist is a NOT IN list") + marker.len();
+        let end = start + migration[start..].find(')').expect("the list closes");
+        let sql_keys: BTreeSet<String> = migration[start..end]
+            .split(',')
+            .map(|key| key.trim().trim_matches('\'').to_owned())
+            .collect();
+        let expected: BTreeSet<String> = [
+            "agent_id", "fields", "message_sequence", "origin", "parent_run_id", "prev", "role", "state",
+        ]
+        .iter()
+        .map(|key| (*key).to_owned())
+        .collect();
+        assert_eq!(sql_keys, expected, "the allowlist of space_event_emit");
+
+        // The golden lists the id columns of a record beside the refs keys; the rest is the SQL list.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../api/contracts/space-events.json");
+        let golden: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("the golden is part of the repo ({}): {error}", path.display())),
+        )
+        .expect("the golden is JSON");
+        let golden_refs: BTreeSet<String> = golden["ref_keys"]
+            .as_array()
+            .expect("ref_keys is an array")
+            .iter()
+            .map(|key| key.as_str().expect("a string").to_owned())
+            .filter(|key| !matches!(key.as_str(), "thread_id" | "run_id" | "message_id"))
+            .collect();
+        assert_eq!(sql_keys, golden_refs, "space-events.json ref_keys");
+
+        // The stream reads exactly these keys, each through its own filter, and nothing else of `refs`.
+        let stream = include_str!("../space_stream_grpc.rs");
+        let production = &stream[..stream.find("#[cfg(test)]").expect("the test modules")];
+        for key in &sql_keys {
+            assert!(production.contains(&format!("\"{key}\"")), "the stream never reads {key}");
+        }
+
+        // An unknown key, a non-object and an oversize body are all refused inside the chokepoint or its table.
+        assert!(migration.contains("RAISE EXCEPTION 'space_event_emit: refs key outside the allowlist'"));
+        assert!(migration.contains("jsonb_typeof(p_refs) <> 'object'"));
+        assert!(migration.contains("CHECK (pg_column_size(refs) <= 512)"));
+    }
 }
 
 #[cfg(test)]
@@ -1093,5 +1146,395 @@ mod db_tests {
         assert_eq!(new_generation, generation + 1);
         assert_eq!((head_seq, min_seq), (1, 2));
         clean_space(&pool, &org, &space).await;
+    }
+
+    // ---- WS11-S5: the attention outbox rows written by the trigger of migration 0080 -------------
+
+    /// Turns the attention outbox on or off for the test database (the settings row is a singleton).
+    async fn set_attention_emit(pool: &PgPool, enabled: bool) {
+        sqlx::query("UPDATE space_attention_settings SET enabled = $1 WHERE singleton")
+            .bind(enabled)
+            .execute(pool)
+            .await
+            .expect("set space_attention_settings");
+    }
+
+    /// `(event log on, attention outbox on)` as stored now.
+    async fn emit_flags(pool: &PgPool) -> (bool, bool) {
+        sqlx::query_as(
+            "SELECT coalesce((SELECT enabled FROM space_event_settings WHERE singleton), FALSE),
+                    coalesce((SELECT enabled FROM space_attention_settings WHERE singleton), FALSE)",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("read flags")
+    }
+
+    /// The attention outbox rows of one Space, oldest event first: `(event_id, subject, payload)`.
+    async fn space_outbox(pool: &PgPool, space: &str) -> Vec<(String, String, serde_json::Value)> {
+        sqlx::query_as(
+            "SELECT event_id, subject, payload FROM session_audit_outbox WHERE subject = $1
+              ORDER BY (payload -> 'payload' ->> 'space_seq')::bigint",
+        )
+        .bind(format!("mp.v1.space.{space}.event"))
+        .fetch_all(pool)
+        .await
+        .expect("read outbox")
+    }
+
+    async fn drop_outbox(pool: &PgPool, org: &str) {
+        sqlx::query("DELETE FROM session_audit_outbox WHERE payload ->> 'org_id' = $1")
+            .bind(org)
+            .execute(pool)
+            .await
+            .ok();
+    }
+
+    async fn error_count(pool: &PgPool, source: &str) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM space_event_errors WHERE source = $1")
+            .bind(source)
+            .fetch_one(pool)
+            .await
+            .expect("count errors")
+    }
+
+    fn sorted_keys(value: &serde_json::Value) -> Vec<String> {
+        let mut keys: Vec<String> = value.as_object().expect("an object").keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn space_event_attention_trigger_emits_ids_only_and_skips_zdr_waived_and_unknown_kinds() {
+        let Some(pool) = connect().await else { return };
+        let (log_before, attention_before) = emit_flags(&pool).await;
+        set_event_log(&pool, true).await;
+        set_attention_emit(&pool, true).await;
+        let (org, space) = ids("attn");
+        let thread = format!("thread-{space}");
+        let run = format!("run-{space}");
+        // Log rows: 1 thread.created, 2 and 3 the two posts, 4 thread.updated, 5 the persistent run and 6 the
+        // waived run. The zero-retention run writes no log row at all.
+        seed_space_thread(&pool, &org, &space, &thread, "owner-1").await;
+        seed_space_message(&pool, &space, &thread, &format!("m-user-{space}"), "user", Some("member-2")).await;
+        seed_space_message(&pool, &space, &thread, &format!("m-agent-{space}"), "assistant", None).await;
+        sqlx::query("UPDATE threads SET presentation_title = 'title canary' WHERE id = $1")
+            .bind(&thread)
+            .execute(&pool)
+            .await
+            .expect("title the thread");
+        seed_space_run(&pool, &org, &space, &thread, &run, "queued", "persistent").await;
+        seed_space_run(&pool, &org, &space, &thread, &format!("run-waived-{space}"), "queued", "zdr_waived").await;
+        seed_space_run(&pool, &org, &space, &thread, &format!("run-zdr-{space}"), "queued", "zdr").await;
+        assert_eq!(log_seqs(&pool, &org, &space).await, (1..=6).collect::<Vec<i64>>());
+
+        // Only the two posts and the persistent run cross: not thread.created, not thread.updated, and not
+        // the row of the run that is held under a waiver.
+        let rows = space_outbox(&pool, &space).await;
+        let event_ids: Vec<String> = rows.iter().map(|(id, _, _)| id.clone()).collect();
+        let expected: Vec<String> = [2, 3, 5]
+            .iter()
+            .map(|seq| format!("space:{org}:{space}:1:{seq}"))
+            .collect();
+        assert_eq!(event_ids, expected);
+        let envelope_keys = [
+            "causation_id", "correlation_id", "event_id", "event_type", "idempotency_key", "org_id", "payload",
+            "producer", "resource_ref", "schema_version", "ts", "user_id", "zdr",
+        ];
+        for (event_id, subject, envelope) in &rows {
+            assert_eq!(subject, &format!("mp.v1.space.{space}.event"));
+            assert!(
+                matches!(
+                    crate::audit_publisher::classify_outbox_subject(subject),
+                    Some(crate::audit_publisher::OutboxRoute::SpaceEvent { space_ref }) if space_ref == space.as_str()
+                ),
+                "the stored subject is one the drainer publishes: {subject}"
+            );
+            assert_eq!(sorted_keys(envelope), envelope_keys);
+            assert_eq!(envelope["event_id"], event_id.as_str());
+            assert_eq!(envelope["idempotency_key"], event_id.as_str());
+            assert_eq!(envelope["producer"], "session-core");
+            assert_eq!(envelope["org_id"], org.as_str());
+            assert_eq!(envelope["resource_ref"], format!("space:{space}").as_str());
+            assert_eq!(envelope["correlation_id"], thread.as_str());
+            assert_eq!(envelope["schema_version"], 1);
+            assert_eq!(envelope["zdr"], false, "the projection admits persistent events only");
+        }
+        let post_keys = [
+            "audience_revision", "author_subject_id", "kind", "mentions", "message_id", "role", "space_ref",
+            "space_seq", "thread_id", "thread_owner_subject_id",
+        ];
+        let user_post = &rows[0].2;
+        assert_eq!(user_post["event_type"], "SPACE_MESSAGE_APPENDED");
+        assert_eq!(user_post["user_id"], "member-2");
+        assert_eq!(user_post["causation_id"], format!("m-user-{space}").as_str());
+        assert_eq!(sorted_keys(&user_post["payload"]), post_keys);
+        assert_eq!(user_post["payload"]["role"], "user");
+        assert_eq!(user_post["payload"]["author_subject_id"], "member-2");
+        assert_eq!(user_post["payload"]["thread_owner_subject_id"], "owner-1");
+        assert_eq!(user_post["payload"]["thread_id"], thread.as_str());
+        assert_eq!(user_post["payload"]["message_id"], format!("m-user-{space}").as_str());
+        assert_eq!(user_post["payload"]["mentions"], serde_json::json!([]));
+        assert_eq!(user_post["payload"]["audience_revision"], 1);
+        assert_eq!(user_post["payload"]["space_ref"], space.as_str());
+        assert_eq!(user_post["payload"]["space_seq"], 2);
+        assert_eq!(user_post["payload"]["kind"], "message.appended");
+        let agent_post = &rows[1].2;
+        assert_eq!(agent_post["event_type"], "SPACE_MESSAGE_APPENDED");
+        assert_eq!(agent_post["user_id"], "", "an agent reply has no author");
+        assert_eq!(sorted_keys(&agent_post["payload"]), post_keys);
+        assert_eq!(agent_post["payload"]["role"], "assistant");
+        assert_eq!(agent_post["payload"]["author_subject_id"], "");
+        assert_eq!(agent_post["payload"]["space_seq"], 3);
+        let run_state = &rows[2].2;
+        assert_eq!(run_state["event_type"], "SPACE_RUN_STATE_CHANGED");
+        assert_eq!(run_state["causation_id"], run.as_str());
+        assert_eq!(
+            sorted_keys(&run_state["payload"]),
+            ["audience_revision", "kind", "run_id", "space_ref", "space_seq", "starter_subject_id", "state", "thread_id"]
+        );
+        assert_eq!(run_state["payload"]["run_id"], run.as_str());
+        assert_eq!(run_state["payload"]["state"], "queued");
+        assert_eq!(run_state["payload"]["starter_subject_id"], "owner-1");
+        assert_eq!(run_state["payload"]["space_seq"], 5);
+
+        // Ids and closed words only: no body, no title, and nothing of the two runs that never crossed.
+        let everything: String = rows.iter().map(|(_, _, envelope)| envelope.to_string()).collect();
+        assert!(!everything.contains("canary"), "no message text or title crosses: {everything}");
+        assert!(!everything.contains(&format!("run-waived-{space}")));
+        assert!(!everything.contains(&format!("run-zdr-{space}")));
+
+        // A thread delete is projected as one tombstone that keeps the thread id and nothing else. The runs go
+        // first: they reference the thread.
+        let mut tx = pool.begin().await.expect("begin");
+        for sql in [
+            "DELETE FROM runs WHERE thread_id = $1",
+            "DELETE FROM messages WHERE thread_id = $1",
+            "DELETE FROM threads WHERE id = $1",
+        ] {
+            sqlx::query(sql).bind(&thread).execute(&mut *tx).await.expect("delete");
+        }
+        tx.commit().await.expect("commit");
+        let rows = space_outbox(&pool, &space).await;
+        assert_eq!(rows.len(), 4, "the earlier rows stay until the erasure path removes them");
+        let (tombstone_id, _, tombstone) = &rows[3];
+        assert_eq!(tombstone_id, &format!("space:{org}:{space}:1:7"));
+        assert_eq!(tombstone["event_type"], "SPACE_THREAD_DELETED");
+        assert_eq!(
+            sorted_keys(&tombstone["payload"]),
+            ["audience_revision", "kind", "space_ref", "space_seq", "thread_id"]
+        );
+        assert_eq!(tombstone["payload"]["thread_id"], thread.as_str());
+
+        drop_outbox(&pool, &org).await;
+        clean_space(&pool, &org, &space).await;
+        set_attention_emit(&pool, attention_before).await;
+        set_event_log(&pool, log_before).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn space_event_attention_flag_refuses_without_log_enabled() {
+        use crate::space::attention_outbox::sync_flag as sync_attention;
+        let Some(pool) = connect().await else { return };
+        let (log_before, attention_before) = emit_flags(&pool).await;
+        let (org, space) = ids("flagoff");
+        let thread = format!("thread-{space}");
+
+        // The log is off: asking for attention events is refused and the stored value stays off.
+        set_event_log(&pool, false).await;
+        set_attention_emit(&pool, false).await;
+        assert!(!sync_attention(&pool, true).await.expect("sync"), "refused while the log is off");
+        assert!(!emit_flags(&pool).await.1, "sync_flag stays off while space_event_settings.enabled is false");
+        // And nothing is written meanwhile: no log row, so no outbox row.
+        seed_space_thread(&pool, &org, &space, &thread, "owner-1").await;
+        seed_space_message(&pool, &space, &thread, &format!("m1-{space}"), "user", Some("member-2")).await;
+        assert!(log_seqs(&pool, &org, &space).await.is_empty());
+        assert!(space_outbox(&pool, &space).await.is_empty());
+
+        // With the log on, the request is honoured.
+        set_event_log(&pool, true).await;
+        assert!(sync_attention(&pool, true).await.expect("sync"));
+        assert!(emit_flags(&pool).await.1);
+        // A stored "on" does not survive a start with the log off: the flag follows the log, never outlives it.
+        set_event_log(&pool, false).await;
+        assert!(!sync_attention(&pool, true).await.expect("sync"));
+        assert!(!emit_flags(&pool).await.1);
+
+        // Off is honoured whatever the log says: the post writes its log row and still no outbox row.
+        set_event_log(&pool, true).await;
+        assert!(sync_attention(&pool, true).await.expect("sync"));
+        assert!(!sync_attention(&pool, false).await.expect("sync"));
+        assert!(!emit_flags(&pool).await.1);
+        seed_space_message(&pool, &space, &thread, &format!("m2-{space}"), "user", Some("member-2")).await;
+        assert_eq!(log_seqs(&pool, &org, &space).await, vec![1], "the log row is written");
+        assert!(space_outbox(&pool, &space).await.is_empty(), "the flag is off: no outbox row");
+
+        drop_outbox(&pool, &org).await;
+        clean_space(&pool, &org, &space).await;
+        set_attention_emit(&pool, attention_before).await;
+        set_event_log(&pool, log_before).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn space_event_attention_outbox_row_commits_with_the_log_row() {
+        let Some(pool) = connect().await else { return };
+        let (log_before, attention_before) = emit_flags(&pool).await;
+        set_event_log(&pool, true).await;
+        set_attention_emit(&pool, true).await;
+        let (org, space) = ids("outbox");
+        let thread = format!("thread-{space}");
+        seed_space_thread(&pool, &org, &space, &thread, "owner-1").await;
+
+        // A post inside a transaction that rolls back leaves neither a log row nor an outbox row.
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content, space_id, recipient_audience_ref, \
+             recipient_audience_revision, recipient_audience_hash, authority_revision, \
+             resource_authorization_ref, author_subject_id) \
+             VALUES ($1, $2, 'user', 'x', $3, 'audience-1', 1, 'sha256:audience-1', 1, 'resource-1', 'member-2')",
+        )
+        .bind(format!("m-rolled-{space}"))
+        .bind(&thread)
+        .bind(&space)
+        .execute(&mut *tx)
+        .await
+        .expect("insert");
+        tx.rollback().await.expect("rollback");
+        assert_eq!(log_seqs(&pool, &org, &space).await, vec![1]);
+        assert!(space_outbox(&pool, &space).await.is_empty(), "a rolled-back post leaves no outbox row");
+
+        // A committed post leaves both. The id is the room's own generation and seq, so it is deterministic.
+        seed_space_message(&pool, &space, &thread, &format!("m-kept-{space}"), "user", Some("member-2")).await;
+        assert_eq!(log_seqs(&pool, &org, &space).await, vec![1, 2]);
+        let rows = space_outbox(&pool, &space).await;
+        let event_id = format!("space:{org}:{space}:1:2");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, event_id);
+        // The two rows were written by one transaction: now() is the transaction's, and both carry it.
+        let same_transaction: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM session_audit_outbox o
+               JOIN space_event_log l
+                 ON o.event_id = 'space:' || l.org_id || ':' || l.space_ref || ':'
+                                 || l.generation::text || ':' || l.seq::text
+              WHERE l.org_id = $1 AND l.space_ref = $2 AND o.created_at = l.created_at",
+        )
+        .bind(&org)
+        .bind(&space)
+        .fetch_one(&pool)
+        .await
+        .expect("join the two rows");
+        assert_eq!(same_transaction, 1);
+
+        // Replay: the same log row inserted again fires the trigger again, and the deterministic id makes the
+        // second outbox insert an ON CONFLICT no-op. It is not an error either.
+        let errors_before = error_count(&pool, "attention_outbox").await;
+        let row: serde_json::Value = sqlx::query_scalar(
+            "SELECT to_jsonb(l) FROM space_event_log l WHERE l.org_id = $1 AND l.space_ref = $2 AND l.seq = 2",
+        )
+        .bind(&org)
+        .bind(&space)
+        .fetch_one(&pool)
+        .await
+        .expect("read the log row");
+        sqlx::query("DELETE FROM space_event_log WHERE org_id = $1 AND space_ref = $2 AND seq = 2")
+            .bind(&org)
+            .bind(&space)
+            .execute(&pool)
+            .await
+            .expect("remove the log row");
+        sqlx::query("INSERT INTO space_event_log SELECT * FROM jsonb_populate_record(NULL::space_event_log, $1::jsonb)")
+            .bind(&row)
+            .execute(&pool)
+            .await
+            .expect("replay the log row");
+        assert_eq!(log_seqs(&pool, &org, &space).await, vec![1, 2]);
+        let again = space_outbox(&pool, &space).await;
+        assert_eq!(again.len(), 1, "a replay adds no second outbox row");
+        assert_eq!(again[0].0, event_id);
+        assert_eq!(again[0].2, rows[0].2, "and the stored envelope is untouched");
+        assert_eq!(error_count(&pool, "attention_outbox").await, errors_before);
+
+        drop_outbox(&pool, &org).await;
+        clean_space(&pool, &org, &space).await;
+        set_attention_emit(&pool, attention_before).await;
+        set_event_log(&pool, log_before).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn space_event_attention_skipped_ref_with_a_dot_is_counted() {
+        let Some(pool) = connect().await else { return };
+        let (log_before, attention_before) = emit_flags(&pool).await;
+        set_event_log(&pool, true).await;
+        set_attention_emit(&pool, true).await;
+        let suffix = mp_ids::new_ulid();
+        let org = format!("org-ref-{suffix}");
+        let emit = |space: String| {
+            let (pool, org) = (pool.clone(), org.clone());
+            async move {
+                sqlx::query_scalar::<_, Option<i64>>(
+                    "SELECT space_event_emit($1, $2, 'message.appended', 'user', 'member-2', 'thread-x', NULL, \
+                     'message-x', 1, 'persistent', $3::jsonb)",
+                )
+                .bind(&org)
+                .bind(&space)
+                .bind(serde_json::json!({ "role": "user" }))
+                .fetch_one(&pool)
+                .await
+                .expect("emit")
+            }
+        };
+        let outbox_rows = || {
+            let (pool, org) = (pool.clone(), org.clone());
+            async move {
+                sqlx::query_scalar::<_, i64>("SELECT count(*) FROM session_audit_outbox WHERE payload ->> 'org_id' = $1")
+                    .bind(&org)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("count outbox rows")
+            }
+        };
+
+        // A ref that could add a subject token, a wildcard, whitespace, or is over 128 characters would widen
+        // the single-token grant: its log row is written, its outbox row is skipped, and the skip is counted.
+        let skipped = [
+            format!("dot.{suffix}"),
+            format!("sp ace-{suffix}"),
+            format!("star*{suffix}"),
+            format!("gt>{suffix}"),
+            "x".repeat(129),
+        ];
+        for space in &skipped {
+            let before = error_count(&pool, "attention_ref").await;
+            assert_eq!(emit(space.clone()).await, Some(1), "the log row itself is written");
+            assert_eq!(error_count(&pool, "attention_ref").await, before + 1, "{space:?} is counted");
+            assert_eq!(outbox_rows().await, 0, "{space:?} is never published");
+        }
+        let counted: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM space_event_errors WHERE source = 'attention_ref' AND sqlstate = '22023'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count by sqlstate");
+        assert!(counted >= skipped.len() as i64, "the error row is a source word and a sqlstate: {counted}");
+
+        // The same event for a clean ref does cross, so the skip above is the ref's doing.
+        let clean_ref = format!("clean-{suffix}");
+        assert_eq!(emit(clean_ref.clone()).await, Some(1));
+        assert_eq!(outbox_rows().await, 1);
+        assert_eq!(
+            space_outbox(&pool, &clean_ref).await.first().map(|row| row.0.clone()),
+            Some(format!("space:{org}:{clean_ref}:1:1"))
+        );
+
+        drop_outbox(&pool, &org).await;
+        for space in skipped.iter().chain(std::iter::once(&clean_ref)) {
+            clean_space(&pool, &org, space).await;
+        }
+        set_attention_emit(&pool, attention_before).await;
+        set_event_log(&pool, log_before).await;
     }
 }

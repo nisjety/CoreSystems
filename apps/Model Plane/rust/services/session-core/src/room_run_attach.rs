@@ -117,6 +117,14 @@ fn live_route(row: &AttachRow, waiver: Option<&ZdrWaiver>) -> Result<(String, St
     }
 }
 
+/// Until when a verdict holds, in Unix seconds: the lesser of the decision's own expiry and
+/// [`MAX_VALID_SECONDS`] from `now`.
+fn valid_until_unix(decision_expires_at: chrono::DateTime<Utc>, now: chrono::DateTime<Utc>) -> i64 {
+    decision_expires_at
+        .timestamp()
+        .min(now.timestamp().saturating_add(MAX_VALID_SECONDS))
+}
+
 /// The verdict. `Ok` carries the run's identity facts and how long the verdict holds.
 pub(crate) async fn authorize_room_run_attach(
     pool: &PgPool,
@@ -180,10 +188,7 @@ pub(crate) async fn authorize_room_run_attach(
     .await?;
     let (provider, connection) = live_route(&row, caller.zdr_waiver())?;
 
-    let valid_until = decision
-        .expires_at
-        .timestamp()
-        .min(now.timestamp().saturating_add(MAX_VALID_SECONDS));
+    let valid_until = valid_until_unix(decision.expires_at, now);
     Ok(pb::AuthorizeRoomRunAttachResponse {
         run_id: run_id.to_owned(),
         thread_id: row.thread_id,
@@ -314,5 +319,483 @@ mod tests {
             .expect("the run is inside the audience");
         let got = live_route(&fetched, None).expect("persistent");
         assert_eq!(got, (String::new(), String::new()));
+    }
+
+    // ---- the verdict (`room_attach_*`) ------------------------------------------------------
+    //
+    // The refusals that come before the first query run against a lazy pool nothing ever reaches.
+    // The tests that read rows are `#[ignore]`d and need a disposable Postgres
+    // (`space::test_support::connect`).
+
+    use crate::grpc::space_w1_tests::{mint, StreamKeysEnv, DECISION_REF};
+
+    fn lazy_pool() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://unreachable.invalid/session")
+            .expect("lazy pool")
+    }
+
+    /// A Control `model.thread.read` decision (audience `model-plane`) for `viewer` in `space`, with
+    /// the given permissions, zero-retention claim and `(issued_at, expires_at)` window.
+    fn read_token(
+        org: &str,
+        viewer: &str,
+        space: &str,
+        permissions: &[&str],
+        zdr: bool,
+        window: (chrono::DateTime<Utc>, chrono::DateTime<Utc>),
+    ) -> String {
+        mint(
+            crate::grpc::CONTROL_SPACE_DECISION_AUDIENCE,
+            permissions,
+            zdr,
+            |claims| {
+                claims["org_id"] = serde_json::json!(org);
+                claims["subject_id"] = serde_json::json!(viewer);
+                claims["space_ref"] = serde_json::json!(space);
+                claims["issued_at"] = serde_json::json!(window.0.to_rfc3339());
+                claims["expires_at"] = serde_json::json!(window.1.to_rfc3339());
+            },
+            false,
+        )
+    }
+
+    /// A read decision that is valid now, for two minutes.
+    fn live_token(org: &str, viewer: &str, space: &str) -> String {
+        let now = Utc::now();
+        read_token(
+            org,
+            viewer,
+            space,
+            &["thread:read"],
+            false,
+            (now, now + chrono::Duration::minutes(2)),
+        )
+    }
+
+    fn attach_request(run: &str, space: &str, token: String) -> pb::AuthorizeRoomRunAttachRequest {
+        pb::AuthorizeRoomRunAttachRequest {
+            run_id: run.to_owned(),
+            space_id: space.to_owned(),
+            space_read_decision_ref: DECISION_REF.to_owned(),
+            space_read_decision_token: token,
+        }
+    }
+
+    fn assert_agent_run_refusal(status: &Status) {
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{status:?}");
+        assert_eq!(
+            Refusal::from_status(status),
+            Some(Refusal::feature_not_supported("agent_run")),
+            "{status:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn room_attach_a_zero_retention_credential_is_refused_with_the_agent_run_feature() {
+        let zdr = VerifiedIdentity::user_for_test_with_zdr("org-1", "viewer-1", true);
+        let refused = authorize_room_run_attach(
+            &lazy_pool(),
+            &zdr,
+            &attach_request("run-1", "space-1", String::new()),
+        )
+        .await
+        .expect_err("the room live view has no zero-retention form");
+        assert_agent_run_refusal(&refused);
+    }
+
+    #[tokio::test]
+    async fn room_attach_a_decision_with_the_zero_retention_claim_is_refused_with_the_agent_run_feature() {
+        let _keys = StreamKeysEnv::publish();
+        let now = Utc::now();
+        // Control: the same decision without the claim verifies, so the refusal below is the claim's.
+        crate::grpc::verify_space_read_claims(
+            &live_token("org-1", "viewer-1", "space-1"),
+            DECISION_REF,
+            "org-1",
+            "viewer-1",
+            "space-1",
+            now,
+        )
+        .expect("a live decision verifies");
+
+        let token = read_token(
+            "org-1",
+            "viewer-1",
+            "space-1",
+            &["thread:read"],
+            true,
+            (now, now + chrono::Duration::minutes(2)),
+        );
+        let viewer = VerifiedIdentity::user_for_test("org-1", "viewer-1");
+        let refused =
+            authorize_room_run_attach(&lazy_pool(), &viewer, &attach_request("run-1", "space-1", token))
+                .await
+                .expect_err("a decision that names zero retention opens no live view");
+        assert_agent_run_refusal(&refused);
+    }
+
+    #[tokio::test]
+    async fn room_attach_expired_foreign_subject_and_write_permission_decisions_are_refused() {
+        let _keys = StreamKeysEnv::publish();
+        let now = Utc::now();
+        let minute = chrono::Duration::minutes(1);
+        let live = (now, now + minute * 2);
+        let viewer = VerifiedIdentity::user_for_test("org-1", "viewer-1");
+        // Control: the live decision verifies, so each refusal below is its own fault.
+        crate::grpc::verify_space_read_claims(
+            &read_token("org-1", "viewer-1", "space-1", &["thread:read"], false, live),
+            DECISION_REF,
+            "org-1",
+            "viewer-1",
+            "space-1",
+            now,
+        )
+        .expect("a live decision verifies");
+
+        let cases = [
+            (
+                "an expired decision",
+                read_token("org-1", "viewer-1", "space-1", &["thread:read"], false, (now - minute * 10, now - minute * 5)),
+                "Control Space read decision is expired or incomplete",
+            ),
+            (
+                "another member's decision",
+                read_token("org-1", "someone-else", "space-1", &["thread:read"], false, live),
+                "Control Space decision does not authorize this conversation read",
+            ),
+            (
+                "a decision that carries a write permission",
+                read_token("org-1", "viewer-1", "space-1", &["thread:read", "thread:append"], false, live),
+                "a Space read decision must not carry write permissions",
+            ),
+            (
+                "a decision for another Space",
+                read_token("org-1", "viewer-1", "space-2", &["thread:read"], false, live),
+                "Control Space decision does not authorize this conversation read",
+            ),
+        ];
+        for (what, token, message) in cases {
+            let refused = authorize_room_run_attach(
+                &lazy_pool(),
+                &viewer,
+                &attach_request("run-1", "space-1", token),
+            )
+            .await
+            .expect_err(what);
+            assert_eq!(refused.code(), tonic::Code::PermissionDenied, "{what}");
+            assert_eq!(refused.message(), message, "{what}");
+        }
+    }
+
+    #[test]
+    fn room_attach_valid_until_is_the_sooner_of_the_decision_expiry_and_ten_minutes() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-17T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let second = chrono::Duration::seconds(1);
+        assert_eq!(MAX_VALID_SECONDS, 600);
+        // A decision that ends in two minutes bounds the verdict at its own expiry.
+        assert_eq!(valid_until_unix(now + second * 120, now), now.timestamp() + 120);
+        // One that lasts an hour is cut to ten minutes from now.
+        assert_eq!(valid_until_unix(now + second * 3600, now), now.timestamp() + 600);
+        // At the cap itself, both readings agree.
+        assert_eq!(valid_until_unix(now + second * 600, now), now.timestamp() + 600);
+        // An expiry already past is never stretched.
+        assert_eq!(valid_until_unix(now - second * 5, now), now.timestamp() - 5);
+    }
+
+    /// One Space thread with one persistent root run, in fresh org and Space ids.
+    struct Room {
+        pool: PgPool,
+        org: String,
+        space: String,
+        thread: String,
+        run: String,
+    }
+
+    async fn room(tag: &str) -> Option<Room> {
+        let pool = test_support::connect().await?;
+        let sfx = mp_ids::new_ulid();
+        let (org, space) = (format!("ra-{tag}-org-{sfx}"), format!("ra-{tag}-space-{sfx}"));
+        let (thread, run) = (format!("ra-{tag}-thread-{sfx}"), format!("ra-{tag}-run-{sfx}"));
+        test_support::seed_space_thread(&pool, &org, &space, &thread, "owner-1").await;
+        test_support::seed_space_run(&pool, &org, &space, &thread, &run, "queued", "persistent").await;
+        Some(Room {
+            pool,
+            org,
+            space,
+            thread,
+            run,
+        })
+    }
+
+    async fn watch(
+        room: &Room,
+        viewer: &VerifiedIdentity,
+        space: &str,
+        run: &str,
+        token: String,
+    ) -> Result<pb::AuthorizeRoomRunAttachResponse, Status> {
+        authorize_room_run_attach(&room.pool, viewer, &attach_request(run, space, token)).await
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn room_attach_wrong_space_foreign_org_beyond_ceiling_and_child_run_are_not_found() {
+        let Some(room) = room("nf").await else {
+            return;
+        };
+        let _keys = StreamKeysEnv::publish();
+        let viewer = VerifiedIdentity::user_for_test(&room.org, "viewer-1");
+        // Control: a member may watch a root run of the Space.
+        let ok = watch(
+            &room,
+            &viewer,
+            &room.space,
+            &room.run,
+            live_token(&room.org, "viewer-1", &room.space),
+        )
+        .await
+        .expect("a member may watch a root run of the Space");
+        assert_eq!(ok.run_id, room.run);
+        assert_eq!(ok.thread_id, room.thread);
+        assert_eq!(ok.org_id, room.org);
+        assert_eq!(ok.owner_subject_id, "owner-1");
+
+        // A run that is not in the decision's Space.
+        let other_space = format!("{}-other", room.space);
+        let wrong_space = watch(
+            &room,
+            &viewer,
+            &other_space,
+            &room.run,
+            live_token(&room.org, "viewer-1", &other_space),
+        )
+        .await
+        .expect_err("another Space's decision reaches no run of this one");
+
+        // A member of another org, holding that org's own decision.
+        let stranger = VerifiedIdentity::user_for_test("org-elsewhere", "viewer-1");
+        let foreign_org = watch(
+            &room,
+            &stranger,
+            &room.space,
+            &room.run,
+            live_token("org-elsewhere", "viewer-1", &room.space),
+        )
+        .await
+        .expect_err("another org reaches no run of this one");
+
+        // A thread whose audience is newer than the decision's ceiling (the decision is at revision 4).
+        let (late_thread, late_run) = (format!("{}-late", room.thread), format!("{}-late", room.run));
+        test_support::seed_space_thread(&room.pool, &room.org, &room.space, &late_thread, "owner-1").await;
+        test_support::seed_space_run(&room.pool, &room.org, &room.space, &late_thread, &late_run, "queued", "persistent")
+            .await;
+        sqlx::query("UPDATE threads SET recipient_audience_revision = 9 WHERE id = $1")
+            .bind(&late_thread)
+            .execute(&room.pool)
+            .await
+            .expect("a newer audience");
+        let beyond_ceiling = watch(
+            &room,
+            &viewer,
+            &room.space,
+            &late_run,
+            live_token(&room.org, "viewer-1", &room.space),
+        )
+        .await
+        .expect_err("a thread beyond the audience ceiling is not visible");
+
+        // A child run: only a root run is watched.
+        let child_run = format!("{}-child", room.run);
+        test_support::seed_space_run(&room.pool, &room.org, &room.space, &room.thread, &child_run, "queued", "persistent")
+            .await;
+        sqlx::query("UPDATE runs SET parent_run_id = $1 WHERE id = $2")
+            .bind(&room.run)
+            .bind(&child_run)
+            .execute(&room.pool)
+            .await
+            .expect("make it a child run");
+        let child = watch(
+            &room,
+            &viewer,
+            &room.space,
+            &child_run,
+            live_token(&room.org, "viewer-1", &room.space),
+        )
+        .await
+        .expect_err("a child run is not watched");
+
+        for (what, refused) in [
+            ("wrong space", wrong_space),
+            ("foreign org", foreign_org),
+            ("beyond the ceiling", beyond_ceiling),
+            ("child run", child),
+        ] {
+            assert_eq!(refused.code(), tonic::Code::NotFound, "{what}");
+            assert_eq!(refused.message(), "run not found", "{what}: no oracle for the run id");
+        }
+        test_support::clean_space(&room.pool, &room.org, &room.space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn room_attach_a_revoked_viewer_is_refused_on_reauthorize() {
+        let Some(room) = room("rv").await else {
+            return;
+        };
+        let _keys = StreamKeysEnv::publish();
+        let viewer = VerifiedIdentity::user_for_test(&room.org, "viewer-1");
+        watch(&room, &viewer, &room.space, &room.run, live_token(&room.org, "viewer-1", &room.space))
+            .await
+            .expect("a member watches");
+
+        sqlx::query(
+            "INSERT INTO space_membership_revocations (space_ref, org_id, subject_id) VALUES ($1, $2, $3) \
+             ON CONFLICT (space_ref, subject_id) DO UPDATE SET revoked_at = NOW()",
+        )
+        .bind(&room.space)
+        .bind(&room.org)
+        .bind("viewer-1")
+        .execute(&room.pool)
+        .await
+        .expect("remove the member");
+        // The 15-second re-authorization meets the removal although the decision still holds.
+        let refused = watch(&room, &viewer, &room.space, &room.run, live_token(&room.org, "viewer-1", &room.space))
+            .await
+            .expect_err("a removed member watches nothing");
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+        assert_eq!(refused.message(), "Space membership required for this run");
+
+        sqlx::query("DELETE FROM space_membership_revocations WHERE space_ref = $1")
+            .bind(&room.space)
+            .execute(&room.pool)
+            .await
+            .ok();
+        test_support::clean_space(&room.pool, &room.org, &room.space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn room_attach_zero_retention_and_unbound_waived_runs_are_refused_with_the_agent_run_feature() {
+        let Some(room) = room("zr").await else {
+            return;
+        };
+        let _keys = StreamKeysEnv::publish();
+        let (zdr_run, waived_run) = (format!("{}-zdr", room.run), format!("{}-waived", room.run));
+        test_support::seed_space_run(&room.pool, &room.org, &room.space, &room.thread, &zdr_run, "queued", "zdr").await;
+        test_support::seed_space_run(&room.pool, &room.org, &room.space, &room.thread, &waived_run, "queued", "zdr_waived")
+            .await;
+
+        let viewer = VerifiedIdentity::user_for_test(&room.org, "viewer-1");
+        for run in [&zdr_run, &waived_run] {
+            let refused = watch(&room, &viewer, &room.space, run, live_token(&room.org, "viewer-1", &room.space))
+                .await
+                .expect_err("a run that keeps nothing, or whose waiver is not the viewer's, is not watched");
+            assert_agent_run_refusal(&refused);
+        }
+        // A waiver for another connection does not bind the waived run (it rests on conn-1 / ack-1).
+        let other_connection =
+            VerifiedIdentity::user_for_test_with_waiver(&room.org, "viewer-1", "conn-2", "ack-1");
+        let refused = watch(
+            &room,
+            &other_connection,
+            &room.space,
+            &waived_run,
+            live_token(&room.org, "viewer-1", &room.space),
+        )
+        .await
+        .expect_err("another connection's waiver does not bind the run");
+        assert_agent_run_refusal(&refused);
+        // The persistent run beside them is unaffected.
+        watch(&room, &viewer, &room.space, &room.run, live_token(&room.org, "viewer-1", &room.space))
+            .await
+            .expect("the persistent run still attaches");
+        test_support::clean_space(&room.pool, &room.org, &room.space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn room_attach_reports_the_run_phase_and_a_window_bounded_by_the_decision_and_ten_minutes() {
+        let Some(room) = room("ph").await else {
+            return;
+        };
+        let _keys = StreamKeysEnv::publish();
+        let viewer = VerifiedIdentity::user_for_test(&room.org, "viewer-1");
+        // A queued run with no open obligation reads as queued.
+        let queued = watch(&room, &viewer, &room.space, &room.run, live_token(&room.org, "viewer-1", &room.space))
+            .await
+            .expect("a queued run attaches");
+        assert_eq!(queued.run_phase, "queued");
+
+        // A run a producer started (an open obligation inside its deadline) reads as running.
+        let started = crate::terminalization::start_managed_run_inner(
+            &room.pool,
+            pb::StartManagedRunRequest {
+                thread_id: room.thread.clone(),
+                agent_id: "general-v1".to_owned(),
+                goal: "a goal".to_owned(),
+                mode: "execute".to_owned(),
+                org_id: room.org.clone(),
+                user_id: "owner-1".to_owned(),
+                start_key: format!("k-{}", room.run),
+                terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+                ..Default::default()
+            },
+            false,
+        )
+        .await
+        .expect("a managed run starts");
+        let running = watch(
+            &room,
+            &viewer,
+            &room.space,
+            &started.run_id,
+            live_token(&room.org, "viewer-1", &room.space),
+        )
+        .await
+        .expect("a running run attaches");
+        assert_eq!(running.run_phase, "running");
+        assert_eq!(running.owner_subject_id, "owner-1");
+        assert!(running.started_at_unix > 0);
+
+        // The window: a short decision bounds it at its own expiry, a long one is cut to ten minutes.
+        let now = Utc::now();
+        let expires = now + chrono::Duration::seconds(120);
+        let short = watch(
+            &room,
+            &viewer,
+            &room.space,
+            &room.run,
+            read_token(&room.org, "viewer-1", &room.space, &["thread:read"], false, (now, expires)),
+        )
+        .await
+        .expect("a short decision attaches");
+        assert_eq!(short.valid_until_unix, expires.timestamp());
+        let before = Utc::now().timestamp();
+        let long = watch(
+            &room,
+            &viewer,
+            &room.space,
+            &room.run,
+            read_token(
+                &room.org,
+                "viewer-1",
+                &room.space,
+                &["thread:read"],
+                false,
+                (now, now + chrono::Duration::hours(1)),
+            ),
+        )
+        .await
+        .expect("a long decision attaches");
+        let after = Utc::now().timestamp();
+        assert!(
+            (before + 600..=after + 600).contains(&long.valid_until_unix),
+            "{} is not ten minutes from now ({before}..{after})",
+            long.valid_until_unix
+        );
+        test_support::clean_space(&room.pool, &room.org, &room.space).await;
     }
 }

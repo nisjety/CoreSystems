@@ -10752,6 +10752,645 @@ mod tests {
             db.cleanup().await;
         }
     }
+
+    /// Build plan WS10 S6 and S7: a Space member decides, reads and reroutes approvals under
+    /// Control-signed decisions, and an unwatched turn takes a `once` decision only. The tests that
+    /// stop before the first query run against the unreachable pool; the rest are `#[ignore]`d and
+    /// need a disposable Postgres (`space::test_support::connect`), and those that set a switch
+    /// run one at a time (`--test-threads=1`).
+    mod member_decide_room {
+        use super::*;
+        use crate::grpc::space_w1_tests::{mint, signing_key, StreamKeysEnv, DECISION_REF, KEY_ID};
+        use crate::space::test_support::{clean_space, connect, seed_space_run, seed_space_thread};
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        use ed25519_dalek::Signer as _;
+        use mp_contracts::space_approvals as sa;
+        use sqlx::PgPool;
+        use std::collections::BTreeSet;
+
+        /// Sets process env vars for one test and restores them on drop. Only the `#[ignore]`d tests
+        /// use it, and they run one at a time, so the process env is not contended.
+        struct EnvOverride(Vec<(&'static str, Option<String>)>);
+
+        impl EnvOverride {
+            fn set(pairs: &[(&'static str, &str)]) -> Self {
+                let saved = pairs
+                    .iter()
+                    .map(|(name, value)| {
+                        let before = std::env::var(name).ok();
+                        std::env::set_var(name, value);
+                        (*name, before)
+                    })
+                    .collect();
+                Self(saved)
+            }
+        }
+
+        impl Drop for EnvOverride {
+            fn drop(&mut self) {
+                for (name, before) in self.0.drain(..) {
+                    match before {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+
+        fn decide_request(
+            space_id: &str,
+            decision_ref: &str,
+            token: &str,
+        ) -> proto::DecideApprovalRequest {
+            proto::DecideApprovalRequest {
+                approval_id: "appr_1".to_owned(),
+                decision: proto::ApprovalState::Granted as i32,
+                org_id: "org_m".to_owned(),
+                space_id: space_id.to_owned(),
+                space_decision_ref: decision_ref.to_owned(),
+                space_decision_token: token.to_owned(),
+                ..Default::default()
+            }
+        }
+
+        /// Every proper, non-empty subset of (space_id, decision ref, decision token).
+        const PARTIAL_SETS: [(&str, &str, &str); 6] = [
+            ("space-1", "", ""),
+            ("", "ref-1", ""),
+            ("", "", "token-1"),
+            ("space-1", "ref-1", ""),
+            ("space-1", "", "token-1"),
+            ("", "ref-1", "token-1"),
+        ];
+
+        const INCOMPLETE: &str = "a member decision requires space_id, decision ref, and token together";
+
+        /// WS10-S6: a decision that carries only some of the Space fields is refused before any lookup,
+        /// whichever way the member-decide switch stands: as incomplete when it is on, as disabled when
+        /// it is off. The pool is unreachable: reaching the database would answer Internal.
+        #[tokio::test]
+        async fn decide_approval_refuses_a_partial_set_of_space_fields_before_any_lookup() {
+            let (svc, _rx) = lazy_unreachable_service();
+            for (space, decision_ref, token) in PARTIAL_SETS {
+                let refused = svc
+                    .decide_approval(with_caller(
+                        decide_request(space, decision_ref, token),
+                        VerifiedIdentity::user_for_test("org_m", "member_m"),
+                    ))
+                    .await
+                    .expect_err("a partial member decision is refused");
+                match refused.code() {
+                    tonic::Code::InvalidArgument => assert_eq!(refused.message(), INCOMPLETE),
+                    tonic::Code::FailedPrecondition => {
+                        assert_eq!(refused.message(), sa::MEMBER_DECIDE_DISABLED);
+                    }
+                    other => panic!("({space:?}, {decision_ref:?}, {token:?}) answered {other:?}: {refused:?}"),
+                }
+            }
+        }
+
+        /// WS10-S6: with the switch on, the same partial sets are the invalid-argument refusal; with
+        /// it off, any Space field at all answers the disabled refusal. Pinned strictly here, so the
+        /// test sets the switch and runs on its own.
+        #[tokio::test]
+        #[ignore = "sets SESSION_CORE_APPROVAL_MEMBER_DECIDE in the process env; run with --test-threads=1"]
+        async fn decide_approval_names_the_switch_state_when_it_refuses_a_partial_set() {
+            let (svc, _rx) = lazy_unreachable_service();
+            for (switch, expected_code, expected_message) in [
+                ("1", tonic::Code::InvalidArgument, INCOMPLETE),
+                ("0", tonic::Code::FailedPrecondition, sa::MEMBER_DECIDE_DISABLED),
+            ] {
+                let _switch = EnvOverride::set(&[(sa::MEMBER_DECIDE_CORE_ENV, switch)]);
+                for (space, decision_ref, token) in PARTIAL_SETS {
+                    let refused = svc
+                        .decide_approval(with_caller(
+                            decide_request(space, decision_ref, token),
+                            VerifiedIdentity::user_for_test("org_m", "member_m"),
+                        ))
+                        .await
+                        .expect_err("a partial member decision is refused");
+                    assert_eq!(refused.code(), expected_code, "switch {switch}: {refused:?}");
+                    assert_eq!(refused.message(), expected_message, "switch {switch}");
+                }
+            }
+        }
+
+        /// WS10-S6: a decision with no Space fields never meets the member gate (whatever the switch
+        /// says); it stays on the owner path, whose first read is the run's stored retention. The pool
+        /// is unreachable, so that read answers Internal.
+        #[tokio::test]
+        async fn decide_approval_without_space_fields_stays_on_the_owner_path() {
+            let (svc, _rx) = lazy_unreachable_service();
+            let reached = svc
+                .decide_approval(with_caller(
+                    decide_request("", "", ""),
+                    VerifiedIdentity::user_for_test("org_m", "owner_m"),
+                ))
+                .await
+                .expect_err("the unreachable pool fails the owner lookup");
+            assert_eq!(reached.code(), tonic::Code::Internal);
+            assert_eq!(reached.message(), "run retention persistence failed");
+        }
+
+        /// A Control `model.thread.read` decision for `member` in `space`, valid now.
+        fn read_decision(org: &str, member: &str, space: &str) -> String {
+            mint(
+                crate::grpc::CONTROL_SPACE_DECISION_AUDIENCE,
+                &["thread:read"],
+                false,
+                |claims| {
+                    claims["org_id"] = serde_json::json!(org);
+                    claims["subject_id"] = serde_json::json!(member);
+                    claims["space_ref"] = serde_json::json!(space);
+                    claims["issued_at"] = serde_json::json!(Utc::now().to_rfc3339());
+                    claims["expires_at"] =
+                        serde_json::json!((Utc::now() + chrono::Duration::minutes(2)).to_rfc3339());
+                },
+                false,
+            )
+        }
+
+        /// A Control approval decision for `member` in `space`: `action`, `schema` and `permission`
+        /// say what it authorizes and `digest` what it commits to. Signed with the shared test key.
+        fn approval_decision(
+            org: &str,
+            member: &str,
+            space: &str,
+            (action, schema, permission): (&str, &str, &str),
+            digest: &str,
+        ) -> String {
+            let now = Utc::now();
+            let claims = serde_json::json!({
+                "decision_ref": DECISION_REF,
+                "org_id": org,
+                "space_ref": space,
+                "subject_id": member,
+                "service_audience": crate::grpc::CONTROL_SPACE_DECISION_AUDIENCE,
+                "action_id": action,
+                "action_schema_hash": schema,
+                "payload_digest": digest,
+                "idempotency_key": "approval-1",
+                "recipient_audience_ref": "audience:space-room:4",
+                "recipient_audience_hash": "sha256:test-audience",
+                "privacy_policy_ref": "privacy:org-1:5",
+                "resource_authorization_ref": "control:space-room:approval:7",
+                "purpose": "assistant_collaboration",
+                "lawful_basis": "contract",
+                "privacy_class": "internal",
+                "third_party_processing_allowed": false,
+                "retention_class": "standard",
+                "residency": "swedencentral",
+                "deletion_scope": "space",
+                "zero_data_retention": false,
+                "nonce": "nonce-1",
+                "authority_revision": 7,
+                "membership_revision": 4,
+                "privacy_revision": 5,
+                "recipient_audience_revision": 4,
+                "entitlement_revision": 3,
+                "permissions": [permission],
+                "issued_at": now.to_rfc3339(),
+                "expires_at": (now + chrono::Duration::minutes(2)).to_rfc3339(),
+            });
+            let key_part = URL_SAFE_NO_PAD.encode(KEY_ID.as_bytes());
+            let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims"));
+            let signing_input = format!(
+                "{}.{key_part}.{payload}",
+                crate::grpc::CONTROL_SPACE_DECISION_VERSION
+            );
+            let signature = signing_key().sign(signing_input.as_bytes());
+            format!(
+                "{signing_input}.{}",
+                URL_SAFE_NO_PAD.encode(signature.to_bytes())
+            )
+        }
+
+        /// A requested approval of `run`, raised by its owner `owner-1`.
+        async fn raise(pool: &PgPool, org: &str, run: &str, reason: &str) -> String {
+            let id = format!("appr_{}", mp_ids::new_ulid());
+            store::request_approval(
+                pool,
+                &id,
+                run,
+                None,
+                "tool_call",
+                "owner-1",
+                org,
+                "owner-1",
+                "",
+                &serde_json::json!({ "reason": reason }),
+                None,
+                Some(Utc::now() + chrono::Duration::minutes(5)),
+                "",
+            )
+            .await
+            .expect("request approval")
+            .expect("inserted");
+            id
+        }
+
+        /// What the room tests read: one org, two Spaces, and approvals the room view must and must
+        /// not show.
+        struct World {
+            org: String,
+            space: String,
+            /// A requested approval of a persistent run in `space`.
+            open: String,
+            /// A denied approval of the same run, with a decision reason.
+            decided: String,
+            /// An approval of a thread whose audience is newer than a decision at revision 4.
+            late: String,
+            /// An approval of a zero-retention run in `space`.
+            zdr: String,
+            /// An approval of a run in another Space.
+            other: String,
+            other_space: String,
+        }
+
+        async fn seed_world(pool: &PgPool, tag: &str) -> World {
+            let sfx = mp_ids::new_ulid();
+            let org = format!("mr-{tag}-org-{sfx}");
+            let (space, other_space) = (format!("mr-{tag}-a-{sfx}"), format!("mr-{tag}-b-{sfx}"));
+            // Space A: a thread with a persistent run and a zero-retention run.
+            let thread = format!("mr-{tag}-t-{sfx}");
+            let (run, zdr_run) = (format!("mr-{tag}-r-{sfx}"), format!("mr-{tag}-rz-{sfx}"));
+            seed_space_thread(pool, &org, &space, &thread, "owner-1").await;
+            seed_space_run(pool, &org, &space, &thread, &run, "queued", "persistent").await;
+            seed_space_run(pool, &org, &space, &thread, &zdr_run, "queued", "zdr").await;
+            // Space A: a thread whose audience is newer than the decision's ceiling.
+            let (late_thread, late_run) = (format!("mr-{tag}-lt-{sfx}"), format!("mr-{tag}-lr-{sfx}"));
+            seed_space_thread(pool, &org, &space, &late_thread, "owner-1").await;
+            seed_space_run(pool, &org, &space, &late_thread, &late_run, "queued", "persistent").await;
+            sqlx::query("UPDATE threads SET recipient_audience_revision = 9 WHERE id = $1")
+                .bind(&late_thread)
+                .execute(pool)
+                .await
+                .expect("a newer audience");
+            // Space B.
+            let (other_thread, other_run) = (format!("mr-{tag}-ot-{sfx}"), format!("mr-{tag}-or-{sfx}"));
+            seed_space_thread(pool, &org, &other_space, &other_thread, "owner-1").await;
+            seed_space_run(pool, &org, &other_space, &other_thread, &other_run, "queued", "persistent").await;
+
+            let open = raise(pool, &org, &run, "send the weekly report").await;
+            let decided = raise(pool, &org, &run, "delete the old files").await;
+            store::decide_approval_recorded(
+                pool,
+                &decided,
+                &org,
+                Some("owner-1"),
+                "denied",
+                "owner-1",
+                "too risky",
+                &store::DecisionRecord {
+                    source: "user",
+                    scope: "once",
+                    audit: false,
+                    grant_ttl_secs: 3600,
+                    rule_proposed: false,
+                    authz_audit: false,
+                },
+            )
+            .await
+            .expect("the owner denies one");
+            let late = raise(pool, &org, &late_run, "late").await;
+            let zdr = raise(pool, &org, &zdr_run, "zero retention").await;
+            let other = raise(pool, &org, &other_run, "elsewhere").await;
+            World {
+                org,
+                space,
+                open,
+                decided,
+                late,
+                zdr,
+                other,
+                other_space,
+            }
+        }
+
+        async fn clean_world(pool: &PgPool, world: &World) {
+            sqlx::query("DELETE FROM approvals WHERE org_id = $1")
+                .bind(&world.org)
+                .execute(pool)
+                .await
+                .ok();
+            clean_space(pool, &world.org, &world.space).await;
+            clean_space(pool, &world.org, &world.other_space).await;
+        }
+
+        async fn addressee_of(pool: &PgPool, id: &str) -> (String, Option<String>) {
+            sqlx::query_as("SELECT addressee_kind, addressee_subject_id FROM approvals WHERE id = $1")
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .expect("the stored addressee")
+        }
+
+        /// WS10-S6: a member who owns no run reads the Space's approvals as a redacted room view, under
+        /// the Space's audience ceiling and for persistent runs only, and sees nothing of another Space.
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+        async fn room_list_and_get_approvals_are_redacted_ceiling_bound_persistent_only_and_space_scoped() {
+            let Some(pool) = connect().await else {
+                return;
+            };
+            let _keys = StreamKeysEnv::publish();
+            let w = seed_world(&pool, "read").await;
+            let (tx, _rx) = broadcast::channel::<proto::OrchestrationEvent>(8);
+            let svc = OrchestrationGrpc::new(pool.clone(), tx);
+            let member = || VerifiedIdentity::user_for_test(&w.org, "member-2");
+            let list = |state: i32, run_id: &str| proto::ListApprovalsRequest {
+                org_id: w.org.clone(),
+                run_id: run_id.to_owned(),
+                space_id: w.space.clone(),
+                space_read_decision_ref: DECISION_REF.to_owned(),
+                space_read_decision_token: read_decision(&w.org, "member-2", &w.space),
+                state,
+                ..Default::default()
+            };
+            let ids = |approvals: &[proto::Approval]| -> BTreeSet<String> {
+                approvals.iter().map(|approval| approval.id.clone()).collect()
+            };
+
+            // The Space's own approvals of persistent runs inside the ceiling, and no others.
+            let listed = svc
+                .list_approvals(with_caller(list(0, ""), member()))
+                .await
+                .expect("a member reads the Space's approvals")
+                .into_inner();
+            assert_eq!(
+                ids(&listed.approvals),
+                BTreeSet::from([w.open.clone(), w.decided.clone()]),
+                "not the other Space's, not a zero-retention run's, not one beyond the ceiling"
+            );
+            for approval in &listed.approvals {
+                assert!(approval.context.is_none(), "the room view carries no context");
+                assert!(approval.decision_reason.is_empty(), "nor the decider's reason");
+                assert_eq!(approval.requester_subject_id, "owner-1");
+            }
+            // One state.
+            let requested = svc
+                .list_approvals(with_caller(list(proto::ApprovalState::Requested as i32, ""), member()))
+                .await
+                .expect("a state filter")
+                .into_inner();
+            assert_eq!(ids(&requested.approvals), BTreeSet::from([w.open.clone()]));
+
+            // The single read answers the same view, and nothing for an approval outside it.
+            let get = |id: &str| proto::GetApprovalRequest {
+                approval_id: id.to_owned(),
+                org_id: w.org.clone(),
+                space_id: w.space.clone(),
+                space_read_decision_ref: DECISION_REF.to_owned(),
+                space_read_decision_token: read_decision(&w.org, "member-2", &w.space),
+            };
+            for id in [&w.open, &w.decided] {
+                let seen = svc
+                    .get_approval(with_caller(get(id), member()))
+                    .await
+                    .expect("a member reads one approval")
+                    .into_inner()
+                    .approval
+                    .expect("the approval is in the Space");
+                assert!(seen.context.is_none());
+                assert!(seen.decision_reason.is_empty());
+            }
+            for (what, id) in [
+                ("another Space's approval", &w.other),
+                ("a zero-retention run's approval", &w.zdr),
+                ("an approval beyond the audience ceiling", &w.late),
+            ] {
+                let seen = svc
+                    .get_approval(with_caller(get(id), member()))
+                    .await
+                    .expect("an approval outside the view is not an error")
+                    .into_inner()
+                    .approval;
+                assert!(seen.is_none(), "{what} is invisible");
+            }
+
+            // The owner's own read is the unredacted one.
+            let owned = svc
+                .get_approval(with_caller(
+                    proto::GetApprovalRequest {
+                        approval_id: w.decided.clone(),
+                        org_id: w.org.clone(),
+                        ..Default::default()
+                    },
+                    VerifiedIdentity::user_for_test(&w.org, "owner-1"),
+                ))
+                .await
+                .expect("the owner reads their approval")
+                .into_inner()
+                .approval
+                .expect("the owner's approval");
+            assert_eq!(owned.decision_reason, "too risky");
+            assert!(owned.context.is_some());
+            clean_world(&pool, &w).await;
+        }
+
+        /// WS10-S6: a reroute moves a requested approval to the named member and nothing else: not a
+        /// decided one, not another Space's, not a zero-retention run's.
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs); sets SESSION_CORE_APPROVAL_MEMBER_DECIDE, run with --test-threads=1"]
+        async fn reroute_approval_moves_only_a_requested_approval_of_a_persistent_run_in_the_decisions_space() {
+            let Some(pool) = connect().await else {
+                return;
+            };
+            let _keys = StreamKeysEnv::publish();
+            let _switch = EnvOverride::set(&[(sa::MEMBER_DECIDE_CORE_ENV, "1")]);
+            let w = seed_world(&pool, "reroute").await;
+            let (tx, _rx) = broadcast::channel::<proto::OrchestrationEvent>(8);
+            let svc = OrchestrationGrpc::new(pool.clone(), tx);
+            let reroute = |approval_id: &str| {
+                let digest = sa::reroute_payload_digest(
+                    &w.org,
+                    "manager-1",
+                    approval_id,
+                    &w.space,
+                    DECISION_REF,
+                    sa::KIND_NAMED,
+                    "member-3",
+                );
+                let token = approval_decision(
+                    &w.org,
+                    "manager-1",
+                    &w.space,
+                    (sa::REROUTE_ACTION_ID, sa::REROUTE_SCHEMA, sa::PERMISSION_REROUTE),
+                    &digest,
+                );
+                svc.reroute_approval(with_caller(
+                    proto::RerouteApprovalRequest {
+                        approval_id: approval_id.to_owned(),
+                        org_id: w.org.clone(),
+                        addressee: Some(proto::Addressee {
+                            kind: proto::AddresseeKind::Named as i32,
+                            subject_id: "member-3".to_owned(),
+                        }),
+                        space_id: w.space.clone(),
+                        space_decision_ref: DECISION_REF.to_owned(),
+                        space_decision_token: token,
+                    },
+                    VerifiedIdentity::user_for_test(&w.org, "manager-1"),
+                ))
+            };
+
+            // A requested approval moves.
+            let moved = reroute(&w.open)
+                .await
+                .expect("a requested approval is rerouted")
+                .into_inner()
+                .approval
+                .expect("the updated approval");
+            assert_eq!(
+                moved.addressee,
+                Some(proto::Addressee {
+                    kind: proto::AddresseeKind::Named as i32,
+                    subject_id: "member-3".to_owned(),
+                })
+            );
+            assert_eq!(
+                addressee_of(&pool, &w.open).await,
+                ("named".to_owned(), Some("member-3".to_owned()))
+            );
+
+            // A decided approval does not.
+            let decided = reroute(&w.decided)
+                .await
+                .expect_err("a decided approval is not rerouted");
+            assert_eq!(decided.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(decided.message(), "approval is already decided");
+            assert_eq!(addressee_of(&pool, &w.decided).await, ("requester".to_owned(), None));
+
+            // Another Space's approval and a zero-retention run's are not found.
+            for (what, id) in [("another Space's", &w.other), ("a zero-retention run's", &w.zdr)] {
+                let missing = reroute(id).await.expect_err("outside the decision's reach");
+                assert_eq!(missing.code(), tonic::Code::NotFound, "{what} approval");
+                assert_eq!(addressee_of(&pool, id).await, ("requester".to_owned(), None), "{what}");
+            }
+            clean_world(&pool, &w).await;
+        }
+
+        /// WS10-S7: an approval raised on an automation turn is addressed to any manager and carries the
+        /// run's own turn origin (a stated `direct` cannot override it), and a thread-scoped decision on
+        /// it is refused; an approval of a person's own turn keeps the requester addressee.
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs); sets approval switches in the process env, run with --test-threads=1"]
+        async fn an_approval_raised_on_an_automation_run_is_addressed_to_any_manager_and_takes_a_once_decision_only() {
+            let Some(pool) = connect().await else {
+                return;
+            };
+            let _switches = EnvOverride::set(&[
+                (sa::MEMBER_DECIDE_CORE_ENV, "1"),
+                (approval_cause::SCOPE_GRANTS_ENV, "true"),
+                (APPROVAL_AUDIT_EVENTS_ENV, "true"),
+            ]);
+            let sfx = mp_ids::new_ulid();
+            let org = format!("ao-org-{sfx}");
+            let space = format!("ao-space-{sfx}");
+            let thread = format!("ao-thread-{sfx}");
+            let (automation_run, direct_run) = (format!("ao-run-auto-{sfx}"), format!("ao-run-direct-{sfx}"));
+            seed_space_thread(&pool, &org, &space, &thread, "owner-1").await;
+            seed_space_run(&pool, &org, &space, &thread, &automation_run, "queued", "persistent").await;
+            seed_space_run(&pool, &org, &space, &thread, &direct_run, "queued", "persistent").await;
+            sqlx::query("UPDATE runs SET turn_origin = 'automation' WHERE id = $1")
+                .bind(&automation_run)
+                .execute(&pool)
+                .await
+                .expect("an automation turn");
+
+            let (tx, _rx) = broadcast::channel::<proto::OrchestrationEvent>(8);
+            let svc = OrchestrationGrpc::new(pool.clone(), tx);
+            let owner = || VerifiedIdentity::user_for_test(&org, "owner-1");
+            let create = |run: &str, key: &str, stated_origin: &str| {
+                svc.create_approval(with_caller(
+                    proto::CreateApprovalRequest {
+                        run_id: run.to_owned(),
+                        kind: proto::ApprovalKind::ToolCall as i32,
+                        requested_of: "owner-1".to_owned(),
+                        org_id: org.clone(),
+                        reason: "post the digest".to_owned(),
+                        expires_in_seconds: 300,
+                        idempotency_key: key.to_owned(),
+                        turn_origin: stated_origin.to_owned(),
+                        ..Default::default()
+                    },
+                    owner(),
+                ))
+            };
+            let stored = |id: String| {
+                let pool = pool.clone();
+                async move {
+                    sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+                        "SELECT addressee_kind, addressee_subject_id, turn_origin FROM approvals WHERE id = $1",
+                    )
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("the stored approval")
+                }
+            };
+
+            // An automation turn: any manager, and the run's origin, even when the creator states `direct`.
+            for (key, stated) in [("auto-1", ""), ("auto-2", "direct")] {
+                let created = create(&automation_run, key, stated)
+                    .await
+                    .expect("the owner's run raises an approval")
+                    .into_inner()
+                    .approval
+                    .expect("created");
+                assert_eq!(
+                    stored(created.id).await,
+                    ("any_manager".to_owned(), None, Some("automation".to_owned())),
+                    "stated origin {stated:?}"
+                );
+            }
+            // A person's own turn keeps the requester addressee and carries no origin.
+            let direct = create(&direct_run, "direct-1", "")
+                .await
+                .expect("a person's own turn")
+                .into_inner()
+                .approval
+                .expect("created");
+            assert_eq!(stored(direct.id).await, ("requester".to_owned(), None, None));
+
+            // A thread-scoped decision on the unwatched turn's approval is refused, and it stays pending.
+            let pending: String = sqlx::query_scalar(
+                "SELECT id FROM approvals WHERE run_id = $1 ORDER BY id LIMIT 1",
+            )
+            .bind(&automation_run)
+            .fetch_one(&pool)
+            .await
+            .expect("the automation run's approval");
+            let refused = svc
+                .decide_approval(with_caller(
+                    proto::DecideApprovalRequest {
+                        approval_id: pending.clone(),
+                        decision: proto::ApprovalState::Granted as i32,
+                        org_id: org.clone(),
+                        scope: proto::ApprovalScope::Thread as i32,
+                        ..Default::default()
+                    },
+                    owner(),
+                ))
+                .await
+                .expect_err("an unwatched turn takes a once decision only");
+            assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+            assert_eq!(refused.message(), "approval_scope_not_permitted");
+            let status: String = sqlx::query_scalar("SELECT status FROM approvals WHERE id = $1")
+                .bind(&pending)
+                .fetch_one(&pool)
+                .await
+                .expect("the approval's status");
+            assert_eq!(status, "requested");
+
+            sqlx::query("DELETE FROM approvals WHERE org_id = $1")
+                .bind(&org)
+                .execute(&pool)
+                .await
+                .ok();
+            clean_space(&pool, &org, &space).await;
+        }
+    }
 }
 
 #[cfg(test)]

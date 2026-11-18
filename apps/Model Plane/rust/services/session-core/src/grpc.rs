@@ -262,7 +262,9 @@ fn session_message_from_row(row: ConversationRow, include_inactive: bool) -> pb:
     // metadata map.
     let mut metadata = row.metadata;
     let mut entry = None;
-    if row.post_kind == "post" {
+    // An agent card (W3-FIX/WS18-S7) is an assistant turn carrying its card in `metadata.entry`; writes refuse an entry on any
+    // other assistant row, so the assistant arm surfaces only cards.
+    if row.post_kind == "post" || row.role == "assistant" {
         if let Some(map) = metadata.as_mut().and_then(serde_json::Value::as_object_mut) {
             if let Some(stored) = map.remove(crate::space::entry::ENTRY_METADATA_KEY) {
                 entry = crate::space::entry::entry_from_stored(&stored);
@@ -5550,6 +5552,7 @@ fn verify_approval_space_decision_with_key(
     expected_key_id: &str,
     key: &VerifyingKey,
     now: DateTime<Utc>,
+    zdr_mode: SpaceZdrMode,
 ) -> Result<(), Status> {
     if expect.token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
         return Err(Status::invalid_argument("Control Space decision is too large"));
@@ -5613,11 +5616,7 @@ fn verify_approval_space_decision_with_key(
             "Control Space approval decision is expired or incomplete",
         ));
     }
-    space_decision_retention_gate(
-        claims.zero_data_retention,
-        expect.metric_action,
-        configured_space_zdr_mode(),
-    )
+    space_decision_retention_gate(claims.zero_data_retention, expect.metric_action, zdr_mode)
 }
 
 /// Key lookup and verification of a member-decide or reroute decision (see
@@ -5636,7 +5635,13 @@ pub(crate) fn verify_approval_space_decision(
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
     let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
-    verify_approval_space_decision_with_key(expect, &key_id, key, Utc::now())
+    verify_approval_space_decision_with_key(
+        expect,
+        &key_id,
+        key,
+        Utc::now(),
+        configured_space_zdr_mode(),
+    )
 }
 
 // Whether a decision-less assistant append may land in a Space thread. The
@@ -6864,6 +6869,225 @@ mod source_scope_db_tests {
             .bind(&org).fetch_all(&pool).await.unwrap();
         assert!(contents.iter().any(|value| value.contains("sjøgrønn")), "new explicit learning remains available");
         assert!(contents.iter().all(|value| !value.contains("ravgul")));
+    }
+
+    // ---- W3-FIX-2: the source scope a thread is created with ----
+
+    /// A create of an unscoped thread; `scope` is the `metadata.source_scope` word, if any.
+    fn scoped_create(org: &str, session_key: &str, scope: Option<&str>) -> pb::CreateThreadRequest {
+        pb::CreateThreadRequest {
+            session_key: session_key.to_owned(),
+            org_id: org.to_owned(),
+            user_id: "scope-user".to_owned(),
+            metadata: scope.map(|scope| prost_types::Struct {
+                fields: [(
+                    "source_scope".to_owned(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::StringValue(scope.to_owned())),
+                    },
+                )]
+                .into(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    async fn stored_source_scope(pool: &PgPool, thread_id: &str) -> String {
+        let (scope,): (String,) = sqlx::query_as("SELECT source_scope FROM threads WHERE id = $1")
+            .bind(thread_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        scope
+    }
+
+    async fn thread_rows_for_key(pool: &PgPool, org: &str, session_key: &str) -> i64 {
+        let (rows,): (i64,) =
+            sqlx::query_as("SELECT count(*) FROM threads WHERE org_id = $1 AND session_key = $2")
+                .bind(org)
+                .bind(session_key)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        rows
+    }
+
+    async fn message_rows(pool: &PgPool, thread_id: &str) -> i64 {
+        let (rows,): (i64,) = sqlx::query_as("SELECT count(*) FROM messages WHERE thread_id = $1")
+            .bind(thread_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        rows
+    }
+
+    async fn erase_scope_thread(pool: &PgPool, thread_id: &str) {
+        let mut tx = pool.begin().await.unwrap();
+        delete_thread_rows(&mut tx, thread_id).await.unwrap();
+        sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(thread_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    /// The scope is written by the create itself (no message exists yet to relabel it): the word
+    /// `conversation` narrows, an absent key or `workspace` is the default, and any other word is
+    /// refused before anything is written.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn create_thread_stores_the_requested_source_scope_at_insert_and_refuses_any_other_word() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let suffix = new_ulid();
+        let org = format!("scope-create-{suffix}");
+        let create = |key: String, scope: Option<&str>| {
+            let request = scoped_create(&org, &key, scope);
+            let pool = pool.clone();
+            async move { create_thread_inner(&pool, request).await }
+        };
+        let conversation = create(format!("conversation-{suffix}"), Some("conversation"))
+            .await
+            .expect("conversation create")
+            .into_inner()
+            .thread_id;
+        let absent = create(format!("absent-{suffix}"), None)
+            .await
+            .expect("create without a scope")
+            .into_inner()
+            .thread_id;
+        let workspace = create(format!("workspace-{suffix}"), Some("workspace"))
+            .await
+            .expect("workspace create")
+            .into_inner()
+            .thread_id;
+        assert_eq!(stored_source_scope(&pool, &conversation).await, "conversation");
+        assert_eq!(stored_source_scope(&pool, &absent).await, "workspace");
+        assert_eq!(stored_source_scope(&pool, &workspace).await, "workspace");
+        assert_eq!(message_rows(&pool, &conversation).await, 0, "no append relabelled it");
+
+        // Any other word, in any case, is refused and writes no thread row.
+        for (index, bad) in ["Conversation", "CONVERSATION", " conversation", "", "private"]
+            .into_iter()
+            .enumerate()
+        {
+            let key = format!("refused-{index}-{suffix}");
+            let refused = create(key.clone(), Some(bad))
+                .await
+                .expect_err("an unknown scope word is refused");
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument, "{bad:?}");
+            assert_eq!(thread_rows_for_key(&pool, &org, &key).await, 0, "{bad:?} wrote a thread row");
+        }
+        for thread in [&conversation, &absent, &workspace] {
+            erase_scope_thread(&pool, thread).await;
+        }
+    }
+
+    /// A reused session key keeps the scope its thread was created with: a conversation-only
+    /// request never gets a workspace thread back, and a conversation-only thread is returned to a
+    /// repeated create of either kind.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn a_conversation_create_never_gets_a_workspace_thread_back_for_a_reused_session_key() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let suffix = new_ulid();
+        let org = format!("scope-reuse-{suffix}");
+        let create = |key: &str, scope: Option<&str>| {
+            let request = scoped_create(&org, key, scope);
+            let pool = pool.clone();
+            async move { create_thread_inner(&pool, request).await }
+        };
+
+        // The key already holds a workspace thread.
+        let workspace_key = format!("workspace-key-{suffix}");
+        let workspace = create(&workspace_key, None)
+            .await
+            .expect("workspace create")
+            .into_inner()
+            .thread_id;
+        let refused = create(&workspace_key, Some("conversation"))
+            .await
+            .expect_err("a conversation request is not handed the workspace thread");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(thread_rows_for_key(&pool, &org, &workspace_key).await, 1, "no second thread");
+        assert_eq!(stored_source_scope(&pool, &workspace).await, "workspace", "the scope is untouched");
+        // The older requests keep their behaviour: a repeat reuses the thread.
+        let repeated = create(&workspace_key, None).await.expect("a repeat").into_inner().thread_id;
+        assert_eq!(repeated, workspace);
+
+        // A key that holds a conversation-only thread.
+        let conversation_key = format!("conversation-key-{suffix}");
+        let first = create(&conversation_key, Some("conversation"))
+            .await
+            .expect("first conversation create")
+            .into_inner()
+            .thread_id;
+        for scope in [Some("conversation"), None] {
+            let again = create(&conversation_key, scope)
+                .await
+                .expect("a repeat returns the conversation-only thread")
+                .into_inner()
+                .thread_id;
+            assert_eq!(again, first, "scope {scope:?}");
+        }
+        assert_eq!(thread_rows_for_key(&pool, &org, &conversation_key).await, 1);
+        assert_eq!(stored_source_scope(&pool, &first).await, "conversation");
+        for thread in [&workspace, &first] {
+            erase_scope_thread(&pool, thread).await;
+        }
+    }
+
+    /// After a conversation-only create the scope is locked: a user append that does not name it is
+    /// refused, and the thread stays conversation-only with nothing stored.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn a_user_append_without_the_scope_is_refused_after_a_conversation_create() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let suffix = new_ulid();
+        let org = format!("scope-append-{suffix}");
+        let thread = create_thread_inner(
+            &pool,
+            scoped_create(&org, &format!("append-{suffix}"), Some("conversation")),
+        )
+        .await
+        .expect("conversation create")
+        .into_inner()
+        .thread_id;
+        let append = |named: bool| pb::AppendMessageRequest {
+            thread_id: thread.clone(),
+            role: "user".into(),
+            content: "Husk at demokoden er scope-amber.".into(),
+            metadata: named.then(|| prost_types::Struct {
+                fields: [(
+                    "source_scope".into(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::StringValue("conversation".into())),
+                    },
+                )]
+                .into(),
+            }),
+            ..Default::default()
+        };
+        let refused = append_message_inner(&pool, None, MemoryRetention::Durable, append(false), "scope-user")
+            .await
+            .expect_err("an append that does not name the scope is refused");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(stored_source_scope(&pool, &thread).await, "conversation");
+        assert_eq!(message_rows(&pool, &thread).await, 0, "the refused append stored nothing");
+
+        // The same text with the scope named is stored, and nothing is learned from it.
+        append_message_inner(&pool, None, MemoryRetention::Durable, append(true), "scope-user")
+            .await
+            .expect("an append that names the scope");
+        assert_eq!(message_rows(&pool, &thread).await, 1);
+        assert_eq!(stored_source_scope(&pool, &thread).await, "conversation");
+        let (memories,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM agent_memory WHERE org_id = $1")
+            .bind(&org)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(memories, 0, "conversation-only text produces no memory");
+        erase_scope_thread(&pool, &thread).await;
     }
 }
 
@@ -22385,6 +22609,81 @@ mod tests {
         clear_skill_rows(&pool, &org).await;
     }
 
+    /// W3-DEC-ZDRSKILL (migration 0134): a revision the trigger wrote under `mp.zdr_posture`
+    /// carries no text, only `truncated`/`content_free` metadata, so `undo_learning_entry`'s
+    /// existing truncation guard (it predates this slice) refuses it exactly as it refuses a
+    /// 64 KiB-truncated snapshot: no row changes.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn undo_refuses_a_content_free_revision_with_snapshot_truncated() {
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        use mp_contracts::model_plane::v1::learning_governance_service_server::LearningGovernanceService;
+        let Some((svc, pool, org)) = skills_service().await else {
+            return;
+        };
+        let gov = governance(&pool);
+        let created = svc
+            .upsert_agent_skill(as_user(
+                &org,
+                "user-z",
+                skill_request(&org, "Zeroed", "v1", "user", "user", ""),
+            ))
+            .await
+            .expect("create")
+            .into_inner();
+        let skill_id = created.id;
+
+        // capability-core's skillActorSQL under a ZDR principal (not session-core, which refuses
+        // a ZDR credential before it ever writes a skill): the delete's revision keeps no text.
+        let mut tx = pool.begin().await.expect("begin zdr delete");
+        sqlx::query(
+            "SELECT set_config('mp.actor_kind', 'user', true), set_config('mp.actor_id', $1, true), \
+             set_config('mp.zdr_posture', 'true', true)",
+        )
+        .bind("user-z")
+        .execute(&mut *tx)
+        .await
+        .expect("name the ZDR actor");
+        sqlx::query("DELETE FROM agent_skills WHERE id = $1 AND org_id = $2")
+            .bind(&skill_id)
+            .bind(&org)
+            .execute(&mut *tx)
+            .await
+            .expect("zdr delete");
+        tx.commit().await.expect("commit zdr delete");
+
+        let (content_free,): (bool,) =
+            sqlx::query_as("SELECT content_free FROM skill_revisions WHERE skill_id = $1 AND revision = 2")
+                .bind(&skill_id)
+                .fetch_one(&pool)
+                .await
+                .expect("the delete's revision");
+        assert!(content_free, "the delete under ZDR must mark its revision content_free");
+
+        let entry = latest_revision_id(&pool, &skill_id).await;
+        let refused = gov
+            .undo_learning_entry(as_user(
+                &org,
+                "user-z",
+                mp_contracts::model_plane::v1::UndoLearningEntryRequest {
+                    org_id: org.clone(),
+                    entry_id: entry,
+                },
+            ))
+            .await
+            .expect_err("a content-free revision cannot be restored");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(refused.message(), "snapshot_truncated");
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_skills WHERE id = $1")
+            .bind(&skill_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(remaining, 0, "the refused undo must not recreate the skill");
+
+        clear_skill_rows(&pool, &org).await;
+    }
+
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
     async fn non_owner_cannot_decide_or_undo() {
@@ -24328,6 +24627,1405 @@ mod tests {
         for space in ["space-a", "space-b"] {
             crate::space::test_support::clean_space(&pool, &org, space).await;
         }
+    }
+
+    // ---- Space W3 test phase: the pure verifier and helper tests that were owed ----
+
+    const OWED_KEY_ID: &str = "control-owed-key";
+
+    fn owed_now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-11-17T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc)
+    }
+
+    /// A signed Control decision envelope over `claims`, as Control issues one.
+    fn owed_sign(signing_key: &SigningKey, key_id: &str, claims: &serde_json::Value) -> String {
+        let key_part = URL_SAFE_NO_PAD.encode(key_id.as_bytes());
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).expect("claims"));
+        let signing_input = format!("{CONTROL_SPACE_DECISION_VERSION}.{key_part}.{payload}");
+        format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(signing_key.sign(signing_input.as_bytes()).to_bytes())
+        )
+    }
+
+    /// The claims every decision family shares, valid for one minute from `now`; a test sets the
+    /// action, the permissions and the payload digest it needs.
+    fn owed_claims(
+        now: DateTime<Utc>,
+        subject: &str,
+        action_id: &str,
+        schema: &str,
+        permissions: &[&str],
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "decision_ref": "decision-1",
+            "org_id": "org-1",
+            "space_ref": "space-room",
+            "subject_id": subject,
+            "service_audience": CONTROL_SPACE_DECISION_AUDIENCE,
+            "action_id": action_id,
+            "action_schema_hash": schema,
+            "payload_digest": "",
+            "idempotency_key": "idempotencyaaaa1",
+            "recipient_audience_ref": "audience:space-room:4",
+            "recipient_audience_hash": "sha256:test-audience",
+            "privacy_policy_ref": "privacy:org-1:5",
+            "resource_authorization_ref": "control:space-room:owed:7",
+            "purpose": "assistant_collaboration",
+            "lawful_basis": "contract",
+            "privacy_class": "internal",
+            "third_party_processing_allowed": false,
+            "retention_class": "standard",
+            "residency": "swedencentral",
+            "deletion_scope": "space",
+            "zero_data_retention": false,
+            "nonce": "nonce-1",
+            "authority_revision": 7,
+            "membership_revision": 4,
+            "privacy_revision": 5,
+            "recipient_audience_revision": 4,
+            "entitlement_revision": 3,
+            "permissions": permissions,
+            "issued_at": now.to_rfc3339(),
+            "expires_at": (now + chrono::Duration::minutes(1)).to_rfc3339(),
+        })
+    }
+
+    // ---- HEALTH_SERVICE_NAMES (P-SC1, WS02-S3, WS11-S2, WS13-S1) ----
+
+    /// The slices that added a health name each wrote the count at their time (10, 11, 12, 13); the
+    /// list now holds 14 (EventLog came last). `standard_health_registers_every_business_service_name`
+    /// pins the list itself. This one pins what a list alone cannot: each name is the generated name of
+    /// a server the serve function registers behind the verifying interceptor, and none repeats.
+    #[test]
+    fn health_service_names_are_generated_names_of_servers_registered_with_the_interceptor() {
+        use tonic::server::NamedService;
+        let generated: [&str; 14] = [
+            <super::SessionCoreServer<()> as NamedService>::NAME,
+            <super::ManagedRunLifecycleServer<()> as NamedService>::NAME,
+            <super::OrchestrationCoreServiceServer<()> as NamedService>::NAME,
+            <super::FinetuneJobsServer<()> as NamedService>::NAME,
+            <super::MemoryServiceServer<()> as NamedService>::NAME,
+            <super::RoutingPolicyServer<()> as NamedService>::NAME,
+            <super::RunServiceServer<()> as NamedService>::NAME,
+            <super::SessionRetentionServiceServer<()> as NamedService>::NAME,
+            <super::ThreadAutonomyServer<()> as NamedService>::NAME,
+            <super::SpaceRoomReadServiceServer<()> as NamedService>::NAME,
+            <super::SpaceEventsServer<()> as NamedService>::NAME,
+            <super::SpaceHistoryServiceServer<()> as NamedService>::NAME,
+            <super::SpaceAttentionServer<()> as NamedService>::NAME,
+            <crate::eventlog_grpc::EventLogServer<()> as NamedService>::NAME,
+        ];
+        assert_eq!(generated, HEALTH_SERVICE_NAMES);
+        let unique: std::collections::BTreeSet<&str> =
+            HEALTH_SERVICE_NAMES.iter().copied().collect();
+        assert_eq!(unique.len(), HEALTH_SERVICE_NAMES.len(), "a health name is listed once");
+        // The serve function registers each one with the interceptor.
+        let source = include_str!("grpc.rs");
+        let from = source
+            .find("tonic_health::server::health_reporter();")
+            .expect("the health reporter");
+        let serving = &source[from..];
+        let serving = &serving[..serving.find(".serve(addr)").expect("the serve call")];
+        for name in HEALTH_SERVICE_NAMES {
+            let server = format!(
+                "{}Server::with_interceptor(",
+                name.rsplit('.').next().expect("a service name")
+            );
+            assert!(serving.contains(&server), "{name} is not registered: no {server}");
+        }
+    }
+
+    // ---- WS18-S7: the reply slot a run's card leaves open ----
+
+    #[test]
+    fn card_reply_slot_is_open_only_for_an_assistant_row_holding_a_card_of_the_same_run() {
+        let open = |role, card_run, reply_run| super::card_reply_slot_is_open(role, card_run, reply_run);
+        // The run's own card is the last row: its final answer may follow.
+        assert!(open(Some("assistant"), Some("run-1"), Some("run-1")));
+        assert!(open(Some(" assistant "), Some("run-1"), Some("run-1")), "the role is trimmed");
+        // Any other last row never opens it, whatever ids ride along.
+        for role in [Some("user"), Some("system"), Some("tool"), Some(""), None] {
+            assert!(!open(role, Some("run-1"), Some("run-1")), "{role:?}");
+        }
+        // Another run's card.
+        assert!(!open(Some("assistant"), Some("run-2"), Some("run-1")));
+        assert!(!open(Some("assistant"), Some("run-1 "), Some("run-1")), "ids compare exactly");
+        assert!(!open(Some("assistant"), Some("run-1"), Some("RUN-1")), "ids compare exactly");
+        // A missing id on either side: an assistant row that is no card, or an append that names no run.
+        assert!(!open(Some("assistant"), None, Some("run-1")));
+        assert!(!open(Some("assistant"), Some("run-1"), None));
+        assert!(!open(Some("assistant"), None, None));
+        // A blank reply run id never matches, not even a blank card id.
+        assert!(!open(Some("assistant"), Some(""), Some("")));
+        assert!(!open(Some("assistant"), Some("  "), Some("  ")));
+        assert!(!open(Some("assistant"), Some("run-1"), Some("")));
+    }
+
+    // ---- W3-FIX-2: the source scope a thread is created with ----
+
+    #[test]
+    fn requested_conversation_scope_is_conversation_or_workspace_and_nothing_else() {
+        use prost_types::value::Kind;
+        let request = |kind: Option<Kind>| pb::CreateThreadRequest {
+            metadata: Some(prost_types::Struct {
+                fields: [("source_scope".to_owned(), prost_types::Value { kind })].into(),
+            }),
+            ..Default::default()
+        };
+        let word = |text: &str| request(Some(Kind::StringValue(text.to_owned())));
+        let narrows = |req: &pb::CreateThreadRequest| super::requested_conversation_scope(req);
+        // Absent: no metadata, or metadata without the key, is the workspace default.
+        assert!(!narrows(&pb::CreateThreadRequest::default()).expect("no metadata"));
+        let other_key = pb::CreateThreadRequest {
+            metadata: Some(prost_types::Struct {
+                fields: [(
+                    "title".to_owned(),
+                    prost_types::Value { kind: Some(Kind::StringValue("x".to_owned())) },
+                )]
+                .into(),
+            }),
+            ..Default::default()
+        };
+        assert!(!narrows(&other_key).expect("metadata without the key"));
+        assert!(narrows(&word("conversation")).expect("conversation narrows"));
+        assert!(!narrows(&word("workspace")).expect("workspace is the default"));
+        // Anything else is refused, never read as workspace: a misspelt scope must not fail open.
+        for bad in [
+            "Conversation",
+            "CONVERSATION",
+            " conversation",
+            "conversation ",
+            "workspace\n",
+            "",
+            "private",
+            "conversations",
+        ] {
+            let status = narrows(&word(bad)).expect_err(bad);
+            assert_eq!(status.code(), tonic::Code::InvalidArgument, "{bad:?}");
+        }
+        for kind in [
+            Some(Kind::BoolValue(true)),
+            Some(Kind::NumberValue(1.0)),
+            Some(Kind::NullValue(0)),
+            None,
+        ] {
+            let status = narrows(&request(kind)).expect_err("a value that is not a word");
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        }
+    }
+
+    // ---- WS10-S6: the member approval decide / reroute decision verifier ----
+
+    /// A `model.approval.decide` decision for `member-2`: approval-1, `granted`, scope `once`.
+    fn approval_decide_token(
+        signing_key: &SigningKey,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> String {
+        use mp_contracts::space_approvals as sa;
+        let mut claims = owed_claims(
+            owed_now(),
+            "member-2",
+            sa::DECIDE_ACTION_ID,
+            sa::DECIDE_SCHEMA,
+            &[sa::PERMISSION_DECIDE],
+        );
+        claims["decision_ref"] = serde_json::json!("approval-decision-1");
+        claims["payload_digest"] = serde_json::json!(approval_decide_digest("approval-1", "once"));
+        edit(&mut claims);
+        owed_sign(signing_key, OWED_KEY_ID, &claims)
+    }
+
+    fn approval_decide_digest(approval: &str, scope: &str) -> String {
+        mp_contracts::space_approvals::decide_payload_digest(
+            "org-1",
+            "member-2",
+            approval,
+            "space-room",
+            "approval-decision-1",
+            "granted",
+            scope,
+        )
+    }
+
+    /// Runs the keyed verifier against what a decide request says; `tweak` changes one field of it.
+    fn verify_approval(
+        token: &str,
+        key: &VerifyingKey,
+        at: DateTime<Utc>,
+        mode: super::SpaceZdrMode,
+        tweak: impl FnOnce(&mut super::ApprovalDecisionExpect<'_>),
+    ) -> Result<(), tonic::Status> {
+        use mp_contracts::space_approvals as sa;
+        let mut expect = super::ApprovalDecisionExpect {
+            action_id: sa::DECIDE_ACTION_ID,
+            schema: sa::DECIDE_SCHEMA,
+            permission: sa::PERMISSION_DECIDE,
+            payload_digest: approval_decide_digest("approval-1", "once"),
+            space_id: "space-room",
+            decision_ref: "approval-decision-1",
+            token,
+            org_id: "org-1",
+            user_id: "member-2",
+            metric_action: "approval_decide",
+        };
+        tweak(&mut expect);
+        super::verify_approval_space_decision_with_key(&expect, OWED_KEY_ID, key, at, mode)
+    }
+
+    #[test]
+    fn approval_decision_verifier_accepts_a_matching_decision_and_refuses_every_other_binding() {
+        use mp_contracts::space_approvals as sa;
+        type ClaimEdit = Box<dyn Fn(&mut serde_json::Value)>;
+        let signing_key = SigningKey::from_bytes(&[61_u8; 32]);
+        let key = signing_key.verifying_key();
+        let now = owed_now();
+        let observe = super::SpaceZdrMode::Observe;
+        let token = approval_decide_token(&signing_key, |_| {});
+        verify_approval(&token, &key, now, observe, |_| {}).expect("a matching decision verifies");
+
+        let denied = |label: &str, outcome: Result<(), tonic::Status>| {
+            let status = outcome.expect_err(label);
+            assert_eq!(status.code(), tonic::Code::PermissionDenied, "{label}: {status:?}");
+        };
+        // The request names something the decision does not bind.
+        denied(
+            "another subject",
+            verify_approval(&token, &key, now, observe, |e| e.user_id = "member-3"),
+        );
+        denied("another org", verify_approval(&token, &key, now, observe, |e| e.org_id = "org-2"));
+        denied(
+            "another Space",
+            verify_approval(&token, &key, now, observe, |e| e.space_id = "space-other"),
+        );
+        denied(
+            "another decision",
+            verify_approval(&token, &key, now, observe, |e| e.decision_ref = "approval-decision-2"),
+        );
+        denied(
+            "another approval",
+            verify_approval(&token, &key, now, observe, |e| {
+                e.payload_digest = approval_decide_digest("approval-2", "once");
+            }),
+        );
+        denied(
+            "another scope",
+            verify_approval(&token, &key, now, observe, |e| {
+                e.payload_digest = approval_decide_digest("approval-1", "thread");
+            }),
+        );
+        denied(
+            "another verdict",
+            verify_approval(&token, &key, now, observe, |e| {
+                e.payload_digest = sa::decide_payload_digest(
+                    "org-1",
+                    "member-2",
+                    "approval-1",
+                    "space-room",
+                    "approval-decision-1",
+                    "denied",
+                    "once",
+                );
+            }),
+        );
+        denied(
+            "another action id",
+            verify_approval(&token, &key, now, observe, |e| e.action_id = sa::REROUTE_ACTION_ID),
+        );
+        denied(
+            "another schema",
+            verify_approval(&token, &key, now, observe, |e| e.schema = sa::REROUTE_SCHEMA),
+        );
+        denied(
+            "another permission",
+            verify_approval(&token, &key, now, observe, |e| e.permission = sa::PERMISSION_REROUTE),
+        );
+
+        // The decision itself is wrong.
+        let edits: Vec<(&str, ClaimEdit)> = vec![
+            (
+                "the stream audience",
+                Box::new(|c: &mut serde_json::Value| {
+                    c["service_audience"] = serde_json::json!(super::CONTROL_SPACE_STREAM_AUDIENCE);
+                }),
+            ),
+            (
+                "another action id",
+                Box::new(|c: &mut serde_json::Value| {
+                    c["action_id"] = serde_json::json!(sa::REROUTE_ACTION_ID);
+                }),
+            ),
+            (
+                "another schema",
+                Box::new(|c: &mut serde_json::Value| {
+                    c["action_schema_hash"] = serde_json::json!(sa::REROUTE_SCHEMA);
+                }),
+            ),
+            (
+                "a tampered digest",
+                Box::new(|c: &mut serde_json::Value| {
+                    c["payload_digest"] = serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+                }),
+            ),
+            (
+                "no permission",
+                Box::new(|c: &mut serde_json::Value| c["permissions"] = serde_json::json!([])),
+            ),
+            (
+                "the reroute permission",
+                Box::new(|c: &mut serde_json::Value| {
+                    c["permissions"] = serde_json::json!([sa::PERMISSION_REROUTE]);
+                }),
+            ),
+            (
+                "an extra permission",
+                Box::new(|c: &mut serde_json::Value| {
+                    c["permissions"] = serde_json::json!([sa::PERMISSION_DECIDE, "thread:append"]);
+                }),
+            ),
+            (
+                "a thread permission only",
+                Box::new(|c: &mut serde_json::Value| {
+                    c["permissions"] = serde_json::json!(["thread:read"]);
+                }),
+            ),
+            (
+                "a blank purpose",
+                Box::new(|c: &mut serde_json::Value| c["purpose"] = serde_json::json!("")),
+            ),
+            (
+                "a blank nonce",
+                Box::new(|c: &mut serde_json::Value| c["nonce"] = serde_json::json!(" ")),
+            ),
+            (
+                "an issue time in the future",
+                Box::new(|c: &mut serde_json::Value| {
+                    c["issued_at"] =
+                        serde_json::json!((owed_now() + chrono::Duration::minutes(5)).to_rfc3339());
+                }),
+            ),
+        ];
+        for (label, edit) in &edits {
+            let edited = approval_decide_token(&signing_key, |claims| edit(claims));
+            denied(*label, verify_approval(&edited, &key, now, observe, |_| {}));
+        }
+
+        // Expiry: the window ends at `expires_at` itself.
+        for later in [1, 30] {
+            denied(
+                "an expired decision",
+                verify_approval(&token, &key, now + chrono::Duration::minutes(later), observe, |_| {}),
+            );
+        }
+
+        // The envelope.
+        let foreign = approval_decide_token(&SigningKey::from_bytes(&[62_u8; 32]), |_| {});
+        denied("a foreign signer", verify_approval(&foreign, &key, now, observe, |_| {}));
+        let unknown_key = owed_sign(
+            &signing_key,
+            "some-other-key-id",
+            &owed_claims(now, "member-2", sa::DECIDE_ACTION_ID, sa::DECIDE_SCHEMA, &[sa::PERMISSION_DECIDE]),
+        );
+        denied("an unknown key id", verify_approval(&unknown_key, &key, now, observe, |_| {}));
+        let other = approval_decide_token(&signing_key, |c| {
+            c["subject_id"] = serde_json::json!("member-3");
+        });
+        let (signed, swapped): (Vec<&str>, Vec<&str>) = (token.split('.').collect(), other.split('.').collect());
+        let spliced = format!("{}.{}.{}.{}", signed[0], signed[1], swapped[2], signed[3]);
+        denied("a payload swapped after signing", verify_approval(&spliced, &key, now, observe, |_| {}));
+        denied("not an envelope", verify_approval("a.b.c", &key, now, observe, |_| {}));
+        denied("another envelope version", verify_approval("v1.a.b.c", &key, now, observe, |_| {}));
+        let oversize = "x".repeat(super::MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES + 1);
+        assert_eq!(
+            verify_approval(&oversize, &key, now, observe, |_| {})
+                .expect_err("an oversize token")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn approval_reroute_and_decide_decisions_are_disjoint() {
+        use mp_contracts::space_approvals as sa;
+        let signing_key = SigningKey::from_bytes(&[66_u8; 32]);
+        let key = signing_key.verifying_key();
+        let now = owed_now();
+        let observe = super::SpaceZdrMode::Observe;
+        let reroute_digest = sa::reroute_payload_digest(
+            "org-1",
+            "member-2",
+            "approval-1",
+            "space-room",
+            "approval-decision-1",
+            "named",
+            "member-3",
+        );
+        let mut claims = owed_claims(
+            now,
+            "member-2",
+            sa::REROUTE_ACTION_ID,
+            sa::REROUTE_SCHEMA,
+            &[sa::PERMISSION_REROUTE],
+        );
+        claims["decision_ref"] = serde_json::json!("approval-decision-1");
+        claims["payload_digest"] = serde_json::json!(reroute_digest);
+        let reroute = owed_sign(&signing_key, OWED_KEY_ID, &claims);
+        verify_approval(&reroute, &key, now, observe, |e| {
+            e.action_id = sa::REROUTE_ACTION_ID;
+            e.schema = sa::REROUTE_SCHEMA;
+            e.permission = sa::PERMISSION_REROUTE;
+            e.payload_digest = reroute_digest.clone();
+            e.metric_action = "approval_reroute";
+        })
+        .expect("a reroute decision verifies as a reroute");
+        // It decides nothing, and a decide decision reroutes nothing.
+        assert_eq!(
+            verify_approval(&reroute, &key, now, observe, |_| {})
+                .expect_err("a reroute decision does not decide")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        let decide = approval_decide_token(&signing_key, |_| {});
+        assert_eq!(
+            verify_approval(&decide, &key, now, observe, |e| {
+                e.action_id = sa::REROUTE_ACTION_ID;
+                e.schema = sa::REROUTE_SCHEMA;
+                e.permission = sa::PERMISSION_REROUTE;
+                e.payload_digest = reroute_digest.clone();
+                e.metric_action = "approval_reroute";
+            })
+            .expect_err("a decide decision does not reroute")
+            .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn approval_decision_zero_data_retention_claim_follows_the_space_zdr_mode() {
+        let signing_key = SigningKey::from_bytes(&[67_u8; 32]);
+        let key = signing_key.verifying_key();
+        let now = owed_now();
+        let zdr = approval_decide_token(&signing_key, |c| {
+            c["zero_data_retention"] = serde_json::json!(true);
+        });
+        // Observe (the default) counts the flag and proceeds.
+        verify_approval(&zdr, &key, now, super::SpaceZdrMode::Observe, |_| {})
+            .expect("observe proceeds on a ZDR claim");
+        // Enforce refuses it with the typed refusal.
+        let status = verify_approval(&zdr, &key, now, super::SpaceZdrMode::Enforce, |_| {})
+            .expect_err("enforce refuses a ZDR claim");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            super::Refusal::from_status(&status).map(|refusal| refusal.code()),
+            Some(mp_contracts::zdr_refusal::code::DURABLE_MUTATION_FORBIDDEN)
+        );
+        // The flag is a rollout switch, not an authorization input: it never widens a binding.
+        let status = verify_approval(&zdr, &key, now, super::SpaceZdrMode::Enforce, |e| {
+            e.user_id = "member-3";
+        })
+        .expect_err("another subject");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    }
+
+    // ---- WS12-S4: the `model.thread.revise` decision verifier ----
+
+    /// A signed revise request (edit of `msg-1` to "edited text") by `user-2`; `edit` changes the
+    /// claims before they are signed, so a test can break one binding of an otherwise valid decision.
+    fn revise_request(
+        signing_key: &SigningKey,
+        permissions: &[&str],
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> pb::ReviseMessageRequest {
+        use mp_contracts::message_revision as rev;
+        let mut request = pb::ReviseMessageRequest {
+            org_id: "org-1".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            message_id: "msg-1".to_owned(),
+            action: rev::ACTION_EDIT.to_owned(),
+            content: "edited text".to_owned(),
+            space_id: "space-room".to_owned(),
+            space_decision_ref: "revise-decision-1".to_owned(),
+            recipient_audience_ref: "audience:space-room:4".to_owned(),
+            recipient_audience_revision: 4,
+            recipient_audience_hash: "sha256:test-audience".to_owned(),
+            privacy_policy_ref: "privacy:org-1:5".to_owned(),
+            authority_revision: 7,
+            resource_authorization_ref: "control:space-room:thread-revise:7".to_owned(),
+            action_schema_hash: rev::DECISION_SCHEMA.to_owned(),
+            idempotency_key: "revise-1".to_owned(),
+            ..Default::default()
+        };
+        request.payload_digest = thread_revise_payload_digest(&request, "org-1", "user-2");
+        let mut claims = owed_claims(
+            owed_now(),
+            "user-2",
+            rev::DECISION_ACTION_ID,
+            rev::DECISION_SCHEMA,
+            permissions,
+        );
+        claims["decision_ref"] = serde_json::json!(request.space_decision_ref);
+        claims["payload_digest"] = serde_json::json!(request.payload_digest);
+        claims["idempotency_key"] = serde_json::json!(request.idempotency_key);
+        claims["resource_authorization_ref"] = serde_json::json!(request.resource_authorization_ref);
+        edit(&mut claims);
+        request.space_decision_token = owed_sign(signing_key, OWED_KEY_ID, &claims);
+        request
+    }
+
+    fn verify_revise(
+        request: &pb::ReviseMessageRequest,
+        key: &VerifyingKey,
+    ) -> Result<super::VerifiedRevise, tonic::Status> {
+        super::verify_revise_space_decision_with_key(
+            request,
+            "org-1",
+            "user-2",
+            OWED_KEY_ID,
+            key,
+            owed_now(),
+        )
+    }
+
+    #[test]
+    fn revise_verifier_needs_exactly_one_retention_permission() {
+        use mp_contracts::message_revision as rev;
+        let signing_key = SigningKey::from_bytes(&[63_u8; 32]);
+        let key = signing_key.verifying_key();
+        let purge = verify_revise(
+            &revise_request(&signing_key, &[rev::PERMISSION_REVISE, rev::PERMISSION_PURGE_ORIGINAL], |_| {}),
+            &key,
+        )
+        .expect("the purge rule");
+        assert_eq!(purge, super::VerifiedRevise { moderate: false, purge_original: true });
+        let retain = verify_revise(
+            &revise_request(&signing_key, &[rev::PERMISSION_REVISE, rev::PERMISSION_RETAIN_ORIGINAL], |_| {}),
+            &key,
+        )
+        .expect("the retain rule");
+        assert_eq!(retain, super::VerifiedRevise { moderate: false, purge_original: false });
+        let moderator = verify_revise(
+            &revise_request(
+                &signing_key,
+                &[rev::PERMISSION_REVISE, rev::PERMISSION_MODERATE, rev::PERMISSION_RETAIN_ORIGINAL],
+                |_| {},
+            ),
+            &key,
+        )
+        .expect("a moderator's decision");
+        assert_eq!(moderator, super::VerifiedRevise { moderate: true, purge_original: false });
+
+        // Neither or both retention permissions is a malformed decision: it fails closed with the
+        // revision refusal (not an envelope or signature refusal), whatever else it carries.
+        let cases: [(&str, Vec<&str>); 6] = [
+            ("neither retention permission", vec![rev::PERMISSION_REVISE]),
+            (
+                "neither, with moderation",
+                vec![rev::PERMISSION_REVISE, rev::PERMISSION_MODERATE],
+            ),
+            (
+                "both retention permissions",
+                vec![
+                    rev::PERMISSION_REVISE,
+                    rev::PERMISSION_PURGE_ORIGINAL,
+                    rev::PERMISSION_RETAIN_ORIGINAL,
+                ],
+            ),
+            (
+                "both, with moderation",
+                vec![
+                    rev::PERMISSION_REVISE,
+                    rev::PERMISSION_MODERATE,
+                    rev::PERMISSION_PURGE_ORIGINAL,
+                    rev::PERMISSION_RETAIN_ORIGINAL,
+                ],
+            ),
+            (
+                "a retention permission without the revise permission",
+                vec![rev::PERMISSION_RETAIN_ORIGINAL],
+            ),
+            ("no permission at all", vec![]),
+        ];
+        for (label, permissions) in cases {
+            let status = verify_revise(&revise_request(&signing_key, &permissions, |_| {}), &key)
+                .expect_err(label);
+            assert_eq!(status.code(), tonic::Code::PermissionDenied, "{label}");
+            assert!(
+                status.message().contains("does not authorize this message revision"),
+                "{label}: {}",
+                status.message()
+            );
+        }
+    }
+
+    #[test]
+    fn revise_decision_binds_the_message_the_action_and_the_text() {
+        use mp_contracts::message_revision as rev;
+        let signing_key = SigningKey::from_bytes(&[68_u8; 32]);
+        let key = signing_key.verifying_key();
+        let ok = revise_request(
+            &signing_key,
+            &[rev::PERMISSION_REVISE, rev::PERMISSION_RETAIN_ORIGINAL],
+            |_| {},
+        );
+        verify_revise(&ok, &key).expect("the request the decision was issued for");
+        let tampered = [
+            (
+                "another text",
+                pb::ReviseMessageRequest { content: "another text".to_owned(), ..ok.clone() },
+            ),
+            (
+                "a delete in place of the edit",
+                pb::ReviseMessageRequest {
+                    action: rev::ACTION_DELETE.to_owned(),
+                    content: String::new(),
+                    ..ok.clone()
+                },
+            ),
+            (
+                "another message",
+                pb::ReviseMessageRequest { message_id: "msg-2".to_owned(), ..ok.clone() },
+            ),
+            (
+                "another thread",
+                pb::ReviseMessageRequest { thread_id: "thread-2".to_owned(), ..ok.clone() },
+            ),
+            (
+                "another Space",
+                pb::ReviseMessageRequest { space_id: "space-other".to_owned(), ..ok.clone() },
+            ),
+            (
+                "another idempotency key",
+                pb::ReviseMessageRequest { idempotency_key: "revise-2".to_owned(), ..ok.clone() },
+            ),
+        ];
+        for (label, request) in &tampered {
+            let status = verify_revise(request, &key).expect_err(label);
+            assert_eq!(status.code(), tonic::Code::PermissionDenied, "{label}");
+        }
+        // Another caller, another org and an expired window.
+        let other_caller = super::verify_revise_space_decision_with_key(
+            &ok, "org-1", "user-3", OWED_KEY_ID, &key, owed_now(),
+        )
+        .expect_err("a decision is bound to its subject");
+        assert_eq!(other_caller.code(), tonic::Code::PermissionDenied);
+        let other_org = super::verify_revise_space_decision_with_key(
+            &ok, "org-2", "user-2", OWED_KEY_ID, &key, owed_now(),
+        )
+        .expect_err("a decision is bound to its org");
+        assert_eq!(other_org.code(), tonic::Code::PermissionDenied);
+        let expired = super::verify_revise_space_decision_with_key(
+            &ok,
+            "org-1",
+            "user-2",
+            OWED_KEY_ID,
+            &key,
+            owed_now() + chrono::Duration::minutes(1),
+        )
+        .expect_err("an expired decision");
+        assert_eq!(expired.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[test]
+    fn v1_append_decision_cannot_revise_and_a_revise_decision_cannot_append() {
+        use mp_contracts::message_revision as rev;
+        let signing_key = SigningKey::from_bytes(&[64_u8; 32]);
+        let now = owed_now();
+        // A real append decision (v1, then v2), unexpired and signed by the trusted key, carried by
+        // a revise request that repeats every binding the decision made.
+        for schema_v2 in [false, true] {
+            let (append, key_id) = signed_thread_append_request_for_kind(&signing_key, now, schema_v2, "turn");
+            let revise = pb::ReviseMessageRequest {
+                org_id: "org-1".to_owned(),
+                thread_id: append.thread_id.clone(),
+                message_id: "msg-1".to_owned(),
+                action: rev::ACTION_EDIT.to_owned(),
+                content: append.content.clone(),
+                space_id: append.space_id.clone(),
+                space_decision_ref: append.space_decision_ref.clone(),
+                recipient_audience_ref: append.recipient_audience_ref.clone(),
+                recipient_audience_revision: append.recipient_audience_revision,
+                recipient_audience_hash: append.recipient_audience_hash.clone(),
+                privacy_policy_ref: append.privacy_policy_ref.clone(),
+                authority_revision: append.authority_revision,
+                resource_authorization_ref: append.resource_authorization_ref.clone(),
+                space_decision_token: append.space_decision_token.clone(),
+                action_schema_hash: append.action_schema_hash.clone(),
+                payload_digest: append.payload_digest.clone(),
+                idempotency_key: append.idempotency_key.clone(),
+                ..Default::default()
+            };
+            let status = super::verify_revise_space_decision_with_key(
+                &revise,
+                "org-1",
+                "user-2",
+                &key_id,
+                &signing_key.verifying_key(),
+                now,
+            )
+            .expect_err("an append decision never revises");
+            assert_eq!(status.code(), tonic::Code::PermissionDenied, "schema_v2 = {schema_v2}");
+            assert!(
+                status.message().contains("does not authorize this message revision"),
+                "schema_v2 = {schema_v2}: {}",
+                status.message()
+            );
+        }
+        // And the other way: a valid revise decision carried by an append request.
+        let revise = revise_request(
+            &signing_key,
+            &[rev::PERMISSION_REVISE, rev::PERMISSION_RETAIN_ORIGINAL],
+            |_| {},
+        );
+        let append = pb::AppendMessageRequest {
+            thread_id: revise.thread_id.clone(),
+            role: "user".to_owned(),
+            content: revise.content.clone(),
+            space_id: revise.space_id.clone(),
+            space_decision_ref: revise.space_decision_ref.clone(),
+            recipient_audience_ref: revise.recipient_audience_ref.clone(),
+            recipient_audience_revision: revise.recipient_audience_revision,
+            recipient_audience_hash: revise.recipient_audience_hash.clone(),
+            privacy_policy_ref: revise.privacy_policy_ref.clone(),
+            authority_revision: revise.authority_revision,
+            resource_authorization_ref: revise.resource_authorization_ref.clone(),
+            space_decision_token: revise.space_decision_token.clone(),
+            action_schema_hash: revise.action_schema_hash.clone(),
+            payload_digest: revise.payload_digest.clone(),
+            idempotency_key: revise.idempotency_key.clone(),
+            ..Default::default()
+        };
+        let status = verify_append_space_decision_with_key(
+            &append,
+            "org-1",
+            "user-2",
+            OWED_KEY_ID,
+            &signing_key.verifying_key(),
+            now,
+        )
+        .expect_err("a revise decision never appends");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        assert!(status.message().contains("does not authorize this message append"), "{}", status.message());
+    }
+
+    // ---- WS17-S7: the `model.memory.declassify` decision verifier ----
+
+    /// The claims of a declassify or retract decision for `user-1`, with the payload digest the
+    /// verifier recomputes from them (the claims are fixed, so the digests are golden).
+    fn declassify_claims(
+        operation: &str,
+        memory_id: &str,
+        content_digest: &str,
+        idempotency_key: &str,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> serde_json::Value {
+        let mut claims = owed_claims(
+            owed_now(),
+            "user-1",
+            super::CONTROL_MEMORY_DECLASSIFY_ACTION,
+            super::CONTROL_MEMORY_DECLASSIFY_SCHEMA,
+            &[super::MEMORY_DECLASSIFY_PERMISSION],
+        );
+        claims["idempotency_key"] = serde_json::json!(idempotency_key);
+        claims["resource_authorization_ref"] =
+            serde_json::json!("control:space-room:memory-declassify:7");
+        // The edit comes before the digest, so a broken decision is still self-consistent and only
+        // the one broken field can be what refuses it.
+        edit(&mut claims);
+        let parsed: ControlSpaceDecisionClaims =
+            serde_json::from_value(claims.clone()).expect("claims fixture");
+        claims["payload_digest"] = serde_json::json!(super::memory_declassify_payload_digest(
+            &parsed,
+            operation,
+            memory_id,
+            content_digest
+        ));
+        claims
+    }
+
+    fn declassify_token(
+        signing_key: &SigningKey,
+        operation: &str,
+        memory_id: &str,
+        content_digest: &str,
+        idempotency_key: &str,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> String {
+        let claims = declassify_claims(operation, memory_id, content_digest, idempotency_key, edit);
+        owed_sign(signing_key, OWED_KEY_ID, &claims)
+    }
+
+    /// The expected hex values were computed by an independent implementation (a script over the
+    /// byte layout Control's Go `memoryDeclassifyPayloadDigest` documents: the prefix, each field as
+    /// name, NUL, big-endian u64 length and value, then the two revisions) for the fixed claims of
+    /// `declassify_claims`. Control's Go side should pin the same hex.
+    #[test]
+    fn memory_declassify_digest_matches_the_independent_golden_vectors() {
+        let reviewed = super::memory_declassify_content_digest("hello");
+        assert_eq!(
+            reviewed,
+            "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+        let share = declassify_claims("declassify", "memory-1", &reviewed, "declassify-1", |_| {});
+        assert_eq!(
+            share["payload_digest"],
+            "sha256:3a23fef9d9603273cf7b1ff31f85f5e2c764565a438338ec4975c8309525fb8e"
+        );
+        let retract = declassify_claims("retract", "room-memory-1", "", "retract-1", |_| {});
+        assert_eq!(
+            retract["payload_digest"],
+            "sha256:0a54fa8304deaa9766eed6812aff77b2a07a615b8214e2ac21bafc59ea653e8f"
+        );
+    }
+
+    #[test]
+    fn memory_declassify_verifier_binds_operation_memory_text_and_key() {
+        let signing_key = SigningKey::from_bytes(&[65_u8; 32]);
+        let key = signing_key.verifying_key();
+        let now = owed_now();
+        let reviewed = super::memory_declassify_content_digest("hello");
+        let verify = |token: &str,
+                      operation: &str,
+                      memory_id: &str,
+                      content_digest: &str,
+                      idempotency_key: Option<&str>,
+                      at: DateTime<Utc>| {
+            super::verify_memory_declassify_decision_with_key(
+                token,
+                "decision-1",
+                "org-1",
+                "user-1",
+                "space-room",
+                operation,
+                memory_id,
+                content_digest,
+                idempotency_key,
+                OWED_KEY_ID,
+                &key,
+                at,
+            )
+        };
+        let denied = |label: &str, outcome: Result<super::VerifiedMemoryDeclassify, tonic::Status>| {
+            let status = outcome.expect_err(label);
+            assert_eq!(status.code(), tonic::Code::PermissionDenied, "{label}: {status:?}");
+        };
+
+        // A share, for the exact reviewed text, memory and idempotency key.
+        let share = declassify_token(&signing_key, "declassify", "memory-1", &reviewed, "declassify-1", |_| {});
+        let verified = verify(&share, "declassify", "memory-1", &reviewed, Some("declassify-1"), now)
+            .expect("the share verifies");
+        assert_eq!(
+            verified,
+            super::VerifiedMemoryDeclassify {
+                recipient_audience_hash: "sha256:test-audience".to_owned(),
+                recipient_audience_revision: 4,
+                authority_revision: 7,
+                zero_data_retention: false,
+            }
+        );
+        // A declassify token is not a retraction.
+        denied("a share used to retract", verify(&share, "retract", "memory-1", "", None, now));
+        denied("a share used to retract with its digest", verify(&share, "retract", "memory-1", &reviewed, None, now));
+        // A changed reviewed text fails the content digest check.
+        let edited = super::memory_declassify_content_digest("hello!");
+        assert_ne!(edited, reviewed);
+        denied("a changed reviewed text", verify(&share, "declassify", "memory-1", &edited, Some("declassify-1"), now));
+        denied("a share of another memory", verify(&share, "declassify", "memory-2", &reviewed, Some("declassify-1"), now));
+        denied("another idempotency key", verify(&share, "declassify", "memory-1", &reviewed, Some("declassify-2"), now));
+        denied("an expired decision", verify(&share, "declassify", "memory-1", &reviewed, Some("declassify-1"), now + chrono::Duration::minutes(1)));
+
+        // A retract token carries no text and no request key, and is not a share.
+        let retract = declassify_token(&signing_key, "retract", "room-memory-1", "", "retract-1", |_| {});
+        verify(&retract, "retract", "room-memory-1", "", None, now).expect("the retraction verifies");
+        denied("a retraction used to share", verify(&retract, "declassify", "room-memory-1", "", Some("retract-1"), now));
+        denied("a retraction used to share a text", verify(&retract, "declassify", "room-memory-1", &reviewed, Some("retract-1"), now));
+        denied("a retraction of another room row", verify(&retract, "retract", "room-memory-2", "", None, now));
+
+        // The decision's own fields.
+        let broken: [(&str, Box<dyn Fn(&mut serde_json::Value)>); 6] = [
+            ("another subject", Box::new(|c: &mut serde_json::Value| c["subject_id"] = serde_json::json!("user-2"))),
+            ("another Space", Box::new(|c: &mut serde_json::Value| c["space_ref"] = serde_json::json!("space-other"))),
+            ("another org", Box::new(|c: &mut serde_json::Value| c["org_id"] = serde_json::json!("org-2"))),
+            ("an extra permission", Box::new(|c: &mut serde_json::Value| c["permissions"] = serde_json::json!(["memory:declassify", "memory:manage"]))),
+            ("no permission", Box::new(|c: &mut serde_json::Value| c["permissions"] = serde_json::json!([]))),
+            ("a blank audience hash", Box::new(|c: &mut serde_json::Value| c["recipient_audience_hash"] = serde_json::json!(" "))),
+        ];
+        for (label, edit) in &broken {
+            let token = declassify_token(&signing_key, "declassify", "memory-1", &reviewed, "declassify-1", |c| edit(c));
+            denied(*label, verify(&token, "declassify", "memory-1", &reviewed, Some("declassify-1"), now));
+        }
+        let foreign = declassify_token(&SigningKey::from_bytes(&[69_u8; 32]), "declassify", "memory-1", &reviewed, "declassify-1", |_| {});
+        denied("a foreign signer", verify(&foreign, "declassify", "memory-1", &reviewed, Some("declassify-1"), now));
+
+        // The flag is carried back to the caller (which refuses it), not refused here.
+        let zdr = declassify_token(&signing_key, "declassify", "memory-1", &reviewed, "declassify-1", |c| {
+            c["zero_data_retention"] = serde_json::json!(true);
+        });
+        assert!(
+            verify(&zdr, "declassify", "memory-1", &reviewed, Some("declassify-1"), now)
+                .expect("the verifier reports the flag")
+                .zero_data_retention
+        );
+    }
+
+    #[test]
+    fn memory_declassify_decision_is_disjoint_from_the_space_memory_manage_decision() {
+        let signing_key = SigningKey::from_bytes(&[70_u8; 32]);
+        let key = signing_key.verifying_key();
+        let now = owed_now();
+        let reviewed = super::memory_declassify_content_digest("hello");
+        // A Space memory manage decision (list or delete of room memory), signed by the same key.
+        let mut claims = owed_claims(
+            now,
+            "user-1",
+            super::CONTROL_SPACE_MEMORY_ACTION,
+            super::CONTROL_SPACE_MEMORY_SCHEMA,
+            &[super::SPACE_MEMORY_PERMISSION],
+        );
+        let parsed: ControlSpaceDecisionClaims =
+            serde_json::from_value(claims.clone()).expect("claims fixture");
+        claims["payload_digest"] = serde_json::json!(space_memory_payload_digest(
+            &parsed,
+            SPACE_MEMORY_OPERATION_DELETE,
+            "memory-1"
+        ));
+        let manage = owed_sign(&signing_key, OWED_KEY_ID, &claims);
+        super::verify_space_memory_decision_with_key(
+            &manage, "decision-1", "org-1", "user-1", "space-room", SPACE_MEMORY_OPERATION_DELETE,
+            "memory-1", OWED_KEY_ID, &key, now,
+        )
+        .expect("the manage decision verifies as itself");
+        let status = super::verify_memory_declassify_decision_with_key(
+            &manage, "decision-1", "org-1", "user-1", "space-room", "declassify", "memory-1",
+            &reviewed, None, OWED_KEY_ID, &key, now,
+        )
+        .expect_err("a manage decision never declassifies");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        // And a declassify token never lists or deletes room memory.
+        let share = declassify_token(&signing_key, "declassify", "memory-1", &reviewed, "declassify-1", |_| {});
+        let status = super::verify_space_memory_decision_with_key(
+            &share, "decision-1", "org-1", "user-1", "space-room", SPACE_MEMORY_OPERATION_DELETE,
+            "memory-1", OWED_KEY_ID, &key, now,
+        )
+        .expect_err("a declassify decision never manages room memory");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        // The keyless wrapper answers a missing decision or subject before it reads any key.
+        for (token, user) in [("", "user-1"), (share.as_str(), " ")] {
+            let status = super::verify_memory_declassify_decision(
+                token, "decision-1", "org-1", user, "space-room", "declassify", "memory-1", &reviewed,
+                Some("declassify-1"), now,
+            )
+            .expect_err("half a decision");
+            assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        }
+    }
+
+    // ---- Space W3 test phase: DB tier (every test below is #[ignore]d; none ran in the unit run) ----
+
+    /// Removes a plain thread and every row `delete_thread_rows` knows about it.
+    async fn owed_erase_thread(pool: &sqlx::PgPool, thread_id: &str) {
+        let mut tx = pool.begin().await.expect("begin cleanup");
+        super::delete_thread_rows(&mut tx, thread_id)
+            .await
+            .expect("erase the thread rows");
+        sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(thread_id)
+            .execute(&mut *tx)
+            .await
+            .expect("delete the thread");
+        tx.commit().await.expect("commit cleanup");
+    }
+
+    async fn owed_plain_thread(pool: &sqlx::PgPool, thread_id: &str, org: &str, owner: &str) {
+        sqlx::query("INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)")
+            .bind(thread_id)
+            .bind(org)
+            .bind(owner)
+            .execute(pool)
+            .await
+            .expect("seed plain thread");
+    }
+
+    /// WS11-S5: the Space event outbox rows of a thread (`SPACE_*` events on
+    /// `mp.v1.space.<ref>.event`) carry the thread id only inside the nested `payload.payload`, so the
+    /// erase names that path; it removes exactly the erased thread's rows and no other thread's.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn delete_thread_erases_the_space_outbox_rows_by_their_nested_thread_id() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let suffix = mp_ids::new_ulid();
+        let org = format!("org-outbox-erase-{suffix}");
+        let owner = format!("user-outbox-owner-{suffix}");
+        // One token: the outbox subject carries the ref between two dots.
+        let space = format!("space-outbox-{suffix}");
+        let erased = format!("thread-outbox-erased-{suffix}");
+        let kept = format!("thread-outbox-kept-{suffix}");
+        for thread in [&erased, &kept] {
+            owed_plain_thread(&pool, thread, &org, &owner).await;
+        }
+        let outbox_row = |event_id: String, event_type: &str, kind: &str, thread: &str| {
+            let subject = format!("mp.v1.space.{space}.event");
+            let payload = serde_json::json!({
+                "event_id": event_id,
+                "event_type": event_type,
+                "schema_version": 1,
+                "producer": "session-core",
+                "org_id": org,
+                "user_id": "",
+                "resource_ref": format!("space:{space}"),
+                "zdr": false,
+                // The thread id is nested only: nothing at the top level names it.
+                "payload": {
+                    "space_ref": space,
+                    "space_seq": 1,
+                    "kind": kind,
+                    "thread_id": thread,
+                    "audience_revision": 1,
+                },
+            });
+            let pool = pool.clone();
+            async move {
+                sqlx::query("INSERT INTO session_audit_outbox (event_id, subject, payload) VALUES ($1, $2, $3)")
+                    .bind(event_id)
+                    .bind(subject)
+                    .bind(payload)
+                    .execute(&pool)
+                    .await
+                    .expect("seed outbox row");
+            }
+        };
+        let id = |name: &str| format!("space:{org}:{name}:{suffix}");
+        for (name, event_type, kind) in [
+            ("a1", "SPACE_MESSAGE_APPENDED", "message.appended"),
+            ("a2", "SPACE_RUN_STATE_CHANGED", "run.state_changed"),
+            ("a3", "SPACE_THREAD_DELETED", "thread.deleted"),
+        ] {
+            outbox_row(id(name), event_type, kind, &erased).await;
+        }
+        outbox_row(id("k1"), "SPACE_MESSAGE_APPENDED", "message.appended", &kept).await;
+        let count = |thread: String| {
+            let pool = pool.clone();
+            async move {
+                let (rows,): (i64,) = sqlx::query_as(
+                    "SELECT count(*) FROM session_audit_outbox WHERE payload -> 'payload' ->> 'thread_id' = $1",
+                )
+                .bind(thread)
+                .fetch_one(&pool)
+                .await
+                .expect("count outbox rows");
+                rows
+            }
+        };
+        assert_eq!(count(erased.clone()).await, 3);
+        assert_eq!(count(kept.clone()).await, 1);
+
+        let svc = sp_service(pool.clone());
+        let mut request = Request::new(pb::DeleteThreadRequest {
+            org_id: org.clone(),
+            thread_id: erased.clone(),
+        });
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test(&org, &owner));
+        let receipt = svc.delete_thread(request).await.expect("owner delete").into_inner();
+        assert!(receipt.deleted);
+        assert_eq!(count(erased.clone()).await, 0, "the erased thread's SPACE_ outbox rows are gone");
+        assert_eq!(count(kept.clone()).await, 1, "another thread's row is untouched");
+
+        sqlx::query("DELETE FROM session_audit_outbox WHERE event_id = $1")
+            .bind(id("k1"))
+            .execute(&pool)
+            .await
+            .ok();
+        owed_erase_thread(&pool, &kept).await;
+    }
+
+    // ---- WS15-S9: the typed entry of a human post, through the append and the read ----
+
+    fn owed_link_entry(url: &str) -> pb::MessageEntry {
+        let fetched = Utc::now() - chrono::Duration::minutes(1);
+        pb::MessageEntry {
+            kind: "link_previews".to_owned(),
+            version: 1,
+            link_previews: vec![pb::LinkPreview {
+                url: url.to_owned(),
+                final_url: String::new(),
+                // A client-sent host is ignored: the host is recomputed from the final URL.
+                host: "client-sent.invalid".to_owned(),
+                title: "Example title".to_owned(),
+                description: "A page".to_owned(),
+                site_name: "Example".to_owned(),
+                fetched_at: Some(prost_types::Timestamp { seconds: fetched.timestamp(), nanos: 0 }),
+            }],
+            agent_card: None,
+        }
+    }
+
+    async fn owed_read_posts(
+        svc: &super::SessionService,
+        org: &str,
+        owner: &str,
+        thread: &str,
+    ) -> Vec<pb::SessionMessage> {
+        let mut request = Request::new(pb::ListConversationRequest {
+            org_id: org.to_owned(),
+            thread_id: thread.to_owned(),
+            include_human_posts: true,
+            ..Default::default()
+        });
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test(org, owner));
+        svc.list_conversation(request)
+            .await
+            .expect("owner read")
+            .into_inner()
+            .messages
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn entry_round_trips_through_metadata_and_never_travels_as_free_metadata() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let (org, space, thread, owner) = sp_room(&pool, "entry").await;
+        let post = pb::AppendMessageRequest {
+            thread_id: thread.clone(),
+            role: "user".to_owned(),
+            content: "have a look at https://Example.com/a".to_owned(),
+            post_kind: "post".to_owned(),
+            client_message_id: "entry-post-1".to_owned(),
+            entry: Some(owed_link_entry("https://Example.com/a")),
+            ..Default::default()
+        };
+        let appended = super::append_message_inner(&pool, None, MemoryRetention::Durable, post, &owner)
+            .await
+            .expect("a post carrying an entry")
+            .into_inner();
+        // Stored under metadata.entry, normalised: the host comes from the URL, never the client.
+        let (_, _, _, kind, _, metadata) = sp_message_columns(&pool, &appended.message_id).await;
+        assert_eq!(kind, "post");
+        assert_eq!(metadata["entry"]["kind"], "link_previews");
+        assert_eq!(metadata["entry"]["version"], 1);
+        let stored = &metadata["entry"]["link_previews"][0];
+        assert_eq!(stored["host"], "example.com");
+        assert_eq!(stored["url"], "https://Example.com/a");
+        assert_eq!(stored["final_url"], "https://Example.com/a");
+        assert_eq!(stored["title"], "Example title");
+
+        // The read returns the typed entry, and no `entry` key in the free metadata.
+        let messages = owed_read_posts(&sp_service(pool.clone()), &org, &owner, &thread).await;
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        let entry = message.entry.as_ref().expect("the typed entry rides on the post");
+        assert_eq!((entry.kind.as_str(), entry.version), ("link_previews", 1));
+        assert_eq!(entry.link_previews.len(), 1);
+        assert_eq!(entry.link_previews[0].host, "example.com");
+        assert_eq!(entry.link_previews[0].title, "Example title");
+        assert!(
+            !message
+                .metadata
+                .as_ref()
+                .is_some_and(|free| free.fields.contains_key("entry")),
+            "the entry key never travels in the free metadata"
+        );
+        crate::space::test_support::clean_space(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn client_metadata_cannot_set_the_entry_or_the_reserved_post_keys() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let (org, space, thread, owner) = sp_room(&pool, "entry-forged").await;
+        // The owner path stores metadata, so the reserved keys are the ones stripped; a client-set
+        // `entry` cannot become a typed entry, whatever it holds.
+        let forged = serde_json::json!({
+            "entry": {"kind": "link_previews", "version": 1, "link_previews": []},
+            "mentions": [{"subject_id": "someone", "kind": "person"}],
+            "wake": {"agent_subject_id": "agent-1"},
+            "turn_origin": "ambient",
+            "post_kind": "turn",
+            "note": "kept",
+        });
+        let post = pb::AppendMessageRequest {
+            thread_id: thread.clone(),
+            role: "user".to_owned(),
+            content: "hello room".to_owned(),
+            post_kind: "post".to_owned(),
+            client_message_id: "entry-forged-1".to_owned(),
+            metadata: super::json_to_struct(&forged),
+            ..Default::default()
+        };
+        let appended = super::append_message_inner(&pool, None, MemoryRetention::Durable, post, &owner)
+            .await
+            .expect("a post with forged metadata")
+            .into_inner();
+        let (_, _, _, kind, _, metadata) = sp_message_columns(&pool, &appended.message_id).await;
+        assert_eq!(kind, "post");
+        assert_eq!(metadata, serde_json::json!({"note": "kept"}));
+        let messages = owed_read_posts(&sp_service(pool.clone()), &org, &owner, &thread).await;
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].entry.is_none(), "a forged key is no typed entry");
+        crate::space::test_support::clean_space(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn an_entry_on_a_turn_or_an_assistant_row_is_refused_and_an_invalid_entry_stores_nothing() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let suffix = mp_ids::new_ulid();
+        let org = format!("org-entry-refused-{suffix}");
+        let thread = format!("thread-entry-refused-{suffix}");
+        owed_plain_thread(&pool, &thread, &org, "owner-1").await;
+        let append = |role: &str, post_kind: &str, entry: Option<pb::MessageEntry>| {
+            let req = pb::AppendMessageRequest {
+                thread_id: thread.clone(),
+                role: role.to_owned(),
+                content: "hello https://example.com/a".to_owned(),
+                post_kind: post_kind.to_owned(),
+                entry,
+                ..Default::default()
+            };
+            let pool = pool.clone();
+            async move {
+                super::append_message_inner(&pool, None, MemoryRetention::Durable, req, "owner-1")
+                    .await
+                    .map(tonic::Response::into_inner)
+            }
+        };
+        // Only a human post may carry an entry.
+        for (role, post_kind) in [("user", "turn"), ("user", ""), ("assistant", "turn"), ("assistant", "post")] {
+            let refused = append(role, post_kind, Some(owed_link_entry("https://example.com/a")))
+                .await
+                .expect_err("an entry needs a human post");
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument, "{role}/{post_kind:?}");
+        }
+        // An entry that fails the write rules refuses the whole post.
+        let with = |change: &dyn Fn(&mut pb::MessageEntry)| {
+            let mut entry = owed_link_entry("https://example.com/a");
+            change(&mut entry);
+            entry
+        };
+        let invalid: Vec<(&str, pb::MessageEntry)> = vec![
+            ("an unsupported kind", with(&|e| e.kind = "poll".to_owned())),
+            ("a newer version", with(&|e| e.version = 2)),
+            ("no previews", with(&|e| e.link_previews.clear())),
+            (
+                "four previews",
+                with(&|e| {
+                    let first = e.link_previews[0].clone();
+                    e.link_previews = vec![first; 4];
+                }),
+            ),
+            ("a script URL", with(&|e| e.link_previews[0].url = "javascript:alert(1)".to_owned())),
+            ("credentials in the URL", with(&|e| e.link_previews[0].url = "https://user:pw@example.com/".to_owned())),
+            ("whitespace in the URL", with(&|e| e.link_previews[0].url = "https://example.com/a b".to_owned())),
+            ("no fetch time", with(&|e| e.link_previews[0].fetched_at = None)),
+            (
+                "a fetch time in the future",
+                with(&|e| {
+                    e.link_previews[0].fetched_at = Some(prost_types::Timestamp {
+                        seconds: (Utc::now() + chrono::Duration::hours(1)).timestamp(),
+                        nanos: 0,
+                    });
+                }),
+            ),
+            ("an over-long title", with(&|e| e.link_previews[0].title = "t".repeat(201))),
+        ];
+        for (label, entry) in invalid {
+            let refused = append("user", "post", Some(entry)).await.expect_err(label);
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument, "{label}");
+        }
+        // Nothing was stored: no row and no MESSAGE_APPENDED event.
+        let (rows,): (i64,) = sqlx::query_as("SELECT count(*) FROM messages WHERE thread_id = $1")
+            .bind(&thread)
+            .fetch_one(&pool)
+            .await
+            .expect("count rows");
+        assert_eq!(rows, 0);
+        let (events,): (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM events WHERE run_id = $1 AND event_type = 'MESSAGE_APPENDED'",
+        )
+        .bind(&thread)
+        .fetch_one(&pool)
+        .await
+        .expect("count events");
+        assert_eq!(events, 0);
+        // A valid entry on a human post is stored.
+        append("user", "post", Some(owed_link_entry("https://example.com/a")))
+            .await
+            .expect("a valid entry");
+        let (rows,): (i64,) = sqlx::query_as("SELECT count(*) FROM messages WHERE thread_id = $1")
+            .bind(&thread)
+            .fetch_one(&pool)
+            .await
+            .expect("count rows");
+        assert_eq!(rows, 1);
+        owed_erase_thread(&pool, &thread).await;
+    }
+
+    // ---- WS08-S2: the post cap of a transcript read ----
+
+    /// A read that includes human posts may cap how many it returns: the newest `post_context_cap`
+    /// posts of the page are kept, older posts are dropped, and a turn is never dropped. The cap
+    /// applies to the page the read returned, after its `has_more` was decided.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn post_context_cap_keeps_the_newest_posts_and_every_turn_on_a_read() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let (org, space, thread, owner) = sp_room(&pool, "cap").await;
+        // Oldest first: p1 t1 p2 p3 t2 p4 (p is a human post, t is a turn).
+        for (name, role, kind, author) in [
+            ("p1", "user", "post", Some("member-2")),
+            ("t1", "user", "turn", Some("owner-1")),
+            ("p2", "user", "post", Some("member-2")),
+            ("p3", "user", "post", Some("member-3")),
+            ("t2", "assistant", "turn", None),
+            ("p4", "user", "post", Some("member-2")),
+        ] {
+            let id = format!("{thread}-{name}");
+            crate::space::test_support::seed_space_message(&pool, &space, &thread, &id, role, author)
+                .await;
+            sqlx::query("UPDATE messages SET post_kind = $2 WHERE id = $1")
+                .bind(&id)
+                .bind(kind)
+                .execute(&pool)
+                .await
+                .expect("set the kind");
+        }
+        let svc = sp_service(pool.clone());
+        let read = |cap: u32, limit: u32| {
+            let mut request = Request::new(pb::ListConversationRequest {
+                org_id: org.clone(),
+                thread_id: thread.clone(),
+                limit,
+                include_human_posts: true,
+                post_context_cap: cap,
+                ..Default::default()
+            });
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::user_for_test(&org, &owner));
+            let svc = &svc;
+            async move { svc.list_conversation(request).await.map(tonic::Response::into_inner) }
+        };
+        let names = |response: &pb::ListConversationResponse| -> Vec<String> {
+            response
+                .messages
+                .iter()
+                .map(|message| message.message_id.rsplit('-').next().unwrap_or_default().to_owned())
+                .collect()
+        };
+        let all = ["p1", "t1", "p2", "p3", "t2", "p4"];
+        assert_eq!(names(&read(0, 0).await.expect("no cap")), all);
+        assert_eq!(names(&read(10, 0).await.expect("a wide cap")), all);
+        assert_eq!(names(&read(2, 0).await.expect("cap of two")), ["t1", "p3", "t2", "p4"]);
+        assert_eq!(names(&read(1, 0).await.expect("cap of one")), ["t1", "t2", "p4"]);
+        // On a page: the newest four rows are p2 p3 t2 p4; the cap then keeps the newest post of them.
+        let page = read(1, 4).await.expect("a capped page");
+        assert_eq!(names(&page), ["t2", "p4"]);
+        assert!(page.has_more, "the cap does not change what the page says about older rows");
+        crate::space::test_support::clean_space(&pool, &org, &space).await;
     }
 }
 
@@ -26406,6 +28104,143 @@ mod conversation_page_tests {
         assert!(empty.is_empty());
         assert!(!none_older);
     }
+
+    // ---- WS15-S9 / WS18-S7: the typed entry on a read ----
+
+    /// A stored row of `role` and `post_kind` whose metadata is `metadata`.
+    fn stored_row(role: &str, post_kind: &str, metadata: Option<serde_json::Value>) -> ConversationRow {
+        ConversationRow {
+            id: "m-entry".to_owned(),
+            role: role.to_owned(),
+            content: "body".to_owned(),
+            agent_name: None,
+            metadata,
+            author_subject_id: None,
+            post_kind: post_kind.to_owned(),
+            created_at: Utc.with_ymd_and_hms(2026, 11, 17, 8, 0, 0).unwrap(),
+            parent_message_id: None,
+            sibling_ordinal: 0,
+            sibling_count: 0,
+            on_active_path: true,
+            versioned: false,
+            revision_state: String::new(),
+            revised_at: None,
+            revised_by_subject_id: None,
+            revision_no: 0,
+            agent_followed_up: false,
+            model_connection_id: None,
+            subscription_connection_id: None,
+        }
+    }
+
+    fn stored_link_entry() -> serde_json::Value {
+        serde_json::json!({
+            "kind": "link_previews",
+            "version": 1,
+            "link_previews": [{
+                "url": "https://example.com/a",
+                "final_url": "https://example.com/a",
+                "host": "example.com",
+                "title": "Example",
+                "description": "A page",
+                "site_name": "Example",
+                "fetched_at": "2026-11-17T07:59:00.000000Z",
+            }],
+        })
+    }
+
+    #[test]
+    fn a_human_post_surfaces_its_stored_entry_and_the_key_never_travels_in_metadata() {
+        let metadata = serde_json::json!({"entry": stored_link_entry(), "note": "kept"});
+        let message = session_message_from_row(stored_row("user", "post", Some(metadata)), false);
+        let entry = message
+            .entry
+            .expect("a valid stored entry is surfaced as the typed entry");
+        assert_eq!((entry.kind.as_str(), entry.version), ("link_previews", 1));
+        assert_eq!(entry.link_previews.len(), 1);
+        assert_eq!(entry.link_previews[0].host, "example.com");
+        assert_eq!(entry.link_previews[0].title, "Example");
+        assert_eq!(entry.link_previews[0].fetched_at.as_ref().map(|at| at.seconds), Some(1_794_902_340));
+        assert!(entry.agent_card.is_none());
+        let free = message.metadata.expect("the other metadata keys still ride along").fields;
+        assert!(free.contains_key("note"));
+        assert!(!free.contains_key("entry"), "the entry key never travels in the free metadata");
+    }
+
+    #[test]
+    fn a_stored_entry_that_fails_the_write_rules_is_not_surfaced_but_its_key_never_travels() {
+        let fetched_at = "2026-11-17T07:59:00.000000Z";
+        let broken = [
+            serde_json::json!({"kind": "link_previews", "version": 1, "link_previews": []}),
+            serde_json::json!({
+                "kind": "link_previews", "version": 1,
+                "link_previews": [{"url": "javascript:alert(1)", "fetched_at": fetched_at}],
+            }),
+            serde_json::json!({"kind": "link_previews", "version": 1}),
+            serde_json::json!("not an object"),
+            serde_json::json!({"kind": "Not A Word!", "version": 3}),
+        ];
+        for stored in broken {
+            let metadata = serde_json::json!({"entry": stored.clone(), "note": "kept"});
+            let message = session_message_from_row(stored_row("user", "post", Some(metadata)), false);
+            assert!(message.entry.is_none(), "{stored}");
+            let free = message.metadata.expect("the note rides along").fields;
+            assert!(!free.contains_key("entry"), "{stored}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_future_kind_or_newer_version_surfaces_as_kind_and_version_only() {
+        for (kind, version) in [("poll", 1_u32), ("link_previews", 2), ("agent_card", 9)] {
+            let stored = serde_json::json!({
+                "kind": kind, "version": version, "title": "x", "options": ["a", "b"],
+            });
+            let message = session_message_from_row(
+                stored_row("user", "post", Some(serde_json::json!({"entry": stored}))),
+                false,
+            );
+            let entry = message.entry.expect("a neutral fallback for an older reader");
+            assert_eq!((entry.kind.as_str(), entry.version), (kind, version));
+            assert!(entry.link_previews.is_empty() && entry.agent_card.is_none(), "{kind}");
+        }
+    }
+
+    #[test]
+    fn an_entry_key_on_a_human_turn_is_not_a_typed_entry() {
+        let metadata = serde_json::json!({"entry": stored_link_entry()});
+        let message = session_message_from_row(stored_row("user", "turn", Some(metadata)), false);
+        assert!(message.entry.is_none(), "only a human post surfaces a stored entry");
+    }
+
+    /// WS18-S7: a card is a stored assistant row (`post_kind` `turn`, `card_run_id` set) whose
+    /// `metadata.entry` is the card (`space::self_api::apply_post_card`); the gateway forwards only the
+    /// typed `SessionMessage.entry`, so the read must surface the card as that field or it never
+    /// reaches the room. `session_message_from_row` surfaces the entry of a `post` row and of an assistant row (the card),
+    /// and removes the key from the free metadata either way.
+    #[test]
+    fn an_agent_card_row_surfaces_its_typed_card_and_not_a_free_entry_key() {
+        let card = crate::space::entry::agent_card_json(
+            "Release notes",
+            "done",
+            &[("Version".to_owned(), "1.4".to_owned())],
+        );
+        let message = session_message_from_row(
+            stored_row("assistant", "turn", Some(serde_json::json!({"entry": card}))),
+            false,
+        );
+        let entry = message.entry.expect("the card is surfaced as the typed entry");
+        assert_eq!((entry.kind.as_str(), entry.version), ("agent_card", 1));
+        let card = entry.agent_card.expect("the card payload rides along");
+        assert_eq!((card.title.as_str(), card.tone.as_str()), ("Release notes", "done"));
+        assert_eq!(card.fields.len(), 1);
+        assert!(
+            !message
+                .metadata
+                .as_ref()
+                .is_some_and(|free| free.fields.contains_key("entry")),
+            "the entry key never travels in the free metadata"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -26768,6 +28603,282 @@ mod conversation_page_db_tests {
         }
 
         cleanup(&pool, &[thread.as_str()]).await;
+    }
+
+    // ---- WS04-S11.sc / WS15-S6: the history floor and the first-turn read ----
+
+    /// Puts an environment variable back the way it was when the guard drops.
+    struct EnvRestore(&'static str, Option<String>);
+
+    impl EnvRestore {
+        fn set(name: &'static str, value: Option<&str>) -> Self {
+            let saved = std::env::var(name).ok();
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+            Self(name, saved)
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match self.1.take() {
+                Some(value) => std::env::set_var(self.0, value),
+                None => std::env::remove_var(self.0),
+            }
+        }
+    }
+
+    fn message_ids(response: &pb::ListConversationResponse) -> Vec<&str> {
+        response
+            .messages
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect()
+    }
+
+    /// A `since_join` reader's floor hides every row stamped with an older audience revision on
+    /// the unpaged read, the tail page, the cursor and the first-turn read alike, and keeps a row with
+    /// no revision (it predates audience snapshots). Without a floor the reader sees all of it.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn the_history_floor_hides_older_rows_on_every_conversation_read_against_real_pg() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        // The first-turn read honours the switch as read once per process, on its first use.
+        std::env::set_var("SPACE_TIMELINE_CORE", "1");
+        let suffix = new_ulid();
+        let org = format!("conv-floor-{suffix}");
+        let thread = format!("conv-floor-thread-{suffix}");
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, 'owner')",
+        )
+        .bind(&thread)
+        .bind(&org)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Oldest first: r1 (audience revision 1), r2 (2), legacy (none), r3 (3), r4 (4).
+        let ids: Vec<String> = ["r1", "r2", "legacy", "r3", "r4"]
+            .iter()
+            .map(|name| format!("{thread}-{name}"))
+            .collect();
+        for (id, revision) in ids.iter().zip([Some(1_i64), Some(2), None, Some(3), Some(4)]) {
+            seed_audience_turn(&pool, &thread, id, revision).await;
+        }
+        let [r1, r2, legacy, r3, r4] = [0, 1, 2, 3, 4].map(|index| ids[index].as_str());
+        let floor = AudienceWindow::new(Some(4), Some(2));
+        let no_floor = AudienceWindow::new(Some(4), None);
+
+        let page = |limit: u32, before: &str, include_first: bool, window: AudienceWindow| {
+            let request = pb::ListConversationRequest {
+                org_id: org.clone(),
+                thread_id: thread.clone(),
+                limit,
+                before_message_id: before.to_owned(),
+                include_first,
+                ..Default::default()
+            };
+            let pool = pool.clone();
+            async move {
+                conversation_page_response(&pool, &request, window)
+                    .await
+                    .map(Response::into_inner)
+            }
+        };
+        // The unpaged read, as `list_conversation` runs it with no limit.
+        let unpaged = |window: AudienceWindow| {
+            let (pool, org, thread) = (pool.clone(), org.clone(), thread.clone());
+            async move {
+                let mut rows = conversation_page_rows(
+                    &pool, &org, &thread, window, true, None, i64::MAX, false,
+                )
+                .await
+                .expect("unpaged rows");
+                rows.reverse();
+                rows.into_iter().map(|row| row.id).collect::<Vec<String>>()
+            }
+        };
+        assert_eq!(unpaged(floor).await, [r2, legacy, r3, r4], "r1 is below the floor");
+        assert_eq!(unpaged(no_floor).await, [r1, r2, legacy, r3, r4]);
+
+        // The tail page and the page before a cursor.
+        let tail = page(2, "", false, floor).await.expect("tail page");
+        assert_eq!(message_ids(&tail), [r3, r4]);
+        assert!(tail.has_more);
+        let older = page(2, r3, false, floor).await.expect("page before r3");
+        assert_eq!(message_ids(&older), [r2, legacy], "the no-revision row is kept");
+        assert!(!older.has_more, "nothing readable is older than r2");
+        let unfloored = page(2, r3, false, no_floor).await.expect("page before r3, no floor");
+        assert_eq!(message_ids(&unfloored), [r2, legacy]);
+        assert!(unfloored.has_more, "without the floor r1 is older");
+
+        // A row below the floor is no cursor for this reader, exactly as an unknown id is not.
+        let hidden = page(2, r1, false, floor).await.expect_err("r1 is hidden");
+        assert_eq!(hidden.code(), tonic::Code::InvalidArgument);
+        let visible = page(2, r1, false, no_floor).await.expect("r1 is a cursor without the floor");
+        assert!(visible.messages.is_empty());
+        let at_floor = page(2, r2, false, floor).await.expect("r2 sits at the floor");
+        assert!(at_floor.messages.is_empty() && !at_floor.has_more);
+
+        // The first-turn read: the first readable turn is r2, and the omitted count skips r1.
+        let first = page(2, "", true, floor).await.expect("first-turn read");
+        assert_eq!(message_ids(&first), [r2, r3, r4]);
+        assert_eq!(first.omitted_before, 1, "only the no-revision row lies between");
+        assert!(first.has_more);
+        let contiguous = page(3, "", true, floor).await.expect("contiguous first-turn read");
+        assert_eq!(message_ids(&contiguous), [r2, legacy, r3, r4]);
+        assert_eq!(contiguous.omitted_before, 0);
+        assert!(!contiguous.has_more);
+        let unfloored_first = page(3, "", true, no_floor).await.expect("first-turn read, no floor");
+        assert_eq!(message_ids(&unfloored_first), [r1, legacy, r3, r4]);
+        assert_eq!(unfloored_first.omitted_before, 1);
+
+        cleanup(&pool, &[thread.as_str()]).await;
+    }
+
+    /// The floor travels on the signed read decision and is honoured only with
+    /// `SESSION_CORE_SPACE_HISTORY_FLOOR` on. Off, or with no claim, a reader sees the full history it
+    /// always did (a presentation rule never fails closed on authority).
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn list_conversation_honours_the_signed_history_floor_only_with_the_switch_on_against_real_pg() {
+        use super::space_w1_tests::{mint, StreamKeysEnv, DECISION_REF};
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        let suffix = new_ulid();
+        let org = format!("conv-floor-rpc-{suffix}");
+        let thread = format!("conv-floor-rpc-thread-{suffix}");
+        let (space, owner) = ("space-room", "owner-1");
+        crate::space::test_support::seed_space_thread(&pool, &org, space, &thread, owner).await;
+        let ids: Vec<String> = ["r1", "r2", "legacy", "r3"]
+            .iter()
+            .map(|name| format!("{thread}-{name}"))
+            .collect();
+        for (id, revision) in ids.iter().zip([Some(1_i64), Some(2), None, Some(3)]) {
+            seed_audience_turn(&pool, &thread, id, revision).await;
+        }
+        let [r1, r2, legacy, r3] = [0, 1, 2, 3].map(|index| ids[index].as_str());
+        let _keys = StreamKeysEnv::publish();
+        let svc = service(pool.clone());
+        // A read decision for the owner at audience revision 3, with an optional floor claim.
+        let read = |claim: Option<u64>, limit: u32| {
+            let token = mint(
+                CONTROL_SPACE_DECISION_AUDIENCE,
+                &["thread:read"],
+                false,
+                |claims| {
+                    claims["org_id"] = serde_json::json!(org);
+                    claims["subject_id"] = serde_json::json!(owner);
+                    claims["space_ref"] = serde_json::json!(space);
+                    claims["recipient_audience_revision"] = serde_json::json!(3);
+                    claims["issued_at"] = serde_json::json!(Utc::now().to_rfc3339());
+                    claims["expires_at"] =
+                        serde_json::json!((Utc::now() + chrono::Duration::minutes(2)).to_rfc3339());
+                    if let Some(claim) = claim {
+                        claims["history_floor_revision"] = serde_json::json!(claim);
+                    }
+                },
+                false,
+            );
+            let mut request = Request::new(pb::ListConversationRequest {
+                org_id: org.clone(),
+                thread_id: thread.clone(),
+                limit,
+                space_id: space.to_owned(),
+                space_read_decision_ref: DECISION_REF.to_owned(),
+                space_read_decision_token: token,
+                ..Default::default()
+            });
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::user_for_test(&org, owner));
+            let svc = &svc;
+            async move { svc.list_conversation(request).await.map(Response::into_inner) }
+        };
+        {
+            let _on = EnvRestore::set("SESSION_CORE_SPACE_HISTORY_FLOOR", Some("1"));
+            let unpaged = read(Some(2), 0).await.expect("unpaged read with the floor");
+            assert_eq!(message_ids(&unpaged), [r2, legacy, r3]);
+            let paged = read(Some(2), 2).await.expect("paged read with the floor");
+            assert_eq!(message_ids(&paged), [legacy, r3]);
+            assert!(paged.has_more);
+            // No claim, or the zero that means none: the full history, switch on or not.
+            for claim in [None, Some(0)] {
+                let full = read(claim, 0).await.expect("no floor claim");
+                assert_eq!(message_ids(&full), [r1, r2, legacy, r3], "claim {claim:?}");
+            }
+        }
+        for switch in [None, Some("0"), Some("floor")] {
+            let _off = EnvRestore::set("SESSION_CORE_SPACE_HISTORY_FLOOR", switch);
+            let full = read(Some(2), 0).await.expect("the switch is not on");
+            assert_eq!(message_ids(&full), [r1, r2, legacy, r3], "switch {switch:?}");
+        }
+        crate::space::test_support::clean_space(&pool, &org, space).await;
+    }
+
+    /// WS15-S6: with `SPACE_TIMELINE_CORE` on, a paged read that asks for the first turn gets it
+    /// ahead of the tail, the omitted count between the two is exact, and `has_more` says whether any
+    /// readable turn was left out.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn tail_transcript_returns_first_plus_tail_with_omitted_count_against_real_pg() {
+        let Some(pool) = crate::space::test_support::connect().await else { return };
+        // Read once per process, on the first include_first read.
+        std::env::set_var("SPACE_TIMELINE_CORE", "1");
+        let suffix = new_ulid();
+        let org = format!("conv-tail-{suffix}");
+        let thread = format!("conv-tail-thread-{suffix}");
+        let single = format!("conv-tail-single-{suffix}");
+        let ids = seed_turns(&pool, &org, "tailer", &thread, 7).await;
+        seed_turns(&pool, &org, "tailer", &single, 1).await;
+        let svc = service(pool.clone());
+        let read_first = |thread: &str, limit: u32, before: &str| {
+            let mut request = Request::new(pb::ListConversationRequest {
+                org_id: org.clone(),
+                thread_id: thread.to_owned(),
+                limit,
+                before_message_id: before.to_owned(),
+                include_first: true,
+                ..Default::default()
+            });
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::user_for_test(&org, "tailer"));
+            let svc = &svc;
+            async move { svc.list_conversation(request).await.map(Response::into_inner) }
+        };
+
+        // Seven turns, a page of three: the first turn, then the newest three, three turns omitted.
+        let page = read_first(&thread, 3, "").await.expect("first plus tail");
+        assert_eq!(contents(&page), ["turn 0", "turn 4", "turn 5", "turn 6"]);
+        assert_eq!(page.omitted_before, 3);
+        assert_eq!(page.has_more, page.omitted_before > 0);
+        assert!(page.has_more);
+        // A tail of six leaves only the first turn out of it: it is put back, nothing is omitted.
+        let page = read_first(&thread, 6, "").await.expect("contiguous from the first turn");
+        assert_eq!(
+            contents(&page),
+            ["turn 0", "turn 1", "turn 2", "turn 3", "turn 4", "turn 5", "turn 6"]
+        );
+        assert_eq!(page.omitted_before, 0);
+        assert!(!page.has_more);
+        // A page that already reaches the first turn adds nothing.
+        let page = read_first(&thread, 7, "").await.expect("the whole thread fits");
+        assert_eq!(page.messages.len(), 7);
+        assert_eq!((page.omitted_before, page.has_more), (0, false));
+        let page = read_first(&single, 3, "").await.expect("a one-turn thread");
+        assert_eq!(contents(&page), ["turn 0"]);
+        assert_eq!((page.omitted_before, page.has_more), (0, false));
+        // A cursor pages backwards as before: no first turn is added to it.
+        let page = read_first(&thread, 2, &ids[5]).await.expect("page before turn 5");
+        assert_eq!(contents(&page), ["turn 3", "turn 4"]);
+        assert_eq!((page.omitted_before, page.has_more), (0, true));
+        // The unpaged read ignores the ask.
+        let page = read_first(&thread, 0, "").await.expect("unpaged read");
+        assert_eq!(page.messages.len(), 7);
+        assert_eq!(page.omitted_before, 0);
+
+        cleanup(&pool, &[thread.as_str(), single.as_str()]).await;
     }
 }
 

@@ -621,3 +621,237 @@ async fn a_stale_claim_is_dismissible_and_a_pre_0126_proposal_cannot_be_claimed(
     .expect_err("late confirm");
     assert_eq!(refusal(late), RuleProposalRefusal::Resolved);
 }
+
+// ---- a Space member decides (WS10-S6) ---------------------------------------------------------
+
+fn member_record() -> DecisionRecord<'static> {
+    DecisionRecord {
+        source: "user",
+        scope: "once",
+        audit: false,
+        grant_ttl_secs: 3600,
+        rule_proposed: false,
+        authz_audit: false,
+    }
+}
+
+async fn member_decides(
+    pool: &Pool,
+    id: &str,
+    org: &str,
+    space: &str,
+    status: &str,
+) -> Result<ApprovalDecisionWrite> {
+    decide_approval_as_member(pool, id, org, space, status, "member-2", "ok", &member_record()).await
+}
+
+#[test]
+fn the_member_statement_is_the_owner_statement_with_the_space_predicate_in_place_of_the_owner_one() {
+    let owner = squash(DECIDE_APPROVAL_SQL);
+    let member = squash(DECIDE_APPROVAL_AS_MEMBER_SQL);
+    // The same compare-and-set: only a requested approval moves, and a grant only before it expires.
+    for sql in [&owner, &member] {
+        assert!(
+            sql.contains("WHERE id = $1 AND org_id = $2 AND status = 'requested'"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("AND ($3 <> 'granted' OR expires_at IS NULL OR expires_at > now())"),
+            "{sql}"
+        );
+        assert!(sql.ends_with("RETURNING id"), "{sql}");
+    }
+    assert!(owner.contains("AND ($6::text IS NULL OR user_id = $6)"));
+    assert!(
+        !member.contains("user_id"),
+        "a member is bound to the run's Space, not to the run's owner: {member}"
+    );
+    assert!(member.contains(
+        "AND run_id IN (SELECT id FROM runs WHERE org_id = $2 AND space_id = $6)"
+    ));
+}
+
+#[tokio::test]
+async fn a_member_decision_names_its_space_and_a_decidable_status_before_it_touches_the_database() {
+    // A lazy pool nothing reaches: each refusal comes before the first statement.
+    let pool = PgPoolOptions::new()
+        .connect_lazy("postgresql://unreachable.invalid/session")
+        .expect("lazy pool");
+    let record = member_record();
+    for (space, status, decided_by, message) in [
+        ("", "granted", "member-2", "space_id is required"),
+        ("   ", "granted", "member-2", "space_id is required"),
+        ("space-1", "requested", "member-2", "unsupported approval decision status"),
+        ("space-1", "granted", " ", "decided_by is required"),
+    ] {
+        let refused = decide_approval_as_member(
+            &pool, "appr_1", "org-1", space, status, decided_by, "", &record,
+        )
+        .await
+        .expect_err(message);
+        assert_eq!(
+            refused.to_string(),
+            message,
+            "({space:?}, {status}, {decided_by:?})"
+        );
+    }
+}
+
+/// A requested approval, with a retained descriptor, on a persistent run of a Space thread whose
+/// owner (the requester) is `owner-1`. Returns the org, the Space and the approval id.
+async fn seed_member_approval(pool: &Pool, tag: &str) -> (String, String, String) {
+    use crate::space::test_support::{seed_space_run, seed_space_thread};
+    let sfx = mp_ids::new_ulid();
+    let (org, space) = (format!("am-{tag}-org-{sfx}"), format!("am-{tag}-space-{sfx}"));
+    let (thread, run) = (format!("am-{tag}-t-{sfx}"), format!("am-{tag}-r-{sfx}"));
+    seed_space_thread(pool, &org, &space, &thread, "owner-1").await;
+    seed_space_run(pool, &org, &space, &thread, &run, "queued", "persistent").await;
+    let id = format!("appr_{}", mp_ids::new_ulid());
+    let descriptor = serde_json::json!({
+        "version": 1,
+        "run_id": run,
+        "org_id": org,
+        "user_id": "owner-1",
+        "step_id": "tool_1_call-1",
+        "action_kind": "tool_call",
+        "action_fingerprint": FINGERPRINT,
+        "tool_name": "browser_navigate",
+        "input": {},
+        "permission_mode": "ask",
+    });
+    request_approval(
+        pool,
+        &id,
+        &run,
+        None,
+        "tool_call",
+        "owner-1",
+        &org,
+        "owner-1",
+        "",
+        &serde_json::json!({}),
+        Some(&descriptor),
+        Some(Utc::now() + chrono::Duration::minutes(5)),
+        "",
+    )
+    .await
+    .expect("request approval")
+    .expect("inserted");
+    (org, space, id)
+}
+
+async fn approval_status(pool: &Pool, id: &str) -> String {
+    sqlx::query_scalar("SELECT status FROM approvals WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("approval status")
+}
+
+async fn delivery_rows(pool: &Pool, id: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM approval_delivery_outbox WHERE approval_id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("count deliveries")
+}
+
+async fn clean_member_world(pool: &Pool, org: &str, space: &str) {
+    for sql in [
+        "DELETE FROM approval_delivery_outbox WHERE org_id = $1",
+        "DELETE FROM approval_continuation_descriptors WHERE org_id = $1",
+        "DELETE FROM approvals WHERE org_id = $1",
+    ] {
+        sqlx::query(sql).bind(org).execute(pool).await.ok();
+    }
+    crate::space::test_support::clean_space(pool, org, space).await;
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+async fn a_space_member_decides_a_requested_approval_once_and_the_action_still_runs_as_the_requester()
+{
+    let Some(pool) = scratch_pool().await else {
+        return;
+    };
+    let (org, space, id) = seed_member_approval(&pool, "grant").await;
+
+    // An approval of another Space is not this member's to decide: nothing changes.
+    let elsewhere = member_decides(&pool, &id, &org, "space-elsewhere", "granted")
+        .await
+        .expect("a decision elsewhere is a no-op, not an error");
+    assert!(!elsewhere.updated);
+    assert!(elsewhere.delivery_id.is_none());
+    assert_eq!(approval_status(&pool, &id).await, "requested");
+    assert_eq!(delivery_rows(&pool, &id).await, 0);
+
+    // The member of the run's Space decides it, once.
+    let granted = member_decides(&pool, &id, &org, &space, "granted")
+        .await
+        .expect("the member grants");
+    assert!(granted.updated);
+    let delivery = granted
+        .delivery_id
+        .clone()
+        .expect("a granted approval is queued for delivery");
+    let (decided_by, via): (String, Option<String>) = sqlx::query_as(
+        "SELECT decided_by, metadata->'decision'->>'via' FROM approvals WHERE id = $1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .expect("the decision");
+    assert_eq!(decided_by, "member-2");
+    assert_eq!(via.as_deref(), Some("space_member"));
+    // The delivery row copies the approval's own user: the approved action runs as the requester.
+    let queued_for: String =
+        sqlx::query_scalar("SELECT user_id FROM approval_delivery_outbox WHERE delivery_id = $1")
+            .bind(&delivery)
+            .fetch_one(&pool)
+            .await
+            .expect("the delivery row");
+    assert_eq!(queued_for, "owner-1");
+
+    // The compare-and-set: a second decision, the same or the opposite, updates nothing.
+    let replay = member_decides(&pool, &id, &org, &space, "granted")
+        .await
+        .expect("a replay");
+    assert!(!replay.updated);
+    assert_eq!(
+        replay.delivery_id,
+        Some(delivery),
+        "the replay reads the same delivery"
+    );
+    let late_denial = member_decides(&pool, &id, &org, &space, "denied")
+        .await
+        .expect("a late denial");
+    assert!(!late_denial.updated);
+    assert!(late_denial.delivery_id.is_none());
+    assert_eq!(approval_status(&pool, &id).await, "granted");
+    assert_eq!(delivery_rows(&pool, &id).await, 1);
+    clean_member_world(&pool, &org, &space).await;
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+async fn a_space_members_denial_deletes_the_retained_descriptor_and_queues_no_delivery() {
+    let Some(pool) = scratch_pool().await else {
+        return;
+    };
+    let (org, space, id) = seed_member_approval(&pool, "deny").await;
+    assert_eq!(descriptor_rows(&pool, &id).await, 1, "premise");
+
+    let denied = member_decides(&pool, &id, &org, &space, "denied")
+        .await
+        .expect("the member denies");
+    assert!(denied.updated);
+    assert!(denied.delivery_id.is_none());
+    assert_eq!(approval_status(&pool, &id).await, "denied");
+    assert_eq!(
+        descriptor_rows(&pool, &id).await,
+        0,
+        "a denial keeps no retained call"
+    );
+    assert_eq!(delivery_rows(&pool, &id).await, 0);
+    clean_member_world(&pool, &org, &space).await;
+}

@@ -61,3 +61,66 @@ pub(crate) fn audience_window(read: Option<VerifiedSpaceRead>) -> AudienceWindow
         None => AudienceWindow::default(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The largest claim a signed `history_floor_revision` can carry and still fit a BIGINT.
+    const MAX_FITTING_CLAIM: u64 = i64::MAX.unsigned_abs();
+
+    #[test]
+    fn a_zero_claim_a_switch_off_and_an_over_bigint_claim_yield_no_floor() {
+        // An absent claim (0) is no floor, whatever the switch says.
+        assert_eq!(history_floor_from_claim(0, true), None);
+        assert_eq!(history_floor_from_claim(0, false), None);
+        // Switch off: a real claim is ignored, so the reader sees full history.
+        assert_eq!(history_floor_from_claim(1, false), None);
+        assert_eq!(history_floor_from_claim(7, false), None);
+        assert_eq!(history_floor_from_claim(MAX_FITTING_CLAIM, false), None);
+        assert_eq!(history_floor_from_claim(u64::MAX, false), None);
+        // A claim that does not fit a BIGINT is dropped, never wrapped into a negative floor.
+        assert_eq!(history_floor_from_claim(MAX_FITTING_CLAIM + 1, true), None);
+        assert_eq!(history_floor_from_claim(u64::MAX, true), None);
+    }
+
+    #[test]
+    fn a_claim_that_fits_with_the_switch_on_is_the_floor() {
+        assert_eq!(history_floor_from_claim(1, true), Some(1));
+        assert_eq!(history_floor_from_claim(7, true), Some(7));
+        assert_eq!(history_floor_from_claim(MAX_FITTING_CLAIM, true), Some(i64::MAX));
+    }
+
+    #[test]
+    fn the_floor_switch_is_on_only_for_an_explicit_on_word() {
+        for on in ["1", "true", "on", "yes", "enabled", " TRUE ", "On", "Enabled"] {
+            assert!(history_floor_enabled_from(Some(on)), "{on:?} must turn the floor on");
+        }
+        for off in [
+            "", " ", "0", "false", "off", "no", "disabled", "2", "y", "tru", "enable", "yes please", "null",
+        ] {
+            assert!(!history_floor_enabled_from(Some(off)), "{off:?} must leave the floor off");
+        }
+        assert!(!history_floor_enabled_from(None), "an unset variable is off");
+    }
+
+    #[test]
+    fn the_window_is_unbounded_for_an_owner_read_and_bounded_by_a_verified_one() {
+        assert_eq!(
+            audience_window(None),
+            AudienceWindow { ceiling: None, floor: None },
+            "an owner-bound read has neither bound"
+        );
+        let both = audience_window(Some(VerifiedSpaceRead {
+            recipient_audience_revision: 7,
+            history_floor: Some(3),
+        }));
+        assert_eq!(both, AudienceWindow::new(Some(7), Some(3)));
+        let ceiling_only = audience_window(Some(VerifiedSpaceRead {
+            recipient_audience_revision: 7,
+            history_floor: None,
+        }));
+        assert_eq!(ceiling_only, AudienceWindow::ceiling_only(Some(7)));
+        assert_eq!(ceiling_only.floor, None, "no floor claim: full history up to the ceiling");
+    }
+}
