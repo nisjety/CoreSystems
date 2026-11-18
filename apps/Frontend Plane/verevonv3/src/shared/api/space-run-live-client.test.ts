@@ -6,7 +6,7 @@ import {
   spaceRunLivePath,
   streamSpaceRunLive,
   type RoomRunFrame,
-  type SpaceRunLiveHandlers,
+  type SpaceRunLiveEnd,
 } from './space-run-live-client'
 
 // WS09-S5: the member live view of an agent run. The frames come from the golden that Model Plane's
@@ -140,8 +140,11 @@ describe('streamSpaceRunLive ends (WS09-S5)', () => {
     vi.unstubAllGlobals()
   })
 
-  function handlers(): SpaceRunLiveHandlers & { onFrame: ReturnType<typeof vi.fn>; onEnd: ReturnType<typeof vi.fn> } {
-    return { onFrame: vi.fn(), onEnd: vi.fn() }
+  function handlers() {
+    return {
+      onFrame: vi.fn<(frame: RoomRunFrame, sseId: string | undefined) => void>(),
+      onEnd: vi.fn<(end: SpaceRunLiveEnd) => void>(),
+    }
   }
 
   it('reports a refused attach as failed with its status, code and feature, and sends no frame', async () => {
@@ -187,7 +190,7 @@ describe('streamSpaceRunLive ends (WS09-S5)', () => {
 
     await streamSpaceRunLive('space 1', 'run/1', live)
 
-    expect(String(fetchMock.mock.calls[0]?.[0])).toContain(spaceRunLivePath('space 1', 'run/1'))
+    expect(String((fetchMock.mock.calls[0] as unknown as [string])[0])).toContain(spaceRunLivePath('space 1', 'run/1'))
     expect(spaceRunLivePath('space 1', 'run/1')).toBe('/api/v1/spaces/space%201/runs/run%2F1/live')
     expect(live.onFrame.mock.calls).toEqual([
       [{ type: 'text', offset: 0, delta: 'hi' }, '7'],

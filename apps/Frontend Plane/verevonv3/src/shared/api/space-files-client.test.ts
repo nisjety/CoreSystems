@@ -48,7 +48,7 @@ describe('listSpaceFiles (WS14-S9)', () => {
 
     const page = await listSpaceFiles('space 1')
 
-    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/api/v1/spaces/space%201/files?limit=50')
+    expect(String((fetchMock.mock.calls[0] as unknown as [string])[0])).toContain('/api/v1/spaces/space%201/files?limit=50')
     expect(page.files).toEqual([{
       document_id: 'doc_1',
       file_name: 'plan.pdf',
@@ -71,7 +71,7 @@ describe('listSpaceFiles (WS14-S9)', () => {
 
     const page = await listSpaceFiles('room-1', { limit: 10, cursor: 'cursor-9' })
 
-    const url = new URL(String(fetchMock.mock.calls[0]?.[0]), 'http://localhost')
+    const url = new URL(String((fetchMock.mock.calls[0] as unknown as [string])[0]), 'http://localhost')
     expect(url.pathname).toBe('/api/v1/spaces/room-1/files')
     expect(url.searchParams.get('limit')).toBe('10')
     expect(url.searchParams.get('cursor')).toBe('cursor-9')
@@ -177,7 +177,7 @@ describe('getSpaceFileUpload (WS14-S9)', () => {
 
     const progress = await getSpaceFileUpload('space_1', 'up_1')
 
-    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/api/v1/spaces/space_1/files/uploads/up_1')
+    expect(String((fetchMock.mock.calls[0] as unknown as [string])[0])).toContain('/api/v1/spaces/space_1/files/uploads/up_1')
     expect(progress).toEqual({
       uploadId: 'up_1',
       status: 'completed_with_errors',
@@ -205,7 +205,7 @@ describe('readSpaceFileText (WS14-S9)', () => {
 
     const text = await readSpaceFileText('space_1', 'doc/1', { maxChars: 500 })
 
-    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/api/v1/spaces/space_1/files/doc%2F1/text?max_chars=500')
+    expect(String((fetchMock.mock.calls[0] as unknown as [string])[0])).toContain('/api/v1/spaces/space_1/files/doc%2F1/text?max_chars=500')
     expect(text).toEqual({ documentId: 'doc/1', fileName: 'plan.txt', text: 'Hei', textChars: 3, truncated: true })
   })
 
