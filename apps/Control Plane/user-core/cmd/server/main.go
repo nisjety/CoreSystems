@@ -412,6 +412,9 @@ func main() {
 	// since_join rooms. Strict literal true; off by default; a presentation
 	// rollout control, never an authorization input.
 	spaceRepo.SetHistoryWindowClaim(os.Getenv("SPACE_HISTORY_WINDOW_CLAIM") == "true")
+	// D18: per-member history windows (the invite's don't-share choice and the admin change). Strict literal
+	// true; off by default; gates the writes only, never an authorization input.
+	spaceRepo.SetMemberHistoryWindows(os.Getenv("SPACE_MEMBER_HISTORY_WINDOWS") == "true")
 	spaceRepo.SetSandboxEgressTiers(os.Getenv("SPACE_SANDBOX_EGRESS_TIERS") == "true")
 		// WS17-S4: agent admission (ADR 4). SPACE_AGENT_ADMISSION is off (unset), observe or
 		// enforce. An unknown value stops startup, so a typo never runs another mode. The owner

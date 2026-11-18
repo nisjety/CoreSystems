@@ -182,6 +182,10 @@ func IssueSharedThreadReadDecision(
 	if evidence.HistoryFloorRevision > 0 {
 		decision.HistoryFloorRevision = evidence.HistoryFloorRevision
 	}
+	if evidence.HistoryFloorAt != nil {
+		at := evidence.HistoryFloorAt.UTC()
+		decision.HistoryFloorAt = &at
+	}
 	return decision, nil
 }
 

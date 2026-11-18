@@ -17,9 +17,10 @@ import (
 // caller must hold a live (active or archived) membership of the room under
 // the signed gateway delegation; the organization comes from that delegation.
 // Rows carry ids and closed words only (no names, no content), so a Zero Data
-// Retention organization reads the same feed. The WS04-S11 history floor
-// (history_mode='since_join') is not applied yet: that column is not built, and
-// this feed shows every member the whole interval until it is.
+// Retention organization reads the same feed. The feed applies the same history
+// floor as the transcript (WS04-S11 and D18): a member sees no membership row older
+// than their floor instant (the join for since_join, the date for since_date). A
+// member with no floor sees the whole interval.
 
 // Feed size bounds. A page of the timeline asks for at most MembershipFeedMaxLimit rows and says
 // truncated when the interval held more.
@@ -108,6 +109,15 @@ func (r *Repository) MembershipFeed(ctx context.Context, spaceRef, orgID, userID
 	if err != nil {
 		return nil, err
 	}
+	// The same floor the transcript reads (WS04-S11, D18): no membership row before it.
+	floor, err := r.resolveHistoryFloor(ctx, membership.SpaceRef, membership.SubjectID)
+	if err != nil {
+		return nil, err
+	}
+	var floorAt any
+	if floor.At != nil {
+		floorAt = *floor.At
+	}
 	limit := params.Limit
 	if limit < 1 || limit > MembershipFeedMaxLimit {
 		limit = MembershipFeedDefaultLimit
@@ -127,9 +137,10 @@ func (r *Repository) MembershipFeed(ctx context.Context, spaceRef, orgID, userID
 		  AND org_id=$2
 		  AND ($3::timestamptz IS NULL OR created_at >= $3)
 		  AND ($4::timestamptz IS NULL OR created_at < $4)
+		  AND ($6::timestamptz IS NULL OR created_at >= $6)
 		ORDER BY created_at DESC, event_id DESC
 		LIMIT $5`,
-		membership.SpaceRef, membership.OrgID, after, before, limit+1,
+		membership.SpaceRef, membership.OrgID, after, before, limit+1, floorAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("read Space membership feed: %w", err)

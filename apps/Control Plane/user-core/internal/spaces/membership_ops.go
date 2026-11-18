@@ -158,6 +158,9 @@ type MemberOpResult struct {
 	// Event is set when the operation changed a row. Publish it only when
 	// Action is not role_changed (role-only changes are ledger-only).
 	Event *MembershipChangeEvent
+	// HistoryWindow (D18) is the window the added member reads under, set on a
+	// committed add. nil on every other path.
+	HistoryWindow *MemberHistoryWindowView
 }
 
 // MemberOpRequest carries one writer call. ActorID and OrgID come from the
@@ -170,6 +173,11 @@ type MemberOpRequest struct {
 	Role             string
 	IdempotencyKey   string
 	ExpectedRevision *int64
+	// SharePastConversation (D18) is the invite's choice on an add. nil and true
+	// both mean "share": the room's history_mode decides, exactly as before D18.
+	// false means "don't share": the member joins and sees nothing posted before
+	// their join. Only AddMember reads it.
+	SharePastConversation *bool
 }
 
 type roomOp struct {
@@ -448,6 +456,12 @@ func (r *Repository) AddMember(ctx context.Context, req MemberOpRequest) (*Membe
 	if !eligible {
 		return nil, roomError(422, CodeMemberNotInOrganization, "that person is not an active member of the organization", nil)
 	}
+	// D18: "don't share past conversation" is refused, never silently shared, while the
+	// per-member windows are switched off.
+	notShared := req.SharePastConversation != nil && !*req.SharePastConversation
+	if notShared && !r.MemberHistoryWindowsEnabled() {
+		return nil, roomError(503, CodeMemberHistoryWindowUnavailable, "per-member history windows are not enabled", nil)
+	}
 	if _, err := op.tx.Exec(ctx, `
 		INSERT INTO space_memberships (space_ref, subject_type, subject_id, role, active, granted_by, source)
 		VALUES ($1,'user',$2,$3,TRUE,$4,'member_ops')
@@ -457,8 +471,16 @@ func (r *Repository) AddMember(ctx context.Context, req MemberOpRequest) (*Membe
 		op.space.SpaceRef, req.SubjectID, req.Role, req.ActorID); err != nil {
 		return nil, fmt.Errorf("add Space member: %w", err)
 	}
+	// The invite's window choice commits with the membership row, in this transaction.
+	if err := op.applyInvitedMemberWindow(ctx, r, req.SubjectID, notShared); err != nil {
+		return nil, err
+	}
+	view, err := op.historyWindowView(ctx, req.SubjectID)
+	if err != nil {
+		return nil, err
+	}
 	return op.commitChange(ctx, req, ledgerEntry{Action: ActionMemberAdded, ToRole: req.Role},
-		&MemberOpResult{SpaceRef: op.space.SpaceRef, SubjectID: req.SubjectID, Role: req.Role})
+		&MemberOpResult{SpaceRef: op.space.SpaceRef, SubjectID: req.SubjectID, Role: req.Role, HistoryWindow: &view})
 }
 
 // ChangeMemberRole sets an active human member's role. Set-to-state; the

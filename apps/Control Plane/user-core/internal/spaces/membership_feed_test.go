@@ -199,11 +199,10 @@ func TestMembershipFeedRefusesNonMember(t *testing.T) {
 // PersonalThreadDecisionEvidence), so wiring the floor into this feed is not
 // the minimal fix this slice allows.
 //
-// This test therefore PINS today's actual behavior -- a late joiner sees the
-// room's whole membership history, including events from before they joined
-// -- as a documented gap and a regression tripwire. If the floor is ever
-// wired into MembershipFeed, this test starts failing and must be rewritten
-// to assert the floor is enforced instead of merely recorded.
+// D18 closes that gap: MembershipFeed now reads the same floor the transcript does
+// (resolveHistoryFloor), so a late joiner no longer sees membership rows from before
+// their join. This test asserts the floor is ENFORCED: the row after the join is
+// visible, and the row before it is absent.
 func TestMembershipFeedAppliesHistoryFloor(t *testing.T) {
 	f := newRoomLiveFixture(t)
 	f.historyPolicy(t)
@@ -243,11 +242,7 @@ func TestMembershipFeedAppliesHistoryFloor(t *testing.T) {
 	if !seen[afterJoin] {
 		t.Fatalf("the event after the editor joined must be visible: %+v", feed.Events)
 	}
-	if !seen[beforeJoin] {
-		// If this fires, the gap has been closed: MembershipFeed now applies the
-		// WS04-S11 history floor. Flip this assertion (and the doc comment above)
-		// to require beforeJoin to be ABSENT, instead of pinning the gap.
-		t.Fatalf("GAP CLOSED? the pre-join event is no longer visible to a floored member -- "+
-			"update this test to assert the floor is enforced, not merely pinned: %+v", feed.Events)
+	if seen[beforeJoin] {
+		t.Fatalf("a floored member must not see a membership row from before their join: %+v", feed.Events)
 	}
 }

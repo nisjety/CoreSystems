@@ -121,6 +121,10 @@ type addSpaceMemberBody struct {
 	SubjectID      string `json:"subject_id"`
 	Role           string `json:"role"`
 	IdempotencyKey string `json:"idempotency_key"`
+	// SharePastConversation (D18) is the invite's choice. Absent or true shares the
+	// past (the room's history_mode decides, exactly as before D18); false joins the
+	// member without the conversation posted before their join.
+	SharePastConversation *bool `json:"share_past_conversation"`
 }
 
 type changeSpaceMemberRoleBody struct {
@@ -143,12 +147,13 @@ func (s *Server) addSpaceMember(c *gin.Context) {
 		return
 	}
 	result, err := s.spaceRepo.AddMember(c.Request.Context(), spaces.MemberOpRequest{
-		SpaceRef:       c.Param("space_ref"),
-		OrgID:          c.GetString("org_id"),
-		ActorID:        c.GetString("user_id"),
-		SubjectID:      body.SubjectID,
-		Role:           body.Role,
-		IdempotencyKey: body.IdempotencyKey,
+		SpaceRef:              c.Param("space_ref"),
+		OrgID:                 c.GetString("org_id"),
+		ActorID:               c.GetString("user_id"),
+		SubjectID:             body.SubjectID,
+		Role:                  body.Role,
+		IdempotencyKey:        body.IdempotencyKey,
+		SharePastConversation: body.SharePastConversation,
 	})
 	if err != nil {
 		writeRoomError(c, err)
@@ -156,7 +161,7 @@ func (s *Server) addSpaceMember(c *gin.Context) {
 	}
 	s.publishMembershipOpEvent(c, result)
 	c.Header("Cache-Control", "no-store")
-	c.JSON(http.StatusOK, gin.H{"data": gin.H{
+	data := gin.H{
 		"space_ref":           result.SpaceRef,
 		"subject_id":          result.SubjectID,
 		"role":                result.Role,
@@ -165,7 +170,12 @@ func (s *Server) addSpaceMember(c *gin.Context) {
 		"membership_revision": result.MembershipRevision,
 		"authority_revision":  result.AuthorityRevision,
 		"member_count":        result.MemberCount,
-	}})
+	}
+	// history_window (D18) is present on a committed add: the window the member reads under.
+	if result.HistoryWindow != nil {
+		data["history_window"] = result.HistoryWindow
+	}
+	c.JSON(http.StatusOK, gin.H{"data": data})
 }
 
 func (s *Server) changeSpaceMemberRole(c *gin.Context) {

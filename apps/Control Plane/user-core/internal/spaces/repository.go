@@ -44,8 +44,12 @@ type Repository struct {
 	// dmRegistration is the SPACE_DM_REGISTRATION rollout switch (WS12-S1).
 	dmRegistration bool
 	// historyWindowClaim is the SPACE_HISTORY_WINDOW_CLAIM rollout switch
-	// (WS04-S11). Off: no read decision carries a history floor.
+	// (WS04-S11). Off: no room-level since_join floor is signed.
 	historyWindowClaim bool
+	// memberHistoryWindows is the SPACE_MEMBER_HISTORY_WINDOWS rollout switch (D18).
+	// Off: the invite's don't-share choice and the admin change are refused; stored
+	// rows keep being enforced.
+	memberHistoryWindows bool
 	// sandboxEgressTiers is the SPACE_SANDBOX_EGRESS_TIERS rollout switch
 	// (EP-9 E2). Off: the capability decision keeps the v1 form and the
 	// egress ceiling columns are neither read nor written.
@@ -1370,6 +1374,11 @@ func (r *Repository) ResolveSharedCanvasDecisionEvidence(ctx context.Context, sp
 		if err := r.applyHistoryFloor(ctx, &evidence); err != nil {
 			return PersonalThreadDecisionEvidence{}, err
 		}
+		// D18: canvas content is not windowed by time yet, so a per-member timestamp
+		// floor is refused here rather than read as the whole canvas.
+		if evidence.HistoryFloorAt != nil {
+			return PersonalThreadDecisionEvidence{}, ErrCanvasHistoryFloorUnsupported
+		}
 	}
 	evidence.ResourceAuthorizationRef = fmt.Sprintf("control:%s:canvas:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
 	if err := evidence.ValidateForCanvas(write); err != nil {
@@ -1638,7 +1647,15 @@ func (r *Repository) ApplyCanvasRunActionFloor(ctx context.Context, evidence *Pe
 	if evidence == nil || !evidence.CanvasEntitled {
 		return nil
 	}
-	return r.applyHistoryFloor(ctx, evidence)
+	if err := r.applyHistoryFloor(ctx, evidence); err != nil {
+		return err
+	}
+	// D18: a per-member timestamp floor is refused on a canvas run action, as a revision
+	// floor is (canvas content is not windowed by time yet).
+	if evidence.HistoryFloorAt != nil {
+		return ErrCanvasHistoryFloorUnsupported
+	}
+	return nil
 }
 
 func (r *Repository) resolvePersonalDecisionEvidence(ctx context.Context, spaceRef, orgID, subjectID string) (PersonalThreadDecisionEvidence, error) {

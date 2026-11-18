@@ -93,6 +93,13 @@ type Decision struct {
 	// with the rest of the decision and is in no payload digest. A consumer that
 	// does not know it shows full history (presentation rule, never authority).
 	HistoryFloorRevision int64 `json:"history_floor_revision,omitempty"`
+	// HistoryFloorAt (D18) is the instant a per-member history window starts at: a
+	// since_date window, or a per-member since_join window's join. It is present only
+	// on a shared thread-read decision whose member has such a row, and it is signed
+	// with the rest of the decision, in no payload digest. A consumer that does not
+	// know it shows full history (presentation rule, never authority); a consumer
+	// that knows it must hide every row older than it.
+	HistoryFloorAt *time.Time `json:"history_floor_at,omitempty"`
 	// ContractDigest and ContractExpiresAt bind a scheduled step to its stored
 	// consent contract. Both are omitted on every decision issued without one.
 	ContractDigest    string     `json:"contract_digest,omitempty"`

@@ -52,21 +52,26 @@ func TestHistoryWindowClaimDefaultsOff(t *testing.T) {
 	}
 }
 
-func TestApplyHistoryFloorIsANoOpWithTheSwitchOffOrNoEvidence(t *testing.T) {
-	// No database is configured: any query would panic, so this proves the
-	// switch-off and nil-evidence paths never reach the pool.
+// D18 changed this contract. The floor is always resolved, because a per-member row is
+// enforced whatever SPACE_HISTORY_WINDOW_CLAIM says, so a repository without a database cannot
+// answer it. It must fail closed, never read as "no floor". Nil evidence has nothing to resolve.
+func TestApplyHistoryFloorFailsClosedWithoutADatabaseAndSkipsNilEvidence(t *testing.T) {
+	// No database is configured: any query would panic, so the error must come before the pool.
 	repo := &Repository{}
 	evidence := validSharedThreadReadEvidence()
-	if err := repo.applyHistoryFloor(t.Context(), &evidence); err != nil || evidence.HistoryFloorRevision != 0 {
-		t.Fatalf("switch off must not touch the evidence: %d %v", evidence.HistoryFloorRevision, err)
+	if err := repo.applyHistoryFloor(t.Context(), &evidence); err == nil {
+		t.Fatal("a repository without a database must refuse to resolve the floor, never read it as full history")
+	}
+	if evidence.HistoryFloorRevision != 0 || evidence.HistoryFloorAt != nil {
+		t.Fatalf("an unresolved floor must leave the evidence untouched: %d %v", evidence.HistoryFloorRevision, evidence.HistoryFloorAt)
 	}
 	repo.SetHistoryWindowClaim(true)
 	if err := repo.applyHistoryFloor(t.Context(), nil); err != nil {
 		t.Fatalf("nil evidence: %v", err)
 	}
 	var nilRepo *Repository
-	if err := nilRepo.applyHistoryFloor(t.Context(), &evidence); err != nil {
-		t.Fatalf("nil repository: %v", err)
+	if err := nilRepo.applyHistoryFloor(t.Context(), &evidence); err == nil {
+		t.Fatal("a nil repository must fail closed too")
 	}
 }
 

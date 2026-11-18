@@ -10,6 +10,7 @@ import (
 // they cannot re-scope an existing route).
 //
 //	any method on /api/v1/internal/spaces/{ref}/members[/{id}] -> spaces:membership:act
+//	any method on /api/v1/internal/spaces/{ref}/members/{id}/history-window (D18) -> spaces:membership:act
 //	GET /api/v1/internal/spaces/{ref}/audience-candidates      -> spaces:membership:read
 //
 // spaces:membership:act is registered as a delegated scope: a service
@@ -26,7 +27,8 @@ func init() {
 		parts := strings.Split(rest, "/")
 		switch {
 		case len(parts) == 2 && parts[1] == "members",
-			len(parts) == 3 && parts[1] == "members":
+			len(parts) == 3 && parts[1] == "members",
+			len(parts) == 4 && parts[1] == "members" && parts[3] == "history-window":
 			return spaceMembershipActScope, true
 		case len(parts) == 2 && parts[1] == "audience-candidates" && method == http.MethodGet:
 			return spaceMembershipReadScope, true

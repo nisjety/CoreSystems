@@ -126,6 +126,11 @@ type PersonalThreadDecisionEvidence struct {
 	// only while SPACE_HISTORY_WINDOW_CLAIM is on. A presentation rule for a thread
 	// read, never authority; a canvas run action refuses a floor instead (WS19-S9).
 	HistoryFloorRevision int64
+	// HistoryFloorAt (D18) is the instant a per-member history window starts at, set only
+	// for a per-member row (see applyHistoryFloor). nil means no timestamp floor. A canvas
+	// read or run action refuses it (ErrCanvasHistoryFloorUnsupported) until canvas
+	// content is windowed by time.
+	HistoryFloorAt *time.Time
 	// WS12-S5: the message-lifecycle bits and the org's original-text rule,
 	// filled only by the thread-revise resolvers.
 	MessageReviseEntitled   bool

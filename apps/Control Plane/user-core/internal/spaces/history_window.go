@@ -2,11 +2,7 @@ package spaces
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"strings"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // History window (WS04-S11). A room's history_mode is "full" (default: every
@@ -30,8 +26,9 @@ func ValidHistoryMode(v string) bool {
 }
 
 // SetHistoryWindowClaim turns the SPACE_HISTORY_WINDOW_CLAIM switch on or off.
-// Off: no thread-read decision carries a floor, whatever a room's history_mode.
-// It is a rollout control only, never an authorization input.
+// Off: a since_join ROOM signs no floor, whatever its history_mode. A per-member
+// window (member_history_window.go, D18) is enforced whatever this switch says: a
+// hide must never depend on a rollout control. It is never an authorization input.
 func (r *Repository) SetHistoryWindowClaim(enabled bool) {
 	r.historyWindowClaim = enabled
 }
@@ -61,33 +58,24 @@ const historyFloorQuery = `
 		  )
 	) gap`
 
-// applyHistoryFloor fills evidence.HistoryFloorRevision for a since_join room
-// when the claim switch is on. It reads on the same pool as the evidence
-// resolver; a database error fails the whole resolution (the caller maps it to
-// the same unavailable response as any other resolver failure) rather than
-// silently dropping the window.
+// applyHistoryFloor fills the history floor a thread read or a canvas read carries.
+// It delegates to resolveHistoryFloor, the one derivation the transcript, the
+// canvas and the membership feed share (D18). The revision floor is what WS04-S11
+// always signed (a since_join room, behind the claim switch). The timestamp floor
+// is set only for a per-member row, so the signed decision gains it additively and
+// Session Core enforces it whatever its own switch says. A database error, or a
+// row that cannot be read, fails the resolution: it is never read as full history.
 func (r *Repository) applyHistoryFloor(ctx context.Context, evidence *PersonalThreadDecisionEvidence) error {
-	if r == nil || !r.historyWindowClaim || evidence == nil {
+	if evidence == nil {
 		return nil
 	}
-	spaceRef := evidence.Membership.SpaceRef
-	var mode string
-	if err := r.db.Pool.QueryRow(ctx,
-		`SELECT history_mode FROM registered_spaces WHERE space_ref=$1`, spaceRef).Scan(&mode); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-		return fmt.Errorf("read Space history mode: %w", err)
+	floor, err := r.resolveHistoryFloor(ctx, evidence.Membership.SpaceRef, evidence.Membership.SubjectID)
+	if err != nil {
+		return err
 	}
-	if mode != HistoryModeSinceJoin {
-		return nil
-	}
-	var floor *int64
-	if err := r.db.Pool.QueryRow(ctx, historyFloorQuery, spaceRef, evidence.Membership.SubjectID).Scan(&floor); err != nil {
-		return fmt.Errorf("derive Space history floor: %w", err)
-	}
-	if floor != nil && *floor > 0 {
-		evidence.HistoryFloorRevision = *floor
+	evidence.HistoryFloorRevision = floor.Revision
+	if floor.Source == historyFloorSourceMember {
+		evidence.HistoryFloorAt = floor.At
 	}
 	return nil
 }
