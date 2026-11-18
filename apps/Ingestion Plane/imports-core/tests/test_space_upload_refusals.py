@@ -96,11 +96,6 @@ def test_a_malformed_or_wrong_subject_decision_is_403_decision_invalid(monkeypat
     assert recorder.create_calls == []
 
 
-@pytest.mark.skip(
-    reason="DEPTH-S6-1: verify_space_import_ingress_decision lets cryptography's InvalidSignature "
-    "escape (it is not a ValueError), so a decision with a well-formed but wrong signature is an "
-    "unhandled 500 instead of the typed 403 decision_invalid. Fail-closed but the wrong envelope."
-)
 def test_a_decision_with_a_wrong_signature_is_403_decision_invalid(monkeypatch) -> None:
     token = decision_token(monkeypatch)
     client, recorder = install(monkeypatch)

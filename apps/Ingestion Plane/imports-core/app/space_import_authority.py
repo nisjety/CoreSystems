@@ -12,6 +12,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from app.auth_middleware import AuthContext
@@ -94,7 +95,7 @@ def verify_space_import_ingress_decision(token: str, auth: AuthContext) -> Space
     try:
         key.verify(signature, ".".join(parts[:3]).encode("utf-8"))
         claims = json.loads(payload)
-    except (ValueError, json.JSONDecodeError) as exc:
+    except (InvalidSignature, ValueError, json.JSONDecodeError) as exc:
         raise SpaceImportIngressDenied("Space import decision signature is invalid") from exc
     if not isinstance(claims, dict):
         raise SpaceImportIngressDenied("Space import decision claims are invalid")
