@@ -5,7 +5,7 @@ import type { ChatArtifact, QueuedInput } from '@/features/chat/components/chat-
 import { listAvailableSkills, MAX_PICKED_SKILLS, type Skill } from '@/shared/api/skills-client'
 import { Paperclip, WandSparkles } from '@/shared/icons'
 import { ATTACHMENT_ACCEPT, ATTACHMENT_MAX_IMAGES, isImageAttachment, type AttachmentPolicyContext, visionAsPartsEnabled } from '@/features/chat/lib/attachment-policy'
-import { isLocalRetentionAllowed } from '@/features/chat/lib/chat-retention'
+import { isLocalRetentionAllowed, subscribeLocalRetention } from '@/features/chat/lib/chat-retention'
 import { chatLimitNoticesEnabled, limitNotice } from '@/features/chat/lib/limit-notices'
 import { getAttachmentPolicy, modelSupportsVision, type ModelInfo } from '@/shared/api/chat-client'
 import {
@@ -308,9 +308,14 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     spaceRoomFeatureWithDevOverride('turn_attachments', import.meta.env.VITE_SPACE_TURN_ATTACHMENTS) ||
     roomFilesFlag('turn_attachments')
   // WS14-S9: the member's choice to also keep this turn's text files in the room's Files tab.
-  // Per message, never remembered: it resets after every send. Offered only where the library is on.
+  // Per message, never remembered: it resets after every send. Offered only where the library is on, and never under
+  // zero data retention: a durable copy of a text file is exactly what that posture refuses.
   const [keepInRoom, setKeepInRoom] = createSignal(false)
-  const keepOffered = () => roomFilesDurableEnabled() && canAddRoomFiles(props.viewerRole?.())
+  // The workspace's verdict as a signal, so a switch made while the box is open takes the choice away at once.
+  const [retentionAllowed, setRetentionAllowed] = createSignal(isLocalRetentionAllowed())
+  onCleanup(subscribeLocalRetention((allowed) => setRetentionAllowed(allowed)))
+  const keepOffered = () =>
+    roomFilesDurableEnabled() && canAddRoomFiles(props.viewerRole?.()) && !zdrRefused() && retentionAllowed()
   // WS17-S8: the member's choice to use their own personal memory for this one room turn. A per-turn opt-in:
   // it is cleared with the send, and it does not carry over to another room. Offered only where the room's
   // `features.personal_memory_turn` is on (see personalMemoryOffered).

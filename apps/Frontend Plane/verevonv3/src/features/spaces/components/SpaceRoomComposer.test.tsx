@@ -2047,6 +2047,26 @@ describe('SpaceRoomComposer — keep text files in the room (WS14-S9)', () => {
     expect(screen.queryByRole('checkbox', { name: /Behold tekstfiler i rommet/ })).toBeNull()
   })
 
+  it('is not offered under zero data retention, and a switch while the box is open takes it away', () => {
+    publishRoomFeatures({ room_files: { turn_attachments: true, durable: true } })
+    renderRoom({ viewerRole: 'editor' })
+    pickRoomFiles([notes()])
+    expect(keepChoice()).toBeTruthy()
+    applyServerRetention(true)
+    flush()
+    expect(screen.getByText('Notat.txt')).toBeTruthy()
+    expect(screen.queryByRole('checkbox', { name: /Behold tekstfiler i rommet/ })).toBeNull()
+  })
+
+  it('is not offered when the workspace is already zero retention as the room opens', () => {
+    publishRoomFeatures({ room_files: { turn_attachments: true, durable: true } })
+    applyServerRetention(true)
+    renderRoom({ viewerRole: 'editor' })
+    pickRoomFiles([notes()])
+    expect(screen.getByText('Notat.txt')).toBeTruthy()
+    expect(screen.queryByRole('checkbox', { name: /Behold tekstfiler i rommet/ })).toBeNull()
+  })
+
   it('uploads exactly the chip files it was chosen for, beside the send', async () => {
     publishRoomFeatures({ room_files: { turn_attachments: true, durable: true } })
     const stream = scriptedStream()
