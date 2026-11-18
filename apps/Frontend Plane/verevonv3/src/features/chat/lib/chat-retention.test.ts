@@ -19,6 +19,7 @@ import {
 import { readClientValue, writeClientJson } from '@/shared/session/client-storage'
 import { homeDraftStorageKey, readHomeDraft, writeHomeDraft } from '@/shared/session/home-draft-storage'
 import { searchSnapshotStorageKey, webHistoryStorageKey } from '@/shared/session/home-local-content'
+import { RECENT_SEARCHES_KEY } from '@/features/spaces/lib/space-search-state'
 
 function createStorageMock(): Storage {
   const entries = new Map<string, string>()
@@ -93,6 +94,21 @@ describe('chat retention', () => {
     expect(isLocalRetentionAllowed()).toBe(false)
     expect(readChatThreadHistory()).toEqual([])
     expect(readChatThreadTranscript('thread-1')).toBeNull()
+  })
+
+  /**
+   * The room search's recent queries are typed text kept in browser storage. Its own subscription clears them only
+   * once search is mounted, so a room that was never opened kept them past the switch.
+   */
+  it('purges the room search recent queries on a ZDR posture, whether or not search is mounted', () => {
+    writeClientJson(RECENT_SEARCHES_KEY, ['kontraktsvilkår'])
+    expect(readClientValue(RECENT_SEARCHES_KEY)).not.toBeNull()
+
+    applyServerRetention(true)
+
+    expect(readClientValue(RECENT_SEARCHES_KEY)).toBeNull()
+    expect(window.localStorage.getItem(RECENT_SEARCHES_KEY)).toBeNull()
+    expect(window.sessionStorage.getItem(RECENT_SEARCHES_KEY)).toBeNull()
   })
 
   it('restores local retention when the posture is turned back off', () => {

@@ -33,6 +33,7 @@
  * the server cannot reach on its own.
  */
 
+import { removeClientValuesWithPrefix } from '@/shared/session/client-storage'
 import { clearHomeLocalContent } from '@/shared/session/home-local-content'
 import {
   clearChatThreadHistory,
@@ -62,6 +63,13 @@ let retentionAllowed = true
  * being typed into.
  */
 const RECONCILE_GRACE_MS = 5 * 60 * 1000
+
+/**
+ * Space-owned browser storage that holds text a person typed: the room search's recent queries. Named here and
+ * not imported from features/spaces, because the room search imports this module. `RECENT_SEARCHES_KEY` in
+ * lib/space-search-state.ts is the key under this prefix; chat-retention.test.ts asserts the two agree.
+ */
+const SPACE_TYPED_TEXT_KEY_PREFIX = 'verevon.space.search.recent.'
 
 /** Whether the SPA may write conversation content to local storage. */
 export function isLocalRetentionAllowed(): boolean {
@@ -101,6 +109,9 @@ export function applyServerRetention(zdr: boolean | undefined): void {
     // Home keeps its own local copies of what a person typed or searched for
     // (unsent draft, saved search, Nett history). The same verdict applies.
     clearHomeLocalContent()
+    // The room search keeps its recent queries in storage too. Its own subscription clears them only once search
+    // is mounted, so a room that was never opened kept them across the switch; clear them here.
+    removeClientValuesWithPrefix(SPACE_TYPED_TEXT_KEY_PREFIX)
   }
   for (const listener of [...listeners]) {
     try {
