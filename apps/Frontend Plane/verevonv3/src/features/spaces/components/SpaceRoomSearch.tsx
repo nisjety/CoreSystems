@@ -85,7 +85,10 @@ export function SpaceRoomSearch(props: SpaceRoomSearchProps) {
 
   const openSearch = (query?: string) => {
     if (!isOpen) {
-      returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+      // The element that had focus when the search opened, unless that is the page itself (a click on a button
+      // does not always focus it): then the trigger takes focus back when the search closes.
+      const active = document.activeElement
+      returnFocus = active instanceof HTMLElement && active !== document.body ? active : null
       isOpen = true
       setOpen(true)
       setRecents(readRecentSearches())
@@ -128,7 +131,7 @@ export function SpaceRoomSearch(props: SpaceRoomSearchProps) {
       },
     ])
     const disposeOpener = setMessageSearchOpener((query) => openSearch(query))
-    const disposeRetention = watchRecentSearchRetention()
+    const disposeRetention = watchRecentSearchRetention(() => setRecents([]))
     return () => {
       disposeCommands()
       disposeOpener()

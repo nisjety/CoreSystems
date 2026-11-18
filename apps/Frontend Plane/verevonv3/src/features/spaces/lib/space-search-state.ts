@@ -162,10 +162,16 @@ export function forgetRecentSearches(): void {
   removeStoredRecents()
 }
 
-/** While mounted, a retention denial removes the stored copy at once. Returns the disposer. */
-export function watchRecentSearchRetention(): () => void {
+/**
+ * While mounted, a retention denial removes the stored copy at once, and calls `onDenied` so a list already
+ * on screen is emptied too. Returns the disposer.
+ */
+export function watchRecentSearchRetention(onDenied?: () => void): () => void {
   return subscribeLocalRetention((allowed) => {
-    if (!allowed) removeStoredRecents()
+    if (allowed) return
+    // Forgets the in-memory list too, so a later read does not bring the recents back on screen.
+    forgetRecentSearches()
+    onDenied?.()
   })
 }
 
