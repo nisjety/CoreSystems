@@ -81,7 +81,7 @@ const SHORTENED_MARKER: &str =
 /// `true` does: no trimming and no case folding, so `1`, `on`, `yes` and `enabled` do not.
 #[must_use]
 pub(crate) fn parse_enabled(raw: Option<&str>) -> bool {
-    raw == Some("true")
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// Whether this deployment verifies writes in the loop right now.

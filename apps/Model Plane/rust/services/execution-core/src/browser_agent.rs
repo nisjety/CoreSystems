@@ -1531,7 +1531,7 @@ pub async fn run_browser_agent_loop(
     let Some(client) = client else {
         plan.status = PlanStatus::Failed;
         let summary =
-            "browser agent unavailable: set QUARRY_BROWSER_AGENT_ENABLED=1 and QUARRY_EDGE_URL"
+            "browser agent unavailable: set QUARRY_BROWSER_AGENT_ENABLED=true and QUARRY_EDGE_URL"
                 .to_owned();
         warn!(plan_id = %plan.config.plan_id, "{summary}");
         return BrowserAgentLoopResult {

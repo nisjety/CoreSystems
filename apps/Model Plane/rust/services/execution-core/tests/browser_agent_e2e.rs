@@ -10,7 +10,7 @@
 //! # quarry-edge must be built WITH the chromiumoxide driver and reachable,
 //! # with a real Chrome/Chromium available to it. execution-core must have a
 //! # registered Auth Core service principal for the `quarry` audience.
-//! QUARRY_BROWSER_AGENT_ENABLED=1 \
+//! QUARRY_BROWSER_AGENT_ENABLED=true \
 //! QUARRY_EDGE_URL=https://quarry-edge.internal \
 //! AUTH_CORE_URL=http://auth-core:3011 \
 //! EXECUTION_CORE_SERVICE_API_KEY=<credential> \
@@ -49,11 +49,11 @@ use std::time::{Duration, Instant};
 #[ignore = "requires a live quarry-edge (chromiumoxide) + inference-core stack; see file header"]
 async fn browser_agent_drives_real_quarry_loop() {
     // Real Quarry agent client from env — panics if the operator forgot to set
-    // QUARRY_BROWSER_AGENT_ENABLED=1 + QUARRY_EDGE_URL (the whole point of the
+    // QUARRY_BROWSER_AGENT_ENABLED=true + QUARRY_EDGE_URL (the whole point of the
     // test is to exercise the real wire path).
     let client = QuarryAgentClient::from_env()
         .expect("Auth Core service-principal configuration must be valid")
-        .expect("set QUARRY_BROWSER_AGENT_ENABLED=1 and QUARRY_EDGE_URL to run the E2E test");
+        .expect("set QUARRY_BROWSER_AGENT_ENABLED=true and QUARRY_EDGE_URL to run the E2E test");
 
     // Optional real LLM planner. When unset, the loop uses the deterministic
     // planner (repeated Observe) — still a real Quarry round-trip per step.
@@ -1044,13 +1044,13 @@ async fn a_session_failure_never_carries_a_cookie_a_path_or_an_id() {
 /// 1. Start a person's run in the UI (or `POST /v1/agent/runs` with a USER
 ///    token) and note its Quarry run id.
 /// 2. Derive an attach grant for it with the user's bearer (the gateway does
-///    this behind `MODEL_GATEWAY_BROWSER_ATTACH=on`; `DeriveRunGrant
+///    this behind `MODEL_GATEWAY_BROWSER_ATTACH=true`; `DeriveRunGrant
 ///    purpose=attach resource_id=<run id>` on the broker).
 /// 3. quarry-edge must run with `QUARRY_EDGE__ATTACH=on` and a driver that has
 ///    background tabs, tab pinning and per-tab egress.
 ///
 /// ```bash
-/// QUARRY_BROWSER_AGENT_ENABLED=1 QUARRY_EDGE_URL=... AUTH_CORE_URL=... \
+/// QUARRY_BROWSER_AGENT_ENABLED=true QUARRY_EDGE_URL=... AUTH_CORE_URL=... \
 /// EXECUTION_CORE_SERVICE_API_KEY=<credential> E2E_ORG_ID=<org> \
 /// E2E_ATTACH_SESSION_RUN_ID=<the person's Quarry run id> \
 /// E2E_ATTACH_GRANT_ID=<derived attach grant> \
@@ -1068,7 +1068,7 @@ async fn a_session_failure_never_carries_a_cookie_a_path_or_an_id() {
 async fn browser_agent_attaches_to_a_live_person_run() {
     let client = QuarryAgentClient::from_env()
         .expect("Auth Core service-principal configuration must be valid")
-        .expect("set QUARRY_BROWSER_AGENT_ENABLED=1 and QUARRY_EDGE_URL to run the E2E test");
+        .expect("set QUARRY_BROWSER_AGENT_ENABLED=true and QUARRY_EDGE_URL to run the E2E test");
     let session_run_id =
         std::env::var("E2E_ATTACH_SESSION_RUN_ID").expect("set E2E_ATTACH_SESSION_RUN_ID");
     let grant_id = std::env::var("E2E_ATTACH_GRANT_ID").expect("set E2E_ATTACH_GRANT_ID");

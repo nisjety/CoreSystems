@@ -1920,11 +1920,13 @@ const MAX_TARGET_CHECKS: usize = 32;
 /// text (F-t3-074), each as its kind and value: the host of a web address (`web_fetch`,
 /// `browser.open`); the domain of every recipient of a mail send, in `to`, `cc` and `bcc`
 /// (`execute_provider_action`); and each command a shell runs (`command_names`; `shell`, and
-/// `code_interpreter` and `process_start` in `sh`): the arguments a POSIX shell is given after `-c`, or the withheld value where it reads
-/// its commands from a script file or its standard input (`shell_script_arguments`), the withheld value for a command word that is a
+/// `code_interpreter` and `process_start` in `sh`): the arguments a shell is given after `-c`, or the withheld value where it reads
+/// its commands from a script file or its standard input, or has no command string (`shell_script_arguments`), the withheld value for a command word that is a
 /// path outside the system binary directories, which may be a script (`is_system_binary_path`), the command a wrapper program
 /// runs (`env`, `sudo`, `xargs`, `builtin` and the others in `WRAPPERS`, and the list of a zsh `repeat`, read by
-/// `list_names`), the command of each `find -exec` predicate, the withheld command of a program in
+/// `list_names`), the command of each `find -exec` predicate, the command that an option or address of an
+/// `OPTION_VALUE_COMMANDS` program gives (`option_value_command_names`), the withheld value of an argument of one that
+/// holds an expansion (`argument_may_hide_an_option`), the withheld command of a program in
 /// `WITHHELD_COMMANDS`, the text `eval` runs, the text a `trap` action or an `alias` value runs, and the withheld value
 /// where a call of an alias may run the words it is given (`alias_value_hides_a_command`). Empty for every
 /// other tool, and for an input that does not read. Each value is named once, in the order it appears;
@@ -1958,14 +1960,22 @@ pub fn derive_targets(tool_name: &str, tool_input: &str) -> Vec<(&'static str, S
         ),
         "execute_provider_action" => ("recipient", mail_recipient_domains(&input)),
         "shell" => ("command_prefix", shell_program_commands(&input)),
-        // A Python program names no command; only the `sh` language runs one. `process_start` takes the same two
-        // languages and runs its `sh` code as `code_interpreter` does, so it is read the same way. Its `args` are the
+        // A Python program names no command; only the `sh` language runs one. `code_interpreter` lowercases its language,
+        // so `SH` runs `sh` there. `process_start` runs only the trimmed language `sh`, exactly, and refuses any other
+        // spelling before it starts anything (process_tools.rs), so only that spelling is read for it. Its `args` are the
         // script's positional parameters, which name nothing here.
         "code_interpreter" | "process_start" => {
             let is_sh = input
                 .get("language")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|language| language.trim().eq_ignore_ascii_case("sh"));
+                .is_some_and(|language| {
+                    let language = language.trim();
+                    if tool_name == "process_start" {
+                        language == "sh"
+                    } else {
+                        language.eq_ignore_ascii_case("sh")
+                    }
+                });
             if !is_sh {
                 return Vec::new();
             }
@@ -2064,7 +2074,9 @@ fn recipient_domains(recipient: &str) -> Option<Vec<String>> {
 /// that one reading hides is named by the other. The text is also cut where `quote_aware_segments` cuts it, which
 /// a separator inside quotes does not, so a quoted script reaches `command_words_names` whole and the reading of
 /// that script names the commands it runs. Each command substitution is lifted out and read as shell text of its
-/// own (`lift_substitutions`), so the quotes inside it cannot hide the commands around it. A text that ends inside
+/// own (`lift_substitutions`), so the quotes inside it cannot hide the commands around it. A zsh special hash's array
+/// (`aliases=(...)`, `functions+=(...)`, `commands=(...)`) is lifted out too, and each element is read (`lift_zsh_hash_arrays`).
+/// A text that ends inside
 /// an open quote or substitution withholds its value, and so does one the readings part on: an ANSI-C string outside
 /// quotes (`quote_aware_segments`), a cut segment that the quote-aware reading does not start where it starts
 /// (`cut_segment_out_of_step`), and a substitution whose body holds a `case` word (`holds_case_word`).
@@ -2080,16 +2092,21 @@ fn command_prefixes_at(text: &str, depth: usize) -> Vec<String> {
         return vec![String::new()];
     }
     let text = read_expansions_as_substitutions(text);
-    let (text, bodies, unclosed) = lift_substitutions(&text);
+    let (text, mut bodies, mut hash_elements, unclosed) = lift_substitutions(&text);
     let joined = join_line_continuations(&text);
+    // The joined text is lifted too, where a line continuation changes it: the joining can make a `$(` or a name's `=(`
+    // that the text as written does not show, so its substitutions and arrays are read as they are in the joined text.
+    let joined_lifted = (joined != text).then(|| lift_substitutions(&joined));
     let mut segments = shell_segments(&text);
     let (aware, aware_open) = quote_aware_segments(&text);
     let mut withheld = unclosed || aware_open || cut_segment_out_of_step(&text, &aware);
     segments.extend(aware);
-    if joined != text {
-        segments.extend(shell_segments(&joined));
-        let (aware, joined_open) = quote_aware_segments(&joined);
-        withheld |= joined_open || cut_segment_out_of_step(&joined, &aware);
+    if let Some((lifted, joined_bodies, joined_elements, joined_open)) = &joined_lifted {
+        bodies.extend(joined_bodies.iter().copied());
+        hash_elements.extend(joined_elements.iter().cloned());
+        segments.extend(shell_segments(lifted));
+        let (aware, joined_quote_open) = quote_aware_segments(lifted);
+        withheld |= *joined_open || joined_quote_open || cut_segment_out_of_step(lifted, &aware);
         segments.extend(aware);
     }
     withheld |= bodies.iter().any(|body| holds_case_word(body));
@@ -2106,6 +2123,11 @@ fn command_prefixes_at(text: &str, depth: usize) -> Vec<String> {
         bodies
             .into_iter()
             .flat_map(|body| command_prefixes_at(body, depth + 1)),
+    );
+    names.extend(
+        hash_elements
+            .into_iter()
+            .flat_map(|(kind, element)| hash_element_names(kind, &element, depth)),
     );
     distinct(names)
 }
@@ -2169,7 +2191,7 @@ fn read_expansions_as_substitutions(text: &str) -> String {
 /// The command names a `shell` call runs. Its `program` runs with its `args` and no shell, so the program's own
 /// name is always a command (`program_name`), and a program that is more than a plain name is read as shell text
 /// too. The program's words and its `args`, as one argv, are then read as a command (`command_words_names`): a
-/// wrapper among them runs the command it is given, and a POSIX shell is given its script through `-c`.
+/// wrapper among them runs the command it is given, and a shell is given its script through `-c`.
 fn shell_program_commands(input: &serde_json::Value) -> Vec<String> {
     let Some(program) = input.get("program").and_then(serde_json::Value::as_str) else {
         return Vec::new();
@@ -2180,7 +2202,7 @@ fn shell_program_commands(input: &serde_json::Value) -> Vec<String> {
     }
     let mut argv: Vec<String> = program
         .split_whitespace()
-        .skip_while(|word| is_assignment(word))
+        .skip_while(|word| is_plain_assignment(word))
         .map(str::to_owned)
         .collect();
     argv.extend(
@@ -2205,40 +2227,138 @@ fn is_plain_program(program: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '+'))
 }
 
-/// The names of the program a `shell` call runs: the first word of its `program` that is not an assignment,
-/// read from the whitespace-separated text as the command name always was (`command_names`). The program
-/// runs with its arguments and no shell, so no keyword or option is skipped: `time` names itself.
+/// The names of the program a `shell` call runs: the first word of its `program` that is not a plain assignment
+/// (`is_plain_assignment`), read from the whitespace-separated text as the command name always was (`command_names`). The
+/// program runs with its arguments and no shell, so no keyword or option is skipped: `time` names itself, and a word such as
+/// `A+=/bin/rm` is the program too, as no shell reads it as an assignment.
 fn program_name(program: &str) -> Vec<String> {
     program
         .split_whitespace()
-        .find(|word| !is_assignment(word))
+        .find(|word| !is_plain_assignment(word))
         .map(command_names)
         .unwrap_or_default()
 }
 
-/// Whether a program is a POSIX shell, by its name whatever its directory.
-fn is_posix_shell(program: &str) -> bool {
-    program.rsplit(['/', '\\']).next().is_some_and(|name| {
-        matches!(
-            name,
-            "sh" | "bash" | "dash" | "zsh" | "ksh" | "mksh" | "ash"
-        )
-    })
+/// The POSIX-family shells, whose `-c` text is read as shell text (`shell_script_arguments`): the Bourne-style shells,
+/// bash and its restricted form, and the Korn-style shells.
+const POSIX_SHELLS: &[&str] = &[
+    "sh", "bash", "rbash", "dash", "ash", "zsh", "ksh", "mksh", "oksh", "pdksh", "rksh", "posh",
+    "yash",
+];
+
+/// The shells whose syntax the reader does not model: csh and tcsh, fish, PowerShell, elvish, nu, xonsh and cmd. Their
+/// `-c` text is read as a POSIX shell's is, and their value is withheld too (`command_words_names`): a command written in
+/// their own syntax, such as `^rm` in nu, `iex` in PowerShell or `e:rm` in elvish, runs a command the reader does not name.
+const OTHER_SHELLS: &[&str] = &[
+    "csh",
+    "tcsh",
+    "fish",
+    "pwsh",
+    "powershell",
+    "elvish",
+    "nu",
+    "xonsh",
+    "cmd",
+];
+
+/// The name of a program: its last path component, whichever separator it uses.
+fn shell_name(program: &str) -> &str {
+    program.rsplit(['/', '\\']).next().unwrap_or_default()
 }
 
-/// The arguments a POSIX shell reads as shell text, when its commands come from its `-c` option: every argument from
-/// the `-c` on, the command string among them. The command string is the first operand left after the options, and the
-/// options are read as the shell reads them up to it: `-o` and `-O` (and `+o`, `+O`) take the next word as their value,
-/// `--rcfile` and `--init-file` do too, and every other option takes none. Every argument after the `-c` is read, which
-/// names more commands than the shell runs, never fewer, since an option's value after the `-c` may be among them
-/// (`-O shopt_option`).
+/// Whether a program is a POSIX-family shell, by its name whatever its directory.
+fn is_posix_shell(program: &str) -> bool {
+    POSIX_SHELLS.contains(&shell_name(program))
+}
+
+/// Whether a program is one of the shells in `OTHER_SHELLS`, by its name whatever its directory.
+fn is_other_shell(program: &str) -> bool {
+    OTHER_SHELLS.contains(&shell_name(program))
+}
+
+/// Whether a program is PowerShell, which takes its command after `-Command` (`powershell_command_arguments`).
+fn is_powershell(program: &str) -> bool {
+    matches!(shell_name(program), "pwsh" | "powershell")
+}
+
+/// The options a POSIX-family shell takes a value for, by its name: `-o option` in every shell, bash's `-O shopt`,
+/// `--rcfile` and `--init-file`, mksh's `-T tty`, and ksh93's `-R file` (`rksh` is its restricted form). The value is
+/// read with its option, so a word shaped like `-c` after one is no `-c` flag (`shell_script_arguments`). An option this
+/// table leaves out is read as a flag, so the table holds only the options named here.
+fn shell_value_options(program: &str) -> (&'static str, &'static [&'static str]) {
+    const NONE: &[&str] = &[];
+    const BASH_LONG: &[&str] = &["rcfile", "init-file"];
+    match shell_name(program) {
+        "bash" | "rbash" => ("oO", BASH_LONG),
+        "mksh" => ("oT", NONE),
+        "ksh" | "rksh" => ("oR", NONE),
+        _ => ("o", NONE),
+    }
+}
+
+/// bash's long options, which it reads ahead of its short options, as the leading words of its arguments, with one dash
+/// or two (`bash_long_option`). These are the names bash 5.3.15's `--help` lists, `protected` among them, which takes no
+/// value (`-protected`). Only `rcfile` and `init-file` take a value, from `shell_value_options`.
+const BASH_LONG_OPTIONS: &[&str] = &[
+    "debug",
+    "debugger",
+    "dump-po-strings",
+    "dump-strings",
+    "help",
+    "init-file",
+    "login",
+    "noediting",
+    "noprofile",
+    "norc",
+    "posix",
+    "pretty-print",
+    "protected",
+    "rcfile",
+    "restricted",
+    "verbose",
+    "version",
+    "wordexp",
+];
+
+/// The name of the bash long option a word is, read with one dash or two (`-login`, `--login`), when the name is one of
+/// `BASH_LONG_OPTIONS`. Any other word, `--` and a lone `-` included, is no long option, and so ends the phase that reads
+/// them (`shell_script_arguments`).
+fn bash_long_option(word: &str) -> Option<&str> {
+    let name = word.strip_prefix("--").or_else(|| word.strip_prefix('-'))?;
+    BASH_LONG_OPTIONS.contains(&name).then_some(name)
+}
+
+/// The arguments a shell reads as shell text, when its commands come from its `-c` option: every argument from the `-c` on,
+/// the command string among them. A bash or rbash reads its long options first, the leading words `bash_long_option`
+/// names, and the first word that is none ends that phase. The options after it are read as getopt reads them, letter by
+/// letter: a flag letter leads to the next, a `c` after a `-` is the `-c` flag, and a value option (`shell_value_options`)
+/// takes the next word when it ends its word. A value option with letters after it in its word is `None`, since its value
+/// may be the rest of the word, and so is one that comes before a `c`. `--` ends the options, and a long option that takes
+/// a value takes the next word. Every argument after the `-c` is read, which names more commands than the shell runs, never
+/// fewer, since an option's value after the `-c` may be among them (`-O shopt_option`).
 ///
 /// `None` when the shell's commands are not the `-c` text, so no name here can read them: a script file, which is the
-/// first operand before any `-c` (`sh x.sh -c 'rm'` runs `x.sh`, and the `-c` is one of its arguments), or the standard
-/// input, which a shell reads when no operand is left after its options (`sh -s`, `sh`, `sh -`, `sh --`). A `c` after
-/// an `o` or `O` in one word is `None` too, since that option's value may be the rest of the word.
-fn shell_script_arguments<'a>(args: &'a [&'a str]) -> Option<&'a [&'a str]> {
+/// first operand before any `-c` (`sh x.sh -c 'rm'` runs `x.sh`, and the `-c` is one of its arguments), the standard
+/// input, which a shell reads when no operand is left after its options (`sh -s`, `sh`, `sh -`, `sh --`), or a `-c` with no
+/// command string after its options (`command_string_present`), whose string a wrapper such as `xargs` gives at run time.
+fn shell_script_arguments<'a>(program: &str, args: &'a [&'a str]) -> Option<&'a [&'a str]> {
+    let (letters, longs) = shell_value_options(program);
     let mut index = 0;
+    // bash reads its long options before its short ones, as its `parse_long_options` does: each leading word that
+    // `bash_long_option` names is one, and takes the next word as its value when `longs` says so. The first word that is
+    // none ends the phase. A single-dash word after it is short letters again, so `-e -rcfile x` has `r`, `c`, `f`, `i`,
+    // `l` and `e` as its letters, and its `c` is the `-c` flag.
+    if matches!(shell_name(program), "bash" | "rbash") {
+        while let Some(&arg) = args.get(index) {
+            let Some(name) = bash_long_option(arg) else {
+                break;
+            };
+            index += 1;
+            if longs.contains(&name) {
+                index += 1;
+            }
+        }
+    }
     while let Some(&arg) = args.get(index) {
         index += 1;
         // An operand is the script file, and a lone `-` or `--` ends the options with no `-c`, so the input is read.
@@ -2250,26 +2370,85 @@ fn shell_script_arguments<'a>(args: &'a [&'a str]) -> Option<&'a [&'a str]> {
             return None;
         }
         if let Some(long) = arg.strip_prefix("--") {
-            if matches!(long, "rcfile" | "init-file") {
+            if longs.contains(&long) {
                 index += 1;
             }
             continue;
         }
-        // Only `-` sets an option, so a `c` after `+` is no `-c` flag.
-        let command_at = if sign == '-' { body.find('c') } else { None };
-        let value_at = body.find(['o', 'O']);
-        match (command_at, value_at) {
-            // A `c` before any `o` or `O` is the `-c` flag, and the command string follows the options.
-            (Some(command), Some(value)) if command < value => return Some(&args[index..]),
-            (Some(_), None) => return Some(&args[index..]),
-            (Some(_), Some(_)) => return None,
-            // An `o` or `O` that ends the word takes the next word as its value.
-            (None, Some(value)) if value + 1 == body.len() => index += 1,
-            (None, Some(_)) => return None,
-            (None, None) => {}
+        for (at, letter) in body.char_indices() {
+            // Only `-` sets an option, so a `c` after `+` is no `-c` flag.
+            if sign == '-' && letter == 'c' {
+                let rest = &args[index..];
+                let after_c = &body[at + letter.len_utf8()..];
+                return command_string_present(program, after_c, rest).then_some(rest);
+            }
+            if letters.contains(letter) {
+                // A value option that ends its word takes the next word as its value. With letters after it, it is withheld.
+                if at + letter.len_utf8() < body.len() {
+                    return None;
+                }
+                index += 1;
+                break;
+            }
         }
     }
     None
+}
+
+/// Whether the `-c` has its command string on the command line: the first operand that its options leave, among the
+/// letters after the `c` in its own word (`after_c`) and the `words` after that word. Each value letter takes the next
+/// word wherever it sits in its word, as bash and dash read it, so `-co pipefail`, `-oe pipefail` and `-coo pipefail
+/// errexit` each take the words they name. `--` ends the options, and the word after it is the operand; a lone `-` does
+/// the same, as bash and dash read it. A lone `+` is no option, and the options go on past it, as bash and dash read
+/// it. Without an operand, the string is one a wrapper gives at run time: `xargs` appends its input after its options,
+/// as operands, so `echo 'rm -rf x' | xargs -0 sh -c` runs `sh -c 'rm -rf x'`, and the string is withheld.
+fn command_string_present(program: &str, after_c: &str, words: &[&str]) -> bool {
+    let (letters, longs) = shell_value_options(program);
+    // The value letters after the `c` take the first of the words that follow it.
+    let mut index = value_letters_in(after_c, letters);
+    while let Some(&word) = words.get(index) {
+        index += 1;
+        // `--` and a lone `-` end the options, so the word after one is the operand, if there is one.
+        if word == "--" || word == "-" {
+            return index < words.len();
+        }
+        // A word that is no option is the command string. A lone `+` has no option letter, so it is read past.
+        if !word.starts_with(['-', '+']) {
+            return true;
+        }
+        if let Some(long) = word.strip_prefix("--") {
+            if longs.contains(&long) {
+                index += 1;
+            }
+            continue;
+        }
+        index += value_letters_in(&word[1..], letters);
+    }
+    false
+}
+
+/// The number of the letters of `word` that are value letters of its shell (`letters`). Each takes the next word as its
+/// value, wherever it sits in its word (`command_string_present`).
+fn value_letters_in(word: &str, letters: &str) -> usize {
+    word.chars()
+        .filter(|letter| letters.contains(*letter))
+        .count()
+}
+
+/// The arguments PowerShell reads as its command: those after its `-Command` parameter, which PowerShell matches by case
+/// and by a leading part of its name (`-c`, `-co`, `-command`). `None` with no such parameter, or with nothing after it.
+/// Its other parameters run what they are given too (`-File`, `-EncodedCommand`), so the withheld value covers them
+/// (`command_words_names`).
+fn powershell_command_arguments<'a>(args: &'a [&'a str]) -> Option<&'a [&'a str]> {
+    let at = args.iter().position(|arg| {
+        arg.len() >= 2
+            && arg.starts_with('-')
+            && "-command"
+                .get(..arg.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(arg))
+    })?;
+    let rest = &args[at + 1..];
+    (!rest.is_empty()).then_some(rest)
 }
 
 /// The segments of a shell text: the pieces between the characters that end one command and start the
@@ -2409,11 +2588,17 @@ fn quote_aware_segments(text: &str) -> (Vec<&str>, bool) {
 /// substitution inside double quotes holds quotes that the text around it would misread, so it is lifted out whole. One
 /// inside single quotes is literal and stays. A substitution that no `)` closes stays too, and the flag says so: the
 /// text then ends inside an open substitution, which withholds its value. A comment is read as in
-/// `quote_aware_segments`. One pass over the text, so a long one costs no more than its length.
-fn lift_substitutions(text: &str) -> (String, Vec<&str>, bool) {
+/// `quote_aware_segments`. One pass over the text, so a long one costs no more than its length. The same pass cuts out
+/// each zsh special-hash array that starts a word outside any substitution (`hash_array_at`): its name, its `=` and its `(`
+/// up to its `)` are replaced by a space, and its elements are returned with the kind of hash they belong to
+/// (`hash_element_names`). Its word and
+/// comment state is this pass's, so the array is found wherever the rest of the text is read as a word.
+fn lift_substitutions(text: &str) -> (String, Vec<&str>, Vec<(HashKind, String)>, bool) {
     let bytes = text.as_bytes();
     let mut lifted = String::with_capacity(text.len());
     let mut bodies = Vec::new();
+    let mut hash_elements = Vec::new();
+    let mut hash_open = false;
     let mut copied = 0;
     // The quote open in the innermost level. Each enclosing level keeps its own quote, and, when it is a substitution,
     // the index its body starts at.
@@ -2446,8 +2631,18 @@ fn lift_substitutions(text: &str) -> (String, Vec<&str>, bool) {
                 quote = None;
             }
         } else if byte == b'\\' {
-            word_start = false;
-            i += 1;
+            // A line continuation is joined out (`join_line_continuations`), so the byte after it reads as the byte before
+            // it did: a `;` after a `>` stays the mark of `>;`, and the word state carries over the break.
+            match line_break_length(bytes, i + 1) {
+                0 => {
+                    word_start = false;
+                    i += 1;
+                }
+                break_len => {
+                    after_redirect = after;
+                    i += break_len;
+                }
+            }
         } else if byte == b'$' && bytes.get(i + 1) == Some(&b'(') {
             enclosing.push((quote, Some(i + 2)));
             if open_substitutions == 0 {
@@ -2463,6 +2658,28 @@ fn lift_substitutions(text: &str) -> (String, Vec<&str>, bool) {
             }
         } else if byte == b'\'' || byte == b'"' {
             quote = Some(byte);
+            word_start = false;
+        } else if let Some((kind, open_at)) =
+            hash_array_at(bytes, i).filter(|_| word_start && open_substitutions == 0)
+        {
+            // The array is taken out whole, its name and `=` as well as its `(` and its elements: a `(` left in the text would
+            // split them into segments of their own, so a value would be read as a command name only where a separator
+            // precedes it. A name left behind with its `+=` would be read as a command word (`is_extended_assignment`).
+            lifted.push_str(&text[copied..i]);
+            lifted.push(' ');
+            match array_close(bytes, open_at) {
+                Some(close) => {
+                    push_hash_elements(&mut hash_elements, kind, &text[open_at + 1..close]);
+                    copied = close + 1;
+                    i = close;
+                }
+                None => {
+                    push_hash_elements(&mut hash_elements, kind, &text[open_at + 1..]);
+                    hash_open = true;
+                    copied = bytes.len();
+                    break;
+                }
+            }
             word_start = false;
         } else if byte == b'#' && word_start {
             comment = true;
@@ -2501,7 +2718,12 @@ fn lift_substitutions(text: &str) -> (String, Vec<&str>, bool) {
         i += 1;
     }
     lifted.push_str(&text[copied..]);
-    (lifted, bodies, open_substitutions > 0)
+    (
+        lifted,
+        bodies,
+        hash_elements,
+        hash_open || open_substitutions > 0,
+    )
 }
 
 /// One token of a shell segment: a word, with its quotes and backslashes removed as the shell removes
@@ -2597,12 +2819,19 @@ fn shell_tokens(segment: &str, zsh_clobber: bool) -> (Vec<ShellToken>, bool) {
 /// The command names of one shell segment, read as each of its readings takes it (`segment_readings`): those of
 /// its commands (`command_positions`), each the first word that is not a leading word (see `is_leading_word`) and not
 /// a redirection's target, and what that command runs (`command_words_names`). Each reading names its own commands, so
-/// a command that one reading hides is named by the other. Empty when no reading's command names anything.
+/// a command that one reading hides is named by the other. The leading assignments of each reading may define names
+/// through an element of a special array (`element_assignment_names`). A leading assignment that only bash and zsh read as
+/// one (`extended_assignment_positions`) is the command word in a POSIX shell, so it is read as a command word too.
+/// Empty when no reading's command names anything.
 fn command_prefix(segment: &str, depth: usize) -> Vec<String> {
     let (readings, cut) = segment_readings(segment);
     let mut names = Vec::new();
     for words in &readings {
-        for start in command_positions(words) {
+        names.extend(element_assignment_names(words, depth, cut));
+        for start in command_positions(words)
+            .into_iter()
+            .chain(extended_assignment_positions(words))
+        {
             names.extend(command_words_names(&words[start..], depth, cut));
         }
     }
@@ -2719,23 +2948,36 @@ fn cut_segment_out_of_step(text: &str, aware: &[&str]) -> bool {
 }
 
 /// Whether a segment's words may hide a command past where the segment is cut: they name no command, or name one
-/// that runs what it is given, a wrapper, `find`, `eval`, `trap`, `alias`, `busybox`, `toybox`, a withheld program or
-/// a POSIX shell (see `command_words_names`).
+/// that runs what it is given, a wrapper, `find`, `eval`, `trap`, `alias`, `emulate`, `busybox`, `toybox`, a withheld program or
+/// a shell (see `command_words_names`). A leading assignment that a POSIX shell reads as the command word is checked as one
+/// too (`extended_assignment_positions`).
 fn may_hide_a_command(words: &[String]) -> bool {
     let positions = command_positions(words);
     if positions.is_empty() || has_function_without_body(words) {
         return true;
     }
-    positions.into_iter().any(|position| {
+    let mut candidates = positions;
+    candidates.extend(extended_assignment_positions(words));
+    candidates.into_iter().any(|position| {
         let word = words[position].as_str();
         let base = command_basename(word);
         wrapper_spec(base).is_some()
             || matches!(
                 base,
-                "eval" | "trap" | "alias" | "busybox" | "toybox" | "find"
+                "eval"
+                    | "trap"
+                    | "alias"
+                    | "emulate"
+                    | "busybox"
+                    | "toybox"
+                    | "find"
+                    | "hash"
+                    | "."
+                    | "source"
             )
             || WITHHELD_COMMANDS.contains(&base)
             || is_posix_shell(word)
+            || is_other_shell(word)
     })
 }
 
@@ -2746,7 +2988,7 @@ fn may_hide_a_command(words: &[String]) -> bool {
 /// segment is found under both segmentations, the plain and the quote-aware.
 fn alias_value_hides_a_command(value: &str) -> bool {
     let text = read_expansions_as_substitutions(value);
-    let (lifted, _, _) = lift_substitutions(&text);
+    let (lifted, _, _, _) = lift_substitutions(&text);
     let joined = join_line_continuations(&lifted);
     for read in [lifted.as_str(), joined.as_str()] {
         let plain = shell_segments(read);
@@ -2759,6 +3001,272 @@ fn alias_value_hides_a_command(value: &str) -> bool {
         }
     }
     false
+}
+
+/// The kinds of zsh special hash whose array assignment defines names through its elements (`ZSH_NAME_HASHES`).
+#[derive(Clone, Copy)]
+enum HashKind {
+    /// `aliases`, `galiases` and `saliases`: a value is shell text, which a call of its name runs with the words the call
+    /// appends, so a value that may run them is withheld (`alias_value_hides_a_command`).
+    Alias,
+    /// `functions`: a body is shell text, which runs when its name is called.
+    Function,
+    /// `commands`: a value is the path that a name runs, with the words a call gives it (`bound_path_names`).
+    Command,
+}
+
+/// The zsh special hashes whose array assignment, `name=(...)` or `name+=(...)`, defines names through its elements. Each
+/// element is read as shell text, and the kind says what its hash makes of it (`hash_element_names`).
+const ZSH_NAME_HASHES: &[(&str, HashKind)] = &[
+    ("aliases", HashKind::Alias),
+    ("galiases", HashKind::Alias),
+    ("saliases", HashKind::Alias),
+    ("functions", HashKind::Function),
+    ("commands", HashKind::Command),
+];
+
+/// The kind of zsh special hash that an array is assigned to at `start`, and the index of the `(` that opens the array:
+/// the bytes at `start` must read `NAME=(` or `NAME+=(` for one of `ZSH_NAME_HASHES`.
+fn hash_array_at(bytes: &[u8], start: usize) -> Option<(HashKind, usize)> {
+    let rest = &bytes[start..];
+    ZSH_NAME_HASHES.iter().find_map(|(name, kind)| {
+        let after_name = rest.strip_prefix(name.as_bytes())?;
+        let after_op = after_name
+            .strip_prefix(b"+=")
+            .or_else(|| after_name.strip_prefix(b"="))?;
+        after_op
+            .starts_with(b"(")
+            .then(|| (*kind, start + rest.len() - after_op.len()))
+    })
+}
+
+/// The index of the `)` that closes the array whose `(` is at `open`: the first unquoted one that no `(` inside the array
+/// opens. A `\` escapes the byte after it, and a quote holds its bytes. `None` when the text ends first.
+fn array_close(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut i = open + 1;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if quote == Some(b'\'') {
+            if byte == b'\'' {
+                quote = None;
+            }
+        } else if byte == b'\\' {
+            i += 1;
+        } else if quote == Some(b'"') {
+            if byte == b'"' {
+                quote = None;
+            }
+        } else if byte == b'\'' || byte == b'"' {
+            quote = Some(byte);
+        } else if byte == b'(' {
+            depth += 1;
+        } else if byte == b')' {
+            if depth == 0 {
+                return Some(i);
+            }
+            depth -= 1;
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Pushes each word of a hash array's body under its hash's kind, the word with its quotes removed as `shell_tokens` removes
+/// them. A line continuation is joined out first.
+fn push_hash_elements(elements: &mut Vec<(HashKind, String)>, kind: HashKind, body: &str) {
+    let (tokens, _) = shell_tokens(&join_line_continuations(body), false);
+    elements.extend(tokens.into_iter().filter_map(|token| match token {
+        ShellToken::Word(word) => Some((kind, word)),
+        ShellToken::Redirect => None,
+    }));
+}
+
+/// The length of the line break at `at`: a line feed, or a carriage return and a line feed. Zero when no break is there.
+fn line_break_length(bytes: &[u8], at: usize) -> usize {
+    match (bytes.get(at), bytes.get(at + 1)) {
+        (Some(b'\n'), _) => 1,
+        (Some(b'\r'), Some(b'\n')) => 2,
+        _ => 0,
+    }
+}
+
+/// The names that one element of a zsh special hash runs, by the hash's kind (`lift_zsh_hash_arrays`). A body is shell
+/// text, read as it is. An alias value is shell text too, and it is withheld where a call's appended words may run.
+/// A command's path is bound to its name (`bound_path_names`).
+fn hash_element_names(kind: HashKind, element: &str, depth: usize) -> Vec<String> {
+    match kind {
+        HashKind::Function => command_prefixes_at(element, depth + 1),
+        HashKind::Alias => {
+            let mut names = command_prefixes_at(element, depth + 1);
+            if alias_value_hides_a_command(element) {
+                names.push(String::new());
+            }
+            names
+        }
+        HashKind::Command => bound_path_names(element, depth),
+    }
+}
+
+/// The names a command bound to `path` runs. `commands=(NAME PATH)` and `hash NAME=PATH` or `hash -p PATH NAME` bind a name
+/// to a path, and a call of the name runs that path with the words the call gives it. So the path is read as shell text, as
+/// a command word is (`command_prefixes_at`), and it is withheld where it lies outside the system binary directories, as a
+/// run path is, or where its program may run the words a call gives it (`alias_value_hides_a_command`).
+fn bound_path_names(path: &str, depth: usize) -> Vec<String> {
+    let mut names = command_prefixes_at(path, depth + 1);
+    if !is_system_binary_path(path) || alias_value_hides_a_command(path) {
+        names.push(String::new());
+    }
+    names
+}
+
+/// The names the `hash` builtin binds (`bound_path_names`): the path of its `-p` option (bash), and the value of each
+/// `NAME=PATH` (zsh). Its options are read as getopt reads them (bash's `dlp:rt`): `p` takes a path, which is the rest
+/// of its word or the next word when it ends its word, wherever it stands among the option letters, so `-p/bin/rm`,
+/// `-rp /bin/rm` and `-lp /bin/rm` each bind a name to `/bin/rm`. `--` ends the options, and after it only a
+/// `NAME=PATH` binds. Its other words name no command. A `-p` with no path after it, or a cut segment, may have its path
+/// past the cut, so the withheld value is named then.
+fn hash_names(args: &[String], depth: usize, cut: bool) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut path_due = false;
+    let mut options_done = false;
+    for arg in args {
+        let arg = arg.as_str();
+        if std::mem::take(&mut path_due) {
+            names.extend(bound_path_names(arg, depth));
+        } else if !options_done && arg == "--" {
+            options_done = true;
+        } else if !options_done && arg.starts_with('-') {
+            // The letters after the dash are read in order, and `p` takes the rest of its word as its path.
+            if let Some(at) = arg[1..].find('p') {
+                let path = &arg[at + 2..];
+                if path.is_empty() {
+                    path_due = true;
+                } else {
+                    names.extend(bound_path_names(path, depth));
+                }
+            }
+        } else if let Some((_, path)) = arg.split_once('=') {
+            names.extend(bound_path_names(path, depth));
+        }
+    }
+    if path_due || cut {
+        names.push(String::new());
+    }
+    names
+}
+
+/// The kind of element that a subscripted assignment to the special array `name` defines a name through: bash's
+/// `BASH_ALIASES` (its alias list) and `BASH_CMDS` (its command hash), and the zsh special hashes of `ZSH_NAME_HASHES`.
+/// `None` for any other name.
+fn special_element_kind(name: &str) -> Option<HashKind> {
+    match name {
+        "BASH_ALIASES" => Some(HashKind::Alias),
+        "BASH_CMDS" => Some(HashKind::Command),
+        _ => ZSH_NAME_HASHES
+            .iter()
+            .find(|(hash, _)| *hash == name)
+            .map(|(_, kind)| *kind),
+    }
+}
+
+/// The kind, key and value of a word that assigns one element of a special array (`special_element_kind`):
+/// `NAME[key]=value` or `NAME[key]+=value`, with the key running to the first `]`, as `is_assignment` reads it. `None`
+/// for any other word.
+fn element_assignment(word: &str) -> Option<(HashKind, &str, &str)> {
+    let name_len = word
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        .count();
+    let kind = special_element_kind(&word[..name_len])?;
+    let subscripted = word[name_len..].strip_prefix('[')?;
+    let close = subscripted.find(']')?;
+    let after = &subscripted[close + 1..];
+    let value = after
+        .strip_prefix("+=")
+        .or_else(|| after.strip_prefix('='))?;
+    Some((kind, &subscripted[..close], value))
+}
+
+/// The names that the leading assignments of a segment's words define through an element of a special array
+/// (`element_assignment`), each read as `element_definition_names` reads it. Only the leading assignments are read
+/// (`leading_assignment_positions`).
+fn element_assignment_names(words: &[String], depth: usize, cut: bool) -> Vec<String> {
+    let mut names = Vec::new();
+    for at in leading_assignment_positions(words) {
+        if let Some((kind, key, value)) = element_assignment(&words[at]) {
+            names.extend(element_definition_names(kind, key, value, depth, cut));
+        }
+    }
+    names
+}
+
+/// The names that one element of a special array defines (`element_assignment`): the key is the name the element defines,
+/// read as shell text, and the value is read as the element of its kind (`hash_element_names`). A cut segment may hold
+/// more of the value past the cut, so the withheld value is named then.
+fn element_definition_names(
+    kind: HashKind,
+    key: &str,
+    value: &str,
+    depth: usize,
+    cut: bool,
+) -> Vec<String> {
+    let mut names = command_prefixes_at(key, depth + 1);
+    names.extend(hash_element_names(kind, value, depth));
+    if cut {
+        names.push(String::new());
+    }
+    names
+}
+
+/// The positions of the leading assignments among a segment's words: the assignment words that `command_positions` steps
+/// past before each command word. A `function` keyword's body, and a `coproc` NAME's, are read from their opening word
+/// on, as `function_positions` and `command_positions` read them.
+fn leading_assignment_positions(words: &[String]) -> Vec<usize> {
+    let mut positions = Vec::new();
+    let mut index = 0;
+    while let Some(word) = words.get(index) {
+        let rest = &words[index + 1..];
+        match word.as_str() {
+            "function" => {
+                for start in (index + 1..words.len()).filter(|&at| is_compound_start(&words[at])) {
+                    positions.extend(
+                        leading_assignment_positions(&words[start..])
+                            .into_iter()
+                            .map(|at| at + start),
+                    );
+                }
+                return positions;
+            }
+            "coproc" if coproc_takes_name(rest) => {
+                positions.extend(
+                    leading_assignment_positions(&words[index + 2..])
+                        .into_iter()
+                        .map(|at| at + index + 2),
+                );
+                return positions;
+            }
+            "coproc" => index += 1,
+            word if is_assignment(word) => {
+                positions.push(index);
+                index += 1;
+            }
+            word if is_leading_word(word) => index += 1,
+            _ => return positions,
+        }
+    }
+    positions
+}
+
+/// The positions of the leading assignments that are assignments only in bash's and zsh's sense (`is_extended_assignment`),
+/// among those `leading_assignment_positions` finds. A POSIX shell such as dash runs each as the command word, so
+/// `command_prefix` reads each one as a command too, and `may_hide_a_command` checks it as one.
+fn extended_assignment_positions(words: &[String]) -> Vec<usize> {
+    leading_assignment_positions(words)
+        .into_iter()
+        .filter(|&at| is_extended_assignment(&words[at]))
+        .collect()
 }
 
 /// Whether a substitution's body holds the word `case`. A `)` that ends a case pattern is no end of the substitution,
@@ -2794,10 +3302,14 @@ fn segment_words(tokens: Vec<ShellToken>) -> Vec<String> {
 /// beyond. It is far past any command written by hand, and it bounds the recursion.
 const MAX_SHELL_DEPTH: usize = 8;
 
+/// How deep a wrapper's operand is read both ways, an assignment where an operand is due being that operand and also a
+/// variable (`wrapped_from`). Each such wrapper doubles the readings, so past this depth the word is withheld instead.
+const MAX_HEDGED_DEPTH: usize = 4;
+
 /// A program that runs its arguments as a command, and how it reads its own: which options take no value, which
 /// take one, and the operands before its command. Its table is in `WRAPPERS`.
 struct Wrapper {
-    /// Single-letter options that take no value. A bare `-` is one.
+    /// Single-letter options that take no value. A bare `-` is one only where the table lists it (`env`'s is `-i`).
     short_flags: &'static str,
     /// Single-letter options that take a value: the next word, or the rest of the word after the letter.
     short_values: &'static str,
@@ -2809,7 +3321,8 @@ struct Wrapper {
     long_values: &'static [&'static str],
     /// Operands before the command that are not commands: `timeout`'s duration. `chrt`'s priority is one only when it
     /// is all digits and more operands follow it (util-linux 2.41), or a decimal number that util-linux before 2.41
-    /// reads as one (`wrapped_command_names`).
+    /// reads as one (`wrapped_command_names`). After the last operand no option is read, since getopt's `+` ends the
+    /// options at the first non-option (`command_after_operands`).
     operands_before_command: usize,
     /// The command run when none is given: `xargs` runs `echo`. `Some("")` names the withheld value instead, for a
     /// program whose default is a shell that reads its commands from stdin (`fakeroot`, `chroot`).
@@ -2822,7 +3335,8 @@ const WRAPPERS: &[(&str, Wrapper)] = &[
     (
         "env",
         Wrapper {
-            short_flags: "i0v",
+            // A bare `-` is GNU env's `-i`, so it is a flag here and in no other table.
+            short_flags: "i0v-",
             short_values: "uC",
             short_optional: "",
             long_flags: &[
@@ -2854,6 +3368,8 @@ const WRAPPERS: &[(&str, Wrapper)] = &[
         },
     ),
     (
+        // The duration is the operand before the command. The words after it are the command, and none is read as an
+        // option, since getopt's `+` ends the options at the first non-option.
         "timeout",
         Wrapper {
             short_flags: "v",
@@ -3094,7 +3610,9 @@ const WRAPPERS: &[(&str, Wrapper)] = &[
         // The priority is the operand before the command. util-linux 2.41 and later read it as the priority only when
         // it is all digits and more operands follow it, and any other word as the command, which `-o`, `-b`, `-i` and
         // `-d` run (the other policies reject it). Before 2.41 a decimal number such as `+10` is the priority too, so
-        // such a word is read both ways (`wrapped_command_names`). `-p` names an existing process, and runs no command.
+        // such a word is read both ways (`wrapped_command_names`). The words after the priority are the command and its
+        // arguments, none read as an option, since chrt's getopt starts with `+`. `-p` names an existing process, and runs
+        // no command.
         "chrt",
         Wrapper {
             short_flags: "abdfimoprRvhV",
@@ -3121,7 +3639,8 @@ const WRAPPERS: &[(&str, Wrapper)] = &[
         },
     ),
     (
-        // The CPU mask or list is the operand before the command. `-p` names an existing process, and runs no command.
+        // The CPU mask or list is the operand before the command, and the words after it are the command, none read as an
+        // option (getopt's `+`). `-p` names an existing process, and runs no command.
         "taskset",
         Wrapper {
             short_flags: "acpVh",
@@ -3135,7 +3654,8 @@ const WRAPPERS: &[(&str, Wrapper)] = &[
     ),
     (
         // The lock file is the operand before the command. `-c` runs its text through a shell, so it is left out.
-        // `-e` is an alias of `-x`, so it takes no value.
+        // `-e` is an alias of `-x`, so it takes no value. Its synopsis `flock FILE -c command` puts an option after the
+        // lock file, so an option-shaped word there is read both as the command and as an option (`operand_names`).
         "flock",
         Wrapper {
             short_flags: "sxeunoFvVh",
@@ -3186,55 +3706,6 @@ const WRAPPERS: &[(&str, Wrapper)] = &[
         },
     ),
     (
-        // The `fakeroot` script's options: `-l`, `-s` and `-i` take a value, and `-u`, `-h` and `-v` take none. Its
-        // other options are left out, so they withhold the command. With no command it starts a shell that reads its
-        // commands from stdin, so the withheld value is its default.
-        "fakeroot",
-        Wrapper {
-            short_flags: "uhv",
-            short_values: "lsi",
-            short_optional: "",
-            long_flags: &["unknown-is-real", "help", "version"],
-            long_values: &["lib", "save-file", "load-file"],
-            operands_before_command: 0,
-            default_command: Some(""),
-        },
-    ),
-    (
-        // `cgexec -g CONTROLLERS:PATH [--sticky] COMMAND`: `-g` takes a value. Its other options are left out.
-        "cgexec",
-        Wrapper {
-            short_flags: "h",
-            short_values: "g",
-            short_optional: "",
-            long_flags: &["help", "sticky"],
-            long_values: &[],
-            operands_before_command: 0,
-            default_command: None,
-        },
-    ),
-    (
-        // `xvfb-run [OPTION...] COMMAND`: `-e`, `-f`, `-n`, `-s` and `-w` take a value, and `-a`, `-h` and `-l` take
-        // none. Its other options are left out. Its default command is not read, so a call with none names the withheld
-        // value.
-        "xvfb-run",
-        Wrapper {
-            short_flags: "ahl",
-            short_values: "efnsw",
-            short_optional: "",
-            long_flags: &["auto-servernum", "help", "listen-tcp"],
-            long_values: &[
-                "error-file",
-                "auth-file",
-                "server-num",
-                "server-args",
-                "wait",
-            ],
-            operands_before_command: 0,
-            default_command: Some(""),
-        },
-    ),
-    (
         // `eatmydata COMMAND [ARG]...` runs its command with the library preloaded and takes no option of its own, so
         // its first word is the command, and an option is withheld.
         "eatmydata",
@@ -3255,13 +3726,19 @@ const WRAPPERS: &[(&str, Wrapper)] = &[
 /// shell text or a template; `gdb` runs the gdb commands of `-ex`, `-x` and its stdin; `screen`, `tmux` and `perf` run
 /// their command after subcommands or options too many or too varied to table. The others have options too many or
 /// too varied to table, or take operands a table cannot count (`firejail`, `bwrap`, `run0`, `dbus-run-session`,
-/// `faketime`, `torsocks`, `proxychains`, `chpst`). A variant of a program with a table is withheld too, since the
-/// table does not read its options (`fakeroot-sysv`, `fakeroot-tcp`). A program that runs a command under a subcommand
+/// `faketime`, `torsocks`, `proxychains`, `chpst`). A variant of a program is withheld too, since its options are not
+/// read (`fakeroot-sysv`, `fakeroot-tcp`). A program that runs a command under a subcommand
 /// (`npm run`, `npx`, `pnpm exec`, `uv run`, `bundle exec`, `cargo run`, `go run`, `kubectl exec`, `docker exec`,
 /// `podman exec`, `ip netns exec`) is withheld whole: the global options before the subcommand are too varied to read,
 /// so the subcommand cannot be found reliably, and `npm install` is withheld with `npm run`. A program that reads its
-/// command from a file or stdin (`at`, `batch`, `expect`) is withheld too. Such a program names itself and the withheld
-/// value, which covers every command (`command_words_names`).
+/// command from a file or stdin (`at`, `batch`, `expect`) is withheld too, and so are `newgrp`, which starts a shell that
+/// reads its commands from stdin, and `arch-chroot`, which runs a shell or the command it is given in a new root. The
+/// option tables of `fakeroot`, `fakechroot`, `cgexec` and `xvfb-run` are not verified on Linux, so those are withheld
+/// whole. So are the container init and privilege-drop helpers (`tini`, `dumb-init`, `gosu`, `su-exec`), the package
+/// runners, version managers and project runners that run a command under a subcommand or a file (`uvx`, `pipx`, `bunx`,
+/// `deno`, `mise`, `hatch`, `tox`), and the container, cluster and machine tools that run one (`nerdctl`, `oc`, `incus`,
+/// `machinectl`, `srun`). Such a program names itself and the withheld value, which covers every command
+/// (`command_words_names`).
 const WITHHELD_COMMANDS: &[&str] = &[
     "ssh",
     "su",
@@ -3303,6 +3780,35 @@ const WITHHELD_COMMANDS: &[&str] = &[
     "setarch",
     "linux32",
     "linux64",
+    // util-linux installs setarch under the names of the architectures it sets as well, and each of those runs the
+    // command it is given (`x86_64 rm x`), so each is withheld too.
+    "i386",
+    "i486",
+    "i586",
+    "i686",
+    "x86_64",
+    "uname26",
+    "ppc",
+    "ppc32",
+    "ppc64",
+    "ppc64le",
+    "s390",
+    "s390x",
+    "sparc",
+    "sparc32",
+    "sparc32bash",
+    "sparc64",
+    "sparc64bash",
+    "mips",
+    "mips64",
+    "hppa",
+    "hppa64",
+    "parisc",
+    "parisc64",
+    "armv7l",
+    "aarch64",
+    "ia64",
+    "alpha",
     "systemd-inhibit",
     "chronic",
     "ifne",
@@ -3355,6 +3861,60 @@ const WITHHELD_COMMANDS: &[&str] = &[
     "podman",
     "docker-compose",
     "ip",
+    "newgrp",
+    "arch-chroot",
+    // The option tables of these are not verified on Linux, so the programs are withheld whole (see above).
+    "fakeroot",
+    "fakechroot",
+    "cgexec",
+    "xvfb-run",
+    // Container init and privilege-drop helpers, which run the command they are given.
+    "tini",
+    "dumb-init",
+    "gosu",
+    "su-exec",
+    // Package runners, version managers and project runners, which run a command under a subcommand or a file.
+    "uvx",
+    "pipx",
+    "bunx",
+    "bun",
+    "pnpx",
+    "deno",
+    "corepack",
+    "composer",
+    "mise",
+    "asdf",
+    "rbenv",
+    "pyenv",
+    "nvm",
+    "hatch",
+    "pdm",
+    "rye",
+    "tox",
+    "nox",
+    "toolbox",
+    // Container, cluster and machine tools, which run a command in a container, pod, job or machine.
+    "nerdctl",
+    "crictl",
+    "buildah",
+    "oc",
+    "incus",
+    "lxc",
+    "machinectl",
+    "systemd-cat",
+    "srun",
+    "mpirun",
+    "mpiexec",
+    "flatpak",
+    "nsjail",
+    "sandbox-exec",
+    // Other programs that run the command they are given.
+    "nix",
+    "mosh",
+    "run-parts",
+    "cpulimit",
+    "multitime",
+    "watchexec",
 ];
 
 /// The wrapper program a command word names, from `WRAPPERS`.
@@ -3363,6 +3923,16 @@ fn wrapper_spec(base: &str) -> Option<&'static Wrapper> {
         .iter()
         .find(|(name, _)| *name == base)
         .map(|(_, wrapper)| wrapper)
+}
+
+/// Whether a wrapper reads a NAME=VALUE word as a variable set for its command: `env` and `sudo` do, and zsh's
+/// `nocorrect`, a reserved word whose assignments the shell reads as its own. Every other wrapper runs its command with
+/// `execvp`, so such a word is the command itself, run by that path when it holds a slash (`wrapped_from`). zsh's
+/// `noglob` is a builtin, not a reserved word, so its word is read both ways instead (`wrapped_from`). `env` reads a word
+/// with an `=` as a variable set whatever its name, unless it holds an expansion, and `sudo` reads a word with an `=` that
+/// no shell reads as an assignment both ways (`wrapped_from`).
+fn reads_assignments(program: &str) -> bool {
+    matches!(program, "env" | "sudo" | "nocorrect")
 }
 
 /// How an option word takes its value: nothing, the next word (`-n 10`), or the rest of its own word (`-n10`).
@@ -3376,6 +3946,11 @@ enum Arity {
 /// How a wrapper's option word takes its value, from the wrapper's table. `None` for an option the table does not
 /// list, which may take a value that the command is then read past.
 fn option_arity(wrapper: &Wrapper, word: &str) -> Option<Arity> {
+    // A bare `-` is an option only where the table lists it, as GNU env's `-` is `-i`. Elsewhere getopt reads it as an
+    // operand, which no table counts, so it is withheld like an option the table leaves out.
+    if word == "-" {
+        return wrapper.short_flags.contains('-').then_some(Arity::Flag);
+    }
     if let Some(long) = word.strip_prefix("--") {
         let (name, attached) = match long.split_once('=') {
             Some((name, _)) => (name, true),
@@ -3420,41 +3995,17 @@ fn option_arity(wrapper: &Wrapper, word: &str) -> Option<Arity> {
     Some(Arity::Flag)
 }
 
-/// Whether `words` hold an operand: a word that is neither an option nor the value an option takes, as `wrapper`'s
-/// table reads them, with `--` ending the options (`options_done` says whether one already has). An option the table
-/// does not list may take a value, so it is taken to hold one, and the command after it is then withheld by
-/// `wrapped_from`. `chrt`'s priority is one only when an operand follows it.
-fn holds_operand(wrapper: &Wrapper, words: &[String], mut options_done: bool) -> bool {
-    let mut index = 0;
-    while let Some(word) = words.get(index) {
-        let word = word.as_str();
-        index += 1;
-        if !options_done && word == "--" {
-            options_done = true;
-        } else if !options_done && word.starts_with('-') {
-            match option_arity(wrapper, word) {
-                Some(Arity::Flag | Arity::Attached) => {}
-                Some(Arity::NextWord) => index += 1,
-                None => return true,
-            }
-        } else {
-            return true;
-        }
-    }
-    false
-}
-
 /// The command names a wrapper runs, read from the words it is given (`args`, after its own name). Its options are
 /// read through its table: a flag or an attached value takes one word, a value takes the next word too, and `--`
-/// ends them. Each `NAME=VALUE` before the command sets a variable for it and names none. The operands the table
-/// lists come next (`timeout`'s duration) and are skipped, but `chrt`'s priority is skipped only when it is all
-/// digits and more operands follow it (`holds_operand`): any other word there is the command. A decimal number that
-/// is not all digits (`is_decimal_number`) is also the priority on util-linux before 2.41, which runs the word after
-/// it, so that word is named too. The word after the operands is the command, which `command_words_names` reads with
-/// its own arguments. Without one, a cut segment's
-/// command may lie past the cut, so the withheld value is named; otherwise the wrapper's default command, if it has
-/// one, runs. `program` is the wrapper's name: zsh's `repeat` is one whose count is followed by the list it repeats,
-/// which `list_names` reads.
+/// ends them. Each `NAME=VALUE` before the command sets a variable for it and names none, where `reads_assignments`
+/// says so; any other wrapper runs it as the command, as `execvp` does, and zsh's `noglob` reads it both ways
+/// (`wrapped_from`). The operands the table lists come next (`timeout`'s duration) and are skipped, but `chrt`'s
+/// priority is skipped only when it is all digits and more operands follow it (`operand_names`): any other word there is
+/// the command. A decimal number that is not all digits (`is_decimal_number`) is also the priority on util-linux before
+/// 2.41, which runs the word after it, so that word is named too. The word after the last operand is the command, with no
+/// option read there (`command_after_operands`). Without one, a cut segment's command may lie past the cut, so the
+/// withheld value is named; otherwise the wrapper's default command, if it has one, runs. `program` is the wrapper's
+/// name: zsh's `repeat` is one whose count is followed by the list it repeats, which `list_names` reads.
 fn wrapped_command_names(
     wrapper: &Wrapper,
     args: &[String],
@@ -3490,6 +4041,8 @@ fn wrapped_from(
 ) -> Vec<String> {
     let mut names = Vec::new();
     let mut operand_read = false;
+    // The replace strings `xargs` is given: it puts each input line in place of each one in the command it runs.
+    let mut replace_strings: Vec<String> = Vec::new();
     let mut index = 0;
     while let Some(word) = args.get(index) {
         let word = word.as_str();
@@ -3497,6 +4050,9 @@ fn wrapped_from(
         if !options_done && word == "--" {
             options_done = true;
         } else if !options_done && word.starts_with('-') {
+            if program == "xargs" {
+                replace_strings.extend(xargs_replace_string(wrapper, word, args.get(index)));
+            }
             match option_arity(wrapper, word) {
                 Some(Arity::Flag | Arity::Attached) => {}
                 Some(Arity::NextWord) => index += 1,
@@ -3507,6 +4063,11 @@ fn wrapped_from(
                 }
             }
         } else if operands_to_skip > 0 && is_assignment(word) {
+            // Past `MAX_HEDGED_DEPTH` nested wrappers the word is withheld rather than read both ways, which bounds the readings.
+            if depth > MAX_HEDGED_DEPTH {
+                names.push(String::new());
+                return names;
+            }
             if program == "chrt" || !operand_read {
                 names.extend(operand_names(
                     wrapper,
@@ -3519,8 +4080,22 @@ fn wrapped_from(
                 ));
                 operand_read = true;
             }
-        } else if is_assignment(word) {
+        } else if is_assignment(word) && reads_assignments(program) {
             // A variable set for the command names no command.
+        } else if program == "env" && word.contains('=') && !is_expanding_word(word) {
+            // GNU env reads any word with an `=` before its command as a variable set, whatever the name before the `=`
+            // (`env 1=x rm` sets the variable `1` and runs `rm`), so it names no command. A word with an expansion may
+            // split into a command, so it is not read this way: it is read as the command it may be, which
+            // `command_names` withholds.
+        } else if program == "sudo" && word.contains('=') && !is_expanding_word(word) {
+            // sudo's reading of a word that no shell reads as an assignment is not verified here, so the word is read as
+            // the command it may be too. The loop reads on past it as a variable set, as `noglob`'s word is.
+            names.extend(command_words_names(&args[index - 1..], depth, cut));
+        } else if is_assignment(word) && program == "noglob" {
+            // zsh's `noglob` is a builtin, so the word after it may be the command it runs (`noglob A=/bin/rm x` runs
+            // the path `A=/bin/rm`), or a variable set for the command after it. The word is read here as the command, and
+            // the loop reads on past it as a variable set.
+            names.extend(command_words_names(&args[index - 1..], depth, cut));
         } else if operands_to_skip > 0 {
             names.extend(operand_names(
                 wrapper,
@@ -3533,7 +4108,9 @@ fn wrapped_from(
             ));
             return names;
         } else {
-            names.extend(command_words_names(&args[index - 1..], depth, cut));
+            // The words of the command are read with its run-time substitutions in place (`substituted`).
+            let command = substituted(&args[index - 1..], &replace_strings);
+            names.extend(command_words_names(&command, depth, cut));
             return names;
         }
     }
@@ -3546,13 +4123,14 @@ fn wrapped_from(
 }
 
 /// The names read when `args[0]` is the word an operand is due for, with `operands_to_skip` operands due in all and
-/// `options_done` as `wrapped_from` has it. `chrt` takes its priority only when the word is all digits and more
-/// operands follow it (`holds_operand`): any other word is the command, which the policies that take no priority run,
-/// and a decimal number that is not all digits is the priority on util-linux before 2.41, which runs the word after it,
-/// so that word is named too. A lone all-digit word is the command on util-linux 2.41, so it is named, and a cut may
-/// hide the operands that would make it the priority, so the withheld value is named too. The list after a `repeat`
-/// count is read from its first word on (`list_names`), since the reserved words that open it run no command.
-/// Any other operand is read past, and the words after it are read with one operand fewer.
+/// `options_done` as `wrapped_from` has it. `chrt` takes its priority only when the word is all digits and more operands
+/// follow it: any other word is the command, which the policies that take no priority run, and a decimal number that is
+/// not all digits is the priority on util-linux before 2.41, which runs the word after it, so that word is named too. A
+/// lone all-digit word is the command on util-linux 2.41, so it is named, and a cut may hide the operands that would make
+/// it the priority, so the withheld value is named too. The list after a `repeat` count is read from its first word on
+/// (`list_names`), since the reserved words that open it run no command. Any other operand is read past, and the words
+/// after it are read with one operand fewer. The last operand ends them: the words after it are the command and its
+/// arguments, none read as an option (`command_after_operands`).
 fn operand_names(
     wrapper: &Wrapper,
     args: &[String],
@@ -3569,13 +4147,12 @@ fn operand_names(
         if !is_digits(word) {
             let mut names = command_words_names(args, depth, cut);
             if is_decimal_number(word) {
-                // On util-linux before 2.41 the rest is the command after the priority, and a `--` before
-                // it ends the options.
-                names.extend(wrapped_from(wrapper, rest, 0, false, depth, cut, program));
+                // On util-linux before 2.41 the word is the priority, and the word after it is the command.
+                names.extend(command_after_operands(wrapper, rest, depth, cut));
             }
             return names;
         }
-        if !holds_operand(wrapper, rest, options_done) {
+        if rest.is_empty() {
             // No operand follows an all-digit word, so util-linux 2.41 runs it as the command.
             let mut names = command_words_names(args, depth, cut);
             if cut {
@@ -3587,15 +4164,97 @@ fn operand_names(
     if program == "repeat" && operands_to_skip == 1 {
         return list_names(rest, depth, cut);
     }
-    wrapped_from(
-        wrapper,
-        rest,
-        operands_to_skip - 1,
-        options_done,
-        depth,
-        cut,
-        program,
-    )
+    if operands_to_skip > 1 {
+        return wrapped_from(
+            wrapper,
+            rest,
+            operands_to_skip - 1,
+            options_done,
+            depth,
+            cut,
+            program,
+        );
+    }
+    // The last operand. For chrt that is an all-digit priority with more operands after it. getopt's `+` ends the options
+    // at the first non-option, so the words after it are the command and its arguments, none read as an option.
+    let mut names = command_after_operands(wrapper, rest, depth, cut);
+    // flock's getopt reads options after its lock file too (`flock FILE -c command`), so an option-shaped word there is
+    // read as an option as well, and the command after those options is named too.
+    if program == "flock" && rest.first().is_some_and(|first| first.starts_with('-')) {
+        names.extend(wrapped_from(wrapper, rest, 0, false, depth, cut, program));
+    }
+    names
+}
+
+/// The names of the command a wrapper runs, read from the words after its last operand, where no option is read: getopt's
+/// `+` ends the options at the first non-option, so an option-shaped word, a `--` and a NAME=VALUE word are each the
+/// command as written (`command_words_names`). With no word after the operand, the command is the wrapper's default, or
+/// the withheld value where a cut may put one past the cut.
+fn command_after_operands(
+    wrapper: &Wrapper,
+    words: &[String],
+    depth: usize,
+    cut: bool,
+) -> Vec<String> {
+    if words.is_empty() {
+        return if cut {
+            vec![String::new()]
+        } else {
+            wrapper
+                .default_command
+                .map(str::to_owned)
+                .into_iter()
+                .collect()
+        };
+    }
+    command_words_names(words, depth, cut)
+}
+
+/// The replace string an `xargs` option word sets, if it sets one. `-I STR` takes the next word (`next`) when `I` ends its
+/// word, and the rest of the word otherwise (`-ISTR`); `-i` takes the rest of its word, with `{}` when that is none (`-i`,
+/// `-iSTR`); `--replace` and `--replace=STR` are the long forms. The first letter that is no flag decides, as `wrapper`'s
+/// table reads the word: a letter that takes a value before `I` or `i` ends it, so `-nI` gives `I` as the number.
+fn xargs_replace_string(wrapper: &Wrapper, word: &str, next: Option<&String>) -> Option<String> {
+    if let Some(long) = word.strip_prefix("--") {
+        return match long.split_once('=') {
+            Some(("replace", value)) => Some(value.to_owned()),
+            None if long == "replace" => Some("{}".to_owned()),
+            _ => None,
+        };
+    }
+    let letters = &word[1..];
+    for (at, letter) in letters.char_indices() {
+        if wrapper.short_flags.contains(letter) {
+            continue;
+        }
+        let value = &letters[at + letter.len_utf8()..];
+        return match letter {
+            'I' if value.is_empty() => next.cloned(),
+            'I' => Some(value.to_owned()),
+            'i' if value.is_empty() => Some("{}".to_owned()),
+            'i' => Some(value.to_owned()),
+            _ => None,
+        };
+    }
+    None
+}
+
+/// The words of a command that a run-time substitution may change: each word that holds one of `strings`, the replace
+/// string `xargs` substitutes or the `{}` `find` does, becomes `$(`, an open substitution. Where such a word is run as a
+/// command, or read as shell text, what it runs or says is withheld, since `$(` is an expansion or leaves a substitution
+/// open (`command_names`, `command_prefixes_at`). Where it is only an argument of a plain command, it names nothing. The
+/// whole word is replaced, since a substitution inside quotes would be read as literal text.
+fn substituted<S: AsRef<str>>(words: &[String], strings: &[S]) -> Vec<String> {
+    words
+        .iter()
+        .map(|word| {
+            if strings.iter().any(|string| word.contains(string.as_ref())) {
+                "$(".to_owned()
+            } else {
+                word.clone()
+            }
+        })
+        .collect()
 }
 
 /// The names the list of a zsh `repeat` runs, read as a segment's words are (`command_positions`), so the keywords the
@@ -3632,10 +4291,17 @@ fn list_names(words: &[String], depth: usize, cut: bool) -> Vec<String> {
 /// rest are its arguments. The word's own name is named (`command_names`). Then, by what the word is: a wrapper runs
 /// the command it is given (`wrapped_command_names`); `find` runs the command of each `-exec` predicate
 /// (`find_command_names`); a program in `WITHHELD_COMMANDS` runs a command no table reads, so its value is withheld;
+/// a program in `OPTION_VALUE_COMMANDS` runs the command its option or address gives (`option_value_command_names`);
 /// `eval` runs its arguments joined, as shell text; `trap` runs its action as shell text (`trap_action`); `alias` reads
-/// the value of each NAME=VALUE operand as shell text; `busybox` and `toybox` run the applet they are given; a POSIX
-/// shell reads its `-c` script, or, when its commands come from a script file or its standard input, its value is
-/// withheld (`shell_script_arguments`). `cut` says the segment goes on past these words.
+/// the value of each NAME=VALUE operand as shell text; `emulate` runs the text after each `-c` option as shell text
+/// (`emulate_script_names`), and is withheld where an expanding word may stand for that option (`emulate_option_may_be_hidden`);
+/// `busybox` and `toybox` run the applet they are given; a shell
+/// reads its `-c` script, or, when its commands come from a script file or its standard input, its value is withheld
+/// (`shell_script_arguments`), and the shells in `OTHER_SHELLS` also withhold it (`is_other_shell`). `hash` names the paths it
+/// binds (`hash_names`), and the declaring builtins (`typeset`, `declare`, ...) name the element that each `NAME[KEY]=VALUE`
+/// operand defines (`element_definition_names`). `.` or `source` runs the file it is given with the words after it, which
+/// are read as a run by that path is (`command_words_names` one level deeper), and the file is withheld where it is no
+/// system binary. `cut` says the segment goes on past these words.
 fn command_words_names(words: &[String], depth: usize, cut: bool) -> Vec<String> {
     let Some((word, args)) = words.split_first() else {
         return Vec::new();
@@ -3654,6 +4320,8 @@ fn command_words_names(words: &[String], depth: usize, cut: bool) -> Vec<String>
         names.extend(find_command_names(args, depth + 1, cut));
     } else if WITHHELD_COMMANDS.contains(&base) {
         names.push(String::new());
+    } else if OPTION_VALUE_COMMANDS.contains(&base) {
+        names.extend(option_value_command_names(base, args, depth + 1, cut));
     } else if base == "eval" {
         names.extend(command_prefixes_at(&args.join(" "), depth + 1));
         // The text `eval` runs is its joined arguments, and those go on past a cut.
@@ -3691,6 +4359,19 @@ fn command_words_names(words: &[String], depth: usize, cut: bool) -> Vec<String>
         if cut {
             names.push(String::new());
         }
+    } else if base == "emulate" {
+        // zsh's `emulate [-LR] SHELL -c ARG` evaluates ARG as shell text, as `eval` evaluates its arguments: the text is one of
+        // the words after each option that holds a `c` (`emulate_script_names`). A cut segment may have its option, or the text
+        // after it, past the cut, so the withheld value is named then, as `eval`'s is.
+        names.extend(emulate_script_names(args, depth));
+        // An expanding word that may stand for the option, or for the words that carry it, is expanded before `emulate`
+        // reads it, so the text it runs is withheld then (`emulate_option_may_be_hidden`).
+        if emulate_option_may_be_hidden(args) {
+            names.push(String::new());
+        }
+        if cut {
+            names.push(String::new());
+        }
     } else if matches!(base, "busybox" | "toybox") {
         // The options before the applet are the binary's own, and the first word that is not one is the applet.
         match args.iter().position(|arg| !arg.starts_with('-')) {
@@ -3698,16 +4379,57 @@ fn command_words_names(words: &[String], depth: usize, cut: bool) -> Vec<String>
             None if cut => names.push(String::new()),
             None => {}
         }
-    } else if is_posix_shell(word) {
+    } else if base == "hash" {
+        names.extend(hash_names(args, depth, cut));
+    } else if matches!(
+        base,
+        "typeset" | "declare" | "local" | "export" | "readonly" | "integer" | "float"
+    ) {
+        // These builtins declare their operands, and a `NAME[KEY]=VALUE` operand assigns an element of a special array, as a
+        // leading assignment does (`element_assignment_names`). Each such operand defines its element.
+        for arg in args {
+            if let Some((kind, key, value)) = element_assignment(arg) {
+                names.extend(element_definition_names(kind, key, value, depth, cut));
+            }
+        }
+    } else if matches!(base, "." | "source") {
+        // `.` and `source` run the commands of the file they are given, in the shell, so the file is read as a script run by
+        // its path is (`command_names`), and the words after it are its arguments. A file that is a wrapper, such as
+        // `eatmydata` or `xvfb-run`, runs those words as a command, which `command_words_names` reads as it reads a run by
+        // path. A bare name is searched for in the working directory too, so it is withheld as well. An option, such as
+        // bash's `-p path`, or a `--` is no file that can be read, so the withheld value covers it. With no file, a cut
+        // segment may have one past the cut.
+        match args.first() {
+            Some(file) if file.starts_with('-') => names.push(String::new()),
+            Some(file) => {
+                names.extend(command_words_names(args, depth + 1, cut));
+                if !is_system_binary_path(file) {
+                    names.push(String::new());
+                }
+            }
+            None if cut => names.push(String::new()),
+            None => {}
+        }
+    } else if is_posix_shell(word) || is_other_shell(word) {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        match shell_script_arguments(&args) {
+        let scripts = if is_powershell(word) {
+            powershell_command_arguments(&args)
+        } else {
+            shell_script_arguments(word, &args)
+        };
+        match scripts {
             Some(scripts) => {
                 for script in scripts {
                     names.extend(command_prefixes_at(script, depth + 1));
                 }
             }
-            // The commands are in a script file or on the standard input, which no name here reads.
+            // The commands are in a script file or on the standard input, which no name here reads, or the command
+            // string is one a wrapper gives at run time (`shell_script_arguments`).
             None => names.push(String::new()),
+        }
+        // A shell whose syntax the reader does not model may run a command it does not name, so its value is withheld too.
+        if is_other_shell(word) {
+            names.push(String::new());
         }
     }
     names
@@ -3716,7 +4438,8 @@ fn command_words_names(words: &[String], depth: usize, cut: bool) -> Vec<String>
 /// The commands `find` runs, read from the words after its own name: the words after each `-exec`, `-execdir`, `-ok`
 /// and `-okdir` predicate, up to the terminator that ends it (a `;`, or a `+` right after `{}`), each read as a
 /// command (`command_words_names`). No other word of `find`, a path or a test, is a command. A predicate whose command
-/// word lies past a cut has that word withheld, as any command word past a cut is.
+/// word lies past a cut has that word withheld, as any command word past a cut is. Each `{}` of the command is replaced
+/// by a file name at run time, so a word of the command that holds one is read as that substitution (`substituted`).
 fn find_command_names(args: &[String], depth: usize, cut: bool) -> Vec<String> {
     let mut names = Vec::new();
     for (at, arg) in args.iter().enumerate() {
@@ -3734,9 +4457,308 @@ fn find_command_names(args: &[String], depth: usize, cut: bool) -> Vec<String> {
         if end == 0 && cut {
             names.push(String::new());
         }
-        names.extend(command_words_names(&command[..end], depth, cut));
+        // `find` puts each file name in place of every `{}`, so a word of the command that holds one is a run-time value.
+        names.extend(command_words_names(
+            &substituted(&command[..end], &["{}"]),
+            depth,
+            cut,
+        ));
     }
     names
+}
+
+/// The programs whose command is the value of one of their options, or the address of `socat`, rather than a word of
+/// their own: `fd` and `fdfind` run the words given with `-x` or `-X`, up to a `;`; `tar` runs the value of
+/// `--to-command`, `--use-compress-program` (`-I`), `--info-script` (`-F`), `--new-volume-script`, `--rsh-command`,
+/// `--rmt-command`, or the `exec=` action of `--checkpoint-action`; `rg` runs the value of `--pre` and
+/// `--hostname-bin`; `socat` runs the command of its `EXEC:`, `SYSTEM:` or `SHELL:` address; and the netcat programs run
+/// the value of `-e` and `-c`, and in `ncat` of `--exec` and `--sh-exec`. Their other options are too many to table, so each
+/// program is read for these forms alone (`option_value_command_names`), and an argument holding an expansion, which may
+/// stand for one of them, withholds the command (`argument_may_hide_an_option`).
+const OPTION_VALUE_COMMANDS: &[&str] = &[
+    "fd",
+    "fdfind",
+    "tar",
+    "gtar",
+    "bsdtar",
+    "rg",
+    "socat",
+    "nc",
+    "ncat",
+    "netcat",
+    "nc.openbsd",
+    "nc.traditional",
+];
+
+/// The long options of `tar` whose value is a command it runs; `--checkpoint-action` is read by `tar_exec_command`.
+const TAR_COMMAND_OPTIONS: &[&str] = &[
+    "to-command",
+    "use-compress-program",
+    "info-script",
+    "new-volume-script",
+    "rsh-command",
+    "rmt-command",
+];
+
+/// The command names an option-value program runs, read from the words after its own name. Every word is read for the
+/// forms that give a command, wherever it stands, since these programs take their options among their operands, and a
+/// word that is a value is read as well: naming too much is safe, naming too little is not. A command option may lie
+/// past a cut, which these words do not show, so the withheld value is named then, as `eval`'s is. An argument that holds
+/// an expansion may stand for one of these forms, so the withheld value is named for it too (`argument_may_hide_an_option`).
+fn option_value_command_names(
+    program: &str,
+    args: &[String],
+    depth: usize,
+    cut: bool,
+) -> Vec<String> {
+    let mut names = Vec::new();
+    if cut {
+        names.push(String::new());
+    }
+    if args.iter().any(|arg| argument_may_hide_an_option(arg)) {
+        names.push(String::new());
+    }
+    names.extend(match program {
+        "fd" | "fdfind" => fd_exec_names(args, depth, cut),
+        "tar" | "gtar" | "bsdtar" => tar_option_names(args, depth),
+        "rg" => rg_option_names(args, depth),
+        "socat" => socat_address_names(args, depth),
+        // The netcat programs: `nc`, `ncat` and `netcat`, and their variants.
+        _ => netcat_option_names(args, depth),
+    });
+    names
+}
+
+/// Whether an argument of an option-value program holds an expansion, which the shell makes before the program reads the
+/// argument (`is_expanding_word`). Its value may be an option or an address the program reads, and it may split into
+/// several words, one of them an option, so it is withheld wherever it stands, even after a literal character: `x$X` gives
+/// two words when `X` holds ` --to-command=rm`. The braces `fd` fills (`FD_PLACEHOLDERS`) are literal to the shell, as a
+/// bare `{}` is, so a word of only those is no expansion.
+fn argument_may_hide_an_option(arg: &str) -> bool {
+    let literal = FD_PLACEHOLDERS
+        .iter()
+        .fold(arg.to_owned(), |word, placeholder| {
+            word.replace(*placeholder, "")
+        });
+    is_expanding_word(&literal)
+}
+
+/// The placeholders `fd` puts a file name in place of, in a word of a command it runs with `-x` or `-X`: `{}` is the path,
+/// `{/}` the basename, `{//}` the parent directory, and `{.}` and `{/.}` the path and the basename without an extension.
+/// The shell reads none of them as an expansion, so a word of only these is literal text to it.
+const FD_PLACEHOLDERS: &[&str] = &["{}", "{/}", "{//}", "{.}", "{/.}"];
+
+/// The commands `fd` and `fdfind` run with `-x` or `-X` (`--exec`, `--exec-batch`). The words given with each such
+/// option, up to the `;` that ends them, are one command and its arguments, and a value attached to the option (`-xrm`,
+/// `--exec=rm`) starts it. Each command is read as `command_words_names` reads one, with each placeholder of
+/// `FD_PLACEHOLDERS` put in place (`substituted`), so a word that holds one is a run-time value, as `find`'s `{}` is.
+/// Every other word is read as any word is. In a short cluster, a letter that takes a value before the `x` takes it
+/// instead (`-tx` is the executable type), so that `x` is no option. A `\;` or a quoted `';'` cuts its segment, which
+/// names the withheld value as well (`option_value_command_names`).
+fn fd_exec_names(args: &[String], depth: usize, cut: bool) -> Vec<String> {
+    let mut names = Vec::new();
+    for (at, arg) in args.iter().enumerate() {
+        let attached = if let Some(long) = arg.strip_prefix("--") {
+            let (name, value) = split_long_option(long);
+            if !long_option_named(name, &["exec", "exec-batch"]) {
+                continue;
+            }
+            value
+        } else if let Some(letters) = arg.strip_prefix('-') {
+            // The first of the exec letters `x` and `X`, and of the letters that take a value (`-d`, `-E`, `-e`, `-t`,
+            // `-S`, `-o`, `-j`, `-c`), decides the word: an exec letter starts the command, and a value letter takes
+            // the rest of the word.
+            let Some(index) = letters.find(|letter: char| "xXdEetSojc".contains(letter)) else {
+                continue;
+            };
+            if !matches!(letters.as_bytes()[index], b'x' | b'X') {
+                continue;
+            }
+            Some(&letters[index + 1..])
+        } else {
+            continue;
+        };
+        let command: Vec<String> = attached
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .into_iter()
+            .chain(
+                args[at + 1..]
+                    .iter()
+                    .take_while(|word| word.as_str() != ";")
+                    .cloned(),
+            )
+            .collect();
+        // `fd` puts a file name in place of each placeholder in any word of the command, so a word that holds one is a
+        // run-time value, read as `find`'s `{}` is (`substituted`).
+        names.extend(command_words_names(
+            &substituted(&command, FD_PLACEHOLDERS),
+            depth,
+            cut,
+        ));
+    }
+    names
+}
+
+/// The commands `tar` runs by one of its options: the value of each long option in `TAR_COMMAND_OPTIONS`, the value of
+/// `-I` and `-F` (a cluster holds either letter, with its value attached or in the next word), and the `exec=COMMAND`
+/// action of `--checkpoint-action`. A long option may be abbreviated, as getopt reads it. The first word may be a
+/// cluster with no dash, which tar's old style reads (`tar xI rm x.tar`). Each value is read as shell text, which names
+/// the command it starts (`command_prefixes_at`).
+fn tar_option_names(args: &[String], depth: usize) -> Vec<String> {
+    let mut names = Vec::new();
+    for (at, arg) in args.iter().enumerate() {
+        let next = args.get(at + 1).map(String::as_str);
+        if let Some(long) = arg.strip_prefix("--") {
+            let (name, attached) = split_long_option(long);
+            let value = attached.or(next);
+            let command = if long_option_named(name, &["checkpoint-action"]) {
+                value.and_then(tar_exec_command)
+            } else if long_option_named(name, TAR_COMMAND_OPTIONS) {
+                value
+            } else {
+                None
+            };
+            if let Some(command) = command {
+                names.extend(command_prefixes_at(command, depth));
+            }
+        } else if let Some(letters) = arg.strip_prefix('-') {
+            if let Some(index) = letters.find(['I', 'F']) {
+                if let Some(command) = cluster_value(letters, index, next) {
+                    names.extend(command_prefixes_at(command, depth));
+                }
+            }
+        } else if at == 0 {
+            // A first word with no dash is tar's old style, whose letters take their values from the words after it, in
+            // order, and not from the rest of it. So the value of an `I` or `F` in it is any of those words, or the
+            // rest of the word, and each of them is read as a command.
+            if let Some(index) = arg.find(['I', 'F']) {
+                if let Some(command) = cluster_value(arg, index, None) {
+                    names.extend(command_prefixes_at(command, depth));
+                }
+                for word in &args[1..] {
+                    names.extend(command_prefixes_at(word, depth));
+                }
+            }
+        }
+    }
+    names
+}
+
+/// The commands `rg` runs by `--pre`, the preprocessor it runs on each file, and by `--hostname-bin`. The value is
+/// attached (`--pre=COMMAND`) or the next word, and is read as shell text (`command_prefixes_at`).
+fn rg_option_names(args: &[String], depth: usize) -> Vec<String> {
+    let mut names = Vec::new();
+    for (at, arg) in args.iter().enumerate() {
+        let Some(long) = arg.strip_prefix("--") else {
+            continue;
+        };
+        let (name, attached) = split_long_option(long);
+        if long_option_named(name, &["pre", "hostname-bin"]) {
+            let next = args.get(at + 1).map(String::as_str);
+            if let Some(command) = attached.or(next) {
+                names.extend(command_prefixes_at(command, depth));
+            }
+        }
+    }
+    names
+}
+
+/// The keywords of the `socat` addresses that run a command: `EXEC` runs its program, and `SYSTEM` and `SHELL` run their
+/// command through a shell. The socat 1.8.0.0 man page documents all three (`socat_address_names`).
+const SOCAT_COMMAND_ADDRESSES: &[&str] = &["exec", "system", "shell"];
+
+/// The separators that put one address after another in an argument of `socat`. `!!` joins the reading and the writing
+/// address of a dual address, as that man page documents. `|` chains addresses in socat 2, and `%` may be read as a
+/// separator by an older build; neither is documented for 1.8.0.0, so both are read too, as reading more only names more.
+const SOCAT_ADDRESS_SEPARATORS: &[&str] = &["!!", "|", "%"];
+
+/// The commands `socat` runs by an `EXEC:`, `SYSTEM:` or `SHELL:` address, which takes its command after the colon. An
+/// address starts an argument or follows one of `SOCAT_ADDRESS_SEPARATORS`, so every address of a dual or chained argument
+/// is read: `OPEN:/dev/null!!EXEC:rm x` runs `rm` from its second address. `SYSTEM` and `SHELL` bar `!!` inside their
+/// commands, and a command runs to the end of its argument, so the text past a separator is read as shell text too
+/// (`command_prefixes_at`). The keyword is read without regard to case, or to the spaces and marks before it.
+fn socat_address_names(args: &[String], depth: usize) -> Vec<String> {
+    args.iter()
+        .flat_map(|arg| socat_address_starts(arg))
+        .filter_map(|address| address.split_once(':'))
+        .filter(|(keyword, _)| {
+            let keyword = keyword.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+            SOCAT_COMMAND_ADDRESSES
+                .iter()
+                .any(|name| keyword.eq_ignore_ascii_case(name))
+        })
+        .flat_map(|(_, command)| command_prefixes_at(command, depth))
+        .collect()
+}
+
+/// The text from each place an address of `socat` may start in an argument: its beginning, and the text after each of
+/// `SOCAT_ADDRESS_SEPARATORS`. Each is read as an address on its own, so an address after a separator is read as one at
+/// the beginning of an argument is.
+fn socat_address_starts(arg: &str) -> Vec<&str> {
+    let mut starts = vec![arg];
+    for separator in SOCAT_ADDRESS_SEPARATORS {
+        starts.extend(
+            arg.match_indices(*separator)
+                .map(|(at, _)| &arg[at + separator.len()..]),
+        );
+    }
+    starts
+}
+
+/// The commands `nc`, `ncat` and `netcat` run by `-e` and `-c`, in a short cluster too, with the value attached or in
+/// the next word, and by `ncat`'s `--exec` and `--sh-exec`. Each is read as shell text (`command_prefixes_at`).
+/// `ncat`'s `--lua-exec` runs a Lua script, whose commands no name here reads, so its value is withheld.
+fn netcat_option_names(args: &[String], depth: usize) -> Vec<String> {
+    let mut names = Vec::new();
+    for (at, arg) in args.iter().enumerate() {
+        let next = args.get(at + 1).map(String::as_str);
+        if let Some(long) = arg.strip_prefix("--") {
+            let (name, attached) = split_long_option(long);
+            if long_option_named(name, &["lua-exec"]) {
+                names.push(String::new());
+            } else if long_option_named(name, &["exec", "sh-exec"]) {
+                if let Some(command) = attached.or(next) {
+                    names.extend(command_prefixes_at(command, depth));
+                }
+            }
+        } else if let Some(letters) = arg.strip_prefix('-') {
+            if let Some(index) = letters.find(['e', 'c']) {
+                if let Some(command) = cluster_value(letters, index, next) {
+                    names.extend(command_prefixes_at(command, depth));
+                }
+            }
+        }
+    }
+    names
+}
+
+/// The command an `exec=COMMAND` action of `tar --checkpoint-action` runs. A prefix of `exec` is read as `exec`, which
+/// names more than tar does if it is no such action, and never less. The other actions run no command.
+fn tar_exec_command(action: &str) -> Option<&str> {
+    let (name, command) = action.split_once('=')?;
+    long_option_named(name, &["exec"]).then_some(command)
+}
+
+/// A long option's name and the value its `=` attaches, if it has one: `to-command=rm` is `to-command` with `rm`.
+fn split_long_option(long: &str) -> (&str, Option<&str>) {
+    match long.split_once('=') {
+        Some((name, value)) => (name, Some(value)),
+        None => (long, None),
+    }
+}
+
+/// Whether a long option's name is one of `options`, or the start of one, as getopt reads an abbreviation. An ambiguous
+/// abbreviation is no option, but it is read as one, which names too much and never too little.
+fn long_option_named(name: &str, options: &[&str]) -> bool {
+    !name.is_empty() && options.iter().any(|option| option.starts_with(name))
+}
+
+/// The value of the option letter at `index` in a cluster of short options: the rest of the word after the letter, or
+/// else the next word (`-Ixz` and `-I xz` both give `xz`).
+fn cluster_value<'a>(letters: &'a str, index: usize, next: Option<&'a str>) -> Option<&'a str> {
+    let attached = &letters[index + 1..];
+    (!attached.is_empty()).then_some(attached).or(next)
 }
 
 /// The action a `trap` is given: its first operand after its options, where `--` ends them. A lone `-` is an operand,
@@ -3752,6 +4774,55 @@ fn trap_action(args: &[String]) -> Option<&str> {
         }
     }
     None
+}
+
+/// The names the text of zsh's `emulate` runs (`command_words_names`). `emulate [-LR] SHELL -c ARG` evaluates ARG as shell text,
+/// as `eval` evaluates its arguments. The text is one of the words after each option that holds a `c` (`-c`, `-Lc`, `+c`).
+/// zsh takes the option words before the text (`+x`, and `-o NAME`, whose `-o` takes the next word as its value), so which of
+/// the words after the option is the text is not known here. Each of them is read as shell text on its own, and the words joined
+/// with spaces are read too (`command_prefixes_at`). The option is read wherever it stands among the words, not only after the
+/// SHELL operand, so no command is named less.
+fn emulate_script_names(args: &[String], depth: usize) -> Vec<String> {
+    args.iter()
+        .enumerate()
+        .filter(|(_, arg)| is_c_option(arg))
+        .flat_map(|(at, _)| {
+            let text = &args[at + 1..];
+            let mut names = command_prefixes_at(&text.join(" "), depth + 1);
+            for word in text {
+                names.extend(command_prefixes_at(word, depth + 1));
+                // After `--` or a lone `-` zsh takes the next word as the text whatever it starts with, so an expanding
+                // word that looks like an option (`-$x`) can be the text and is read as a leading word above. It is
+                // withheld, as an expanding word that starts a command is.
+                if is_expanding_word(word) {
+                    names.push(String::new());
+                }
+            }
+            names
+        })
+        .collect()
+}
+
+/// Whether an argument of `emulate` is a `-c` option: a word that starts with `-` or `+` and holds a `c`, as `-c`, `-Lc` and
+/// `+c` do. zsh's parseopts reads the `c` under either sign as the command flag, so `+c` takes the text as `-c` does.
+fn is_c_option(arg: &str) -> bool {
+    arg.strip_prefix(['-', '+'])
+        .is_some_and(|letters| letters.contains('c'))
+}
+
+/// Whether `emulate`'s arguments may hide its `-c` option behind an expanding word, so the text it runs is withheld. The
+/// shell expands a word before `emulate` reads it, so the option may be a word no name here reads, or a word that carries
+/// it (`a=(sh -c 'rm x'); emulate $a`). The words before the last literal `-c` option are checked, and with no such option
+/// every word is. The text is one of the words after that option, which `emulate_script_names` reads each on its own, so an
+/// expanding word there that starts a command is withheld by that reading.
+fn emulate_option_may_be_hidden(args: &[String]) -> bool {
+    let before_option = args
+        .iter()
+        .rposition(|arg| is_c_option(arg))
+        .unwrap_or(args.len());
+    args[..before_option]
+        .iter()
+        .any(|arg| is_expanding_word(arg))
 }
 
 /// The names a command word stands for. A word that holds an expansion runs as whatever the shell expands it
@@ -3877,13 +4948,47 @@ fn distinct(values: impl IntoIterator<Item = String>) -> Vec<String> {
         .collect()
 }
 
-/// Whether a word is a shell assignment: a name, then `=`, then its value.
+/// Whether a word is a shell assignment in the sense bash and zsh give it: a name, an optional subscript, then `=` or
+/// `+=` and its value. A POSIX shell such as dash reads only a plain `NAME=VALUE` as one (`is_plain_assignment`), so a
+/// word that is no plain assignment is also the command word there, and `command_prefix` reads it both ways.
 fn is_assignment(word: &str) -> bool {
+    if !word.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+        return false;
+    }
+    let name_len = word
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        .count();
+    // An array element's assignment, `NAME[subscript]=value`, is one too: its subscript runs to the first `]`, and may hold a
+    // `=` of its own.
+    let rest = &word[name_len..];
+    let rest = match rest.strip_prefix('[') {
+        Some(subscripted) => match subscripted.find(']') {
+            Some(close) => &subscripted[close + 1..],
+            None => return false,
+        },
+        None => rest,
+    };
+    // `NAME+=value` appends to the variable (bash and zsh alike), so its `+` is the operator's, not part of the name.
+    rest.starts_with('=') || rest.starts_with("+=")
+}
+
+/// Whether a word is a plain assignment, `NAME=VALUE`: an identifier and then `=`, the one form every POSIX shell reads as
+/// an assignment. The `+=` and subscripted forms are not (`is_assignment`). The program of a `shell` call runs with no
+/// shell, so `program_name` and the argv of `shell_program_commands` skip only a plain assignment.
+fn is_plain_assignment(word: &str) -> bool {
     let Some((name, _)) = word.split_once('=') else {
         return false;
     };
     let starts_as_name = name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_');
     starts_as_name && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether a word is an assignment only in bash's and zsh's sense (`NAME+=VALUE`, `NAME[subscript]=VALUE`): one that
+/// `is_assignment` reads and `is_plain_assignment` does not. In a POSIX shell such as dash it is the command word, so
+/// `A+=/bin/rm` runs the path `A+=/bin/rm` and `A[1]=x` is a glob. `command_prefix` reads such a word as a command too.
+fn is_extended_assignment(word: &str) -> bool {
+    is_assignment(word) && !is_plain_assignment(word)
 }
 
 /// Whether a word is a number written in decimal digits: one or more ASCII digits and nothing else.
@@ -6238,6 +7343,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn process_start_reads_only_the_sh_it_runs_while_code_interpreter_lowercases_its_language() {
+        // `process_start` matches the trimmed language exactly, so `SH` starts nothing and names nothing, and a padded
+        // `sh` runs `sh` and is read. `code_interpreter` lowercases its language, so `SH` runs `sh` there and is read.
+        let code = |language: &str| format!(r#"{{"language":"{language}","code":"rm x"}}"#);
+        assert!(targets_of("process_start", &code("SH")).is_empty());
+        assert!(targets_of("process_start", &code("Sh")).is_empty());
+        assert_eq!(
+            targets_of("process_start", &code(" sh ")),
+            pairs(&[("command_prefix", "rm")])
+        );
+        assert_eq!(
+            targets_of("code_interpreter", &code("SH")),
+            pairs(&[("command_prefix", "rm")])
+        );
+    }
+
     #[tokio::test]
     async fn a_mail_body_passed_on_unread_is_decided_by_a_recipient_rule_whatever_its_domain() {
         let (mut policy, state) = harness(ToolClassGate::Enforce).await;
@@ -7857,6 +8979,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_denied_command_run_by_an_option_value_program_is_denied_too() {
+        // `fd`, `tar`, `rg`, `socat` and the netcat programs run the command their option or address gives, so a deny
+        // on that command denies the call, and its target is sent.
+        for (tool, input) in [
+            ("shell", r#"{"program":"fd","args":["-x","rm","{}"]}"#),
+            (
+                "shell",
+                r#"{"program":"fdfind","args":["-X","rm","{}","+"]}"#,
+            ),
+            (
+                "shell",
+                r#"{"program":"tar","args":["--to-command=rm","-x"]}"#,
+            ),
+            (
+                "shell",
+                r#"{"program":"tar","args":["-I","rm","-xf","a.tar"]}"#,
+            ),
+            (
+                "shell",
+                r#"{"program":"tar","args":["-cf","a.tar","--checkpoint-action=exec=rm","."]}"#,
+            ),
+            ("shell", r#"{"program":"rg","args":["--pre","rm","foo"]}"#),
+            ("shell", r#"{"program":"socat","args":["-","SYSTEM:rm"]}"#),
+            ("shell", r#"{"program":"nc","args":["-e","rm","host","1"]}"#),
+            (
+                "shell",
+                r#"{"program":"ncat","args":["--sh-exec","rm x","host","1"]}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"tar --use-compress-program=rm -xf a.tar"}"#,
+            ),
+        ] {
+            let (mut policy, state) = harness(ToolClassGate::Enforce).await;
+            policy.permission_rules = true;
+            state
+                .decision_by_target
+                .lock()
+                .unwrap()
+                .insert("rm".to_owned(), "deny".to_owned());
+            let evaluation = policy
+                .evaluate_tool_call_with_input(tool, input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("a deny is an evaluation, not an error");
+            assert_eq!(evaluation.decision, CapabilityDecision::Deny, "{input}");
+            let sent = state.evaluated.lock().unwrap();
+            assert!(
+                sent.iter().any(|request| {
+                    request.target_kind == "command_prefix" && request.target_value == "rm"
+                }),
+                "{input}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_expansion_that_may_stand_for_an_option_is_checked_as_the_withheld_value() {
+        // The shell expands `$A` before `tar` reads it, and `A` may hold `--to-command=rm`, so the call is checked as the
+        // withheld value, and a deny on that value denies it. `fd -x sh -c 'rm {}'` runs the `rm` of each file name, and
+        // is checked the same way.
+        for (tool, input) in [
+            ("shell", r#"{"program":"tar","args":["$A","-xf","a.tar"]}"#),
+            (
+                "shell",
+                r#"{"program":"fd","args":["-x","sh","-c","rm {}"]}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"A=--to-command=rm; tar $A -xf a.tar"}"#,
+            ),
+        ] {
+            let (mut policy, state) = harness(ToolClassGate::Enforce).await;
+            policy.permission_rules = true;
+            state
+                .decision_by_target
+                .lock()
+                .unwrap()
+                .insert(String::new(), "deny".to_owned());
+            let evaluation = policy
+                .evaluate_tool_call_with_input(tool, input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("a deny is an evaluation, not an error");
+            assert_eq!(evaluation.decision, CapabilityDecision::Deny, "{input}");
+            let sent = state.evaluated.lock().unwrap();
+            assert!(
+                sent.iter().any(|request| {
+                    request.target_kind == "command_prefix" && request.target_value.is_empty()
+                }),
+                "{input}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_wrapper_and_its_command_are_each_checked_and_the_strictest_answer_decides() {
         // The wrapper's own name is a target too: an ask on `xargs` asks the whole call, whatever command it runs.
         let (mut policy, state) = harness(ToolClassGate::Enforce).await;
@@ -8353,6 +9569,65 @@ mod tests {
     }
 
     #[test]
+    fn an_emulate_runs_the_text_after_its_dash_c_option_as_shell_text() {
+        // zsh's `emulate [-LR] SHELL -c ARG` evaluates ARG as shell text, as `eval` does, so the commands of ARG are named.
+        // The option is read wherever it stands among the words, so ARG is read whether `-c` follows the SHELL operand or not.
+        assert_eq!(command_prefixes("emulate sh -c 'rm x'"), ["emulate", "rm"]);
+        assert_eq!(
+            command_prefixes("zsh -c \"emulate sh -c 'rm x'\""),
+            ["zsh", "emulate", "rm"]
+        );
+        assert_eq!(
+            command_prefixes("emulate -LR zsh -c 'echo rm'"),
+            ["emulate", "echo"]
+        );
+        // Each word after the option is read on its own as well as joined, so the `sh` after the text is read too. That names
+        // more than zsh runs, which is the direction the reading errs in: the names are never fewer.
+        assert_eq!(
+            command_prefixes("emulate -c 'rm x' sh"),
+            ["emulate", "rm", "sh", ""]
+        );
+        assert!(command_prefixes("emulate sh -c 'ls && rm x'").contains(&"rm".to_owned()));
+        // The option words zsh takes before the text (`+x`, and `-o NAME`) are among the words after the option, so the text
+        // is named whichever word it is.
+        assert!(command_prefixes("emulate sh -c +x 'rm x'").contains(&"rm".to_owned()));
+        assert!(command_prefixes("emulate sh -co errexit 'rm x'").contains(&"rm".to_owned()));
+        assert!(command_prefixes("emulate sh -c +o errexit 'rm x'").contains(&"rm".to_owned()));
+        // zsh's parseopts reads the `c` of `+c` as the command flag too.
+        assert!(command_prefixes("emulate sh +c 'rm x'").contains(&"rm".to_owned()));
+        // After `--` or a lone `-` the next word is the text whatever it starts with, so an expanding word shaped like an
+        // option (`-$x`) is withheld, not skipped as a leading word.
+        assert!(command_prefixes("emulate sh -c -- \"-$x\"").contains(&String::new()));
+        assert!(command_prefixes("emulate sh -c - \"-$x\"").contains(&String::new()));
+        // An option with no text after it, or an emulation with no `-c`, runs nothing.
+        assert_eq!(command_prefixes("emulate sh -c"), ["emulate"]);
+        assert_eq!(command_prefixes("emulate -L zsh"), ["emulate"]);
+        // A word of the text with an expansion is withheld, as `eval`'s is.
+        assert_eq!(command_prefixes("emulate sh -c \"$X\""), ["emulate", ""]);
+        // An expanding word that may stand for the `-c` option, or for the words that carry it, is withheld, as the shell
+        // expands it before `emulate` reads it (`emulate_option_may_be_hidden`).
+        assert!(command_prefixes("emulate sh $o 'rm x'").contains(&String::new()));
+        assert!(command_prefixes("emulate $a").contains(&String::new()));
+        assert!(command_prefixes("builtin emulate sh $o 'rm x'").contains(&String::new()));
+        // A cut segment may have its `-c`, and the text after it, past the cut, so the withheld value is named.
+        let words = vec!["emulate".to_owned()];
+        assert_eq!(command_words_names(&words, 0, true), ["emulate", ""]);
+        let open = command_prefixes("emulate sh -c 'rm x");
+        assert!(open.contains(&"rm".to_owned()), "{open:?}");
+        assert!(open.contains(&String::new()), "{open:?}");
+        // An alias whose value is an emulation may get its `-c` from the words a call appends, so its value is withheld.
+        assert!(command_prefixes("alias x='emulate sh'\nx -c 'rm y'").contains(&String::new()));
+        // The program of a `shell` call names the same commands.
+        assert_eq!(
+            targets_of(
+                "shell",
+                r#"{"program":"emulate","args":["sh","-c","rm x"]}"#
+            ),
+            pairs(&[("command_prefix", "emulate"), ("command_prefix", "rm")])
+        );
+    }
+
+    #[test]
     fn an_alias_reads_the_text_it_defines_as_shell_text() {
         // zsh expands an alias in a `-c` script, and bash does after `shopt -s expand_aliases`, so the command its value
         // runs is named where the alias is defined, as the text of `eval` is read.
@@ -8425,8 +9700,8 @@ mod tests {
         assert_eq!(command_prefixes("chroot X=1 rm x"), ["chroot", "rm", "x"]);
         assert_eq!(command_prefixes("taskset X=1 rm x"), ["taskset", "rm", "x"]);
         assert_eq!(command_prefixes("flock -x X=1 rm"), ["flock", "rm"]);
-        // Past the operand, the assignment is a variable set, and the command after the operand is the one named.
-        assert_eq!(command_prefixes("timeout 5 X=1 rm x"), ["timeout", "rm"]);
+        // Past the operand, timeout execs the assignment as its command (`X=1`), so no `rm` runs and none is named.
+        assert_eq!(command_prefixes("timeout 5 X=1 rm x"), ["timeout", "X"]);
         // `chrt` reads each word after its options as the priority, or, when it is not all digits, as the command it runs.
         assert!(command_prefixes("chrt X=1 rm x").contains(&"rm".to_owned()));
     }
@@ -8472,6 +9747,482 @@ mod tests {
         // A value whose last command runs no word of a call's own withholds nothing.
         assert!(!command_prefixes("alias l=ls\nl -la").contains(&String::new()));
         assert!(!command_prefixes("alias x='rm -rf y'\nx").contains(&String::new()));
+    }
+
+    #[test]
+    fn a_zsh_special_hash_array_defines_names_through_its_elements() {
+        // `aliases=(name value ...)` defines an alias whose value runs when its name is used, and `functions+=(name body)`
+        // a function. Each element is shell text, so a command in an element is named where the array is assigned, and
+        // `NAME+=` is an assignment's operator, the append of bash and zsh, not part of the name.
+        assert_eq!(command_prefixes("aliases=(x 'rm -rf y')"), ["x", "rm"]);
+        assert_eq!(command_prefixes("aliases+=(x 'rm -rf y')"), ["x", "rm"]);
+        assert_eq!(command_prefixes("galiases=(x 'rm -rf y')"), ["x", "rm"]);
+        assert_eq!(command_prefixes("saliases=(x 'rm -rf y')"), ["x", "rm"]);
+        assert_eq!(command_prefixes("functions+=(f 'rm x')"), ["f", "rm"]);
+        assert_eq!(command_prefixes("aliases=(x 'rm -rf y')\nx"), ["x", "rm"]);
+        // A value that a call's own words may run is withheld, as an alias's is (`alias_value_hides_a_command`).
+        assert!(command_prefixes("aliases=(s sudo)\ns rm x").contains(&String::new()));
+        // An array that no `)` closes may go on past the text, so its value is withheld too.
+        let open = command_prefixes("aliases=(x 'rm -rf y'");
+        assert!(open.contains(&"rm".to_owned()), "{open:?}");
+        assert!(open.contains(&String::new()), "{open:?}");
+        // A plain command, and an assignment with no command after it, name what they run as before.
+        assert_eq!(command_prefixes("x -rf y"), ["x"]);
+        // `A+=1` is an assignment in bash and zsh, and in a POSIX shell such as dash the command word `A+=1`, which names
+        // itself as any command word does (`command_name`).
+        assert_eq!(command_prefixes("A+=1"), ["A+"]);
+        // An appending prefix (`A+=1 rm`) is an assignment, so the command after it is named, as in bash and zsh; a POSIX
+        // shell also names the word `A+=1` as its command.
+        assert_eq!(command_prefixes("A+=1 rm -rf x"), ["rm", "A+"]);
+        assert_eq!(command_prefixes("A+=1 B=2 rm -rf x"), ["rm", "A+"]);
+        // An array element's assignment is a prefix assignment too, and its subscript may hold a `=`. A POSIX shell reads the
+        // word as a glob command, which is withheld.
+        assert_eq!(command_prefixes("A[1]=x rm -rf y"), ["rm", ""]);
+        assert_eq!(command_prefixes("A[x=1]+=y rm -rf z"), ["rm", ""]);
+        // Without an `=` after the subscript, `A[1]` is a glob that names a file, so its value is withheld and nothing more.
+        assert_eq!(command_prefixes("A[1] rm -rf z"), [""]);
+        // Where a `#` follows a redirect's mark, it is the target's word and no comment, so an array after it is read.
+        assert!(command_prefixes("echo >&# x; aliases=(x 'rm -rf y')").contains(&"rm".to_owned()));
+        assert!(command_prefixes("echo >;# x; aliases=(x 'rm -rf y')").contains(&"rm".to_owned()));
+        // A line continuation can join a name to its `=(`, which only the joined line shows, so the array is read there too.
+        assert!(command_prefixes("aliases\\\n=(x 'rm -rf y')").contains(&"rm".to_owned()));
+        // An array inside a substitution is read by the substitution's own text, and one in quotes is no array.
+        assert!(command_prefixes("echo $(aliases=(x 'rm -rf y'))").contains(&"rm".to_owned()));
+        assert!(!command_prefixes("echo \"aliases=(x 'rm -rf y')\"").contains(&"rm".to_owned()));
+        // The same array in a tool's code is read the same way.
+        assert_eq!(
+            targets_of(
+                "code_interpreter",
+                r#"{"language":"sh","code":"aliases+=(x 'rm -rf y')"}"#
+            ),
+            pairs(&[("command_prefix", "x"), ("command_prefix", "rm")])
+        );
+    }
+
+    #[test]
+    fn a_subscripted_assignment_to_a_special_array_names_its_element() {
+        // bash's `BASH_CMDS[NAME]=PATH` binds NAME to PATH in its command hash, and `BASH_ALIASES[NAME]=VALUE` defines an
+        // alias. zsh's `aliases`, `galiases`, `saliases`, `functions` and `commands` take the same subscripted form, and each
+        // element is read as its hash reads it (`hash_element_names`): the key is the name it defines, and the value is what
+        // a call of that name runs. Such a word before a command is an assignment, so it defines its element; as an argument
+        // it does not.
+        // Each subscripted word is also a command word in a POSIX shell, where it is a glob, so its withheld value is named too.
+        assert_eq!(
+            command_prefixes("BASH_CMDS[x]=/bin/rm; x -rf y"),
+            ["x", "/bin/rm", "rm", ""]
+        );
+        assert_eq!(
+            command_prefixes("BASH_ALIASES[x]='rm -rf y'\nx"),
+            ["x", "rm", ""]
+        );
+        assert_eq!(
+            command_prefixes("BASH_ALIASES[x]+='rm -rf y'"),
+            ["x", "rm", ""]
+        );
+        assert_eq!(command_prefixes("aliases[x]='rm -rf y'"), ["x", "rm", ""]);
+        assert_eq!(command_prefixes("galiases[x]='rm -rf y'"), ["x", "rm", ""]);
+        assert_eq!(command_prefixes("saliases[x]='rm -rf y'"), ["x", "rm", ""]);
+        assert_eq!(command_prefixes("functions[f]='rm x'"), ["f", "rm", ""]);
+        assert_eq!(
+            command_prefixes("commands[x]=/bin/rm"),
+            ["x", "/bin/rm", "rm", ""]
+        );
+        // A value that a call's own words may run is withheld, as an alias's is (`alias_value_hides_a_command`).
+        assert!(command_prefixes("aliases[s]=sudo\ns rm x").contains(&String::new()));
+        // Where no assignment stands, as an argument of a command, the subscripted word defines nothing.
+        assert_eq!(command_prefixes("echo aliases[x]='rm -rf y'"), ["echo"]);
+        // An element of an array that defines no name runs nothing, and an assignment before a command leaves that command
+        // named: `A[1]=x rm -rf y` names `rm`, and `BASH_CMDS[1]=x` binds `1` to `x` and names the withheld value of `x`.
+        // A POSIX shell runs `A[1]=/bin/rm` as a glob command word, so the withheld value is named there too (`A1=` may be a
+        // symlink to `/`), and the command after it is `x`.
+        assert_eq!(command_prefixes("A[1]=/bin/rm x"), ["x", ""]);
+        assert_eq!(command_prefixes("A[1]=x rm -rf y"), ["rm", ""]);
+        assert_eq!(
+            command_prefixes("BASH_CMDS[1]=x rm -rf y"),
+            ["1", "x", "", "rm"]
+        );
+        // A body opened by `function` or by a `coproc` NAME is read from its opening word on, so its assignments are read.
+        assert_eq!(
+            command_prefixes("function f { BASH_CMDS[x]=/bin/rm; }; x -rf y"),
+            ["x", "/bin/rm", "rm", ""]
+        );
+        assert_eq!(
+            command_prefixes("coproc NAME { BASH_CMDS[x]=/bin/rm; }; x -rf y"),
+            ["x", "/bin/rm", "rm", "NAME", ""]
+        );
+    }
+
+    #[test]
+    fn a_plus_or_subscripted_assignment_is_also_the_command_a_posix_shell_runs() {
+        // `NAME+=VALUE` and `NAME[sub]=VALUE` are assignments in bash and zsh, but in dash they are the command word: `A+=/bin/rm`
+        // runs the path `A+=/bin/rm`, which a symlink `A+=` to `/` resolves to `/bin/rm`, and `A[1]=/bin/rm` is a glob. The
+        // reading as an assignment names the command after the word, and the reading as a command word names the word, so both
+        // are named.
+        assert_eq!(command_prefixes("A+=/bin/rm -rf y"), ["y", "A+", "rm", ""]);
+        assert_eq!(command_prefixes("A[1]=/bin/rm x"), ["x", ""]);
+        assert_eq!(
+            command_prefixes("ln -s / A+=; A+=/bin/rm -rf y"),
+            ["ln", "y", "A+", "rm", ""]
+        );
+        assert_eq!(
+            command_prefixes("nohup A+=/bin/rm x"),
+            ["nohup", "A+", "rm", ""]
+        );
+        // A word after a keyword, after a redirection or after `time` is read as a command word the same way.
+        assert!(command_prefixes("if A+=/bin/rm x; then :; fi").contains(&"rm".to_owned()));
+        assert!(command_prefixes("time A+=/bin/rm x").contains(&"rm".to_owned()));
+        assert!(command_prefixes("2>f A+=/bin/rm x").contains(&"rm".to_owned()));
+        // Negative controls. A plain assignment is an assignment only, so the command after it is the one named, and `env` and
+        // `sudo` read such a word as a variable set for the command they run.
+        assert_eq!(command_prefixes("A=1 rm x"), ["rm"]);
+        assert_eq!(command_prefixes("env A+=/bin/rm x"), ["env", "x"]);
+        assert_eq!(command_prefixes("env A[1]=/bin/rm x"), ["env", "x"]);
+        // The shell tool's program runs with no shell, so its extended assignment word is the program, named as a command.
+        assert_eq!(
+            targets_of("shell", r#"{"program":"A+=/bin/rm","args":["-rf","y"]}"#),
+            pairs(&[
+                ("command_prefix", "A+"),
+                ("command_prefix", "rm"),
+                ("command_prefix", ""),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_declaring_builtin_defines_the_element_of_each_subscripted_operand() {
+        // `typeset`, `declare` and the other builtins that declare their operands define an element of a special array from a
+        // `NAME[KEY]=VALUE` operand, as a leading assignment does: `typeset aliases[x]='rm -rf y'` defines the alias `x`, and a
+        // call of `x` runs `rm -rf y`.
+        assert_eq!(
+            command_prefixes("typeset aliases[x]='rm -rf y'; x"),
+            ["typeset", "x", "rm"]
+        );
+        assert_eq!(
+            command_prefixes("declare BASH_CMDS[x]=/bin/rm; x"),
+            ["declare", "x", "/bin/rm", "rm"]
+        );
+        assert_eq!(
+            command_prefixes("readonly BASH_CMDS[1]=x"),
+            ["readonly", "1", "x", ""]
+        );
+        assert_eq!(
+            command_prefixes("integer aliases[x]=rm"),
+            ["integer", "x", "rm"]
+        );
+        // A value that a call's own words may run is withheld, as an alias's is.
+        assert!(command_prefixes("local -x aliases[s]=sudo\ns rm x").contains(&String::new()));
+        // An option or a name with no subscript defines no element, and so does an argument of a command that declares nothing.
+        assert_eq!(command_prefixes("typeset -A aliases"), ["typeset"]);
+        assert_eq!(command_prefixes("typeset X=1 rm x"), ["typeset"]);
+        assert_eq!(
+            command_prefixes("echo typeset aliases[x]='rm -rf y'"),
+            ["echo"]
+        );
+    }
+
+    #[test]
+    fn a_hash_binds_a_name_to_the_path_it_names_and_that_path_is_read() {
+        // `hash NAME=PATH` (zsh) and `hash -p PATH NAME` (bash) bind NAME to PATH, so a later `NAME -rf y` runs the program
+        // at PATH: the path is read as a command word is, and a path outside the system binary directories is withheld.
+        assert_eq!(
+            command_prefixes("hash x=/bin/rm"),
+            ["hash", "/bin/rm", "rm"]
+        );
+        assert_eq!(
+            command_prefixes("hash -p /bin/rm x"),
+            ["hash", "/bin/rm", "rm"]
+        );
+        assert_eq!(
+            command_prefixes("hash x=/bin/rm\nx -rf y"),
+            ["hash", "/bin/rm", "rm", "x"]
+        );
+        assert_eq!(
+            command_prefixes("hash -p ./x.sh x"),
+            ["hash", "./x.sh", "x.sh", ""]
+        );
+        assert_eq!(
+            command_prefixes("hash x=/workspace/y"),
+            ["hash", "/workspace/y", "y", ""]
+        );
+        // A path to a program that runs the words a call gives it is withheld too (`alias_value_hides_a_command`).
+        assert!(command_prefixes("hash x=/usr/bin/env").contains(&String::new()));
+        // zsh's `commands` hash binds names to paths the same way, from an array.
+        assert!(command_prefixes("commands=(x /bin/rm)").contains(&"rm".to_owned()));
+        assert!(command_prefixes("commands=(x /usr/bin/env)").contains(&String::new()));
+        // A `hash` that binds nothing names nothing more.
+        assert_eq!(command_prefixes("hash rm"), ["hash"]);
+        assert_eq!(command_prefixes("hash -r"), ["hash"]);
+        // A `-p` with no path, or a cut segment whose path may lie past the cut, withholds its value.
+        assert_eq!(command_prefixes("hash -p"), ["hash", ""]);
+        let words: Vec<String> = ["hash", "-p"]
+            .iter()
+            .map(|word| (*word).to_owned())
+            .collect();
+        assert_eq!(command_words_names(&words, 0, true), ["hash", ""]);
+    }
+
+    #[test]
+    fn a_hash_option_that_clusters_or_attaches_its_path_binds_that_path_too() {
+        // bash's `hash` reads its options as getopt does (`dlp:rt`), so `-p` may follow other option letters, or be attached
+        // to its path: `-rp /bin/rm`, `-p/bin/rm` and `-rp/bin/rm` bind NAME to `/bin/rm`, as `-p /bin/rm` does.
+        assert_eq!(
+            command_prefixes("hash -p/bin/rm x\nx -rf y"),
+            ["hash", "/bin/rm", "rm", "x"]
+        );
+        assert_eq!(
+            command_prefixes("hash -rp/bin/rm x"),
+            ["hash", "/bin/rm", "rm"]
+        );
+        for option in ["-rp", "-tp", "-lp", "-dp"] {
+            let text = format!("hash {option} /bin/rm x\nx -rf y");
+            let names = command_prefixes(&text);
+            assert!(names.contains(&"rm".to_owned()), "{text}: {names:?}");
+        }
+        // The rest of the word is the path, so `-pr` binds to `r`, and a `-rp` with no path after it withholds one.
+        assert_eq!(command_prefixes("hash -pr x"), ["hash", "r", ""]);
+        assert_eq!(command_prefixes("hash -rp"), ["hash", ""]);
+        // Options without a `p` name no path, and after `--` a word binds nothing but a `NAME=PATH`.
+        assert_eq!(command_prefixes("hash -tr x"), ["hash"]);
+        assert_eq!(command_prefixes("hash -- -p /bin/rm"), ["hash"]);
+        assert_eq!(
+            command_prefixes("hash -- x=/bin/rm"),
+            ["hash", "/bin/rm", "rm"]
+        );
+    }
+
+    #[test]
+    fn a_dot_or_source_builtin_withholds_the_file_it_runs() {
+        // `. FILE` and `source FILE` run the commands of FILE in the shell, so FILE is read as a script run by its path is:
+        // its path and basename are named, and the withheld value covers its commands. The builtin's own name is named too.
+        assert_eq!(command_prefixes(". ./x.sh"), [".", "./x.sh", "x.sh", ""]);
+        assert_eq!(command_prefixes(". x.sh"), [".", "x.sh", ""]);
+        assert_eq!(
+            command_prefixes("source ./x.sh rm -rf y"),
+            ["source", "./x.sh", "x.sh", ""]
+        );
+        // A system binary's path is the image's own file, so it is named without the withheld value.
+        assert_eq!(command_prefixes(". /usr/bin/x"), [".", "/usr/bin/x", "x"]);
+        assert_eq!(
+            command_prefixes("echo rm | . /dev/stdin"),
+            ["echo", ".", "/dev/stdin", "stdin", ""]
+        );
+        // An option, such as bash's `-p path`, and a `--` before the file withhold the file too.
+        assert!(command_prefixes(". -p /usr/bin ./x.sh").contains(&String::new()));
+        assert!(command_prefixes(". -- ./x.sh").contains(&String::new()));
+        // With no file the builtin runs nothing, and a cut segment may have its file past the cut.
+        assert_eq!(command_prefixes("."), ["."]);
+        let words = vec![".".to_owned()];
+        assert_eq!(command_words_names(&words, 0, true), [".", ""]);
+        assert_eq!(
+            targets_of("shell", r#"{"program":".","args":["./x.sh"]}"#),
+            pairs(&[
+                ("command_prefix", "."),
+                ("command_prefix", "./x.sh"),
+                ("command_prefix", "x.sh"),
+                ("command_prefix", ""),
+            ])
+        );
+    }
+
+    #[test]
+    fn dot_or_source_runs_the_words_after_its_file_as_a_run_by_path_would() {
+        // `. FILE ARGS` runs FILE with ARGS, so a system file that is a wrapper runs the command it is given, as a run by its
+        // path does: `eatmydata` and `setsid` exec the words after them. A system file of a program withheld whole, such as
+        // `xvfb-run`, names that program and the withheld value. A system file that runs nothing it is given names no more
+        // than its path does, and a file outside the system directories keeps its withheld value.
+        assert_eq!(
+            command_prefixes(". /usr/bin/eatmydata rm -rf x"),
+            [".", "/usr/bin/eatmydata", "eatmydata", "rm"]
+        );
+        assert_eq!(
+            command_prefixes("source /usr/bin/setsid rm x"),
+            ["source", "/usr/bin/setsid", "setsid", "rm"]
+        );
+        assert_eq!(
+            command_prefixes("source /usr/bin/xvfb-run rm x"),
+            ["source", "/usr/bin/xvfb-run", "xvfb-run", ""]
+        );
+        assert_eq!(command_prefixes(". /usr/bin/x"), [".", "/usr/bin/x", "x"]);
+        assert_eq!(
+            command_prefixes(". /usr/bin/x rm -rf y"),
+            [".", "/usr/bin/x", "x"]
+        );
+        // An option that the wrapper's table leaves out withholds its command, as its own run does.
+        assert_eq!(
+            command_prefixes(". /usr/bin/eatmydata -v rm x"),
+            [".", "/usr/bin/eatmydata", "eatmydata", ""]
+        );
+        assert_eq!(
+            command_prefixes(". ./eatmydata rm x"),
+            [".", "./eatmydata", "eatmydata", "", "rm"]
+        );
+        assert_eq!(
+            targets_of(
+                "shell",
+                r#"{"program":".","args":["/usr/bin/eatmydata","rm","-rf","x"]}"#
+            ),
+            pairs(&[
+                ("command_prefix", "."),
+                ("command_prefix", "/usr/bin/eatmydata"),
+                ("command_prefix", "eatmydata"),
+                ("command_prefix", "rm"),
+            ])
+        );
+    }
+
+    #[test]
+    fn newgrp_and_arch_chroot_start_a_shell_so_their_value_is_withheld() {
+        // `newgrp` starts a shell that reads its commands from stdin, and `arch-chroot` runs a shell, or the command it is
+        // given, in a new root. Each names itself and the withheld value, as `schroot` and `systemd-nspawn` do.
+        assert_eq!(
+            command_prefixes("echo 'rm x' | newgrp"),
+            ["echo", "newgrp", ""]
+        );
+        assert_eq!(command_prefixes("newgrp"), ["newgrp", ""]);
+        assert_eq!(command_prefixes("newgrp mygroup"), ["newgrp", ""]);
+        assert_eq!(
+            command_prefixes("/usr/bin/newgrp -"),
+            ["/usr/bin/newgrp", "newgrp", ""]
+        );
+        assert_eq!(
+            command_prefixes("arch-chroot /mnt rm x"),
+            ["arch-chroot", ""]
+        );
+        assert_eq!(command_prefixes("arch-chroot /mnt"), ["arch-chroot", ""]);
+    }
+
+    #[test]
+    fn chroot_reads_no_option_or_assignment_after_its_newroot() {
+        // coreutils' `chroot` takes its options before NEWROOT only, so the words after it are the command and its
+        // arguments: an option-shaped word is that command, and NAME=VALUE is a program of that name, not a variable set.
+        assert_eq!(
+            command_prefixes("chroot /srv --userspec x rm"),
+            ["chroot", "--userspec"]
+        );
+        assert_eq!(command_prefixes("chroot /srv X=1 rm x"), ["chroot", "X"]);
+        assert_eq!(command_prefixes("chroot /srv rm -rf x"), ["chroot", "rm"]);
+        // The options before NEWROOT are still read, so the command after it is named.
+        assert_eq!(
+            command_prefixes("chroot --userspec=0:0 /srv rm x"),
+            ["chroot", "rm"]
+        );
+    }
+
+    #[test]
+    fn a_wrapper_that_execs_its_command_runs_a_name_value_word_as_that_command() {
+        // `nohup`, `nice`, `xargs`, `command`, `exec` and `eatmydata` run their command with `execvp`, so `A=/bin/rm` is a
+        // program run by that path, not a variable set. It names `A`, the basename `rm` and the withheld value, as a
+        // command word does.
+        assert_eq!(
+            command_prefixes("nohup A=/bin/rm x"),
+            ["nohup", "A", "rm", ""]
+        );
+        assert_eq!(
+            command_prefixes("ln -s / A=; nohup A=/bin/rm x"),
+            ["ln", "nohup", "A", "rm", ""]
+        );
+        assert_eq!(
+            command_prefixes("nice -n 1 A=/bin/rm x"),
+            ["nice", "A", "rm", ""]
+        );
+        assert_eq!(
+            command_prefixes("xargs A=/bin/rm"),
+            ["xargs", "A", "rm", ""]
+        );
+        assert_eq!(
+            command_prefixes("command A=/bin/rm x"),
+            ["command", "A", "rm", ""]
+        );
+        assert_eq!(
+            command_prefixes("exec A=/bin/rm x"),
+            ["exec", "A", "rm", ""]
+        );
+        assert_eq!(
+            command_prefixes("eatmydata A=/bin/rm x"),
+            ["eatmydata", "A", "rm", ""]
+        );
+        // The program a NAME=VALUE word names runs no command of its own, so the word after it is only its argument.
+        assert_eq!(command_prefixes("nohup A=1 rm x"), ["nohup", "A"]);
+        // env and sudo read an assignment as a variable set for the command they run.
+        assert_eq!(command_prefixes("env A=1 rm x"), ["env", "rm"]);
+        assert_eq!(command_prefixes("sudo A=1 rm x"), ["sudo", "rm"]);
+    }
+
+    #[test]
+    fn env_takes_any_word_with_an_equals_sign_as_a_variable_set_whatever_its_name() {
+        // GNU env (coreutils 8.32) reads every word with an `=` before its command as a variable set, whatever the name
+        // before the `=`: `env 1=x rm` sets the variable `1` and runs `rm`, so `rm` is named as it is after `env A=1`.
+        // `A-B` and `A.B` are such names too, after options and after `--`.
+        assert_eq!(command_prefixes("env 1=x rm -rf y"), ["env", "rm"]);
+        assert_eq!(command_prefixes("env A-B=x rm -rf y"), ["env", "rm"]);
+        assert_eq!(command_prefixes("env A.B=1 rm -rf y"), ["env", "rm"]);
+        assert_eq!(command_prefixes("env -i 1=x A-B=2 rm x"), ["env", "rm"]);
+        assert_eq!(command_prefixes("env -- 1=x rm x"), ["env", "rm"]);
+        assert_eq!(
+            targets_of(
+                "shell",
+                r#"{"program":"env","args":["1=x","rm","-rf","x"]}"#
+            ),
+            pairs(&[("command_prefix", "env"), ("command_prefix", "rm")])
+        );
+        // A word with an expansion may split into a command, so it is withheld as it was before.
+        assert_eq!(command_prefixes("env 1=$Y rm x"), ["env", ""]);
+        assert_eq!(command_prefixes("env $X=1 rm x"), ["env", ""]);
+        // sudo's reading of such a word is not verified here, so the word is also read as the command it may be, and the
+        // `rm` after it is named.
+        assert_eq!(command_prefixes("sudo 1=x rm -rf y"), ["sudo", "1", "rm"]);
+        assert_eq!(
+            command_prefixes("sudo A-B=x rm -rf y"),
+            ["sudo", "A-B", "rm"]
+        );
+        // nocorrect reads only the assignments the shell reads, so `1=x` is the command it runs, as it is in zsh.
+        assert_eq!(command_prefixes("nocorrect 1=x rm x"), ["nocorrect", "1"]);
+    }
+
+    #[test]
+    fn noglob_reads_its_word_as_the_command_it_runs_and_as_a_variable() {
+        // zsh's `noglob` is a builtin, not a reserved word, so `noglob A=/bin/rm x` runs the path `A=/bin/rm` (a symlink `A=`
+        // to `/` resolves it to `/bin/rm`), and its word may also be a variable set for the command after it. Both are read.
+        assert_eq!(
+            command_prefixes("ln -s / A=; noglob A=/bin/rm x"),
+            ["ln", "noglob", "A", "rm", "", "x"]
+        );
+        assert_eq!(command_prefixes("noglob A=1 rm x"), ["noglob", "A", "rm"]);
+        assert_eq!(command_prefixes("noglob A=1"), ["noglob", "A"]);
+        // `nocorrect` is a reserved word that reads its assignments as variable sets, so the command after them is named.
+        assert_eq!(command_prefixes("nocorrect A=1 rm x"), ["nocorrect", "rm"]);
+        // A command after `noglob` with no assignment is named as before.
+        assert_eq!(command_prefixes("noglob rm x"), ["noglob", "rm"]);
+    }
+
+    #[test]
+    fn a_line_continuation_after_a_redirect_is_read_as_the_joined_line_is() {
+        // `>\<LF>;` joins to `>;`, the ksh sync mark, so the `;` is no separator and the `#` after it is a word, not a
+        // comment. The substitution after that `#` is lifted from the text as written, so its commands and its withheld
+        // value are read: the command in `>;x rm` is `rm`, and `x` is its redirect's target.
+        assert!(command_prefixes("xargs >\\\n;#>\"$(>;x rm)\"").contains(&"rm".to_owned()));
+        let open = command_prefixes("echo >\\\n;# $(rm x");
+        assert!(open.contains(&"rm".to_owned()), "{open:?}");
+        assert!(open.contains(&String::new()), "{open:?}");
+        let body = command_prefixes("echo >\\\n;# $(case x in x) rm;; esac)");
+        assert!(body.contains(&String::new()), "{body:?}");
+        // Without the continuation the same text is read as before.
+        assert!(command_prefixes("xargs >;#>\"$(>;x rm)\"").contains(&"rm".to_owned()));
+    }
+
+    #[test]
+    fn a_nested_chain_of_assignment_operands_is_read_within_a_bound() {
+        // An assignment where a wrapper's operand is due is read both ways, so each such wrapper in a chain doubles the
+        // readings. Past `MAX_HEDGED_DEPTH` nested wrappers the rest is withheld, which covers every command, so a chain of
+        // eight is read at once. A shallow chain still names the command it runs.
+        let repeats = format!("{}rm x", "repeat X=1 ".repeat(8));
+        let names = command_prefixes(&repeats);
+        assert!(names.contains(&String::new()), "{names:?}");
+        assert!(names.contains(&"repeat".to_owned()), "{names:?}");
+        let timeouts = format!("{}rm x", "timeout X=1 ".repeat(8));
+        assert!(command_prefixes(&timeouts).contains(&String::new()));
+        assert!(command_prefixes("repeat X=1 repeat X=1 rm x").contains(&"rm".to_owned()));
+        assert!(command_prefixes("timeout X=1 timeout X=1 rm x").contains(&"rm".to_owned()));
     }
 
     #[tokio::test]
@@ -8543,6 +10294,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_denied_command_bound_by_a_special_array_a_dot_file_or_noglob_is_denied() {
+        for input in [
+            r#"{"program":"bash","args":["-c","BASH_CMDS[x]=/bin/rm; x -rf y"]}"#,
+            r#"{"program":"bash","args":["-c","function f { BASH_CMDS[x]=/bin/rm; }; x -rf y"]}"#,
+            r#"{"program":"bash","args":["-c","BASH_ALIASES[x]='rm -rf y'\nx"]}"#,
+            r#"{"program":"zsh","args":["-c","aliases[x]='rm -rf y'\nx"]}"#,
+            r#"{"program":"zsh","args":["-c","functions[f]='rm x'\nf"]}"#,
+            r#"{"program":"zsh","args":["-c","commands[x]=/bin/rm\nx -rf y"]}"#,
+            r#"{"program":"zsh","args":["-c","ln -s / A=; noglob A=/bin/rm x"]}"#,
+            r#"{"program":"zsh","args":["-c","noglob A=1 rm x"]}"#,
+            r#"{"program":"bash","args":["-c",". /usr/bin/eatmydata rm -rf x"]}"#,
+            r#"{"program":"bash","args":["-c","source /usr/bin/setsid rm x"]}"#,
+        ] {
+            let (mut policy, state) = harness(ToolClassGate::Enforce).await;
+            policy.permission_rules = true;
+            state
+                .decision_by_target
+                .lock()
+                .unwrap()
+                .insert("rm".to_owned(), "deny".to_owned());
+            let evaluation = policy
+                .evaluate_tool_call_with_input("shell", input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("a deny is an evaluation, not an error");
+            assert_eq!(evaluation.decision, CapabilityDecision::Deny, "{input}");
+            let sent = state.evaluated.lock().unwrap();
+            assert!(
+                sent.iter().any(|request| {
+                    request.target_kind == "command_prefix" && request.target_value == "rm"
+                }),
+                "{input}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_denied_command_behind_a_builtin_repeat_or_alias_is_denied_in_every_shell() {
         for (tool, input) in [
             (
@@ -8585,6 +10372,18 @@ mod tests {
                 "shell",
                 r#"{"program":"zsh","args":["-c","alias -- -x='rm -rf y'\n-x"]}"#,
             ),
+            (
+                "shell",
+                r#"{"program":"zsh","args":["-c","emulate sh -c 'rm x'"]}"#,
+            ),
+            (
+                "shell",
+                r#"{"program":"zsh","args":["-c","emulate sh -c +x 'rm x'"]}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"emulate -L zsh -c 'rm x'"}"#,
+            ),
             ("shell", r#"{"program":"flock","args":["X=1","rm","x"]}"#),
             ("shell", r#"{"program":"timeout","args":["X=1","rm","x"]}"#),
         ] {
@@ -8604,6 +10403,73 @@ mod tests {
             assert!(
                 sent.iter().any(|request| {
                     request.target_kind == "command_prefix" && request.target_value == "rm"
+                }),
+                "{input}"
+            );
+        }
+        // A `-c` that an expansion stands for hides the text it runs, so the withheld value is named for it, and a deny on
+        // that value denies the call (`emulate_option_may_be_hidden`). `rm` is not named, as the text is not read.
+        let input = r#"{"program":"zsh","args":["-c","o=-c; emulate sh $o 'rm x'"]}"#;
+        let (mut policy, state) = harness(ToolClassGate::Enforce).await;
+        policy.permission_rules = true;
+        state
+            .decision_by_target
+            .lock()
+            .unwrap()
+            .insert(String::new(), "deny".to_owned());
+        let evaluation = policy
+            .evaluate_tool_call_with_input("shell", input, "run-a", "org-a", "user-a", false)
+            .await
+            .expect("a deny is an evaluation, not an error");
+        assert_eq!(evaluation.decision, CapabilityDecision::Deny, "{input}");
+        let sent = state.evaluated.lock().unwrap();
+        assert!(
+            sent.iter().any(|request| {
+                request.target_kind == "command_prefix" && request.target_value.is_empty()
+            }),
+            "{input}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_command_named_by_a_dash_word_or_a_declaring_builtin_is_denied() {
+        // Each call's command is named by the reading a POSIX shell (dash, or sh) gives its extended-assignment word, or by the
+        // declaring builtin that defines the element, and the denied name is one of those names.
+        for (input, denied) in [
+            (
+                r#"{"program":"sh","args":["-c","ln -s / A+=; A+=/bin/rm -rf y"]}"#,
+                "rm",
+            ),
+            (
+                r#"{"program":"sh","args":["-c","ln -s / A1=; A[1]=/bin/rm x"]}"#,
+                "",
+            ),
+            (r#"{"program":"A+=/bin/rm","args":["-rf","y"]}"#, "rm"),
+            (
+                r#"{"program":"zsh","args":["-c","typeset aliases[x]='rm -rf y'\nx"]}"#,
+                "rm",
+            ),
+            (
+                r#"{"program":"bash","args":["-c","declare BASH_CMDS[x]=/bin/rm; x -rf y"]}"#,
+                "rm",
+            ),
+        ] {
+            let (mut policy, state) = harness(ToolClassGate::Enforce).await;
+            policy.permission_rules = true;
+            state
+                .decision_by_target
+                .lock()
+                .unwrap()
+                .insert(denied.to_owned(), "deny".to_owned());
+            let evaluation = policy
+                .evaluate_tool_call_with_input("shell", input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("a deny is an evaluation, not an error");
+            assert_eq!(evaluation.decision, CapabilityDecision::Deny, "{input}");
+            let sent = state.evaluated.lock().unwrap();
+            assert!(
+                sent.iter().any(|request| {
+                    request.target_kind == "command_prefix" && request.target_value == denied
                 }),
                 "{input}"
             );
@@ -8658,7 +10524,9 @@ mod tests {
             ("find . -name rm -print", vec!["find"]),
             ("find . -exec env rm {} \\;", vec!["find", "env", "rm"]),
             ("find . -exec xargs rm {} +", vec!["find", "xargs", "rm"]),
-            ("find . -exec sh -c 'rm {}' \\;", vec!["find", "sh", "rm"]),
+            // A `{}` in the `-c` text is replaced at run time, so that text is withheld (`command_words_names`).
+            ("find . -exec sh -c 'rm {}' \\;", vec!["find", "sh", ""]),
+            ("find . -exec sh -c 'rm x' \\;", vec!["find", "sh", "rm"]),
             (
                 "find . -exec rm {} + -exec ls \\;",
                 vec!["find", "rm", "ls"],
@@ -8679,6 +10547,214 @@ mod tests {
             ),
             pairs(&[("command_prefix", "find"), ("command_prefix", "rm")])
         );
+    }
+
+    #[test]
+    fn fd_names_the_command_its_exec_option_runs_up_to_the_terminator() {
+        // `fd` and `fdfind` run the words given with `-x` or `-X` (`--exec`, `--exec-batch`), up to the `;` that
+        // ends them, as one command: a value attached to the option (`-xrm`, `--exec=rm`) starts it. The other words
+        // are fd's own.
+        for (text, expected) in [
+            ("fd -x rm {}", vec!["fd", "rm"]),
+            ("fd -X rm {}", vec!["fd", "rm"]),
+            ("fd --exec rm {}", vec!["fd", "rm"]),
+            ("fd --exec=rm {}", vec!["fd", "rm"]),
+            ("fdfind --exec-batch rm {}", vec!["fdfind", "rm"]),
+            ("fd -xrm {}", vec!["fd", "rm"]),
+            ("fd -Hx rm {}", vec!["fd", "rm"]),
+            ("fd -e rs -x wc -l", vec!["fd", "wc"]),
+            ("fd -x sh -c 'rm x'", vec!["fd", "sh", "rm"]),
+            ("fd -x 'rm x' {}", vec!["fd", "rm"]),
+            // `fd` puts a file name in place of each placeholder in a word of the command, so a word that holds one is a
+            // run-time value (`substituted`): the `rm` a shell runs with the name is withheld, as the command of a word
+            // that holds a placeholder is. A placeholder is no shell expansion, so a word of the command that holds only
+            // one is read as text, and `{.}.jpg` names nothing.
+            ("fd -x sh -c 'rm {}'", vec!["fd", "sh", ""]),
+            ("fd -x sh -c 'rm {/}'", vec!["fd", "sh", ""]),
+            ("fd -x sh -c 'rm {.}'", vec!["fd", "sh", ""]),
+            ("fd -x rm {.}.bak", vec!["fd", "rm"]),
+            ("fd -e png -x convert {} {.}.jpg", vec!["fd", "convert"]),
+            ("/usr/bin/fd -x rm {}", vec!["/usr/bin/fd", "fd", "rm"]),
+            // A command word that expands is withheld, as any command word is, and an option with no command runs none.
+            ("fd -x {} x", vec!["fd", ""]),
+            ("fd -e rs src", vec!["fd"]),
+            // A letter that takes a value before an `x` takes it: `-tx` is the type `x`, and `-ex` the extension `x`.
+            ("fd -tx . src", vec!["fd"]),
+            ("fd -ex txt src", vec!["fd"]),
+            ("fd -x", vec!["fd"]),
+            // An escaped `\;` and a quoted `';'` each cut their segment, as a quoted separator cuts a wrapper's
+            // arguments (`a_wrapper_whose_arguments_a_quote_cuts_withholds_the_command`), so the value is withheld too.
+            ("fd -x rm {} \\;", vec!["fd", "", "rm"]),
+            ("fd -x wc -l ';' -e rs", vec!["fd", "", "wc"]),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+        assert_eq!(
+            targets_of("shell", r#"{"program":"fd","args":["-x","rm","{}",";"]}"#),
+            pairs(&[("command_prefix", "fd"), ("command_prefix", "rm")])
+        );
+    }
+
+    #[test]
+    fn tar_names_the_command_its_option_runs_in_each_form() {
+        for (text, expected) in [
+            ("tar --to-command=rm -xf a.tar", vec!["tar", "rm"]),
+            ("tar --to-command rm -xf a.tar", vec!["tar", "rm"]),
+            ("tar -I rm -xf a.tar", vec!["tar", "rm"]),
+            ("tar -Irm -xf a.tar", vec!["tar", "rm"]),
+            ("tar -xIrm a.tar", vec!["tar", "rm"]),
+            ("tar -x -I 'zstd -19' -f a.tar", vec!["tar", "zstd"]),
+            ("tar --use-compress-program=rm -xf a.tar", vec!["tar", "rm"]),
+            ("tar --use-compress-program rm -xf a.tar", vec!["tar", "rm"]),
+            ("tar -cf a.tar -F rm .", vec!["tar", "rm"]),
+            ("tar -cf a.tar --info-script=rm .", vec!["tar", "rm"]),
+            ("tar -cf a.tar --new-volume-script rm .", vec!["tar", "rm"]),
+            ("tar -xf a.tar --rsh-command=rm host:x", vec!["tar", "rm"]),
+            ("tar -xf a.tar --rmt-command rm host:x", vec!["tar", "rm"]),
+            (
+                "tar -cf a.tar --checkpoint-action=exec=rm .",
+                vec!["tar", "rm"],
+            ),
+            (
+                "tar -cf a.tar --checkpoint-action exec=rm .",
+                vec!["tar", "rm"],
+            ),
+            (
+                r#"tar '--checkpoint-action=exec=sh -c "rm x"' -cf a.tar ."#,
+                vec!["tar", "sh", "rm"],
+            ),
+            // getopt_long reads an unambiguous abbreviation of a long option as that option.
+            ("tar --to-c=rm -xf a.tar", vec!["tar", "rm"]),
+            // The first word may be a cluster with no dash, whose values are the words after it in order, so each of
+            // them is read as a command (`tar fI x.tar rm a` gives `I` the value `rm` after `f`'s `x.tar`).
+            ("tar xI rm x.tar", vec!["tar", "rm", "x.tar"]),
+            ("tar fI x.tar rm a", vec!["tar", "x.tar", "rm", "a"]),
+            ("tar Ixf rm a.tar", vec!["tar", "xf", "rm", "a.tar"]),
+            // The other options run no command, so only tar is named.
+            ("tar -czf x.tgz dir", vec!["tar"]),
+            ("tar --to-stdout -xf a.tar", vec!["tar"]),
+            ("tar --totals -cf a.tar .", vec!["tar"]),
+            ("tar --checkpoint=100 -cf a.tar .", vec!["tar"]),
+            ("tar -cf - dir", vec!["tar"]),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn rg_socat_and_the_netcat_programs_name_the_command_an_option_or_address_gives() {
+        for (text, expected) in [
+            ("rg --pre rm foo", vec!["rg", "rm"]),
+            ("rg --pre=rm foo", vec!["rg", "rm"]),
+            ("rg --hostname-bin rm foo", vec!["rg", "rm"]),
+            ("rg --pre ./x.sh foo", vec!["rg", "./x.sh", "x.sh", ""]),
+            ("rg -n --no-pre --pretty foo src", vec!["rg"]),
+            ("socat TCP-LISTEN:1234 EXEC:rm", vec!["socat", "rm"]),
+            ("socat - SYSTEM:'rm x'", vec!["socat", "rm"]),
+            ("socat - exec:'rm x',pty", vec!["socat", "rm"]),
+            ("socat - TCP:127.0.0.1:80", vec!["socat"]),
+            ("nc -e rm host 1", vec!["nc", "rm"]),
+            ("nc -lp 4444 -e rm", vec!["nc", "rm"]),
+            ("nc -erm host 1", vec!["nc", "rm"]),
+            // A shell that the value starts reads its commands from the standard input, which is withheld.
+            ("nc -lp 4444 -e /bin/sh", vec!["nc", "/bin/sh", "sh", ""]),
+            ("nc -zv host 80", vec!["nc"]),
+            ("nc -lvnp 4444", vec!["nc"]),
+            ("ncat -c 'rm x' host 1", vec!["ncat", "rm"]),
+            ("ncat -lvc 'rm x'", vec!["ncat", "rm"]),
+            ("ncat --sh-exec 'rm x' host 1", vec!["ncat", "rm"]),
+            ("ncat --sh-exec='rm x' host 1", vec!["ncat", "rm"]),
+            ("ncat --exec rm host 1", vec!["ncat", "rm"]),
+            // `--lua-exec` runs a Lua script, whose commands no name here reads, so its value is withheld.
+            ("ncat --lua-exec hook.lua -l 1", vec!["ncat", ""]),
+            ("ncat --ssl -l 1", vec!["ncat"]),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn socat_names_the_command_of_every_address_in_a_dual_or_chained_argument() {
+        // `!!` joins the reading and the writing address of a dual argument, and `|` and `%` are read as separators too.
+        // An address after any of them runs its command as one at the start of an argument does. The keyword is read
+        // without regard to case, and `SHELL` runs its command through a shell as `SYSTEM` does (the 1.8.0.0 man page
+        // documents `SHELL`). A command runs to the end of its argument, so a later address is read in its text too.
+        for (words, expected) in [
+            (
+                vec!["socat", "-", "OPEN:/dev/null!!EXEC:rm x"],
+                vec!["socat", "rm"],
+            ),
+            (
+                vec!["socat", "-", "STDIO!!SYSTEM:rm x"],
+                vec!["socat", "rm"],
+            ),
+            (
+                vec!["socat", "-", "STDIO!!system:rm x"],
+                vec!["socat", "rm"],
+            ),
+            (
+                vec!["socat", "-", "OPEN:/dev/null!! EXEC:rm x"],
+                vec!["socat", "rm"],
+            ),
+            (vec!["socat", "-", "STDIO!!SHELL:rm x"], vec!["socat", "rm"]),
+            (
+                vec!["socat", "-", "TCP:host:80|EXEC:rm"],
+                vec!["socat", "rm"],
+            ),
+            (
+                vec!["socat", "-", "TCP:host:80%SYSTEM:rm"],
+                vec!["socat", "rm"],
+            ),
+            (
+                vec!["socat", "-", "OPEN:/dev/null!!TCP:host:80"],
+                vec!["socat"],
+            ),
+            (vec!["socat", "-", "EXEC:rm x!!STDIO"], vec!["socat", "rm"]),
+        ] {
+            let words: Vec<String> = words.into_iter().map(str::to_owned).collect();
+            assert_eq!(command_words_names(&words, 0, false), expected, "{words:?}");
+        }
+    }
+
+    #[test]
+    fn an_expansion_that_may_stand_for_an_option_or_address_withholds_the_command() {
+        // The shell expands an argument before the program reads it, so an expansion may be an option or an address the
+        // program reads: `tar $T a.tar` is `tar Ixf a.tar` when `T` holds `Ixf`, and `rg "$P" .` is `rg --pre=rm .` when
+        // `P` holds `--pre=rm`. It may split into several words, one of them an option, so it is withheld wherever it
+        // stands. A bare `{}`, and each placeholder `fd` fills, is literal to the shell, so it is no expansion.
+        for (text, expected) in [
+            ("tar $A -xf a.tar", vec!["tar", ""]),
+            ("A=--to-command=rm; tar $A -xf a.tar", vec!["tar", ""]),
+            ("tar $T a.tar", vec!["tar", ""]),
+            ("tar -cf a.tar x$X", vec!["tar", ""]),
+            ("socat - $A", vec!["socat", ""]),
+            ("socat - \"$ADDR\"", vec!["socat", ""]),
+            ("socat - 'OPEN:$F'", vec!["socat", ""]),
+            ("rg $P foo", vec!["rg", ""]),
+            ("rg \"$P\" .", vec!["rg", ""]),
+            ("nc $O host 1", vec!["nc", ""]),
+            ("fd $X rm {}", vec!["fd", ""]),
+            ("fd -x rm $X", vec!["fd", "", "rm"]),
+            ("fd -x rm {}", vec!["fd", "rm"]),
+            ("fd -e png -x convert {} {.}.jpg", vec!["fd", "convert"]),
+            ("tar -czf x.tgz dir", vec!["tar"]),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn an_option_value_program_names_its_command_and_withholds_a_cut_one() {
+        // A command option may lie past a cut, so the withheld value is named then, as `eval`'s is. A command the given
+        // words already hold is named as well.
+        for (words, expected) in [
+            (vec!["tar", "-czf", "x.tgz"], vec!["tar", ""]),
+            (vec!["fd", "-x", "rm"], vec!["fd", "", "rm"]),
+            (vec!["socat", "-", "EXEC:rm"], vec!["socat", "", "rm"]),
+        ] {
+            let words: Vec<String> = words.into_iter().map(str::to_owned).collect();
+            assert_eq!(command_words_names(&words, 0, true), expected, "{words:?}");
+        }
     }
 
     #[test]
@@ -8774,7 +10850,7 @@ mod tests {
         // An option a table does not list may take a value, or run its text as a command: `flock -c` and `sudo -i`
         // (`--login`) run a shell text, so the command is withheld rather than read as `FOO` in `FOO=1 rm x`.
         for (text, expected) in [
-            ("flock /tmp/lock -c 'rm x'", vec!["flock", ""]),
+            ("flock /tmp/lock -c 'rm x'", vec!["flock", "-c", ""]),
             ("flock -c 'rm x' /tmp/lock", vec!["flock", ""]),
             ("sudo -i 'FOO=1 rm x'", vec!["sudo", ""]),
             ("sudo --login 'FOO=1 rm x'", vec!["sudo", ""]),
@@ -8793,8 +10869,8 @@ mod tests {
     #[test]
     fn every_program_that_runs_a_command_names_that_command_or_withholds_it() {
         // A program with a table names the command it runs past the options the table reads. One whose options or form
-        // no table reads names the withheld value, which covers every command. `fakeroot` with no command names the
-        // withheld value too: the shell it starts reads its commands from stdin.
+        // no table reads names the withheld value, which covers every command. `fakeroot`, `cgexec` and `xvfb-run` are
+        // withheld whole, since their option tables are not verified, so each names the withheld value.
         for (text, expected) in [
             ("setsid -f -w rm x", vec!["setsid", "rm"]),
             ("stdbuf -oL rm x", vec!["stdbuf", "rm"]),
@@ -8803,24 +10879,21 @@ mod tests {
             ("taskset 0x1 rm x", vec!["taskset", "rm"]),
             ("flock /tmp/l rm x", vec!["flock", "rm"]),
             ("flock -e /tmp/l rm x", vec!["flock", "rm"]),
-            ("flock /tmp/l -c 'rm x'", vec!["flock", ""]),
+            ("flock /tmp/l -c 'rm x'", vec!["flock", "-c", ""]),
             ("doas -n rm x", vec!["doas", "rm"]),
             ("chroot /srv rm x", vec!["chroot", "rm"]),
-            ("fakeroot -l /tmp/lib -- rm x", vec!["fakeroot", "rm"]),
-            ("fakeroot --save-file=/tmp/s rm x", vec!["fakeroot", "rm"]),
+            ("fakeroot -l /tmp/lib -- rm x", vec!["fakeroot", ""]),
+            ("fakeroot --save-file=/tmp/s rm x", vec!["fakeroot", ""]),
             ("fakeroot -b rm x", vec!["fakeroot", ""]),
             ("fakeroot", vec!["fakeroot", ""]),
-            ("cgexec -g memory:/x rm x", vec!["cgexec", "rm"]),
-            (
-                "cgexec --sticky -g cpu,memory:/x rm x",
-                vec!["cgexec", "rm"],
-            ),
+            ("cgexec -g memory:/x rm x", vec!["cgexec", ""]),
+            ("cgexec --sticky -g cpu,memory:/x rm x", vec!["cgexec", ""]),
             ("cgexec -s rm x", vec!["cgexec", ""]),
             (
                 "xvfb-run -a -s '-screen 0 1x1x24' rm x",
-                vec!["xvfb-run", "rm"],
+                vec!["xvfb-run", ""],
             ),
-            ("xvfb-run -n 99 -e /dev/null rm x", vec!["xvfb-run", "rm"]),
+            ("xvfb-run -n 99 -e /dev/null rm x", vec!["xvfb-run", ""]),
             ("xvfb-run -x rm x", vec!["xvfb-run", ""]),
             ("xvfb-run", vec!["xvfb-run", ""]),
             ("runuser -u root -- rm x", vec!["runuser", ""]),
@@ -8924,6 +10997,53 @@ mod tests {
             "podman",
             "docker-compose",
             "ip",
+            "tini",
+            "dumb-init",
+            "gosu",
+            "su-exec",
+            "fakeroot",
+            "fakechroot",
+            "cgexec",
+            "xvfb-run",
+            "uvx",
+            "pipx",
+            "bunx",
+            "bun",
+            "pnpx",
+            "deno",
+            "corepack",
+            "composer",
+            "mise",
+            "asdf",
+            "rbenv",
+            "pyenv",
+            "nvm",
+            "hatch",
+            "pdm",
+            "rye",
+            "tox",
+            "nox",
+            "toolbox",
+            "nerdctl",
+            "crictl",
+            "buildah",
+            "oc",
+            "incus",
+            "lxc",
+            "machinectl",
+            "systemd-cat",
+            "srun",
+            "mpirun",
+            "mpiexec",
+            "flatpak",
+            "nsjail",
+            "sandbox-exec",
+            "nix",
+            "mosh",
+            "run-parts",
+            "cpulimit",
+            "multitime",
+            "watchexec",
         ] {
             assert_eq!(
                 command_prefixes(&format!("{program} rm x")),
@@ -8945,6 +11065,66 @@ mod tests {
             targets_of("shell", r#"{"program":"npx","args":["rm","x"]}"#),
             pairs(&[("command_prefix", "npx"), ("command_prefix", "")])
         );
+    }
+
+    #[test]
+    fn setarch_is_withheld_under_each_architecture_name_util_linux_installs_it_as() {
+        // util-linux installs setarch under the names of the architectures it sets, and each of those runs the
+        // command it is given, as `setarch` and its `linux32` and `linux64` aliases do. Each name is withheld bare,
+        // by its path, as the program of a `shell` call, and as the command a wrapper runs, so none names the `rm`.
+        for name in [
+            "i386",
+            "i486",
+            "i586",
+            "i686",
+            "x86_64",
+            "uname26",
+            "ppc",
+            "ppc32",
+            "ppc64",
+            "ppc64le",
+            "s390",
+            "s390x",
+            "sparc",
+            "sparc32",
+            "sparc32bash",
+            "sparc64",
+            "sparc64bash",
+            "mips",
+            "mips64",
+            "hppa",
+            "hppa64",
+            "parisc",
+            "parisc64",
+            "armv7l",
+            "aarch64",
+            "ia64",
+            "alpha",
+        ] {
+            assert_eq!(
+                command_prefixes(&format!("{name} rm x")),
+                [name, ""],
+                "{name}"
+            );
+            assert_eq!(
+                command_prefixes(&format!("/usr/bin/{name} rm x")),
+                [format!("/usr/bin/{name}"), name.to_owned(), String::new()],
+                "/usr/bin/{name}"
+            );
+            assert_eq!(
+                command_prefixes(&format!("nice {name} rm x")),
+                ["nice", name, ""],
+                "nice {name}"
+            );
+            assert_eq!(
+                targets_of(
+                    "shell",
+                    &format!(r#"{{"program":"{name}","args":["rm","x"]}}"#)
+                ),
+                pairs(&[("command_prefix", name), ("command_prefix", "")]),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -8994,6 +11174,34 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn with_the_permission_rules_off_the_option_value_programs_name_no_command() {
+        let (policy, state) = harness(ToolClassGate::Off).await;
+        for (tool, input) in [
+            ("shell", r#"{"program":"fd","args":["-x","rm","{}"]}"#),
+            (
+                "shell",
+                r#"{"program":"tar","args":["--to-command=rm","-x"]}"#,
+            ),
+            ("shell", r#"{"program":"socat","args":["-","EXEC:rm"]}"#),
+            ("shell", r#"{"program":"ncat","args":["-c","rm x"]}"#),
+            ("shell", r#"{"program":"tar","args":["$A","-xf","a.tar"]}"#),
+        ] {
+            policy
+                .evaluate_tool_call_with_input(tool, input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("an allowed call evaluates");
+        }
+        let sent = state.evaluated.lock().unwrap();
+        assert_eq!(sent.len(), 5, "one request per call, no extra checks");
+        for request in sent.iter() {
+            assert_eq!(request.tool_name, "");
+            assert_eq!(request.user_id, "");
+            assert_eq!(request.target_kind, "");
+            assert_eq!(request.target_value, "");
+        }
+    }
+
     #[test]
     fn nested_wrappers_name_every_command_down_the_chain() {
         assert_eq!(
@@ -9005,12 +11213,17 @@ mod tests {
             ["sudo", "env", "timeout", "nice", "chrt", "rm"]
         );
         assert_eq!(
+            command_prefixes("setsid -f nice -n 1 timeout 5 rm x"),
+            ["setsid", "nice", "timeout", "rm"]
+        );
+        // A program withheld whole withholds the value, and nothing past it is read.
+        assert_eq!(
             command_prefixes("fakeroot cgexec -g memory:/x xvfb-run -a rm x"),
-            ["fakeroot", "cgexec", "xvfb-run", "rm"]
+            ["fakeroot", ""]
         );
         assert_eq!(
-            command_prefixes("xargs setsid -f fakeroot -u rm x"),
-            ["xargs", "setsid", "fakeroot", "rm"]
+            command_prefixes("xargs setsid -f doas -n rm x"),
+            ["xargs", "setsid", "doas", "rm"]
         );
         // A withheld program inside a table program withholds the value, and nothing past it is read.
         assert_eq!(
@@ -9023,20 +11236,24 @@ mod tests {
     fn chrt_names_its_command_whether_its_operand_is_the_priority_or_the_command() {
         for (text, expected) in [
             // A lone all-digit operand is the command on util-linux 2.41, since the priority is one only when more
-            // operands follow it. A `--` that ends the options is no operand.
+            // operands follow it.
             ("chrt -o 5", vec!["chrt", "5"]),
-            ("chrt -o 5 --", vec!["chrt", "5"]),
-            ("chrt -o 5 -T 10", vec!["chrt", "5"]),
+            // chrt's getopt starts with `+`, so the words after the priority are the command and its arguments, and none
+            // is read as an option: a `--` or an option-shaped word after the priority is the command.
+            ("chrt -o 5 --", vec!["chrt", "--"]),
+            ("chrt -o 5 -T 10", vec!["chrt", "-T"]),
+            ("chrt -o 5 -v rm", vec!["chrt", "-v"]),
+            ("chrt -o 5 -Z rm x", vec!["chrt", "-Z"]),
             ("chrt -o 5 rm x", vec!["chrt", "rm"]),
-            ("chrt -o 5 -- rm x", vec!["chrt", "rm"]),
-            ("chrt -o 0 -- rm x", vec!["chrt", "rm"]),
+            ("chrt -o 5 -- rm x", vec!["chrt", "--"]),
+            ("chrt -o 0 -- rm x", vec!["chrt", "--"]),
             // A decimal number that is not all digits is the priority before 2.41, and the command after it on 2.41:
-            // both are named, and a `--` after the priority ends the options before the command.
-            ("chrt -f +10 -- rm x", vec!["chrt", "+10", "rm"]),
-            ("chrt -o +10 -- rm x", vec!["chrt", "+10", "rm"]),
+            // both are named.
+            ("chrt -f +10 -- rm x", vec!["chrt", "+10", "--"]),
+            ("chrt -o +10 -- rm x", vec!["chrt", "+10", "--"]),
+            ("chrt -f +10 -v", vec!["chrt", "+10", "-v"]),
+            ("chrt -f +10 rm x", vec!["chrt", "+10", "rm"]),
             ("chrt -f +10", vec!["chrt", "+10"]),
-            // An option the table does not list withholds the command, whichever operand it follows.
-            ("chrt -o 5 -Z rm x", vec!["chrt", ""]),
             // After a `--` the words are operands, so `-o` is the command that follows the priority.
             ("chrt -o -- 5 -o", vec!["chrt", "-o"]),
             // An assignment where the priority is due is read as the operand it may be, whose path is named. That path is
@@ -9052,6 +11269,452 @@ mod tests {
             .map(|word| (*word).to_owned())
             .collect();
         assert_eq!(command_words_names(&words, 0, true), ["chrt", "5", ""]);
+        // A decimal priority with nothing after it may have its command past the cut, which is withheld.
+        let words: Vec<String> = ["chrt", "+10"]
+            .iter()
+            .map(|word| (*word).to_owned())
+            .collect();
+        assert_eq!(command_words_names(&words, 0, true), ["chrt", "+10", ""]);
+    }
+
+    #[test]
+    fn a_wrapper_reads_no_option_after_its_operand_and_the_word_after_it_is_the_command() {
+        // getopt's `+` ends the options at the first non-option, so an option-shaped word after timeout's duration,
+        // taskset's mask or chroot's NEWROOT is the command, and the words after it are its arguments.
+        assert_eq!(
+            command_prefixes("timeout 5 -s KILL rm x"),
+            ["timeout", "-s"]
+        );
+        assert_eq!(command_prefixes("timeout 5 -v rm x"), ["timeout", "-v"]);
+        assert_eq!(command_prefixes("timeout 5 -- rm x"), ["timeout", "--"]);
+        assert_eq!(command_prefixes("taskset 0x1 -c rm x"), ["taskset", "-c"]);
+        assert_eq!(command_prefixes("chroot /srv -x rm x"), ["chroot", "-x"]);
+        // The plain case still names only the command it runs.
+        assert_eq!(command_prefixes("timeout 5 rm x"), ["timeout", "rm"]);
+        assert_eq!(command_prefixes("taskset 0x1 rm x"), ["taskset", "rm"]);
+        assert_eq!(command_prefixes("chroot /srv rm x"), ["chroot", "rm"]);
+        assert_eq!(command_prefixes("echo rm x"), ["echo"]);
+        // flock's getopt reads options after its lock file too, so an option-shaped word there is named as the command and
+        // as an option, and the command after the options is named as well.
+        assert_eq!(
+            command_prefixes("flock /tmp/l -x rm x"),
+            ["flock", "-x", "rm"]
+        );
+        assert_eq!(command_prefixes("flock /tmp/l rm x"), ["flock", "rm"]);
+        // A bare `-` is no option of flock, and no table reads it as an operand, so the value is withheld.
+        assert_eq!(command_prefixes("flock - rm x"), ["flock", ""]);
+        // GNU env's bare `-` is its `-i` option, so the command after it is `rm`.
+        assert_eq!(command_prefixes("env - rm x"), ["env", "rm"]);
+    }
+
+    #[test]
+    fn an_assignment_after_a_wrapper_operand_is_the_program_it_execs() {
+        // A wrapper that execs its command runs `A=1` as the program after its operands, so `rm` is only its argument.
+        assert_eq!(command_prefixes("timeout 5 A=1 rm x"), ["timeout", "A"]);
+        assert_eq!(command_prefixes("taskset 0x1 A=1 rm x"), ["taskset", "A"]);
+        assert_eq!(command_prefixes("chroot /srv A=1 rm x"), ["chroot", "A"]);
+        assert_eq!(command_prefixes("nice A=1 rm x"), ["nice", "A"]);
+    }
+
+    #[test]
+    fn a_dash_c_with_no_script_operand_withholds_its_value() {
+        // The script of `-c` is the first operand after the options that follow it. With none on the command line, the
+        // script comes at run time: `xargs` appends its input as the operands (`echo 'rm -rf x' | xargs -0 sh -c` runs
+        // `sh -c 'rm -rf x'`), and a `find -exec` with no operand gives none at all. The value is withheld, as its script
+        // is unread.
+        for (text, expected) in [
+            (
+                "echo 'rm -rf x' | xargs -0 sh -c",
+                vec!["echo", "xargs", "sh", ""],
+            ),
+            ("xargs sh -c -e", vec!["xargs", "sh", ""]),
+            ("sh -c", vec!["sh", ""]),
+            ("sh -c -e", vec!["sh", ""]),
+            ("sh -c --", vec!["sh", ""]),
+            ("sh -c -o pipefail", vec!["sh", ""]),
+            ("sh -o pipefail -c", vec!["sh", ""]),
+            ("sudo -u root sh -c", vec!["sudo", "sh", ""]),
+            ("find . -exec sh -c \\;", vec!["find", "sh", ""]),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+        // A script on the command line is read, after the options that follow the `-c`.
+        for (text, expected) in [
+            ("sh -c -e 'rm x'", vec!["sh", "rm"]),
+            ("sh -c -- 'rm x'", vec!["sh", "rm"]),
+            ("sh -c -o pipefail 'rm x'", vec!["sh", "pipefail", "rm"]),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_word_xargs_or_find_substitutes_at_run_time_names_the_withheld_value() {
+        // `xargs -I STR` (and `-iSTR`, `-i`, `--replace`, `--replace=STR`) and `find -exec`'s `{}` put a run-time value
+        // where the string stands. Where that value is run as a command, or read as shell text, it is withheld: the
+        // command word, a `-c` text, an `eval` text, or a wrapper's command that holds the string.
+        for (text, expected) in [
+            (
+                "echo 'rm x' | xargs -I X sh -c X",
+                vec!["echo", "xargs", "sh", ""],
+            ),
+            (
+                "echo 'rm x' | xargs -I{} sh -c {}",
+                vec!["echo", "xargs", "sh", ""],
+            ),
+            (
+                "echo 'rm x' | xargs -iX sh -c X",
+                vec!["echo", "xargs", "sh", ""],
+            ),
+            (
+                "echo 'rm x' | xargs --replace=X sh -c X",
+                vec!["echo", "xargs", "sh", ""],
+            ),
+            (
+                "echo 'rm x' | xargs -I{} sh -c 'echo {}'",
+                vec!["echo", "xargs", "sh", ""],
+            ),
+            (
+                "echo 'rm x' | xargs -I X sh -c \"echo 'X'\"",
+                vec!["echo", "xargs", "sh", ""],
+            ),
+            ("xargs -I X X x", vec!["xargs", ""]),
+            ("xargs -I X env X x", vec!["xargs", "env", ""]),
+            ("xargs -I X sudo X", vec!["xargs", "sudo", ""]),
+            ("xargs -I X eval 'X x'", vec!["xargs", "eval", ""]),
+            ("xargs -I X find . -exec X \\;", vec!["xargs", "find", ""]),
+            ("find . -exec sh -c 'echo {}' \\;", vec!["find", "sh", ""]),
+            ("find . -exec sh -c 'rm {}' \\;", vec!["find", "sh", ""]),
+            ("find . -exec eval 'echo {}' \\;", vec!["find", "eval", ""]),
+            ("find . -exec {} \\;", vec!["find", ""]),
+            // The default string `{}` of a bare `-i` and of a bare `--replace`, and a flag letter before the `I`.
+            (
+                "echo 'rm x' | xargs -i sh -c {}",
+                vec!["echo", "xargs", "sh", ""],
+            ),
+            (
+                "echo 'rm x' | xargs --replace sh -c {}",
+                vec!["echo", "xargs", "sh", ""],
+            ),
+            ("xargs -0I X sh -c X", vec!["xargs", "sh", ""]),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+        // The string in an argument names nothing, and the command it is an argument of is named as before.
+        for (text, expected) in [
+            ("xargs -i rm {}", vec!["xargs", "rm"]),
+            ("xargs --replace rm {}", vec!["xargs", "rm"]),
+            ("xargs -I{} rm {}", vec!["xargs", "rm"]),
+            ("xargs -I X echo X", vec!["xargs", "echo"]),
+            ("find . -exec rm {} \\;", vec!["find", "rm"]),
+            ("xargs -I X sh -c 'rm x'", vec!["xargs", "sh", "rm"]),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn the_shells_the_table_did_not_list_read_their_script_or_withhold_it() {
+        // The POSIX-family shells the table did not list read their `-c` text as the others do, and a shell with no
+        // script withholds its value.
+        for (text, expected) in [
+            ("rbash -c 'rm x'", vec!["rbash", "rm"]),
+            ("posh -c 'rm x'", vec!["posh", "rm"]),
+            ("yash -c 'rm x'", vec!["yash", "rm"]),
+            ("oksh -c 'rm x'", vec!["oksh", "rm"]),
+            ("pdksh -c 'rm x'", vec!["pdksh", "rm"]),
+            ("rksh -c 'rm x'", vec!["rksh", "rm"]),
+            (
+                "/usr/bin/rbash -c 'rm x'",
+                vec!["/usr/bin/rbash", "rbash", "rm"],
+            ),
+            ("echo 'rm x' | rbash", vec!["echo", "rbash", ""]),
+            ("rbash ./x.sh", vec!["rbash", ""]),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+        // The shells whose syntax the reader does not model also withhold their value, whatever their text names: `^rm`
+        // in nu, `iex` in PowerShell and `e:rm` in elvish run commands the reader does not name.
+        for (text, expected) in [
+            ("tcsh -c 'rm x'", vec!["tcsh", "rm", ""]),
+            ("csh -c 'rm x'", vec!["csh", "rm", ""]),
+            ("echo 'rm x' | fish", vec!["echo", "fish", ""]),
+            ("fish -c 'rm x'", vec!["fish", "rm", ""]),
+            ("pwsh -c 'rm x'", vec!["pwsh", "rm", ""]),
+            ("pwsh -Command 'rm x'", vec!["pwsh", "rm", ""]),
+            ("pwsh -EncodedCommand cm0geA==", vec!["pwsh", ""]),
+            ("pwsh -File x.ps1", vec!["pwsh", ""]),
+            ("nu -c '^rm x'", vec!["nu", ""]),
+            ("nu", vec!["nu", ""]),
+            ("elvish -c 'e:rm x'", vec!["elvish", "e", ""]),
+            ("xonsh -c 'rm x'", vec!["xonsh", "rm", ""]),
+            ("cmd /c 'rm x'", vec!["cmd", ""]),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_value_an_option_takes_is_not_read_as_a_dash_c_flag() {
+        // mksh's `-T tty` and ksh93's `-R file` take a value, so a word shaped like `-c` right after one is that value,
+        // and the script file that follows it is withheld, not read as `-c` text.
+        for (text, expected) in [
+            ("mksh -T -c ./evil.sh", vec!["mksh", ""]),
+            ("mksh -T -c rm", vec!["mksh", ""]),
+            ("ksh -R -c 'rm x'", vec!["ksh", ""]),
+            ("mksh -T tty -c 'rm x'", vec!["mksh", "rm"]),
+            ("ksh -R file -c 'rm x'", vec!["ksh", "rm"]),
+            ("mksh -c 'rm x'", vec!["mksh", "rm"]),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn the_options_after_a_dash_c_decide_whether_its_text_is_on_the_command_line() {
+        // The `-c` text is the first word that the options after the `-c` leave. Each value letter takes the word
+        // after it, wherever it sits in its word (`-co pipefail`, `-oe pipefail`, `-coo pipefail errexit`), as bash and
+        // dash read them. A lone `+` is no option, so the options go on past it, as bash and dash read it. A lone `-`
+        // ends the options, as `--` does. With no word left for the text, the text is the run-time input `xargs`
+        // appends, so it is withheld.
+        for (text, expected) in [
+            (
+                "echo 'rm x' | xargs -0 bash -c -",
+                vec!["echo", "xargs", "bash", ""],
+            ),
+            (
+                "echo 'rm x' | xargs -0 bash -c +",
+                vec!["echo", "xargs", "bash", ""],
+            ),
+            (
+                "echo 'rm x' | xargs -0 bash -c + -o pipefail",
+                vec!["echo", "xargs", "bash", ""],
+            ),
+            (
+                "echo 'rm x' | xargs -0 sh -c + -o noglob",
+                vec!["echo", "xargs", "sh", ""],
+            ),
+            (
+                "echo 'rm x' | xargs -0 bash -co pipefail",
+                vec!["echo", "xargs", "bash", ""],
+            ),
+            (
+                "echo 'rm x' | xargs -0 bash -cO extglob",
+                vec!["echo", "xargs", "bash", ""],
+            ),
+            (
+                "echo 'rm x' | xargs -0 bash -coo pipefail errexit",
+                vec!["echo", "xargs", "bash", ""],
+            ),
+            (
+                "echo 'rm x' | xargs -0 bash -c -oe pipefail",
+                vec!["echo", "xargs", "bash", ""],
+            ),
+            (
+                "echo 'rm x' | xargs -0 mksh -cT tty",
+                vec!["echo", "xargs", "mksh", ""],
+            ),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+        // A script on the command line is read after the words its options take. A lone `-` ends the options, so the
+        // `-o` after it is the command text, and the run-time input is only an argument of it: `pipefail` is named,
+        // and no withheld value is needed.
+        for (text, expected) in [
+            ("bash -c - 'rm x'", vec!["bash", "rm"]),
+            ("bash -c + 'rm x'", vec!["bash", "+", "rm"]),
+            ("bash -co pipefail 'rm x'", vec!["bash", "pipefail", "rm"]),
+            ("bash -cO extglob 'rm x'", vec!["bash", "extglob", "rm"]),
+            (
+                "bash -coo pipefail errexit 'rm x'",
+                vec!["bash", "pipefail", "errexit", "rm"],
+            ),
+            (
+                "bash -c -oe pipefail 'rm x'",
+                vec!["bash", "pipefail", "rm"],
+            ),
+            ("mksh -cT tty 'rm x'", vec!["mksh", "tty", "rm"]),
+            (
+                "echo 'rm x' | xargs -0 bash -c - -o pipefail",
+                vec!["echo", "xargs", "bash", "pipefail"],
+            ),
+            (
+                "echo 'rm x' | xargs -0 sh -c - -o noglob",
+                vec!["echo", "xargs", "sh", "noglob"],
+            ),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_bash_long_option_is_read_ahead_of_its_short_options() {
+        // bash reads its long options first, as the leading words, with one dash or two: `-rcfile x` and `-init-file x` take
+        // the next word as their value, and `-restricted`, `-login` and the others take none. The first word that is no long
+        // option ends that phase, and a single-dash word after it is short letters again, so in `-e -rcfile` the `c` is the
+        // `-c` flag. With no command string after the options, the text is withheld, as a script file's is.
+        for (text, expected) in [
+            (
+                "echo 'rm x' | xargs -0 bash -rcfile x -c",
+                vec!["echo", "xargs", "bash", ""],
+            ),
+            ("xargs -0 rbash -init-file x -c", vec!["xargs", "rbash", ""]),
+            (
+                "xargs -0 bash -login -restricted -c",
+                vec!["xargs", "bash", ""],
+            ),
+            ("bash -restricted s.sh", vec!["bash", ""]),
+            ("bash -rcfile x s.sh", vec!["bash", ""]),
+            ("bash -init-file x -c", vec!["bash", ""]),
+            ("bash -rcfile", vec!["bash", ""]),
+            ("bash -rcfile -c 'rm x'", vec!["bash", ""]),
+            ("bash -e -login -c 'rm x'", vec!["bash", ""]),
+            // The command string after the long options is read, as it is with none before it.
+            ("bash -rcfile x -c 'rm x'", vec!["bash", "rm"]),
+            ("bash -restricted -c 'rm x'", vec!["bash", "rm"]),
+            ("bash -login -c 'rm x'", vec!["bash", "rm"]),
+            ("bash --rcfile x -c 'rm x'", vec!["bash", "rm"]),
+            ("bash -posix -protected -c 'rm x'", vec!["bash", "rm"]),
+            ("rbash -rcfile x -e -c 'rm x'", vec!["rbash", "rm"]),
+            // Not leading, `-rcfile` is short letters, so its `c` is the `-c` flag and `rm x` is the command string.
+            ("bash -e -rcfile 'rm x'", vec!["bash", "rm"]),
+        ] {
+            assert_eq!(command_prefixes(text), expected, "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bash_long_option_before_its_dash_c_text_leaves_that_text_read() {
+        // The command string after a leading long option is read, so a deny on the command it runs denies the call.
+        for input in [
+            r#"{"program":"bash","args":["-rcfile","x","-c","rm x"]}"#,
+            r#"{"program":"bash","args":["-restricted","-c","rm x"]}"#,
+            r#"{"program":"bash","args":["-login","-c","rm x"]}"#,
+        ] {
+            let (mut policy, state) = harness(ToolClassGate::Enforce).await;
+            policy.permission_rules = true;
+            state
+                .decision_by_target
+                .lock()
+                .unwrap()
+                .insert("rm".to_owned(), "deny".to_owned());
+            let evaluation = policy
+                .evaluate_tool_call_with_input("shell", input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("a deny is an evaluation, not an error");
+            assert_eq!(evaluation.decision, CapabilityDecision::Deny, "{input}");
+        }
+        // Nothing is withheld for these, so a deny on the withheld value alone leaves the call allowed.
+        for input in [
+            r#"{"program":"bash","args":["-rcfile","x","-c","echo hi"]}"#,
+            r#"{"program":"bash","args":["-restricted","-c","echo hi"]}"#,
+        ] {
+            let (mut policy, state) = harness(ToolClassGate::Enforce).await;
+            policy.permission_rules = true;
+            state
+                .decision_by_target
+                .lock()
+                .unwrap()
+                .insert(String::new(), "deny".to_owned());
+            let evaluation = policy
+                .evaluate_tool_call_with_input("shell", input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("an allow is an evaluation, not an error");
+            assert_eq!(evaluation.decision, CapabilityDecision::Allow, "{input}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_script_supplied_at_run_time_is_denied_when_its_withheld_value_is_denied() {
+        // The run-time script names no command the reader can read, so the call names the withheld value, which covers
+        // every command rule: a deny on it denies the call.
+        for (tool, input) in [
+            ("shell", r#"{"program":"xargs","args":["-0","sh","-c"]}"#),
+            ("shell", r#"{"program":"xargs","args":["-i","sh","-c","{}"]}"#),
+            (
+                "shell",
+                r#"{"program":"zsh","args":["-c","a=';'; b=rm; c=' z'; emulate sh -c -- \"-$a$b$c\""]}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"echo 'rm -rf x' | xargs -0 sh -c"}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"echo 'rm x' | xargs -I X sh -c X"}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"find . -exec sh -c 'echo {}' \\;"}"#,
+            ),
+            (
+                "shell",
+                r#"{"program":"find","args":[".","-exec","sh","-c","echo {}",";"]}"#,
+            ),
+            (
+                "shell",
+                r#"{"program":"xargs","args":["-0","bash","-c","+","-o","pipefail"]}"#,
+            ),
+            ("shell", r#"{"program":"tcsh","args":["-c","rm x"]}"#),
+            ("shell", r#"{"program":"nu","args":["-c","^rm x"]}"#),
+            (
+                "shell",
+                r#"{"program":"xargs","args":["-0","bash","-rcfile","x","-c"]}"#,
+            ),
+            (
+                "shell",
+                r#"{"program":"xargs","args":["-0","rbash","-init-file","x","-c"]}"#,
+            ),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"echo 'rm x' | xargs -0 bash -rcfile x -c"}"#,
+            ),
+        ] {
+            let (mut policy, state) = harness(ToolClassGate::Enforce).await;
+            policy.permission_rules = true;
+            state
+                .decision_by_target
+                .lock()
+                .unwrap()
+                .insert(String::new(), "deny".to_owned());
+            let evaluation = policy
+                .evaluate_tool_call_with_input(tool, input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("a deny is an evaluation, not an error");
+            assert_eq!(evaluation.decision, CapabilityDecision::Deny, "{input}");
+            let sent = state.evaluated.lock().unwrap();
+            assert!(
+                target_pairs(&sent).contains(&("command_prefix".to_owned(), String::new())),
+                "{input}: {:?}",
+                target_pairs(&sent)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn with_the_permission_rules_off_a_script_supplied_at_run_time_names_no_command() {
+        let (policy, state) = harness(ToolClassGate::Off).await;
+        for (tool, input) in [
+            ("shell", r#"{"program":"xargs","args":["-0","sh","-c"]}"#),
+            (
+                "code_interpreter",
+                r#"{"language":"sh","code":"find . -exec sh -c {} \\;"}"#,
+            ),
+            ("shell", r#"{"program":"nu","args":["-c","^rm x"]}"#),
+        ] {
+            policy
+                .evaluate_tool_call_with_input(tool, input, "run-a", "org-a", "user-a", false)
+                .await
+                .expect("an allowed call evaluates");
+        }
+        let sent = state.evaluated.lock().unwrap();
+        assert_eq!(sent.len(), 3, "one request per call, no extra checks");
+        for request in sent.iter() {
+            assert_eq!(request.tool_name, "");
+            assert_eq!(request.user_id, "");
+            assert_eq!(request.target_kind, "");
+            assert_eq!(request.target_value, "");
+        }
     }
 
     #[tokio::test]
@@ -9059,21 +11722,26 @@ mod tests {
         // The call is checked once for each name it gives, and the strictest answer decides it: the program itself, the
         // command it runs, a command nested in another, and the withheld value each deny the call on their own.
         for (tool, input, denied) in [
-            ("shell", r#"{"program":"fakeroot","args":["rm","x"]}"#, "rm"),
+            (
+                "shell",
+                r#"{"program":"setsid","args":["-f","rm","x"]}"#,
+                "rm",
+            ),
             (
                 "shell",
                 r#"{"program":"fakeroot","args":["rm","x"]}"#,
                 "fakeroot",
             ),
+            ("shell", r#"{"program":"fakeroot","args":["rm","x"]}"#, ""),
             (
                 "shell",
                 r#"{"program":"xvfb-run","args":["-a","rm","x"]}"#,
-                "rm",
+                "",
             ),
             (
                 "shell",
                 r#"{"program":"cgexec","args":["-g","memory:/x","rm","x"]}"#,
-                "rm",
+                "",
             ),
             ("shell", r#"{"program":"fakeroot","args":[]}"#, ""),
             ("shell", r#"{"program":"chroot","args":["/srv"]}"#, ""),
@@ -9121,7 +11789,7 @@ mod tests {
         let evaluation = policy
             .evaluate_tool_call_with_input(
                 "shell",
-                r#"{"program":"fakeroot","args":["-l","/tmp/lib","rm","x"]}"#,
+                r#"{"program":"setsid","args":["-f","rm","x"]}"#,
                 "run-a",
                 "org-a",
                 "user-a",

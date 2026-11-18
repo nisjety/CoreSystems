@@ -408,7 +408,7 @@ pub(crate) async fn execute_browser_agent(
                 Some(recipe) => {
                     let Some(quarry) = client.clone() else {
                         return BrowserAgentExecution::Failed {
-                            reason: "browser agent unavailable: set QUARRY_BROWSER_AGENT_ENABLED=1 and QUARRY_EDGE_URL"
+                            reason: "browser agent unavailable: set QUARRY_BROWSER_AGENT_ENABLED=true and QUARRY_EDGE_URL"
                                 .to_owned(),
                         };
                     };

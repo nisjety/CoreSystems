@@ -10,6 +10,8 @@ use tracing::info;
 async fn main() -> Result<()> {
     let _otel_guard = mp_telemetry::init("execution-core")?;
     info!("execution-core starting");
+    // Logs a retired spelling of an exact-literal switch; it changes no switch.
+    execution_core::switch_spellings::warn_former_spellings();
 
     // EP-9 E4: shell-rule proposals narrow WS13-S7's proposals, so they refuse to start without them.
     mp_contracts::shell_rule::shell_rule_proposals_checked()?;

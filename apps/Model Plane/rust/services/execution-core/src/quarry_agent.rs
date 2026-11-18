@@ -2330,6 +2330,14 @@ pub struct QuarryAgentClient {
     auth: TokenSource,
 }
 
+/// Whether the browser agent switch is on, from the value of `QUARRY_BROWSER_AGENT_ENABLED`
+/// when that is set. Default off. Only the exact literal `true` turns it on: no trimming and no
+/// case folding, so `1`, `yes`, `TRUE` and a padded `true ` leave it off.
+#[must_use]
+pub(crate) fn browser_agent_enabled_from(raw: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(raw)
+}
+
 impl QuarryAgentClient {
     /// Construct a client against an explicit base URL + bearer token.
     pub fn new(
@@ -2349,13 +2357,15 @@ impl QuarryAgentClient {
     }
 
     /// Build a client from the environment, gated by `QUARRY_BROWSER_AGENT_ENABLED`
-    /// (truthy) and `QUARRY_EDGE_URL` (non-empty) — analogous to how the Fetch
+    /// (the exact literal `true`) and `QUARRY_EDGE_URL` (non-empty) — analogous to how the Fetch
     /// tool gates on `QUARRY_EDGE_URL`. Returns `None` when the browser agent is
     /// disabled or unconfigured, so the loop can degrade gracefully.
     pub fn from_env() -> Result<Option<Self>, AgentClientError> {
-        let enabled = std::env::var("QUARRY_BROWSER_AGENT_ENABLED")
-            .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes"))
-            .unwrap_or(false);
+        let enabled = browser_agent_enabled_from(
+            std::env::var("QUARRY_BROWSER_AGENT_ENABLED")
+                .ok()
+                .as_deref(),
+        );
         if !enabled {
             return Ok(None);
         }
@@ -2932,6 +2942,24 @@ mod tests {
     use super::*;
     use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn browser_agent_switch_reads_only_the_exact_literal_true() {
+        assert!(
+            browser_agent_enabled_from(Some("true")),
+            "the exact literal turns it on"
+        );
+        assert!(!browser_agent_enabled_from(None), "unset is off");
+        for off in [
+            "1", "TRUE", "True", "yes", "on", "enabled", " true", "true ", "true\n", "\ttrue", "",
+            "0", "false", "off", "no", "2",
+        ] {
+            assert!(
+                !browser_agent_enabled_from(Some(off)),
+                "{off:?} must leave the browser agent off"
+            );
+        }
+    }
 
     fn act(action_type: ActionType, selector: &str, value: &str, url: &str) -> BrowserAction {
         BrowserAction {
