@@ -148,7 +148,7 @@ test('consumeBudget: first call opens a window, count rises to the limit, then d
     const step = consumeBudget(state, 1000 + i);
     assert.equal(step.allowed, true);
     assert.equal(step.next.count, i);
-    assert.equal(step.next.windowStart, i === 1 ? 1001 : 1001, 'window start is fixed by the first call');
+    assert.equal(step.next.windowStart, 1001, 'window start is fixed by the first call');
     state = step.next;
   }
   const denied = consumeBudget(state, 5000);

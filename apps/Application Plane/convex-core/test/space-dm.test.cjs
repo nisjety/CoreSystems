@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
@@ -32,7 +33,11 @@ const {
 } = require('../convex/spaceDmHides.ts');
 const fake = require('./helpers/fake-convex.cjs');
 
-const VECTORS_PATH = path.join(
+// The shared vectors are a byte copy of Control's file, pinned by sha256 beside it. The drift
+// test below compares the copy with Control's file whenever Control's tree is checked out.
+const FIXTURES_DIR = path.join(__dirname, 'fixtures');
+const VECTORS_PATH = path.join(FIXTURES_DIR, 'participant-set-vectors.v1.json');
+const CONTROL_VECTORS_PATH = path.join(
   __dirname,
   '..',
   '..',
@@ -44,7 +49,8 @@ const VECTORS_PATH = path.join(
   'testdata',
   'participant-set-vectors.v1.json',
 );
-const vectors = JSON.parse(fs.readFileSync(VECTORS_PATH, 'utf8'));
+const vectorBytes = fs.readFileSync(VECTORS_PATH);
+const vectors = JSON.parse(vectorBytes.toString('utf8'));
 
 // ---------------------------------------------------------------------------
 // Pure identity: Control's shared vectors.
@@ -62,6 +68,7 @@ test('participantSetHash equals every valid vector of Control\'s participant-set
 
 test('every invalid vector is refused with the same reason word as Control', async () => {
   assert.ok(vectors.invalid.length >= 6);
+  assert.deepEqual([...new Set(vectors.invalid.map((vector) => vector.reason))].sort(), ['count', 'duplicate', 'empty']);
   for (const vector of vectors.invalid) {
     assert.throws(
       () => canonicalParticipants(vector.input_ids),
@@ -70,6 +77,23 @@ test('every invalid vector is refused with the same reason word as Control', asy
     );
     await assert.rejects(participantSetHash(vector.input_ids), (error) => error.reason === vector.reason, vector.name);
   }
+});
+
+test('the vector fixture matches its sha256 pin (line endings normalised, as the sidebar fixture pin)', () => {
+  const pin = fs.readFileSync(path.join(FIXTURES_DIR, 'participant-set-vectors.v1.json.sha256'), 'utf8').trim();
+  const [hash, name] = pin.split(/\s+/);
+  assert.equal(name, 'participant-set-vectors.v1.json');
+  const normalised = Buffer.from(vectorBytes.toString('utf8').replace(/\r\n/g, '\n'), 'utf8');
+  assert.equal(crypto.createHash('sha256').update(normalised).digest('hex'), hash);
+});
+
+test('the vector fixture equals Control\'s participant-set-vectors.v1.json when Control is checked out', (t) => {
+  if (!fs.existsSync(CONTROL_VECTORS_PATH)) {
+    t.skip('Control Plane testdata is not in this checkout; the sha256 pin still guards the copy');
+    return;
+  }
+  const normalise = (bytes) => bytes.toString('utf8').replace(/\r\n/g, '\n');
+  assert.equal(normalise(vectorBytes), normalise(fs.readFileSync(CONTROL_VECTORS_PATH)));
 });
 
 test('dmKindForCount: 2 is dm, 3..9 is group_dm, anything else is a count error', () => {
@@ -87,6 +111,12 @@ test('canonicalParticipants sorts by code point, not locale, and does not mutate
   const copy = [...input];
   assert.deepEqual(canonicalParticipants(input), ['A', 'B', 'a', 'b', 'z', 'é']);
   assert.deepEqual(input, copy);
+});
+
+test('canonicalParticipants orders by UTF-8 bytes, not UTF-16 units: an astral id sorts after U+FF01', () => {
+  // U+1F600 is one code point (UTF-16 surrogates D83D DE00, which sort before U+FF01) but
+  // F0 9F 98 80 in UTF-8, which sorts after EF BC 81; Control's shared order is the UTF-8 one.
+  assert.deepEqual(canonicalParticipants(['\u{1F600}', '！', 'é']), ['é', '！', '\u{1F600}']);
 });
 
 test('isDmKind recognises only dm and group_dm', () => {

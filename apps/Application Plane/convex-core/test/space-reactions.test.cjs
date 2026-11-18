@@ -251,11 +251,12 @@ test('a thread read groups per message and scopes by org', async (t) => {
 test('reads and writes need the service key and an organization member', async (t) => {
   withServiceKey(t);
   withReactions(t);
-  const { ctx } = makeCtx(memberTables({ spaceReactions: [] }));
-  await assert.rejects(setForGateway._handler(ctx, { ...base, serviceKey: 'wrong', emoji: '\u{1F44D}', present: true }));
+  const { ctx, tables } = makeCtx(memberTables({ spaceReactions: [] }));
+  await rejectsWith(setForGateway._handler(ctx, { ...base, serviceKey: 'wrong', emoji: '\u{1F44D}', present: true }), 'Unauthorized');
   await rejectsWith(setForGateway._handler(ctx, { ...base, externalAuthId: 'stranger', emoji: '\u{1F44D}', present: true }), 'Unauthorized');
-  await assert.rejects(reactionsForThreadForGateway._handler(ctx, { ...base, serviceKey: 'wrong' }));
-  await assert.rejects(clearForMessageForGateway._handler(ctx, { ...base, serviceKey: 'wrong' }));
+  await rejectsWith(reactionsForThreadForGateway._handler(ctx, { ...base, serviceKey: 'wrong' }), 'Unauthorized');
+  await rejectsWith(clearForMessageForGateway._handler(ctx, { ...base, serviceKey: 'wrong' }), 'Unauthorized');
+  assert.equal(tables.spaceReactions.length, 0, 'a refused write stores nothing');
 });
 
 test('clearForMessage removes every reaction of that message only, even with the flag off', async (t) => {
@@ -288,19 +289,21 @@ test('clearForMessage reports more when a full batch of 500 was read', async (t)
 
 test('approval and wake code do not import the reactions module (a reaction grants nothing)', () => {
   const convexDir = path.join(__dirname, '..', 'convex');
-  const importers = [];
-  for (const name of fs.readdirSync(convexDir)) {
-    if (!name.endsWith('.ts') || name === 'spaceReactions.ts') continue;
-    const source = fs.readFileSync(path.join(convexDir, name), 'utf8');
-    if (/from\s+["']\.\/spaceReactions["']/.test(source) || /internal\.spaceReactions\b|api\.spaceReactions\b/.test(source)) {
-      importers.push(name);
-    }
-  }
-  // Only the erasure path (purgeSpace) may name the table, and it does so by table name, not by import.
-  assert.deepEqual(importers, []);
-  const wakeAndApproval = fs.readdirSync(convexDir).filter((name) => /wake|approval/i.test(name) && name.endsWith('.ts'));
-  for (const name of wakeAndApproval) {
-    const source = fs.readFileSync(path.join(convexDir, name), 'utf8');
-    assert.equal(/spaceReactions/.test(source), false, `${name} must not reference reactions`);
+  const modules = fs.readdirSync(convexDir).filter((name) => name.endsWith('.ts') && name !== 'spaceReactions.ts');
+  const sourceOf = (name) => fs.readFileSync(path.join(convexDir, name), 'utf8');
+  // Any quoted path to the module (import, export from, require or dynamic import, with or without an extension), or a generated reference.
+  const importsReactions = /["']\.\/spaceReactions(?:\.[cm]?[jt]s)?["']|internal\.spaceReactions\b|api\.spaceReactions\b/;
+  assert.deepEqual(modules.filter((name) => importsReactions.test(sourceOf(name))), []);
+  // Approval and wake code is any module whose source says so. Only the Space erasure purge may name the table
+  // (it deletes rows when a Space is deleted and decides nothing), so that is the one permitted mention.
+  const approvalOrWake = modules.filter((name) => /approval|wake/i.test(sourceOf(name)));
+  assert.ok(approvalOrWake.length > 0, 'approval and wake modules are found');
+  for (const name of approvalOrWake) {
+    const source = sourceOf(name);
+    if (!source.includes('"spaceReactions"')) continue;
+    assert.equal(name, 'spaceAttentionIngest.ts', `${name} must not name the reactions table`);
+    assert.equal(source.split('"spaceReactions"').length - 1, 1, 'the erasure purge is the only mention');
+    const purge = source.slice(source.indexOf('export const purgeSpace'), source.indexOf('export const purgeSubject'));
+    assert.ok(purge.includes('"spaceReactions"'), 'the one mention sits inside purgeSpace');
   }
 });

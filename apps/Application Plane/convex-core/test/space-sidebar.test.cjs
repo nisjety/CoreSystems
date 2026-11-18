@@ -169,6 +169,20 @@ test('a document over 32 KiB serialised is refused', () => {
   assert.equal(SIDEBAR_LIMITS.maxBytes, 32768);
 });
 
+test('a document is accepted at exactly 32 KiB serialised and refused one byte over', () => {
+  // ASCII only, so characters are bytes. 249 hidden refs of 128 characters, then one last ref sized so the JSON lands on the target.
+  const sized = (bytes) => {
+    const full = Array.from({ length: 249 }, (_, i) => `${String(i).padStart(4, '0')}${'x'.repeat(124)}`);
+    const before = JSON.stringify(doc({ hidden: full })).length;
+    // the last ref costs its characters, two quotes and a separating comma
+    const last = `${String(249).padStart(4, '0')}${'x'.repeat(bytes - before - 7)}`;
+    return doc({ hidden: [...full, last] });
+  };
+  assert.equal(JSON.stringify(sized(32768)).length, 32768);
+  assert.equal(validateSidebarDoc(sized(32768)).hidden.length, 250);
+  invalid(sized(32769), 'too_large');
+});
+
 test('sidebarDocsEqual ignores key order and undefined', () => {
   assert.equal(sidebarDocsEqual({ a: 1, b: [1, { c: 2 }] }, { b: [1, { c: 2 }], a: 1 }), true);
   assert.equal(sidebarDocsEqual({ a: 1, b: undefined }, { a: 1 }), true);

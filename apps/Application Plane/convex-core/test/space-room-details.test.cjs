@@ -122,8 +122,10 @@ function makeCtx({ spaces, members = true, organizations = true }) {
         const rows = tables[table] ?? [];
         return {
           withIndex(_name, build) {
-            build({ eq() { return this; } });
-            return { collect: async () => rows };
+            // Apply the eq() filters as the real index does, so a lookup never sees another row.
+            const conditions = [];
+            build({ eq(field, value) { conditions.push([field, value]); return this; } });
+            return { collect: async () => rows.filter((row) => conditions.every(([field, value]) => row[field] === value)) };
           },
         };
       },
@@ -183,10 +185,13 @@ test('updateRoomDetailsForGateway error codes and patch', async (t) => {
     assert.deepEqual(patches, []);
   });
 
-  await t.test('space_not_found when the ref is unknown', async () => {
-    const { ctx, patches } = makeCtx({ spaces: [] });
-    await assert.rejects(() => callUpdate(ctx, { name: 'New' }), /^Error: space_not_found$/);
-    assert.deepEqual(patches, []);
+  await t.test('space_not_found when the ref is unknown, even with other Spaces in the organization', async () => {
+    const empty = makeCtx({ spaces: [] });
+    await assert.rejects(() => callUpdate(empty.ctx, { name: 'New' }), /^Error: space_not_found$/);
+    assert.deepEqual(empty.patches, []);
+    const other = makeCtx({ spaces: [room({ _id: 'space_row_2', spaceRef: 'space_2' })] });
+    await assert.rejects(() => callUpdate(other.ctx, { name: 'New' }), /^Error: space_not_found$/);
+    assert.deepEqual(other.patches, []);
   });
 
   await t.test('space_not_found when the Space belongs to another organization', async () => {

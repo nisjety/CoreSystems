@@ -294,7 +294,7 @@ test('roomNoticesForGateway scopes by Space and by organization', async (t) => {
 test('roomNoticesForGateway needs the service key, an organization member and a clean Space ref', async (t) => {
   withServiceKey(t);
   const { ctx } = makeCtx(memberTables({ spaceRoomNotices: [notice(100)] }));
-  await assert.rejects(roomNoticesForGateway._handler(ctx, { ...base, serviceKey: 'wrong', spaceRef: 'space_1' }));
+  await rejectsWith(roomNoticesForGateway._handler(ctx, { ...base, serviceKey: 'wrong', spaceRef: 'space_1' }), 'Unauthorized');
   await rejectsWith(roomNoticesForGateway._handler(ctx, { ...base, externalAuthId: 'stranger', spaceRef: 'space_1' }), 'Unauthorized');
   await rejectsWith(roomNoticesForGateway._handler(ctx, { ...base, spaceRef: '  ' }), 'room_notices_invalid:space_ref');
   await rejectsWith(roomNoticesForGateway._handler(ctx, { ...base, spaceRef: 'a\u0000b' }), 'room_notices_invalid:space_ref');

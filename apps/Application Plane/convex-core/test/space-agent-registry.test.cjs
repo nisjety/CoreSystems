@@ -467,3 +467,87 @@ test('spaceAgentBindingsForGateway projects respondTo and respondToSubjects', as
   assert.deepEqual(byRef.sab_1.respondToSubjects, ['user-1']);
   assert.equal(byRef.sab_2.respondTo, undefined, 'absent stays absent; the gateway reads it as members');
 });
+
+
+// ---------------------------------------------------------------------------
+// WS10-S5b: the projection of Control's per-tool policy on one binding. Control stores the policy; this
+// mutation only records the revision and merged digest Control returned, and never lowers a stored revision.
+// ---------------------------------------------------------------------------
+
+const { setSpaceAgentBindingPolicyForGateway } = require('../convex/spaceAgents.ts');
+
+function setToolPolicy(ctx, overrides = {}) {
+  return setSpaceAgentBindingPolicyForGateway._handler(ctx, {
+    serviceKey: fake.SERVICE_KEY,
+    externalAuthId: fake.AUTH,
+    externalOrgId: fake.ORG,
+    spaceRef: 'space-a',
+    bindingRef: 'sab_1',
+    toolPolicyRevision: 2,
+    toolPolicyDigest: 'digest-bbbb',
+    ...overrides,
+  });
+}
+
+test('setSpaceAgentBindingPolicyForGateway stores the revision and digest once, and leaves updatedAt and approvalMode alone', async (t) => {
+  fake.withServiceKey(t);
+  const { ctx, tables, log } = policyCtx({ approvalMode: 'auto' });
+  const result = await setToolPolicy(ctx);
+  assert.deepEqual(result, {
+    bindingRef: 'sab_1',
+    toolPolicyRevision: 2,
+    toolPolicyDigest: 'digest-bbbb',
+    projectionVersion: 5,
+    changed: true,
+  });
+  assert.equal(log.patches.length, 1);
+  assert.deepEqual(Object.keys(log.patches[0].value).sort(), ['projectionVersion', 'toolPolicyDigest', 'toolPolicyRevision']);
+  const stored = tables.spaceAgentBindings[0];
+  assert.equal(stored.toolPolicyRevision, 2);
+  assert.equal(stored.toolPolicyDigest, 'digest-bbbb');
+  assert.equal(stored.updatedAt, 1000, 'the wake-policy write compares updatedAt, so a policy sync must not move it');
+  assert.equal(stored.approvalMode, 'auto', 'the legacy approval mode is not synced from the policy layer');
+});
+
+test('a lower revision is a no-op and never lowers the stored revision', async (t) => {
+  fake.withServiceKey(t);
+  const { ctx, tables, log } = policyCtx({ toolPolicyRevision: 3, toolPolicyDigest: 'digest-cccc' });
+  const result = await setToolPolicy(ctx, { toolPolicyRevision: 2, toolPolicyDigest: 'digest-bbbb' });
+  assert.deepEqual(result, {
+    bindingRef: 'sab_1',
+    toolPolicyRevision: 3,
+    toolPolicyDigest: 'digest-cccc',
+    projectionVersion: 4,
+    changed: false,
+  });
+  assert.equal(log.patches.length, 0);
+  assert.equal(tables.spaceAgentBindings[0].toolPolicyRevision, 3);
+  assert.equal(tables.spaceAgentBindings[0].toolPolicyDigest, 'digest-cccc');
+});
+
+test('a binding of another Space or organization, or a revoked binding, answers agent_binding_not_found', async (t) => {
+  fake.withServiceKey(t);
+  for (const overrides of [{ spaceRef: 'space-other' }, { externalOrgId: 'org_other' }, { status: 'revoked' }]) {
+    const { ctx, log } = policyCtx(overrides);
+    await fake.rejectsWith(setToolPolicy(ctx), 'agent_binding_not_found');
+    assert.equal(log.patches.length, 0);
+  }
+});
+
+test('spaceAgentBindingsForGateway returns the stored tool-policy revision and digest', async (t) => {
+  fake.withServiceKey(t);
+  const { ctx } = fake.makeCtx(
+    fake.memberTables({
+      agents: [{ _id: 'agent-1', orgId: 'org_row', name: 'Bot', status: 'active' }],
+      spaceAgentBindings: [policyBinding({ toolPolicyRevision: 4, toolPolicyDigest: 'digest-dddd' })],
+    }),
+  );
+  const [row] = await spaceAgentBindingsForGateway._handler(ctx, {
+    serviceKey: fake.SERVICE_KEY,
+    externalAuthId: fake.AUTH,
+    externalOrgId: fake.ORG,
+    spaceRef: 'space-a',
+  });
+  assert.equal(row.toolPolicyRevision, 4);
+  assert.equal(row.toolPolicyDigest, 'digest-dddd');
+});

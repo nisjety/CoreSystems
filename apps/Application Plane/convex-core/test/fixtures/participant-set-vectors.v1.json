@@ -1,0 +1,182 @@
+{
+  "version": 1,
+  "description": "Shared participant-set/v1 vectors (WS12). Hash = sha256:hex(SHA-256('participant-set/v1\u0000' || per byte-sorted unique trimmed id: uint64be(len) || id)). Consumed by Control Go and the Application Convex test.",
+  "domain": "participant-set/v1",
+  "valid": [
+    {
+      "name": "two_people",
+      "input_ids": [
+        "user_b",
+        "user_a"
+      ],
+      "canonical_ids": [
+        "user_a",
+        "user_b"
+      ],
+      "kind": "dm",
+      "hash": "sha256:e88878054b8f3bbed456893b47ce1796c80e99cce49072f11389d313da6514ce"
+    },
+    {
+      "name": "two_people_reversed_input",
+      "input_ids": [
+        "user_a",
+        "user_b"
+      ],
+      "canonical_ids": [
+        "user_a",
+        "user_b"
+      ],
+      "kind": "dm",
+      "hash": "sha256:e88878054b8f3bbed456893b47ce1796c80e99cce49072f11389d313da6514ce"
+    },
+    {
+      "name": "three_people",
+      "input_ids": [
+        "u3",
+        "u1",
+        "u2"
+      ],
+      "canonical_ids": [
+        "u1",
+        "u2",
+        "u3"
+      ],
+      "kind": "group_dm",
+      "hash": "sha256:725e452fc751344203084696dde4b131ba98291de45d9d75288ba234681114f8"
+    },
+    {
+      "name": "byte_order_not_locale",
+      "input_ids": [
+        "alice",
+        "Zed"
+      ],
+      "canonical_ids": [
+        "Zed",
+        "alice"
+      ],
+      "kind": "dm",
+      "hash": "sha256:364e765d7101b431234440edaaf249e45032e5a631849c08f0749fa532a52817"
+    },
+    {
+      "name": "uuid_like_ids",
+      "input_ids": [
+        "0c8e1f52-6a4b-4d0e-9a57-3b1d2f6e7a90",
+        "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+      ],
+      "canonical_ids": [
+        "0c8e1f52-6a4b-4d0e-9a57-3b1d2f6e7a90",
+        "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+      ],
+      "kind": "dm",
+      "hash": "sha256:11911a0689e167f5a314e36cdb7636a383f7782c610350e4f03de79379202fc6"
+    },
+    {
+      "name": "multibyte_length_is_bytes",
+      "input_ids": [
+        "hélène",
+        "bjørn"
+      ],
+      "canonical_ids": [
+        "bjørn",
+        "hélène"
+      ],
+      "kind": "dm",
+      "hash": "sha256:3f0b7192049f03911abd703fd29549b6c6e4eed852ae87d24b62086827b59e19"
+    },
+    {
+      "name": "surrounding_whitespace_trimmed",
+      "input_ids": [
+        " user_a ",
+        "user_b"
+      ],
+      "canonical_ids": [
+        "user_a",
+        "user_b"
+      ],
+      "kind": "dm",
+      "hash": "sha256:e88878054b8f3bbed456893b47ce1796c80e99cce49072f11389d313da6514ce"
+    },
+    {
+      "name": "nine_people",
+      "input_ids": [
+        "p9",
+        "p3",
+        "p7",
+        "p1",
+        "p5",
+        "p2",
+        "p8",
+        "p4",
+        "p6"
+      ],
+      "canonical_ids": [
+        "p1",
+        "p2",
+        "p3",
+        "p4",
+        "p5",
+        "p6",
+        "p7",
+        "p8",
+        "p9"
+      ],
+      "kind": "group_dm",
+      "hash": "sha256:7de76812a67ec43cf8b6d09fb7563176bfec7cb35ea9dba193ae8e4ffd8fb3a7"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "one_person",
+      "input_ids": [
+        "only"
+      ],
+      "reason": "count"
+    },
+    {
+      "name": "empty_set",
+      "input_ids": [],
+      "reason": "count"
+    },
+    {
+      "name": "ten_people",
+      "input_ids": [
+        "p0",
+        "p1",
+        "p2",
+        "p3",
+        "p4",
+        "p5",
+        "p6",
+        "p7",
+        "p8",
+        "p9"
+      ],
+      "reason": "count"
+    },
+    {
+      "name": "duplicate",
+      "input_ids": [
+        "a",
+        "b",
+        "a"
+      ],
+      "reason": "duplicate"
+    },
+    {
+      "name": "duplicate_after_trim",
+      "input_ids": [
+        "a",
+        " a"
+      ],
+      "reason": "duplicate"
+    },
+    {
+      "name": "empty_id",
+      "input_ids": [
+        "a",
+        ""
+      ],
+      "reason": "empty"
+    }
+  ]
+}

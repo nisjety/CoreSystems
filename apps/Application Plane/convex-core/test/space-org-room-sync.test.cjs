@@ -1,4 +1,6 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
 
 const {
@@ -121,4 +123,12 @@ test('crons.ts registers the org-room roster reconcile every 10 minutes', () => 
   assert.ok(job, 'cron "space org-room roster reconcile" is not registered');
   assert.equal(job.name, 'spaceMembershipSync:syncAllOrganizationRooms');
   assert.deepEqual(job.schedule, { type: 'interval', minutes: 10 });
+});
+
+test('crons.ts source registers the org-room roster reconcile at ten minutes and calls the org-room sync', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'convex', 'crons.ts'), 'utf8');
+  assert.match(
+    source,
+    /crons\.interval\(\s*["']space org-room roster reconcile["']\s*,\s*\{\s*minutes:\s*10\s*\}\s*,\s*internal\.spaceMembershipSync\.syncAllOrganizationRooms\s*,/,
+  );
 });

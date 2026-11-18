@@ -392,7 +392,7 @@ test('reconcileRoomAudience: a person not yet projected into Application is proj
     const { ctx, calls } = makeCtx({
       reads: [sharedRoom(null)],
       replace: () => {
-        throw new Error('recipient user is not an active Application organization member');
+        throw new Error('recipient is not an active Application organization member');
       },
     });
     assert.deepEqual(await run(ctx), { status: 'projection_lag' });

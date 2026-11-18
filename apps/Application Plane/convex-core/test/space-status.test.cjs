@@ -11,6 +11,8 @@ const {
   isMemberState,
   statusView,
 } = require('../convex/spaceMemberStatusRules.ts');
+const spaceMemberStatus = require('../convex/spaceMemberStatus.ts');
+const { AUTH, ORG, SERVICE_KEY, makeCtx, memberTables, rejectsWith, withServiceKey } = require('./helpers/fake-convex.cjs');
 
 const NOW = 1_800_000_000_000;
 
@@ -119,6 +121,39 @@ test('statusView: no row, an unknown state or an empty text give null / null tex
   assert.equal(statusView({ state: 'busy', updatedAt: 1 }, NOW, true), null);
   assert.equal(statusView({ state: 'away', text: '', updatedAt: 1 }, NOW, true).text, null);
   assert.equal(statusView({ state: 'away', text: null, updatedAt: 1 }, NOW, true).text, null);
+});
+
+test('the gateway reads return no text for a ZDR organization (includeText false), and the text otherwise', async (t) => {
+  withServiceKey(t);
+  const base = { serviceKey: SERVICE_KEY, externalAuthId: AUTH, externalOrgId: ORG };
+  const soon = Date.now() + 60_000;
+  const { ctx } = makeCtx(
+    memberTables({
+      spaceMemberStatus: [
+        { externalOrgId: ORG, externalAuthId: AUTH, state: 'away', text: 'private note', updatedAt: 1 },
+        { externalOrgId: ORG, externalAuthId: 'bob', state: 'dnd', text: 'in a meeting', expiresAt: soon, updatedAt: 2 },
+      ],
+    }),
+  );
+  assert.deepEqual(await spaceMemberStatus.getOwnStatusForGateway._handler(ctx, { ...base, includeText: false }), {
+    state: 'away',
+    text: null,
+    expiresAt: null,
+    updatedAt: 1,
+  });
+  assert.deepEqual(await spaceMemberStatus.statusesForGateway._handler(ctx, { ...base, subjectIds: ['bob'], includeText: false }), [
+    { externalAuthId: 'bob', state: 'dnd', text: null, expiresAt: soon },
+  ]);
+  assert.equal((await spaceMemberStatus.getOwnStatusForGateway._handler(ctx, { ...base, includeText: true })).text, 'private note');
+});
+
+test('setStatusForGateway refuses bidi and control text with invalid_status and stores nothing', async (t) => {
+  withServiceKey(t);
+  const base = { serviceKey: SERVICE_KEY, externalAuthId: AUTH, externalOrgId: ORG };
+  const { ctx, log } = makeCtx(memberTables({}));
+  await rejectsWith(spaceMemberStatus.setStatusForGateway._handler(ctx, { ...base, state: 'away', text: 'pay ‮me' }), 'invalid_status');
+  await rejectsWith(spaceMemberStatus.setStatusForGateway._handler(ctx, { ...base, state: 'away', text: 'a\u0007b' }), 'invalid_status');
+  assert.deepEqual(log.inserts, []);
 });
 
 test('agentChipState: working and waiting rows are shown while fresh', () => {
