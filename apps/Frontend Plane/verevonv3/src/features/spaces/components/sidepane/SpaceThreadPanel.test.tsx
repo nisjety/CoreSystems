@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-li
 import { createSignal, flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { __resetRetentionForTests, applyServerRetention } from '@/features/chat/lib/chat-retention'
 import { ApiError } from '@/shared/api/http'
 
 const spacesClient = vi.hoisted(() => ({
@@ -37,7 +38,10 @@ beforeEach(() => {
   spacesClient.getSpaceThreadTranscript.mockReset()
 })
 
-afterEach(() => cleanup())
+afterEach(() => {
+  cleanup()
+  __resetRetentionForTests()
+})
 
 describe('SpaceThreadPanel (WS01-S7a)', () => {
   it('shows a loading state before the read answers', async () => {
@@ -293,5 +297,34 @@ describe('SpaceThreadPanel (WS01-S7a)', () => {
       expect(document.querySelector('.verevon-space-thread-panel__turns')).toBeNull()
       expect(spacesClient.getSpaceThreadTranscript).toHaveBeenCalledTimes(2)
     })
+  })
+})
+
+describe('SpaceThreadPanel and the workspace posture (WS01-S7a)', () => {
+  it('takes the turns off the screen when the workspace turns zero retention on, then reads again', async () => {
+    spacesClient.getSpaceThreadTranscript
+      .mockResolvedValueOnce({ turns: [{ role: 'user', content: 'Lagerstatus i dag' }] })
+      .mockReturnValueOnce(new Promise(() => undefined))
+    renderPanel()
+    expect(await screen.findByText('Lagerstatus i dag')).toBeTruthy()
+
+    applyServerRetention(true)
+    flush()
+
+    expect(screen.queryByText('Lagerstatus i dag')).toBeNull()
+    expect(spacesClient.getSpaceThreadTranscript).toHaveBeenCalledTimes(2)
+    expect(await screen.findByText(/Henter samtalen/)).toBeTruthy()
+  })
+
+  it('leaves the turns alone when the posture is allowed or stays the same', async () => {
+    spacesClient.getSpaceThreadTranscript.mockResolvedValue({ turns: [{ role: 'user', content: 'Lagerstatus i dag' }] })
+    renderPanel()
+    expect(await screen.findByText('Lagerstatus i dag')).toBeTruthy()
+
+    applyServerRetention(false)
+    flush()
+
+    expect(screen.getByText('Lagerstatus i dag')).toBeTruthy()
+    expect(spacesClient.getSpaceThreadTranscript).toHaveBeenCalledTimes(1)
   })
 })

@@ -2,6 +2,7 @@ import { MessageCircle } from '@/shared/icons'
 import type { JSX } from '@solidjs/web'
 import { Match, Show, Switch, createEffect, createMemo, onCleanup } from 'solid-js'
 
+import { subscribeLocalRetention } from '@/features/chat/lib/chat-retention'
 import { threadStatus, formatWhen } from '@/features/spaces/lib/space-thread-presentation'
 import { ApiError } from '@/shared/api/http'
 import { presentSpaceDenialText, readSpaceDenial } from '@/shared/api/space-denials'
@@ -84,7 +85,7 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
   const i18n = useI18n()
   // Shared reads off: the same answer the timeline gives, so no transcript is asked for and none is drawn.
   const sharedRead = () => props.sharedReadAvailable?.() !== false
-  const [read, { refetch }] = createResource(
+  const [read, { refetch, mutate }] = createResource(
     // The revision suffix refetches when the room's poll reports the thread
     // changed, the same keying the timeline uses. NUL-joined because ids may
     // contain any printable character. No key while shared reads are off: no request.
@@ -116,6 +117,15 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
         return { threadId, state: 'error' }
       }
     },
+  )
+  // A switch to zero data retention while the pane is open: the turns on screen were read under the posture that has
+  // just ended, so they come off now and the pane reads again under the new one.
+  onCleanup(
+    subscribeLocalRetention((allowed) => {
+      if (allowed) return
+      mutate(undefined)
+      void refetch()
+    }),
   )
   // WS12-S7: edit and delete controls; a change re-reads this thread and the room's projection.
   const lifecycle = createSpaceTurnLifecycle({
