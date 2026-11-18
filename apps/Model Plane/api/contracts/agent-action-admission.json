@@ -17,6 +17,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "agents.create_personal",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:a6842be59501d7c7134974a8ae9940e9da0009af37c4e70411e6dd88398d5b8f",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "agents.draft.save",
       "registry": true,
       "access": "none",
@@ -66,6 +79,32 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:ab68817a9885cdedd52202fa03cc701f94ba82bfcf03d60a4840d37446016d78",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "agents.set_primary",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:5182512c05d079db7626d2e9e69d24ffd5d673c6614148fd186261f4ef0a0367",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "agents.update_access",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:9fa09b1b00f066ab865d0a87e7852853c3291dec8f34988c5a413a8272e1836b",
       "zdr_allowed": false
     },
     {
@@ -2570,6 +2609,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "memory.declassify_to_space",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:966cad397880f2c96ed94e3f571ae939dcbd36a80295fc417ceb0de0ab0c61a3",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "memory.delete",
       "registry": true,
       "access": "none",
@@ -2632,6 +2684,32 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:410e6082fd50dbff4d5d7477b37f2eca9466df545a467f04e94c20298f1fcba6",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "memory.restore",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:a5f635dffa21ade4c9c2a66f9f4087a78dddb1d371d0fb9d72bc76b9bdd46954",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "memory.retract_from_space",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:ffbe1015d418f6802b0e8256a6a98a2357ca8fb1017ecff823d035e2699ca9d4",
       "zdr_allowed": false
     },
     {
@@ -4061,6 +4139,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "spaces.browser_run.start",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:be83dd8b104bf5805da5457df2c3075d6b3f6475994c229a2b203478bd7f8108",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "spaces.cancel_reminder",
       "registry": true,
       "access": "none",
@@ -4321,6 +4412,32 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "spaces.open_private_panel",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:6f2c08088f665fa29865bbfbcbe89f664c48c96a0e1759c884f7392ab729f727",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "spaces.reactivate_org_agent",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:2295211692fc1334ca630b67354782eb7ed222d173505a2e1b21cb13799658fb",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "spaces.record_presence",
       "registry": true,
       "access": "none",
@@ -4373,6 +4490,32 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "spaces.restore_canvas_version",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:4dca19e06f3386a0ff71b58e2cef22342b875f214dfa76b3a6292562d6730443",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "spaces.retire_org_agent",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:b09ca69233b79713a52c13ce4743548c4a44678fd0cfb8903fb0d71e5ba1f554",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "spaces.revoke_agent",
       "registry": true,
       "access": "none",
@@ -4396,6 +4539,45 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:10cc7021c2bdb1470b66cea403660d227d4f5c09386e920ef569437dbe697757",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "spaces.save_canvas",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:8ec4548209a792526ed27388137db15c2e56c4de029ec4da6e4f8c4404251b31",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "spaces.set_agent_canvas_tools",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:679d0786b9f226a4a6cf1d0ee67cd729041fd3ea92dc7c51ecacf27a28ca3f7f",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "spaces.set_agent_self_api",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:81fdb30b97bd5ebba99ade4b1f072864cd3089a87bede9c432b3434e9c0399ac",
       "zdr_allowed": false
     },
     {
@@ -4516,6 +4698,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "spaces.suspend_org_agent",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:5c225a215d84ba078307d8f0a45e1379944e48028fb31362bd3a6f193ac2de2f",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "spaces.toggle_reaction",
       "registry": true,
       "access": "none",
@@ -4591,6 +4786,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:c766a20f8393d62845baa198d17d6ab3ef6ad72266d6a36d00ae224cee542b51",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "spaces.withdraw_agent",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:8a5203596ad69ccaf579ff394f1ee21fdbdd050570230545fa3a620e8046bf81",
       "zdr_allowed": false
     },
     {
