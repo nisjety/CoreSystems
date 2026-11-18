@@ -995,6 +995,7 @@ export default function SpacePage() {
                         spaceRef={current().space.space_ref}
                         threadId={threadId()}
                         thread={thread}
+                        sharedReadAvailable={sharedReadAvailable}
                         messageId={selectedMessageId}
                         messageReviseEnabled={() => current().features?.message_revise === true}
                         reactionsEnabled={() => current().features?.reactions === true}

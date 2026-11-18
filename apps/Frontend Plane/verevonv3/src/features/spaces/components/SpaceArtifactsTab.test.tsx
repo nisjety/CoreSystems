@@ -127,20 +127,31 @@ describe('SpaceArtifactsTab states (WS07-S12)', () => {
     mount()
     expect(await screen.findByText(/Samtalene i dette rommet er ikke delt med deg/)).toBeTruthy()
     expect(screen.queryByText('Innkjøpsplan')).toBeNull()
+    expect(document.querySelectorAll('.verevon-space-artifacts__entry')).toHaveLength(0)
+    expect(client.loadSpaceTranscript).not.toHaveBeenCalled()
   })
 
   it('shows the restricted notice for a 403', async () => {
     client.getSpaceArtifacts.mockRejectedValue(new ApiError('no', 403, 'space_read_not_authorized'))
     mount()
     expect(await screen.findByText(/Samtalene i dette rommet er ikke delt med deg/)).toBeTruthy()
+    expect(document.querySelectorAll('.verevon-space-artifacts__entry')).toHaveLength(0)
+    expect(client.loadSpaceTranscript).not.toHaveBeenCalled()
   })
 
   it('shows the zero data retention copy and lists nothing', async () => {
+    window.localStorage.clear()
+    window.sessionStorage.clear()
     client.getSpaceArtifacts.mockResolvedValue(page({ zdr: true }))
     mount()
     expect(await screen.findByText('Ingen artefakter lagres')).toBeTruthy()
     expect(screen.queryByText('Innkjøpsplan')).toBeNull()
     expect(screen.queryByText('Ingen artefakter ennå')).toBeNull()
+    expect(document.querySelectorAll('.verevon-space-artifacts__entry')).toHaveLength(0)
+    expect(client.loadSpaceTranscript).not.toHaveBeenCalled()
+    // Nothing the zero-retention view shows is kept in the browser.
+    expect(window.localStorage.length).toBe(0)
+    expect(window.sessionStorage.length).toBe(0)
   })
 
   it('shows an error with Retry, not an empty room, and Retry reads again', async () => {
@@ -248,6 +259,10 @@ describe('SpaceArtifactsTab opening an entry (WS07-S12)', () => {
     expect(client.loadSpaceTranscript).toHaveBeenCalledWith('room-1', 't1')
     await waitFor(() => expect(dialog.textContent).toContain('Planens tekst'))
     expect(dialog.textContent).not.toContain('Andres tekst')
+    // The pressed artifact is the one the sheet opens selected.
+    const tabs = [...dialog.querySelectorAll('[role="tab"]')]
+    expect(tabs.find((tab) => tab.textContent?.includes('Innkjøpsplan'))?.getAttribute('aria-selected')).toBe('true')
+    expect(tabs.find((tab) => tab.textContent?.includes('Andre'))?.getAttribute('aria-selected')).toBe('false')
     fireEvent.keyDown(dialog, { key: 'Escape' })
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
 
@@ -348,5 +363,49 @@ describe('SpaceArtifactsTab live artifacts (WS07-S12)', () => {
     fireEvent.click(screen.getByText('Innkjøpsplan').closest('button')!)
     const dialog = await screen.findByRole('dialog')
     await waitFor(() => expect(dialog.textContent).toContain('Levende tekst'))
+  })
+
+  it('keeps a live revision until a refresh lists the same version, then the list carries it', async () => {
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+    const live = createRoomLiveArtifacts()
+    const view = mount({ live })
+    await screen.findByText('Innkjøpsplan')
+    live.note(liveArt({ version: 3 }), 't1')
+    flush()
+    await waitFor(() => expect(document.querySelector('.verevon-space-artifacts__live')).toBeTruthy())
+    expect(screen.getByText('v3')).toBeTruthy()
+
+    // A refresh that still lists v2 does not carry the live v3: it stays marked as new.
+    view.select('chat')
+    view.select('artefakter')
+    await waitFor(() => expect(client.getSpaceArtifacts).toHaveBeenCalledTimes(2))
+    await settle()
+    flush()
+    expect(document.querySelector('.verevon-space-artifacts__live')).toBeTruthy()
+
+    // A refresh that lists v3 carries it: the mark goes and the list still has one entry.
+    client.getSpaceArtifacts.mockResolvedValue(page({ artifacts: [summary({ version: 3, version_count: 3 })] }))
+    view.select('chat')
+    view.select('artefakter')
+    await waitFor(() => expect(client.getSpaceArtifacts).toHaveBeenCalledTimes(3))
+    await settle()
+    flush()
+    await waitFor(() => expect(document.querySelector('.verevon-space-artifacts__live')).toBeNull())
+    expect(document.querySelectorAll('.verevon-space-artifacts__entry')).toHaveLength(1)
+    expect(screen.getByText('v3')).toBeTruthy()
+  })
+
+  it('lists no live artifact under zero data retention either, and reads no transcript', async () => {
+    client.getSpaceArtifacts.mockResolvedValue(page({ zdr: true }))
+    const live = createRoomLiveArtifacts()
+    mount({ live })
+    expect(await screen.findByText('Ingen artefakter lagres')).toBeTruthy()
+    live.note(liveArt({ id: 'fresh', title: 'Fersk', version: 1 }), 't9')
+    flush()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    flush()
+    expect(screen.queryByText('Fersk')).toBeNull()
+    expect(document.querySelectorAll('.verevon-space-artifacts__entry')).toHaveLength(0)
+    expect(client.loadSpaceTranscript).not.toHaveBeenCalled()
   })
 })

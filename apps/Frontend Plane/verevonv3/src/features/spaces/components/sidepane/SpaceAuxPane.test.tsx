@@ -82,10 +82,13 @@ describe('clampAuxPaneWidth and the stored width (WS01-S7a)', () => {
   })
 
   it('falls back to the default when reading storage throws', () => {
-    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+    // The test setup gives each test its own storage object, so the spy goes on the object the code reads
+    // (a Storage.prototype spy never reaches it).
+    const getItem = vi.spyOn(window.localStorage, 'getItem').mockImplementation(() => {
       throw new DOMException('blocked', 'SecurityError')
     })
     expect(readStoredAuxPaneWidth()).toBe(SPACE_AUX_PANE_DEFAULT_WIDTH)
+    expect(getItem).toHaveBeenCalledWith(SPACE_AUX_PANE_WIDTH_KEY)
   })
 })
 
@@ -100,6 +103,14 @@ describe('SpaceAuxPane (WS01-S7a)', () => {
     expect(separator.getAttribute('aria-valuemin')).toBe('320')
     expect(separator.getAttribute('aria-valuemax')).toBe('720')
     expect(separator.getAttribute('aria-valuenow')).toBe(String(SPACE_AUX_PANE_DEFAULT_WIDTH))
+  })
+
+  it('opens at the default width when storage cannot be read', () => {
+    vi.spyOn(window.localStorage, 'getItem').mockImplementation(() => {
+      throw new DOMException('blocked', 'SecurityError')
+    })
+    renderPane(readStoredAuxPaneWidth())
+    expect(screen.getByRole('complementary').style.width).toBe(`${SPACE_AUX_PANE_DEFAULT_WIDTH}px`)
   })
 
   describe('closing', () => {
@@ -130,6 +141,18 @@ describe('SpaceAuxPane (WS01-S7a)', () => {
       expect(document.activeElement).toBe(opener)
     })
 
+    it('closes on Escape from the resize separator too, and returns focus to the opener', async () => {
+      const opener = document.createElement('button')
+      document.body.appendChild(opener)
+      opener.focus()
+      const { onClose } = renderPane()
+      fireEvent.keyDown(screen.getByRole('separator'), { key: 'Escape' })
+      expect(onClose).toHaveBeenCalledTimes(1)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(document.activeElement).toBe(opener)
+    })
+
     it('does not close on other keys', () => {
       const { onClose } = renderPane()
       fireEvent.keyDown(screen.getByRole('complementary'), { key: 'Enter' })
@@ -143,8 +166,10 @@ describe('SpaceAuxPane (WS01-S7a)', () => {
       const { widths } = renderPane(416)
       const separator = screen.getByRole('separator')
       press(separator, 'ArrowLeft')
+      expect(separator.getAttribute('aria-valuenow')).toBe('448')
       press(separator, 'ArrowRight')
       press(separator, 'ArrowRight')
+      expect(separator.getAttribute('aria-valuenow')).toBe('384')
       expect(widths).toEqual([448, 416, 384])
     })
 
@@ -168,18 +193,20 @@ describe('SpaceAuxPane (WS01-S7a)', () => {
       expect(widths).toEqual([320, 720])
     })
 
-    it('persists the width under verevon.space.auxpane.width.v1', () => {
+    it('persists the width under verevon.space.auxpane.width.v1, and nothing else', () => {
       renderPane(416)
       press(screen.getByRole('separator'), 'ArrowLeft')
       expect(window.localStorage.getItem(SPACE_AUX_PANE_WIDTH_KEY)).toBe('448')
+      expect(window.localStorage.length).toBe(1)
     })
 
     it('still resizes for this page view when storage refuses the write', () => {
-      vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      const setItem = vi.spyOn(window.localStorage, 'setItem').mockImplementation(() => {
         throw new DOMException('quota', 'QuotaExceededError')
       })
       const { widths } = renderPane(416)
       expect(() => press(screen.getByRole('separator'), 'ArrowLeft')).not.toThrow()
+      expect(setItem).toHaveBeenCalledWith(SPACE_AUX_PANE_WIDTH_KEY, '448')
       expect(widths).toEqual([448])
     })
   })

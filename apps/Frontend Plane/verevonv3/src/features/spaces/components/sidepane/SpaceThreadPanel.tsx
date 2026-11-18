@@ -49,6 +49,12 @@ export interface SpaceThreadPanelProps {
   /** The room roster's agents, so an agent turn here has the same colour as in the timeline. */
   readonly agents?: () => readonly SpaceAgent[]
   /**
+   * Whether this reader may read the room's conversations (the listing's `shared_read.available`), the
+   * signal the timeline gates its transcripts on. `false` makes no transcript call, draws the room's
+   * restricted notice and no turn text, including turns read before. Absent means available.
+   */
+  readonly sharedReadAvailable?: () => boolean
+  /**
    * The pane's reply composer (WS01-S7b), drawn under the turns. The page passes it only while
    * `features.human_posts` is on; absent, the panel stays read-only. Not drawn for a thread that
    * is not available to this member, because there is nothing to reply to.
@@ -76,11 +82,14 @@ const HIGHLIGHT_MS = 3000
 
 export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
   const i18n = useI18n()
+  // Shared reads off: the same answer the timeline gives, so no transcript is asked for and none is drawn.
+  const sharedRead = () => props.sharedReadAvailable?.() !== false
   const [read, { refetch }] = createResource(
     // The revision suffix refetches when the room's poll reports the thread
     // changed, the same keying the timeline uses. NUL-joined because ids may
-    // contain any printable character.
+    // contain any printable character. No key while shared reads are off: no request.
     () => {
+      if (!sharedRead()) return undefined
       const thread = props.thread()
       return `${props.spaceRef}\u0000${props.threadId}\u0000${thread?.updated_at ?? thread?.latest_run_updated_at ?? ''}`
     },
@@ -125,8 +134,10 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
     },
   })
   // A read for a different thread is not an answer for this one: while the new
-  // read is in flight the pane shows loading, not the previous thread.
+  // read is in flight the pane shows loading, not the previous thread. With shared
+  // reads off there is no answer at all: the resource keeps its last value, which is not drawn.
   const current = (): PanelRead | undefined => {
+    if (!sharedRead()) return undefined
     const value = read()
     return value && value.threadId === props.threadId ? value : undefined
   }
@@ -140,7 +151,7 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
     const id = wantedId()
     return id ? okTurns(current()).find((turn) => turn.messageId === id) : undefined
   })
-  const entryMissing = () => wantedId() !== null && current()?.state === 'ok' && wantedTurn() === undefined
+  const entryMissing = () => wantedId() !== null && (!sharedRead() || (current()?.state === 'ok' && wantedTurn() === undefined))
   const entryAnnouncement = () => {
     const turn = wantedTurn()
     if (turn) {
@@ -178,7 +189,7 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
   onCleanup(() => { root = undefined })
 
   return (
-    <div ref={(element) => { root = element }} class="verevon-space-thread-panel" aria-busy={current() === undefined ? 'true' : 'false'}>
+    <div ref={(element) => { root = element }} class="verevon-space-thread-panel" aria-busy={sharedRead() && current() === undefined ? 'true' : 'false'}>
       <Show when={wantedId()}>
         <p class={entryMissing() ? 'verevon-space-inline-status' : 'sr-only'} role="status" aria-live="polite" data-entry-status={entryMissing() ? 'missing' : 'found'}>
           {entryAnnouncement()}
@@ -211,6 +222,10 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
           </p>
         }
       >
+        {/* Shared reads off for this Space: the room's notice, the same one the timeline shows. */}
+        <Match when={!sharedRead()}>
+          <SpaceRestrictedNotice variant="room" />
+        </Match>
         <Match when={current()?.state === 'restricted'}>
           <Show when={restrictedDenial(current())} fallback={<SpaceRestrictedNotice variant="thread" />}>
             {(denial) => (

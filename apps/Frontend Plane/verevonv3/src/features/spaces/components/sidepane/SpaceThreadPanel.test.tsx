@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
-import { createSignal } from 'solid-js'
+import { createSignal, flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiError } from '@/shared/api/http'
@@ -110,6 +110,7 @@ describe('SpaceThreadPanel (WS01-S7a)', () => {
     renderPanel()
     expect(await screen.findByText(/Denne samtalen er ikke delt med deg/)).toBeTruthy()
     expect(document.body.textContent ?? '').not.toMatch(/logg inn|sign in|log in/i)
+    expect(document.querySelector('.verevon-space-thread-panel__turns')).toBeNull()
   })
 
   it('says a typed 403 in the denial presenter’s words instead of the generic notice', async () => {
@@ -193,6 +194,7 @@ describe('SpaceThreadPanel (WS01-S7a)', () => {
       renderPanel('thr_1', { footer: <div data-testid="pane-footer" /> })
       await screen.findByText(/Denne samtalen er ikke delt med deg/)
       expect(screen.getByTestId('pane-footer')).toBeTruthy()
+      expect(document.querySelector('.verevon-space-thread-panel__turns')).toBeNull()
     })
 
     it('does not draw the footer for a thread that is not available to this member', async () => {
@@ -207,6 +209,89 @@ describe('SpaceThreadPanel (WS01-S7a)', () => {
       renderPanel()
       await screen.findByText('Hei')
       expect(document.querySelector('.verevon-space-thread-panel__composer')).toBeNull()
+    })
+  })
+
+  // Shared reads off for this Space is the same rule the timeline keeps (its `transcriptEnabled` gate):
+  // no transcript call, the room's restricted notice, and no turn text, including turns read earlier.
+  describe('shared reads (the timeline rule)', () => {
+    it('makes no transcript call and shows no turn text while shared reads are off', async () => {
+      spacesClient.getSpaceThreadTranscript.mockResolvedValue({
+        turns: [{ role: 'user', content: 'Hemmelig innhold', authorSubjectId: 'user-1' }],
+      })
+      renderPanel('thr_1', { sharedReadAvailable: () => false })
+      expect(await screen.findByText(/Samtalene i dette rommet er ikke delt med deg/)).toBeTruthy()
+      // Let any scheduled read run before asserting that none was made.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      flush()
+      expect(spacesClient.getSpaceThreadTranscript).not.toHaveBeenCalled()
+      expect(screen.queryByText('Hemmelig innhold')).toBeNull()
+      expect(document.querySelector('.verevon-space-thread-panel__turns')).toBeNull()
+      expect(screen.queryByText(/Henter samtalen/)).toBeNull()
+    })
+
+    // The control for the case above: the same thread, with shared reads on, is read and drawn.
+    it('reads the thread and draws its turns while shared reads are on', async () => {
+      spacesClient.getSpaceThreadTranscript.mockResolvedValue({
+        turns: [{ role: 'user', content: 'Hemmelig innhold', authorSubjectId: 'user-1' }],
+      })
+      renderPanel('thr_1', { sharedReadAvailable: () => true })
+      expect(await screen.findByText('Hemmelig innhold')).toBeTruthy()
+      expect(spacesClient.getSpaceThreadTranscript).toHaveBeenCalledTimes(1)
+      expect(screen.queryByText(/Samtalene i dette rommet er ikke delt med deg/)).toBeNull()
+    })
+
+    it('hides the turns it read earlier once shared reads go off, and asks for nothing more', async () => {
+      const [shared, setShared] = createSignal(true)
+      spacesClient.getSpaceThreadTranscript.mockResolvedValue({
+        turns: [{ role: 'user', content: 'Tidligere innhold' }],
+      })
+      renderPanel('thr_1', { sharedReadAvailable: shared })
+      expect(await screen.findByText('Tidligere innhold')).toBeTruthy()
+
+      setShared(false)
+      flush()
+      expect(await screen.findByText(/Samtalene i dette rommet er ikke delt med deg/)).toBeTruthy()
+      expect(screen.queryByText('Tidligere innhold')).toBeNull()
+      expect(spacesClient.getSpaceThreadTranscript).toHaveBeenCalledTimes(1)
+    })
+
+    it('reads the thread once when shared reads come back on', async () => {
+      const [shared, setShared] = createSignal(false)
+      spacesClient.getSpaceThreadTranscript.mockResolvedValue({
+        turns: [{ role: 'user', content: 'Igjen synlig' }],
+      })
+      renderPanel('thr_1', { sharedReadAvailable: shared })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      flush()
+      expect(spacesClient.getSpaceThreadTranscript).not.toHaveBeenCalled()
+
+      setShared(true)
+      flush()
+      expect(await screen.findByText('Igjen synlig')).toBeTruthy()
+      expect(spacesClient.getSpaceThreadTranscript).toHaveBeenCalledTimes(1)
+      expect(spacesClient.getSpaceThreadTranscript).toHaveBeenCalledWith('room-1', 'thr_1')
+    })
+
+    it('a refused re-read hides the turns it showed before', async () => {
+      const [updated, setUpdated] = createSignal('2026-10-27T10:00:00Z')
+      spacesClient.getSpaceThreadTranscript.mockResolvedValueOnce({
+        turns: [{ role: 'user', content: 'Før avslaget' }],
+      })
+      renderPanel('thr_1', {
+        thread: () => ({ thread_id: 'thr_1', space_id: 'room-1', updated_at: updated() }),
+      })
+      expect(await screen.findByText('Før avslaget')).toBeTruthy()
+
+      spacesClient.getSpaceThreadTranscript.mockRejectedValueOnce(
+        new ApiError('forbidden', 403, 'space_read_not_authorized'),
+      )
+      setUpdated('2026-10-27T11:00:00Z')
+      flush()
+      expect(await screen.findByText(/Denne samtalen er ikke delt med deg/)).toBeTruthy()
+      expect(screen.queryByText('Før avslaget')).toBeNull()
+      expect(document.querySelector('.verevon-space-thread-panel__turns')).toBeNull()
+      expect(spacesClient.getSpaceThreadTranscript).toHaveBeenCalledTimes(2)
     })
   })
 })
