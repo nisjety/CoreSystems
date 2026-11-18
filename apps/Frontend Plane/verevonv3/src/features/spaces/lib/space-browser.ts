@@ -79,7 +79,8 @@ const ACTION_VERBS: Readonly<Record<string, [string, string]>> = {
 export function spaceBrowserEventLabel(event: SpaceBrowserEvent, tr: Tr): string {
   switch (event.kind) {
     case 'action': {
-      const verb = event.actionType ? ACTION_VERBS[event.actionType] : undefined
+      // Own keys only: a plain object also answers for `constructor`, `toString` and `__proto__`, which an action type can name.
+      const verb = event.actionType && Object.hasOwn(ACTION_VERBS, event.actionType) ? ACTION_VERBS[event.actionType] : undefined
       const what = verb ? tr(verb[0], verb[1]) : tr('Handling', 'Action')
       return event.host ? `${what} · ${event.host}` : what
     }

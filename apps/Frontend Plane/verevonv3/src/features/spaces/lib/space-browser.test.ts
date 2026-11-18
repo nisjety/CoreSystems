@@ -103,4 +103,15 @@ describe('WS20-S5 room browser run presentation', () => {
     })
     expect(spaceBrowserEventLabel(urlAsAction, en)).toBe('Action · shop.example.com')
   })
+
+  it('an action type that names a property the table inherits is not a known verb', () => {
+    // The table is a plain object, so a lookup by name reaches Object.prototype unless it is checked for an own key.
+    for (const actionType of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+      expect(spaceBrowserEventLabel(event({ eventId: 'p1', kind: 'action', actionType }), en)).toBe('Action')
+    }
+    const withHost = event({ eventId: 'p2', kind: 'action', actionType: 'constructor', host: 'shop.example.com' })
+    expect(spaceBrowserEventLabel(withHost, en)).toBe('Action · shop.example.com')
+    // A verb the table does name still reads as one.
+    expect(spaceBrowserEventLabel(event({ eventId: 'p3', kind: 'action', actionType: 'click' }), en)).toBe('Clicked')
+  })
 })
