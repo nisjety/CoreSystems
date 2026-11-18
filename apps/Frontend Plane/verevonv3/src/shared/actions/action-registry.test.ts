@@ -1526,6 +1526,75 @@ describe('action registry', () => {
     ).toBe(true)
   })
 
+  it('registers the WS04 join and room settings actions, and their schemas take the values the gateway takes (WS04-S8, WS04-S11)', () => {
+    const join = getActionDescriptor('spaces.join_room')
+    expect(join).toBeDefined()
+    expect(join?.inputSchema.safeParse({ spaceRef: 'space-1' }).success).toBe(true)
+    expect(join?.inputSchema.safeParse({}).success).toBe(false)
+
+    const settings = getActionDescriptor('spaces.update_room_settings')
+    expect(settings).toBeDefined()
+    // Who may enter a room, or open it to the organization, is a human decision.
+    expect(isModelExecutableAction('spaces.join_room')).toBe(false)
+    expect(isModelExecutableAction('spaces.update_room_settings')).toBe(false)
+    expect(settings?.inputSchema.safeParse({ spaceRef: 'space-1', visibility: 'org_public' }).success).toBe(true)
+    // A self-join receives a viewer or an editor, never a manager or an owner.
+    expect(settings?.inputSchema.safeParse({ spaceRef: 'space-1', joinRole: 'editor' }).success).toBe(true)
+    expect(settings?.inputSchema.safeParse({ spaceRef: 'space-1', joinRole: 'manager' }).success).toBe(false)
+    expect(settings?.inputSchema.safeParse({ spaceRef: 'space-1', joinRole: 'owner' }).success).toBe(false)
+    // An empty body changes nothing, so it is refused. The history mode alone is a valid change (WS04-S11).
+    expect(settings?.inputSchema.safeParse({ spaceRef: 'space-1' }).success).toBe(false)
+    expect(settings?.inputSchema.safeParse({ spaceRef: 'space-1', historyMode: 'since_join' }).success).toBe(true)
+    expect(settings?.inputSchema.safeParse({ spaceRef: 'space-1', historyMode: 'all' }).success).toBe(false)
+    expect(
+      settings?.outputSchema.safeParse({ space_ref: 'space-1', visibility: 'private', join_role: null, changed: true }).success,
+    ).toBe(true)
+    expect(
+      settings?.outputSchema.safeParse({
+        space_ref: 'space-1',
+        visibility: 'private',
+        join_role: null,
+        history_mode: 'full',
+        changed: true,
+      }).success,
+    ).toBe(true)
+    expect(
+      settings?.outputSchema.safeParse({
+        space_ref: 'space-1',
+        visibility: 'private',
+        join_role: null,
+        history_mode: 'partial',
+        changed: true,
+      }).success,
+    ).toBe(false)
+  })
+
+  it('registers the Space read-state, notify, attention, follow and tool policy actions (WS11-S3, WS11-S7, WS10-S5b)', () => {
+    for (const id of ['spaces.mark_all_read', 'spaces.mark_unread', 'spaces.set_notify_level'] as const) {
+      const action = getActionDescriptor(id)
+      expect(action, id).toBeDefined()
+      expect(action?.ownerPlane, id).toBe('application')
+      expect(action?.risk, id).toBe('low')
+      expect(isModelExecutableAction(id), id).toBe(false)
+    }
+    for (const id of ['spaces.set_attention_item_state', 'spaces.set_thread_follow', 'spaces.set_tool_policy'] as const) {
+      expect(getActionDescriptor(id), id).toBeDefined()
+    }
+    // An agent never sets the tool policy that limits what it may call.
+    expect(isModelExecutableAction('spaces.set_tool_policy')).toBe(false)
+  })
+
+  it('takes a memory id with or without the Space it was learned in, and refuses a blank or over-long Space (W3-DEC-KIND2)', () => {
+    const restore = getActionDescriptor('memory.restore')
+    expect(restore).toBeDefined()
+    expect(restore?.inputSchema.safeParse({ memoryId: 'mem_1' }).success).toBe(true)
+    expect(restore?.inputSchema.safeParse({ memoryId: 'mem_1', spaceRef: 'space-1' }).success).toBe(true)
+    expect(restore?.inputSchema.safeParse({ memoryId: 'mem_1', spaceRef: '' }).success).toBe(false)
+    expect(restore?.inputSchema.safeParse({ memoryId: 'mem_1', spaceRef: '   ' }).success).toBe(false)
+    expect(restore?.inputSchema.safeParse({ memoryId: 'mem_1', spaceRef: 's'.repeat(200) }).success).toBe(true)
+    expect(restore?.inputSchema.safeParse({ memoryId: 'mem_1', spaceRef: 's'.repeat(201) }).success).toBe(false)
+  })
+
   // P-SPA1 moved the spaces.* entries into per-workstream fragments under
   // domains/spaces/*.ts and spread them once. The move must not add, drop, rename
   // or reorder an id: the order is what the contract probes and the context pack read.
@@ -1825,7 +1894,12 @@ describe('action registry', () => {
     // (browser.list_origin_consents, browser.revoke_origin_consent, browser_attach.stop, browser_tab.control,
     // browser_context.resolve_tab_mentions, browser_region.attach, browser_evidence.save_recipe and
     // chat.research_run.cancel): 374 + 8 = 382.
-    expect(ids).toHaveLength(382)
+    // +16 since that merge (382 to 398): WS17-S5 +4 (agents.create_personal, agents.update_access, agents.set_primary,
+    // spaces.withdraw_agent), WS17-S6 +1 (spaces.open_private_panel), WS17-S7 +1 (memory.declassify_to_space), WS17-S7b +1
+    // (memory.retract_from_space), W3-DEC-KIND2 +1 (memory.restore), W3-DEC-CANVAS +1 (spaces.set_agent_canvas_tools),
+    // WS18-S5 +1 (spaces.set_agent_self_api), W3-DEC-ORGAGENT +3 (spaces.suspend_org_agent, spaces.reactivate_org_agent,
+    // spaces.retire_org_agent), WS19-S4 +2 (spaces.save_canvas, spaces.restore_canvas_version), WS20-S5 +1 (spaces.browser_run.start).
+    expect(ids).toHaveLength(398)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

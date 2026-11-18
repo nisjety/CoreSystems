@@ -66,4 +66,28 @@ describe('model eligibility characterisation', () => {
       expect(isModelExecutableAction(id), id).toBe(false)
     }
   })
+
+  it('never admits the audit event read or the organization domain, SSO and SCIM actions to the model (WS05-S4, WS05-S6, WS05-S7, WS05-S8)', () => {
+    for (const id of [
+      'audit.list_events',
+      'org.add_domain',
+      'org.verify_domain',
+      'org.revoke_domain',
+      'org.update_sso_policy',
+      'org.add_sso_provider',
+      'org.remove_sso_provider',
+      'org.create_scim_token',
+      'org.revoke_scim_token',
+    ]) {
+      expect(actionRegistry.map((action) => action.id), id).toContain(id)
+      expect(isModelExecutableAction(id), id).toBe(false)
+    }
+  })
+
+  it('never admits the attention item and thread follow actions to the model (WS11-S7)', () => {
+    for (const id of ['spaces.set_attention_item_state', 'spaces.set_thread_follow']) {
+      expect(actionRegistry.map((action) => action.id), id).toContain(id)
+      expect(isModelExecutableAction(id), id).toBe(false)
+    }
+  })
 })

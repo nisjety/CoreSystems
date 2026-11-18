@@ -162,4 +162,83 @@ describe('provisional Action Catalog manifest', () => {
       await expect(actionSchemaHash(moved)).resolves.toBe(await actionSchemaHash(action))
     }
   })
+
+  it('lists the audit event read as human-only, and adds no audit export action (WS05-S4)', async () => {
+    const manifest = await buildActionCatalogManifest()
+    const entry = manifest.actions.find((action) => action.id === 'audit.list_events')
+    expect(entry).toBeDefined()
+    expect(entry?.allowedActorTypes).toEqual(['human'])
+    expect(isModelExecutableAction('audit.list_events')).toBe(false)
+    // The plan's export route and its audit.export action were not built; the compliance export is audit.export_log.
+    expect(actionRegistry.map((action) => action.id)).not.toContain('audit.export')
+  })
+
+  it('lists the organization domain, SSO and SCIM actions as human-only and closed to the model (WS05-S6, WS05-S7, WS05-S8)', async () => {
+    const manifest = await buildActionCatalogManifest()
+    for (const id of [
+      'org.add_domain',
+      'org.verify_domain',
+      'org.revoke_domain',
+      'org.update_sso_policy',
+      'org.add_sso_provider',
+      'org.remove_sso_provider',
+      'org.create_scim_token',
+      'org.revoke_scim_token',
+    ]) {
+      const entry = manifest.actions.find((action) => action.id === id)
+      expect(entry, id).toBeDefined()
+      expect(entry?.allowedActorTypes, id).toEqual(['human'])
+      expect(isModelExecutableAction(id), id).toBe(false)
+    }
+  })
+
+  it('lists the Space read-state and notify actions as application actions closed to the model (WS11-S3, WS11-S10)', async () => {
+    const manifest = await buildActionCatalogManifest()
+    for (const id of ['spaces.mark_all_read', 'spaces.mark_unread', 'spaces.set_notify_level']) {
+      const entry = manifest.actions.find((action) => action.id === id)
+      expect(entry, id).toBeDefined()
+      expect(entry?.ownerPlane, id).toBe('application')
+      expect(entry?.risk, id).toBe('low')
+      expect(entry?.modelAccess, id).toBe('none')
+      expect(entry?.allowedActorTypes, id).toEqual(['human'])
+    }
+    expect(manifest.actions.find((action) => action.id === 'spaces.set_status')).toBeDefined()
+  })
+
+  it('keeps the edit and delete message actions out of the model (WS12-S7)', async () => {
+    const manifest = await buildActionCatalogManifest()
+    for (const id of ['spaces.edit_message', 'spaces.delete_message']) {
+      expect(manifest.actions.find((action) => action.id === id), id).toBeDefined()
+      expect(isModelExecutableAction(id), id).toBe(false)
+    }
+  })
+
+  it('keeps the agent withdrawal, private panel, memory sharing and memory restore actions human-only (WS17-S5, WS17-S6, WS17-S7, WS17-S7b, W3-DEC-NOTES, W3-FIX-13)', async () => {
+    const manifest = await buildActionCatalogManifest()
+    for (const id of [
+      'agents.create_personal',
+      'agents.update_access',
+      'agents.set_primary',
+      'spaces.withdraw_agent',
+      'spaces.open_private_panel',
+      'memory.declassify_to_space',
+      'memory.retract_from_space',
+      'memory.restore',
+    ]) {
+      const entry = manifest.actions.find((action) => action.id === id)
+      expect(entry, id).toBeDefined()
+      expect(entry?.allowedActorTypes, id).toEqual(['human'])
+      expect(isModelExecutableAction(id), id).toBe(false)
+    }
+  })
+
+  it('keeps the canvas save, the canvas restore and the browser run start out of the model (WS19-S4, WS20-S5)', async () => {
+    const manifest = await buildActionCatalogManifest()
+    for (const id of ['spaces.save_canvas', 'spaces.restore_canvas_version', 'spaces.browser_run.start']) {
+      const entry = manifest.actions.find((action) => action.id === id)
+      expect(entry, id).toBeDefined()
+      expect(entry?.allowedActorTypes, id).toEqual(['human'])
+      expect(isModelExecutableAction(id), id).toBe(false)
+    }
+  })
 })
