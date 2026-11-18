@@ -659,16 +659,28 @@ mod tests {
         );
     }
 
+    /// With the switch off the Agent API routes are absent. The route policy reads the switch at each
+    /// call, so this test sets it off itself, and it runs serially with the test that turns it on.
     #[tokio::test]
+    #[serial_test::serial]
     async fn switch_off_routes_are_absent() {
+        std::env::remove_var(ENABLED_ENV);
         for (method, path) in ROUTES {
+            // A router built with the switch off has no Agent API route at all.
+            let (status, _) =
+                send(router(false).with_state(unreachable_state()), method, path).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "no route, {method} {path}");
+            // A person passes the route policy and finds no route.
+            let (status, _) = send(app(false, user_claims(), false), method, path).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "a person, {method} {path}");
+            // A key is refused by the route policy: it reaches no Agent API route while the switch is off.
             let (status, _) = send(
                 app(false, key_claims(&[API_KEY_SCOPE_AGENT_RUNS], false), true),
                 method,
                 path,
             )
             .await;
-            assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
+            assert_eq!(status, StatusCode::FORBIDDEN, "a key, {method} {path}");
         }
     }
 

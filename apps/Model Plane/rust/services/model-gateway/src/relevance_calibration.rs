@@ -232,13 +232,15 @@ fn verify_pin(bytes: &str, pin: &str) -> Result<(), CalibrationError> {
     Ok(())
 }
 
-/// Read the switch value. Unset, empty or an explicit off value (`0`, `false`, `off`, `no`) is off;
-/// only the exact literal `true` is on. Anything else is refused, so a typo cannot silently leave
-/// the feature in the wrong state: `1`, `on`, `yes`, `TRUE` and ` true ` are refused, not read.
+/// Read the switch value. Unset, empty or an explicit off word (`0`, `false`, `off`, `no`, in any
+/// case and with surrounding whitespace) is off; only the exact literal `true` is on. Anything else
+/// is refused, so a typo cannot silently leave the feature in the wrong state: `1`, `on`, `yes`,
+/// `TRUE` and ` true ` are refused, not read. The off words are the list the legacy ZDR boolean
+/// reads too (`mp_contracts::loop_fold::is_explicit_off`), so the two agree on what counts as off.
 ///
 /// # Errors
 ///
-/// [`CalibrationError::UnreadableSwitch`] for a value that is neither `true` nor an off value.
+/// [`CalibrationError::UnreadableSwitch`] for a value that is neither `true` nor an off word.
 pub fn parse_switch(value: Option<&str>) -> Result<bool, CalibrationError> {
     let Some(raw) = value else {
         return Ok(false);
@@ -246,10 +248,10 @@ pub fn parse_switch(value: Option<&str>) -> Result<bool, CalibrationError> {
     if raw == "true" {
         return Ok(true);
     }
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "0" | "false" | "off" | "no" => Ok(false),
-        _ => Err(CalibrationError::UnreadableSwitch(raw.to_owned())),
+    if mp_contracts::loop_fold::is_explicit_off(raw) {
+        return Ok(false);
     }
+    Err(CalibrationError::UnreadableSwitch(raw.to_owned()))
 }
 
 /// The boot-time decision. Off means no table and no request for cross-encoder scores. On needs a
@@ -519,6 +521,25 @@ mod tests {
         );
         // The other on-words are refused, never read as on.
         for other in ["1", "on", "yes", "TRUE", " true "] {
+            assert_eq!(
+                parse_switch(Some(other)),
+                Err(CalibrationError::UnreadableSwitch(other.to_owned())),
+                "{other:?}"
+            );
+        }
+    }
+
+    /// The off words are the list the legacy ZDR boolean reads as no claim too, because both take
+    /// `mp_contracts::loop_fold::EXPLICIT_OFF_WORDS`. Here they are off in any case and padded.
+    #[test]
+    fn the_explicit_off_words_are_off_in_any_case_and_padding() {
+        for &off in mp_contracts::loop_fold::EXPLICIT_OFF_WORDS {
+            assert_eq!(parse_switch(Some(off)), Ok(false), "{off:?}");
+        }
+        for off in [" false ", "FALSE", "Off", " NO ", "\tno\n", "   "] {
+            assert_eq!(parse_switch(Some(off)), Ok(false), "{off:?}");
+        }
+        for other in ["ON", "Yes", " 1 ", "enforce", "offf"] {
             assert_eq!(
                 parse_switch(Some(other)),
                 Err(CalibrationError::UnreadableSwitch(other.to_owned())),

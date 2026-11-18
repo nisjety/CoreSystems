@@ -115,8 +115,8 @@ pub fn validate_steer_text(text: Option<&str>) -> Result<Option<String>, SteerRe
 /// reports against. Strict: only the literal `true` turns it on.
 pub const SEND_RECEIPTS_ENV: &str = "MODEL_GATEWAY_SEND_RECEIPTS";
 
-/// The strict parser of [`SEND_RECEIPTS_ENV`]: `true` in any case with surrounding whitespace, and
-/// nothing else, so a typo never turns receipts on.
+/// The strict parser of [`SEND_RECEIPTS_ENV`]: the exact literal `true`, and nothing else, so a typo
+/// never turns receipts on.
 #[must_use]
 pub fn send_receipts_enabled_from(value: Option<&str>) -> bool {
     mp_contracts::loop_fold::switch_from(value)

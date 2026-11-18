@@ -271,6 +271,9 @@ pub async fn run(registry: DocReadyRegistry) {
     info!("doc-indexed readiness consumer stopped (subscription closed)");
 }
 
+/// The three gates that open the unsigned readiness consumer. Each is read as exactly `1`, the
+/// spelling the Data Plane readers of the same names take, and not as `true`: the documented
+/// exception in `switch_spellings::LITERAL_ONE_EXCEPTIONS`.
 fn unverified_doc_ready_events_enabled(
     legacy: &str,
     insecure_dev: &str,

@@ -16113,16 +16113,32 @@ mod tests {
     /// edge's `UrlTriple` shape. Its prose quotes the question and carries a marker, and its structured harvest carries a
     /// price figure; only that page holds either. `scrapes` is how many scrapes the test expects.
     async fn grounding_scrape(quarry: &wiremock::MockServer, final_url: &str, scrapes: u64) {
+        grounding_scrape_with_url(
+            quarry,
+            serde_json::json!({
+                "requested": "https://allowed.rel1.example/strompris",
+                "final_url": final_url
+            }),
+            scrapes,
+        )
+        .await;
+    }
+
+    /// A Quarry scrape of the kept hit whose `url` object is `url` as given: a blank or absent final URL, or the legacy
+    /// `final` key alone. The prose and the structured harvest are those of [`grounding_scrape`]. `scrapes` is how many
+    /// scrapes the test expects.
+    async fn grounding_scrape_with_url(
+        quarry: &wiremock::MockServer,
+        url: serde_json::Value,
+        scrapes: u64,
+    ) {
         let markdown = "Strømpris i Norge REL1-MARKER-7f3a for uke 46 følger kraftbørsen time for time. Prisen \
                         varierer mellom prisområdene i Norge gjennom døgnet, og oversikten over strømpris i Norge \
                         oppdateres hver time fra nettselskapene i landet.";
         let body = serde_json::json!({
             "data": {
                 "status": 200,
-                "url": {
-                    "requested": "https://allowed.rel1.example/strompris",
-                    "final_url": final_url
-                },
+                "url": url,
                 "formats": {"markdown": markdown},
                 "structured": {"figures": [{
                     "label": "Strømpris",
@@ -16162,8 +16178,18 @@ mod tests {
         state: &crate::state::AppState,
         org_id: &str,
     ) -> (WebSearchGate, ToolOutcome) {
+        ground_hit(state, org_id, "https://allowed.rel1.example/strompris").await
+    }
+
+    /// Reads one kept hit at `hit_url` through the grounding phase for `org_id`. Returns the gate and the outcome the model
+    /// would read.
+    async fn ground_hit(
+        state: &crate::state::AppState,
+        org_id: &str,
+        hit_url: &str,
+    ) -> (WebSearchGate, ToolOutcome) {
         let mut outcome = web_search_outcome(&[(
-            "https://allowed.rel1.example/strompris",
+            hit_url,
             "Strømpris i Norge",
             "Oversikt over strømpris i Norge.",
         )]);
@@ -16259,6 +16285,147 @@ mod tests {
         let state = grounding_state(&org_core, &quarry);
 
         let (gate, outcome) = ground_one_hit(&state, "org_rel1_shadow").await;
+        let output = outcome.output.as_str();
+        let line = hit_line(output);
+
+        assert_eq!(gate.kept, 1, "{output}");
+        assert!(line.contains("[PAGE READ]"), "{line}");
+        assert!(output.contains("REL1-MARKER-7f3a"), "{output}");
+        assert!(!line.contains("org_site_blocked"), "{line}");
+    }
+
+    /// V3-mg-4, grounding path: a blank final URL is no final URL. Under enforce it is judged on the requested host, which is
+    /// allowed here, so the page is read, and org-core is asked for that host once. The legacy `final` beside it, which names
+    /// a denied host, is not read.
+    #[tokio::test]
+    async fn a_blank_final_url_is_judged_on_the_requested_host_under_enforce() {
+        let _mode = crate::site_policy_client::test_seam::set(
+            mp_contracts::site_policy::WebDomainPolicyMode::Enforce,
+        );
+        let org_core = wiremock::MockServer::start().await;
+        grounding_org_rules(&org_core, "org_v3_mg4_blank", 1).await;
+        let quarry = wiremock::MockServer::start().await;
+        grounding_scrape_with_url(
+            &quarry,
+            serde_json::json!({
+                "requested": "https://allowed.rel1.example/strompris",
+                "final_url": "",
+                "final": "https://blocked.rel1.example/landing"
+            }),
+            1,
+        )
+        .await;
+        let state = grounding_state(&org_core, &quarry);
+
+        let (gate, outcome) = ground_one_hit(&state, "org_v3_mg4_blank").await;
+        let output = outcome.output.as_str();
+        let line = hit_line(output);
+
+        assert_eq!(gate.kept, 1, "{output}");
+        assert!(line.contains("[PAGE READ]"), "{line}");
+        assert!(output.contains("REL1-MARKER-7f3a"), "{output}");
+        assert!(output.contains("4,56"), "{output}");
+        assert!(!line.contains("org_site_blocked"), "{line}");
+    }
+
+    /// V3-mg-4, grounding path: an absent final URL (the reply names only the requested URL) is the requested host, which
+    /// the same-host check passes under enforce without a second read. The page is read, and org-core is asked nothing.
+    #[tokio::test]
+    async fn an_absent_final_url_is_read_without_a_second_look_under_enforce() {
+        let _mode = crate::site_policy_client::test_seam::set(
+            mp_contracts::site_policy::WebDomainPolicyMode::Enforce,
+        );
+        let org_core = wiremock::MockServer::start().await;
+        grounding_org_rules(&org_core, "org_v3_mg4_absent", 0).await;
+        let quarry = wiremock::MockServer::start().await;
+        grounding_scrape_with_url(
+            &quarry,
+            serde_json::json!({"requested": "https://allowed.rel1.example/strompris"}),
+            1,
+        )
+        .await;
+        let state = grounding_state(&org_core, &quarry);
+
+        let (gate, outcome) = ground_one_hit(&state, "org_v3_mg4_absent").await;
+        let output = outcome.output.as_str();
+        let line = hit_line(output);
+
+        assert_eq!(gate.kept, 1, "{output}");
+        assert!(line.contains("[PAGE READ]"), "{line}");
+        assert!(output.contains("REL1-MARKER-7f3a"), "{output}");
+        assert!(!line.contains("org_site_blocked"), "{line}");
+    }
+
+    /// V3-mg-4, grounding path: a blank final URL on a requested host the org denies is judged on that host under enforce.
+    /// The page is not quoted: neither its prose nor its structured fact reaches the model, and the hit keeps its snippet,
+    /// labelled with the refusal's typed code.
+    #[tokio::test]
+    async fn a_blank_final_url_on_a_denied_requested_host_is_not_quoted_under_enforce() {
+        let _mode = crate::site_policy_client::test_seam::set(
+            mp_contracts::site_policy::WebDomainPolicyMode::Enforce,
+        );
+        let org_core = wiremock::MockServer::start().await;
+        grounding_org_rules(&org_core, "org_v3_mg4_blank_deny", 1).await;
+        let quarry = wiremock::MockServer::start().await;
+        grounding_scrape_with_url(
+            &quarry,
+            serde_json::json!({
+                "requested": "https://blocked.rel1.example/strompris",
+                "final_url": ""
+            }),
+            1,
+        )
+        .await;
+        let state = grounding_state(&org_core, &quarry);
+
+        let (gate, outcome) = ground_hit(
+            &state,
+            "org_v3_mg4_blank_deny",
+            "https://blocked.rel1.example/strompris",
+        )
+        .await;
+        let output = outcome.output.as_str();
+        let line = output
+            .lines()
+            .find(|line| line.contains("https://blocked.rel1.example/strompris"))
+            .expect("the kept hit is listed in the output");
+
+        assert_eq!(gate.kept, 1, "{output}");
+        assert!(
+            !output.contains("REL1-MARKER-7f3a"),
+            "the blocked page's prose reached the model: {output}"
+        );
+        assert!(
+            !output.contains("4,56"),
+            "the blocked page's structured fact reached the model: {output}"
+        );
+        assert!(!line.contains("[PAGE READ]"), "{line}");
+        assert!(line.contains("[SNIPPET ONLY"), "{line}");
+        assert!(line.contains("org_site_blocked"), "{line}");
+    }
+
+    /// V3-mg-4, grounding path: with the switch off a blank final URL is read as it always was, and org-core is asked
+    /// nothing.
+    #[tokio::test]
+    async fn a_blank_final_url_is_read_and_unasked_under_off() {
+        let _mode = crate::site_policy_client::test_seam::set(
+            mp_contracts::site_policy::WebDomainPolicyMode::Off,
+        );
+        let org_core = wiremock::MockServer::start().await;
+        grounding_org_rules(&org_core, "org_v3_mg4_off", 0).await;
+        let quarry = wiremock::MockServer::start().await;
+        grounding_scrape_with_url(
+            &quarry,
+            serde_json::json!({
+                "requested": "https://allowed.rel1.example/strompris",
+                "final_url": "   "
+            }),
+            1,
+        )
+        .await;
+        let state = grounding_state(&org_core, &quarry);
+
+        let (gate, outcome) = ground_one_hit(&state, "org_v3_mg4_off").await;
         let output = outcome.output.as_str();
         let line = hit_line(output);
 

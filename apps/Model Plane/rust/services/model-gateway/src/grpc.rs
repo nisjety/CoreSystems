@@ -5207,12 +5207,23 @@ mod tests {
     /// A Quarry scrape of `requested` whose page ended at `final_url`, in the edge's `UrlTriple` shape. `scrapes` is how
     /// many scrapes the test expects.
     async fn scrape_page(quarry: &MockServer, requested: &str, final_url: &str, scrapes: u64) {
+        scrape_page_with_url(
+            quarry,
+            serde_json::json!({"requested": requested, "final_url": final_url}),
+            scrapes,
+        )
+        .await;
+    }
+
+    /// A Quarry scrape whose `url` object is `url` as given: a blank or absent final URL, or the legacy `final` key alone.
+    /// `scrapes` is how many scrapes the test expects.
+    async fn scrape_page_with_url(quarry: &MockServer, url: serde_json::Value, scrapes: u64) {
         Mock::given(method("POST"))
             .and(path("/v1/scrape"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": {
                     "status": 200,
-                    "url": {"requested": requested, "final_url": final_url},
+                    "url": url,
                     "formats": {"markdown": "Price 5"}
                 }
             })))
@@ -5473,6 +5484,201 @@ mod tests {
             "the model did not return a JSON object"
         );
         assert!(published(&publisher) > 0, "the inference call was made");
+    }
+
+    /// V3-mg-4: a blank final URL is no final URL. Under `enforce` the requested host is judged in its place, and this host
+    /// is allowed, so the page is read. The reply's final URL stays blank (unknown), never the request. The legacy `final`
+    /// beside the blank one names a denied host, and it is not read.
+    #[tokio::test]
+    async fn fetch_reads_a_blank_final_url_on_an_allowed_host_under_enforce() {
+        let _mode = crate::site_policy_client::test_seam::set(WebDomainPolicyMode::Enforce);
+        let org_core = MockServer::start().await;
+        // The pre-check asks org-core once for the requested host. The blank final URL is judged on that same host, which
+        // the verdict cache already holds, so org-core is not asked again.
+        org_rules(&org_core, "org_v3_mg4_fetch_blank", 1).await;
+        let quarry = MockServer::start().await;
+        scrape_page_with_url(
+            &quarry,
+            serde_json::json!({
+                "requested": "https://allowed.c09.example/a",
+                "final_url": "",
+                "final": "https://blocked.c09.example/landing",
+            }),
+            1,
+        )
+        .await;
+        let (service, _) = site_policy_service(&org_core, &quarry).await;
+
+        let reply = service
+            .fetch(authenticated_as(
+                fetch_of("org_v3_mg4_fetch_blank", "https://allowed.c09.example/a"),
+                "org_v3_mg4_fetch_blank",
+                "user_test",
+            ))
+            .await
+            .expect(
+                "a blank final URL is judged on the allowed requested host, so the page is read",
+            )
+            .into_inner();
+        assert!(
+            reply.final_url.is_empty(),
+            "the final URL is unknown, not the request: {:?}",
+            reply.final_url
+        );
+        assert!(reply.markdown.contains("Price 5"), "{}", reply.markdown);
+    }
+
+    /// V3-mg-4: an absent final URL (the reply names only the requested URL) is read under `enforce`. The reader falls back
+    /// to the requested URL for it, and the same-host check passes that without a second read, so org-core is asked once.
+    #[tokio::test]
+    async fn fetch_reads_an_absent_final_url_under_enforce() {
+        let _mode = crate::site_policy_client::test_seam::set(WebDomainPolicyMode::Enforce);
+        let org_core = MockServer::start().await;
+        org_rules(&org_core, "org_v3_mg4_fetch_absent", 1).await;
+        let quarry = MockServer::start().await;
+        scrape_page_with_url(
+            &quarry,
+            serde_json::json!({"requested": "https://allowed.c09.example/a"}),
+            1,
+        )
+        .await;
+        let (service, _) = site_policy_service(&org_core, &quarry).await;
+
+        let reply = service
+            .fetch(authenticated_as(
+                fetch_of("org_v3_mg4_fetch_absent", "https://allowed.c09.example/a"),
+                "org_v3_mg4_fetch_absent",
+                "user_test",
+            ))
+            .await
+            .expect("an absent final URL on an allowed host is read")
+            .into_inner();
+        assert!(reply.markdown.contains("Price 5"), "{}", reply.markdown);
+    }
+
+    /// V3-mg-4: with the switch off a blank final URL is read as it always was, and org-core is asked nothing.
+    #[tokio::test]
+    async fn fetch_is_unchanged_with_a_blank_final_url_and_the_switch_off() {
+        let _mode = crate::site_policy_client::test_seam::set(WebDomainPolicyMode::Off);
+        let org_core = MockServer::start().await;
+        org_rules(&org_core, "org_v3_mg4_fetch_off", 0).await;
+        let quarry = MockServer::start().await;
+        scrape_page_with_url(
+            &quarry,
+            serde_json::json!({"requested": "https://blocked.c09.example/a", "final_url": ""}),
+            1,
+        )
+        .await;
+        let (service, _) = site_policy_service(&org_core, &quarry).await;
+
+        let reply = service
+            .fetch(authenticated_as(
+                fetch_of("org_v3_mg4_fetch_off", "https://blocked.c09.example/a"),
+                "org_v3_mg4_fetch_off",
+                "user_test",
+            ))
+            .await
+            .expect("off reads the page")
+            .into_inner();
+        assert!(reply.final_url.is_empty(), "{:?}", reply.final_url);
+        assert!(reply.markdown.contains("Price 5"), "{}", reply.markdown);
+    }
+
+    /// V3-mg-4 through `extract_structured`: a blank final URL on an allowed host is judged on that host under `enforce`, so
+    /// the page reaches inference. The result's final URL stays blank (unknown), never the request. The legacy `final` beside
+    /// it, which names a denied host, is not read.
+    #[tokio::test]
+    async fn extract_structured_reads_a_blank_final_url_on_an_allowed_host_under_enforce() {
+        let _mode = crate::site_policy_client::test_seam::set(WebDomainPolicyMode::Enforce);
+        let org_core = MockServer::start().await;
+        org_rules(&org_core, "org_v3_mg4_extract_blank", 1).await;
+        let quarry = MockServer::start().await;
+        scrape_page_with_url(
+            &quarry,
+            serde_json::json!({
+                "requested": "https://allowed.c09.example/a",
+                "final_url": "",
+                "final": "https://blocked.c09.example/landing",
+            }),
+            1,
+        )
+        .await;
+        let (service, publisher) = site_policy_service(&org_core, &quarry).await;
+
+        let reply = service
+            .extract_structured(authenticated_as(
+                extract_of("org_v3_mg4_extract_blank", "https://allowed.c09.example/a"),
+                "org_v3_mg4_extract_blank",
+                "user_test",
+            ))
+            .await
+            .expect("a blank final URL is judged on the allowed requested host, so the page is extracted")
+            .into_inner();
+        assert_eq!(reply.results.len(), 1);
+        assert!(
+            reply.results[0].final_url.is_empty(),
+            "the final URL is unknown, not the request: {:?}",
+            reply.results[0].final_url
+        );
+        assert!(published(&publisher) > 0, "the page reached inference");
+    }
+
+    /// V3-mg-4 through `extract_structured`: an absent final URL on an allowed host is read under `enforce` and reaches
+    /// inference, as the same-host check passes it unread.
+    #[tokio::test]
+    async fn extract_structured_reads_an_absent_final_url_under_enforce() {
+        let _mode = crate::site_policy_client::test_seam::set(WebDomainPolicyMode::Enforce);
+        let org_core = MockServer::start().await;
+        org_rules(&org_core, "org_v3_mg4_extract_absent", 1).await;
+        let quarry = MockServer::start().await;
+        scrape_page_with_url(
+            &quarry,
+            serde_json::json!({"requested": "https://allowed.c09.example/a"}),
+            1,
+        )
+        .await;
+        let (service, publisher) = site_policy_service(&org_core, &quarry).await;
+
+        let reply = service
+            .extract_structured(authenticated_as(
+                extract_of("org_v3_mg4_extract_absent", "https://allowed.c09.example/a"),
+                "org_v3_mg4_extract_absent",
+                "user_test",
+            ))
+            .await
+            .expect("an absent final URL on an allowed host is extracted")
+            .into_inner();
+        assert_eq!(reply.results.len(), 1);
+        assert!(published(&publisher) > 0, "the page reached inference");
+    }
+
+    /// V3-mg-4 through `extract_structured`: with the switch off a blank final URL is extracted as it always was, and
+    /// org-core is asked nothing.
+    #[tokio::test]
+    async fn extract_structured_is_unchanged_with_a_blank_final_url_and_the_switch_off() {
+        let _mode = crate::site_policy_client::test_seam::set(WebDomainPolicyMode::Off);
+        let org_core = MockServer::start().await;
+        org_rules(&org_core, "org_v3_mg4_extract_off", 0).await;
+        let quarry = MockServer::start().await;
+        scrape_page_with_url(
+            &quarry,
+            serde_json::json!({"requested": "https://blocked.c09.example/a", "final_url": ""}),
+            1,
+        )
+        .await;
+        let (service, publisher) = site_policy_service(&org_core, &quarry).await;
+
+        let reply = service
+            .extract_structured(authenticated_as(
+                extract_of("org_v3_mg4_extract_off", "https://blocked.c09.example/a"),
+                "org_v3_mg4_extract_off",
+                "user_test",
+            ))
+            .await
+            .expect("off reads the page")
+            .into_inner();
+        assert_eq!(reply.results.len(), 1);
+        assert!(published(&publisher) > 0, "the page reached inference");
     }
 
     fn authenticated_as<T>(value: T, org_id: &str, user_id: &str) -> Request<T> {

@@ -63,8 +63,8 @@ const MAX_TOKEN_LEN: usize = 64;
 /// Bumped only for a change an older gateway would misread; an unknown version is dropped.
 const PROTOCOL_VERSION: u8 = 1;
 
-/// The strict parser of [`BUS_ENV`]: `true` in any case with surrounding whitespace, and
-/// nothing else, so a typo never turns the bus on.
+/// The strict parser of [`BUS_ENV`]: the exact literal `true`, and nothing else, so a typo never
+/// turns the bus on.
 #[must_use]
 pub fn enabled_from(value: Option<&str>) -> bool {
     mp_contracts::loop_fold::switch_from(value)

@@ -14452,8 +14452,8 @@ const PLAN_GRANT_UNAVAILABLE_MESSAGE: &str = "No live plan grant exists for this
 /// the client sends one execute turn that names the approved plan. Named and read here only.
 pub(crate) const PLAN_EXECUTE_ON_APPROVE_ENV: &str = "MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE";
 
-/// The one strict parser of that switch: `true` in any case with surrounding whitespace, and
-/// nothing else, so a typo never enables the path.
+/// The one strict parser of that switch: the exact literal `true`, and nothing else, so a typo never
+/// enables the path.
 #[must_use]
 pub(crate) fn plan_execute_on_approve_from(value: Option<&str>) -> bool {
     mp_contracts::loop_fold::switch_from(value)

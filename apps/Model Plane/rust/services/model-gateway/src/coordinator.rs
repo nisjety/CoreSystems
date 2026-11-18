@@ -137,9 +137,9 @@ pub struct PlanModeStore {
 /// flip is rolled back.
 pub const PLAN_EXECUTE_ENV: &str = "MODEL_GATEWAY_PLAN_EXECUTE_ENABLED";
 
-/// The one strict parser of the execute switch: the shared durable-loop parser, `true`
-/// in any case with surrounding whitespace and nothing else, so a typo or a
-/// half-recognised value never enables execute turns.
+/// The one strict parser of the execute switch: the shared durable-loop parser, the exact literal
+/// `true` with no trimming and no case folding, so a typo or a half-recognised value never enables
+/// execute turns.
 #[must_use]
 pub fn plan_execute_from(value: Option<&str>) -> bool {
     mp_contracts::loop_fold::switch_from(value)
@@ -155,12 +155,18 @@ pub fn plan_execute_from(value: Option<&str>) -> bool {
 /// back; a grant recorded durably is then simply no longer read.
 pub const DURABLE_PLAN_GRANT_ENV: &str = "MODEL_GATEWAY_DURABLE_PLAN_GRANT";
 
-/// The one strict parser of the durable grant switch: the shared durable-loop parser, `true`
-/// in any case with surrounding whitespace and nothing else.
+/// The one strict parser of the durable grant switch: the shared durable-loop parser, the exact
+/// literal `true` with no trimming and no case folding.
 #[must_use]
 pub fn durable_plan_grant_from(value: Option<&str>) -> bool {
     mp_contracts::loop_fold::switch_from(value)
 }
+
+/// The two switches of this file, each with the value that turns it on, for the startup report of
+/// former spellings (`switch_spellings`). They were lenient before the exact-literal change, so the
+/// report covers them. They are named in this file and nowhere else.
+pub const STARTUP_REPORT_SWITCHES: &[(&str, &str)] =
+    &[(PLAN_EXECUTE_ENV, "true"), (DURABLE_PLAN_GRANT_ENV, "true")];
 
 /// How long the lazy channel to Session Core waits to connect. Matches the other clients of
 /// that endpoint (`state.rs`).
@@ -1028,8 +1034,8 @@ mod tests {
         assert_eq!(s.grant_expires_at("org-1", "thread-1"), Some(expires));
     }
 
-    /// The execute switch is the shared strict parser: `true` in any case with
-    /// surrounding whitespace, and nothing else. A store built any other way than
+    /// The execute switch is the shared strict parser: the exact literal `true`, with no trimming
+    /// and no case folding, and nothing else. A store built any other way than
     /// from the environment is off.
     #[test]
     fn the_plan_execute_switch_is_strict_and_defaults_off() {
