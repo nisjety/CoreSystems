@@ -3,7 +3,10 @@ package spaces
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -249,5 +252,97 @@ func TestApprovalGrantUseIsNotInterchangeableWithOtherEnvelopes(t *testing.T) {
 	relabelled := strings.Replace(token, approvalGrantUseVersion, "run-action-v1", 1)
 	if _, err := VerifyApprovalGrantUse(key, relabelled, now); err == nil {
 		t.Fatal("a relabelled token verified as a grant-use token")
+	}
+}
+
+// approvalGrantUseGoldenVector is the shape of testdata/approval-grant-use-v1.golden.json.
+type approvalGrantUseGoldenVector struct {
+	SigningKey struct {
+		ID           string `json:"id"`
+		SeedHex      string `json:"seed_hex"`
+		PublicKeyHex string `json:"public_key_hex"`
+	} `json:"signing_key"`
+	Input struct {
+		TokenRef          string `json:"token_ref"`
+		RuleID            string `json:"rule_id"`
+		RunID             string `json:"run_id"`
+		Nonce             string `json:"nonce"`
+		OrgID             string `json:"org_id"`
+		SpaceRef          string `json:"space_ref"`
+		SubjectID         string `json:"subject_id"`
+		AgentSubjectID    string `json:"agent_subject_id"`
+		ToolKey           string `json:"tool_key"`
+		ActionKey         string `json:"action_key"`
+		ActionSchemaHash  string `json:"action_schema_hash"`
+		AuthorityRevision int64  `json:"authority_revision"`
+		IssuedAt          string `json:"issued_at"`
+	} `json:"input"`
+	Expected struct {
+		Token string `json:"token"`
+	} `json:"expected"`
+}
+
+// WS10-S3: a Control-signed approval-grant-use-v1 token must verify in Session
+// Core. This is the Control side of that cross-vector: it pins the exact
+// token bytes Session Core's own verifier must accept and the exact claims it
+// must recover, under a fixed Ed25519 seed shared with the Rust fixture named
+// in the golden file's comment. It does not and cannot run the Rust half from
+// here - that assertion belongs to the session-core area.
+func TestApprovalGrantUseGoldenVectorMatchesSessionCore(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "approval-grant-use-v1.golden.json"))
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	var golden approvalGrantUseGoldenVector
+	if err := json.Unmarshal(raw, &golden); err != nil {
+		t.Fatalf("decode golden: %v", err)
+	}
+
+	seed, err := hex.DecodeString(golden.SigningKey.SeedHex)
+	if err != nil || len(seed) != ed25519.SeedSize {
+		t.Fatalf("golden seed_hex is invalid: %v", err)
+	}
+	key := SigningKey{ID: golden.SigningKey.ID, PrivateKey: ed25519.NewKeyFromSeed(seed)}
+	if got := hex.EncodeToString(key.PrivateKey.Public().(ed25519.PublicKey)); got != golden.SigningKey.PublicKeyHex {
+		t.Fatalf("public key = %s, golden %s", got, golden.SigningKey.PublicKeyHex)
+	}
+
+	issuedAt, err := time.Parse(time.RFC3339, golden.Input.IssuedAt)
+	if err != nil {
+		t.Fatalf("parse issued_at: %v", err)
+	}
+	in := golden.Input
+	evidence := validPersonalThreadEvidence()
+	evidence.Membership.Kind = KindRoom
+	evidence.Membership.OrgID = in.OrgID
+	evidence.Membership.SpaceRef = in.SpaceRef
+	evidence.Membership.SubjectID = in.SubjectID
+	evidence.Membership.Revisions.Authority = in.AuthorityRevision
+	rule := ApprovalRule{
+		RuleID: in.RuleID, OrgID: in.OrgID, SpaceRef: in.SpaceRef, Scope: string(ApprovalScopeAlways),
+		AgentSubjectID: in.AgentSubjectID, ToolKey: in.ToolKey, ActionKey: in.ActionKey,
+		ActionSchemaHash: in.ActionSchemaHash, AuthorityRevision: in.AuthorityRevision,
+	}
+	use, err := NewApprovalGrantUse(evidence, rule, in.RunID, in.TokenRef, in.Nonce, issuedAt)
+	if err != nil {
+		t.Fatalf("NewApprovalGrantUse: %v", err)
+	}
+
+	token, err := SignApprovalGrantUse(key, use)
+	if err != nil {
+		t.Fatalf("SignApprovalGrantUse: %v", err)
+	}
+	if token != golden.Expected.Token {
+		t.Fatalf("token = %s, golden %s (change only on an intended wire change, on both sides)", token, golden.Expected.Token)
+	}
+
+	// Session Core's own verifier must recover exactly this claim set from
+	// exactly this token; this proves the Go side of that promise.
+	verified, err := VerifyApprovalGrantUse(key, golden.Expected.Token, issuedAt.Add(time.Second))
+	if err != nil {
+		t.Fatalf("VerifyApprovalGrantUse: %v", err)
+	}
+	if verified != use {
+		t.Fatalf("verified claims = %+v, want %+v", verified, use)
 	}
 }
