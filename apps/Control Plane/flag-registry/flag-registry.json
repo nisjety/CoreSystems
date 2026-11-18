@@ -2169,6 +2169,18 @@
       ]
     },
     {
+      "name": "SPACE_AGENT_ADMISSION",
+      "kind": "choice",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "off",
+      "values": ["off", "observe", "enforce"],
+      "purpose": "WS17-S4 (ADR 4): user-core's agent admission mode. off changes nothing. observe writes would_skip rows to the ledger, roster unchanged. enforce drops unadmitted agents from the roster. A rollout control, not an authorization input.",
+      "declarations": [
+        { "service": "user-core", "env": "SPACE_AGENT_ADMISSION", "default": "off" }
+      ]
+    },
+    {
       "name": "SPACE_AGENT_WAKE_POLICY_API",
       "kind": "switch",
       "owner": "frontend-plane",
