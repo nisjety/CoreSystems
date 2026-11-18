@@ -15,8 +15,8 @@ func TestMemoryAuthorizerPinsTenantAndScopes(t *testing.T) {
 		RetentionPolicyPresent: true,
 	}
 	if err := MemoryAuthorizer(user, mpv1.MemoryService_SearchMemory_FullMethodName,
-		&mpv1.SearchMemoryRequest{OrgId: "org-a"}); err != nil {
-		t.Fatalf("own tenant read denied: %v", err)
+		&mpv1.SearchMemoryRequest{OrgId: "org-a"}); err == nil {
+		t.Fatal("user principal must not read tenant memory (WS17-S3)")
 	}
 	if err := MemoryAuthorizer(user, mpv1.MemoryService_SearchMemory_FullMethodName,
 		&mpv1.SearchMemoryRequest{OrgId: "org-b"}); err == nil {
@@ -93,16 +93,16 @@ func TestMemoryAuthorizerPinsTenantForListAndDeleteMemory(t *testing.T) {
 		RetentionPolicyPresent: true,
 	}
 	if err := MemoryAuthorizer(user, mpv1.MemoryService_ListMemory_FullMethodName,
-		&mpv1.ListMemoryRequest{OrgId: "org-a", UserId: "user-a"}); err != nil {
-		t.Fatalf("own tenant list denied: %v", err)
+		&mpv1.ListMemoryRequest{OrgId: "org-a", UserId: "user-a"}); err == nil {
+		t.Fatal("user principal must not list tenant memory (WS17-S3)")
 	}
 	if err := MemoryAuthorizer(user, mpv1.MemoryService_ListMemory_FullMethodName,
 		&mpv1.ListMemoryRequest{OrgId: "org-b", UserId: "user-a"}); err == nil {
 		t.Fatal("cross-tenant list must be denied")
 	}
 	if err := MemoryAuthorizer(user, mpv1.MemoryService_DeleteMemory_FullMethodName,
-		&mpv1.DeleteMemoryRequest{OrgId: "org-a", UserId: "user-a", MemoryId: "m1"}); err != nil {
-		t.Fatalf("own tenant delete denied: %v", err)
+		&mpv1.DeleteMemoryRequest{OrgId: "org-a", UserId: "user-a", MemoryId: "m1"}); err == nil {
+		t.Fatal("user principal must not delete tenant memory (WS17-S3)")
 	}
 	if err := MemoryAuthorizer(user, mpv1.MemoryService_DeleteMemory_FullMethodName,
 		&mpv1.DeleteMemoryRequest{OrgId: "org-b", UserId: "user-a", MemoryId: "m1"}); err == nil {
@@ -123,6 +123,43 @@ func TestMemoryAuthorizerPinsTenantForListAndDeleteMemory(t *testing.T) {
 	if err := MemoryAuthorizer(readOnlyService, mpv1.MemoryService_DeleteMemory_FullMethodName,
 		&mpv1.DeleteMemoryRequest{OrgId: "org-a", UserId: "user-a", MemoryId: "m1"}); err == nil {
 		t.Fatal("read-only service must not delete memory")
+	}
+}
+
+// WS17-S3: no user principal reaches tenant memory, whatever scopes its token
+// carries. The same scoped principal as a service is allowed, so the refusal
+// turns on the principal type alone. MemoryHealth is not tenant memory and
+// answers before this check, so it is outside this test.
+func TestMemoryAuthorizerRefusesUserPrincipalsOnEveryMemoryOperation(t *testing.T) {
+	user := authctx.Principal{
+		OrganizationID:         "org-a",
+		ActorID:                "user-a",
+		PrincipalType:          "user",
+		Scopes:                 []string{"memory:read", "memory:write"},
+		RetentionPolicyPresent: true,
+	}
+	service := user
+	service.ActorID = "service:session-core"
+	service.PrincipalType = "service"
+
+	for _, operation := range []struct {
+		name    string
+		method  string
+		request any
+	}{
+		{"search", mpv1.MemoryService_SearchMemory_FullMethodName, &mpv1.SearchMemoryRequest{OrgId: "org-a", UserId: "user-a"}},
+		{"index", mpv1.MemoryService_IndexMemory_FullMethodName, &mpv1.IndexMemoryRequest{OrgId: "org-a", UserId: "user-a"}},
+		{"list", mpv1.MemoryService_ListMemory_FullMethodName, &mpv1.ListMemoryRequest{OrgId: "org-a", UserId: "user-a"}},
+		{"delete", mpv1.MemoryService_DeleteMemory_FullMethodName, &mpv1.DeleteMemoryRequest{OrgId: "org-a", UserId: "user-a", MemoryId: "m1"}},
+	} {
+		t.Run(operation.name, func(t *testing.T) {
+			if err := MemoryAuthorizer(user, operation.method, operation.request); err == nil {
+				t.Fatal("user principal reached tenant memory")
+			}
+			if err := MemoryAuthorizer(service, operation.method, operation.request); err != nil {
+				t.Fatalf("the same scoped service principal was refused: %v", err)
+			}
+		})
 	}
 }
 

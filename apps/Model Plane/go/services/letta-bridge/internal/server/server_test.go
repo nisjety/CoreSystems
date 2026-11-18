@@ -75,7 +75,7 @@ func TestSemanticReadinessRequiresAnActualHitNotJustA200(t *testing.T) {
 	}
 
 	// Succeeds, returns nothing.
-	if _, err := srv.SearchMemory(context.Background(), &mpv1.SearchMemoryRequest{OrgId: "org-a", Query: "safe query", Limit: 1}); err != nil {
+	if _, err := srv.SearchMemory(context.Background(), &mpv1.SearchMemoryRequest{OrgId: "org-a", ThreadId: "thread-1", Query: "safe query", Limit: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if ready, status := srv.ReadyStatus(); ready || status != "DEGRADED_SEMANTIC_EMPTY_INDEX" {
@@ -88,7 +88,7 @@ func TestSemanticReadinessRequiresAnActualHitNotJustA200(t *testing.T) {
 		"agent-memory",
 		true,
 	)
-	resp, err := hitting.SearchMemory(context.Background(), &mpv1.SearchMemoryRequest{OrgId: "org-a", Query: "safe query", Limit: 1})
+	resp, err := hitting.SearchMemory(context.Background(), &mpv1.SearchMemoryRequest{OrgId: "org-a", ThreadId: "thread-1", Query: "safe query", Limit: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestSemanticReadinessRequiresAnActualHitNotJustA200(t *testing.T) {
 
 	// And readiness is sticky once earned: a later legitimately-empty query for
 	// some unrelated term must not flap it back to degraded.
-	if _, err := hitting.SearchMemory(context.Background(), &mpv1.SearchMemoryRequest{OrgId: "org-a", Query: "no match", Limit: 1}); err != nil {
+	if _, err := hitting.SearchMemory(context.Background(), &mpv1.SearchMemoryRequest{OrgId: "org-a", ThreadId: "thread-1", Query: "no match", Limit: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if ready, _ := hitting.ReadyStatus(); !ready {
@@ -109,7 +109,7 @@ func TestSemanticReadinessRequiresAnActualHitNotJustA200(t *testing.T) {
 	}
 
 	failing := NewServerWithBackend(semanticTestStore{searchErr: errors.New("backend down")}, "agent-memory", true)
-	_, _ = failing.SearchMemory(context.Background(), &mpv1.SearchMemoryRequest{OrgId: "org-a", Query: "safe query", Limit: 1})
+	_, _ = failing.SearchMemory(context.Background(), &mpv1.SearchMemoryRequest{OrgId: "org-a", ThreadId: "thread-1", Query: "safe query", Limit: 1})
 	if ready, status := failing.ReadyStatus(); ready || status != "DEGRADED_SEMANTIC_UNAVAILABLE" {
 		t.Fatalf("failed semantic search readiness=%v status=%q", ready, status)
 	}
