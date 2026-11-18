@@ -182,18 +182,20 @@ export function createSpaceBrowserRunFeed(input: {
   })
   const active = createMemo(() => input.visible() && live())
 
-  createEffect(() => {
-    // A different run never shows the previous run's rows.
-    const runId = input.runId()
-    if (runId !== heldRunId) {
-      heldRunId = runId
-      untrack(reset)
-    }
-    if (!active()) return
-    untrack(() => void pollOnce())
-    const timer = setInterval(() => void pollOnce(), SPACE_BROWSER_POLL_MS)
-    onCleanup(() => clearInterval(timer))
-  })
+  createEffect(
+    () => ({ runId: input.runId(), on: active() }),
+    ({ runId, on }) => {
+      // A different run never shows the previous run's rows.
+      if (runId !== heldRunId) {
+        heldRunId = runId
+        untrack(reset)
+      }
+      if (!on) return
+      untrack(() => void pollOnce())
+      const timer = setInterval(() => void pollOnce(), SPACE_BROWSER_POLL_MS)
+      onCleanup(() => clearInterval(timer))
+    },
+  )
 
   return { header, events, failed, live }
 }

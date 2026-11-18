@@ -51,16 +51,18 @@ export function SpaceBrowserThreadSection(props: SpaceBrowserThreadSectionProps)
   }
 
   // A different thread never shows the previous thread's runs. The list is read now and then every few seconds.
-  createEffect(() => {
-    const threadId = props.threadId
-    if (!cardsOn() || !threadId) return
-    untrack(() => {
-      setRuns([])
-      void refresh()
-    })
-    const timer = setInterval(() => void refresh(), LIST_POLL_MS)
-    onCleanup(() => clearInterval(timer))
-  })
+  createEffect(
+    () => ({ threadId: props.threadId, on: cardsOn() }),
+    ({ threadId, on }) => {
+      if (!on || !threadId) return
+      untrack(() => {
+        setRuns([])
+        void refresh()
+      })
+      const timer = setInterval(() => void refresh(), LIST_POLL_MS)
+      onCleanup(() => clearInterval(timer))
+    },
+  )
 
   return (
     <Show when={startOn() || cardsOn()}>

@@ -77,16 +77,18 @@ export function SpaceAgentAccessDialog(props: SpaceAgentAccessDialogProps) {
   })
 
   // Every stored read resets the drafts, so a save only ever sends the list the person is shown.
-  createEffect(() => {
-    const current = access()
-    if (!current) return
-    setVisibility(current.visibility)
-    setAddPolicy(current.addPolicy)
-    setEntries(current.entries.map((entry) => ({ principalId: entry.principalId, role: entry.role })))
-    setEntryError(null)
-    setSaveError(null)
-    setConflict(false)
-  })
+  createEffect(
+    () => access(),
+    (current) => {
+      if (!current) return
+      setVisibility(current.visibility)
+      setAddPolicy(current.addPolicy)
+      setEntries(current.entries.map((entry) => ({ principalId: entry.principalId, role: entry.role })))
+      setEntryError(null)
+      setSaveError(null)
+      setConflict(false)
+    },
+  )
 
   function changed(): void {
     setSaved(false)
