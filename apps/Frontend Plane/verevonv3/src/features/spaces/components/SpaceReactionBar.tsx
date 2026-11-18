@@ -22,6 +22,12 @@ export function SpaceReactionBar(props: {
 }) {
   const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
+  let addButton: HTMLButtonElement | undefined
+  // The picker's emoji leave with it, so focus goes back to the add button that opened it, not to the page.
+  const closePicker = () => {
+    setOpen(false)
+    addButton?.focus()
+  }
   const label = (chip: SpaceReactionChip) =>
     chip.reacted
       ? i18n.tr(
@@ -30,7 +36,7 @@ export function SpaceReactionBar(props: {
         )
       : i18n.tr(`${chip.emoji} fra ${chip.count}. Trykk for å legge til.`, `${chip.emoji} from ${chip.count}. Press to add.`)
   const pick = (emoji: string) => {
-    setOpen(false)
+    closePicker()
     const mine = props.chips.some((chip) => chip.emoji === emoji && chip.reacted)
     if (!mine) props.onToggle(emoji, true)
   }
@@ -43,7 +49,7 @@ export function SpaceReactionBar(props: {
         onKeyDown={(event) => {
           if (event.key === 'Escape' && open()) {
             event.stopPropagation()
-            setOpen(false)
+            closePicker()
           }
         }}
       >
@@ -67,6 +73,7 @@ export function SpaceReactionBar(props: {
             <button
               type="button"
               class="verevon-reaction-chip verevon-reaction-chip--add"
+              ref={addButton}
               aria-haspopup="true"
               aria-expanded={open() ? 'true' : 'false'}
               aria-label={i18n.tr('Legg til reaksjon', 'Add reaction')}

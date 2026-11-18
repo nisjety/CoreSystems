@@ -2,7 +2,8 @@ import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
 import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { IdentityCardModel } from '../lib/agent-activity'
+import type { SpaceAgent, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
+import { agentCardModel, memberCardModel, type IdentityCardModel } from '../lib/agent-activity'
 import { SpaceIdentityHoverCard } from './SpaceIdentityHoverCard'
 
 // No I18nProvider wraps these renders, so useI18n() falls back to Norwegian (the default locale).
@@ -231,5 +232,90 @@ describe('SpaceIdentityHoverCard member card (WS07-S8)', () => {
     const shown = open(memberCard())
     expect(shown.querySelector('.verevon-identity-card__sub')).toBeNull()
     expect(shown.querySelector('.verevon-identity-card__lead')).toBeNull()
+  })
+})
+
+describe('SpaceIdentityHoverCard exact timing and keyboard (WS07-S8)', () => {
+  it('opens at exactly the 350 ms hover delay, not a millisecond sooner', async () => {
+    const trigger = renderCard(agentCard())
+    fireEvent.mouseEnter(trigger)
+    await settle(349)
+    expect(card()).toBeNull()
+    await settle(1)
+    expect(card()).toBeTruthy()
+    expect(trigger.getAttribute('aria-describedby')).toBe(card()?.id)
+  })
+
+  it('Escape closes a card that opened on hover, and the trigger stops describing it', async () => {
+    const trigger = renderCard(agentCard())
+    fireEvent.mouseEnter(trigger)
+    await settle(350)
+    expect(card()).toBeTruthy()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    flush()
+    expect(card()).toBeNull()
+    expect(trigger.hasAttribute('aria-describedby')).toBe(false)
+  })
+})
+
+describe('SpaceIdentityHoverCard models from the lib (WS07-S8)', () => {
+  const roster: SpaceRosterMember[] = [
+    { subject_type: 'user', subject_id: 'user-9', role: 'manager', revision: 1, display_name: 'Kari Nordmann' },
+  ]
+  const lagerhjelpen: SpaceAgent = {
+    subject_id: 'agent-lager',
+    role: 'viewer',
+    revision: 1,
+    identity_published: true,
+    name: 'Lagerhjelpen',
+    status: 'active',
+  }
+  const turns = [
+    { threadId: 't-innkjop', role: 'assistant' as const, agentName: 'Lagerhjelpen', content: 'Alt er klart.' },
+  ]
+  const blocked: SpaceThread = {
+    thread_id: 't-innkjop',
+    space_id: 'space-1',
+    title: 'Innkjøp',
+    latest_run_status: 'awaiting_approval',
+    owner_subject_id: 'user-9',
+  }
+  const running: SpaceThread = { thread_id: 't-drift', space_id: 'space-1', title: 'Drift', latest_run_status: 'running' }
+
+  const agentFrom = (threads: SpaceThread[]) =>
+    agentCardModel({ agent: lagerhjelpen, agents: [lagerhjelpen], threads, turns, name: 'Lagerhjelpen', roster })
+
+  const openCard = (model: IdentityCardModel) => {
+    fireEvent.focus(renderCard(model))
+    flush()
+    return card() as HTMLElement
+  }
+
+  it('leads with blocking, then working, then the last reply, and draws only the winning line', () => {
+    const cases: { threads: SpaceThread[]; line: string; absent: string[] }[] = [
+      { threads: [blocked, running], line: 'Venter på Kari Nordmann', absent: ['Jobber', 'Alt er klart.'] },
+      { threads: [running], line: 'Jobber i Drift', absent: ['Venter', 'Alt er klart.'] },
+      { threads: [], line: 'Alt er klart.', absent: ['Venter', 'Jobber'] },
+    ]
+    for (const { threads, line, absent } of cases) {
+      const shown = openCard(agentFrom(threads))
+      expect(shown.querySelectorAll('.verevon-identity-card__lead')).toHaveLength(1)
+      expect(shown.querySelector('.verevon-identity-card__lead')?.textContent).toContain(line)
+      for (const word of absent) expect(shown.textContent).not.toContain(word)
+      cleanup()
+    }
+  })
+
+  it('a member card built from the roster and the posts shows the role and the latest post time', () => {
+    const shown = openCard(
+      memberCardModel({
+        name: 'Kari Nordmann',
+        subjectId: 'user-9',
+        roster,
+        threads: [{ thread_id: 't-a', space_id: 'space-1', owner_subject_id: 'user-9', updated_at: '2026-10-02T10:00:00Z' }],
+      }),
+    )
+    expect(shown.querySelector('.verevon-identity-card__sub')?.textContent).toBe('Leder')
+    expect(shown.querySelector('.verevon-identity-card__lead')?.textContent).toMatch(/^Siste innlegg /)
   })
 })

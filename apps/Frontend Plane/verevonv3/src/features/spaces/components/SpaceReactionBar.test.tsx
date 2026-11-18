@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
+import { cleanup, fireEvent, render, screen, within } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { SpaceReactionChip } from '@/shared/api/spaces-client'
@@ -137,5 +137,62 @@ describe('SpaceReactionBar', () => {
     await flush()
     expect(onToggle).not.toHaveBeenCalled()
     expect(screen.queryByRole('group', { name: 'Velg emoji' })).toBeNull()
+  })
+
+  it('names a pressed chip for what a press does, with the count', () => {
+    renderBar(chips)
+    const [mine, others] = chipButtons()
+    expect(mine?.getAttribute('aria-label')).toBe(`${THUMBS} fra deg og 2 andre. Trykk for å fjerne.`)
+    expect(others?.getAttribute('aria-label')).toBe(`${PARTY} fra 1. Trykk for å legge til.`)
+  })
+
+  it('Escape with focus inside the picker hands focus back to the add button that opened it', async () => {
+    renderBar([])
+    const add = screen.getByRole('button', { name: 'Legg til reaksjon' })
+    add.focus()
+    fireEvent.click(add)
+    await flush()
+    const firstEmoji = within(screen.getByRole('group', { name: 'Velg emoji' })).getByRole('button', { name: THUMBS })
+    firstEmoji.focus()
+    expect(document.activeElement).toBe(firstEmoji)
+
+    fireEvent.keyDown(firstEmoji, { key: 'Escape' })
+    await flush()
+    expect(screen.queryByRole('group', { name: 'Velg emoji' })).toBeNull()
+    expect(document.activeElement).toBe(add)
+  })
+
+  it('Escape closes only the picker: while it is open the key stops there, and with it shut the key reaches the surface above', async () => {
+    const above = vi.fn()
+    render(() => (
+      <div onKeyDown={() => above()}>
+        <SpaceReactionBar chips={chips} canReact onToggle={vi.fn()} />
+      </div>
+    ))
+    const add = screen.getByRole('button', { name: 'Legg til reaksjon' })
+    fireEvent.keyDown(add, { key: 'Escape' })
+    expect(above).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(add)
+    await flush()
+    fireEvent.keyDown(screen.getByRole('group', { name: 'Velg emoji' }), { key: 'Escape' })
+    await flush()
+    expect(screen.queryByRole('group', { name: 'Velg emoji' })).toBeNull()
+    expect(above).toHaveBeenCalledTimes(1)
+  })
+
+  it('picking an emoji closes the picker and hands focus back to the add button', async () => {
+    const { onToggle } = renderBar(chips)
+    const add = screen.getByRole('button', { name: 'Legg til reaksjon' })
+    fireEvent.click(add)
+    await flush()
+    const rocket = within(screen.getByRole('group', { name: 'Velg emoji' })).getByRole('button', { name: '\u{1F680}' })
+    rocket.focus()
+
+    fireEvent.click(rocket)
+    await flush()
+    expect(onToggle).toHaveBeenCalledWith('\u{1F680}', true)
+    expect(screen.queryByRole('group', { name: 'Velg emoji' })).toBeNull()
+    expect(document.activeElement).toBe(add)
   })
 })
