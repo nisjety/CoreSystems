@@ -127,4 +127,12 @@ describe('agentAvatarColor (WS07-S7)', () => {
     expect(agentAvatarColor(agent())).toBeUndefined()
     expect(agentAvatarColor(undefined)).toBeUndefined()
   })
+
+  it('a name that matches one agent paints that agent; two or zero matches leave the avatar neutral', () => {
+    const first = agent({ subject_id: 'agent-1', name: 'Lagerhjelpen', avatar_color: '#2563eb' })
+    const twin = agent({ subject_id: 'agent-2', name: 'Lagerhjelpen', avatar_color: '#dc2626' })
+    expect(agentAvatarColor(agentForName([first], 'Lagerhjelpen'))).toBe('#2563eb')
+    expect(agentAvatarColor(agentForName([first, twin], 'Lagerhjelpen'))).toBeUndefined()
+    expect(agentAvatarColor(agentForName([], 'Lagerhjelpen'))).toBeUndefined()
+  })
 })
