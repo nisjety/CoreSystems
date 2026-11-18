@@ -458,6 +458,63 @@ describe('A zero-data-retention workspace', () => {
   })
 })
 
+describe('scope (a Space room draft)', () => {
+  // A surface with several drafts passes a scope accessor; `undefined` means it has no draft here.
+  const roomKey = (scope: string) => homeDraftStorageKey('user-a', 'org-a', scope)!
+  function mountScoped(scope: () => string | undefined) {
+    let api!: HomeDraft
+    let dispose!: () => void
+    createRoot((d) => { dispose = d; api = useHomeDraft({ zeroRetention, scope }) })
+    roots.push(dispose)
+    return {
+      message: () => untrack(api[0]),
+      type: (text: string) => { api[1](text); flush() },
+    }
+  }
+
+  it('reads and writes nothing while the scope is undefined', () => {
+    writeHomeDraft(keyA, 'Hjemme-utkast')
+    const read = vi.spyOn(window.sessionStorage, 'getItem')
+    const write = writes()
+    const remove = vi.spyOn(window.sessionStorage, 'removeItem')
+    const draft = mountScoped(() => undefined)
+    composer(false)
+    draft.type('Skrevet uten rom')
+    wait(HOME_DRAFT_DEBOUNCE_MS * 2)
+    expect(draft.message()).toBe('Skrevet uten rom')
+    for (const spy of [read, write, remove]) expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('saves the draft of the scope it came from and shows the new scope own draft on a change', () => {
+    writeHomeDraft(roomKey('room-2'), 'Utkast i rom 2')
+    const [scope, setScope] = createSignal<string | undefined>('room-1')
+    const draft = mountScoped(scope)
+    composer(false)
+    draft.type('Utkast i rom 1')
+
+    setScope('room-2')
+    flush()
+    expect(readHomeDraft(roomKey('room-1'))).toBe('Utkast i rom 1')
+    expect(draft.message()).toBe('Utkast i rom 2')
+
+    draft.type('Nytt i rom 2')
+    wait(HOME_DRAFT_DEBOUNCE_MS)
+    expect(readHomeDraft(roomKey('room-2'))).toBe('Nytt i rom 2')
+    expect(readHomeDraft(roomKey('room-1'))).toBe('Utkast i rom 1')
+  })
+
+  it('leaves Home alone: a scoped draft never shares the Home key', () => {
+    writeHomeDraft(roomKey('room-1'), 'Rom-utkast')
+    const draft = mount()
+    composer(false)
+    expect(draft.message()).toBe('')
+    draft.type('Hjem')
+    wait(HOME_DRAFT_DEBOUNCE_MS)
+    expect(readHomeDraft(keyA)).toBe('Hjem')
+    expect(readHomeDraft(roomKey('room-1'))).toBe('Rom-utkast')
+  })
+})
+
 describe('identity', () => {
   it('reads and writes nothing until both the user and the workspace are known', () => {
     writeHomeDraft(keyA, 'Fra forrige gang')

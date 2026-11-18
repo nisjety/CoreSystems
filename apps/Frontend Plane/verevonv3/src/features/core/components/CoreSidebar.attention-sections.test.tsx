@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 
 import { createRouter, memoryHistory } from '@solidjs/router'
-import { cleanup, render, screen, waitFor } from '@solidjs/testing-library'
+import { cleanup, render, screen, waitFor, within } from '@solidjs/testing-library'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { ChatSidebarPanel } from './CoreSidebar'
+import { ChatSidebarPanel, CoreSidebar } from './CoreSidebar'
 import type { AttentionSnapshot } from '@/shared/api/attention-client'
 import { I18nProvider } from '@/shared/i18n'
 import {
@@ -34,6 +34,17 @@ vi.mock('@/shared/api/chat-client', () => ({
 vi.mock('@/shared/api/attention-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/shared/api/attention-client')>()),
   getAttention: attentionClient.getAttention,
+}))
+
+// WS11-S4: the Rom item's total reads the shared Spaces attention store; the test states the total.
+const spaceAttention = vi.hoisted(() => ({ totals: undefined as unknown }))
+vi.mock('@/features/spaces/lib/space-attention', () => ({
+  retainSpaceAttention: () => () => undefined,
+  refreshSpaceAttention: () => undefined,
+  spaceAttentionRoom: () => undefined,
+  spaceAttentionTotals: () => spaceAttention.totals,
+  spaceAttentionStale: () => false,
+  spaceAttentionAvailable: () => true,
 }))
 
 function createStorageMock(): Storage {
@@ -177,5 +188,51 @@ describe('ChatSidebarPanel attention rail', () => {
     const row = await screen.findByText('Paused run')
 
     expect(row.closest('.core-chat-session')?.textContent).toContain('Trenger oppmerksomhet')
+  })
+})
+
+function renderCoreSidebar(path: string) {
+  const TestRouter = createRouter({
+    routes: [{ path: '/*all', component: () => <CoreSidebar activeRoute="/dashboard" expanded onExpandedChange={() => undefined} onOpenSearch={() => undefined} /> }],
+    history: memoryHistory(path),
+    explicitLinks: true,
+  })
+  return render(() => (
+    <I18nProvider>
+      <TestRouter>{(props) => <>{props.children}</>}</TestRouter>
+    </I18nProvider>
+  ))
+}
+
+describe('CoreSidebar Rom item and the cross-room attention total', () => {
+  afterEach(() => {
+    cleanup()
+    spaceAttention.totals = undefined
+  })
+
+  // WS11-S4: the Rom item draws the server's total beside its label, and only while it is above zero.
+  // On /dashboard the item is the Home overview button, not a link, so the item is found by its label.
+  async function romItem() {
+    return waitFor(() => {
+      const item = Array.from(document.querySelectorAll<HTMLElement>('.core-sidebar-panel-link'))
+        .find((link) => link.querySelector('.core-sidebar-panel-link__label')?.textContent === 'Rom')
+      expect(item).toBeTruthy()
+      return item as HTMLElement
+    })
+  }
+
+  it('draws no total on Rom while no room needs the reader', async () => {
+    spaceAttention.totals = { badge: 0, unreadRooms: 2, otherOpen: 0 }
+    renderCoreSidebar('/dashboard')
+
+    expect((await romItem()).querySelector('.space-attention-badge')).toBeNull()
+  })
+
+  it('draws the server total on Rom when rooms need the reader', async () => {
+    spaceAttention.totals = { badge: 3, unreadRooms: 1, otherOpen: 0 }
+    renderCoreSidebar('/dashboard')
+
+    const badge = within(await romItem()).getByRole('img', { name: /3 (trenger deg i rom|need you in rooms)/ })
+    expect(badge.textContent).toBe('3')
   })
 })

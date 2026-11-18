@@ -39,6 +39,18 @@ describe('home draft storage key', () => {
       expect(homeDraftStorageKey(userId, orgId)).toBeNull()
     }
   })
+
+  it('appends the encoded scope for a surface with its own draft, and leaves the unscoped key as it was', () => {
+    const scoped = homeDraftStorageKey('user-a', 'org-a', 'room/1 x')
+    expect(scoped).toBe('verevon.home-draft.v1:org-a:user-a:room%2F1%20x')
+    expect(scoped).not.toBe(keyA)
+    expect(homeDraftStorageKey('user-a', 'org-a', undefined)).toBe(keyA)
+  })
+
+  it('gives no key for a blank scope', () => {
+    expect(homeDraftStorageKey('user-a', 'org-a', '')).toBeNull()
+    expect(homeDraftStorageKey('user-a', 'org-a', '   ')).toBeNull()
+  })
 })
 
 describe('reading and writing the draft', () => {
@@ -125,6 +137,13 @@ describe('clearing the drafts', () => {
     expect(sessionStorage.getItem('verevon.chat.pendingLaunch')).toBe('keep')
     expect(localStorage.getItem('verevon.home-layout.v1:org-a:user-a')).toBe('keep')
     expect(homeDraftClearEpoch()).toBe(before + 1)
+  })
+
+  it('removes a scoped draft too, since every scoped key starts with the Home prefix', () => {
+    const scoped = homeDraftStorageKey('user-a', 'org-a', 'room-1')!
+    writeHomeDraft(scoped, 'utkast i rommet')
+    clearHomeDrafts()
+    expect(sessionStorage.getItem(scoped)).toBeNull()
   })
 
   it('happens when the session is cleared (sign-out)', () => {

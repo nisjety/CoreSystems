@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
-import { createSignal, lazy } from 'solid-js'
+import { createSignal, lazy, Loading } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/shared/build/version-check', () => ({ checkClientVersion: vi.fn(() => Promise.resolve()) }))
@@ -102,5 +102,24 @@ describe('RegionBoundary', () => {
     const alert = await screen.findByRole('alert')
     expect(alert.getAttribute('data-failure-class')).toBe('stale_deploy')
     expect(screen.queryByRole('button', { name: /retry|prøv igjen/i })).toBeNull()
+  })
+
+  // WS07-S1 spike (Solid 2.0.0-rc.0, App has no outer Loading): a rejected lazy() import is a pending read the
+  // nearest Loading catches. Errored must still take the rejection once that Loading settles, and classify it.
+  it('SPIKE: Errored catches a rejected lazy() import under an inner Loading, with no outer Loading', async () => {
+    const failed = Promise.reject(new TypeError('Failed to fetch dynamically imported module: /assets/Page-x.js'))
+    failed.catch(() => undefined)
+    const Stale = lazy(() => failed)
+    render(() => (
+      <RegionBoundary region="outlet">
+        <Loading fallback={<p>loading the page</p>}>
+          <Stale />
+        </Loading>
+      </RegionBoundary>
+    ))
+    const alert = await screen.findByRole('alert')
+    expect(alert.getAttribute('data-failure-class')).toBe('stale_deploy')
+    expect(alert.getAttribute('data-failure-region')).toBe('outlet')
+    expect(screen.queryByText('loading the page')).toBeNull()
   })
 })

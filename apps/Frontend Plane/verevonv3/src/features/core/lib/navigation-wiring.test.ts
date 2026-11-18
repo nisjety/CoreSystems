@@ -129,4 +129,9 @@ describe('sidebar navigation wiring', () => {
     const section = getSidebarSectionForPath('/spaces/space_personal_1', '/spaces')
     expect(section.href).toBe('/spaces')
   })
+
+  it('carries the cross-room attention total on the Rom item', () => {
+    // WS11-S4: the item asks for the server's total; CoreSidebar draws it beside the label, and only above zero.
+    expect(allItems().find((item) => item.id === 'overview-spaces')?.badge).toBe('attention')
+  })
 })

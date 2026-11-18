@@ -1380,6 +1380,9 @@ function SidebarPanelLink(props: {
         }}>
           <PanelItemIcon icon={props.item.icon} active={homeActive()} />
           <span class={cn('core-sidebar-panel-link__label', homeActive() ? 'verevon-sidebar-row' : 'verevon-sidebar-row-normal')}>{props.item.label}</span>
+          <Show when={props.item.badge === 'attention'}>
+            <SpaceTotalAttentionBadge />
+          </Show>
         </button>
       </Show>
     </Show>

@@ -52,9 +52,8 @@ export default function AttentionPage() {
     disposed = true
   })
 
-  async function load(append: boolean): Promise<void> {
+  async function load(append: boolean, state: AttentionItemState = tab()): Promise<void> {
     const mine = ++generation
-    const state = tab()
     if (append) setLoadingMore(true)
     else setPhase('loading')
     setMessage('')
@@ -93,7 +92,8 @@ export default function AttentionPage() {
     setItems([])
     setNeedsYou([])
     setCursor(null)
-    void load(false)
+    // The chosen tab is passed in: this handler's write to `tab` is not readable here until it commits.
+    void load(false, next)
   }
 
   async function change(

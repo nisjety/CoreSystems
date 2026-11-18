@@ -55,6 +55,12 @@ describe('FailureCard', () => {
   it('shows Sign in only for session_expired', () => {
     render(() => <FailureCard error={apiError(401)} region="root" onRetry={() => undefined} />)
     expect(screen.queryByRole('button', { name: /sign in|logg inn/i })).not.toBeNull()
+    cleanup()
+    for (const error of [new TypeError('Failed to fetch dynamically imported module: /a.js'), apiError(503)]) {
+      render(() => <FailureCard error={error} region="root" onRetry={() => undefined} />)
+      expect(screen.queryByRole('button', { name: /sign in|logg inn/i })).toBeNull()
+      cleanup()
+    }
   })
 
   it('does not check the version for a non-stale failure', () => {

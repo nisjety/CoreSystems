@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { createRouter, memoryHistory } from '@solidjs/router'
-import { cleanup, render, screen } from '@solidjs/testing-library'
+import { cleanup, render, screen, waitFor } from '@solidjs/testing-library'
 import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -18,6 +18,7 @@ vi.mock('@/shared/api/space-policy-client', async (importOriginal) => ({
 }))
 
 function renderPanel() {
+  const history = memoryHistory('/settings/profile')
   const TestRouter = createRouter({
     routes: [
       {
@@ -25,14 +26,15 @@ function renderPanel() {
         component: () => <SettingsExpandedSidebarPanel modelAccessEnabled={false} onCollapse={() => undefined} />,
       },
     ],
-    history: memoryHistory('/settings/profile'),
+    history,
     explicitLinks: true,
   })
-  return render(() => (
+  const view = render(() => (
     <I18nProvider>
       <TestRouter>{(props) => <>{props.children}</>}</TestRouter>
     </I18nProvider>
   ))
+  return { view, location: () => history.get() }
 }
 
 function signIn(role: string) {
@@ -63,5 +65,20 @@ describe('Settings sidebar: audit log link', () => {
     expect(auditLink()).toBeNull()
     // The rest of the list is still there.
     expect(screen.getAllByRole('link').length).toBeGreaterThan(3)
+  })
+
+  it('opens the audit log for an admin when the entry is clicked', async () => {
+    signIn('admin')
+    const { location } = renderPanel()
+    expect(location()).toBe('/settings/profile')
+    auditLink()?.click()
+    await waitFor(() => expect(location()).toBe('/settings/audit-log'))
+  })
+
+  it('leaves a member where they are: there is no entry to open', () => {
+    signIn('member')
+    const { location } = renderPanel()
+    expect(auditLink()).toBeNull()
+    expect(location()).toBe('/settings/profile')
   })
 })
