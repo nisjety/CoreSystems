@@ -2,8 +2,17 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
 import { flush } from 'solid-js'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemorySection } from '@/features/settings/components/MemorySection'
+import { executeAction } from '@/shared/actions/action-client'
+import { ApiError } from '@/shared/api/api-error'
+import { clearSession, markSessionOnboardingComplete, setSessionUser } from '@/shared/session/session-store'
+
+// The restore tests assert the action call the section makes; the action itself is covered by the registry tests.
+vi.mock('@/shared/actions/action-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/actions/action-client')>()),
+  executeAction: vi.fn(),
+}))
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -258,5 +267,159 @@ describe('MemorySection withheld legacy rows (WS17-S2)', () => {
     await waitFor(() => {
       expect(screen.queryByText(BADGE)).toBeNull()
     })
+  })
+})
+
+describe('MemorySection restore and share (W3-DEC-KIND2, W3-DEC-NOTES, W3-FIX-13)', () => {
+  const WITHHELD = {
+    memory_id: 'mem_withheld',
+    topic: 'USER',
+    content: 'Likes oat milk',
+    updated_at: '2026-10-01T10:00:00Z',
+    provenance: 'unknown',
+    withheld_reason: 'room_origin_unverified',
+    origin_space_ref: 'space-room-1',
+  }
+  const WITHHELD_NO_REF = {
+    memory_id: 'mem_no_ref',
+    topic: 'USER',
+    content: 'Likes green tea',
+    updated_at: '2026-10-01T11:00:00Z',
+    provenance: 'unknown',
+    withheld_reason: 'room_origin_unverified',
+  }
+  const ORDINARY = {
+    memory_id: 'mem_ordinary',
+    topic: 'USER',
+    content: 'Prefers dark mode',
+    updated_at: '2026-10-02T10:00:00Z',
+    provenance: 'stated',
+  }
+  const ACTOR = { type: 'human', userId: 'user_1', orgId: 'org_1' }
+  const RESTORED = { result: { memory_id: 'mem_withheld', restored: true } } as unknown as Awaited<
+    ReturnType<typeof executeAction>
+  >
+  const FEATURES_ON = { data: { features: { memory_declassify: true } } }
+
+  const list = (memories: unknown[]) => () => jsonResponse({ memories, degraded: false, degradation_reason: '' })
+
+  beforeEach(() => {
+    // Solid 2 applies store writes on flush(), so each session write is flushed before the next reads it.
+    setSessionUser({ id: 'user_1', email: 'user@example.com', name: 'User', emailVerified: true })
+    flush()
+    markSessionOnboardingComplete({ id: 'org_1', name: 'Acme', role: 'member' })
+    flush()
+    vi.mocked(executeAction).mockReset()
+  })
+
+  afterEach(() => {
+    clearSession()
+    flush()
+  })
+
+  it('sends the origin Space with the restore of a withheld row (W3-DEC-KIND2)', async () => {
+    stubBackend(ON, { 'GET /api/v1/memory': list([WITHHELD, ORDINARY]) })
+    vi.mocked(executeAction).mockResolvedValue(RESTORED)
+
+    render(() => <MemorySection />)
+    fireEvent.click(await screen.findByRole('button', { name: /Gjenopprett minne: Likes oat milk/ }))
+    flush()
+
+    await waitFor(() => {
+      expect(executeAction).toHaveBeenCalledWith('memory.restore', ACTOR, {
+        memoryId: 'mem_withheld',
+        spaceRef: 'space-room-1',
+      })
+    })
+  })
+
+  it('sends the memory id alone when a withheld row has no origin Space (W3-DEC-KIND2)', async () => {
+    stubBackend(ON, { 'GET /api/v1/memory': list([WITHHELD_NO_REF]) })
+    vi.mocked(executeAction).mockResolvedValue(RESTORED)
+
+    render(() => <MemorySection />)
+    fireEvent.click(await screen.findByRole('button', { name: /Gjenopprett minne: Likes green tea/ }))
+    flush()
+
+    await waitFor(() => {
+      expect(executeAction).toHaveBeenCalledWith('memory.restore', ACTOR, { memoryId: 'mem_no_ref' })
+    })
+  })
+
+  it('shows Restore on a withheld row and not on an ordinary row (W3-DEC-NOTES)', async () => {
+    stubBackend(ON, { 'GET /api/v1/memory': list([WITHHELD, ORDINARY]) })
+
+    render(() => <MemorySection />)
+
+    expect(await screen.findByRole('button', { name: /Gjenopprett minne: Likes oat milk/ })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Gjenopprett minne: Prefers dark mode/ })).toBeNull()
+  })
+
+  it('says a note from a shared room cannot be restored, from the refusal reason (W3-DEC-NOTES)', async () => {
+    stubBackend(ON, { 'GET /api/v1/memory': list([WITHHELD]) })
+    vi.mocked(executeAction).mockRejectedValue(
+      new ApiError('refused', 409, 'memory_restore_refused', { details: { reason: 'thread_is_shared_room' } }),
+    )
+
+    render(() => <MemorySection />)
+    fireEvent.click(await screen.findByRole('button', { name: /Gjenopprett minne: Likes oat milk/ }))
+    flush()
+
+    expect(await screen.findByText('Notatet kommer fra et delt rom, så det kan ikke gjenopprettes.')).toBeTruthy()
+  })
+
+  it('reads the list again after a successful restore (W3-DEC-NOTES)', async () => {
+    let listCalls = 0
+    const fetchMock = stubBackend(ON, {
+      'GET /api/v1/memory': () => {
+        listCalls += 1
+        return jsonResponse({ memories: listCalls === 1 ? [WITHHELD] : [], degraded: false, degradation_reason: '' })
+      },
+    })
+    vi.mocked(executeAction).mockResolvedValue(RESTORED)
+
+    render(() => <MemorySection />)
+    fireEvent.click(await screen.findByRole('button', { name: /Gjenopprett minne: Likes oat milk/ }))
+    flush()
+
+    await waitFor(() => {
+      expect(callsTo(fetchMock, 'GET', '/api/v1/memory')).toHaveLength(2)
+    })
+  })
+
+  it('shows Share to a room only when the features endpoint reports memory_declassify (W3-FIX-13)', async () => {
+    stubBackend(ON, { 'GET /api/v1/memory': list([ORDINARY]) })
+
+    render(() => <MemorySection />)
+
+    expect(await screen.findByText('Prefers dark mode')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Del i et rom: Prefers dark mode/ })).toBeNull()
+  })
+
+  it('shows Share on a personal row and never on a withheld row, when the flag is on (W3-FIX-13)', async () => {
+    stubBackend(ON, {
+      'GET /api/v1/memory': list([WITHHELD, ORDINARY]),
+      'GET /api/v1/spaces/features': () => jsonResponse(FEATURES_ON),
+    })
+
+    render(() => <MemorySection />)
+
+    expect(await screen.findByRole('button', { name: /Del i et rom: Prefers dark mode/ })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Del i et rom: Likes oat milk/ })).toBeNull()
+  })
+
+  it('opens the share dialog for the chosen memory (W3-FIX-13)', async () => {
+    stubBackend(ON, {
+      'GET /api/v1/memory': list([ORDINARY]),
+      'GET /api/v1/spaces/features': () => jsonResponse(FEATURES_ON),
+    })
+
+    render(() => <MemorySection />)
+    fireEvent.click(await screen.findByRole('button', { name: /Del i et rom: Prefers dark mode/ }))
+    flush()
+
+    const dialog = await screen.findByRole('dialog')
+    // The memory text is the share dialog's textarea value, not its text content.
+    expect((dialog.querySelector('textarea') as HTMLTextAreaElement | null)?.value).toBe('Prefers dark mode')
   })
 })

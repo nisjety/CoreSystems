@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { getSpaceThreads, getSpaceThreadTranscript, loadSpaceTranscript } from './index'
+import { spaceAgentWorkFrom } from './core'
+import { spaceRunWorkFrom } from './run-work'
 
 type FetchCall = { url: string }
 
@@ -211,5 +213,84 @@ describe('loadSpaceTranscript (WS07-S4)', () => {
     const calls = stubFetch(200, transcript([]))
     await loadSpaceTranscript('room a', 't/1')
     expect(calls[0]?.url).toContain('/api/v1/spaces/room%20a/threads/t%2F1/transcript')
+  })
+})
+
+// Regression (typedEntry): normalizeSpaceThreadTurns once declared `const entry` in the loop body, which shadowed the
+// loop variable and threw "Cannot access 'entry' before initialization" on any non-empty turn array. The first case
+// below runs a non-empty array through the typed-entry path, so that bug fails it.
+describe('getSpaceThreadTranscript typed entry (WS18-S7, typedEntry regression)', () => {
+  it('runs over a non-empty array and carries a well-formed entry object on its turn', async () => {
+    const entry = { kind: 'membership', action: 'joined', subject_id: 'sub_1' }
+    stubFetch(
+      200,
+      transcript([
+        { role: 'user', content: 'hei', message_id: 'm1' },
+        { role: 'assistant', content: 'velkommen', message_id: 'm2', entry },
+      ]),
+    )
+    const { turns } = await getSpaceThreadTranscript('room', 't1')
+    expect(turns).toHaveLength(2)
+    expect(turns[0]).not.toHaveProperty('entry')
+    expect(turns[1]).toMatchObject({ role: 'assistant', content: 'velkommen', messageId: 'm2', entry })
+  })
+
+  it('drops a non-object entry and keeps the turn', async () => {
+    stubFetch(
+      200,
+      transcript([
+        { role: 'assistant', content: 'a', entry: 'not-an-object' },
+        { role: 'assistant', content: 'b', entry: ['an', 'array'] },
+        { role: 'assistant', content: 'c', entry: null },
+      ]),
+    )
+    const { turns } = await getSpaceThreadTranscript('room', 't1')
+    expect(turns.map((turn) => turn.content)).toEqual(['a', 'b', 'c'])
+    for (const turn of turns) expect(turn).not.toHaveProperty('entry')
+  })
+
+  it('does not carry an entry on a deleted tombstone', async () => {
+    stubFetch(200, transcript([{ role: 'user', content: '', revision_state: 'deleted', entry: { kind: 'membership' } }]))
+    const { turns } = await getSpaceThreadTranscript('room', 't1')
+    expect(turns).toHaveLength(1)
+    expect(turns[0]).toMatchObject({ revisionState: 'deleted' })
+    expect(turns[0]).not.toHaveProperty('entry')
+  })
+})
+
+describe('agent work and run work wire mapping (WS09-S2, WS09-S5)', () => {
+  it('reads an agent work field only on an explicit true, and a missing object is undefined', () => {
+    expect(spaceAgentWorkFrom({ live: true, text: 'yes', steer_owner: true, stop_manager: 1 })).toEqual({
+      live: true,
+      text: false,
+      steer_owner: true,
+      stop_manager: false,
+    })
+    expect(spaceAgentWorkFrom(undefined)).toBeUndefined()
+    expect(spaceAgentWorkFrom(null)).toBeUndefined()
+  })
+
+  it('accepts only the closed run-work shape and skips a malformed step', () => {
+    expect(spaceRunWorkFrom({ v: 2, steps: [] })).toBeUndefined()
+    expect(spaceRunWorkFrom({ v: 1, steps: [] })).toBeUndefined()
+    expect(
+      spaceRunWorkFrom({
+        v: 1,
+        steps: [
+          { id: 's1', class: 'tool', state: 'ok', ms: 12.4 },
+          { id: '', state: 'ok' },
+          { id: 's3', state: 'unknown' },
+        ],
+        steer: 2,
+      }),
+    ).toEqual({ v: 1, steps: [{ id: 's1', class: 'tool', state: 'ok', ms: 12 }], steer: 2 })
+  })
+
+  it('keeps run work only on an assistant turn', async () => {
+    const work = { v: 1, steps: [{ id: 's1', class: 'tool', state: 'ok' }], steer: 0 }
+    stubFetch(200, transcript([{ role: 'user', content: 'hei', work }, { role: 'assistant', content: 'svar', work }]))
+    const { turns } = await getSpaceThreadTranscript('room', 't1')
+    expect(turns[0]).not.toHaveProperty('work')
+    expect(turns[1]).toMatchObject({ work: { v: 1, steps: [{ id: 's1', class: 'tool', state: 'ok' }], steer: 0 } })
   })
 })

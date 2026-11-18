@@ -1,12 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   correctMemory,
+  declassifySpaceMemoryResultFrom,
   deleteMemory,
   getMemoryControls,
   listMemories,
   rememberMemory,
   resetMemory,
+  restoreMemoryInputFrom,
+  restoreMemoryResultFrom,
+  retractSpaceMemoryResultFrom,
   setMemoryState,
+  type MemoryEntry,
 } from './memory-client'
 
 function jsonResponse(data: unknown, status = 200): Response {
@@ -405,5 +410,89 @@ describe('listMemories withheld legacy rows (WS17-S2)', () => {
       expect(entry).not.toHaveProperty('originSpaceRef')
     }
     expect(result.memories).toHaveLength(2)
+  })
+})
+
+describe('restore, share and take-back results (W3-DEC-KIND2, W3-DEC-NOTES, W3-FIX-13)', () => {
+  const entryOf = (over: Partial<MemoryEntry>): MemoryEntry =>
+    ({
+      memoryId: 'mem_1',
+      topic: 'USER',
+      content: 'Likes oat milk',
+      updatedAt: '2026-10-01T10:00:00Z',
+      provenance: 'unknown',
+      ...over,
+    }) as MemoryEntry
+
+  it('sends the trimmed origin Space ref with the memory id', () => {
+    expect(restoreMemoryInputFrom(entryOf({ originSpaceRef: '  space-room-1  ' }))).toEqual({
+      memoryId: 'mem_1',
+      spaceRef: 'space-room-1',
+    })
+  })
+
+  it('sends the memory id alone when the origin Space ref is absent, blank or longer than 200 characters', () => {
+    expect(restoreMemoryInputFrom(entryOf({}))).toEqual({ memoryId: 'mem_1' })
+    expect(restoreMemoryInputFrom(entryOf({ originSpaceRef: '   ' }))).toEqual({ memoryId: 'mem_1' })
+    expect(restoreMemoryInputFrom(entryOf({ originSpaceRef: 'x'.repeat(201) }))).toEqual({ memoryId: 'mem_1' })
+  })
+
+  it('keeps an origin Space ref of exactly 200 characters', () => {
+    expect(restoreMemoryInputFrom(entryOf({ originSpaceRef: 'x'.repeat(200) }))).toEqual({
+      memoryId: 'mem_1',
+      spaceRef: 'x'.repeat(200),
+    })
+  })
+
+  it('reads a restored row, and throws on restored false or a missing id', () => {
+    expect(restoreMemoryResultFrom({ memory_id: ' mem_1 ', restored: true })).toEqual({
+      memoryId: 'mem_1',
+      restored: true,
+    })
+    expect(() => restoreMemoryResultFrom({ memory_id: 'mem_1', restored: false })).toThrow(
+      'invalid_memory_restore_response',
+    )
+    expect(() => restoreMemoryResultFrom({ restored: true })).toThrow('invalid_memory_restore_response')
+  })
+
+  it('maps a share result to camelCase and keeps deduplicated for a retried request', () => {
+    expect(
+      declassifySpaceMemoryResultFrom({
+        room_memory_id: 'rm_1',
+        space_ref: 'space-room-1',
+        source_memory_id: 'mem_1',
+        deduplicated: true,
+      }),
+    ).toEqual({ roomMemoryId: 'rm_1', spaceRef: 'space-room-1', sourceMemoryId: 'mem_1', deduplicated: true })
+  })
+
+  it('throws on a share result with a missing id or a non-boolean deduplicated', () => {
+    expect(() =>
+      declassifySpaceMemoryResultFrom({ space_ref: 'space-room-1', source_memory_id: 'mem_1', deduplicated: false }),
+    ).toThrow('invalid_memory_share_response')
+    expect(() =>
+      declassifySpaceMemoryResultFrom({
+        room_memory_id: 'rm_1',
+        space_ref: 'space-room-1',
+        source_memory_id: 'mem_1',
+        deduplicated: 'false',
+      }),
+    ).toThrow('invalid_memory_share_response')
+  })
+
+  it('maps a take-back result and reads a missing deleted as false', () => {
+    expect(retractSpaceMemoryResultFrom({ memory_id: 'rm_1', space_ref: 'space-room-1', deleted: true })).toEqual({
+      memoryId: 'rm_1',
+      spaceRef: 'space-room-1',
+      deleted: true,
+    })
+    expect(retractSpaceMemoryResultFrom({ memory_id: 'rm_1', space_ref: 'space-room-1' })).toEqual({
+      memoryId: 'rm_1',
+      spaceRef: 'space-room-1',
+      deleted: false,
+    })
+    expect(() => retractSpaceMemoryResultFrom({ space_ref: 'space-room-1' })).toThrow(
+      'invalid_memory_takeback_response',
+    )
   })
 })
