@@ -97,7 +97,7 @@ Routing policy is durable + hot-swappable: seeded from `RoutingPolicy::default` 
 
 ## ZDR / EU residency (cross-plane rule)
 
-- Embedding path enforces **EU residency deny-by-default**, in two places: (1) startup fail-loud `assert!` that refuses to boot a non-EU Azure embedding deployment unless `MODEL_PLANE_ALLOW_NON_EU_EMBEDDING=1`; (2) request-time gate in `create_embedding` that rejects a non-EU region *before any network call* → `ProviderError::ResidencyViolation` → gRPC `FAILED_PRECONDITION`. Deployed region is `swedencentral` (EU) so the gate passes. Tested (reaches-provider vs rejected-before-network). `[source-only]`
+- Embedding path enforces **EU residency deny-by-default**, in two places: (1) startup fail-loud `assert!` that refuses to boot a non-EU Azure embedding deployment unless `MODEL_PLANE_ALLOW_NON_EU_EMBEDDING=true`; (2) request-time gate in `create_embedding` that rejects a non-EU region *before any network call* → `ProviderError::ResidencyViolation` → gRPC `FAILED_PRECONDITION`. Deployed region is `swedencentral` (EU) so the gate passes. Tested (reaches-provider vs rejected-before-network). `[source-only]`
 - `zdr` is monotonic from the verified issuer. Unary, streaming, embeddings, and
   every other modality reject unattested deployments before provider I/O. Direct
   OpenAI and Anthropic remain false; Azure OpenAI is false unless

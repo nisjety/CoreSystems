@@ -235,7 +235,7 @@ but only in a build that simultaneously removes the surface.
 | yr_weather / traffic / news / track_shipment / company_lookup | information-core (Application) | `INFORMATION_CORE_URL` → :3190 (+`INFORMATION_CORE_INTERNAL_KEY`) |
 | knowledge_search | Data Plane v2 retrieval | `DATAPLANE_RETRIEVAL_URL` → :50062 (+`DATAPLANE_INTERNAL_KEY`) |
 | list_social_accounts / publish_social_post | social-core (Application) | `SOCIAL_CORE_URL` → :3162 |
-| web_search / web_fetch / browser_agent | Quarry-v2 edge (Ingestion) | `QUARRY_EDGE_URL` → :8082, `QUARRY_BROWSER_AGENT_ENABLED=1` |
+| web_search / web_fetch / browser_agent | Quarry-v2 edge (Ingestion) | `QUARRY_EDGE_URL` → :8082, `QUARRY_BROWSER_AGENT_ENABLED=true` (exactly `true`; `1` leaves it off) |
 | mcp__* | model-gateway MCP registry (proxy) | `MODEL_GATEWAY_ADDR` → model-gateway:9090 |
 | Infer round | inference-core | `INFERENCE_CORE_ADDR/URL` → :9092 |
 | runs/approvals/checkpoints | session-core | `SESSION_CORE_ADDR` → :9091 |

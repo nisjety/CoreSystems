@@ -109,6 +109,64 @@ func TestShippedRegistryMatchesComposeFiles(t *testing.T) {
 	}
 }
 
+// modelSwitchShapedOutsideConvention returns the Model Plane compose variables outside the
+// naming convention whose compose default is a boolean-looking value, keyed by variable name.
+func modelSwitchShapedOutsideConvention(t *testing.T) map[string]bool {
+	t.Helper()
+	f, err := os.Open(repoFile(modelPlaneCompose))
+	if err != nil {
+		t.Fatalf("open %s: %v", modelPlaneCompose, err)
+	}
+	defer f.Close()
+	decls, err := ScanCompose(f)
+	if err != nil {
+		t.Fatalf("scan %s: %v", modelPlaneCompose, err)
+	}
+	found := make(map[string]bool)
+	for _, d := range decls {
+		if !IsConventionName(d.Host) && isBooleanLooking(d.Default) {
+			found[d.Host] = true
+		}
+	}
+	return found
+}
+
+// TestModelComposeSwitchesOutsideTheConventionAreRegisteredOrListed is the second compose ratchet.
+// The convention ratchet reads only names that follow the naming convention, so a switch such as
+// ORG_EXTENSION_ALLOWLIST could be set in the Model Plane compose with no entry and nothing would
+// notice. This one reads every Model Plane compose variable outside the convention whose default is
+// a boolean-looking value, and requires each to be registered or listed in unregisteredSwitches.
+func TestModelComposeSwitchesOutsideTheConventionAreRegisteredOrListed(t *testing.T) {
+	reg := loadShipped(t)
+	switches := modelSwitchShapedOutsideConvention(t)
+	listed := reg.UnregisteredSwitches()
+	for _, name := range slices.Sorted(maps.Keys(switches)) {
+		if _, ok := reg.Flag(name); ok {
+			continue
+		}
+		if !slices.Contains(listed, name) {
+			t.Errorf("%s is set by the Model Plane compose outside the naming convention with a switch-shaped default, but has no registry entry; add it to flags or to unregisteredSwitches", name)
+		}
+	}
+	for _, name := range listed {
+		if !switches[name] {
+			t.Errorf("%s is listed in unregisteredSwitches, but the Model Plane compose no longer sets it to a switch value; remove it", name)
+		}
+	}
+}
+
+// TestModelComposeSwitchRatchetReadsTheNamesThatEscapedIt pins the scan on names the convention
+// ratchet could not see: a switch outside the convention is read whether it is registered or
+// listed, so removing its entry would make the ratchet fail rather than pass silently.
+func TestModelComposeSwitchRatchetReadsTheNamesThatEscapedIt(t *testing.T) {
+	switches := modelSwitchShapedOutsideConvention(t)
+	for _, name := range []string{"HOOKS_DURABLE", "MCP_DO_TOOLS", "ORG_AGENT_POLICY_API", "ORG_EXTENSION_ALLOWLIST", "SPACE_WAKE_API", "WORKSPACE_TOOLS"} {
+		if !switches[name] {
+			t.Errorf("%s is set by the Model Plane compose with a switch-shaped default, but the ratchet does not read it", name)
+		}
+	}
+}
+
 func TestShippedCodeFlagsAreStillRead(t *testing.T) {
 	for _, f := range loadShipped(t).Flags() {
 		if f.CodePath == "" {

@@ -22,7 +22,7 @@
  *   AUTH_CORE_JWKS_URL=http://auth-core:3011/api/convex-auth/jwks
  *   AUTH_CORE_AUDIENCE=model-gateway
  *   AUTH_CORE_ISSUER=<whatever MODEL_PLANE_AUTH_ISSUER resolves to>
- * and **remove** `MODEL_GATEWAY_AUTH_DEV_BYPASS=1` from production
+ * and **remove** `MODEL_GATEWAY_AUTH_DEV_BYPASS=true` from production
  * compose. Dev compose can keep the bypass for offline iteration.
  */
 

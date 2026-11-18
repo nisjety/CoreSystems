@@ -86,6 +86,19 @@ const (
 	AgentAccessRead AgentAccess = "read"
 )
 
+// ChoiceRead says how a choice's service compares the raw variable with the choice values.
+// A choice that sets none is trimmed. Each constant names one reader the registry models.
+type ChoiceRead string
+
+const (
+	// ChoiceReadExact is a reader that compares the raw variable as written. A padded or
+	// cased value is not a choice, so the typed read refuses it.
+	ChoiceReadExact ChoiceRead = "exact"
+	// ChoiceReadAnyCase is a reader that trims surrounding space and folds ASCII case before
+	// it compares, so " ENFORCE " reads as enforce. Its values are lowercase.
+	ChoiceReadAnyCase ChoiceRead = "anyCase"
+)
+
 // Declaration is one compose environment entry that sets a flag. Env is the
 // container variable; the flag name is the host variable it reads from.
 type Declaration struct {
@@ -128,6 +141,21 @@ type Flag struct {
 	// enable it, but only within the build or environment ceiling. Only switches and
 	// choices owned by frontend-plane or model-plane may carry it.
 	OrgOverridable bool `json:"orgOverridable,omitempty"`
+	// OnLiteral is set on a switch whose reader turns it on for one exact value and no
+	// other: "true", or "1" for a gate that reads 1. The reader compares the raw value, so
+	// a padded, cased or other spelling reads as off, as it does in the service. Empty
+	// means the canonical vocabulary (ParseSwitch) or OnLiteralAnyCase. validateFlag checks
+	// the literal against the purpose and against every declared default.
+	OnLiteral string `json:"onLiteral,omitempty"`
+	// OnLiteralAnyCase is set on a switch whose reader trims surrounding space and folds
+	// ASCII case, then turns it on for the literal true only: "TRUE" and " true " are on,
+	// and 1, on and yes are off. Its value is always "true". A switch sets OnLiteral or
+	// OnLiteralAnyCase, never both.
+	OnLiteralAnyCase string `json:"onLiteralAnyCase,omitempty"`
+	// ChoiceRead says how a choice's reader compares the raw variable with Values. Empty
+	// means trimmed: the reader removes surrounding space and compares the rest exactly.
+	// Only choices carry it. See the ChoiceRead constants.
+	ChoiceRead ChoiceRead `json:"choiceRead,omitempty"`
 }
 
 // File is the document shape of flag-registry.json.
@@ -137,6 +165,11 @@ type File struct {
 	// Unregistered names compose variables that follow the naming convention
 	// but have no entry yet. It is a visible baseline and may only shrink.
 	Unregistered []string `json:"unregistered"`
+	// UnregisteredSwitches names Model Plane compose variables outside the naming
+	// convention whose compose default is a boolean-looking value, and that have no
+	// entry yet. It is a visible baseline and may only shrink. A convention name
+	// belongs in Unregistered instead.
+	UnregisteredSwitches []string `json:"unregisteredSwitches"`
 }
 
 // Lookup reports a variable's value and whether it is set. os.LookupEnv has this shape.
@@ -158,9 +191,10 @@ var (
 
 // Registry is a validated, read-only set of flags.
 type Registry struct {
-	flags        []Flag
-	byName       map[string]int
-	unregistered []string
+	flags                []Flag
+	byName               map[string]int
+	unregistered         []string
+	unregisteredSwitches []string
 }
 
 // Load decodes and validates a registry document. Unknown fields and data after
@@ -206,13 +240,28 @@ func New(doc File) (*Registry, error) {
 			errs = append(errs, fmt.Errorf("%s is both registered and unregistered", name))
 		}
 	}
+	for i, name := range doc.UnregisteredSwitches {
+		if i > 0 && name <= doc.UnregisteredSwitches[i-1] {
+			errs = append(errs, fmt.Errorf("unregisteredSwitches must be sorted with no duplicates: %s follows %s", name, doc.UnregisteredSwitches[i-1]))
+		}
+		if !namePattern.MatchString(name) {
+			errs = append(errs, fmt.Errorf("unregisteredSwitches %q must match %s", name, namePattern))
+		}
+		if IsConventionName(name) {
+			errs = append(errs, fmt.Errorf("unregisteredSwitches %s follows the naming convention; list it in unregistered", name))
+		}
+		if _, ok := byName[name]; ok {
+			errs = append(errs, fmt.Errorf("%s is both registered and in unregisteredSwitches", name))
+		}
+	}
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}
 	return &Registry{
-		flags:        slices.Clone(doc.Flags),
-		byName:       byName,
-		unregistered: slices.Clone(doc.Unregistered),
+		flags:                slices.Clone(doc.Flags),
+		byName:               byName,
+		unregistered:         slices.Clone(doc.Unregistered),
+		unregisteredSwitches: slices.Clone(doc.UnregisteredSwitches),
 	}, nil
 }
 
@@ -290,6 +339,9 @@ func validateFlag(f Flag) []error {
 			fail("orgOverridable applies only to frontend-plane and model-plane flags")
 		}
 	}
+	if f.ChoiceRead != "" && f.Kind != KindChoice {
+		fail("choiceRead applies only to choice flags")
+	}
 	switch f.Kind {
 	case KindSwitch:
 		if len(f.Values) > 0 {
@@ -325,6 +377,38 @@ func validateFlag(f Flag) []error {
 		if f.KillSwitch && on {
 			fail("a kill switch must default to the safe value, off")
 		}
+		if f.OnLiteral != "" && f.OnLiteralAnyCase != "" {
+			fail("set onLiteral or onLiteralAnyCase, not both")
+		}
+		if f.OnLiteral != "" {
+			if f.OnLiteral != "true" && f.OnLiteral != "1" {
+				fail("onLiteral %q must be true or 1", f.OnLiteral)
+			} else if !namesLiteral(f.Purpose, f.OnLiteral) {
+				fail("onLiteral %s: the purpose must say that only the literal %s turns it on", f.OnLiteral, f.OnLiteral)
+			}
+		}
+		if f.OnLiteralAnyCase != "" {
+			if f.OnLiteralAnyCase != "true" {
+				fail("onLiteralAnyCase %q must be true", f.OnLiteralAnyCase)
+			} else if !namesLiteral(f.Purpose, "true") || !strings.Contains(stripTicks(f.Purpose), "in any case") {
+				fail("onLiteralAnyCase: the purpose must say that only the literal true, in any case, turns it on")
+			}
+		}
+		if literal := f.literal(); literal != "" {
+			field := "onLiteral"
+			if f.OnLiteralAnyCase != "" {
+				field = "onLiteralAnyCase"
+			}
+			values := []string{f.Default, f.CodeDefault}
+			for _, d := range f.Declarations {
+				values = append(values, d.Default)
+			}
+			for _, v := range values {
+				if v != literal && readsOn(v) {
+					fail("%s %s: the value %q reads as on, but only the exact value %s turns the switch on", field, literal, v, literal)
+				}
+			}
+		}
 	case KindChoice:
 		if len(f.Values) == 0 {
 			fail("choice flags need values")
@@ -335,15 +419,33 @@ func validateFlag(f Flag) []error {
 		if !slices.Contains(f.Values, f.Default) {
 			fail("default %q is not one of the values", f.Default)
 		}
-		if f.OnDefaultReason != "" || f.DriftReason != "" || f.CodeDefault != "" || f.DevOnly {
-			fail("only switch flags take onDefaultReason, driftReason, codeDefault or devOnly")
+		switch f.ChoiceRead {
+		case "", ChoiceReadExact:
+		case ChoiceReadAnyCase:
+			for _, v := range f.Values {
+				if v != asciiFold(v) {
+					fail("choiceRead anyCase needs lowercase values, and %q is not", v)
+				}
+			}
+		default:
+			fail("choiceRead %q must be exact or anyCase", f.ChoiceRead)
+		}
+		if f.ChoiceRead != ChoiceReadExact {
+			for _, v := range f.Values {
+				if v != strings.TrimSpace(v) {
+					fail("value %q has surrounding space, which a trimmed or anyCase choice never reads", v)
+				}
+			}
+		}
+		if f.OnDefaultReason != "" || f.DriftReason != "" || f.CodeDefault != "" || f.DevOnly || f.OnLiteral != "" || f.OnLiteralAnyCase != "" {
+			fail("only switch flags take onDefaultReason, driftReason, codeDefault, devOnly, onLiteral or onLiteralAnyCase")
 		}
 	case KindText:
 		if len(f.Values) > 0 {
 			fail("text flags take no values")
 		}
-		if f.OnDefaultReason != "" || f.DriftReason != "" || f.CodeDefault != "" || f.DevOnly {
-			fail("only switch flags take onDefaultReason, driftReason, codeDefault or devOnly")
+		if f.OnDefaultReason != "" || f.DriftReason != "" || f.CodeDefault != "" || f.DevOnly || f.OnLiteral != "" || f.OnLiteralAnyCase != "" {
+			fail("only switch flags take onDefaultReason, driftReason, codeDefault, devOnly, onLiteral or onLiteralAnyCase")
 		}
 	default:
 		fail("unknown kind %q", f.Kind)
@@ -427,21 +529,36 @@ func (r *Registry) Unregistered() []string {
 	return slices.Clone(r.unregistered)
 }
 
-// Switch returns the typed value of a switch flag. A variable that is unset or
-// blank takes the registry default, as compose's ${NAME:-default} does.
+// UnregisteredSwitches returns the Model Plane compose switches outside the naming
+// convention that compose sets and the registry does not yet describe.
+func (r *Registry) UnregisteredSwitches() []string {
+	return slices.Clone(r.unregisteredSwitches)
+}
+
+// Switch returns the typed value of a switch flag, read as its service reads it. An exact switch
+// (OnLiteral set) is on only when the raw value is its literal; any other value, blank-looking
+// whitespace included, reads as off. An any-case switch (OnLiteralAnyCase set) is on when the value,
+// trimmed and folded, is the literal. A canonical switch reads the ParseSwitch vocabulary. An unset
+// or empty variable takes the registry default for every kind, as compose's ${NAME:-default} does.
 func (r *Registry) Switch(name string, lookup Lookup) (bool, error) {
 	f, err := r.kindOf(name, KindSwitch)
 	if err != nil {
 		return false, err
 	}
-	on, err := ParseSwitch(valueOr(f, lookup))
+	raw := valueOr(f, lookup)
+	if literal := f.literal(); literal != "" {
+		return raw == literal, nil
+	}
+	on, err := ParseSwitch(raw)
 	if err != nil {
 		return false, fmt.Errorf("%s: %w", name, err)
 	}
 	return on, nil
 }
 
-// Choice returns the typed value of a choice flag and rejects values outside Values.
+// Choice returns the typed value of a choice flag, read as its service reads it, and rejects a
+// value outside Values. An exact choice compares the raw value, so a padded value is refused. An
+// any-case choice trims and folds it first. A trimmed choice trims it. See ChoiceRead.
 func (r *Registry) Choice(name string, lookup Lookup) (string, error) {
 	f, err := r.kindOf(name, KindChoice)
 	if err != nil {
@@ -474,13 +591,85 @@ func (r *Registry) kindOf(name string, want Kind) (Flag, error) {
 	return f, nil
 }
 
+// valueOr returns the value a deployment sees for f, as the flag's service reads it. An unset or
+// empty variable takes the default, as compose's ${NAME:-default} does. Otherwise the read depends
+// on the flag's readMode: an exact switch and an exact choice keep the raw value; an any-case switch
+// and an any-case choice trim and fold ASCII case, and keep a value that is blank afterwards, so the
+// reader sees it and does not fall back to the default; every other flag trims the value and takes
+// the default when the trimmed value is blank.
 func valueOr(f Flag, lookup Lookup) string {
 	if lookup != nil {
-		if raw, ok := lookup(f.Name); ok && strings.TrimSpace(raw) != "" {
-			return strings.TrimSpace(raw)
+		if raw, ok := lookup(f.Name); ok && raw != "" {
+			switch f.read() {
+			case readRaw:
+				return raw
+			case readFolded:
+				return asciiFold(strings.TrimSpace(raw))
+			default:
+				if trimmed := strings.TrimSpace(raw); trimmed != "" {
+					return trimmed
+				}
+			}
 		}
 	}
 	return f.Default
+}
+
+// readMode is how a flag's service compares the raw variable.
+type readMode int
+
+const (
+	// readTrimmed trims surrounding space, then compares. Every flag without an exact or any-case
+	// reader reads this way.
+	readTrimmed readMode = iota
+	// readRaw compares the value as written.
+	readRaw
+	// readFolded trims surrounding space and folds ASCII case, then compares.
+	readFolded
+)
+
+// read reports how the flag's service compares the raw variable.
+func (f Flag) read() readMode {
+	switch {
+	case f.OnLiteral != "" || f.ChoiceRead == ChoiceReadExact:
+		return readRaw
+	case f.OnLiteralAnyCase != "" || f.ChoiceRead == ChoiceReadAnyCase:
+		return readFolded
+	default:
+		return readTrimmed
+	}
+}
+
+// literal is the value that turns an exact or any-case switch on, or "" for a canonical switch.
+func (f Flag) literal() string {
+	if f.OnLiteral != "" {
+		return f.OnLiteral
+	}
+	return f.OnLiteralAnyCase
+}
+
+// asciiFold lowercases the ASCII letters of s and leaves every other rune as it is, as Rust's
+// to_ascii_lowercase and eq_ignore_ascii_case do.
+func asciiFold(s string) string {
+	return strings.Map(func(r rune) rune {
+		if 'A' <= r && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, s)
+}
+
+// stripTicks removes the backticks a purpose puts around a literal, so "`true`" reads as true.
+func stripTicks(s string) string {
+	return strings.ReplaceAll(s, "`", "")
+}
+
+// namesLiteral reports whether a purpose names the literal that turns the switch on. The word
+// "literal" matches in any case, so "Literal true only" names it as "literal true" does, and the
+// literal itself must match exactly and end at a word boundary: "literal trueish" does not name true.
+func namesLiteral(purpose, literal string) bool {
+	pattern := regexp.MustCompile(`(?i:literal) ` + regexp.QuoteMeta(literal) + `\b`)
+	return pattern.MatchString(stripTicks(purpose))
 }
 
 func cloneFlag(f Flag) Flag {

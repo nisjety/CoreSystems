@@ -23,3 +23,21 @@ func ParseSwitch(raw string) (bool, error) {
 		return false, fmt.Errorf("%w: %q", ErrUnknownSwitchValue, raw)
 	}
 }
+
+// readsOn reports whether the canonical vocabulary reads value as on. An unknown value
+// reads as neither.
+func readsOn(value string) bool {
+	on, err := ParseSwitch(value)
+	return err == nil && on
+}
+
+// isBooleanLooking reports whether a compose default is a non-blank word in the canonical
+// vocabulary, such as 0, 1, true, false or off. A blank default is an unset value, not a
+// switch word, and a number such as 600 is not one either.
+func isBooleanLooking(value string) bool {
+	if strings.TrimSpace(value) == "" {
+		return false
+	}
+	_, err := ParseSwitch(value)
+	return err == nil
+}

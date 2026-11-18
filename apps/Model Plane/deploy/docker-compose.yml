@@ -225,16 +225,19 @@ services:
       # F-t3-075 (W5-075-a): JSON logs and exported span attributes keep only the names on TRACE_FIELDS. Only the literal true.
       MP_TELEMETRY_FIELD_ALLOWLIST: ${MP_TELEMETRY_FIELD_ALLOWLIST:-false}
       # Shared-Space transcript reads return only allowlisted metadata keys
-      # (WS07-S9a). `1` restores the old pass-through (kill switch only).
+      # (WS07-S9a). `true` restores the old pass-through (kill switch only).
       SPACE_ROOM_METADATA_LEGACY_PASSTHROUGH: ${SPACE_ROOM_METADATA_LEGACY_PASSTHROUGH:-false}
       # Human post routes (WS01-S4): POST /v1/threads and POST /v1/threads/:id/messages.
-      # Off unless an explicit on-word; a rollout control, never an authorization input.
+      # Only the exact literal `true` turns it on: `1`, `yes` and `on` leave it OFF. A rollout control,
+      # never an authorization input.
       SPACE_HUMAN_POSTS_API: ${SPACE_HUMAN_POSTS_API:-0}
       # Edit, delete and target routes for one message (WS12-S6). Off unless an explicit on-word;
       # a rollout control, never an authorization input. Session Core has its own CORE switch.
+      # Only the exact literal `true` turns it on: `1`, `yes` and `on` leave it OFF.
       SPACE_MESSAGE_REVISE_API: ${SPACE_MESSAGE_REVISE_API:-0}
       # Mentions on posts and the addressed-wake invoke mode (WS08-S3). Rollout controls, never
       # authorization inputs. The room context stays off until decision D-6.
+      # Only the exact literal `true` turns it on: `1`, `yes` and `on` leave it OFF.
       SPACE_WAKE_API: ${SPACE_WAKE_API:-0}
       SPACE_WAKE_ROOM_CONTEXT: ${SPACE_WAKE_ROOM_CONTEXT:-0}
       # Empty by default = "Verevon Auto": inference-core resolves an unpinned
@@ -763,6 +766,8 @@ services:
       # SERVICE principals holding models:invoke (404 while off). Users are unaffected. Only the exact
       # literal `true` turns each one on.
       MODEL_GATEWAY_AI_LAYOUT_SERVICE: ${MODEL_GATEWAY_AI_LAYOUT_SERVICE:-0}
+      # The PII route follows the same literal rule as the layout route above.
+      # Only the exact literal `true` turns it on: `1`, `yes` and `on` leave it OFF.
       MODEL_GATEWAY_AI_PII_SERVICE: ${MODEL_GATEWAY_AI_PII_SERVICE:-0}
       # Agentic (Do mode) runs on the user's ChatGPT subscription: the
       # kill switch, OFF by default. One variable with three readers, and the
@@ -861,6 +866,7 @@ services:
       MODEL_GATEWAY_MANAGED_START_KEY_SECRET: ${MODEL_GATEWAY_MANAGED_START_KEY_SECRET:?MODEL_GATEWAY_MANAGED_START_KEY_SECRET is required}
       # Wave 7 — fine-tuning kill switch + budget guard (off by default in
       # production-style profile; dev override flips FINETUNE_ENABLED=true).
+      # Only the exact literal `true` turns it on: `1`, `yes` and `on` leave it OFF.
       FINETUNE_ENABLED: ${FINETUNE_ENABLED:-0}
       # WS09-S3: save a room turn's work summary (steps and steer count, no text) with its answer.
       # Off in production-style profiles; the dev override turns it on. Never an authorization input.
@@ -874,12 +880,15 @@ services:
       SPACE_RUN_MANAGER_STOP: ${SPACE_RUN_MANAGER_STOP:-false}
       # WS11-S2: POST /v1/spaces/attention, the cross-room attention aggregate. Off unless set; dev
       # override turns it on. A rollout control, never an authorization input.
+      # Only the exact literal `true` turns it on: `1`, `yes` and `on` leave it OFF.
       SPACE_ATTENTION_SUMMARY: ${SPACE_ATTENTION_SUMMARY:-0}
       # WS15-S6: GET /v1/spaces/:space_id/timeline and the tail transcript parameters. Off unless set; dev
       # override turns it on. A rollout control, never an authorization input.
+      # Only the exact literal `true` turns it on: `1`, `yes` and `on` leave it OFF.
       SPACE_TIMELINE_API: ${SPACE_TIMELINE_API:-0}
       # WS13-S2: POST /v1/spaces/:space_id/messages/search and /resolve. Off unless set; dev override
       # turns it on. A rollout control, never an authorization input.
+      # Only the exact literal `true` turns it on: `1`, `yes` and `on` leave it OFF.
       SPACE_MESSAGE_SEARCH_API: ${SPACE_MESSAGE_SEARCH_API:-0}
       FINETUNE_ORG_BUDGET_USD: ${FINETUNE_ORG_BUDGET_USD:-50}
       FINETUNE_PER_JOB_BUDGET_USD: ${FINETUNE_PER_JOB_BUDGET_USD:-20}
@@ -1274,28 +1283,35 @@ services:
       # Member append path (WS01-S3): a Space member who does not own a thread may append a human
       # `post` to it, only with a v2 Control decision. OFF unless set; dev override turns it on.
       # Never an authorization input.
+      # Only the exact literal `true` turns it on: `1`, `yes` and `on` leave it OFF.
       SPACE_HUMAN_POSTS_CORE: ${SPACE_HUMAN_POSTS_CORE:-0}
       # Space message search (WS13-S1): SpaceHistoryService answers SearchMessages/ResolveMessage over
       # the 0077 index. OFF unless set; dev override turns it on. Gates the query path only (the index
       # is built either way). Never an authorization input.
+      # Only the exact literal `true` turns it on: `1`, `yes` and `on` leave it OFF.
       SPACE_MESSAGE_SEARCH_CORE: ${SPACE_MESSAGE_SEARCH_CORE:-0}
       # Message revisions (WS12-S4): ReviseMessage edits or deletes one Space message under a
       # Control `model.thread.revise` decision. OFF unless set; dev override turns it on. The
       # fold that shows revisions on every read has no switch. Never an authorization input.
+      # Only the exact literal `true` turns it on: `1`, `yes` and `on` leave it OFF.
       SPACE_MESSAGE_REVISE_CORE: ${SPACE_MESSAGE_REVISE_CORE:-0}
       # Identity-bound mentions of a human post, and addressed agent wake-up (WS08-S2). Rollout
       # controls, never authorization inputs: Control's signed decision decides.
+      # Only the exact literal `true` turns it on: `1`, `yes` and `on` leave it OFF.
       SPACE_MENTION_RECORDS_CORE: ${SPACE_MENTION_RECORDS_CORE:-0}
       # Cross-room attention aggregate (WS11-S2): SpaceAttention.GetSpaceAttention. OFF unless set;
       # dev override turns it on. Never an authorization input: each Space's Control read decision decides.
+      # Only the exact literal `true` turns it on: `1`, `yes` and `on` leave it OFF.
       SPACE_ATTENTION_SUMMARY: ${SPACE_ATTENTION_SUMMARY:-0}
       # WS15-S6: SpaceRoomReadService.ListSpaceTimeline and the include_first tail transcript. OFF unless
       # set; dev override turns it on. The activity trigger and backfill (0078) always run. Never an
       # authorization input: each Space read decision decides.
+      # Only the exact literal `true` turns it on: `1`, `yes` and `on` leave it OFF.
       SPACE_TIMELINE_CORE: ${SPACE_TIMELINE_CORE:-0}
       # Approval addressee and member decide (WS10-S6): a Space member other than the run owner
       # decides, or reroutes, an approval with a Control `model.approval.decide` / `.reroute`
       # decision. OFF unless set; dev override turns it on. Never an authorization input.
+      # Only the exact literal `true` turns it on: `1`, `yes` and `on` leave it OFF.
       SESSION_CORE_APPROVAL_MEMBER_DECIDE: ${SESSION_CORE_APPROVAL_MEMBER_DECIDE:-0}
       # WS04-S11: honour the signed `history_floor_revision` claim of a `since_join` room on transcript,
       # thread and run reads. OFF unless set (full history); dev override turns it on. Only the exact
@@ -1303,6 +1319,9 @@ services:
       # say `true`. Paired with user-core SPACE_HISTORY_WINDOW_CLAIM. Never an authorization input: a
       # presentation rule only.
       SESSION_CORE_SPACE_HISTORY_FLOOR: ${SESSION_CORE_SPACE_HISTORY_FLOOR:-false}
+      # Session Core accepts a wake on StartManagedRun, so an addressed agent can be woken by a human post.
+      # Off unless set.
+      # Only the exact literal `true` turns it on: `1`, `yes` and `on` leave it OFF.
       SPACE_WAKE_CORE: ${SPACE_WAKE_CORE:-0}
       SESSION_CORE_LOOP_CHECKPOINT_ENABLED: ${SESSION_CORE_LOOP_CHECKPOINT_ENABLED:-false}
       # WS14-S5: store resume questions (ask_user waits for its answer in the same run). Only the literal true; needs the executor's AGENT_ASK_USER_RESUME_ENABLED and the loop checkpoint flip.
@@ -1427,7 +1446,7 @@ services:
       # provider, whatever route the user's chat ran on: one claude-haiku-4-5
       # call at 21:32:28 UTC on 2026-09-30, while the gates ran live ChatGPT
       # Terra turns. Off, Dreaming uses the deterministic phrase matcher alone.
-      # Turn it on (=true; 1 and yes leave it off) only for a deployment that
+      # Turn it on (the literal true; 1 and yes leave it off) only for a deployment that
       # accepts a paid extraction model, or after Dreaming can run on the
       # user's own route.
       DREAMING_LLM_EXTRACTION: ${DREAMING_LLM_EXTRACTION:-0}
@@ -1456,6 +1475,7 @@ services:
       # ADD/EXTEND/SUPERSEDE/NOOP against existing same-scope memories instead
       # of always inserting. Reuses INFERENCE_CORE_ADDR/AUTH_CORE_URL/
       # SESSION_CORE_SERVICE_ID/SESSION_CORE_SERVICE_API_KEY already set above.
+      # Only the literal true turns it on; 1 and yes leave it off.
       MEMORY_GROUNDING_ENABLED: ${MEMORY_GROUNDING_ENABLED:-0}
       MEMORY_GROUNDING_MODEL: ${MEMORY_GROUNDING_MODEL:-claude-haiku-4-5}
       # WS26-S4: one content policy on every memory write (instruction markers, hidden characters, secret shapes, and
@@ -1698,6 +1718,9 @@ services:
       # Records that a provider making no residency commitment is accepted. Without
       # it the service still boots but logs a warning per such provider.
       MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY: ${MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY:-false}
+      # Embedding residency opt-in (outside the EU boundary): default off, and only the exact literal true counts.
+      # Example only, deliberately not active; uncomment to opt in with the operator's decision on record:
+      # MODEL_PLANE_ALLOW_NON_EU_EMBEDDING: ${MODEL_PLANE_ALLOW_NON_EU_EMBEDDING:-false}
       # ZDR is evidence-bound. The legacy boolean below is read ONLY to reject an
       # unbacked assertion: with it true and no attestation supplied, the service
       # refuses to boot rather than silently serving ZDR traffic on no evidence.
@@ -1849,6 +1872,8 @@ services:
       # input. The Control token is a service credential for tool-gate-view,
       # approval-grants/use and approval-continuation-check; blank means the gate runs
       # without Control (the once-token still works, per-tool levels and standing rules do not).
+      # Deliberate dev behaviour: this dev compose enforces by default. The code default is off, and the
+      # production and release files set it to off.
       EXECUTION_CORE_SPACE_APPROVAL_GATE: ${EXECUTION_CORE_SPACE_APPROVAL_GATE:-enforce}
       # Quarantine-and-release of flagged tool output (WS10-S8): dev counts and logs only; a Space
       # must also set its own quarantine_mode in Control before anything is held.
@@ -1969,7 +1994,8 @@ services:
       # PLANE_TOKEN_TTL_* override is followed rather than outlived.
       EXECUTION_RUN_WALL_CLOCK_SECS: ${EXECUTION_RUN_WALL_CLOCK_SECS:-0}
       # Post-mutation verification inside the agentic loop. OFF by default:
-      # only an explicit 1/true/on/yes/enabled turns it on. When on, after a
+      # only the exact literal true turns it on: no trimming, no case folding, so 1, on, yes and enabled do not.
+      # When on, after a
       # successful provider write (execute_provider_action) or shipment booking
       # (book_shipment) the loop reads the effect back from the system of record
       # and appends one line to the tool output (Verified / NOT confirmed /
@@ -2223,7 +2249,9 @@ services:
       # env var this block's QUARRY_EDGE_URL comment already promises but that
       # was never actually wired here (Phase 2, found live: run_browser_agent_loop
       # failed fast with "browser agent unavailable" until this was added).
-      QUARRY_BROWSER_AGENT_ENABLED: ${QUARRY_BROWSER_AGENT_ENABLED:-1}
+      # Only the exact literal true turns it on: no trimming, no case folding, so a 1, TRUE or yes set in the
+      # environment turns it OFF. The default here is true, so this stack keeps the browser agent on.
+      QUARRY_BROWSER_AGENT_ENABLED: ${QUARRY_BROWSER_AGENT_ENABLED:-true}
       # WS11.S1: per-run bounds for the browser agent. A run takes the default when the caller names none
       # and is clamped to the ceiling; the planner token budget binds only when an LLM planner is selected.
       # The numbers below are the built-in ones, so leaving them alone changes nothing.
@@ -2870,6 +2898,8 @@ services:
       BROWSER_BROKER_QUARRY_READY_URL: ${BROWSER_BROKER_QUARRY_READY_URL:-${QUARRY_EDGE_URL:-http://quarry-edge:8082}/ready}
       # Browser access consults Control-owned site decisions when explicitly enabled.
       BROWSER_BROKER_SITE_POLICY: ${BROWSER_BROKER_SITE_POLICY:-off}
+      # A signed-in user's assistant task may take its one-host cloud browser grant. Off, the broker refuses it.
+      # Only the exact literal `true` turns it on: `1`, `yes` and `on` leave it OFF.
       BROWSER_BROKER_ASSISTANT_TASK_GRANTS_ENABLED: ${BROWSER_BROKER_ASSISTANT_TASK_GRANTS_ENABLED:-0}
       ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
       BROWSER_BROKER_ORG_CORE_TOKEN: ${BROWSER_BROKER_ORG_CORE_SERVICE_TOKEN:-}
@@ -2897,8 +2927,8 @@ services:
       # OFF unless exactly the literal true. On, a one-time approval for fill_otp is
       # bound to one https origin and one mail connection; ZDR is refused.
       BROWSER_BROKER_FILL_OTP_ENABLED: ${BROWSER_BROKER_FILL_OTP_ENABLED:-0}
-      # Org web-policy snapshot (WS7.K, internal/grant/policy.go). OFF unless exactly
-      # true (0 or false is off; any other value, 1 included, stops the broker). On, an ordinary grant's
+      # Org web-policy snapshot (WS7.K, internal/grant/policy.go). Only the exact literal true turns it on
+      # (0 or false is off; any other value, 1 included, stops the broker). On, an ordinary grant's
       # hosts are narrowed by the verified token's web_policy claim, an
       # unreadable claim refuses the mint, and the snapshot is returned as
       # web_policy (field 20). Not persisted by the durable store yet.

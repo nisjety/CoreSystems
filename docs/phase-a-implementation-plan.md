@@ -26,7 +26,7 @@ lands, surfacing admin / usage / billing data per-org leaks across tenants.
 - `auth-core/src/grpc/auth-grpc.controller.ts` validates JWTs for gRPC calls
   but uses `JWT_SECRET` env var (HS256) — needs migration to JWKS-verified
   RS256 for consistency with the model-plane token.
-- `model-gateway` (Rust) honors `MODEL_GATEWAY_AUTH_DEV_BYPASS=1` and
+- `model-gateway` (Rust) honors `MODEL_GATEWAY_AUTH_DEV_BYPASS=true` and
   accepts the dev-bypass bearer; production should verify against JWKS.
 - **Data Plane v2** — `X-Org-ID` is read but never verified.
 - **Quarry-control / quarry-edge** — `QUARRY_CONTROL_API_KEY` is the only

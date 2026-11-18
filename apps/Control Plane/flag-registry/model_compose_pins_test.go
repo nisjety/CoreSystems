@@ -1,7 +1,9 @@
 package flagregistry
 
 import (
+	"os"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -80,4 +82,62 @@ func TestModelPlaneComposePinsReadOffWhenUnset(t *testing.T) {
 	if on, err := reg.Switch("ORG_AGENT_POLICY_API", unset); err != nil || on {
 		t.Errorf("ORG_AGENT_POLICY_API unset reads %v (err %v), want off", on, err)
 	}
+}
+
+// strictPinNames are Model Plane switches that read only the exact literal true and default to 0 in the
+// Model Plane compose. The pin test must find each one, so it cannot quietly stop covering them.
+var strictPinNames = []string{
+	"DREAMING_LLM_EXTRACTION",
+	"MEMORY_GROUNDING_ENABLED",
+	"SESSION_CORE_APPROVAL_MEMBER_DECIDE",
+	"SPACE_ATTENTION_SUMMARY",
+	"SPACE_HUMAN_POSTS_CORE",
+	"SPACE_MENTION_RECORDS_CORE",
+	"SPACE_MESSAGE_REVISE_CORE",
+	"SPACE_MESSAGE_SEARCH_CORE",
+	"SPACE_TIMELINE_CORE",
+	"SPACE_WAKE_CORE",
+}
+
+// TestZeroDefaultLiteralSwitchesNameTheLiteralInCompose pins the sentence an operator reads. A switch that
+// reads only the exact literal true treats 1, yes and on as off, so a compose line that defaults it to 0 must
+// say, in the comment above it, which value turns it on. Without that, an operator who types 1 gets a switch
+// that stays off with no word about why.
+func TestZeroDefaultLiteralSwitchesNameTheLiteralInCompose(t *testing.T) {
+	reg := loadShipped(t)
+	data, err := os.ReadFile(repoFile(modelPlaneCompose))
+	if err != nil {
+		t.Fatalf("read %s: %v", modelPlaneCompose, err)
+	}
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	found := make(map[string]bool)
+	for i, line := range lines {
+		m := composeEnv.FindStringSubmatch(line)
+		if m == nil || m[3] != "0" {
+			continue
+		}
+		f, ok := reg.Flag(m[2])
+		if !ok || f.OnLiteral == "" {
+			continue
+		}
+		found[m[2]] = true
+		said := strings.ReplaceAll(commentAbove(lines, i)+" "+m[4], "`", "")
+		if !strings.Contains(said, "literal "+f.OnLiteral) {
+			t.Errorf("%s (%s line %d) defaults to 0 and reads only the literal %s, but its compose comment does not say so", m[2], modelPlaneCompose, i+1, f.OnLiteral)
+		}
+	}
+	for _, name := range strictPinNames {
+		if !found[name] {
+			t.Errorf("%s is not a literal switch that defaults to 0 in the Model Plane compose; the pin no longer covers it", name)
+		}
+	}
+}
+
+// commentAbove joins the comment lines directly above line i, in file order.
+func commentAbove(lines []string, i int) string {
+	var block []string
+	for j := i - 1; j >= 0 && strings.HasPrefix(strings.TrimSpace(lines[j]), "#"); j-- {
+		block = append([]string{lines[j]}, block...)
+	}
+	return strings.Join(block, " ")
 }
