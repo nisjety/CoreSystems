@@ -12,8 +12,9 @@ afterEach(() => {
 describe('space tab registry (P-SPA1)', () => {
   it('lists the room tabs in their fixed order with unique ids', () => {
     const ids = SPACE_TABS.map((tab) => tab.id)
-    // Filer (the Space files tab) sits after the artefakter tab, as main added it.
-    expect(ids).toEqual(['chat', 'arbeid', 'kunnskap', 'artefakter', 'filer', 'aktivitet', 'agent', 'medlemmer'])
+    // Lerret (the Canvas tab, WS19-S5) sits second, after chat. Filer (the Space files tab) sits after the
+    // artefakter tab, as main added it.
+    expect(ids).toEqual(['chat', 'lerret', 'arbeid', 'kunnskap', 'artefakter', 'filer', 'aktivitet', 'agent', 'medlemmer'])
     expect(new Set(ids).size).toBe(ids.length)
     expect(DEFAULT_SPACE_TAB).toBe('chat')
   })
@@ -80,6 +81,24 @@ describe('space tab registry (P-SPA1)', () => {
       primeSpaceRoomFeatures(undefined)
       expect(spaceTabFromHash('#agent')).toBe('agent')
       expect(spaceTabFromHash('#members')).toBe('medlemmer')
+    })
+  })
+
+  describe('the Canvas tab (WS19-S5)', () => {
+    it('#canvas and #lerret resolve to lerret while features.canvas is on', () => {
+      primeSpaceRoomFeatures({ canvas: true })
+      expect(visibleSpaceTabs().map((tab) => tab.id)).toContain('lerret')
+      expect(spaceTabFromHash('#canvas')).toBe('lerret')
+      expect(spaceTabFromHash('#lerret')).toBe('lerret')
+    })
+
+    it('is hidden, and #canvas goes to chat, while the flag is off, absent, or not exactly true', () => {
+      for (const features of [undefined, { canvas: false }, { canvas: 'true' }]) {
+        primeSpaceRoomFeatures(features)
+        expect(visibleSpaceTabs().map((tab) => tab.id)).not.toContain('lerret')
+        expect(spaceTabFromHash('#canvas')).toBe('chat')
+        expect(spaceTabFromHash('#lerret')).toBe('chat')
+      }
     })
   })
 })
