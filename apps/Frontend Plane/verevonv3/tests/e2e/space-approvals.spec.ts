@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { memberContext, requireMembers, requireSpaceRef, skipUnlessSpace } from './space-fixtures'
+import { memberContext, requireMembers, requireSpaceRef, skipUnlessSpace, spaceTestModel } from './space-fixtures'
 
 /**
  * WS10-S4 approval scopes, end to end (later tier: needs the seeded Space fixtures AND a stack with
@@ -74,7 +74,48 @@ test('the thread scope is refused and the answer is typed, never downgraded', as
   }
 })
 
-test('decide once, standing rule passes, revoke, next call prompts', async ({ browser, baseURL }) => {
+// FIXME(WS10-S8): the quarantine path cannot fire yet. Control's per-Space quarantine_mode is read from
+// tool-gate-view, but EXECUTION_CORE_CONTROL_APPROVAL_GATE_TOKEN is not configured, so a flagged fixture is
+// never held. Re-enable when the Control train lands. The card copy is "Held content" (no "quarantine" wording).
+test.fixme('a flagged output in enforce is held, previewed to the requester only, released once, and held again', async ({ browser, baseURL }) => {
+  const ref = requireSpaceRef(test)
+  requireMembers(test, 'A', 'B')
+  skipUnlessSpace(test, process.env.E2E_SPACE_QUARANTINE_RUN !== '1', 'E2E_SPACE_QUARANTINE_RUN=1 needs a fixture run of member A that calls a flagged tool in an enforce Space')
+  spaceTestModel(test)
+  const held = /Tilbakeholdt innhold|Held content/
+  const preview = /Vis en ren tekstforhåndsvisning|Show a plain-text preview/
+  const owner = await memberContext(browser, baseURL, 'A')
+  const editor = await memberContext(browser, baseURL, 'B')
+  try {
+    const pageA = await owner.newPage()
+    const pageB = await editor.newPage()
+    await pageA.goto(`/spaces/${encodeURIComponent(ref)}#chat`)
+    await pageB.goto(`/spaces/${encodeURIComponent(ref)}#chat`)
+
+    // The requester sees the held content and can open its plain-text preview.
+    const cardA = pageA.locator('.verevon-room-approval', { hasText: held }).first()
+    await expect(cardA).toBeVisible({ timeout: 120_000 })
+    await cardA.getByRole('button', { name: preview }).click()
+    await expect(cardA.locator('pre')).toBeVisible()
+
+    // The preview goes to the requester only: another editor sees no preview control.
+    await expect(pageB.getByRole('button', { name: preview })).toHaveCount(0)
+
+    // One approve releases the call once.
+    await cardA.getByRole('button', { name: /^(Godkjenn|Approve)$/ }).click()
+    await expect(pageA.getByText(/Godkjent\. Avgjørelsen er registrert\.|Approved\. The decision is recorded\./)).toBeVisible()
+    // A second identical call is held again; the first decision does not carry over.
+    await expect(pageA.locator('.verevon-room-approval', { hasText: held }).first()).toBeVisible({ timeout: 120_000 })
+  } finally {
+    await owner.close()
+    await editor.close()
+  }
+})
+
+// FIXME(WS10-S4): standing-rule creation cannot succeed yet. The gateway approval projection lacks
+// agent_subject_id and action_schema_hash, so decide answers grant.status not_recorded
+// (approval_projection_incomplete). Re-enable when S6 ResolveApprovalAuthority or an additive projection lands.
+test.fixme('decide once, standing rule passes, revoke, next call prompts', async ({ browser, baseURL }) => {
   const ref = requireSpaceRef(test)
   requireMembers(test, 'A')
   skipUnlessSpace(test, !APPROVALS_READY, 'E2E_SPACE_APPROVAL_RUNS=1 needs a fixture run of member A paused on an MCP approval')

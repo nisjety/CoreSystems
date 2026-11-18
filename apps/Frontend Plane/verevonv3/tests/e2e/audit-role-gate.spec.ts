@@ -16,7 +16,8 @@ const MEMBER_STATE = process.env.E2E_MEMBER_STORAGE_STATE
 const FOREIGN_USER_ID = 'user_that_is_not_the_caller'
 
 async function readAudit(browser: Browser, storageState: string, query: string) {
-  const context = await browser.newContext({ storageState })
+  // A context made by hand does not inherit the project's baseURL, so the relative path needs one.
+  const context = await browser.newContext({ storageState, baseURL: process.env.E2E_BASE_URL || 'http://localhost:5199' })
   try {
     const response = await context.request.get(`/api/v1/audit${query}`)
     const body = (await response.json().catch(() => null)) as {

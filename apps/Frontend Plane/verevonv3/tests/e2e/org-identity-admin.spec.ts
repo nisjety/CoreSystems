@@ -21,6 +21,9 @@ const ADMIN_STATE = process.env.E2E_ADMIN_STORAGE_STATE
 const MEMBER_STATE = process.env.E2E_MEMBER_STORAGE_STATE
 const ORG_ID = process.env.E2E_ORG_ID
 const PUBLISH_URL = process.env.E2E_DNS_STUB_PUBLISH_URL
+const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5199'
+/** WS05-S8: a domain this org has already verified; the SCIM IdP's user emails sit on it. */
+const SCIM_DOMAIN = process.env.E2E_SCIM_EMAIL_DOMAIN?.trim()
 
 type Envelope = {
   data?: Record<string, unknown> & { domains?: Array<Record<string, unknown>>; challenge?: { name?: string; value?: string } }
@@ -28,9 +31,22 @@ type Envelope = {
 }
 
 async function call(browser: Browser, storageState: string, method: 'GET' | 'POST' | 'DELETE', path: string, data?: unknown) {
-  const context = await browser.newContext({ storageState })
+  // A context made by hand does not inherit the project's baseURL, so the relative path needs one.
+  const context = await browser.newContext({ storageState, baseURL: BASE_URL })
   try {
     const response = await context.request.fetch(`/api/v1/orgs/${ORG_ID}/domains${path}`, { method, data })
+    const body = (await response.json().catch(() => null)) as Envelope | null
+    return { status: response.status(), body }
+  } finally {
+    await context.close()
+  }
+}
+
+/** Any org-scoped route (the SCIM token routes live beside the domain routes). */
+async function callOrg(browser: Browser, storageState: string, method: 'GET' | 'POST' | 'DELETE', tail: string, data?: unknown) {
+  const context = await browser.newContext({ storageState, baseURL: BASE_URL })
+  try {
+    const response = await context.request.fetch(`/api/v1/orgs/${ORG_ID}${tail}`, { method, data })
     const body = (await response.json().catch(() => null)) as Envelope | null
     return { status: response.status(), body }
   } finally {
@@ -101,5 +117,60 @@ test.describe('org identity administration', () => {
     expect(removed.status).toBe(200)
     const listed = await call(browser, ADMIN_STATE!, 'GET', '')
     expect(listed.body?.data?.domains?.some((candidate) => candidate.domain === DOMAIN)).toBeFalsy()
+  })
+
+  // WS05-S8: a SCIM token (shown once) lets an IdP provision and deprovision members on the public edge.
+  test('an admin issues a SCIM token; a stub IdP provisions, replays, deprovisions; a revoked token is refused', async ({ browser }) => {
+    test.skip(!SCIM_DOMAIN, 'needs E2E_SCIM_EMAIL_DOMAIN: a domain this org has already verified')
+    const marker = Date.now().toString(36)
+    const issued = await callOrg(browser, ADMIN_STATE!, 'POST', '/scim/tokens', { name: `e2e-idp-${marker}`, expires_in_days: 1 })
+    expect([200, 201]).toContain(issued.status)
+    const bearer = issued.body?.data?.bearer_token as string | undefined
+    const tokenId = (issued.body?.data?.token as { id?: string } | undefined)?.id
+    expect(bearer).toBeTruthy()
+    expect(tokenId).toBeTruthy()
+
+    // The stub IdP calls the public SCIM edge with the bearer token only, no session.
+    const idp = await browser.newContext({ baseURL: BASE_URL })
+    try {
+      const headers = { authorization: `Bearer ${bearer}`, 'content-type': 'application/scim+json' }
+      const email = `idp-${marker}@${SCIM_DOMAIN}`
+      const user = {
+        schemas: ['urn:ietf:params:scim:schemas:core:2.0:User'],
+        userName: email,
+        externalId: `ext-${marker}`,
+        emails: [{ value: email, primary: true }],
+        active: true,
+      }
+      const created = await idp.request.fetch('/api/v1/scim/v2/Users', { method: 'POST', headers, data: user })
+      expect([200, 201]).toContain(created.status())
+      const id = ((await created.json()) as { id?: string }).id
+      expect(id).toBeTruthy()
+
+      // Replaying the same POST answers the stored result: the same resource, no second member.
+      const replay = await idp.request.fetch('/api/v1/scim/v2/Users', { method: 'POST', headers, data: user })
+      expect([200, 201]).toContain(replay.status())
+      expect(((await replay.json()) as { id?: string }).id).toBe(id)
+
+      // Deprovision: PATCH active=false, sent twice (the second answers the stored result).
+      const patch = { schemas: ['urn:ietf:params:scim:api:messages:2.0:PatchOp'], Operations: [{ op: 'replace', value: { active: false } }] }
+      const path = `/api/v1/scim/v2/Users/${encodeURIComponent(id ?? '')}`
+      expect((await idp.request.fetch(path, { method: 'PATCH', headers, data: patch })).status()).toBe(200)
+      expect((await idp.request.fetch(path, { method: 'PATCH', headers, data: patch })).status()).toBe(200)
+
+      // Revoking the token refuses the IdP at once.
+      const revoked = await callOrg(browser, ADMIN_STATE!, 'DELETE', `/scim/tokens/${encodeURIComponent(tokenId ?? '')}`)
+      expect([200, 204]).toContain(revoked.status)
+      const refused = await idp.request.fetch('/api/v1/scim/v2/Users', { method: 'POST', headers, data: user })
+      expect([401, 403]).toContain(refused.status())
+    } finally {
+      await idp.close()
+    }
+  })
+
+  test('a member cannot issue a SCIM token', async ({ browser }) => {
+    test.skip(!SCIM_DOMAIN, 'needs E2E_SCIM_EMAIL_DOMAIN: a domain this org has already verified')
+    const refused = await callOrg(browser, MEMBER_STATE!, 'POST', '/scim/tokens', { name: 'e2e-member', expires_in_days: 1 })
+    expect(refused.status).toBe(403)
   })
 })

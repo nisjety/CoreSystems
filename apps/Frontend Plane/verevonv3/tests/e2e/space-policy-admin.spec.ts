@@ -21,7 +21,8 @@ const WRITES_OK = process.env.E2E_SPACE_POLICY_ORG_OK === '1'
 const KNOWLEDGE_LABEL = 'Bruke kunnskap i rom'
 
 async function openConsole(browser: Browser): Promise<{ page: Page; close: () => Promise<void> }> {
-  const context = await browser.newContext({ storageState: ADMIN_STATE! })
+  // A context made by hand does not inherit the project's baseURL, so the relative goto needs one.
+  const context = await browser.newContext({ storageState: ADMIN_STATE!, baseURL: process.env.E2E_BASE_URL || 'http://localhost:5199' })
   const page = await context.newPage()
   await page.goto('/settings/space-policy')
   return { page, close: () => context.close() }

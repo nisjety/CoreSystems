@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { memberContext, requireMembers, requireSpaceRef } from './space-fixtures'
+import { memberContext, requireMembers, requireSpaceRef, skipUnlessSpace } from './space-fixtures'
 
 /**
  * WS01-S7a thread side pane, end to end (later tier: needs the seeded Space fixtures and a room with
@@ -90,5 +90,25 @@ test('a member outside the Space sees the restricted or not-available state, nev
   } finally {
     await a.close()
     await outsider.close()
+  }
+})
+
+// WS01-S7a: the restricted state for a viewer (role C), not only a same-org outsider.
+test('a viewer who may not read a restricted thread sees the restricted state, never a sign-in message', async ({ browser, baseURL }) => {
+  const ref = requireSpaceRef(test)
+  requireMembers(test, 'C')
+  const restrictedThread = process.env.E2E_SPACE_VIEWER_RESTRICTED_THREAD_ID?.trim()
+  skipUnlessSpace(test, !restrictedThread, 'E2E_SPACE_VIEWER_RESTRICTED_THREAD_ID must name a thread that viewer C may not read')
+  const viewer = await memberContext(browser, baseURL, 'C')
+  try {
+    const page = await viewer.newPage()
+    await page.goto(`/spaces/${encodeURIComponent(ref)}?thread_id=${encodeURIComponent(restrictedThread ?? '')}#chat`)
+    const pane = page.locator('.verevon-space-auxpane')
+    await expect(pane).toBeVisible()
+    await expect(pane.locator('.verevon-space-restricted[data-variant="thread"]')).toBeVisible()
+    await expect(page.getByText(/ikke delt med deg|not shared with you/)).toBeVisible()
+    await expect(page.getByText(/logg inn|sign in|log in/i)).toHaveCount(0)
+  } finally {
+    await viewer.close()
   }
 })
