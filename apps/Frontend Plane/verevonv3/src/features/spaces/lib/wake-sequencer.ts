@@ -149,6 +149,11 @@ export interface WakeSequencer {
   readonly wakeNow: (messageId: string) => void
   /** Run one failed wake again under its own `clientWakeId`. */
   readonly retry: (messageId: string, agentSubjectId: string) => void
+  /**
+   * This session stops: the wake in flight is aborted and every wake still queued is marked `interrupted`, so
+   * "Wake now" can run them. Runs on `pagehide`, the closing of the tab the module comment describes.
+   */
+  readonly interrupt: () => void
   /** Called after each wake settles and when a post's sequence ends, so the room re-reads. */
   readonly onSettled: (listener: () => void) => () => void
 }
@@ -181,6 +186,13 @@ export function createWakeSequencer(deps: WakeSequencerDeps): WakeSequencer {
       }
     }
   }
+  // Aborting a run's controller is what its loop reads as "stopped": the wake in flight is marked interrupted and
+  // the loop marks the wakes queued behind it the same way.
+  const interrupt = () => {
+    for (const controller of [...running.values()]) controller.abort()
+  }
+  // Closing the tab stops this session's wakes (see the module comment); the server keeps those agents `expected`.
+  if (typeof window !== 'undefined') window.addEventListener('pagehide', interrupt)
 
   async function runOne(entry: WakeEntry, signal: AbortSignal): Promise<'stop' | 'next'> {
     const patch = (next: Partial<WakeEntry>) => board.patch(entry.messageId, entry.agentSubjectId, next)
@@ -276,6 +288,7 @@ export function createWakeSequencer(deps: WakeSequencerDeps): WakeSequencer {
       board.patch(messageId, agentSubjectId, { state: 'queued', code: undefined })
       void run(messageId)
     },
+    interrupt,
     onSettled(listener) {
       listeners.add(listener)
       return () => {

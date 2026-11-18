@@ -9,6 +9,7 @@ import {
   type WakeEntry,
   type WakePlan,
   type WakePlanEntry,
+  type WakeSequencer,
   type WakeStreamResult,
 } from './wake-sequencer'
 
@@ -240,5 +241,53 @@ describe('createWakeSequencer abort, retry and Wake now (WS08-S6)', () => {
     sequencer.retry(MESSAGE, 'agent-a')
     await vi.advanceTimersByTimeAsync(0)
     expect(streamWake).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('createWakeSequencer interrupt (WS08-S6)', () => {
+  /** The first ask hangs until its run is aborted, the way a stream does when the session lets go of it. */
+  function hangingFirstAsk() {
+    let asks = 0
+    return (_entry: WakeEntry, signal: AbortSignal): Promise<WakeStreamResult> => {
+      asks += 1
+      if (asks > 1) return Promise.resolve({})
+      return new Promise<WakeStreamResult>((resolve) => {
+        signal.addEventListener('abort', () => resolve({}))
+      })
+    }
+  }
+
+  it.each([
+    ['interrupt()', (sequencer: WakeSequencer) => sequencer.interrupt()],
+    ['the page hiding (pagehide)', () => window.dispatchEvent(new Event('pagehide'))],
+  ])('%s interrupts the wake in flight and the ones queued behind it; Wake now runs them again', async (_how, leave) => {
+    const { board, streamWake, sequencer } = harness(hangingFirstAsk())
+    sequencer.start(plan([agent('agent-a', 0), agent('agent-b', 1), agent('agent-c', 2)]))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(stateOf(board, 'agent-a')?.state).toBe('answering')
+
+    leave(sequencer)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(['agent-a', 'agent-b', 'agent-c'].map((id) => stateOf(board, id)?.state)).toEqual([
+      'interrupted',
+      'interrupted',
+      'interrupted',
+    ])
+    expect(streamWake).toHaveBeenCalledTimes(1)
+
+    sequencer.wakeNow(MESSAGE)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(callOrder(streamWake.mock.calls)).toEqual(['agent-a', 'agent-a', 'agent-b', 'agent-c'])
+    expect(['agent-a', 'agent-b', 'agent-c'].map((id) => stateOf(board, id)?.state)).toEqual(['done', 'done', 'done'])
+  })
+
+  it('interrupting a session with nothing in flight changes nothing, and later wakes still run', async () => {
+    const { board, streamWake, sequencer } = harness(async () => ({}))
+    sequencer.interrupt()
+    window.dispatchEvent(new Event('pagehide'))
+    sequencer.start(plan([agent('agent-a', 0)]))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(stateOf(board, 'agent-a')?.state).toBe('done')
+    expect(streamWake).toHaveBeenCalledTimes(1)
   })
 })
