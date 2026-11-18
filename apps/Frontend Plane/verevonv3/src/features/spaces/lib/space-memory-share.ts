@@ -51,13 +51,13 @@ export async function memoryDeclassifyOffered(): Promise<boolean> {
 }
 
 /**
- * The rooms a memory can be shared to: shared rooms that are active and not archived, by name. The list carries no role, so
- * an editor-or-above check is the server's: a room the person may not share into is refused with
- * `memory_declassify_not_authorized`. Personal Spaces and direct messages are not rooms, and are left out.
+ * The rooms a memory can be shared to: rooms (Control's kind `room`) that are active and not archived, by name. The list
+ * carries no role, so an editor-or-above check is the server's: a room the person may not share into is refused with
+ * `memory_declassify_not_authorized`. Personal Spaces, direct messages and group DMs are not rooms, and are left out.
  */
 export function shareableRooms(spaces: readonly SpaceSummary[]): SpaceSummary[] {
   return spaces
-    .filter((space) => space.kind === 'shared' && space.lifecycle === 'active' && space.archived !== true)
+    .filter((space) => space.kind === 'room' && space.lifecycle === 'active' && space.archived !== true)
     .sort((left, right) => left.name.localeCompare(right.name))
 }
 
