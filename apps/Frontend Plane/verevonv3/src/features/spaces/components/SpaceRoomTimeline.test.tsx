@@ -1,4 +1,5 @@
 import { cleanup, render, screen, waitFor } from '@solidjs/testing-library'
+import { createSignal, flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const spacesClient = vi.hoisted(() => ({
@@ -571,5 +572,121 @@ describe('SpaceRoomTimeline — room pins (WS13-S8)', () => {
     renderRoom(threads, [agent], { roomPins: () => [{ thread_id: 'gone', pinned_by: 'user-2', pinned_at: 999 }] })
     await screen.findByText('Alfa')
     expect(postOrder()).toEqual(['a', 'b', 'c', 'd'])
+  })
+})
+
+// WS07-S4: the withheld-content rule. With shared reads off the room makes no transcript call and says so once;
+// a refused or missing post draws no turn text; a 5xx offers Retry, which asks the server again.
+describe('SpaceRoomTimeline — withheld turns and the transcript read states (WS07-S4)', () => {
+  const withheld = 'Hemmelig samtaletekst'
+  const withheldTurns = [{ role: 'user', content: withheld, authorSubjectId: 'user-2' }]
+  const postA = { thread_id: 't1', space_id: 'room-1', title: 'Innkjøp', preview: 'Forhåndsvisning A', latest_run_status: 'completed' }
+  const postB = { thread_id: 't2', space_id: 'room-1', title: 'Levering', preview: 'Forhåndsvisning B', latest_run_status: 'completed' }
+  const roomNotices = () => document.querySelectorAll('.verevon-space-restricted[data-variant="room"]')
+  const threadNotices = () => document.querySelectorAll('.verevon-space-restricted[data-variant="thread"]')
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+  it('shows one room notice and makes no transcript call for any post when shared reads are off', async () => {
+    spacesClient.loadSpaceTranscript.mockResolvedValue({ state: 'ok', threadId: 't1', turns: withheldTurns })
+    spacesClient.getSpaceThreadTranscript.mockResolvedValue({ threadId: 't1', turns: withheldTurns })
+    renderRoom([postA, postB], [agent], { sharedReadAvailable: () => false })
+    await screen.findByText('Forhåndsvisning B')
+    await settle()
+    expect(roomNotices()).toHaveLength(1)
+    expect(threadNotices()).toHaveLength(0)
+    expect(spacesClient.loadSpaceTranscript).not.toHaveBeenCalled()
+    expect(spacesClient.getSpaceThreadTranscript).not.toHaveBeenCalled()
+    expect(document.body.textContent ?? '').not.toContain(withheld)
+  })
+
+  it('shows a thread notice on each post refused with a 403, and draws no turn text', async () => {
+    // A refusal that carried turns anyway must still draw none: only an `ok` read draws turns.
+    spacesClient.loadSpaceTranscript.mockResolvedValue({ state: 'restricted', turns: withheldTurns })
+    renderRoom([postA, postB], [agent])
+    await screen.findAllByText(/Denne samtalen er ikke delt med deg/)
+    expect(threadNotices()).toHaveLength(2)
+    expect(roomNotices()).toHaveLength(0)
+    expect(document.body.textContent ?? '').not.toContain(withheld)
+  })
+
+  it('says a 404 conversation is no longer available, with no turn text and no sharing notice', async () => {
+    spacesClient.loadSpaceTranscript.mockResolvedValue({ state: 'missing', turns: withheldTurns })
+    renderRoom([postA], [agent])
+    expect(await screen.findByText(/ikke lenger tilgjengelig/)).toBeTruthy()
+    expect(threadNotices()).toHaveLength(0)
+    expect(document.body.textContent ?? '').not.toContain(withheld)
+  })
+
+  it('offers Retry on a 5xx, and Retry asks the server again and then draws the turns', async () => {
+    spacesClient.loadSpaceTranscript
+      .mockResolvedValueOnce({ state: 'error' })
+      .mockResolvedValueOnce({ state: 'ok', threadId: 't1', turns: [{ role: 'user', content: 'Nå virker det' }] })
+    renderRoom([postA], [agent])
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('Kunne ikke hente denne samtalen')
+    expect(spacesClient.loadSpaceTranscript).toHaveBeenCalledTimes(1)
+    ;(screen.getByRole('button', { name: 'Prøv igjen' })).click()
+    expect(await screen.findByText('Nå virker det')).toBeTruthy()
+    expect(spacesClient.loadSpaceTranscript).toHaveBeenCalledTimes(2)
+    expect(spacesClient.loadSpaceTranscript).toHaveBeenLastCalledWith('room-1', 't1')
+    expect(threadNotices()).toHaveLength(0)
+  })
+
+  it('draws the turns of a thread read ok, with no notice', async () => {
+    spacesClient.loadSpaceTranscript.mockResolvedValue({
+      state: 'ok',
+      threadId: 't1',
+      turns: [{ role: 'user', content: 'Alt er klart nå.', authorSubjectId: 'user-2' }],
+    })
+    renderRoom([postA], [agent])
+    expect(await screen.findByText('Alt er klart nå.')).toBeTruthy()
+    expect(document.querySelector('.verevon-space-restricted')).toBeNull()
+    expect(spacesClient.loadSpaceTranscript).toHaveBeenCalledWith('room-1', 't1')
+  })
+
+  // The listing poll can turn shared reads off while the room is open. A turn read before that must not stay on screen.
+  it('stops drawing turns read earlier once the listing turns shared reads off', async () => {
+    const [available, setAvailable] = createSignal(true)
+    spacesClient.loadSpaceTranscript.mockResolvedValue({ state: 'ok', threadId: 't1', turns: withheldTurns })
+    renderRoom([postA], [agent], { sharedReadAvailable: available })
+    expect(await screen.findByText(withheld)).toBeTruthy()
+    setAvailable(false)
+    flush()
+    expect(await screen.findByText(/Samtalene i dette rommet er ikke delt med deg/)).toBeTruthy()
+    expect(roomNotices()).toHaveLength(1)
+    expect(document.body.textContent ?? '').not.toContain(withheld)
+  })
+})
+
+// WS04-S11: a since_join member is told once, above the posts, that earlier conversations may be hidden.
+describe('SpaceRoomTimeline — the history notice (WS04-S11)', () => {
+  const post = { thread_id: 't1', space_id: 'room-1', title: 'Innkjøp', preview: 'Forhåndsvisning', latest_run_status: 'completed' }
+  const historyNotices = () => document.querySelectorAll('.verevon-space-restricted[data-variant="history"]')
+
+  it('shows the history notice once, above the posts, for a since_join room', async () => {
+    renderRoom([post], [agent], { historyMode: () => 'since_join' })
+    await screen.findByText('Forhåndsvisning')
+    expect(historyNotices()).toHaveLength(1)
+    expect(screen.getByText(/Dette rommet viser historikk fra du ble med/)).toBeTruthy()
+    const notice = historyNotices()[0] as HTMLElement
+    const firstPost = document.querySelector('.verevon-room-post') as HTMLElement
+    expect(notice.compareDocumentPosition(firstPost) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('shows no history notice for full history, or when the room states no mode', async () => {
+    renderRoom([post], [agent], { historyMode: () => 'full' })
+    await screen.findByText('Forhåndsvisning')
+    expect(historyNotices()).toHaveLength(0)
+    cleanup()
+    renderRoom([post])
+    await screen.findByText('Forhåndsvisning')
+    expect(historyNotices()).toHaveLength(0)
+  })
+
+  it('is hidden while the restricted notice shows', async () => {
+    renderRoom([post], [agent], { historyMode: () => 'since_join', sharedReadAvailable: () => false })
+    expect(await screen.findByText(/Samtalene i dette rommet er ikke delt med deg/)).toBeTruthy()
+    expect(historyNotices()).toHaveLength(0)
+    expect(document.querySelectorAll('.verevon-space-restricted[data-variant="room"]')).toHaveLength(1)
   })
 })

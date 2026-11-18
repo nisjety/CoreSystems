@@ -633,6 +633,9 @@ function SpaceRoomPost(props: {
     readonly denial?: unknown
   }
   const transcript = (): TranscriptView | undefined => {
+    // Withheld while shared reads are off. A turn read before Control turned them off still sits in the
+    // resource (it keeps its last value when its source goes undefined) or in the store, so it is not drawn.
+    if (!props.transcriptEnabled()) return undefined
     const store = props.timeline
     if (!store) return legacyTranscript()
     const entry = store.transcript(props.thread.thread_id)

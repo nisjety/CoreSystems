@@ -7,6 +7,7 @@ import { ApiError } from '@/shared/api/http'
 const spacesClient = vi.hoisted(() => ({
   searchSpaceMessages: vi.fn(() => new Promise(() => {})),
   updateSpaceRoomDetails: vi.fn(),
+  updateSpaceRoomSettings: vi.fn(),
 }))
 vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
@@ -53,6 +54,8 @@ function type(input: HTMLInputElement, value: string) {
 beforeEach(() => {
   spacesClient.updateSpaceRoomDetails.mockReset()
   spacesClient.updateSpaceRoomDetails.mockResolvedValue({ spaceRef: 'room_1', name: 'Lager', topic: 'Innkjøp' })
+  spacesClient.updateSpaceRoomSettings.mockReset()
+  spacesClient.updateSpaceRoomSettings.mockResolvedValue({ visibility: 'private', joinRole: 'viewer', historyMode: null, changed: true })
 })
 
 afterEach(() => cleanup())
@@ -309,5 +312,153 @@ describe('SpaceRoomSettings refusals (WS04-S2)', () => {
     fireEvent.click(editButton() as HTMLElement)
     flush()
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+})
+
+// WS04-S8: who can find the room. Owner and manager only, on an active shared room with the directory flag on.
+// Anywhere else the block is absent from the page, not merely disabled.
+describe('SpaceRoomSettings who-can-find-the-room block (WS04-S8)', () => {
+  type VisibilityOverrides = Partial<{
+    role: string
+    kind: string
+    lifecycle: string
+    archived: boolean
+    directoryEnabled: boolean | undefined
+    isOrganizationRoom: boolean
+    visibility: string | null
+    joinRole: string | null
+  }>
+
+  function renderVisibility(overrides: VisibilityOverrides = {}) {
+    return render(() => (
+      <SpaceRoomSettings
+        spaceRef="room_1"
+        name="Lager"
+        topic="Innkjøp"
+        role={overrides.role ?? 'owner'}
+        kind={overrides.kind ?? 'room'}
+        lifecycle={overrides.lifecycle ?? 'active'}
+        archived={overrides.archived}
+        enabled
+        directoryEnabled={'directoryEnabled' in overrides ? overrides.directoryEnabled : true}
+        isOrganizationRoom={overrides.isOrganizationRoom ?? false}
+        visibility={'visibility' in overrides ? overrides.visibility : 'private'}
+        joinRole={'joinRole' in overrides ? overrides.joinRole : 'viewer'}
+      />
+    ))
+  }
+
+  const block = () => document.querySelector('.verevon-space-room-visibility')
+  const radios = () => document.querySelectorAll('input[type="radio"]')
+  const joinRoleSelect = () => document.querySelector('.verevon-space-room-visibility select') as HTMLSelectElement | null
+  const choose = (name: RegExp) => {
+    fireEvent.click(screen.getByRole('radio', { name }))
+    flush()
+  }
+  const save = () => fireEvent.click(screen.getByRole('button', { name: 'Lagre' }))
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+  const sentBody = () => spacesClient.updateSpaceRoomSettings.mock.calls[0]?.[1]
+
+  it('is shown to an owner and to a manager of an active shared room with the directory on', () => {
+    renderVisibility({ role: 'owner' })
+    expect(block()).toBeTruthy()
+    expect(screen.getByText('Hvem kan finne rommet')).toBeTruthy()
+    expect(radios()).toHaveLength(2)
+    cleanup()
+    renderVisibility({ role: 'manager' })
+    expect(block()).toBeTruthy()
+  })
+
+  it('is absent from the page, not merely disabled, for a viewer and an editor', () => {
+    for (const role of ['viewer', 'editor']) {
+      renderVisibility({ role })
+      expect(block(), role).toBeNull()
+      expect(screen.queryByText('Hvem kan finne rommet'), role).toBeNull()
+      expect(radios(), role).toHaveLength(0)
+      cleanup()
+    }
+  })
+
+  it.each([
+    ['an archived room', { archived: true }],
+    ['an organization room', { isOrganizationRoom: true }],
+    ['a personal Space', { kind: 'personal' }],
+    ['a room with the directory flag off', { directoryEnabled: false }],
+    ['a room whose gateway sends no directory flag', { directoryEnabled: undefined }],
+  ])('is absent from the page, not merely disabled, for %s', (_label, overrides) => {
+    renderVisibility(overrides)
+    expect(block()).toBeNull()
+    expect(screen.queryByText('Hvem kan finne rommet')).toBeNull()
+    expect(radios()).toHaveLength(0)
+  })
+
+  it('sends only the visibility when only the visibility changed', async () => {
+    renderVisibility({ visibility: 'private', joinRole: 'viewer' })
+    choose(/Åpent for organisasjonen/)
+    save()
+    await waitFor(() => expect(spacesClient.updateSpaceRoomSettings).toHaveBeenCalledTimes(1))
+    expect(spacesClient.updateSpaceRoomSettings.mock.calls[0]?.[0]).toBe('room_1')
+    expect(sentBody()).toStrictEqual({ visibility: 'org_public' })
+  })
+
+  it('sends only the join role when only the join role changed', async () => {
+    renderVisibility({ visibility: 'org_public', joinRole: 'viewer' })
+    fireEvent.change(joinRoleSelect() as HTMLSelectElement, { target: { value: 'editor' } })
+    flush()
+    save()
+    await waitFor(() => expect(spacesClient.updateSpaceRoomSettings).toHaveBeenCalledTimes(1))
+    expect(sentBody()).toStrictEqual({ joinRole: 'editor' })
+  })
+
+  it('sends both when both changed', async () => {
+    renderVisibility({ visibility: 'private', joinRole: 'viewer' })
+    choose(/Åpent for organisasjonen/)
+    fireEvent.change(joinRoleSelect() as HTMLSelectElement, { target: { value: 'editor' } })
+    flush()
+    save()
+    await waitFor(() => expect(spacesClient.updateSpaceRoomSettings).toHaveBeenCalledTimes(1))
+    expect(sentBody()).toStrictEqual({ visibility: 'org_public', joinRole: 'editor' })
+  })
+
+  it('sends nothing when nothing changed', async () => {
+    renderVisibility({ visibility: 'org_public', joinRole: 'editor' })
+    save()
+    await settle()
+    expect(spacesClient.updateSpaceRoomSettings).not.toHaveBeenCalled()
+  })
+
+  it('offers the join role only while the room is open to the organization', () => {
+    renderVisibility({ visibility: 'private' })
+    expect(joinRoleSelect()).toBeNull()
+    choose(/Åpent for organisasjonen/)
+    expect(joinRoleSelect()).not.toBeNull()
+    expect(Array.from(joinRoleSelect()?.options ?? []).map((option) => option.textContent)).toEqual(['Leser', 'Redaktør'])
+    choose(/Privat/)
+    expect(joinRoleSelect()).toBeNull()
+    cleanup()
+    renderVisibility({ visibility: 'org_public' })
+    expect(joinRoleSelect()).not.toBeNull()
+    expect(joinRoleSelect()?.value).toBe('viewer')
+  })
+
+  it('says the directory policy refused the change, in the directory copy', async () => {
+    spacesClient.updateSpaceRoomSettings.mockRejectedValue(new ApiError('x', 403, 'directory_disabled'))
+    renderVisibility({ visibility: 'private' })
+    choose(/Åpent for organisasjonen/)
+    save()
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toBe(
+      'Organisasjonen din har ikke slått på romkatalogen, så rom kan ikke åpnes for alle ennå. Spør en administrator.',
+    )
+  })
+
+  it('says the members follow the organization when the room roster is derived', async () => {
+    spacesClient.updateSpaceRoomSettings.mockRejectedValue(new ApiError('x', 409, 'room_roster_derived'))
+    renderVisibility({ visibility: 'private' })
+    choose(/Åpent for organisasjonen/)
+    save()
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toBe('Medlemmene i dette rommet følger organisasjonen og redigeres ikke her.')
+    expect(alert.textContent).not.toContain('Innstillingene kunne ikke lagres')
   })
 })
