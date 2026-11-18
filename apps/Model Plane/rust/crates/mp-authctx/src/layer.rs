@@ -42,27 +42,23 @@ impl Config {
     /// Honoured env vars:
     /// - `AUTH_CORE_JWKS_URL`  (default `http://auth-core:3011/api/convex-auth/jwks`)
     /// - `AUTH_CORE_ISSUER`    (default `http://auth-core:3011/api/convex-auth`)
-    /// - `AUTHCTX_ENFORCE`     (`1`/`true`/`yes` → enforce mode)
+    /// - `AUTHCTX_ENFORCE`     (`1`, `true`, `yes` or `on`, in any case, enforce; unset observes.
+    ///   See `enforce_from` for the exact reading and how documents-api-go differs.)
     /// - `AUTHCTX_JWKS_TTL_SECS` (default 900)
     #[must_use]
     pub fn from_env(audience: impl Into<String>) -> Self {
-        let jwks_url = env::var("AUTH_CORE_JWKS_URL")
-            .unwrap_or_else(|_| "http://auth-core:3011/api/convex-auth/jwks".to_owned());
-        let expected_issuer = env::var("AUTH_CORE_ISSUER")
-            .unwrap_or_else(|_| "http://auth-core:3011/api/convex-auth".to_owned());
-        // Documented exception to the exact-literal rule (this reader does not use
-        // `switch_from`): the name is shared with the Data Plane, whose documents-api-go
-        // enforces by default and whose compose sets `AUTHCTX_ENFORCE: "1"`, so `1`,
-        // `true`, `yes` and `on` keep enforcing here.
-        let enforce = matches!(
-            env::var("AUTHCTX_ENFORCE")
-                .unwrap_or_default()
-                .to_lowercase()
-                .as_str(),
-            "1" | "true" | "yes" | "on"
-        );
-        let jwks_ttl = env::var("AUTHCTX_JWKS_TTL_SECS")
-            .ok()
+        Self::from_lookup(audience, |key| env::var(key).ok())
+    }
+
+    /// The reader behind [`Config::from_env`], with the variable lookup injected so the defaults can
+    /// be tested without touching the process environment.
+    fn from_lookup(audience: impl Into<String>, lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let jwks_url = lookup("AUTH_CORE_JWKS_URL")
+            .unwrap_or_else(|| "http://auth-core:3011/api/convex-auth/jwks".to_owned());
+        let expected_issuer = lookup("AUTH_CORE_ISSUER")
+            .unwrap_or_else(|| "http://auth-core:3011/api/convex-auth".to_owned());
+        let enforce = enforce_from(lookup("AUTHCTX_ENFORCE").as_deref());
+        let jwks_ttl = lookup("AUTHCTX_JWKS_TTL_SECS")
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|&v| v > 0)
             .map_or(Duration::from_secs(900), Duration::from_secs);
@@ -74,6 +70,31 @@ impl Config {
             enforce,
         }
     }
+}
+
+/// The reading of `AUTHCTX_ENFORCE`, pure so the accepted spellings are pinned without the process
+/// environment.
+///
+/// Enforce on `1`, `true`, `yes` or `on`, in any case and with no trimming, so ` 1 `, `true ` and
+/// `enforce` observe. Unset, empty and every other value observe.
+///
+/// This is a documented exception to the exact-literal rule for switches, and it stays lenient on
+/// purpose: an exact read would enforce fewer spellings and weaken the check. documents-api-go
+/// reads the same name the other way round. It observes only on `0`, `false`, `no` and `off`
+/// (trimmed, any case) and enforces otherwise, so it enforces when the variable is unset and on a
+/// value this reader observes, such as `unexpected`. The Data Plane compose sets
+/// `AUTHCTX_ENFORCE: "1"`; no Model Plane compose sets it, so Model Plane services observe unless
+/// their environment says otherwise.
+///
+/// Whether an unset value should enforce, as documents-api-go does, is an open owner decision
+/// (fail closed, or keep observing). Until the owner decides, unset observes here, and
+/// `unset_authctx_enforce_observes_in_the_config_reader` pins that. Flipping the default is a
+/// behaviour change and needs that decision first.
+fn enforce_from(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(str::to_lowercase).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
 }
 
 /// Tower `Layer` that applies the auth context to every request.
@@ -292,4 +313,55 @@ fn error_response(err: &AuthCtxError) -> Response<Body> {
                 .body(Body::empty())
                 .expect("empty body is always valid")
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{enforce_from, Config};
+
+    #[test]
+    fn authctx_enforce_enforces_on_the_four_words_in_any_case() {
+        for raw in ["1", "true", "TRUE", "True", "yes", "YES", "on", "On"] {
+            assert!(enforce_from(Some(raw)), "{raw:?} must enforce");
+        }
+    }
+
+    /// Everything else observes here: unset, empty, the off words, padded forms and any other word.
+    /// documents-api-go enforces for unset, padded and unrecognised values, and that difference is
+    /// pinned here so it cannot close by accident.
+    #[test]
+    fn authctx_enforce_observes_for_everything_else() {
+        for raw in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("no"),
+            Some("off"),
+            Some(" 1 "),
+            Some(" true"),
+            Some("true "),
+            Some("enforce"),
+            Some("unexpected"),
+        ] {
+            assert!(!enforce_from(raw), "{raw:?} must observe");
+        }
+    }
+
+    /// The Model Plane default, read through the same body `Config::from_env` runs. With
+    /// `AUTHCTX_ENFORCE` unset the layer observes, where documents-api-go enforces. That is the
+    /// open owner decision on `enforce_from`, so this pin changes only together with that decision.
+    #[test]
+    fn unset_authctx_enforce_observes_in_the_config_reader() {
+        let cfg = Config::from_lookup("model-plane", |_| None);
+        assert!(!cfg.enforce);
+    }
+
+    #[test]
+    fn authctx_enforce_one_enables_enforce_in_the_config_reader() {
+        let cfg = Config::from_lookup("model-plane", |key| {
+            (key == "AUTHCTX_ENFORCE").then(|| "1".to_owned())
+        });
+        assert!(cfg.enforce);
+    }
 }

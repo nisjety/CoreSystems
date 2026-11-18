@@ -185,14 +185,15 @@ pub enum ZdrAttestationError {
         prefix: String,
     },
 
-    /// The legacy `*_ZDR_CONFIRMED` boolean holds a value other than unset, empty, `false`, `0` or
-    /// the exact literal `true`. It is refused rather than read as off, because an off reading
-    /// would drop a claim the operator may have meant. The value is not echoed into the error: it
-    /// may be a secret pasted into the wrong variable, and boot logs are not the place for it.
+    /// The legacy `*_ZDR_CONFIRMED` boolean holds a value other than unset, an explicit off word
+    /// (`false`, `0`, `off` or `no`, in any case and padded, or empty) or the exact literal `true`.
+    /// It is refused rather than read as off, because an off reading would drop a claim the
+    /// operator may have meant. The value is not echoed into the error: it may be a secret pasted
+    /// into the wrong variable, and boot logs are not the place for it.
     #[error(
-        "{legacy_var} must be exactly true, false, 0, or unset (an empty value counts as unset). \
-         Only true asserts ZDR, and it still needs an attestation behind it. Any other value is \
-         refused rather than read as off, so a claim is never dropped silently."
+        "{legacy_var} must be exactly true, or an off word (false, 0, off or no, in any case, or \
+         unset). Only true asserts ZDR, and it still needs an attestation behind it. Any other \
+         value is refused rather than read as off, so a claim is never dropped silently."
     )]
     UnreadableLegacyBoolean { legacy_var: &'static str },
 }

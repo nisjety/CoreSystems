@@ -1,8 +1,9 @@
 //! The strict switch reader behind `INFERENCE_BYO_GATEWAY_ENABLED`,
 //! `INFERENCE_PROVIDER_BENCHING` and `INFERENCE_SAME_TIER_FALLBACK`: only the literal
 //! `true` turns a switch on. The residency opt-ins (`truthy_env`) follow the same rule.
-//! The legacy ZDR boolean (`resolve_zdr`) asserts ZDR only on the literal `true`, and
-//! refuses any value other than unset, empty, `false` or `0` rather than reading it as off.
+//! The legacy ZDR boolean (`resolve_zdr`) asserts ZDR only on the literal `true`, reads the
+//! explicit off words (`false`, `0`, `off` and `no`, in any case and padded) as no claim, and
+//! refuses any other value rather than reading it as off.
 
 use super::*;
 
@@ -45,15 +46,20 @@ fn default_off_boolean_flags_are_on_only_for_the_exact_literal_true() {
     std::env::remove_var(PROBE);
 }
 
-/// The legacy boolean is read as exactly one of `true`, `false`, `0`, empty or unset. Every other
-/// spelling is refused, never read as off: a `1` or `TRUE` read as off would boot without the claim
-/// its operator meant, which is the silent drop this reader exists to prevent.
+/// The legacy boolean asserts ZDR only on the exact literal `true`. Unset and the explicit off
+/// words make no claim, padded and in any case: they are the same words `parse_switch` reads as
+/// off, because both take `mp_contracts::loop_fold::EXPLICIT_OFF_WORDS`. Every other spelling is
+/// refused, never read as off: a `1` or `TRUE` read as off would boot without the claim its
+/// operator meant, which is the silent drop this reader exists to prevent.
 #[test]
 fn legacy_zdr_boolean_reads_only_its_known_spellings() {
     const LEGACY: &str = "AZURE_OPENAI_ZDR_CONFIRMED";
     let read = |raw: Option<&str>| legacy_zdr_asserted(LEGACY, raw.map(OsStr::new));
     assert_eq!(read(None), Ok(false), "unset makes no claim");
-    for off in ["", "false", "0"] {
+    for &off in mp_contracts::loop_fold::EXPLICIT_OFF_WORDS {
+        assert_eq!(read(Some(off)), Ok(false), "{off:?} makes no claim");
+    }
+    for off in [" false ", "FALSE", "Off", " NO ", "\tno\n", "   "] {
         assert_eq!(read(Some(off)), Ok(false), "{off:?} makes no claim");
     }
     assert_eq!(
@@ -62,7 +68,7 @@ fn legacy_zdr_boolean_reads_only_its_known_spellings() {
         "the exact literal asserts ZDR"
     );
     for other in [
-        "1", "TRUE", "True", " true", "true ", "yes", "on", "off", "no", " false", "FALSE", "ture",
+        "1", "TRUE", "True", " true", "true ", "yes", "on", "ture", "onn", "offf", "enforce",
     ] {
         assert_eq!(
             read(Some(other)),
@@ -110,14 +116,21 @@ fn legacy_zdr_boolean_boots_without_zdr_only_for_its_off_spellings() {
         matches!(resolve_zdr("test", PREFIX, LEGACY, today), Ok(None)),
         "unset must not assert ZDR"
     );
-    for raw in ["", "false", "0"] {
+    for &raw in mp_contracts::loop_fold::EXPLICIT_OFF_WORDS {
         std::env::set_var(LEGACY, raw);
         assert!(
             matches!(resolve_zdr("test", PREFIX, LEGACY, today), Ok(None)),
             "{raw:?} must not assert ZDR"
         );
     }
-    for raw in ["1", " true", "TRUE", "yes", "on"] {
+    for raw in [" false ", "FALSE", "Off", " NO ", "\tno\n"] {
+        std::env::set_var(LEGACY, raw);
+        assert!(
+            matches!(resolve_zdr("test", PREFIX, LEGACY, today), Ok(None)),
+            "{raw:?} must not assert ZDR"
+        );
+    }
+    for raw in ["1", " true", "TRUE", "yes", "on", "ture"] {
         std::env::set_var(LEGACY, raw);
         let error = resolve_zdr("test", PREFIX, LEGACY, today)
             .expect_err("a spelling this reader does not know must stop the boot");

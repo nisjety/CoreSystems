@@ -300,14 +300,19 @@ impl SpaceZdrMode {
     }
 }
 
-/// Parse the `SESSION_CORE_SPACE_ZDR` value. Only the exact string `enforce` enables
-/// enforcement; unset, empty, `observe`, `Enforce`, `true` and every other value are `Observe`,
-/// so a typo can never silently turn the refusal on or change what ships by default.
+/// Parse the `SESSION_CORE_SPACE_ZDR` value. Only the word `enforce` enables enforcement, and it
+/// is read trimmed and case-folded, so `Enforce`, `ENFORCE` and ` enforce ` enforce too.
+///
+/// This is a deliberate exception to the exact-literal rule for switches. The mode strengthens a
+/// ZDR refusal, so a spelling variant must not drop enforcement silently, and a mis-cased word can
+/// only make the refusal stricter. Every other value is `Observe`, as before: unset, empty,
+/// `observe`, `true` and any other typo, so nothing but the word changes what ships by default.
 #[must_use]
 pub fn space_zdr_mode(raw: Option<&str>) -> SpaceZdrMode {
-    match raw {
-        Some("enforce") => SpaceZdrMode::Enforce,
-        _ => SpaceZdrMode::Observe,
+    if raw.is_some_and(|value| value.trim().eq_ignore_ascii_case("enforce")) {
+        SpaceZdrMode::Enforce
+    } else {
+        SpaceZdrMode::Observe
     }
 }
 
@@ -552,10 +557,35 @@ mod tests {
     }
 
     #[test]
-    fn space_zdr_mode_parses_exactly() {
-        assert_eq!(space_zdr_mode(Some("enforce")), SpaceZdrMode::Enforce);
-        // Only the exact lower-case word enables enforcement; everything else is the default.
-        for raw in [None, Some(""), Some("observe"), Some("Enforce"), Some("ENFORCE"), Some("true"), Some("1"), Some(" enforce"), Some("enforce ")] {
+    fn space_zdr_mode_enforces_on_the_word_trimmed_and_in_any_case() {
+        for raw in [
+            "enforce",
+            "Enforce",
+            "ENFORCE",
+            " enforce",
+            "enforce ",
+            "\tEnforce\n",
+        ] {
+            assert_eq!(space_zdr_mode(Some(raw)), SpaceZdrMode::Enforce, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn space_zdr_mode_is_observe_for_every_other_value() {
+        // Unset, empty and the rest keep the default, including the words a switch reads as on.
+        for raw in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("observe"),
+            Some("true"),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+            Some("enforced"),
+            Some("enforc"),
+            Some("enforce me"),
+        ] {
             assert_eq!(space_zdr_mode(raw), SpaceZdrMode::Observe, "{raw:?}");
         }
     }

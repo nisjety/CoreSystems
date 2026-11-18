@@ -399,9 +399,10 @@ impl InferenceConfig {
 /// ZDR without supplying the attestation fails boot: silently dropping the claim
 /// would leave them believing ZDR is on while requests fail later with
 /// `ZdrUnavailable`, far from the change that caused it. Only the exact literal `true`
-/// asserts it. Unset, empty, `false` and `0` make no claim, and any other value (`1`,
-/// `TRUE`, ` true `, `yes`) fails boot as unreadable rather than being read as off, because
-/// reading it as off is the same silent drop. See [`legacy_zdr_asserted`].
+/// asserts it. Unset and the explicit off words (`false`, `0`, `off` and `no`, in any case and
+/// padded) make no claim. Any other value (`1`, `TRUE`, ` true `, `yes`) fails boot as unreadable
+/// rather than being read as off, because reading it as off is the same silent drop. See
+/// [`legacy_zdr_asserted`].
 ///
 /// An approval outside its in-force window is the one thing that does not fail
 /// boot (DEC-33 D6): the surface boots without ZDR, so ZDR turns refuse with the
@@ -509,11 +510,13 @@ fn truthy_env(name: &str) -> bool {
 /// Whether the legacy `*_ZDR_CONFIRMED` boolean asserts ZDR. `value` is the variable as read, or
 /// `None` when it is unset.
 ///
-/// Unset, empty, `false` and `0` make no claim. Only the exact literal `true` asserts one, and
-/// [`ZdrAttestation::resolve_lenient`] refuses that without an attestation behind it. Any other
-/// value is refused rather than read as off, so `1`, `TRUE`, ` true ` and a value that is not UTF-8
-/// cannot boot without the claim the operator may have meant. As with the other switch readers
-/// here, there is no trimming and no case folding.
+/// Only the exact literal `true` asserts one, and [`ZdrAttestation::resolve_lenient`] refuses that
+/// without an attestation behind it. Unset and the explicit off words (`false`, `0`, `off` and
+/// `no`, in any case and with surrounding whitespace, and an empty value) make no claim. These are
+/// the words `relevance_calibration::parse_switch` reads as off, because both take
+/// `mp_contracts::loop_fold::is_explicit_off`. Any other value is refused rather than read as off,
+/// so `1`, `TRUE`, ` true ` and a value that is not UTF-8 cannot boot without the claim the
+/// operator may have meant.
 ///
 /// # Errors
 ///
@@ -527,7 +530,7 @@ fn legacy_zdr_asserted(
     };
     match raw.to_str() {
         Some("true") => Ok(true),
-        Some("" | "0" | "false") => Ok(false),
+        Some(word) if mp_contracts::loop_fold::is_explicit_off(word) => Ok(false),
         _ => Err(ZdrAttestationError::UnreadableLegacyBoolean { legacy_var }),
     }
 }

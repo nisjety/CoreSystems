@@ -370,6 +370,23 @@ pub fn former_spelling(literal: &str, value: Option<&str>) -> bool {
     })
 }
 
+/// The explicit off words: an empty value (which is also an unset one), `0`, `false`, `off` and
+/// `no`. [`is_explicit_off`] reads a value against this list.
+pub const EXPLICIT_OFF_WORDS: &[&str] = &["", "0", "false", "off", "no"];
+
+/// Whether `value` is an explicit off word, after surrounding whitespace is trimmed and ASCII case
+/// is folded.
+///
+/// A reader that asserts something uses it to tell an off word, which makes no claim, from a value
+/// it must refuse: the legacy `*_ZDR_CONFIRMED` boolean and the relevance calibration switch both
+/// take this one list, so they agree on what counts as off. It does not replace the switch
+/// readers. [`switch_from`] still reads every value other than the exact `true` as off.
+#[must_use]
+pub fn is_explicit_off(value: &str) -> bool {
+    let folded = value.trim().to_ascii_lowercase();
+    EXPLICIT_OFF_WORDS.contains(&folded.as_str())
+}
+
 /// The environment switch for the in-place resume of a paused Do loop (build plan WS03
 /// S7). Default off; parsed by [`switch_from`] (the exact literal `true`, nothing else).
 ///
@@ -1437,6 +1454,28 @@ mod tests {
         // The report only flags: the exact reader still reads each former spelling as off.
         for former in ["1", "on", "TRUE", " true "] {
             assert!(!switch_from(Some(former)), "{former:?}");
+        }
+    }
+
+    #[test]
+    fn the_explicit_off_words_are_off_after_trimming_and_case_folding() {
+        for off in EXPLICIT_OFF_WORDS {
+            assert!(is_explicit_off(off), "{off:?} is an off word");
+        }
+        for off in [" false ", "FALSE", "Off", " NO ", "\tno\n", "0 ", "   "] {
+            assert!(
+                is_explicit_off(off),
+                "{off:?} is an off word once padded or cased"
+            );
+        }
+        for not_off in [
+            "true", "TRUE", " true ", "1", "on", "yes", "enabled", "ture", "offf", "n o", "enforce",
+        ] {
+            assert!(!is_explicit_off(not_off), "{not_off:?} is not an off word");
+        }
+        // The strict reader reads every off word as off too, so an off word is off by both readers.
+        for off in EXPLICIT_OFF_WORDS {
+            assert!(!switch_from(Some(*off)), "{off:?}");
         }
     }
 
