@@ -2376,6 +2376,7 @@ describeIfPolicy('principal bundle R-13 PR 1: quarry-edge model lanes', () => {
     expect(principalNames()).toEqual([
       'browser-broker',
       'capability-core',
+      'control-space-deletion',
       'conversation-core',
       'corpus-seeder',
       'data-orchestrator',
@@ -3293,6 +3294,79 @@ describeIfPolicy(
           listed: names.includes(variable),
         }).toEqual({ principal, variable, listed: true });
       }
+    });
+  },
+);
+
+// W3-FIX-10 (first cut in W3-FIX-5): Control's Space-deletion principal. Control signs
+// the data-plane purge of a deleted Space, so the one row holds exactly the two deletion
+// scopes, stays directory-bound, and is the only holder of either scope.
+describeIfPolicy(
+  'principal bundle W3-FIX-10: control-space-deletion holds the Space deletion scopes alone',
+  () => {
+    const deletionScopes = [
+      'data:space-binding:delete',
+      'data:space-canvas:delete',
+    ];
+
+    it('holds exactly the two deletion scopes on data-plane, directory-bound with no allowAnyOrg', () => {
+      const row = policy?.['control-space-deletion'];
+      expect(row?.audiences).toEqual(['data-plane']);
+      expect(row?.scopesByAudience?.['data-plane']).toEqual(deletionScopes);
+      expect(row?.tenancy).toBe('directory');
+      expect(row?.allowAnyOrg).toBeUndefined();
+      expect(row?.consumerEnv).toBe('CONTROL_SPACE_DELETION_SERVICE_API_KEY');
+    });
+
+    it('is the only holder of either deletion scope, on data-plane alone', () => {
+      for (const scope of deletionScopes) {
+        expect(holdersOfScope(scope)).toEqual(['control-space-deletion']);
+        expect(lanesHoldingScope(scope)).toEqual([
+          'control-space-deletion|data-plane',
+        ]);
+        expectScopeConfinedTo(scope, ['control-space-deletion|data-plane']);
+      }
+    });
+  },
+);
+
+// WS18-S2: execution-core carries the owner-action health write on capability-core and
+// the run-thread probe on session-core, and no other principal holds either.
+describeIfPolicy(
+  'principal bundle WS18-S2: execution-core holds the owner-action health and run-thread probe scopes',
+  () => {
+    it('gives execution-core the owner-action health write on capability-core and the probe on session-core', () => {
+      expect(
+        policy?.['execution-core']?.scopesByAudience?.['capability-core'],
+      ).toContain('capability:owner-action:health:write');
+      expect(
+        policy?.['execution-core']?.scopesByAudience?.['session-core'],
+      ).toContain('session:run-thread-action:probe');
+    });
+
+    it('is the only holder of each of those scopes, on its one lane', () => {
+      expect(holdersOfScope('capability:owner-action:health:write')).toEqual([
+        'execution-core',
+      ]);
+      expect(
+        lanesHoldingScope('capability:owner-action:health:write'),
+      ).toEqual(['execution-core|capability-core']);
+      expectScopeConfinedTo(
+        'capability:owner-action:health:write',
+        ['execution-core|capability-core'],
+        'global',
+      );
+      expect(holdersOfScope('session:run-thread-action:probe')).toEqual([
+        'execution-core',
+      ]);
+      expect(lanesHoldingScope('session:run-thread-action:probe')).toEqual([
+        'execution-core|session-core',
+      ]);
+      expectScopeConfinedTo(
+        'session:run-thread-action:probe',
+        ['execution-core|session-core'],
+        'global',
+      );
     });
   },
 );
