@@ -383,9 +383,10 @@ pub(crate) async fn revise_message(
         }
         let reply = map_model_response(status, response);
         // WS12-S8: a deleted message keeps no reactions. Best effort: the delete already landed
-        // and a reaction on a tombstone is hidden from the transcript either way.
+        // and a reaction on a tombstone is hidden from the transcript either way. A clear that does
+        // not land is counted and logged (V3d-bff-2), and is not retried here.
         if action == "delete" && reply.0 == StatusCode::OK && state.space_features.reactions_api {
-            let _ = convex_mutation_message(
+            if let Err(cause) = convex_mutation_message(
                 state,
                 "spaceReactions:clearForMessageForGateway",
                 json!({
@@ -396,7 +397,11 @@ pub(crate) async fn revise_message(
                     "messageId": message_id,
                 }),
             )
-            .await;
+            .await
+            {
+                // Application's own text is dropped unread: only whether it refused is kept.
+                note_reaction_clear_failure(cause.is_some());
+            }
         }
         return reply;
     }
@@ -932,13 +937,23 @@ pub(super) async fn attach_reactions(
     false
 }
 
+/// Counts and logs one reaction clear that did not land after its message was deleted (V3d-bff-2). The delete
+/// has already landed and still answers 200. `refused` says whether Application threw; the thread, the message
+/// and Application's text never reach the counter or the log.
+fn note_reaction_clear_failure(refused: bool) {
+    let reason = if refused { "refused" } else { "unavailable" };
+    metrics::counter!("verevon_space_reaction_clear_failures_total", "reason" => reason)
+        .increment(1);
+    tracing::warn!(reason, "reactions of a deleted message were not cleared");
+}
+
 #[cfg(test)]
 mod tests {
     //! WS12-S8: the reaction routes' refusal order, error mapping and the transcript merge, driven
     //! through the real router against mock Auth, Control, org-core, Application (Convex) and
     //! Model Gateway. Message edit and delete share the module; the delete test here pins only that
     //! a landed delete clears the message's reactions.
-    use super::attach_reactions;
+    use super::{attach_reactions, note_reaction_clear_failure};
     use crate::config::AppState;
     use crate::middleware::{AuthenticatedUser, AuthorizedMembership};
     use axum::{body::Body, http::Request};
@@ -1542,6 +1557,83 @@ mod tests {
         let (status, body) = call(&fx, "DELETE", MESSAGE, Some(("idempotency-key", "key-0000000000000001"))).await;
         assert_eq!(status, 200, "{body}");
         assert_eq!(body["data"]["revision_state"], "deleted");
+    }
+
+    /// V3d-bff-2: a reaction clear that fails after a landed delete is counted under its closed reason, and the
+    /// delete still answers 200. Both refusals are covered: Application throwing, and Application unreachable or
+    /// unreadable. The log line is pinned by the synchronous test below.
+    #[tokio::test]
+    async fn a_failed_reaction_clear_is_counted_and_the_delete_still_lands() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _metrics = metrics::set_default_local_recorder(&recorder);
+
+        let mut thrown = Opts::new("editor");
+        thrown.revise_on = true;
+        thrown.mutation = ResponseTemplate::new(200).set_body_json(json!({
+            "status": "error",
+            "errorMessage": "thread-1 msg-1 private-words",
+        }));
+        let fx_thrown = fx(thrown).await;
+        let (status, body) = call(
+            &fx_thrown,
+            "DELETE",
+            MESSAGE,
+            Some(("idempotency-key", "key-0000000000000001")),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+
+        let mut unreachable = Opts::new("editor");
+        unreachable.revise_on = true;
+        unreachable.mutation = ResponseTemplate::new(500);
+        let fx_down = fx(unreachable).await;
+        let (status, body) = call(
+            &fx_down,
+            "DELETE",
+            MESSAGE,
+            Some(("idempotency-key", "key-0000000000000001")),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+
+        let rendered = handle.render();
+        for reason in ["refused", "unavailable"] {
+            let row =
+                format!("verevon_space_reaction_clear_failures_total{{reason=\"{reason}\"}} 1");
+            assert!(rendered.lines().any(|line| line == row), "{rendered}");
+        }
+    }
+
+    /// V3d-bff-2: a failed reaction clear logs one fixed sentence and its closed reason, and counts under the same
+    /// reason. The thread, the message and Application's text never reach the function, so never the log. The
+    /// gateway's own request span (which carries the request path) is outside this function and is not asserted.
+    /// The interest cache is rebuilt inside the scope, because the callsite may already be registered from a
+    /// concurrent test that ran with no subscriber.
+    #[test]
+    fn a_failed_reaction_clear_logs_a_fixed_line_and_its_reason() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _metrics = metrics::set_default_local_recorder(&recorder);
+        let capture = crate::zdr_log::test_capture::Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
+            note_reaction_clear_failure(true);
+            note_reaction_clear_failure(false);
+        });
+        let log = capture.text();
+        for reason in ["refused", "unavailable"] {
+            let line =
+                format!("reactions of a deleted message were not cleared reason=\"{reason}\"");
+            assert!(log.contains(&line), "{log}");
+            let row =
+                format!("verevon_space_reaction_clear_failures_total{{reason=\"{reason}\"}} 1");
+            assert!(handle.render().lines().any(|rendered| rendered == row));
+        }
     }
 
     #[tokio::test]

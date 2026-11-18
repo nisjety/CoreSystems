@@ -98,6 +98,7 @@ import {
 	type ComposerSettingsItem,
 } from "@/shared/api/composer-settings-client";
 import { selectChatThread } from "@/features/chat/lib/chat-thread-history";
+import { subscriptionRouteWithheldOnSpace } from "@/features/chat/lib/space-side-features";
 import {
 	VoiceModeDialog,
 	type VoiceReply,
@@ -1460,9 +1461,13 @@ export function DashboardComposer(props: {
 		);
 	// Chat-capable models grouped by family/provider. Non-chat modalities
 	// (image/video/embeddings/transcribe) are filtered out by `groupChatModels`.
+	// A Space thread does not take the ChatGPT subscription route while the BYO gateway switch is on (DEC-V-R8): its models
+	// are not listed there, so no subscription route can be chosen for a Space turn.
 	const chatModelGroups = createMemo<ModelGroup[]>(() =>
 		groupChatModels(models() ?? []).filter(
-			(group) => group.label !== "Subscription" || activeSubscriptionConnection(),
+			(group) =>
+				group.label !== "Subscription" ||
+				(Boolean(activeSubscriptionConnection()) && !subscriptionRouteWithheldOnSpace(props.spaceScoped)),
 		),
 	);
 	// Temporary chat is only offerable if some deployment is ATTESTED zero-retention.
@@ -1730,8 +1735,11 @@ export function DashboardComposer(props: {
 	const [selectedGatewayConnectionId, setSelectedGatewayConnectionId] = createSignal<string | undefined>(
 		initialModelSelection.modelConnectionId,
 	);
+	// A Space thread never takes the person's own gateway (DEC-V-R8): its turns may be written under one, so the connection is
+	// not sent on it. A remembered gateway choice on a Space thread is refused at submit, and never replaced by the platform.
 	const gatewayRoute = createMemo(() => {
 		const connectionId = selectedGatewayConnectionId();
+		if (customerGatewayEnabled && props.spaceScoped) return undefined;
 		return connectionId ? { connectionId } : undefined;
 	});
 	const [customerGateways] = createResource(
@@ -1965,7 +1973,8 @@ export function DashboardComposer(props: {
 	// `/learn` (EP-11 S7). Offered only behind VITE_LEARN_COMMAND, and only where the page says this chat is saved,
 	// W4-BYO-6: the "Your gateway" models the menu offers. None in a Temporary chat or for a zero-retention organisation.
 	const gatewayModelOptions = createMemo(() => {
-		if (!customerGatewayEnabled || temporaryChat() || orgZeroRetention() === true) return [];
+		// A Space thread never takes the person's own gateway (DEC-V-R8), so no gateway model is offered in one.
+		if (!customerGatewayEnabled || temporaryChat() || props.spaceScoped || orgZeroRetention() === true) return [];
 		return (customerGateways() ?? []).flatMap((connection) =>
 			connection.modelIds.map((modelId) => ({ connectionId: connection.id, modelId })),
 		);
@@ -3267,10 +3276,31 @@ export function DashboardComposer(props: {
 					"Checking your ChatGPT subscription … Try again in a moment.",
 				),
 			};
+		// A Space thread never takes the ChatGPT subscription route while the BYO gateway switch is on (DEC-V-R8): the turn
+		// would be written under one member's subscription. The draft is kept and the person chooses another model; nothing is
+		// sent in its place.
+		if (subscriptionBacked() && subscriptionRouteWithheldOnSpace(props.spaceScoped)) {
+			const message = i18n.tr(
+				"Abonnementsmodeller kan ikke brukes i et delt Space. Velg en annen modell. Utkastet er beholdt.",
+				"ChatGPT subscription models cannot be used in a shared Space. Choose another model. Your draft has been kept.",
+			);
+			setSubmitError(message);
+			return { ok: false, message };
+		}
 		const subscriptionRoute = selectedSubscriptionRoute();
 		if (subscriptionBacked() && !subscriptionRoute) {
 			setStaleSubscriptionNotice(true);
 			const message = i18n.tr("Koble til ChatGPT-abonnementet under Profil → ChatGPT-abonnement før du sender. Utkastet er beholdt.", "Connect your ChatGPT subscription under Profile → ChatGPT subscription before sending. Your draft has been kept.");
+			setSubmitError(message);
+			return { ok: false, message };
+		}
+		// A Space thread never takes the person's own gateway (DEC-V-R8): its turns may be written under one, and the platform
+		// must not take that work over. The draft is kept and the person chooses another model; nothing is sent in its place.
+		if (customerGatewayEnabled && props.spaceScoped && selectedGatewayConnectionId()) {
+			const message = i18n.tr(
+				"Din egen gateway kan ikke brukes i et delt Space. Velg en annen modell. Utkastet er beholdt.",
+				"Your own gateway cannot be used in a shared Space. Choose another model. Your draft has been kept.",
+			);
 			setSubmitError(message);
 			return { ok: false, message };
 		}

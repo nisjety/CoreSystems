@@ -30,6 +30,7 @@ import {
   type AiModelSelection,
 } from '@/shared/ai/model-selection'
 import { rememberedPrivacyTier } from '@/features/dashboard/home/submit-privacy-tier'
+import { subscriptionRouteWithheldOnSpace } from '@/features/chat/lib/space-side-features'
 import { cn } from '@/shared/lib/cn'
 import { ModelSearchField } from './ModelSearchField'
 
@@ -80,6 +81,11 @@ export function AiModelPicker(props: {
   onGatewayPick?: (connectionId: string, modelId: string) => void
   /** The chat is temporary (stores nothing): the "Your gateway" group is not offered. */
   temporaryChat?: boolean
+  /**
+   * The picker serves a Space thread or room. With `VITE_BYO_GATEWAY` the literal `'true'`, the ChatGPT subscription models
+   * are not offered there (DEC-V-R8), as the "Your gateway" models are not. Absent or false changes nothing.
+   */
+  spaceScoped?: boolean
   /** Support transcripts must honor the organization's no-retention posture. */
   respectOrgZdr?: boolean
   /**
@@ -138,8 +144,10 @@ export function AiModelPicker(props: {
     (subscriptions() ?? []).find((connection) => connection.status.trim().toLocaleLowerCase() === 'active'),
   )
   const subscriptionBlocked = createMemo(() => props.respectOrgZdr && organizationSettings()?.zdr === true)
+  // A Space never takes the subscription route while the BYO gateway switch is on (DEC-V-R8): its group is not offered there.
+  const subscriptionOffered = () => !subscriptionRouteWithheldOnSpace(props.spaceScoped)
   const catalogGroups = createMemo(() => groupChatModels(models() ?? []).filter(
-    (group) => group.label !== 'Subscription' || Boolean(activeSubscription()),
+    (group) => group.label !== 'Subscription' || (Boolean(activeSubscription()) && subscriptionOffered()),
   ))
   const flatModels = createMemo(() => catalogGroups().flatMap((group) => group.models))
   // The search applies only while its field is shown (more than six chat models). Selection and
@@ -240,7 +248,7 @@ export function AiModelPicker(props: {
   }
 
   function chooseCatalogModel(model: ModelInfo): void {
-    if (model.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER && untrack(subscriptionBlocked)) return
+    if (model.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER && (untrack(subscriptionBlocked) || !untrack(subscriptionOffered))) return
     choose({
       model: model.id,
       label: model.name,

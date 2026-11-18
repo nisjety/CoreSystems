@@ -3,6 +3,7 @@
 import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
 import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ApiError } from '@/shared/api/api-error'
 
 // A reasoning translation of a Space thread is not offered while the BYO gateway switch is on: the thread's turns may be
 // written under a customer gateway or a subscription, and a translation there would run on the platform chain (DEC-V-R8).
@@ -74,5 +75,22 @@ describe('ReasoningPopover translation on a Space thread', () => {
   it('still offers the translation on a thread that is not a Space thread while the switch is on', () => {
     vi.stubEnv('VITE_BYO_GATEWAY', 'true')
     expect(translateOffered({ spaceThread: false })).toBe(true)
+  })
+
+  it('shows the gateway refusal of the thread as its reason, with no retry', async () => {
+    vi.stubEnv('VITE_BYO_GATEWAY', 'true')
+    translateMock.mockRejectedValueOnce(new ApiError('m', 409, 'side_chat_thread_retention_refused'))
+    render(() => <ReasoningPopover message={turn} />)
+    fireEvent.click(screen.getByRole('button', { name: /Detaljer|Details/ }))
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Innsikt' }))
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Oversett' }))
+    await vi.waitFor(() => {
+      flush()
+      expect(screen.getByText(/ikke tilgjengelig for denne samtalen/)).toBeTruthy()
+    })
+    expect(screen.queryByRole('button', { name: 'Oversett' })).toBeNull()
+    expect(translateMock).toHaveBeenCalledTimes(1)
   })
 })

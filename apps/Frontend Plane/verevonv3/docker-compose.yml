@@ -252,12 +252,13 @@ services:
       # and no step receipt — triggered by exactly the 403/429 that meant Quarry
       # had refused. Web fetch belongs to the Ingestion Plane; a stealth tier, if
       # needed, goes behind quarry-edge as another DriverKind in its waterfall.
+      # Dev only: the dev auth bypass. Only the literal true turns it on; refused when APP_ENV is production.
       ALLOW_DEV_AUTH_BYPASS: ${ALLOW_DEV_AUTH_BYPASS:-0}
       # Dev only: logs the blocked origin of each CSP report. Forced off when APP_ENV is production.
       CSP_REPORT_LOG_HOSTS: ${CSP_REPORT_LOG_HOSTS:-false}
-      # Dev only: accepts dev actor headers. Refused, with a log line, when APP_ENV is production.
+      # Dev only: accepts dev actor headers. Only the literal true turns it on; refused, with a log line, when APP_ENV is production.
       ALLOW_DEV_ACTOR_HEADERS: ${ALLOW_DEV_ACTOR_HEADERS:-false}
-      # Dev only: lets a release build boot with placeholder dev keys. The production overlay forces it to 0.
+      # Dev only: lets a release build boot with placeholder dev keys. Only the literal 1 turns it on. The production overlay forces it to 0.
       ALLOW_INSECURE_DEV_DEFAULTS: ${ALLOW_INSECURE_DEV_DEFAULTS:-false}
       RUST_LOG: ${RUST_LOG:-info}
       VEREVON_ALLOWED_ORIGINS: ${VEREVON_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:5199,http://127.0.0.1:5199,http://localhost:3186,http://127.0.0.1:3186,http://localhost:3187,http://127.0.0.1:3187}
@@ -422,7 +423,6 @@ services:
       # WS09: agent work in the room. Rollout controls only (never authorization): the owner plane
       # re-authorizes every steer, attach and stop. OWNER_STEER lets the person who started a run type
       # into it; LIVE_VIEW, LIVE_TEXT and MANAGER_STOP are read by later WS09 slices. Production: off.
-      # Those three default off in every environment, as model-gateway's base compose does (only the literal true enables).
       SPACE_RUN_OWNER_STEER: ${SPACE_RUN_OWNER_STEER:-true}
       # WS16-S8: the personal sidebar layout (GET/PUT /api/v1/spaces/sidebar; 404 when off, which the SPA reads
       # as "use the legacy panel"). A rollout control only; a Zero Data Retention org gets zdr_local / 412 regardless.
@@ -439,12 +439,15 @@ services:
       # WS12-S8: message reactions (PUT/DELETE .../messages/{message_id}/reactions/{emoji}; 404
       # space_reactions_disabled when off). Rollout control only; the live room role, Control's read decision
       # and Session Core's message check decide, ZDR orgs get the typed 412. Needs Convex SPACE_REACTIONS and
-      # model-gateway SPACE_MESSAGE_REVISE_API.
-      SPACE_REACTIONS_API: ${SPACE_REACTIONS_API:-true}
+      # model-gateway SPACE_MESSAGE_REVISE_API. Off by default in every environment, as Convex SPACE_REACTIONS
+      # is; only the literal true enables it.
+      SPACE_REACTIONS_API: ${SPACE_REACTIONS_API:-false}
       # WS04-S8: GET /api/v1/directory/rooms, POST .../join, PATCH .../settings and the actions
       # spaces.join_room / spaces.update_room_settings (404 feature_disabled when off). Rollout control
       # only; Control's per-org space_directory_policies row (absent = off) and the room's visibility decide.
       SPACE_ROOM_DIRECTORY_API: ${SPACE_ROOM_DIRECTORY_API:-true}
+      # SPACE_RUN_LIVE_VIEW, SPACE_RUN_LIVE_TEXT and SPACE_RUN_MANAGER_STOP default off in every environment, as
+      # model-gateway's base compose does (only the literal true enables each). SPACE_RUN_OWNER_STEER above does not.
       SPACE_RUN_LIVE_VIEW: ${SPACE_RUN_LIVE_VIEW:-false}
       SPACE_RUN_LIVE_TEXT: ${SPACE_RUN_LIVE_TEXT:-false}
       SPACE_RUN_MANAGER_STOP: ${SPACE_RUN_MANAGER_STOP:-false}

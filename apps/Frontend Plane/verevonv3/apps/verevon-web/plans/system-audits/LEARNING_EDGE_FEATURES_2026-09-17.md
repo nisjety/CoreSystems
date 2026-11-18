@@ -412,8 +412,7 @@ by direct SQL read, no `DELETE` anywhere in the path. The three read queries (`s
 filter `is_latest = true`. Migration `0037_agent_memory_lineage.sql` adds the two columns,
 forward-only per this service's own convention (zero down-migrations across 37 prior migrations).
 
-The whole feature is gated behind `MEMORY_GROUNDING_ENABLED` (default **off**, following the exact
-`env_flag` convention `DREAMING_LLM_EXTRACTION` already established in this file) — the flag-off
+The whole feature is gated behind `MEMORY_GROUNDING_ENABLED` (default **off**, following the convention `DREAMING_LLM_EXTRACTION` set for default-off switches in this file; the lenient `env_flag` helper it once cited is retired, and such switches now read only the exact literal `true`) — the flag-off
 path was proven **byte-for-byte identical** to pre-change behavior by diffing `persist_candidates`'s
 function body against `git show HEAD`, not by trusting a comment, and a test in the suite itself
 (`persist_candidates_itself_has_no_grounding_dependency`) `include_str!`s the file and asserts the

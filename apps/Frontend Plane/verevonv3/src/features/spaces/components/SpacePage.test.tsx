@@ -685,6 +685,55 @@ describe('SpacePage', () => {
     )
   })
 
+  // V3d-bff-2: a removal whose notes were kept says so in the panel, which outlives the removed card.
+  it('says when a removed agent\'s notes were kept under a legal hold', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+    spacesClient.getSpaceAgents.mockResolvedValue([
+      {
+        subject_id: 'agent-drift', role: 'editor', revision: 1, identity_published: true,
+        binding_ref: 'sab_drift', name: 'Driftsassistent', status: 'active',
+        definition_status: 'active', delivery_targets: [],
+      },
+    ])
+    spacesClient.revokeSpaceAgent.mockResolvedValueOnce({ status: 'revoked', agentMemoryErase: 'held' })
+    renderSpacePage()
+
+    const agentPanel = await openAgentTab()
+    ;(await agentPanel.findByRole('button', { name: 'Fjern fra rommet' })).click()
+    ;(await agentPanel.findByRole('button', { name: /Bekreft at Driftsassistent fjernes/ })).click()
+    await waitFor(() =>
+      expect(spacesClient.getSpaceAgents.mock.calls.length).toBeGreaterThan(1),
+    )
+    expect(await agentPanel.findByText(/en juridisk sperre gjelder for dem/)).toBeTruthy()
+  })
+
+  it('says when a removed agent\'s notes could not be erased, and clears that once a later erase ran', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+    spacesClient.getSpaceAgents.mockResolvedValue([
+      {
+        subject_id: 'agent-drift', role: 'editor', revision: 1, identity_published: true,
+        binding_ref: 'sab_drift', name: 'Driftsassistent', status: 'active',
+        definition_status: 'active', delivery_targets: [],
+      },
+    ])
+    spacesClient.revokeSpaceAgent.mockResolvedValueOnce({ status: 'revoked', agentMemoryErase: 'unavailable' })
+    renderSpacePage()
+
+    const agentPanel = await openAgentTab()
+    ;(await agentPanel.findByRole('button', { name: 'Fjern fra rommet' })).click()
+    ;(await agentPanel.findByRole('button', { name: /Bekreft at Driftsassistent fjernes/ })).click()
+    expect(await agentPanel.findByText(/kunne ikke slettes nå/)).toBeTruthy()
+
+    // The roster still lists the agent in this test, so the card is still there to remove again.
+    spacesClient.revokeSpaceAgent.mockResolvedValueOnce({ status: 'revoked', agentMemoryErase: 'erased' })
+    ;(await agentPanel.findByRole('button', { name: 'Fjern fra rommet' })).click()
+    ;(await agentPanel.findByRole('button', { name: /Bekreft at Driftsassistent fjernes/ })).click()
+    await waitFor(() =>
+      expect(spacesClient.revokeSpaceAgent).toHaveBeenCalledTimes(2),
+    )
+    await waitFor(() => expect(agentPanel.queryByText(/kunne ikke slettes nå/)).toBeNull())
+  })
+
   // A pending binding is waiting on Control; a failed one records that
   // provisioning did not work. Neither can be governed, so neither gets a
   // control the server would refuse.

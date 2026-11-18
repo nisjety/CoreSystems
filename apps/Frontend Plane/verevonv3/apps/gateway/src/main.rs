@@ -440,10 +440,10 @@ mod tests {
                 .strip_prefix(":-")?
                 .strip_suffix('}')
         }
-        // The values `space_flag` reads as on: the exact word `true` for a Model Plane mirror, the
-        // `env_bool` words for every other Space switch.
+        // The values `space_flag` reads as on: the exact word `true` for a switch it reads exactly,
+        // the `env_bool` words for every other Space switch.
         fn reads_on(key: &str, raw: &str) -> bool {
-            if crate::config::MODEL_PLANE_EXACT_TRUE_SWITCHES.contains(&key) {
+            if crate::config::is_exact_true_space_switch(key) {
                 return raw == "true";
             }
             matches!(
@@ -465,8 +465,8 @@ mod tests {
             })
             .map(|(key, _)| key)
             .collect();
-        // V3c-bff-3-rel1: the six Model Plane mirrors now default off, so 36 remain. The floor only
-        // catches a scan that finds next to nothing.
+        // The floor only catches a scan that finds next to nothing: the exact-literal switches default
+        // off and are not counted here.
         assert!(
             dev_default_on.len() >= 30,
             "only {} dev-default-on space_flag switches in the base gateway block: \
@@ -510,6 +510,59 @@ mod tests {
                 declared,
                 vec![off.as_str()],
                 "docker-compose.yml must declare {key} once, defaulting off"
+            );
+        }
+    }
+
+    /// V3d-bff-3: the BFF-only Space switches that default off (`BFF_EXACT_TRUE_SPACE_SWITCHES`) are
+    /// declared once in the base gateway block as `${KEY:-false}`, so a stack without an override shows
+    /// none of their routes.
+    #[test]
+    fn bff_exact_space_switches_default_off_in_the_base_compose() {
+        let base = include_str!("../../../docker-compose.yml").replace("\r\n", "\n");
+        let gateway = compose_gateway_env(&base);
+        for key in crate::config::BFF_EXACT_TRUE_SPACE_SWITCHES {
+            let declared: Vec<&str> = gateway
+                .iter()
+                .filter(|(name, _)| *name == key)
+                .map(|(_, value)| *value)
+                .collect();
+            let off = format!("${{{key}:-false}}");
+            assert_eq!(
+                declared,
+                vec![off.as_str()],
+                "docker-compose.yml must declare {key} once, defaulting off"
+            );
+        }
+    }
+
+    /// V3d-bff-3: a Space switch that keeps the lenient `1|true|yes|on` reading is a default-on kill
+    /// switch, declared `${KEY:-true}` in the base gateway block. The exact list covers every switch
+    /// that defaults off, so a lenient switch that defaults off fails here instead of reading `1` as on.
+    #[test]
+    fn every_lenient_space_switch_is_a_default_on_kill_switch_in_the_base_compose() {
+        let base = include_str!("../../../docker-compose.yml").replace("\r\n", "\n");
+        let gateway = compose_gateway_env(&base);
+        let lenient: Vec<&str> = space_flag_keys()
+            .into_iter()
+            .filter(|key| !crate::config::is_exact_true_space_switch(key))
+            .collect();
+        assert!(
+            lenient.len() >= 30,
+            "only {} lenient space_flag switches: the scan is broken",
+            lenient.len()
+        );
+        for key in lenient {
+            let declared: Vec<&str> = gateway
+                .iter()
+                .filter(|(name, _)| *name == key)
+                .map(|(_, value)| *value)
+                .collect();
+            let on = format!("${{{key}:-true}}");
+            assert_eq!(
+                declared,
+                vec![on.as_str()],
+                "{key} reads 1|true|yes|on, so the base compose must default it on"
             );
         }
     }

@@ -308,6 +308,62 @@ describe('SpaceRoomComposer — subscription model routing', () => {
     })
     stream.finish()
   })
+
+  // DEC-V-R8: a Space room never takes the member's subscription while the BYO gateway switch is on. The subscription models
+  // are not offered in the room, a remembered subscription choice is refused with the draft kept, and nothing is sent in its
+  // place. With the switch off the room sends the route as before (the test above).
+  it('offers no subscription model in a room while the BYO gateway switch is the literal true', async () => {
+    vi.stubEnv('VITE_BYO_GATEWAY', 'true')
+    chatClient.listModels.mockResolvedValue([{
+      id: 'gpt-5.6-luna',
+      name: 'GPT 5.6 Luna Subscription',
+      provider: 'openai-codex-subscription',
+    }])
+    subscriptionsClient.listChatGptSubscriptions.mockResolvedValue([{
+      id: 'conn-subscription-1',
+      providerKey: 'openai-codex-subscription',
+      status: 'active',
+    }])
+    renderComposer()
+
+    fireEvent.click(await screen.findByRole('button', { name: /choose ai model|velg ai-modell/i }))
+    await waitFor(() => expect(subscriptionsClient.listChatGptSubscriptions).toHaveBeenCalled())
+    await new Promise((resolve) => { setTimeout(resolve, 10) })
+    expect(screen.queryByRole('button', { name: /gpt 5\.6 luna subscription/i })).toBeNull()
+  })
+
+  it('refuses a remembered subscription choice in a room, keeps the draft, and sends nothing', async () => {
+    vi.stubEnv('VITE_BYO_GATEWAY', 'true')
+    chatClient.listModels.mockResolvedValue([{
+      id: 'gpt-5.6-luna',
+      name: 'GPT 5.6 Luna Subscription',
+      provider: 'openai-codex-subscription',
+    }])
+    subscriptionsClient.listChatGptSubscriptions.mockResolvedValue([{
+      id: 'conn-subscription-1',
+      providerKey: 'openai-codex-subscription',
+      status: 'active',
+    }])
+    window.localStorage.setItem('verevon.ai-model-selection.v1:org-1', JSON.stringify({
+      model: 'gpt-5.6-luna',
+      label: 'GPT 5.6 Luna Subscription',
+      provider: 'openai-codex-subscription',
+      subscriptionConnectionId: 'conn-subscription-1',
+    }))
+    renderComposer()
+    await waitFor(() => expect(subscriptionsClient.listChatGptSubscriptions).toHaveBeenCalled())
+    flush()
+
+    const box = screen.getByRole('textbox')
+    fireEvent.input(box, { target: { value: 'Use the room subscription' } })
+    flush()
+    fireEvent.submit(box.closest('form') as HTMLFormElement)
+    await new Promise((resolve) => { setTimeout(resolve, 10) })
+
+    expect(screen.getByText(/kan ikke brukes i et delt Space/)).toBeTruthy()
+    expect(chatClient.streamChat).not.toHaveBeenCalled()
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Use the room subscription')
+  })
 })
 
 // A room turn for a catalogue model carries the model's privacy tier, resolved

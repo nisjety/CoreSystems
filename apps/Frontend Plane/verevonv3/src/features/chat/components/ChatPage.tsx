@@ -125,6 +125,7 @@ import { createTranscriptDensity, transcriptDensityEnabled } from '../lib/transc
 import { DensityMenu } from './DensityMenu'
 import { ReaderTools } from './ReaderTools'
 import { SideChatPanel, sideChatConnectionModel, sideChatEnabled } from './SideChatPanel'
+import { sideFeatureThreadOf } from '../lib/space-side-features'
 
 export default function ChatPage() {
   const i18n = useI18n()
@@ -282,11 +283,11 @@ export default function ChatPage() {
   })
   const artifactTemporary = () => temporaryChat() || isActiveThreadTemporary()
   // The thread a side feature (a review, a reasoning translation) names to the gateway, and the model its connection serves
-  // (DEC-V-R8). A temporary or Space thread names neither. Model Gateway refuses a Space thread named for a side feature, and
-  // a Space thread's turns can be written under a connection, so with the BYO gateway switch on the review and the translation
-  // are not offered on a Space thread at all (`sideFeaturesWithheldOnSpace`), as side chat is hidden there. With the switch
-  // off a Space thread names nothing and runs on the platform, as before.
-  const sideFeatureThreadId = () => (state.threadId && !artifactTemporary() && !spaceScoped() ? state.threadId : undefined)
+  // (DEC-V-R8). A temporary thread names none. A Space thread is named too: Model Gateway refuses it with a typed answer
+  // (`scope_not_available_in_space`) while its switch is on, so a Space thread's side feature is never served on the platform
+  // chain by default. With the BYO gateway switch on the review and the translation are also not offered on a Space thread at
+  // all (`sideFeaturesWithheldOnSpace`), as side chat is hidden there.
+  const sideFeatureThreadId = () => sideFeatureThreadOf(state.threadId, artifactTemporary())
   const sideFeatureConnectionModel = createMemo(() =>
     sideFeatureThreadId() ? sideChatConnectionModel(state.turns) : null,
   )

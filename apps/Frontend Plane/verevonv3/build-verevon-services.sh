@@ -473,7 +473,7 @@ plane_overlay_files() {
     # Its own scripts/compose.sh layers docker-compose.override.yml whenever
     # MODEL_PLANE_DEV != 0 — and that variable DEFAULTS TO 1, so the dev
     # profile is the canonical local configuration, not an opt-in. It sets
-    # RUST_LOG=debug, relaxed rate limits, and FINETUNE_ENABLED=1. Building
+    # RUST_LOG=debug, relaxed rate limits, and FINETUNE_ENABLED=true. Building
     # from the base file alone silently produced a production-ish Model Plane
     # with finetune routes off. Skipped under --production, where the script
     # already layers docker-compose.production.yml instead.

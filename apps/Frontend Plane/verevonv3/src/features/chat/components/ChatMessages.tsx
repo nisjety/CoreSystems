@@ -103,7 +103,7 @@ import { readerPolishOn } from '../lib/reader-polish'
 import { listConversations, type LiveTicket } from '@/shared/api/inbox-client'
 import { listNotifications, type Notification } from '@/shared/api/notifications-client'
 import { MIN_PLAN_JUSTIFICATION_CHARS, translateText } from '@/shared/api/chat-client'
-import { sideFeaturesWithheldOnSpace } from '@/features/chat/lib/space-side-features'
+import { isThreadRefusalCode, sideFeaturesWithheldOnSpace } from '@/features/chat/lib/space-side-features'
 import {
   REASONING_TRANSLATE_MAX_CHARS,
   reasoningTranslateChars,
@@ -2370,7 +2370,8 @@ export function ReasoningPopover(props: {
   const [translation, setTranslation] = createSignal<ReasoningTranslation | null>(null)
   const [showOriginal, setShowOriginal] = createSignal(false)
   const [translating, setTranslating] = createSignal(false)
-  const [translateFailure, setTranslateFailure] = createSignal<'failed' | 'unavailable' | null>(null)
+  // 'refused' is the gateway's typed refusal of the thread the translation names (DEC-V-R8): the reason, and no retry.
+  const [translateFailure, setTranslateFailure] = createSignal<'failed' | 'unavailable' | 'refused' | null>(null)
   // Offered on a settled turn that keeps its content, when the text fits the route and reads in the other language from the reader's.
   const translatable = createMemo(() => {
     if (!reasoningTranslateEnabled() || props.temporaryChat || props.message.streaming) return false
@@ -2406,8 +2407,8 @@ export function ReasoningPopover(props: {
         setTranslation({ source, target, text })
         setShowOriginal(false)
       }
-    } catch {
-      setTranslateFailure('failed')
+    } catch (error) {
+      setTranslateFailure(error instanceof ApiError && isThreadRefusalCode(error.code) ? 'refused' : 'failed')
     } finally {
       setTranslating(false)
     }
@@ -2505,7 +2506,7 @@ export function ReasoningPopover(props: {
                         </span>
                       </Show>
                     </Show>
-                    <Show when={heldTranslation() === null && translatable() && translateFailure() !== 'unavailable'}>
+                    <Show when={heldTranslation() === null && translatable() && translateFailure() !== 'unavailable' && translateFailure() !== 'refused'}>
                       <button type="button" disabled={translating()} onClick={() => void translateReasoning()}>
                         {translating() ? i18n.tr('Oversetter…', 'Translating…') : i18n.tr('Oversett', 'Translate')}
                       </button>
@@ -2513,6 +2514,14 @@ export function ReasoningPopover(props: {
                     <Show when={translateFailure() === 'unavailable'}>
                       <span class="verevon-chat-reasoning-translate__note">
                         {i18n.tr('Oversettelse er ikke tilgjengelig akkurat nå.', 'Translation is not available right now.')}
+                      </span>
+                    </Show>
+                    <Show when={translateFailure() === 'refused'}>
+                      <span class="verevon-chat-reasoning-translate__note" role="alert">
+                        {i18n.tr(
+                          'Oversettelsen er ikke tilgjengelig for denne samtalen. Forespørselen ble ikke sendt til en modell.',
+                          'A translation is not available for this chat. The request was not sent to a model.',
+                        )}
                       </span>
                     </Show>
                     <Show when={translateFailure() === 'failed'}>

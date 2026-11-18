@@ -83,6 +83,7 @@ function ModelPickerEntry(props: { readonly ctx: SpaceComposerSlotContext }) {
       orgId={props.ctx.orgId}
       class="verevon-space-room-composer__model-picker"
       catalogue={props.ctx.model.catalogue}
+      spaceScoped
       onChange={props.ctx.model.onChange}
     />
   )

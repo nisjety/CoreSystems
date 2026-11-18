@@ -4,10 +4,13 @@ import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
 import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ComposerCapabilities, ReviewCard } from '@/shared/api/chat-client'
+import { ApiError } from '@/shared/api/api-error'
 import type { ReviewRunInput } from '@/shared/actions/chat-review'
+import { reviewRunFailureKind } from './ReviewRunCard'
 
 // A review of a chat thread names the thread and the model its connection serves (DEC-V-R8). The panel passes both to the
-// review it starts, and a review that names no thread is sent as it was before the feature named one.
+// review it starts, and a review that names no thread is sent as it was before the feature named one. A typed refusal of the
+// thread is shown as its own reason, with no retry, and is not a failed review.
 
 const runReviewMock = vi.hoisted(() => vi.fn<(input: ReviewRunInput) => Promise<ReviewCard | null>>())
 const capabilitiesMock = vi.hoisted(() => vi.fn<() => Promise<ComposerCapabilities>>())
@@ -118,5 +121,46 @@ describe('ArtifactsPanel review thread', () => {
     expect(input.threadId).toBeUndefined()
     expect(input.model).toBeUndefined()
     expect(input.target).toBe('artifact_revision')
+  })
+
+  it('shows the gateway refusal of the thread as its own reason, with no retry, and not as a failed review', async () => {
+    runReviewMock.mockRejectedValueOnce(
+      new ApiError('A review is not available for this thread.', 409, 'side_chat_thread_retention_refused'),
+    )
+    render(() => (
+      <ArtifactsPanel
+        items={[item()]}
+        history={{ threadId: 'thread-1', temporary: false }}
+        reviewThreadId="thread-1"
+        connectionModel="gpt-5-codex"
+      />
+    ))
+    const review = await vi.waitFor(() => {
+      flush()
+      return screen.getByRole('button', { name: REVIEW })
+    })
+    fireEvent.click(review)
+    await vi.waitFor(() => {
+      flush()
+      expect(screen.getByText(/ikke tilgjengelig for denne samtalen/)).toBeTruthy()
+    })
+    expect(screen.queryByText(/Kunne ikke gjennomgå/)).toBeNull()
+    expect(runReviewMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('reviewRunFailureKind on a thread', () => {
+  it('types each refusal of the named thread, and leaves an untyped conflict as a failed review', () => {
+    for (const code of [
+      'scope_not_available_in_space',
+      'side_chat_thread_retention_refused',
+      'connection_ambiguous',
+      'side_chat_model_required',
+    ]) {
+      expect(reviewRunFailureKind(new ApiError('m', code === 'side_chat_model_required' ? 400 : 409, code))).toBe(
+        'thread_refused',
+      )
+    }
+    expect(reviewRunFailureKind(new ApiError('m', 409, 'review_unavailable'))).toBe('failed')
   })
 })

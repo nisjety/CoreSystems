@@ -341,20 +341,23 @@ fn named_feature_field(raw: &str) -> Result<Option<String>, (StatusCode, Json<Va
 }
 
 /// The delegated session credential a request that names a thread carries (DEC-V-R8). Model Gateway reads that thread's
-/// connection through it, and refuses a named thread that comes without it with a typed 401, which the relay answers as
-/// unavailable. So a missing credential never moves the thread onto the platform chain. The mint is best effort, so a
-/// review or translation on a platform thread is not refused when Model Gateway would not read the credential anyway. A
-/// request that names no thread mints none and goes upstream as it did before.
+/// connection through it, and refuses a named thread that comes without it. The mint is required once a thread is named,
+/// as side chat requires it (`required_session_token`): a credential that cannot be minted refuses the request here, with
+/// `delegated_auth_unavailable`, before Model Gateway is called. So a named thread is never sent on without the credential,
+/// and never falls back onto the platform chain. A request that names no thread mints none and goes upstream as before.
 async fn thread_session_token(
     state: &AppState,
     user: &AuthenticatedUser,
     headers: &HeaderMap,
     names_thread: bool,
-) -> Option<String> {
+) -> Result<Option<String>, (StatusCode, Json<Value>)> {
     if !names_thread {
-        return None;
+        return Ok(None);
     }
-    shared::session_token(state, user, headers).await
+    shared::required_session_token(state, user, headers)
+        .await
+        .map(Some)
+        .map_err(shared::delegated_auth_unavailable)
 }
 
 /// The review the browser asks for (F-t3-086): the text and the fields that frame it, and nothing else. An unknown field
@@ -435,7 +438,11 @@ async fn review_run_answer(
         }
         Err(detail) => return shared::delegated_auth_unavailable(detail),
     };
-    let session_token = thread_session_token(state, user, headers, thread_id.is_some()).await;
+    let names_thread = thread_id.is_some();
+    let session_token = match thread_session_token(state, user, headers, names_thread).await {
+        Ok(token) => token,
+        Err(refusal) => return refusal,
+    };
     // A one-way raise, as on every model route: the header's flag or the organisation's posture makes the review
     // zero-retention. The body names only the fields the review reads, and the thread and model only when they are named.
     let mut body = json!({
@@ -514,6 +521,9 @@ async fn review_run_answer(
             (status, Json(response))
         }
         StatusCode::PRECONDITION_FAILED if code.starts_with("zdr_") => (status, Json(response)),
+        // A typed refusal of the thread the review names (DEC-V-R8), refused before any model call: relayed, so the caller
+        // is told why this thread cannot be reviewed, and not answered as an unavailable review.
+        _ if thread_refusal_passes(status, &code) => (status, Json(response)),
         _ => (
             status,
             Json(error(
@@ -598,7 +608,11 @@ async fn reasoning_translate_answer(
         }
         Err(detail) => return shared::delegated_auth_unavailable(detail),
     };
-    let session_token = thread_session_token(state, user, headers, thread_id.is_some()).await;
+    let names_thread = thread_id.is_some();
+    let session_token = match thread_session_token(state, user, headers, names_thread).await {
+        Ok(token) => token,
+        Err(refusal) => return refusal,
+    };
     // A one-way raise, as on every model route: the header's flag or the organisation's posture makes the turn
     // zero-retention, and Model Gateway then refuses to translate it. The body names only the fields the route reads, and
     // the thread and model only when they are named.
@@ -673,6 +687,8 @@ async fn reasoning_translate_answer(
             (status, Json(response))
         }
         StatusCode::PRECONDITION_FAILED if code.starts_with("zdr_") => (status, Json(response)),
+        // A typed refusal of the thread the translation names (DEC-V-R8), refused before any model call: relayed as sent.
+        _ if thread_refusal_passes(status, &code) => (status, Json(response)),
         _ => (
             status,
             Json(error(
@@ -756,7 +772,11 @@ async fn council_answer(
         }
         Err(detail) => return shared::delegated_auth_unavailable(detail),
     };
-    let session_token = thread_session_token(state, user, headers, thread_id.is_some()).await;
+    let names_thread = thread_id.is_some();
+    let session_token = match thread_session_token(state, user, headers, names_thread).await {
+        Ok(token) => token,
+        Err(refusal) => return refusal,
+    };
     // A one-way raise, as on every model route. The body names only the fields the council reads, and the thread only when
     // one is named.
     let mut body = json!({
@@ -834,12 +854,35 @@ async fn council_answer(
 }
 
 /// Whether an upstream refusal is the council's own typed answer, which passes through as sent: its switch, its input
-/// limits, a zero-retention precondition, a model the caller may not use, or an entitlement the gateway cannot read.
+/// limits, a zero-retention precondition, a model the caller may not use, an entitlement the gateway cannot read, or a
+/// typed refusal of the thread it names (see [`thread_refusal_passes`]).
 fn council_refusal_passes(status: StatusCode, code: &str) -> bool {
     match code {
         "model_entitlement_unavailable" => true,
         "model_council_disabled" | "model_not_entitled" => status.is_client_error(),
-        _ => status.is_client_error() && (code.starts_with("council_") || code.starts_with("zdr_")),
+        _ => {
+            (status.is_client_error() && (code.starts_with("council_") || code.starts_with("zdr_")))
+                || thread_refusal_passes(status, code)
+        }
+    }
+}
+
+/// Whether an upstream refusal is a typed refusal of the thread a side feature names (DEC-V-R8). Model Gateway refuses each
+/// one before any model call: a Space thread (409 `scope_not_available_in_space`, DEC-06), a thread holding a zero-retention
+/// or waived run (409 `side_chat_thread_retention_refused`), a thread written under two connections (409
+/// `connection_ambiguous`), and a connection thread named without its model (400 `side_chat_model_required`). The route
+/// relays these with their status and body, so the caller is told why the feature cannot run on that thread. Nothing is
+/// answered on the platform chain in their place, and a 401 or an untyped 403 is never one of them.
+fn thread_refusal_passes(status: StatusCode, code: &str) -> bool {
+    match status {
+        StatusCode::CONFLICT => matches!(
+            code,
+            "scope_not_available_in_space"
+                | "side_chat_thread_retention_refused"
+                | "connection_ambiguous"
+        ),
+        StatusCode::BAD_REQUEST => code == "side_chat_model_required",
+        _ => false,
     }
 }
 
@@ -919,8 +962,8 @@ mod tests {
     };
 
     use super::{
-        assistant_navigation_enabled_for, proxy_dictate, proxy_speech, router, routes,
-        AI_AUDIO_BODY_LIMIT_BYTES,
+        assistant_navigation_enabled_for, named_feature_field, proxy_dictate, proxy_speech, router,
+        routes, AI_AUDIO_BODY_LIMIT_BYTES,
     };
     use crate::domains::chat::shared::tests::{assert_rule_answer, credential_rule_cases};
     use crate::middleware::{AuthenticatedUser, AuthorizedMembership};
@@ -1822,20 +1865,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_missing_session_credential_is_refused_by_model_gateway_not_the_platform() {
-        // The credential cannot be minted, so the thread goes upstream without one. Model Gateway refuses a named thread that
-        // comes without it, with a typed 401, and the relay answers that as unavailable: nothing is answered on the platform.
+    async fn a_named_thread_without_a_session_credential_is_refused_before_any_call() {
+        // The credential cannot be minted, so a request that names a thread is refused here, before Model Gateway is called:
+        // nothing reaches the platform chain, and nothing is answered on the thread's connection (DEC-V-R8).
         let (_, org, _) = upstreams().await;
         let auth = auth_core_refusing_a_session_token().await;
-        let (_, _, model) = answering(
+
+        let (_, _, review_model) = answering(
             "/v1/ai/review",
-            401,
-            json!({ "error": { "code": "delegated_credential_required", "message": "", "details": {} } }),
+            200,
+            json!({ "data": { "run": { "runId": "run-1" } } }),
         )
         .await;
-        let state = state_for(&auth, &org, &model);
         let (status, body) = super::review_run_answer(
-            &state,
+            &state_for(&auth, &org, &review_model),
             &member_of("org-open"),
             &HeaderMap::new(),
             review_request("thread-1", "gpt-5-codex"),
@@ -1843,11 +1886,195 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.0["error"]["code"], "delegated_auth_unavailable");
-        let bodies = forwarded_bodies(&model, "/v1/ai/review").await;
-        assert_eq!(bodies[0]["thread_id"], "thread-1");
-        // No credential could be given, so none is forwarded.
-        let session = forwarded_session(&model, "/v1/ai/review").await;
-        assert_eq!(session, None);
+        assert!(
+            forwarded_bodies(&review_model, "/v1/ai/review")
+                .await
+                .is_empty(),
+            "a named review is not sent without its credential"
+        );
+
+        let (_, _, translate_model) = answering(
+            "/v1/ai/reasoning-translate",
+            200,
+            json!({ "data": { "text": "Hello" } }),
+        )
+        .await;
+        let (status, body) = super::reasoning_translate_answer(
+            &state_for(&auth, &org, &translate_model),
+            &member_of("org-open"),
+            &HeaderMap::new(),
+            translate_request("thread-1", "gpt-5-codex"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0["error"]["code"], "delegated_auth_unavailable");
+        assert!(
+            forwarded_bodies(&translate_model, "/v1/ai/reasoning-translate")
+                .await
+                .is_empty(),
+            "a named translation is not sent without its credential"
+        );
+
+        let (_, _, council_model) =
+            answering("/v1/ai/council", 200, json!({ "data": { "members": [] } })).await;
+        let (status, body) = super::council_answer(
+            &state_for(&auth, &org, &council_model),
+            &member_of("org-open"),
+            &HeaderMap::new(),
+            council_request("thread-1"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0["error"]["code"], "delegated_auth_unavailable");
+        assert!(
+            forwarded_bodies(&council_model, "/v1/ai/council")
+                .await
+                .is_empty(),
+            "a named council is not sent without its credential"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_typed_thread_refusal_is_relayed_by_every_side_feature_and_an_untyped_one_is_not() {
+        // Model Gateway refuses a thread a side feature names before any model call. The route relays that typed refusal with
+        // its status and body, rather than answering the generic unavailable envelope, so the caller learns why.
+        let cases = [
+            (409, "scope_not_available_in_space"),
+            (409, "side_chat_thread_retention_refused"),
+            (409, "connection_ambiguous"),
+            (400, "side_chat_model_required"),
+        ];
+        for (status, code) in cases {
+            let reply = json!({ "error": { "code": code, "message": "m", "details": {} } });
+
+            let (auth, org, model) = answering("/v1/ai/review", status, reply.clone()).await;
+            let (answered, body) = super::review_run_answer(
+                &state_for(&auth, &org, &model),
+                &member_of("org-open"),
+                &HeaderMap::new(),
+                review_request("thread-1", "gpt-5-codex"),
+            )
+            .await;
+            assert_eq!(
+                (answered.as_u16(), &body.0),
+                (status, &reply),
+                "a review relays {code}"
+            );
+
+            let (auth, org, model) =
+                answering("/v1/ai/reasoning-translate", status, reply.clone()).await;
+            let (answered, body) = super::reasoning_translate_answer(
+                &state_for(&auth, &org, &model),
+                &member_of("org-open"),
+                &HeaderMap::new(),
+                translate_request("thread-1", "gpt-5-codex"),
+            )
+            .await;
+            assert_eq!(
+                (answered.as_u16(), &body.0),
+                (status, &reply),
+                "a translation relays {code}"
+            );
+
+            let (auth, org, model) = answering("/v1/ai/council", status, reply.clone()).await;
+            let (answered, body) = super::council_answer(
+                &state_for(&auth, &org, &model),
+                &member_of("org-open"),
+                &HeaderMap::new(),
+                council_request("thread-1"),
+            )
+            .await;
+            assert_eq!(
+                (answered.as_u16(), &body.0),
+                (status, &reply),
+                "a council relays {code}"
+            );
+        }
+
+        // A conflict that is not one of the thread's typed refusals is still the route's own unavailable answer.
+        let untyped = json!({ "error": { "code": "conflict", "message": "m", "details": {} } });
+        let (auth, org, model) = answering("/v1/ai/review", 409, untyped).await;
+        let (answered, body) = super::review_run_answer(
+            &state_for(&auth, &org, &model),
+            &member_of("org-open"),
+            &HeaderMap::new(),
+            review_request("thread-1", "gpt-5-codex"),
+        )
+        .await;
+        assert_eq!(answered, StatusCode::CONFLICT);
+        assert_eq!(body.0["error"]["code"], "review_unavailable");
+    }
+
+    #[test]
+    fn a_feature_name_takes_200_characters_and_refuses_one_more_or_a_control_character() {
+        // The limit counts characters, not bytes: 200 characters of two bytes each are one name, and 201 are refused.
+        let at_limit = "å".repeat(200);
+        assert_eq!(
+            named_feature_field(&at_limit).expect("200 characters are named"),
+            Some(at_limit.clone())
+        );
+        assert!(named_feature_field(&"t".repeat(201)).is_err());
+        assert!(named_feature_field(&"å".repeat(201)).is_err());
+        // A blank name is no value, and a name with a space or a control character is refused, never dropped.
+        assert_eq!(named_feature_field("   ").expect("blank is no value"), None);
+        assert!(named_feature_field("thread 1").is_err());
+        assert!(named_feature_field("thread\u{7}1").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_malformed_council_thread_id_is_refused_before_any_credential_or_call() {
+        let (auth, org, model) = upstreams().await;
+        let state = state_for(&auth, &org, &model);
+        for thread_id in ["thread 1", "thread\u{7}1", "thread\n1"] {
+            let (status, body) = super::council_answer(
+                &state,
+                &member_of("org-open"),
+                &HeaderMap::new(),
+                council_request(thread_id),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{thread_id:?} is refused");
+            assert_eq!(body.0["error"]["code"], "bad_request");
+        }
+        assert!(
+            forwarded_bodies(&model, "/v1/ai/council").await.is_empty(),
+            "nothing reached model-gateway"
+        );
+        assert_eq!(token_calls(&auth, "/api/model-plane/token").await, 0);
+        assert_eq!(token_calls(&auth, "/api/session-core/token").await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_council_thread_id_of_200_characters_is_forwarded_and_201_is_refused() {
+        let (auth, org, model) =
+            answering("/v1/ai/council", 200, json!({ "data": { "members": [] } })).await;
+        let state = state_for(&auth, &org, &model);
+        let at_limit = "t".repeat(200);
+        let (status, _) = super::council_answer(
+            &state,
+            &member_of("org-open"),
+            &HeaderMap::new(),
+            council_request(&at_limit),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let bodies = forwarded_bodies(&model, "/v1/ai/council").await;
+        assert_eq!(bodies[0]["thread_id"], at_limit.as_str());
+
+        let (status, body) = super::council_answer(
+            &state,
+            &member_of("org-open"),
+            &HeaderMap::new(),
+            council_request(&"t".repeat(201)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body.0["error"]["code"], "bad_request");
+        assert_eq!(
+            forwarded_bodies(&model, "/v1/ai/council").await.len(),
+            1,
+            "the 201-character id never left the gateway"
+        );
     }
 
     #[tokio::test]

@@ -1231,6 +1231,20 @@ export async function setSpaceAgentState(
 }
 
 /**
+ * What the revoke did to the agent's notes in this room (`agent_memory_erase` on the answer, V3d-bff-2): `erased`
+ * (removed, or there were none), `held` (kept because a legal hold covers them), `unavailable` (kept because the
+ * erase could not be made or did not complete) or `not_applicable` (the Space memory feature is off, so no erase
+ * was attempted). A closed set: never content or a count of private data.
+ */
+export type AgentMemoryErase = 'erased' | 'held' | 'unavailable' | 'not_applicable'
+
+const AGENT_MEMORY_ERASE_OUTCOMES: readonly AgentMemoryErase[] = ['erased', 'held', 'unavailable', 'not_applicable']
+
+function agentMemoryEraseOutcome(value: unknown): AgentMemoryErase | undefined {
+  return AGENT_MEMORY_ERASE_OUTCOMES.find((outcome) => outcome === value)
+}
+
+/**
  * Revoke a bound agent from this room.
  *
  * Its own verb rather than a third status on the call above, because it is the
@@ -1242,16 +1256,22 @@ export async function setSpaceAgentState(
  * is what actually stops it acting. A `agent_revocation_unconfirmed` response
  * means the binding was revoked and Control has not converged yet, so the
  * agent may still show as a member until it does.
+ *
+ * `agentMemoryErase` says what happened to the agent's notes in the room (see {@link AgentMemoryErase}).
  */
 export async function revokeSpaceAgent(
   spaceRef: string,
   bindingRef: string,
-): Promise<{ status: string }> {
-  const response = await requestJson<{ status?: string }>(
+): Promise<{ status: string; agentMemoryErase?: AgentMemoryErase }> {
+  const response = await requestJson<{ status?: string; agent_memory_erase?: unknown }>(
     `/api/v1/spaces/${encodeURIComponent(spaceRef)}/agents/${encodeURIComponent(bindingRef)}`,
     { method: 'DELETE' },
   )
-  return { status: response.status ?? 'revoked' }
+  const agentMemoryErase = agentMemoryEraseOutcome(response.agent_memory_erase)
+  return {
+    status: response.status ?? 'revoked',
+    ...(agentMemoryErase ? { agentMemoryErase } : {}),
+  }
 }
 
 /**

@@ -83,6 +83,7 @@ import {
 import { createTurnPrivacyTierResolver } from '@/features/dashboard/home/submit-privacy-tier'
 import { readAiModelSelection, type AiModelSelection } from '@/shared/ai/model-selection'
 import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
+import { subscriptionRouteWithheldOnSpace } from '@/features/chat/lib/space-side-features'
 import { getSession } from '@/shared/session/session-store'
 import { useHomeDraft } from '@/features/dashboard/home/home-draft'
 import { spaceRoomFeature, spaceRoomFeatureWithDevOverride } from '../lib/space-room-features'
@@ -1054,6 +1055,11 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   const subscriptionIncompatible = () => selectedModel().provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
     && (effectiveMode() === 'ask' || !addressedWakeOn())
     && (Boolean(askAgentRef()) || pickedSkills().length > 0)
+  // A Space room never takes the member's ChatGPT subscription while the BYO gateway switch is on (DEC-V-R8): the turn would be
+  // written under that one connection. The send is refused with the draft kept; the picker offers no subscription model here.
+  const subscriptionWithheld = () => effectiveMode() !== 'post'
+    && selectedModel().provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
+    && subscriptionRouteWithheldOnSpace(true)
 
   // `override` is the text to send when the box was just rewritten and the signal has not flushed
   // yet (the request-to-add path appends a line naming the managers).
@@ -1093,7 +1099,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     }
     // One message waits for the agent at a time: while it does, a further send keeps its words in the box.
     if (midRun.deferred()) return
-    if (submitting() || preparing() || postBusy() || blockedByApproval() || subscriptionIncompatible()) return
+    if (submitting() || preparing() || postBusy() || blockedByApproval() || subscriptionIncompatible() || subscriptionWithheld()) return
     // Another run is live in the thread being replied to: keep the message here until it is free.
     const busyThread = busyReplyThread()
     if (busyThread && files().length === 0) {
@@ -1859,10 +1865,18 @@ ${managers.map((m) => `@${m.label}`).join(' ')} ${request}`
             )}
           </p>
         </Show>
+        <Show when={subscriptionWithheld()}>
+          <p class="verevon-space-room-composer__blocked" role="status">
+            {i18n.tr(
+              'Abonnementsmodeller kan ikke brukes i et delt Space. Velg en annen modell.',
+              'ChatGPT subscription models cannot be used in a shared Space. Choose another model.',
+            )}
+          </p>
+        </Show>
         <button
           type="submit"
           disabled={
-            (submitting() && !steerOpen()) || preparing() || blockedByApproval() || subscriptionIncompatible() || !text().trim()
+            (submitting() && !steerOpen()) || preparing() || blockedByApproval() || subscriptionIncompatible() || subscriptionWithheld() || !text().trim()
             || postBusy() || roleBlocked() || nothingOffered() || overLimit() || Boolean(midRun.deferred())
           }
         >

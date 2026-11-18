@@ -30,11 +30,13 @@ pub(crate) struct AppState {
     /// failure to obtain one stops the session (WS1.B).
     pub(crate) browser_grant_mode: BrowserGrantMode,
     /// `BROWSER_HUMAN_BROWSE` (WS8.D): whether a session asks for a person's open-web
-    /// `human_browse` grant. Off unless set to a truthy value, in every environment.
+    /// `human_browse` grant. Only the literal `true` turns it on, in every environment (see
+    /// [`exact_true_flag`]).
     pub(crate) browser_human_browse: bool,
     /// `BROWSER_LIVE_VIEW_ONLY` (W3-E3.4-5, W3-E3.4-5b): whether the owner's view-only live
     /// routes (`/api/v1/browser/sessions/{id}/view/frames/ws` and `.../view/frames/stream`) are
-    /// served. Off unless set to a truthy value; while off they answer 404. Quarry honours the
+    /// served. Off unless set to `1`, `true`, `yes` or `on`, the words the flag registry documents
+    /// (see [`human_browse_enabled`]); while off they answer 404. Quarry honours the
     /// scope only with `QUARRY_EDGE__LIVE_VIEW_ONLY` on, so the gateway also drops input frames
     /// itself on the socket; the SSE stream carries no client frames at all.
     pub(crate) browser_live_view_only: bool,
@@ -53,19 +55,21 @@ pub(crate) struct AppState {
     /// (version 2) and can be saved as a recipe (`POST /api/v1/browser/sessions/{id}/recipes`,
     /// `browser_evidence.save_recipe`) and the saved recipes listed (`GET /api/v1/browser/recipes`)
     /// and read one at a time with their slots (`GET /api/v1/browser/recipes/{recipe_id}`, QF-29).
-    /// Read once here, never in a handler. Off unless set to a truthy word (1/true/yes/on); while
-    /// off the routes are absent and the action answers 404. Quarry also needs
-    /// `QUARRY_EDGE__PROCEDURE_CANONICAL` on and capability-core `PROCEDURES_API` on.
+    /// Read once here, never in a handler. Only the literal `true` turns it on (see
+    /// [`exact_true_flag`]); while off the routes are absent and the action answers 404. Quarry also
+    /// needs `QUARRY_EDGE__PROCEDURE_CANONICAL` on and capability-core `PROCEDURES_API` on.
     pub(crate) browser_recipes: bool,
     /// `BROWSER_REGION_ATTACH` (E3.3-d, QF-7): whether a dragged page region can be attached
     /// (`POST /api/v1/browser/sessions/{id}/attachments/region`, `browser_region.attach`). Read
-    /// once here, never in a handler. Off unless set to a truthy word (1/true/yes/on); while off
-    /// the route is absent and the action answers 404.
+    /// once here, never in a handler. Off unless set to `1`, `true`, `yes` or `on`, the words the
+    /// flag registry documents (see [`human_browse_enabled`]); while off the route is absent and the
+    /// action answers 404.
     pub(crate) browser_region_attach: bool,
     /// `BROWSER_TAB_MENTIONS` (E3.3-c, QF-7): whether a turn's `@tab` mentions can be re-resolved
     /// (`POST /api/v1/browser/sessions/{id}/context/tab-mentions`,
     /// `browser_context.resolve_tab_mentions`). Read once here, never in a handler. Off unless set
-    /// to a truthy word (1/true/yes/on); while off the route is absent and the action answers 404.
+    /// to `1`, `true`, `yes` or `on`, the words the flag registry documents (see
+    /// [`human_browse_enabled`]); while off the route is absent and the action answers 404.
     pub(crate) browser_tab_mentions: bool,
     /// `BROWSER_TURN_CONTEXT` (QF-8, E3.3-c/-d): whether a chat turn may carry browser page
     /// context. Read once here, never in a handler. Exactly `true` enables it. Off or on, the
@@ -345,7 +349,7 @@ pub(crate) struct SpaceFeatureFlags {
     pub(crate) chat_artifact_promote: bool,
     /// `CHAT_RESEARCH_RUNS` (Quarry v2 E4.6, Q4-062b): `GET /api/v1/chat/research-runs/{id}` and
     /// `POST /api/v1/chat/research-runs/{id}/cancel`, the person's read and stop of one addressable
-    /// research run. `1`/`true`/`yes`/`on` turns it on; default off, never by default in development.
+    /// research run. Only the literal `true` turns it on; default off, never by default in development.
     /// Off, the routes are not registered (404). A rollout control, never an authorization input:
     /// Model Gateway and Session Core decide that the run is the caller's own, and a zero-retention
     /// run comes back with ids, status and counters only.
@@ -383,7 +387,8 @@ pub(crate) struct SpaceFeatureFlags {
     /// `space_reactions_disabled`. A rollout control, never an authorization input: the caller's live
     /// room role (editor or above), the Control shared-read decision and Session Core's message check
     /// decide, and a Zero Data Retention org is refused with the typed 412 before any write. Needs
-    /// Convex `SPACE_REACTIONS` on and model-gateway `SPACE_MESSAGE_REVISE_API` (target route). Production default off.
+    /// Convex `SPACE_REACTIONS` on and model-gateway `SPACE_MESSAGE_REVISE_API` (target route). Off by
+    /// default in every environment, development included; only the literal `true` turns it on.
     pub(crate) reactions_api: bool,
     /// `CLIENT_VERSION_POLICY` / `CLIENT_MIN_CONTRACT` (WS07-S3): the stale-client contract the
     /// public `/api/v1/client-config` route reports. Unlike the booleans its default is `banner`,
@@ -391,7 +396,8 @@ pub(crate) struct SpaceFeatureFlags {
     pub(crate) client_policy: crate::client_contract::ClientPolicy,
     /// `CSP_REPORT_LOG_HOSTS` (WS07-S6): log the blocked ORIGIN (scheme and host, never a path
     /// or query) of each CSP report, for a host inventory. Forced off when `APP_ENV` is
-    /// production (see `dev_only_flag`); the counters never carry a URL either way.
+    /// production (see `dev_only_documented_flag`); the counters never carry a URL either way. Its
+    /// switch reads `1`, `true`, `yes` or `on`, the words the flag registry documents.
     pub(crate) csp_report_log_hosts: bool,
     /// `CLIENT_ENV_IDENTITY` (F-t3-098): the closed environment label `GET /api/v1/client-config` reports
     /// as `environment` (`production`, `staging`, `development` or `other`), derived once from `APP_ENV`
@@ -476,7 +482,7 @@ pub(crate) struct SpaceFeatureFlags {
     /// `room_files_api`) so the SPA shows the Files tab. Never an authorization input.
     pub(crate) room_files_ui: bool,
     /// `RUN_TRACE_API` (WS10.S6, GW-2): `GET /api/v1/runs/{run_id}/trace`, one page of a run's durable
-    /// browser trace. `1`/`true`/`yes`/`on` turns it on; default off in every environment, never by
+    /// browser trace. Only the literal `true` turns it on; default off in every environment, never by
     /// default in development. Off, the route is not registered (404). A rollout control, never an
     /// authorization input: Model Gateway and Session Core decide that the run is the caller's own, and
     /// a zero-retention run has no rows, so its page is empty.
@@ -593,7 +599,8 @@ pub(crate) struct SpaceFeatureFlags {
     /// `SCIM_EDGE_ENABLED` (WS05-S8): the public, session-less SCIM edge `/api/v1/scim/v2/*`
     /// that forwards an identity provider's bearer token to org-core. Off (the default, in
     /// development too) answers the same 501 SCIM error as before the feature existed. A rollout
-    /// control, never an authorization input: org-core resolves the token and the organization.
+    /// control, never an authorization input: org-core resolves the token and the organization. Its
+    /// switch reads `1`, `true`, `yes` or `on`, the words the flag registry documents.
     pub(crate) scim_edge: ScimEdgeConfig,
 }
 
@@ -648,7 +655,7 @@ impl SpaceFeatureFlags {
             chat_artifact_promote: chat_artifact_promote_from(
                 env::var("CHAT_ARTIFACT_PROMOTE_ENABLED").ok().as_deref(),
             ),
-            chat_research_runs: env_bool("CHAT_RESEARCH_RUNS", false),
+            chat_research_runs: env_exact_true("CHAT_RESEARCH_RUNS"),
             crawl_robots_override: crate::domains::knowledge::quarry::crawl_robots_override_from(
                 env::var(crate::domains::knowledge::quarry::CRAWL_ROBOTS_OVERRIDE_FLAG)
                     .ok()
@@ -662,7 +669,7 @@ impl SpaceFeatureFlags {
             message_revise_api: space_flag("SPACE_MESSAGE_REVISE_API"),
             reactions_api: space_flag("SPACE_REACTIONS_API"),
             client_policy: crate::client_contract::ClientPolicy::from_env(),
-            csp_report_log_hosts: dev_only_flag("CSP_REPORT_LOG_HOSTS"),
+            csp_report_log_hosts: dev_only_documented_flag("CSP_REPORT_LOG_HOSTS"),
             client_environment: client_environment_identity(),
             connectivity_banner_ui: space_flag("SPACE_CONNECTIVITY_BANNER_UI"),
             human_posts_api: space_flag("SPACE_HUMAN_POSTS_API"),
@@ -678,7 +685,7 @@ impl SpaceFeatureFlags {
             room_pins: space_flag("SPACE_ROOM_PINS_API"),
             room_files_api: space_flag("SPACE_ROOM_FILES_API"),
             room_files_ui: space_flag("SPACE_ROOM_FILES_UI"),
-            run_trace_api: env_bool("RUN_TRACE_API", false),
+            run_trace_api: env_exact_true("RUN_TRACE_API"),
             turn_attachments_ui: space_flag("SPACE_TURN_ATTACHMENTS_UI"),
             message_search_api: space_flag("SPACE_MESSAGE_SEARCH_API"),
             message_search_ui: space_flag("SPACE_MESSAGE_SEARCH_UI"),
@@ -713,8 +720,7 @@ impl SpaceFeatureFlags {
 /// for the exact literal `true` (`switch_from` in mp-contracts), so the gateway reads these the same
 /// way. Read leniently here, a `1`, `yes` or `on` would show a route in the UI that Model Plane
 /// refuses. Model Plane's base compose defaults them off (only its dev override turns them on), so an
-/// unset value is off here in every environment too. Every other Space flag keeps the lenient reading
-/// (see [`space_flag`]).
+/// unset value is off here in every environment too.
 pub(crate) const MODEL_PLANE_EXACT_TRUE_SWITCHES: [&str; 7] = [
     "SPACE_HUMAN_POSTS_API",
     "SPACE_MESSAGE_SEARCH_API",
@@ -725,16 +731,35 @@ pub(crate) const MODEL_PLANE_EXACT_TRUE_SWITCHES: [&str; 7] = [
     "SPACE_RUN_MANAGER_STOP",
 ];
 
-/// One Space flag. A name in [`MODEL_PLANE_EXACT_TRUE_SWITCHES`] is on only for the exact literal
-/// `true`: not trimmed, not case-folded. An UNSET variable is OFF for those names in every
-/// environment, with no development default, as in Model Plane's base compose. Every other Space
-/// flag is on for `1|true|yes|on`, and an UNSET variable falls back to ON in development and OFF when
-/// `APP_ENV` is production, the same dev default as every other dev-defaulted gateway flag.
+/// The BFF-only Space rollout controls that default off in every environment (the base compose
+/// declares `${KEY:-false}`). They read the exact literal `true`, as the Model Plane mirrors do, with
+/// no development default: a development stack without an override shows none of these routes, and
+/// a stray `1` or `yes` cannot turn one on (V3d-bff-3).
+pub(crate) const BFF_EXACT_TRUE_SPACE_SWITCHES: [&str; 6] = [
+    "SPACE_REACTIONS_API",
+    "SPACE_THREAD_FORK_API",
+    "SPACE_ROOM_FILES_API",
+    "SPACE_ROOM_FILES_UI",
+    "SPACE_TURN_ATTACHMENTS_UI",
+    "SPACE_SYSTEM_ENTRIES_API",
+];
+
+/// Whether a Space switch reads only the exact literal `true`: a name in either list above. Every other
+/// Space flag keeps the lenient reading (see [`space_flag`]). Each of those is a default-on kill switch
+/// in the base compose, which `main.rs` pins, so the lenient words only ever read a switch on by default.
+pub(crate) fn is_exact_true_space_switch(key: &str) -> bool {
+    MODEL_PLANE_EXACT_TRUE_SWITCHES.contains(&key) || BFF_EXACT_TRUE_SPACE_SWITCHES.contains(&key)
+}
+
+/// One Space flag. A name for which [`is_exact_true_space_switch`] holds is on only for the exact
+/// literal `true`: not trimmed, not case-folded. An UNSET variable is OFF for those names in every
+/// environment, with no development default. Every other Space flag is on for `1|true|yes|on`, and an
+/// UNSET variable falls back to ON in development and OFF when `APP_ENV` is production, the same dev
+/// default as every other dev-defaulted gateway flag.
 #[allow(dead_code, reason = "first consumer is the next Space slice that adds a flag")]
 pub(crate) fn space_flag(key: &str) -> bool {
-    if MODEL_PLANE_EXACT_TRUE_SWITCHES.contains(&key) {
-        // `var_os`, not `var`: only a set value that is exactly `true` turns the switch on.
-        return env::var_os(key).is_some_and(|value| value.to_str() == Some("true"));
+    if is_exact_true_space_switch(key) {
+        return env_exact_true(key);
     }
     let fallback = dev_flags_allowed(&env::var("APP_ENV").unwrap_or_default());
     env_bool(key, fallback)
@@ -833,7 +858,7 @@ pub(crate) async fn build_state() -> Result<AppState> {
             env::var("BROWSER_GRANT_ENFORCEMENT").ok().as_deref(),
             &env::var("APP_ENV").unwrap_or_default(),
         ),
-        browser_human_browse: human_browse_enabled(env::var("BROWSER_HUMAN_BROWSE").ok().as_deref()),
+        browser_human_browse: exact_true_flag(env::var("BROWSER_HUMAN_BROWSE").ok().as_deref()),
         browser_live_view_only: human_browse_enabled(
             env::var("BROWSER_LIVE_VIEW_ONLY").ok().as_deref(),
         ),
@@ -841,7 +866,7 @@ pub(crate) async fn build_state() -> Result<AppState> {
             env::var("BROWSER_CONSENT_API").ok().as_deref(),
         ),
         browser_downloads: browser_downloads_enabled(env::var("BROWSER_DOWNLOADS").ok().as_deref()),
-        browser_recipes: human_browse_enabled(env::var("BROWSER_RECIPES").ok().as_deref()),
+        browser_recipes: exact_true_flag(env::var("BROWSER_RECIPES").ok().as_deref()),
         browser_region_attach: human_browse_enabled(
             env::var("BROWSER_REGION_ATTACH").ok().as_deref(),
         ),
@@ -1144,9 +1169,19 @@ fn validate_service_token_distinctness(
 
 /// Dev auth escape hatches must never activate in a production deploy, even if
 /// the env var leaks into the profile: `APP_ENV=production` (or `prod`) wins
-/// over the flag.
+/// over the flag. Read exactly: only the literal `true` turns one on.
 fn dev_only_flag(key: &str) -> bool {
-    let enabled = env_bool(key, false);
+    dev_gated(key, env_exact_true(key))
+}
+
+/// The dev-only switch whose vocabulary the flag registry documents as `1`, `true`, `yes` or `on`
+/// (`CSP_REPORT_LOG_HOSTS`). It has the same production refusal as [`dev_only_flag`].
+fn dev_only_documented_flag(key: &str) -> bool {
+    dev_gated(key, env_bool(key, false))
+}
+
+/// Refuses an enabled dev switch in production, whatever its vocabulary.
+fn dev_gated(key: &str, enabled: bool) -> bool {
     let app_env = env::var("APP_ENV").unwrap_or_default();
     if enabled && !dev_flags_allowed(&app_env) {
         eprintln!("refusing {key}=true because APP_ENV={app_env}; dev bypass is disabled");
@@ -1361,11 +1396,21 @@ pub(crate) fn browser_grant_mode(raw: Option<&str>, app_env: &str) -> BrowserGra
     }
 }
 
-/// Parses `BROWSER_HUMAN_BROWSE` (WS8.D). Unset, blank or anything but a truthy word is off;
-/// the flag is never read against `APP_ENV`, so every environment defaults to off.
+/// Parses a browser switch whose vocabulary the flag registry documents as `1`, `true`, `yes` or `on`:
+/// `BROWSER_LIVE_VIEW_ONLY`, `BROWSER_REGION_ATTACH` and `BROWSER_TAB_MENTIONS`. Surrounding space and
+/// case are ignored, as the registry's canonical reader ignores them. Unset, blank or any other word is
+/// off; the flag is never read against `APP_ENV`, so every environment defaults to off. The switches
+/// that read only the exact literal `true` use [`exact_true_flag`] instead.
 pub(crate) fn human_browse_enabled(raw: Option<&str>) -> bool {
     raw.map(|value| value.trim().to_ascii_lowercase())
         .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+}
+
+/// Parses a browser switch that reads only the exact literal `true`: `BROWSER_HUMAN_BROWSE` and
+/// `BROWSER_RECIPES` (V3d-bff-3). Not trimmed and not case-folded, so `1`, `yes`, `on`, `TRUE` and a
+/// padded `true` are off in every environment.
+pub(crate) fn exact_true_flag(raw: Option<&str>) -> bool {
+    raw == Some("true")
 }
 
 /// Parses `BROWSER_CONSENT_API` (Q3-E3.2-e3-gw). Only the literal `true` enables the consent
@@ -1386,6 +1431,15 @@ pub(crate) fn browser_turn_context_enabled(raw: Option<&str>) -> bool {
     raw == Some("true")
 }
 
+/// Reads `key` as the exact word `true`: not trimmed, not case-folded, and no other spelling. An unset
+/// or non-UTF-8 value is off.
+fn env_exact_true(key: &str) -> bool {
+    env::var_os(key).is_some_and(|value| value.to_str() == Some("true"))
+}
+
+/// The lenient reader: `1`, `true`, `yes` or `on` in any case turn the switch on, and the fallback
+/// applies when the variable is unset. Used by the Space kill switches and by the switches the flag
+/// registry documents with these words.
 fn env_bool(key: &str, fallback: bool) -> bool {
     env::var(key)
         .ok()
@@ -1802,8 +1856,9 @@ mod tests").next().unwrap_or(&config);
         assert!(!flags.thread_pane_ui);
     }
 
-    /// WS10.S6 (GW-2): `RUN_TRACE_API` is off unless it is `1`, `true`, `yes` or `on`, in every
-    /// environment, development included, so the run-trace route ships dark.
+    /// WS10.S6 (GW-2): `RUN_TRACE_API` is on only for the literal `true`, in every environment,
+    /// development included, so the run-trace route ships dark. `1`, `yes`, `on`, `TRUE` and a padded
+    /// `true` leave it off (V3d-bff-3).
     #[test]
     fn run_trace_api_flag_is_default_off_in_every_environment() {
         assert!(!super::SpaceFeatureFlags::default().run_trace_api);
@@ -1813,19 +1868,125 @@ mod tests").next().unwrap_or(&config);
                 assert!(!read(), "APP_ENV={app_env:?}");
             });
         }
-        for value in ["", "0", "false", "off"] {
+        for value in [
+            "", "0", "1", "false", "off", "yes", "on", "TRUE", " true", "true ",
+        ] {
             let vars = [
                 ("APP_ENV", Some("development")),
                 ("RUN_TRACE_API", Some(value)),
             ];
             with_env(&vars, || assert!(!read(), "{value:?}"));
         }
+        for app_env in ["development", "production"] {
+            let vars = [("APP_ENV", Some(app_env)), ("RUN_TRACE_API", Some("true"))];
+            with_env(&vars, || assert!(read(), "APP_ENV={app_env}"));
+        }
+    }
+
+    /// `CHAT_RESEARCH_RUNS` is default off in every environment and reads only the literal `true`:
+    /// `1`, `yes`, `on`, `TRUE` and a padded `true` leave the research-run routes unregistered.
+    #[test]
+    fn chat_research_runs_flag_is_default_off_and_reads_only_the_literal_true() {
+        assert!(!super::SpaceFeatureFlags::default().chat_research_runs);
+        let read = || super::SpaceFeatureFlags::from_env().chat_research_runs;
+        for app_env in [None, Some("production"), Some("development")] {
+            with_env(
+                &[("APP_ENV", app_env), ("CHAT_RESEARCH_RUNS", None)],
+                || {
+                    assert!(!read(), "APP_ENV={app_env:?}");
+                },
+            );
+        }
+        for value in ["", "0", "1", "yes", "on", "TRUE", " true", "true "] {
+            let vars = [
+                ("APP_ENV", Some("development")),
+                ("CHAT_RESEARCH_RUNS", Some(value)),
+            ];
+            with_env(&vars, || assert!(!read(), "{value:?}"));
+        }
+        let vars = [
+            ("APP_ENV", Some("production")),
+            ("CHAT_RESEARCH_RUNS", Some("true")),
+        ];
+        with_env(&vars, || assert!(read()));
+    }
+
+    /// `ALLOW_DEV_ACTOR_HEADERS` and `ALLOW_DEV_AUTH_BYPASS` are dev escape hatches: each reads only
+    /// the literal `true`, is off unless set, and is refused in production whatever it says.
+    #[test]
+    fn dev_escape_hatches_read_only_the_literal_true_and_are_refused_in_production() {
+        for key in ["ALLOW_DEV_ACTOR_HEADERS", "ALLOW_DEV_AUTH_BYPASS"] {
+            with_env(&[("APP_ENV", Some("development")), (key, None)], || {
+                assert!(!super::dev_only_flag(key), "{key} unset");
+            });
+            for value in ["", "0", "1", "yes", "on", "TRUE", " true", "true "] {
+                let vars = [("APP_ENV", Some("development")), (key, Some(value))];
+                with_env(&vars, || {
+                    assert!(!super::dev_only_flag(key), "{key}={value:?}")
+                });
+            }
+            with_env(
+                &[("APP_ENV", Some("development")), (key, Some("true"))],
+                || {
+                    assert!(super::dev_only_flag(key), "{key} true in development");
+                },
+            );
+            with_env(
+                &[("APP_ENV", Some("production")), (key, Some("true"))],
+                || {
+                    assert!(!super::dev_only_flag(key), "{key} true in production");
+                },
+            );
+        }
+    }
+
+    /// `CSP_REPORT_LOG_HOSTS` keeps the `1`, `true`, `yes` and `on` reading that the flag registry
+    /// documents for it, so it is a documented exception to the exact-literal rule. It is still
+    /// refused in production.
+    #[test]
+    fn csp_report_log_hosts_keeps_the_documented_words_outside_production() {
         for value in ["1", "true", "yes", "on"] {
             let vars = [
-                ("APP_ENV", Some("production")),
-                ("RUN_TRACE_API", Some(value)),
+                ("APP_ENV", Some("development")),
+                ("CSP_REPORT_LOG_HOSTS", Some(value)),
             ];
-            with_env(&vars, || assert!(read(), "{value:?}"));
+            with_env(&vars, || {
+                assert!(
+                    super::SpaceFeatureFlags::from_env().csp_report_log_hosts,
+                    "{value}"
+                );
+            });
+        }
+        let vars = [
+            ("APP_ENV", Some("production")),
+            ("CSP_REPORT_LOG_HOSTS", Some("1")),
+        ];
+        with_env(&vars, || {
+            assert!(!super::SpaceFeatureFlags::from_env().csp_report_log_hosts);
+        });
+    }
+
+    /// The BFF-only Space switches that default off (`BFF_EXACT_TRUE_SPACE_SWITCHES`) read only the
+    /// exact literal `true` and have no development default: unset is off in development and
+    /// production, and `1`, `yes`, `on`, `TRUE`, a padded `true` and an empty value are off in both.
+    #[test]
+    fn bff_default_off_space_switches_are_on_only_for_the_exact_literal_true() {
+        for key in super::BFF_EXACT_TRUE_SPACE_SWITCHES {
+            let read = |app_env: &str, value: Option<&str>| {
+                let vars = [("APP_ENV", Some(app_env)), (key, value)];
+                with_env(&vars, || super::space_flag(key))
+            };
+            assert!(!read("development", None), "{key} unset in development");
+            assert!(!read("production", None), "{key} unset in production");
+            assert!(read("production", Some("true")), "{key} set to true");
+            assert!(
+                read("development", Some("true")),
+                "{key} set to true in development"
+            );
+            for value in ["", "1", "yes", "on", "TRUE", "True", " true", "true "] {
+                assert!(!read("development", Some(value)), "{key}={value:?}");
+                assert!(!read("production", Some(value)), "{key}={value:?}");
+            }
         }
     }
 
@@ -2066,10 +2227,12 @@ mod tests").next().unwrap_or(&config);
     }
 
     /// WS10-S4 / WS13-S3 / WS14-S7 / WS15-S7 / WS15-S11: the approval-scope, message-search UI,
-    /// entry-link, command-palette, thread-fork, room-file, turn-attachment and system-entry flags
-    /// default OFF, are OFF under `APP_ENV=production` when unset, ON in dev, and an explicit value
-    /// wins. The message-search API and timeline switches mirror Model Plane, so they are off in
-    /// development too; see `model_plane_mirrored_space_flags_are_off_in_development_when_unset`.
+    /// entry-link and command-palette flags are default ON in the base compose, so they are ON in
+    /// development when unset and OFF under `APP_ENV=production`, and an explicit value wins. The
+    /// thread-fork, room-file, turn-attachment and system-entry switches default OFF in every
+    /// environment; see `bff_default_off_space_switches_are_on_only_for_the_exact_literal_true`. The
+    /// message-search API and timeline switches mirror Model Plane, so they are off in development
+    /// too; see `model_plane_mirrored_space_flags_are_off_in_development_when_unset`.
     #[test]
     fn ws10_ws13_ws14_ws15_gateway_flags_default_off_and_follow_their_variables() {
         let default = super::SpaceFeatureFlags::default();
@@ -2089,11 +2252,6 @@ mod tests").next().unwrap_or(&config);
             "SPACE_MESSAGE_SEARCH_UI",
             "SPACE_ENTRY_LINKS_UI",
             "SPACE_COMMAND_PALETTE_UI",
-            "SPACE_THREAD_FORK_API",
-            "SPACE_ROOM_FILES_API",
-            "SPACE_ROOM_FILES_UI",
-            "SPACE_TURN_ATTACHMENTS_UI",
-            "SPACE_SYSTEM_ENTRIES_API",
         ];
         let vars = |env: &'static str, value: Option<&'static str>| {
             let mut vars = vec![("APP_ENV", Some(env))];
@@ -2107,20 +2265,15 @@ mod tests").next().unwrap_or(&config);
                 flags.message_search_ui,
                 flags.entry_links_ui,
                 flags.command_palette_ui,
-                flags.thread_fork_api,
-                flags.room_files_api,
-                flags.room_files_ui,
-                flags.turn_attachments_ui,
-                flags.system_entries_api,
             ]
         };
-        with_env(&vars("production", None), || assert_eq!(read(), [false; 9]));
-        with_env(&vars("development", None), || assert_eq!(read(), [true; 9]));
+        with_env(&vars("production", None), || assert_eq!(read(), [false; 4]));
+        with_env(&vars("development", None), || assert_eq!(read(), [true; 4]));
         with_env(&vars("production", Some("true")), || {
-            assert_eq!(read(), [true; 9])
+            assert_eq!(read(), [true; 4])
         });
         with_env(&vars("development", Some("false")), || {
-            assert_eq!(read(), [false; 9])
+            assert_eq!(read(), [false; 4])
         });
     }
 
@@ -2274,8 +2427,10 @@ mod tests").next().unwrap_or(&config);
 
 #[cfg(test)]
 mod human_browse_flag_tests {
-    use super::human_browse_enabled;
+    use super::{exact_true_flag, human_browse_enabled};
 
+    /// The documented `1`/`true`/`yes`/`on` reader, for BROWSER_LIVE_VIEW_ONLY, BROWSER_REGION_ATTACH
+    /// and BROWSER_TAB_MENTIONS. Unset is off everywhere.
     #[test]
     fn human_browse_flag_defaults_off_in_every_environment() {
         // The flag is read without APP_ENV: unset is off everywhere, production included.
@@ -2288,6 +2443,25 @@ mod human_browse_flag_tests {
         assert!(human_browse_enabled(Some("1")));
         assert!(human_browse_enabled(Some(" TRUE ")));
         assert!(human_browse_enabled(Some("yes")));
+    }
+
+    /// BROWSER_HUMAN_BROWSE and BROWSER_RECIPES read only the literal `true` (V3d-bff-3): the padded,
+    /// cased and other-word spellings that `human_browse_enabled` accepts are off here.
+    #[test]
+    fn exact_true_browser_flags_read_only_the_literal_true() {
+        assert!(exact_true_flag(Some("true")));
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some("yes"),
+            Some("on"),
+            Some(" true"),
+            Some("true "),
+        ] {
+            assert!(!exact_true_flag(value), "{value:?}");
+        }
     }
 }
 

@@ -326,6 +326,58 @@ const REASON_LEGAL_HOLD: &str = "legal_hold";
 const REASON_HOLD_CHECK: &str = "hold_check_unavailable";
 const REASON_UPSTREAM: &str = "upstream";
 
+/// What a revocation's erase of one agent's notes came to, as the revoke's answer reports it under
+/// `agent_memory_erase` (V3d-bff-2). A closed word set, never an id, a count or content. `NotApplicable`
+/// is the answer while the Space memory feature is off in this gateway: no erase is attempted there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AgentMemoryErase {
+    /// The erase ran; the agent's notes in this Space are gone, or there were none.
+    Erased,
+    /// A legal hold covers the notes, so they were kept.
+    Held,
+    /// The notes were kept because the erase could not be made or did not complete.
+    Unavailable,
+    /// The Space memory feature is off, so no erase was attempted.
+    NotApplicable,
+}
+
+impl AgentMemoryErase {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Erased => "erased",
+            Self::Held => "held",
+            Self::Unavailable => "unavailable",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+/// The typed hold answers of model-gateway (V3d-bff-2). A legal hold is the code `erasure_blocked_legal_hold`
+/// with `details.retryable: false`; a hold-check outage is `erasure_hold_check_unavailable` with
+/// `details.retryable: true`. Both halves are read, as the Convex copy reads a legal hold
+/// (`isOwnerLegalHoldRefusal` in spaceDeletionReceipts.ts), so the two classify a hold the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HoldAnswer {
+    LegalHold,
+    HoldCheckUnavailable,
+}
+
+/// The typed hold answer of an upstream refusal, or `None` for every other answer. The upstream message is
+/// never read.
+fn hold_answer(response: &Value) -> Option<HoldAnswer> {
+    let error = response.get("error")?;
+    let code = error.get("code").and_then(Value::as_str)?;
+    let retryable = error
+        .get("details")
+        .and_then(|details| details.get("retryable"))
+        .and_then(Value::as_bool);
+    match (code, retryable) {
+        ("erasure_blocked_legal_hold", Some(false)) => Some(HoldAnswer::LegalHold),
+        ("erasure_hold_check_unavailable", Some(true)) => Some(HoldAnswer::HoldCheckUnavailable),
+        _ => None,
+    }
+}
+
 /// The pause before the one retry of a revocation erase whose hold check was unavailable (V3c-bff-2-rel1).
 const ERASE_OUTAGE_RETRY_DELAY: Duration = Duration::from_secs(1);
 
@@ -334,18 +386,13 @@ fn record_erase_failure(reason: &'static str) {
     metrics::counter!("verevon_space_agent_erase_failures_total", "reason" => reason).increment(1);
 }
 
-/// The closed reason of a failed revocation erase, read from the upstream's typed code only (V3-sc-1).
-/// Only the two fixed hold codes are read; the upstream message and every other field are ignored.
+/// The closed reason of a failed revocation erase, read from the upstream's typed hold answer only (V3-sc-1,
+/// V3d-bff-2). The upstream message and every other field are ignored, and a hold needs its `retryable` flag.
 fn erase_failure_reason(response: &Value) -> &'static str {
-    let code = response
-        .get("error")
-        .and_then(|error| error.get("code"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    match code {
-        "erasure_blocked_legal_hold" => REASON_LEGAL_HOLD,
-        "erasure_hold_check_unavailable" => REASON_HOLD_CHECK,
-        _ => REASON_UPSTREAM,
+    match hold_answer(response) {
+        Some(HoldAnswer::LegalHold) => REASON_LEGAL_HOLD,
+        Some(HoldAnswer::HoldCheckUnavailable) => REASON_HOLD_CHECK,
+        None => REASON_UPSTREAM,
     }
 }
 
@@ -468,28 +515,41 @@ async fn erase_agent_memory_pass(
     }
 }
 
-/// Counts and logs the final outcome of one revocation erase. A success logs its row count only.
-fn settle_erase_pass(pass: ErasePass) {
+/// Counts and logs the final outcome of one revocation erase, and returns what the revoke's answer reports
+/// (V3d-bff-2). A success logs its row count only. A skip was counted where it happened, and the notes it
+/// leaves behind read as `Unavailable`.
+fn settle_erase_pass(pass: ErasePass) -> AgentMemoryErase {
     match pass {
-        ErasePass::Erased(erased) => tracing::info!(erased, "revoked agent memory erased"),
-        ErasePass::Skipped => {}
-        ErasePass::Refused { status, reason } => note_erase_failure(status, reason),
+        ErasePass::Erased(erased) => {
+            tracing::info!(erased, "revoked agent memory erased");
+            AgentMemoryErase::Erased
+        }
+        ErasePass::Skipped => AgentMemoryErase::Unavailable,
+        ErasePass::Refused { status, reason } => {
+            note_erase_failure(status, reason);
+            if reason == REASON_LEGAL_HOLD {
+                AgentMemoryErase::Held
+            } else {
+                AgentMemoryErase::Unavailable
+            }
+        }
     }
 }
 
 /// Best-effort erase of one named agent's memory once its binding is revoked (EP-6 P3, EP-8 S10).
 ///
 /// The caller runs this only when `GATEWAY_SPACE_MEMORY_UI` is on (`SpaceFeatureFlags::memory_ui`,
-/// dark by default). It runs after the revocation has landed and never changes the revoke's answer:
-/// any failure here is logged by status only, counted under a closed reason, and the revoke still
-/// succeeds. A legal hold (`erasure_blocked_legal_hold`) is counted under its own reason and is not
-/// retried: it stands until it is released. A hold-check outage (`erasure_hold_check_unavailable`) is
-/// retried once after [`ERASE_OUTAGE_RETRY_DELAY`] and counted only if the retry fails too. Repeating
-/// the revoke runs this erase again, the other retry path. Nothing is recorded durably: a held or
-/// still-failing erase is counted and logged only. Session Core is the authority: it verifies the
-/// fresh Control decision issued for THIS agent and erases that agent's rows in this Space, whatever
-/// its own agent switch says. Allowed under every retention posture: the call removes rows and
-/// carries ids, never content, and only a row count is logged.
+/// dark by default). It runs after the revocation has landed and never changes whether the revoke
+/// succeeds: any failure here is logged by status only, counted under a closed reason, and the revoke
+/// still succeeds. Its outcome is returned so the revoke's answer can tell the admin what happened to
+/// the notes (`agent_memory_erase`, V3d-bff-2). A legal hold (`erasure_blocked_legal_hold`) is counted
+/// under its own reason and is not retried: it stands until it is released. A hold-check outage
+/// (`erasure_hold_check_unavailable`) is retried once after [`ERASE_OUTAGE_RETRY_DELAY`] and counted only
+/// if the retry fails too. Repeating the revoke runs this erase again, the other retry path. Nothing is
+/// recorded durably: a held or still-failing erase is counted and logged only. Session Core is the
+/// authority: it verifies the fresh Control decision issued for THIS agent and erases that agent's rows
+/// in this Space, whatever its own agent switch says. Allowed under every retention posture: the call
+/// removes rows and carries ids, never content, and only a row count is logged.
 pub(super) async fn erase_agent_memory_after_revocation(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -497,20 +557,20 @@ pub(super) async fn erase_agent_memory_after_revocation(
     org_id: &str,
     space_ref: &str,
     agent_subject_id: &str,
-) {
+) -> AgentMemoryErase {
     let space_ref = space_ref.trim();
     let agent_subject_id = agent_subject_id.trim();
     if org_id.trim().is_empty() || !valid_space_ref(space_ref) || !valid_memory_id(agent_subject_id)
     {
         tracing::warn!("revoked agent memory erase skipped: no valid Space or agent subject");
         record_erase_failure("invalid_input");
-        return;
+        return AgentMemoryErase::Unavailable;
     }
     let pass = run_erase_with_outage_retry(ERASE_OUTAGE_RETRY_DELAY, || {
         erase_agent_memory_pass(state, user, headers, org_id, space_ref, agent_subject_id)
     })
     .await;
-    settle_erase_pass(pass);
+    settle_erase_pass(pass)
 }
 
 /// Asks Control for the `model.space.memory.manage` decision of this call. A refusal (a member
@@ -657,6 +717,11 @@ fn relay_answer(status: StatusCode, response: &Value, operation: &str, memory_id
     if code == ZDR_FEATURE_NOT_SUPPORTED && feature == NAMED_AGENT_FEATURE {
         return (StatusCode::PRECONDITION_FAILED, Json(named_agent_refusal()));
     }
+    // A legal hold on a delete, or a hold check that could not be made, keeps its typed code and retryable
+    // flag (V3d-bff-2). Model-gateway sends both; a hold code without its flag stays the generic answer.
+    if let Some(hold) = hold_answer(response) {
+        return hold_reply(hold);
+    }
     match code {
         "space_memory_not_authorized" => reply(StatusCode::FORBIDDEN, "space_memory_not_authorized", DENIED),
         "memory_not_found" => reply(
@@ -668,6 +733,30 @@ fn relay_answer(status: StatusCode, response: &Value, operation: &str, memory_id
             StatusCode::SERVICE_UNAVAILABLE,
             "space_memory_unavailable",
             "Space memory is temporarily unavailable.",
+        ),
+    }
+}
+
+/// A typed hold answer for a Space memory delete, in fixed words with its retryable flag (V3d-bff-2). A hold
+/// is final until it is released (409, not retryable); a hold-check outage is retryable (503). Nothing upstream
+/// crosses.
+fn hold_reply(hold: HoldAnswer) -> Reply {
+    match hold {
+        HoldAnswer::LegalHold => (
+            StatusCode::CONFLICT,
+            Json(error_with_details(
+                "erasure_blocked_legal_hold",
+                "A legal hold covers this data, so it was not deleted. It can be deleted once the hold is released.",
+                json!({"retryable": false}),
+            )),
+        ),
+        HoldAnswer::HoldCheckUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error_with_details(
+                "erasure_hold_check_unavailable",
+                "Legal holds could not be checked, so nothing was deleted. Try again shortly.",
+                json!({"retryable": true}),
+            )),
         ),
     }
 }
@@ -688,6 +777,11 @@ fn named_agent_refusal() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     /// The Space is resolved server side: the model-gateway call is built from the path
     /// `space_ref` alone, and the decision rides in the body, never the URL.
@@ -754,7 +848,7 @@ mod tests {
 
     #[test]
     fn a_revocation_erase_failure_classifies_by_its_typed_code() {
-        // The typed code decides. The upstream message is never read, whatever it says.
+        // The typed code and its retryable flag decide. The upstream message is never read, whatever it says.
         let held = json!({"error": {
             "code": "erasure_blocked_legal_hold",
             "message": "hold lh_0123 on org-9",
@@ -783,14 +877,139 @@ mod tests {
         }
     }
 
+    /// V3d-bff-2: the BFF classifies a legal hold as the Convex copy does (`isOwnerLegalHoldRefusal`): the exact
+    /// code with `details.retryable: false`. The code alone is not a hold, and neither is a hold code with the
+    /// outage's flag. The same table is pinned on the Convex side in test/space-deletion-hold-classification.test.cjs
+    /// and test/space-deletion-model.test.cjs ("the hold shape is exact").
+    #[test]
+    fn a_legal_hold_needs_the_code_and_its_retryable_false() {
+        let body = |code: &str, details: Option<Value>| {
+            let mut error = json!({"code": code, "message": "upstream-detail"});
+            if let Some(details) = details {
+                error["details"] = details;
+            }
+            json!({ "error": error })
+        };
+        let held = |details: Option<Value>| body("erasure_blocked_legal_hold", details);
+        assert_eq!(
+            hold_answer(&held(Some(json!({"retryable": false})))),
+            Some(HoldAnswer::LegalHold)
+        );
+        assert_eq!(
+            hold_answer(&held(None)),
+            None,
+            "the code alone is not a hold"
+        );
+        assert_eq!(hold_answer(&held(Some(json!({"retryable": true})))), None);
+        assert_eq!(
+            hold_answer(&held(Some(json!({"retryable": "false"})))),
+            None,
+            "a string is not false"
+        );
+        assert_eq!(hold_answer(&held(Some(json!({})))), None);
+        assert_eq!(
+            hold_answer(&held(Some(json!(false)))),
+            None,
+            "details must be an object"
+        );
+        let outage = |details: Option<Value>| body("erasure_hold_check_unavailable", details);
+        assert_eq!(
+            hold_answer(&outage(Some(json!({"retryable": true})))),
+            Some(HoldAnswer::HoldCheckUnavailable)
+        );
+        assert_eq!(hold_answer(&outage(None)), None);
+        assert_eq!(
+            hold_answer(&outage(Some(json!({"retryable": false})))),
+            None
+        );
+        assert_eq!(erase_failure_reason(&held(None)), REASON_UPSTREAM);
+        assert_eq!(erase_failure_reason(&outage(None)), REASON_UPSTREAM);
+    }
+
+    /// V3d-bff-2: a settled erase reports the outcome the revoke's answer carries.
+    #[test]
+    fn a_settled_erase_reports_the_outcome_the_revoke_answers_with() {
+        assert_eq!(
+            settle_erase_pass(ErasePass::Erased(0)),
+            AgentMemoryErase::Erased
+        );
+        assert_eq!(
+            settle_erase_pass(ErasePass::Erased(4)),
+            AgentMemoryErase::Erased
+        );
+        assert_eq!(
+            settle_erase_pass(ErasePass::Skipped),
+            AgentMemoryErase::Unavailable
+        );
+        assert_eq!(settle_erase_pass(held_pass()), AgentMemoryErase::Held);
+        assert_eq!(
+            settle_erase_pass(outage_pass()),
+            AgentMemoryErase::Unavailable
+        );
+        assert_eq!(
+            settle_erase_pass(other_refusal_pass()),
+            AgentMemoryErase::Unavailable
+        );
+        assert_eq!(AgentMemoryErase::Erased.as_str(), "erased");
+        assert_eq!(AgentMemoryErase::Held.as_str(), "held");
+        assert_eq!(AgentMemoryErase::Unavailable.as_str(), "unavailable");
+        assert_eq!(AgentMemoryErase::NotApplicable.as_str(), "not_applicable");
+    }
+
+    /// V3d-bff-2: a held delete keeps the typed code and its flag, and an outage keeps its own. A hold code
+    /// without its flag is the generic answer, as the classifier reads it.
+    #[test]
+    fn a_held_delete_keeps_the_typed_hold_answer_and_its_flag() {
+        let held = json!({"error": {
+            "code": "erasure_blocked_legal_hold",
+            "message": "hold lh_0123 on org-9",
+            "details": {"retryable": false},
+        }});
+        let (status, Json(body)) =
+            relay_answer(StatusCode::CONFLICT, &held, OPERATION_DELETE, "m1");
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "erasure_blocked_legal_hold");
+        assert_eq!(body["error"]["details"]["retryable"], false);
+        assert!(!body.to_string().contains("lh_0123"), "{body}");
+
+        let outage = json!({"error": {
+            "code": "erasure_hold_check_unavailable",
+            "message": "org-core down",
+            "details": {"retryable": true},
+        }});
+        let (status, Json(body)) = relay_answer(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &outage,
+            OPERATION_DELETE,
+            "m1",
+        );
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "erasure_hold_check_unavailable");
+        assert_eq!(body["error"]["details"]["retryable"], true);
+        assert!(!body.to_string().contains("org-core"), "{body}");
+
+        let bare = json!({"error": {"code": "erasure_blocked_legal_hold", "message": "x"}});
+        let (status, Json(body)) =
+            relay_answer(StatusCode::CONFLICT, &bare, OPERATION_DELETE, "m1");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "space_memory_unavailable");
+    }
+
     #[test]
     fn a_held_erase_and_an_outage_are_counted_apart() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         let _guard = metrics::set_default_local_recorder(&recorder);
-        let held = json!({"error": {"code": "erasure_blocked_legal_hold", "message": "held"}});
-        let outage =
-            json!({"error": {"code": "erasure_hold_check_unavailable", "message": "down"}});
+        let held = json!({"error": {
+            "code": "erasure_blocked_legal_hold",
+            "message": "held",
+            "details": {"retryable": false},
+        }});
+        let outage = json!({"error": {
+            "code": "erasure_hold_check_unavailable",
+            "message": "down",
+            "details": {"retryable": true},
+        }});
         note_erase_failure(StatusCode::CONFLICT, erase_failure_reason(&held));
         note_erase_failure(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -844,10 +1063,12 @@ mod tests {
         let held = json!({"error": {
             "code": "erasure_blocked_legal_hold",
             "message": "hold lh_0123 on org-9",
+            "details": {"retryable": false},
         }});
         let outage = json!({"error": {
             "code": "erasure_hold_check_unavailable",
             "message": "org-core down",
+            "details": {"retryable": true},
         }});
         tracing::subscriber::with_default(subscriber, || {
             note_erase_failure(StatusCode::CONFLICT, erase_failure_reason(&held));
@@ -967,6 +1188,180 @@ mod tests {
                 .lines()
                 .any(|line| line.contains(REASON_HOLD_CHECK)),
             "{rendered}"
+        );
+    }
+
+    // ----- the revoke answer (V3d-bff-2) ------------------------------------------------------
+
+    /// One agent call through the real router, against mock Auth, Control, Application (Convex) and Model
+    /// Gateway. `binding_status` is what Application's binding mutation answers; `erase` is what model-gateway's
+    /// erase route answers. Returns the status, the body and how many erase calls reached model-gateway.
+    async fn agent_call(
+        method: &str,
+        json_body: Option<Value>,
+        memory_ui: bool,
+        binding_status: &str,
+        erase: ResponseTemplate,
+    ) -> (u16, Value, usize) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for slug in ["session-core", "model-gateway", "capability-core"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{slug}/token")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})),
+                )
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": "member", "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": "owner", "subject_id": "user-1"}
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/memory-decision"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"decision": {"decision_ref": "decision-1"}, "token": "decision-token"}
+            })))
+            .mount(&user_core)
+            .await;
+
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": {
+                "bindingRef": "sab-1", "subjectId": "agent-7", "status": binding_status, "changed": true
+            }})))
+            .mount(&application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/action"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"value": {"status": "applied"}})),
+            )
+            .mount(&application)
+            .await;
+
+        let model_gateway = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/spaces/space-room/agents/agent-7/memory/erase"))
+            .respond_with(erase)
+            .mount(&model_gateway)
+            .await;
+
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.model_gateway_url = model_gateway.uri();
+        state.space_features.memory_ui = memory_ui;
+
+        let mut request = Request::builder()
+            .method(method)
+            .uri("/api/v1/spaces/space-room/agents/sab-1")
+            .header("cookie", "better-auth.session_token=session-1");
+        let body = match json_body {
+            Some(value) => {
+                request = request.header("content-type", "application/json");
+                Body::from(value.to_string())
+            }
+            None => Body::empty(),
+        };
+        let response = crate::build_router(state)
+            .oneshot(request.body(body).unwrap())
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let answer: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        let erase_calls = model_gateway.received_requests().await.unwrap().len();
+        (status, answer, erase_calls)
+    }
+
+    /// A legal hold on the erase: the revoke still succeeds, names the held notes, and does not retry.
+    #[tokio::test]
+    async fn a_revoke_names_a_held_erase() {
+        let held = ResponseTemplate::new(409).set_body_json(json!({"error": {
+            "code": "erasure_blocked_legal_hold",
+            "message": "hold lh_0123 on org-9",
+            "details": {"retryable": false},
+        }}));
+        let (status, body, erase_calls) = agent_call("DELETE", None, true, "revoked", held).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(erase_calls, 1, "a legal hold is not retried");
+        assert_eq!(
+            body["data"],
+            json!({"binding_ref": "sab-1", "status": "revoked", "changed": true, "agent_memory_erase": "held"})
+        );
+        assert!(!body.to_string().contains("lh_0123"), "{body}");
+    }
+
+    /// An erase that ran names `erased`; a generic refusal is final and names `unavailable`.
+    #[tokio::test]
+    async fn a_revoke_names_an_erase_that_ran_and_one_that_failed() {
+        let ran = ResponseTemplate::new(200).set_body_json(json!({"erased": 3}));
+        let (status, body, _) = agent_call("DELETE", None, true, "revoked", ran).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"]["agent_memory_erase"], "erased");
+
+        let refused = ResponseTemplate::new(500).set_body_json(json!({"error": {
+            "code": "space_memory_unavailable",
+            "message": "upstream-words",
+        }}));
+        let (status, body, erase_calls) =
+            agent_call("DELETE", None, true, "revoked", refused).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(erase_calls, 1, "a generic refusal is not retried");
+        assert_eq!(body["data"]["agent_memory_erase"], "unavailable");
+        assert!(!body.to_string().contains("upstream-words"), "{body}");
+    }
+
+    /// With the Space memory feature off no erase is attempted, and the answer says so.
+    #[tokio::test]
+    async fn a_revoke_says_not_applicable_while_the_memory_feature_is_off() {
+        let ran = ResponseTemplate::new(200).set_body_json(json!({"erased": 0}));
+        let (status, body, erase_calls) = agent_call("DELETE", None, false, "revoked", ran).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(erase_calls, 0, "no erase is attempted with the feature off");
+        assert_eq!(body["data"]["agent_memory_erase"], "not_applicable");
+    }
+
+    /// Pause and resume never erase, and their answer keeps the three fields it always had.
+    #[tokio::test]
+    async fn a_pause_answer_carries_no_erase_field() {
+        let (status, body, erase_calls) = agent_call(
+            "PATCH",
+            Some(json!({"status": "paused"})),
+            true,
+            "paused",
+            ResponseTemplate::new(200),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(erase_calls, 0);
+        assert_eq!(
+            body["data"],
+            json!({"binding_ref": "sab-1", "status": "paused", "changed": true})
         );
     }
 }

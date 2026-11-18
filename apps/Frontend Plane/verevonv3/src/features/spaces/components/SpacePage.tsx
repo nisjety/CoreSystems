@@ -19,6 +19,7 @@ import {
   revokeSpaceAgent,
   setSpaceAgentState,
   updateSpaceInstructions,
+  type AgentMemoryErase,
   type SpaceAgent,
   type SpacePresence,
   type SpaceReadMarker,
@@ -1399,6 +1400,9 @@ function SpaceAgentPanel(props: {
   const i18n = useI18n()
   const agents = props.agents
   const current = () => agents() ?? []
+  // What a revoke left of the agent's notes, when they were kept (V3d-bff-2). The revoked card leaves the
+  // roster when it refreshes, so the notice lives here, where it outlives the card.
+  const [erasureNotice, setErasureNotice] = createSignal<'held' | 'unavailable' | null>(null)
 
   return (
     <section class="verevon-space-view" aria-labelledby="space-agents-title">
@@ -1449,6 +1453,24 @@ function SpaceAgentPanel(props: {
         </p>
       </Show>
 
+      {/* V3d-bff-2: a revoked agent whose notes were kept, by a legal hold or a failed erase. Shown only for those;
+          an erase that ran, or none that was attempted, says nothing new. */}
+      <Show when={erasureNotice()}>
+        {(kind) => (
+          <p class="verevon-space-agent__unpublished" role="status">
+            {kind() === 'held'
+              ? i18n.tr(
+                  'Agenten er fjernet fra rommet. Notatene den la igjen her er ikke slettet, fordi en juridisk sperre gjelder for dem.',
+                  'The agent was removed from the room. The notes it kept here were not erased, because a legal hold covers them.',
+                )
+              : i18n.tr(
+                  'Agenten er fjernet fra rommet. Notatene den la igjen her kunne ikke slettes nå.',
+                  'The agent was removed from the room. The notes it kept here could not be erased right now.',
+                )}
+          </p>
+        )}
+      </Show>
+
       <Show when={agents.error ? undefined : agents()}>
         <Show
           when={current().length > 0}
@@ -1471,6 +1493,9 @@ function SpaceAgentPanel(props: {
                   spaceRef={props.spaceRef}
                   canGovern={props.canGovern}
                   onChanged={props.onChanged}
+                  onRevoked={(erase) =>
+                    setErasureNotice(erase === 'held' || erase === 'unavailable' ? erase : null)
+                  }
                 />
               )}
             </For>
@@ -1490,6 +1515,8 @@ function SpaceAgentCard(props: {
   readonly spaceRef: string
   readonly canGovern: boolean
   readonly onChanged?: () => void
+  /** Told what a revoke did to the agent's notes, before the refresh takes this card off the roster. */
+  readonly onRevoked?: (erase: AgentMemoryErase | undefined) => void
 }) {
   const i18n = useI18n()
   const agent = () => props.agent
@@ -1540,7 +1567,10 @@ function SpaceAgentCard(props: {
     const ref = bindingRef()
     if (!ref) return
     void run(
-      () => revokeSpaceAgent(props.spaceRef, ref),
+      async () => {
+        const answer = await revokeSpaceAgent(props.spaceRef, ref)
+        props.onRevoked?.(answer.agentMemoryErase)
+      },
       {
         no: 'Agenten kunne ikke fjernes. Den deltar fortsatt i rommet.',
         en: 'The agent could not be removed. It is still taking part in the room.',

@@ -10,6 +10,7 @@ import { ApiError } from '@/shared/api/api-error'
 import { ReviewRunContractError } from '@/shared/actions/chat-review'
 import { AlertCircle, AlertTriangle, CircleCheck, CircleHelp, X } from '@/shared/icons'
 import { useI18n } from '@/shared/i18n'
+import { isThreadRefusalCode } from '../lib/space-side-features'
 import { formatLatency, formatUsd } from './chat-media-markdown'
 import './review-run.css'
 
@@ -24,13 +25,15 @@ export type ReviewLineRange = { start: number; end: number }
 
 /**
  * Why a review produced no card, as one line of copy. `refused_locally` is the contract refusing the text before anything
- * was sent; `off` is the gateway's review switch answering 404.
+ * was sent; `off` is the gateway's review switch answering 404; `thread_refused` is the gateway refusing the chat thread the
+ * review names, before any model call (DEC-V-R8).
  */
 export type ReviewRunFailureKind =
   | 'too_large'
   | 'no_text'
   | 'refused'
   | 'refused_locally'
+  | 'thread_refused'
   | 'unavailable'
   | 'off'
   | 'failed'
@@ -56,6 +59,8 @@ export function reviewHeadline(card: Pick<ReviewCard, 'status' | 'verdict'>): Ve
 export function reviewRunFailureKind(error: unknown): ReviewRunFailureKind {
   if (error instanceof ReviewRunContractError) return 'refused_locally'
   if (error instanceof ApiError) {
+    // The thread the review names is refused typed, before any model call (DEC-V-R8): the card says so, and offers no retry.
+    if (isThreadRefusalCode(error.code)) return 'thread_refused'
     if (error.status === 413) return 'too_large'
     if (error.status === 400) return error.code === 'review_material_missing' ? 'no_text' : 'refused'
     if (error.status === 503) return 'unavailable'
@@ -287,6 +292,10 @@ export function ReviewRunFailure(props: { kind: ReviewRunFailureKind }) {
     refused_locally: i18n.tr(
       'Teksten kan ikke gjennomgås. Den er tom, eller over grensen på 60 000 byte og 2 000 linjer.',
       'This text cannot be reviewed. It is empty, or over the limit of 60,000 bytes and 2,000 lines.',
+    ),
+    thread_refused: i18n.tr(
+      'Gjennomgangen er ikke tilgjengelig for denne samtalen. Forespørselen ble ikke sendt til en modell.',
+      'A review is not available for this chat. The request was not sent to a model.',
     ),
     unavailable: i18n.tr(
       'Gjennomgangen er ikke tilgjengelig akkurat nå. Prøv igjen om litt.',

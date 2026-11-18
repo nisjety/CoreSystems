@@ -15,6 +15,7 @@ import {
   getSpaceRosterView,
   leaveSpaceRoom,
   removeSpaceMember,
+  revokeSpaceAgent,
 } from './spaces-client'
 
 const mockedRequest = vi.mocked(requestJson)
@@ -142,5 +143,28 @@ describe('getSpaceRosterView', () => {
   it('leaves the plain roster call unchanged', async () => {
     mockedRequest.mockResolvedValue({ members, writer_api: true })
     await expect(getSpaceRoster('space_1')).resolves.toEqual(members)
+  })
+})
+
+describe('revokeSpaceAgent', () => {
+  it('reads the erase outcome the answer names, and only a known one', async () => {
+    mockedRequest.mockResolvedValueOnce({ binding_ref: 'sab-1', status: 'revoked', changed: true, agent_memory_erase: 'held' })
+    await expect(revokeSpaceAgent('space 1', 'sab/1')).resolves.toEqual({ status: 'revoked', agentMemoryErase: 'held' })
+    expect(mockedRequest).toHaveBeenLastCalledWith('/api/v1/spaces/space%201/agents/sab%2F1', { method: 'DELETE' })
+    for (const outcome of ['erased', 'unavailable', 'not_applicable'] as const) {
+      mockedRequest.mockResolvedValueOnce({ status: 'revoked', agent_memory_erase: outcome })
+      await expect(revokeSpaceAgent('space_1', 'sab_1')).resolves.toEqual({ status: 'revoked', agentMemoryErase: outcome })
+    }
+  })
+
+  it('names no outcome for an answer without one, or with a word the client does not know', async () => {
+    mockedRequest.mockResolvedValueOnce({ status: 'revoked', changed: true })
+    await expect(revokeSpaceAgent('space_1', 'sab_1')).resolves.toEqual({ status: 'revoked' })
+    mockedRequest.mockResolvedValueOnce({ status: 'revoked', agent_memory_erase: 'deleted' })
+    const unknown = await revokeSpaceAgent('space_1', 'sab_1')
+    expect(unknown).toEqual({ status: 'revoked' })
+    expect(unknown).not.toHaveProperty('agentMemoryErase')
+    mockedRequest.mockResolvedValueOnce({})
+    await expect(revokeSpaceAgent('space_1', 'sab_1')).resolves.toEqual({ status: 'revoked' })
   })
 })

@@ -4105,12 +4105,16 @@ async fn apply_space_agent_state(
     };
 
     // EP-6 P3 and EP-8 S10: a revoked agent's notes in this room go with its binding. Best-effort
-    // and after the revocation has landed, so it never changes the answer below; repeating a revoke
-    // repeats it, which is how a missed erase is retried. Pause and resume keep the notes. Dark
-    // behind GATEWAY_SPACE_MEMORY_UI (`SpaceFeatureFlags::memory_ui`, default off), like the Space
-    // memory routes.
-    if status == "revoked" && state.space_features.memory_ui {
-        if let Some(headers) = headers {
+    // and after the revocation has landed, so a failed erase never fails the revoke. Its outcome is
+    // reported in the answer below as `agent_memory_erase` (V3d-bff-2), so the admin is told when the
+    // notes were kept. Repeating a revoke repeats the erase, which is how a missed erase is retried.
+    // Pause and resume keep the notes and carry no outcome. Dark behind GATEWAY_SPACE_MEMORY_UI
+    // (`SpaceFeatureFlags::memory_ui`, default off), like the Space memory routes: with it off no
+    // erase is attempted, and the answer says `not_applicable`.
+    let agent_memory_erase = if status == "revoked" {
+        Some(if !state.space_features.memory_ui {
+            memory::AgentMemoryErase::NotApplicable
+        } else if let Some(headers) = headers {
             let subject_id = updated
                 .get("subjectId")
                 .and_then(Value::as_str)
@@ -4118,9 +4122,13 @@ async fn apply_space_agent_state(
             memory::erase_agent_memory_after_revocation(
                 state, user, headers, &org_id, space_ref, subject_id,
             )
-            .await;
-        }
-    }
+            .await
+        } else {
+            memory::AgentMemoryErase::Unavailable
+        })
+    } else {
+        None
+    };
 
     // Only revocation changes who is in the room, so only revocation needs
     // Control to converge. Pausing keeps the agent a member that may not be
@@ -4135,14 +4143,17 @@ async fn apply_space_agent_state(
         );
     }
 
-    (
-        StatusCode::OK,
-        Json(json!({"data": {
-            "binding_ref": updated.get("bindingRef").and_then(Value::as_str).unwrap_or(binding_ref),
-            "status": updated.get("status").and_then(Value::as_str).unwrap_or(status),
-            "changed": updated.get("changed").and_then(Value::as_bool).unwrap_or(false),
-        }})),
-    )
+    let mut answer = json!({
+        "binding_ref": updated.get("bindingRef").and_then(Value::as_str).unwrap_or(binding_ref),
+        "status": updated.get("status").and_then(Value::as_str).unwrap_or(status),
+        "changed": updated.get("changed").and_then(Value::as_bool).unwrap_or(false),
+    });
+    // Additive (V3d-bff-2): only a revocation carries the outcome of its erase, a closed word and never
+    // content or a count.
+    if let Some(erase) = agent_memory_erase {
+        answer["agent_memory_erase"] = json!(erase.as_str());
+    }
+    (StatusCode::OK, Json(json!({"data": answer})))
 }
 
 /// `PATCH /api/v1/spaces/{space_ref}/agents/{binding_ref}` — pause or resume.
