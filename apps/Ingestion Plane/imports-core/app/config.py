@@ -1,7 +1,7 @@
 from functools import lru_cache
-from typing import List
+from typing import Any, List
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -107,6 +107,16 @@ class Settings(BaseSettings):
     stirling_pdf_url: str = Field(
         default="http://stirling-pdf:8080", alias="STIRLING_PDF_URL"
     )
+
+    @field_validator("allow_insecure_dev_defaults", mode="before")
+    @classmethod
+    def read_insecure_dev_defaults_exactly(cls, value: Any) -> Any:
+        # Model Plane and the BFF read this switch as the literal 1 only. pydantic's bool would
+        # also take true, yes, on, t and y in any case, so a spelling those planes refuse would
+        # open the legacy tenant path here. Any other string reads as off.
+        if isinstance(value, str):
+            return value == "1"
+        return value
 
     @property
     def allowed_file_types(self) -> List[str]:

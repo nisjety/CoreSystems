@@ -43,8 +43,10 @@ impl Settings {
         let internal_token = env::var("AUTOCOMPLETE_INTERNAL_TOKEN")
             .ok()
             .filter(|value| !value.trim().is_empty());
-        let isolated_insecure =
-            env_bool("ALLOW_INSECURE_DEV_DEFAULTS", false) && env_bool("ISOLATED_E2E", false);
+        let isolated_insecure = isolated_insecure_from(
+            env::var("ALLOW_INSECURE_DEV_DEFAULTS").ok().as_deref(),
+            env::var("ISOLATED_E2E").ok().as_deref(),
+        );
         if internal_token.is_none() && !isolated_insecure {
             return Err(AppError::Config(
                 "AUTOCOMPLETE_INTERNAL_TOKEN is required outside isolated E2E".to_string(),
@@ -106,4 +108,60 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(default)
+}
+
+/// Reads one bypass switch exactly, as Model Plane, the BFF and `routes.rs` read it: only the
+/// literal `1` turns it on. `true`, `yes`, `on` and padded values leave it off.
+fn switch_is_literal_one(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+/// The isolated-E2E bypass needs both gates, each read exactly: `ALLOW_INSECURE_DEV_DEFAULTS=1`
+/// and `ISOLATED_E2E=1`. The boot check here and the request-time check in `routes.rs` must
+/// accept the same spellings, or a boot could pass that every authorized route then refuses.
+fn isolated_insecure_from(allow_insecure: Option<&str>, isolated_e2e: Option<&str>) -> bool {
+    switch_is_literal_one(allow_insecure) && switch_is_literal_one(isolated_e2e)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insecure_switch_opens_only_for_the_exact_literal_one() {
+        assert!(switch_is_literal_one(Some("1")));
+        for value in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("true"),
+            Some("TRUE"),
+            Some("yes"),
+            Some("on"),
+            Some(" 1"),
+            Some("1 "),
+            Some("01"),
+        ] {
+            assert!(!switch_is_literal_one(value), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn isolated_insecure_needs_both_gates_as_the_literal_one() {
+        assert!(isolated_insecure_from(Some("1"), Some("1")));
+        for (allow_insecure, isolated_e2e) in [
+            (Some("true"), Some("1")),
+            (Some("1"), Some("true")),
+            (Some("yes"), Some("on")),
+            (Some("TRUE"), Some("TRUE")),
+            (Some("1"), None),
+            (None, Some("1")),
+            (None, None),
+        ] {
+            assert!(
+                !isolated_insecure_from(allow_insecure, isolated_e2e),
+                "{allow_insecure:?} {isolated_e2e:?}"
+            );
+        }
+    }
 }
