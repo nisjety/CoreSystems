@@ -102,3 +102,55 @@ func TestLoadReadsDedicatedGDPRSharedNATSCredentialsAndLeavesThemUnsetByDefault(
 		t.Fatalf("GDPRSharedNatsURL must not fall back to a generic shared-NATS env var, got %q", cfg.GDPRSharedNatsURL)
 	}
 }
+
+// WIKISTORE_SPACE_CANVAS is dark by default and turns on only for the literal "true", the same rule as the other rollout
+// switches. The canvas routes verify what they serve with a Control decision key, so the flag without one is refused.
+func TestSpaceCanvasSwitchIsTheLiteralTrue(t *testing.T) {
+	for _, value := range []string{"", "1", "t", "T", "TRUE", "True", "yes", "on", "false", "0", "truee", "\"true\""} {
+		t.Setenv("WIKISTORE_SPACE_CANVAS", value)
+		if Load().SpaceCanvasEnabled {
+			t.Errorf("WIKISTORE_SPACE_CANVAS=%q turned the room canvas on; only the literal true may", value)
+		}
+	}
+	t.Setenv("WIKISTORE_SPACE_CANVAS", "true")
+	if !Load().SpaceCanvasEnabled {
+		t.Error("WIKISTORE_SPACE_CANVAS=true left the room canvas off")
+	}
+}
+
+func TestSpaceCanvasRefusesWithoutAControlDecisionKey(t *testing.T) {
+	t.Setenv("CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON", "")
+	t.Setenv("CONTROL_SPACE_DECISION_KEY_ID", "")
+	t.Setenv("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64", "")
+
+	t.Setenv("WIKISTORE_SPACE_CANVAS", "false")
+	if err := Load().ValidateSpaceCanvas(); err != nil {
+		t.Fatalf("the flag off needs no key: %v", err)
+	}
+
+	t.Setenv("WIKISTORE_SPACE_CANVAS", "true")
+	if err := Load().ValidateSpaceCanvas(); err == nil {
+		t.Fatal("WIKISTORE_SPACE_CANVAS=true started without a Control decision key")
+	}
+	t.Setenv("CONTROL_SPACE_DECISION_KEY_ID", "control-space-decision-1")
+	if err := Load().ValidateSpaceCanvas(); err == nil {
+		t.Fatal("a key id without its public key was accepted")
+	}
+	t.Setenv("CONTROL_SPACE_DECISION_KEY_ID", "")
+	t.Setenv("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64", "public-key-placeholder")
+	if err := Load().ValidateSpaceCanvas(); err == nil {
+		t.Fatal("a public key without its key id was accepted")
+	}
+
+	t.Setenv("CONTROL_SPACE_DECISION_KEY_ID", "control-space-decision-1")
+	if err := Load().ValidateSpaceCanvas(); err != nil {
+		t.Fatalf("the single key pair was refused: %v", err)
+	}
+
+	t.Setenv("CONTROL_SPACE_DECISION_KEY_ID", "")
+	t.Setenv("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64", "")
+	t.Setenv("CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON", `{"control-space-decision-1":"public-key-placeholder"}`)
+	if err := Load().ValidateSpaceCanvas(); err != nil {
+		t.Fatalf("the JSON key map was refused: %v", err)
+	}
+}

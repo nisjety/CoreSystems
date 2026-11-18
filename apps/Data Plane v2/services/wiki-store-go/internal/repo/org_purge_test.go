@@ -319,6 +319,65 @@ func TestHardPurgeByOrgIsOrgScopedAndIdempotent(t *testing.T) {
 	}
 }
 
+// TestHardPurgeByOrgDeletesTheCanvasTablesForTheOrgOnly seeds one canvas, its version and a Space fence for org-A and for
+// org-B, then purges org-A. The canvas tables are not in purgeScopedTables, so this case checks them on their own: org-A's
+// rows go, org-B's stay, and both canvas counts reach PurgeResult.Total.
+func TestHardPurgeByOrgDeletesTheCanvasTablesForTheOrgOnly(t *testing.T) {
+	pool := setupPurgeTestPool(t)
+	ctx := context.Background()
+	var schema string
+	if err := pool.QueryRow(ctx, "SELECT current_schema()").Scan(&schema); err != nil {
+		t.Fatalf("read the test schema: %v", err)
+	}
+	for _, file := range []string{"20261116102141_space_canvas.sql", "20261116112048_space_canvas_purge_fence.sql"} {
+		path := filepath.Join("..", "..", "..", "..", "infra", "postgres", "migrations", file)
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read canvas migration %s: %v", file, err)
+		}
+		// The migrations qualify their GRANT and policy statements with public.; name the test schema instead.
+		if _, err := pool.Exec(ctx, strings.ReplaceAll(string(raw), "public.", schema+".")); err != nil {
+			t.Fatalf("apply canvas migration %s: %v", file, err)
+		}
+	}
+	digest := "sha256:" + strings.Repeat("a", 64)
+	for _, org := range []string{"org-A", "org-B"} {
+		canvasID := "canvas-" + org
+		versionID := "version-" + org
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO space_canvases (canvas_id, org_id, space_ref, created_by, head_version_id, head_version_no)
+			VALUES ($1, $2, 'space-1', 'user-1', $3, 1)`, canvasID, org, versionID); err != nil {
+			t.Fatalf("seed the canvas of %s: %v", org, err)
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO space_canvas_versions (version_id, canvas_id, org_id, version_no, content, content_sha256, content_bytes,
+				author_kind, author_id, change_kind, decision_ref, authority_revision, audience_revision, idempotency_hash)
+			VALUES ($1, $2, $3, 1, 'room text', $4, 9, 'user', 'user-1', 'create', 'decision-1', 1, 1, $5)`,
+			versionID, canvasID, org, digest, "hash-"+org); err != nil {
+			t.Fatalf("seed the version of %s: %v", org, err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO space_canvas_purges (org_id, space_ref) VALUES ($1, 'space-1')`, org); err != nil {
+			t.Fatalf("seed the Space fence of %s: %v", org, err)
+		}
+	}
+
+	result, err := NewWikiRepo(pool).HardPurgeByOrg(ctx, "org-A")
+	if err != nil {
+		t.Fatalf("hard purge org-A: %v", err)
+	}
+	if result.SpaceCanvasesDeleted != 1 || result.SpaceCanvasVersionsDeleted != 1 || result.Total() != 2 {
+		t.Fatalf("purge result = %+v; want one canvas and one version, and a Total of 2", result)
+	}
+	for _, table := range []string{"space_canvases", "space_canvas_versions", "space_canvas_purges"} {
+		if n := countRowsForOrg(ctx, t, pool, table, "org-A"); n != 0 {
+			t.Fatalf("org-A %s not purged: %d rows remain", table, n)
+		}
+		if n := countRowsForOrg(ctx, t, pool, table, "org-B"); n != 1 {
+			t.Fatalf("org-B %s = %d rows, want 1", table, n)
+		}
+	}
+}
+
 func TestHardPurgeByOrgRejectsEmptyOrgID(t *testing.T) {
 	pool := setupPurgeTestPool(t)
 	wikiRepo := NewWikiRepo(pool)
