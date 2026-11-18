@@ -154,3 +154,101 @@ func TestClient_Scrape_NonJSONErrorBody(t *testing.T) {
 		t.Fatalf("error message did not include body excerpt: %q", qerr.Message)
 	}
 }
+
+// requestedURL is the address every final-URL test below asks Quarry for.
+const requestedURL = "https://allowed.example/a"
+
+// scrapeWithURL serves one Quarry envelope whose url object is urlObj (nil for no url object at all) and returns the
+// projected result of a scrape of requestedURL.
+func scrapeWithURL(t *testing.T, urlObj map[string]any) *quarry.ScrapeResult {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		data := map[string]any{
+			"status":  200,
+			"formats": map[string]any{"markdown": "# Page"},
+		}
+		if urlObj != nil {
+			data["url"] = urlObj
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+	}))
+	defer srv.Close()
+
+	c := quarry.New(quarry.Config{BaseURL: srv.URL, Timeout: 5 * time.Second})
+	res, err := c.Scrape(context.Background(), quarry.ScrapeRequest{URL: requestedURL})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	return res
+}
+
+// The edge's real shape: url.requested beside url.final_url, the address the page ended on. A redirect onto another
+// host must come back as that host, and URL stays the request.
+func TestClient_Scrape_ReadsTheFinalURLTheEdgeSends(t *testing.T) {
+	res := scrapeWithURL(t, map[string]any{
+		"requested": requestedURL,
+		"final_url": "https://blocked.example/landing",
+	})
+	if res.URL != requestedURL {
+		t.Fatalf("URL = %q, want the request", res.URL)
+	}
+	if res.FinalURL != "https://blocked.example/landing" {
+		t.Fatalf("FinalURL = %q, want the redirect target", res.FinalURL)
+	}
+}
+
+// final_url is the edge's key and wins over the legacy final key when both are present.
+func TestClient_Scrape_PrefersFinalURLOverTheLegacyFinalKey(t *testing.T) {
+	res := scrapeWithURL(t, map[string]any{
+		"requested": requestedURL,
+		"final_url": "https://example.org/landing",
+		"final":     "https://legacy.example/b",
+	})
+	if res.FinalURL != "https://example.org/landing" {
+		t.Fatalf("FinalURL = %q, want final_url", res.FinalURL)
+	}
+}
+
+// An edge that predates final_url answers with the legacy final key alone, and that key still names where the page
+// ended.
+func TestClient_Scrape_ReadsTheLegacyFinalKeyOnlyWhenFinalURLIsAbsent(t *testing.T) {
+	res := scrapeWithURL(t, map[string]any{"final": "https://legacy.example/b"})
+	if res.FinalURL != "https://legacy.example/b" {
+		t.Fatalf("FinalURL = %q, want the legacy final key", res.FinalURL)
+	}
+}
+
+// A blank final URL is no final URL, and it stays blank. The requested URL must not stand in for it, and the legacy
+// final key beside a blank final_url is not read. FinalURL is empty, which callers treat as unknown.
+func TestClient_Scrape_BlankFinalURLIsUnknownNotTheRequest(t *testing.T) {
+	for _, blank := range []string{"", "   ", "\t\n"} {
+		for _, urlObj := range []map[string]any{
+			{"requested": requestedURL, "final_url": blank},
+			{"requested": requestedURL, "final_url": blank, "final": "https://blocked.example/landing"},
+			{"requested": requestedURL, "final": blank},
+		} {
+			res := scrapeWithURL(t, urlObj)
+			if res.FinalURL != "" {
+				t.Fatalf("url %v: FinalURL = %q, want empty (unknown)", urlObj, res.FinalURL)
+			}
+			if res.URL != requestedURL {
+				t.Fatalf("url %v: URL = %q, want the request", urlObj, res.URL)
+			}
+		}
+	}
+}
+
+// With no final address at all (no url object, or neither key), the final URL is unknown too. It is not filled in from the
+// request.
+func TestClient_Scrape_AbsentFinalURLIsUnknownNotTheRequest(t *testing.T) {
+	for name, urlObj := range map[string]map[string]any{
+		"no url object": nil,
+		"no final keys": {"requested": requestedURL},
+	} {
+		res := scrapeWithURL(t, urlObj)
+		if res.FinalURL != "" {
+			t.Fatalf("%s: FinalURL = %q, want empty (unknown)", name, res.FinalURL)
+		}
+	}
+}

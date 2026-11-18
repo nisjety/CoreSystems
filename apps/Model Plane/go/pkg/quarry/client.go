@@ -60,6 +60,13 @@ type ScrapeRequest struct {
 
 // ScrapeResult is the projected response. The full Quarry envelope is
 // kept under Raw for callers that need more (branding, JSON-LD, links).
+//
+// FinalURL is the address the page ended on, read from the edge's url.final_url
+// (or the legacy url.final when final_url is absent). When the edge sent no
+// non-blank address, FinalURL is empty, which means unknown: it is never filled
+// in from the requested URL. A caller that judges where a page ended must treat
+// empty as unknown and fail closed, not as a page that stayed on the requested
+// host.
 type ScrapeResult struct {
 	URL         string
 	FinalURL    string
@@ -225,12 +232,17 @@ func project(requested string, data map[string]any) *ScrapeResult {
 	// fingerprint
 	out.Fingerprint = toString(data["fingerprint"])
 
-	// url.final
+	// url.final_url: the address the page ended on (the edge's UrlTriple). The legacy url.final is read only when final_url
+	// is absent or not a string. A blank or missing address stays empty, which is unknown. It is never replaced by the
+	// requested URL, which a redirect check would then trust as the final host (see ScrapeResult).
 	if urlObj, ok := data["url"].(map[string]any); ok {
-		out.FinalURL = toString(urlObj["final"])
-	}
-	if out.FinalURL == "" {
-		out.FinalURL = requested
+		final, isString := urlObj["final_url"].(string)
+		if !isString {
+			final, _ = urlObj["final"].(string)
+		}
+		if strings.TrimSpace(final) != "" {
+			out.FinalURL = final
+		}
 	}
 
 	// formats.markdown / formats.text
