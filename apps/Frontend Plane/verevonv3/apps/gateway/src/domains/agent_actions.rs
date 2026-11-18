@@ -2412,7 +2412,8 @@ mod tests {
     use super::{
         apply_agent_draft_preview, apply_preview_persona, builder_session_authority,
         can_author_own_schedule, can_run_schedule_now, cron_create_names_explicit_space,
-        draft_from_request, member_private_skill_body, parse_builder_definition, skill_import_body,
+        draft_from_request, member_private_skill_body, parse_builder_definition, publish_agent,
+        save_agent_draft, skill_import_body,
         version_to_api, BuilderDefinition, SKILL_IMPORT_BODY_LIMIT_BYTES,
     };
     use crate::middleware::AuthenticatedUser;
@@ -2550,6 +2551,25 @@ mod tests {
         state
     }
 
+    /// org-core's answer to the posture read the durable-write guard makes for `org-1`.
+    async fn org_core_with(answer: ResponseTemplate) -> MockServer {
+        let org_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(answer)
+            .mount(&org_core)
+            .await;
+        org_core
+    }
+
+    /// org-core's posture answer for `org-1`: the standing ZDR flag, as an organization record carries it.
+    async fn org_core_posture(zdr: bool) -> MockServer {
+        org_core_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}
+        })))
+        .await
+    }
+
     #[tokio::test]
     async fn list_cron_fires_forwards_org_scope() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
@@ -2625,7 +2645,9 @@ mod tests {
             }})))
             .mount(&model)
             .await;
-        let state = fires_test_state(&auth, &user_core, &model);
+        let org_core = org_core_posture(false).await;
+        let mut state = fires_test_state(&auth, &user_core, &model);
+        state.org_core_url = org_core.uri();
         let response = crate::build_router(state)
             .oneshot(
                 Request::builder()
@@ -2930,15 +2952,26 @@ mod tests {
             })))
             .mount(&convex)
             .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .and(body_partial_json(json!({"path": "agents:saveDraftForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "success",
+                "value": {"saved": true},
+            })))
+            .mount(&convex)
+            .await;
         convex
     }
 
     async fn publish_through_router(creator: &str, switch: Option<&str>) -> (axum::http::StatusCode, Value, MockServer) {
         let (auth, user_core, model) = fires_test_servers("user-1").await;
         let convex = builder_convex(creator).await;
+        let org_core = org_core_posture(false).await;
         let mut state = fires_test_state(&auth, &user_core, &model);
         state.application_convex_url = convex.uri();
         state.application_convex_service_key = "test-convex-service-key".to_owned();
+        state.org_core_url = org_core.uri();
         // The switch is read once, into AppState, by build_state; the same parser decides it here.
         state.agent_definition_versions = crate::config::agent_definition_versions_from(switch);
         let app = crate::build_router(state);
@@ -3077,7 +3110,9 @@ mod tests {
         switch: Option<&str>,
     ) -> (axum::http::StatusCode, Value) {
         let (auth, user_core, model) = servers;
-        let state = fires_test_state(auth, user_core, model);
+        let org_core = org_core_posture(false).await;
+        let mut state = fires_test_state(auth, user_core, model);
+        state.org_core_url = org_core.uri();
         match switch {
             Some(value) => std::env::set_var("SKILL_MEMBER_AUTHORING", value),
             None => std::env::remove_var("SKILL_MEMBER_AUTHORING"),
@@ -3565,5 +3600,481 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    // Zero Data Retention on the guarded routes of this file (W3-DEC-ZDR, W3-DEC-ZDR2, W3-FIX-18). Each route runs
+    // `zdr_write_guard` before its authority check, its token mint and any Control, Convex or model-gateway call. The
+    // table below drives every guarded route through the whole router as an owner of `org-1`: a non-ZDR org reaches the
+    // upstream that route names, while a ZDR org, or a failed posture read, reaches nothing past the guard.
+
+    /// What org-core answers the posture read for `org-1`: not ZDR, ZDR, or no answer at all.
+    #[derive(Clone, Copy, Debug)]
+    enum Posture {
+        NotZdr,
+        Zdr,
+        Down,
+    }
+
+    /// The first upstream call a non-ZDR org's request makes, which the route must reach.
+    #[derive(Clone, Copy, Debug)]
+    enum Reach {
+        /// A model-gateway call, by method and path.
+        Model(&'static str, &'static str),
+        /// A Control call to user-core, by method and path.
+        UserCore(&'static str, &'static str),
+        /// A Convex function, by the `path` its call names.
+        Convex(&'static str),
+    }
+
+    /// One guarded route: the request that reaches it, the `details.surface` its ZDR refusal names, and the upstream
+    /// call a non-ZDR org still makes.
+    struct GuardedRoute {
+        name: &'static str,
+        method: &'static str,
+        uri: &'static str,
+        body: Option<Value>,
+        surface: &'static str,
+        reach: Reach,
+    }
+
+    fn guarded(
+        name: &'static str,
+        method: &'static str,
+        uri: &'static str,
+        body: Option<Value>,
+        surface: &'static str,
+        reach: Reach,
+    ) -> GuardedRoute {
+        GuardedRoute {
+            name,
+            method,
+            uri,
+            body,
+            surface,
+            reach,
+        }
+    }
+
+    /// Every guarded route of this file: the skill, plugin, schedule, event-trigger and agent-builder writes.
+    fn guarded_routes() -> Vec<GuardedRoute> {
+        vec![
+            guarded(
+                "create_skill",
+                "POST",
+                "/api/v1/skills",
+                Some(json!({"name": "Brand", "content": "Svar kort.", "scope": "org"})),
+                "skills",
+                Reach::Model("POST", "/v1/skills"),
+            ),
+            guarded(
+                "update_skill",
+                "POST",
+                "/api/v1/skills/skill_1",
+                Some(json!({"enabled": false})),
+                "skills",
+                Reach::Model("PATCH", "/v1/skills/skill_1"),
+            ),
+            guarded(
+                "publish_skill",
+                "POST",
+                "/api/v1/skills/skill_1/publish",
+                None,
+                "skills",
+                Reach::Model("POST", "/v1/skills/skill_1/publish"),
+            ),
+            guarded(
+                "restore_skill_version",
+                "POST",
+                "/api/v1/skills/skill_1/versions/2/restore",
+                None,
+                "skills",
+                Reach::Model("POST", "/v1/skills/skill_1/versions/2/restore"),
+            ),
+            guarded(
+                "import_skill",
+                "POST",
+                "/api/v1/skills/import",
+                Some(json!({"content_base64": "LS0t", "scope": "org"})),
+                "skills",
+                Reach::Model("POST", "/v1/skills/import"),
+            ),
+            guarded(
+                "create_plugin",
+                "POST",
+                "/api/v1/plugins",
+                Some(json!({"name": "ticket-tools", "version": "1.0.0"})),
+                "plugins",
+                Reach::Model("POST", "/v1/plugins"),
+            ),
+            guarded(
+                "update_plugin",
+                "POST",
+                "/api/v1/plugins/plugin_1",
+                Some(json!({"enabled": false})),
+                "plugins",
+                Reach::Model("PATCH", "/v1/plugins/plugin_1"),
+            ),
+            guarded(
+                "install_plugin",
+                "POST",
+                "/api/v1/plugins/plugin_1/install",
+                Some(json!({})),
+                "plugins",
+                Reach::Model("POST", "/v1/plugins/plugin_1/install"),
+            ),
+            guarded(
+                "create_plugin_kill",
+                "POST",
+                "/api/v1/plugin-kill-list",
+                Some(json!({"plugin_id": "ticket-tools"})),
+                "plugins",
+                Reach::Model("POST", "/v1/plugin-kill-list"),
+            ),
+            guarded(
+                "create_cron",
+                "POST",
+                "/api/v1/cron",
+                Some(json!({
+                    "name": "Nightly", "schedule_expr": "0 7 * * *", "timezone": "UTC",
+                    "task_template": {"kind": "cron"}, "space_ref": "personal-1",
+                })),
+                "schedules",
+                Reach::UserCore("POST", "/api/v1/internal/spaces/schedule-create-decision"),
+            ),
+            guarded(
+                "run_cron_now",
+                "POST",
+                "/api/v1/cron/cron_1/run",
+                Some(json!({"request_id": "req-0123456789abcdef"})),
+                "schedules",
+                Reach::Model("POST", "/v1/cron/cron_1/run"),
+            ),
+            guarded(
+                "create_event_trigger",
+                "POST",
+                "/api/v1/event-triggers",
+                Some(json!({
+                    "space_ref": "space-1", "connection_id": "conn-1", "event_type": "webhook.received",
+                    "name": "Ticket", "clock_enabled": false, "schedule_id": "", "wake_filter_json": "{}",
+                })),
+                "event_triggers",
+                Reach::Model("POST", "/v1/event-triggers"),
+            ),
+            guarded(
+                "update_event_trigger",
+                "PATCH",
+                "/api/v1/event-triggers/trigger_1",
+                Some(json!({"expected_revision": 1, "update_paths": ["name"], "name": "Renamed"})),
+                "event_triggers",
+                Reach::Model("PATCH", "/v1/event-triggers/trigger_1"),
+            ),
+            guarded(
+                "save_agent_draft",
+                "PUT",
+                "/api/v1/agents/agent_1/draft",
+                Some(valid_draft()),
+                "agent_builder",
+                Reach::Convex("agents:saveDraftForGateway"),
+            ),
+            guarded(
+                "publish_agent",
+                "POST",
+                "/api/v1/agents/agent_1/publish",
+                None,
+                "agent_builder",
+                Reach::Convex("agents:publishForGateway"),
+            ),
+        ]
+    }
+
+    /// Every server one guarded request can reach, mocked for an owner of `org-1`: the session double (auth), user-core
+    /// (the session context and Control's schedule decision), the model gateway, Convex and org-core's posture read.
+    struct GuardedServers {
+        auth: MockServer,
+        user_core: MockServer,
+        model: MockServer,
+        convex: MockServer,
+        org_core: MockServer,
+    }
+
+    async fn guarded_servers(posture: Posture, active_org: bool) -> GuardedServers {
+        let auth = MockServer::start().await;
+        let session = if active_org {
+            json!({"activeOrganizationId": "org-1"})
+        } else {
+            json!({})
+        };
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": session,
+            })))
+            .mount(&auth)
+            .await;
+        for path in [
+            "/api/model-plane/token",
+            "/api/capability-core/token",
+            "/api/session-core/token",
+        ] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(path))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"token": "delegated-token"})))
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": "owner", "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        let model = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/cron/cron_1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "cron_1", "creator_subject_id": "user-1"
+            })))
+            .mount(&model)
+            .await;
+        let org_core = match posture {
+            Posture::NotZdr => org_core_posture(false).await,
+            Posture::Zdr => org_core_posture(true).await,
+            Posture::Down => org_core_with(ResponseTemplate::new(503)).await,
+        };
+        GuardedServers {
+            auth,
+            user_core,
+            model,
+            convex: builder_convex("user-1").await,
+            org_core,
+        }
+    }
+
+    /// The router state for a guarded request: every upstream pointed at its double, with both builder routes and the
+    /// event triggers switched on.
+    fn guarded_state(servers: &GuardedServers) -> crate::config::AppState {
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = servers.auth.uri();
+        state.user_core_url = servers.user_core.uri();
+        state.model_gateway_url = servers.model.uri();
+        state.org_core_url = servers.org_core.uri();
+        state.application_convex_url = servers.convex.uri();
+        state.application_convex_service_key = "test-convex-service-key".to_owned();
+        state.agent_definition_versions = true;
+        state.event_triggers_enabled = true;
+        state
+    }
+
+    /// One guarded request through the whole router, with `x-zdr: true` when `zdr_header` is set.
+    async fn send_guarded(
+        route: &GuardedRoute,
+        posture: Posture,
+        zdr_header: bool,
+    ) -> (axum::http::StatusCode, Value, GuardedServers) {
+        let servers = guarded_servers(posture, true).await;
+        let mut builder = Request::builder()
+            .method(route.method)
+            .uri(route.uri)
+            .header("cookie", "better-auth.session_token=session-1");
+        if zdr_header {
+            builder = builder.header("x-zdr", "true");
+        }
+        let request = match &route.body {
+            Some(body) => builder
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string())),
+            None => builder.body(Body::empty()),
+        }
+        .unwrap();
+        let response = crate::build_router(guarded_state(&servers))
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            servers,
+        )
+    }
+
+    /// Every call that went past the guard: anything but the two reads every request makes before its handler (the
+    /// session check and the session context). The posture read is org-core's and is not counted.
+    async fn calls_past_the_guard(servers: &GuardedServers) -> Vec<String> {
+        let mut calls = Vec::new();
+        for (name, server, read_before_the_handler) in [
+            ("auth", &servers.auth, "/api/auth/get-session"),
+            ("user-core", &servers.user_core, "/api/v1/me/session-context"),
+            ("model-gateway", &servers.model, ""),
+            ("convex", &servers.convex, ""),
+        ] {
+            for request in server.received_requests().await.unwrap_or_default() {
+                if request.url.path() != read_before_the_handler {
+                    calls.push(format!(
+                        "{name} {} {}",
+                        request.method.as_str(),
+                        request.url.path()
+                    ));
+                }
+            }
+        }
+        calls
+    }
+
+    /// Whether the upstream call a non-ZDR org's request makes first reached the server it names.
+    async fn reached(reach: Reach, servers: &GuardedServers) -> bool {
+        match reach {
+            Reach::Model(method, path) => servers
+                .model
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .iter()
+                .any(|request| request.method.as_str() == method && request.url.path() == path),
+            Reach::UserCore(method, path) => servers
+                .user_core
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .iter()
+                .any(|request| request.method.as_str() == method && request.url.path() == path),
+            Reach::Convex(function) => servers
+                .convex
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .iter()
+                .any(|request| {
+                    serde_json::from_slice::<Value>(&request.body)
+                        .is_ok_and(|body| body["path"] == function)
+                }),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_zdr_org_refuses_every_guarded_route_before_any_upstream_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for route in guarded_routes() {
+            let (status, body, servers) = send_guarded(&route, Posture::Zdr, false).await;
+            assert_eq!(status, axum::http::StatusCode::PRECONDITION_FAILED, "{}", route.name);
+            assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden", "{}", route.name);
+            assert_eq!(body["error"]["details"]["surface"], route.surface, "{}", route.name);
+            let calls = calls_past_the_guard(&servers).await;
+            assert!(calls.is_empty(), "{} reached {calls:?}", route.name);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_x_zdr_header_alone_refuses_every_guarded_route() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for route in guarded_routes() {
+            // The org is not ZDR, so only the header can be the reason for the refusal.
+            let (status, body, servers) = send_guarded(&route, Posture::NotZdr, true).await;
+            assert_eq!(status, axum::http::StatusCode::PRECONDITION_FAILED, "{}", route.name);
+            assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden", "{}", route.name);
+            assert_eq!(body["error"]["details"]["surface"], route.surface, "{}", route.name);
+            let calls = calls_past_the_guard(&servers).await;
+            assert!(calls.is_empty(), "{} reached {calls:?}", route.name);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_posture_read_refuses_every_guarded_route_with_a_typed_503() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for route in guarded_routes() {
+            let (status, body, servers) = send_guarded(&route, Posture::Down, false).await;
+            assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE, "{}", route.name);
+            assert_eq!(body["error"]["code"], "zdr_decision_unavailable", "{}", route.name);
+            let calls = calls_past_the_guard(&servers).await;
+            assert!(calls.is_empty(), "{} reached {calls:?}", route.name);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_non_zdr_org_still_reaches_the_upstream_of_every_guarded_route() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for route in guarded_routes() {
+            let (status, body, servers) = send_guarded(&route, Posture::NotZdr, false).await;
+            assert_ne!(status, axum::http::StatusCode::PRECONDITION_FAILED, "{}", route.name);
+            assert_ne!(body["error"]["code"], "zdr_decision_unavailable", "{}", route.name);
+            assert!(
+                reached(route.reach, &servers).await,
+                "{} never reached {:?}",
+                route.name,
+                route.reach
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_non_zdr_org_still_saves_the_agent_draft() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let route = guarded_routes()
+            .into_iter()
+            .find(|route| route.name == "save_agent_draft")
+            .expect("save_agent_draft is a guarded route");
+        let (status, body, _) = send_guarded(&route, Posture::NotZdr, false).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body["data"]["draft"]["name"], "Driftsassistent");
+    }
+
+    #[tokio::test]
+    async fn a_caller_with_no_membership_gets_the_builder_403_before_any_posture_or_convex_read() {
+        // Called directly: the membership middleware answers a session with no active org before the handler runs.
+        let org_core = org_core_posture(false).await;
+        let convex = builder_convex("user-1").await;
+        let mut state = crate::tests::test_state(false);
+        state.org_core_url = org_core.uri();
+        state.application_convex_url = convex.uri();
+        state.application_convex_service_key = "test-convex-service-key".to_owned();
+        let (status, axum::Json(body)) = save_agent_draft(
+            axum::extract::State(state.clone()),
+            axum::extract::Extension(member("user-1")),
+            axum::extract::Path("agent_1".to_owned()),
+            axum::http::HeaderMap::new(),
+            axum::Json(valid_draft()),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "active_membership_required");
+        let (status, axum::Json(body)) = publish_agent(
+            axum::extract::State(state),
+            axum::extract::Extension(member("user-1")),
+            axum::extract::Path("agent_1".to_owned()),
+            axum::http::HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "active_membership_required");
+        assert!(org_core.received_requests().await.unwrap_or_default().is_empty());
+        assert!(convex.received_requests().await.unwrap_or_default().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_session_without_an_active_organization_is_refused_by_the_membership_gate_not_the_posture_read() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let servers = guarded_servers(Posture::Down, false).await;
+        let request = Request::builder()
+            .method("PUT")
+            .uri("/api/v1/agents/agent_1/draft")
+            .header("cookie", "better-auth.session_token=session-1")
+            .header("content-type", "application/json")
+            .body(Body::from(valid_draft().to_string()))
+            .unwrap();
+        let response = crate::build_router(guarded_state(&servers))
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "organization_membership_required");
+        assert!(calls_past_the_guard(&servers).await.is_empty());
+        assert!(servers.org_core.received_requests().await.unwrap_or_default().is_empty());
     }
 }
