@@ -220,6 +220,10 @@ func TestSharesRefuseEditRoleSelfShareAndBadBodyWithoutCallingControl(t *testing
 	if rec := s.call(admin, http.MethodPost, "/v1/documents/"+orgDoc+"/shares", `{"subject_id":"owner-2"}`); rec.Code != http.StatusConflict {
 		t.Errorf("share with the owner: %d %s", rec.Code, rec.Body.String())
 	}
+	// The actor sharing a visible document with itself is a self share too.
+	if rec := s.call(admin, http.MethodPost, "/v1/documents/"+orgDoc+"/shares", `{"subject_id":"admin-1"}`); rec.Code != http.StatusConflict || decodeError(t, rec)["code"] != "self_share" {
+		t.Errorf("share with the actor: %d %s", rec.Code, rec.Body.String())
+	}
 	for _, c := range s.control.snapshot() {
 		if c == "grant" {
 			t.Fatal("a refused share reached Control's grant write")

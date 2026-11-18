@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/userauthz"
+	"github.com/triodelab/dataplane/services/documents-api-go/pkg/authctx"
 )
 
 // WS14-S4: share routes. These cover everything decided BEFORE the owner proof
@@ -144,5 +145,30 @@ func TestSharedWithMeIsReadOnlyIndependentOfTheWriteFlagAndNeedsAnEndUser(t *tes
 	rec := call(auth.userToken(testOrg, "viewer-1", false))
 	if rec.Code != http.StatusServiceUnavailable || decodeError(t, rec)["code"] != "sharing_unavailable" {
 		t.Fatalf("flag off, no authz client: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The handler proves the actor's bearer itself. A verified end-user claim with no
+// forwarded bearer never comes out of the middleware (it always forwards one), so
+// this drives the handler's own guard: refused before the owner proof and before
+// any Control call. The router here has no middleware on purpose.
+func TestShareRoutesRefuseAVerifiedUserWithoutTheForwardedBearer(t *testing.T) {
+	stub := &stubShareGrants{}
+	h := NewDocumentHandler(nil, nil).WithShares(SharesConfig{Enabled: true, Grants: stub})
+	router := chi.NewRouter()
+	router.Get("/v1/documents/{documentID}/shares", h.ListShares)
+	router.Post("/v1/documents/{documentID}/shares", h.CreateShare)
+	claims := &authctx.Claims{Verified: true, PrincipalType: "user", UserID: "owner-1", Subject: "owner-1", OrgID: testOrg, ZDRPresent: true}
+	for _, tc := range shareRoutes[:2] { // list and add
+		req := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
+		req = req.WithContext(authctx.IntoContext(req.Context(), claims))
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden || decodeError(t, rec)["error"] != "an end-user token is required to manage shares" {
+			t.Errorf("%s: %d %s", tc.name, rec.Code, rec.Body.String())
+		}
+	}
+	if len(stub.calls) != 0 {
+		t.Fatalf("Control was called without the bearer proof: %v", stub.calls)
 	}
 }

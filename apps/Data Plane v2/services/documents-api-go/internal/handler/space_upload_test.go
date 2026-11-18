@@ -421,6 +421,64 @@ func TestBulkIngestRefusesSpaceUploadType(t *testing.T) {
 	}
 }
 
+// Bulk ingest has no decision, so a room file is refused there outright. A batch
+// of ordinary documents is still refused per item for a verified zdr=true bearer
+// (service or user), before the repository, so nothing is persisted under ZDR.
+func TestBulkIngestRefusesZDRBearerPerItemBeforeAnyWrite(t *testing.T) {
+	auth := newTestAuth(t)
+	h := NewDocumentHandler(nil, nil).WithSpaceFiles(roomFilesOn(&stubGrants{}))
+	body, _ := json.Marshal(map[string]any{"documents": []map[string]any{
+		{"source": "s", "type": "note", "title": "t", "content": "c"},
+	}})
+	bearers := map[string]string{
+		"imports-core zdr=true": auth.serviceTokenZDR(testOrg, "imports-core", true, "documents:write"),
+		"user zdr=true":         auth.userToken(testOrg, "user-1", true),
+	}
+	for name, bearer := range bearers {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/documents/bulk", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+bearer)
+			req.Header.Set("X-Org-ID", testOrg)
+			rec := httptest.NewRecorder()
+			auth.wrap(http.HandlerFunc(h.BulkIngest)).ServeHTTP(rec, req)
+			var out struct {
+				Accepted  int      `json:"accepted"`
+				Rejected  int      `json:"rejected"`
+				IDs       []string `json:"document_ids"`
+				Rejection []string `json:"rejection_reasons"`
+			}
+			if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &out) != nil {
+				t.Fatalf("status = %d %s", rec.Code, rec.Body.String())
+			}
+			if out.Accepted != 0 || out.Rejected != 1 || len(out.IDs) != 0 || len(out.Rejection) != 1 ||
+				!strings.Contains(out.Rejection[0], "zdr=true forbids durable document persistence") {
+				t.Fatalf("bulk result = %+v", out)
+			}
+		})
+	}
+}
+
+// The owner gate passes for the signed subject alone. With no owner_id, or with
+// the subject named as owner, the request gets past the gate and fails on the
+// empty title, which is validation and comes before the repository.
+func TestRoomFileOwnerGatePassesForTheSignedSubject(t *testing.T) {
+	f := newUploadFixture(t, roomFilesOn(&stubGrants{}))
+	shapes := map[string]map[string]any{
+		"no owner_id":             {},
+		"owner_id is the subject": {"owner_id": "user-1"},
+	}
+	for name, extra := range shapes {
+		body := map[string]any{"title": ""}
+		for k, v := range extra {
+			body[k] = v
+		}
+		rec := f.post(uploadRequest{decision: uploadDecision("user-1"), body: body})
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "title is required") {
+			t.Fatalf("%s: %d %s", name, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func roomFileDoc(space string) *model.Document {
 	return &model.Document{DocumentID: "doc-1", Type: "space_upload", SpaceRef: &space}
 }

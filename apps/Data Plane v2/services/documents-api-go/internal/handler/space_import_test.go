@@ -143,3 +143,60 @@ func TestPersonalSpaceConnectorImportOwnerFollowsTheFlag(t *testing.T) {
 		t.Fatalf("flag off, owner = principal: %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+// ZDR is a refusal before any row write for a personal-Space connector import as
+// well as for a room file: a verified imports-core bearer that carries zdr=true
+// is refused with the flag on or off. The handler has no repository here, so a
+// write that got past the check would panic and fail the test.
+func TestPersonalSpaceConnectorImportRefusesZDRBearerBeforeAnyWrite(t *testing.T) {
+	notion := baseDecision(testOrg, "space:org-1:user-1", "user-1", "notion")
+	for name, cfg := range map[string]SpaceFilesConfig{"flag on": {Enabled: true}, "flag off": {}} {
+		t.Run(name, func(t *testing.T) {
+			f := newUploadFixture(t, cfg)
+			rec := f.post(uploadRequest{
+				decision: &notion,
+				bearer:   f.auth.serviceTokenZDR(testOrg, "imports-core", true, "documents:write"),
+				body:     map[string]any{"type": "notion", "metadata": map[string]any{}},
+			})
+			if rec.Code != 403 || !strings.Contains(rec.Body.String(), "zdr=true forbids durable document persistence") {
+				t.Fatalf("%d %s", rec.Code, rec.Body.String())
+			}
+			if rec.Header().Get(spaceImportAcceptedHeader) != "" {
+				t.Fatal("accepted header set on a ZDR refusal")
+			}
+		})
+	}
+}
+
+// The decision is Control's signed authority for one write. Each shape below
+// must be refused on its own, so none of them can be replayed into a durable
+// write. The valid decision is the control case.
+func TestSpaceImportDecisionValidateRefusesEveryUnauthorisedShape(t *testing.T) {
+	now := time.Now().UTC()
+	base := func() spaceImportDecisionClaims {
+		return baseDecision("org-1", "space:org-1:room-7", "user-1", "space_upload")
+	}
+	if err := base().validate("org-1", now); err != nil {
+		t.Fatalf("valid decision refused: %v", err)
+	}
+	cases := map[string]func(d *spaceImportDecisionClaims){
+		"expired":                  func(d *spaceImportDecisionClaims) { d.ExpiresAt = now.Add(-time.Second) },
+		"issued far in the future": func(d *spaceImportDecisionClaims) { d.IssuedAt = now.Add(2 * time.Minute) },
+		"zero data retention":      func(d *spaceImportDecisionClaims) { d.ZeroDataRetention = true },
+		"no documents:write":       func(d *spaceImportDecisionClaims) { d.Permissions = []string{"documents:read"} },
+		"other action":             func(d *spaceImportDecisionClaims) { d.ActionID = "ingestion.import.delete" },
+		"zero authority revision":  func(d *spaceImportDecisionClaims) { d.AuthorityRevision = 0 },
+		"blank subject":            func(d *spaceImportDecisionClaims) { d.SubjectID = " " },
+	}
+	for name, mutate := range cases {
+		d := base()
+		mutate(&d)
+		if err := d.validate("org-1", now); err == nil {
+			t.Errorf("%s: decision accepted", name)
+		}
+	}
+	// A decision for another tenant is refused for this request's org.
+	if err := base().validate("org-2", now); err == nil {
+		t.Error("decision for org-1 accepted for org-2")
+	}
+}
