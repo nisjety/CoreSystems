@@ -7,6 +7,7 @@ const {
   claimSpaceLifecycleDelivery,
   controlRegistrationResourceRef,
   createSpaceLifecycleEvent,
+  failSpaceLifecycleDeliveryPermanently,
   releaseSpaceLifecycleDelivery,
   transitionSpaceLifecycle,
 } = require('../convex/spaceLifecycle.ts');
@@ -21,7 +22,9 @@ const { dataDeletionReceipt } = require('../convex/spaceDeletionData.ts');
 const { ingestionDeletionReceipt } = require('../convex/spaceDeletionIngestion.ts');
 const {
   aggregateDeletionReceipts,
+  assertCoordinatorLegalHold,
   assertReceiptTransition,
+  isPermanentOwnerRefusal,
   receiptDeadlineHasElapsed,
 } = require('../convex/spaceDeletionReceipts.ts');
 
@@ -248,4 +251,36 @@ test('recipient audience canonical order and hash equal Control for mixed-case i
     await recipientAudienceHash(wider),
     'sha256:b39434808ad98560fd1a2ea27abfaf0a2ddee12c8ae75917f455c2a30d802401',
   );
+});
+
+test('a permanent owner refusal parks a claimed delivery where no claim selects it', () => {
+  const claimed = claimSpaceLifecycleDelivery({ attempts: 0, nextAttemptAt: 0, state: 'pending' }, 'worker-a', 100, 30_000);
+  const parked = failSpaceLifecycleDeliveryPermanently(claimed, 'worker-a', 200);
+  assert.deepEqual(parked, { attempts: 1, nextAttemptAt: 200, state: 'failed_permanent' });
+  for (const now of [200, 30_100, 10_000_000]) {
+    assert.equal(canClaimSpaceLifecycleDelivery(parked, now), false, `claimable at ${now}`);
+  }
+  assert.throws(() => failSpaceLifecycleDeliveryPermanently(claimed, 'worker-b', 200), /active delivery worker/i);
+  assert.throws(
+    () => failSpaceLifecycleDeliveryPermanently({ attempts: 1, nextAttemptAt: 0, state: 'failed' }, 'worker-a', 200),
+    /active delivery worker/i,
+  );
+  assert.throws(() => failSpaceLifecycleDeliveryPermanently(claimed, 'worker-a', 0), /positive safe integer/);
+});
+
+test('only 400, 401, 403 and 412 are permanent owner refusals', () => {
+  for (const status of [400, 401, 403, 412]) {
+    assert.equal(isPermanentOwnerRefusal(status), true, String(status));
+  }
+  for (const status of [404, 409, 422, 429, 500, 502, 503]) {
+    assert.equal(isPermanentOwnerRefusal(status), false, String(status));
+  }
+});
+
+test('the trusted coordinator may record a legal hold for the Model owner only', () => {
+  assert.doesNotThrow(() => assertCoordinatorLegalHold('model', 'blocked_legal_hold'));
+  for (const owner of ['application', 'control', 'data', 'ingestion', 'infra']) {
+    assert.throws(() => assertCoordinatorLegalHold(owner, 'blocked_legal_hold'), /may not record blocked_legal_hold/, owner);
+    assert.doesNotThrow(() => assertCoordinatorLegalHold(owner, 'succeeded'), owner);
+  }
 });

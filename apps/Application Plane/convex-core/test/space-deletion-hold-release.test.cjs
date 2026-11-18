@@ -349,3 +349,64 @@ test('with the flag on a relayed non-success answer on a held receipt keeps the 
   assert.equal(receiptFor(handle.tables).status, 'failed');
   assert.equal(handle.tables.spaces[0].lifecycle, 'deleting');
 });
+
+/** Runs `body` with SPACE_DELETION_HOLD_RELEASE set to `value` (`undefined` removes it), then restores it. */
+async function withFlag(value, body) {
+  const prior = process.env.SPACE_DELETION_HOLD_RELEASE;
+  try {
+    if (value === undefined) delete process.env.SPACE_DELETION_HOLD_RELEASE;
+    else process.env.SPACE_DELETION_HOLD_RELEASE = value;
+    await body();
+  } finally {
+    restoreFlag(prior);
+  }
+}
+
+test('the trusted ingress cannot record a legal hold for any owner but Model, flag on or off', async () => {
+  for (const flag of [undefined, 'true']) {
+    await withFlag(flag, async () => {
+      for (const ownerPlane of OTHER_OWNERS) {
+        const handle = harness(seedTables({ others: 'pending' }));
+        const before = JSON.stringify(handle.tables);
+        await fake.rejectsWith(
+          spaces.recordDeletionOwnerReceipt._handler(handle.ctx, {
+            requestId: REQUEST_ID, ownerPlane, status: 'blocked_legal_hold', now: 1_000,
+          }),
+          `${ownerPlane} owner may not record blocked_legal_hold`,
+        );
+        assert.equal(writeCount(handle.log), 0, `${ownerPlane} with flag ${flag}`);
+        assert.equal(JSON.stringify(handle.tables), before, `${ownerPlane} with flag ${flag}`);
+      }
+    });
+  }
+});
+
+test('the trusted ingress blocks a Model receipt only once the Model owner has refused the erase', async () => {
+  for (const flag of [undefined, 'true']) {
+    await withFlag(flag, async () => {
+      // A live Model delivery (pending, or claimed by a worker): the owner has not refused the erase.
+      for (const [receiptStatus, deliveryState] of [['pending', 'pending'], ['unknown', 'pending'], ['pending', 'claimed']]) {
+        const live = harness(seedTables({ modelReceipt: receiptStatus, parked: false, others: 'pending' }));
+        eventRow(live.tables).deliveryState = deliveryState;
+        const before = JSON.stringify(live.tables);
+        await fake.rejectsWith(
+          spaces.recordDeletionOwnerReceipt._handler(live.ctx, {
+            requestId: REQUEST_ID, ownerPlane: 'model', status: 'blocked_legal_hold', now: 1_000,
+          }),
+          'a Model legal hold is recorded only once the Model owner has refused the erasure',
+        );
+        assert.equal(writeCount(live.log), 0, `${receiptStatus} receipt, ${deliveryState} delivery, flag ${flag}`);
+        assert.equal(JSON.stringify(live.tables), before, `${receiptStatus} receipt, ${deliveryState} delivery, flag ${flag}`);
+      }
+
+      // The owner refused the erase and its delivery is parked: the hold is recorded and the Space stays fenced.
+      const parked = harness(seedTables({ modelReceipt: 'pending', parked: true, others: 'pending' }));
+      const result = await spaces.recordDeletionOwnerReceipt._handler(parked.ctx, {
+        requestId: REQUEST_ID, ownerPlane: 'model', status: 'blocked_legal_hold', now: 1_000,
+      });
+      assert.deepEqual(result, { ownerPlane: 'model', status: 'blocked_legal_hold', finalized: false });
+      assert.equal(receiptFor(parked.tables).status, 'blocked_legal_hold', `flag ${flag}`);
+      assert.equal(parked.tables.spaces[0].lifecycle, 'deleting', `flag ${flag}`);
+    });
+  }
+});

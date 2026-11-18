@@ -40,6 +40,18 @@ export function legalHoldReleaseEnabled(): boolean {
   return process.env.SPACE_DELETION_HOLD_RELEASE === "true";
 }
 
+/**
+ * Flag `SPACE_DELETION_PERMANENT_REFUSAL_PARK` (Convex env, read at call time, off
+ * by default). Only the literal "true" turns it on. With it off a permanent owner
+ * refusal (400, 401, 403, 412) releases the delivery for a retry like any other
+ * non-200, so a bearer that is fixed later still lets the deletion complete. With
+ * it on such a refusal parks the delivery as `failed_permanent`, which nothing in
+ * this plane re-arms yet.
+ */
+export function permanentRefusalParkEnabled(): boolean {
+  return process.env.SPACE_DELETION_PERMANENT_REFUSAL_PARK === "true";
+}
+
 // Owner answers a blocked receipt may take once its hold is lifted. `pending` is
 // deliberately absent: a released receipt goes back to pending only through the
 // re-drive (`assertReceiptRearmAfterLegalHold`), which also re-arms the delivery.
@@ -67,6 +79,21 @@ export function assertReceiptRearmAfterLegalHold(from: SpaceDeletionOwnerStatus)
   }
 }
 
+/**
+ * A legal hold parks an owner's delivery only once that owner's own adapter has
+ * received the typed refusal (the Model, Data and Ingestion adapters alike). The
+ * trusted coordinator ingress may record `blocked_legal_hold` for the Model owner
+ * alone, and only on a Model delivery that is already parked (see
+ * `requireParkedModelDelivery` in spaces.ts). A receipt the ingress blocks for any
+ * other owner has no parked delivery behind it, so that owner's live delivery
+ * would later answer over a blocked receipt, which no transition allows.
+ */
+export function assertCoordinatorLegalHold(ownerPlane: SpaceDeletionOwner, to: SpaceDeletionOwnerStatus): void {
+  if (to === "blocked_legal_hold" && ownerPlane !== "model") {
+    throw new Error(`invalid Space deletion owner receipt transition: ${ownerPlane} owner may not record blocked_legal_hold`);
+  }
+}
+
 export function aggregateDeletionReceipts(receipts: readonly SpaceDeletionReceipt[]): SpaceDeletionAggregateStatus {
 	if (receipts.some((receipt) => receipt.status === "blocked_legal_hold")) return "blocked_legal_hold";
 	if (receipts.length === 0 || receipts.some((receipt) => receipt.status === "pending")) return "pending";
@@ -82,4 +109,32 @@ export function aggregateDeletionReceipts(receipts: readonly SpaceDeletionReceip
 
 export function receiptDeadlineHasElapsed(status: SpaceDeletionOwnerStatus, deadlineAt: number, now: number): boolean {
   return status === "pending" && Number.isSafeInteger(deadlineAt) && deadlineAt > 0 && now >= deadlineAt;
+}
+
+/**
+ * The typed legal-hold refusal an owner returns for an erase that a legal hold
+ * covers: the exact code with `details.retryable: false`. Only those fields are
+ * read. The upstream message is never read or stored, and any other body is not a hold.
+ */
+export function isOwnerLegalHoldRefusal(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false;
+  const error = (body as { error?: unknown }).error;
+  if (!error || typeof error !== "object") return false;
+  const { code, details } = error as { code?: unknown; details?: unknown };
+  if (code !== "erasure_blocked_legal_hold") return false;
+  return Boolean(details && typeof details === "object" && (details as { retryable?: unknown }).retryable === false);
+}
+
+/**
+ * Statuses an owner returns when a retry cannot succeed: a bad request (400), a
+ * bad bearer (401, 403) or a precondition the owner will not meet (412). With
+ * SPACE_DELETION_PERMANENT_REFUSAL_PARK on, such a delivery parks as
+ * `failed_permanent` instead of retrying without limit; with it off each one
+ * releases for a retry as before. Every other non-200 (a 409 that is not a hold,
+ * 429, 5xx, a timeout) stays retryable.
+ */
+const PERMANENT_OWNER_REFUSAL_STATUSES: readonly number[] = [400, 401, 403, 412];
+
+export function isPermanentOwnerRefusal(status: number): boolean {
+  return PERMANENT_OWNER_REFUSAL_STATUSES.includes(status);
 }

@@ -154,6 +154,10 @@ set_convex_env "NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN" "${NOTIFICATION_SPAC
 # and the trusted receipt path may leave a legal-hold block. Off unless a compose file turns it on; read at
 # call time, so set 0 and `docker restart convex-gateway` to stop. With it off a hold stays terminal.
 set_convex_env "SPACE_DELETION_HOLD_RELEASE" "${SPACE_DELETION_HOLD_RELEASE:-0}"
+# Space deletion flag SPACE_DELETION_PERMANENT_REFUSAL_PARK: on, a permanent owner refusal (400, 401, 403, 412)
+# parks that owner's delivery as failed_permanent, which nothing re-arms yet. Off unless a compose file turns it
+# on; read at call time, so set 0 and `docker restart convex-gateway` to stop. With it off such a refusal retries.
+set_convex_env "SPACE_DELETION_PERMANENT_REFUSAL_PARK" "${SPACE_DELETION_PERMANENT_REFUSAL_PARK:-0}"
 
 # ─────────────────────────────────────────────────────────────────────────
 # Force-deploy functions before starting dev mode.

@@ -8,6 +8,7 @@ import {
   canClaimSpaceLifecycleDelivery,
   claimSpaceLifecycleDelivery,
   createSpaceLifecycleEvent,
+  failSpaceLifecycleDeliveryPermanently,
   rearmSpaceLifecycleDeliveryAfterLegalHold,
   releaseSpaceLifecycleDelivery,
   transitionSpaceLifecycle,
@@ -31,6 +32,7 @@ import {
 import {
   SPACE_DELETION_OWNERS,
   aggregateDeletionReceipts,
+  assertCoordinatorLegalHold,
   assertReceiptRearmAfterLegalHold,
   assertReceiptTransition,
   legalHoldReleaseEnabled,
@@ -1327,24 +1329,71 @@ export const acknowledgeDeletionAuthorizationClaim = internalMutation({
   },
 });
 
+// A claimable owner delivery whose deletion is no longer live must be closed, not
+// skipped or allowed to throw: a row left claimable stays first in line and would fail
+// every later claim for that owner, which blocks every other Space's deletion.
+const CLOSED_DELIVERY_DELETION_COMPLETED = "deletion_completed";
+const CLOSED_DELIVERY_NOT_LIVE = "deletion_not_live";
+
+function closedOwnerDeliveryPatch(reason: string) {
+  return {
+    deliveryState: "closed",
+    lastDeliveryError: reason,
+    leaseExpiresAt: undefined,
+    leaseOwner: undefined,
+  };
+}
+
+// A live lease means a worker is still inside its owner call. Closing that row would
+// turn the worker's acknowledgement into an error, so the row is left to that worker.
+function ownerDeliveryLeaseIsLive(event: any, now: number): boolean {
+  return Boolean(event.leaseExpiresAt && event.leaseExpiresAt > now);
+}
+
+// The earliest claimable delivery whose deletion is still live: an authorized request
+// and a Space fenced for deletion. Each claimable row that is not live is closed and
+// skipped, so one stale row cannot stop the claims behind it.
+async function selectLiveOwnerDelivery(ctx: any, owner: AdaptedDeletionOwner, now: number) {
+  const events = await ctx.db.query("spaceDeletionOwnerDeliveryEvents")
+    .withIndex("by_owner_and_delivery", (q: any) => q.eq("ownerPlane", owner)).collect();
+  const candidates = events
+    .filter((event: any) => canClaimSpaceLifecycleDelivery(deliveryFor(event), now))
+    .sort((left: any, right: any) => (left.nextAttemptAt ?? left.createdAt) - (right.nextAttemptAt ?? right.createdAt));
+  for (const candidate of candidates) {
+    const request = await ctx.db.query("spaceDeletionRequests")
+      .withIndex("by_request_id", (q: any) => q.eq("requestId", candidate.requestId)).first();
+    const space = request ? await getSpaceByRef(ctx, request.spaceRef) : null;
+    if (request?.state === "authorized" && space?.lifecycle === "deleting") return { candidate, request };
+    const completed = space?.lifecycle === "deleted";
+    await ctx.db.patch(candidate._id, closedOwnerDeliveryPatch(
+      completed ? CLOSED_DELIVERY_DELETION_COMPLETED : CLOSED_DELIVERY_NOT_LIVE,
+    ));
+  }
+  return null;
+}
+
+// A completed deletion needs no more owner delivery, so every live row of its request
+// is closed. A row a worker still holds under a live lease is left to that worker.
+async function closeLiveOwnerDeliveries(ctx: any, requestId: string, now: number): Promise<void> {
+  const events = await ctx.db.query("spaceDeletionOwnerDeliveryEvents")
+    .withIndex("by_request_and_owner", (q: any) => q.eq("requestId", requestId)).collect();
+  for (const event of events) {
+    if (event.deliveryState === "acknowledged" || event.deliveryState === "closed") continue;
+    if (event.deliveryState === "claimed" && ownerDeliveryLeaseIsLive(event, now)) continue;
+    await ctx.db.patch(event._id, closedOwnerDeliveryPatch(CLOSED_DELIVERY_DELETION_COMPLETED));
+  }
+}
+
 export const claimNextModelDeletionOwnerDelivery = internalMutation({
   args: { workerId: v.string(), now: v.number() },
   handler: async (ctx, args) => {
     assertDeliveryWorker(args.workerId);
     if (!Number.isSafeInteger(args.now) || args.now <= 0) throw new Error("deletion delivery claim time is invalid");
-    const events = await ctx.db.query("spaceDeletionOwnerDeliveryEvents")
-      .withIndex("by_owner_and_delivery", (q: any) => q.eq("ownerPlane", "model")).collect();
-    const candidate = events.filter((event: any) => canClaimSpaceLifecycleDelivery(deliveryFor(event), args.now))
-      .sort((left: any, right: any) => (left.nextAttemptAt ?? left.createdAt) - (right.nextAttemptAt ?? right.createdAt))[0];
-    if (!candidate) return null;
-    const request = await ctx.db.query("spaceDeletionRequests")
-      .withIndex("by_request_id", (q: any) => q.eq("requestId", candidate.requestId)).first();
-    if (!request || request.state !== "authorized") throw new Error("Model deletion delivery lacks an authorized request");
-    const space = await getSpaceByRef(ctx, request.spaceRef);
-    if (!space || space.lifecycle !== "deleting") throw new Error("Model deletion delivery Space is not fenced");
-    const delivery = claimSpaceLifecycleDelivery(deliveryFor(candidate), args.workerId, args.now, 30_000);
-    await ctx.db.patch(candidate._id, patchForDelivery(delivery));
-    return { eventId: candidate.eventId, request, workerId: args.workerId };
+    const selected = await selectLiveOwnerDelivery(ctx, "model", args.now);
+    if (!selected) return null;
+    const delivery = claimSpaceLifecycleDelivery(deliveryFor(selected.candidate), args.workerId, args.now, 30_000);
+    await ctx.db.patch(selected.candidate._id, patchForDelivery(delivery));
+    return { eventId: selected.candidate.eventId, request: selected.request, workerId: args.workerId };
   },
 });
 
@@ -1361,35 +1410,109 @@ export const releaseModelDeletionOwnerDelivery = internalMutation({
   },
 });
 
-// A typed legal-hold refusal from the Model owner is a definitive answer, not an
-// outage. The delivery parks in `blocked_legal_hold`, which no claim selects, so
-// the same refusal is not retried. The Model receipt shows the hold while it can
-// still move there (pending, or unknown after the deadline); an answer the owner
-// already gave is left as it is. The re-drive after a lifted hold is
+// A typed legal-hold refusal from an owner is a definitive answer, not an outage.
+// The delivery parks in `blocked_legal_hold`, which no claim selects, so the same
+// refusal is not retried. The owner's receipt shows the hold while it can still
+// move there (pending, or unknown after the deadline); an answer the owner already
+// gave is left as it is. The one re-drive after a lifted hold is
 // `redriveModelDeletionAfterLegalHoldRelease`, behind SPACE_DELETION_HOLD_RELEASE.
+type AdaptedDeletionOwner = "data" | "ingestion" | "model";
+const ADAPTED_OWNER_LABEL: Readonly<Record<AdaptedDeletionOwner, string>> = {
+  data: "Data",
+  ingestion: "Ingestion",
+  model: "Model",
+};
+
+async function adaptedOwnerDeliveryEvent(ctx: any, owner: AdaptedDeletionOwner, eventId: string) {
+  const event = await ctx.db.query("spaceDeletionOwnerDeliveryEvents")
+    .withIndex("by_event_id", (q: any) => q.eq("eventId", eventId)).first();
+  if (!event || event.ownerPlane !== owner) {
+    throw new Error(`${ADAPTED_OWNER_LABEL[owner]} deletion delivery event not found`);
+  }
+  return event;
+}
+
+async function parkOwnerDeliveryForLegalHold(
+  ctx: any,
+  owner: AdaptedDeletionOwner,
+  args: { eventId: string; workerId: string; now: number },
+) {
+  assertDeliveryWorker(args.workerId);
+  const label = ADAPTED_OWNER_LABEL[owner];
+  const event = await adaptedOwnerDeliveryEvent(ctx, owner, args.eventId);
+  const delivery = blockSpaceLifecycleDeliveryForLegalHold(deliveryFor(event), args.workerId, args.now);
+  await ctx.db.patch(event._id, { ...patchForDelivery(delivery), lastDeliveryError: "erasure_blocked_legal_hold" });
+  const receipt = await ctx.db.query("spaceDeletionOwnerReceipts")
+    .withIndex("by_request_and_owner", (q: any) => q.eq("requestId", event.requestId).eq("ownerPlane", owner))
+    .first();
+  if (!receipt) throw new Error(`${label} deletion owner receipt is not expected`);
+  if (receipt.status === "pending" || receipt.status === "unknown") {
+    assertReceiptTransition(receipt.status as SpaceDeletionOwnerStatus, "blocked_legal_hold");
+    await ctx.db.patch(receipt._id, {
+      status: "blocked_legal_hold",
+      detail: `A legal hold blocks the ${label} owner erasure until the hold is released`,
+      updatedAt: args.now,
+    });
+  }
+  return { eventId: event.eventId, status: "blocked_legal_hold" as const };
+}
+
+// A permanent refusal (see `isPermanentOwnerRefusal`, parked only behind
+// SPACE_DELETION_PERMANENT_REFUSAL_PARK) parks the delivery and leaves the receipt
+// alone: the owner did not answer, so the receipt stays pending until its deadline,
+// exactly as for any unanswered owner. The row keeps a reason code only.
+async function failOwnerDeliveryPermanently(
+  ctx: any,
+  owner: AdaptedDeletionOwner,
+  args: { eventId: string; workerId: string; now: number; reason: string },
+) {
+  assertDeliveryWorker(args.workerId);
+  const event = await adaptedOwnerDeliveryEvent(ctx, owner, args.eventId);
+  const delivery = failSpaceLifecycleDeliveryPermanently(deliveryFor(event), args.workerId, args.now);
+  await ctx.db.patch(event._id, { ...patchForDelivery(delivery), lastDeliveryError: args.reason.slice(0, 256) });
+  return { eventId: event.eventId, status: "failed_permanent" as const };
+}
+
+// The trusted ingress may record a Model hold only on a Model delivery the Model owner
+// already refused. A live delivery would keep asking, and its later answer could not be
+// recorded over a blocked receipt, so the stall is refused here rather than created.
+async function requireParkedModelDelivery(ctx: any, requestId: string): Promise<void> {
+  const event = await ctx.db.query("spaceDeletionOwnerDeliveryEvents")
+    .withIndex("by_request_and_owner", (q: any) => q.eq("requestId", requestId).eq("ownerPlane", "model"))
+    .first();
+  if (!event || event.deliveryState !== "blocked_legal_hold") {
+    throw new Error("invalid Space deletion owner receipt transition: a Model legal hold is recorded only once the Model owner has refused the erasure");
+  }
+}
+
 export const blockModelDeletionOwnerDeliveryForLegalHold = internalMutation({
   args: { eventId: v.string(), workerId: v.string(), now: v.number() },
-  handler: async (ctx, args) => {
-    assertDeliveryWorker(args.workerId);
-    const event = await ctx.db.query("spaceDeletionOwnerDeliveryEvents")
-      .withIndex("by_event_id", (q: any) => q.eq("eventId", args.eventId)).first();
-    if (!event || event.ownerPlane !== "model") throw new Error("Model deletion delivery event not found");
-    const delivery = blockSpaceLifecycleDeliveryForLegalHold(deliveryFor(event), args.workerId, args.now);
-    await ctx.db.patch(event._id, { ...patchForDelivery(delivery), lastDeliveryError: "erasure_blocked_legal_hold" });
-    const receipt = await ctx.db.query("spaceDeletionOwnerReceipts")
-      .withIndex("by_request_and_owner", (q: any) => q.eq("requestId", event.requestId).eq("ownerPlane", "model"))
-      .first();
-    if (!receipt) throw new Error("Model deletion owner receipt is not expected");
-    if (receipt.status === "pending" || receipt.status === "unknown") {
-      assertReceiptTransition(receipt.status as SpaceDeletionOwnerStatus, "blocked_legal_hold");
-      await ctx.db.patch(receipt._id, {
-        status: "blocked_legal_hold",
-        detail: "A legal hold blocks the Model owner erasure until the hold is released",
-        updatedAt: args.now,
-      });
-    }
-    return { eventId: event.eventId, status: "blocked_legal_hold" as const };
-  },
+  handler: async (ctx, args) => parkOwnerDeliveryForLegalHold(ctx, "model", args),
+});
+
+export const blockDataDeletionOwnerDeliveryForLegalHold = internalMutation({
+  args: { eventId: v.string(), workerId: v.string(), now: v.number() },
+  handler: async (ctx, args) => parkOwnerDeliveryForLegalHold(ctx, "data", args),
+});
+
+export const blockIngestionDeletionOwnerDeliveryForLegalHold = internalMutation({
+  args: { eventId: v.string(), workerId: v.string(), now: v.number() },
+  handler: async (ctx, args) => parkOwnerDeliveryForLegalHold(ctx, "ingestion", args),
+});
+
+export const failModelDeletionOwnerDeliveryPermanently = internalMutation({
+  args: { eventId: v.string(), workerId: v.string(), now: v.number(), reason: v.string() },
+  handler: async (ctx, args) => failOwnerDeliveryPermanently(ctx, "model", args),
+});
+
+export const failDataDeletionOwnerDeliveryPermanently = internalMutation({
+  args: { eventId: v.string(), workerId: v.string(), now: v.number(), reason: v.string() },
+  handler: async (ctx, args) => failOwnerDeliveryPermanently(ctx, "data", args),
+});
+
+export const failIngestionDeletionOwnerDeliveryPermanently = internalMutation({
+  args: { eventId: v.string(), workerId: v.string(), now: v.number(), reason: v.string() },
+  handler: async (ctx, args) => failOwnerDeliveryPermanently(ctx, "ingestion", args),
 });
 
 /**
@@ -1454,6 +1577,9 @@ async function finalizeDeletionWhenEveryOwnerSucceeded(ctx: any, requestId: stri
   if (!request) throw new Error("completed deletion has no durable request");
   const space = await getSpaceByRef(ctx, request.spaceRef);
   if (!space) throw new Error("completed deletion has no canonical Space");
+  // The completed deletion needs no more owner delivery. This runs on every completing
+  // call, so a Space that an earlier call already deleted is covered as well.
+  await closeLiveOwnerDeliveries(ctx, requestId, now);
   if (space.lifecycle === "deleted") return true;
   if (space.lifecycle !== "deleting") throw new Error("only a fenced Space can finalize deletion");
   const next = transitionSpaceLifecycle(
@@ -1501,19 +1627,11 @@ export const claimNextDataDeletionOwnerDelivery = internalMutation({
   handler: async (ctx, args) => {
     assertDeliveryWorker(args.workerId);
     if (!Number.isSafeInteger(args.now) || args.now <= 0) throw new Error("deletion delivery claim time is invalid");
-    const events = await ctx.db.query("spaceDeletionOwnerDeliveryEvents")
-      .withIndex("by_owner_and_delivery", (q: any) => q.eq("ownerPlane", "data")).collect();
-    const candidate = events.filter((event: any) => canClaimSpaceLifecycleDelivery(deliveryFor(event), args.now))
-      .sort((left: any, right: any) => (left.nextAttemptAt ?? left.createdAt) - (right.nextAttemptAt ?? right.createdAt))[0];
-    if (!candidate) return null;
-    const request = await ctx.db.query("spaceDeletionRequests")
-      .withIndex("by_request_id", (q: any) => q.eq("requestId", candidate.requestId)).first();
-    if (!request || request.state !== "authorized") throw new Error("Data deletion delivery lacks an authorized request");
-    const space = await getSpaceByRef(ctx, request.spaceRef);
-    if (!space || space.lifecycle !== "deleting") throw new Error("Data deletion delivery Space is not fenced");
-    const delivery = claimSpaceLifecycleDelivery(deliveryFor(candidate), args.workerId, args.now, 30_000);
-    await ctx.db.patch(candidate._id, patchForDelivery(delivery));
-    return { eventId: candidate.eventId, request, workerId: args.workerId };
+    const selected = await selectLiveOwnerDelivery(ctx, "data", args.now);
+    if (!selected) return null;
+    const delivery = claimSpaceLifecycleDelivery(deliveryFor(selected.candidate), args.workerId, args.now, 30_000);
+    await ctx.db.patch(selected.candidate._id, patchForDelivery(delivery));
+    return { eventId: selected.candidate.eventId, request: selected.request, workerId: args.workerId };
   },
 });
 
@@ -1563,18 +1681,11 @@ export const claimNextIngestionDeletionOwnerDelivery = internalMutation({
   args: { workerId: v.string(), now: v.number() },
   handler: async (ctx, args) => {
     assertDeliveryWorker(args.workerId);
-    const events = await ctx.db.query("spaceDeletionOwnerDeliveryEvents")
-      .withIndex("by_owner_and_delivery", (q: any) => q.eq("ownerPlane", "ingestion")).collect();
-    const candidate = events.filter((event: any) => canClaimSpaceLifecycleDelivery(deliveryFor(event), args.now))
-      .sort((left: any, right: any) => (left.nextAttemptAt ?? left.createdAt) - (right.nextAttemptAt ?? right.createdAt))[0];
-    if (!candidate) return null;
-    const request = await ctx.db.query("spaceDeletionRequests").withIndex("by_request_id", (q: any) => q.eq("requestId", candidate.requestId)).first();
-    if (!request || request.state !== "authorized") throw new Error("Ingestion deletion delivery lacks an authorized request");
-    const space = await getSpaceByRef(ctx, request.spaceRef);
-    if (!space || space.lifecycle !== "deleting") throw new Error("Ingestion deletion delivery Space is not fenced");
-    const delivery = claimSpaceLifecycleDelivery(deliveryFor(candidate), args.workerId, args.now, 30_000);
-    await ctx.db.patch(candidate._id, patchForDelivery(delivery));
-    return { eventId: candidate.eventId, request };
+    const selected = await selectLiveOwnerDelivery(ctx, "ingestion", args.now);
+    if (!selected) return null;
+    const delivery = claimSpaceLifecycleDelivery(deliveryFor(selected.candidate), args.workerId, args.now, 30_000);
+    await ctx.db.patch(selected.candidate._id, patchForDelivery(delivery));
+    return { eventId: selected.candidate.eventId, request: selected.request };
   },
 });
 
@@ -1609,7 +1720,8 @@ export const acknowledgeIngestionDeletionOwnerDelivery = internalMutation({
 
 // Trusted coordinator ingress only. An owner receipt may improve an uncertain
 // result after reconciliation, but cannot silently turn a completed successful
-// receipt into another state.
+// receipt into another state. It records a legal hold for the Model owner only, and
+// only on a Model delivery that the Model owner has already refused.
 export const recordDeletionOwnerReceipt = internalMutation({
   args: {
     requestId: v.string(),
@@ -1620,6 +1732,7 @@ export const recordDeletionOwnerReceipt = internalMutation({
     now: v.number(),
   },
   handler: async (ctx, args) => {
+    assertCoordinatorLegalHold(args.ownerPlane as SpaceDeletionOwner, args.status as SpaceDeletionOwnerStatus);
     const receipt = await ctx.db.query("spaceDeletionOwnerReceipts")
       .withIndex("by_request_and_owner", (q: any) => q.eq("requestId", args.requestId).eq("ownerPlane", args.ownerPlane))
       .first();
@@ -1627,6 +1740,9 @@ export const recordDeletionOwnerReceipt = internalMutation({
     assertReceiptTransition(receipt.status as SpaceDeletionOwnerStatus, args.status as SpaceDeletionOwnerStatus, {
       legalHoldRelease: legalHoldReleaseEnabled(),
     });
+    if (args.status === "blocked_legal_hold" && receipt.status !== "blocked_legal_hold") {
+      await requireParkedModelDelivery(ctx, args.requestId);
+    }
     await ctx.db.patch(receipt._id, {
       status: args.status,
       receiptRef: args.receiptRef?.trim() || undefined,

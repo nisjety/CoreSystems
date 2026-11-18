@@ -96,6 +96,17 @@ function jsonReply(status, payload) {
   });
 }
 
+/** Sets SPACE_DELETION_PERMANENT_REFUSAL_PARK for one test (`undefined` removes it), restored afterwards. */
+function setPermanentParkFlag(t, value) {
+  const prior = process.env.SPACE_DELETION_PERMANENT_REFUSAL_PARK;
+  t.after(() => {
+    if (prior === undefined) delete process.env.SPACE_DELETION_PERMANENT_REFUSAL_PARK;
+    else process.env.SPACE_DELETION_PERMANENT_REFUSAL_PARK = prior;
+  });
+  if (value === undefined) delete process.env.SPACE_DELETION_PERMANENT_REFUSAL_PARK;
+  else process.env.SPACE_DELETION_PERMANENT_REFUSAL_PARK = value;
+}
+
 /** The gateway's typed hold refusal, carrying upstream text that must never be stored. */
 function holdReply() {
   return jsonReply(409, {
@@ -186,7 +197,8 @@ test('only a non-retryable hold is parked; every other refusal keeps the retry p
     ['the hold code with no retryable flag', jsonReply(409, { error: { code: HOLD_CODE } })],
     ['the hold code with a string retryable flag', jsonReply(409, { error: { code: HOLD_CODE, details: { retryable: 'false' } } })],
     ['a JSON body with no typed error', jsonReply(409, { error: 'a legal hold covers this' })],
-    ['a different typed refusal', jsonReply(412, { error: { code: 'thread_persistence_not_permitted', message: 'x' } })],
+    ['a different typed refusal that is not permanent', jsonReply(409, { error: { code: 'thread_persistence_not_permitted', message: 'x' } })],
+    ['a rate limit with a typed body', jsonReply(429, { error: { code: 'rate_limited', details: { retryable: true } } })],
     ['a 200 receipt for another request', jsonReply(200, { request_id: 'other', owner_plane: 'model', owner_outcome: 'succeeded' })],
   ];
   for (const [name, reply] of cases) {
@@ -287,4 +299,107 @@ test('the hold shape is exact: the code with retryable false and nothing weaker'
   assert.equal(isModelLegalHoldRefusal({ error: HOLD_CODE }), false);
   assert.equal(isModelLegalHoldRefusal(null), false);
   assert.equal(isModelLegalHoldRefusal([HOLD_CODE]), false);
+});
+
+test('with the permanent-refusal switch on, a permanent refusal parks the Model delivery as failed_permanent and is never retried', async (t) => {
+  setPermanentParkFlag(t, 'true');
+  for (const status of [400, 401, 403, 412]) {
+    const handle = harness(seedTables());
+    let first;
+    let second;
+    const sent = await withModelReply(jsonReply(status, {
+      error: { code: 'bad_request', message: 'upstream-permanent-detail', details: { retryable: false } },
+    }), async () => {
+      first = await deliverOne._handler(handle.ctx, { workerId: 'worker-1' });
+      second = await deliverOne._handler(handle.ctx, { workerId: 'worker-2' });
+    });
+
+    assert.deepEqual(first, { eventId: EVENT_ID, status: 'failed_permanent' }, String(status));
+    assert.deepEqual(second, { status: 'idle' }, String(status));
+    assert.equal(sent.length, 1, `HTTP ${status} is sent once`);
+    assert.deepEqual(scheduledNames(handle.log), [], `HTTP ${status} schedules no retry`);
+    const event = eventRow(handle.tables);
+    assert.equal(event.deliveryState, 'failed_permanent', String(status));
+    assert.equal(event.lastDeliveryError, `permanent_refusal_http_${status}`, String(status));
+    assert.equal(event.leaseOwner, undefined, String(status));
+    assert.equal(receiptRow(handle.tables).status, 'pending', 'a refusal is not an owner answer');
+    assert.equal(
+      JSON.stringify(handle.tables).includes('upstream-permanent-detail'),
+      false,
+      'upstream text is never stored',
+    );
+  }
+});
+
+test('a throw after the claim releases the delivery for a retry instead of leaving it claimed', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  // The owner answers 200 over a blocked receipt, which no transition accepts, so the acknowledgement throws.
+  const handle = harness(seedTables({ receiptStatus: 'blocked_legal_hold' }));
+  let result;
+  const sent = await withModelReply(jsonReply(200, {
+    request_id: REQUEST_ID, owner_plane: 'model', owner_outcome: 'succeeded', remaining_work: [],
+  }), async () => {
+    result = await deliverOne._handler(handle.ctx, { workerId: 'worker-1' });
+  });
+
+  assert.equal(result.status, 'retry_scheduled');
+  assert.equal(sent.length, 1);
+  const event = eventRow(handle.tables);
+  assert.equal(event.deliveryState, 'failed', 'released, not left claimed');
+  assert.equal(event.leaseOwner, undefined);
+  assert.equal(event.lastDeliveryError, 'Model Space deletion delivery failed before an owner receipt was recorded');
+  assert.deepEqual(scheduledNames(handle.log), ['spaceDeletionModel:deliverOne']);
+  assert.equal(receiptRow(handle.tables).status, 'blocked_legal_hold', 'the refused answer does not move the receipt');
+});
+
+test('with the permanent-refusal switch off, a permanent refusal releases for a retry exactly as before', async (t) => {
+  setPermanentParkFlag(t, undefined);
+  for (const status of [400, 401, 403, 412]) {
+    const handle = harness(seedTables());
+    let first;
+    let second;
+    const sent = await withModelReply(jsonReply(status, {
+      error: { code: 'bad_request', message: 'upstream-permanent-detail', details: { retryable: false } },
+    }), async () => {
+      first = await deliverOne._handler(handle.ctx, { workerId: 'worker-1' });
+      second = await deliverOne._handler(handle.ctx, { workerId: 'worker-2' });
+    });
+
+    assert.equal(first.status, 'retry_scheduled', String(status));
+    assert.deepEqual(second, { status: 'idle' }, `HTTP ${status} is not claimed again before its backoff`);
+    assert.equal(sent.length, 1, `HTTP ${status} is sent once per attempt`);
+    assert.deepEqual(scheduledNames(handle.log), ['spaceDeletionModel:deliverOne'], `HTTP ${status} schedules one retry`);
+    const event = eventRow(handle.tables);
+    assert.equal(event.deliveryState, 'failed', String(status));
+    assert.equal(event.lastDeliveryError, `Model Space deletion returned HTTP ${status}`, String(status));
+    assert.equal(event.leaseOwner, undefined, String(status));
+    assert.equal(receiptRow(handle.tables).status, 'pending', 'a refusal is not an owner answer');
+    assert.equal(
+      JSON.stringify(handle.tables).includes('upstream-permanent-detail'),
+      false,
+      'upstream text is never stored',
+    );
+  }
+});
+
+test('with the permanent-refusal switch off, a refusal that clears on the retry still completes the deletion', async (t) => {
+  setPermanentParkFlag(t, undefined);
+  const handle = harness(seedTables());
+  const replies = [
+    jsonReply(401, { error: { code: 'unauthorized', message: 'upstream-permanent-detail' } }),
+    jsonReply(200, { request_id: REQUEST_ID, owner_plane: 'model', owner_outcome: 'partial', remaining_work: [] }),
+  ];
+  let second;
+  const sent = await withModelReply(() => replies.shift()(), async () => {
+    const first = await deliverOne._handler(handle.ctx, { workerId: 'worker-1' });
+    assert.equal(first.status, 'retry_scheduled');
+    // The bearer has been fixed and the backoff has passed: the retry is claimed and acknowledged.
+    eventRow(handle.tables).nextAttemptAt = 0;
+    second = await deliverOne._handler(handle.ctx, { workerId: 'worker-2' });
+  });
+
+  assert.deepEqual(second, { eventId: EVENT_ID, status: 'partial' });
+  assert.equal(sent.length, 2);
+  assert.equal(eventRow(handle.tables).deliveryState, 'acknowledged');
+  assert.equal(receiptRow(handle.tables).status, 'partial');
 });

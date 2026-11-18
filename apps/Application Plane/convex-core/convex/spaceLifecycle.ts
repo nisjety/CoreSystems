@@ -30,7 +30,14 @@ export type SpaceLifecycleEvent = Readonly<{
   spaceRef: string;
 }>;
 
-export type SpaceDeliveryState = 'pending' | 'claimed' | 'acknowledged' | 'failed' | 'rejected' | 'blocked_legal_hold';
+export type SpaceDeliveryState =
+  | 'pending'
+  | 'claimed'
+  | 'acknowledged'
+  | 'failed'
+  | 'rejected'
+  | 'blocked_legal_hold'
+  | 'failed_permanent';
 
 export type SpaceLifecycleDelivery = Readonly<{
   attempts: number;
@@ -192,6 +199,30 @@ export function rearmSpaceLifecycleDeliveryAfterLegalHold(
     attempts: delivery.attempts,
     nextAttemptAt: now,
     state: 'pending',
+  };
+}
+
+/**
+ * An owner refused the erase in a way a retry cannot change (a bad bearer, a bad
+ * request, an unmet precondition). The claim parks in `failed_permanent`, which
+ * `canClaimSpaceLifecycleDelivery` never selects. The attempt count stays on the
+ * row; nothing in this plane re-arms a permanently failed delivery yet.
+ */
+export function failSpaceLifecycleDeliveryPermanently(
+  delivery: SpaceLifecycleDelivery,
+  workerId: string,
+  now: number,
+): SpaceLifecycleDelivery {
+  if (delivery.state !== 'claimed' || delivery.leaseOwner !== workerId) {
+    throw new Error('only the active delivery worker may record a permanent refusal');
+  }
+  if (!Number.isSafeInteger(now) || now <= 0) {
+    throw new Error('delivery failure time must be a positive safe integer');
+  }
+  return {
+    attempts: delivery.attempts,
+    nextAttemptAt: now,
+    state: 'failed_permanent',
   };
 }
 

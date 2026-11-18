@@ -82,7 +82,12 @@ export const spaceDeletionTables = {
   // the receipt, while a timeout/crash remains retryable and visibly pending.
   // `blocked_legal_hold` is a typed, non-retryable owner refusal: no claim
   // selects it until the re-drive re-arms it once the hold is lifted (flag
-  // SPACE_DELETION_HOLD_RELEASE, `spaces.ts`).
+  // SPACE_DELETION_HOLD_RELEASE, `spaces.ts`). `failed_permanent` is a typed,
+  // non-retryable owner refusal (400/401/403/412, parked only behind flag
+  // SPACE_DELETION_PERMANENT_REFUSAL_PARK): no claim selects it, and the reason
+  // code in `lastDeliveryError` is the only detail stored. `closed` is terminal: the
+  // deletion completed, or stopped being live, so no claim selects the row and no
+  // owner answer moves it. `lastDeliveryError` holds the closing reason code.
   spaceDeletionOwnerDeliveryEvents: defineTable({
     eventId: v.string(),
     requestId: v.string(),
@@ -92,7 +97,7 @@ export const spaceDeletionTables = {
     ),
     deliveryState: v.union(
       v.literal("pending"), v.literal("claimed"), v.literal("acknowledged"), v.literal("failed"),
-      v.literal("blocked_legal_hold"),
+      v.literal("blocked_legal_hold"), v.literal("failed_permanent"), v.literal("closed"),
     ),
     deliveryAttempts: v.number(),
     leaseOwner: v.optional(v.string()),

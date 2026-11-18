@@ -1,8 +1,13 @@
 /** Ingestion bounded-purge adapter: only the Control-issued ingestion bearer
- * can cross the boundary; delivery stays leased until an exact owner receipt. */
+ * can cross the boundary; delivery stays leased until an exact owner receipt. A
+ * typed legal-hold refusal parks the delivery and blocks its receipt, as the Model
+ * adapter does; with SPACE_DELETION_PERMANENT_REFUSAL_PARK on, a permanent refusal
+ * (400, 401, 403, 412) parks it as `failed_permanent`, and with it off that refusal
+ * retries as before; any throw after the claim releases it for retry. */
 import { v } from "convex/values";
 import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
+import { isOwnerLegalHoldRefusal, isPermanentOwnerRefusal, permanentRefusalParkEnabled } from "./spaceDeletionReceipts";
 
 const INGESTION_SPACE_DELETION_URL = process.env.INGESTION_SPACE_DELETION_URL || "";
 const CONTROL_SPACE_DELETION_INGESTION_BEARER = process.env.CONTROL_SPACE_DELETION_INGESTION_BEARER || "";
@@ -16,6 +21,13 @@ export function ingestionDeletionReceipt(receipt: unknown, requestId: string): {
   const remaining = typeof body.remaining_work === "string" ? body.remaining_work.slice(0, 180) : "";
   return { status: body.owner_outcome, receiptRef: `ingestion:${requestId}`, detail: remaining ? `Ingestion owner receipt: ${remaining}` : "Ingestion owner receipt accepted" };
 }
+async function isLegalHoldRefusal(response: Response): Promise<boolean> {
+  try {
+    return isOwnerLegalHoldRefusal(await response.json());
+  } catch {
+    return false;
+  }
+}
 function nextWorker(eventId: string): string { return `space-deletion-ingestion:${eventId}:${crypto.randomUUID()}`; }
 
 export const deliverOne = internalAction({
@@ -28,20 +40,41 @@ export const deliverOne = internalAction({
       await ctx.scheduler.runAfter(Math.max(0, retryAt - Date.now()), internal.spaceDeletionIngestion.deliverOne, { workerId: nextWorker(claimed.eventId) });
       return { status: "retry_scheduled" as const, retryAt };
     };
-    if (!INGESTION_SPACE_DELETION_URL.trim() || !CONTROL_SPACE_DELETION_INGESTION_BEARER.trim()) return release("Ingestion Space deletion endpoint or dedicated bearer is not configured");
-    let response: Response;
+    const blockByLegalHold = async () => {
+      await ctx.runMutation(internal.spaces.blockIngestionDeletionOwnerDeliveryForLegalHold, { eventId: claimed.eventId, workerId: args.workerId, now: Date.now() });
+      return { eventId: claimed.eventId, status: "blocked_legal_hold" as const };
+    };
+    const failPermanently = async (reason: string) => {
+      await ctx.runMutation(internal.spaces.failIngestionDeletionOwnerDeliveryPermanently, { eventId: claimed.eventId, workerId: args.workerId, now: Date.now(), reason });
+      return { eventId: claimed.eventId, status: "failed_permanent" as const };
+    };
     try {
-      response = await fetch(INGESTION_SPACE_DELETION_URL, {
-        method: "POST", headers: { "Authorization": `Bearer ${CONTROL_SPACE_DELETION_INGESTION_BEARER}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ deletion_request_id: claimed.request.requestId, space_ref: claimed.request.spaceRef, reason: "Control-authorized Space deletion queued-job cancellation" }),
-      });
-    } catch { return release("Ingestion Space deletion request failed"); }
-    if (response.status !== 200) return release(`Ingestion Space deletion returned HTTP ${response.status}`);
-    let receipt: unknown;
-    try { receipt = await response.json(); } catch { return release("Ingestion Space deletion returned an invalid receipt"); }
-    const outcome = ingestionDeletionReceipt(receipt, claimed.request.requestId);
-    if (!outcome) return release("Ingestion Space deletion receipt did not match the claimed request");
-    await ctx.runMutation(internal.spaces.acknowledgeIngestionDeletionOwnerDelivery, { eventId: claimed.eventId, workerId: args.workerId, now: Date.now(), ...outcome });
-    return { eventId: claimed.eventId, status: outcome.status };
+      if (!INGESTION_SPACE_DELETION_URL.trim() || !CONTROL_SPACE_DELETION_INGESTION_BEARER.trim()) return await release("Ingestion Space deletion endpoint or dedicated bearer is not configured");
+      let response: Response;
+      try {
+        response = await fetch(INGESTION_SPACE_DELETION_URL, {
+          method: "POST", headers: { "Authorization": `Bearer ${CONTROL_SPACE_DELETION_INGESTION_BEARER}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ deletion_request_id: claimed.request.requestId, space_ref: claimed.request.spaceRef, reason: "Control-authorized Space deletion queued-job cancellation" }),
+        });
+      } catch { return await release("Ingestion Space deletion request failed"); }
+      if (response.status !== 200) {
+        if (await isLegalHoldRefusal(response)) return await blockByLegalHold();
+        if (permanentRefusalParkEnabled() && isPermanentOwnerRefusal(response.status)) {
+          return await failPermanently(`permanent_refusal_http_${response.status}`);
+        }
+        return await release(`Ingestion Space deletion returned HTTP ${response.status}`);
+      }
+      let receipt: unknown;
+      try { receipt = await response.json(); } catch { return await release("Ingestion Space deletion returned an invalid receipt"); }
+      const outcome = ingestionDeletionReceipt(receipt, claimed.request.requestId);
+      if (!outcome) return await release("Ingestion Space deletion receipt did not match the claimed request");
+      await ctx.runMutation(internal.spaces.acknowledgeIngestionDeletionOwnerDelivery, { eventId: claimed.eventId, workerId: args.workerId, now: Date.now(), ...outcome });
+      return { eventId: claimed.eventId, status: outcome.status };
+    } catch {
+      // Only a release schedules the next attempt; without it an abandoned claim
+      // stays claimed. The logged text is fixed, so no upstream body is recorded.
+      console.error("[Space deletion] Ingestion delivery failed after the claim; releasing it for retry");
+      return await release("Ingestion Space deletion delivery failed before an owner receipt was recorded");
+    }
   },
 });
