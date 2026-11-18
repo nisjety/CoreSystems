@@ -129,6 +129,11 @@ describe('firstUnreadIndex', () => {
     expect(firstUnreadIndex(ordered, new Set(['n2', 'n1']))).toBe(1)
   })
 
+  it('points at the top of the list when the very first post is new', () => {
+    const ordered = [thread('n0'), thread('old'), thread('n2')]
+    expect(firstUnreadIndex(ordered, new Set(['n0', 'n2']))).toBe(0)
+  })
+
   it('is -1 when nothing is new, when the list is empty, or when the new post is not in the list', () => {
     const ordered = [thread('old'), thread('n1')]
     expect(firstUnreadIndex(ordered, new Set<string>())).toBe(-1)

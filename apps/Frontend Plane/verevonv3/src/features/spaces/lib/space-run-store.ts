@@ -94,14 +94,20 @@ export function createSpaceRunStore(options: SpaceRunStoreOptions = {}): SpaceRu
   const entries = new Map<string, Entry>()
   const [map, setMap] = createSignal<ReadonlyMap<string, SpaceRunView>>(new Map())
 
-  const patch = (runId: string, change: (view: SpaceRunView) => SpaceRunView) => {
+  // Returns the view this write left. A plain read of the signal straight after a write still gives the
+  // value from before it (Solid 2 applies writes at flush), so a caller that must act on what the write
+  // did takes the new view from here, not from `map()`.
+  const patch = (runId: string, change: (view: SpaceRunView) => SpaceRunView): SpaceRunView | undefined => {
+    const written: { view?: SpaceRunView } = {}
     setMap((prev) => {
       const current = prev.get(runId)
       if (!current) return prev
       const next = change(current)
+      written.view = next
       if (next === current) return prev
       return new Map(prev).set(runId, next)
     })
+    return written.view
   }
 
   const drop = (runId: string) => {
@@ -153,6 +159,8 @@ export function createSpaceRunStore(options: SpaceRunStoreOptions = {}): SpaceRu
     const controller = new AbortController()
     entry.controller = controller
     entry.active = true
+    // A run that had waited for a slot is now asking for its stream: connecting until its first snapshot.
+    patch(entry.runId, (view) => (view.status === 'waiting' ? { ...view, status: 'connecting' } : view))
     const onFrame = (frame: RoomRunFrame, sseId: string | undefined) => {
       if (entries.get(entry.runId) !== entry || controller.signal.aborted) return
       if (sseId) entry.lastEventId = sseId
@@ -162,11 +170,10 @@ export function createSpaceRunStore(options: SpaceRunStoreOptions = {}): SpaceRu
       }
       if (frame.type === 'finished') entry.terminal = true
       if (frame.type === 'error' && !frame.retryable) entry.terminal = true
-      patch(entry.runId, (view) => applyRoomRunFrame(view, frame))
-      const view = map().get(entry.runId)
+      const written = patch(entry.runId, (view) => applyRoomRunFrame(view, frame))
       // A gap in the text, or an authorization that is about to end, is healed by attaching again;
       // closing this stream hands over to `onEnd`, which reconnects.
-      if (view && (view.needsReattach || view.reauthRequired) && !entry.terminal) {
+      if (written && (written.needsReattach || written.reauthRequired) && !entry.terminal) {
         entry.lastEventId = undefined
         controller.abort()
       }

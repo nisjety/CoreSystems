@@ -326,3 +326,199 @@ describe('the shared attention store: visibility', () => {
     release()
   })
 })
+
+// ── two tabs in one test (WS11-S4) ───────────────────────────────────────────────────────────────────
+// Stand-ins for the two browser APIs the store uses between tabs. The lock manager grants one holder at a
+// time, in the order requests were made, and drops a request aborted while it waits. The channel delivers
+// what one tab posts to every other tab. The store reaches them only through `navigator.locks` and
+// `BroadcastChannel`; nothing here reads its state.
+
+const LEADER_LOCK = 'verevon.space-attention.leader'
+const openChannels = new Set<FakeChannel>()
+
+class FakeChannel {
+  onmessage: ((event: { data: unknown }) => void) | null = null
+  private open = true
+
+  constructor(_name?: string) {
+    openChannels.add(this)
+  }
+
+  postMessage(data: unknown): void {
+    for (const other of openChannels) {
+      if (other !== this && other.open) void Promise.resolve().then(() => other.onmessage?.({ data }))
+    }
+  }
+
+  close(): void {
+    this.open = false
+    openChannels.delete(this)
+  }
+}
+
+type LockWaiter = { readonly abort: () => void; readonly grant: () => void }
+
+function installLockManager() {
+  const held = new Map<string, boolean>()
+  const queues = new Map<string, LockWaiter[]>()
+  const requests: string[] = []
+
+  const grantNext = (name: string) => {
+    const queue = queues.get(name) ?? []
+    if (held.get(name) || queue.length === 0) return
+    held.set(name, true)
+    queue.shift()?.grant()
+  }
+
+  const manager = {
+    requests,
+    isHeld: (name: string) => held.get(name) === true,
+    request(name: string, options: { readonly signal?: AbortSignal } = {}, callback: () => unknown): Promise<unknown> {
+      requests.push(name)
+      return new Promise((resolve, reject) => {
+        const queue = queues.get(name) ?? []
+        queues.set(name, queue)
+        const waiter: LockWaiter = {
+          abort: () => {
+            const index = queue.indexOf(waiter)
+            if (index < 0) return // already granted: an abort cannot take a held lock back
+            queue.splice(index, 1)
+            reject(new DOMException('The request was aborted.', 'AbortError'))
+          },
+          grant: () => {
+            Promise.resolve()
+              .then(callback)
+              .then(resolve, reject)
+              .finally(() => {
+                held.set(name, false)
+                grantNext(name)
+              })
+          },
+        }
+        options.signal?.addEventListener('abort', waiter.abort, { once: true })
+        queue.push(waiter)
+        grantNext(name)
+      })
+    },
+  }
+  Object.defineProperty(navigator, 'locks', { configurable: true, value: manager })
+  return manager
+}
+
+describe('the shared attention store: one poller per browser (WS11-S4)', () => {
+  let locks: ReturnType<typeof installLockManager>
+
+  /** Another tab takes the leader lock and keeps it until `release` is called. */
+  function holdLeaderLock(): { readonly release: () => void } {
+    let release: () => void = () => undefined
+    void locks.request(LEADER_LOCK, {}, () => new Promise<void>((resolve) => {
+      release = () => resolve()
+    }))
+    return { release: () => release() }
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal('BroadcastChannel', FakeChannel)
+    locks = installLockManager()
+  })
+
+  afterEach(() => {
+    delete (navigator as unknown as { locks?: unknown }).locks
+    openChannels.clear()
+  })
+
+  it('a tab that does not hold the leader lock only listens to the answers another tab sends', async () => {
+    attention.getSpacesAttention.mockResolvedValue(answer([room('room-a', 1)]))
+    const otherTab = new FakeChannel()
+    const holder = holdLeaderLock()
+    const release = store.retainSpaceAttention(tr)
+    await settle()
+
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(locks.isHeld(LEADER_LOCK)).toBe(true)
+    expect(attention.getSpacesAttention).not.toHaveBeenCalled()
+    expect(store.spaceAttentionRoom('room-a')).toBeUndefined()
+
+    otherTab.postMessage({ type: 'snapshot', at: Date.now(), snapshot: answer([room('room-a', 2)]) })
+    await settle()
+    expect(store.spaceAttentionRoom('room-a')?.badge).toEqual({ kind: 'count', n: 2 })
+    expect(attention.getSpacesAttention).not.toHaveBeenCalled()
+
+    holder.release()
+    release()
+  })
+
+  it('when the leader lets go, the waiting tab takes the lock and asks the server itself', async () => {
+    attention.getSpacesAttention.mockResolvedValue(answer([room('room-a', 1)]))
+    const holder = holdLeaderLock()
+    const release = store.retainSpaceAttention(tr)
+    await settle()
+    expect(attention.getSpacesAttention).not.toHaveBeenCalled()
+
+    holder.release()
+    await settle()
+    expect(attention.getSpacesAttention).toHaveBeenCalledTimes(1)
+    expect(locks.isHeld(LEADER_LOCK)).toBe(true)
+
+    release()
+    await settle()
+    expect(locks.isHeld(LEADER_LOCK)).toBe(false)
+  })
+
+  it('a hidden tab never asks for the leader lock, and asks for it once it is seen', async () => {
+    attention.getSpacesAttention.mockResolvedValue(answer([room('room-a', 1)]))
+    visibility.state = 'hidden'
+    const release = store.retainSpaceAttention(tr)
+    await settle()
+    expect(locks.requests).toEqual([])
+    expect(attention.getSpacesAttention).not.toHaveBeenCalled()
+
+    setVisibility('visible')
+    await settle()
+    expect(locks.requests).toEqual([LEADER_LOCK])
+    expect(attention.getSpacesAttention).toHaveBeenCalledTimes(1)
+    release()
+  })
+})
+
+describe('the shared attention store: the wait between failed requests (WS11-S4)', () => {
+  it('doubles the wait after each failure, and never waits more than five minutes', async () => {
+    attention.getSpacesAttention.mockRejectedValue(new ApiError('Busy', 503, 'search_busy'))
+    const release = store.retainSpaceAttention(tr)
+    await settle()
+
+    // The waits after failures one to five: 60 s, 120 s, 240 s, then the five-minute cap twice.
+    for (const [index, wait] of [60_000, 120_000, 240_000, 300_000, 300_000].entries()) {
+      await vi.advanceTimersByTimeAsync(wait - 1)
+      expect(attention.getSpacesAttention).toHaveBeenCalledTimes(index + 1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(attention.getSpacesAttention).toHaveBeenCalledTimes(index + 2)
+    }
+    release()
+  })
+})
+
+describe('the shared attention store: announcements (WS11-S4)', () => {
+  it('does not announce a rise that lands while the tab is hidden, though it still shows the new number', async () => {
+    let answerLater: (value: SpacesAttention) => void = () => undefined
+    attention.getSpacesAttention
+      .mockResolvedValueOnce(answer([room('room-a', 1)]))
+      .mockReturnValueOnce(
+        new Promise<SpacesAttention>((resolve) => {
+          answerLater = resolve
+        }),
+      )
+    const release = store.retainSpaceAttention(tr)
+    await settle()
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(attention.getSpacesAttention).toHaveBeenCalledTimes(2)
+
+    setVisibility('hidden')
+    answerLater(answer([room('room-a', 3)]))
+    await settle()
+    expect(store.spaceAttentionRoom('room-a')?.badge).toEqual({ kind: 'count', n: 3 })
+    expect(attention.announce).not.toHaveBeenCalled()
+    release()
+  })
+})

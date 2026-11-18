@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiError } from '@/shared/api/http'
+import type { ApprovalContinuationState } from '@/shared/api/orchestration-client'
+import type { ApprovalOutcome } from './space-approvals'
 
 const orchestration = vi.hoisted(() => ({
   decideApproval: vi.fn(),
@@ -16,7 +18,7 @@ const spaceClient = vi.hoisted(() => ({
 vi.mock('@/shared/api/orchestration-client', () => orchestration)
 vi.mock('@/shared/api/space-approvals-client', () => spaceClient)
 
-const { describeApproval, pendingApprovals, readPendingApprovals, settleApproval } = await import(
+const { describeApproval, grantedOutcome, pendingApprovals, readPendingApprovals, settleApproval } = await import(
   './space-approvals'
 )
 
@@ -143,6 +145,30 @@ describe('settleApproval', () => {
     await expect(
       settleApproval({ approvalId: 'ap-1', runId: 'run-1', decision: 'approve' }),
     ).resolves.toBe('granted')
+  })
+})
+
+// WS10-S1: what a recorded grant leads to is read from the server's continuation state, never assumed.
+describe('grantedOutcome per continuation state (WS10-S1)', () => {
+  it.each<[ApprovalContinuationState, ApprovalOutcome]>([
+    ['queued', 'granted_action'],
+    ['running', 'granted_action'],
+    ['completed', 'granted_action'],
+    ['failed', 'granted_action'],
+    ['not_resumable', 'granted_retry'],
+    ['live', 'granted_live'],
+    ['awaiting_continue', 'granted_continue'],
+  ])('reads a continuation of %s as %s', (state, outcome) => {
+    expect(grantedOutcome({ id: 'ap-1', continuation: { state } })).toBe(outcome)
+  })
+
+  it('reads no continuation, or one it does not know, as a plain grant that claims nothing more', () => {
+    expect(grantedOutcome({ id: 'ap-1' })).toBe('granted')
+    expect(grantedOutcome({ id: 'ap-1', continuation: { state: 'not_a_state' as ApprovalContinuationState } })).toBe(
+      'granted',
+    )
+    expect(grantedOutcome(null)).toBe('granted')
+    expect(grantedOutcome(undefined)).toBe('granted')
   })
 })
 

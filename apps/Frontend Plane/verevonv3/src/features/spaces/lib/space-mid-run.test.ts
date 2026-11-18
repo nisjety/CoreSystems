@@ -307,3 +307,41 @@ describe('deferredSendReady: when a send-when-ready goes out (WS09-S2)', () => {
     expect(deferredSendReady({ ...base, waiting: undefined, run: 'done' })).toBe(false)
   })
 })
+
+// WS09-S2: a refused steer keeps the member's words in the strip, with the reason; a run that ended
+// before taking a message resends it under the id the message was named with.
+describe('createSpaceMidRun: refusals keep the words, and a resend keeps its id (WS09-S2)', () => {
+  it('keeps the words of a steer the gateway refused, and notes the gateway reason', async () => {
+    const { queue, midRun } = setup()
+    queue.mockResolvedValueOnce({ outcome: 'refused', reason: 'too_long', message: 'Meldingen er for lang.' })
+
+    const outcome = await midRun.steer('Lang melding', TARGET)
+    flush()
+
+    expect(outcome).toBe('refused')
+    expect(midRun.entries()[0]).toEqual(
+      expect.objectContaining({ content: 'Lang melding', state: 'refused', note: 'Meldingen er for lang.' }),
+    )
+  })
+
+  it('keeps the words of a steer made before the run started, and calls nothing', async () => {
+    const { queue, midRun } = setup()
+
+    await midRun.steer('Tidlig', { ...TARGET, requestId: undefined })
+    flush()
+
+    expect(midRun.entries()[0]?.content).toBe('Tidlig')
+    expect(queue).not.toHaveBeenCalled()
+  })
+
+  it('resends a message the run ended before taking under the id it was named with, when the gateway names none', async () => {
+    const { queue, midRun } = setup()
+    queue.mockResolvedValueOnce({ outcome: 'run_ended' })
+
+    const outcome = await midRun.steer('Legg til kolonne', TARGET)
+    flush()
+
+    expect(outcome).toBe('resend')
+    expect(midRun.settle()).toEqual([{ content: 'Legg til kolonne', clientMessageId: 'cm-1' }])
+  })
+})

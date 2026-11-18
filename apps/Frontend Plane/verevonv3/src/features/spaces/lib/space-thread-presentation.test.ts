@@ -11,6 +11,8 @@ import {
   continuesTurnGroup,
   formatRelativeWhen,
   formatTurnTime,
+  formatWhen,
+  formatWhenWithTime,
   threadStatus,
 } from './space-thread-presentation'
 
@@ -179,5 +181,75 @@ describe('threadStatus shared run-status vocabulary', () => {
   it('keeps a raw token for a state the room does not name', () => {
     expect(threadStatus(thread('paused'), en)).toBe('Paused')
     expect(threadStatus(thread('blocked'), en)).toBe('Blocked')
+  })
+})
+
+// WS16-S1: the room's status words, in both languages, from one vocabulary.
+describe('threadStatus words in both languages (WS16-S1)', () => {
+  it.each<[string | undefined, string, string]>([
+    [undefined, 'Samtale åpen', 'Conversation open'],
+    ['awaiting_approval', 'Venter på godkjenning', 'Needs approval'],
+    ['running', 'Arbeider', 'Working'],
+    ['queued', 'I kø', 'Queued'],
+    ['completed', 'Fullført', 'Completed'],
+    ['failed', 'Feilet', 'Failed'],
+    ['cancelled', 'Stoppet', 'Stopped'],
+  ])('reads %s as the Norwegian and the English word', (status, norwegian, english) => {
+    expect(threadStatus(thread(status), no)).toBe(norwegian)
+    expect(threadStatus(thread(status), en)).toBe(english)
+  })
+})
+
+// WS16-S1: the date and time helpers are Norwegian by default, and switch with the locale and with the
+// viewer's own preferences. The instant is 12:30 UTC, which is 21:30 in Asia/Tokyo (no daylight saving).
+describe('the date and time helpers: Norwegian by default, switched by locale and preferences (WS16-S1)', () => {
+  const instant = '2026-10-31T12:30:00Z'
+  const now = Date.parse('2026-10-31T12:31:00Z')
+  const minutesAgo = (minutes: number) => new Date(now - minutes * 60_000).toISOString()
+  const NB_FORMAT = { locale: 'no' as const }
+  const EN_FORMAT = { locale: 'en' as const }
+
+  it('gives the Norwegian output by default, identical to an explicit Norwegian locale', () => {
+    expect(formatWhen(instant)).toBe(formatWhen(instant, NB_FORMAT))
+    expect(formatWhen(instant)).toMatch(/okt/)
+    expect(formatWhenWithTime(instant)).toBe(formatWhenWithTime(instant, NB_FORMAT))
+    expect(formatRelativeWhen(minutesAgo(4), now)).toBe(formatRelativeWhen(minutesAgo(4), now, NB_FORMAT))
+    expect(formatRelativeWhen(minutesAgo(4), now)).toMatch(/siden/)
+    expect(formatTurnTime(instant)).toEqual(formatTurnTime(instant, NB_FORMAT))
+  })
+
+  it('switches every helper to English words with the English locale', () => {
+    expect(formatWhen(instant, EN_FORMAT)).toMatch(/Oct/)
+    expect(formatWhen(instant, EN_FORMAT)).not.toBe(formatWhen(instant, NB_FORMAT))
+    expect(formatWhenWithTime(instant, { ...EN_FORMAT, prefs: { timeZone: 'Asia/Tokyo' } })).toMatch(
+      /10\/31\/26,\s9:30\s?PM/,
+    )
+    expect(formatRelativeWhen(minutesAgo(4), now, EN_FORMAT)).toMatch(/4 min\.? ago/)
+    expect(formatRelativeWhen(minutesAgo(3 * 24 * 60), now, EN_FORMAT)).toMatch(/3 days? ago/)
+    expect(formatRelativeWhen(minutesAgo(0.1), now, EN_FORMAT)).toMatch(/now/i)
+    expect(formatRelativeWhen(minutesAgo(10 * 24 * 60), now, EN_FORMAT)).toMatch(/Oct 21/)
+    expect(formatTurnTime(instant, { ...EN_FORMAT, prefs: { timeZone: 'Asia/Tokyo' } })?.full).toMatch(/Oct/)
+  })
+
+  it('follows the time format, the time zone and the date pattern the viewer chose', () => {
+    const tokyo24 = { timeZone: 'Asia/Tokyo', timeFormat: '24h' as const }
+    const tokyo12 = { timeZone: 'Asia/Tokyo', timeFormat: '12h' as const }
+
+    expect(formatTurnTime(instant, { locale: 'no', prefs: tokyo24 })?.short).toBe('21:30')
+    expect(formatTurnTime(instant, { locale: 'no', prefs: tokyo12 })?.short).toMatch(/9:30/)
+    expect(formatTurnTime(instant, { locale: 'no', prefs: tokyo12 })?.short).not.toBe('21:30')
+    expect(formatTurnTime(instant, { locale: 'en', prefs: tokyo24 })?.short).toBe('21:30')
+
+    expect(formatWhenWithTime(instant, { locale: 'no', prefs: tokyo24 })).toMatch(/21:30/)
+    expect(formatWhenWithTime(instant, { locale: 'en', prefs: { dateFormat: 'DD/MM/YYYY', ...tokyo24 } })).toBe(
+      '31/10/2026, 21:30',
+    )
+
+    expect(formatWhen(instant, { locale: 'en', prefs: { dateFormat: 'DD/MM/YYYY', timeZone: 'Asia/Tokyo' } })).toBe(
+      '31/10/2026',
+    )
+    expect(formatWhen(instant, { locale: 'no', prefs: { dateFormat: 'YYYY-MM-DD', timeZone: 'Asia/Tokyo' } })).toBe(
+      '2026-10-31',
+    )
   })
 })
