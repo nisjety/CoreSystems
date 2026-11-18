@@ -17,7 +17,8 @@ export type SpaceMembership = {
   space_ref: string
   org_id: string
   subject_id: string
-  kind: 'personal' | 'shared' | string
+  /** Control's space kind: `personal`, `room` or a direct-message kind. The open tail reads a kind this client does not name. */
+  kind: 'personal' | 'room' | 'dm' | 'group_dm' | (string & {})
   role: string
   /** WS04-S8: `private` or `org_public`. Absent on an older Control: unknown, not private. */
   visibility?: string
