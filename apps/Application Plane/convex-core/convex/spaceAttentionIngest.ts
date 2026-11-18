@@ -502,7 +502,7 @@ export const purgeThread = internalMutation({
 
 /**
  * A Space is being deleted: every attention, follow, preference, reminder,
- * agent-activity, read-marker and presence row for it goes. Scheduled beside
+ * agent-activity, read-marker, presence, reaction and pin row for it goes. Scheduled beside
  * the audience purge in `spaces.ts`.
  */
 export const purgeSpace = internalMutation({
@@ -521,6 +521,7 @@ export const purgeSpace = internalMutation({
     more = (await deleteBatch(ctx, await take("spaceReminders", "by_space", (q) => q.eq("spaceRef", spaceRef)), org)) || more;
     // WS12-S8: message reactions of the Space.
     more = (await deleteBatch(ctx, await take("spaceReactions", "by_space_thread", (q) => q.eq("spaceRef", spaceRef)), org)) || more;
+    more = (await deleteBatch(ctx, await take("spacePins", "by_space", (q) => q.eq("spaceRef", spaceRef)), org)) || more;
     if (more) await ctx.scheduler.runAfter(0, internal.spaceAttentionIngest.purgeSpace, args);
     return { more };
   },

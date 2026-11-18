@@ -499,6 +499,7 @@ test('purgeSpace deletes every table\'s rows for the Space and nothing of anothe
     spaceRoomNotifyPrefs: [mine({ externalAuthId: 'a' })],
     spaceReminders: [mine({ externalAuthId: 'a' })],
     spaceReactions: [mine({ threadId: THREAD })],
+    spacePins: [mine({ threadId: THREAD, pinnedAt: 1 }), mine({ externalOrgId: 'org_other', threadId: THREAD, pinnedAt: 2 })],
   };
   const { ctx, tables, log } = makeCtx(tablesIn);
   const result = await purgeSpace._handler(ctx, { externalOrgId: ORG, spaceRef: SPACE });
@@ -508,6 +509,7 @@ test('purgeSpace deletes every table\'s rows for the Space and nothing of anothe
     assert.equal(left.length, 0, name);
   }
   assert.equal(tables.spaceAttentionItems.length, 2, 'the other Space and the other org are untouched');
+  assert.equal(tables.spacePins.length, 1, 'the Space\'s pins go; the other org\'s pin stays');
   assert.deepEqual(log.scheduled, []);
 });
 
