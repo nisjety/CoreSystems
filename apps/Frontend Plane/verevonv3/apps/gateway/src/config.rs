@@ -1852,6 +1852,27 @@ mod tests").next().unwrap_or(&config);
         });
     }
 
+    /// WS20-S4 and WS20-S5: `SPACE_BROWSER_RUN_API` and `SPACE_BROWSER_CARD` are off by default and in production when
+    /// unset, and on in development when unset, like the other Space switches.
+    #[test]
+    fn ws20_browser_run_and_card_flags_are_off_by_default_and_in_production_when_unset() {
+        let defaults = super::SpaceFeatureFlags::default();
+        assert!(!defaults.browser_run);
+        assert!(!defaults.browser_card);
+        let cases: [(&str, fn(&super::SpaceFeatureFlags) -> bool); 2] = [
+            ("SPACE_BROWSER_RUN_API", |flags| flags.browser_run),
+            ("SPACE_BROWSER_CARD", |flags| flags.browser_card),
+        ];
+        for (key, read) in cases {
+            with_env(&[("APP_ENV", Some("production")), (key, None)], || {
+                assert!(!read(&super::SpaceFeatureFlags::from_env()), "{key} is off in production when unset");
+            });
+            with_env(&[("APP_ENV", Some("development")), (key, None)], || {
+                assert!(read(&super::SpaceFeatureFlags::from_env()), "{key} is on in development when unset");
+            });
+        }
+    }
+
     /// WS10.S6 (GW-2): `RUN_TRACE_API` is off unless it is `1`, `true`, `yes` or `on`, in every
     /// environment, development included, so the run-trace route ships dark.
     #[test]

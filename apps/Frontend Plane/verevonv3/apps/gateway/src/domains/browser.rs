@@ -12690,6 +12690,37 @@ mod human_browse_session_tests {
     }
 
     #[test]
+    fn a_room_run_parent_grant_names_its_hosts_and_lifetime_with_no_kind() {
+        // W3-DEC-GRANT: a room run's parent is an ordinary session grant. It names exactly the run's hosts and lives
+        // `ttl_s` seconds; no kind is sent, and a run with no host has no parent body at all.
+        let hosts = vec!["example.com".to_owned(), "docs.example.org".to_owned()];
+        let grant = session_grant_request_body(
+            SessionGrantScope::RoomRunParent {
+                hosts: &hosts,
+                ttl_s: 600,
+            },
+            false,
+        )
+        .expect("a room run with hosts has a parent grant body");
+        assert_eq!(
+            grant,
+            json!({ "allowed_domains": ["example.com", "docs.example.org"], "zdr": false, "ttl_s": 600 })
+        );
+        assert!(grant.get("kind").is_none(), "{grant}");
+        let no_hosts: Vec<String> = Vec::new();
+        assert_eq!(
+            session_grant_request_body(
+                SessionGrantScope::RoomRunParent {
+                    hosts: &no_hosts,
+                    ttl_s: 600,
+                },
+                true,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn keepalive_requires_owner_and_returns_expiry_only() {
         let renewed = json!({
             "expires_at": "2030-01-01T00:00:00Z",

@@ -1556,3 +1556,891 @@ fn room_host_ok(host: &str) -> bool {
 fn sha256_digest(text: &str) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(text.as_bytes())))
 }
+
+#[cfg(test)]
+mod tests {
+    //! The room browser-run routes through the real router (WS20-S4 reads and evidence, WS20-S5 start, W3-DEC-GRANT and
+    //! W3-DEC-GWFIX2). Session Core, Control (user-core), org-core, Convex and model-gateway are doubles, so each refusal
+    //! order, each zero-retention refusal before any Control call, the parent grant's life and the evidence rule are read
+    //! off the wire. `parse_start` is checked directly for the body rules.
+    use axum::{
+        body::Body,
+        http::{HeaderMap, Request, StatusCode},
+        Json,
+    };
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+    use crate::middleware::{AuthenticatedUser, AuthorizedMembership};
+
+    const SPACE: &str = "space-room";
+    const RUN: &str = "run-1";
+    const THREAD: &str = "thread-1";
+    const SEND: &str = "send-0123456789abcdef";
+    const GOAL: &str = "Find the pricing page on example.com";
+    /// The sha256 of [`GOAL`] in Control's form, computed outside this code with `sha256sum`.
+    const GOAL_DIGEST: &str = "sha256:67da0de00da5e05ed0adcbe80da0059c645f866f8f527c3705d79e3d7c3882e3";
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\nevidence-bytes";
+    const COOKIE: &str = "better-auth.session_token=session-1";
+    const ROOM_RUNS: &str = "/api/v1/spaces/space-room/browser-runs";
+    const TIMELINE: &str = "/api/v1/spaces/space-room/browser-runs/run-1/timeline";
+    const EVIDENCE: &str = "/api/v1/spaces/space-room/browser-runs/run-1/evidence/ev-1";
+    const MODEL_RUNS: &str = "/v1/spaces/space-room/browser/runs";
+    const MODEL_TIMELINE: &str = "/v1/spaces/space-room/browser/runs/run-1/timeline";
+    const MODEL_EVIDENCE: &str = "/v1/spaces/space-room/browser/runs/run-1/evidence/ev-1";
+    const MODEL_START: &str = "/v1/browser/runs";
+    const MODEL_GRANT: &str = "/v1/browser/grants";
+    const MODEL_REVOKE: &str = "/v1/browser/grants/grant-1";
+
+    /// Every double a room route reaches. `user_core` answers Control, `model` answers model-gateway and `org_core` answers
+    /// the zero-retention read.
+    struct Fixture {
+        state: AppState,
+        user_core: MockServer,
+        org_core: MockServer,
+        model: MockServer,
+        _others: Vec<MockServer>,
+    }
+
+    /// `org` is org-core's answer to the zero-retention read; `read` and `browser` are Control's answers to the room read
+    /// decision and to the browser-run decision. The thread-append decision is granted, and model-gateway's grant and grant
+    /// revoke succeed. A test mounts the model-gateway answer it exercises.
+    async fn fixture(org: ResponseTemplate, read: ResponseTemplate, browser: ResponseTemplate) -> Fixture {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for (slug, token) in [
+            ("session-core", "session-token"),
+            ("browser-broker", "broker-token"),
+            ("model-plane", "model-token"),
+        ] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{slug}/token")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "token": token })))
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": "member", "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        for (path, answer) in [
+            ("/api/v1/internal/spaces/thread-read-decision", read),
+            ("/api/v1/internal/spaces/browser-run-decision", browser),
+            ("/api/v1/internal/spaces/thread-append-decision", append_granted()),
+        ] {
+            Mock::given(wm_method("POST"))
+                .and(wm_path(path))
+                .respond_with(answer)
+                .mount(&user_core)
+                .await;
+        }
+        let org_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(org)
+            .mount(&org_core)
+            .await;
+        let convex = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef": SPACE, "name": "Room", "kind": "room", "lifecycle": "active"}
+            ]})))
+            .mount(&convex)
+            .await;
+        let model = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path(MODEL_GRANT))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"grant_id": "grant-1"}})))
+            .mount(&model)
+            .await;
+        Mock::given(wm_method("DELETE"))
+            .and(wm_path(MODEL_REVOKE))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"revoked": true}})))
+            .mount(&model)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.org_core_url = org_core.uri();
+        state.application_convex_url = convex.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.model_gateway_url = model.uri();
+        Fixture {
+            state,
+            user_core,
+            org_core,
+            model,
+            _others: vec![auth, convex],
+        }
+    }
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "User One".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    fn org_record(zdr: bool) -> ResponseTemplate {
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}}))
+    }
+
+    fn granted_read() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"data": {
+            "decision": {"decision_ref": "read-ref-1"},
+            "token": "read-token-secret"
+        }}))
+    }
+
+    fn granted_browser() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"data": {
+            "decision": {"decision_ref": "browser-ref-1"},
+            "token": "browser-decision-token",
+            "claims": {"sub": "user-1", "space_ref": SPACE}
+        }}))
+    }
+
+    /// Control's refusal of a decision, as Control answers it: the closed code at the top level.
+    fn refused(status: u16, code: &str) -> ResponseTemplate {
+        ResponseTemplate::new(status).set_body_json(json!({"code": code}))
+    }
+
+    fn append_granted() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"data": {
+            "decision": {
+                "space_ref": SPACE,
+                "decision_ref": "append-ref-1",
+                "recipient_audience_ref": "audience-1",
+                "recipient_audience_revision": 4,
+                "recipient_audience_hash": "audience-hash-1",
+                "privacy_policy_ref": "policy-1",
+                "authority_revision": 7,
+                "resource_authorization_ref": "resource-1",
+                "action_schema_hash": "schema-1",
+                "payload_digest": "payload-1",
+                "idempotency_key": "space-browser-append-send-0123456789abcdef"
+            },
+            "token": "append-token"
+        }}))
+    }
+
+    /// model-gateway's answer to a start: the run's ids at the top level, the way the start reads them.
+    fn started_answer() -> ResponseTemplate {
+        ResponseTemplate::new(202).set_body_json(json!({
+            "run_id": RUN, "thread_id": THREAD, "plan_id": "plan-1"
+        }))
+    }
+
+    /// model-gateway's typed refusal of a start because the Space's authority moved.
+    fn stale_answer() -> ResponseTemplate {
+        ResponseTemplate::new(409).set_body_json(json!({"error": {"code": "space_authority_stale"}}))
+    }
+
+    /// A start the body rules accept: one host, a goal with surrounding space, and the thread the run lands in.
+    fn start_json() -> Value {
+        json!({
+            "thread_id": THREAD,
+            "goal": format!("  {GOAL} \n"),
+            "allowed_domains": ["example.com"],
+            "client_send_id": SEND,
+        })
+    }
+
+    /// A room run's header as the projection names it. The starter is the run's own subject.
+    fn run_json(starter: &str) -> Value {
+        json!({
+            "run_id": RUN,
+            "thread_id": THREAD,
+            "started_by": {"subject_id": starter},
+            "phase": "running",
+            "started_at_unix": 1800000000,
+            "finished_at_unix": null,
+            "control": {"mode": "agent"},
+            "handoff": {"open": false},
+            "view": {"scope": "owner"}
+        })
+    }
+
+    /// One list row: the header plus the counts and hosts the list adds.
+    fn list_row(starter: &str) -> Value {
+        let mut row = run_json(starter);
+        row["hosts"] = json!(["example.com"]);
+        row["step_count"] = json!(3);
+        row
+    }
+
+    fn timeline_answer(run: Value, events: Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "run": run,
+            "events": events,
+            "next_event_id": null,
+            "valid_until": 1800000600
+        }))
+    }
+
+    fn png_answer() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_raw(PNG.to_vec(), "image/png")
+    }
+
+    /// The request as the router answers it: the status, the headers and the raw body.
+    async fn send(state: AppState, method: &str, uri: &str, body: Option<Value>) -> (u16, HeaderMap, Vec<u8>) {
+        let mut builder = Request::builder().method(method).uri(uri).header("cookie", COOKIE);
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let request = builder
+            .body(Body::from(body.map(|value| value.to_string()).unwrap_or_default()))
+            .expect("a request");
+        let response = crate::build_router(state)
+            .oneshot(request)
+            .await
+            .expect("the router answers");
+        let status = response.status().as_u16();
+        let headers = response.headers().clone();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("a body")
+            .to_bytes()
+            .to_vec();
+        (status, headers, bytes)
+    }
+
+    fn json_of(bytes: &[u8]) -> Value {
+        serde_json::from_slice(bytes).unwrap_or(Value::Null)
+    }
+
+    fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+        headers.get(name).and_then(|value| value.to_str().ok())
+    }
+
+    /// The requests a server recorded, as "METHOD path", for the paths that contain `part`.
+    async fn hits(server: &MockServer, part: &str) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|request| format!("{} {}", request.method, request.url.path()))
+            .filter(|hit| hit.contains(part))
+            .collect()
+    }
+
+    /// The JSON bodies a server recorded for one method and one exact path.
+    async fn bodies(server: &MockServer, verb: &str, path: &str) -> Vec<Value> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|request| request.method.as_str() == verb && request.url.path() == path)
+            .map(|request| request.body_json::<Value>().unwrap_or(Value::Null))
+            .collect()
+    }
+
+    /// Primes the cached org-zdr read to "not ZDR", as a read inside the minute does, then replaces org-core's answer with
+    /// `org_after`. The cache is in memory so the route sees the same entry the priming wrote.
+    async fn cached_not_zdr_then(fixture: &mut Fixture, org_after: ResponseTemplate) {
+        fixture.state.cache = crate::cache::ResultCache::in_memory();
+        assert_eq!(
+            crate::zdr::org_zdr_lookup(&fixture.state, &user()).await,
+            crate::zdr::OrgZdrPosture::Disabled,
+            "the cached read remembers that the org is not ZDR"
+        );
+        fixture.org_core.reset().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(org_after)
+            .mount(&fixture.org_core)
+            .await;
+    }
+
+    // ---- WS20-S4: the room reads and the evidence -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn the_room_reads_are_404_and_call_nothing_while_the_flag_is_off() {
+        let fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        for uri in [ROOM_RUNS, TIMELINE, EVIDENCE] {
+            let (status, _, body) = send(fixture.state.clone(), "GET", uri, None).await;
+            assert_eq!(status, 404, "{uri}");
+            assert_eq!(json_of(&body)["error"]["code"], "feature_unavailable", "{uri}");
+        }
+        assert!(hits(&fixture.user_core, "/internal/spaces/").await.is_empty());
+        assert!(hits(&fixture.model, "").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_org_under_zero_retention_is_refused_with_412_before_any_control_call() {
+        let mut fixture = fixture(org_record(true), granted_read(), granted_browser()).await;
+        fixture.state.space_features.browser_run = true;
+        let (status, _, body) = send(fixture.state.clone(), "GET", ROOM_RUNS, None).await;
+        assert_eq!(status, 412);
+        assert_eq!(json_of(&body)["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(json_of(&body)["error"]["feature"], "browser_run");
+        assert!(hits(&fixture.user_core, "/internal/spaces/").await.is_empty());
+        assert!(hits(&fixture.model, "").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn control_declining_the_room_read_is_space_read_not_authorized() {
+        let mut fixture = fixture(
+            org_record(false),
+            refused(403, "space_membership_required"),
+            granted_browser(),
+        )
+        .await;
+        fixture.state.space_features.browser_run = true;
+        let (status, _, body) = send(fixture.state.clone(), "GET", ROOM_RUNS, None).await;
+        assert_eq!(status, 403);
+        assert_eq!(json_of(&body)["error"]["code"], "space_read_not_authorized");
+        assert!(hits(&fixture.model, "").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_rows_keep_only_the_fields_the_room_may_see() {
+        let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        fixture.state.space_features.browser_run = true;
+        let mut row = list_row("user-1");
+        row["goal"] = json!("Secret goal text");
+        row["grant_id"] = json!("grant-9");
+        row["start_url"] = json!("https://example.com/private");
+        row["space_browser_authority"] = json!({"decision_token": "leaked"});
+        row["org_id"] = json!("org-2");
+        Mock::given(wm_method("GET"))
+            .and(wm_path(MODEL_RUNS))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"runs": [row], "next_cursor": null})))
+            .mount(&fixture.model)
+            .await;
+        let (status, _, body) = send(fixture.state.clone(), "GET", ROOM_RUNS, None).await;
+        assert_eq!(status, 200);
+        let answer = json_of(&body);
+        let mut keys: Vec<&str> = answer["data"][0]
+            .as_object()
+            .expect("a row")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        let mut expected = vec![
+            "control",
+            "finished_at",
+            "handoff",
+            "hosts",
+            "phase",
+            "run_id",
+            "started_at",
+            "started_by",
+            "step_count",
+            "thread_id",
+            "view",
+        ];
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
+        assert_eq!(answer["data"][0]["hosts"], json!(["example.com"]));
+        assert_eq!(answer["meta"]["next_cursor"], Value::Null);
+        let text = String::from_utf8_lossy(&body);
+        assert!(!text.contains("Secret goal text"), "{text}");
+        assert!(!text.contains("grant-9"), "{text}");
+        assert!(!text.contains("leaked"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_run_row_is_an_invalid_upstream_answer_and_nothing_of_it_is_shown() {
+        let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        fixture.state.space_features.browser_run = true;
+        let mut row = list_row("user-1");
+        row["phase"] = Value::Null;
+        row["goal"] = json!("Secret goal text");
+        Mock::given(wm_method("GET"))
+            .and(wm_path(MODEL_RUNS))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"runs": [row], "next_cursor": null})))
+            .mount(&fixture.model)
+            .await;
+        let (status, _, body) = send(fixture.state.clone(), "GET", ROOM_RUNS, None).await;
+        assert_eq!(status, 502);
+        assert_eq!(json_of(&body)["error"]["code"], "invalid_model_gateway_response");
+        assert!(!String::from_utf8_lossy(&body).contains("Secret goal text"));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_timeline_kind_and_a_malformed_optional_field_are_dropped_and_the_page_still_answers() {
+        let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        fixture.state.space_features.browser_run = true;
+        let events = json!([
+            {"event_id": "evt-1", "at_unix": 1800000010, "kind": "action", "step": "step-1",
+             "action_type": "click", "host": "example.com", "status": "completed",
+             "url": "https://example.com/private?q=secret", "title": "Private page"},
+            {"event_id": "evt-2", "at_unix": 1800000011, "kind": "frame", "image": "AAAA"},
+            {"event_id": "evt-3", "at_unix": 1800000012, "kind": "observation", "evidence_id": "ev-1",
+             "host": "not a host/path", "status": "ok"}
+        ]);
+        Mock::given(wm_method("GET"))
+            .and(wm_path(MODEL_TIMELINE))
+            .respond_with(timeline_answer(run_json("user-1"), events))
+            .mount(&fixture.model)
+            .await;
+        let (status, _, body) = send(fixture.state.clone(), "GET", TIMELINE, None).await;
+        assert_eq!(status, 200);
+        let answer = json_of(&body);
+        assert_eq!(
+            answer["data"]["events"],
+            json!([
+                {"event_id": "evt-1", "at": "2027-01-15T08:00:10+00:00", "kind": "action", "step": "step-1",
+                 "action_type": "click", "host": "example.com", "status": "completed"},
+                {"event_id": "evt-3", "at": "2027-01-15T08:00:12+00:00", "kind": "observation",
+                 "evidence_id": "ev-1", "status": "ok"}
+            ])
+        );
+        assert_eq!(answer["data"]["valid_until"], "2027-01-15T08:10:00+00:00");
+        assert_eq!(answer["data"]["next_event_id"], Value::Null);
+        assert_eq!(answer["data"]["run"]["run_id"], RUN);
+    }
+
+    #[tokio::test]
+    async fn the_starter_receives_the_evidence_image_with_the_sandbox_headers() {
+        let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        fixture.state.space_features.browser_run = true;
+        Mock::given(wm_method("GET"))
+            .and(wm_path(MODEL_TIMELINE))
+            .respond_with(timeline_answer(run_json("user-1"), json!([])))
+            .mount(&fixture.model)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path(MODEL_EVIDENCE))
+            .respond_with(png_answer())
+            .mount(&fixture.model)
+            .await;
+        let (status, headers, body) = send(fixture.state.clone(), "GET", EVIDENCE, None).await;
+        assert_eq!(status, 200);
+        assert_eq!(body, PNG);
+        assert_eq!(header_text(&headers, "content-type"), Some("image/png"));
+        assert_eq!(header_text(&headers, "cache-control"), Some("private, no-store"));
+        assert_eq!(header_text(&headers, "x-content-type-options"), Some("nosniff"));
+        assert_eq!(header_text(&headers, "content-security-policy"), Some("sandbox"));
+    }
+
+    #[tokio::test]
+    async fn evidence_that_is_not_an_image_is_an_invalid_upstream_answer_and_is_not_relayed() {
+        let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        fixture.state.space_features.browser_run = true;
+        Mock::given(wm_method("GET"))
+            .and(wm_path(MODEL_TIMELINE))
+            .respond_with(timeline_answer(run_json("user-1"), json!([])))
+            .mount(&fixture.model)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path(MODEL_EVIDENCE))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(b"<html>not an image</html>".to_vec(), "text/html"))
+            .mount(&fixture.model)
+            .await;
+        let (status, _, body) = send(fixture.state.clone(), "GET", EVIDENCE, None).await;
+        assert_eq!(status, 502);
+        assert_eq!(json_of(&body)["error"]["code"], "invalid_model_gateway_response");
+        assert!(!String::from_utf8_lossy(&body).contains("<html>"));
+    }
+
+    // ---- WS20-S5: the room start --------------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn the_room_start_is_404_and_calls_nothing_while_its_flag_is_off() {
+        let fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        let (status, _, body) = send(fixture.state.clone(), "POST", ROOM_RUNS, Some(start_json())).await;
+        assert_eq!(status, 404);
+        assert_eq!(json_of(&body)["error"]["code"], "feature_unavailable");
+        assert!(hits(&fixture.user_core, "/internal/spaces/").await.is_empty());
+        assert!(hits(&fixture.model, "").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_org_under_zero_retention_is_refused_with_412_before_any_control_or_model_call() {
+        let mut fixture = fixture(org_record(true), granted_read(), granted_browser()).await;
+        fixture.state.space_features.browser_run = true;
+        let (status, _, body) = send(fixture.state.clone(), "POST", ROOM_RUNS, Some(start_json())).await;
+        assert_eq!(status, 412);
+        assert_eq!(json_of(&body)["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(json_of(&body)["error"]["feature"], "browser_run");
+        assert!(hits(&fixture.user_core, "/internal/spaces/").await.is_empty());
+        assert!(hits(&fixture.model, "").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_start_body_with_an_authority_field_is_refused_400_and_never_forwarded() {
+        let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        fixture.state.space_features.browser_run = true;
+        for field in ["space_browser_authority", "grant_id", "profile_id"] {
+            let mut body = start_json();
+            body[field] = json!("forged");
+            let (status, _, bytes) = send(fixture.state.clone(), "POST", ROOM_RUNS, Some(body)).await;
+            let answer = json_of(&bytes);
+            assert_eq!(status, 400, "{field}");
+            assert_eq!(answer["error"]["code"], "invalid_browser_run", "{field}");
+            assert_eq!(answer["error"]["details"]["reason"], "body", "{field}");
+        }
+        assert!(hits(&fixture.user_core, "/internal/spaces/").await.is_empty());
+        assert!(hits(&fixture.model, "").await.is_empty());
+    }
+
+    #[test]
+    fn a_domain_list_that_is_not_one_to_eight_public_hostnames_is_policy_invalid() {
+        let nine: Vec<String> = (0..9).map(|n| format!("site{n}.example.com")).collect();
+        let cases = [
+            json!(["192.168.0.1"]),
+            json!(["localhost"]),
+            json!(["app.localhost"]),
+            json!(["*.example.com"]),
+            json!(["https://example.com"]),
+            json!(["example.com/path"]),
+            json!(["example.com:8443"]),
+            json!(["example"]),
+            json!(nine),
+            json!([]),
+        ];
+        for hosts in cases {
+            let mut body = start_json();
+            body["allowed_domains"] = hosts.clone();
+            let (status, Json(refusal)) = parse_start(&body).err().expect("the host list is refused");
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{hosts}");
+            assert_eq!(refusal["error"]["code"], "browser_domain_policy_invalid", "{hosts}");
+        }
+        let mut accepted = start_json();
+        accepted["allowed_domains"] = json!(["Example.com", "docs.example.org"]);
+        assert!(parse_start(&accepted).is_ok(), "two public hostnames are accepted");
+    }
+
+    #[test]
+    fn share_view_is_refused_as_unavailable_and_false_is_not_a_refusal() {
+        let mut body = start_json();
+        body["share_view"] = json!(true);
+        let (status, Json(refusal)) = parse_start(&body).err().expect("share_view true is refused");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(refusal["error"]["code"], "browser_share_view_unavailable");
+        body["share_view"] = json!(false);
+        assert!(parse_start(&body).is_ok());
+    }
+
+    #[test]
+    fn the_step_runtime_and_goal_bounds_refuse_just_outside_and_accept_the_edges() {
+        for (field, value, reason) in [
+            ("max_steps", 4, "max_steps"),
+            ("max_steps", 41, "max_steps"),
+            ("max_runtime_s", 29, "max_runtime_s"),
+            ("max_runtime_s", 601, "max_runtime_s"),
+        ] {
+            let mut body = start_json();
+            body[field] = json!(value);
+            let (status, Json(refusal)) = parse_start(&body).err().expect("out of bounds is refused");
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{field}={value}");
+            assert_eq!(refusal["error"]["code"], "invalid_browser_run", "{field}={value}");
+            assert_eq!(refusal["error"]["details"]["reason"], reason, "{field}={value}");
+        }
+        for (field, value) in [
+            ("max_steps", 5),
+            ("max_steps", 40),
+            ("max_runtime_s", 30),
+            ("max_runtime_s", 600),
+        ] {
+            let mut body = start_json();
+            body[field] = json!(value);
+            assert!(parse_start(&body).is_ok(), "{field}={value}");
+        }
+        let mut body = start_json();
+        body["goal"] = json!("g".repeat(2001));
+        let (_, Json(refusal)) = parse_start(&body).err().expect("a 2001-character goal is refused");
+        assert_eq!(refusal["error"]["details"]["reason"], "goal");
+        body["goal"] = json!("g".repeat(2000));
+        assert!(parse_start(&body).is_ok(), "a 2000-character goal is accepted");
+    }
+
+    #[tokio::test]
+    async fn a_control_403_is_browser_not_entitled_for_an_entitlement_and_a_browser_refusal_otherwise() {
+        for (control_code, answer_code) in [
+            ("space_entitlement_off", "browser_not_entitled"),
+            ("space_membership_required", "space_browser_not_authorized"),
+        ] {
+            let mut fixture = fixture(org_record(false), granted_read(), refused(403, control_code)).await;
+            fixture.state.space_features.browser_run = true;
+            let (status, _, body) = send(fixture.state.clone(), "POST", ROOM_RUNS, Some(start_json())).await;
+            assert_eq!(status, 403, "{control_code}");
+            assert_eq!(json_of(&body)["error"]["code"], answer_code, "{control_code}");
+            // The browser decision refused, so no append decision, no grant and no start follow it.
+            assert!(hits(&fixture.user_core, "thread-append-decision").await.is_empty(), "{control_code}");
+            assert!(hits(&fixture.model, "").await.is_empty(), "{control_code}");
+        }
+    }
+
+    #[tokio::test]
+    async fn both_decisions_carry_the_sha256_of_the_trimmed_goal_and_the_send_keys() {
+        let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        fixture.state.space_features.browser_run = true;
+        Mock::given(wm_method("POST"))
+            .and(wm_path(MODEL_START))
+            .respond_with(started_answer())
+            .mount(&fixture.model)
+            .await;
+        let (status, _, _) = send(fixture.state.clone(), "POST", ROOM_RUNS, Some(start_json())).await;
+        assert_eq!(status, 202);
+        let browser = bodies(&fixture.user_core, "POST", "/api/v1/internal/spaces/browser-run-decision").await;
+        let append = bodies(&fixture.user_core, "POST", "/api/v1/internal/spaces/thread-append-decision").await;
+        assert_eq!(browser.len(), 1);
+        assert_eq!(append.len(), 1);
+        assert_eq!(browser[0]["goal_digest"], GOAL_DIGEST);
+        assert_eq!(append[0]["content_digest"], GOAL_DIGEST);
+        assert_eq!(browser[0]["idempotency_key"], "space-browser-send-0123456789abcdef");
+        assert_eq!(append[0]["idempotency_key"], "space-browser-append-send-0123456789abcdef");
+        assert_eq!(browser[0]["allowed_domains"], json!(["example.com"]));
+        assert_eq!(browser[0]["view_scope"], "owner");
+        assert_eq!(browser[0]["thread_id"], THREAD);
+        assert_eq!(append[0]["thread_id"], THREAD);
+    }
+
+    #[tokio::test]
+    async fn a_started_run_forwards_only_the_decided_authority_and_answers_202_with_the_owner_view() {
+        let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        fixture.state.space_features.browser_run = true;
+        Mock::given(wm_method("POST"))
+            .and(wm_path(MODEL_START))
+            .respond_with(started_answer())
+            .mount(&fixture.model)
+            .await;
+        let (status, _, body) = send(fixture.state.clone(), "POST", ROOM_RUNS, Some(start_json())).await;
+        assert_eq!(status, 202);
+        assert_eq!(
+            json_of(&body),
+            json!({"data": {"run_id": RUN, "thread_id": THREAD, "plan_id": "plan-1", "view": {"scope": "owner"}}})
+        );
+        let sent = bodies(&fixture.model, "POST", MODEL_START).await;
+        assert_eq!(sent.len(), 1);
+        let forwarded = &sent[0];
+        let mut keys: Vec<&str> = forwarded
+            .as_object()
+            .expect("the start body is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        let mut expected = vec![
+            "goal",
+            "grant_id",
+            "max_cost_usd",
+            "max_runtime_s",
+            "max_steps",
+            "space_append_context",
+            "space_browser_authority",
+            "thread_id",
+        ];
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
+        assert_eq!(forwarded["goal"], GOAL);
+        assert_eq!(forwarded["thread_id"], THREAD);
+        assert_eq!(forwarded["grant_id"], "grant-1");
+        assert_eq!(forwarded["max_steps"], 20);
+        assert_eq!(forwarded["max_runtime_s"], 300);
+        assert_eq!(forwarded["max_cost_usd"], 0.25);
+        assert_eq!(
+            forwarded["space_browser_authority"],
+            json!({
+                "decision_token": "browser-decision-token",
+                "claims": {"sub": "user-1", "space_ref": SPACE},
+                "idempotency_key": "space-browser-send-0123456789abcdef"
+            })
+        );
+        assert_eq!(forwarded["space_append_context"]["space_decision_token"], "append-token");
+        assert_eq!(forwarded["space_append_context"]["space_id"], SPACE);
+        // A run that starts keeps its parent grant: Model Plane revokes it when the run ends.
+        assert!(hits(&fixture.model, "DELETE").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_refused_start_answers_its_typed_code_and_revokes_the_parent_grant_it_was_given() {
+        for (upstream_status, upstream_code, answer_status, answer_code) in [
+            (429, "browser_capacity", 429, "browser_capacity"),
+            (403, "space_membership_required", 403, "space_browser_not_authorized"),
+        ] {
+            let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+            fixture.state.space_features.browser_run = true;
+            Mock::given(wm_method("POST"))
+                .and(wm_path(MODEL_START))
+                .respond_with(
+                    ResponseTemplate::new(upstream_status)
+                        .set_body_json(json!({"error": {"code": upstream_code}})),
+                )
+                .mount(&fixture.model)
+                .await;
+            let (status, _, body) = send(fixture.state.clone(), "POST", ROOM_RUNS, Some(start_json())).await;
+            assert_eq!(status, answer_status, "{upstream_code}");
+            assert_eq!(json_of(&body)["error"]["code"], answer_code, "{upstream_code}");
+            assert_eq!(
+                hits(&fixture.model, "/v1/browser/grants/grant-1").await,
+                vec!["DELETE /v1/browser/grants/grant-1"],
+                "{upstream_code}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_second_stale_authority_is_surfaced_after_one_fresh_mint() {
+        let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        fixture.state.space_features.browser_run = true;
+        Mock::given(wm_method("POST"))
+            .and(wm_path(MODEL_START))
+            .respond_with(stale_answer())
+            .mount(&fixture.model)
+            .await;
+        let (status, _, body) = send(fixture.state.clone(), "POST", ROOM_RUNS, Some(start_json())).await;
+        assert_eq!(status, 409);
+        assert_eq!(json_of(&body)["error"]["code"], "space_authority_stale");
+        // Exactly two attempts: each mints both decisions and issues its own grant, and each revokes that grant.
+        assert_eq!(hits(&fixture.user_core, "browser-run-decision").await.len(), 2);
+        assert_eq!(hits(&fixture.user_core, "thread-append-decision").await.len(), 2);
+        assert_eq!(hits(&fixture.model, "POST /v1/browser/grants").await.len(), 2);
+        assert_eq!(hits(&fixture.model, "POST /v1/browser/runs").await.len(), 2);
+        assert_eq!(hits(&fixture.model, "DELETE /v1/browser/grants/").await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_stale_authority_once_is_minted_again_and_the_retry_starts_the_run() {
+        let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        fixture.state.space_features.browser_run = true;
+        Mock::given(wm_method("POST"))
+            .and(wm_path(MODEL_START))
+            .respond_with(stale_answer())
+            .up_to_n_times(1)
+            .mount(&fixture.model)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path(MODEL_START))
+            .respond_with(started_answer())
+            .mount(&fixture.model)
+            .await;
+        let (status, _, body) = send(fixture.state.clone(), "POST", ROOM_RUNS, Some(start_json())).await;
+        assert_eq!(status, 202);
+        assert_eq!(json_of(&body)["data"]["run_id"], RUN);
+        assert_eq!(hits(&fixture.user_core, "browser-run-decision").await.len(), 2);
+        assert_eq!(hits(&fixture.model, "POST /v1/browser/grants").await.len(), 2);
+        // The first attempt's grant was revoked; the run keeps the second one until its own end.
+        assert_eq!(hits(&fixture.model, "DELETE /v1/browser/grants/").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_keyed_replay_answers_the_run_and_revokes_the_parent_grant_it_does_not_need() {
+        let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        fixture.state.space_features.browser_run = true;
+        Mock::given(wm_method("POST"))
+            .and(wm_path(MODEL_START))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "idempotent_replay": true, "run_id": RUN, "thread_id": THREAD, "plan_id": "plan-1"
+            })))
+            .mount(&fixture.model)
+            .await;
+        let (status, _, body) = send(fixture.state.clone(), "POST", ROOM_RUNS, Some(start_json())).await;
+        assert_eq!(status, 202);
+        assert_eq!(json_of(&body)["data"]["run_id"], RUN);
+        assert_eq!(
+            hits(&fixture.model, "/v1/browser/grants/grant-1").await,
+            vec!["DELETE /v1/browser/grants/grant-1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_evidence_is_withheld_from_anyone_but_the_starter_and_from_a_projection_that_names_none() {
+        let mut no_starter = run_json("user-1");
+        no_starter.as_object_mut().expect("an object").remove("started_by");
+        for run in [run_json("user-2"), no_starter] {
+            let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+            fixture.state.space_features.browser_run = true;
+            Mock::given(wm_method("GET"))
+                .and(wm_path(MODEL_TIMELINE))
+                .respond_with(timeline_answer(run, json!([])))
+                .mount(&fixture.model)
+                .await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path(MODEL_EVIDENCE))
+                .respond_with(png_answer())
+                .mount(&fixture.model)
+                .await;
+            let (status, _, body) = send(fixture.state.clone(), "GET", EVIDENCE, None).await;
+            assert_eq!(status, 403);
+            assert_eq!(json_of(&body)["error"]["code"], "browser_evidence_withheld");
+            assert!(hits(&fixture.model, "/evidence/").await.is_empty(), "no image request upstream");
+        }
+    }
+
+    // ---- W3-DEC-GRANT: the parent grant the start takes ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn the_parent_grant_names_the_start_hosts_and_a_ten_minute_lifetime_with_no_kind() {
+        let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        fixture.state.space_features.browser_run = true;
+        Mock::given(wm_method("POST"))
+            .and(wm_path(MODEL_START))
+            .respond_with(started_answer())
+            .mount(&fixture.model)
+            .await;
+        let mut body = start_json();
+        body["allowed_domains"] = json!(["Example.com", "docs.example.org", "example.com"]);
+        let (status, _, _) = send(fixture.state.clone(), "POST", ROOM_RUNS, Some(body)).await;
+        assert_eq!(status, 202);
+        let grants = bodies(&fixture.model, "POST", MODEL_GRANT).await;
+        assert_eq!(
+            grants,
+            vec![json!({"allowed_domains": ["docs.example.org", "example.com"], "zdr": false, "ttl_s": 600})]
+        );
+    }
+
+    // ---- W3-DEC-GWFIX2: the start reads the zero-retention posture live ----------------------------------------------
+
+    #[tokio::test]
+    async fn a_start_reads_the_org_posture_live_so_a_cached_not_zdr_does_not_admit_it() {
+        let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        fixture.state.space_features.browser_run = true;
+        cached_not_zdr_then(&mut fixture, org_record(true)).await;
+        let (status, _, body) = send(fixture.state.clone(), "POST", ROOM_RUNS, Some(start_json())).await;
+        assert_eq!(status, 412);
+        assert_eq!(json_of(&body)["error"]["code"], "zdr_feature_not_supported");
+        assert!(hits(&fixture.user_core, "/internal/spaces/").await.is_empty());
+        assert!(hits(&fixture.model, "").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_start_whose_live_org_read_fails_is_503_before_any_control_call() {
+        let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        fixture.state.space_features.browser_run = true;
+        cached_not_zdr_then(
+            &mut fixture,
+            ResponseTemplate::new(500).set_body_json(json!({"error": {"code": "internal"}})),
+        )
+        .await;
+        let (status, _, body) = send(fixture.state.clone(), "POST", ROOM_RUNS, Some(start_json())).await;
+        assert_eq!(status, 503);
+        assert_eq!(json_of(&body)["error"]["code"], "zdr_decision_unavailable");
+        assert!(hits(&fixture.user_core, "/internal/spaces/").await.is_empty());
+        assert!(hits(&fixture.model, "").await.is_empty());
+    }
+}
