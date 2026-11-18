@@ -9,6 +9,9 @@ import type { SpaceRunLiveHandlers } from '@/shared/api/space-run-live-client'
 import { publishSpaceThreads, resetLiveWorkForTests } from '../lib/space-live-work'
 import { spaceRunStore } from '../lib/space-run-store'
 import { createSpaceSendJournal, type SpaceSendJournal } from '../lib/space-send-journal'
+import { applyServerRetention, __resetRetentionForTests } from '@/features/chat/lib/chat-retention'
+import { HOME_DRAFT_DEBOUNCE_MS } from '@/features/dashboard/home/home-draft'
+import { clearSpaceRoomFeatures, publishSpaceRoomFeatures } from '../lib/space-room-features'
 
 const chatClient = vi.hoisted(() => ({
   streamChat: vi.fn(),
@@ -27,7 +30,8 @@ vi.mock('@/shared/api/chatgpt-subscription-client', async (importOriginal) => ({
   ...subscriptionsClient,
 }))
 vi.mock('@/shared/session/session-store', () => ({
-  getSession: () => ({ activeOrg: { id: 'org-1', name: 'Test', role: 'admin' } }),
+  // The user id keys the room's drafts (WS15-S2); the org keys the rest.
+  getSession: () => ({ user: { id: 'user-kari' }, activeOrg: { id: 'org-1', name: 'Test', role: 'admin' } }),
 }))
 const spacesClient = vi.hoisted(() => ({
   searchSpaceMessages: vi.fn(() => new Promise(() => {})),
@@ -40,6 +44,12 @@ const spacesClient = vi.hoisted(() => ({
 vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
   ...spacesClient,
+}))
+// WS14-S9: the durable upload of a turn's chosen text files. The cases read the call; nothing leaves.
+const spaceFilesClient = vi.hoisted(() => ({ uploadSpaceFiles: vi.fn() }))
+vi.mock('@/shared/api/space-files-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/space-files-client')>()),
+  ...spaceFilesClient,
 }))
 // WS09-S2: the live stream of the run a send-when-ready waits behind; the test drives its frames.
 const runLive = vi.hoisted(() => ({ streamSpaceRunLive: vi.fn() }))
@@ -1206,6 +1216,7 @@ describe('SpaceRoomComposer — human posts (WS01-S6)', () => {
       expect(catalogueText).not.toBe('')
       expect(screen.getByRole('status', { name: '' }).textContent ?? '').toContain(catalogueText)
       expect(screen.queryByRole('radiogroup')).toBeNull()
+      expect(screen.queryByRole('button', { name: 'Send' })).toBeNull()
       expect(screen.getByRole('button', { name: 'Spør Verevon' })).toBeTruthy()
     })
   })
@@ -1693,5 +1704,582 @@ describe('SpaceRoomComposer — owner mid-run steer (WS09-S2)', () => {
       mentionedAgentRef: 'agent-1',
       actions: [{ id: 'sk-hms', name: 'HMS-runde', kind: 'skill' }],
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// W3 P1-D: per-turn attachments, keep-in-room, drafts and the personal memory choice.
+// The shared helpers come first; each owed item has its own describe below.
+// ---------------------------------------------------------------------------
+
+/**
+ * A chip's object URL. jsdom has none, so each fixture file is given a data URL carrying the same
+ * bytes; the composer and the real `fetch` read it the way they would a blob URL.
+ */
+const chipUrls = new Map<Blob, string>()
+
+function fixtureFile(name: string, body: string, type: string): File {
+  const file = new File([body], name, { type })
+  chipUrls.set(file, `data:${type};base64,${btoa(body)}`)
+  return file
+}
+
+/**
+ * Gives the chips their object URLs, and the composer's reads of those URLs a body, for one case. The
+ * setup file replaces `fetch` with an empty-JSON stub, so the reads of this case's data URLs are served
+ * here. The function it returns puts everything back.
+ */
+function stubObjectUrls(): () => void {
+  const url = URL as unknown as { createObjectURL?: (blob: Blob) => string }
+  const original = url.createObjectURL
+  url.createObjectURL = (blob: Blob) => chipUrls.get(blob) ?? 'data:application/octet-stream;base64,'
+  vi.stubGlobal('fetch', async (input: string | URL) => {
+    const match = /^data:([^;,]*)(;base64)?,(.*)$/s.exec(String(input))
+    if (!match) return new Response('', { status: 404 })
+    const body = match[2] ? atob(match[3] ?? '') : decodeURIComponent(match[3] ?? '')
+    return new Response(body, { status: 200, headers: { 'Content-Type': match[1] || 'text/plain' } })
+  })
+  return () => {
+    url.createObjectURL = original
+    vi.unstubAllGlobals()
+  }
+}
+
+/** The room's flags, published the way the page publishes them after a context read. */
+function publishRoomFeatures(features: Record<string, unknown>): void {
+  publishSpaceRoomFeatures(features)
+  flush()
+}
+
+const DRAFT_KEY_PREFIX = 'verevon.home-draft.v1'
+
+const roomBox = () => screen.getByRole('textbox') as HTMLTextAreaElement
+
+function typeInRoomBox(value: string): void {
+  fireEvent.input(roomBox(), { target: { value } })
+  flush()
+}
+
+function submitRoomBox(): void {
+  fireEvent.submit(roomBox().closest('form') as HTMLFormElement)
+  flush()
+}
+
+/** Picks files with the attach button's own file input. */
+function pickRoomFiles(files: readonly File[]): void {
+  fireEvent.change(screen.getByLabelText('Legg til filer'), { target: { files: [...files] } })
+  flush()
+}
+
+function pasteIntoRoomBox(files: readonly File[]): void {
+  fireEvent.paste(roomBox(), { clipboardData: { files: [...files], getData: () => '', types: ['Files'] } })
+  flush()
+}
+
+function dropOnRoomForm(files: readonly File[]): void {
+  fireEvent.drop(roomBox().closest('form') as HTMLFormElement, { dataTransfer: { files: [...files], types: ['Files'] } })
+  flush()
+}
+
+type RoomOptions = {
+  readonly spaceRef?: string
+  readonly humanPosts?: boolean
+  readonly viewerRole?: string
+  readonly replyTarget?: { readonly threadId: string; readonly title: string }
+  readonly journal?: SpaceSendJournal
+}
+
+function renderRoom(options: RoomOptions = {}) {
+  return render(() => (
+    <SpaceRoomComposer
+      spaceRef={options.spaceRef ?? 'room-1'}
+      roster={() => []}
+      agents={() => []}
+      threads={() => []}
+      humanPostsEnabled={options.humanPosts ? () => true : undefined}
+      viewerRole={() => options.viewerRole ?? 'editor'}
+      replyTarget={options.replyTarget ? () => options.replyTarget : undefined}
+      journal={options.journal}
+    />
+  ))
+}
+
+/** Every key and value either browser store holds, as text, so a case can search them for the words. */
+function storedEntries(): string[] {
+  const entries: string[] = []
+  for (const store of [window.localStorage, window.sessionStorage]) {
+    for (let index = 0; index < store.length; index += 1) {
+      const key = store.key(index) ?? ''
+      entries.push(`${key}=${store.getItem(key) ?? ''}`)
+    }
+  }
+  return entries
+}
+
+/** The text of each draft this tab holds in session storage. */
+function storedDraftTexts(): string[] {
+  const texts: string[] = []
+  const store = window.sessionStorage
+  for (let index = 0; index < store.length; index += 1) {
+    const key = store.key(index) ?? ''
+    if (!key.startsWith(DRAFT_KEY_PREFIX)) continue
+    const stored = JSON.parse(store.getItem(key) ?? '{}') as { text?: unknown }
+    if (typeof stored.text === 'string') texts.push(stored.text)
+  }
+  return texts
+}
+
+/**
+ * Types, then lets the draft's write-after-typing run. The timer is set under fake time, so the write
+ * happens inside the advance and the case needs no real wait.
+ */
+async function typeAndSettleDraft(value: string): Promise<void> {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  try {
+    typeInRoomBox(value)
+    await vi.advanceTimersByTimeAsync(HOME_DRAFT_DEBOUNCE_MS)
+  } finally {
+    vi.useRealTimers()
+  }
+}
+
+/** A journal that flushes after each write, as the post sender needs (see the human-post cases above). */
+function flushingPostJournal(): SpaceSendJournal {
+  const inner = createSpaceSendJournal()
+  const settled = <A extends unknown[], R>(fn: (...args: A) => R) => (...args: A): R => {
+    const result = fn(...args)
+    flush()
+    return result
+  }
+  return {
+    ...inner,
+    begin: settled(inner.begin),
+    update: settled(inner.update),
+    remove: settled(inner.remove),
+    reconcile: settled(inner.reconcile),
+  }
+}
+
+describe('SpaceRoomComposer — turn attachments (WS14-S8)', () => {
+  let restoreObjectUrls: () => void = () => {}
+  const zdrNotice = 'Dette støttes ikke med Zero Data Retention ennå'
+  const notes = () => fixtureFile('Notat.txt', 'Lagerliste: 12 paller', 'text/plain')
+  const photo = () => fixtureFile('bilde.png', 'PNG', 'image/png')
+
+  beforeEach(() => {
+    vi.stubEnv('VITE_SPACE_TURN_ATTACHMENTS', '')
+    vi.stubEnv('VITE_SPACE_ROOM_FILES', '')
+    vi.stubEnv('VITE_SPACE_COMPOSER_DRAFTS', '')
+    vi.stubEnv('VITE_CHAT_VISION_AS_PARTS_ENABLED', '')
+    restoreObjectUrls = stubObjectUrls()
+  })
+
+  afterEach(() => {
+    cleanup()
+    clearSpaceRoomFeatures()
+    __resetRetentionForTests()
+    window.sessionStorage.clear()
+    restoreObjectUrls()
+  })
+
+  it('has no attach button, and ignores paste and drop, while turn_attachments is off', () => {
+    renderRoom()
+    expect(screen.queryByRole('button', { name: 'Legg ved fil' })).toBeNull()
+    pasteIntoRoomBox([photo()])
+    dropOnRoomForm([notes()])
+    expect(screen.queryByRole('list', { name: 'Vedlegg' })).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('offers the attach button, paste and drop in an Ask turn while turn_attachments is on', () => {
+    publishRoomFeatures({ room_files: { turn_attachments: true } })
+    renderRoom()
+    expect(screen.getByRole('button', { name: 'Legg ved fil' })).toBeTruthy()
+    pasteIntoRoomBox([photo()])
+    expect(screen.getByText('bilde.png')).toBeTruthy()
+    dropOnRoomForm([notes()])
+    expect(screen.getByText('Notat.txt')).toBeTruthy()
+  })
+
+  it('offers none of them in a Send turn, where the box posts words to the room', () => {
+    publishRoomFeatures({ room_files: { turn_attachments: true } })
+    renderRoom({ humanPosts: true })
+    expect(screen.getByRole('radio', { name: 'Send til rommet' }).getAttribute('aria-checked')).toBe('true')
+    expect(screen.queryByRole('button', { name: 'Legg ved fil' })).toBeNull()
+    pasteIntoRoomBox([photo()])
+    dropOnRoomForm([notes()])
+    expect(screen.queryByRole('list', { name: 'Vedlegg' })).toBeNull()
+  })
+
+  it('removes a chip from the box and keeps the words', () => {
+    publishRoomFeatures({ room_files: { turn_attachments: true } })
+    renderRoom()
+    pickRoomFiles([notes()])
+    typeInRoomBox('Oppsummer')
+    fireEvent.click(screen.getByRole('button', { name: 'Fjern Notat.txt' }))
+    flush()
+    expect(screen.queryByRole('button', { name: 'Fjern Notat.txt' })).toBeNull()
+    expect(roomBox().value).toBe('Oppsummer')
+  })
+
+  it('sends a document\'s text fenced into the message, not as an attachment', async () => {
+    publishRoomFeatures({ room_files: { turn_attachments: true } })
+    const stream = scriptedStream()
+    renderRoom()
+    pickRoomFiles([notes()])
+    typeInRoomBox('Oppsummer')
+    submitRoomBox()
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(1))
+    const request = chatClient.streamChat.mock.calls[0]?.[0] as { content: string; attachments?: unknown }
+    expect(request.content).toBe(
+      'Oppsummer\n\n--- VEDLEGG: Notat.txt ---\nLagerliste: 12 paller\n--- SLUTT PÅ VEDLEGG: Notat.txt ---',
+    )
+    expect(request.attachments).toBeUndefined()
+    stream.finish()
+  })
+
+  it('keeps the chips until the room has accepted the turn, then clears them', async () => {
+    publishRoomFeatures({ composer_drafts: true, room_files: { turn_attachments: true } })
+    const stream = scriptedStream()
+    renderRoom()
+    pickRoomFiles([notes()])
+    typeInRoomBox('Oppsummer')
+    submitRoomBox()
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(1))
+    // The sent message's own bubble lists its files too, so the composer's chip is named by its remove control.
+    expect(screen.getByRole('button', { name: 'Fjern Notat.txt' })).toBeTruthy()
+    stream.handlers().onConnected?.({ requestId: 'req-1', threadId: 't-1' })
+    flush()
+    expect(screen.queryByRole('button', { name: 'Fjern Notat.txt' })).toBeNull()
+    stream.finish()
+  })
+
+  it('refuses an image under zero data retention, visibly, and no send starts', async () => {
+    publishRoomFeatures({ room_files: { turn_attachments: true } })
+    applyServerRetention(true)
+    renderRoom()
+    pickRoomFiles([photo()])
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain(zdrNotice)
+    expect(alert.textContent).toContain('fil- og bildevedlegg')
+    expect(screen.queryByText('bilde.png')).toBeNull()
+    expect(chatClient.streamChat).not.toHaveBeenCalled()
+  })
+
+  it('refuses a picked image at Send once the workspace turns zero retention on, and sends nothing', async () => {
+    publishRoomFeatures({ room_files: { turn_attachments: true } })
+    renderRoom()
+    pickRoomFiles([photo()])
+    applyServerRetention(true)
+    flush()
+    typeInRoomBox('Se på bildet')
+    submitRoomBox()
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain(zdrNotice)
+    expect(alert.textContent).toContain('Utkastet er beholdt')
+    expect(chatClient.streamChat).not.toHaveBeenCalled()
+    expect(screen.getByText('bilde.png')).toBeTruthy()
+    expect(roomBox().value).toBe('Se på bildet')
+  })
+
+  it('shows the notice, and sends nothing, when a Send turn is posted with chips in the box', async () => {
+    publishRoomFeatures({ room_files: { turn_attachments: true } })
+    renderRoom({ humanPosts: true })
+    fireEvent.click(screen.getByRole('radio', { name: 'Spør Verevon' }))
+    flush()
+    pickRoomFiles([notes()])
+    fireEvent.click(screen.getByRole('radio', { name: 'Send til rommet' }))
+    flush()
+    typeInRoomBox('Oppsummer')
+    submitRoomBox()
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('Vedlegg følger bare med når du spør Verevon')
+    expect(spacesClient.createSpacePost).not.toHaveBeenCalled()
+    expect(spacesClient.replyInSpaceThread).not.toHaveBeenCalled()
+    expect(chatClient.streamChat).not.toHaveBeenCalled()
+  })
+})
+
+describe('SpaceRoomComposer — keep text files in the room (WS14-S9)', () => {
+  let restoreObjectUrls: () => void = () => {}
+  const notes = () => fixtureFile('Notat.txt', 'Lagerliste: 12 paller', 'text/plain')
+  const list = () => fixtureFile('Liste.csv', 'Paller;12', 'text/csv')
+  const keepChoice = () => screen.getByRole('checkbox', { name: /Behold tekstfiler i rommet/ }) as HTMLInputElement
+
+  beforeEach(() => {
+    vi.stubEnv('VITE_SPACE_TURN_ATTACHMENTS', '')
+    vi.stubEnv('VITE_SPACE_ROOM_FILES', '')
+    vi.stubEnv('VITE_SPACE_COMPOSER_DRAFTS', '')
+    vi.stubEnv('VITE_CHAT_VISION_AS_PARTS_ENABLED', '')
+    restoreObjectUrls = stubObjectUrls()
+    spaceFilesClient.uploadSpaceFiles.mockReset()
+    spaceFilesClient.uploadSpaceFiles.mockResolvedValue({ uploadId: 'up-1', deduplicated: false, files: [] })
+  })
+
+  afterEach(() => {
+    cleanup()
+    clearSpaceRoomFeatures()
+    __resetRetentionForTests()
+    window.sessionStorage.clear()
+    restoreObjectUrls()
+  })
+
+  it('is offered with the durable flag and a writer role, unchecked', () => {
+    publishRoomFeatures({ room_files: { turn_attachments: true, durable: true } })
+    renderRoom({ viewerRole: 'editor' })
+    pickRoomFiles([notes()])
+    expect(keepChoice().checked).toBe(false)
+  })
+
+  it('is not offered without the durable flag', () => {
+    publishRoomFeatures({ room_files: { turn_attachments: true } })
+    renderRoom({ viewerRole: 'editor' })
+    pickRoomFiles([notes()])
+    expect(screen.getByText('Notat.txt')).toBeTruthy()
+    expect(screen.queryByRole('checkbox', { name: /Behold tekstfiler i rommet/ })).toBeNull()
+  })
+
+  it('is not offered to a reader, who cannot add files to the room', () => {
+    publishRoomFeatures({ room_files: { turn_attachments: true, durable: true } })
+    renderRoom({ viewerRole: 'viewer' })
+    pickRoomFiles([notes()])
+    expect(screen.getByText('Notat.txt')).toBeTruthy()
+    expect(screen.queryByRole('checkbox', { name: /Behold tekstfiler i rommet/ })).toBeNull()
+  })
+
+  it('uploads exactly the chip files it was chosen for, beside the send', async () => {
+    publishRoomFeatures({ room_files: { turn_attachments: true, durable: true } })
+    const stream = scriptedStream()
+    renderRoom({ viewerRole: 'editor' })
+    pickRoomFiles([notes(), list()])
+    fireEvent.click(keepChoice())
+    flush()
+    typeInRoomBox('Oppsummer')
+    submitRoomBox()
+    await waitFor(() => expect(spaceFilesClient.uploadSpaceFiles).toHaveBeenCalledTimes(1))
+    const [spaceRef, kept] = spaceFilesClient.uploadSpaceFiles.mock.calls[0] as [string, File[]]
+    expect(spaceRef).toBe('room-1')
+    expect(kept.map((file) => file.name)).toEqual(['Notat.txt', 'Liste.csv'])
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(1))
+    stream.finish()
+  })
+
+  it('is unchecked again after the send, so the next turn uploads nothing unless it is chosen again', async () => {
+    publishRoomFeatures({ room_files: { turn_attachments: true, durable: true } })
+    const first = scriptedStream()
+    renderRoom({ viewerRole: 'editor' })
+    pickRoomFiles([notes()])
+    fireEvent.click(keepChoice())
+    flush()
+    typeInRoomBox('Første')
+    submitRoomBox()
+    await waitFor(() => expect(spaceFilesClient.uploadSpaceFiles).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(1))
+    first.handlers().onDone?.({})
+    flush()
+    first.finish()
+    await waitFor(() => expect(roomBox().disabled).toBe(false))
+
+    const second = scriptedStream()
+    pickRoomFiles([list()])
+    expect(keepChoice().checked).toBe(false)
+    typeInRoomBox('Andre')
+    submitRoomBox()
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(2))
+    expect(spaceFilesClient.uploadSpaceFiles).toHaveBeenCalledTimes(1)
+    second.finish()
+  })
+})
+
+describe('SpaceRoomComposer — drafts (WS15-S2)', () => {
+  const receipt = { threadId: 'thr_new', messageId: 'msg_1', sequence: 1, deduplicated: false }
+
+  beforeEach(() => {
+    vi.stubEnv('VITE_SPACE_COMPOSER_DRAFTS', '')
+    publishRoomFeatures({ composer_drafts: true })
+  })
+
+  afterEach(() => {
+    cleanup()
+    clearSpaceRoomFeatures()
+    __resetRetentionForTests()
+    window.sessionStorage.clear()
+    vi.useRealTimers()
+  })
+
+  it('restores a draft in the room and reply target it was typed in, and in no other', async () => {
+    renderRoom()
+    await typeAndSettleDraft('Utkast i rommet')
+    cleanup()
+
+    renderRoom()
+    expect(roomBox().value).toBe('Utkast i rommet')
+    cleanup()
+
+    renderRoom({ spaceRef: 'room-2' })
+    expect(roomBox().value).toBe('')
+    cleanup()
+
+    const reply = { threadId: 't-1', title: 'Innkjøp' }
+    renderRoom({ replyTarget: reply })
+    expect(roomBox().value).toBe('')
+    await typeAndSettleDraft('Svar i tråden')
+    cleanup()
+
+    renderRoom()
+    expect(roomBox().value).toBe('Utkast i rommet')
+    cleanup()
+
+    renderRoom({ replyTarget: reply })
+    expect(roomBox().value).toBe('Svar i tråden')
+  })
+
+  it('an ask send keeps its words until the room has the turn, then clears them and the stored draft', async () => {
+    const stream = scriptedStream()
+    renderRoom()
+    await typeAndSettleDraft('Rydd lageret')
+    submitRoomBox()
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(1))
+    expect(roomBox().value).toBe('Rydd lageret')
+    expect(storedDraftTexts()).toEqual(['Rydd lageret'])
+
+    stream.handlers().onConnected?.({ requestId: 'req-1', threadId: 't-1' })
+    flush()
+    expect(roomBox().value).toBe('')
+    expect(storedDraftTexts()).toEqual([])
+    stream.finish()
+  })
+
+  it('an ask send that fails before the room has the turn keeps its words and the stored draft', async () => {
+    const stream = scriptedStream()
+    renderRoom()
+    await typeAndSettleDraft('Rydd lageret')
+    submitRoomBox()
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(1))
+    stream.handlers().onError?.({ code: 'upstream_error', message: 'Tjenesten svarte ikke' })
+    stream.finish()
+    flush()
+    await screen.findByRole('alert')
+    expect(roomBox().value).toBe('Rydd lageret')
+    expect(storedDraftTexts()).toEqual(['Rydd lageret'])
+  })
+
+  it('an ask send stopped before the room has the turn keeps its words and the stored draft', async () => {
+    const stream = scriptedStream()
+    renderRoom()
+    await typeAndSettleDraft('Rydd lageret')
+    submitRoomBox()
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(1))
+    fireEvent.click(screen.getByRole('button', { name: 'Stopp' }))
+    flush()
+    expect(await screen.findByText(/Avbrutt før svaret startet/)).toBeTruthy()
+    stream.finish()
+    flush()
+    expect(roomBox().value).toBe('Rydd lageret')
+    expect(storedDraftTexts()).toEqual(['Rydd lageret'])
+  })
+
+  it('a post the room accepts clears the box and the stored draft', async () => {
+    spacesClient.createSpacePost.mockResolvedValueOnce(receipt)
+    renderRoom({ humanPosts: true, journal: flushingPostJournal() })
+    await typeAndSettleDraft('Hei alle')
+    expect(storedDraftTexts()).toEqual(['Hei alle'])
+    submitRoomBox()
+    await waitFor(() => expect(spacesClient.createSpacePost).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(roomBox().value).toBe(''))
+    expect(storedDraftTexts()).toEqual([])
+  })
+
+  it('with the drafts flag off the box is cleared at Send, as before, and nothing is stored', async () => {
+    publishRoomFeatures({})
+    const stream = scriptedStream()
+    renderRoom()
+    await typeAndSettleDraft('Rydd lageret')
+    submitRoomBox()
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(1))
+    expect(roomBox().value).toBe('')
+    expect(storedDraftTexts()).toEqual([])
+    stream.finish()
+  })
+
+  it('under a zero-retention workspace nothing is written to browser storage, and no older draft comes back', async () => {
+    renderRoom()
+    await typeAndSettleDraft('Gammelt utkast')
+    expect(storedDraftTexts()).toEqual(['Gammelt utkast'])
+    cleanup()
+
+    applyServerRetention(true)
+    expect(storedDraftTexts()).toEqual([])
+
+    renderRoom()
+    expect(roomBox().value).toBe('')
+    await typeAndSettleDraft('Hemmelig utkast')
+    expect(roomBox().value).toBe('Hemmelig utkast')
+    expect(storedEntries().filter((entry) => entry.includes('Hemmelig') || entry.startsWith(DRAFT_KEY_PREFIX))).toEqual([])
+    cleanup()
+
+    renderRoom()
+    expect(roomBox().value).toBe('')
+  })
+})
+
+describe('SpaceRoomComposer — personal memory for one room turn (WS17-S8)', () => {
+  const MEMORY_LABEL = 'Bruk mitt personlige minne for dette svaret'
+
+  beforeEach(() => {
+    vi.stubEnv('VITE_SPACE_COMPOSER_DRAFTS', '')
+  })
+
+  afterEach(() => {
+    cleanup()
+    clearSpaceRoomFeatures()
+    window.sessionStorage.clear()
+  })
+
+  it('is offered only while features.personal_memory_turn is on', () => {
+    renderRoom()
+    expect(screen.queryByRole('checkbox', { name: MEMORY_LABEL })).toBeNull()
+    cleanup()
+
+    publishRoomFeatures({ personal_memory_turn: true })
+    renderRoom()
+    expect(screen.getByRole('checkbox', { name: MEMORY_LABEL })).toBeTruthy()
+  })
+
+  it('is offered for an Ask turn, not for a Send turn', () => {
+    publishRoomFeatures({ personal_memory_turn: true })
+    renderRoom({ humanPosts: true })
+    expect(screen.queryByRole('checkbox', { name: MEMORY_LABEL })).toBeNull()
+    fireEvent.click(screen.getByRole('radio', { name: 'Spør Verevon' }))
+    flush()
+    expect(screen.getByRole('checkbox', { name: MEMORY_LABEL })).toBeTruthy()
+  })
+
+  it('goes with the turn it was chosen for, and is unchecked again after the send', async () => {
+    publishRoomFeatures({ personal_memory_turn: true })
+    const first = scriptedStream()
+    renderRoom()
+    const memory = screen.getByRole('checkbox', { name: MEMORY_LABEL }) as HTMLInputElement
+    fireEvent.click(memory)
+    flush()
+    expect(memory.checked).toBe(true)
+
+    typeInRoomBox('Hva fant vi sist?')
+    submitRoomBox()
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(1))
+    expect(chatClient.streamChat.mock.calls[0]?.[0]).toMatchObject({ usePersonalMemory: true })
+    expect(memory.checked).toBe(false)
+
+    first.handlers().onDone?.({})
+    flush()
+    first.finish()
+    await waitFor(() => expect(roomBox().disabled).toBe(false))
+
+    const second = scriptedStream()
+    typeInRoomBox('Og nå?')
+    submitRoomBox()
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(2))
+    expect((chatClient.streamChat.mock.calls[1]?.[0] as { usePersonalMemory?: unknown }).usePersonalMemory).toBeUndefined()
+    second.finish()
   })
 })
