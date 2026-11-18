@@ -378,3 +378,41 @@ func TestBrowserRunDigestGolden(t *testing.T) {
 		t.Fatal("a new-thread decision must not share its digest with an existing-thread decision")
 	}
 }
+
+// W3-FIX-5: surrounding whitespace on the recipient audience ref/hash,
+// privacy policy ref, resource authorization ref or idempotency key must not
+// change the payload digest - the digest trims each before hashing.
+func TestBrowserRunPayloadDigestTrimsPaddedReferences(t *testing.T) {
+	evidence := browserRunRoomEvidence()
+	request := validBrowserRunRequest()
+	claims := BrowserRunClaims{
+		ThreadID: request.ThreadID, ThreadMode: "existing", GoalDigest: request.GoalDigest,
+		AllowedDomains: canonicalBrowserDomains(request.AllowedDomains), ProfileScope: BrowserProfileEphemeral,
+		ViewScope: request.ViewScope, MaxSteps: request.MaxSteps, MaxRuntimeS: request.MaxRuntimeS,
+	}
+	trimmed := browserRunPayloadDigest(evidence, request, claims)
+
+	padded := evidence
+	padded.RecipientAudienceRef = "  " + evidence.RecipientAudienceRef + "\t"
+	padded.RecipientAudienceHash = "\n" + evidence.RecipientAudienceHash + "  "
+	padded.Privacy.PolicyRef = " " + evidence.Privacy.PolicyRef + " "
+	padded.ResourceAuthorizationRef = "\t" + evidence.ResourceAuthorizationRef + "\n"
+	paddedRequest := request
+	paddedRequest.IdempotencyKey = "  " + request.IdempotencyKey + "  "
+
+	got := browserRunPayloadDigest(padded, paddedRequest, claims)
+	if got != trimmed {
+		t.Fatalf("browserRunPayloadDigest with padded references = %s, want the trimmed digest %s", got, trimmed)
+	}
+
+	// And the digest IssueBrowserRunDecision actually signs must equal the one
+	// recomputed from the signed decision's own fields.
+	decision, issuedClaims, err := IssueBrowserRunDecision(evidence, request, time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	recomputed := browserRunPayloadDigest(evidence, request, issuedClaims)
+	if decision.PayloadDigest != recomputed {
+		t.Fatalf("decision.PayloadDigest = %s, recomputed = %s", decision.PayloadDigest, recomputed)
+	}
+}
