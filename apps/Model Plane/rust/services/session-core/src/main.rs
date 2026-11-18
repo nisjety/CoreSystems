@@ -65,6 +65,7 @@ mod space_deletion_reconciler;
 mod space_membership_nats;
 mod space_stream_grpc;
 mod store;
+mod switch_spellings;
 mod terminalization;
 #[cfg(test)]
 mod test_log_capture;
@@ -97,6 +98,10 @@ async fn main() -> Result<()> {
 
     let _otel_guard = mp_telemetry::init("session-core")?;
     info!("session-core starting");
+    // Logs a retired spelling of an exact-literal switch; it changes no switch.
+    switch_spellings::warn_former_spellings();
+    // Logs a CONTENT_WRITE_POLICY value other than the exact words; it changes no switch.
+    write_policy::warn_inexact_mode();
     // Per-thread run guard (WS09-S1): read once, never in a handler. ON unless
     // SPACE_RUN_THREAD_GUARD is switched off.
     let thread_run_guard = run_phase::guard_enabled_from_env();

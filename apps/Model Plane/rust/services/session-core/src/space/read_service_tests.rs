@@ -127,6 +127,32 @@ fn artifact_query_reads_only_the_indexed_predicate_and_never_content() {
     assert!(!LIST_SPACE_ARTIFACTS_SQL.contains("m.content"));
 }
 
+#[test]
+fn artifact_query_applies_the_history_floor_before_the_count() {
+    // WS04-S11: a message stamped before a `since_join` floor is hidden, the predicate the search
+    // and the conversation read carry. It sits in `art`'s WHERE clause, which Postgres applies
+    // before the window `count(*) OVER`, so the version count only counts rows the reader may
+    // see. An unstamped message counts, and a `NULL` floor (the switch off, or no signed claim)
+    // hides nothing. The floor is the ninth bind.
+    let sql = LIST_SPACE_ARTIFACTS_SQL;
+    let predicate = "m.recipient_audience_revision >= $9::BIGINT";
+    assert!(sql.contains("$9::BIGINT IS NULL"));
+    assert!(sql.contains(predicate));
+    assert!(!sql.contains("$10"), "nine binds");
+    // The floor must sit inside `art`'s WHERE clause: after its `WHERE m.space_id`, and before the
+    // `latest` CTE that follows `art`. The window count's text position does not matter (it is
+    // written in the SELECT list), because window functions run after WHERE.
+    let where_at = sql
+        .find("WHERE m.space_id = $2")
+        .expect("art's WHERE clause");
+    let floor_at = sql.find(predicate).expect("the floor predicate");
+    let latest_at = sql.find("latest AS").expect("the CTE after art");
+    assert!(
+        where_at < floor_at && floor_at < latest_at,
+        "the floor filters art's rows, so the window count only counts visible rows"
+    );
+}
+
 // ---- refusals before any row is read ----------------------------------------------------
 
 #[tokio::test]
@@ -433,6 +459,93 @@ mod db_tests {
         );
         let current = list(&pool, &org, &space, 2, 0, "").await;
         assert_eq!(current.artifacts.len(), 2);
+        clean_space(&pool, &org, &space).await;
+    }
+
+    /// The `(artifact id, version, version count)` of each row of a page, sorted by artifact id.
+    fn shape(rows: &[ArtifactRow]) -> Vec<(String, i64, i64)> {
+        let mut shaped: Vec<(String, i64, i64)> = Vec::new();
+        for row in rows {
+            shaped.push((row.2.clone(), row.5, row.6));
+        }
+        shaped.sort();
+        shaped
+    }
+
+    /// WS04-S11: a `since_join` reader's list does not show an artifact stamped before the floor,
+    /// and the version count counts only the rows the reader sees. The floor is the one the signed
+    /// claim yields with the switch on; with no floor (the switch off) the list is full history.
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn space_room_read_hides_artifacts_stamped_before_the_history_floor() {
+        let Some(pool) = connect().await else { return };
+        let (org, space) = ids("floor");
+        let thread = format!("thread-{space}");
+        let (before, after) = (format!("before-{space}"), format!("after-{space}"));
+        seed_space_thread(&pool, &org, &space, &thread, "owner-1").await;
+        seed(
+            &pool,
+            &space,
+            &thread,
+            &before,
+            1,
+            300,
+            json!({"artifacts": [
+                artifact("old", "document", 1, "written before the join"),
+                artifact("shared", "document", 1, "first draft"),
+            ]}),
+        )
+        .await;
+        seed(
+            &pool,
+            &space,
+            &thread,
+            &after,
+            3,
+            100,
+            json!({"artifacts": [
+                artifact("new", "code", 1, "written after the join"),
+                artifact("shared", "document", 2, "second draft after the join"),
+            ]}),
+        )
+        .await;
+        let read = |floor: Option<i64>| VerifiedSpaceRead {
+            recipient_audience_revision: 3,
+            history_floor: floor,
+        };
+
+        // A member who joined at revision 3 reads from revision 3 on: the pre-join artifact is not
+        // listed, and the shared artifact counts only the version the member can see.
+        let floored = artifact_page_rows(&pool, &org, &space, read(Some(3)), None, 50)
+            .await
+            .expect("the list answers");
+        assert_eq!(
+            shape(&floored),
+            vec![("new".to_owned(), 1, 1), ("shared".to_owned(), 2, 1)],
+            "{NEEDS_DB}"
+        );
+        let shared = floored.iter().find(|row| row.2 == "shared");
+        let shared = shared.expect("shared is listed");
+        assert_eq!(shared.1, after, "newest visible version");
+        let size = "second draft after the join".chars().count() as i64;
+        assert_eq!(shared.7, size, "the post-join content length");
+        assert!(
+            floored.iter().all(|row| row.4 != "Title old"),
+            "a title stamped before the floor is never listed"
+        );
+
+        // No floor (the switch off): the same rows show full history, as before the floor.
+        let full = artifact_page_rows(&pool, &org, &space, read(None), None, 50)
+            .await
+            .expect("the list answers");
+        assert_eq!(
+            shape(&full),
+            vec![
+                ("new".to_owned(), 1, 1),
+                ("old".to_owned(), 1, 1),
+                ("shared".to_owned(), 2, 2)
+            ]
+        );
         clean_space(&pool, &org, &space).await;
     }
 

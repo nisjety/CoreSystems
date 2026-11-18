@@ -74,6 +74,33 @@ pub(crate) async fn seed_space_message(
     .expect("seed space message");
 }
 
+/// One user message of a Space thread stamped with `revision` as its recipient-audience revision.
+/// The history-floor tests need a message on each side of a `since_join` floor, so the stamp is
+/// a parameter where [`seed_space_message`] fixes it at 1.
+pub(crate) async fn seed_space_message_at_revision(
+    pool: &PgPool,
+    space: &str,
+    thread_id: &str,
+    message_id: &str,
+    content: &str,
+    revision: i64,
+) {
+    sqlx::query(
+        "INSERT INTO messages (id, thread_id, role, content, space_id, recipient_audience_ref, \
+         recipient_audience_revision, recipient_audience_hash, authority_revision, \
+         resource_authorization_ref, author_subject_id) \
+         VALUES ($1, $2, 'user', $3, $4, 'audience-1', $5, 'sha256:audience-1', 1, 'resource-1', 'member-2')",
+    )
+    .bind(message_id)
+    .bind(thread_id)
+    .bind(content)
+    .bind(space)
+    .bind(revision)
+    .execute(pool)
+    .await
+    .expect("seed space message at revision");
+}
+
 /// A Space run in `status` under `retention_class` (`persistent`, `zdr` or `zdr_waived`). A waived
 /// run names its acknowledgement and connection, and no other class does, as production writes its
 /// receipt (`runs_retention_waiver_consistent`, migration 0044).

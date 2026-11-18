@@ -335,6 +335,9 @@ pub(crate) struct GateContext<'a> {
     pub lease_until: DateTime<Utc>,
     /// Highest `recipient_audience_revision` the decision authorizes.
     pub decision_ceiling: i64,
+    /// WS04-S11: the first revision a `since_join` reader may see. `None` is full history (the
+    /// switch is off, or the decision carries no floor).
+    pub decision_floor: Option<i64>,
     pub decision_issued_at: DateTime<Utc>,
     /// `revoked_at` of an inactive `space_membership_revocations` row for this subject.
     pub revoked_at: Option<DateTime<Utc>>,
@@ -377,6 +380,11 @@ pub(crate) fn gate(row: &GateRow<'_>, ctx: &GateContext<'_>) -> GateOutcome {
         Some(revision) if revision > ctx.decision_ceiling => {
             GateOutcome::Close(CloseCode::Reauthorize)
         }
+        // WS04-S11: a `since_join` reader does not see a row stamped before its floor. The row is
+        // stubbed, not dropped, so the client's seq stays contiguous.
+        Some(revision) if ctx.decision_floor.is_some_and(|floor| revision < floor) => {
+            GateOutcome::Stub
+        }
         Some(_) => GateOutcome::Deliver,
     }
 }
@@ -384,6 +392,7 @@ pub(crate) fn gate(row: &GateRow<'_>, ctx: &GateContext<'_>) -> GateOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::space::audience_window::history_floor_from_claim;
 
     fn at(secs: i64) -> DateTime<Utc> {
         DateTime::from_timestamp(1_800_000_000 + secs, 0).expect("valid test time")
@@ -405,6 +414,7 @@ mod tests {
             now: at(0),
             lease_until: at(60),
             decision_ceiling: 5,
+            decision_floor: None,
             decision_issued_at: at(-10),
             revoked_at: None,
             caller_zdr: false,
@@ -432,6 +442,54 @@ mod tests {
         assert_eq!(gate(&row("reaction", Some(1), "persistent"), &c), GateOutcome::Stub);
         assert_eq!(gate(&space(Some(1), "zdr"), &c), GateOutcome::Stub);
         assert_eq!(gate(&space(Some(1), ""), &c), GateOutcome::Stub);
+    }
+
+    /// WS04-S11: with a floor, a row stamped before it is stubbed (its content never reaches the
+    /// wire), a row at or after it is delivered, and the ceiling still closes a newer row first. A
+    /// zero claim signs no floor, and no floor is full history, as before the claim existed.
+    #[test]
+    fn gate_stubs_rows_before_the_history_floor_and_keeps_full_history_without_one() {
+        let mut c = ctx();
+        c.decision_floor = Some(3);
+        let space = |rev, ret| row("space", rev, ret);
+        assert_eq!(
+            gate(&space(Some(2), "persistent"), &c),
+            GateOutcome::Stub,
+            "before the floor"
+        );
+        assert_eq!(
+            gate(&space(Some(3), "persistent"), &c),
+            GateOutcome::Deliver,
+            "at the floor"
+        );
+        assert_eq!(
+            gate(&space(Some(5), "zdr_waived"), &c),
+            GateOutcome::Deliver,
+            "at the ceiling"
+        );
+        assert_eq!(
+            gate(&space(Some(6), "persistent"), &c),
+            GateOutcome::Close(CloseCode::Reauthorize),
+            "the ceiling still closes a newer row before the floor is judged"
+        );
+        assert_eq!(gate(&space(None, "persistent"), &c), GateOutcome::Stub);
+
+        // A zero claim is no floor: every row at or below the ceiling is delivered.
+        c.decision_floor = history_floor_from_claim(0, true);
+        assert_eq!(c.decision_floor, None);
+        assert_eq!(
+            gate(&space(Some(1), "persistent"), &c),
+            GateOutcome::Deliver,
+            "zero claim"
+        );
+
+        // The switch off (or no claim) leaves the floor unset: full history.
+        c.decision_floor = history_floor_from_claim(3, false);
+        assert_eq!(
+            gate(&space(Some(1), "persistent"), &c),
+            GateOutcome::Deliver,
+            "switch off"
+        );
     }
 
     #[test]

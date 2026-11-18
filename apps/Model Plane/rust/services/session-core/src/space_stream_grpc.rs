@@ -250,6 +250,7 @@ impl SpaceEvents for SpaceEventsGrpc {
             head_hint: head_seq,
             resumed: req.resume,
             ceiling: decision.recipient_audience_revision,
+            floor: decision.history_floor,
             issued_at: decision.issued_at,
             lease,
             lease_until: now
@@ -531,6 +532,8 @@ struct StreamState {
     resumed: bool,
     /// Highest `recipient_audience_revision` the decision authorizes.
     ceiling: i64,
+    /// WS04-S11: the `since_join` floor the decision carries (`None` is full history).
+    floor: Option<i64>,
     issued_at: DateTime<Utc>,
     lease: Duration,
     lease_until: DateTime<Utc>,
@@ -623,6 +626,7 @@ impl StreamState {
             now: Utc::now(),
             lease_until: self.lease_until,
             decision_ceiling: self.ceiling,
+            decision_floor: self.floor,
             decision_issued_at: self.issued_at,
             revoked_at,
             // ZDR callers and decisions never reach a stream task.

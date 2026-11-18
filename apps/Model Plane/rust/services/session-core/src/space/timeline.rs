@@ -10,7 +10,10 @@
 //! Authority, in order: a user principal (`session:read`, which writes nothing, so a ZDR
 //! credential passes), the caller's org, the rollout switch, a Control Space read decision that
 //! must be PRESENT (an absent decision is `permission_denied`, never an owner-bound fallback) and
-//! verified for exactly this org, this user and this Space, then the audience ceiling it carries.
+//! verified for exactly this org, this user and this Space, then the audience ceiling it carries
+//! and the `since_join` history floor it may carry (WS04-S11): a thread with no message stamped at
+//! or after the floor is not listed, and its title, preview and reply count read only messages from
+//! the floor on.
 //! A thread is eligible only when its newest audience stamp (`activity_max_audience_revision`,
 //! else the thread's own revision, else 0) is at or below the ceiling, and the thread's own stamp
 //! is too: fail closed, so a count or a recent-author list never reveals a row the reader could
@@ -91,12 +94,18 @@ fn summary_from_row(row: TimelineRow, space_id: &str) -> pb::ThreadSummary {
 }
 
 /// The eligible-thread predicate shared by the window, the pinned shelf, the refresh read and the
-/// count. `$1` org, `$2` space, `$3` audience ceiling. A thread with no message (no summary) is
-/// never listed, which also keeps an orphan thread's internal key out of the room.
+/// count. `$1` org, `$2` space, `$3` audience ceiling, `$4` history floor (`NULL` = none). A thread
+/// with no message (no summary) is never listed, which also keeps an orphan thread's internal key
+/// out of the room. Under a floor a thread needs a message stamped at or after it, as `ListThreads`
+/// does, so a thread that holds only earlier messages is not listed to a `since_join` reader.
 const ELIGIBLE_SQL: &str = "t.org_id = $1 AND t.space_id = $2 AND t.archived_at IS NULL
       AND t.last_message_seq IS NOT NULL
       AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $3)
-      AND COALESCE(t.activity_max_audience_revision, t.recipient_audience_revision, 0) <= $3";
+      AND COALESCE(t.activity_max_audience_revision, t.recipient_audience_revision, 0) <= $3
+      AND ($4::BIGINT IS NULL OR EXISTS (
+            SELECT 1 FROM messages em
+             WHERE em.thread_id = t.id
+               AND (em.recipient_audience_revision IS NULL OR em.recipient_audience_revision >= $4)))";
 
 /// The page query: `extra` narrows the eligible set, `order` is the inner (indexed) order, `limit`
 /// an integer literal, `outer_order` the order of the answer. Lateral joins run on page rows only.
@@ -127,6 +136,7 @@ fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str) -> String {
             {fold_join}
             WHERE m.thread_id = page.id AND m.role = 'user' AND m.on_active_path
               AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $3)
+              AND ($4::BIGINT IS NULL OR m.recipient_audience_revision IS NULL OR m.recipient_audience_revision >= $4)
             ORDER BY m.sequence ASC
             LIMIT 1
          ) fu ON TRUE
@@ -136,6 +146,7 @@ fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str) -> String {
             {fold_join}
             WHERE m.thread_id = page.id AND m.on_active_path
               AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $3)
+              AND ($4::BIGINT IS NULL OR m.recipient_audience_revision IS NULL OR m.recipient_audience_revision >= $4)
             ORDER BY m.sequence DESC
             LIMIT 1
          ) lm ON TRUE
@@ -151,6 +162,7 @@ fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str) -> String {
             FROM messages m
             WHERE m.thread_id = page.id AND m.on_active_path
               AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $3)
+              AND ($4::BIGINT IS NULL OR m.recipient_audience_revision IS NULL OR m.recipient_audience_revision >= $4)
          ) rc ON TRUE
          ORDER BY {outer_order}",
         eligible = ELIGIBLE_SQL,
@@ -223,7 +235,7 @@ fn refresh_ids(ids: &[String]) -> Result<Vec<String>, Status> {
     Ok(out)
 }
 
-/// What a page query binds after `$1..$3` (org, space, ceiling).
+/// What a page query binds after `$1..$4` (org, space, ceiling, history floor).
 enum Extra<'a> {
     None,
     Cursors(Option<i64>, Option<i64>),
@@ -236,12 +248,14 @@ async fn fetch_rows(
     org_id: &str,
     space_id: &str,
     ceiling: i64,
+    floor: Option<i64>,
     extra: Extra<'_>,
 ) -> Result<Vec<TimelineRow>, Status> {
     let query = sqlx::query_as::<_, TimelineRow>(sql)
         .bind(org_id)
         .bind(space_id)
-        .bind(ceiling);
+        .bind(ceiling)
+        .bind(floor);
     let query = match extra {
         Extra::None => query,
         Extra::Cursors(before, after) => query.bind(before).bind(after),
@@ -284,6 +298,8 @@ pub(crate) async fn list_space_timeline(
     )?
     .ok_or_else(|| Status::permission_denied("a Space read decision is required"))?;
     let ceiling = read.recipient_audience_revision;
+    // WS04-S11: `None` when the switch is off or the decision signs no floor (full history).
+    let floor = read.history_floor;
     let window = window_from(&req)?;
     let ids = refresh_ids(&req.refresh_thread_ids)?;
 
@@ -304,16 +320,16 @@ pub(crate) async fn list_space_timeline(
     // newer rows are read oldest first (that is what the index walks) and put back newest first.
     let sql = if window.after.is_some() {
         page_sql(
-            "AND ($4::BIGINT IS NULL OR t.last_message_seq < $4)
-             AND ($5::BIGINT IS NULL OR t.last_message_seq > $5)",
+            "AND ($5::BIGINT IS NULL OR t.last_message_seq < $5)
+             AND ($6::BIGINT IS NULL OR t.last_message_seq > $6)",
             "t.last_message_seq ASC",
             window.limit + 1,
             "page.last_message_seq ASC",
         )
     } else if window.before.is_some() {
         page_sql(
-            "AND ($4::BIGINT IS NULL OR t.last_message_seq < $4)
-             AND ($5::BIGINT IS NULL OR t.last_message_seq > $5)",
+            "AND ($5::BIGINT IS NULL OR t.last_message_seq < $5)
+             AND ($6::BIGINT IS NULL OR t.last_message_seq > $6)",
             "t.last_message_seq DESC",
             window.limit + 1,
             "page.last_message_seq DESC",
@@ -331,7 +347,7 @@ pub(crate) async fn list_space_timeline(
     } else {
         Extra::Cursors(window.before, window.after)
     };
-    let mut rows = fetch_rows(pool, &sql, &req.org_id, &space_id, ceiling, extra).await?;
+    let mut rows = fetch_rows(pool, &sql, &req.org_id, &space_id, ceiling, floor, extra).await?;
     let page_size = usize::try_from(window.limit).unwrap_or(usize::MAX);
     let has_more = rows.len() > page_size;
     rows.truncate(page_size);
@@ -355,17 +371,26 @@ pub(crate) async fn list_space_timeline(
                 i64::try_from(MAX_PINNED).unwrap_or(10),
                 "page.pinned_at DESC, page.id DESC",
             );
-            pinned = fetch_rows(pool, &sql, &req.org_id, &space_id, ceiling, Extra::None)
-                .await?
-                .into_iter()
-                .map(|row| summary_from_row(row, &space_id))
-                .collect();
+            pinned = fetch_rows(
+                pool,
+                &sql,
+                &req.org_id,
+                &space_id,
+                ceiling,
+                floor,
+                Extra::None,
+            )
+            .await?
+            .into_iter()
+            .map(|row| summary_from_row(row, &space_id))
+            .collect();
         }
         let sql = format!("SELECT count(*) FROM threads t WHERE {ELIGIBLE_SQL}");
         let total: i64 = sqlx::query_scalar(&sql)
             .bind(&req.org_id)
             .bind(&space_id)
             .bind(ceiling)
+            .bind(floor)
             .fetch_one(pool)
             .await
             .map_err(|error| {
@@ -380,16 +405,24 @@ pub(crate) async fn list_space_timeline(
         Vec::new()
     } else {
         let sql = page_sql(
-            "AND t.id = ANY($4::TEXT[])",
+            "AND t.id = ANY($5::TEXT[])",
             "t.last_message_seq DESC",
             i64::try_from(MAX_REFRESH_IDS).unwrap_or(30),
             "page.last_message_seq DESC",
         );
-        fetch_rows(pool, &sql, &req.org_id, &space_id, ceiling, Extra::Ids(&ids))
-            .await?
-            .into_iter()
-            .map(|row| summary_from_row(row, &space_id))
-            .collect()
+        fetch_rows(
+            pool,
+            &sql,
+            &req.org_id,
+            &space_id,
+            ceiling,
+            floor,
+            Extra::Ids(&ids),
+        )
+        .await?
+        .into_iter()
+        .map(|row| summary_from_row(row, &space_id))
+        .collect()
     };
 
     Ok(Response::new(pb::ListSpaceTimelineResponse {
@@ -401,4 +434,140 @@ pub(crate) async fn list_space_timeline(
         newest_seq,
         total_posts,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::space::audience_window::{history_floor_enabled_from, history_floor_from_claim};
+    use crate::space::test_support::{
+        clean_space, connect, seed_space_message_at_revision, seed_space_thread,
+    };
+    use mp_ids::new_ulid;
+
+    /// The floor is `$4`: in the eligible set and in the three message joins (title, preview and
+    /// reply count), while the cursors and the refresh ids moved to `$5` and `$6`. Checked on the
+    /// statement text, so no database is needed.
+    #[test]
+    fn the_history_floor_is_bound_fourth_and_every_message_join_applies_it() {
+        assert!(ELIGIBLE_SQL.contains("$4::BIGINT IS NULL"));
+        let page = page_sql(
+            "",
+            "t.last_message_seq DESC",
+            10,
+            "page.last_message_seq DESC",
+        );
+        // Three lateral joins and the eligible EXISTS each read messages under the floor.
+        assert_eq!(page.matches("recipient_audience_revision >= $4").count(), 4);
+        assert!(!page.contains("$5") && !page.contains("$6"));
+        let window = page_sql(
+            "AND ($5::BIGINT IS NULL OR t.last_message_seq < $5)
+             AND ($6::BIGINT IS NULL OR t.last_message_seq > $6)",
+            "t.last_message_seq DESC",
+            10,
+            "page.last_message_seq DESC",
+        );
+        assert!(window.contains("$5") && window.contains("$6"));
+    }
+
+    /// WS04-S11 against Postgres: under a `since_join` floor, a thread with no message from the floor
+    /// on is not listed, and a listed thread's title, preview and reply count read only messages from
+    /// the floor on. The switch off, or a zero claim, lists both threads with the earlier turn in view.
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn timeline_under_a_history_floor_lists_and_previews_only_what_the_reader_may_see() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let suffix = new_ulid();
+        let org = format!("timeline-floor-{suffix}");
+        let space = format!("space-timeline-floor-{suffix}");
+        let earlier_only = format!("{suffix}-earlier-only");
+        let mixed = format!("{suffix}-mixed");
+        seed_space_thread(&pool, &org, &space, &earlier_only, "owner-a").await;
+        seed_space_thread(&pool, &org, &space, &mixed, "owner-a").await;
+        seed_space_message_at_revision(
+            &pool,
+            &space,
+            &earlier_only,
+            &format!("{suffix}-e1"),
+            "earlier only",
+            1,
+        )
+        .await;
+        seed_space_message_at_revision(
+            &pool,
+            &space,
+            &mixed,
+            &format!("{suffix}-m1"),
+            "first before the join",
+            1,
+        )
+        .await;
+        seed_space_message_at_revision(
+            &pool,
+            &space,
+            &mixed,
+            &format!("{suffix}-m2"),
+            "second after the join",
+            4,
+        )
+        .await;
+
+        let sql = page_sql(
+            "",
+            "t.last_message_seq DESC",
+            10,
+            "page.last_message_seq DESC",
+        );
+        // A member who joined at revision 3; the decision is at revision 5.
+        let on = history_floor_enabled_from(Some("true"));
+        let floored = fetch_rows(
+            &pool,
+            &sql,
+            &org,
+            &space,
+            5,
+            history_floor_from_claim(3, on),
+            Extra::None,
+        )
+        .await
+        .expect("floored page");
+        let listed: Vec<&str> = floored.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(
+            listed,
+            vec![mixed.as_str()],
+            "a thread with nothing from the floor on is not listed"
+        );
+        let shown = &floored[0];
+        assert_eq!(shown.title.as_deref(), Some("second after the join"));
+        assert_eq!(shown.preview.as_deref(), Some("second after the join"));
+        assert_eq!(
+            shown.reply_count,
+            Some(0),
+            "the earlier turn is not a reply here"
+        );
+
+        // The switch off: the same claim is ignored, both threads list and the earlier turn shows.
+        let off = history_floor_from_claim(3, history_floor_enabled_from(Some("1")));
+        let all = fetch_rows(&pool, &sql, &org, &space, 5, off, Extra::None)
+            .await
+            .expect("unfloored page");
+        assert_eq!(all.len(), 2, "floor off lists both threads");
+        let full = all
+            .iter()
+            .find(|row| row.id == mixed)
+            .expect("the mixed thread");
+        assert_eq!(full.title.as_deref(), Some("first before the join"));
+        assert_eq!(full.reply_count, Some(1));
+
+        // The switch on with a zero claim: no floor is signed, so the full view again.
+        let zero = history_floor_from_claim(0, on);
+        let zero_claim = fetch_rows(&pool, &sql, &org, &space, 5, zero, Extra::None)
+            .await
+            .expect("zero-claim page");
+        assert_eq!(zero_claim.len(), 2, "a zero claim is no floor");
+
+        clean_space(&pool, &org, &space).await;
+    }
 }

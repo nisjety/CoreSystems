@@ -10,15 +10,17 @@
 //! then per Space the Control `model.thread.read` decision (a failure, or no decision at all, is
 //! DENIED for that Space only, never an error for the call) and the membership revocation row.
 //! The decision's audience revision is the ceiling for every thread and message counted or
-//! named. The index is never the access boundary: each query restates org, Space, archive and
-//! ceiling predicates.
+//! named. The `since_join` history floor it may sign (WS04-S11) is the floor for every message
+//! read: a headline's first user message, the unread probe and the room's latest activity see
+//! only what the floor lets the reader see. The index is never the access boundary: each query
+//! restates org, Space, archive, ceiling and floor predicates.
 //!
 //! No migration: the thread activity summary (migration 0078) and `threads.last_activity_at`
 //! (0049) serve the candidate selection, so cost follows new activity, not room history.
 //!
 //! Message text never crosses this surface. The only text returned is a thread's display title,
-//! for the thread ids the caller asked for, under the same ceiling, and never for a thread that
-//! holds a `zdr_waived` run. Ids, titles and counts never reach a log line.
+//! for the thread ids the caller asked for, under the same ceiling and floor, and never for a
+//! thread that holds a `zdr_waived` run. Ids, titles and counts never reach a log line.
 
 use chrono::{DateTime, Utc};
 use mp_contracts::model_plane::v1 as pb;
@@ -126,25 +128,57 @@ pub(crate) fn is_unread(
 const THREAD_SCOPE: &str = "t.org_id = $1 AND t.space_id = $2 AND t.archived_at IS NULL
       AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $3)";
 
-/// The newest user or assistant message of a thread the ceiling lets the caller see, on the
-/// active path, not deleted. Parameter: $3 ceiling.
-const LATEST_VISIBLE_MESSAGE: &str = "SELECT m.created_at, m.author_subject_id
+/// The history floor predicate of a message read (WS04-S11), `floor` being the placeholder that
+/// carries it. A message stamped before the floor is hidden; an unstamped one is not, as in the
+/// conversation read; no floor (`NULL`: the switch off, or no signed claim) hides nothing. The
+/// message is `m`.
+fn floor_predicate(floor: &str) -> String {
+    format!(
+        "({floor}::BIGINT IS NULL OR m.recipient_audience_revision IS NULL
+                 OR m.recipient_audience_revision >= {floor}::BIGINT)"
+    )
+}
+
+/// The thread-level floor gate of a headline (WS04-S11): under a floor a thread needs a message
+/// stamped at or after it, an unstamped message counting, the same gate `ListThreads` and the Space
+/// timeline apply. No floor (`NULL`: the switch off, or no signed claim) passes every thread. The
+/// thread is `t`; the floor is the placeholder `floor` that carries it.
+fn thread_floor_predicate(floor: &str) -> String {
+    format!(
+        "({floor}::BIGINT IS NULL OR EXISTS (SELECT 1 FROM messages em
+                 WHERE em.thread_id = t.id
+                   AND (em.recipient_audience_revision IS NULL
+                        OR em.recipient_audience_revision >= {floor}::BIGINT)))"
+    )
+}
+
+/// The newest user or assistant message of a thread the ceiling and the history floor let the
+/// caller see, on the active path, not deleted. Parameters: $3 ceiling, and the floor under the
+/// placeholder `floor`.
+fn latest_visible_message(floor: &str) -> String {
+    let predicate = floor_predicate(floor);
+    format!(
+        "SELECT m.created_at, m.author_subject_id
         FROM messages m
        WHERE m.thread_id = t.id AND m.role IN ('user', 'assistant') AND m.on_active_path
          AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $3)
+         AND {predicate}
          AND NOT EXISTS (SELECT 1 FROM message_revisions r WHERE r.message_id = m.id AND r.action = 'deleted')
        ORDER BY m.sequence DESC
-       LIMIT 1";
+       LIMIT 1"
+    )
+}
 
 /// Unread candidates. Parameters: $1 org, $2 Space, $3 ceiling, $4 marker time, $5 viewer,
-/// $6 `true` = last-author rule, `false` = legacy owner rule, $7 row cap. Threads are
-/// pre-filtered by `last_activity_at` so the lateral probe runs only for threads that moved
-/// after the marker.
+/// $6 `true` = last-author rule, `false` = legacy owner rule, $7 row cap, $8 history floor.
+/// Threads are pre-filtered by `last_activity_at` so the lateral probe runs only for threads that
+/// moved after the marker.
 fn unread_sql() -> String {
+    let latest = latest_visible_message("$8");
     format!(
         "SELECT t.id
            FROM threads t
-           JOIN LATERAL ({LATEST_VISIBLE_MESSAGE}) lm ON TRUE
+           JOIN LATERAL ({latest}) lm ON TRUE
           WHERE {THREAD_SCOPE}
             AND t.last_activity_at > $4::TIMESTAMPTZ
             AND lm.created_at > $4::TIMESTAMPTZ
@@ -155,8 +189,10 @@ fn unread_sql() -> String {
     )
 }
 
-/// The room's latest visible activity. Parameters: $1 org, $2 Space, $3 ceiling, $4 probe size.
+/// The room's latest visible activity. Parameters: $1 org, $2 Space, $3 ceiling, $4 probe size,
+/// $5 history floor.
 fn latest_activity_sql() -> String {
+    let latest = latest_visible_message("$5");
     format!(
         "SELECT max(lm.created_at)
            FROM (SELECT t.id
@@ -164,7 +200,7 @@ fn latest_activity_sql() -> String {
                   WHERE {THREAD_SCOPE} AND t.last_message_seq IS NOT NULL
                   ORDER BY t.last_message_seq DESC
                   LIMIT $4) t
-           JOIN LATERAL ({LATEST_VISIBLE_MESSAGE}) lm ON TRUE"
+           JOIN LATERAL ({latest}) lm ON TRUE"
     )
 }
 
@@ -207,10 +243,15 @@ fn pending_sql() -> String {
 }
 
 /// Display titles of the requested threads that pass the ceiling and hold no `zdr_waived` run.
-/// Same derivation as the thread list: the presentation title, else the first user message,
-/// else the session key. Parameters: $1 org, $2 Space, $3 ceiling, $4 thread ids,
-/// $5 title source length.
+/// Under the history floor a thread is named only when it passes the gate `ListThreads` and the
+/// Space timeline apply: it holds a message stamped at or after the floor. A thread with only
+/// earlier messages gets no row at all, its title included. The title is the thread list's
+/// derivation: the presentation title, else the first user message the floor lets the reader see,
+/// else the session key. Parameters: $1 org, $2 Space, $3 ceiling, $4 thread ids, $5 title source
+/// length, $6 history floor.
 fn headlines_sql() -> String {
+    let floor = floor_predicate("$6");
+    let thread_floor = thread_floor_predicate("$6");
     format!(
         "SELECT t.id, t.session_key,
                 COALESCE(t.presentation_title, first_user.content) AS title
@@ -220,11 +261,13 @@ fn headlines_sql() -> String {
                   FROM messages m
                  WHERE m.thread_id = t.id AND m.role = 'user' AND m.on_active_path
                    AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $3)
+                   AND {floor}
                    AND NOT EXISTS (SELECT 1 FROM message_revisions r WHERE r.message_id = m.id)
                  ORDER BY m.sequence ASC
                  LIMIT 1
            ) first_user ON TRUE
           WHERE t.id = ANY($4) AND {THREAD_SCOPE}
+            AND {thread_floor}
             AND NOT EXISTS (SELECT 1 FROM runs wr WHERE wr.thread_id = t.id AND wr.retention_class = 'zdr_waived')"
     )
 }
@@ -233,9 +276,20 @@ fn headlines_sql() -> String {
 // Handler.
 // ---------------------------------------------------------------------------------------------
 
-/// One Space whose decision verified: the ceiling every query below restates.
+/// One Space whose decision verified: the ceiling and the history floor every query below restates.
 struct Reach {
     ceiling: i64,
+    /// WS04-S11: the `since_join` floor the decision signs. `None` is full history, which the
+    /// switch being off gives too.
+    floor: Option<i64>,
+}
+
+/// The reach a verified Space read gives this surface: its ceiling and the floor it may carry.
+fn reach_from(read: crate::grpc::VerifiedSpaceRead) -> Reach {
+    Reach {
+        ceiling: read.recipient_audience_revision,
+        floor: read.history_floor,
+    }
 }
 
 fn result_with(space_id: &str, status: pb::AttentionStatus) -> pb::SpaceAttentionResult {
@@ -283,6 +337,7 @@ impl SpaceAttentionGrpc {
                 .bind(user_id)
                 .bind(rule == Rule::LastAuthor)
                 .bind(cap + 1)
+                .bind(reach.floor)
                 .fetch_all(&mut *tx)
                 .await?;
             result.unread_capped = ids.len() > UNREAD_CAP;
@@ -294,6 +349,7 @@ impl SpaceAttentionGrpc {
             .bind(&query.space_id)
             .bind(reach.ceiling)
             .bind(LATEST_ACTIVITY_PROBE)
+            .bind(reach.floor)
             .fetch_one(&mut *tx)
             .await?;
         result.latest_activity_ms = latest.map_or(0, |at| at.timestamp_millis());
@@ -333,6 +389,7 @@ impl SpaceAttentionGrpc {
                 .bind(reach.ceiling)
                 .bind(&query.headline_thread_ids)
                 .bind(TITLE_SOURCE_CHARS)
+                .bind(reach.floor)
                 .fetch_all(&mut *tx)
                 .await?;
             let mut rows = rows;
@@ -451,7 +508,7 @@ impl SpaceAttentionGrpc {
                     &user_id,
                     &query.space_id,
                 ) {
-                    Ok(Some(read)) => Some(Reach { ceiling: read.recipient_audience_revision }),
+                    Ok(Some(read)) => Some(reach_from(read)),
                     Ok(None) | Err(_) => None,
                 }
             };
@@ -521,5 +578,240 @@ impl SpaceAttention for SpaceAttentionGrpc {
         let result = self.get(request).await;
         record_metrics("space_get_attention", started, result.is_ok());
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grpc::VerifiedSpaceRead;
+    use crate::space::audience_window::{history_floor_enabled_from, history_floor_from_claim};
+    use crate::space::test_support::{clean_space, connect, seed_space_thread};
+    use mp_ids::new_ulid;
+    use std::collections::BTreeSet;
+
+    /// The placeholders a statement names, by the number Postgres binds them with.
+    fn placeholders(sql: &str) -> BTreeSet<usize> {
+        let mut found = BTreeSet::new();
+        let mut rest = sql;
+        while let Some(at) = rest.find('$') {
+            let after = &rest[at + 1..];
+            let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+            if let Ok(number) = digits.parse::<usize>() {
+                found.insert(number);
+            }
+            rest = &after[digits.len()..];
+        }
+        found
+    }
+
+    /// WS04-S11: each attention read of messages binds the history floor last, after the binds it
+    /// already had, and states the floor predicate on the message. Checked on the statement text,
+    /// so no database is needed.
+    #[test]
+    fn each_attention_read_of_messages_binds_the_history_floor_last() {
+        assert_eq!(
+            placeholders(&unread_sql()),
+            (1..=8).collect::<BTreeSet<usize>>()
+        );
+        assert!(unread_sql().contains(floor_predicate("$8").as_str()));
+        assert_eq!(
+            placeholders(&latest_activity_sql()),
+            (1..=5).collect::<BTreeSet<usize>>()
+        );
+        assert!(latest_activity_sql().contains(floor_predicate("$5").as_str()));
+        assert_eq!(
+            placeholders(&headlines_sql()),
+            (1..=6).collect::<BTreeSet<usize>>()
+        );
+        assert!(headlines_sql().contains(floor_predicate("$6").as_str()));
+        assert!(
+            headlines_sql().contains(thread_floor_predicate("$6").as_str()),
+            "the thread-level floor gate is in the outer WHERE of the headline read"
+        );
+    }
+
+    /// The reach carries the floor a verified read signs. With the switch off the claim is dropped
+    /// before it gets here, so the reach has no floor: every floor bind is NULL and nothing is
+    /// hidden.
+    #[test]
+    fn a_verified_read_reaches_the_floor_it_signs_and_the_switch_off_reaches_none() {
+        let on = history_floor_enabled_from(Some("true"));
+        let signed = reach_from(VerifiedSpaceRead {
+            recipient_audience_revision: 9,
+            history_floor: history_floor_from_claim(7, on),
+        });
+        assert_eq!((signed.ceiling, signed.floor), (9, Some(7)));
+
+        let off = history_floor_enabled_from(Some("1"));
+        let dropped = reach_from(VerifiedSpaceRead {
+            recipient_audience_revision: 9,
+            history_floor: history_floor_from_claim(7, off),
+        });
+        assert_eq!((dropped.ceiling, dropped.floor), (9, None));
+    }
+
+    /// One user message of a Space thread, stamped with `revision` as its recipient-audience
+    /// revision, so a test can place it on either side of a `since_join` floor.
+    async fn seed_user_message(
+        pool: &PgPool,
+        space: &str,
+        thread: &str,
+        message: &str,
+        text: &str,
+        revision: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content, space_id, recipient_audience_ref, \
+             recipient_audience_revision, recipient_audience_hash, authority_revision, \
+             resource_authorization_ref, author_subject_id) \
+             VALUES ($1, $2, 'user', $3, $4, 'audience-1', $5, 'sha256:audience-1', 1, \
+             'resource-1', 'member-2')",
+        )
+        .bind(message)
+        .bind(thread)
+        .bind(text)
+        .bind(space)
+        .bind(revision)
+        .execute(pool)
+        .await
+        .expect("seed user message");
+    }
+
+    /// The creation time of one message, in epoch milliseconds.
+    async fn created_ms(pool: &PgPool, message: &str) -> i64 {
+        let (at,): (DateTime<Utc>,) =
+            sqlx::query_as("SELECT created_at FROM messages WHERE id = $1")
+                .bind(message)
+                .fetch_one(pool)
+                .await
+                .expect("message creation time");
+        at.timestamp_millis()
+    }
+
+    /// The display title the answer gives `thread`, when it names that thread.
+    fn headline_of(result: &pb::SpaceAttentionResult, thread: &str) -> Option<String> {
+        result
+            .headlines
+            .iter()
+            .find(|headline| headline.thread_id == thread)
+            .map(|headline| headline.title.clone())
+    }
+
+    /// WS04-S11 against Postgres: under a `since_join` floor the headline, the unread count and the
+    /// room's latest activity read only messages from the floor on, and a thread with no message
+    /// from the floor on is named by no headline. `mixed` holds a message before the floor and one
+    /// from it on; `early` holds only a message before the floor, written last, so it is the room's
+    /// newest message, and it carries a presentation title written before the join. The switch off
+    /// gives the full view, as before.
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn attention_under_a_history_floor_reads_only_what_the_reader_may_see() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let suffix = new_ulid();
+        let org = format!("attention-floor-{suffix}");
+        let space = format!("space-attention-floor-{suffix}");
+        let mixed = format!("{suffix}-mixed");
+        let early = format!("{suffix}-early");
+        let viewer = "viewer-x";
+        // The marker is an hour before the rows are written, so every message is after it.
+        let since_ms = Utc::now().timestamp_millis() - 3_600_000;
+        seed_space_thread(&pool, &org, &space, &mixed, "owner-a").await;
+        seed_space_thread(&pool, &org, &space, &early, "owner-a").await;
+        let mixed_before = format!("{suffix}-mixed-before");
+        let mixed_after = format!("{suffix}-mixed-after");
+        let early_before = format!("{suffix}-early-before");
+        seed_user_message(&pool, &space, &mixed, &mixed_before, "before the join", 2).await;
+        seed_user_message(&pool, &space, &mixed, &mixed_after, "after the join", 4).await;
+        seed_user_message(&pool, &space, &early, &early_before, "earlier only", 2).await;
+        // A title written before the join is pre-join content too: under the floor the whole row
+        // for `early` is hidden, title included.
+        sqlx::query("UPDATE threads SET presentation_title = $1 WHERE id = $2")
+            .bind("pre-join title")
+            .bind(&early)
+            .execute(&pool)
+            .await
+            .expect("title the pre-join thread");
+        let after_ms = created_ms(&pool, &mixed_after).await;
+        let newest_ms = created_ms(&pool, &early_before).await;
+
+        let grpc = SpaceAttentionGrpc::new(pool.clone(), true);
+        let query = pb::SpaceAttentionQuery {
+            space_id: space.clone(),
+            since_ms,
+            headline_thread_ids: vec![mixed.clone(), early.clone()],
+            ..Default::default()
+        };
+
+        // A member who joined at revision 3; the decision is at revision 5.
+        let on = history_floor_enabled_from(Some("true"));
+        let floor = history_floor_from_claim(3, on);
+        let floored = grpc
+            .read_space(
+                &org,
+                viewer,
+                Rule::LastAuthor,
+                &query,
+                &Reach { ceiling: 5, floor },
+            )
+            .await
+            .expect("floored read");
+        assert_eq!(
+            floored.unread_threads, 1,
+            "only the thread with a message from the floor on is unread"
+        );
+        assert_eq!(
+            floored.latest_activity_ms, after_ms,
+            "the latest activity is the newest message the floor lets the reader see"
+        );
+        assert_eq!(
+            headline_of(&floored, &mixed).as_deref(),
+            Some("after the join")
+        );
+        assert_eq!(
+            headline_of(&floored, &early),
+            None,
+            "a thread with only earlier messages is named by no headline, its title included"
+        );
+        assert_eq!(
+            floored.headlines.len(),
+            1,
+            "only the thread with a message from the floor on is named"
+        );
+
+        // The switch off: the same signed claim is ignored, so the full view is read.
+        let off = history_floor_from_claim(3, history_floor_enabled_from(Some("1")));
+        let full = grpc
+            .read_space(
+                &org,
+                viewer,
+                Rule::LastAuthor,
+                &query,
+                &Reach {
+                    ceiling: 5,
+                    floor: off,
+                },
+            )
+            .await
+            .expect("unfloored read");
+        assert_eq!(full.unread_threads, 2, "the switch off counts both threads");
+        assert_eq!(
+            full.latest_activity_ms, newest_ms,
+            "the switch off sees the pre-join message too"
+        );
+        assert_eq!(
+            headline_of(&full, &mixed).as_deref(),
+            Some("before the join")
+        );
+        assert_eq!(
+            headline_of(&full, &early).as_deref(),
+            Some("pre-join title"),
+            "the switch off names the early thread by its title"
+        );
+        assert_eq!(full.headlines.len(), 2, "the switch off names both threads");
+
+        clean_space(&pool, &org, &space).await;
     }
 }

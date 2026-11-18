@@ -9,6 +9,10 @@
 //!   (fail-open on a presentation rule, never on authority). The switch is a rollout control,
 //!   never an authorization input.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use tracing::warn;
+
 use crate::grpc::VerifiedSpaceRead;
 
 /// Session Core switch: honour the signed `history_floor_revision` claim. ON only for the literal
@@ -26,9 +30,23 @@ pub(crate) fn history_floor_enabled() -> bool {
 }
 
 /// The floor a signed claim yields: `None` when the claim is absent (0), does not fit a BIGINT, or
-/// the switch is off.
+/// the switch is off. A non-zero claim that the off switch drops logs one warning per process, so
+/// a rollout that signs floors while the switch is off can be seen; the claim is still ignored.
 pub(crate) fn history_floor_from_claim(claim: u64, enabled: bool) -> Option<i64> {
-    if !enabled || claim == 0 {
+    if !enabled {
+        // Warned once per process, as `decision_keys::parse_public_key` warns: the claim is read
+        // on every request, so the warning must not repeat.
+        static IGNORED_CLAIM_WARNED: AtomicBool = AtomicBool::new(false);
+        if claim != 0 && !IGNORED_CLAIM_WARNED.swap(true, Ordering::Relaxed) {
+            warn!(
+                "a Space read decision signs a history floor, but the \
+                 SESSION_CORE_SPACE_HISTORY_FLOOR switch is not the literal true; the floor is \
+                 ignored and full history is shown"
+            );
+        }
+        return None;
+    }
+    if claim == 0 {
         return None;
     }
     i64::try_from(claim).ok()

@@ -3,7 +3,7 @@
 //! * WS02-S3: the Space event stream decision (`model-plane-space-stream`) and its separation
 //!   from the `model-plane` read decision.
 //! * WS06-S2: the `zero_data_retention` flag of the create and append decisions under
-//!   `SESSION_CORE_SPACE_ZDR` (observe by default, enforce on the exact word).
+//!   `SESSION_CORE_SPACE_ZDR` (observe by default, enforce on the word, trimmed and case-folded).
 //! * WS06-S1: the typed refusal of `record_run_output` for a ZDR caller.
 //!
 //! Everything here is pure: tokens are minted with a test key and verified with the keyed cores,
@@ -641,20 +641,26 @@ fn space_zdr_observe_is_the_default_for_the_real_verifiers() {
         verify_create(&create_request(true)).expect("flag true proceeds under observe");
         verify_append(&append_request(true)).expect("flag true proceeds under observe");
     }
-    let _env = ZdrEnv::set(Some("Enforce"));
-    verify_create(&create_request(true)).expect("a mis-cased word never enforces");
+    // A value that is not the word, here one a switch reads as on, stays observe.
+    let _env = ZdrEnv::set(Some("true"));
+    verify_create(&create_request(true)).expect("a value that is not the word does not enforce");
 }
 
 #[test]
 fn space_zdr_enforce_refuses_create_and_append_with_flag_true() {
-    let _env = ZdrEnv::set(Some("enforce"));
-    assert_zdr_forbidden(&verify_create(&create_request(true)).expect_err("enforce refuses create"));
-    assert_zdr_forbidden(
-        &verify_append(&append_request(true)).expect_err("enforce refuses append"),
-    );
-    // Flag false stays accepted under enforce.
-    verify_create(&create_request(false)).expect("flag false still creates");
-    verify_append(&append_request(false)).expect("flag false still appends");
+    // The word is read trimmed and case-folded, so each spelling enforces.
+    for spelling in ["enforce", "Enforce", "ENFORCE", " enforce "] {
+        let _env = ZdrEnv::set(Some(spelling));
+        assert_zdr_forbidden(
+            &verify_create(&create_request(true)).expect_err("enforce refuses create"),
+        );
+        assert_zdr_forbidden(
+            &verify_append(&append_request(true)).expect_err("enforce refuses append"),
+        );
+        // Flag false stays accepted under enforce.
+        verify_create(&create_request(false)).expect("flag false still creates");
+        verify_append(&append_request(false)).expect("flag false still appends");
+    }
 }
 
 #[test]

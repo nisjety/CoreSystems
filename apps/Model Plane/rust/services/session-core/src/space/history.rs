@@ -8,8 +8,8 @@
 //! `coverage = "shared"`; `None` = the caller's own threads in the Space only,
 //! `coverage = "own_threads_only"`); the membership revocation row; then one SQL statement under
 //! a permit and a statement timeout. The index is never the access boundary: every row is still
-//! checked against the Space, the org, the audience ceiling (thread AND message) and, without a
-//! decision, the thread owner.
+//! checked against the Space, the org, the audience ceiling (thread AND message), the `since_join`
+//! history floor (message, WS04-S11) and, without a decision, the thread owner.
 //!
 //! Query text, snippets and hit ids never reach a log line. Snippets are returned as text
 //! segments split on a per-request nonce, never as markup.
@@ -215,16 +215,23 @@ pub(crate) fn parse_snippet(raw: &str, start: &str, stop: &str) -> Vec<pb::Snipp
 // SQL.
 // ---------------------------------------------------------------------------------------------
 
+/// The history floor's placeholder in each statement built on [`base_predicates`]: the page binds
+/// $1..$16 and the floor last as $17; the waived-run probe binds $1..$10 and the floor as $11.
+const PAGE_FLOOR_PARAM: &str = "$17";
+const WAIVED_FLOOR_PARAM: &str = "$11";
+
 /// The predicates every hit must satisfy. Parameters: $1 org, $2 Space, $3 user (owner path),
 /// $4 audience ceiling (`NULL` = no decision, owner-only), $5 tsquery, $6 thread filter,
-/// $7 author filter, $8 role filter, $9 since, $10 until.
+/// $7 author filter, $8 role filter, $9 since, $10 until, and the history floor under the
+/// placeholder `floor` (`NULL` = none; WS04-S11).
 ///
 /// `m.space_id = $2` with the role list is the index's partial predicate; the Space equality is
-/// stated on the thread and the message, the ceiling on both. A message that has any revision
-/// row is excluded (retain-mode originals of an edited or deleted message stay in
+/// stated on the thread and the message, the ceiling on both. A message stamped before the floor
+/// is not a hit, and an unstamped one is, as in the conversation read. A message that has any
+/// revision row is excluded (retain-mode originals of an edited or deleted message stay in
 /// `messages.content`, so they must never be found). Threads that hold a `zdr_waived` run are
 /// added by the page query and reported by [`WAIVED_EXISTS_SQL`].
-fn base_predicates() -> String {
+fn base_predicates(floor: &str) -> String {
     format!(
         "m.space_id = $2 AND m.space_id IS NOT NULL AND m.role IN ('user', 'assistant')
       AND {FTS_EXPR} @@ to_tsquery('simple', $5)
@@ -234,6 +241,9 @@ fn base_predicates() -> String {
                 ELSE (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $4::BIGINT)
                      AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $4::BIGINT)
            END)
+      AND ({floor}::BIGINT IS NULL
+           OR m.recipient_audience_revision IS NULL
+           OR m.recipient_audience_revision >= {floor}::BIGINT)
       AND (NULLIF($6, '') IS NULL OR t.id = $6)
       AND (NULLIF($7, '') IS NULL OR m.author_subject_id = $7)
       AND (NULLIF($8, '') IS NULL OR m.role = $8)
@@ -247,7 +257,8 @@ const WAIVED_RUN_SQL: &str =
     "EXISTS (SELECT 1 FROM runs wr WHERE wr.thread_id = t.id AND wr.retention_class = 'zdr_waived')";
 
 /// The page. Extra parameters: $11/$12 keyset position, $13 offset (relevance), $14 rows to
-/// read, $15/$16 snippet markers. `ts_headline` runs on the page only, after the limit.
+/// read, $15/$16 snippet markers, $17 the history floor. `ts_headline` runs on the page only,
+/// after the limit.
 fn search_sql(relevance: bool) -> String {
     let (score, order) = if relevance {
         (
@@ -257,7 +268,7 @@ fn search_sql(relevance: bool) -> String {
     } else {
         ("0::FLOAT4".to_owned(), "m.created_at DESC, m.id DESC")
     };
-    let base = base_predicates();
+    let base = base_predicates(PAGE_FLOOR_PARAM);
     format!(
         "WITH page AS (
     SELECT m.id AS message_id, m.thread_id, m.role, m.author_subject_id, m.agent_name,
@@ -286,9 +297,9 @@ ORDER BY p.score DESC, p.created_at DESC, p.message_id DESC"
 }
 
 /// Whether any matching message sits in a thread withheld because it holds a `zdr_waived` run.
-/// Same $1..$10 as the page.
+/// Same $1..$10 as the page, and the history floor as $11.
 fn waived_exists_sql() -> String {
-    let base = base_predicates();
+    let base = base_predicates(WAIVED_FLOOR_PARAM);
     format!(
         "SELECT EXISTS (
     SELECT 1 FROM messages m JOIN threads t ON t.id = m.thread_id
@@ -297,9 +308,10 @@ fn waived_exists_sql() -> String {
     )
 }
 
-/// Message address: the thread of one message under the same Space, org, ceiling and owner
-/// predicates. A deleted message is not addressable; an edited one is. Parameters: $1 org,
-/// $2 Space, $3 user, $4 ceiling (`NULL` = owner-only), $5 message id.
+/// Message address: the thread of one message under the same Space, org, ceiling, floor and owner
+/// predicates. A deleted message is not addressable; an edited one is; a message before the
+/// history floor is not addressable either (WS04-S11). Parameters: $1 org, $2 Space, $3 user,
+/// $4 ceiling (`NULL` = owner-only), $5 message id, $6 history floor (`NULL` = none).
 const RESOLVE_SQL: &str = "
 SELECT m.thread_id
 FROM messages m
@@ -314,6 +326,9 @@ WHERE m.id = $5
             ELSE (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $4::BIGINT)
                  AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $4::BIGINT)
        END)
+  AND ($6::BIGINT IS NULL
+       OR m.recipient_audience_revision IS NULL
+       OR m.recipient_audience_revision >= $6::BIGINT)
   AND NOT EXISTS (SELECT 1 FROM message_revisions r WHERE r.message_id = m.id AND r.action = 'deleted')";
 
 type SearchRow = (
@@ -349,6 +364,9 @@ struct Reach {
     space_id: String,
     /// `Some` = a verified decision (shared coverage up to this revision); `None` = owner-only.
     ceiling: Option<i64>,
+    /// WS04-S11: the `since_join` floor the decision signs, read from this revision on
+    /// (`None` = full history, including owner-only reads and the switch being off).
+    floor: Option<i64>,
 }
 
 impl SpaceHistoryGrpc {
@@ -390,14 +408,14 @@ impl SpaceHistoryGrpc {
         if space_id.is_empty() || space_id.len() > MAX_SPACE_ID_BYTES {
             return Err(Status::invalid_argument("space_id is required"));
         }
-        let ceiling = verify_thread_read_space_decision(
-            decision_token,
-            decision_ref,
-            org_id,
-            user_id,
-            space_id,
-        )?
-        .map(|read| read.recipient_audience_revision);
+        let audience =
+            crate::space::audience_window::audience_window(verify_thread_read_space_decision(
+                decision_token,
+                decision_ref,
+                org_id,
+                user_id,
+                space_id,
+            )?);
         let revoked: (bool,) = sqlx::query_as(
             "SELECT EXISTS(SELECT 1 FROM space_membership_revocations WHERE space_ref = $1 AND subject_id = $2)",
         )
@@ -416,7 +434,8 @@ impl SpaceHistoryGrpc {
             org_id: org_id.to_owned(),
             user_id: user_id.to_owned(),
             space_id: space_id.to_owned(),
-            ceiling,
+            ceiling: audience.ceiling,
+            floor: audience.floor,
         })
     }
 
@@ -532,6 +551,7 @@ impl SpaceHistoryGrpc {
             .bind(page_size + 1)
             .bind(&start_marker)
             .bind(&stop_marker)
+            .bind(reach.floor)
             .fetch_all(&mut *tx)
             .await
             .map_err(map_db_error)?;
@@ -546,6 +566,7 @@ impl SpaceHistoryGrpc {
             .bind(&req.role)
             .bind(since)
             .bind(until)
+            .bind(reach.floor)
             .fetch_one(&mut *tx)
             .await
             .map_err(map_db_error)?;
@@ -623,6 +644,7 @@ impl SpaceHistoryGrpc {
             .bind(&reach.user_id)
             .bind(reach.ceiling)
             .bind(message_id)
+            .bind(reach.floor)
             .fetch_optional(&mut *tx)
             .await
             .map_err(map_db_error)?;
@@ -656,5 +678,198 @@ impl SpaceHistoryService for SpaceHistoryGrpc {
         let result = self.resolve(request).await;
         record_metrics("space_resolve_message", started, result.is_ok());
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::space::audience_window::{history_floor_enabled_from, history_floor_from_claim};
+    use crate::space::test_support::{
+        clean_space, connect, seed_space_message_at_revision, seed_space_thread,
+    };
+    use mp_ids::new_ulid;
+
+    /// The highest `$n` a statement names. Postgres refuses a statement unless every bind up to
+    /// it is supplied, in order, so this is checked against the binds the handlers make.
+    fn highest_placeholder(sql: &str) -> usize {
+        sql.match_indices('$')
+            .filter_map(|(at, _)| {
+                let digits: String = sql[at + 1..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                digits.parse::<usize>().ok()
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// WS04-S11: the floor is the last bind of the page ($17), of the waived-run probe ($11) and of
+    /// the message address ($6). No database needed.
+    #[test]
+    fn the_history_floor_is_the_last_bind_of_each_statement_that_reads_messages() {
+        assert_eq!(highest_placeholder(&search_sql(false)), 17);
+        assert_eq!(highest_placeholder(&search_sql(true)), 17);
+        assert_eq!(highest_placeholder(&waived_exists_sql()), 11);
+        assert_eq!(highest_placeholder(RESOLVE_SQL), 6);
+        assert!(search_sql(false).contains("m.recipient_audience_revision >= $17::BIGINT"));
+        assert!(waived_exists_sql().contains("m.recipient_audience_revision >= $11::BIGINT"));
+        assert!(RESOLVE_SQL.contains("m.recipient_audience_revision >= $6::BIGINT"));
+    }
+
+    /// The message ids one Space search returns, bound exactly as `search()` binds them.
+    async fn search_ids(
+        pool: &PgPool,
+        org: &str,
+        space: &str,
+        ceiling: Option<i64>,
+        floor: Option<i64>,
+        query: &str,
+    ) -> Vec<String> {
+        let tsquery = build_tsquery(query, false).expect("a word");
+        let rows: Vec<SearchRow> = sqlx::query_as(&search_sql(false))
+            .bind(org)
+            .bind(space)
+            .bind("owner-a")
+            .bind(ceiling)
+            .bind(&tsquery)
+            .bind("")
+            .bind("")
+            .bind("")
+            .bind(None::<DateTime<Utc>>)
+            .bind(None::<DateTime<Utc>>)
+            .bind(None::<DateTime<Utc>>)
+            .bind(None::<String>)
+            .bind(0_i64)
+            .bind(clamp_limit(0) + 1)
+            .bind("\u{E000}")
+            .bind("\u{E002}")
+            .bind(floor)
+            .fetch_all(pool)
+            .await
+            .expect("space search");
+        let mut ids: Vec<String> = rows.into_iter().map(|row| row.0).collect();
+        ids.sort();
+        ids
+    }
+
+    /// The thread a message address resolves to, bound exactly as `resolve()` binds it.
+    async fn resolve_thread(
+        pool: &PgPool,
+        org: &str,
+        space: &str,
+        ceiling: Option<i64>,
+        floor: Option<i64>,
+        message: &str,
+    ) -> Option<String> {
+        let row: Option<(String,)> = sqlx::query_as(RESOLVE_SQL)
+            .bind(org)
+            .bind(space)
+            .bind("owner-a")
+            .bind(ceiling)
+            .bind(message)
+            .bind(floor)
+            .fetch_optional(pool)
+            .await
+            .expect("resolve message");
+        row.map(|(thread,)| thread)
+    }
+
+    /// WS04-S11 against Postgres: a `since_join` reader's search and message address do not reach a
+    /// message stamped before the floor. The switch off, and a zero claim, give full history.
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn space_history_search_and_resolve_honour_the_history_floor() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let suffix = new_ulid();
+        let org = format!("history-floor-{suffix}");
+        let space = format!("space-history-floor-{suffix}");
+        let thread = format!("{suffix}-thread");
+        seed_space_thread(&pool, &org, &space, &thread, "owner-a").await;
+        let before = format!("{suffix}-before");
+        let after = format!("{suffix}-after");
+        seed_space_message_at_revision(
+            &pool,
+            &space,
+            &thread,
+            &before,
+            "budget before the join",
+            1,
+        )
+        .await;
+        seed_space_message_at_revision(&pool, &space, &thread, &after, "budget after the join", 4)
+            .await;
+
+        // A member who joined at revision 3; the decision is at revision 5.
+        let on = history_floor_enabled_from(Some("true"));
+        let floor = history_floor_from_claim(3, on);
+        assert_eq!(
+            search_ids(&pool, &org, &space, Some(5), floor, "budget").await,
+            vec![after.clone()],
+            "a message stamped before the floor is not a hit"
+        );
+        assert_eq!(
+            resolve_thread(&pool, &org, &space, Some(5), floor, &before).await,
+            None,
+            "a message stamped before the floor is not addressable"
+        );
+        assert_eq!(
+            resolve_thread(&pool, &org, &space, Some(5), floor, &after).await,
+            Some(thread.clone()),
+            "a message from the floor on is addressable"
+        );
+
+        // The waived-run probe takes the same floor, so it binds and answers.
+        let (waived,): (bool,) = sqlx::query_as(&waived_exists_sql())
+            .bind(&org)
+            .bind(&space)
+            .bind("owner-a")
+            .bind(Some(5_i64))
+            .bind(build_tsquery("budget", false).expect("a word"))
+            .bind("")
+            .bind("")
+            .bind("")
+            .bind(None::<DateTime<Utc>>)
+            .bind(None::<DateTime<Utc>>)
+            .bind(floor)
+            .fetch_one(&pool)
+            .await
+            .expect("waived probe binds the floor");
+        assert!(!waived, "no waived run in this Space");
+
+        // The switch off: the same signed claim is ignored, so the earlier message is found.
+        let off = history_floor_from_claim(3, history_floor_enabled_from(Some("1")));
+        assert_eq!(
+            search_ids(&pool, &org, &space, Some(5), off, "budget")
+                .await
+                .len(),
+            2,
+            "floor off returns the earlier message"
+        );
+        assert_eq!(
+            resolve_thread(&pool, &org, &space, Some(5), off, &before).await,
+            Some(thread.clone()),
+            "floor off addresses the earlier message"
+        );
+
+        // The switch on with a zero claim: no floor is signed, so everything is returned.
+        let zero = history_floor_from_claim(0, on);
+        assert_eq!(
+            search_ids(&pool, &org, &space, Some(5), zero, "budget")
+                .await
+                .len(),
+            2,
+            "a zero claim is no floor"
+        );
+        assert_eq!(
+            resolve_thread(&pool, &org, &space, Some(5), zero, &before).await,
+            Some(thread.clone()),
+            "a zero claim addresses the earlier message"
+        );
+
+        clean_space(&pool, &org, &space).await;
     }
 }

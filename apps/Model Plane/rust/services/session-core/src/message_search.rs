@@ -54,7 +54,8 @@ const QUERY_CANCELED: &str = "57014";
 /// Parameters: $1 org, $2 owner, $3 prefix tsquery, $4 Space, $5 Space audience ceiling,
 /// $6 origin, $7 thread filter, $8 excluded thread, $9 recall (no human posts, no zero-retention
 /// threads), $10 archive state,
-/// $11/$12 keyset position, $13 page rows + 1, $14 candidate cap.
+/// $11/$12 keyset position, $13 page rows + 1, $14 candidate cap, $15 Space history floor
+/// (`NULL` = none; a message stamped before it is not a hit, WS04-S11).
 ///
 /// The predicate on `to_tsvector('simple', left(m.content, 65536))` and the role filter
 /// match migration 0055's index expression, so the planner can use it. `ts_headline` runs
@@ -77,6 +78,9 @@ WITH candidates AS (
                      AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $5::BIGINT)
                      AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $5::BIGINT)
            END)
+      AND ($15::BIGINT IS NULL
+           OR m.recipient_audience_revision IS NULL
+           OR m.recipient_audience_revision >= $15::BIGINT)
       AND (NULLIF($6, '') IS NULL OR t.origin = $6)
       AND (NULLIF($7, '') IS NULL OR t.id = $7)
       AND (NULLIF($8, '') IS NULL OR t.id <> $8)
@@ -274,7 +278,9 @@ impl MessageSearchGrpc {
             &req.user_id,
             &req.space_id,
         )?;
-        let audience_ceiling = space_read.map(|read| read.recipient_audience_revision);
+        // The window rides the same verified decision as the ceiling. The floor (WS04-S11) is
+        // `None` for an owner read and whenever SESSION_CORE_SPACE_HISTORY_FLOOR is off.
+        let audience = crate::space::audience_window::audience_window(space_read);
         let archive_state = match pb::ArchiveFilter::try_from(req.archived) {
             Ok(pb::ArchiveFilter::Unspecified) => "active",
             Ok(pb::ArchiveFilter::Archived) => "archived",
@@ -306,7 +312,7 @@ impl MessageSearchGrpc {
             .bind(&req.user_id)
             .bind(&tsquery)
             .bind(&req.space_id)
-            .bind(audience_ceiling)
+            .bind(audience.ceiling)
             .bind(&req.origin)
             .bind(&req.thread_id)
             .bind(&req.exclude_thread_id)
@@ -316,6 +322,7 @@ impl MessageSearchGrpc {
             .bind(cursor.as_ref().map(|position| position.message_id.clone()))
             .bind(page_size + 1)
             .bind(CANDIDATE_LIMIT)
+            .bind(audience.floor)
             .fetch_all(&mut *tx)
             .await
             .map_err(map_search_error)?;
@@ -378,6 +385,10 @@ impl MessageSearchGrpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::space::audience_window::{history_floor_enabled_from, history_floor_from_claim};
+    use crate::space::test_support::{
+        clean_space, seed_space_message_at_revision, seed_space_thread,
+    };
     use chrono::{Duration, TimeZone};
     use mp_ids::new_ulid;
 
@@ -710,6 +721,126 @@ mod tests {
         let mut expected = vec![turn.as_str(), post.as_str()];
         expected.sort_unstable();
         assert_eq!(ui_threads, expected, "UI search keeps the post");
+    }
+
+    /// WS04-S11: the history floor is bound last ($15) and, as in the conversation read, admits a
+    /// message stamped with no revision. Checked on the statement text (no database needed).
+    #[test]
+    fn the_space_history_floor_is_bound_last_and_admits_an_unstamped_message() {
+        assert!(SEARCH_SQL.contains("$15::BIGINT IS NULL"));
+        assert!(SEARCH_SQL.contains("m.recipient_audience_revision >= $15::BIGINT"));
+        assert!(
+            !SEARCH_SQL.contains("$16"),
+            "fifteen binds: the floor is the last one"
+        );
+    }
+
+    /// WS04-S11: a `since_join` reader's search returns no message stamped before the floor. The
+    /// floor is an SQL predicate, so this runs the statement with the binds `search()` makes and the
+    /// floor the signed claim yields. The switch off, and a zero claim, give full history.
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn space_search_hides_messages_before_the_history_floor() {
+        let Some(pool) = crate::space::test_support::connect().await else {
+            return;
+        };
+        let suffix = new_ulid();
+        let org = format!("search-floor-{suffix}");
+        let space = format!("space-search-floor-{suffix}");
+        // One thread per message. Search keeps only the newest hit of each thread unless a thread
+        // filter is set, so two messages in one thread would show one of them whatever the floor.
+        let before_thread = format!("{suffix}-before-thread");
+        let after_thread = format!("{suffix}-after-thread");
+        seed_space_thread(&pool, &org, &space, &before_thread, "owner-a").await;
+        seed_space_thread(&pool, &org, &space, &after_thread, "owner-a").await;
+        let before = format!("{suffix}-before");
+        let after = format!("{suffix}-after");
+        seed_space_message_at_revision(
+            &pool,
+            &space,
+            &before_thread,
+            &before,
+            "budget before the join",
+            1,
+        )
+        .await;
+        seed_space_message_at_revision(
+            &pool,
+            &space,
+            &after_thread,
+            &after,
+            "budget after the join",
+            4,
+        )
+        .await;
+        let mut full_history = vec![before.clone(), after.clone()];
+        full_history.sort();
+
+        // A member who joined at revision 3 reads from revision 3 on; the decision is at revision 5.
+        let on = history_floor_enabled_from(Some("true"));
+        let floored = space_search_ids(
+            &pool,
+            &org,
+            &space,
+            Some(5),
+            history_floor_from_claim(3, on),
+            "budget",
+        )
+        .await;
+        assert_eq!(
+            floored,
+            vec![after.clone()],
+            "a message stamped before the floor is not returned"
+        );
+
+        // The switch off: the same signed claim is ignored and the earlier message shows.
+        let off = history_floor_from_claim(3, history_floor_enabled_from(Some("1")));
+        let unfloored = space_search_ids(&pool, &org, &space, Some(5), off, "budget").await;
+        assert_eq!(
+            unfloored, full_history,
+            "floor off returns the earlier message"
+        );
+
+        // The switch on with a zero claim: no floor is signed, so everything is returned.
+        let zero = history_floor_from_claim(0, on);
+        let zero_claim = space_search_ids(&pool, &org, &space, Some(5), zero, "budget").await;
+        assert_eq!(zero_claim, full_history, "a zero claim is no floor");
+
+        clean_space(&pool, &org, &space).await;
+    }
+
+    /// The message ids one Space search returns, bound exactly as `search()` binds them.
+    async fn space_search_ids(
+        pool: &PgPool,
+        org: &str,
+        space: &str,
+        ceiling: Option<i64>,
+        floor: Option<i64>,
+        query: &str,
+    ) -> Vec<String> {
+        let tsquery = build_prefix_tsquery(query).expect("a word");
+        let rows: Vec<SearchRow> = sqlx::query_as(SEARCH_SQL)
+            .bind(org)
+            .bind("owner-a")
+            .bind(&tsquery)
+            .bind(space)
+            .bind(ceiling)
+            .bind("")
+            .bind("")
+            .bind("")
+            .bind(false)
+            .bind("active")
+            .bind(None::<DateTime<Utc>>)
+            .bind(None::<String>)
+            .bind(DEFAULT_HIT_LIMIT + 1)
+            .bind(CANDIDATE_LIMIT)
+            .bind(floor)
+            .fetch_all(pool)
+            .await
+            .expect("space search");
+        let mut ids: Vec<String> = rows.into_iter().map(|row| row.1).collect();
+        ids.sort();
+        ids
     }
 
     /// The post predicate rides on the recall flag alone: it must stay in the statement and stay

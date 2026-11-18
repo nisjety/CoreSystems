@@ -18,9 +18,11 @@
 //! enabled skill is injected as trusted text. A person's own skill is never
 //! refused, only counted: the person wrote its text.
 //!
-//! The switch is `CONTENT_WRITE_POLICY`. `off`, which is also what any other
-//! value means, runs no check at all. `report` runs the check, counts and logs
-//! what it would refuse, and lets the write through. `enforce` refuses it.
+//! The switch is `CONTENT_WRITE_POLICY`. Unset, blank or `off` runs no check at
+//! all. `report` runs the check, counts and logs what it would refuse, and lets
+//! the write through. `enforce` refuses it, and only the exact word does so: a
+//! set value the switch does not read runs as `report`, never as off, so a
+//! padded or mistyped value stays visible in the counters and the startup log.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -51,13 +53,21 @@ pub(crate) enum Mode {
 }
 
 impl Mode {
-    /// Only the exact words `report` and `enforce` turn the policy on. Nothing is trimmed or
-    /// case-folded: a padded or differently cased word, and an unset variable, leave it off.
+    /// Unset, blank, or `off` once its surrounding whitespace is removed, is [`Mode::Off`]. The
+    /// words `report` and `enforce` are read exactly, never through padding or another casing.
+    /// Any other set value is [`Mode::Report`]: never off, so a value this switch does not read
+    /// cannot silently disable the policy, and never enforce, so a typo cannot start refusing
+    /// writes. This is the rule `SESSION_RETENTION_SWEEP` follows (`retention_sweeper::mode_from`).
+    /// [`warn_inexact_mode`] names such a value at startup.
     pub(crate) fn from_env_value(value: Option<&str>) -> Self {
         match value {
-            Some("report") => Self::Report,
+            None => Self::Off,
             Some("enforce") => Self::Enforce,
-            _ => Self::Off,
+            Some("report") => Self::Report,
+            Some(raw) => match raw.trim() {
+                "" | "off" => Self::Off,
+                _ => Self::Report,
+            },
         }
     }
 
@@ -74,6 +84,28 @@ impl Mode {
             Self::Report => "report",
             Self::Enforce => "enforce",
         }
+    }
+}
+
+/// Whether `value` is set to something other than exactly `off`, `report` or `enforce`, and is
+/// not blank. [`Mode::from_env_value`] reads such a value as report, or as off when it is only
+/// padded `off`, so the startup log names it.
+fn is_inexact(value: Option<&str>) -> bool {
+    value.is_some_and(|raw| !matches!(raw, "off" | "report" | "enforce") && !raw.trim().is_empty())
+}
+
+/// Logs one warning at startup when [`MODE_ENV`] is set to a value other than exactly `off`,
+/// `report` or `enforce`. It names the mode the value reads as and never the value itself, and
+/// it changes nothing.
+pub(crate) fn warn_inexact_mode() {
+    let raw = std::env::var(MODE_ENV).ok();
+    if is_inexact(raw.as_deref()) {
+        tracing::warn!(
+            switch = MODE_ENV,
+            mode = Mode::from_env_value(raw.as_deref()).label(),
+            "switch is set to a value other than exactly off, report or enforce; it reads as the \
+             mode shown, and only the exact word enforce refuses writes"
+        );
     }
 }
 
@@ -506,14 +538,55 @@ mod tests {
     }
 
     #[test]
-    fn the_switch_is_on_only_for_the_exact_words() {
+    fn the_switch_is_off_only_when_unset_blank_or_off_and_enforce_only_for_the_exact_word() {
         assert_eq!(Mode::from_env_value(None), Mode::Off);
         assert_eq!(Mode::from_env_value(Some("")), Mode::Off);
-        assert_eq!(Mode::from_env_value(Some("true")), Mode::Off);
-        assert_eq!(Mode::from_env_value(Some("ENFORCE")), Mode::Off);
-        assert_eq!(Mode::from_env_value(Some(" report ")), Mode::Off);
+        assert_eq!(Mode::from_env_value(Some(" \r\n")), Mode::Off);
+        assert_eq!(Mode::from_env_value(Some("off")), Mode::Off);
+        assert_eq!(Mode::from_env_value(Some(" off\r\n")), Mode::Off);
         assert_eq!(Mode::from_env_value(Some("report")), Mode::Report);
         assert_eq!(Mode::from_env_value(Some("enforce")), Mode::Enforce);
+    }
+
+    /// A padded, cased or mistyped word, a boolean and a CRLF-terminated `enforce` all run as
+    /// report: they count what enforce would refuse, and they never switch the policy off or
+    /// start refusing writes.
+    #[test]
+    fn a_set_value_the_switch_does_not_read_runs_as_report_and_never_as_off_or_enforce() {
+        for raw in [
+            " report ",
+            "report\r\n",
+            "enforce\r\n",
+            "\tenforce",
+            "ENFORCE",
+            "Enforce",
+            "enforced",
+            "true",
+            "1",
+            "on",
+            "yes",
+            "maybe",
+        ] {
+            assert_eq!(Mode::from_env_value(Some(raw)), Mode::Report, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_value_other_than_the_exact_words_is_named_at_startup() {
+        assert!(!is_inexact(None));
+        for quiet in ["", " \r\n", "off", "report", "enforce"] {
+            assert!(!is_inexact(Some(quiet)), "{quiet:?}");
+        }
+        for named in [
+            " off ",
+            " report",
+            "enforce\r\n",
+            "ENFORCE",
+            "true",
+            "maybe",
+        ] {
+            assert!(is_inexact(Some(named)), "{named:?}");
+        }
     }
 
     #[test]

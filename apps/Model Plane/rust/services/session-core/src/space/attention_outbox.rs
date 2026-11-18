@@ -21,10 +21,16 @@ use tracing::{info, warn};
 pub(crate) const EMIT_ENV: &str = "SPACE_ATTENTION_EMIT";
 
 /// Whether attention outbox rows are requested. Off by default (release artifacts); compose
-/// dev sets it. Only the exact literal `true` turns it on: `1`, `TRUE` and a padded value leave
-/// it off.
+/// dev sets it.
 pub(crate) fn emit_enabled_from_env() -> bool {
-    mp_contracts::loop_fold::switch_from(std::env::var(EMIT_ENV).ok().as_deref())
+    emit_enabled_from(std::env::var(EMIT_ENV).ok().as_deref())
+}
+
+/// The pure reading of [`EMIT_ENV`], so the exact-literal rule is testable without touching the
+/// process environment. Only the exact literal `true` turns it on: `1`, `TRUE` and a padded value
+/// leave it off.
+pub(crate) fn emit_enabled_from(value: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(value)
 }
 
 /// Writes the flag into `space_attention_settings` and returns the value now stored.
@@ -58,4 +64,27 @@ pub(crate) async fn sync_flag(pool: &PgPool, requested: bool) -> Result<bool> {
     tx.commit().await?;
     info!(requested, effective, "space attention outbox flag synced");
     Ok(effective)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exact reading of `SPACE_ATTENTION_EMIT`, pinned because nothing else tests this module.
+    /// Only the literal `true` turns the outbox writes on. The readers this replaced also took `1`
+    /// and `true` in any case, and trimmed a padded value first; a later lenient reader fails here.
+    #[test]
+    fn the_emit_switch_is_on_only_for_the_exact_literal_true() {
+        assert!(!emit_enabled_from(None), "unset means off");
+        assert!(emit_enabled_from(Some("true")));
+        for raw in [
+            "", " ", "0", "false", "no", "off", "yes", "on", "1", "TRUE", "True", " true ",
+            "true\n", "enabled",
+        ] {
+            assert!(
+                !emit_enabled_from(Some(raw)),
+                "{raw:?} must leave the attention outbox off"
+            );
+        }
+    }
 }

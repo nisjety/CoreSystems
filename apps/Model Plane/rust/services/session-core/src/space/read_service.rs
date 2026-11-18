@@ -12,7 +12,9 @@
 //! `permission_denied`, never an owner-bound fallback) and verified for exactly this org, this
 //! user and this Space, then the audience ceiling the decision carries, applied to both the
 //! thread and the message row so a newer-audience message changes neither the list nor any
-//! count. A ZDR caller reads no row and gets an empty page (a ZDR turn produces no artifact).
+//! count, and the `since_join` history floor (WS04-S11) applied to the message row the same way,
+//! so a late joiner never lists an artifact stamped before the floor. A ZDR caller reads no row
+//! and gets an empty page (a ZDR turn produces no artifact).
 //! Content is never returned: the summary carries `char_length` only, and the viewer reads the
 //! thread through the existing transcript route under its own authority.
 
@@ -25,7 +27,7 @@ use tonic::{Request, Response, Status};
 use tracing::warn;
 
 use crate::auth::{authorize_operation, identity};
-use crate::grpc::verify_thread_read_space_decision;
+use crate::grpc::{verify_thread_read_space_decision, VerifiedSpaceRead};
 
 const MAX_SPACE_ID_BYTES: usize = 128;
 const DEFAULT_ARTIFACT_LIMIT: u32 = 50;
@@ -113,7 +115,8 @@ fn clamp_artifact_limit(limit: u32) -> i64 {
 /// One row per (thread, artifact) at its latest version.
 ///
 /// `art` explodes `metadata.artifacts` of the Space's assistant messages under the org join,
-/// the unarchived-thread filter and the audience ceiling (thread AND message); the window
+/// the unarchived-thread filter, the audience ceiling (thread AND message) and the `since_join`
+/// history floor (message, WS04-S11: `$9`, `NULL` when the read carries none); the window
 /// count therefore only ever counts rows the caller may see. The artifact kinds are the ones
 /// the room can render (`document`, `code`, `html`); a non-object element, a missing id or any
 /// other kind is dropped. `version` falls back to 1 when it is not a small non-negative
@@ -147,6 +150,8 @@ WITH art AS (
       AND t.archived_at IS NULL
       AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $3)
       AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $3)
+      AND ($9::BIGINT IS NULL OR m.recipient_audience_revision IS NULL
+           OR m.recipient_audience_revision >= $9::BIGINT)
       AND jsonb_typeof(a.elem) = 'object'
       AND NULLIF(a.elem->>'id', '') IS NOT NULL
       AND a.elem->>'kind' IN ('document', 'code', 'html')
@@ -178,6 +183,31 @@ type ArtifactRow = (
     Option<String>,
     DateTime<Utc>,
 );
+
+/// The page statement for one verified read. `read` supplies the audience ceiling and the history
+/// floor, so the handler and the DB tests bind the same values in the same order. It reads
+/// `limit + 1` rows so the caller can tell whether a next page exists.
+async fn artifact_page_rows(
+    pool: &PgPool,
+    org_id: &str,
+    space_id: &str,
+    read: VerifiedSpaceRead,
+    cursor: Option<&ArtifactCursor>,
+    limit: i64,
+) -> Result<Vec<ArtifactRow>, sqlx::Error> {
+    sqlx::query_as::<_, ArtifactRow>(LIST_SPACE_ARTIFACTS_SQL)
+        .bind(org_id)
+        .bind(space_id)
+        .bind(read.recipient_audience_revision)
+        .bind(limit + 1)
+        .bind(cursor.map(|c| c.created_at))
+        .bind(cursor.map(|c| c.message_id.clone()))
+        .bind(cursor.map(|c| c.artifact_id.clone()))
+        .bind(MAX_TITLE_CHARS)
+        .bind(read.history_floor)
+        .fetch_all(pool)
+        .await
+}
 
 #[tonic::async_trait]
 impl SpaceRoomReadService for SpaceRoomReadGrpc {
@@ -235,21 +265,19 @@ impl SpaceRoomReadService for SpaceRoomReadGrpc {
             }));
         }
 
-        let rows: Vec<ArtifactRow> = sqlx::query_as(LIST_SPACE_ARTIFACTS_SQL)
-            .bind(&req.org_id)
-            .bind(&space_id)
-            .bind(read.recipient_audience_revision)
-            .bind(limit + 1)
-            .bind(cursor.as_ref().map(|c| c.created_at))
-            .bind(cursor.as_ref().map(|c| c.message_id.clone()))
-            .bind(cursor.as_ref().map(|c| c.artifact_id.clone()))
-            .bind(MAX_TITLE_CHARS)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|error| {
-                warn!(error = %error, "list_space_artifacts failed");
-                Status::unavailable("Space artifacts are unavailable")
-            })?;
+        let rows: Vec<ArtifactRow> = artifact_page_rows(
+            &self.pool,
+            &req.org_id,
+            &space_id,
+            read,
+            cursor.as_ref(),
+            limit,
+        )
+        .await
+        .map_err(|error| {
+            warn!(error = %error, "list_space_artifacts failed");
+            Status::unavailable("Space artifacts are unavailable")
+        })?;
 
         let page_size = usize::try_from(limit).unwrap_or(usize::MAX);
         let has_more = rows.len() > page_size;
