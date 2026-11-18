@@ -8,7 +8,7 @@
 //   GET  /api/v1/spaces/{ref}/browser-runs/{run}/evidence/{id}      R4 -> image bytes, the run's starter only
 // Errors arrive as the typed `{error:{code,message,details}}` envelope (ApiError). Their copy lives in
 // shared/i18n/errors.ts under the WS20 banner.
-import { requestJson } from '../http'
+import { requestJson, requestJsonPage } from '../http'
 
 /** The most hosts one room run may name (R1). */
 export const SPACE_BROWSER_MAX_HOSTS = 8
@@ -178,11 +178,11 @@ export async function startSpaceBrowserRun(
     share_view: false,
     client_send_id: input.clientSendId,
   }
-  const wire = await requestJson<{ data?: unknown }>(
+  // requestJson hands back the envelope's `data` already.
+  const raw = await requestJson<unknown>(
     `/api/v1/spaces/${encodeURIComponent(spaceRef)}/browser-runs`,
     { method: 'POST', body: JSON.stringify(body) },
   )
-  const raw = wire?.data
   const data = isRecord(raw) ? raw : null
   const runId = data ? text(data.run_id) : null
   const threadId = data ? text(data.thread_id) : null
@@ -199,10 +199,11 @@ export async function listSpaceBrowserRuns(
 ): Promise<{ readonly runs: readonly SpaceBrowserRun[]; readonly nextCursor: string | null }> {
   const query = new URLSearchParams({ thread_id: options.threadId })
   if (options.limit !== undefined) query.set('limit', String(options.limit))
-  const wire = await requestJson<{ data?: unknown; meta?: unknown }>(
+  // requestJsonPage keeps the envelope's meta beside its data, where the next cursor is.
+  const page = await requestJsonPage<unknown>(
     `/api/v1/spaces/${encodeURIComponent(spaceRef)}/browser-runs?${query.toString()}`,
   )
-  const items: unknown = wire?.data
+  const items: unknown = page.data
   if (!Array.isArray(items)) throw unreadable()
   const runs: SpaceBrowserRun[] = []
   for (const item of items) {
@@ -210,8 +211,7 @@ export async function listSpaceBrowserRuns(
     if (!run) throw unreadable()
     runs.push(run)
   }
-  const rawMeta = wire?.meta
-  const meta: WireRecord = isRecord(rawMeta) ? rawMeta : {}
+  const meta: WireRecord = isRecord(page.meta) ? page.meta : {}
   return { runs, nextCursor: text(meta.next_cursor) }
 }
 
@@ -225,10 +225,9 @@ export async function readSpaceBrowserTimeline(
   if (options.after) query.set('after', options.after)
   if (options.limit !== undefined) query.set('limit', String(options.limit))
   const suffix = query.toString() ? `?${query.toString()}` : ''
-  const wire = await requestJson<{ data?: unknown }>(
+  const raw = await requestJson<unknown>(
     `/api/v1/spaces/${encodeURIComponent(spaceRef)}/browser-runs/${encodeURIComponent(runId)}/timeline${suffix}`,
   )
-  const raw = wire?.data
   const data = isRecord(raw) ? raw : null
   const run = data ? parseHeader(data.run) : null
   if (!data || !run || !Array.isArray(data.events)) throw unreadable()

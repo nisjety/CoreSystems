@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { translateApiError } from '@/shared/i18n/errors'
-import { ApiError, requestForm, requestJson, SESSION_EXPIRED_EVENT } from './http'
+import { ApiError, requestForm, requestJson, requestJsonPage, SESSION_EXPIRED_EVENT } from './http'
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -174,5 +174,55 @@ describe('gateway HTTP client failure handling', () => {
     expect(bare).toMatchObject({ status: 502, code: null })
     expect(translateApiError(bare, no, fallback)).toBe('Kunne ikke lagre.')
     expect(translateApiError(bare, no, fallback)).not.toMatch(/html|Bad gateway|502/i)
+  })
+})
+
+// WS19-S7: the page read keeps `meta` beside `data` and shares requestJson's headers, dev bypass and typed error.
+describe('requestJsonPage (WS19-S7)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
+  })
+
+  it('returns the data and the meta, keeping meta.next_cursor', async () => {
+    vi.stubEnv('VITE_ALLOW_DEV_AUTH_BYPASS', 'false')
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ data: [{ id: 'v1' }], meta: { next_cursor: 'cursor-2' } })))
+
+    const page = await requestJsonPage<Array<{ id: string }>>('/api/v1/spaces/s1/canvas/versions')
+
+    expect(page.data).toEqual([{ id: 'v1' }])
+    expect(page.meta).toEqual({ next_cursor: 'cursor-2' })
+  })
+
+  it('returns a null meta when the answer carries none', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ data: { ok: true } })))
+
+    const page = await requestJsonPage<{ ok: boolean }>('/api/v1/spaces/s1/canvas/versions')
+
+    expect(page).toEqual({ data: { ok: true }, meta: null })
+  })
+
+  it('sends the dev bypass Authorization only when VITE_ALLOW_DEV_AUTH_BYPASS is the exact string true', async () => {
+    for (const value of ['true', 'TRUE', '1', ' true', 'yes', 'false', '']) {
+      vi.stubEnv('VITE_ALLOW_DEV_AUTH_BYPASS', value)
+      const fetchMock = vi.fn(async () => jsonResponse({ data: [] }))
+      vi.stubGlobal('fetch', fetchMock)
+
+      await requestJsonPage('/api/v1/spaces/s1/canvas/versions')
+
+      const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+      expect((init.headers as Headers).get('Authorization'), value).toBe(value === 'true' ? 'Bearer dev-bypass' : null)
+    }
+  })
+
+  it('throws the typed ApiError with its status and code on a non-2xx answer', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      error: { code: 'space_not_found', message: 'Space is not available.' },
+    }, 404)))
+
+    const failure = await requestJsonPage('/api/v1/spaces/s1/canvas/versions').catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(ApiError)
+    expect(failure).toMatchObject({ status: 404, code: 'space_not_found' })
   })
 })

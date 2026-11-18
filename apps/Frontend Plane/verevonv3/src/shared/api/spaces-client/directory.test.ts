@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiError } from '../http'
-import { searchDirectoryPeople } from './directory'
+import { listDirectoryRooms, searchDirectory, searchDirectoryPeople } from './directory'
 
 type FetchCall = { url: string; init: RequestInit | undefined }
 
@@ -144,5 +144,126 @@ describe('searchDirectoryPeople (WS04-S3)', () => {
       expect(error, code).toBeInstanceOf(ApiError)
       expect(error, code).toMatchObject({ status, code })
     }
+  })
+})
+
+describe('listDirectoryRooms (WS04-S8)', () => {
+  it('GETs /api/v1/directory/rooms with only a trimmed q and the cursor', async () => {
+    const calls = stubFetch(200, { data: { enabled: true, rooms: [], next_cursor: null } })
+    await listDirectoryRooms('  lager  ', { cursor: 'c2' })
+    expect(calls).toHaveLength(1)
+    const url = new URL(calls[0]?.url ?? '', 'http://localhost')
+    expect(url.pathname).toBe('/api/v1/directory/rooms')
+    expect([...url.searchParams.keys()].sort()).toEqual(['cursor', 'q'])
+    expect(url.searchParams.get('q')).toBe('lager')
+    expect(url.searchParams.get('cursor')).toBe('c2')
+    await listDirectoryRooms('   ')
+    expect(calls[1]?.url.endsWith('/api/v1/directory/rooms')).toBe(true)
+  })
+
+  it('maps rooms and drops rows without a ref or a name', async () => {
+    stubFetch(200, {
+      data: {
+        enabled: true,
+        rooms: [
+          { space_ref: 'room_1', name: 'Lager', topic: 'Innkjøp', member_count: 4, join_role: 'editor' },
+          { space_ref: 'room_2', name: 'Ops', topic: '  ', member_count: 'many', join_role: 'manager' },
+          { name: 'Ingen ref' },
+          { space_ref: '', name: 'Tom ref' },
+          { space_ref: 'room_3', name: '   ' },
+          { space_ref: 'room_4', name: 7 },
+        ],
+        next_cursor: 'next-1',
+      },
+    })
+    const page = await listDirectoryRooms('')
+    expect(page).toEqual({
+      enabled: true,
+      rooms: [
+        { spaceRef: 'room_1', name: 'Lager', topic: 'Innkjøp', memberCount: 4, joinRole: 'editor' },
+        { spaceRef: 'room_2', name: 'Ops', topic: null, memberCount: 0, joinRole: 'viewer' },
+      ],
+      nextCursor: 'next-1',
+    })
+  })
+
+  it('passes enabled:false through as its own answer, not as an empty directory', async () => {
+    stubFetch(200, { data: { enabled: false, rooms: [] } })
+    expect(await listDirectoryRooms('')).toEqual({ enabled: false, rooms: [], nextCursor: null })
+  })
+
+  it('carries feature_disabled and directory_unavailable as ApiError codes', async () => {
+    for (const [status, code] of [
+      [404, 'feature_disabled'],
+      [503, 'directory_unavailable'],
+    ] as const) {
+      stubFetch(status, { error: { code, message: code } })
+      const error = await listDirectoryRooms('x').catch((caught: unknown) => caught)
+      expect(error, code).toBeInstanceOf(ApiError)
+      expect(error, code).toMatchObject({ status, code })
+    }
+  })
+})
+
+describe('searchDirectory (WS04-S9)', () => {
+  it('sends kinds person and agent by default, with the trimmed q, limit, cursor and exclude_member_of', async () => {
+    const calls = stubFetch(200, { data: { results: [] } })
+    await searchDirectory('  ola  ', { limit: 10, cursor: 'c2', excludeMemberOf: 'room_1' })
+    const params = paramsOf(calls[0])
+    expect([...params.keys()].sort()).toEqual(['cursor', 'exclude_member_of', 'kinds', 'limit', 'q'])
+    expect(params.get('kinds')).toBe('person,agent')
+    expect(params.get('q')).toBe('ola')
+    expect(params.get('limit')).toBe('10')
+    expect(params.get('cursor')).toBe('c2')
+    expect(params.get('exclude_member_of')).toBe('room_1')
+  })
+
+  it('sends only the kinds asked for', async () => {
+    const calls = stubFetch(200, { data: { results: [] } })
+    await searchDirectory('', { kinds: ['agent'] })
+    expect(paramsOf(calls[0]).get('kinds')).toBe('agent')
+    expect(paramsOf(calls[0]).has('q')).toBe(false)
+  })
+
+  it('maps person and agent rows and drops rows without a subject_id or an agent_ref', async () => {
+    stubFetch(200, {
+      data: {
+        results: [
+          { kind: 'person', subject_id: 'user_2', display_name: 'Kari Nordmann', email: 'kari@example.test', is_self: false },
+          {
+            kind: 'agent',
+            agent_ref: 'agent_ref_1',
+            display_name: 'Lagerhjelpen',
+            description: 'Hjelper',
+            installed_in: ['room_1', '', 7],
+          },
+          { kind: 'person', display_name: 'Ingen id' },
+          { kind: 'agent', display_name: 'Ingen ref' },
+          { kind: 'agent', agent_ref: '' },
+          { kind: 'person', subject_id: '' },
+        ],
+        next_cursor: 'n1',
+      },
+    })
+    const page = await searchDirectory('')
+    expect(page.results).toEqual([
+      { kind: 'person', subjectId: 'user_2', displayName: 'Kari Nordmann', email: 'kari@example.test', isSelf: false },
+      {
+        kind: 'agent',
+        agentRef: 'agent_ref_1',
+        displayName: 'Lagerhjelpen',
+        description: 'Hjelper',
+        installedIn: ['room_1'],
+      },
+    ])
+    expect(page.nextCursor).toBe('n1')
+    expect(page.presenceOnly).toBe(true)
+  })
+
+  it('surfaces feature_disabled as an ApiError with its code', async () => {
+    stubFetch(404, { error: { code: 'feature_disabled', message: 'off' } })
+    const error = await searchDirectory('x').catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error).toMatchObject({ status: 404, code: 'feature_disabled' })
   })
 })

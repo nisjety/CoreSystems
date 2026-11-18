@@ -102,6 +102,13 @@ describe('attentionFromWire', () => {
     ])
   })
 
+  it('clamps each room count to a whole, non-negative number', () => {
+    const [room] = attentionFromWire({
+      rooms: [{ space_ref: 'room-d', unread_threads: -3, mentions: 2.9, needs_you: 'many', working: Infinity }],
+    }).rooms
+    expect(room).toMatchObject({ unreadThreads: 0, mentions: 2, needsYou: 0, working: 0 })
+  })
+
   it('reads the stale sources from the envelope meta, and keeps the zdr_empty mode', () => {
     const parsed = attentionFromWire({ mode: 'zdr_empty', rooms: [], totals: { badge: 0 } }, { stale_sources: ['application'] })
     expect(parsed.mode).toBe('zdr_empty')

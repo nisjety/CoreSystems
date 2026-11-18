@@ -18,9 +18,11 @@ import {
   getApprovalPreview,
   listApprovals,
   listRunQuestions,
+  normalizeApproval,
   normalizePlan,
   normalizeRunQuestion,
   planStepEditToWire,
+  readQuarantinePreview,
   runQuestionErrorCodeOf,
 } from './orchestration-client'
 import clientSource from './orchestration-client.ts?raw'
@@ -169,6 +171,93 @@ describe('listApprovals', () => {
       undefined,
       undefined,
     ])
+  })
+})
+
+// WS10-S1: the card context an approval carries (what it is, what approving does, where it stands).
+describe('normalizeApproval card context (WS10-S1)', () => {
+  it('reads tool_key, action_label, resume_class and continuation from the wire', () => {
+    const approval = normalizeApproval({
+      id: 'appr_1',
+      run_id: 'run_1',
+      state: 'APPROVAL_STATE_GRANTED',
+      tool_key: 'mcp__mail__send',
+      action_label: 'Send an email',
+      resume_class: 'action_continuation',
+      continuation: {
+        state: 'queued',
+        failure_code: 'provider_timeout',
+        verification: 'pending',
+        provider_receipt_id: 'rcpt_1',
+      },
+    })
+
+    expect(approval).toMatchObject({
+      id: 'appr_1',
+      status: 'GRANTED',
+      toolKey: 'mcp__mail__send',
+      actionLabel: 'Send an email',
+      resumeClass: 'action_continuation',
+      continuation: {
+        state: 'queued',
+        failureCode: 'provider_timeout',
+        verification: 'pending',
+        providerReceiptId: 'rcpt_1',
+      },
+    })
+  })
+
+  it('reads a resume class or a continuation state it does not know as no claim, and a non-text field as absent', () => {
+    const approval = normalizeApproval({
+      id: 'appr_2',
+      tool_key: 7,
+      action_label: '',
+      resume_class: 'teleport',
+      continuation: { state: 'teleported' },
+    })
+
+    expect(approval?.toolKey).toBeUndefined()
+    expect(approval?.actionLabel).toBeUndefined()
+    expect(approval?.resumeClass).toBeUndefined()
+    expect(approval?.continuation).toBeUndefined()
+  })
+
+  it('reads nothing for an approval that has no id', () => {
+    expect(normalizeApproval({ tool_key: 'mcp__mail__send' })).toBeNull()
+  })
+})
+
+// WS10-S8: the held output of an approval, shown as inert text.
+describe('readQuarantinePreview (WS10-S8)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('maps the preview wire fields and reads the approval path', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        preview: { text: 'Held page text', truncated: true, tool_key: 'mcp__web__fetch', trust_class: 'untrusted' },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const preview = await readQuarantinePreview('appr/1')
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/api/v1/orchestration/approvals/appr%2F1/quarantine-preview')
+    expect(preview).toEqual({
+      text: 'Held page text',
+      truncated: true,
+      toolKey: 'mcp__web__fetch',
+      trustClass: 'untrusted',
+    })
+  })
+
+  it('reads a preview with no text as no preview, and an absent truncated flag as false', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ preview: { text: 42, truncated: true } })))
+    await expect(readQuarantinePreview('appr_1')).resolves.toBeNull()
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ preview: { text: 'Plain' } })))
+    await expect(readQuarantinePreview('appr_1')).resolves.toEqual({ text: 'Plain', truncated: false })
   })
 })
 

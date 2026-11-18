@@ -15,6 +15,7 @@ import {
   getSpaceRosterView,
   leaveSpaceRoom,
   removeSpaceMember,
+  updateSpaceRoomSettings,
 } from './spaces-client'
 
 const mockedRequest = vi.mocked(requestJson)
@@ -142,5 +143,35 @@ describe('getSpaceRosterView', () => {
   it('leaves the plain roster call unchanged', async () => {
     mockedRequest.mockResolvedValue({ members, writer_api: true })
     await expect(getSpaceRoster('space_1')).resolves.toEqual(members)
+  })
+})
+
+// WS04-S11: the room's history mode is one more field of the settings PATCH; only the field given is sent.
+describe('updateSpaceRoomSettings history mode (WS04-S11)', () => {
+  it('sends history_mode alone and maps the echoed mode to historyMode', async () => {
+    mockedRequest.mockResolvedValueOnce({ history_mode: 'since_join', changed: true })
+    await expect(updateSpaceRoomSettings('space_1', { historyMode: 'since_join' })).resolves.toEqual({
+      visibility: null,
+      joinRole: null,
+      historyMode: 'since_join',
+      changed: true,
+    })
+    expect(mockedRequest).toHaveBeenCalledWith('/api/v1/spaces/space_1/settings', {
+      method: 'PATCH',
+      body: JSON.stringify({ history_mode: 'since_join' }),
+    })
+  })
+
+  it('maps a full echo to full, and anything else the server did not name to null', async () => {
+    for (const [echoed, mapped] of [
+      ['full', 'full'],
+      ['since_join', 'since_join'],
+      ['everyone', null],
+      [null, null],
+      [undefined, null],
+    ] as const) {
+      mockedRequest.mockResolvedValueOnce({ history_mode: echoed, changed: false })
+      expect((await updateSpaceRoomSettings('space_1', { historyMode: 'full' })).historyMode, String(echoed)).toBe(mapped)
+    }
   })
 })

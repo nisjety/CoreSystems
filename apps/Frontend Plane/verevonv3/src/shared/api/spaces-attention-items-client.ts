@@ -95,7 +95,8 @@ function actorFrom(value: unknown): AttentionActor {
 function itemFrom(value: unknown): AttentionItem | undefined {
   if (!isRecord(value)) return undefined
   const itemId = text(value.item_id)
-  const spaceRef = text(value.space_ref)
+  // A blank ref names no room (the sibling attention client drops it the same way), so it is a malformed row.
+  const spaceRef = text(value.space_ref)?.trim() || null
   if (!itemId || !spaceRef || !isKind(value.kind)) return undefined
   const state: AttentionItemState =
     value.state === 'done' || value.state === 'snoozed' ? value.state : 'open'
@@ -122,7 +123,7 @@ function itemFrom(value: unknown): AttentionItem | undefined {
 function needsYouFrom(value: unknown): AttentionNeedsYou | undefined {
   if (!isRecord(value)) return undefined
   const approvalId = text(value.approval_id)
-  const spaceRef = text(value.space_ref)
+  const spaceRef = text(value.space_ref)?.trim() || null
   if (!approvalId || !spaceRef) return undefined
   return {
     approvalId,

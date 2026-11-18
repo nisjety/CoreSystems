@@ -96,6 +96,68 @@ describe('replyInSpaceThread (WS01-S6)', () => {
   })
 })
 
+describe('mentions on a human post (WS08-S6)', () => {
+  it('carries mentions in the body only when some were picked', async () => {
+    const calls = stubFetch(201, { data: { thread_id: 'thr_1', message_id: 'msg_1', sequence: 1 } })
+    await createSpacePost('room', { content: 'hi @Kari', clientSendId: 'j'.repeat(32) })
+    await createSpacePost('room', {
+      content: 'hi',
+      clientSendId: 'k'.repeat(32),
+      mentions: { people: [], agents: [] },
+    })
+    for (const call of calls) {
+      expect(Object.keys(JSON.parse(String(call.init.body)))).toEqual(['content', 'client_send_id'])
+    }
+  })
+
+  it('sends people and agents by subject id, with the locked source only where it was set', async () => {
+    const calls = stubFetch(201, { data: { thread_id: 'thr_1', message_id: 'msg_1', sequence: 2 } })
+    await createSpacePost('room', {
+      content: '@Kari @Lagerhjelpen',
+      clientSendId: 'l'.repeat(32),
+      mentions: {
+        people: [{ subjectId: 'user_2', label: 'Kari', source: 'typed' }],
+        agents: [{ subjectId: 'agent_1', source: 'locked' }],
+      },
+    })
+    expect(JSON.parse(String(calls[0]?.init.body)).mentions).toEqual({
+      people: [{ subject_id: 'user_2', label: 'Kari' }],
+      agents: [{ subject_id: 'agent_1', source: 'locked' }],
+    })
+  })
+
+  it('reads the receipt mentions as recorded and rejected, and leaves them out when none came back', async () => {
+    stubFetch(201, {
+      data: {
+        thread_id: 'thr_1',
+        message_id: 'msg_1',
+        sequence: 2,
+        mentions: {
+          recorded: [
+            { subject_id: 'user_2', kind: 'user' },
+            { subject_id: 'agent_1', kind: 'agent', wake: 'expected', ordinal: 1 },
+            { subject_id: 'agent_2', kind: 'agent', wake: 'refused', reason: 'mention_not_enabled' },
+          ],
+          rejected: [{ subject_id: 'user_9', code: 'person_not_in_room' }],
+        },
+      },
+    })
+    const receipt = await createSpacePost('room', { content: 'hi', clientSendId: 'm'.repeat(32) })
+    expect(receipt.mentions).toEqual({
+      recorded: [
+        { subjectId: 'user_2', kind: 'user' },
+        { subjectId: 'agent_1', kind: 'agent', wake: 'expected', ordinal: 1 },
+        { subjectId: 'agent_2', kind: 'agent', wake: 'refused', reason: 'mention_not_enabled' },
+      ],
+      rejected: [{ subjectId: 'user_9', code: 'person_not_in_room' }],
+    })
+
+    stubFetch(201, { data: { thread_id: 'thr_1', message_id: 'msg_1', sequence: 3 } })
+    const plain = await createSpacePost('room', { content: 'hi', clientSendId: 'n'.repeat(32) })
+    expect(plain).not.toHaveProperty('mentions')
+  })
+})
+
 describe('SPACE_POST_MAX_CHARS_DEFAULT', () => {
   it('is the gateway default bound', () => {
     expect(SPACE_POST_MAX_CHARS_DEFAULT).toBe(8000)

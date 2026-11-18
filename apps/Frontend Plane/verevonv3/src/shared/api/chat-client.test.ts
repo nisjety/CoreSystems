@@ -796,6 +796,22 @@ describe('chat-client viewer locale (WS16-S6)', () => {
   })
 })
 
+// WS08-S6: the wake names the stored post and this wake's own retry identity; it is on the wire only for a wake.
+describe('chat-client wake wire (WS08-S6)', () => {
+  it('puts {message_id, client_wake_id} on the wire only on a wake', () => {
+    const wake = buildChatWireBody({
+      content: 'Kan du se på dette?',
+      threadId: 'thr_7',
+      mentionedAgentRef: 'agent_1',
+      wake: { messageId: 'msg_9', clientWakeId: 'wake_9' },
+    })
+    expect(wake.wake).toEqual({ message_id: 'msg_9', client_wake_id: 'wake_9' })
+
+    const plain = buildChatWireBody({ content: 'Kan du se på dette?', threadId: 'thr_7', mentionedAgentRef: 'agent_1' })
+    expect('wake' in plain).toBe(false)
+  })
+})
+
 describe('chat-client tool wiring', () => {
   it('carries conversation isolation and suppresses automatic support/web/agent context', () => {
     const body = buildChatWireBody({ content: 'Finn oppfølging i innboksen', sourceScope: 'conversation', browseWeb: true, deepResearch: true, generateImage: true, planMode: true })
