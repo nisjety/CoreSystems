@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { describeApiError, LocalizedError, translateApiError } from './errors'
+import { presentSpaceDenialText } from '@/shared/api/space-denials'
+import { describeApiError, ERROR_COPY, LocalizedError, translateApiError } from './errors'
 
 describe('translateApiError', () => {
   it('keeps an unknown provider-send outcome distinct from a normal retryable failure', () => {
@@ -99,5 +100,145 @@ describe('LocalizedError', () => {
     const fallback = { no: 'Kunne ikke lagre.', en: 'Could not save.' }
     expect(translateApiError(new Error('boom: internal detail'), (no) => no, fallback)).toBe('Kunne ikke lagre.')
     expect(translateApiError({ code: 'no_such_code', status: 400, message: 'English ops text' }, (no) => no, fallback)).toBe('Kunne ikke lagre.')
+  })
+})
+
+// The copy the owed Space slices added: a code that is renamed or dropped fails here, instead of falling back silently
+// to the generic sentence. Each describe names the slice whose owed line it answers.
+const no = (norwegian: string) => norwegian
+const en = (_norwegian: string, english: string) => english
+
+function expectCopyInBothLanguages(codes: readonly string[]) {
+  for (const code of codes) {
+    expect(ERROR_COPY[code]?.no.trim(), `${code} has Norwegian copy`).toBeTruthy()
+    expect(ERROR_COPY[code]?.en.trim(), `${code} has English copy`).toBeTruthy()
+  }
+}
+
+describe('WS01-S6 send copy', () => {
+  it('every new WS01 code has no and en copy', () => {
+    expectCopyInBothLanguages([
+      'active_membership_required',
+      'idempotency_key_conflict',
+      'invalid_client_send_id',
+      'invalid_post',
+      'post_not_stored',
+      'session_unavailable',
+      'space_authority_stale',
+      'space_decision_unavailable',
+      'space_human_posts_disabled',
+      'space_lifecycle_unavailable',
+      'space_not_found',
+      'space_post_not_authorized',
+      'space_read_not_authorized',
+      'thread_not_found',
+      'thread_state_conflict',
+      // WS01-S8: the send on the agent path, answered when the same message is already received.
+      'managed_run_already_started',
+    ])
+  })
+
+  it('space_post_not_authorized with a typed details.reason keeps the denial copy', () => {
+    const refusal = { code: 'space_post_not_authorized', status: 403, details: { reason: 'space_role_below_floor' } }
+    expect(translateApiError(refusal, no)).toMatch(/^Rollen din i dette rommet er ikke høy nok til dette\./)
+    expect(translateApiError(refusal, en)).toMatch(/^Your role in this Space is not high enough for this\./)
+  })
+})
+
+describe('WS03-S7 translateApiError and the Space denial presenter', () => {
+  it('translateApiError delegates a typed Space denial to the presenter and leaves other codes unchanged', () => {
+    const denial = { code: 'space_role_below_floor', status: 403, details: { reason: 'space_role_below_floor' } }
+    expect(translateApiError(denial, en)).toBe(presentSpaceDenialText(denial, en))
+    expect(translateApiError({ code: 'space_not_found', status: 404 }, en)).toBe(ERROR_COPY.space_not_found?.en)
+    expect(translateApiError({ code: 'upstream_unavailable', status: 503 }, en)).toBe(ERROR_COPY.upstream_unavailable?.en)
+  })
+})
+
+describe('WS04-S8.spa room directory copy', () => {
+  it('directory_disabled has no and en copy', () => {
+    expectCopyInBothLanguages(['directory_disabled'])
+  })
+
+  it('directory_unavailable copy change does not break a pinned test', () => {
+    // SpaceMemberControls.test.tsx pins this Norwegian sentence for a 503 from the directory read; the copy now says
+    // "the directory" because the rooms route answers the same code.
+    expect(translateApiError({ code: 'directory_unavailable', status: 503 }, no)).toBe('Katalogen er utilgjengelig akkurat nå. Prøv igjen om litt.')
+    expect(translateApiError({ code: 'directory_unavailable', status: 503 }, en)).not.toMatch(/People search/)
+  })
+})
+
+describe('WS08 wake and mention copy', () => {
+  it('every new WS08 code has no and en copy', () => {
+    expectCopyInBothLanguages([
+      'agent_not_bound',
+      'agent_respond_to_denied',
+      'invalid_mentions',
+      'mention_text_missing',
+      'mention_unavailable',
+      'person_not_in_room',
+      'space_addressed_wake_disabled',
+      'wake_not_authorized',
+      'wake_owner_required',
+      'wake_requires_single_agent',
+      'wake_requires_thread',
+      'wake_trigger_mismatch',
+    ])
+  })
+
+  it('policy_conflict, invalid_policy, space_role_cannot_manage_agent and agent_binding_not_found have no and en copy', () => {
+    expectCopyInBothLanguages(['policy_conflict', 'invalid_policy', 'space_role_cannot_manage_agent', 'agent_binding_not_found'])
+  })
+})
+
+describe('WS11-S4 attention copy', () => {
+  it('the three WS11 codes have no and en copy', () => {
+    expectCopyInBothLanguages(['space_attention_disabled', 'invalid_level', 'space_index_unavailable'])
+  })
+})
+
+describe('WS13-S4b permalink copy', () => {
+  it('entry_not_found has no and en copy', () => {
+    expectCopyInBothLanguages(['entry_not_found'])
+  })
+})
+
+describe('WS17-S5 agent_not_addable', () => {
+  it('agent_not_addable with details.reason resolves the reason sentence, not the Space denial line', () => {
+    const refusal = { code: 'agent_not_addable', status: 409, details: { reason: 'add_policy_nobody' } }
+    expect(translateApiError(refusal, no)).toBe(ERROR_COPY.add_policy_nobody?.no)
+    expect(translateApiError(refusal, en)).toBe(ERROR_COPY.add_policy_nobody?.en)
+    expect(translateApiError(refusal, en)).not.toBe(presentSpaceDenialText(refusal, en))
+    // A reason this build does not know keeps the code's own sentence.
+    const unknown = { code: 'agent_not_addable', status: 409, details: { reason: 'not_a_reason_yet' } }
+    expect(translateApiError(unknown, en)).toBe(ERROR_COPY.agent_not_addable?.en)
+  })
+})
+
+describe('W3-FIX-13 memory refusals keep their own sentence', () => {
+  it('memory_declassify_not_authorized and memory_retract_not_authorized carrying details.reason keep their own copy', () => {
+    for (const code of ['memory_declassify_not_authorized', 'memory_retract_not_authorized']) {
+      const refusal = { code, status: 403, details: { reason: 'space_role_below_floor' } }
+      expect(translateApiError(refusal, no), code).toBe(ERROR_COPY[code]?.no)
+      expect(translateApiError(refusal, en), code).toBe(ERROR_COPY[code]?.en)
+      expect(translateApiError(refusal, en), code).not.toBe(presentSpaceDenialText(refusal, en))
+    }
+  })
+})
+
+describe('W3-FIX-14 private panel and send refusal copy', () => {
+  it('private_panel_unavailable has copy with no Nothing was changed claim', () => {
+    expectCopyInBothLanguages(['private_panel_unavailable'])
+    expect(ERROR_COPY.private_panel_unavailable?.en).not.toMatch(/Nothing was changed/)
+    expect(ERROR_COPY.private_panel_unavailable?.no).not.toMatch(/Ingenting er endret/)
+  })
+
+  it('private_panel_creation_unavailable has no entry', () => {
+    expect(ERROR_COPY.private_panel_creation_unavailable).toBeUndefined()
+  })
+
+  it('space_decision_unavailable copy does not say the message is kept', () => {
+    expectCopyInBothLanguages(['space_decision_unavailable'])
+    expect(ERROR_COPY.space_decision_unavailable?.en).not.toMatch(/kept/)
+    expect(ERROR_COPY.space_decision_unavailable?.no).not.toMatch(/beholdt/)
   })
 })

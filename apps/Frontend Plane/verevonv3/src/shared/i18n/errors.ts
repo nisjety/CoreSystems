@@ -773,14 +773,6 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Et rom trenger et navn. Skriv inn et navn og prøv igjen.',
     en: 'A room needs a name. Enter a name and try again.',
   },
-  room_membership_unavailable: {
-    no: 'Medlemmene i rommet kunne ikke endres akkurat nå, og ingenting ble endret. Prøv igjen om litt.',
-    en: 'The members of the room could not be changed right now, and nothing was altered. Try again shortly.',
-  },
-  room_membership_unconfirmed: {
-    no: 'Endringen ble lagret, men er ikke bekreftet for rommets medlemmer ennå. Det kan ta et øyeblikk før listen er oppdatert.',
-    en: 'The change was saved, but the room members have not confirmed it yet. It may take a moment before the list is up to date.',
-  },
   member_required: {
     no: 'Velg et medlem først.',
     en: 'Choose a member first.',

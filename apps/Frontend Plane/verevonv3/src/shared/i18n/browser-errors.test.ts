@@ -57,6 +57,19 @@ const BROWSER_ERROR_CODES = [
   'invalid_browser_action',
   'zdr_persistent_profile_forbidden',
   'model_gateway_unreachable',
+  // WS20-S5: a room browser run's start and its starter-only evidence (domains/spaces/browser_runs.rs). invalid_space is the
+  // Space reference refusal the run start answers too, so it has copy here as well.
+  'browser_domain_policy_invalid',
+  'browser_share_view_unavailable',
+  'space_browser_not_authorized',
+  'browser_not_entitled',
+  'browser_capacity',
+  'browser_evidence_withheld',
+  'evidence_not_found',
+  'evidence_too_large',
+  'evidence_unsupported',
+  'evidence_unavailable',
+  'invalid_space',
 ] as const
 
 const BLOCK_REASONS = ['captcha_widget', 'waf_interstitial', 'unexpected_bot_error', 'challenge_loop'] as const
