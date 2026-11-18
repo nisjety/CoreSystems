@@ -47,7 +47,8 @@ function wrap(value: string, start: number, end: number, mark: string): Markdown
 
 /** The start of the first line and the end of the last line the selection touches. */
 function lineBounds(value: string, start: number, end: number): [number, number] {
-  const lineStart = value.lastIndexOf('\n', start - 1) + 1
+  // At start 0 there is no earlier line break to find; lastIndexOf(-1) would still match a newline at index 0.
+  const lineStart = start > 0 ? value.lastIndexOf('\n', start - 1) + 1 : 0
   // A selection that ends right after a newline does not include the next line.
   const probe = end > start && value[end - 1] === '\n' ? end - 1 : end
   const nextBreak = value.indexOf('\n', probe)

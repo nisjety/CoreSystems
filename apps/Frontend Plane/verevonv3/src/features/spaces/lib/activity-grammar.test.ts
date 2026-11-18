@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  activityFromApproval,
+  activityFromAuthority,
+  activityFromOperation,
   activityFromProcess,
   activityFromRun,
+  activityFromSchedule,
   activityFromThread,
   activitySentence,
   buildSpaceActivity,
@@ -12,6 +16,7 @@ import {
   type SpaceActivityItem,
   type ThreadLikeActivitySource,
 } from './activity-grammar'
+import { noTr, type Tr } from './space-copy'
 
 function thread(overrides: Partial<ThreadLikeActivitySource> = {}): ThreadLikeActivitySource {
   return { thread_id: 'thr_1', ...overrides }
@@ -294,5 +299,178 @@ describe('activityFromProcess', () => {
     const withProcesses = buildSpaceWork([], [], [{ process_id: 'p1', state: 'RUNNING' }])
     expect(withProcesses).toHaveLength(1)
     expect(withProcesses[0]?.renderClass).toBe('process')
+  })
+})
+
+// WS16-S1: every builder takes a translator. With none, or with noTr, the output is the Norwegian copy the
+// grammar always produced; with an English translator, the verbs, outcomes and details read in English.
+// A raw server token (an action id, a status, an approval state) is never routed through the copy.
+describe('activity grammar copy through a translator (WS16-S1)', () => {
+  const en: Tr = (_no, english) => english
+
+  it('every builder with no translator gives exactly the noTr output', () => {
+    const thread = { thread_id: 'thr_1', space_id: 'space-room', title: 'Budsjett', latest_run_status: 'awaiting_approval' }
+    const run = { id: 'run_1', goal: 'Tell lageret', status: 'queued', steps_completed: 2, input_tokens: 0, output_tokens: 0 }
+    const schedule = { id: 'sch_1', name: 'Ukentlig', schedule_expr: '0 8 * * 1', enabled: true }
+    const background = { process_id: 'p1', state: 'EXITED', exit_code: 2 }
+    const operation = { operation_id: 'op_1', action_id: 'tickets.create', status: 'completed', ticket_id: 'T-1' }
+    const authority = { grant_id: 'g1', action_id: 'tickets.create', subject_id: 'Ola', created_by_user_id: 'Kari' }
+    const approval = { id: 'ap_1', kind: 'tickets.create', status: 'APPROVAL_STATE_REQUESTED', requested_by: 'Ola' }
+
+    expect(buildSpaceActivity([thread])).toEqual(buildSpaceActivity([thread], noTr))
+    expect(activityFromRun(run)).toEqual(activityFromRun(run, noTr))
+    expect(activityFromSchedule(schedule)).toEqual(activityFromSchedule(schedule, noTr))
+    expect(activityFromProcess(background)).toEqual(activityFromProcess(background, noTr))
+    expect(activityFromOperation(operation)).toEqual(activityFromOperation(operation, noTr))
+    expect(activityFromAuthority(authority)).toEqual(activityFromAuthority(authority, noTr))
+    expect(activityFromApproval(approval)).toEqual(activityFromApproval(approval, noTr))
+    expect(buildSpaceWork([run], [schedule], [background])).toEqual(buildSpaceWork([run], [schedule], [background], noTr))
+    expect(buildSpaceRecord({ runs: [run], operations: [operation], authority: [authority], approvals: [approval] })).toEqual(
+      buildSpaceRecord({ runs: [run], operations: [operation], authority: [authority], approvals: [approval] }, noTr),
+    )
+  })
+
+  it('the thread builder reads in Norwegian with noTr and in English with an English translator', () => {
+    const thread = { thread_id: 'thr_1', space_id: 'space-room', title: 'Budget', latest_run_status: 'awaiting_approval' }
+    const [norwegianConversation, norwegianRun] = activityFromThread(thread, noTr)
+    expect(norwegianConversation).toMatchObject({ verb: 'Samtale', outcome: { label: 'åpen' } })
+    expect(norwegianRun).toMatchObject({ verb: 'Kjøring', object: 'Budget', outcome: { label: 'venter på godkjenning' } })
+
+    const [conversation, run] = activityFromThread(thread, en)
+    expect(conversation).toMatchObject({ verb: 'Conversation', outcome: { label: 'open' } })
+    expect(run).toMatchObject({ verb: 'Run', object: 'Budget', outcome: { label: 'needs approval' } })
+    expect(activitySentence(run!)).toBe('Run: Budget → needs approval')
+
+    const untitled = { thread_id: 'thr_2' }
+    expect(activityFromThread(untitled, noTr)[0]?.object).toBe('Uten tittel')
+    expect(activityFromThread(untitled, en)[0]?.object).toBe('Untitled')
+  })
+
+  it('the run builder names a run with no goal in either language', () => {
+    expect(activityFromRun({ id: 'run_1', status: 'running' }, noTr)).toMatchObject({
+      verb: 'Kjøring',
+      object: 'Uten beskrevet mål',
+      outcome: { label: 'kjører' },
+    })
+    expect(activityFromRun({ id: 'run_1', status: 'running' }, en)).toMatchObject({
+      verb: 'Run',
+      object: 'No stated goal',
+      outcome: { label: 'running' },
+    })
+    expect(activityFromRun({ id: 'run_1', goal: 'Tell lageret', status: 'failed' }, en)).toMatchObject({
+      object: 'Tell lageret',
+      outcome: { label: 'failed', tone: 'failure' },
+    })
+  })
+
+  it('the schedule builder reads its expression and its switched-off state in either language', () => {
+    const active = { id: 'sch_1', name: 'Ukentlig', schedule_expr: '0 8 * * 1', enabled: true }
+    expect(activityFromSchedule(active, noTr)).toMatchObject({ verb: 'Planlagt', object: 'Ukentlig', outcome: { label: 'kjører 0 8 * * 1' } })
+    expect(activityFromSchedule(active, en)).toMatchObject({ verb: 'Scheduled', outcome: { label: 'runs 0 8 * * 1' } })
+    const off = { id: 'sch_2', enabled: false }
+    expect(activityFromSchedule(off, noTr)).toMatchObject({ object: 'Uten navn', outcome: { label: 'slått av' } })
+    expect(activityFromSchedule(off, en)).toMatchObject({ object: 'Unnamed', outcome: { label: 'switched off' } })
+    expect(activityFromSchedule({ id: 'sch_3', enabled: true }, en)).toMatchObject({ outcome: { label: 'active' } })
+  })
+
+  it('the process builder splits an exit by its code, and reads the lost state, in either language', () => {
+    expect(activityFromProcess({ process_id: 'p1', state: 'RUNNING' }, noTr)).toMatchObject({
+      verb: 'Bakgrunnsprosess',
+      object: 'Bakgrunnsprosess',
+      outcome: { label: 'kjører' },
+    })
+    expect(activityFromProcess({ process_id: 'p1', state: 'RUNNING' }, en)).toMatchObject({
+      verb: 'Background process',
+      object: 'Background process',
+      outcome: { label: 'running' },
+    })
+    expect(activityFromProcess({ process_id: 'p2', state: 'EXITED', exit_code: 2 }, noTr)?.outcome.label).toBe('avsluttet med kode 2')
+    expect(activityFromProcess({ process_id: 'p2', state: 'EXITED', exit_code: 2 }, en)?.outcome.label).toBe('exited with code 2')
+    expect(activityFromProcess({ process_id: 'p3', state: 'EXITED', exit_code: 0 }, en)?.outcome.label).toBe('done')
+    expect(activityFromProcess({ process_id: 'p4', state: 'LOST' }, noTr)?.outcome.label).toBe('verten forsvant — utfall ukjent')
+    expect(activityFromProcess({ process_id: 'p4', state: 'LOST' }, en)?.outcome.label).toBe('the host disappeared — outcome unknown')
+  })
+
+  it('the effect builder names a ticket in either language', () => {
+    const done = { operation_id: 'op_1', action_id: 'tickets.create', status: 'completed', ticket_id: 'T-1', subject_id: 'Kari' }
+    expect(activityFromOperation(done, noTr)).toMatchObject({ verb: 'Opprettet sak', outcome: { label: 'utført' }, detail: ['Sak T-1'] })
+    expect(activityFromOperation(done, en)).toMatchObject({ verb: 'Created ticket', outcome: { label: 'carried out' }, detail: ['Ticket T-1'] })
+  })
+
+  it('the authority builder reads a grant and a withdrawn grant in either language', () => {
+    const granted = { grant_id: 'g1', action_id: 'tickets.create', subject_id: 'Ola', created_by_user_id: 'Kari' }
+    expect(activityFromAuthority(granted, noTr)).toMatchObject({
+      verb: 'Ga fullmakt',
+      object: 'Ola',
+      outcome: { label: 'tillatt her' },
+      detail: ['Gitt av Kari', 'tickets.create'],
+    })
+    expect(activityFromAuthority(granted, en)).toMatchObject({
+      verb: 'Granted authority',
+      outcome: { label: 'allowed here' },
+      detail: ['Granted by Kari', 'tickets.create'],
+    })
+    const revoked = { ...granted, created_at: '2026-10-01T10:00:00Z', revoked_at: '2026-11-01T10:00:00Z', revoked_by_user_id: 'Kari' }
+    expect(activityFromAuthority(revoked, noTr)).toMatchObject({
+      verb: 'Fjernet fullmakt',
+      outcome: { label: 'ikke lenger tillatt' },
+      detail: ['Trukket av Kari', 'Gitt 2026-10-01T10:00:00Z', 'tickets.create'],
+    })
+    expect(activityFromAuthority(revoked, en)).toMatchObject({
+      verb: 'Removed authority',
+      outcome: { label: 'no longer allowed' },
+      detail: ['Withdrawn by Kari', 'Granted 2026-10-01T10:00:00Z', 'tickets.create'],
+    })
+  })
+
+  it('the approval builder reads its decision and its requester in either language', () => {
+    const waiting = { id: 'ap_1', kind: 'tickets.create', status: 'APPROVAL_STATE_REQUESTED', requested_by: 'Ola', run_id: 'run_1', space_id: 'space-room' }
+    expect(activityFromApproval(waiting, noTr)).toMatchObject({
+      verb: 'Godkjenning',
+      object: 'tickets.create',
+      outcome: { label: 'venter på en avgjørelse' },
+      detail: ['Bedt om av Ola'],
+    })
+    expect(activityFromApproval(waiting, en)).toMatchObject({
+      verb: 'Approval',
+      outcome: { label: 'waiting for a decision' },
+      detail: ['Requested by Ola'],
+    })
+    expect(activityFromApproval({ id: 'ap_3', status: 'APPROVAL_STATE_GRANTED' }, en)).toMatchObject({
+      object: 'Action with no named type',
+      outcome: { label: 'approved' },
+    })
+  })
+
+  it('keeps a raw action id, status and approval state as the server sent them, in either language', () => {
+    const operation = { operation_id: 'op_2', action_id: 'vendor.sync', status: 'partially_done' }
+    const approval = { id: 'ap_2', kind: 'tool.call', status: 'APPROVAL_STATE_SOMETHING_NEW' }
+    for (const tr of [noTr, en]) {
+      expect(activityFromOperation(operation, tr)).toMatchObject({ verb: 'vendor.sync', outcome: { label: 'partially_done', tone: 'neutral' } })
+      expect(activityFromApproval(approval, tr)).toMatchObject({ object: 'tool.call', outcome: { label: 'approval_state_something_new', tone: 'neutral' } })
+    }
+    expect(activityFromThread({ thread_id: 't', latest_run_status: 'quantum_superposition' }, en)[1]?.outcome.label).toBe(
+      'quantum_superposition',
+    )
+  })
+
+  it('the record and work feeds read in Norwegian by default and in English with the English translator', () => {
+    const run = { id: 'run_1', goal: 'Tell lageret', status: 'running' }
+    const schedule = { id: 'sch_1', name: 'Ukentlig', enabled: false }
+    const background = { process_id: 'p1', state: 'RUNNING' }
+    expect(buildSpaceWork([run], [schedule], [background]).map((item) => activitySentence(item))).toEqual([
+      'Kjøring: Tell lageret → kjører',
+      'Planlagt: Ukentlig → slått av',
+      'Bakgrunnsprosess: Bakgrunnsprosess → kjører',
+    ])
+    expect(buildSpaceWork([run], [schedule], [background], en).map((item) => activitySentence(item))).toEqual([
+      'Run: Tell lageret → running',
+      'Scheduled: Ukentlig → switched off',
+      'Background process: Background process → running',
+    ])
+    const [item] = buildSpaceRecord({ runs: [{ run_id: 'r1', thread_id: 't1', space_id: 's1', goal: 'G', status: 'completed', steps_completed: 1 }] }, en)
+    expect(item?.detail).toEqual(['1 step'])
+    const [plural] = buildSpaceRecord({ runs: [{ run_id: 'r2', thread_id: 't1', space_id: 's1', goal: 'G', status: 'completed', steps_completed: 3 }] }, noTr)
+    expect(plural?.detail).toEqual(['3 steg'])
   })
 })
