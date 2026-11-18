@@ -163,7 +163,7 @@ func TestMembershipChangedSubjectAndReannounceAction(t *testing.T) {
 		t.Fatalf("subject = %q: Session Core subscribes to this exact subject", MembershipChangedSubject)
 	}
 	// A re-announcement is never a ledger action: the ledger CHECK would refuse it.
-	for _, ledger := range []string{ActionMemberAdded, ActionMemberJoined, ActionMemberRemoved, ActionMemberLeft} {
+	for _, ledger := range []string{ActionMemberAdded, ActionMemberJoined, ActionRoleChanged, ActionMemberRemoved, ActionMemberLeft} {
 		if ledger == ActionReannounce {
 			t.Fatal("reannounce collides with a ledger action")
 		}

@@ -74,8 +74,10 @@ func TestMembershipOutboxClaimsOnlyPendingUserRowsOldestFirstLive(t *testing.T) 
 	second := o.ledger(t, "b", ActionMemberJoined, "user", "u-b", "viewer")
 	third := o.ledger(t, "c", ActionMemberRemoved, "user", "u-c", "")
 	fourth := o.ledger(t, "d", ActionMemberLeft, "user", "u-d", "")
-	// Never claimed: a role change, an archive, and a service subject.
-	roleChanged := o.ledger(t, "e", "role_changed", "user", "u-e", "manager")
+	// Claimed too: W3-DEC-RETRACT needs a demotion to reach Session Core, so
+	// role_changed joined the claim list alongside the other user actions.
+	roleChanged := o.ledger(t, "e", ActionRoleChanged, "user", "u-e", "manager")
+	// Never claimed: an archive (no subject_type) and a service subject.
 	archived := o.ledger(t, "f", "archived", "", "", "")
 	service := o.ledger(t, "g", ActionMemberAdded, "service", "agent-1", "editor")
 	// Already published.
@@ -87,7 +89,7 @@ func TestMembershipOutboxClaimsOnlyPendingUserRowsOldestFirstLive(t *testing.T) 
 		t.Fatalf("publish: %v", err)
 	}
 	got := o.mine(publisher.published())
-	want := []string{first, second, third, fourth}
+	want := []string{first, second, third, fourth, roleChanged}
 	if len(got) != len(want) {
 		t.Fatalf("published %d of my rows, want %d: %v", len(got), len(want), got)
 	}
@@ -96,7 +98,7 @@ func TestMembershipOutboxClaimsOnlyPendingUserRowsOldestFirstLive(t *testing.T) 
 			t.Fatalf("publish %d = %s on %s, want %s on %s (oldest first)", i, got[i].msgID, got[i].subject, id, MembershipChangedSubject)
 		}
 	}
-	for _, id := range []string{roleChanged, archived, service, done} {
+	for _, id := range []string{archived, service, done} {
 		for _, call := range got {
 			if call.msgID == id {
 				t.Errorf("row %s must never be claimed", id)
@@ -108,10 +110,59 @@ func TestMembershipOutboxClaimsOnlyPendingUserRowsOldestFirstLive(t *testing.T) 
 			t.Errorf("%s after a PubAck: published=%v attempts=%d next=%v err=%q", id, published, attempts, next, lastError)
 		}
 	}
-	for _, id := range []string{roleChanged, archived, service} {
+	for _, id := range []string{archived, service} {
 		if published, attempts, _, _ := o.row(t, id); published || attempts != 0 {
 			t.Errorf("%s was touched: published=%v attempts=%d", id, published, attempts)
 		}
+	}
+}
+
+// W3-DEC-RETRACT: a demotion must reach Session Core as a current fact (role
+// viewer, still active) so the retraction logic can act on it, and a later
+// removal of the same member must publish active=false with no role so
+// nothing stays visible to someone who lost access.
+func TestMembershipOutboxRoleChangedDemotionThenRemovalPublishesCurrentFactLive(t *testing.T) {
+	o := newOutboxLive(t, "ob-role")
+	ctx := context.Background()
+	member := o.user(t, "ob-role-member", o.org)
+	o.member(t, o.ref, member, "editor", SourceMemberOps)
+
+	// Demotion: the row stays active, now as viewer.
+	o.exec(t, `UPDATE space_memberships SET role='viewer', updated_at=NOW() WHERE space_ref=$1 AND subject_id=$2`, o.ref, member)
+	demoted := o.ledger(t, "a", ActionRoleChanged, "user", member, "viewer")
+
+	demotionPublisher := &fakeMembershipPublisher{}
+	if _, err := o.repo.PublishPendingMembershipEvents(ctx, demotionPublisher, bigBatch); err != nil {
+		t.Fatalf("publish demotion: %v", err)
+	}
+	gotDemotion := o.mine(demotionPublisher.published())
+	if len(gotDemotion) != 1 || gotDemotion[0].msgID != demoted {
+		t.Fatalf("published %v, want exactly the demotion %s", gotDemotion, demoted)
+	}
+	if p := gotDemotion[0].payload; p["active"] != true || p["role"] != "viewer" || p["action"] != ActionRoleChanged {
+		t.Fatalf("demotion payload = %v, want active=true role=viewer", p)
+	}
+	if published, attempts, next, lastError := o.row(t, demoted); !published || attempts != 1 || next != nil || lastError != "" {
+		t.Fatalf("demotion row: published=%v attempts=%d next=%v err=%q", published, attempts, next, lastError)
+	}
+
+	// Removal: the row goes inactive. The later fact must win, with no role.
+	o.exec(t, `UPDATE space_memberships SET active=FALSE, updated_at=NOW() WHERE space_ref=$1 AND subject_id=$2`, o.ref, member)
+	removed := o.ledger(t, "b", ActionMemberRemoved, "user", member, "")
+
+	removalPublisher := &fakeMembershipPublisher{}
+	if _, err := o.repo.PublishPendingMembershipEvents(ctx, removalPublisher, bigBatch); err != nil {
+		t.Fatalf("publish removal: %v", err)
+	}
+	gotRemoval := o.mine(removalPublisher.published())
+	if len(gotRemoval) != 1 || gotRemoval[0].msgID != removed {
+		t.Fatalf("published %v, want exactly the removal %s", gotRemoval, removed)
+	}
+	if p := gotRemoval[0].payload; p["active"] != false || p["role"] != "" || p["action"] != ActionMemberRemoved {
+		t.Fatalf("removal payload = %v, want active=false with no role", p)
+	}
+	if published, attempts, next, lastError := o.row(t, removed); !published || attempts != 1 || next != nil || lastError != "" {
+		t.Fatalf("removal row: published=%v attempts=%d next=%v err=%q", published, attempts, next, lastError)
 	}
 }
 
