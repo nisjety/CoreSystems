@@ -282,6 +282,26 @@ test('the WS10-S4 approval actions and the WS14-S7 room file actions are not mod
   }
 });
 
+// W3-DEC-CANVAS (D2): the canvas-tools binding switch is a human decision. Its gateway arm reaches the
+// Space canvas-tools dispatcher, and its model-access row is closed (`exempt`, not eligible), so an
+// agent can neither offer canvas tools to itself nor see the switch in the model's action list.
+test('spaces.set_agent_canvas_tools has a dispatcher arm and is not model executable', () => {
+  const handlerSource = fs.readFileSync(handlerPath, 'utf8');
+  assert.match(
+    handlerSource,
+    /"spaces\.set_agent_canvas_tools"[\s\S]{0,320}?=>[\s\S]{0,160}?dispatch_/,
+    'spaces.set_agent_canvas_tools must reach a named owner dispatcher',
+  );
+  const modelAccessSource = fs.readFileSync(
+    path.join(verevonDirectory, 'src/shared/actions/model-access.ts'),
+    'utf8',
+  );
+  const row = modelAccessSource.match(/'spaces\.set_agent_canvas_tools':\s*([^\n]+)/);
+  assert.ok(row, 'spaces.set_agent_canvas_tools has a model-access row');
+  assert.match(row[1], /^exempt\(/, 'spaces.set_agent_canvas_tools is a closed (access none) row');
+  assert.doesNotMatch(row[1], /eligible:\s*true/, 'spaces.set_agent_canvas_tools must not be eligible');
+});
+
 // The dispatchers the two WS10-S4 ids reach are the Space route functions, so the scope rules, the
 // role gate and the typed errors exist once.
 test('the WS10-S4 and WS14-S7 handler arms reach the Space dispatchers', () => {
