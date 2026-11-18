@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, onCleanup, untrack } from 'solid-js'
+import { createEffect, createMemo, createSignal, untrack } from 'solid-js'
 
 import {
   readSpaceBrowserTimeline,
@@ -193,7 +193,9 @@ export function createSpaceBrowserRunFeed(input: {
       if (!on) return
       untrack(() => void pollOnce())
       const timer = setInterval(() => void pollOnce(), SPACE_BROWSER_POLL_MS)
-      onCleanup(() => clearInterval(timer))
+      // Returned as the effect's cleanup. onCleanup has no owner inside an effect's apply, so it never ran and every
+      // re-run left its timer polling.
+      return () => clearInterval(timer)
     },
   )
 

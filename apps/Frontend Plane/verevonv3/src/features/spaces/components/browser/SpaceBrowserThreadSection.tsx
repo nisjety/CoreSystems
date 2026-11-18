@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createSignal, onCleanup, untrack } from 'solid-js'
+import { For, Show, createEffect, createSignal, untrack } from 'solid-js'
 
 import { listSpaceBrowserRuns, type SpaceBrowserRun } from '@/shared/api/spaces-client/browser-runs'
 import { useI18n } from '@/shared/i18n'
@@ -54,13 +54,14 @@ export function SpaceBrowserThreadSection(props: SpaceBrowserThreadSectionProps)
   createEffect(
     () => ({ threadId: props.threadId, on: cardsOn() }),
     ({ threadId, on }) => {
-      if (!on || !threadId) return
+      if (!on || !threadId) return undefined
       untrack(() => {
         setRuns([])
         void refresh()
       })
+      // The cleanup is returned, not registered with onCleanup: inside the effect's apply step onCleanup has no owner.
       const timer = setInterval(() => void refresh(), LIST_POLL_MS)
-      onCleanup(() => clearInterval(timer))
+      return () => clearInterval(timer)
     },
   )
 

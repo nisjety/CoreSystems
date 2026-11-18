@@ -29,7 +29,8 @@ export interface SpaceBrowserCardProps {
 export function SpaceBrowserCard(props: SpaceBrowserCardProps) {
   const i18n = useI18n()
   let root: HTMLElement | undefined
-  const [visible, setVisible] = createSignal(true)
+  // Where there is an observer, the card starts unseen until it reports itself visible, so an off-screen card never reads.
+  const [visible, setVisible] = createSignal(typeof IntersectionObserver === 'undefined')
   const feed = createSpaceBrowserRunFeed({
     spaceRef: () => props.spaceRef,
     runId: () => props.run.runId,
