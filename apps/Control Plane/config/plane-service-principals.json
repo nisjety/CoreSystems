@@ -198,6 +198,7 @@
       "approval:deliver",
       "browser:execute",
       "capability:health:global:write",
+      "capability:owner-action:health:write",
       "capability:read",
       "crawl:write",
       "extract:read",
@@ -210,6 +211,7 @@
       "scrape:write",
       "search:read",
       "session:heartbeat",
+      "session:run-thread-action:probe",
       "session:terminalize"
     ],
     "scopesByAudience": {
