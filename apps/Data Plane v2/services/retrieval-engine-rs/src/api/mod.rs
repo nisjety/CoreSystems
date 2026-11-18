@@ -3706,4 +3706,79 @@ mod space_files_tests {
         assert!(!space_decision_is_enforced_for_path("/v1/knowledge/space-documents"));
         assert!(!space_decision_is_enforced_for_path("/v1/knowledge/graph"));
     }
+
+    // ── WS17-S9: the per-candidate Space label on /retrieve ───────────────────
+
+    #[test]
+    fn a_space_answer_labels_every_candidate_with_its_verified_space() {
+        let mut body = serde_json::json!({
+            "candidates": [
+                {"knowledge_id": "k-1", "document_id": "doc-1", "text": "first", "final_score": 0.9},
+                {"knowledge_id": "k-2", "document_id": "doc-2", "text": "second", "final_score": 0.4}
+            ],
+            "sources": [{"document_id": "doc-1", "title": "Plan"}]
+        });
+        label_space_candidates(&mut body, SPACE);
+        for candidate in body["candidates"].as_array().expect("candidates array") {
+            assert_eq!(candidate["space_ref"], SPACE);
+        }
+        assert_eq!(body["candidates"][1]["text"], "second", "the rest of each candidate is kept");
+        assert!(body["sources"][0].get("space_ref").is_none(), "only candidates carry the label");
+    }
+
+    #[test]
+    fn an_unscoped_candidate_carries_no_space_label() {
+        // `label_space_candidates` runs only for a Space-scoped answer, and the candidate type has no
+        // field for the label, so an unscoped answer serializes with no `space_ref` key.
+        let candidate = ScoredCandidate {
+            knowledge_id: "k-1".into(),
+            document_id: "doc-1".into(),
+            text: "unscoped".into(),
+            dense_score: 0.0,
+            sparse_score: 0.0,
+            rerank_score: 0.0,
+            final_score: 0.5,
+            chunk_index: 0,
+            metadata: Default::default(),
+        };
+        let value = serde_json::to_value(&candidate).expect("candidate serializes");
+        assert!(value.get("space_ref").is_none());
+    }
+
+    // The Space read endpoints refuse a call that carries no verified decision before they touch a
+    // database, so this holds without Postgres.
+    #[tokio::test]
+    async fn a_room_file_or_listing_is_refused_without_a_space_decision() {
+        let pipeline = pipeline_with(recording(&[], &[])).await;
+        let Err(document) = space_document(
+            State(pipeline.clone()),
+            Some(user(&[])),
+            HeaderMap::new(),
+            Json(SpaceDocumentRequest {
+                document_id: "doc-1".to_string(),
+                max_chars: None,
+            }),
+        )
+        .await
+        else {
+            panic!("a room file read needs a verified Space decision");
+        };
+        assert_eq!(document.status, axum::http::StatusCode::FORBIDDEN);
+
+        let Err(listing) = space_knowledge(
+            State(pipeline),
+            Some(user(&[])),
+            HeaderMap::new(),
+            Json(SpaceKnowledgeRequest {
+                limit: None,
+                types: None,
+                cursor: None,
+            }),
+        )
+        .await
+        else {
+            panic!("a Space listing needs a verified Space decision");
+        };
+        assert_eq!(listing.status, axum::http::StatusCode::FORBIDDEN);
+    }
 }

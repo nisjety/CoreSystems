@@ -1084,3 +1084,93 @@ mod zdr_boundary_tests {
         assert_eq!(parse_zdr_mode(None).expect("absent mode"), None);
     }
 }
+
+/// WS17-S9 (W3-FIX-3): the Space label on gRPC candidates. These cover the helpers the unary and stream
+/// handlers call. The handlers' own end-to-end labelling is not covered here: `apply_space_decision`
+/// resolves the Space binding from Postgres before the label is set, so it needs TEST_DATABASE_URL.
+#[cfg(test)]
+mod space_label_tests {
+    use super::{candidate_metadata, grpc_to_pipeline, verified_space_ref, RetrieveRequest};
+    use crate::space_scope::{ResolvedSpaceRetrievalScope, VerifiedSpaceAuthority};
+
+    const SPACE: &str = "space:org-1:room-7";
+
+    fn scope(space_ref: &str) -> ResolvedSpaceRetrievalScope {
+        ResolvedSpaceRetrievalScope {
+            authority: VerifiedSpaceAuthority {
+                authority_revision: 1,
+                decision_ref: "decision-1".into(),
+                org_id: "org-1".into(),
+                privacy_policy_ref: "privacy-1".into(),
+                recipient_audience_hash: "audience-hash-1".into(),
+                recipient_audience_ref: "audience-1".into(),
+                recipient_audience_revision: 1,
+                resource_authorization_ref: "resource-1".into(),
+                space_ref: space_ref.into(),
+            },
+            collection_id: None,
+            document_ids: Vec::new(),
+            document_ids_truncated: false,
+            owner_resource_ref: "owner-1".into(),
+            workspace_id: Some("workspace-1".into()),
+        }
+    }
+
+    fn pipeline_request() -> crate::pipeline::types::RetrievalRequest {
+        grpc_to_pipeline(RetrieveRequest {
+            org_id: "org-1".into(),
+            query: "synthetic label query".into(),
+            ..Default::default()
+        })
+        .expect("valid gRPC request")
+    }
+
+    fn string_at(metadata: &prost_types::Struct, key: &str) -> Option<String> {
+        match metadata.fields.get(key)?.kind.as_ref()? {
+            prost_types::value::Kind::StringValue(value) => Some(value.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn an_unscoped_answer_is_labelled_with_nothing() {
+        let unscoped = pipeline_request();
+        assert_eq!(verified_space_ref(&unscoped), None);
+        assert!(candidate_metadata(None, None).is_none());
+    }
+
+    #[test]
+    fn a_scoped_answer_is_labelled_with_the_verified_space_ref() {
+        let mut scoped = pipeline_request();
+        scoped.space_scope = Some(scope(SPACE));
+        let space = verified_space_ref(&scoped);
+        assert_eq!(space.as_deref(), Some(SPACE));
+
+        let label =
+            candidate_metadata(None, space.as_deref()).expect("a labelled candidate has metadata");
+        assert_eq!(label.fields.len(), 1, "the label is the only entry");
+        assert_eq!(string_at(&label, "space_ref").as_deref(), Some(SPACE));
+    }
+
+    #[test]
+    fn the_label_keeps_other_metadata_and_replaces_only_a_same_named_space_ref() {
+        let text = |value: &str| prost_types::Value {
+            kind: Some(prost_types::value::Kind::StringValue(value.to_string())),
+        };
+        let existing = prost_types::Struct {
+            fields: [
+                ("suggested_next_tools".to_string(), text("planner-hint")),
+                ("space_ref".to_string(), text("stale-room")),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let merged = candidate_metadata(Some(existing), Some(SPACE)).expect("labelled");
+        assert_eq!(merged.fields.len(), 2);
+        assert_eq!(
+            string_at(&merged, "suggested_next_tools").as_deref(),
+            Some("planner-hint")
+        );
+        assert_eq!(string_at(&merged, "space_ref").as_deref(), Some(SPACE));
+    }
+}

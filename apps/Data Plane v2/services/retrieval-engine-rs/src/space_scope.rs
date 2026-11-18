@@ -464,23 +464,34 @@ mod tests {
     use ed25519_dalek::{Signer as _, SigningKey};
     use std::collections::BTreeMap;
 
-    fn signed_retrieval_decision(key: &SigningKey, key_id: &str) -> String {
+    /// A complete Control decision for `org-1` / `user-1`. The recipient audience hash and revision
+    /// are signed claims (WS17-S9); a decision without them is refused.
+    fn retrieval_decision_payload() -> serde_json::Value {
         let now = Utc::now();
-        let payload = serde_json::json!({
+        serde_json::json!({
             "decision_ref":"decision-1", "org_id":"org-1", "space_ref":"space-1", "subject_id":"user-1",
-            "service_audience": RETRIEVAL_AUDIENCE, "recipient_audience_ref":"audience-1", "privacy_policy_ref":"privacy-1",
+            "service_audience": RETRIEVAL_AUDIENCE, "recipient_audience_ref":"audience-1",
+            "recipient_audience_hash":"audience-hash-1", "recipient_audience_revision": 1,
+            "privacy_policy_ref":"privacy-1",
             "resource_authorization_ref":"resource-1", "authority_revision": 1, "permissions":["retrieval:read"],
             "purpose":"assistant_collaboration", "lawful_basis":"contract", "privacy_class":"internal",
             "retention_class":"standard", "residency":"swedencentral", "deletion_scope":"space", "nonce":"nonce-1",
             "issued_at": now.to_rfc3339(), "expires_at": (now + chrono::Duration::minutes(1)).to_rfc3339()
-        });
+        })
+    }
+
+    fn sign_decision(key: &SigningKey, key_id: &str, payload: &serde_json::Value) -> String {
         let key_part = URL_SAFE_NO_PAD.encode(key_id.as_bytes());
-        let payload_part = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let payload_part = URL_SAFE_NO_PAD.encode(serde_json::to_vec(payload).unwrap());
         let input = format!("{DECISION_VERSION}.{key_part}.{payload_part}");
         format!(
             "{input}.{}",
             URL_SAFE_NO_PAD.encode(key.sign(input.as_bytes()).to_bytes())
         )
+    }
+
+    fn signed_retrieval_decision(key: &SigningKey, key_id: &str) -> String {
+        sign_decision(key, key_id, &retrieval_decision_payload())
     }
 
     fn scope() -> ResolvedSpaceRetrievalScope {
@@ -615,5 +626,71 @@ mod tests {
             verify_retrieval_space_decision(&token, &keys, "org-1", "other-user", Utc::now())
                 .is_err()
         );
+    }
+
+    // WS17-S9: the recipient audience hash and revision are required, signed claims. A decision that
+    // omits either one, or whose audience is blank or has a revision that is not positive, is refused.
+    #[test]
+    fn a_retrieval_decision_without_the_recipient_audience_claims_is_refused() {
+        let signing = SigningKey::from_bytes(&[22; 32]);
+        let keys = BTreeMap::from([("control-current".to_owned(), signing.verifying_key())]);
+        let verify = |payload: &serde_json::Value| {
+            let token = sign_decision(&signing, "control-current", payload);
+            verify_retrieval_space_decision(&token, &keys, "org-1", "user-1", Utc::now())
+        };
+        assert!(
+            verify(&retrieval_decision_payload()).is_ok(),
+            "the complete decision verifies"
+        );
+
+        for claim in ["recipient_audience_hash", "recipient_audience_revision"] {
+            let mut payload = retrieval_decision_payload();
+            payload
+                .as_object_mut()
+                .expect("object payload")
+                .remove(claim);
+            // Required by the claims struct (no serde default), so the parse is what refuses it.
+            let error = verify(&payload).expect_err("a decision without the claim must be refused");
+            assert!(
+                error.to_string().contains("invalid Space decision claims"),
+                "{claim}: {error}"
+            );
+        }
+
+        let mut zero_revision = retrieval_decision_payload();
+        zero_revision["recipient_audience_revision"] = serde_json::json!(0);
+        let error = verify(&zero_revision).expect_err("a zero audience revision must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("recipient audience revision must be positive"),
+            "{error}"
+        );
+
+        let mut blank_hash = retrieval_decision_payload();
+        blank_hash["recipient_audience_hash"] = serde_json::json!("   ");
+        let error = verify(&blank_hash).expect_err("a blank audience hash must be refused");
+        assert!(
+            error.to_string().contains("recipient_audience_hash"),
+            "{error}"
+        );
+    }
+
+    // WS17-S9: the retrieval-cache partition of a Space-scoped answer names its room, its recipient
+    // audience hash and its audience revision, so none of the three can share a cache entry.
+    #[test]
+    fn a_space_answers_cache_partition_names_its_room_and_its_audience() {
+        let base = scope().authority;
+        assert_eq!(base.cache_partition(), scope().authority.cache_partition());
+
+        let mut other_room = base.clone();
+        other_room.space_ref = "space_2".into();
+        let mut other_audience = base.clone();
+        other_audience.recipient_audience_hash = "audience_hash_9".into();
+        let mut newer_audience = base.clone();
+        newer_audience.recipient_audience_revision = 4;
+        for other in [other_room, other_audience, newer_audience] {
+            assert_ne!(other.cache_partition(), base.cache_partition());
+        }
     }
 }

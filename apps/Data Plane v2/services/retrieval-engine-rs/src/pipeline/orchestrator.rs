@@ -113,6 +113,22 @@ fn key_for_rerank_input(key: String, includes_chunk_context: bool) -> String {
     }
 }
 
+/// WS17-S9: partitions a retrieval-cache key by the verified Space of the answer. The Space filters apply
+/// after the cache read, so a Space-scoped answer must never be served from, or written over, another room's
+/// entry or an older recipient audience's entry. An unscoped answer keeps the key it always had.
+fn key_for_space_scope(
+    key: String,
+    scope: Option<&crate::space_scope::ResolvedSpaceRetrievalScope>,
+) -> String {
+    match scope {
+        Some(scope) => crate::cache::compose_cache_key(&[
+            key.as_str(),
+            scope.authority.cache_partition().as_str(),
+        ]),
+        None => key,
+    }
+}
+
 /// The sovereignty posture of a request. ABSENT means STRICT (`true`): the caller
 /// needs sovereign infrastructure, which the Azure-hosted query embedding cannot
 /// give, so cloud egress is restricted like a restrictive ZDR posture and a
@@ -1223,13 +1239,7 @@ impl RetrievalPipeline {
         // WS17-S9: the Space filters apply after this read, so a Space-scoped answer is keyed by its
         // verified Space and recipient audience. Two rooms with one query and one grant set, or one
         // room under an older audience revision, never share an entry.
-        let cache_key = match req.space_scope.as_ref() {
-            Some(scope) => crate::cache::compose_cache_key(&[
-                cache_key.as_str(),
-                scope.authority.cache_partition().as_str(),
-            ]),
-            None => cache_key,
-        };
+        let cache_key = key_for_space_scope(cache_key, req.space_scope.as_ref());
         // CR-T15: an answer reranked with chunk context is its own partition, never shared with one
         // reranked on the raw text.
         let cache_key = key_for_rerank_input(
@@ -2082,8 +2092,8 @@ struct SourceRow {
 mod tests {
     use super::{
         embed_zdr_for_mode, embedding_cache_allowed, encode_cost_event, fuse_arms,
-        key_for_rerank_input, reciprocal_rank_fusion, retrieval_cache_allowed, text_rerank_allowed,
-        ResolvedWeights, ScoredCandidate, ZdrMode,
+        key_for_rerank_input, key_for_space_scope, reciprocal_rank_fusion, retrieval_cache_allowed,
+        text_rerank_allowed, ResolvedWeights, ScoredCandidate, ZdrMode,
     };
     // P2-5: tests bind to the same constant the config defaults to, so a change
     // to the default is caught here rather than silently reordering results.
@@ -2173,6 +2183,58 @@ mod tests {
             key_for_rerank_input(key.clone(), true),
             "the flag-on key is stable"
         );
+    }
+
+    /// WS17-S9: a Space-scoped answer is its own cache partition. One query and one grant set, but
+    /// another room, another recipient audience or an older audience revision never shares its entry.
+    #[test]
+    fn the_space_partitions_the_retrieval_cache_by_room_audience_and_revision() {
+        use crate::space_scope::{ResolvedSpaceRetrievalScope, VerifiedSpaceAuthority};
+        let scope = |space_ref: &str, audience_hash: &str, revision: i64| {
+            ResolvedSpaceRetrievalScope {
+                authority: VerifiedSpaceAuthority {
+                    authority_revision: 1,
+                    decision_ref: "decision_1".into(),
+                    org_id: "org_1".into(),
+                    privacy_policy_ref: "privacy_1".into(),
+                    recipient_audience_hash: audience_hash.into(),
+                    recipient_audience_ref: "audience_1".into(),
+                    recipient_audience_revision: revision,
+                    resource_authorization_ref: "resource_1".into(),
+                    space_ref: space_ref.into(),
+                },
+                collection_id: None,
+                document_ids: Vec::new(),
+                document_ids_truncated: false,
+                owner_resource_ref: "owner_1".into(),
+                workspace_id: Some("workspace_1".into()),
+            }
+        };
+        let key = crate::cache::compose_cache_key(&["margin", "5", "10"]);
+        assert_eq!(
+            key_for_space_scope(key.clone(), None),
+            key,
+            "an unscoped answer keeps its key"
+        );
+        let room = scope("space_1", "audience_hash_2", 3);
+        let keyed = key_for_space_scope(key.clone(), Some(&room));
+        assert_ne!(keyed, key, "a Space-scoped answer is a separate partition");
+        assert_eq!(
+            keyed,
+            key_for_space_scope(key.clone(), Some(&scope("space_1", "audience_hash_2", 3))),
+            "the same room under the same audience keys the same entry"
+        );
+        for other in [
+            scope("space_2", "audience_hash_2", 3),
+            scope("space_1", "audience_hash_9", 3),
+            scope("space_1", "audience_hash_2", 4),
+        ] {
+            assert_ne!(
+                key_for_space_scope(key.clone(), Some(&other)),
+                keyed,
+                "{other:?}"
+            );
+        }
     }
 
     #[test]
