@@ -59,15 +59,34 @@ func TestDecisionAuditRouteForMatchesTheIssuerSuffix(t *testing.T) {
 func TestEffectBoundRoutesAreExactlyTheEffectKinds(t *testing.T) {
 	for route, row := range decisionAuditRoutes {
 		switch row.Name {
-		case "thread_create", "thread_append", "thread_read", "retrieval", "watch_observe", "run_wake":
+		case "thread_create", "thread_append", "thread_read", "retrieval", "watch_observe", "run_wake", "memory_personal_context":
 			if row.EffectBound {
-				t.Errorf("%s (%s) is a read/append/wake and must not be audited as issued", route, row.Name)
+				t.Errorf("%s (%s) is a read/append/wake/per-turn kind and must not be audited as issued", route, row.Name)
 			}
 		default:
 			if !row.EffectBound {
 				t.Errorf("%s (%s) is an effect kind and must be effect-bound", route, row.Name)
 			}
 		}
+	}
+}
+
+// WS17-S7/WS17-S8: the two memory decisions this wave added to the Space
+// issuer surface must be in the audit registry like every other issuer
+// route, or a refusal and (for declassify) an issuance both go unaudited.
+// Declassify durably shares a personal memory into the room (or retracts
+// it), the same kind of lasting effect as memory-decision/canvas-decision/
+// browser-run-decision, so it is effect-bound; personal-context authorizes
+// one chat turn's use of memory and is denial-audited only, like
+// thread_create/thread_append/thread_read.
+func TestDecisionAuditRouteForCoversTheW3MemoryDecisions(t *testing.T) {
+	route, row, ok := DecisionAuditRouteFor("/api/v1/internal/spaces/memory-declassify-decision")
+	if !ok || route != "/memory-declassify-decision" || row.Name == "" || !row.EffectBound {
+		t.Fatalf("memory-declassify-decision = %q %+v %v, want an effect-bound row", route, row, ok)
+	}
+	route, row, ok = DecisionAuditRouteFor("/api/v1/internal/spaces/memory-personal-context-decision")
+	if !ok || route != "/memory-personal-context-decision" || row.Name == "" || row.EffectBound {
+		t.Fatalf("memory-personal-context-decision = %q %+v %v, want a denial-only row", route, row, ok)
 	}
 }
 
