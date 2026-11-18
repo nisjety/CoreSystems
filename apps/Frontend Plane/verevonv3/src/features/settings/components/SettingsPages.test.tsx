@@ -169,6 +169,94 @@ describe('settings profile page', () => {
     expect(screen.getByTestId('settings-top-scroll-fade').className).toContain('verevon-settings-fade--top')
     expect(screen.getByTestId('settings-bottom-scroll-fade').className).toContain('verevon-settings-fade--bottom')
   })
+
+  // WS16-S3: the density, date and time selects and the language list on the profile page.
+  function stubAccountGateway(preferences: Record<string, unknown>) {
+    const preferencePatches: Array<Record<string, unknown>> = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/me')) {
+        return new Response(JSON.stringify({
+          user: {
+            id: 'user_live',
+            email: 'mae@example.com',
+            name: 'Mae Jensen',
+            display_name: 'Mae Jensen',
+            avatar: null,
+            email_verified: true,
+            status: 'online',
+            account_status: 'active',
+            first_name: 'Mae',
+            last_name: 'Jensen',
+            timezone: 'Europe/Oslo',
+          },
+        }), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+      }
+      if (url.endsWith('/api/v1/preferences')) {
+        if (init?.method === 'PATCH') {
+          preferencePatches.push(JSON.parse(String(init.body)) as Record<string, unknown>)
+          return new Response(JSON.stringify({ message: 'Preferences updated successfully' }), {
+            headers: { 'Content-Type': 'application/json' },
+            status: 200,
+          })
+        }
+        return new Response(JSON.stringify({ preferences }), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 200,
+        })
+      }
+      return new Response(JSON.stringify({}), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+    }))
+    return { preferencePatches }
+  }
+
+  it('shows the density, date format and time format the person chose', async () => {
+    stubAccountGateway({
+      compactMode: true,
+      dateFormat: 'DD/MM/YYYY',
+      timeFormat: '24h',
+      explicit: { language: false, timezone: false, dateFormat: true, timeFormat: true, compactMode: true },
+    })
+    render(() => <AccountSettingsPage />)
+
+    await waitFor(() => expect((screen.getByRole('combobox', { name: /^tetthet$/i }) as HTMLSelectElement).value).toBe('compact'))
+    expect((screen.getByRole('combobox', { name: /^datoformat$/i }) as HTMLSelectElement).value).toBe('DD/MM/YYYY')
+    expect((screen.getByRole('combobox', { name: /^tidsformat$/i }) as HTMLSelectElement).value).toBe('24h')
+  })
+
+  it('saves the density, date format and time format the person picks', async () => {
+    const gateway = stubAccountGateway({
+      compactMode: false,
+      explicit: { language: false, timezone: false, dateFormat: false, timeFormat: false, compactMode: false },
+    })
+    render(() => <AccountSettingsPage />)
+    await waitFor(() => expect((screen.getByRole('textbox', { name: /visningsnavn/i }) as HTMLInputElement).value).toBe('Mae Jensen'))
+
+    fireEvent.change(screen.getByRole('combobox', { name: /^tetthet$/i }), { target: { value: 'compact' } })
+    fireEvent.change(screen.getByRole('combobox', { name: /^datoformat$/i }), { target: { value: 'YYYY-MM-DD' } })
+    fireEvent.change(screen.getByRole('combobox', { name: /^tidsformat$/i }), { target: { value: '12h' } })
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: /lagre profil/i }))
+
+    await waitFor(() => expect(gateway.preferencePatches).toHaveLength(1))
+    expect(gateway.preferencePatches[0]).toMatchObject({ compactMode: true, dateFormat: 'YYYY-MM-DD', timeFormat: '12h' })
+  })
+
+  it('offers only English and Norwegian, and keeps a stored other language visible but disabled', async () => {
+    stubAccountGateway({
+      language: 'fr-FR',
+      explicit: { language: true, timezone: false, dateFormat: false, timeFormat: false, compactMode: false },
+    })
+    render(() => <AccountSettingsPage />)
+
+    await waitFor(() => expect((screen.getByRole('combobox', { name: /^språk$/i }) as HTMLSelectElement).value).toBe('fr-FR'))
+    const options = Array.from((screen.getByRole('combobox', { name: /^språk$/i }) as HTMLSelectElement).options)
+    expect(options.map((option) => [option.value, option.disabled])).toEqual([
+      ['en-US', false],
+      ['nb-NO', false],
+      ['fr-FR', true],
+    ])
+  })
 })
 
 describe('workspace settings page', () => {
