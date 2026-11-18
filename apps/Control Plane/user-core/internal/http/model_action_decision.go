@@ -158,6 +158,9 @@ func (s *Server) issueRunActionDecision(c *gin.Context) {
 	// floor, so the floor is read before the decision is issued.
 	if _, canvas := spaces.CanvasRunActionWrite(request.ActionID); canvas {
 		if err := s.spaceRepo.ApplyCanvasRunActionFloor(c.Request.Context(), &evidence); err != nil {
+			if refuseCanvasHistoryFloor(c, err) {
+				return
+			}
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "current Space authority is unavailable"})
 			return
 		}
@@ -251,6 +254,9 @@ func (s *Server) checkCurrentRunActionAuthority(c *gin.Context) {
 	// WS19-S9: effect-time freshness reads a canvas decision's since_join floor again.
 	if _, canvas := spaces.CanvasRunActionWrite(decision.ActionID); canvas {
 		if err := s.spaceRepo.ApplyCanvasRunActionFloor(c.Request.Context(), &evidence); err != nil {
+			if refuseCanvasHistoryFloor(c, err) {
+				return
+			}
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "current Space authority is unavailable"})
 			return
 		}

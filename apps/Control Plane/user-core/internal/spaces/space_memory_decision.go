@@ -177,6 +177,11 @@ func (r *Repository) ResolveSharedSpaceMemoryDecisionEvidence(ctx context.Contex
 	if err != nil {
 		return PersonalThreadDecisionEvidence{}, fmt.Errorf("resolve shared Space memory authority: %w", err)
 	}
+	// D18: a list reads the room's memory rows, which are derived from room content, so a windowed manager carries the
+	// floor for the memory verifier to apply. Delete and erase carry it too, and need no window to act.
+	if err := r.applyHistoryFloor(ctx, &evidence); err != nil {
+		return PersonalThreadDecisionEvidence{}, err
+	}
 	evidence.ResourceAuthorizationRef = fmt.Sprintf("control:%s:memory-manage:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
 	if err := evidence.ValidateForSpaceMemoryManage(); err != nil {
 		return PersonalThreadDecisionEvidence{}, fmt.Errorf("invalid shared Space memory authority: %w", err)
@@ -237,9 +242,9 @@ func IssueSpaceMemoryDecision(evidence PersonalThreadDecisionEvidence, request S
 	if now.IsZero() {
 		return Decision{}, fmt.Errorf("space memory decision issuance time is required")
 	}
-	return newEvidenceDecision(
+	return carryHistoryFloor(newEvidenceDecision(
 		evidence, request.DecisionRef, spaceMemoryAudience, spaceMemoryAction, spaceMemorySchema,
 		spaceMemoryPayloadDigest(evidence, request), request.IdempotencyKey, request.Nonce,
 		[]string{SpaceMemoryPermission}, evidence.Privacy.ZeroDataRetention, now,
-	), nil
+	), evidence), nil
 }

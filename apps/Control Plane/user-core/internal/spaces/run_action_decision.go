@@ -137,6 +137,10 @@ type RunActionDecision struct {
 	IssuedAt                   time.Time `json:"issued_at"`
 	ExpiresAt                  time.Time `json:"expires_at"`
 	Nonce                      string    `json:"nonce"`
+	// HistoryFloorAt (D18) is set only on a canvas READ row whose member has a timestamp window, so the canvas is
+	// windowed by time. It is omitted otherwise. A reader that refuses unknown claims refuses this decision
+	// (fail closed) until it names the claim, which is the intended failure while the claim is not yet honoured.
+	HistoryFloorAt *time.Time `json:"history_floor_at,omitempty"`
 }
 
 func (d RunActionDecision) Validate() error {
@@ -217,7 +221,7 @@ func IssueRunActionDecision(evidence PersonalThreadDecisionEvidence, authority R
 	) || evidence.ResourceAuthorizationRef != expectedSourceRef {
 		return RunActionDecision{}, fmt.Errorf("run action authority does not match current Control authority")
 	}
-	return RunActionDecision{
+	decision := RunActionDecision{
 		DecisionRef:                strings.TrimSpace(request.DecisionRef),
 		RunID:                      strings.TrimSpace(authority.RunID),
 		ThreadID:                   strings.TrimSpace(authority.ThreadID),
@@ -247,7 +251,13 @@ func IssueRunActionDecision(evidence PersonalThreadDecisionEvidence, authority R
 		IssuedAt:                   now.UTC(),
 		ExpiresAt:                  now.UTC().Add(personalDecisionLifetime),
 		Nonce:                      strings.TrimSpace(request.Nonce),
-	}, nil
+	}
+	// D18: only a canvas read carries the timestamp floor (a canvas write under any floor is refused above).
+	if write, canvas := CanvasRunActionWrite(spec.ActionID); canvas && !write && evidence.HistoryFloorAt != nil {
+		at := evidence.HistoryFloorAt.UTC()
+		decision.HistoryFloorAt = &at
+	}
+	return decision, nil
 }
 
 // ValidateCurrentRunActionDecision performs Control's effect-time freshness
@@ -274,6 +284,11 @@ func ValidateCurrentRunActionDecision(evidence PersonalThreadDecisionEvidence, d
 	if write, canvas := CanvasRunActionWrite(spec.ActionID); canvas {
 		if err := evidence.ValidateForCanvasRunAction(write); err != nil {
 			return fmt.Errorf("run action decision is no longer authorized for the canvas: %w", err)
+		}
+		// D18: a window that tightened after issuance must not be read under the older, looser floor. The decision
+		// has to carry a floor at least as late as the member's current one.
+		if evidence.HistoryFloorAt != nil && (decision.HistoryFloorAt == nil || decision.HistoryFloorAt.Before(*evidence.HistoryFloorAt)) {
+			return fmt.Errorf("run action decision history window changed since it was issued")
 		}
 	}
 	expectedSourceRef := fmt.Sprintf("control:%s:thread-create:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)

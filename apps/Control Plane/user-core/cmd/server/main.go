@@ -415,6 +415,9 @@ func main() {
 	// D18: per-member history windows (the invite's don't-share choice and the admin change). Strict literal
 	// true; off by default; gates the writes only, never an authorization input.
 	spaceRepo.SetMemberHistoryWindows(os.Getenv("SPACE_MEMBER_HISTORY_WINDOWS") == "true")
+	// D18: a canvas read under a member's timestamp floor is issued for the canvas verifier to window. Strict literal
+	// true; off by default. Turn it on only once the canvas verifier applies history_floor_at, or the canvas shows whole.
+	spaceRepo.SetCanvasHistoryWindow(os.Getenv("SPACE_CANVAS_HISTORY_WINDOW") == "true")
 	spaceRepo.SetSandboxEgressTiers(os.Getenv("SPACE_SANDBOX_EGRESS_TIERS") == "true")
 		// WS17-S4: agent admission (ADR 4). SPACE_AGENT_ADMISSION is off (unset), observe or
 		// enforce. An unknown value stops startup, so a typo never runs another mode. The owner

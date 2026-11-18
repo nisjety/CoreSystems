@@ -480,6 +480,14 @@ func (s *Server) resolveCurrentSpaceMembership(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Space membership resolution failed"})
 		return
 	}
+	// D18: the caller's own effective history window, from the same floor the reads sign. It is for this
+	// member only: the membership is the caller's, so the window is too.
+	window, err := s.spaceRepo.OwnHistoryWindowFor(c.Request.Context(), membership)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Space membership resolution failed"})
+		return
+	}
+	membership.HistoryWindow = window
 	c.JSON(http.StatusOK, gin.H{"data": membership})
 }
 
@@ -862,6 +870,10 @@ func (s *Server) issueWatchCreateDecision(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if err := s.spaceRepo.ApplyReadHistoryFloor(c.Request.Context(), &evidence); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space watch authority unavailable"})
+		return
+	}
 	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
 	if !ok {
 		return
@@ -919,6 +931,11 @@ func (s *Server) issueWatchObserveDecision(c *gin.Context) {
 	}
 	evidence, ok := s.resolvePersonalThreadEvidence(c, request.Intent.SpaceRef, request.Intent.OrgID, request.Intent.SubjectID, "Space watch authority unavailable")
 	if !ok {
+		return
+	}
+	// D18: each observation is a disclosure from a standing read of a shared room; the subject's floor is carried.
+	if err := s.spaceRepo.ApplyReadHistoryFloor(c.Request.Context(), &evidence); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space watch authority unavailable"})
 		return
 	}
 	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)

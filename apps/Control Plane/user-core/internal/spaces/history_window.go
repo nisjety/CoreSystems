@@ -80,6 +80,34 @@ func (r *Repository) applyHistoryFloor(ctx context.Context, evidence *PersonalTh
 	return nil
 }
 
+// ApplyReadHistoryFloor resolves a member's floor onto evidence that a handler gathered through a resolver which
+// does not apply one (D18). It is for a shared Space only: a personal Space has one member and no window, so its
+// evidence is left as it is. A resolution error is returned, so the caller refuses the decision (fail closed).
+func (r *Repository) ApplyReadHistoryFloor(ctx context.Context, evidence *PersonalThreadDecisionEvidence) error {
+	if evidence == nil || evidence.Membership.Kind == KindPersonal {
+		return nil
+	}
+	return r.applyHistoryFloor(ctx, evidence)
+}
+
+// hasHistoryFloor reports whether the evidence carries any floor: a WS04-S11 revision floor or a D18 timestamp floor.
+func (e PersonalThreadDecisionEvidence) hasHistoryFloor() bool {
+	return e.HistoryFloorRevision > 0 || e.HistoryFloorAt != nil
+}
+
+// carryHistoryFloor copies the member's floor onto a decision whose verifier applies it as a presentation narrowing
+// (D18). Each issuer that calls it opts in explicitly; a decision that does not call it carries no floor, so the
+// personal and own-scheduled decisions stay floor-free. The floor is additive and in no payload digest.
+func carryHistoryFloor(decision Decision, evidence PersonalThreadDecisionEvidence) Decision {
+	decision.HistoryFloorRevision = evidence.HistoryFloorRevision
+	decision.HistoryFloorAt = nil
+	if evidence.HistoryFloorAt != nil {
+		at := evidence.HistoryFloorAt.UTC()
+		decision.HistoryFloorAt = &at
+	}
+	return decision
+}
+
 // normalizeHistoryMode trims a requested history mode; empty means unchanged.
 func normalizeHistoryMode(v *string) *string {
 	if v == nil {

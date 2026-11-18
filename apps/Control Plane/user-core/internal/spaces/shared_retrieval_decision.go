@@ -24,5 +24,6 @@ func IssueSharedRetrievalDecision(
 	if now.IsZero() {
 		return Decision{}, fmt.Errorf("shared retrieval decision issuance time is required")
 	}
-	return newRetrievalReadDecision(evidence, request, now), nil
+	// D18: agent retrieval reads room content on the member's behalf, so the member's floor is carried.
+	return carryHistoryFloor(newRetrievalReadDecision(evidence, request, now), evidence), nil
 }

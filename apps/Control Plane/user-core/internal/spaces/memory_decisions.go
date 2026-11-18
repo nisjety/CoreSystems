@@ -168,6 +168,11 @@ func (r *Repository) ResolveSharedMemoryDeclassifyDecisionEvidence(ctx context.C
 	if err != nil {
 		return PersonalThreadDecisionEvidence{}, fmt.Errorf("resolve shared Space memory declassify authority: %w", err)
 	}
+	// D18: a declassify copies personal memory into the room and a retract removes that copy; both carry the member's
+	// floor, so the memory verifier can apply it to what the room's memory shows this member.
+	if err := r.applyHistoryFloor(ctx, &evidence); err != nil {
+		return PersonalThreadDecisionEvidence{}, err
+	}
 	evidence.ResourceAuthorizationRef = fmt.Sprintf("control:%s:memory-declassify:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
 	return evidence, nil
 }
@@ -206,6 +211,11 @@ func (r *Repository) ResolveSharedMemoryPersonalContextDecisionEvidence(ctx cont
 	}
 	if err != nil {
 		return PersonalThreadDecisionEvidence{}, fmt.Errorf("resolve shared Space personal context authority: %w", err)
+	}
+	// D18: a turn that uses personal memory in a room is an agent reading room context on the member's behalf, so the
+	// member's floor is carried for the memory verifier to apply.
+	if err := r.applyHistoryFloor(ctx, &evidence); err != nil {
+		return PersonalThreadDecisionEvidence{}, err
 	}
 	evidence.ResourceAuthorizationRef = fmt.Sprintf("control:%s:memory-personal-context:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
 	return evidence, nil
@@ -272,9 +282,9 @@ func IssueMemoryDeclassifyDecision(evidence PersonalThreadDecisionEvidence, requ
 	if now.IsZero() {
 		return Decision{}, fmt.Errorf("memory declassify decision issuance time is required")
 	}
-	return newEvidenceDecision(
+	return carryHistoryFloor(newEvidenceDecision(
 		evidence, request.DecisionRef, memoryDeclassifyAudience, memoryDeclassifyAction, memoryDeclassifySchema,
 		memoryDeclassifyPayloadDigest(evidence, request), request.IdempotencyKey, request.Nonce,
 		[]string{MemoryDeclassifyPermission}, evidence.Privacy.ZeroDataRetention, now,
-	), nil
+	), evidence), nil
 }

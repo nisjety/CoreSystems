@@ -64,9 +64,30 @@ const (
 // denial vocabulary, which is pinned across planes.
 const CanvasHistoryFloorCode = "space_history_floor_unsupported"
 
-// ErrCanvasHistoryFloorUnsupported is the refusal of a canvas run action in a
-// since_join room whose member has a history floor. Its text is CanvasHistoryFloorCode.
+// ErrCanvasHistoryFloorUnsupported is the refusal of a canvas decision the member's history floor forbids. Its text
+// is CanvasHistoryFloorCode.
 var ErrCanvasHistoryFloorUnsupported = errors.New(CanvasHistoryFloorCode)
+
+// SetCanvasHistoryWindow turns the SPACE_CANVAS_HISTORY_WINDOW rollout switch on or off (D18). On: a canvas READ
+// under a per-member timestamp floor is issued with history_floor_at, so the canvas verifier can window the canvas by
+// time. Off (the default): such a read is refused, as before. The switch must stay off until the canvas verifier
+// applies history_floor_at, because a verifier that ignores the claim would show the whole canvas. It only narrows a
+// read, so it is a rollout control and never an authorization input.
+func (r *Repository) SetCanvasHistoryWindow(enabled bool) {
+	r.canvasHistoryWindow = enabled
+}
+
+// CanvasHistoryWindowEnabled reports the SPACE_CANVAS_HISTORY_WINDOW switch.
+func (r *Repository) CanvasHistoryWindowEnabled() bool { return r != nil && r.canvasHistoryWindow }
+
+// refuseCanvasTimestampFloor refuses a canvas READ under a per-member timestamp floor while the canvas window is not
+// applied. It is the one gate both canvas read paths (a person's canvas and a canvas run action) share.
+func refuseCanvasTimestampFloor(evidence PersonalThreadDecisionEvidence, windowEnabled bool) error {
+	if evidence.HistoryFloorAt != nil && !windowEnabled {
+		return ErrCanvasHistoryFloorUnsupported
+	}
+	return nil
+}
 
 // CanvasDecisionRequest carries only the operation-bound fields the verified
 // gateway path supplies. It names no actor, organisation, role, audience, policy,
@@ -235,16 +256,20 @@ func CanvasRunActionWrite(actionID string) (write bool, canvas bool) {
 
 // ValidateForCanvasRunAction authorizes a canvas run action (write true for
 // space.canvas.write). It is ValidateForCanvas, so a run action meets the kind, role
-// floor, canvas_entitled and Zero Data Retention rules a person does, plus the one
-// refusal only a run action adds: a room carrying a since_join history floor is
-// refused with ErrCanvasHistoryFloorUnsupported. Archived rooms need no check here,
-// because the agent evidence resolvers read active rooms only. The agent gate
-// (ValidateForAgentAction) still runs first, so an agent's canvas read needs an editor.
+// floor, canvas_entitled and Zero Data Retention rules a person does, plus the history
+// floor rules only a run action adds. A run action never writes under a floor: its
+// canvas operation travels in the agent's arguments, which Control does not read, so a
+// create cannot be told apart from a save here. A read under a WS04-S11 revision floor
+// is refused. A read under a D18 timestamp floor
+// is decided by ApplyCanvasRunActionFloor, which holds the SPACE_CANVAS_HISTORY_WINDOW
+// rollout switch. Archived rooms need no check here, because the agent evidence
+// resolvers read active rooms only. The agent gate (ValidateForAgentAction) still runs
+// first, so an agent's canvas read needs an editor.
 func (e PersonalThreadDecisionEvidence) ValidateForCanvasRunAction(write bool) error {
 	if err := e.ValidateForCanvas(write); err != nil {
 		return err
 	}
-	if e.HistoryFloorRevision > 0 {
+	if e.HistoryFloorRevision > 0 || (write && e.HistoryFloorAt != nil) {
 		return ErrCanvasHistoryFloorUnsupported
 	}
 	return nil
@@ -300,6 +325,14 @@ func canvasPayloadDigest(evidence PersonalThreadDecisionEvidence, request Canvas
 // write token cannot be presented as a read. The decision carries no content and
 // no head: wiki-store checks the expected head in its own transaction and
 // recomputes the digest from the bytes it received.
+//
+// A member's history floor (D18) is carried on a read, so the canvas verifier can
+// window the canvas. A write under any floor is refused unless it only creates a
+// canvas: a save answers a head-moved conflict that names the current head (its
+// version id, number, time and author kind) and an unchanged answer that names the head's
+// version id, so a windowed member could learn pre-floor state; a restore makes an older
+// version the head, which the member would then read. A create writes new content only,
+// because no canvas, and so no pre-floor content, exists for it.
 func IssueCanvasDecision(evidence PersonalThreadDecisionEvidence, request CanvasDecisionRequest, now time.Time) (Decision, error) {
 	if err := request.Validate(); err != nil {
 		return Decision{}, err
@@ -311,6 +344,9 @@ func IssueCanvasDecision(evidence PersonalThreadDecisionEvidence, request Canvas
 	if err := evidence.ValidateForCanvas(write); err != nil {
 		return Decision{}, err
 	}
+	if write && request.Op != CanvasOpCreate && evidence.hasHistoryFloor() {
+		return Decision{}, ErrCanvasHistoryFloorUnsupported
+	}
 	action, schema, permission := canvasReadAction, canvasReadSchema, canvasReadPermission
 	if write {
 		action, schema, permission = canvasWriteAction, canvasWriteSchema, canvasWritePermission
@@ -320,8 +356,5 @@ func IssueCanvasDecision(evidence PersonalThreadDecisionEvidence, request Canvas
 		canvasPayloadDigest(evidence, request, schema), request.IdempotencyKey, request.Nonce,
 		[]string{permission}, evidence.Privacy.ZeroDataRetention, now,
 	)
-	if evidence.HistoryFloorRevision > 0 {
-		decision.HistoryFloorRevision = evidence.HistoryFloorRevision
-	}
-	return decision, nil
+	return carryHistoryFloor(decision, evidence), nil
 }

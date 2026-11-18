@@ -240,11 +240,12 @@ func IssueWatchCreateDecision(evidence PersonalThreadDecisionEvidence, request W
 	if now.IsZero() {
 		return Decision{}, fmt.Errorf("watch create decision issuance time is required")
 	}
-	return newEvidenceDecision(
+	// D18: a watch on a shared room is a standing read of that room, so the member's floor is carried.
+	return carryHistoryFloor(newEvidenceDecision(
 		evidence, request.DecisionRef, watchCreateAudience, watchCreateAction, watchCreateSchema,
 		watchCreatePayloadDigest(evidence, request), request.IdempotencyKey, request.Nonce,
 		[]string{"watch:create"}, evidence.Privacy.ZeroDataRetention, now,
-	), nil
+	), evidence), nil
 }
 
 // IssueWatchObserveDecision is a fresh, one-observation Model Plane decision.
@@ -279,9 +280,10 @@ func IssueWatchObserveDecision(
 	if strings.TrimSpace(decisionRef) == "" || strings.TrimSpace(nonce) == "" || now.IsZero() {
 		return Decision{}, fmt.Errorf("watch observe decision fields are required")
 	}
-	return newEvidenceDecision(
+	// D18: each observation is a disclosure from a standing read of the room, so it carries the member's floor now.
+	return carryHistoryFloor(newEvidenceDecision(
 		evidence, decisionRef, watchObserveAudience, watchObserveAction, watchObserveSchema,
 		watchObservePayloadDigest(evidence, intent), intent.IdempotencyKey, nonce,
 		[]string{"watch:observe"}, evidence.Privacy.ZeroDataRetention, now,
-	), nil
+	), evidence), nil
 }

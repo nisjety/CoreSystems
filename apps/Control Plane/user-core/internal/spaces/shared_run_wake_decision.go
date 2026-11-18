@@ -186,9 +186,10 @@ func IssueRunWakeDecision(evidence PersonalThreadDecisionEvidence, roster []Rost
 	if !runWakeAgentOnRoster(roster, request.AgentSubjectID) {
 		return Decision{}, fmt.Errorf("run wake agent is not an active service member of the Space")
 	}
-	return newEvidenceDecision(
+	// D18: the run a wake starts reads the room's conversation as the agent's context, so the member's floor is carried.
+	return carryHistoryFloor(newEvidenceDecision(
 		evidence, request.DecisionRef, runWakeAudience, runWakeAction, runWakeSchema,
 		runWakePayloadDigest(evidence, request), request.IdempotencyKey, request.Nonce,
 		[]string{RunWakePermission}, evidence.Privacy.ZeroDataRetention, now,
-	), nil
+	), evidence), nil
 }

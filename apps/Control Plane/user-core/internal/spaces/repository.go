@@ -50,6 +50,9 @@ type Repository struct {
 	// Off: the invite's don't-share choice and the admin change are refused; stored
 	// rows keep being enforced.
 	memberHistoryWindows bool
+	// canvasHistoryWindow is the SPACE_CANVAS_HISTORY_WINDOW rollout switch (D18). Off: a canvas read under a
+	// per-member timestamp floor is refused. On: the floor is issued for the canvas verifier to window by time.
+	canvasHistoryWindow bool
 	// sandboxEgressTiers is the SPACE_SANDBOX_EGRESS_TIERS rollout switch
 	// (EP-9 E2). Off: the capability decision keeps the v1 form and the
 	// egress ceiling columns are neither read nor written.
@@ -1256,6 +1259,10 @@ func (r *Repository) ResolveSharedRetrievalDecisionEvidence(ctx context.Context,
 	if err != nil {
 		return PersonalThreadDecisionEvidence{}, fmt.Errorf("resolve shared Space retrieval authority: %w", err)
 	}
+	// D18: agent retrieval reads room content on the member's behalf, so the member's floor is carried.
+	if err := r.applyHistoryFloor(ctx, &evidence); err != nil {
+		return PersonalThreadDecisionEvidence{}, err
+	}
 	evidence.ResourceAuthorizationRef = fmt.Sprintf("control:%s:retrieval-read:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
 	if err := evidence.ValidateForSharedRetrieval(); err != nil {
 		return PersonalThreadDecisionEvidence{}, fmt.Errorf("invalid shared Space retrieval authority: %w", err)
@@ -1370,14 +1377,15 @@ func (r *Repository) ResolveSharedCanvasDecisionEvidence(ctx context.Context, sp
 	if err != nil {
 		return PersonalThreadDecisionEvidence{}, fmt.Errorf("resolve shared Space canvas authority: %w", err)
 	}
+	// D18: the member's floor is resolved for a read and a write alike. IssueCanvasDecision refuses a write under
+	// any floor except a create. A read under a timestamp floor is refused here unless the canvas window is on
+	// (SPACE_CANVAS_HISTORY_WINDOW), so a windowed member is never shown the canvas whole.
+	if err := r.applyHistoryFloor(ctx, &evidence); err != nil {
+		return PersonalThreadDecisionEvidence{}, err
+	}
 	if !write {
-		if err := r.applyHistoryFloor(ctx, &evidence); err != nil {
+		if err := refuseCanvasTimestampFloor(evidence, r.CanvasHistoryWindowEnabled()); err != nil {
 			return PersonalThreadDecisionEvidence{}, err
-		}
-		// D18: canvas content is not windowed by time yet, so a per-member timestamp
-		// floor is refused here rather than read as the whole canvas.
-		if evidence.HistoryFloorAt != nil {
-			return PersonalThreadDecisionEvidence{}, ErrCanvasHistoryFloorUnsupported
 		}
 	}
 	evidence.ResourceAuthorizationRef = fmt.Sprintf("control:%s:canvas:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
@@ -1639,10 +1647,10 @@ func (r *Repository) ResolveAgentActionDecisionEvidence(ctx context.Context, spa
 	return evidence, nil
 }
 
-// ApplyCanvasRunActionFloor fills the since_join history floor a canvas run action is
-// refused on (WS19-S9). The floor is read only for a room whose canvas bit is on, since
-// an unentitled room is refused on that bit alone. With SPACE_HISTORY_WINDOW_CLAIM off
-// the floor is never set, as for a person's canvas decision.
+// ApplyCanvasRunActionFloor fills the history floor a canvas run action is decided under (WS19-S9, D18).
+// The floor is read only for a room whose canvas bit is on, since an unentitled room is refused on that bit
+// alone. A timestamp floor is refused on a read while SPACE_CANVAS_HISTORY_WINDOW is off, as a person's canvas
+// read is; a write under a floor is refused by ValidateForCanvasRunAction.
 func (r *Repository) ApplyCanvasRunActionFloor(ctx context.Context, evidence *PersonalThreadDecisionEvidence) error {
 	if evidence == nil || !evidence.CanvasEntitled {
 		return nil
@@ -1650,12 +1658,7 @@ func (r *Repository) ApplyCanvasRunActionFloor(ctx context.Context, evidence *Pe
 	if err := r.applyHistoryFloor(ctx, evidence); err != nil {
 		return err
 	}
-	// D18: a per-member timestamp floor is refused on a canvas run action, as a revision
-	// floor is (canvas content is not windowed by time yet).
-	if evidence.HistoryFloorAt != nil {
-		return ErrCanvasHistoryFloorUnsupported
-	}
-	return nil
+	return refuseCanvasTimestampFloor(*evidence, r.CanvasHistoryWindowEnabled())
 }
 
 func (r *Repository) resolvePersonalDecisionEvidence(ctx context.Context, spaceRef, orgID, subjectID string) (PersonalThreadDecisionEvidence, error) {

@@ -120,9 +120,9 @@ func IssueMemoryPersonalContextDecision(evidence PersonalThreadDecisionEvidence,
 	if now.IsZero() {
 		return Decision{}, fmt.Errorf("memory personal context decision issuance time is required")
 	}
-	return newEvidenceDecision(
+	return carryHistoryFloor(newEvidenceDecision(
 		evidence, request.DecisionRef, memoryPersonalContextAudience, memoryPersonalContextAction, memoryPersonalContextSchema,
 		memoryPersonalContextPayloadDigest(evidence, request), request.IdempotencyKey, request.Nonce,
 		[]string{MemoryPersonalContextPermission}, evidence.Privacy.ZeroDataRetention, now,
-	), nil
+	), evidence), nil
 }

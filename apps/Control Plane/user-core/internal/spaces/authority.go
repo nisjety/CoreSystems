@@ -614,6 +614,9 @@ type CurrentMembership struct {
 	// the settings UI. Whether a floor is actually signed also depends on the
 	// SPACE_HISTORY_WINDOW_CLAIM rollout switch.
 	HistoryMode string `json:"history_mode,omitempty"`
+	// HistoryWindow (D18) is the signed-in member's own effective history window. Only the membership read sets it,
+	// for the caller who asked; no decision reads it. Omitted when unset.
+	HistoryWindow *OwnHistoryWindow `json:"history_window,omitempty"`
 }
 
 func (m CurrentMembership) Validate() error {

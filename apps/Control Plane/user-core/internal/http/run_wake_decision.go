@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -50,8 +51,21 @@ func (s *Server) issueRunWakeDecision(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	// D18: a wake starts a run that reads the room's conversation, so a shared room's wake carries the member's floor.
+	sharedWithFloor := func(ctx context.Context, spaceRef, orgID, subjectID string) (spaces.PersonalThreadDecisionEvidence, error) {
+		evidence, err := s.spaceRepo.ResolveSharedThreadDecisionEvidence(ctx, spaceRef, orgID, subjectID)
+		if err != nil {
+			return evidence, err
+		}
+		// The floor is applied before the evidence is returned: a return that reads the value and calls the
+		// applier in one expression does not order the two, so the floor would be dropped.
+		if err := s.spaceRepo.ApplyReadHistoryFloor(ctx, &evidence); err != nil {
+			return spaces.PersonalThreadDecisionEvidence{}, err
+		}
+		return evidence, nil
+	}
 	evidence, _, ok := s.resolveThreadWriteEvidence(c, request.SpaceRef,
-		s.spaceRepo.ResolvePersonalThreadDecisionEvidence, s.spaceRepo.ResolveSharedThreadDecisionEvidence,
+		s.spaceRepo.ResolvePersonalThreadDecisionEvidence, sharedWithFloor,
 		"current recipient audience authority required")
 	if !ok {
 		return

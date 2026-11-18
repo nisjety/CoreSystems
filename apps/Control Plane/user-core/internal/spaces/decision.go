@@ -87,18 +87,23 @@ type Decision struct {
 	// ImportSourceType is present only for the import action family. It binds a
 	// durable connector intent without turning Control into a connector owner.
 	ImportSourceType string `json:"import_source_type,omitempty"`
-	// HistoryFloorRevision (WS04-S11) is present only on a shared thread-read
-	// decision for a since_join room while SPACE_HISTORY_WINDOW_CLAIM is on:
-	// the first recipient-audience revision the reader may see. It is signed
-	// with the rest of the decision and is in no payload digest. A consumer that
-	// does not know it shows full history (presentation rule, never authority).
+	// HistoryFloorRevision (WS04-S11) is present on a shared thread-read decision
+	// for a since_join room while SPACE_HISTORY_WINDOW_CLAIM is on, and on the
+	// shared decisions that carry a member's floor (see HistoryFloorAt): the first
+	// recipient-audience revision the reader may see. It is signed with the rest of
+	// the decision and is in no payload digest. A consumer that does not know it
+	// shows full history (presentation rule, never authority).
 	HistoryFloorRevision int64 `json:"history_floor_revision,omitempty"`
 	// HistoryFloorAt (D18) is the instant a per-member history window starts at: a
-	// since_date window, or a per-member since_join window's join. It is present only
-	// on a shared thread-read decision whose member has such a row, and it is signed
-	// with the rest of the decision, in no payload digest. A consumer that does not
-	// know it shows full history (presentation rule, never authority); a consumer
-	// that knows it must hide every row older than it.
+	// since_date window, or a per-member since_join window's join. It is present
+	// only on a decision that lets an agent or a member read room content on that
+	// member's behalf, and only when the member has such a row: a shared thread read,
+	// a shared retrieval, a personal-memory turn, a memory declassify or retract, a
+	// space-memory manage, a run wake, a watch create or observe, a canvas read or
+	// create, and a canvas run action read. A canvas save or restore under a floor is
+	// refused, not issued. It is signed with the rest of the decision, in no payload
+	// digest. A consumer that does not know it shows full history (presentation rule,
+	// never authority); a consumer that knows it must hide every row older than it.
 	HistoryFloorAt *time.Time `json:"history_floor_at,omitempty"`
 	// ContractDigest and ContractExpiresAt bind a scheduled step to its stored
 	// consent contract. Both are omitted on every decision issued without one.

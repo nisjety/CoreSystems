@@ -91,10 +91,13 @@ func (r *Repository) MemberHistoryWindowsEnabled() bool {
 //   - Revision is the first recipient-audience revision the member may read from; 0 means none.
 //   - At is the first instant the member may read from; nil means none.
 //   - Source is "member" when a per-member row decided, and "room" when the room's history_mode did.
+//   - Mode is the window mode the floor was derived under: the member's row mode for a member source,
+//     and the room's history_mode for a room source. It is what the member's own read reports.
 type HistoryFloor struct {
 	Revision int64
 	At       *time.Time
 	Source   string
+	Mode     string
 }
 
 // memberWindowState is one member's stored window, read under the row lock.
@@ -145,36 +148,38 @@ func (r *Repository) resolveHistoryFloor(ctx context.Context, spaceRef, subjectI
 func (r *Repository) memberWindowFloor(ctx context.Context, spaceRef, subjectID, mode string, sinceAt *time.Time) (HistoryFloor, error) {
 	switch mode {
 	case MemberHistoryModeFull:
-		return HistoryFloor{}, nil
+		return HistoryFloor{Source: historyFloorSourceMember, Mode: mode}, nil
 	case MemberHistoryModeSinceDate:
 		if sinceAt == nil {
 			return HistoryFloor{}, errMemberHistoryWindowCorrupt
 		}
 		at := sinceAt.UTC()
-		return HistoryFloor{At: &at, Source: historyFloorSourceMember}, nil
+		return HistoryFloor{At: &at, Source: historyFloorSourceMember, Mode: mode}, nil
 	case MemberHistoryModeSinceJoin:
-		return r.joinFloor(ctx, spaceRef, subjectID, historyFloorSourceMember)
+		floor, err := r.joinFloor(ctx, spaceRef, subjectID, historyFloorSourceMember)
+		floor.Mode = mode
+		return floor, err
 	}
 	return HistoryFloor{}, errMemberHistoryWindowCorrupt
 }
 
-// roomHistoryFloor is WS04-S11 unchanged: a since_join room floors on the revision, behind the claim switch.
+// roomHistoryFloor is WS04-S11 unchanged: a since_join room floors on the revision, behind the claim switch. The
+// room's mode is read on every path, so a member's own read reports the mode the room sets even while the claim is off.
 func (r *Repository) roomHistoryFloor(ctx context.Context, spaceRef, subjectID string) (HistoryFloor, error) {
-	if !r.historyWindowClaim {
-		return HistoryFloor{}, nil
-	}
 	var roomMode string
 	err := r.db.Pool.QueryRow(ctx, `SELECT history_mode FROM registered_spaces WHERE space_ref=$1`, spaceRef).Scan(&roomMode)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return HistoryFloor{}, nil
+		return HistoryFloor{Source: historyFloorSourceRoom}, nil
 	}
 	if err != nil {
 		return HistoryFloor{}, fmt.Errorf("read Space history mode: %w", err)
 	}
-	if roomMode != HistoryModeSinceJoin {
-		return HistoryFloor{}, nil
+	if !r.historyWindowClaim || roomMode != HistoryModeSinceJoin {
+		return HistoryFloor{Source: historyFloorSourceRoom, Mode: roomMode}, nil
 	}
-	return r.joinFloor(ctx, spaceRef, subjectID, historyFloorSourceRoom)
+	floor, err := r.joinFloor(ctx, spaceRef, subjectID, historyFloorSourceRoom)
+	floor.Mode = roomMode
+	return floor, err
 }
 
 // joinFloor derives a since_join floor. The revision is the audience revision the member first
@@ -383,6 +388,53 @@ func windowView(state memberWindowState, roomMode string) MemberHistoryWindowVie
 		return MemberHistoryWindowView{Source: historyFloorSourceMember, Mode: state.Mode, SinceAt: state.SinceAt, Revision: state.Revision}
 	}
 	return MemberHistoryWindowView{Source: historyFloorSourceRoom, Mode: roomMode, Revision: state.Revision}
+}
+
+// OwnHistoryWindow is the window the signed-in member reads under, as the membership read shows it to that member
+// alone (D18). It is derived from resolveHistoryFloor, the one floor source the reads sign, so it cannot report a
+// window where no read hides anything, nor hide the window a read enforces.
+//
+//   - Source is "member" when the member's own row decides, and "room" when the room's history_mode does.
+//   - Mode is the effective mode: full, since_join or since_date.
+//   - SinceAt is the instant the floor names: the instant before which this member's reads hide rows. It is null when
+//     the floor names none.
+//   - Hidden is true when the floor hides earlier messages from this member, in the form each source is read under: a
+//     member's row by its instant (Session Core applies that unconditionally), and a room's floor by its WS04-S11
+//     revision (Session Core applies that only behind SESSION_CORE_SPACE_HISTORY_FLOOR, which Control cannot see).
+type OwnHistoryWindow struct {
+	Source  string     `json:"source"`
+	Mode    string     `json:"mode"`
+	SinceAt *time.Time `json:"since_at"`
+	Hidden  bool       `json:"hidden"`
+}
+
+// ownHistoryWindowFrom renders one resolved floor for its member's own read. A room's floor is read on its revision
+// for messages, so an instant alone (the join the membership feed uses) does not mark messages hidden.
+func ownHistoryWindowFrom(floor HistoryFloor) OwnHistoryWindow {
+	hidden := floor.At != nil
+	if floor.Source == historyFloorSourceRoom {
+		hidden = floor.Revision > 0
+	}
+	view := OwnHistoryWindow{Source: floor.Source, Mode: floor.Mode, Hidden: hidden}
+	if floor.At != nil {
+		at := floor.At.UTC()
+		view.SinceAt = &at
+	}
+	return view
+}
+
+// OwnHistoryWindowFor reads the signed-in member's own window. It takes the membership the caller already resolved for
+// that member, so the window it returns is always the caller's own: it has no subject parameter to name another member.
+func (r *Repository) OwnHistoryWindowFor(ctx context.Context, membership *CurrentMembership) (*OwnHistoryWindow, error) {
+	if membership == nil {
+		return nil, ErrNoCurrentMembership
+	}
+	floor, err := r.resolveHistoryFloor(ctx, membership.SpaceRef, membership.SubjectID)
+	if err != nil {
+		return nil, err
+	}
+	view := ownHistoryWindowFrom(floor)
+	return &view, nil
 }
 
 // requireActiveMember refuses a subject who is not an active human member of the room, as unknown.
