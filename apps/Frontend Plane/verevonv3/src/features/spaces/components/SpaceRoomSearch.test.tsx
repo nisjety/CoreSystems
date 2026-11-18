@@ -102,11 +102,6 @@ async function settle(): Promise<void> {
   flush()
 }
 
-async function nextFrame(): Promise<void> {
-  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-  flush()
-}
-
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] })
   // A dev build may force the flags with VITE_*; the cases here read the room's own features, so no override applies.

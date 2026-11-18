@@ -269,6 +269,7 @@ describe('SpaceIdentityHoverCard models from the lib (WS07-S8)', () => {
     identity_published: true,
     name: 'Lagerhjelpen',
     status: 'active',
+    delivery_targets: [],
   }
   const turns = [
     { threadId: 't-innkjop', role: 'assistant' as const, agentName: 'Lagerhjelpen', content: 'Alt er klart.' },
