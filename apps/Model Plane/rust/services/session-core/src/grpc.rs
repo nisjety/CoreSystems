@@ -4599,12 +4599,14 @@ pub(crate) const SPACE_MEMORY_OPERATION_DELETE: &str = "delete";
 pub(crate) const SPACE_MEMORY_OPERATION_ERASE_AGENT: &str = "erase_agent";
 
 /// What a verified Space memory decision tells the reader: the Space's audience as Control signed
-/// it now, so the owner's list can mark the rows a current member is not shown, and the
-/// zero-retention claim.
+/// it now, so the owner's list can mark the rows a current member is not shown, the zero-retention
+/// claim, and the manager's own D18 timestamp floor (`history_floor_at`, `None` without a window). The
+/// floor narrows a list to the room-derived rows the manager may see; it never widens anything.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedSpaceMemoryManage {
     pub(crate) recipient_audience_hash: String,
     pub(crate) zero_data_retention: bool,
+    pub(crate) history_floor_at: Option<DateTime<Utc>>,
 }
 
 /// Recompute Control's `model.space.memory.manage` payload digest from the claims plus the request's
@@ -4738,6 +4740,7 @@ fn verify_space_memory_decision_with_key(
     Ok(VerifiedSpaceMemoryManage {
         recipient_audience_hash: claims.recipient_audience_hash,
         zero_data_retention: claims.zero_data_retention,
+        history_floor_at: claims.history_floor_at,
     })
 }
 
@@ -4802,13 +4805,15 @@ pub(crate) const MEMORY_DECLASSIFY_OPERATION_RETRACT: &str = "retract";
 
 /// What a verified memory declassify decision tells the writer: the audience the room row is stamped
 /// with (hash and revision), the Space authority revision the decision binds (W3-DEC-ORDER2: the ordering key the share's
-/// ledger row records) and the zero-retention claim.
+/// ledger row records), the zero-retention claim and the member's D18 timestamp floor (`history_floor_at`, `None`
+/// without a window). Under a floor a share never re-attaches to a room row the member could not see.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedMemoryDeclassify {
     pub(crate) recipient_audience_hash: String,
     pub(crate) recipient_audience_revision: i64,
     pub(crate) authority_revision: i64,
     pub(crate) zero_data_retention: bool,
+    pub(crate) history_floor_at: Option<DateTime<Utc>>,
 }
 
 /// The `sha256:<hex>` digest of reviewed text, over its exact bytes. Control binds this value; Session
@@ -4978,6 +4983,7 @@ fn verify_memory_declassify_decision_with_key(
         recipient_audience_revision,
         authority_revision,
         zero_data_retention: claims.zero_data_retention,
+        history_floor_at: claims.history_floor_at,
     })
 }
 
@@ -25504,6 +25510,38 @@ mod tests {
         );
     }
 
+    /// D18: a share or retract decision carries the member's window instant, and a decision without one carries none.
+    #[test]
+    fn memory_declassify_verifier_carries_the_members_history_floor() {
+        let signing_key = SigningKey::from_bytes(&[65_u8; 32]);
+        let key = signing_key.verifying_key();
+        let now = owed_now();
+        let reviewed = super::memory_declassify_content_digest("hello");
+        let verify = |token: &str| {
+            super::verify_memory_declassify_decision_with_key(
+                token,
+                "decision-1",
+                "org-1",
+                "user-1",
+                "space-room",
+                "declassify",
+                "memory-1",
+                &reviewed,
+                Some("declassify-1"),
+                OWED_KEY_ID,
+                &key,
+                now,
+            )
+        };
+        let plain = declassify_token(&signing_key, "declassify", "memory-1", &reviewed, "declassify-1", |_| {});
+        assert_eq!(verify(&plain).expect("an unwindowed share verifies").history_floor_at, None);
+        let floor = DateTime::parse_from_rfc3339("2026-10-15T09:30:00Z").expect("rfc3339").with_timezone(&Utc);
+        let windowed = declassify_token(&signing_key, "declassify", "memory-1", &reviewed, "declassify-1", |claims| {
+            claims["history_floor_at"] = serde_json::json!(floor.to_rfc3339());
+        });
+        assert_eq!(verify(&windowed).expect("a windowed share verifies").history_floor_at, Some(floor));
+    }
+
     #[test]
     fn memory_declassify_verifier_binds_operation_memory_text_and_key() {
         let signing_key = SigningKey::from_bytes(&[65_u8; 32]);
@@ -25547,6 +25585,7 @@ mod tests {
                 recipient_audience_revision: 4,
                 authority_revision: 7,
                 zero_data_retention: false,
+                history_floor_at: None,
             }
         );
         // A declassify token is not a retraction.

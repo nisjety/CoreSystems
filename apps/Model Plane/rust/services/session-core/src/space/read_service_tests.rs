@@ -127,6 +127,29 @@ fn artifact_query_reads_only_the_indexed_predicate_and_never_content() {
     assert!(!LIST_SPACE_ARTIFACTS_SQL.contains("m.content"));
 }
 
+/// The message floors of the verified read (D18) are the shared rule the transcript applies, written into the
+/// artifact query with the same placeholders: `$9` the WS04-S11 revision floor, `$10` the D18 instant.
+#[test]
+fn artifact_query_applies_the_shared_message_floors_on_the_message_row() {
+    let flat = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    let rule = flat(&crate::space::audience_window::message_floor_sql(("$9", "$10")));
+    assert!(
+        flat(LIST_SPACE_ARTIFACTS_SQL).contains(&rule),
+        "the artifact query must carry the shared message floor rule verbatim: {rule}"
+    );
+    // The floors are bound after the existing eight parameters, so none is left unbound.
+    let mut found: Vec<usize> = Vec::new();
+    for part in LIST_SPACE_ARTIFACTS_SQL.split('$').skip(1) {
+        let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
+        if let Ok(number) = digits.parse::<usize>() {
+            found.push(number);
+        }
+    }
+    found.sort_unstable();
+    found.dedup();
+    assert_eq!(found, (1..=10).collect::<Vec<usize>>(), "ten parameters, each named");
+}
+
 // ---- refusals before any row is read ----------------------------------------------------
 
 #[tokio::test]

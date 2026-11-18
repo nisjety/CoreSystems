@@ -272,7 +272,6 @@ fn search_sql(relevance: bool) -> String {
         "WITH page AS (
     SELECT m.id AS message_id, m.thread_id, m.role, m.author_subject_id, m.agent_name,
            m.created_at, left(m.content, 100000) AS body, {score} AS score,
-           t.session_key,
            CASE WHEN $17::BIGINT IS NOT NULL OR $18::TIMESTAMPTZ IS NOT NULL
                 THEN NULL ELSE t.presentation_title END AS presentation_title
     FROM messages m
@@ -284,7 +283,7 @@ fn search_sql(relevance: bool) -> String {
     LIMIT $14 OFFSET $13
 )
 SELECT p.message_id, p.thread_id, p.role, p.author_subject_id, p.agent_name, p.created_at,
-       p.session_key, p.presentation_title,
+       p.presentation_title,
        ts_headline(
            'simple',
            replace(replace(replace(replace(p.body, chr(57344), ''), chr(57345), ''), chr(57346), ''), chr(57347), ''),
@@ -332,6 +331,9 @@ WHERE m.id = $5
   AND ($7::TIMESTAMPTZ IS NULL OR m.created_at >= $7::TIMESTAMPTZ)
   AND NOT EXISTS (SELECT 1 FROM message_revisions r WHERE r.message_id = m.id AND r.action = 'deleted')";
 
+/// One hit row: message id, thread id, role, author, agent, created_at, the thread's stored title, and the
+/// snippet. The internal session key is not selected: it is never a title (the timeline says so), so the
+/// fallback title of a hit is the constant [`HIT_TITLE_FALLBACK`].
 type SearchRow = (
     String,
     String,
@@ -339,10 +341,12 @@ type SearchRow = (
     Option<String>,
     Option<String>,
     DateTime<Utc>,
-    String,
     Option<String>,
     Option<String>,
 );
+
+/// The title a search hit shows when its thread has no stored title. Never the session key (D18 P2 fix).
+const HIT_TITLE_FALLBACK: &str = "Verevon Chat";
 
 fn map_db_error(error: sqlx::Error) -> Status {
     let timed_out = error
@@ -592,8 +596,7 @@ impl SpaceHistoryGrpc {
 
         response.hits = rows
             .into_iter()
-            .map(|(message_id, thread_id, role, author, agent, created_at, session_key, title, snippet)| {
-                let fallback = if session_key.trim().is_empty() { "Verevon Chat" } else { session_key.as_str() };
+            .map(|(message_id, thread_id, role, author, agent, created_at, title, snippet)| {
                 pb::SpaceMessageHit {
                     message_id,
                     thread_id,
@@ -603,7 +606,7 @@ impl SpaceHistoryGrpc {
                     agent_name: agent.unwrap_or_default(),
                     created_at: Some(to_proto_timestamp(created_at)),
                     snippet: parse_snippet(&snippet.unwrap_or_default(), &start_marker, &stop_marker),
-                    thread_title: compact_thread_text(title, fallback, THREAD_TITLE_MAX_CHARS),
+                    thread_title: compact_thread_text(title, HIT_TITLE_FALLBACK, THREAD_TITLE_MAX_CHARS),
                 }
             })
             .collect();
@@ -686,6 +689,14 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn a_hit_never_takes_the_internal_session_key_as_its_title() {
+        // The hit query selects no session key, so no hit can carry one as its title fallback (the timeline's rule).
+        assert!(!search_sql(false).contains("session_key"), "the recent-order hit query");
+        assert!(!search_sql(true).contains("session_key"), "the relevance-order hit query");
+        assert_eq!(HIT_TITLE_FALLBACK, "Verevon Chat");
+    }
 
     // ---- the query as a tsquery -------------------------------------------------------------
 

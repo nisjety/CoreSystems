@@ -42,6 +42,10 @@ pub(crate) struct DeclassifyInput<'a> {
     pub(crate) audience_revision: i64,
     /// The Space authority revision the verified decision binds (W3-DEC-ORDER2), recorded on the ledger row.
     pub(crate) authority_revision: i64,
+    /// The sharing member's D18 timestamp floor, `None` without a window. Under a floor the share re-attaches
+    /// to the room row of its key only when that row is one the floor admits; an older row the member may not
+    /// see is never updated through the share (the share is then refused as a room row that is not current).
+    pub(crate) history_floor_at: Option<DateTime<Utc>>,
 }
 
 /// What a declassify produced: the room row, and whether this decision or key had already produced it.
@@ -175,7 +179,11 @@ pub(crate) async fn declassify_into_room(
         format!("decision:{}", input.decision_ref),
     ];
     let key = format!("{}/declassified:{}", input.space_id, input.content_digest);
-    let room_memory_id: Option<String> = sqlx::query_scalar(
+    // D18: a windowed sharer may update the existing row of this key only when the floor admits that row. A row
+    // said before the window is not updated (the share is refused below), so a share never rewrites or re-labels
+    // a room row the member cannot see. With no floor the predicate is TRUE and the share is what it was.
+    let floor_admits = crate::space::memory_scope::history_floor_admits_sql("$14");
+    let room_memory_id: Option<String> = sqlx::query_scalar(&format!(
         "INSERT INTO agent_memory \
          (id, org_id, session_id, scope, scope_id, key, content, kind, confidence, owner, source_links, \
           review_state, audience_hash, audience_revision, source_label, origin_kind, space_ref) \
@@ -194,9 +202,9 @@ pub(crate) async fn declassify_into_room(
            origin_kind = EXCLUDED.origin_kind, \
            space_ref = EXCLUDED.space_ref, \
            updated_at = now() \
-         WHERE agent_memory.is_latest \
+         WHERE agent_memory.is_latest AND {floor_admits} \
          RETURNING id",
-    )
+    ))
     .bind(new_ulid())
     .bind(input.org_id)
     .bind(SPACE_SCOPE)
@@ -210,6 +218,7 @@ pub(crate) async fn declassify_into_room(
     .bind(input.audience_revision)
     .bind(SOURCE_MEMBER_SAVE)
     .bind(ORIGIN_DECLASSIFIED)
+    .bind(input.history_floor_at)
     .fetch_optional(&mut *tx)
     .await
     .map_err(internal)?;
@@ -535,6 +544,7 @@ mod tests {
             audience_hash: "sha256:test-audience",
             audience_revision: 1,
             authority_revision,
+            history_floor_at: None,
         }
     }
 
@@ -593,6 +603,66 @@ mod tests {
         .await
         .expect("count ledger rows");
         assert_eq!(ledger_rows, 1, "a replay must never write a second ledger row");
+
+        clean_declassify_world(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn a_windowed_share_never_reattaches_to_a_room_row_said_before_its_window() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let org = format!("declassify-org-{}", mp_ids::new_ulid());
+        let space = format!("declassify-space-{}", mp_ids::new_ulid());
+        let user = "owner-1";
+        let source_id = format!("mem-{}", mp_ids::new_ulid());
+        seed_personal_memory(&pool, &org, user, &source_id, "pref-w").await;
+
+        // The room already holds this text, shared before the sharer's window (an unwindowed share, aged).
+        let text = digest(7);
+        let earlier_decision = format!("decision-{}", mp_ids::new_ulid());
+        let earlier = declassify_into_room(
+            &pool,
+            share(&org, user, &space, &source_id, &text, &earlier_decision, "idem-e", 1),
+        )
+        .await
+        .expect("the earlier share");
+        sqlx::query("UPDATE agent_memory SET created_at = now() - interval '3 hours' WHERE id = $1")
+            .bind(&earlier.memory_id)
+            .execute(&pool)
+            .await
+            .expect("the room row predates the window");
+
+        // A sharer whose window starts an hour ago may not re-attach to that row: the share is refused, and the
+        // row is left as it was (its source and decision are the earlier ones).
+        let window = chrono::Utc::now() - chrono::Duration::hours(1);
+        let windowed_decision = format!("decision-{}", mp_ids::new_ulid());
+        let mut refused = share(&org, user, &space, &source_id, &text, &windowed_decision, "idem-w", 1);
+        refused.history_floor_at = Some(window);
+        let outcome = declassify_into_room(&pool, refused).await;
+        assert_eq!(
+            outcome.expect_err("a pre-window room row is not re-attached").code(),
+            tonic::Code::FailedPrecondition
+        );
+        let links: Vec<String> = sqlx::query_scalar("SELECT source_links FROM agent_memory WHERE id = $1")
+            .bind(&earlier.memory_id)
+            .fetch_one(&pool)
+            .await
+            .expect("the earlier room row");
+        assert!(
+            links.contains(&format!("decision:{earlier_decision}")) && !links.contains(&format!("decision:{windowed_decision}")),
+            "the refused share wrote nothing to the row: {links:?}"
+        );
+
+        // A share of text the window's sharer is new to lands in the room as a new row.
+        let fresh_decision = format!("decision-{}", mp_ids::new_ulid());
+        let fresh_text = digest(8);
+        let mut fresh = share(&org, user, &space, &source_id, &fresh_text, &fresh_decision, "idem-f", 1);
+        fresh.history_floor_at = Some(window);
+        let created = declassify_into_room(&pool, fresh).await.expect("a share of new text is admitted");
+        assert!(!created.deduplicated);
+        assert_ne!(created.memory_id, earlier.memory_id);
 
         clean_declassify_world(&pool, &org, &space).await;
     }

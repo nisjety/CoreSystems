@@ -2662,18 +2662,20 @@ pub(crate) struct SpaceMemoryRow {
 }
 
 /// Lists one Space's memory for its owner or admin (EP-8 S7). The caller has verified the Control
-/// Space memory decision; `current_audience_hash` is the audience that decision signed.
+/// Space memory decision; `current_audience_hash` is the audience that decision signed. `floor_at` is the
+/// manager's own D18 timestamp floor (`None` without a window): under it only the room-derived rows the
+/// floor admits are listed (`memory_scope::history_floor_admits_sql`), so a windowed manager never lists
+/// a row said before the window, and an agent note, which has no reliable source instant, is never listed.
 pub(crate) async fn list_space_memory(
     pool: &PgPool,
     org_id: &str,
     space_id: &str,
     current_audience_hash: &str,
     limit: i64,
+    floor_at: Option<DateTime<Utc>>,
 ) -> Result<Vec<SpaceMemoryRow>, sqlx::Error> {
-    let rows = sqlx::query_as::<
-        _,
-        (String, String, String, Option<String>, DateTime<Utc>, Vec<String>, Option<String>),
-    >(
+    let floor_admits = crate::space::memory_scope::history_floor_admits_sql("$4");
+    let sql = format!(
         "SELECT id, kind, content, source_label, updated_at, source_links, audience_hash \
          FROM agent_memory \
          WHERE org_id = $1 \
@@ -2682,12 +2684,18 @@ pub(crate) async fn list_space_memory(
            AND review_state = 'accepted' \
            AND is_latest = true \
            AND (expires_at IS NULL OR expires_at > now()) \
+           AND {floor_admits} \
          ORDER BY updated_at DESC \
-         LIMIT $3",
-    )
+         LIMIT $3"
+    );
+    let rows = sqlx::query_as::<
+        _,
+        (String, String, String, Option<String>, DateTime<Utc>, Vec<String>, Option<String>),
+    >(&sql)
     .bind(org_id)
     .bind(space_id)
     .bind(limit.clamp(1, 200))
+    .bind(floor_at)
     .fetch_all(pool)
     .await?;
     let current = current_audience_hash.trim();
@@ -4206,7 +4214,7 @@ mod space_recall_tests {
         assert!(no_audience.rows.is_empty(), "a thread without an audience recalls nothing");
         assert_eq!(no_audience.withheld, 2);
 
-        let listed = list_space_memory(&seeded.pool, &seeded.org, &space, "sha256:audience-2", 50)
+        let listed = list_space_memory(&seeded.pool, &seeded.org, &space, "sha256:audience-2", 50, None)
             .await
             .expect("list");
         assert_eq!(listed.len(), 2, "the owner sees every row of the Space");

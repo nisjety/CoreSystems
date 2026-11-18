@@ -334,6 +334,7 @@ mod tests {
                 audience_hash: "sha256:test-audience",
                 audience_revision: 1,
                 authority_revision,
+                history_floor_at: None,
             },
         )
         .await

@@ -95,6 +95,10 @@ struct PersonalContextClaims {
     permissions: Vec<String>,
     issued_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
+    // D18: the instant the member's history window starts at. Absent on a decision for a member without a window.
+    // Not part of the payload digest; the memory rows it narrows are the room-derived ones (`memory_scope`).
+    #[serde(default)]
+    history_floor_at: Option<DateTime<Utc>>,
 }
 
 /// Byte for byte the Go `memoryPersonalContextPayloadDigest`: the prefix, then each (name, value) as name, a NUL, a
@@ -133,6 +137,8 @@ fn personal_context_payload_digest(claims: &PersonalContextClaims, thread_id: &s
 /// `verify_memory_declassify_decision_with_key`: version, key id, Ed25519 signature, service audience, action,
 /// schema, the one permission, the digest, privacy completeness and the two-minute window (one minute of clock
 /// skew allowed). A zero-retention claim is refused: such a decision is never issued.
+///
+/// On success it returns the member's D18 timestamp floor (`history_floor_at`), `None` for a member without a window.
 pub(crate) fn verify_personal_context_decision(
     token: &str,
     decision_ref: &str,
@@ -141,7 +147,7 @@ pub(crate) fn verify_personal_context_decision(
     space_id: &str,
     thread_id: &str,
     now: DateTime<Utc>,
-) -> Result<(), Status> {
+) -> Result<Option<DateTime<Utc>>, Status> {
     const DENIED: &str = "Control personal context decision does not authorize this request";
     if token.trim().is_empty()
         || decision_ref.trim().is_empty()
@@ -222,12 +228,14 @@ pub(crate) fn verify_personal_context_decision(
             "Control personal context decision is expired or incomplete",
         ));
     }
-    Ok(())
+    Ok(claims.history_floor_at)
 }
 
 /// The owner's personal rows for one turn: `scope = 'user'`, no session, owned by the verified caller, the
 /// personal origin, accepted and current, and the legacy room-origin exclusion (C7). Ranked like the other
 /// personal readers: an exact match on the turn's query gets the head start, then confidence and recency.
+/// D18: under the member's timestamp floor a room-derived row is admitted only as `history_floor_admits_sql`
+/// says; the member's own personal memory, which is not room-derived, is never narrowed by a room window.
 async fn personal_rows(
     pool: &PgPool,
     org_id: &str,
@@ -235,9 +243,11 @@ async fn personal_rows(
     thread_id: &str,
     query: &str,
     limit: u32,
+    floor_at: Option<DateTime<Utc>>,
 ) -> Result<Vec<MemorySearchRow>, Status> {
     let limit = usize::try_from(limit.clamp(1, 50)).unwrap_or(10);
     let legacy_exclusion = crate::space::memory_scope::legacy_room_origin_exclusion("$4", "$5");
+    let floor_admits = crate::space::memory_scope::history_floor_admits_sql("$6");
     let sql = format!(
         "SELECT id, kind, key, content, confidence, updated_at, source_links \
          FROM agent_memory \
@@ -247,6 +257,7 @@ async fn personal_rows(
            AND review_state = 'accepted' AND is_latest = true \
            AND (expires_at IS NULL OR expires_at > now()) \
            AND {legacy_exclusion} \
+           AND {floor_admits} \
          ORDER BY confidence DESC, updated_at DESC \
          LIMIT $3"
     );
@@ -264,6 +275,7 @@ async fn personal_rows(
         .bind(PERSONAL_CANDIDATE_POOL)
         .bind(crate::space::memory_scope::containment_on())
         .bind(thread_id)
+        .bind(floor_at)
         .fetch_all(pool)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -349,7 +361,7 @@ pub(crate) async fn personal_only_answer(
             return Ok(empty_answer());
         }
     };
-    if verify_personal_context_decision(
+    let Ok(floor_at) = verify_personal_context_decision(
         &grant.token,
         &grant.decision_ref,
         org_id,
@@ -357,13 +369,11 @@ pub(crate) async fn personal_only_answer(
         &space_id,
         thread_id,
         Utc::now(),
-    )
-    .is_err()
-    {
+    ) else {
         metrics::counter!("mp_session_memory_personal_context_total", "op" => "refused").increment(1);
         return Ok(empty_answer());
-    }
-    let rows = personal_rows(pool, org_id, owner_user_id, thread_id, query, limit).await?;
+    };
+    let rows = personal_rows(pool, org_id, owner_user_id, thread_id, query, limit, floor_at).await?;
     let entries: Vec<MemoryEntry> = rows
         .into_iter()
         .map(|row| crate::memory_grpc::pg_row_to_entry(row, owner_user_id))
@@ -460,11 +470,11 @@ mod tests {
         token_for(base_claims(), THREAD)
     }
 
-    fn verify(token: &str) -> Result<(), Status> {
+    fn verify(token: &str) -> Result<Option<DateTime<Utc>>, Status> {
         verify_personal_context_decision(token, DECISION_REF, ORG, USER, SPACE, THREAD, now())
     }
 
-    fn refused(result: Result<(), Status>, why: &str) {
+    fn refused<T: std::fmt::Debug>(result: Result<T, Status>, why: &str) {
         let status = result.expect_err(why);
         assert_eq!(status.code(), tonic::Code::PermissionDenied, "{why}: {status:?}");
     }
@@ -594,6 +604,34 @@ mod tests {
     fn a_decision_for_this_owner_org_space_and_thread_verifies() {
         let _keys = StreamKeysEnv::publish();
         verify(&valid_token()).expect("a valid decision verifies");
+    }
+
+    #[test]
+    fn a_decision_carries_the_members_timestamp_floor_and_a_member_without_a_window_has_none() {
+        let _keys = StreamKeysEnv::publish();
+        // D18: the member's window instant rides on the decision; it narrows the owner's room-derived rows.
+        assert_eq!(verify(&valid_token()).expect("no window verifies"), None, "no window, no floor");
+        let floor = Utc.with_ymd_and_hms(2026, 10, 15, 9, 30, 0).single().expect("floor time");
+        let windowed = token_for(
+            {
+                let mut claims = base_claims();
+                claims["history_floor_at"] = json!(floor.to_rfc3339());
+                claims
+            },
+            THREAD,
+        );
+        assert_eq!(verify(&windowed).expect("a windowed decision verifies"), Some(floor));
+    }
+
+    #[test]
+    fn a_malformed_timestamp_floor_refuses_the_decision_rather_than_showing_full_history() {
+        let _keys = StreamKeysEnv::publish();
+        // The claim must parse or the whole decision is refused: a floor that cannot be read is never read as none.
+        let mut claims = base_claims();
+        claims["history_floor_at"] = json!("the first Tuesday");
+        let digest = digest_of(&base_claims(), THREAD);
+        claims["payload_digest"] = json!(digest);
+        refused(verify(&sign_with(&signing_key(), KEY_ID, &claims)), "a floor that is not a timestamp");
     }
 
     #[test]

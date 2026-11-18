@@ -1021,7 +1021,24 @@ pub(crate) async fn list_agent_memory(
     scope_id: &str,
     current_audience_hash: &str,
     limit: i64,
+    floor_at: Option<DateTime<Utc>>,
 ) -> Result<Vec<crate::dreaming::SpaceMemoryRow>, sqlx::Error> {
+    // D18: an agent note is made from its run's whole context, so it has no reliable source instant and a
+    // windowed manager is shown none of them (`memory_scope::history_floor_admits_sql`).
+    let floor_admits = crate::space::memory_scope::history_floor_admits_sql("$4");
+    let sql = format!(
+        "SELECT id, content, source_label, updated_at, source_links, audience_hash \
+         FROM agent_memory \
+         WHERE org_id = $1 \
+           AND scope = 'agent' \
+           AND scope_id = $2 \
+           AND review_state = 'accepted' \
+           AND is_latest = true \
+           AND (expires_at IS NULL OR expires_at > now()) \
+           AND {floor_admits} \
+         ORDER BY updated_at DESC \
+         LIMIT $3"
+    );
     let rows = sqlx::query_as::<
         _,
         (
@@ -1032,21 +1049,11 @@ pub(crate) async fn list_agent_memory(
             Vec<String>,
             Option<String>,
         ),
-    >(
-        "SELECT id, content, source_label, updated_at, source_links, audience_hash \
-         FROM agent_memory \
-         WHERE org_id = $1 \
-           AND scope = 'agent' \
-           AND scope_id = $2 \
-           AND review_state = 'accepted' \
-           AND is_latest = true \
-           AND (expires_at IS NULL OR expires_at > now()) \
-         ORDER BY updated_at DESC \
-         LIMIT $3",
-    )
+    >(&sql)
     .bind(org_id)
     .bind(scope_id)
     .bind(limit.clamp(1, 200))
+    .bind(floor_at)
     .fetch_all(pool)
     .await?;
     let current = current_audience_hash.trim();

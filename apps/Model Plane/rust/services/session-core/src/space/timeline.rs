@@ -34,7 +34,7 @@ use crate::grpc::{
     compact_thread_text, to_proto_timestamp, verify_thread_read_space_decision,
     THREAD_PREVIEW_MAX_CHARS, THREAD_TITLE_MAX_CHARS,
 };
-use crate::space::audience_window::{audience_window, AudienceWindow};
+use crate::space::audience_window::{audience_window, message_floor_sql, AudienceWindow};
 
 const MAX_SPACE_ID_BYTES: usize = 128;
 const MAX_THREAD_ID_BYTES: usize = 128;
@@ -120,17 +120,6 @@ fn has_floor_sql((floor_rev, floor_at): (&str, &str)) -> String {
     format!("({floor_rev}::BIGINT IS NOT NULL OR {floor_at}::TIMESTAMPTZ IS NOT NULL)")
 }
 
-/// The floors on one message row `m`, the predicates the conversation reads apply (WS04-S11, D18):
-/// a NULL-stamped row passes the revision floor, and the timestamp floor hides a row created before
-/// the instant.
-fn message_floor_sql((floor_rev, floor_at): (&str, &str)) -> String {
-    format!(
-        "({floor_rev}::BIGINT IS NULL OR m.recipient_audience_revision IS NULL
-                 OR m.recipient_audience_revision >= {floor_rev}::BIGINT)
-         AND ({floor_at}::TIMESTAMPTZ IS NULL OR m.created_at >= {floor_at}::TIMESTAMPTZ)"
-    )
-}
-
 /// Under a floor a thread is listed only when it holds a message the reader may see (the ceiling and
 /// the floors, on the active path). A thread that predates the floor then shows neither its text
 /// nor its owner, authors or activity. Without a floor the EXISTS is never read.
@@ -161,12 +150,19 @@ fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str, floor: (&st
             ORDER BY {order}
             LIMIT {limit}
          )
-         SELECT page.id, page.created_at,
+         SELECT page.id,
+                CASE WHEN {floor_at}::TIMESTAMPTZ IS NULL THEN page.created_at
+                     ELSE GREATEST(page.created_at, {floor_at}::TIMESTAMPTZ) END AS created_at,
                 COALESCE(CASE WHEN {has_floor} THEN NULL ELSE page.presentation_title END, fu.content) AS title,
                 COALESCE(CASE WHEN {has_floor} THEN NULL ELSE page.presentation_preview END, lm.content) AS preview,
-                page.pinned_at, page.last_activity_at, page.last_message_seq, page.turn_count,
-                page.last_role, page.last_author_subject_id, page.recent_author_subject_ids,
-                page.user_id AS owner_subject_id, page.origin, page.persona_enabled,
+                page.pinned_at, page.last_activity_at, page.last_message_seq,
+                CASE WHEN {has_floor} THEN wf.turn_count ELSE page.turn_count END AS turn_count,
+                CASE WHEN {has_floor} THEN wf.last_role ELSE page.last_role END AS last_role,
+                CASE WHEN {has_floor} THEN wf.last_author ELSE page.last_author_subject_id END AS last_author_subject_id,
+                CASE WHEN {has_floor} THEN wf.recent ELSE page.recent_author_subject_ids END AS recent_author_subject_ids,
+                CASE WHEN {floor_at}::TIMESTAMPTZ IS NOT NULL AND page.created_at < {floor_at}::TIMESTAMPTZ
+                     THEN '' ELSE page.user_id END AS owner_subject_id,
+                page.origin, page.persona_enabled,
                 page.title_source, page.pinned_source,
                 latest_run.id AS latest_run_id, latest_run.status AS latest_run_status,
                 latest_run.updated_at AS latest_run_updated_at, rc.reply_count
@@ -195,6 +191,7 @@ fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str, floor: (&st
             SELECT r.id, {run_phase} AS status, r.updated_at
             FROM runs r
             WHERE r.thread_id = page.id
+              AND ({floor_at}::TIMESTAMPTZ IS NULL OR r.created_at >= {floor_at}::TIMESTAMPTZ)
             ORDER BY r.updated_at DESC, r.created_at DESC, r.id DESC
             LIMIT 1
          ) latest_run ON TRUE
@@ -205,10 +202,37 @@ fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str, floor: (&st
               AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $3)
               AND {visible}
          ) rc ON TRUE
+         LEFT JOIN LATERAL (
+            SELECT
+              (SELECT count(*)::INTEGER FROM messages m
+                WHERE m.thread_id = page.id AND m.role IN ('user', 'assistant')
+                  AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $3)
+                  AND {visible}) AS turn_count,
+              (SELECT m.role FROM messages m
+                WHERE m.thread_id = page.id
+                  AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $3)
+                  AND {visible}
+                ORDER BY m.sequence DESC LIMIT 1) AS last_role,
+              (SELECT m.author_subject_id FROM messages m
+                WHERE m.thread_id = page.id AND m.role = 'user' AND m.author_subject_id IS NOT NULL
+                  AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $3)
+                  AND {visible}
+                ORDER BY m.sequence DESC LIMIT 1) AS last_author,
+              COALESCE((SELECT array_agg(a.author ORDER BY a.newest DESC) FROM (
+                  SELECT m.author_subject_id AS author, max(m.sequence) AS newest FROM messages m
+                  WHERE m.thread_id = page.id AND m.role = 'user' AND m.author_subject_id IS NOT NULL
+                    AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $3)
+                    AND {visible}
+                  GROUP BY m.author_subject_id
+                  ORDER BY max(m.sequence) DESC
+                  LIMIT 5) a), '{{}}') AS recent
+            WHERE {has_floor}
+         ) wf ON TRUE
          ORDER BY {outer_order}",
         eligible = ELIGIBLE_SQL,
         thread_floor = thread_floor_sql(floor),
         has_floor = has_floor_sql(floor),
+        floor_at = floor.1,
         visible = message_floor_sql(floor),
         fold_content = crate::space::revisions::FOLD_CONTENT_SQL,
         fold_join = crate::space::revisions::fold_join_sql("$3::BIGINT"),
@@ -480,7 +504,9 @@ mod tests {
     use super::*;
     use crate::auth::VerifiedIdentity;
     use crate::grpc::space_w1_tests::{mint, StreamKeysEnv, DECISION_REF};
-    use crate::space::test_support::{clean_space, connect, seed_space_message, seed_space_thread};
+    use crate::space::test_support::{
+        clean_space, connect, seed_space_message, seed_space_run, seed_space_thread,
+    };
     use chrono::TimeZone as _;
     use serde_json::json;
     use std::collections::BTreeSet;
@@ -876,6 +902,65 @@ mod tests {
             .find(|summary| summary.thread_id == before_join)
             .expect("the pre-join post");
         assert_eq!(older.title, "Pre-join title");
+        clean_space(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn a_windowed_reader_sees_no_pre_floor_turn_count_authors_owner_creation_or_run() {
+        let Some(pool) = connect().await else { return };
+        let _keys = StreamKeysEnv::publish();
+        let suffix = mp_ids::new_ulid();
+        let (org, space) = (format!("org-md-{suffix}"), format!("space-md-{suffix}"));
+        let thread = format!("thread-md-{suffix}");
+        // The thread and its first message predate the window; a second message by another author follows it.
+        post(&pool, &org, &space, &thread).await;
+        seed_space_message(&pool, &space, &thread, &format!("second-{thread}"), "user", Some("bob")).await;
+        sqlx::query("UPDATE messages SET created_at = now() - interval '2 hours' WHERE id = $1")
+            .bind(format!("first-{thread}"))
+            .execute(&pool)
+            .await
+            .expect("age the first message");
+        sqlx::query("UPDATE threads SET created_at = now() - interval '2 hours' WHERE id = $1")
+            .bind(&thread)
+            .execute(&pool)
+            .await
+            .expect("the thread was made before the window");
+        let run = format!("run-md-{suffix}");
+        seed_space_run(&pool, &org, &space, &thread, &run, "completed", "persistent").await;
+        sqlx::query("UPDATE runs SET created_at = now() - interval '2 hours', updated_at = now() - interval '2 hours' WHERE id = $1")
+            .bind(&run)
+            .execute(&pool)
+            .await
+            .expect("the run predates the window");
+        let join = chrono::Utc::now() - chrono::Duration::hours(1);
+
+        let windowed = timeline_as(&pool, &org, &space, Some(join), |_| {}).await;
+        let summary = windowed
+            .posts
+            .iter()
+            .find(|summary| summary.thread_id == thread)
+            .expect("the thread is listed: it holds a message the reader may see");
+        assert_eq!(summary.turn_count, 1, "only the post-window turn is counted");
+        assert_eq!(summary.recent_author_subject_ids, ["bob"], "no author of a pre-window turn");
+        assert_eq!(summary.last_author_subject_id, "bob");
+        assert_eq!(summary.owner_subject_id, "", "the owner made the thread before the window");
+        let created = summary.created_at.as_ref().expect("a creation instant");
+        assert!(created.seconds >= join.timestamp(), "the creation instant is never before the window");
+        assert_eq!(summary.latest_run_id, "", "a run that predates the window is not shown");
+        assert_eq!(summary.latest_run_status, "");
+
+        // Without a window the same thread reads whole.
+        let whole = timeline(&pool, &org, &space, |_| {}).await;
+        let full = whole
+            .posts
+            .iter()
+            .find(|summary| summary.thread_id == thread)
+            .expect("the whole room lists the thread");
+        assert_eq!(full.turn_count, 2);
+        assert_eq!(full.recent_author_subject_ids, ["bob", OWNER]);
+        assert_eq!(full.owner_subject_id, OWNER);
+        assert_eq!(full.latest_run_status, "completed");
         clean_space(&pool, &org, &space).await;
     }
 }

@@ -12,7 +12,10 @@
 //! `permission_denied`, never an owner-bound fallback) and verified for exactly this org, this
 //! user and this Space, then the audience ceiling the decision carries, applied to both the
 //! thread and the message row so a newer-audience message changes neither the list nor any
-//! count. A ZDR caller reads no row and gets an empty page (a ZDR turn produces no artifact).
+//! count. The verified read's history floors (WS04-S11 revision, D18 timestamp; see
+//! `space::audience_window`) narrow the message rows the same way: an artifact of a message said
+//! before a member's window is neither listed nor counted in a version count. A ZDR caller reads
+//! no row and gets an empty page (a ZDR turn produces no artifact).
 //! Content is never returned: the summary carries `char_length` only, and the viewer reads the
 //! thread through the existing transcript route under its own authority.
 
@@ -26,6 +29,7 @@ use tracing::warn;
 
 use crate::auth::{authorize_operation, identity};
 use crate::grpc::verify_thread_read_space_decision;
+use crate::space::audience_window::audience_window;
 
 const MAX_SPACE_ID_BYTES: usize = 128;
 const DEFAULT_ARTIFACT_LIMIT: u32 = 50;
@@ -147,6 +151,7 @@ WITH art AS (
       AND t.archived_at IS NULL
       AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $3)
       AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $3)
+      AND ($9::BIGINT IS NULL OR m.recipient_audience_revision IS NULL OR m.recipient_audience_revision >= $9::BIGINT) AND ($10::TIMESTAMPTZ IS NULL OR m.created_at >= $10::TIMESTAMPTZ)
       AND jsonb_typeof(a.elem) = 'object'
       AND NULLIF(a.elem->>'id', '') IS NOT NULL
       AND a.elem->>'kind' IN ('document', 'code', 'html')
@@ -220,6 +225,7 @@ impl SpaceRoomReadService for SpaceRoomReadGrpc {
             &space_id,
         )?
         .ok_or_else(|| Status::permission_denied("a Space read decision is required"))?;
+        let floors = audience_window(Some(read));
         let cursor = if req.cursor.is_empty() {
             None
         } else {
@@ -244,6 +250,9 @@ impl SpaceRoomReadService for SpaceRoomReadGrpc {
             .bind(cursor.as_ref().map(|c| c.message_id.clone()))
             .bind(cursor.as_ref().map(|c| c.artifact_id.clone()))
             .bind(MAX_TITLE_CHARS)
+            // D18 and WS04-S11: the message floors of the verified read, the same rule the transcript applies.
+            .bind(floors.floor)
+            .bind(floors.floor_at)
             .fetch_all(&self.pool)
             .await
             .map_err(|error| {

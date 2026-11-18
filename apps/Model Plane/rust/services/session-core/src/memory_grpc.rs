@@ -264,12 +264,14 @@ impl MemoryGrpc {
             )));
         }
         let limit = if req.limit == 0 { 100 } else { req.limit };
+        // D18: the manager's own window narrows the list to the rows the floor admits (never widens it).
         let rows = crate::dreaming::list_space_memory(
             &self.pool,
             org_id,
             space_id,
             &verified.recipient_audience_hash,
             i64::from(limit),
+            verified.history_floor_at,
         )
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -349,6 +351,7 @@ impl MemoryGrpc {
             &scope_id,
             &verified.recipient_audience_hash,
             i64::from(limit),
+            verified.history_floor_at,
         )
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -515,6 +518,7 @@ impl MemoryGrpc {
                 audience_hash: &verified.recipient_audience_hash,
                 audience_revision: verified.recipient_audience_revision,
                 authority_revision: verified.authority_revision,
+                history_floor_at: verified.history_floor_at,
             },
         )
         .await?;

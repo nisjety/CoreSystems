@@ -248,6 +248,10 @@ impl MessageRevisionService for MessageRevisionGrpc {
             )?
             .ok_or_else(|| Status::permission_denied("a Space read decision is required"))?;
             let ceiling = read.recipient_audience_revision;
+            // D18 and WS04-S11: a message said before the reader's window is not resolved either. It answers
+            // `message_not_found`, the same as a message that does not exist, so its role and revision state
+            // are never told to a windowed reader.
+            let audience = crate::space::audience_window::audience_window(Some(read));
             let sql = format!(
                 "SELECT m.role, {state} AS revision_state
                  FROM messages m
@@ -255,9 +259,11 @@ impl MessageRevisionService for MessageRevisionGrpc {
                  {join}
                  WHERE m.id = $1 AND m.thread_id = $2 AND t.org_id = $3 AND t.space_id = $4
                    AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $5)
-                   AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $5)",
+                   AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $5)
+                   AND {floor}",
                 state = FOLD_STATE_SQL,
                 join = fold_join_sql("$5::BIGINT"),
+                floor = crate::space::audience_window::message_floor_sql(("$6", "$7")),
             );
             let row: Option<(String, String)> = sqlx::query_as(&sql)
                 .bind(&req.message_id)
@@ -265,6 +271,8 @@ impl MessageRevisionService for MessageRevisionGrpc {
                 .bind(&req.org_id)
                 .bind(&req.space_id)
                 .bind(ceiling)
+                .bind(audience.floor)
+                .bind(audience.floor_at)
                 .fetch_optional(&self.pool)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;

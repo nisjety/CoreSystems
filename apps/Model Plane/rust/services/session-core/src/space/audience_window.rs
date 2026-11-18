@@ -81,6 +81,18 @@ impl AudienceWindow {
     }
 }
 
+/// The floors on one message row `m` (WS04-S11 revision floor, D18 timestamp floor), as the predicates the
+/// message reads apply. `(floor_rev, floor_at)` are the placeholders the query binds the two floors to. A
+/// NULL-stamped row passes the revision floor, and the timestamp floor hides a row created before its instant.
+/// The row must be aliased `m`. With no floor bound (both NULL) it admits every row.
+pub(crate) fn message_floor_sql((floor_rev, floor_at): (&str, &str)) -> String {
+    format!(
+        "({floor_rev}::BIGINT IS NULL OR m.recipient_audience_revision IS NULL
+                 OR m.recipient_audience_revision >= {floor_rev}::BIGINT)
+         AND ({floor_at}::TIMESTAMPTZ IS NULL OR m.created_at >= {floor_at}::TIMESTAMPTZ)"
+    )
+}
+
 /// `audience_window(read)`: the window of a verified Space read, or the unbounded window for an
 /// owner-bound read.
 pub(crate) fn audience_window(read: Option<VerifiedSpaceRead>) -> AudienceWindow {

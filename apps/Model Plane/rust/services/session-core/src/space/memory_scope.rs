@@ -151,6 +151,51 @@ pub(crate) fn withheld_origin_space(flag_param: &str) -> String {
     )
 }
 
+/// D18: the member's timestamp floor, as a SQL predicate over an unaliased `agent_memory` row.
+///
+/// `floor` is the bound parameter (`$n`) that carries Control's `history_floor_at`, NULL for no floor. A row
+/// is ROOM-DERIVED when it is not a personal row, is a Space or agent row, or names a shared-room thread (by a
+/// `thread:` link or by its session). A room-derived row is admitted to a floored reader only when its source
+/// instant is known and at or after the floor:
+///
+/// * a row with `message:` links: every linked message must exist and be posted at or after the floor (a
+///   missing message counts as posted before it);
+/// * a row with no `message:` link whose source is the member's own save or share (`source_label =
+///   'member_save'` or `origin_kind = 'declassified'`): its `created_at`, the first write, must be at or after
+///   the floor. A later re-save keeps the first instant, which only ever hides more;
+/// * anything else is hidden. An agent note is always hidden: its text is made from the whole run context, so it
+///   has no reliable source instant. So is a row with no source link at all.
+///
+/// A row that is not room-derived (the member's own personal memory) is not narrowed by a room window. With no
+/// floor every row is admitted, so the predicate changes nothing for a reader without a window.
+pub(crate) fn history_floor_admits_sql(floor: &str) -> String {
+    format!(
+        "({floor}::TIMESTAMPTZ IS NULL
+          OR NOT (agent_memory.origin_kind <> '{ORIGIN_PERSONAL}'
+                  OR agent_memory.scope IN ('space', 'agent')
+                  OR EXISTS (SELECT 1 FROM unnest(agent_memory.source_links) AS sl(link)
+                             JOIN threads ct ON ct.id = substr(sl.link, 8)
+                             WHERE sl.link LIKE 'thread:%'
+                               AND ct.space_id IS NOT NULL AND ct.space_kind IS DISTINCT FROM 'personal')
+                  OR EXISTS (SELECT 1 FROM threads st
+                             WHERE st.id = agent_memory.session_id
+                               AND st.space_id IS NOT NULL AND st.space_kind IS DISTINCT FROM 'personal'))
+          OR (agent_memory.scope <> 'agent' AND (
+                (EXISTS (SELECT 1 FROM unnest(agent_memory.source_links) AS sl(link)
+                         WHERE sl.link LIKE 'message:%')
+                 AND NOT EXISTS (SELECT 1 FROM unnest(agent_memory.source_links) AS sl(link)
+                                 WHERE sl.link LIKE 'message:%'
+                                   AND NOT EXISTS (SELECT 1 FROM messages fm
+                                                   WHERE fm.id = substr(sl.link, 9)
+                                                     AND fm.created_at >= {floor}::TIMESTAMPTZ)))
+                OR (NOT EXISTS (SELECT 1 FROM unnest(agent_memory.source_links) AS sl(link)
+                                WHERE sl.link LIKE 'message:%')
+                    AND (agent_memory.source_label = 'member_save' OR agent_memory.origin_kind = 'declassified')
+                    AND agent_memory.created_at >= {floor}::TIMESTAMPTZ)))
+        )"
+    )
+}
+
 /// Message shown when a contained thread tries to write tenant- or user-wide memory.
 pub(crate) const REFUSAL_CONTAINED: &str =
     "memory_scope_contained: a shared room cannot write user, policy, agent or workspace memory";
