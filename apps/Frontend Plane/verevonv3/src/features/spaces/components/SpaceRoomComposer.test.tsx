@@ -297,6 +297,36 @@ describe('SpaceRoomComposer — interruptible turns', () => {
     expect(await screen.findByText(/Avbrutt før svaret startet/)).toBeTruthy()
     expect(screen.queryByRole('alert')).toBeNull()
   })
+
+  // WS09-S8: a `stopped` frame this browser did not ask for is a room manager's stop, and the copy says so.
+  it('reads a stop this browser did not ask for as stopped by a room manager', async () => {
+    const stream = scriptedStream()
+    renderComposer()
+    await send('Rydd lageret')
+    stream.handlers().onConnected?.({ requestId: 'req-42' })
+    flush()
+    stream.handlers().onStopped?.({})
+    flush()
+    stream.finish()
+
+    expect(await screen.findByText('Kjøringen ble stoppet av en rombehandler. Rommet ser dette som stoppet.')).toBeTruthy()
+    expect(screen.queryByText(/Stoppet av deg/)).toBeNull()
+    expect(chatClient.cancelInvocation).not.toHaveBeenCalled()
+  })
+
+  it('reads a stop this browser made as stopped by you once the server has recorded it', async () => {
+    const stream = scriptedStream()
+    renderComposer()
+    await send('Rydd lageret')
+    stream.handlers().onConnected?.({ requestId: 'req-42' })
+    flush()
+
+    screen.getByRole('button', { name: 'Stopp' }).click()
+
+    expect(await screen.findByText('Stoppet av deg. Rommet ser dette som stoppet.')).toBeTruthy()
+    expect(screen.queryByText(/rombehandler/)).toBeNull()
+    expect(chatClient.cancelInvocation).toHaveBeenCalledWith('req-42')
+  })
 })
 
 describe('SpaceRoomComposer — subscription model routing', () => {
@@ -564,6 +594,53 @@ describe('SpaceRoomComposer — the room is visibly working', () => {
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'Stopp' })).toBeTruthy())
     expect(screen.queryByText(/Verevon jobber i/)).toBeNull()
+  })
+
+  // WS09-S6: with the room's live view on, the run strip replaces the sentence once a run shows its work.
+  it('with agent_work.live on, the run strip replaces the working sentence once a run shows its work', async () => {
+    const frames: { onFrame?: SpaceRunLiveHandlers['onFrame'] } = {}
+    runLive.streamSpaceRunLive.mockImplementation((_spaceRef: string, runId: string, handlers: SpaceRunLiveHandlers) => {
+      if (runId === 'run-live-7') frames.onFrame = handlers.onFrame
+      return new Promise<void>(() => {})
+    })
+    publishSpaceThreads('room-1', [
+      { thread_id: 't9', space_id: 'room-1', title: 'Innkjøp', latest_run_id: 'run-live-7', latest_run_status: 'running' },
+    ])
+    flush()
+    render(() => (
+      <SpaceRoomComposer
+        spaceRef="room-1"
+        roster={() => []}
+        agents={() => []}
+        threads={() => []}
+        agentWork={() => ({ live: true, text: false, steer_owner: false, stop_manager: false }) as never}
+      />
+    ))
+    await waitFor(() => expect(frames.onFrame).toBeDefined())
+    frames.onFrame?.({ type: 'step', step: { id: 'step-1', class: 'web', state: 'running' } }, undefined)
+    flush()
+
+    expect(await screen.findByText('Søker på nettet', {}, { timeout: 3000 })).toBeTruthy()
+    expect(document.querySelector('.verevon-run-strip')).not.toBeNull()
+    expect(screen.queryByText(/Verevon jobber i/)).toBeNull()
+  })
+
+  it('with agent_work.live off, the plain working sentence stays and no strip is drawn', () => {
+    publishSpaceThreads('room-1', [
+      { thread_id: 't1', space_id: 'room-1', title: 'Innkjøp', latest_run_id: 'run-9', latest_run_status: 'running' },
+    ])
+    flush()
+    render(() => (
+      <SpaceRoomComposer
+        spaceRef="room-1"
+        roster={() => []}
+        agents={() => []}
+        threads={() => []}
+        agentWork={() => ({ live: false, text: false, steer_owner: false, stop_manager: false }) as never}
+      />
+    ))
+    expect(screen.getByText(/Verevon jobber i «Innkjøp»/)).toBeTruthy()
+    expect(document.querySelector('.verevon-run-strip')).toBeNull()
   })
 
   it('shows nothing when the room is quiet', () => {
@@ -1544,6 +1621,47 @@ describe('SpaceRoomComposer — owner mid-run steer (WS09-S2)', () => {
 
     stream.handlers().onStopped?.({})
     flush()
+    stream.finish()
+
+    await waitFor(() => expect(stripState('Legg til kolonne')).toBe('refused'))
+    expect(screen.getByText(/ble ikke sendt på nytt/)).toBeTruthy()
+    expect(chatClient.streamChat).toHaveBeenCalledTimes(1)
+  })
+
+  // The real client turns the gateway's 429 into a refusal that keeps the words; only the transport is stubbed.
+  it('a 429 from the gateway shows its note as the refusal and keeps the words in the box', async () => {
+    const stream = scriptedStream()
+    const actual = await vi.importActual<typeof import('@/shared/api/chat-client')>('@/shared/api/chat-client')
+    chatClient.queueInvocationInput.mockImplementation(actual.queueInvocationInput)
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ error: { code: 'too_many_pending', message: 'Tre meldinger venter allerede.' } }),
+      { status: 429, headers: { 'Content-Type': 'application/json' } },
+    )))
+    try {
+      renderInThread(STEER_ON)
+      await ownTurnStreaming(stream)
+
+      typeAndSubmit('Ny instruks')
+
+      await waitFor(() => expect(stripState('Ny instruks')).toBe('refused'))
+      expect(screen.getByText('Tre meldinger venter allerede.')).toBeTruthy()
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Ny instruks')
+      expect(chatClient.queueInvocationInput).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('says a steered message the run never read was not sent again when the run fails', async () => {
+    const stream = scriptedStream()
+    chatClient.queueInvocationInput.mockResolvedValue({ outcome: 'run_ended' })
+    renderInThread(STEER_ON)
+    await ownTurnStreaming(stream)
+
+    typeAndSubmit('Legg til kolonne')
+    await waitFor(() => expect(stripState('Legg til kolonne')).toBe('resent'))
+
+    stream.handlers().onError?.({ code: 'upstream_error', message: 'Tjenesten svarte ikke' })
     stream.finish()
 
     await waitFor(() => expect(stripState('Legg til kolonne')).toBe('refused'))
