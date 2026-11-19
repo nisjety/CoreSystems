@@ -1,5 +1,5 @@
 import { Bot, MessageCircle, Pin, PinOff } from '@/shared/icons'
-import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from 'solid-js'
 
 import {
   AWAITING_APPROVAL_RUN_STATUS,
@@ -288,7 +288,8 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
     post.focus({ preventScroll: true })
   }
   const sharedRead = () => props.sharedReadAvailable?.() !== false
-  const artifactsOn = roomArtifactsEnabled()
+  // Read where it is used, so a flag the room publishes after the timeline is drawn reaches the chips too.
+  const artifactsOn = () => roomArtifactsEnabled()
   const pendingNewPosts = () =>
     (props.pendingPosts?.() ?? []).filter((entry) => entry.kind === 'post_new')
   const pendingRepliesFor = (threadId: string) =>
@@ -318,8 +319,11 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
   }
   let sentinelEl: HTMLLIElement | undefined
   createEffect(
-    () => ({ el: sentinelEl, store: props.timeline, more: props.timeline?.hasEarlier() === true }),
-    ({ el, store, more }) => {
+    // The element is read in the effect, not in the compute step: the ref is a plain variable, so the compute
+    // step would read it before the list is rendered and never observe the sentinel.
+    () => ({ store: props.timeline, more: props.timeline?.hasEarlier() === true }),
+    ({ store, more }) => {
+      const el = sentinelEl
       if (!el || !store || !more) return undefined
       return watcher.observe(el, (near) => {
         if (near && readerScrolledUp) void store.loadEarlier().catch(() => undefined)
@@ -338,7 +342,8 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
   }
 
   // The reader's own send always goes to the bottom: a new journal entry means this browser just posted.
-  let lastPendingCount = props.pendingPosts?.().length ?? 0
+  // The baseline for the effect below: read once, on purpose, so the count is not tracked here.
+  let lastPendingCount = untrack(() => props.pendingPosts?.().length ?? 0)
   createEffect(
     () => props.pendingPosts?.().length ?? 0,
     (count) => {
@@ -572,7 +577,7 @@ function SpaceRoomPost(props: {
   /** False when the room's shared read is unavailable: no transcript call is made. */
   readonly transcriptEnabled: () => boolean
   /** `features.room_artifacts`: chips, sheet and artifact-only turns. Off, the post reads as before. */
-  readonly artifactsOn: boolean
+  readonly artifactsOn: () => boolean
   readonly liveArtifacts?: (threadId: string) => readonly ChatArtifact[]
   /** This post's room pin (WS13-S8), when the room has pinned it. */
   readonly roomPin?: () => SpaceRoomPin | undefined
@@ -652,8 +657,10 @@ function SpaceRoomPost(props: {
   let postEl: HTMLLIElement | undefined
   const [near, setNear] = createSignal(false)
   createEffect(
-    () => ({ el: postEl, store: props.timeline, watch: props.watch }),
-    ({ el, store, watch }) => {
+    // Read in the effect, as above: the post's ref is set after the compute step has run.
+    () => ({ store: props.timeline, watch: props.watch }),
+    ({ store, watch }) => {
+      const el = postEl
       if (!el || !store || !watch) return undefined
       const id = props.thread.thread_id
       return watch(el, (isNear) => {
@@ -678,7 +685,7 @@ function SpaceRoomPost(props: {
   // so it is dropped here and the post reads exactly as it did before.
   const allTurns = (): readonly TranscriptTurn[] => {
     const all = transcript()?.turns ?? []
-    return props.artifactsOn ? all : all.filter((turn) => turn.content.length > 0 || turn.revisionState === 'deleted')
+    return props.artifactsOn() ? all : all.filter((turn) => turn.content.length > 0 || turn.revisionState === 'deleted')
   }
   // WS12-S7: edit and delete controls for this post's turns; a change re-reads this post's transcript.
   const lifecycle = createSpaceTurnLifecycle({
@@ -712,7 +719,7 @@ function SpaceRoomPost(props: {
   // Live artifacts from this browser's own stream that the transcript does not
   // carry yet (same id and version). In memory only, never stored.
   const pendingLive = (): readonly ChatArtifact[] => {
-    if (!props.artifactsOn) return []
+    if (!props.artifactsOn()) return []
     const persisted = new Set(
       allTurns().flatMap((turn) => (turn.artifacts ?? []).map((artifact) => `${artifact.id}\u0000${artifact.version}`)),
     )
@@ -721,7 +728,7 @@ function SpaceRoomPost(props: {
     )
   }
   const artifactItems = createMemo(() =>
-    props.artifactsOn ? roomItems([...allTurns(), { artifacts: pendingLive() }]) : [],
+    props.artifactsOn() ? roomItems([...allTurns(), { artifacts: pendingLive() }]) : [],
   )
   const readState = () => transcript()?.state
   // The typed denial a 403 carried, when it carried one this build understands; else undefined and the
@@ -1041,7 +1048,7 @@ function SpaceRoomPost(props: {
           agents={props.agents}
           threads={props.threads}
           threadId={props.thread.thread_id}
-          onOpenArtifact={props.artifactsOn ? setOpenArtifactId : undefined}
+          onOpenArtifact={props.artifactsOn() ? setOpenArtifactId : undefined}
           headMeta={headMeta}
           earlierTurns={earlierTurns}
           lifecycle={lifecycle}
