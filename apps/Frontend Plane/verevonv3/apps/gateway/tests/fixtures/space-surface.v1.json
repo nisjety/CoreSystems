@@ -5562,6 +5562,42 @@
       "flag": null,
       "payload_allow_list": [],
       "reason": "Frontend door to the org-admin retire of an organization agent (soft delete; the row is kept for audit). The body carries the revision only; a removal, allowed under every posture."
+    },
+    {
+      "id": "bff:GET:/api/v1/spaces/{space_ref}/members/{subject_id}/history-window",
+      "kind": "route",
+      "plane": "frontend",
+      "service": "verevonv3-gateway",
+      "method": "GET",
+      "path": "/api/v1/spaces/{space_ref}/members/{subject_id}/history-window",
+      "handler": "domains/spaces/room_admin.rs::get_member_history_window_route",
+      "route_class": "ReadMetadata",
+      "decision_type": "membership",
+      "min_role": "manager",
+      "zdr_class": "n/a",
+      "basis": "registry",
+      "idempotency": "n/a",
+      "flag": "member_history_windows",
+      "payload_allow_list": [],
+      "reason": "D18: reads one member's history window (a mode and an instant, no content) for a room owner or manager; Control owns the rule and answers anyone else with a refusal. Allowed under every posture."
+    },
+    {
+      "id": "bff:PUT:/api/v1/spaces/{space_ref}/members/{subject_id}/history-window",
+      "kind": "route",
+      "plane": "frontend",
+      "service": "verevonv3-gateway",
+      "method": "PUT",
+      "path": "/api/v1/spaces/{space_ref}/members/{subject_id}/history-window",
+      "handler": "domains/spaces/room_admin.rs::put_member_history_window_route",
+      "route_class": "Config",
+      "decision_type": "membership",
+      "min_role": "manager",
+      "zdr_class": "n/a",
+      "basis": "registry",
+      "idempotency": "last_write_wins",
+      "flag": "member_history_windows",
+      "payload_allow_list": [],
+      "reason": "D18: sets one member's history window, a mode (full, since_join or since_date) and an instant, no content, so allowed under every posture. A window only hides what a member reads; Control owns the role rule, the audit row and the floor every read signs."
     }
   ]
 }
