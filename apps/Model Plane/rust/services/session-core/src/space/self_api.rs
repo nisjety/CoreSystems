@@ -169,6 +169,13 @@ struct ReceiptRow {
 
 /// Control's `RunActionDecision` claims, 29 fields in Control's order. Unknown fields are refused,
 /// so a Control change that adds a claim fails closed until this reader is updated with it.
+///
+/// D18: this reader serves the three thread actions of the golden registry, which are writes on the run's own
+/// thread. Control signs a member's history floor (`history_floor_at`) on a canvas READ run action only, and
+/// those decisions go to wiki-store (`data-plane-canvas`), which accepts and applies the floor. Session Core
+/// never verifies one. A floor on a thread action is a claim Control does not issue, so it stays an unknown
+/// claim and the decision is refused: accepting it here would only add a way for a signed narrowing to be
+/// read and dropped on a write. `a_history_floor_is_not_a_claim_of_a_thread_action` pins the split.
 #[allow(dead_code)]
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1243,6 +1250,47 @@ mod tests {
             let mut narrowed = claims.clone();
             narrowed.as_object_mut().expect("an object").remove(name);
             refused(&sign_with(&key, "kid-1", &narrowed), name);
+        }
+    }
+
+    // D18: the member's history floor is signed on a canvas read run action, which wiki-store verifies. A
+    // thread action carries none, so a floor on one is refused as an unknown claim, whatever its value.
+    #[test]
+    fn a_history_floor_is_not_a_claim_of_a_thread_action() {
+        let key = SigningKey::from_bytes(&[7_u8; 32]);
+        let keys: BTreeMap<String, VerifyingKey> =
+            BTreeMap::from([("kid-1".to_owned(), key.verifying_key())]);
+        for (name, value) in [
+            ("history_floor_at", json!("2026-11-18T09:30:00Z")),
+            ("history_floor_at", json!("2026-11-18T09:30:00.123456789Z")),
+            ("history_floor_at", json!(null)),
+            ("history_floor_revision", json!(5)),
+        ] {
+            let mut claims = claims_json();
+            claims[name] = value;
+            let status = verify_decision(&sign_with(&key, "kid-1", &claims), &keys)
+                .expect_err("a thread action decision with a history floor is refused");
+            assert_eq!(status.code(), tonic::Code::PermissionDenied, "{name}");
+            assert_eq!(trailer(&status).as_deref(), Some("not_authorized"), "{name}");
+        }
+
+        // The split that makes this safe: the rows this service serves are exactly the three thread actions,
+        // and the two canvas rows, the only run actions a floor is signed on, name the canvas audience.
+        let registry = golden().expect("the golden registry loads");
+        let mut served: Vec<&str> = registry
+            .rows
+            .iter()
+            .filter(|row| row.service_audience == SESSION_CORE_AUDIENCE)
+            .map(|row| row.action_id.as_str())
+            .collect();
+        served.sort_unstable();
+        let mut thread_actions = vec![RENAME_ACTION, PIN_ACTION, POST_CARD_ACTION];
+        thread_actions.sort_unstable();
+        assert_eq!(served, thread_actions, "a registry row for Session Core that is not a thread action");
+        for canvas in ["space.canvas.read", "space.canvas.write"] {
+            let row = registry.row(canvas).expect("the golden registry names the canvas row");
+            assert_eq!(row.service_audience, "data-plane-canvas", "{canvas} is not Session Core's");
+            assert_ne!(row.service_audience, SESSION_CORE_AUDIENCE);
         }
     }
 
