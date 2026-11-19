@@ -64,7 +64,7 @@ func TestObserveAuthorizerTreatsATypedRefusalAsFinalAndAnOutageAsRetryable(t *te
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			server := controlStub(t, tc.status, tc.body)
-			err := testObserveAuthorizer(t, server.URL).AuthorizeObserve(context.Background(), watch)
+			_, err := testObserveAuthorizer(t, server.URL).AuthorizeObserve(context.Background(), watch)
 			if tc.wantOK {
 				if err != nil {
 					t.Fatalf("approval returned an error: %v", err)
@@ -86,7 +86,7 @@ func TestObserveAuthorizerTreatsATransportFailureAsRetryable(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	endpoint := server.URL
 	server.Close() // nothing listens any more
-	err := testObserveAuthorizer(t, endpoint).AuthorizeObserve(context.Background(),
+	_, err := testObserveAuthorizer(t, endpoint).AuthorizeObserve(context.Background(),
 		activeWatch(Predicate{Kind: "contains", Value: "ERROR"}, "every", 3))
 	if !errors.Is(err, ErrAuthorityUnavailable) {
 		t.Fatalf("a dead socket must be retryable, got %v", err)

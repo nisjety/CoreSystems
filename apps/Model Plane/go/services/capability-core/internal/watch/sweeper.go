@@ -33,8 +33,12 @@ const DefaultSweepInterval = time.Second
 // Returning an error terminates the watch as [StateSourceGone] — "the thing you
 // were watching is no longer yours to see" is an answer, and leaving it ACTIVE
 // to retry forever would be a poller quietly probing a resource it was refused.
+//
+// The answer also carries the member's CURRENT history window (D18) as an
+// [ObserveGrant]. Every implementation must say it, so none can approve a disclosure
+// without stating how much of the room's past it covers. The zero grant is no window.
 type Reauthorizer interface {
-	AuthorizeObserve(ctx context.Context, w Watch) error
+	AuthorizeObserve(ctx context.Context, w Watch) (ObserveGrant, error)
 }
 
 // Sweeper claims due watches, polls each one's adapter, and commits what it saw.
@@ -174,7 +178,8 @@ func (s *Sweeper) pollOne(ctx context.Context, w Watch) {
 	// What needs fresh human authority is turning a read into a RECORDED event,
 	// so the check sits here, and a quiet watch costs Control nothing.
 	if len(events) > 0 {
-		if err := s.authz.AuthorizeObserve(ctx, w); err != nil {
+		grant, err := s.authz.AuthorizeObserve(ctx, w)
+		if err != nil {
 			if errors.Is(err, ErrAuthorityUnavailable) {
 				// Control could not answer, which says nothing about the member.
 				// The cursor is deliberately NOT committed: the adapter is
@@ -195,6 +200,13 @@ func (s *Sweeper) pollOne(ctx context.Context, w Watch) {
 				slog.Warn("terminating an unauthorized watch failed", "watch", w.ID, "error", termErr)
 			}
 			return
+		}
+		// D18: the member's window, from the same fresh decision that approved the disclosure. The poll is
+		// decided again over what the window shows, so a `once` watch answers with the first match the member
+		// may see rather than a match from before their window, and nothing from before it is recorded. The
+		// cursor still moves past what was hidden. Only a windowed member pays for the second pass.
+		if grant.Windowed() {
+			events, cursor = s.decide(w, grant.narrow(result))
 		}
 	}
 
@@ -267,7 +279,7 @@ func (s *Sweeper) decide(w Watch, result PollResult) ([]Emission, int64) {
 		})
 	}
 
-	if result.SourceTerminal {
+	if result.SourceTerminal && !result.terminalHidden {
 		summary := result.TerminalSummary
 		if summary == "" {
 			summary = "the watched source finished"

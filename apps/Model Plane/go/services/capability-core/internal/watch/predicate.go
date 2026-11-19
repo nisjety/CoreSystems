@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Predicate kinds. This vocabulary is CLOSED, and the closure is the design.
@@ -99,6 +100,11 @@ type Line struct {
 	Cursor int64
 	Stream string
 	Text   string
+	// CapturedAt is when the source first recorded any of this line's bytes. The zero time means the source
+	// did not say. A member's history window (D18) places a line by this instant, and a line it cannot place
+	// is hidden, so an adapter that knows it must fill it in: the EARLIEST instant of the line's bytes, so a
+	// line that began before a window and ended inside it is not shown as if it began inside.
+	CapturedAt time.Time
 }
 
 // MatchLine reports whether this line satisfies the predicate.
@@ -158,6 +164,16 @@ type PollResult struct {
 	// ("exited with code 2"). Emitted as [TrustOwnerMetadata], so it must
 	// never carry source payload.
 	TerminalSummary string
+	// SourceRevision is the recipient-audience revision the source was registered under, or zero when it
+	// carries none. A member's WS04-S11 revision window (D18) places the source by it.
+	SourceRevision int64
+	// EndedAt is when the source reached its terminal state, or the zero time when it did not say. The end of
+	// a source is told to a member only when it lies inside their timestamp window.
+	EndedAt time.Time
+	// terminalHidden withholds the source_gone event of a terminal source. The watch still ends with the
+	// source; what a member's history window hides is the telling, not the state. Set by
+	// [ObserveGrant.narrow], never by an adapter.
+	terminalHidden bool
 }
 
 // ErrSourceGone means a source no longer exists, or no longer belongs to the

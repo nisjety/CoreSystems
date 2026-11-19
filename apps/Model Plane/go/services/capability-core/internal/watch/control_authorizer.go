@@ -7,10 +7,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// maxObserveDecisionBytes bounds the decision body this reads. A decision is a few hundred bytes of claims.
+const maxObserveDecisionBytes = 1 << 20
 
 // ControlObserveAuthorizer re-derives current Space authority from Control
 // immediately before a watch records anything a human can read.
@@ -103,7 +107,7 @@ type observeIntent struct {
 // authorizes the disclosure, it does not review it, and sending a program's
 // output to the identity plane would put unscreened payload somewhere it has no
 // business being.
-func (a *ControlObserveAuthorizer) AuthorizeObserve(ctx context.Context, w Watch) error {
+func (a *ControlObserveAuthorizer) AuthorizeObserve(ctx context.Context, w Watch) (ObserveGrant, error) {
 	intent := observeIntent{
 		OrgID: w.OrgID, SpaceRef: w.SpaceRef, SubjectID: w.CreatorSubjectID,
 		WatchID: w.ID, SourceKind: w.SourceKind, SourceRef: w.SourceRef,
@@ -115,12 +119,12 @@ func (a *ControlObserveAuthorizer) AuthorizeObserve(ctx context.Context, w Watch
 	}
 	body, err := json.Marshal(map[string]any{"intent": intent})
 	if err != nil {
-		return fmt.Errorf("encode a watch observe intent: %w", err)
+		return ObserveGrant{}, fmt.Errorf("encode a watch observe intent: %w", err)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		a.endpoint+"/api/v1/internal/spaces/watch-observe-decision", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("build a watch observe request: %w", err)
+		return ObserveGrant{}, fmt.Errorf("build a watch observe request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Service-Id", a.serviceID)
@@ -132,18 +136,50 @@ func (a *ControlObserveAuthorizer) AuthorizeObserve(ctx context.Context, w Watch
 		// terminates the watch, and Control being briefly unreachable must not
 		// cancel a person's watch — so this is wrapped as a distinct condition
 		// the sweeper backs off on.
-		return fmt.Errorf("%w: %v", ErrAuthorityUnavailable, err)
+		return ObserveGrant{}, fmt.Errorf("%w: %v", ErrAuthorityUnavailable, err)
 	}
 	defer func() { _ = response.Body.Close() }()
 	switch {
 	case response.StatusCode == http.StatusOK:
-		return nil
+		return readObserveGrant(response.Body)
 	case response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusNotFound:
 		// A real refusal: the member's authority no longer covers this watch.
-		return fmt.Errorf("Control refused this watch's observation (status %d)", response.StatusCode)
+		return ObserveGrant{}, fmt.Errorf("Control refused this watch's observation (status %d)", response.StatusCode)
 	default:
 		// Anything else — 5xx, a gateway timeout, a misconfigured route — is
 		// Control being unable to answer rather than answering no.
-		return fmt.Errorf("%w: Control returned status %d", ErrAuthorityUnavailable, response.StatusCode)
+		return ObserveGrant{}, fmt.Errorf("%w: Control returned status %d", ErrAuthorityUnavailable, response.StatusCode)
 	}
+}
+
+// readObserveGrant reads the member's history window (D18) off the signed decision Control answers with.
+//
+// The window is read from the decision's own claims, the ones Control signs, and an answer whose window cannot
+// be read is NOT an approval: it is Control being unable to answer, so the watch backs off and the cursor is
+// not committed. A watch must never record an event without knowing how much of the room's past its member
+// may see. A decision with no window claim is a member with no window.
+func readObserveGrant(body io.Reader) (ObserveGrant, error) {
+	var envelope struct {
+		Data struct {
+			Decision struct {
+				HistoryFloorAt       *time.Time `json:"history_floor_at"`
+				HistoryFloorRevision int64      `json:"history_floor_revision"`
+			} `json:"decision"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(body, maxObserveDecisionBytes)).Decode(&envelope); err != nil {
+		return ObserveGrant{}, fmt.Errorf("%w: decode a watch observe decision: %v", ErrAuthorityUnavailable, err)
+	}
+	decision := envelope.Data.Decision
+	// A zero instant or a negative revision is not a window Control signs. Reading it as no window would show
+	// the whole room, so the answer is refused as unreadable.
+	if (decision.HistoryFloorAt != nil && decision.HistoryFloorAt.Unix() <= 0) || decision.HistoryFloorRevision < 0 {
+		return ObserveGrant{}, fmt.Errorf("%w: the watch observe decision carries a history window that is not valid", ErrAuthorityUnavailable)
+	}
+	grant := ObserveGrant{HistoryFloorRevision: decision.HistoryFloorRevision}
+	if decision.HistoryFloorAt != nil {
+		at := decision.HistoryFloorAt.UTC()
+		grant.HistoryFloorAt = &at
+	}
+	return grant, nil
 }

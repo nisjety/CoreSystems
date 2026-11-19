@@ -145,6 +145,10 @@ func (a *Adapter) Poll(ctx context.Context, w watch.Watch) (watch.PollResult, er
 		// Only once drained. See `drained` above.
 		SourceTerminal:  drained,
 		TerminalSummary: terminalSummary(process),
+		// D18: what a member's history window places this poll by. The revision the process was
+		// registered under, and when it ended. An unset end is the zero time, which a window hides.
+		SourceRevision: process.GetRecipientAudienceRevision(),
+		EndedAt:        instantOf(process.GetEndedAt()),
 	}, nil
 }
 

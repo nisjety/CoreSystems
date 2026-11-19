@@ -24,6 +24,9 @@ package processwatch
 import (
 	"bytes"
 	"fmt"
+	"time"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/services/capability-core/internal/watch"
@@ -109,6 +112,9 @@ type assembled struct {
 func assembleLines(chunks []*mpv1.ProcessOutputChunk, afterSeq int64, sourceTerminal bool) (assembled, error) {
 	result := assembled{cursor: afterSeq}
 	pending := map[string][]byte{}
+	// When each stream's open fragment began (D18). A line is placed by the EARLIEST instant of its bytes, so a
+	// line that began before a member's window and ended inside it is not taken to have begun inside.
+	pendingFrom := map[string]time.Time{}
 	// A chunk seq is only safe once every stream is clean at that point.
 	clean := func() bool {
 		for _, fragment := range pending {
@@ -152,6 +158,13 @@ func assembleLines(chunks []*mpv1.ProcessOutputChunk, afterSeq int64, sourceTerm
 			continue
 		}
 
+		capturedAt := instantOf(chunk.GetCapturedAt())
+		// The first line of this chunk may continue a fragment from an earlier one, and it began when that
+		// fragment did. Every later line begins in this chunk.
+		lineAt := capturedAt
+		if len(pending[name]) > 0 {
+			lineAt = pendingFrom[name]
+		}
 		buffer := append(pending[name], chunk.GetContent()...)
 		for {
 			index := bytes.IndexByte(buffer, '\n')
@@ -159,21 +172,30 @@ func assembleLines(chunks []*mpv1.ProcessOutputChunk, afterSeq int64, sourceTerm
 				break
 			}
 			result.lines = append(result.lines, watch.Line{
-				Cursor: chunk.GetSeq(),
-				Stream: name,
-				Text:   string(trimCR(buffer[:index])),
+				Cursor:     chunk.GetSeq(),
+				Stream:     name,
+				Text:       string(trimCR(buffer[:index])),
+				CapturedAt: lineAt,
 			})
 			buffer = buffer[index+1:]
+			lineAt = capturedAt
 		}
 		if len(buffer) > MaxPendingBytes {
 			// The bound described on MaxPendingBytes: treat it as a line rather
 			// than stall the cursor forever.
 			result.lines = append(result.lines, watch.Line{
-				Cursor: chunk.GetSeq(),
-				Stream: name,
-				Text:   string(trimCR(buffer[:MaxPendingBytes])),
+				Cursor:     chunk.GetSeq(),
+				Stream:     name,
+				Text:       string(trimCR(buffer[:MaxPendingBytes])),
+				CapturedAt: lineAt,
 			})
 			buffer = buffer[MaxPendingBytes:]
+			lineAt = capturedAt
+		}
+		if len(buffer) > 0 {
+			// An open fragment began at `lineAt`: the instant it already had, when this chunk completed no line,
+			// and this chunk's own when a line completed before it.
+			pendingFrom[name] = lineAt
 		}
 		pending[name] = buffer
 		if clean() {
@@ -195,13 +217,24 @@ func assembleLines(chunks []*mpv1.ProcessOutputChunk, afterSeq int64, sourceTerm
 				continue
 			}
 			result.lines = append(result.lines, watch.Line{
-				Cursor: result.cursor,
-				Stream: name,
-				Text:   string(trimCR(fragment)),
+				Cursor:     result.cursor,
+				Stream:     name,
+				Text:       string(trimCR(fragment)),
+				CapturedAt: pendingFrom[name],
 			})
 		}
 	}
 	return result, nil
+}
+
+// instantOf is the time a protobuf timestamp names, or the zero time when the source did not set one. An unset
+// timestamp reads as the Unix epoch through AsTime, which would place a line at the very start of time and
+// show it to any window; the zero time is what a member's history window (D18) cannot place, and hides.
+func instantOf(at *timestamppb.Timestamp) time.Time {
+	if at == nil || !at.IsValid() || at.GetSeconds() <= 0 {
+		return time.Time{}
+	}
+	return at.AsTime().UTC()
 }
 
 // trimCR drops a single trailing carriage return, so a program writing CRLF

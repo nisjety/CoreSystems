@@ -38,20 +38,30 @@ func (s *scriptedAdapter) Poll(context.Context, Watch) (PollResult, error) {
 
 type allowAll struct{ calls int }
 
-func (a *allowAll) AuthorizeObserve(context.Context, Watch) error { a.calls++; return nil }
+func (a *allowAll) AuthorizeObserve(context.Context, Watch) (ObserveGrant, error) {
+	a.calls++
+	return ObserveGrant{}, nil
+}
 
 type denyAll struct{}
 
-func (denyAll) AuthorizeObserve(context.Context, Watch) error {
-	return errors.New("membership was revoked")
+func (denyAll) AuthorizeObserve(context.Context, Watch) (ObserveGrant, error) {
+	return ObserveGrant{}, errors.New("membership was revoked")
 }
 
 // unavailableAuthority stands in for Control being unreachable, which is a
 // different answer from Control saying no.
 type unavailableAuthority struct{}
 
-func (unavailableAuthority) AuthorizeObserve(context.Context, Watch) error {
-	return fmt.Errorf("%w: connection refused", ErrAuthorityUnavailable)
+func (unavailableAuthority) AuthorizeObserve(context.Context, Watch) (ObserveGrant, error) {
+	return ObserveGrant{}, fmt.Errorf("%w: connection refused", ErrAuthorityUnavailable)
+}
+
+// windowedAuthority approves every disclosure under one history window (D18).
+type windowedAuthority struct{ grant ObserveGrant }
+
+func (a windowedAuthority) AuthorizeObserve(context.Context, Watch) (ObserveGrant, error) {
+	return a.grant, nil
 }
 
 func sweeperOver(t *testing.T, store *Store, adapter SourceAdapter, authz Reauthorizer) *Sweeper {
