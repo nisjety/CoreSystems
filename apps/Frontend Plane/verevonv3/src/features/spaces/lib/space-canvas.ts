@@ -5,6 +5,7 @@
  */
 import type { SpaceCanvasVersion, SpaceRosterMember } from '@/shared/api/spaces-client'
 
+import { DM_SPACE_FEATURE } from './space-kind'
 import { spaceRoomFeature } from './space-room-features'
 
 /** The tab's id in the registry and the URL hash (`#lerret`). `#canvas` is its alias. */
@@ -18,9 +19,13 @@ export const CANVAS_REFRESH_MS = 15_000
 
 type Translate = (noText: string, enText: string) => string
 
-/** Lists the tab while the gateway says the canvas is on. Off until the room context has been read. */
+/**
+ * Lists the tab while the gateway says the canvas is on. Off until the room context has been read. A direct message
+ * has no canvas (Control refuses one in a `dm` or `group_dm` Space, D-8), so the tab is not offered there either:
+ * the Agent and Members tabs follow the same trait.
+ */
 export function canvasTabEnabled(): boolean {
-  return spaceRoomFeature(CANVAS_FEATURE)
+  return spaceRoomFeature(CANVAS_FEATURE) && !spaceRoomFeature(DM_SPACE_FEATURE)
 }
 
 /** A member's display name from the roster, or undefined when there is none. Never the subject id. */

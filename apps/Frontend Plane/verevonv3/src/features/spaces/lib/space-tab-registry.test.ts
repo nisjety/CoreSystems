@@ -75,6 +75,17 @@ describe('space tab registry (P-SPA1)', () => {
       expect(spaceTabFromHash('#aktivitet')).toBe('aktivitet')
     })
 
+    // Control has no canvas for a dm or group_dm (D-8): the tab would only ever show a refusal.
+    it('hides the Canvas tab even while features.canvas is on, and sends #canvas to chat', () => {
+      primeSpaceRoomFeatures({ canvas: true, [DM_SPACE_FEATURE]: true })
+      expect(visibleSpaceTabs().map((tab) => tab.id)).not.toContain('lerret')
+      expect(spaceTabFromHash('#canvas')).toBe('chat')
+      expect(spaceTabFromHash('#lerret')).toBe('chat')
+      primeSpaceRoomFeatures({ canvas: true, [DM_SPACE_FEATURE]: false })
+      expect(visibleSpaceTabs().map((tab) => tab.id)).toContain('lerret')
+      expect(spaceTabFromHash('#canvas')).toBe('lerret')
+    })
+
     it('a room (the flag false or absent) keeps both tabs', () => {
       primeSpaceRoomFeatures({ [DM_SPACE_FEATURE]: false })
       expect(visibleSpaceTabs().map((tab) => tab.id)).toEqual(expect.arrayContaining(['agent', 'medlemmer']))

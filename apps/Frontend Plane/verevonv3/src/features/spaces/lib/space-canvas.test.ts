@@ -11,6 +11,7 @@ import {
   sameCanvasText,
   toggleCompareSelection,
 } from './space-canvas'
+import { DM_SPACE_FEATURE } from './space-kind'
 import { clearSpaceRoomFeatures, publishSpaceRoomFeatures } from './space-room-features'
 
 const en = (_noText: string, enText: string) => enText
@@ -57,6 +58,16 @@ describe('WS19-S5 canvas tab and version line', () => {
     }
     publishSpaceRoomFeatures({ other_flag: true })
     expect(canvasTabEnabled()).toBe(false)
+  })
+
+  // Control refuses a canvas in a dm or group_dm Space (D-8), so the tab must not be offered where it can only refuse.
+  it('canvasTabEnabled is false in a direct message even while features.canvas is on', () => {
+    publishSpaceRoomFeatures({ canvas: true, [DM_SPACE_FEATURE]: true })
+    expect(canvasTabEnabled()).toBe(false)
+    publishSpaceRoomFeatures({ canvas: true, [DM_SPACE_FEATURE]: false })
+    expect(canvasTabEnabled()).toBe(true)
+    publishSpaceRoomFeatures({ canvas: true })
+    expect(canvasTabEnabled()).toBe(true)
   })
 
   it('canvasVersionMeta names a member, an agent run with its asker, an agent run with no asker, and falls back to a member for an unknown subject; a subject id never appears in the line', () => {
