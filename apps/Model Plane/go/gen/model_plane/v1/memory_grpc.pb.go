@@ -32,6 +32,8 @@ const (
 	MemoryService_RebuildUserProfile_FullMethodName = "/model_plane.v1.MemoryService/RebuildUserProfile"
 	MemoryService_EraseAgentMemory_FullMethodName   = "/model_plane.v1.MemoryService/EraseAgentMemory"
 	MemoryService_CheckMemoryWrite_FullMethodName   = "/model_plane.v1.MemoryService/CheckMemoryWrite"
+	MemoryService_DeclassifyMemory_FullMethodName   = "/model_plane.v1.MemoryService/DeclassifyMemory"
+	MemoryService_RestoreMemory_FullMethodName      = "/model_plane.v1.MemoryService/RestoreMemory"
 )
 
 // MemoryServiceClient is the client API for MemoryService service.
@@ -107,6 +109,15 @@ type MemoryServiceClient interface {
 	// session:memory-controls:read scope for a service caller). An allow is also
 	// the answer while the policy mode is off.
 	CheckMemoryWrite(ctx context.Context, in *CheckMemoryWriteRequest, opts ...grpc.CallOption) (*CheckMemoryWriteResponse, error)
+	// Share one of the caller's personal memory rows into a shared Space (WS17-S7), under a Control
+	// `model.memory.declassify` decision for the reviewed text. The source row is untouched; one
+	// transaction inserts the `declassified` room row and its ledger row. User callers only, for
+	// themselves; refused for a ZDR caller (durable_mutation_forbidden) before any other check.
+	DeclassifyMemory(ctx context.Context, in *DeclassifyMemoryRequest, opts ...grpc.CallOption) (*DeclassifyMemoryResponse, error)
+	// WS17 D9: the owner restores one withheld legacy row (origin `room_unverified`) to ordinary personal memory,
+	// once every thread the row is linked to is verified not to be a shared room. User callers only, for
+	// themselves; refused for a ZDR caller (durable_mutation_forbidden) before any other check. Ids only.
+	RestoreMemory(ctx context.Context, in *RestoreMemoryRequest, opts ...grpc.CallOption) (*RestoreMemoryResponse, error)
 }
 
 type memoryServiceClient struct {
@@ -247,6 +258,26 @@ func (c *memoryServiceClient) CheckMemoryWrite(ctx context.Context, in *CheckMem
 	return out, nil
 }
 
+func (c *memoryServiceClient) DeclassifyMemory(ctx context.Context, in *DeclassifyMemoryRequest, opts ...grpc.CallOption) (*DeclassifyMemoryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeclassifyMemoryResponse)
+	err := c.cc.Invoke(ctx, MemoryService_DeclassifyMemory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *memoryServiceClient) RestoreMemory(ctx context.Context, in *RestoreMemoryRequest, opts ...grpc.CallOption) (*RestoreMemoryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RestoreMemoryResponse)
+	err := c.cc.Invoke(ctx, MemoryService_RestoreMemory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MemoryServiceServer is the server API for MemoryService service.
 // All implementations must embed UnimplementedMemoryServiceServer
 // for forward compatibility.
@@ -320,6 +351,15 @@ type MemoryServiceServer interface {
 	// session:memory-controls:read scope for a service caller). An allow is also
 	// the answer while the policy mode is off.
 	CheckMemoryWrite(context.Context, *CheckMemoryWriteRequest) (*CheckMemoryWriteResponse, error)
+	// Share one of the caller's personal memory rows into a shared Space (WS17-S7), under a Control
+	// `model.memory.declassify` decision for the reviewed text. The source row is untouched; one
+	// transaction inserts the `declassified` room row and its ledger row. User callers only, for
+	// themselves; refused for a ZDR caller (durable_mutation_forbidden) before any other check.
+	DeclassifyMemory(context.Context, *DeclassifyMemoryRequest) (*DeclassifyMemoryResponse, error)
+	// WS17 D9: the owner restores one withheld legacy row (origin `room_unverified`) to ordinary personal memory,
+	// once every thread the row is linked to is verified not to be a shared room. User callers only, for
+	// themselves; refused for a ZDR caller (durable_mutation_forbidden) before any other check. Ids only.
+	RestoreMemory(context.Context, *RestoreMemoryRequest) (*RestoreMemoryResponse, error)
 	mustEmbedUnimplementedMemoryServiceServer()
 }
 
@@ -368,6 +408,12 @@ func (UnimplementedMemoryServiceServer) EraseAgentMemory(context.Context, *Erase
 }
 func (UnimplementedMemoryServiceServer) CheckMemoryWrite(context.Context, *CheckMemoryWriteRequest) (*CheckMemoryWriteResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CheckMemoryWrite not implemented")
+}
+func (UnimplementedMemoryServiceServer) DeclassifyMemory(context.Context, *DeclassifyMemoryRequest) (*DeclassifyMemoryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeclassifyMemory not implemented")
+}
+func (UnimplementedMemoryServiceServer) RestoreMemory(context.Context, *RestoreMemoryRequest) (*RestoreMemoryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RestoreMemory not implemented")
 }
 func (UnimplementedMemoryServiceServer) mustEmbedUnimplementedMemoryServiceServer() {}
 func (UnimplementedMemoryServiceServer) testEmbeddedByValue()                       {}
@@ -624,6 +670,42 @@ func _MemoryService_CheckMemoryWrite_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MemoryService_DeclassifyMemory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeclassifyMemoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MemoryServiceServer).DeclassifyMemory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MemoryService_DeclassifyMemory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MemoryServiceServer).DeclassifyMemory(ctx, req.(*DeclassifyMemoryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MemoryService_RestoreMemory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RestoreMemoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MemoryServiceServer).RestoreMemory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MemoryService_RestoreMemory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MemoryServiceServer).RestoreMemory(ctx, req.(*RestoreMemoryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MemoryService_ServiceDesc is the grpc.ServiceDesc for MemoryService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -682,6 +764,14 @@ var MemoryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CheckMemoryWrite",
 			Handler:    _MemoryService_CheckMemoryWrite_Handler,
+		},
+		{
+			MethodName: "DeclassifyMemory",
+			Handler:    _MemoryService_DeclassifyMemory_Handler,
+		},
+		{
+			MethodName: "RestoreMemory",
+			Handler:    _MemoryService_RestoreMemory_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

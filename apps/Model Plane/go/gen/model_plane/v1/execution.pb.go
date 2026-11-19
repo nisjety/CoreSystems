@@ -633,7 +633,13 @@ type RunAgentRequest struct {
 	// The gateway sets it only while EXECUTION_COORDINATOR_MODE_ENABLED is the literal `true`, and never on a
 	// zero-retention or waived turn or a continuation. Execution-core applies it only while the same switch is on.
 	// Field 27 is the next free number on this message.
-	Coordinator   bool `protobuf:"varint,27,opt,name=coordinator,proto3" json:"coordinator,omitempty"`
+	Coordinator bool `protobuf:"varint,27,opt,name=coordinator,proto3" json:"coordinator,omitempty"`
+	// The tool profile of this run (WS18-S4; additive). Empty is the ordinary run, exactly as before the field
+	// existed. `space_self_api` offers only the server-resolved Space registry rows (`space.thread.*`) and no
+	// built-in, MCP, client or ask tool; any other non-empty value offers no tool. The gateway derives it per
+	// binding, never from the client. Field 25 was planned for this, but `wide_research` took it (see 4.6.C),
+	// so the next free number, 28, is used.
+	ToolProfile   string `protobuf:"bytes,28,opt,name=tool_profile,json=toolProfile,proto3" json:"tool_profile,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -855,6 +861,13 @@ func (x *RunAgentRequest) GetCoordinator() bool {
 		return x.Coordinator
 	}
 	return false
+}
+
+func (x *RunAgentRequest) GetToolProfile() string {
+	if x != nil {
+		return x.ToolProfile
+	}
+	return ""
 }
 
 // WideResearchRequest is what a person asked a wide-research run to cover (Wave 3 EP-2 S8/S9). It only
@@ -2819,7 +2832,7 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"tool_calls\x18\t \x01(\rR\ttoolCalls\x12!\n" +
 	"\finput_tokens\x18\n" +
 	" \x01(\rR\vinputTokens\x12#\n" +
-	"\routput_tokens\x18\v \x01(\rR\foutputTokens\"\xd4\t\n" +
+	"\routput_tokens\x18\v \x01(\rR\foutputTokens\"\xf7\t\n" +
 	"\x0fRunAgentRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x12\n" +
@@ -2851,7 +2864,8 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"org_policy\x18\x18 \x01(\v2 .model_plane.v1.OrgPolicyContextR\torgPolicy\x12H\n" +
 	"\rwide_research\x18\x19 \x01(\v2#.model_plane.v1.WideResearchRequestR\fwideResearch\x12T\n" +
 	"\x14agent_tool_allowlist\x18\x1a \x01(\v2\".model_plane.v1.AgentToolAllowlistR\x12agentToolAllowlist\x12 \n" +
-	"\vcoordinator\x18\x1b \x01(\bR\vcoordinator\"\x93\x01\n" +
+	"\vcoordinator\x18\x1b \x01(\bR\vcoordinator\x12!\n" +
+	"\ftool_profile\x18\x1c \x01(\tR\vtoolProfile\"\x93\x01\n" +
 	"\x13WideResearchRequest\x12\x19\n" +
 	"\bitem_cap\x18\x01 \x01(\rR\aitemCap\x12\x14\n" +
 	"\x05items\x18\x02 \x03(\tR\x05items\x12\x19\n" +
