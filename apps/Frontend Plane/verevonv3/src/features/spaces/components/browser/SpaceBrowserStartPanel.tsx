@@ -17,7 +17,8 @@ const RUNTIME_CHOICES = [120, 300, 600] as const
 
 export interface SpaceBrowserStartPanelProps {
   readonly spaceRef: string
-  readonly threadId: string
+  /** The thread the run starts in. Absent starts a new thread (D4): the gateway creates it and the receipt names it. */
+  readonly threadId?: string
   /** Whether this viewer may start a run here: an editor, manager or owner in a room that is not archived. */
   readonly canStart: boolean
   /** Why the start is closed, said in words, when `canStart` is false. */

@@ -4,10 +4,12 @@ import { spaceBrowserEvidenceUrl } from '@/shared/api/spaces-client/browser-runs
 import { useI18n } from '@/shared/i18n'
 import {
   createSpaceBrowserRunFeed,
+  isSpaceBrowserRunLive,
   spaceBrowserEventLabel,
   spaceBrowserEvidenceIds,
   spaceBrowserPhaseLabel,
 } from '../../lib/space-browser'
+import { SpaceBrowserRunStop } from './SpaceBrowserRunStop'
 import './space-browser.css'
 
 /** The most screenshots the starter's view shows at once. */
@@ -20,6 +22,8 @@ export interface SpaceBrowserViewProps {
   readonly viewerSubjectId: string
   /** The starter's display name, resolved by the room. */
   readonly nameOf: (subjectId: string) => string
+  /** Offers Stop on a live run, as the card does (`canOfferBrowserStop`). Presentation only. */
+  readonly canStop?: boolean
 }
 
 /**
@@ -59,6 +63,9 @@ export function SpaceBrowserView(props: SpaceBrowserViewProps) {
               · {i18n.tr('Startet av', 'Started by')} {props.nameOf(run().startedBySubjectId)} ·{' '}
               {i18n.tr('kontroll: agent', 'control: agent')}
             </p>
+            <Show when={props.canStop === true && isSpaceBrowserRunLive(run())}>
+              <SpaceBrowserRunStop spaceRef={props.spaceRef} runId={props.runId()} />
+            </Show>
             <Show
               when={starter()}
               fallback={

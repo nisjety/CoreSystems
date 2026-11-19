@@ -88,6 +88,30 @@ describe('browser run parsers (WS20-S5)', () => {
     ).rejects.toThrow('space_browser_run_unreadable')
   })
 
+  // D4 (W3-DEC-BROWSER): no thread starts a new one, which the gateway does for an empty or absent thread_id.
+  it('names the thread in the body only when there is one: a start with none asks for a new thread', async () => {
+    const data = { run_id: 'run_2', thread_id: 'thr_new', plan_id: 'plan_2', view: { scope: 'owner' } }
+    const bodyOf = (calls: FetchCall[]) => JSON.parse(String(calls[0]?.init?.body)) as Record<string, unknown>
+    const start = { goal: 'Check the docs', allowedDomains: ['docs.example.test'], clientSendId: 'start-0000000000000003' }
+
+    let calls = stubFetch(202, { data })
+    await expect(startSpaceBrowserRun('room', start)).resolves.toEqual({
+      runId: 'run_2',
+      threadId: 'thr_new',
+      planId: 'plan_2',
+      viewScope: 'owner',
+    })
+    expect('thread_id' in bodyOf(calls)).toBe(false)
+
+    calls = stubFetch(202, { data })
+    await startSpaceBrowserRun('room', { ...start, threadId: '   ' })
+    expect('thread_id' in bodyOf(calls)).toBe(false)
+
+    calls = stubFetch(202, { data })
+    await startSpaceBrowserRun('room', { ...start, threadId: ' thr_1 ' })
+    expect(bodyOf(calls).thread_id).toBe('thr_1')
+  })
+
   it('reads each run row with its hosts and step count, and the next cursor', async () => {
     const calls = stubFetch(200, { data: [runRow], meta: { next_cursor: 'cur_2' } })
     const page = await listSpaceBrowserRuns('room', { threadId: 'thr_1', limit: 5 })

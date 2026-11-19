@@ -1,13 +1,17 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 
 import type { SpaceBrowserEvent, SpaceBrowserRunHeader } from '@/shared/api/spaces-client/browser-runs'
 
 import {
+  canOfferBrowserStop,
   isSpaceBrowserRunLive,
   latestSpaceBrowserEvidenceId,
   spaceBrowserEventLabel,
   spaceBrowserEvidenceIds,
+  spaceBrowserStartOffered,
 } from './space-browser'
+import { DM_SPACE_FEATURE } from './space-kind'
+import { clearSpaceRoomFeatures, publishSpaceRoomFeatures } from './space-room-features'
 
 const en = (_noText: string, enText: string) => enText
 
@@ -113,5 +117,36 @@ describe('WS20-S5 room browser run presentation', () => {
     expect(spaceBrowserEventLabel(withHost, en)).toBe('Action · shop.example.com')
     // A verb the table does name still reads as one.
     expect(spaceBrowserEventLabel(event({ eventId: 'p3', kind: 'action', actionType: 'click' }), en)).toBe('Clicked')
+  })
+})
+
+afterEach(() => {
+  clearSpaceRoomFeatures()
+})
+
+describe('WS20-S5 where a browser run is offered', () => {
+  it('spaceBrowserStartOffered follows features.browser_run and never offers a start in a direct message', () => {
+    expect(spaceBrowserStartOffered()).toBe(false)
+    publishSpaceRoomFeatures({ browser_run: true })
+    expect(spaceBrowserStartOffered()).toBe(true)
+    // Control has no browser run outside personal, room, project and case Spaces.
+    publishSpaceRoomFeatures({ browser_run: true, [DM_SPACE_FEATURE]: true })
+    expect(spaceBrowserStartOffered()).toBe(false)
+    publishSpaceRoomFeatures({ browser_run: true, [DM_SPACE_FEATURE]: false })
+    expect(spaceBrowserStartOffered()).toBe(true)
+    for (const browser_run of ['true', 1, {}, false]) {
+      publishSpaceRoomFeatures({ browser_run })
+      expect(spaceBrowserStartOffered()).toBe(false)
+    }
+  })
+
+  it('canOfferBrowserStop needs manager Stop on in the listing and a manager or owner in the room', () => {
+    expect(canOfferBrowserStop(true, 'manager')).toBe(true)
+    expect(canOfferBrowserStop(true, 'owner')).toBe(true)
+    expect(canOfferBrowserStop(true, 'editor')).toBe(false)
+    expect(canOfferBrowserStop(true, 'viewer')).toBe(false)
+    expect(canOfferBrowserStop(true, undefined)).toBe(false)
+    expect(canOfferBrowserStop(false, 'owner')).toBe(false)
+    expect(canOfferBrowserStop(undefined, 'manager')).toBe(false)
   })
 })

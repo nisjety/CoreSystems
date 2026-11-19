@@ -1,6 +1,8 @@
-import { cleanup, render, screen } from '@solidjs/testing-library'
+import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
 import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { ApiError } from '@/shared/api/api-error'
 
 import type {
   SpaceBrowserEvent,
@@ -23,6 +25,10 @@ vi.mock('@/shared/api/spaces-client/browser-runs', async (importOriginal) => {
   browserRuns.spaceBrowserEvidenceUrl.mockImplementation(actual.spaceBrowserEvidenceUrl)
   return { ...actual, ...browserRuns }
 })
+
+// WS20 and WS09-S8: Stop on a live run is the room's own stop route; it is answered here.
+const runStop = vi.hoisted(() => ({ stopSpaceRun: vi.fn() }))
+vi.mock('@/shared/api/spaces-client/run-stop', () => ({ stopSpaceRun: runStop.stopSpaceRun }))
 
 const { SpaceBrowserCard } = await import('./SpaceBrowserCard')
 const { SpaceBrowserThreadSection } = await import('./SpaceBrowserThreadSection')
@@ -98,7 +104,7 @@ async function settle() {
   }
 }
 
-function mountCard(viewerSubjectId: string, run: SpaceBrowserRun = listRun) {
+function mountCard(viewerSubjectId: string, run: SpaceBrowserRun = listRun, canStop?: boolean) {
   render(() => (
     <SpaceBrowserCard
       spaceRef={SPACE}
@@ -106,6 +112,7 @@ function mountCard(viewerSubjectId: string, run: SpaceBrowserRun = listRun) {
       viewerSubjectId={viewerSubjectId}
       startedByName="Kari"
       onOpen={vi.fn()}
+      canStop={canStop}
     />
   ))
   flush()
@@ -120,6 +127,7 @@ beforeEach(() => {
   browserRuns.readSpaceBrowserTimeline.mockReset()
   browserRuns.readSpaceBrowserTimeline.mockResolvedValue(timelineAnswer('running', [navigated, screenshot]))
   browserRuns.listSpaceBrowserRuns.mockReset()
+  runStop.stopSpaceRun.mockReset()
 })
 
 afterEach(() => {
@@ -226,5 +234,131 @@ describe('the client answers fill the card (WS20-S5)', () => {
     expect(screen.getByText('Kjører')).toBeTruthy()
     expect(screen.getByText('shop.example.test')).toBeTruthy()
     expect(screen.getByText('Åpnet side · shop.example.test')).toBeTruthy()
+  })
+})
+
+// Before this, the card and the pane had an Open button and nothing else: the only Stop was the generic one on the run
+// card in the timeline, which hides itself from the run's own starter. A room manager or owner (when the listing says
+// manager Stop is on) now has Stop on the run itself. The starter's own stop has no route yet.
+describe('Stop on a live run (WS20, WS09-S8)', () => {
+  const stopButton = () => screen.queryByRole('button', { name: 'Stopp kjøringen' })
+
+  it('is offered only to a viewer who may stop, and only while the run is live', async () => {
+    mountCard(OTHER, listRun, false)
+    await settle()
+    expect(stopButton()).toBeNull()
+    cleanup()
+
+    mountCard(OTHER, listRun, undefined)
+    await settle()
+    expect(stopButton()).toBeNull()
+    cleanup()
+
+    mountCard(OTHER, listRun, true)
+    await settle()
+    expect(stopButton()).not.toBeNull()
+    cleanup()
+
+    // The run has ended by the time the card reads it: there is nothing to stop.
+    browserRuns.readSpaceBrowserTimeline.mockResolvedValue(timelineAnswer('completed', [navigated]))
+    mountCard(OTHER, listRun, true)
+    await settle()
+    expect(screen.getByText('Fullført')).toBeTruthy()
+    expect(stopButton()).toBeNull()
+  })
+
+  it('stops this run with one key, says the stop was sent, and cannot be pressed twice', async () => {
+    runStop.stopSpaceRun.mockResolvedValue({ runId: RUN_ID, status: 'cancelled', cancelled: true, receiptId: 'rcpt_1' })
+    mountCard(OTHER, listRun, true)
+    await settle()
+
+    fireEvent.click(stopButton() as HTMLElement)
+    await settle()
+
+    expect(runStop.stopSpaceRun).toHaveBeenCalledTimes(1)
+    expect(runStop.stopSpaceRun).toHaveBeenCalledWith(SPACE, RUN_ID, expect.stringMatching(/^stop-/))
+    expect(screen.getByText('Stopp sendt …')).toBeTruthy()
+    expect((stopButton() as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('says when the organisation has not turned on stopping other members\' runs, and a retry names the same attempt', async () => {
+    runStop.stopSpaceRun
+      .mockRejectedValueOnce(new ApiError('Forbidden', 403, 'space_run_control_not_authorized'))
+      .mockResolvedValueOnce({ runId: RUN_ID, status: 'cancelled', cancelled: true, receiptId: 'rcpt_1' })
+    mountCard(OTHER, listRun, true)
+    await settle()
+
+    fireEvent.click(stopButton() as HTMLElement)
+    await settle()
+    expect(screen.getByRole('alert').textContent).toContain('Organisasjonen din har ikke slått på stopping')
+
+    fireEvent.click(stopButton() as HTMLElement)
+    await settle()
+    expect(runStop.stopSpaceRun).toHaveBeenCalledTimes(2)
+    expect(runStop.stopSpaceRun.mock.calls[1]?.[2]).toBe(runStop.stopSpaceRun.mock.calls[0]?.[2])
+    expect(screen.getByText('Stopp sendt …')).toBeTruthy()
+  })
+
+  it('says it could not stop the run when the call fails for any other reason', async () => {
+    runStop.stopSpaceRun.mockRejectedValue(new TypeError('Failed to fetch'))
+    mountCard(OTHER, listRun, true)
+    await settle()
+
+    fireEvent.click(stopButton() as HTMLElement)
+    await settle()
+    expect(screen.getByRole('alert').textContent).toBe('Kunne ikke stoppe kjøringen. Prøv igjen.')
+    expect((stopButton() as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('reaches the cards of a thread: the section hands Stop on to each', async () => {
+    primeSpaceRoomFeatures({ browser_run: true, browser_card: true })
+    browserRuns.listSpaceBrowserRuns.mockResolvedValue({ runs: [listRun], nextCursor: null })
+    render(() => (
+      <SpaceBrowserThreadSection
+        spaceRef={SPACE}
+        threadId="thr_1"
+        canStart={true}
+        canStop={true}
+        viewerSubjectId={OTHER}
+        nameOf={() => 'Kari'}
+        onOpen={vi.fn()}
+      />
+    ))
+    flush()
+    await settle()
+    expect(stopButton()).not.toBeNull()
+  })
+})
+
+// Control has no browser run in a direct message (personal, room, project and case Spaces only).
+describe('the start entry in a thread (WS20-S5)', () => {
+  const browseButton = () => screen.queryByRole('button', { name: 'Surf med agenten' })
+
+  function mountSection() {
+    render(() => (
+      <SpaceBrowserThreadSection
+        spaceRef={SPACE}
+        threadId="thr_1"
+        canStart={true}
+        viewerSubjectId={OTHER}
+        nameOf={() => 'Kari'}
+        onOpen={vi.fn()}
+      />
+    ))
+    flush()
+  }
+
+  it('is offered in a room while features.browser_run is on', async () => {
+    primeSpaceRoomFeatures({ browser_run: true })
+    mountSection()
+    await settle()
+    expect(browseButton()).not.toBeNull()
+  })
+
+  it('is not offered in a direct message, even while features.browser_run is on', async () => {
+    primeSpaceRoomFeatures({ browser_run: true, space_dm: true })
+    mountSection()
+    await settle()
+    expect(browseButton()).toBeNull()
   })
 })

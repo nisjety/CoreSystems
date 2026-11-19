@@ -4,11 +4,13 @@ import { spaceBrowserEvidenceUrl, type SpaceBrowserRun } from '@/shared/api/spac
 import { useI18n } from '@/shared/i18n'
 import {
   createSpaceBrowserRunFeed,
+  isSpaceBrowserRunLive,
   lastSpaceBrowserActions,
   latestSpaceBrowserEvidenceId,
   spaceBrowserEventLabel,
   spaceBrowserPhaseLabel,
 } from '../../lib/space-browser'
+import { SpaceBrowserRunStop } from './SpaceBrowserRunStop'
 import './space-browser.css'
 
 export interface SpaceBrowserCardProps {
@@ -19,6 +21,11 @@ export interface SpaceBrowserCardProps {
   /** The starter's display name, resolved by the room. A person who left the room reads as a former member. */
   readonly startedByName: string
   readonly onOpen: (runId: string) => void
+  /**
+   * Offers Stop on a live run: the listing says manager Stop is on and the viewer is the room's manager or owner
+   * (`canOfferBrowserStop`). Presentation only; Control decides and Session Core verifies on every call.
+   */
+  readonly canStop?: boolean
 }
 
 /**
@@ -93,9 +100,14 @@ export function SpaceBrowserCard(props: SpaceBrowserCardProps) {
           {i18n.tr('Status kunne ikke hentes akkurat nå.', 'Status could not be read right now.')}
         </p>
       </Show>
-      <button type="button" class="verevon-space-browser-card__open" onClick={() => props.onOpen(props.run.runId)}>
-        {i18n.tr('Åpne', 'Open')}
-      </button>
+      <div class="verevon-space-browser-card__actions">
+        <button type="button" class="verevon-space-browser-card__open" onClick={() => props.onOpen(props.run.runId)}>
+          {i18n.tr('Åpne', 'Open')}
+        </button>
+        <Show when={props.canStop === true && isSpaceBrowserRunLive(feed.header() ?? props.run)}>
+          <SpaceBrowserRunStop spaceRef={props.spaceRef} runId={props.run.runId} />
+        </Show>
+      </div>
     </article>
   )
 }

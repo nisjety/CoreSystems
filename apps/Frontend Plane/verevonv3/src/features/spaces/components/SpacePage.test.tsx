@@ -114,12 +114,16 @@ vi.mock('@/features/chat/lib/chat-thread-history', () => ({
   selectChatThread: vi.fn(),
 }))
 
-// WS20-S5: a room browser run's pane reads its timeline through this. Nothing answers, so a pane that opens stays on
-// "loading"; the pane's own behaviour is covered in components/browser.
+// WS20-S5: a room browser run's pane reads its timeline through this. Nothing answers unless a test says so, so a pane
+// that opens stays on "loading"; the pane's own behaviour is covered in components/browser.
+const browserRuns = vi.hoisted(() => ({
+  readSpaceBrowserTimeline: vi.fn(),
+  listSpaceBrowserRuns: vi.fn(),
+  startSpaceBrowserRun: vi.fn(),
+}))
 vi.mock('@/shared/api/spaces-client/browser-runs', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/shared/api/spaces-client/browser-runs')>()),
-  readSpaceBrowserTimeline: () => new Promise(() => {}),
-  listSpaceBrowserRuns: () => new Promise(() => {}),
+  ...browserRuns,
 }))
 
 const orchestration = vi.hoisted(() => ({
@@ -304,6 +308,11 @@ describe('SpacePage', () => {
     spacesClient.archiveSpaceRoom.mockResolvedValue({ state: 'archived', changed: true, archivedAt: '2026-10-31T09:30:00Z' })
     spacesClient.unarchiveSpaceRoom.mockReset()
     spacesClient.unarchiveSpaceRoom.mockResolvedValue({ state: 'active', changed: true, archivedAt: null })
+    browserRuns.readSpaceBrowserTimeline.mockReset()
+    browserRuns.readSpaceBrowserTimeline.mockImplementation(() => new Promise(() => {}))
+    browserRuns.listSpaceBrowserRuns.mockReset()
+    browserRuns.listSpaceBrowserRuns.mockImplementation(() => new Promise(() => {}))
+    browserRuns.startSpaceBrowserRun.mockReset()
     // Nothing answers the private panel's pointer unless the test that opens the panel says so.
     spacesClient.getSpacePrivatePanel.mockReset()
     spacesClient.getSpacePrivatePanel.mockImplementation(() => new Promise(() => {}))
@@ -2442,6 +2451,139 @@ describe('SpacePage', () => {
         await screen.findByRole('heading', { name: 'Leveranse', level: 1 })
         expect(document.querySelector('.verevon-space-auxpane')).toBeNull()
         expect(workroom()?.hasAttribute('data-aux-open')).toBe(false)
+      })
+    })
+
+    // WS20-S5, D4: a browser run could be started only inside an open thread pane, on that thread. The room itself had
+    // no entry, so a run on a new thread (which the gateway supports) could not be asked for at all.
+    describe('the room-level entry to browse with the agent', () => {
+      const browseButton = () => screen.queryByRole('button', { name: 'Surf med agenten' })
+
+      async function openRoom(over: Parameters<typeof roomCtx>[0] = {}, path = '/spaces/space_room_1') {
+        const ctx = roomCtx(over)
+        spacesClient.getSpaceContext.mockResolvedValue(ctx)
+        spacesClient.getSpaceThreads.mockResolvedValue({ ...ctx, threads: [] })
+        renderSpacePage(path)
+        await screen.findByRole('heading', { name: 'Leveranse', level: 1 })
+        await screen.findByRole('button', { name: 'Start en samtale' })
+      }
+
+      it('sits beside Start a conversation for an editor while features.browser_run is on', async () => {
+        await openRoom({ role: 'editor', features: { browser_run: true } })
+        const entry = browseButton() as HTMLElement
+        expect(entry).not.toBeNull()
+        // The two entries share one actions group in the conversation heading.
+        expect(entry.parentElement).toBe(screen.getByRole('button', { name: 'Start en samtale' }).parentElement)
+      })
+
+      it('is not offered while the flag is off, to a viewer, or in an archived room', async () => {
+        await openRoom({ role: 'editor', features: { browser_run: false } })
+        expect(browseButton()).toBeNull()
+        cleanup()
+
+        await openRoom({ role: 'viewer', features: { browser_run: true } })
+        expect(browseButton()).toBeNull()
+        cleanup()
+
+        const archived = roomCtx({ role: 'owner', archived: true, features: { browser_run: true, room_archive: true } })
+        spacesClient.getSpaceContext.mockResolvedValue(archived)
+        spacesClient.getSpaceThreads.mockResolvedValue({ ...archived, threads: [] })
+        renderSpacePage('/spaces/space_room_1')
+        await screen.findByRole('heading', { name: 'Leveranse', level: 1 })
+        expect(browseButton()).toBeNull()
+      })
+
+      it('opens the start panel with no thread, starts a run on a new thread, re-reads the room and opens the run', async () => {
+        browserRuns.startSpaceBrowserRun.mockResolvedValue({
+          runId: 'run_9',
+          threadId: 'thr_new',
+          planId: 'plan_9',
+          viewScope: 'owner',
+        })
+        await openRoom({ role: 'editor', features: { browser_run: true, browser_card: true } })
+        const readsBefore = spacesClient.getSpaceThreads.mock.calls.length
+
+        fireEvent.click(browseButton() as HTMLElement)
+        flush()
+        const goal = (await screen.findByLabelText('Hva skal agenten gjøre?')) as HTMLTextAreaElement
+        fireEvent.input(goal, { target: { value: 'Find the price of the lamp' } })
+        flush()
+        const hosts = screen.getByLabelText('Domener agenten kan besøke (1 til 8)') as HTMLInputElement
+        fireEvent.input(hosts, { target: { value: 'shop.example.test' } })
+        flush()
+        fireEvent.keyDown(hosts, { key: 'Enter' })
+        flush()
+        fireEvent.click(screen.getByRole('button', { name: 'Start nettleserkjøring' }))
+        flush()
+
+        await waitFor(() => expect(browserRuns.startSpaceBrowserRun).toHaveBeenCalledTimes(1))
+        const [spaceRef, sent] = browserRuns.startSpaceBrowserRun.mock.calls[0] as [string, Record<string, unknown>]
+        expect(spaceRef).toBe('space_room_1')
+        expect(sent.threadId).toBeUndefined()
+        expect(sent).toMatchObject({ goal: 'Find the price of the lamp', allowedDomains: ['shop.example.test'] })
+        // The run's pane opens, the panel is closed, and the room's listing is read again so the new thread shows.
+        expect(await screen.findByRole('complementary', { name: 'Nettleserkjøring' })).toBeTruthy()
+        expect(screen.queryByLabelText('Hva skal agenten gjøre?')).toBeNull()
+        expect(spacesClient.getSpaceThreads.mock.calls.length).toBeGreaterThan(readsBefore)
+      })
+
+      it('closes the start panel on Cancel and starts nothing', async () => {
+        await openRoom({ role: 'editor', features: { browser_run: true } })
+        fireEvent.click(browseButton() as HTMLElement)
+        flush()
+        expect(await screen.findByLabelText('Hva skal agenten gjøre?')).toBeTruthy()
+        fireEvent.click(screen.getByRole('button', { name: 'Avbryt' }))
+        flush()
+        expect(screen.queryByLabelText('Hva skal agenten gjøre?')).toBeNull()
+        expect(browserRuns.startSpaceBrowserRun).not.toHaveBeenCalled()
+      })
+    })
+
+    // WS20 and WS09-S8: Stop on the run itself, for a room manager or owner while the listing says manager Stop is on.
+    describe('Stop in the browser run pane', () => {
+      const liveRun = {
+        run: {
+          runId: 'run_1',
+          threadId: 'thr_1',
+          startedBySubjectId: 'user_2',
+          phase: 'running',
+          startedAt: '2026-11-19T09:00:00Z',
+          finishedAt: null,
+          controlMode: 'agent',
+          handoffOpen: false,
+          viewScope: 'owner',
+        },
+        events: [],
+        nextEventId: null,
+        validUntil: '2026-11-19T09:05:00Z',
+      }
+
+      async function openRun(role: string, stopManager: boolean) {
+        browserRuns.readSpaceBrowserTimeline.mockResolvedValue(liveRun)
+        const ctx = roomCtx({ role, features: { browser_card: true } })
+        spacesClient.getSpaceContext.mockResolvedValue(ctx)
+        spacesClient.getSpaceThreads.mockResolvedValue({
+          ...ctx,
+          threads: [],
+          agent_work: { live: true, text: false, steer_owner: false, stop_manager: stopManager },
+        })
+        renderSpacePage('/spaces/space_room_1?browser_run=run_1')
+        await screen.findByRole('complementary', { name: 'Nettleserkjøring' })
+        await screen.findByText('Kjører')
+      }
+
+      it('is offered to a manager or owner while the listing says manager Stop is on', async () => {
+        await openRun('manager', true)
+        expect(screen.getByRole('button', { name: 'Stopp kjøringen' })).toBeTruthy()
+      })
+
+      it('is not offered to an editor, nor while the listing says manager Stop is off', async () => {
+        await openRun('editor', true)
+        expect(screen.queryByRole('button', { name: 'Stopp kjøringen' })).toBeNull()
+        cleanup()
+
+        await openRun('owner', false)
+        expect(screen.queryByRole('button', { name: 'Stopp kjøringen' })).toBeNull()
       })
     })
 

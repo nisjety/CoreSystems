@@ -192,3 +192,35 @@
   display: grid;
   gap: 0.5rem;
 }
+
+/* The room-level start: its entry sits beside "Start a conversation", and its panel opens under the heading. */
+.verevon-space-view__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.verevon-space-browser-room-start {
+  flex: none;
+  max-height: 70%;
+  margin-bottom: 0.75rem;
+  overflow-y: auto;
+}
+
+/* Open and Stop on one line, on the card and in the pane. */
+.verevon-space-browser-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.verevon-space-browser-stop {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.875rem;
+}

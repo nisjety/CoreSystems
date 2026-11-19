@@ -6,6 +6,9 @@ import {
   type SpaceBrowserRunHeader,
 } from '@/shared/api/spaces-client/browser-runs'
 
+import { DM_SPACE_FEATURE } from './space-kind'
+import { spaceRoomFeature } from './space-room-features'
+
 /**
  * The room browser run's presentation rules (WS20-S5). Receipts only: the labels name a closed kind, a host, a closed
  * status or a closed risk word, never page content. Presentation only; the gateway decides what a caller may read.
@@ -27,6 +30,24 @@ const TERMINAL_PHASES = new Set([
   'handoff_declined',
   'handoff_timeout',
 ])
+
+/**
+ * Whether the room offers starting a browser run: the room's `features.browser_run`, and never in a direct message.
+ * Control refuses a browser run outside personal, room, project and case Spaces, so the entry would only refuse there.
+ * Presentation only; the gateway and Control decide every start.
+ */
+export function spaceBrowserStartOffered(): boolean {
+  return spaceRoomFeature('browser_run') && !spaceRoomFeature(DM_SPACE_FEATURE)
+}
+
+/**
+ * Whether a viewer may be offered Stop on a room run they did not start: the listing says manager Stop is on
+ * (`agent_work.stop_manager`, WS09-S8) and the viewer is the room's manager or owner. Presentation only: Control decides
+ * and Session Core verifies on every call, and the starter's own stop has no route yet.
+ */
+export function canOfferBrowserStop(stopManager: boolean | undefined, role: string | undefined): boolean {
+  return stopManager === true && (role === 'manager' || role === 'owner')
+}
 
 /** Whether the run is still going, so its card keeps polling. */
 export function isSpaceBrowserRunLive(run: Pick<SpaceBrowserRunHeader, 'phase' | 'finishedAt'>): boolean {

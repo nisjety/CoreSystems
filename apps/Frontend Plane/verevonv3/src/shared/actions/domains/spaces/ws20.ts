@@ -12,8 +12,10 @@ const clientSendId = z
 
 const spacesBrowserRunStartInput = z.object({
   spaceRef: z.string().trim().min(1),
-  // A new thread cannot be the start's thread in v1: the goal's append decision binds an existing thread.
-  threadId: z.string().trim().min(1).max(128),
+  // The thread the run starts in. Absent starts a new thread (D4, W3-DEC-BROWSER): the gateway creates it under the
+  // shared-room thread-create decision before the start, with the goal as its first post, so the run never lands in a
+  // personal thread. The receipt names the thread either way.
+  threadId: z.string().trim().min(1).max(128).optional(),
   goal: z.string().trim().min(1).max(2000),
   allowedDomains: z.array(z.string().trim().min(1).max(253)).min(1).max(8),
   startUrl: z.string().trim().max(2048).optional(),
@@ -36,7 +38,7 @@ export const ws20SpaceActions = [
     id: 'spaces.browser_run.start',
     label: 'Start room browser run',
     description:
-      'Start a browser run on one thread of this room, limited to the domains you name. The room sees the steps and the hosts; only the person who started the run sees the live view and the screenshots.',
+      'Start a browser run in this room, on one of its threads or on a new one, limited to the domains you name. The room sees the steps and the hosts; only the person who started the run sees the live view and the screenshots.',
     ownerPlane: 'model',
     risk: 'high',
     requiresApproval: true,

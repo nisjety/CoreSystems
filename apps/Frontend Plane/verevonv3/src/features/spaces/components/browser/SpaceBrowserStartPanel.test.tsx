@@ -19,13 +19,13 @@ const GOAL_LABEL = 'Hva skal agenten gjøre?'
 const HOST_LABEL = 'Domener agenten kan besøke (1 til 8)'
 const SUBMIT_LABEL = 'Start nettleserkjøring'
 
-function mountPanel(options: { canStart?: boolean; disabledReason?: string } = {}) {
+function mountPanel(options: { canStart?: boolean; disabledReason?: string; threadId?: string | null } = {}) {
   const onStarted = vi.fn()
   const onCancel = vi.fn()
   render(() => (
     <SpaceBrowserStartPanel
       spaceRef={SPACE}
-      threadId={THREAD}
+      threadId={options.threadId === null ? undefined : (options.threadId ?? THREAD)}
       canStart={options.canStart ?? true}
       disabledReason={options.disabledReason}
       onStarted={onStarted}
@@ -105,6 +105,26 @@ describe('SpaceBrowserStartPanel (WS20-S5)', () => {
     expect(within(chosen).getAllByRole('listitem')).toHaveLength(8)
     expect(screen.queryByRole('button', { name: 'Fjern nine.example.test' })).toBeNull()
     expect(browserRuns.startSpaceBrowserRun).not.toHaveBeenCalled()
+  })
+
+  // D4 (W3-DEC-BROWSER): the room-level entry has no thread to name, and the gateway creates one for the run.
+  it('with no thread to name, the start asks for a new thread and hands the receipt on', async () => {
+    const receipt: SpaceBrowserRunReceipt = { runId: 'run_9', threadId: 'thr_new', planId: 'plan_9', viewScope: 'owner' }
+    browserRuns.startSpaceBrowserRun.mockResolvedValue(receipt)
+    const { onStarted } = mountPanel({ threadId: null })
+    typeInto(screen.getByLabelText(GOAL_LABEL), 'Find the price of the lamp')
+    addHost('shop.example.test')
+
+    fireEvent.click(submitButton())
+    flush()
+    await settle()
+
+    expect(browserRuns.startSpaceBrowserRun).toHaveBeenCalledTimes(1)
+    const [spaceRef, sent] = browserRuns.startSpaceBrowserRun.mock.calls[0] as [string, Record<string, unknown>]
+    expect(spaceRef).toBe(SPACE)
+    expect(sent.threadId).toBeUndefined()
+    expect(sent).toMatchObject({ goal: 'Find the price of the lamp', allowedDomains: ['shop.example.test'] })
+    expect(onStarted).toHaveBeenCalledWith(receipt)
   })
 
   it('retries reuse one clientSendId', async () => {

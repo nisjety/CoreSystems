@@ -2,7 +2,7 @@ import { useNavigate, useParams, useSearchParams } from '@solidjs/router'
 // `Blocks` stands in for lucide's `Puzzle` on the "add existing agent" action:
 // the vendored Solid 2 icon barrel carries no Puzzle glyph, and lucide-solid
 // itself is Solid 1-only, so it cannot be imported here.
-import { Blocks, Bot, Clock3, Loader2, MessageCircle, Sparkles, Users } from '@/shared/icons'
+import { Blocks, Bot, Clock3, Globe2, Loader2, MessageCircle, Sparkles, Users } from '@/shared/icons'
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 
 import { createResource, type ResourceAccessor } from '@/shared/lib/create-resource-compat'
@@ -88,8 +88,10 @@ import {
 } from './sidepane/SpaceAuxPane'
 import { SpaceThreadPanel } from './sidepane/SpaceThreadPanel'
 import { SpacePrivatePanel } from './sidepane/SpacePrivatePanel'
+import { SpaceBrowserStartPanel } from './browser/SpaceBrowserStartPanel'
 import { SpaceBrowserThreadSection } from './browser/SpaceBrowserThreadSection'
 import { SpaceBrowserView } from './browser/SpaceBrowserView'
+import { canOfferBrowserStop, spaceBrowserStartOffered } from '../lib/space-browser'
 import { SpaceShareToRoomDialog } from './SpaceShareToRoomDialog'
 import { spaceThreadPaneEnabled } from '../lib/space-thread-deep-link'
 import { isDmKind, withSpaceKindTraits } from '../lib/space-kind'
@@ -891,6 +893,7 @@ export default function SpacePage() {
                         viewerRole={() => current().membership.role}
                         postMaxChars={() => current().limits?.post_max_chars}
                         onOpenThread={threadPaneEnabled() ? (thread) => openThread(thread.thread_id) : undefined}
+                        onOpenBrowserRun={openBrowserRun}
                         openThreadId={selectedThreadId}
                         typingSentence={() => typingSentence(presenceReading(), i18n.tr)}
                         onTyping={noteTyping}
@@ -1057,6 +1060,7 @@ export default function SpacePage() {
                                 ?.display_name ?? i18n.tr('Tidligere medlem', 'Former member')
                             }
                             onOpen={openBrowserRun}
+                            canStop={canOfferBrowserStop(agentWork()?.stop_manager, current().membership.role)}
                           />
                           {roomIsArchived(current()) ? (
                             <SpaceArchivedNotice />
@@ -1121,6 +1125,7 @@ export default function SpacePage() {
                     <SpaceBrowserView
                       spaceRef={current().space.space_ref}
                       runId={runId}
+                      canStop={canOfferBrowserStop(agentWork()?.stop_manager, current().membership.role)}
                       viewerSubjectId={current().membership.subject_id}
                       nameOf={(subjectId: string) =>
                         (roster.error ? [] : roster() ?? []).find((member) => member.subject_id === subjectId)
@@ -1182,6 +1187,8 @@ function SpaceConversationPanel(props: {
   readonly onTyping?: () => void
   /** Opens a post in the read-only side pane; absent while the pane is off. */
   readonly onOpenThread?: (thread: SpaceThread) => void
+  /** Opens one room browser run's pane (WS20-S5). Absent means the room cannot offer to start one. */
+  readonly onOpenBrowserRun?: (runId: string) => void
   /** The thread open in the side pane; its post stays marked in the timeline. */
   readonly openThreadId?: () => string | null | undefined
   /** The room's in-memory store of this browser's own live artifacts (owned by the page, shared with the Artifacts tab). */
@@ -1207,6 +1214,15 @@ function SpaceConversationPanel(props: {
   const artifactsOn = () => roomArtifactsEnabled()
   const noteLiveArtifact = props.liveArtifacts.note
   let focusComposer: (() => void) | undefined
+  // WS20-S5: the entry that starts a browser run on a new thread, beside "Start a conversation". Behind
+  // `features.browser_run`, never in a direct message, and offered to a member who may post (a viewer cannot start one).
+  // Presentation only: the gateway and Control decide every start.
+  const [browsing, setBrowsing] = createSignal(false)
+  const browseOffered = () =>
+    props.onOpenBrowserRun !== undefined
+    && spaceBrowserStartOffered()
+    && props.viewerRole?.() !== 'viewer'
+    && props.archived?.() !== true
   const [replyTarget, setReplyTarget] = createSignal<
     { threadId: string; title: string; awaitingApproval?: boolean } | undefined
   >(undefined)
@@ -1235,12 +1251,42 @@ function SpaceConversationPanel(props: {
           )}</p>
         </div>
         <Show when={props.archived?.() !== true}>
-          <button type="button" class="verevon-space-secondary-action" onClick={() => focusComposer?.()}>
-            <Sparkles size={15} aria-hidden="true" />
-            {i18n.tr('Start en samtale', 'Start a conversation')}
-          </button>
+          <div class="verevon-space-view__actions">
+            <Show when={browseOffered()}>
+              <button
+                type="button"
+                class="verevon-space-secondary-action"
+                aria-expanded={browsing() ? 'true' : 'false'}
+                onClick={() => setBrowsing(!browsing())}
+              >
+                <Globe2 size={15} aria-hidden="true" />
+                {i18n.tr('Surf med agenten', 'Browse with the agent')}
+              </button>
+            </Show>
+            <button type="button" class="verevon-space-secondary-action" onClick={() => focusComposer?.()}>
+              <Sparkles size={15} aria-hidden="true" />
+              {i18n.tr('Start en samtale', 'Start a conversation')}
+            </button>
+          </div>
         </Show>
       </div>
+
+      {/* A run started here has no thread yet: the gateway creates one with the goal as its first post (D4). The room is
+          read again so the new thread is in the timeline, and the run's pane opens beside it. */}
+      <Show when={browsing() && browseOffered()}>
+        <div class="verevon-space-browser-room-start">
+          <SpaceBrowserStartPanel
+            spaceRef={props.spaceRef}
+            canStart={browseOffered()}
+            onStarted={(receipt) => {
+              setBrowsing(false)
+              props.onExchangeSettled?.()
+              props.onOpenBrowserRun?.(receipt.runId)
+            }}
+            onCancel={() => setBrowsing(false)}
+          />
+        </div>
+      </Show>
 
       <Show when={props.loading()}>
         <p class="verevon-space-inline-status" role="status">{i18n.tr('Laster samtaler i rommet …', 'Loading Space conversations…')}</p>

@@ -2,6 +2,7 @@ import { For, Show, createEffect, createSignal, untrack } from 'solid-js'
 
 import { listSpaceBrowserRuns, type SpaceBrowserRun } from '@/shared/api/spaces-client/browser-runs'
 import { useI18n } from '@/shared/i18n'
+import { spaceBrowserStartOffered } from '../../lib/space-browser'
 import { spaceRoomFeature } from '../../lib/space-room-features'
 import { SpaceBrowserCard } from './SpaceBrowserCard'
 import { SpaceBrowserStartPanel } from './SpaceBrowserStartPanel'
@@ -20,6 +21,8 @@ export interface SpaceBrowserThreadSectionProps {
   readonly nameOf: (subjectId: string) => string
   /** Opens a run's pane (the `browser_run` parameter). */
   readonly onOpen: (runId: string) => void
+  /** Offers Stop on a live run's card (`canOfferBrowserStop`). Presentation only. */
+  readonly canStop?: boolean
 }
 
 /**
@@ -32,7 +35,8 @@ export function SpaceBrowserThreadSection(props: SpaceBrowserThreadSectionProps)
   const [runs, setRuns] = createSignal<readonly SpaceBrowserRun[]>([])
   const [composing, setComposing] = createSignal(false)
   const [listFailed, setListFailed] = createSignal(false)
-  const startOn = () => spaceRoomFeature('browser_run')
+  // Not in a direct message: Control refuses a browser run there.
+  const startOn = () => spaceBrowserStartOffered()
   const cardsOn = () => spaceRoomFeature('browser_card')
   let inFlight = false
 
@@ -77,6 +81,7 @@ export function SpaceBrowserThreadSection(props: SpaceBrowserThreadSectionProps)
                 viewerSubjectId={props.viewerSubjectId}
                 startedByName={props.nameOf(run.startedBySubjectId)}
                 onOpen={props.onOpen}
+                canStop={props.canStop}
               />
             )}
           </For>

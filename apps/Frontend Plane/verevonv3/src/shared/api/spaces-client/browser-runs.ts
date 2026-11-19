@@ -66,9 +66,12 @@ export type SpaceBrowserRunReceipt = {
   readonly viewScope: string
 }
 
-/** What the start panel sends. The live view is never shared in v1, so `shareView` is not a field here. */
+/**
+ * What the start panel sends. The live view is never shared in v1, so `shareView` is not a field here. No `threadId`
+ * starts a new thread (D4, W3-DEC-BROWSER): the gateway creates it, and the receipt names it.
+ */
 export type SpaceBrowserRunStart = {
-  readonly threadId: string
+  readonly threadId?: string
   readonly goal: string
   readonly allowedDomains: readonly string[]
   readonly startUrl?: string
@@ -163,13 +166,14 @@ function unreadable(): Error {
   return new Error('space_browser_run_unreadable')
 }
 
-/** Starts a room browser run on one thread of the Space (R1). A retry with the same `clientSendId` is the same run. */
+/** Starts a room browser run on one thread of the Space, or on a new one (R1). A retry with the same `clientSendId` is the same run. */
 export async function startSpaceBrowserRun(
   spaceRef: string,
   input: SpaceBrowserRunStart,
 ): Promise<SpaceBrowserRunReceipt> {
   const body = {
-    thread_id: input.threadId,
+    // Only a named thread is sent: an empty one is how the gateway knows the run starts a new thread.
+    ...(input.threadId?.trim() ? { thread_id: input.threadId.trim() } : {}),
     goal: input.goal,
     allowed_domains: [...input.allowedDomains],
     ...(input.startUrl ? { start_url: input.startUrl } : {}),
