@@ -47,6 +47,9 @@ const spacesClient = vi.hoisted(() => ({
   replyInSpaceThread: vi.fn(),
   archiveSpaceRoom: vi.fn(),
   unarchiveSpaceRoom: vi.fn(),
+  // WS17-S6: the private panel reads its pointer through these when `?panel=private` opens it.
+  getSpacePrivatePanel: vi.fn(),
+  openSpacePrivatePanel: vi.fn(),
 }))
 
 vi.mock('@/shared/api/space-approvals-client', async (importOriginal) => ({
@@ -81,6 +84,8 @@ vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
   replyInSpaceThread: spacesClient.replyInSpaceThread,
   archiveSpaceRoom: spacesClient.archiveSpaceRoom,
   unarchiveSpaceRoom: spacesClient.unarchiveSpaceRoom,
+  getSpacePrivatePanel: spacesClient.getSpacePrivatePanel,
+  openSpacePrivatePanel: spacesClient.openSpacePrivatePanel,
   SPACE_POST_MAX_CHARS_DEFAULT: 8000,
   // The timeline and the artifacts tab read through loadSpaceTranscript (WS07-S4), which turns the
   // transcript read's outcome into a value. Mirrors the real one over the hoisted read.
@@ -107,6 +112,14 @@ vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
 
 vi.mock('@/features/chat/lib/chat-thread-history', () => ({
   selectChatThread: vi.fn(),
+}))
+
+// WS20-S5: a room browser run's pane reads its timeline through this. Nothing answers, so a pane that opens stays on
+// "loading"; the pane's own behaviour is covered in components/browser.
+vi.mock('@/shared/api/spaces-client/browser-runs', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client/browser-runs')>()),
+  readSpaceBrowserTimeline: () => new Promise(() => {}),
+  listSpaceBrowserRuns: () => new Promise(() => {}),
 }))
 
 const orchestration = vi.hoisted(() => ({
@@ -291,6 +304,10 @@ describe('SpacePage', () => {
     spacesClient.archiveSpaceRoom.mockResolvedValue({ state: 'archived', changed: true, archivedAt: '2026-10-31T09:30:00Z' })
     spacesClient.unarchiveSpaceRoom.mockReset()
     spacesClient.unarchiveSpaceRoom.mockResolvedValue({ state: 'active', changed: true, archivedAt: null })
+    // Nothing answers the private panel's pointer unless the test that opens the panel says so.
+    spacesClient.getSpacePrivatePanel.mockReset()
+    spacesClient.getSpacePrivatePanel.mockImplementation(() => new Promise(() => {}))
+    spacesClient.openSpacePrivatePanel.mockReset()
     spacesClient.getSpaceActivity.mockReset()
     spacesClient.getSpaceActivity.mockResolvedValue({
       space: personalContext.space, membership: personalContext.membership,
@@ -2381,6 +2398,51 @@ describe('SpacePage', () => {
       renderSpacePage('/spaces/space_room_1?thread_id=thread_1')
       await screen.findByRole('heading', { name: 'Leveranse', level: 1 })
       expect(document.querySelector('.verevon-space-auxpane')).toBeNull()
+    })
+
+    // The room's right-hand pane takes its width from the workroom: `data-aux-open` makes the grid reserve it, hides the
+    // pulse column and collapses the layout. A pane that opens without the attribute is drawn over the right side of the
+    // room and its composer, so every pane the registry can open has to set it.
+    describe('the workroom makes room for the right-hand pane', () => {
+      const workroom = () => document.querySelector('.verevon-space-workroom')
+
+      it('sets data-aux-open while a thread pane is open', async () => {
+        const ctx = roomCtx({ features: { thread_pane: true } })
+        spacesClient.getSpaceContext.mockResolvedValue(ctx)
+        spacesClient.getSpaceThreads.mockResolvedValue({ ...ctx, threads: [{ thread_id: 'thread_1', space_id: 'space_room_1', title: 'Innkjøp', preview: 'x', updated_at: '2026-10-27T10:00:00Z' }] })
+        spacesClient.getSpaceThreadTranscript.mockResolvedValue({ threadId: 'thread_1', turns: [] })
+        renderSpacePage('/spaces/space_room_1?thread_id=thread_1')
+        await screen.findByRole('complementary', { name: 'Innkjøp' })
+        expect(workroom()?.getAttribute('data-aux-open')).toBe('true')
+      })
+
+      it('sets data-aux-open while the private panel is open', async () => {
+        const ctx = roomCtx({ features: { private_panel: true } })
+        spacesClient.getSpaceContext.mockResolvedValue(ctx)
+        spacesClient.getSpaceThreads.mockResolvedValue({ ...ctx, threads: [] })
+        renderSpacePage('/spaces/space_room_1?panel=private')
+        await screen.findByRole('complementary', { name: 'Privat assistent' })
+        expect(workroom()?.getAttribute('data-aux-open')).toBe('true')
+      })
+
+      it('sets data-aux-open while a room browser run pane is open', async () => {
+        const ctx = roomCtx({ features: { browser_card: true } })
+        spacesClient.getSpaceContext.mockResolvedValue(ctx)
+        spacesClient.getSpaceThreads.mockResolvedValue({ ...ctx, threads: [] })
+        renderSpacePage('/spaces/space_room_1?browser_run=run_1')
+        await screen.findByRole('complementary', { name: 'Nettleserkjøring' })
+        expect(workroom()?.getAttribute('data-aux-open')).toBe('true')
+      })
+
+      it('leaves data-aux-open off with no pane, and for a pane the room does not offer', async () => {
+        const ctx = roomCtx({ features: { browser_card: false, private_panel: false } })
+        spacesClient.getSpaceContext.mockResolvedValue(ctx)
+        spacesClient.getSpaceThreads.mockResolvedValue({ ...ctx, threads: [] })
+        renderSpacePage('/spaces/space_room_1?browser_run=run_1&panel=private')
+        await screen.findByRole('heading', { name: 'Leveranse', level: 1 })
+        expect(document.querySelector('.verevon-space-auxpane')).toBeNull()
+        expect(workroom()?.hasAttribute('data-aux-open')).toBe(false)
+      })
     })
 
     it('shows the Artifacts tab only when the context says features.room_artifacts', async () => {

@@ -726,7 +726,7 @@ export default function SpacePage() {
           return (
             <div
               class="verevon-space-workroom"
-              data-aux-open={selectedThreadId() || privatePanelOpen() ? 'true' : undefined}
+              data-aux-open={selectedThreadId() || privatePanelOpen() || browserRunId() ? 'true' : undefined}
               style={{ '--verevon-space-auxpane-width': `${auxPaneWidth()}px` }}
             >
               <main class="verevon-space-canvas">
