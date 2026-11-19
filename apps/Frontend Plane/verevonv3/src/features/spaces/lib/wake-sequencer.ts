@@ -80,6 +80,8 @@ const REFUSAL_CODES: ReadonlySet<string> = new Set([
   'agent_invocation_blocked',
   'mentioned_agent_not_bound',
   'wake_owner_required',
+  // D18: a Do wake under the member's history window; asking again gives the same answer.
+  'wake_history_window_do_unsupported',
 ])
 
 /** Codes where asking again can succeed: shown with Retry. */

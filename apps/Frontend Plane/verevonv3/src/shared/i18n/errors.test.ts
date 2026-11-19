@@ -182,6 +182,8 @@ describe('WS08 wake and mention copy', () => {
       'wake_requires_single_agent',
       'wake_requires_thread',
       'wake_trigger_mismatch',
+      // D18: a Do wake under the member's history window is refused before its run exists.
+      'wake_history_window_do_unsupported',
     ])
   })
 

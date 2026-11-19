@@ -1346,6 +1346,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   wake_requires_single_agent: { no: 'Én agent kan tilkalles om gangen. Prøv igjen.', en: 'One agent can be called at a time. Try again.' },
   wake_requires_thread: { no: 'Agenten kan bare tilkalles fra en melding som er lagret i en samtale.', en: 'An agent can only be called from a message stored in a conversation.' },
   wake_trigger_mismatch: { no: 'Meldingen er endret siden den ble sendt, så agenten ble ikke tilkalt.', en: 'The message changed after it was sent, so the agent was not called.' },
+  wake_history_window_do_unsupported: { no: 'Denne agenten kan ikke utføre oppgaver for deg her, fordi du ikke ser hele historikken i rommet. Meldingen er sendt, men agenten svarer ikke.', en: 'This agent cannot carry out tasks for you here, because you do not see the room\'s full history. Your message was sent, but the agent will not answer.' },
   // WS08-S8 wake policy editor
   agent_binding_not_found: { no: 'Agenten er ikke lenger knyttet til dette rommet. Ingenting er endret.', en: 'The agent is no longer bound to this room. Nothing was changed.' },
   invalid_policy: { no: 'Valget er ikke gyldig. Velg minst én person for en liste, og høyst 50. Ingenting er endret.', en: 'That choice is not valid. A list needs at least one person and at most 50. Nothing was changed.' },

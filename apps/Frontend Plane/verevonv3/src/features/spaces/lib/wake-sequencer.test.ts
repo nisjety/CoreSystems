@@ -149,6 +149,7 @@ describe('createWakeSequencer outcomes (WS08-S6)', () => {
     'agent_invocation_blocked',
     'mentioned_agent_not_bound',
     'wake_owner_required',
+    'wake_history_window_do_unsupported',
   ]
 
   it.each(refusals)('shows %s as refused, never asks again, and moves on to the next agent', async (code) => {
