@@ -106,13 +106,25 @@ describe('SpaceConnectivityBanner (WS01-S8)', () => {
     expect(document.querySelector('.verevon-space-connectivity')).toBeNull()
   })
 
-  it('DEPTH-SPA-2: stops following browser events once it is removed', () => {
+  it('DEPTH-SPA-2: stops following browser events once it is removed', async () => {
     const view = render(() => <SpaceConnectivityBanner />)
-    view.unmount()
+    // The watcher starts once the component has settled, so a flush is what attaches it.
+    flush()
     setNavigatorOnline(false)
     window.dispatchEvent(new Event('offline'))
     flush()
-    // The module state is shared, so it still reads offline; what matters is that nothing is drawn.
+    expect(spaceConnectivity()).toBe('offline')
+    setNavigatorOnline(true)
+    window.dispatchEvent(new Event('online'))
+    flush()
+    expect(spaceConnectivity()).toBe('online')
+
+    view.unmount()
+    // The unmount runs the watcher's stop function, so the browser's offline event no longer reaches the state.
+    setNavigatorOnline(false)
+    window.dispatchEvent(new Event('offline'))
+    flush()
+    expect(spaceConnectivity()).toBe('online')
     expect(document.querySelector('.verevon-space-connectivity')).toBeNull()
   })
 })
