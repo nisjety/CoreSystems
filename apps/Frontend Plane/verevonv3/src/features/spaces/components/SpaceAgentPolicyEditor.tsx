@@ -126,14 +126,14 @@ export function SpaceAgentPolicyEditor(props: {
       )
       props.onSaved?.()
     } catch (err) {
-      setError(
-        translateApiError(err, i18n.tr, {
-          no: 'Verktøyreglene kunne ikke lagres. Ingenting er endret.',
-          en: 'The tool rules could not be saved. Nothing was changed.',
-        }),
-      )
-      // Someone else changed the layer: show what is stored now rather than overwrite it blind.
+      const message = translateApiError(err, i18n.tr, {
+        no: 'Verktøyreglene kunne ikke lagres. Ingenting er endret.',
+        en: 'The tool rules could not be saved. Nothing was changed.',
+      })
+      // Someone else changed the layer: show what is stored now rather than overwrite it blind. The reload
+      // clears the error, so the sentence is set after it, or the person would never learn why nothing saved.
       if (hasErrorCode(err, 'tool_policy_revision_conflict')) await load()
+      setError(message)
     } finally {
       setSaving(false)
     }
