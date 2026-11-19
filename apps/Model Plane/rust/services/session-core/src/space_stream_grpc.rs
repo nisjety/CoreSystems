@@ -250,6 +250,8 @@ impl SpaceEvents for SpaceEventsGrpc {
             head_hint: head_seq,
             resumed: req.resume,
             ceiling: decision.recipient_audience_revision,
+            floor_revision: decision.history_floor,
+            floor_at: decision.history_floor_at,
             issued_at: decision.issued_at,
             lease,
             lease_until: now
@@ -514,6 +516,16 @@ fn hidden_stub(row: &LogRow) -> pb::SpaceEventRecord {
     }
 }
 
+/// The stub of a row the gate withholds. A row logged before the member's timestamp floor (D18) carries the floor
+/// instant in `at`, not its own time: the time of the activity the window hides never reaches the reader.
+fn withheld_stub(row: &LogRow, floor_at: Option<DateTime<Utc>>) -> pb::SpaceEventRecord {
+    let mut stub = hidden_stub(row);
+    if let Some(floor) = floor_at.filter(|floor| row.created_at < *floor) {
+        stub.at = floor.to_rfc3339_opts(SecondsFormat::Millis, true);
+    }
+    stub
+}
+
 struct StreamState {
     shared: Arc<Shared>,
     _guard: ActiveGuard,
@@ -531,6 +543,10 @@ struct StreamState {
     resumed: bool,
     /// Highest `recipient_audience_revision` the decision authorizes.
     ceiling: i64,
+    /// WS04-S11: the member's revision floor (`None` for full history). A row stamped below it is withheld.
+    floor_revision: Option<i64>,
+    /// D18: the member's timestamp floor (`None` for full history). A row logged before it is withheld.
+    floor_at: Option<DateTime<Utc>>,
     issued_at: DateTime<Utc>,
     lease: Duration,
     lease_until: DateTime<Utc>,
@@ -596,6 +612,7 @@ impl StreamState {
                     scope: "space",
                     audience_revision: Some(0),
                     retention_class: "persistent",
+                    created_at: None,
                 };
                 if let GateOutcome::Close(code) = gate(&probe, &self.gate_context(revoked_at)) {
                     return self.close(code).await;
@@ -628,6 +645,8 @@ impl StreamState {
             // ZDR callers and decisions never reach a stream task.
             caller_zdr: false,
             decision_zdr: false,
+            floor_revision: self.floor_revision,
+            floor_at: self.floor_at,
         }
     }
 
@@ -664,12 +683,13 @@ impl StreamState {
                         scope: &row.scope,
                         audience_revision: row.audience_revision,
                         retention_class: &row.retention_class,
+                        created_at: Some(row.created_at),
                     },
                     &self.gate_context(revoked_at),
                 );
                 let record = match verdict {
                     GateOutcome::Close(code) => return Some(self.close(code).await),
-                    GateOutcome::Stub => hidden_stub(row),
+                    GateOutcome::Stub => withheld_stub(row, self.floor_at),
                     GateOutcome::Deliver if KNOWN_KINDS.contains(&row.kind.as_str()) => {
                         record_from_row(row)
                     }

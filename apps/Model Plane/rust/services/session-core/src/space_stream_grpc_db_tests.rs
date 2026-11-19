@@ -141,6 +141,58 @@ async fn stream_resume_honours_the_cursor() {
     clean_space(&pool, &org, &space).await;
 }
 
+/// Opens a resume stream whose member has a D18 timestamp floor, signed on the decision as Control signs it.
+async fn open_floored(pool: &PgPool, org: &str, space: &str, floor: DateTime<Utc>, after_seq: i64) -> Frames {
+    let service = SpaceEventsGrpc::new(pool.clone(), SpaceWakes::new());
+    let mut request = Request::new(pb::StreamSpaceEventsRequest {
+        org_id: org.to_owned(),
+        user_id: MEMBER.to_owned(),
+        space_id: space.to_owned(),
+        decision_ref: DECISION_REF.to_owned(),
+        decision_token: live_stream_token(org, MEMBER, space, 4, false, |claims| {
+            claims["history_floor_at"] = serde_json::json!(floor.to_rfc3339());
+        }),
+        resume: true,
+        generation: 1,
+        after_seq,
+    });
+    request
+        .extensions_mut()
+        .insert(VerifiedIdentity::user_for_test(org, MEMBER));
+    service
+        .stream_space_events(request)
+        .await
+        .expect("the stream opens")
+        .into_inner()
+}
+
+#[tokio::test]
+#[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+async fn stream_a_member_window_stubs_every_row_logged_before_its_floor_at_the_floor_instant() {
+    let Some((pool, org, space, _thread, _keys)) = setup("floor", 3).await else { return };
+    // Rows 1..=4 (thread.created and three messages) were logged a moment ago. The window starts a day from now,
+    // so every one of them is before it: each is a hidden stub that keeps its sequence and carries no id.
+    let floor = Utc::now() + chrono::Duration::days(1);
+    let mut stream = open_floored(&pool, &org, &space, floor, 0).await;
+    let connected = next_non_heartbeat(&mut stream).await;
+    let Some(Frame::Connected(connected)) = connected.frame else { panic!("connected first, {NEEDS_DB}") };
+    assert_eq!(connected.cursor, 0);
+    let floor_at = floor.to_rfc3339_opts(SecondsFormat::Millis, true);
+    for seq in 1..=4 {
+        let frame = next_non_heartbeat(&mut stream).await;
+        assert_eq!(word(&frame), format!("event:hidden:{seq}"), "a withheld row keeps its sequence");
+        let Some(Frame::Event(record)) = frame.frame else { unreachable!() };
+        assert_eq!(record.at, floor_at, "the stub carries the window's instant, not the row's own time");
+        assert_eq!(
+            (record.thread_id.as_str(), record.message_id.as_str(), record.actor_id.as_str()),
+            ("", "", ""),
+            "no id of a withheld row reaches the reader"
+        );
+    }
+    drop(stream);
+    clean_space(&pool, &org, &space).await;
+}
+
 #[tokio::test]
 #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
 async fn stream_cursor_too_old_for_ahead_of_head_generation_changed_and_retention() {

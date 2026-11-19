@@ -224,6 +224,26 @@ fn hidden_stub_carries_no_ids_and_keeps_the_sequence_contiguous() {
 }
 
 #[test]
+fn a_row_logged_before_the_timestamp_floor_is_stubbed_at_the_floor_instant() {
+    // The row was logged at at(0); the member's window starts at at(60), so the row is before it.
+    let logged = row("message.appended", json!({"role": "user", "message_sequence": 3}));
+    let floored = withheld_stub(&logged, Some(at(60)));
+    assert_eq!(floored.kind, "hidden");
+    assert_eq!((floored.seq, floored.generation), (7, 2), "the sequence stays contiguous");
+    assert_eq!(
+        floored.at,
+        at(60).to_rfc3339_opts(SecondsFormat::Millis, true),
+        "the window's instant, not the time of the activity it hides"
+    );
+    assert_eq!(floored.thread_id, "", "no thread leaks through a hidden stub");
+    assert_eq!(floored.message_id, "", "no message leaks through a hidden stub");
+    assert_eq!(floored.actor_id, "", "no actor leaks through a hidden stub");
+    // A row logged at or after the floor, or with no floor, keeps its own time.
+    assert_eq!(withheld_stub(&logged, Some(at(-60))), hidden_stub(&logged));
+    assert_eq!(withheld_stub(&logged, None), hidden_stub(&logged));
+}
+
+#[test]
 fn frame_wrapper_and_too_old_frame_shape() {
     let wrapped = frame(Frame::Heartbeat(pb::SpaceStreamHeartbeat {
         head: 5,

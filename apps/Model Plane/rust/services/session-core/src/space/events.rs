@@ -326,6 +326,8 @@ pub(crate) struct GateRow<'a> {
     pub scope: &'a str,
     pub audience_revision: Option<i64>,
     pub retention_class: &'a str,
+    /// When the row was logged, for the member's timestamp floor (D18). `None` for a probe with no row.
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 /// The subscriber facts the gate looks at, taken from the verified Control decision, the
@@ -342,6 +344,22 @@ pub(crate) struct GateContext<'a> {
     pub revoked_at: Option<DateTime<Utc>>,
     pub caller_zdr: bool,
     pub decision_zdr: bool,
+    /// WS04-S11: the member's revision floor (`None` for full history). A row stamped below it is withheld.
+    pub floor_revision: Option<i64>,
+    /// D18: the member's timestamp floor (`None` for full history). A row logged before it is withheld.
+    pub floor_at: Option<DateTime<Utc>>,
+}
+
+/// Whether the member's history floors admit a row the ceiling already admits. Both floors only hide, so they never
+/// widen anything. A row with no instant is not admitted under a timestamp floor: it cannot be judged, so it is hidden.
+fn floor_admits(row: &GateRow<'_>, revision: i64, ctx: &GateContext<'_>) -> bool {
+    if ctx.floor_revision.is_some_and(|floor| revision < floor) {
+        return false;
+    }
+    match ctx.floor_at {
+        None => true,
+        Some(floor) => row.created_at.is_some_and(|created| created >= floor),
+    }
 }
 
 /// Clock-skew tolerance, in the fail-closed direction.
@@ -379,6 +397,9 @@ pub(crate) fn gate(row: &GateRow<'_>, ctx: &GateContext<'_>) -> GateOutcome {
         Some(revision) if revision > ctx.decision_ceiling => {
             GateOutcome::Close(CloseCode::Reauthorize)
         }
+        // A member's history floor withholds the row as a stub: the seq stays contiguous and nothing of the row
+        // reaches the reader. It never closes the stream, and it never widens the ceiling above.
+        Some(revision) if !floor_admits(row, revision, ctx) => GateOutcome::Stub,
         Some(_) => GateOutcome::Deliver,
     }
 }
@@ -397,6 +418,7 @@ mod tests {
             scope,
             audience_revision: revision,
             retention_class: retention,
+            created_at: None,
         }
     }
 
@@ -411,7 +433,40 @@ mod tests {
             revoked_at: None,
             caller_zdr: false,
             decision_zdr: false,
+            floor_revision: None,
+            floor_at: None,
         }
+    }
+
+    #[test]
+    fn gate_withholds_a_row_logged_before_the_timestamp_floor_and_a_row_with_no_instant() {
+        let mut c = ctx();
+        c.floor_at = Some(at(10));
+        let dated = |created_at| GateRow { created_at, ..row("space", Some(1), "persistent") };
+        assert_eq!(gate(&dated(Some(at(9))), &c), GateOutcome::Stub, "one second before the floor");
+        assert_eq!(gate(&dated(Some(at(10))), &c), GateOutcome::Deliver, "the floor instant is admitted");
+        assert_eq!(gate(&dated(Some(at(11))), &c), GateOutcome::Deliver);
+        assert_eq!(gate(&dated(None), &c), GateOutcome::Stub, "no instant cannot be judged, so it is hidden");
+    }
+
+    #[test]
+    fn gate_withholds_a_row_below_the_revision_floor_and_a_floor_never_closes_the_stream() {
+        let mut c = ctx();
+        c.floor_revision = Some(3);
+        assert_eq!(gate(&row("space", Some(2), "persistent"), &c), GateOutcome::Stub);
+        assert_eq!(gate(&row("space", Some(3), "persistent"), &c), GateOutcome::Deliver);
+        // A row above the ceiling still closes the stream: a floor narrows authority, it never replaces it.
+        assert_eq!(
+            gate(&row("space", Some(6), "persistent"), &c),
+            GateOutcome::Close(CloseCode::Reauthorize)
+        );
+    }
+
+    #[test]
+    fn gate_with_no_floor_keeps_every_verdict_the_ceiling_gives() {
+        let c = ctx();
+        assert_eq!(gate(&row("space", Some(1), "persistent"), &c), GateOutcome::Deliver);
+        assert_eq!(gate(&row("space", None, "persistent"), &c), GateOutcome::Stub);
     }
 
     #[test]
