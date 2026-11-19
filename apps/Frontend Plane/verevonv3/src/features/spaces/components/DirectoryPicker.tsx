@@ -123,6 +123,12 @@ export function DirectoryPicker(props: DirectoryPickerProps) {
           autocomplete="off"
           placeholder={i18n.tr('Navn eller e-post', 'Name or email')}
           onInput={(event) => onInput(event.currentTarget.value)}
+          // A search box is not a field of the form around it. Enter in it would make the browser press that form's
+          // default button, and the access dialog's default button saves the draft it holds. The search itself needs
+          // no Enter: it runs on its own once the text has been still for a moment.
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') event.preventDefault()
+          }}
         />
       </label>
 

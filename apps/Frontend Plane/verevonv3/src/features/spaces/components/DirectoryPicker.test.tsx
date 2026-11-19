@@ -192,4 +192,47 @@ describe('DirectoryPicker (WS04-S9)', () => {
     const others = screen.getAllByRole('button', { name: /Legg til/ }) as HTMLButtonElement[]
     expect(others.every((button) => button.disabled)).toBe(true)
   })
+
+  // jsdom has no implicit submission, so this does what a browser does with a key that nothing took: Enter in a text
+  // field presses the form's default button (its first submit button) unless that button is disabled.
+  function pressEnterInBrowser(input: HTMLElement): void {
+    const taken = !fireEvent.keyDown(input, { key: 'Enter' })
+    if (taken) return
+    const button = input.closest('form')?.querySelector<HTMLButtonElement>('button[type="submit"]')
+    if (button && !button.disabled) button.click()
+  }
+
+  it('does not let Enter in the search box press the default button of the form around it', async () => {
+    const submitted = vi.fn()
+    render(() => (
+      <form
+        onSubmit={(event) => {
+          event.preventDefault()
+          submitted()
+        }}
+      >
+        <DirectoryPicker pickLabel="Legg til" pickingLabel="Legger til …" onPickPerson={vi.fn()} />
+        <button type="submit">Lagre</button>
+      </form>
+    ))
+    await waitFor(() => expect(spacesClient.searchDirectory).toHaveBeenCalledTimes(1))
+    type('kari')
+
+    // The key is taken: the browser has no default action left to run, so nothing presses the default button.
+    expect(fireEvent.keyDown(box(), { key: 'Enter' })).toBe(false)
+    pressEnterInBrowser(box())
+    expect(submitted).not.toHaveBeenCalled()
+
+    // The button still works as a button: this is about the key, not about the form.
+    fireEvent.click(screen.getByRole('button', { name: 'Lagre' }))
+    expect(submitted).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves every other key to the box, so typing is not taken', async () => {
+    renderPicker()
+    await waitFor(() => expect(spacesClient.searchDirectory).toHaveBeenCalledTimes(1))
+    for (const key of ['a', ' ', 'Backspace', 'ArrowDown', 'Tab', 'Escape']) {
+      expect(fireEvent.keyDown(box(), { key }), key).toBe(true)
+    }
+  })
 })

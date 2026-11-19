@@ -165,6 +165,47 @@ describe('SpaceAgentAccessDialog (WS17-S5)', () => {
       ])
     })
 
+    // The search box sits inside the form whose default button saves the draft. jsdom has no implicit submission, so this
+    // does what a browser does with an Enter that nothing took: it presses the form's default button, if it can be pressed.
+    it('does not save the draft when Enter is pressed in the people search', async () => {
+      access.getPersonalAgentAccess.mockResolvedValue(accessOf())
+      access.updatePersonalAgentAccess.mockResolvedValue(accessOf({ revision: 8 }))
+      access.searchDirectory.mockResolvedValue({
+        results: [person('sub-ola', 'Ola Hansen', 'ola@example.com')],
+        nextCursor: null,
+      })
+      renderDialog()
+      await screen.findByText('sub-kari')
+      await screen.findByText('Ola Hansen')
+
+      // A draft worth saving: anyone who can see the agent may now add it to a room. Nothing is stored until Save.
+      fireEvent.click(screen.getByRole('radio', { name: 'Alle som kan se den' }))
+      flush()
+      const save = screen.getByRole('button', { name: 'Lagre tilgang' }) as HTMLButtonElement
+      expect(save.disabled).toBe(false)
+
+      const search = screen.getByRole('searchbox') as HTMLInputElement
+      fireEvent.input(search, { target: { value: 'ola' } })
+      flush()
+      const taken = !fireEvent.keyDown(search, { key: 'Enter' })
+      if (!taken && !save.disabled) save.click()
+      flush()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      flush()
+
+      expect(taken).toBe(true)
+      expect(access.updatePersonalAgentAccess).not.toHaveBeenCalled()
+      expect(screen.queryByText('Tilgangen er lagret.')).toBeNull()
+
+      // Saving is still the person's own act, on the button.
+      fireEvent.click(save)
+      flush()
+      await waitFor(() => expect(access.updatePersonalAgentAccess).toHaveBeenCalledTimes(1))
+      expect(
+        (access.updatePersonalAgentAccess.mock.calls[0] as [string, { addPolicy: string }])[1].addPolicy,
+      ).toBe('anyone')
+    })
+
     it('says the search failed when the directory does, and the id box still adds a person', async () => {
       access.getPersonalAgentAccess.mockResolvedValue(accessOf())
       access.searchDirectory.mockRejectedValue(new ApiError('off', 404, 'feature_disabled'))
