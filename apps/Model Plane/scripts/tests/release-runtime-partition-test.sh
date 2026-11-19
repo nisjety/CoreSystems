@@ -322,6 +322,29 @@ validate_runtime "$runtime_zdr" "$attested_but_boolean_false" "$gates_zdr"
 expect_rejection zdr-attested-on-non-zdr-path 'ZDR provider confirmation requires provider-route attestation' \
   validate_runtime "$runtime_zdr" "$attested_but_boolean_false" "$gates_non_zdr"
 
+# The legacy boolean passes only as the literal false or true, on both surfaces. inference-core reads
+# the empty value and the words 0, off and no as an explicit off, but this gate refuses them on purpose:
+# it is the deliberate stricter choice documented at the check in release-artifact.sh. It also refuses
+# TRUE, 1 and yes, which inference-core refuses at boot. Each spelling replaces only the boolean line.
+for surface in AZURE_OPENAI AZURE_ANTHROPIC; do
+  for spelling in '' 0 off no FALSE TRUE 1 yes; do
+    spelled="$TMP_DIR/zdr-spelled-$surface-${spelling:-empty}.env"
+    {
+      grep -v "^${surface}_ZDR_CONFIRMED=" "$public_non_zdr" || true
+      printf '%s_ZDR_CONFIRMED=%s\n' "$surface" "$spelling"
+    } >"$spelled"
+    chmod 644 "$spelled"
+    expect_rejection "zdr-spelled-$surface-${spelling:-empty}" "${surface}_ZDR_CONFIRMED must be true or false" \
+      validate_runtime "$runtime_secrets" "$spelled" "$gates_non_zdr"
+  done
+done
+
+anthropic_false="$TMP_DIR/zdr-anthropic-false.env"
+cp "$public_non_zdr" "$anthropic_false"
+printf 'AZURE_ANTHROPIC_ZDR_CONFIRMED=false\n' >>"$anthropic_false"
+chmod 644 "$anthropic_false"
+validate_runtime "$runtime_secrets" "$anthropic_false" "$gates_non_zdr"
+
 # Foundry Claude is a separate surface with its own attestation, route and key.
 public_claude="$TMP_DIR/public-claude.env"
 cp "$public_non_zdr" "$public_claude"

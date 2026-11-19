@@ -112,9 +112,9 @@ proto-file | space_room.proto (service SpaceRoomReadService, empty) | P-SC1 | ap
 flag | SPACE_ORG_ROOM_RECONCILE (Convex env, dev compose default 1, startup.sh/production default 0) | WS04-S1 | apps/Application Plane/convex-core/convex/spaceMembershipSync.ts
 flag | AUDIT_READ_ROLE_ENFORCEMENT (audit-core env, default enforce; report/off refused when ENVIRONMENT=production) | WS05-S1 | apps/Control Plane/audit-core/internal/api/read_scope.go
 migration | integration-corev2 0014 | WS05-S2 | apps/Ingestion Plane/integration-corev2/internal/db/migrations/0014_scim_stub_payload_redaction.sql
-flag | SESSION_CORE_SPACE_ZDR (session-core env, observe default; only exact "enforce" refuses) | WS06-S2 | apps/Model Plane/deploy/docker-compose.yml
+flag | SESSION_CORE_SPACE_ZDR (session-core env, observe default; only the word enforce refuses, trimmed and case-folded) | WS06-S2 | apps/Model Plane/deploy/docker-compose.yml
 flag | SPACE_DENIALS_TYPED (gateway env, dev default on, production "false" in compose override; APP_ENV=production unset is off) | WS03-S5 | apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs
-flag | SPACE_ROOM_METADATA_LEGACY_PASSTHROUGH (model-gateway env, default false = allowlist active; 1/true restores pass-through) | WS07-S9a | apps/Model Plane/rust/services/model-gateway/src/room_metadata.rs
+flag | SPACE_ROOM_METADATA_LEGACY_PASSTHROUGH (model-gateway env, default false = allowlist active; the exact literal true restores pass-through) | WS07-S9a | apps/Model Plane/rust/services/model-gateway/src/room_metadata.rs
 migration | session-core 0071 | WS01-S1 | apps/Model Plane/rust/services/session-core/migrations/0071_message_post_kind.sql
 proto-tag | sessions.proto AppendMessageRequest.post_kind=19, SessionMessage.post_kind=11, ListConversationRequest.include_human_posts=9, ThreadSummary.reply_count=23, last_author_subject_id=24 | WS01-S1 | apps/Model Plane/proto/model_plane/v1/sessions.proto
 flag | SPACE_POLICY_ADMIN_WRITES (user-core env, strict true, compose ${:-false}) | WS03-S3 | apps/Control Plane/docker-compose.yml

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -109,26 +110,87 @@ func TestShippedRegistryMatchesComposeFiles(t *testing.T) {
 	}
 }
 
+// modelComposeFiles returns the Model Plane compose files the second ratchet reads: the base file, and every overlay in
+// the same deploy directory, such as the override, production, release, replica and bridge files. A switch that only an
+// overlay sets is ratcheted like one in the base file.
+func modelComposeFiles(t *testing.T) []string {
+	t.Helper()
+	const deploy = "apps/Model Plane/deploy"
+	matches, err := filepath.Glob(filepath.Join(repoFile(deploy), "docker-compose*.yml"))
+	if err != nil {
+		t.Fatalf("list the Model Plane compose files: %v", err)
+	}
+	files := []string{modelPlaneCompose}
+	for _, p := range matches {
+		if rel := deploy + "/" + filepath.Base(p); rel != modelPlaneCompose {
+			files = append(files, rel)
+		}
+	}
+	slices.Sort(files)
+	return files
+}
+
 // modelSwitchShapedOutsideConvention returns the Model Plane compose variables outside the
-// naming convention whose compose default is a boolean-looking value, keyed by variable name.
+// naming convention whose compose default is a boolean-looking value, keyed by variable name. It reads every file
+// modelComposeFiles returns.
 func modelSwitchShapedOutsideConvention(t *testing.T) map[string]bool {
 	t.Helper()
-	f, err := os.Open(repoFile(modelPlaneCompose))
-	if err != nil {
-		t.Fatalf("open %s: %v", modelPlaneCompose, err)
-	}
-	defer f.Close()
-	decls, err := ScanCompose(f)
-	if err != nil {
-		t.Fatalf("scan %s: %v", modelPlaneCompose, err)
-	}
 	found := make(map[string]bool)
+	for _, rel := range modelComposeFiles(t) {
+		f, err := os.Open(repoFile(rel))
+		if err != nil {
+			t.Fatalf("open %s: %v", rel, err)
+		}
+		decls, err := ScanCompose(f)
+		f.Close()
+		if err != nil {
+			t.Fatalf("scan %s: %v", rel, err)
+		}
+		switchShapedOutsideConvention(decls, found)
+	}
+	return found
+}
+
+// switchShapedOutsideConvention records in found each declared variable outside the naming convention whose compose
+// default is a boolean-looking value.
+func switchShapedOutsideConvention(decls []ComposeDecl, found map[string]bool) {
 	for _, d := range decls {
 		if !IsConventionName(d.Host) && isBooleanLooking(d.Default) {
 			found[d.Host] = true
 		}
 	}
-	return found
+}
+
+// TestModelComposeOverlaysAreReadByTheSecondRatchet pins the overlays the second ratchet reads, and the rule it applies to a
+// switch that only an overlay sets: such a switch is found, and a blank default is not a switch.
+func TestModelComposeOverlaysAreReadByTheSecondRatchet(t *testing.T) {
+	files := modelComposeFiles(t)
+	for _, want := range []string{
+		modelPlaneCompose,
+		"apps/Model Plane/deploy/docker-compose.override.yml",
+		"apps/Model Plane/deploy/docker-compose.production.yml",
+		"apps/Model Plane/deploy/docker-compose.release.yml",
+		"apps/Model Plane/deploy/docker-compose.replicas.yml",
+	} {
+		if !slices.Contains(files, want) {
+			t.Errorf("%s is not read by the second ratchet; it reads %v", want, files)
+		}
+	}
+	const overlay = `services:
+  model-gateway:
+    environment:
+      OVERLAY_ONLY_SWITCH: ${OVERLAY_ONLY_SWITCH:-false}
+      OVERLAY_BLANK: ${OVERLAY_BLANK:-}
+`
+	decls, err := ScanCompose(strings.NewReader(overlay))
+	if err != nil {
+		t.Fatalf("scan the fixture: %v", err)
+	}
+	found := make(map[string]bool)
+	switchShapedOutsideConvention(decls, found)
+	if !found["OVERLAY_ONLY_SWITCH"] || found["OVERLAY_BLANK"] {
+		t.Errorf("the fixture's switch-shaped names are %v, want OVERLAY_ONLY_SWITCH and not OVERLAY_BLANK", found)
+	}
 }
 
 // TestModelComposeSwitchesOutsideTheConventionAreRegisteredOrListed is the second compose ratchet.

@@ -92,7 +92,9 @@ The tests read `apps/Model Plane/deploy/docker-compose.yml` and
 - Every Model Plane compose variable outside the convention whose compose default is a
   boolean-looking value (a non-blank word the canonical vocabulary reads, such as `0`,
   `false` or `off`) is registered or listed in `unregisteredSwitches`. A blank default is an
-  unset value, so it is not counted. `catalogue_test.go` holds this second ratchet.
+  unset value, so it is not counted. `catalogue_test.go` holds this second ratchet. It reads the
+  base Model Plane compose and every overlay in `apps/Model Plane/deploy` (`docker-compose*.yml`),
+  so a switch that only an overlay sets, with an interpolated default, is ratcheted too.
 - A switch with an exact literal whose compose default is `0` names that literal in the
   comment above its line, so an operator who types `1` reads why it stays off.
   `model_compose_pins_test.go` pins this.
@@ -106,18 +108,29 @@ The tests read `apps/Model Plane/deploy/docker-compose.yml` and
   gateway's switches read true in any case must be exactly the rows that declare
   `onLiteralAnyCase`. A table row the test cannot read fails the test, so a changed shape
   is never skipped. A name with no registry row has no typed read, so it is not checked.
-- `literal_reader_source_test.go` reads the Model Plane Go services and the Rust crates and
-  services (their `src` trees), and finds every variable a reader takes by the exact literal
-  `true` or `1`: `getenv`, `os.Getenv` or `lookup` compared with the literal; a Go helper that
-  returns its parameter compared with it, called with an environment read; a Rust `switch_from`,
-  or a function that reaches it or compares with the literal, called with an environment read; an
-  environment read compared in its own statement; and an environment read bound to a local that a
-  reader takes later in the same function. A Rust call resolves to the functions of its own file
-  first, and a constant resolves through its module path, a `use ... as` rename, or the scope that
-  declares it. Each such variable with a row must declare the literal as `onLiteral`. A reader whose
-  variable the scan cannot name fails the test. The scan follows only these shapes, so the
-  `literal_reader_source_test.go` shape test and its pins fail by name when one stops matching, and
-  a value that a helper with several parameters carries is not followed.
+- `literal_reader_source_test.go` reads the Model Plane Go services, the Rust crates and services
+  (their `src` trees), and the BFF gateway's `src` tree. It finds every variable a reader takes by
+  the exact literal `true` or `1`: `getenv`, `os.Getenv` or `lookup` compared with the literal; a
+  Go helper that returns its parameter compared with it, called with an environment read; a Rust
+  `switch_from`, or a function that reaches it or compares with the literal, called with an
+  environment read; an environment read compared in its own statement; and an environment read
+  bound to a local that a reader takes later in the same function. A Rust name helper reads the
+  environment by one of its own parameters, exactly, such as `truthy_env(name)`, or the gateway's
+  `env_exact_true(key)`, which reads through `var_os`. Each call that
+  passes it a quoted name, a constant, or a parameter that the caller passes on reads that variable.
+  A call whose name the scan cannot resolve is unnamed. A helper that reads its parameter both
+  exactly and leniently is mixed, and its calls are not followed. The gateway's constant arrays of
+  exact-true names (`MODEL_PLANE_EXACT_TRUE_SWITCHES`, `BFF_EXACT_TRUE_SPACE_SWITCHES`,
+  `BROWSER_EXACT_TRUE_SWITCHES`) are read member by member, and the gateway's value helpers
+  (`exact_true_flag`, `browser_consent_api_enabled`, `browser_downloads_enabled`) are read through their
+  callers. `space_flag` is mixed, exact for the array names and lenient otherwise, so its calls are not
+  followed. A Rust call resolves to the functions of
+  its own file first, and a constant resolves through its module path, a `use ... as` rename, or the
+  scope that declares it. An environment read inside a closure argument, such as
+  `from_lookup(|name| env::var(name).ok())`, is the closure's value and not the reader's. Each such
+  variable with a row must declare the literal as `onLiteral`. A reader whose variable the scan
+  cannot name fails the test. The scan follows only these shapes, so the
+  `literal_reader_source_test.go` shape test and its pins fail by name when one stops matching.
 
 The scanner reads a service at the indent of the first service under `services:`,
 so the two-space Model Plane layout and the four-space Control Plane layout both
@@ -145,16 +158,45 @@ release process. The registry records the change; it does not make it.
   are not ratcheted. Switch-shaped names outside the convention are listed in
   `unregisteredSwitches` until each gets an entry. Control Plane names are covered by the
   switch ratchet above.
-- Literal compose values such as `MP_COMPAT_MODE: v1_only` in the Model Plane compose,
-  which are not interpolated and are not ratcheted. In the Control Plane compose the
+- Literal compose values such as `MP_COMPAT_MODE: v1_only` in the Model Plane compose and its
+  overlays, which are not interpolated and are not ratcheted. Were they ratcheted, the one name that
+  would be unlisted is `DISABLE_AUTH` in the production overlay, the agent-memory-server's own
+  variable and not a Model Plane switch. The override's literal dev values
+  (`FINETUNE_ENABLED: "true"`, `SPACE_RUN_LIVE_VIEW: "true"`) are among them. In the Control Plane compose the
   literal switches are checked, and four stay out of the registry with a reason in
   `controlSwitchUnregistered`: `PPROF_ENABLED`, `DRAGONFLY_ENABLED`,
   `NATS_SHARED_ALLOW_TOKEN_FALLBACK` and `GF_USERS_ALLOW_SIGN_UP`. `GIN_MODE` is a
   framework value, not a switch.
 - Compose files other than the two above: the Control Plane's
   `docker-compose.production.yml`, `docker-compose.legacy-bridge.yml`,
-  `docker-compose.recovery.override.yml` and `docker-compose.shared-nats.yml`, and
-  `apps/Model Plane/deploy/docker-compose.production.yml`.
+  `docker-compose.recovery.override.yml` and `docker-compose.shared-nats.yml`. The Model Plane
+  overlays are read by the second ratchet for interpolated names only.
+- Convention names that an overlay sets with an interpolated default. The first ratchet reads only
+  the base Model Plane compose, and the second ratchet skips convention names, so an overlay's
+  declaration of one is not checked. Two are set today: `AGENTIC_SPACE_RETRIEVAL_ENABLED` in
+  `docker-compose.production.yml` repeats the base default on `model-gateway`, and
+  `BROWSER_BROKER_HUMAN_BROWSE_ENABLED` has the base default `true` on `browser-broker` while the
+  production overlay sets `0`. A row records one default, and invariant 3 refuses a second, so the
+  owner decides how an environment default is recorded.
+- Rust reads that the scan does not follow. Reads through `var_os` are followed, so the gateway's
+  `env_exact_true` and `dev_only_flag` callers are checked. Still missed: a read whose value passes
+  through a helper that returns it, such as `non_eu_tts_opted_in(env_nonempty(NON_EU_TTS_ENV).as_deref())`,
+  a reader taken as a function value and bound to a local, such as
+  `let on = mp_contracts::agentic_subscription::switch_value_is_on;` in model-gateway's `room_run.rs`,
+  and a compare written as a pattern, such as `matches!(raw, Some("true"))` or
+  `matches!(std::env::var(NAME).as_deref(), Ok("true"))`. A row whose reader has one of these shapes
+  has its `onLiteral` unchecked. Inference-core's `*_ZDR_CONFIRMED` reads are tri-state (`true`
+  asserts, the off words make no claim, any other value is refused). The scan does not classify them
+  as exact readers, and their rows (`AZURE_ANTHROPIC_ZDR_CONFIRMED`, `AZURE_OPENAI_ZDR_CONFIRMED`)
+  declare no `onLiteral`.
+- Rust closures that read the environment by a name the callee supplies, such as
+  `from_lookup(|name| env::var(name).ok())`, and the callee's own `lookup("NAME")` calls. The scan
+  reads neither, so an exact compare of such a name is not checked. Go's `lookup(NAME)` shape has
+  no Rust counterpart yet.
+- Go reads that the scan does not follow: a `switch getenv(NAME) { case "true": ... }` compare, and a
+  helper that takes the environment function as a parameter, such as browser-broker's
+  `boolEnv(getenv, NAME)`. That helper reads exactly `true`, so its row is right, but the scan does not
+  see the read. A row whose reader has one of these shapes has its `onLiteral` unchecked.
 - User and org settings (user-core `AISettings`, org entitlements). They need a typed
   value store before they can be registered.
 - Compose files of the Data, Ingestion and Application planes. Frontend build-time
@@ -173,9 +215,16 @@ release process. The registry records the change; it does not make it.
   reads the variable as `off`, while compose and the row default it to `strict`; the row
   cannot record that drift, because `codeDefault` applies only to compose flags.
 - Choice readers that the registry models as `exact` but that also read a padded or cased
-  off word as off: `false` for `TASK_EXECUTOR_ENABLED` and `off` for `CONTENT_WRITE_POLICY`.
+  off word as off: `false` for `TASK_EXECUTOR_ENABLED`, a padded `off` for `CONTENT_WRITE_POLICY`,
+  and a padded or cased `off` for `SESSION_RETENTION_SWEEP`.
   The registry refuses those spellings instead. The refusal is fail-closed, so a typed read
-  never turns on what the service keeps off.
+  never turns on what the service keeps off. `CONTENT_WRITE_POLICY` also reads any other set value
+  as `report`, which the typed read refuses too; its purpose says so.
+- Readers that no scanned compose file sets. A declaration is checked against the Control Plane, Model
+  Plane and BFF compose files only, so a reader whose service sets the variable in another compose file, or
+  in its own env file, has no declaration. Its purpose names it, and `codePath` names one reader file.
+  `ALLOW_INSECURE_DEV_DEFAULTS` is set by the Data Plane compose and read by autocomplete-core and
+  imports-core. `ISOLATED_E2E` is set by the Data Plane and Engagement test compose files.
 
 ## Commands
 

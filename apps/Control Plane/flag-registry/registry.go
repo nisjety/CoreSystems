@@ -1,8 +1,10 @@
 // Package flagregistry is the Control Plane's typed registry of feature flags and
 // config knobs. Each entry declares a flag once: its name, shape, default,
 // owning plane and where it is set. The registry does not read the environment
-// for services. Services keep their own parsers until they migrate, and
-// ParseSwitch is the canonical parser for new switches.
+// for services. Services keep their own parsers until they migrate. A new switch
+// is read as the exact literal "true" (OnLiteral "true"); ParseSwitch is the
+// canonical vocabulary for the switches that do not set OnLiteral or
+// OnLiteralAnyCase.
 package flagregistry
 
 import (
@@ -25,7 +27,8 @@ const maxPurposeRunes = 240
 type Kind string
 
 const (
-	// KindSwitch is a boolean, read with the canonical vocabulary (ParseSwitch).
+	// KindSwitch is a boolean. It is read as its OnLiteral or OnLiteralAnyCase when one is
+	// set, and otherwise with the canonical vocabulary (ParseSwitch).
 	KindSwitch Kind = "switch"
 	// KindChoice is one value from the closed set Values.
 	KindChoice Kind = "choice"

@@ -313,7 +313,7 @@ Without `run_context` the seed is exactly today's (test pins it). Execution-core
 **Steps (no code except the S5 tier alignment already landed):**
 1. Staging stack with an OpenAI or Azure deployment. Requests must **pin** `provider` to `openai`/`azure-openai`, otherwise the turn is `CacheRoute::Other` and the flags do nothing (`prompt_context.rs:64-67`).
 2. Baseline run, flags off: 3 threads x 8 turns, 2 Do runs per thread. Record the S2 view per provider/model.
-3. Set `MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER=1` (optionally `MODEL_GATEWAY_COMPACTION_TOKEN_BUDGET`, `MODEL_GATEWAY_DEDUP_CONTEXT_HISTORY`, one change per run), restart, repeat.
+3. Set `MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER=true` (optionally `MODEL_GATEWAY_COMPACTION_TOKEN_BUDGET`, `MODEL_GATEWAY_DEDUP_CONTEXT_HISTORY`, one change per run), restart, repeat.
 4. Eval parity: `cd "apps/Model Plane/python/eval-lab-py" && make selftest` (offline) and `make eval` live (`EVAL_LIVE=1`), flag off vs on, three reruns; no baseline or compaction case may flip pass to fail.
 5. Record the answer-quality effect (previously unmeasured) in the ledger.
 **Files:** `docs/decisions/ledger.md` entry; `deploy/docker-compose.yml:415-417` default only if the owner approves.

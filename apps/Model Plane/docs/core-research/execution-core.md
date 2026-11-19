@@ -221,7 +221,9 @@ retrieval so the post-filter runs as the real user. Caveat: in the **running**
 binary the bearer is *not* required and `knowledge_search` grounds on the
 `user_id`/`org_id` fields without a verified credential — so per-user isolation
 currently leans on Data Plane trusting those fields (tie-in to the Data Plane
-Phase 2 finding that `AUTHCTX_ENFORCE` is not yet flipped). The WIP closes this,
+Phase 2 finding on `AUTHCTX_ENFORCE`: the Data Plane compose sets
+`AUTHCTX_ENFORCE: "1"` on documents-api only, so `retrieval-engine`, which
+`knowledge_search` calls, has no such entry there). The WIP closes this,
 but only in a build that simultaneously removes the surface.
 
 ## Tool → backend wiring (from compose env, `[source-only]`)
@@ -239,6 +241,8 @@ but only in a build that simultaneously removes the surface.
 | mcp__* | model-gateway MCP registry (proxy) | `MODEL_GATEWAY_ADDR` → model-gateway:9090 |
 | Infer round | inference-core | `INFERENCE_CORE_ADDR/URL` → :9092 |
 | runs/approvals/checkpoints | session-core | `SESSION_CORE_ADDR` → :9091 |
+
+`QUARRY_BROWSER_AGENT_ENABLED` is read only as the exact literal `true`. Any other value leaves the browser agent off, and the browser tools then report it as unavailable. Execution-core logs a startup warning for `1`, `yes`, `on`, `enabled`, and `true` in another case or with surrounding spaces. A value outside that list, such as `y`, also reads as off but gets no warning, so the warning is not a full check. Before `compose up`, check this line in `deploy/.env` (the file `scripts/compose.sh` passes to compose) and in any other `--env-file` that the stack passes. The line must be absent, empty (compose then uses its default, `true`), or exactly `true`. Docker Compose lets a value exported in the shell override the file.
 
 Cross-plane targets use `host.docker.internal` published ports because exec-core
 sits only on `model-plane-network` (the documented fix for the earlier

@@ -26,9 +26,11 @@ var choiceReadPins = []choiceReadPin{
 	{"MCP_DO_TOOLS", ChoiceReadExact, "execution-core mcp_gateway.rs: from_raw matches read and all exactly"},
 	{"MODEL_ACTION_ADMISSION", ChoiceReadExact, "capability-core model_action_view.go (os.Getenv) and execution-core ticket_tools.rs and owner_reads.rs: the literal table, exactly"},
 	{"MODEL_GATEWAY_AI_CHAT_METERING", ChoiceReadExact, "model-gateway http_routes.rs: AiChatMetering::parse matches service and all exactly, with no trimming"},
+	{"MODEL_GATEWAY_ARTIFACT_REVISIONS", ChoiceReadExact, "model-gateway artifact_revisions.rs: ArtifactRevisionsMode::parse matches off, shadow and on exactly; unset and empty are off, and any other value refuses boot"},
 	{"MODEL_GATEWAY_REVIEW_PROPOSAL_RULE", ChoiceReadExact, "model-gateway review_proposal_rule.rs: recognise matches off and on exactly, with no folding or trimming"},
 	{"PROMOTE_ON_USE_SIGNAL", ChoiceReadExact, "execution-core promote_on_use.rs: the variable must equal cited exactly"},
-	{"SESSION_RETENTION_SWEEP", ChoiceReadExact, "session-core retention_sweeper.rs: mode_from matches enforce exactly and trims only to find off"},
+	{"RUN_ACTION_TARGETS", ChoiceReadExact, "user-core run_action_targets.go: RunActionTargetsModeFromLookup compares the raw value with table, exactly; anything else keeps tickets_only"},
+	{"SESSION_RETENTION_SWEEP", ChoiceReadExact, "session-core retention_sweeper.rs: mode_from matches enforce exactly and finds off after trimming and in any case"},
 	{"TASK_EXECUTOR_ENABLED", ChoiceReadExact, "capability-core cmd/main.go: taskExecutorEnabled matches true exactly; the service also reads a padded or cased false as off, which the typed read refuses"},
 	{"WORKSPACE_TOOLS", ChoiceReadExact, "execution-core workspace_tools.rs: parse_mode matches read and all exactly"},
 }

@@ -276,7 +276,7 @@ Commands used below (from the repo root unless stated):
 
 **Tests.** `profile_slot_is_context_tier_after_identity`, `no_profile_prompt_is_byte_identical`, `profile_skipped_for_space_zdr_waived_paused_thread_off` (table), `do_run_context_carries_profile_field_7`. Commands: `cargo test -q -p model-gateway --lib prompt_context run_context`, `-p execution-core --lib` for seeding.
 
-**Live proof.** Two consecutive Ask turns on an OpenAI-API route with `MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER=1` and the profile on: the WS02-S2 cache view shows cached input tokens covering the prefix through the profile on turn 2; then edit the profile and show one miss followed by hits. Anthropic proof waits for WS02-S9 (D1-450). Evidence `EP-8-S5.md`.
+**Live proof.** Two consecutive Ask turns on an OpenAI-API route with `MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER=true` and the profile on: the WS02-S2 cache view shows cached input tokens covering the prefix through the profile on turn 2; then edit the profile and show one miss followed by hits. Anthropic proof waits for WS02-S9 (D1-450). Evidence `EP-8-S5.md`.
 
 **Effort.** S. **Dependencies.** S4; WS02-S5/S6/S7 (done); WS02-S9 for the Anthropic benefit. **Risks.** D1-444: if the Context tier changes often, cache writes are paid every turn. The profile changes at most once per Dreaming cycle or edit; measure before the switch.
 
@@ -404,12 +404,12 @@ Contract changes:
 Order of switches (each flip only after its slice's live proof is in `docs/plans/wave3/evidence/`):
 
 1. S2 merged and live-proved (no switch). Then the lead may consider `GATEWAY_CHAT_PROJECTS_ENABLED`/`VITE_CHAT_PROJECTS_ENABLED` against the other WS18 rows (D2-460, D2-461, D2-769 are still P0; this epic does not clear them).
-2. `MODEL_GATEWAY_USER_LOCALE_CONTEXT=1` after the S1 Auckland proof.
-3. `MODEL_GATEWAY_TONE_PRESETS=1` and `TONE_PRESETS_VISIBLE=true` after S3's paired-answer proof.
-4. `SESSION_USER_PROFILE_ENABLED=1` after S4's proof and after the pre-S2 Space-row report (S4 risk) shows zero or the rows are rejected.
-5. `MODEL_GATEWAY_USER_PROFILE_PREFIX=1` after S5's cache proof on an OpenAI-API route; Anthropic after WS02-S9's staging proof.
+2. `MODEL_GATEWAY_USER_LOCALE_CONTEXT=true` after the S1 Auckland proof.
+3. `MODEL_GATEWAY_TONE_PRESETS=true` and `TONE_PRESETS_VISIBLE=true` after S3's paired-answer proof.
+4. `SESSION_USER_PROFILE_ENABLED=true` after S4's proof and after the pre-S2 Space-row report (S4 risk) shows zero or the rows are rejected.
+5. `MODEL_GATEWAY_USER_PROFILE_PREFIX=true` after S5's cache proof on an OpenAI-API route; Anthropic after WS02-S9's staging proof.
 6. `PERSONAL_SETUP_VISIBLE=true` after S8's first-login proof.
-7. `SESSION_SPACE_MEMORY_ENABLED=1` and `GATEWAY_SPACE_MEMORY_UI=true` only after D2-480, D2-481 and D2-461 are closed and S6/S7 proofs pass.
+7. `SESSION_SPACE_MEMORY_ENABLED=true` and `GATEWAY_SPACE_MEMORY_UI=true` only after D2-480, D2-481 and D2-461 are closed and S6/S7 proofs pass.
 8. `SESSION_AGENT_MEMORY_ENABLED` stays off in W3.
 
 Regression gates every slice runs: session-core DB harness full run (compare against `c18196af2`'s 1031 passed; diff failing sets, do not trust the exit code alone), `cargo test -q -p model-gateway --lib`, BFF all targets, `pnpm exec vitest run src/features/settings src/features/chat src/shared/actions`, `tsc6 -p tsconfig.app.json`, admission golden, ZDR contract sync, `buf lint` + `buf breaking` for S4-S7.

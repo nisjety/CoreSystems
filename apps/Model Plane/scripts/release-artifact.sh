@@ -1007,6 +1007,13 @@ validate_runtime_public_policy_files() {
     validate_evidence_sha256 AUTH_IDENTITY_EVIDENCE_SHA256 \
       "$(assignment_value "$gates_file" AUTH_IDENTITY_EVIDENCE_SHA256)"
   fi
+  # The legacy boolean is read exactly here: only the literal true or false passes. inference-core
+  # reads the empty value and the words 0, off and no (any case) as an explicit off, and it refuses
+  # TRUE, 1 and yes at boot. This gate refuses the explicit off spellings on purpose. That is the
+  # deliberate stricter choice: a signed release states its claim one way, and the restricted
+  # dotenv grammar already refuses padded values. Every value that passes reads the same way in
+  # inference-core (true asserts a claim, false makes none), so the gate never passes a value the
+  # service refuses. release-runtime-partition-test.sh pins both halves of this rule.
   [[ "$zdr" == "false" || "$zdr" == "true" ]] ||
     die "AZURE_OPENAI_ZDR_CONFIRMED must be true or false"
   today="$(date -u +%Y-%m-%d)"
@@ -1053,6 +1060,7 @@ validate_runtime_public_policy_files() {
     done
     validate_zdr_attestation "$policy_file" AZURE_OPENAI "$today"
   fi
+  # The same deliberate rule as AZURE_OPENAI_ZDR_CONFIRMED above: the literal true or false only.
   if grep -q '^AZURE_ANTHROPIC_ZDR_CONFIRMED=' "$policy_file"; then
     [[ "$(assignment_value "$policy_file" AZURE_ANTHROPIC_ZDR_CONFIRMED)" == "false" ||
       "$(assignment_value "$policy_file" AZURE_ANTHROPIC_ZDR_CONFIRMED)" == "true" ]] ||

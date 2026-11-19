@@ -33,7 +33,7 @@ A ZDR run never gets the planner. An org that switched the planner off never get
 When the planner is selected but no inference credential can be built, the run fails
 with `browser planner unavailable: ...`; it never falls back to the deterministic loop.
 
-The legacy variable `QUARRY_BROWSER_AGENT_LLM=1` still selects the planner for every
+The legacy variable `QUARRY_BROWSER_AGENT_LLM=true` still selects the planner for every
 org (after the ZDR and org-off rules) and logs one deprecation warning per process.
 It is removed at stage 4.
 

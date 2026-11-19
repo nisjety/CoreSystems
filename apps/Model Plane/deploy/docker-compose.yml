@@ -231,8 +231,8 @@ services:
       # Only the exact literal `true` turns it on: `1`, `yes` and `on` leave it OFF. A rollout control,
       # never an authorization input.
       SPACE_HUMAN_POSTS_API: ${SPACE_HUMAN_POSTS_API:-0}
-      # Edit, delete and target routes for one message (WS12-S6). Off unless an explicit on-word;
-      # a rollout control, never an authorization input. Session Core has its own CORE switch.
+      # Edit, delete and target routes for one message (WS12-S6). A rollout control, never an authorization input.
+      # Session Core has its own CORE switch.
       # Only the exact literal `true` turns it on: `1`, `yes` and `on` leave it OFF.
       SPACE_MESSAGE_REVISE_API: ${SPACE_MESSAGE_REVISE_API:-0}
       # Mentions on posts and the addressed-wake invoke mode (WS08-S3). Rollout controls, never
@@ -1260,7 +1260,9 @@ services:
       # Durable loop fold store (WS03 S4). Off by default: a loop keeps its fold in
       # memory and a pause cannot be resumed from the store. Sealed under the key above.
       # Space decision ZDR flag on the legacy owner create/append paths (WS06-S2). `observe`
-      # counts and proceeds; only the exact value `enforce` refuses typed. Never an authorization input.
+      # counts and proceeds; only the word `enforce` refuses typed, read trimmed and case-folded (so
+      # `ENFORCE` also refuses). This is a deliberate exception to the exact-literal rule. Never an
+      # authorization input.
       SESSION_CORE_SPACE_ZDR: ${SESSION_CORE_SPACE_ZDR:-observe}
       # Space event log (WS02-S1): the migration-0072 triggers write ids-and-kinds rows only
       # while this is the exact literal `true`. On here for dev; docker-compose.production.yml and
@@ -1872,8 +1874,10 @@ services:
       # input. The Control token is a service credential for tool-gate-view,
       # approval-grants/use and approval-continuation-check; blank means the gate runs
       # without Control (the once-token still works, per-tool levels and standing rules do not).
-      # Deliberate dev behaviour: this dev compose enforces by default. The code default is off, and the
-      # production and release files set it to off.
+      # The dev enforce default is the one the WS10 plan records (.plan-work/design/WS10.md: "prod off, dev
+      # enforce"; the WS10-S3 build ledger says the same). The code default is off, and the production and
+      # release files set it to off. The owner has not confirmed the dev enforce default against the
+      # default-off rule, so it stays an open owner decision; this comment is not that confirmation.
       EXECUTION_CORE_SPACE_APPROVAL_GATE: ${EXECUTION_CORE_SPACE_APPROVAL_GATE:-enforce}
       # Quarantine-and-release of flagged tool output (WS10-S8): dev counts and logs only; a Space
       # must also set its own quarantine_mode in Control before anything is held.

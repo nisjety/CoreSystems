@@ -449,6 +449,8 @@ services:
             DRAGONFLY_PASSWORD: ${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set in Control Plane .env}
             # G26: silence gin's debug-mode banner + enable release-mode perf paths.
             GIN_MODE: release
+            # RUN_ACTION_TARGETS: the owner actions a Model may be offered. tickets_only (default) or table, exactly.
+            RUN_ACTION_TARGETS: ${RUN_ACTION_TARGETS:-tickets_only}
             # Single-source the DB password from ${DB_PASSWORD} in .env (see org-core).
             # user-core needs both its own DB and a secondary auth_service connection.
             DATABASE_URL: postgres://${DB_USER:-coresystem}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/user_service?sslmode=disable
