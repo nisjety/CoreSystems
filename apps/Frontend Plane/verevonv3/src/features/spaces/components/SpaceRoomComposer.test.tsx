@@ -12,6 +12,8 @@ import { createSpaceSendJournal, type SpaceSendJournal } from '../lib/space-send
 import { applyServerRetention, __resetRetentionForTests } from '@/features/chat/lib/chat-retention'
 import { HOME_DRAFT_DEBOUNCE_MS } from '@/features/dashboard/home/home-draft'
 import { clearSpaceRoomFeatures, publishSpaceRoomFeatures } from '../lib/space-room-features'
+import { spaceWakeBoard } from '../lib/wake-sequencer'
+import { setCommandPaletteFeature, setMessageSearchOpener } from '@/features/command/command-registry'
 
 const chatClient = vi.hoisted(() => ({
   streamChat: vi.fn(),
@@ -59,6 +61,12 @@ vi.mock('@/shared/api/space-run-live-client', async (importOriginal) => ({
 }))
 const skillsClient = vi.hoisted(() => ({ listAvailableSkills: vi.fn(), MAX_PICKED_SKILLS: 4 }))
 vi.mock('@/shared/api/skills-client', () => skillsClient)
+// WS13-S7: `/read` runs the shared mark-read action; the action itself is faked, the composer's part is tested.
+const paletteProviders = vi.hoisted(() => ({ runPaletteAction: vi.fn() }))
+vi.mock('@/features/command/palette-providers', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/features/command/palette-providers')>(),
+  ...paletteProviders,
+}))
 vi.mock('@/features/chat/components/ChatMessages', () => ({
   ChatMarkdown: (props: { content: string }) => <p>{props.content}</p>,
   // The mid-run strip (WS09-S2). A stand-in that shows each entry's words, state and note: the chat's
@@ -644,8 +652,14 @@ describe('SpaceRoomComposer — `/` picks a skill (later tier)', () => {
   ]
 
   beforeEach(() => {
+    // The platform commands (WS13-S7) have their own describe; here the list is the skills alone.
+    setCommandPaletteFeature(false)
     skillsClient.listAvailableSkills.mockReset()
     skillsClient.listAvailableSkills.mockResolvedValue(catalogue)
+  })
+
+  afterEach(() => {
+    setCommandPaletteFeature(undefined)
   })
 
   const textarea = () => screen.getByPlaceholderText(/velger en ferdighet/) as HTMLTextAreaElement
@@ -658,7 +672,7 @@ describe('SpaceRoomComposer — `/` picks a skill (later tier)', () => {
     flush()
     expect(skillsClient.listAvailableSkills).toHaveBeenCalledTimes(1)
 
-    // The platform commands list first (WS13-S7); the skills follow once their catalogue has loaded.
+    // The skills follow once their catalogue has loaded (the commands are off in this describe).
     await screen.findByRole('option', { name: /HMS-runde/ })
     const labels = screen.getAllByRole('option').map((option) => option.textContent ?? '')
     expect(labels).toEqual(
@@ -1021,9 +1035,7 @@ describe('SpaceRoomComposer — human posts (WS01-S6)', () => {
     })
 
     // WS12-S3: a direct message is people only, so the page passes canAsk false.
-    // DEPTH-GW1-2: SpaceRoomComposer.tsx:259 calls createEffect with one function (WS08-S6), which Solid 2
-    // rejects (MISSING_EFFECT_FN); the composer cannot mount, so this file's cases cannot run yet.
-    it.skip('offers Send only, with no mode switch, when canAsk is false (a direct message)', async () => {
+    it('offers Send only, with no mode switch, when canAsk is false (a direct message)', async () => {
       renderPosts({ canAsk: false })
       expect(screen.queryByRole('radio', { name: 'Spør Verevon' })).toBeNull()
       expect(screen.queryByRole('button', { name: 'Spør Verevon' })).toBeNull()
@@ -1034,9 +1046,8 @@ describe('SpaceRoomComposer — human posts (WS01-S6)', () => {
       expect(chatClient.streamChat).not.toHaveBeenCalled()
     })
 
-    // DEPTH-GW1-2: SpaceRoomComposer.tsx:259 calls createEffect with one function (WS08-S6), which Solid 2
-    // rejects (MISSING_EFFECT_FN); the composer cannot mount, so this file's cases cannot run yet.
-    it.skip('a default of ask cannot bring Ask back when canAsk is false', () => {
+    // WS12-S3: a default of ask must not bring Ask back in a direct message.
+    it('a default of ask cannot bring Ask back when canAsk is false', () => {
       renderPosts({ canAsk: false, defaultSendMode: 'ask' })
       expect(screen.queryByRole('button', { name: 'Spør Verevon' })).toBeNull()
       expect(screen.getByRole('button', { name: 'Send' })).toBeTruthy()
@@ -2301,5 +2312,82 @@ describe('SpaceRoomComposer — personal memory for one room turn (WS17-S8)', ()
     await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(2))
     expect((chatClient.streamChat.mock.calls[1]?.[0] as { usePersonalMemory?: unknown }).usePersonalMemory).toBeUndefined()
     second.finish()
+  })
+})
+
+// WS13-S7: platform slash commands. A command runs locally on Enter, clears its `/token`, sends nothing and
+// reports through one status line. The shared mark-read action it runs is faked; the composer's part is tested.
+describe('SpaceRoomComposer — platform commands (WS13-S7)', () => {
+  const textarea = () => screen.getByPlaceholderText(/velger en ferdighet/) as HTMLTextAreaElement
+  let disposeOpener: (() => void) | undefined
+
+  beforeEach(() => {
+    setCommandPaletteFeature(true)
+    skillsClient.listAvailableSkills.mockReset()
+    skillsClient.listAvailableSkills.mockResolvedValue([
+      { id: 'sk-hms', name: 'HMS-runde', description: '', enabled: true, scope: 'org' },
+    ])
+    paletteProviders.runPaletteAction.mockReset()
+    paletteProviders.runPaletteAction.mockResolvedValue('done')
+  })
+
+  afterEach(() => {
+    cleanup()
+    disposeOpener?.()
+    disposeOpener = undefined
+    setCommandPaletteFeature(undefined)
+  })
+
+  it('a command picked from the list runs locally: the box is cleared, nothing is sent, and one status line says so', async () => {
+    renderComposer()
+    fireEvent.input(textarea(), { target: { value: '/read' } })
+    flush()
+    fireEvent.click(await screen.findByRole('option', { name: /Merk rommet som lest/ }))
+    flush()
+
+    const status = await screen.findByText('Rommet er merket som lest.')
+    expect(status.closest('[role="status"]')).toBeTruthy()
+    expect(paletteProviders.runPaletteAction).toHaveBeenCalledWith('spaces.mark_read', { spaceRef: 'room-1' })
+    expect(textarea().value).toBe('')
+    expect(chatClient.streamChat).not.toHaveBeenCalled()
+  })
+
+  it('/search with words opens message search with them on Enter, and posts nothing', async () => {
+    const opener = vi.fn()
+    disposeOpener = setMessageSearchOpener(opener)
+    renderComposer()
+    fireEvent.input(textarea(), { target: { value: '/search kvartals' } })
+    flush()
+    fireEvent.keyDown(textarea(), { key: 'Enter' })
+    flush()
+
+    await waitFor(() => expect(opener).toHaveBeenCalledWith('kvartals'))
+    expect(textarea().value).toBe('')
+    expect(chatClient.streamChat).not.toHaveBeenCalled()
+  })
+
+  it('a /word that names no command is sent as an ordinary message', async () => {
+    const stream = scriptedStream()
+    renderComposer()
+    await send('/redo')
+    expect(chatClient.streamChat.mock.calls[0]?.[0]).toMatchObject({ content: '/redo' })
+    expect(paletteProviders.runPaletteAction).not.toHaveBeenCalled()
+    stream.finish()
+  })
+
+  it('the commands are listed above the skills, each with a Command badge', async () => {
+    renderComposer()
+    fireEvent.input(textarea(), { target: { value: '/' } })
+    flush()
+    await screen.findByRole('option', { name: /HMS-runde/ })
+
+    const options = screen.getAllByRole('option')
+    const labels = options.map((option) => option.textContent ?? '')
+    expect(labels[0]).toContain('/read')
+    expect(within(options[0] as HTMLElement).getByText('Kommando')).toBeTruthy()
+    const lastCommand = labels.reduce((last, label, index) => (label.includes('Kommando') ? index : last), -1)
+    const firstSkill = labels.findIndex((label) => label.includes('HMS-runde'))
+    expect(lastCommand).toBeGreaterThanOrEqual(0)
+    expect(lastCommand).toBeLessThan(firstSkill)
   })
 })
