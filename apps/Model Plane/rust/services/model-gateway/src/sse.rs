@@ -4567,6 +4567,7 @@ pub async fn invoke_stream_sse(
             min_privacy_tier: min_privacy_tier_wire,
             inference_bearer: &inference_bearer,
             token_budget: cache_options.compaction_token_budget,
+            recalls_room_memory: wake_window.recalls_room_memory(),
         },
         wake_history.as_ref(),
     )
@@ -4686,14 +4687,24 @@ pub async fn invoke_stream_sse(
             }
         };
         let ((memory_entries, recall_status), profile_read) = tokio::join!(
-            fetch_chat_memory_context(
-                &state,
-                &org_id,
-                &session_run.thread_id,
-                &user_content,
-                &model_bearer,
-                &mut memory_skip_reason,
-            ),
+            async {
+                // D18: a wake under the member's history window recalls none of the room's memory or the
+                // thread's notes (`WakeWindow::recalls_room_memory`): no read, no rows and no recall frame. The
+                // skip it records leaves the standing profile out with them.
+                if !wake_window.recalls_room_memory() {
+                    memory_skip_reason = Some(crate::space_sse::HISTORY_WINDOW_MEMORY_SKIP.to_owned());
+                    return (Vec::new(), None);
+                }
+                fetch_chat_memory_context(
+                    &state,
+                    &org_id,
+                    &session_run.thread_id,
+                    &user_content,
+                    &model_bearer,
+                    &mut memory_skip_reason,
+                )
+                .await
+            },
             profile_read
         );
         let memory_entries = crate::space_sse::with_personal_memory_turn(&state, &org_id, &session_run.thread_id, &user_content, &model_bearer, req.space_context.as_ref(), memory_entries).await;
@@ -5163,6 +5174,8 @@ pub async fn invoke_stream_sse(
         // is the whole thread with no window, so it would hand the model turns from before the member's
         // window. Not offered, a call to it is refused at dispatch as not available.
         crate::space_sse::withhold_thread_reattach(&mut defs, wake_window);
+        // D18: nor `recall_memory`, whose search returns the room's memory and the thread's notes with no window.
+        crate::space_sse::withhold_memory_recall(&mut defs, wake_window);
         // MCP tools are intentionally not advertised in the inline loop. They
         // are effectful remote capabilities and must be routed through the
         // execution-core policy/HITL path; dispatch_tool also denies forged
@@ -9111,6 +9124,9 @@ struct SummarizerContext<'a> {
     /// count, and reuse a persisted summary (`prompt_context::CacheOptions`).
     /// `None` keeps the 24/23 message-count compaction.
     token_budget: Option<usize>,
+    /// D18: whether the compaction's memory hint may search the room's memory; false under a member's
+    /// history window (`space_sse::WakeWindow::recalls_room_memory`).
+    recalls_room_memory: bool,
 }
 
 /// The loaded thread, and a compaction summary written for it this turn.
@@ -9730,7 +9746,7 @@ async fn summarize_head(
     // `on_pre_compress`: let memory flag what the summarizer must not drop
     // before the head is destroyed. Best-effort — an empty directive
     // yields exactly the pre-hook prompt.
-    let memory_directive = if summarizer.conversation_only {
+    let memory_directive = if summarizer.conversation_only || !summarizer.recalls_room_memory {
         String::new()
     } else {
         fetch_compaction_memory_directive(state, org_id, thread_id, transcript, bearer).await

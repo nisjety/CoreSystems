@@ -516,6 +516,17 @@ impl WakeWindow {
         matches!(self, Self::Open)
     }
 
+    /// Whether a turn read under this window recalls the room's memory: the room's memory rows and the
+    /// thread's agent notes, which are derived from the room's turns and posts, from before the window too.
+    /// The memory prefetch, the compaction's memory hint and the `recall_memory` tool read them through
+    /// `SearchMemory`, which knows no window (the context assembly already leaves them out under one). So
+    /// only a read with no window recalls them. The member's own personal-memory grant for the turn
+    /// (`with_personal_memory_turn`) is not room history and is kept.
+    #[must_use]
+    pub(crate) fn recalls_room_memory(self) -> bool {
+        matches!(self, Self::Open)
+    }
+
     /// The native compaction checkpoint a turn under this window persists with its answer: the one the
     /// provider returned, and none under a window (see [`Self::keeps_summaries`]).
     #[must_use]
@@ -539,6 +550,23 @@ pub(crate) fn withhold_thread_reattach(
         defs.retain(|def| def.name != "reattach_context");
     }
 }
+
+/// Takes `recall_memory` out of a turn's tools when its window does not allow it
+/// ([`WakeWindow::recalls_room_memory`]): the gateway offers it only as a caller's tool. Not offered, a
+/// call to it is refused at dispatch as not available. With no window the list is left exactly as it was.
+pub(crate) fn withhold_memory_recall(
+    defs: &mut Vec<mp_contracts::model_plane::v1::ToolDefinition>,
+    window: WakeWindow,
+) {
+    if !window.recalls_room_memory() {
+        defs.retain(|def| def.name != "recall_memory");
+    }
+}
+
+/// The memory skip a turn under a history window records instead of searching
+/// ([`WakeWindow::recalls_room_memory`]). The standing profile follows the turn's memory decision
+/// (`run_context::decide_profile`), so it is left out with the memory.
+pub(crate) const HISTORY_WINDOW_MEMORY_SKIP: &str = "history_window";
 
 /// What a wake needs from the history read: the persisted trigger, whether the newest room
 /// posts are read as fenced context (`SPACE_WAKE_ROOM_CONTEXT`), and the member's history window.
@@ -1490,6 +1518,46 @@ mod tests {
         assert!(WakeWindow::Open.allows_do_run());
         assert!(!WakeWindow::Since(at("2026-11-18T09:30:00Z")).allows_do_run());
         assert!(!WakeWindow::Unreadable.allows_do_run());
+    }
+
+    /// The room's memory and the thread's notes are derived from turns before the window too, and `SearchMemory`
+    /// knows no window. So a wake under a window, readable or not, recalls none: `recall_memory` is not offered,
+    /// whoever declared it, and the skip the prefetch records leaves the standing profile out with the memory. With
+    /// no window the tool list is untouched.
+    #[test]
+    fn a_wake_under_a_window_recalls_no_room_memory() {
+        use crate::run_context::{decide_profile, ProfileReads};
+        use mp_contracts::model_plane::v1::ToolDefinition;
+        let tools = || {
+            ["count_words", "recall_memory", "reattach_context"]
+                .into_iter()
+                .map(|name| ToolDefinition { name: name.to_owned(), ..ToolDefinition::default() })
+                .collect::<Vec<_>>()
+        };
+        let names = |defs: &[ToolDefinition]| defs.iter().map(|def| def.name.clone()).collect::<Vec<_>>();
+
+        let mut open = tools();
+        withhold_memory_recall(&mut open, WakeWindow::Open);
+        assert_eq!(names(&open), ["count_words", "recall_memory", "reattach_context"]);
+        assert!(WakeWindow::Open.recalls_room_memory());
+
+        for window in [WakeWindow::Since(at("2026-11-18T09:30:00Z")), WakeWindow::Unreadable] {
+            assert!(!window.recalls_room_memory(), "{window:?}");
+            let mut defs = tools();
+            withhold_memory_recall(&mut defs, window);
+            assert_eq!(names(&defs), ["count_words", "reattach_context"], "{window:?}");
+        }
+
+        let profile = |memory_skip_reason| {
+            decide_profile(&ProfileReads {
+                memory_skip_reason,
+                profile: Some(("", "the member's standing profile")),
+                ..ProfileReads::default()
+            })
+            .outcome()
+        };
+        assert_eq!(profile(Some("")), "injected", "a turn whose memory is used");
+        assert_eq!(profile(Some(HISTORY_WINDOW_MEMORY_SKIP)), "skipped_memory");
     }
 
     // A turn inside the member's window can carry a summary persisted over turns before it: the head summary an

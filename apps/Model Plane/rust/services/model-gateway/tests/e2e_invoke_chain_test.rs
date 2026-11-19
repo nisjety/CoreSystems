@@ -6756,6 +6756,138 @@ async fn a_do_wake_under_a_history_window_is_refused_before_any_run_exists() {
     }
 }
 
+/// The room memory row the memory service answers every search with in [`memory_wake`]: derived from the room's
+/// turns, from before the member's window too.
+const ROOM_MEMORY: &str = "ROOM MEMORY: the layoff plan Nina posted before the window";
+
+/// What one [`memory_wake`] showed inference and asked of the memory service.
+struct MemoryWake {
+    body: String,
+    /// Every prompt inference was given: the compaction summary, the tool round and the answer.
+    prompts: Vec<Vec<(String, String)>>,
+    /// The tool names each unary `infer` offered.
+    offered: Vec<Vec<String>>,
+    /// Every `SearchMemory` the gateway sent.
+    searches: Vec<mpv1::SearchMemoryRequest>,
+}
+
+/// One wake of a room thread with two turns before the floor and thirty after it, enough for the history read to
+/// compact the turns it loads, whose memory service answers every search with [`ROOM_MEMORY`]. The caller declares
+/// `recall_memory`, and the decision's token carries `history_floor_at` (or no window).
+async fn memory_wake(history_floor_at: Option<&str>) -> MemoryWake {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let _wake_api = WakeApiOn::set();
+    let prompts: CapturedMessages = Arc::new(Mutex::new(Vec::new()));
+    let offers: CapturedOffers = Arc::new(Mutex::new(Vec::new()));
+    let client = spawn_mock(MockOk {
+        captured_messages: Some(prompts.clone()),
+        captured_offers: Some(offers.clone()),
+        ..MockOk::default()
+    })
+    .await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    let floor = chrono::DateTime::parse_from_rfc3339("2026-11-18T09:30:00Z")
+        .expect("test instant")
+        .timestamp();
+    let turn = |id: String, role: &str, content: String, seconds: i64| SessionMessage {
+        message_id: id,
+        role: role.to_owned(),
+        post_kind: "turn".to_owned(),
+        content,
+        created_at: Some(prost_types::Timestamp { seconds, nanos: 0 }),
+        ..Default::default()
+    };
+    let mut thread = vec![
+        turn("m-pre-1".into(), "user", "PRE-WINDOW question about the layoff plan".into(), floor - 3_600),
+        turn("m-pre-2".into(), "assistant", "PRE-WINDOW answer quoting what Nina posted".into(), floor - 3_595),
+    ];
+    thread.extend((0..30_i64).map(|index| {
+        let role = if index % 2 == 0 { "user" } else { "assistant" };
+        turn(
+            format!("m-in-{index}"),
+            role,
+            format!("IN-WINDOW turn {index} about the offsite"),
+            floor + 60 * (index + 1),
+        )
+    }));
+    *session_handles.conversation_messages.lock().unwrap() = Some(thread);
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, _publisher) = make_state(client, session_client).await;
+    let searches = Arc::new(Mutex::new(Vec::new()));
+    state.memory_client = spawn_memory_mock(vec![ROOM_MEMORY.to_owned()], searches.clone()).await;
+    let (app, _delegated_jwks) =
+        authenticated_user_router(build_router(state, None), "org_placeholder", "user_placeholder").await;
+    let extra = serde_json::json!({
+        "features": ["tools", "memory"],
+        "tools": [{
+            "name": "recall_memory",
+            "description": "Recall what this room remembers",
+            "parameters_json": "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}}}"
+        }]
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(wake_body(MEMORY_WAKE_POST, history_floor_at, extra)))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    let offered = offers.lock().unwrap().iter().map(|(_, tools, _)| tools.clone()).collect();
+    let prompts = prompts.lock().unwrap().clone();
+    let searches = searches.lock().unwrap().clone();
+    MemoryWake { body, prompts, offered, searches }
+}
+
+/// The stored post a [`memory_wake`] answers.
+const MEMORY_WAKE_POST: &str = "@agent what did we decide about the offsite?";
+
+/// D18: the room's memory rows and the thread's agent notes are derived from the room's turns, from before the
+/// member's window too, and `SearchMemory` knows no window. A wake under a window, readable or not, makes no search:
+/// no memory prefetch, no memory hint for the compaction of its history, no row in the prompt, no recall frame, and
+/// the caller's `recall_memory` is not offered. With no window every one of them is as before.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_wake_under_a_history_window_recalls_no_room_memory() {
+    let shows_memory = |wake: &MemoryWake| {
+        wake.prompts.iter().flatten().any(|(_, content)| content.contains(ROOM_MEMORY))
+    };
+    let offers_recall = |wake: &MemoryWake| {
+        wake.offered.iter().any(|tools| tools.iter().any(|name| name == "recall_memory"))
+    };
+    let queries = |wake: &MemoryWake| wake.searches.iter().map(|search| search.query.clone()).collect::<Vec<_>>();
+
+    let open = memory_wake(None).await;
+    assert!(open.body.contains("event: done"), "{}", open.body);
+    assert!(
+        open.searches.iter().any(|search| search.query == MEMORY_WAKE_POST),
+        "the prefetch: {:?}",
+        queries(&open)
+    );
+    assert!(
+        open.searches.iter().any(|search| search.query != MEMORY_WAKE_POST),
+        "the compaction's memory hint, queried with the head it compacts: {:?}",
+        queries(&open)
+    );
+    assert!(shows_memory(&open), "{:?}", open.prompts);
+    assert!(open.body.contains("event: memory_recall"), "{}", open.body);
+    assert!(offers_recall(&open), "{:?}", open.offered);
+
+    for floor in ["2026-11-18T09:30:00Z", "not an instant"] {
+        let windowed = memory_wake(Some(floor)).await;
+        assert!(windowed.body.contains("event: done"), "{floor}: {}", windowed.body);
+        assert!(windowed.searches.is_empty(), "{floor}: {:?}", queries(&windowed));
+        assert!(!shows_memory(&windowed), "{floor}: {:?}", windowed.prompts);
+        assert!(!windowed.body.contains("event: memory_recall"), "{floor}: {}", windowed.body);
+        assert!(!windowed.offered.is_empty(), "{floor}: the tool round still runs");
+        assert!(!offers_recall(&windowed), "{floor}: {:?}", windowed.offered);
+    }
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_search_turn_keeps_prior_user_name_context() {
