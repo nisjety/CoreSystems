@@ -1,8 +1,10 @@
 import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
 import { ChatGptSubscriptionPanel } from '@/features/integrations/components/ChatGptSubscriptionPanel'
 import { MailTaskAddressSection } from '@/features/settings/components/MailTaskAddressSection'
+import { MemorySection } from '@/features/settings/components/MemorySection'
 import { NotificationChannelsSection } from '@/features/settings/components/NotificationChannelsSection'
 import { PasskeySecuritySection } from '@/features/settings/components/PasskeySecuritySection'
+import { PersonalAgentsSection } from '@/features/settings/components/PersonalAgentsSection'
 import { PrivacyDataSection } from '@/features/settings/components/PrivacyDataSection'
 import { SpaceNotificationPreferences } from '@/features/settings/components/SpaceNotificationPreferences'
 import { SpaceStatusMenu } from '@/features/spaces/components/SpaceStatusMenu'
@@ -25,7 +27,9 @@ import {
   type UserPreferences,
   type UserProfile,
 } from '@/shared/api/settings-client'
+import { getPersonalAgentsFeature } from '@/shared/api/spaces-client'
 import { useI18n, translateApiError } from '@/shared/i18n'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { languageFromLocale, localeFromLanguage } from '@/shared/preferences/locale-map'
 import { receivePreferences } from '@/shared/preferences/preferences-store'
 import { getSession } from '@/shared/session/session-store'
@@ -286,6 +290,8 @@ export default function AccountSettingsPage() {
       <MailTaskAddressSection />
       <PrivacySection />
       <PrivacyDataSection />
+      <AccountPersonalAgentsSection />
+      <AccountMemorySection />
       <SettingsSaveActions
         description={actionDescription()}
         saveLabel={loadState().type === 'saving' ? i18n.tr('Lagrer …', 'Saving...') : i18n.tr('Lagre profil', 'Save profile')}
@@ -620,6 +626,36 @@ function ChatGptSubscriptionSection() {
         )}
       />
       <ChatGptSubscriptionPanel orgId={orgId()} />
+    </section>
+  )
+}
+
+/**
+ * The caller's own personal agents (WS17-S5), on the page every member can open. The same section is also in workspace
+ * Settings, but that route is admin-only, so an ordinary member would never reach it: creating an agent, choosing the
+ * primary one and editing who may see an agent are the member's own business. Hidden, with no empty gap, while the
+ * gateway does not report `features.personal_agents`.
+ */
+function AccountPersonalAgentsSection() {
+  const [featureOn] = createResource(() => getPersonalAgentsFeature())
+  return (
+    <Show when={featureOn() === true}>
+      <section id="personal-agents" class="verevon-settings-section">
+        <PersonalAgentsSection />
+      </section>
+    </Show>
+  )
+}
+
+/**
+ * What Verevon remembers about the signed-in person (EP08, WS17-S7), on the page every member can open: reading and
+ * deleting memories, sharing one to a room, taking it back and restoring a withheld note are the member's own memory,
+ * not a workspace setting. The same section is in workspace Settings for an administrator.
+ */
+function AccountMemorySection() {
+  return (
+    <section id="memory" class="verevon-settings-section">
+      <MemorySection />
     </section>
   )
 }

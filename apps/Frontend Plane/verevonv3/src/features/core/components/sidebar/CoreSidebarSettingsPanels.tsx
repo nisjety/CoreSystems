@@ -46,6 +46,10 @@ const accountSidebarSections: SettingsLinkSection[] = [
   { id: 'availability', label: 'Availability', icon: CheckCircle2, href: '#availability' },
   { id: 'connected-accounts', label: 'Connected accounts', icon: Plug, href: '#connected-accounts' },
   { id: 'privacy', label: 'Privacy', icon: Globe2, href: '#privacy' },
+  // Both are the member's own (WS17), so they sit on the account page, which every member can open; the workspace
+  // Settings route is admin-only. They follow the privacy sections on the page, so the scroll marker keeps its order.
+  { id: 'personal-agents', label: 'Personal agents', icon: Bot, href: '#personal-agents' },
+  { id: 'memory', label: 'Memory', icon: Brain, href: '#memory' },
 ]
 
 const settingsSidebarSections: SettingsLinkSection[] = [
@@ -77,6 +81,8 @@ const defaultSettingsSectionId = settingsSidebarSections[0]!.id
 export function AccountExpandedSidebarPanel(props: { onCollapse: () => void }) {
   const i18n = useI18n()
   const activeSectionId = useActiveAccountSection()
+  // Personal agents are listed only while the gateway reports them on (WS17-S5), as in the settings list below.
+  const [personalAgents] = createResource(() => getPersonalAgentsFeature())
 
   return (
     <div class="core-sidebar-dedicated-panel">
@@ -86,7 +92,9 @@ export function AccountExpandedSidebarPanel(props: { onCollapse: () => void }) {
 
       <SettingsSectionLinks
         ariaLabel={i18n.tr('Kontoseksjoner', 'Account sections')}
-        sections={localizedAccountSections(i18n)}
+        sections={localizedAccountSections(i18n).filter(
+          (section) => section.id !== 'personal-agents' || personalAgents() === true,
+        )}
         activeSectionId={activeSectionId()}
       />
     </div>
@@ -283,6 +291,10 @@ function accountSectionLabel(id: string, fallback: string, i18n: ReturnType<type
       return i18n.tr('Tilkoblede kontoer', 'Connected accounts')
     case 'privacy':
       return i18n.tr('Personvern', 'Privacy')
+    case 'personal-agents':
+      return i18n.tr('Personlige agenter', 'Personal agents')
+    case 'memory':
+      return i18n.tr('Minne', 'Memory')
     default:
       return fallback
   }

@@ -1073,6 +1073,43 @@ describe('settings sidebars', () => {
     expect(within(accountNav).getByRole('link', { name: /^personvern$/i }).getAttribute('href')).toBe('#privacy')
   })
 
+  // WS17: the person's own agents and memory are on the account page, which every member can open (the workspace
+  // Settings route is admin-only), so the account sidebar links to them. Personal agents follow the gateway's switch.
+  it.each([
+    [true, true],
+    [false, false],
+  ])('lists memory, and personal agents only while the gateway reports them (reported: %s), in the account sidebar', async (reported, listed) => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => (
+      String(input) === '/api/v1/spaces/features'
+        ? new Response(JSON.stringify({ data: { features: { personal_agents: reported } } }), {
+            headers: { 'Content-Type': 'application/json' },
+            status: 200,
+          })
+        : new Response(JSON.stringify({}), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+    )))
+    renderWithRouter(() => (
+      <CoreSidebar
+        activeRoute="/account"
+        expanded
+        onExpandedChange={vi.fn()}
+        onOpenSearch={vi.fn()}
+      />
+    ), '/account')
+
+    const accountNav = screen.getByRole('navigation', { name: /kontoseksjoner/i })
+    expect(within(accountNav).getByRole('link', { name: /^minne$/i }).getAttribute('href')).toBe('#memory')
+    const agentsLink = () => within(accountNav).queryByRole('link', { name: /^personlige agenter$/i })
+    if (listed) {
+      await waitFor(() => expect(agentsLink()).not.toBeNull())
+      expect(agentsLink()?.getAttribute('href')).toBe('#personal-agents')
+    } else {
+      // Let the probe answer, then check nothing was added.
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      flush()
+      expect(agentsLink()).toBeNull()
+    }
+  })
+
   it('renders workspace settings routes in the settings sidebar', () => {
     renderWithRouter(() => (
       <CoreSidebar
