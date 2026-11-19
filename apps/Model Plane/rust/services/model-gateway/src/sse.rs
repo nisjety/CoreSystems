@@ -135,7 +135,7 @@ fn do_attachments_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
 /// attaches to `space_append_context` (WS18-S2). Opt-in: only the literal `true` enables it. Off, a
 /// follow-up reads no retrieval decision and keeps today's unscoped retrieval. The BFF's own switch
 /// cannot stand in for this one, because an absent token and an empty one both decode to "".
-const SPACE_APPEND_RETRIEVAL_VAR: &str = "MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL";
+pub(crate) const SPACE_APPEND_RETRIEVAL_VAR: &str = "MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL";
 
 fn space_append_retrieval_enabled() -> bool {
     space_append_retrieval_enabled_with(&|key| std::env::var(key).ok())
@@ -151,7 +151,7 @@ fn space_append_retrieval_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> 
 /// run carries the Space retrieval header at all, and the knowledge receipt that follows it. It does not
 /// decide the inline loop's refusal of the organisation-wide document inventory, which reads
 /// `OWNER_LIST_SPACE_REFUSE` (C-05).
-const SPACE_AGENTIC_RETRIEVAL_VAR: &str = "AGENTIC_SPACE_RETRIEVAL_ENABLED";
+pub(crate) const SPACE_AGENTIC_RETRIEVAL_VAR: &str = "AGENTIC_SPACE_RETRIEVAL_ENABLED";
 
 pub(crate) fn space_agentic_retrieval_enabled() -> bool {
     space_agentic_retrieval_enabled_with(&|key| std::env::var(key).ok())
@@ -165,7 +165,7 @@ fn space_agentic_retrieval_enabled_with(get: &dyn Fn(&str) -> Option<String>) ->
 /// Space-scoped turn of the inline loop (D2-769, D2-774, C-05). execution-core reads the same name for a Do
 /// run, so both paths refuse together. Strict: only the literal `true` enables it. Off, the inventory stays
 /// organisation-wide, as it always has.
-const OWNER_LIST_SPACE_REFUSE_VAR: &str = "OWNER_LIST_SPACE_REFUSE";
+pub(crate) const OWNER_LIST_SPACE_REFUSE_VAR: &str = "OWNER_LIST_SPACE_REFUSE";
 
 pub(crate) fn owner_list_space_refuse_enabled() -> bool {
     owner_list_space_refuse_enabled_with(&|key| std::env::var(key).ok())
@@ -217,7 +217,7 @@ fn agentic_knowledge_frame(space_retrieval: Option<&str>) -> Option<crate::sse_e
 /// only the literal `true` enables it. Off, `InvokeRequest.agent_roles` is never read and the run's
 /// `RunContext` carries no roles. execution-core honours the catalogue only under its own switch,
 /// `EXECUTION_CORE_SUBAGENT_ROLES`; this one decides whether the gateway sends it at all.
-const SUBAGENT_ROLE_CATALOGUE_VAR: &str = "MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE";
+pub(crate) const SUBAGENT_ROLE_CATALOGUE_VAR: &str = "MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE";
 
 fn subagent_role_catalogue_enabled() -> bool {
     subagent_role_catalogue_enabled_with(&|key| std::env::var(key).ok())
@@ -335,7 +335,7 @@ fn within_bytes(text: &str, max_bytes: usize) -> &str {
 /// allowlist and its autonomy cap. Opt-in: only the literal `true` enables it. Off, the five
 /// `agent_*` pin fields of `InvokeRequest` are never read, so a turn is exactly what it was. The BFF
 /// gateway sends them only under its own switch, `AGENT_VERSION_PINNING`.
-const AGENT_TOOL_ALLOWLIST_VAR: &str = "MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST";
+pub(crate) const AGENT_TOOL_ALLOWLIST_VAR: &str = "MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST";
 
 fn agent_tool_allowlist_enabled() -> bool {
     agent_tool_allowlist_enabled_with(&|key| std::env::var(key).ok())
@@ -13128,7 +13128,7 @@ fn zdr_turn_settings_with(
 /// The switch that states a ZDR answer's cost in-stream (WS27-S5). Opt-in: only the
 /// literal `true` enables it. Off, a ZDR answer's usage frame states no cost and no
 /// cache count, exactly as it did before the switch existed.
-const ZDR_STREAM_COST_VAR: &str = "MODEL_GATEWAY_ZDR_STREAM_COST";
+pub(crate) const ZDR_STREAM_COST_VAR: &str = "MODEL_GATEWAY_ZDR_STREAM_COST";
 
 fn zdr_stream_cost_enabled() -> bool {
     zdr_stream_cost_enabled_with(&|key| std::env::var(key).ok())
@@ -13142,7 +13142,7 @@ fn zdr_stream_cost_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
 /// the literal `true` enables it. Off, a ZDR turn is not checked against the org's budget
 /// and publishes no ledger row, exactly as it did before the switch existed. Turning it
 /// on is an owner call under DEC-18(d).
-const ZDR_LEDGER_ROWS_VAR: &str = "MODEL_GATEWAY_ZDR_LEDGER_ROWS";
+pub(crate) const ZDR_LEDGER_ROWS_VAR: &str = "MODEL_GATEWAY_ZDR_LEDGER_ROWS";
 
 fn zdr_ledger_rows_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
     mp_contracts::loop_fold::switch_from(get(ZDR_LEDGER_ROWS_VAR).as_deref())
@@ -14155,11 +14155,13 @@ fn latest_proposed_plan(
         .find(|p| p.state == PlanState::Proposed as i32)
 }
 
+pub(crate) const AGENT_ASK_USER_ENV: &str = "AGENT_ASK_USER_ENABLED";
+
 /// Whether the deployment offers the `ask_user` tool (build plan WS14 S4), read once per process so a run
 /// cannot see it change. Only the literal `true` enables it, and the default is off.
 fn ask_user_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| ask_user_switch(std::env::var("AGENT_ASK_USER_ENABLED").ok().as_deref()))
+    *ON.get_or_init(|| ask_user_switch(std::env::var(AGENT_ASK_USER_ENV).ok().as_deref()))
 }
 
 /// The strict reading of `AGENT_ASK_USER_ENABLED`: only the literal `true` enables it.
@@ -14187,13 +14189,15 @@ fn ask_user_max_questions(
     }
 }
 
+pub(crate) const EXECUTION_COORDINATOR_MODE_ENV: &str = "EXECUTION_COORDINATOR_MODE_ENABLED";
+
 /// Whether the deployment runs coordinator mode (`EXECUTION_COORDINATOR_MODE_ENABLED`), read once per process so a
 /// run cannot see it change. Only the literal `true` enables it, and the default is off.
 fn coordinator_mode_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         coordinator_switch(
-            std::env::var("EXECUTION_COORDINATOR_MODE_ENABLED")
+            std::env::var(EXECUTION_COORDINATOR_MODE_ENV)
                 .ok()
                 .as_deref(),
         )
@@ -16960,7 +16964,7 @@ fn build_usage_envelope(
 /// it off. Off by default: the cost-core ledger enqueues billing for a metered
 /// entry, so enabling it starts billing Do runs, which waits on Control confirming
 /// the attribution (DEC-18).
-const AGENT_USAGE_ENVELOPE_ENV: &str = "MODEL_GATEWAY_AGENT_USAGE_ENVELOPE";
+pub(crate) const AGENT_USAGE_ENVELOPE_ENV: &str = "MODEL_GATEWAY_AGENT_USAGE_ENVELOPE";
 
 fn agent_usage_envelope_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
     lookup(AGENT_USAGE_ENVELOPE_ENV).as_deref() == Some("true")
@@ -16969,7 +16973,7 @@ fn agent_usage_envelope_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool
 /// Switch for a chat turn's own ledger rows (WS27 S2): one row for each tool-decision round
 /// and overhead call, and the run id on every chat row. Only the literal `true` enables it,
 /// and it is read per turn, so a restart is not needed to turn it off.
-const TURN_USAGE_COMPLETE_ENV: &str = "MODEL_GATEWAY_TURN_USAGE_COMPLETE";
+pub(crate) const TURN_USAGE_COMPLETE_ENV: &str = "MODEL_GATEWAY_TURN_USAGE_COMPLETE";
 
 fn turn_usage_complete_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
     lookup(TURN_USAGE_COMPLETE_ENV).as_deref() == Some("true")
@@ -16984,7 +16988,7 @@ fn turn_usage_complete_switch() -> bool {
 /// Switch for the `usage_progress` frames (WS27 S3): one for each provider call a turn makes,
 /// streamed while the turn runs. Only the literal `true` enables it, and it is read per turn, so a
 /// restart is not needed to turn it off.
-const USAGE_PROGRESS_ENV: &str = "MODEL_GATEWAY_USAGE_PROGRESS";
+pub(crate) const USAGE_PROGRESS_ENV: &str = "MODEL_GATEWAY_USAGE_PROGRESS";
 
 fn usage_progress_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
     lookup(USAGE_PROGRESS_ENV).as_deref() == Some("true")
@@ -16999,7 +17003,7 @@ fn usage_progress_switch() -> bool {
 /// Switch for a chat answer's routing decision (W5-073-b): the Verevon mode, complexity and reason its route
 /// note states, carried on the answer's usage frames, its usage envelope and its persisted metadata. Only the
 /// literal `true` enables it, and it is read per turn, so a restart is not needed to turn it off.
-const ROUTING_DECISION_ENV: &str = "MODEL_GATEWAY_ROUTING_DECISION_ENABLED";
+pub(crate) const ROUTING_DECISION_ENV: &str = "MODEL_GATEWAY_ROUTING_DECISION_ENABLED";
 
 fn routing_decision_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
     lookup(ROUTING_DECISION_ENV).as_deref() == Some("true")
@@ -23457,6 +23461,8 @@ async fn continue_skipped_site(
 // while it is still requested, and launches the resume. Nothing is spent here (`NotSpent`), and the
 // gateway never consumes a question: execution-core claims it and applies or releases the stored row.
 
+pub(crate) const AGENT_ASK_USER_RESUME_ENV: &str = "AGENT_ASK_USER_RESUME_ENABLED";
+
 /// Whether the deployment accepts the question form of `/continue` and relays `awaiting_input`
 /// (`AGENT_ASK_USER_RESUME_ENABLED`, read once per process so a run cannot see it change). Only the
 /// literal `true` enables it, the default is off, and it takes effect only with the loop resume switch
@@ -23464,7 +23470,7 @@ async fn continue_skipped_site(
 fn ask_resume_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        ask_resume_switch(std::env::var("AGENT_ASK_USER_RESUME_ENABLED").ok().as_deref())
+        ask_resume_switch(std::env::var(AGENT_ASK_USER_RESUME_ENV).ok().as_deref())
     }) && mp_contracts::loop_fold::loop_resume_enabled()
 }
 

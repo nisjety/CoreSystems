@@ -205,6 +205,10 @@ impl DocReadyRegistry {
     }
 }
 
+pub(crate) const ALLOW_UNVERIFIED_LEGACY_EVENTS_ENV: &str = "ALLOW_UNVERIFIED_LEGACY_EVENTS";
+
+pub(crate) const ISOLATED_E2E_ENV: &str = "ISOLATED_E2E";
+
 /// Run the consumer: connect a NATS subscriber from `NATS_URL`, subscribe to
 /// [`DOC_INDEXED_SUBJECT`], and record each event into `registry`.
 ///
@@ -218,13 +222,13 @@ pub async fn run(registry: DocReadyRegistry) {
     use futures::StreamExt as _;
 
     if !unverified_doc_ready_events_enabled(
-        std::env::var("ALLOW_UNVERIFIED_LEGACY_EVENTS")
+        std::env::var(ALLOW_UNVERIFIED_LEGACY_EVENTS_ENV)
             .as_deref()
             .unwrap_or(""),
-        std::env::var("ALLOW_INSECURE_DEV_DEFAULTS")
+        std::env::var(crate::auth::INSECURE_DEV_DEFAULTS_ENV)
             .as_deref()
             .unwrap_or(""),
-        std::env::var("ISOLATED_E2E").as_deref().unwrap_or(""),
+        std::env::var(ISOLATED_E2E_ENV).as_deref().unwrap_or(""),
     ) {
         warn!("unsigned doc-indexed readiness consumer disabled in production posture");
         return;

@@ -57,12 +57,12 @@ pub const TARGETED_SOURCE_REPAIR_ENV: &str = "MODEL_GATEWAY_TARGETED_SOURCE_REPA
 /// Switch for [`LatencyLevers::list_item_segments`].
 pub const LIST_ITEM_SEGMENTS_ENV: &str = "MODEL_GATEWAY_LIST_ITEM_SEGMENTS";
 
-/// Switch for [`LatencyLevers::dated_post_section_only`]. Opt-in: only an
-/// explicit on word turns it on.
+/// Switch for [`LatencyLevers::dated_post_section_only`]. Opt-in: only the exact
+/// literal `true` turns it on.
 pub const DATED_POST_SECTION_ONLY_ENV: &str = "MODEL_GATEWAY_DATED_POST_SECTION_ONLY";
 
-/// Switch for [`LatencyLevers::finer_review_batches`]. Opt-in: only an
-/// explicit on word turns it on.
+/// Switch for [`LatencyLevers::finer_review_batches`]. Opt-in: only the exact
+/// literal `true` turns it on.
 pub const FINER_REVIEW_BATCHES_ENV: &str = "MODEL_GATEWAY_FINER_REVIEW_BATCHES";
 
 /// Switch for [`LatencyLevers::speed_tier`]. Opt-in: only the exact literal `true` turns it on.

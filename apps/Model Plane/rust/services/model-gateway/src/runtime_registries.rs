@@ -4028,12 +4028,14 @@ pub fn hooks_durable_from_env_value(value: Option<&str>) -> bool {
     value == Some("true")
 }
 
+pub(crate) const HOOKS_DURABLE_ENV: &str = "HOOKS_DURABLE";
+
 /// The process's `HOOKS_DURABLE`, read once so the mode cannot change under a request.
 #[must_use]
 pub fn hooks_durable() -> bool {
     static DURABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *DURABLE.get_or_init(|| {
-        hooks_durable_from_env_value(std::env::var("HOOKS_DURABLE").ok().as_deref())
+        hooks_durable_from_env_value(std::env::var(HOOKS_DURABLE_ENV).ok().as_deref())
     })
 }
 

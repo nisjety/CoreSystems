@@ -286,11 +286,13 @@ fn plugin_loader_enabled_from_env_value(value: Option<&str>) -> bool {
     value == Some("true")
 }
 
+pub(crate) const PLUGIN_LOADER_ENV: &str = "PLUGIN_LOADER_ENABLED";
+
 /// The process's `PLUGIN_LOADER_ENABLED`, read once so it cannot change under a request.
 fn plugin_loader_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
-        let raw = std::env::var("PLUGIN_LOADER_ENABLED").ok();
+        let raw = std::env::var(PLUGIN_LOADER_ENV).ok();
         plugin_loader_enabled_from_env_value(raw.as_deref())
     })
 }
@@ -5528,8 +5530,9 @@ mod tests {
         assert!(reply.markdown.contains("Price 5"), "{}", reply.markdown);
     }
 
-    /// V3-mg-4: an absent final URL (the reply names only the requested URL) is read under `enforce`. The reader falls back
-    /// to the requested URL for it, and the same-host check passes that without a second read, so org-core is asked once.
+    /// V3d-go-1: an absent final URL (the reply names only the requested URL) is unknown, never the request. Under
+    /// `enforce` it is judged on the requested host, which the pre-check has already read, so org-core is asked once and
+    /// the page is read. The reply's final URL stays blank.
     #[tokio::test]
     async fn fetch_reads_an_absent_final_url_under_enforce() {
         let _mode = crate::site_policy_client::test_seam::set(WebDomainPolicyMode::Enforce);
@@ -5553,6 +5556,11 @@ mod tests {
             .await
             .expect("an absent final URL on an allowed host is read")
             .into_inner();
+        assert!(
+            reply.final_url.is_empty(),
+            "the final URL is unknown, not the request: {:?}",
+            reply.final_url
+        );
         assert!(reply.markdown.contains("Price 5"), "{}", reply.markdown);
     }
 
@@ -5623,8 +5631,8 @@ mod tests {
         assert!(published(&publisher) > 0, "the page reached inference");
     }
 
-    /// V3-mg-4 through `extract_structured`: an absent final URL on an allowed host is read under `enforce` and reaches
-    /// inference, as the same-host check passes it unread.
+    /// V3d-go-1 through `extract_structured`: an absent final URL on an allowed host is unknown, never the request. Under
+    /// `enforce` it is judged on the requested host, which the pre-check has read, so the page reaches inference.
     #[tokio::test]
     async fn extract_structured_reads_an_absent_final_url_under_enforce() {
         let _mode = crate::site_policy_client::test_seam::set(WebDomainPolicyMode::Enforce);
@@ -5649,6 +5657,11 @@ mod tests {
             .expect("an absent final URL on an allowed host is extracted")
             .into_inner();
         assert_eq!(reply.results.len(), 1);
+        assert!(
+            reply.results[0].final_url.is_empty(),
+            "the final URL is unknown, not the request: {:?}",
+            reply.results[0].final_url
+        );
         assert!(published(&publisher) > 0, "the page reached inference");
     }
 

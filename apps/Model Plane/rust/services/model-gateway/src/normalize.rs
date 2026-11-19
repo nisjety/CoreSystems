@@ -181,11 +181,13 @@ const CUSTOMER_GATEWAY_PROVIDER_HINT: &str = "customer-gateway";
 /// has no tool, image, research, plan or agent route, so such a turn is refused rather than sent on.
 const CUSTOMER_GATEWAY_TEXT_ONLY_REFUSAL: &str = "customer gateway connections support text-only chat without image generation, deep research, plan mode, attachments, tool specs or agentic runs";
 
+pub(crate) const BYO_GATEWAY_ENV: &str = "MODEL_GATEWAY_BYO_GATEWAY";
+
 /// Whether a customer-gateway connection may be named on a chat turn: the `MODEL_GATEWAY_BYO_GATEWAY`
 /// switch, read as the literal `true` only. Off by default (W4-BYO-6).
 #[must_use]
 pub fn byo_gateway_enabled() -> bool {
-    std::env::var("MODEL_GATEWAY_BYO_GATEWAY").ok().as_deref() == Some("true")
+    std::env::var(BYO_GATEWAY_ENV).ok().as_deref() == Some("true")
 }
 
 /// The shape of an opaque customer-gateway connection id: non-empty, at most 128 bytes, and made of ASCII

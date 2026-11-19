@@ -2438,7 +2438,7 @@ async fn get_quarantine_preview(
 
 /// The full-draft preview switch (EP-10-S1). Off: the route answers 404 `preview_unavailable` and
 /// nothing reaches Session Core. Only the literal `true` enables it.
-const APPROVAL_WRITE_PREVIEW_ENV: &str = "APPROVAL_WRITE_PREVIEW_ENABLED";
+pub(crate) const APPROVAL_WRITE_PREVIEW_ENV: &str = "APPROVAL_WRITE_PREVIEW_ENABLED";
 
 fn approval_write_preview_enabled() -> bool {
     mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_WRITE_PREVIEW_ENV).ok().as_deref())
@@ -3117,7 +3117,7 @@ async fn get_run_timing(
 // ---------------------------------------------------------------------------
 
 /// The inspector switch. Off: the route answers 404 as if it did not exist. Only the literal `true` enables it.
-const REQUEST_INSPECTOR_ENV: &str = "MODEL_GATEWAY_REQUEST_INSPECTOR";
+pub(crate) const REQUEST_INSPECTOR_ENV: &str = "MODEL_GATEWAY_REQUEST_INSPECTOR";
 
 fn request_inspector_enabled() -> bool {
     mp_contracts::loop_fold::switch_from(std::env::var(REQUEST_INSPECTOR_ENV).ok().as_deref())
@@ -3502,7 +3502,7 @@ struct DecideEditBody {
 /// The approve-with-edits switch (EP-10-S4). Off: a decision carrying an edit is refused with 403
 /// `approval_edit_disabled` before anything reaches Session Core. Only the literal `true` enables
 /// it.
-const APPROVAL_EDIT_ENV: &str = "APPROVAL_EDIT_ENABLED";
+pub(crate) const APPROVAL_EDIT_ENV: &str = "APPROVAL_EDIT_ENABLED";
 
 fn approval_edit_enabled() -> bool {
     mp_contracts::loop_fold::switch_from(env::var(APPROVAL_EDIT_ENV).ok().as_deref())
@@ -3740,9 +3740,14 @@ fn checked_rule_proposal(
     Ok(true)
 }
 
+/// The approval step-up switch's name, `APPROVAL_STEP_UP_ENFORCED`. Read by
+/// [`ApprovalStepUpGate::from_env`] and listed in `switch_spellings::MODE_SWITCHES`.
+pub(crate) const APPROVAL_STEP_UP_ENV: &str = "APPROVAL_STEP_UP_ENFORCED";
+
 /// The approval step-up switch (build plan WS13 S5). `off` changes nothing; `shadow` counts a grant
-/// that lacks a fresh re-authentication and lets it through; `enforce` refuses it. Only the literal
-/// values `shadow` and `enforce` turn anything on.
+/// that lacks a fresh re-authentication and lets it through; `enforce` refuses it. `shadow` and
+/// `enforce` are read trimmed and case-folded, as `SESSION_CORE_SPACE_ZDR` is, so a mis-cased word
+/// keeps its mode. Any other value stays off, and the startup report warns about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApprovalStepUpGate {
     Off,
@@ -3751,14 +3756,13 @@ enum ApprovalStepUpGate {
 }
 
 impl ApprovalStepUpGate {
-    const ENV: &'static str = "APPROVAL_STEP_UP_ENFORCED";
-
     fn from_env() -> Self {
-        Self::from_raw(std::env::var(Self::ENV).ok().as_deref())
+        Self::from_raw(std::env::var(APPROVAL_STEP_UP_ENV).ok().as_deref())
     }
 
     fn from_raw(raw: Option<&str>) -> Self {
-        match raw {
+        let folded = raw.map(|value| value.trim().to_ascii_lowercase());
+        match folded.as_deref() {
             Some("shadow") => Self::Shadow,
             Some("enforce") => Self::Enforce,
             _ => Self::Off,
@@ -11007,7 +11011,7 @@ fn run_detail_value_with(run: &RunDetail, origin_field: bool) -> Value {
 
 /// The switch that adds the top-level `origin` to a run projection (EP-12 S1). Default
 /// off; the strict parser the other gateway switches share reads it.
-const RUN_ORIGIN_FIELD_ENV: &str = "MODEL_GATEWAY_RUN_ORIGIN_FIELD";
+pub(crate) const RUN_ORIGIN_FIELD_ENV: &str = "MODEL_GATEWAY_RUN_ORIGIN_FIELD";
 
 fn run_origin_field_enabled() -> bool {
     mp_contracts::loop_fold::switch_from(std::env::var(RUN_ORIGIN_FIELD_ENV).ok().as_deref())
@@ -11365,11 +11369,25 @@ mod approval_step_up_tests {
     #[test]
     fn step_up_off_changes_nothing() {
         assert_eq!(ApprovalStepUpGate::from_raw(None), ApprovalStepUpGate::Off);
-        for raw in ["off", "true", "ENFORCE", " enforce", "enforced", ""] {
+        for raw in ["", "off", "Off", "true", "1", "enforced", "on"] {
             assert_eq!(
                 ApprovalStepUpGate::from_raw(Some(raw)),
                 ApprovalStepUpGate::Off,
                 "{raw:?} must not enable the gate"
+            );
+        }
+        for raw in ["shadow", " Shadow ", "SHADOW"] {
+            assert_eq!(
+                ApprovalStepUpGate::from_raw(Some(raw)),
+                ApprovalStepUpGate::Shadow,
+                "{raw:?} is read trimmed and in any case"
+            );
+        }
+        for raw in ["enforce", "ENFORCE", " enforce ", "\tEnforce\n"] {
+            assert_eq!(
+                ApprovalStepUpGate::from_raw(Some(raw)),
+                ApprovalStepUpGate::Enforce,
+                "{raw:?} is read trimmed and in any case"
             );
         }
         assert_eq!(
@@ -15275,7 +15293,7 @@ struct ListThreadsQuery {
 
 /// The switch that lets a thread listing narrow to one named agent's threads (EP-6 P3). Read at
 /// each call, as the thread switches are; only the literal `true` turns it on.
-const NAMED_AGENT_THREADS_ENV: &str = "MODEL_GATEWAY_NAMED_AGENT_THREADS";
+pub(crate) const NAMED_AGENT_THREADS_ENV: &str = "MODEL_GATEWAY_NAMED_AGENT_THREADS";
 
 /// Whether the named-agent thread filter is on in this process (EP-6 P3).
 fn named_agent_threads_enabled() -> bool {
@@ -16453,7 +16471,7 @@ struct ThreadMessagesQuery {
 /// The gateway's copy of the message-version switch (WS17 S8). Session Core enforces it; the gateway
 /// reads its own copy to report `versions_enabled` and to refuse a branch move before it crosses the
 /// wire. The deploy sets the two together. Read by the strict parser the other switches share.
-const MESSAGE_VERSIONS_ENV: &str = "MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED";
+pub(crate) const MESSAGE_VERSIONS_ENV: &str = "MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED";
 
 pub(crate) fn message_versions_enabled() -> bool {
     mp_contracts::loop_fold::switch_from(std::env::var(MESSAGE_VERSIONS_ENV).ok().as_deref())

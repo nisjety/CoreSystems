@@ -48,7 +48,7 @@ use crate::finetune_routes::{
 };
 use crate::state::{AppState, DynPublisher};
 
-const FEATURE_ENV: &str = "FINETUNE_ENABLED";
+pub(crate) const FEATURE_ENV: &str = "FINETUNE_ENABLED";
 const INTERVAL_ENV: &str = "FINETUNE_POLLER_INTERVAL_SECS";
 const DEFAULT_INTERVAL_SECS: u64 = 60;
 

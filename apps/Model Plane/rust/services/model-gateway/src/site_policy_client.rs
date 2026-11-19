@@ -361,16 +361,15 @@ pub async fn fetch_refusal(
 /// The refusal a web call meets when the page it read ended on a host the org's rules do not allow, for example an
 /// allowed address that redirected onto a blocked one. `requested` is the URL the call named (already checked by
 /// [`fetch_refusal`]); `final_url` is the address the reader says it ended on. `None` means the page may reach the
-/// model: under `off`, under `shadow` when `final_url` is empty, when it has the same canonical host as `requested`,
-/// or when the rules allow its host. Otherwise the refusal is logged with the closed fields of [`fetch_refusal`] (no
-/// path, no query), and under `enforce` the typed message for the FINAL host is returned. Under `shadow` it is logged
-/// and `None` is returned. An answer that cannot be read, or a final URL with no host the rules can name, counts as
-/// refused.
+/// model: under `off`, when it has the same canonical host as `requested` (a known final URL only), or when the rules
+/// allow its host. Otherwise the refusal is logged with the closed fields of [`fetch_refusal`] (no path, no query), and
+/// under `enforce` the typed message for the FINAL host is returned. Under `shadow` it is logged and `None` is returned.
+/// An answer that cannot be read, or a final URL with no host the rules can name, counts as refused.
 ///
-/// An empty or blank `final_url` is no final URL, so it is treated as absent: under `enforce` the rules judge the
-/// `requested` URL's host in its place, with the same fail-closed reads. A host the rules deny, an answer that cannot be
-/// read, or a `requested` URL with no host refuses the page. Under `shadow` an absent `final_url` passes unread, as it
-/// always has.
+/// An empty or blank `final_url` is no final URL: it is unknown, and it is judged as the `requested` URL. The rules judge
+/// the requested URL's host in its place, with the same fail-closed reads. Under `enforce` a host the rules deny, an
+/// answer that cannot be read, or a `requested` URL with no host refuses the page. Under `shadow` the same judgement is
+/// made and logged, and nothing is refused.
 pub async fn final_url_refusal(
     mode: WebDomainPolicyMode,
     checker: &SiteChecker,
@@ -384,15 +383,12 @@ pub async fn final_url_refusal(
         return None;
     }
     let final_url = final_url.trim();
-    let absent = final_url.is_empty();
-    if absent && mode == WebDomainPolicyMode::Shadow {
-        return None;
-    }
-    // An absent final URL is judged as the requested URL. The same-host pass below does not apply to it, because that
+    let unknown = final_url.is_empty();
+    // An unknown final URL is judged as the requested URL. The same-host pass below does not apply to it, because that
     // pass lets the requested host through without a read.
-    let judged = if absent { requested.trim() } else { final_url };
+    let judged = if unknown { requested.trim() } else { final_url };
     let judged_host = host_of_url(judged);
-    if !absent && judged_host.is_some() && judged_host == host_of_url(requested) {
+    if !unknown && judged_host.is_some() && judged_host == host_of_url(requested) {
         return None;
     }
     let hosts: Vec<String> = judged_host.into_iter().collect();
@@ -404,6 +400,7 @@ pub async fn final_url_refusal(
         reason = refusal.reason(),
         host = refusal.host().unwrap_or(""),
         enforced = mode == WebDomainPolicyMode::Enforce,
+        final_known = !unknown,
         "org web domain policy refused the page a web call ended on"
     );
     match mode {

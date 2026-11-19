@@ -83,7 +83,9 @@ pub fn max_tool_rounds() -> usize {
 /// `LOOP_GUARD_MODE`, read once per process so the mode cannot change mid-turn. Unset is off.
 fn loop_guard_mode() -> LoopGuardMode {
     static MODE: std::sync::OnceLock<LoopGuardMode> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| LoopGuardMode::from_env_value(std::env::var("LOOP_GUARD_MODE").ok().as_deref()))
+    *MODE.get_or_init(|| {
+        LoopGuardMode::from_env_value(std::env::var(mp_contracts::loop_guard::ENV).ok().as_deref())
+    })
 }
 
 /// Default allowance for one artifact's private check: review passes,
@@ -585,7 +587,7 @@ pub(crate) struct OfficeDelivery {
 }
 
 /// The switch that holds back failed Office files. Only the literal `true` enables it.
-const VERIFY_ENFORCE_ENV: &str = "CODE_INTERPRETER_VERIFY_ENFORCE";
+pub(crate) const VERIFY_ENFORCE_ENV: &str = "CODE_INTERPRETER_VERIFY_ENFORCE";
 
 impl OfficeDelivery {
     /// The delivery state for one turn, with the switch read from the environment.
@@ -3596,7 +3598,7 @@ async fn skill_file_outcome(
 /// The switch for the `/skills` mount of a turn's skill bundles (WS19-S8). Read here, in the
 /// gateway, and only the literal `true` enables it: a bundle is named in a request only while it
 /// is on, and execution-core honours the field only when it is present.
-const SKILL_BUNDLE_MOUNT_ENV: &str = "SKILL_BUNDLE_MOUNT_ENABLED";
+pub(crate) const SKILL_BUNDLE_MOUNT_ENV: &str = "SKILL_BUNDLE_MOUNT_ENABLED";
 
 /// Most bundles one turn mounts. The gateway injects at most three skills a turn.
 const MAX_SKILL_MOUNTS: usize = 3;
@@ -4535,7 +4537,7 @@ async fn dispatch_tool_with_cost(
                                  not retry this URL or fetch a similar page — answer from the \
                                  web_search snippets, or run web_search with a more specific \
                                  query that puts the figure in the snippet itself.",
-                                r.final_url
+                                page_address(&r.final_url, &url)
                             ),
                         );
                     }
@@ -4564,7 +4566,11 @@ async fn dispatch_tool_with_cost(
                             output: crate::semantic_screening::withheld_output(
                                 &call.name,
                                 &provenance,
-                                Some(r.final_url.as_str()),
+                                Some(if final_url_is_unknown(&r.final_url) {
+                                    url.as_str()
+                                } else {
+                                    r.final_url.as_str()
+                                }),
                             ),
                             provenance,
                             error: None,
@@ -4586,6 +4592,7 @@ async fn dispatch_tool_with_cost(
                     );
                     let output = fetched_page_output(
                         &r.final_url,
+                        &url,
                         &r.title,
                         &body,
                         parked.as_ref(),
@@ -5785,9 +5792,10 @@ fn read_back_provenance(
 /// The output a `fetch_url` call returns for a page. The head stays inline as it always has. When the
 /// page was parked under a handle and the reader is on, the output names the handle as `ref` and gives
 /// the outline to read it by; otherwise it carries the handle as it always has, or nothing when the
-/// page was not parked.
+/// page was not parked. Its URL fields are the final URL, or the requested URL when the final one is unknown.
 fn fetched_page_output(
     final_url: &str,
+    requested: &str,
     title: &str,
     body: &str,
     parked: Option<&crate::tool_result_handles::ToolResultHandle>,
@@ -5798,29 +5806,72 @@ fn fetched_page_output(
         Some(handle) if reader => {
             let sections = crate::page_reader::outline(body);
             reader_result_within_budget(&sections, |shown| {
-                serde_json::json!({
-                    "final_url": final_url,
-                    "title": title,
-                    "ref": handle.handle_id,
-                    "outline": outline_rows(&sections[..shown]),
-                    "content": head,
-                    "note": reader_fetch_note(body.chars().count(), shown, sections.len()),
-                })
+                with_page_url(
+                    serde_json::json!({
+                        "title": title,
+                        "ref": handle.handle_id,
+                        "outline": outline_rows(&sections[..shown]),
+                        "content": head,
+                        "note": reader_fetch_note(body.chars().count(), shown, sections.len()),
+                    }),
+                    final_url,
+                    requested,
+                )
             })
         }
-        Some(handle) => serde_json::json!({
-            "final_url": final_url,
-            "title": title,
-            "content": head,
-            "handle": handle.to_model_value(),
-        })
+        Some(handle) => with_page_url(
+            serde_json::json!({
+                "title": title,
+                "content": head,
+                "handle": handle.to_model_value(),
+            }),
+            final_url,
+            requested,
+        )
         .to_string(),
-        None => serde_json::json!({
-            "final_url": final_url,
-            "title": title,
-            "content": head,
-        })
+        None => with_page_url(
+            serde_json::json!({
+                "title": title,
+                "content": head,
+            }),
+            final_url,
+            requested,
+        )
         .to_string(),
+    }
+}
+
+/// Adds the URL fields to a `fetch_url` page header. A final URL the reply named is `final_url`, as it always was. An
+/// unknown one (blank or absent) is `final_url` as null, with the URL asked for under `requested_url`: the model never
+/// reads the request as the address the page ended on, nor an empty address.
+fn with_page_url(mut header: Value, final_url: &str, requested: &str) -> Value {
+    if let Some(fields) = header.as_object_mut() {
+        if final_url_is_unknown(final_url) {
+            fields.insert("final_url".to_owned(), Value::Null);
+            fields.insert(
+                "requested_url".to_owned(),
+                Value::String(requested.to_owned()),
+            );
+        } else {
+            fields.insert("final_url".to_owned(), Value::String(final_url.to_owned()));
+        }
+    }
+    header
+}
+
+/// Whether the reply named a final URL. A blank one is no final URL: it is unknown, and it is never taken for the URL
+/// asked for.
+fn final_url_is_unknown(final_url: &str) -> bool {
+    final_url.trim().is_empty()
+}
+
+/// The address a `fetch_url` message names for the page: the final URL the page ended on or, when that is unknown, the
+/// URL asked for, labelled as requested.
+fn page_address(final_url: &str, requested: &str) -> String {
+    if final_url_is_unknown(final_url) {
+        format!("the requested URL {requested}, whose final URL was not reported")
+    } else {
+        final_url.to_owned()
     }
 }
 
@@ -16328,15 +16379,16 @@ mod tests {
         assert!(!line.contains("org_site_blocked"), "{line}");
     }
 
-    /// V3-mg-4, grounding path: an absent final URL (the reply names only the requested URL) is the requested host, which
-    /// the same-host check passes under enforce without a second read. The page is read, and org-core is asked nothing.
+    /// V3d-go-1, grounding path: an absent final URL (the reply names only the requested URL) is unknown, never the
+    /// request. It is judged on the requested host under enforce, as a blank one is: org-core is asked for that host
+    /// once, and the allowed host reads the page.
     #[tokio::test]
-    async fn an_absent_final_url_is_read_without_a_second_look_under_enforce() {
+    async fn an_absent_final_url_is_judged_on_the_requested_host_under_enforce() {
         let _mode = crate::site_policy_client::test_seam::set(
             mp_contracts::site_policy::WebDomainPolicyMode::Enforce,
         );
         let org_core = wiremock::MockServer::start().await;
-        grounding_org_rules(&org_core, "org_v3_mg4_absent", 0).await;
+        grounding_org_rules(&org_core, "org_v3_mg4_absent", 1).await;
         let quarry = wiremock::MockServer::start().await;
         grounding_scrape_with_url(
             &quarry,
@@ -19429,7 +19481,14 @@ mod tests {
     #[test]
     fn reader_fetch_output_is_the_old_head_when_nothing_was_parked() {
         let page = "word ".repeat(2_000);
-        let output = fetched_page_output("https://a.test/p", "P", &page, None, true);
+        let output = fetched_page_output(
+            "https://a.test/p",
+            "https://a.test/p",
+            "P",
+            &page,
+            None,
+            true,
+        );
         let expected = serde_json::json!({
             "final_url": "https://a.test/p",
             "title": "P",
@@ -19437,6 +19496,33 @@ mod tests {
         })
         .to_string();
         assert_eq!(output, expected);
+    }
+
+    /// V3d-go-1, display: the header of a page whose final URL is unknown carries `final_url` as null and the URL asked
+    /// for under `requested_url`. A known final URL is shown as it was, with no `requested_url`.
+    #[test]
+    fn fetched_page_header_names_the_requested_url_when_the_final_url_is_unknown() {
+        for blank in ["", "   "] {
+            let output =
+                fetched_page_output(blank, "https://a.test/asked", "P", "body", None, false);
+            let header: Value = serde_json::from_str(&output).expect("JSON");
+            assert!(header["final_url"].is_null(), "{blank:?}: {output}");
+            assert_eq!(
+                header["requested_url"], "https://a.test/asked",
+                "{blank:?}: {output}"
+            );
+        }
+        let known = fetched_page_output(
+            "https://a.test/landing",
+            "https://a.test/asked",
+            "P",
+            "body",
+            None,
+            false,
+        );
+        let header: Value = serde_json::from_str(&known).expect("JSON");
+        assert_eq!(header["final_url"], "https://a.test/landing", "{known}");
+        assert!(header.get("requested_url").is_none(), "{known}");
     }
 
     #[tokio::test]
@@ -19455,7 +19541,14 @@ mod tests {
             &provenance,
         )
         .expect("a page past the cut is parked");
-        let output = fetched_page_output("https://a.test/p", "P", &page, Some(&handle), false);
+        let output = fetched_page_output(
+            "https://a.test/p",
+            "https://a.test/p",
+            "P",
+            &page,
+            Some(&handle),
+            false,
+        );
         let expected = serde_json::json!({
             "final_url": "https://a.test/p",
             "title": "P",
@@ -19488,6 +19581,7 @@ mod tests {
         )
         .expect("a page past the cut is parked");
         let output: Value = serde_json::from_str(&fetched_page_output(
+            "https://a.test/p",
             "https://a.test/p",
             "P",
             &page,
@@ -19715,6 +19809,7 @@ mod tests {
         assert!(parked.is_none());
         let output: Value = serde_json::from_str(&fetched_page_output(
             "https://a.test/p",
+            "https://a.test/p",
             "P",
             &page,
             parked.as_ref(),
@@ -19767,7 +19862,14 @@ mod tests {
             untrimmed.chars().count() > MAX_TOOL_OUTPUT_CHARS,
             "the premise: all forty rows would be cut"
         );
-        let output = fetched_page_output("https://a.test/p", "P", &page, Some(&handle), true);
+        let output = fetched_page_output(
+            "https://a.test/p",
+            "https://a.test/p",
+            "P",
+            &page,
+            Some(&handle),
+            true,
+        );
         assert!(output.chars().count() <= MAX_TOOL_OUTPUT_CHARS, "{}", output.chars().count());
         let value: Value = serde_json::from_str(&output).expect("the result stays valid JSON");
         assert_eq!(value["ref"], serde_json::json!(handle.handle_id));
@@ -19979,8 +20081,22 @@ mod tests {
 
         let page = "word ".repeat(2_000);
         assert_eq!(
-            fetched_page_output("https://a.test/p", "P", &page, None, true),
-            fetched_page_output("https://a.test/p", "P", &page, None, false),
+            fetched_page_output(
+                "https://a.test/p",
+                "https://a.test/p",
+                "P",
+                &page,
+                None,
+                true
+            ),
+            fetched_page_output(
+                "https://a.test/p",
+                "https://a.test/p",
+                "P",
+                &page,
+                None,
+                false
+            ),
         );
 
         let state = crate::state::AppState::new();
@@ -19998,8 +20114,22 @@ mod tests {
         );
         assert!(parked.is_none(), "unscreened content is never parked");
         assert_eq!(
-            fetched_page_output("https://a.test/p", "P", &unscreened, parked.as_ref(), true),
-            fetched_page_output("https://a.test/p", "P", &unscreened, parked.as_ref(), false),
+            fetched_page_output(
+                "https://a.test/p",
+                "https://a.test/p",
+                "P",
+                &unscreened,
+                parked.as_ref(),
+                true,
+            ),
+            fetched_page_output(
+                "https://a.test/p",
+                "https://a.test/p",
+                "P",
+                &unscreened,
+                parked.as_ref(),
+                false,
+            ),
         );
     }
 

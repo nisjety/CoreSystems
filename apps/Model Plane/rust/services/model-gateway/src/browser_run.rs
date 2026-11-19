@@ -90,18 +90,26 @@ async fn verify_attached_policy_protocol(
     Ok(())
 }
 
+pub(crate) const ATTACH_ENV: &str = "MODEL_GATEWAY_BROWSER_ATTACH";
+
+pub(crate) const ATTACH_POLICY_ENFORCED_ENV: &str = "MODEL_GATEWAY_BROWSER_ATTACH_POLICY_ENFORCED";
+
+pub(crate) const POLICY_ASK_ENV: &str = "MODEL_GATEWAY_BROWSER_POLICY_ASK";
+
+pub(crate) const PLANNER_QUOTAS_ENV: &str = "MODEL_GATEWAY_BROWSER_PLANNER_QUOTAS";
+
 async fn browser_run_capabilities(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     bearer: VerifiedExecutionBearer,
 ) -> Result<Json<Value>, ApiError> {
-    let enabled = attach_flag(std::env::var("MODEL_GATEWAY_BROWSER_ATTACH").ok().as_deref())
-        && policy_ask_flag(std::env::var("MODEL_GATEWAY_BROWSER_POLICY_ASK").ok().as_deref())
-        && attach_flag(std::env::var("MODEL_GATEWAY_BROWSER_ATTACH_POLICY_ENFORCED").ok().as_deref());
+    let enabled = attach_flag(std::env::var(ATTACH_ENV).ok().as_deref())
+        && policy_ask_flag(std::env::var(POLICY_ASK_ENV).ok().as_deref())
+        && attach_flag(std::env::var(ATTACH_POLICY_ENFORCED_ENV).ok().as_deref());
     if !enabled {
         return Err((StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"browser_attach_policy_unavailable"}))));
     }
-    let quotas_enabled = planner_quotas_flag(std::env::var("MODEL_GATEWAY_BROWSER_PLANNER_QUOTAS").ok().as_deref());
+    let quotas_enabled = planner_quotas_flag(std::env::var(PLANNER_QUOTAS_ENV).ok().as_deref());
     let quota = planner_quota(&state, &claims.org_id).await;
     verify_restricted_planner_quota(quotas_enabled, quota.flag)?;
     verify_attached_policy_protocol(&state, &claims.org_id, &bearer).await?;
@@ -1283,13 +1291,15 @@ fn mint_budget_from(
     Some((claim, source))
 }
 
+pub(crate) const BUDGET_CLAIM_ENV: &str = "MODEL_GATEWAY_BROWSER_BUDGET_CLAIM";
+
 /// The run's mint: reads the organization's per-run ceiling from org-core (an
 /// unreachable or unconfigured org-core is fail-open, see
 /// `org_quota::fetch_org_limits`: Quarry's own ceiling still applies) and
 /// decides what to ask the broker for. Off by default.
 async fn mint_budget(state: &AppState, req: &BrowserRunStartRequest, org_id: &str) -> BudgetMint {
     let enabled = state.browser_budget_claim.unwrap_or_else(|| {
-        let flag = std::env::var("MODEL_GATEWAY_BROWSER_BUDGET_CLAIM").ok();
+        let flag = std::env::var(BUDGET_CLAIM_ENV).ok();
         budget_claim_flag(flag.as_deref())
     });
     mint_budget_with(state, req, org_id, enabled).await
@@ -1415,7 +1425,7 @@ impl PlannerQuota {
 }
 
 async fn planner_quota(state: &AppState, org_id: &str) -> PlannerQuota {
-    let flag = std::env::var("MODEL_GATEWAY_BROWSER_PLANNER_QUOTAS").ok();
+    let flag = std::env::var(PLANNER_QUOTAS_ENV).ok();
     if !planner_quotas_flag(flag.as_deref()) {
         return PlannerQuota::OFF;
     }
@@ -2230,6 +2240,8 @@ async fn browser_run_start(
     }
 }
 
+pub(crate) const RECIPE_ENV: &str = "MODEL_GATEWAY_BROWSER_RECIPE";
+
 // Cohesive single-flow handler (validate → thread → run → dispatch); splitting
 // it would obscure the linear session-core/execution-core sequencing.
 #[allow(clippy::too_many_lines)]
@@ -2275,7 +2287,7 @@ async fn browser_run_start_inner(
     // refused before any grant, thread or run write. It belongs to the person
     // of the verified claims, so a credential without one cannot name a recipe.
     let recipe = recipe_for(
-        recipe_flag(std::env::var("MODEL_GATEWAY_BROWSER_RECIPE").ok().as_deref()),
+        recipe_flag(std::env::var(RECIPE_ENV).ok().as_deref()),
         &req,
     )?;
     if recipe.is_some() && claims.user_id.trim().is_empty() {
@@ -2284,19 +2296,19 @@ async fn browser_run_start_inner(
     // A restriction the run cannot honour is refused before any grant, thread
     // or run write: flag off, or a malformed ask, never "run without it".
     let policy_ask = policy_ask_for(
-        policy_ask_flag(std::env::var("MODEL_GATEWAY_BROWSER_POLICY_ASK").ok().as_deref()),
+        policy_ask_flag(std::env::var(POLICY_ASK_ENV).ok().as_deref()),
         &req,
     )?;
     // Attach mode needs its flag; refused the same way, before any write.
     let attach_session = attach_session_for(
-        attach_flag(std::env::var("MODEL_GATEWAY_BROWSER_ATTACH").ok().as_deref()),
+        attach_flag(std::env::var(ATTACH_ENV).ok().as_deref()),
         &req,
     )?;
     // Rollout attestation is off by default; old execution-core would drop it.
     reject_attached_policy(attach_session.as_deref(), policy_ask.as_ref(),
-        attach_flag(std::env::var("MODEL_GATEWAY_BROWSER_ATTACH_POLICY_ENFORCED").ok().as_deref()))?;
+        attach_flag(std::env::var(ATTACH_POLICY_ENFORCED_ENV).ok().as_deref()))?;
     let restricted_planner = if attach_session.is_some() && policy_ask.is_some() {
-        let enabled = planner_quotas_flag(std::env::var("MODEL_GATEWAY_BROWSER_PLANNER_QUOTAS").ok().as_deref());
+        let enabled = planner_quotas_flag(std::env::var(PLANNER_QUOTAS_ENV).ok().as_deref());
         let quota = planner_quota(&state, &claims.org_id).await;
         verify_restricted_planner_quota(enabled, quota.flag)?;
         Some(quota)

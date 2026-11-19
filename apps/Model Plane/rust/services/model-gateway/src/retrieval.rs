@@ -938,13 +938,15 @@ fn graph_space_scope_enabled_from(raw: Option<&str>) -> bool {
     mp_contracts::loop_fold::switch_from(raw)
 }
 
+pub(crate) const GRAPH_SPACE_SCOPE_ENV: &str = "MODEL_GATEWAY_GRAPH_SPACE_SCOPE";
+
 /// Whether graph grounding carries the Space read decision of a scoped turn (WS18-S2). Read once per
 /// process, so it cannot change under a request.
 fn graph_space_scope_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
         graph_space_scope_enabled_from(
-            std::env::var("MODEL_GATEWAY_GRAPH_SPACE_SCOPE").ok().as_deref(),
+            std::env::var(GRAPH_SPACE_SCOPE_ENV).ok().as_deref(),
         )
     })
 }

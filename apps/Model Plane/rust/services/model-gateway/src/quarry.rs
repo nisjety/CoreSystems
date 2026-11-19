@@ -1427,8 +1427,9 @@ fn project(requested: &str, data: &Value) -> ScrapeResult {
 
     // The edge's `url` is the `UrlTriple` it serialises: `requested` beside `final_url`, the address the page ended
     // on. `final` is the older spelling, read only when `final_url` is absent or not a string. A blank address stays
-    // blank, not the requested URL: that would pass the same-host check in `final_url_refusal` unread. There a blank
-    // final URL is judged on the requested host instead.
+    // blank, and so does an address the reply never named: the final URL is unknown then, not the requested URL, which
+    // would pass the same-host check in `final_url_refusal` unread. There a blank or unknown final URL is judged on the
+    // requested host instead.
     let final_url = obj
         .get("url")
         .and_then(Value::as_object)
@@ -1437,7 +1438,7 @@ fn project(requested: &str, data: &Value) -> ScrapeResult {
                 .and_then(Value::as_str)
                 .or_else(|| u.get("final").and_then(Value::as_str))
         })
-        .unwrap_or(requested)
+        .unwrap_or("")
         .to_string();
 
     // The edge inlines the page text as top-level `markdown` when asked for
@@ -2390,7 +2391,9 @@ mod tests {
         let data = serde_json::json!({"status": 200});
         let r = project("https://example.com", &data);
         assert_eq!(r.status, 200);
-        assert_eq!(r.final_url, "https://example.com"); // falls back to requested
+        assert_eq!(r.url, "https://example.com");
+        // No final address is unknown, not the request: the request would pass the same-host check unread.
+        assert!(r.final_url.is_empty(), "{:?}", r.final_url);
         assert!(r.markdown.is_empty());
         assert!(r.title.is_empty());
     }
@@ -2447,6 +2450,26 @@ mod tests {
                 r.final_url
             );
             assert_ne!(r.final_url, requested, "{blank:?}");
+        }
+    }
+
+    /// V3d-go-1: a reply that names no final address at all (no `url` object, an empty one, a `url` that is not an
+    /// object, or neither key as a string) has an unknown final URL. It is blank, never the requested URL, which
+    /// `final_url_refusal` would take for an unread same-host page under `enforce`.
+    #[test]
+    fn project_leaves_a_final_url_the_reply_never_named_unknown() {
+        let requested = "https://allowed.example/a";
+        for data in [
+            serde_json::json!({"status": 200}),
+            serde_json::json!({"status": 200, "url": {}}),
+            serde_json::json!({"status": 200, "url": {"requested": requested}}),
+            serde_json::json!({"status": 200, "url": {"requested": requested, "final_url": null}}),
+            serde_json::json!({"status": 200, "url": {"requested": requested, "final_url": 42}}),
+            serde_json::json!({"status": 200, "url": "https://allowed.example/a"}),
+        ] {
+            let r = project(requested, &data);
+            assert!(r.final_url.is_empty(), "{data}: {:?}", r.final_url);
+            assert_eq!(r.url, requested, "{data}");
         }
     }
 

@@ -18,7 +18,7 @@ use serde_json::Value;
 
 /// Opt-in switch for the judge. Only the literal `true` enables it, so a typo or
 /// an unset variable keeps the goal without a judge.
-const GOAL_JUDGE_ENABLED_VAR: &str = "MODEL_GATEWAY_GOAL_JUDGE_ENABLED";
+pub(crate) const GOAL_JUDGE_ENABLED_VAR: &str = "MODEL_GATEWAY_GOAL_JUDGE_ENABLED";
 
 /// The tail of the last answer the judge reads. The end of an answer is where a
 /// run states what it finished, so a long answer keeps its last characters.

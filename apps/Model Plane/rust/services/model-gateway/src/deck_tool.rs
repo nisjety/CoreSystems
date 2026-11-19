@@ -71,7 +71,7 @@ use crate::{
 pub const TOOL_NAME: &str = "deck";
 
 /// The switch. Only the literal `true` enables the tool.
-const DECK_TOOL_ENV: &str = "MODEL_GATEWAY_DECK_TOOL";
+pub(crate) const DECK_TOOL_ENV: &str = "MODEL_GATEWAY_DECK_TOOL";
 
 /// Where execution-core's image keeps the builder (EP-5 S1). Only the test reads it: it pins
 /// `BUILD_COMMAND` to this path, since a const string cannot be formatted from it.
@@ -118,7 +118,7 @@ const SUMMARY_FINDING_CHARS: usize = 120;
 
 /// The research-to-deck switch (EP-5 S8). Only the literal `true` enables it,
 /// and it is reached only while the deck tool itself is on.
-const DECK_FROM_ARTIFACT_ENV: &str = "MODEL_GATEWAY_DECK_FROM_ARTIFACT";
+pub(crate) const DECK_FROM_ARTIFACT_ENV: &str = "MODEL_GATEWAY_DECK_FROM_ARTIFACT";
 
 /// The operation that reads a document's outline.
 const FROM_ARTIFACT_OP: &str = "create_from_artifact";

@@ -1,9 +1,11 @@
 //! F-f10-04 / FU-29: the org's web domain rules apply to the page a web call ENDED on. org-core (wiremock) allows
 //! `example.org` and denies `blocked.example`. `final_url_refusal` refuses a final URL on the blocked host under
 //! `enforce` only, passes the same host without asking org-core, and reads but refuses nothing under `shadow`. An
-//! empty or blank final URL is no final URL: under `enforce` the requested host is read in its place, and under `off`
-//! and `shadow` nothing is read. The inline `fetch_url` tool drops the redirected page unread: the model gets the typed
-//! refusal and none of the page's text, while `off` and `shadow` read the page as before.
+//! empty, blank or absent final URL is no final URL, so it is unknown: under `enforce` and `shadow` the requested host
+//! is read in its place (under `shadow` a would-be refusal is logged and nothing is refused), and under `off` nothing
+//! is read. The inline `fetch_url` tool drops the redirected page unread: the model gets the typed refusal and none of
+//! the page's text, while `off` and `shadow` read the page as before. When the final URL is unknown, the `fetch_url`
+//! header and failure name the requested URL under its own label.
 
 use mp_contracts::model_plane::v1::ToolCall;
 use mp_contracts::site_policy::WebDomainPolicyMode;
@@ -248,35 +250,62 @@ async fn a_blank_final_url_for_a_requested_url_with_no_host_is_refused_under_enf
     assert_eq!(requests(&server).await, 0, "no host, so nothing is asked");
 }
 
+/// A blank final URL is no final URL. Under `off` nothing is read. Under `shadow` the requested host is judged, so a
+/// would-be refusal is logged, but nothing is refused: a denied requested host passes here, as every shadow judgement
+/// passes.
 #[tokio::test]
-async fn a_blank_final_url_is_not_read_under_off_or_shadow() {
+async fn a_blank_final_url_is_not_read_under_off_and_is_judged_under_shadow() {
     let server = org_core("org-f1004-blank-quiet").await;
     let base = server.uri();
-    for mode in [WebDomainPolicyMode::Off, WebDomainPolicyMode::Shadow] {
-        for (requested, final_url) in [
-            ("https://example.org/a", ""),
-            ("https://example.org/a", "  "),
-            ("https://blocked.example/a", ""),
-            ("not a url", ""),
-        ] {
-            let refusal = final_url_refusal(
-                mode,
-                &SiteChecker::default(),
-                &owner(&base),
-                "org-f1004-blank-quiet",
-                requested,
-                final_url,
-                "fetch_url",
-            )
-            .await;
-            assert_eq!(refusal, None, "{mode:?} {requested} -> {final_url:?}");
-        }
+    for (requested, final_url) in [
+        ("https://example.org/a", ""),
+        ("https://example.org/a", "  "),
+        ("https://blocked.example/a", ""),
+        ("not a url", ""),
+    ] {
+        let refusal = final_url_refusal(
+            WebDomainPolicyMode::Off,
+            &SiteChecker::default(),
+            &owner(&base),
+            "org-f1004-blank-quiet",
+            requested,
+            final_url,
+            "fetch_url",
+        )
+        .await;
+        assert_eq!(refusal, None, "off {requested} -> {final_url:?}");
     }
     assert_eq!(
         requests(&server).await,
         0,
-        "off and shadow ask org-core nothing for a blank final URL"
+        "off asks org-core nothing for a blank final URL"
     );
+
+    // Shadow asks org-core about the requested host (none for a URL with no host) and refuses nothing.
+    for (requested, final_url, asked) in [
+        ("https://example.org/a", "", 1),
+        ("https://example.org/a", "  ", 1),
+        ("https://blocked.example/a", "", 1),
+        ("not a url", "", 0),
+    ] {
+        let before = requests(&server).await;
+        let refusal = final_url_refusal(
+            WebDomainPolicyMode::Shadow,
+            &SiteChecker::default(),
+            &owner(&base),
+            "org-f1004-blank-quiet",
+            requested,
+            final_url,
+            "fetch_url",
+        )
+        .await;
+        assert_eq!(refusal, None, "shadow {requested} -> {final_url:?}");
+        assert_eq!(
+            requests(&server).await,
+            before + asked,
+            "shadow judges the requested host: {requested} -> {final_url:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -313,6 +342,21 @@ async fn fetch_state(org: &MockServer, final_url: &str) -> (AppState, MockServer
 /// The same gateway, with Quarry's reply carrying `url` as given. A test names the keys it means: `final_url`, the
 /// legacy `final`, or neither.
 async fn fetch_state_with_url(org: &MockServer, url: Value) -> (AppState, MockServer) {
+    fetch_state_with_page(
+        org,
+        url,
+        &format!("Page text {MARKER} with enough words to be readable prose here."),
+    )
+    .await
+}
+
+/// The same gateway, with Quarry's reply carrying `url` as given and `markdown` as the page's text. An empty `markdown`
+/// is a page with nothing to read.
+async fn fetch_state_with_page(
+    org: &MockServer,
+    url: Value,
+    markdown: &str,
+) -> (AppState, MockServer) {
     let quarry = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/scrape"))
@@ -321,7 +365,7 @@ async fn fetch_state_with_url(org: &MockServer, url: Value) -> (AppState, MockSe
                 "status": 200,
                 "url": url,
                 "title": "Landing",
-                "formats": {"markdown": format!("Page text {MARKER} with enough words to be readable prose here.")}
+                "formats": {"markdown": markdown}
             }
         })))
         .mount(&quarry)
@@ -552,4 +596,80 @@ async fn fetch_url_reads_a_page_with_an_absent_or_blank_final_url_under_off() {
             "{org_id}: off asks org-core nothing"
         );
     }
+}
+
+/// V3d-go-1, display: a page whose final URL is unknown has a header `final_url` of null, and the URL asked for under its
+/// own label, never an empty address. A known final URL is shown as it always was, with no `requested_url` key.
+#[tokio::test]
+async fn fetch_url_header_names_the_requested_url_when_the_final_url_is_unknown() {
+    let _mode = test_seam::set(WebDomainPolicyMode::Enforce);
+    for (org_id, url) in no_final_url_replies("header") {
+        let org = org_core(&org_id).await;
+        let (state, _quarry) = fetch_state_with_url(&org, url).await;
+        let outcome = fetch_url(&state, &org_id).await;
+        assert!(outcome.error.is_none(), "{org_id}: {:?}", outcome.error);
+        let header: Value = serde_json::from_str(&outcome.output).expect("the page is JSON");
+        assert!(
+            header["final_url"].is_null(),
+            "{org_id}: {}",
+            outcome.output
+        );
+        assert_eq!(
+            header["requested_url"], REQUESTED,
+            "{org_id}: {}",
+            outcome.output
+        );
+        assert!(outcome.output.contains(MARKER), "{org_id}");
+    }
+
+    let org = org_core("org-f1004-header-known").await;
+    let (state, _quarry) = fetch_state(&org, "https://example.org/landing").await;
+    let outcome = fetch_url(&state, "org-f1004-header-known").await;
+    let header: Value = serde_json::from_str(&outcome.output).expect("the page is JSON");
+    assert_eq!(
+        header["final_url"], "https://example.org/landing",
+        "{}",
+        outcome.output
+    );
+    assert!(header.get("requested_url").is_none(), "{}", outcome.output);
+}
+
+/// V3d-go-1, display: a page with no readable text names the requested URL, labelled as requested, in its failure when
+/// the final URL is unknown. The failure never reads "from" followed by an empty address. A known final URL is named as
+/// it always was.
+#[tokio::test]
+async fn fetch_url_failure_names_the_requested_url_when_the_final_url_is_unknown() {
+    let _mode = test_seam::set(WebDomainPolicyMode::Enforce);
+    for (org_id, url) in no_final_url_replies("failure") {
+        let org = org_core(&org_id).await;
+        let (state, _quarry) = fetch_state_with_page(&org, url, "").await;
+        let outcome = fetch_url(&state, &org_id).await;
+        let error = outcome
+            .error
+            .clone()
+            .expect("a page with no text is a failure");
+        assert!(
+            error.contains(&format!(
+                "from the requested URL {REQUESTED}, whose final URL was not reported"
+            )),
+            "{org_id}: {error}"
+        );
+    }
+
+    let org = org_core("org-f1004-failure-known").await;
+    let (state, _quarry) = fetch_state_with_page(
+        &org,
+        json!({"requested": REQUESTED, "final_url": "https://example.org/landing"}),
+        "",
+    )
+    .await;
+    let outcome = fetch_url(&state, "org-f1004-failure-known").await;
+    let error = outcome
+        .error
+        .clone()
+        .expect("a page with no text is a failure");
+    assert!(
+        error.contains("from https://example.org/landing (the page is most likely"),
+        "{error}"
+    );
 }

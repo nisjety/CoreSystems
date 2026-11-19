@@ -60,7 +60,7 @@ const INFER_TIMEOUT: Duration = Duration::from_secs(120);
 /// The most of one page's extracted data a tool result carries, in chars.
 const MAX_TOOL_DATA_CHARS: usize = 12_000;
 
-const FLAG_ENV: &str = "MODEL_GATEWAY_EXTRACT_TOOL";
+pub(crate) const FLAG_ENV: &str = "MODEL_GATEWAY_EXTRACT_TOOL";
 
 /// Whether the chat tool loop offers `extract_structured`. Off unless the variable is exactly the
 /// literal `true` (no trimming, no case folding).

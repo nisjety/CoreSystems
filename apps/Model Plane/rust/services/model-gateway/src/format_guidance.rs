@@ -243,6 +243,8 @@ fn widget_guidance_enabled_from(raw: Option<&str>) -> bool {
     mp_contracts::loop_fold::switch_from(raw)
 }
 
+pub(crate) const WIDGET_GUIDANCE_ENV: &str = "MODEL_GATEWAY_WIDGET_GUIDANCE";
+
 /// Whether this gateway may write the widget notice (EP-4 S2). Read once per process, so it cannot
 /// change under a request.
 #[must_use]
@@ -250,7 +252,7 @@ pub fn widget_guidance_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         widget_guidance_enabled_from(
-            std::env::var("MODEL_GATEWAY_WIDGET_GUIDANCE").ok().as_deref(),
+            std::env::var(WIDGET_GUIDANCE_ENV).ok().as_deref(),
         )
     })
 }

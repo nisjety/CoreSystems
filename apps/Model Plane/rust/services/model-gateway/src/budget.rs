@@ -17,7 +17,7 @@ const DEFAULT_COST_CORE_URL: &str = "http://localhost:8089";
 /// Switch for the windowed org budget (WS27-S8). Only the literal `true`
 /// enables it, and it is read per request, so a restart is not needed to turn
 /// it off. Off, the check counts lifetime spend, as it did before.
-const BUDGET_WINDOW_ENV: &str = "MODEL_GATEWAY_BUDGET_WINDOW";
+pub(crate) const BUDGET_WINDOW_ENV: &str = "MODEL_GATEWAY_BUDGET_WINDOW";
 /// Switch for the per-run cap rule (D2-698). Only the literal `true` enables it.
 /// On, a cap on the request can only tighten the org ceiling: the smaller of the
 /// two applies. Off, a cap on the request replaces the org ceiling, as it did

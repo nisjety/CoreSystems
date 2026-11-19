@@ -310,13 +310,15 @@ pub async fn handle_code_interpreter(
     }
 }
 
+pub(crate) const SANDBOX_THREAD_WORKSPACE_ENV: &str = "SANDBOX_THREAD_WORKSPACE_ENABLED";
+
 /// Whether this gateway adds the `workspace` part to a `code_interpreter` result that execution-core did
 /// not attach one to (WS22-S3). Read once per process, and only the literal `true` enables it: with the
 /// switch off a result is returned exactly as execution-core wrote it.
 fn thread_workspace_reporting_enabled() -> bool {
     static SWITCH: OnceLock<bool> = OnceLock::new();
     *SWITCH.get_or_init(|| {
-        std::env::var("SANDBOX_THREAD_WORKSPACE_ENABLED").is_ok_and(|value| value == "true")
+        std::env::var(SANDBOX_THREAD_WORKSPACE_ENV).is_ok_and(|value| value == "true")
     })
 }
 

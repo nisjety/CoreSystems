@@ -65,13 +65,13 @@ pub fn enabled_from_env_value(value: Option<&str>) -> bool {
     value == Some("true")
 }
 
+pub(crate) const ENABLED_ENV: &str = "MCP_ELICITATION_ENABLED";
+
 /// The process's `MCP_ELICITATION_ENABLED`, read once so it cannot change under a request.
 #[must_use]
 pub fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        enabled_from_env_value(std::env::var("MCP_ELICITATION_ENABLED").ok().as_deref())
-    })
+    *ENABLED.get_or_init(|| enabled_from_env_value(std::env::var(ENABLED_ENV).ok().as_deref()))
 }
 
 /// `MCP_ELICITATION_HOLD_SECONDS`: a whole number of seconds clamped to

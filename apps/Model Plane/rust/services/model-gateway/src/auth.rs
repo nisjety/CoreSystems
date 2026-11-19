@@ -1023,16 +1023,14 @@ async fn reset_jwks_cache_for_test() {
     *guard = None;
 }
 
+pub(crate) const DEV_BYPASS_ENV: &str = "MODEL_GATEWAY_AUTH_DEV_BYPASS";
+
 fn dev_bypass_enabled() -> bool {
     // `validate_startup` requires the second insecure-development gate before
     // the executable opens a listener. Keeping this helper single-purpose
     // also lets middleware unit tests exercise the bypass without booting the
     // entire service.
-    dev_bypass_from(
-        std::env::var("MODEL_GATEWAY_AUTH_DEV_BYPASS")
-            .ok()
-            .as_deref(),
-    )
+    dev_bypass_from(std::env::var(DEV_BYPASS_ENV).ok().as_deref())
 }
 
 /// `MODEL_GATEWAY_AUTH_DEV_BYPASS`, read exactly: only the literal `true` requests the bypass.
@@ -1074,6 +1072,8 @@ fn validate_startup_values(
     Ok(())
 }
 
+pub(crate) const INSECURE_DEV_DEFAULTS_ENV: &str = "ALLOW_INSECURE_DEV_DEFAULTS";
+
 /// Validate authentication configuration before either public listener starts.
 /// Production posture has no observe/optional verification mode.
 ///
@@ -1084,7 +1084,7 @@ fn validate_startup_values(
 pub fn validate_startup() -> anyhow::Result<()> {
     let bypass_requested = dev_bypass_enabled();
     let insecure_development =
-        insecure_dev_defaults_from(std::env::var("ALLOW_INSECURE_DEV_DEFAULTS").ok().as_deref());
+        insecure_dev_defaults_from(std::env::var(INSECURE_DEV_DEFAULTS_ENV).ok().as_deref());
     validate_startup_values(
         std::env::var("AUTH_CORE_JWKS_URL").ok().as_deref(),
         std::env::var("AUTH_CORE_ISSUER").ok().as_deref(),

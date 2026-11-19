@@ -364,9 +364,11 @@ fn key_grants_flag(value: Option<&str>) -> bool {
     mp_contracts::loop_fold::switch_from(value)
 }
 
+pub(crate) const KEY_GRANTS_ENV: &str = "MODEL_GATEWAY_BROWSER_KEY_GRANTS";
+
 fn key_grants_enabled(state: &AppState) -> bool {
     state.browser_key_grants.unwrap_or_else(|| {
-        key_grants_flag(std::env::var("MODEL_GATEWAY_BROWSER_KEY_GRANTS").ok().as_deref())
+        key_grants_flag(std::env::var(KEY_GRANTS_ENV).ok().as_deref())
     })
 }
 

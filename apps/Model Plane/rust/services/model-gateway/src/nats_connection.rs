@@ -37,6 +37,10 @@ fn select_auth(
     }
 }
 
+/// The gate that lets `NATS_AUTH_TOKEN` stand in for a missing user/password pair. Read exactly:
+/// only `1` opens it. Named in `switch_spellings::LITERAL_ONE_EXCEPTIONS`.
+pub(crate) const ALLOW_TOKEN_FALLBACK_ENV: &str = "NATS_ALLOW_TOKEN_FALLBACK";
+
 /// Connect to NATS using scoped `NATS_USER`/`NATS_PASSWORD` credentials.
 /// `NATS_AUTH_TOKEN` is considered only when `NATS_ALLOW_TOKEN_FALLBACK=1`
 /// and no user/password pair is configured.
@@ -52,7 +56,7 @@ pub async fn connect(url: &str) -> Result<async_nats::Client, async_nats::Connec
         user.as_deref(),
         password.as_deref(),
         token.as_deref(),
-        std::env::var("NATS_ALLOW_TOKEN_FALLBACK").as_deref() == Ok("1"),
+        std::env::var(ALLOW_TOKEN_FALLBACK_ENV).as_deref() == Ok("1"),
     ) {
         NatsAuth::UserPassword(user, password) => {
             async_nats::ConnectOptions::with_user_and_password(user, password)
