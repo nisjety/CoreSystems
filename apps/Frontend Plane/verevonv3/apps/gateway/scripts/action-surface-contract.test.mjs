@@ -200,6 +200,8 @@ const WS11_ACTION_IDS = [
 // drift it reports predates the Space work): each new id is declared in its own fragment, is part
 // of the registry set, and has an execute_action arm that reaches a named dispatch_ function.
 for (const [fragment, ids] of [
+  // D18: per-member room history. The dispatcher rides room_admin::set_member_history_window (dispatchers_spaces/d18.rs).
+  ['d18.ts', ['spaces.set_member_history_window']],
   ['ws01.ts', ['spaces.create_post', 'spaces.reply_in_thread']],
   ['ws03.ts', ['spaces.set_effect_entitlements', 'spaces.apply_effect_preset']],
   [
@@ -384,6 +386,8 @@ test('the Wave 2 and Wave 3 Space actions are human-only: a closed model-access 
     'spaces.restore_canvas_version',
     // WS20-S5: starting a browser run from a room.
     'spaces.browser_run.start',
+    // D18: who may read a room's past is a human decision; an agent never sets a member's history window.
+    'spaces.set_member_history_window',
   ]) {
     const row = modelAccessSource.match(new RegExp(`'${actionId.replaceAll('.', '\\.')}':\\s*([^\\n]+)`));
     assert.ok(row, `${actionId} has a model-access row`);

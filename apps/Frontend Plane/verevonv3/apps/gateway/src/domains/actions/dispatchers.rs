@@ -7350,14 +7350,23 @@ pub(super) async fn dispatch_space_add_member(
     if space_ref.is_empty() || member_id.is_empty() {
         return ticket_bad_request("spaces.add_member requires non-empty 'spaceRef' and 'memberId'");
     }
+    let mut body = json!({ "member_id": member_id });
+    let role = ticket_string(input, "role");
+    if !role.is_empty() {
+        body["role"] = json!(role);
+    }
+    // D18: the invite's "share past conversation" choice reaches the member writer as the route's own
+    // `share_past_conversation`, exactly as given (`false` included). The route is the one place that decides what a value
+    // means, and it refuses a malformed one, so a choice that is not a boolean can never degrade into the default and add
+    // the person with the past shared. Absent is no choice: the room's own history mode decides, as before.
+    if let Some(choice) = input.get("sharePastConversation") {
+        body["share_past_conversation"] = choice.clone();
+    }
     let (status, Json(payload)) = add_space_member(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
         PathExtractor(space_ref.to_owned()),
-        Json(match ticket_string(input, "role") {
-            "" => json!({ "member_id": member_id }),
-            role => json!({ "member_id": member_id, "role": role }),
-        }),
+        Json(body),
     )
     .await;
     owner_json_response_to_envelope("spaces.add_member", user, status, payload)

@@ -89,6 +89,7 @@ use super::dispatchers::{
 use super::dispatchers_client_routed::{
     dispatch_agents_admitted_actions_list, dispatch_client_executed, dispatch_owner_not_wired,
 };
+use super::dispatchers_spaces::d18::dispatch_spaces_set_member_history_window;
 use super::dispatchers_spaces::ws01::{dispatch_spaces_create_post, dispatch_spaces_reply_in_thread};
 use super::dispatchers_spaces::ws20::dispatch_spaces_browser_run_start;
 use super::dispatchers_spaces::ws04::{
@@ -1196,6 +1197,12 @@ pub(super) async fn execute_action(
         }
         "spaces.leave_room" => {
             boxed_dispatch(|| dispatch_spaces_leave_room(&state, &user, &body.input)).await
+        }
+        "spaces.set_member_history_window" => {
+            boxed_dispatch(|| {
+                dispatch_spaces_set_member_history_window(&state, &user, &body.input)
+            })
+            .await
         }
         "spaces.open_dm" => {
             boxed_dispatch(|| dispatch_spaces_open_dm(&state, &user, &headers, &body.input)).await
