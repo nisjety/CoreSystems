@@ -11,6 +11,7 @@ const spacesClient = vi.hoisted(() => ({
   changeSpaceMemberRole: vi.fn(),
   leaveSpaceRoom: vi.fn(),
   searchDirectoryPeople: vi.fn(),
+  searchDirectory: vi.fn(),
 }))
 
 vi.mock('@/shared/api/organization-client', () => orgClient)
@@ -572,5 +573,115 @@ describe('SpaceMemberControls people search (WS04-S3)', () => {
     view.unmount()
     await sleep(400)
     expect(spacesClient.searchDirectoryPeople).toHaveBeenCalledTimes(1)
+  })
+})
+
+// WS04-S9: with `features.directory_resolver` the picker is the shared DirectoryPicker. People and
+// published agents are listed together, the room's members are left out, an agent row is labelled
+// and never offered an add, and a person is added with the role chosen here when the writer is on.
+describe('SpaceMemberControls directory picker (WS04-S9)', () => {
+  const person = (id: string, name: string) => ({
+    kind: 'person' as const,
+    subjectId: id,
+    displayName: name,
+    email: `${id}@example.test`,
+    isSelf: false,
+  })
+  const driftsagent = {
+    kind: 'agent' as const,
+    agentRef: 'agent-ops',
+    displayName: 'Driftsassistent',
+    description: 'Svarer på driftsspørsmål',
+    installedIn: [],
+  }
+  const pageOf = (results: readonly unknown[]) => ({ results, nextCursor: null, presenceOnly: true as const })
+  const searchCalls = () => spacesClient.searchDirectory.mock.calls as Array<[string, Record<string, unknown>]>
+
+  beforeEach(() => {
+    spacesClient.searchDirectory.mockReset().mockResolvedValue(pageOf([]))
+  })
+
+  const renderPicker = (
+    props: { directoryResolver?: boolean; peopleSearch?: boolean; writerApi?: boolean; actorRole?: string } = {},
+  ) =>
+    render(() => (
+      <SpaceMemberControls
+        spaceRef="space_1"
+        orgId="org_1"
+        roster={() => roster}
+        directoryResolver={props.directoryResolver}
+        peopleSearch={props.peopleSearch}
+        writerApi={props.writerApi}
+        actorRole={props.actorRole}
+      />
+    ))
+  const openPicker = () => screen.getByRole('button', { name: /Legg til personer/ }).click()
+
+  it('draws the shared picker in place of the organisation list, with no organisation read and no people-search call', async () => {
+    renderPicker({ directoryResolver: true, peopleSearch: true })
+    openPicker()
+    await waitFor(() => expect(spacesClient.searchDirectory).toHaveBeenCalledTimes(1))
+    expect(searchCalls()[0]?.[0]).toBe('')
+    expect(searchCalls()[0]?.[1]).toMatchObject({ limit: 20, cursor: null, excludeMemberOf: 'space_1' })
+    expect(orgClient.listOrganizationMembers).not.toHaveBeenCalled()
+    expect(spacesClient.searchDirectoryPeople).not.toHaveBeenCalled()
+    // One search box: the picker's own. The WS04-S3 people-search box is not drawn beside it.
+    expect(screen.getAllByRole('searchbox')).toHaveLength(1)
+    expect(screen.getByText('Søk etter personer og agenter')).toBeTruthy()
+  })
+
+  it('lists people and agents together, hides the people already on the roster, and offers no add on an agent', async () => {
+    spacesClient.searchDirectory.mockResolvedValue(
+      pageOf([person('user_2', 'Ola Hansen'), person('user_4', 'Kari Solheim'), driftsagent]),
+    )
+    renderPicker({ directoryResolver: true })
+    openPicker()
+    expect(await screen.findByText('Kari Solheim')).toBeTruthy()
+    // Ola is user_2, already on Control's roster, so the picker leaves him out.
+    expect(screen.queryByText('Ola Hansen')).toBeNull()
+    expect(screen.getByText('Driftsassistent')).toBeTruthy()
+    expect(screen.getByText('Agent, ikke en person')).toBeTruthy()
+    // Exactly one add button: the one for Kari. The agent row has none.
+    expect(screen.getAllByRole('button', { name: 'Legg til' })).toHaveLength(1)
+  })
+
+  it('adds the person picked here with the role chosen here, when the writer is on', async () => {
+    spacesClient.searchDirectory.mockResolvedValue(pageOf([person('user_4', 'Kari Solheim')]))
+    renderPicker({ directoryResolver: true, writerApi: true, actorRole: 'owner' })
+    openPicker()
+    const select = (await screen.findByLabelText('Rolle for nye medlemmer')) as HTMLSelectElement
+    select.value = 'viewer'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    // Signals flush on the next tick: let the chosen role settle before the press reads it.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    fireEvent.click(screen.getByRole('button', { name: 'Legg til' }))
+    await waitFor(() => expect(spacesClient.addSpaceMember).toHaveBeenCalledWith('space_1', 'user_4', 'viewer'))
+  })
+
+  it('adds with no role when the writer is off, as the legacy add does', async () => {
+    spacesClient.searchDirectory.mockResolvedValue(pageOf([person('user_4', 'Kari Solheim')]))
+    renderPicker({ directoryResolver: true, writerApi: false, actorRole: 'owner' })
+    openPicker()
+    fireEvent.click(await screen.findByRole('button', { name: 'Legg til' }))
+    await waitFor(() => expect(spacesClient.addSpaceMember).toHaveBeenCalledTimes(1))
+    const call = spacesClient.addSpaceMember.mock.calls[0]!
+    expect(call.slice(0, 2)).toEqual(['space_1', 'user_4'])
+    expect(call[2]).toBeUndefined()
+  })
+
+  it('with the flag off, the people-search path is kept and the shared picker is not drawn', async () => {
+    renderPicker({ directoryResolver: false, peopleSearch: true })
+    openPicker()
+    await waitFor(() => expect(spacesClient.searchDirectoryPeople).toHaveBeenCalledTimes(1))
+    expect(spacesClient.searchDirectory).not.toHaveBeenCalled()
+    expect(orgClient.listOrganizationMembers).not.toHaveBeenCalled()
+  })
+
+  it('with the flag undefined (the server did not say), the organisation list is used as before', async () => {
+    renderPicker({ peopleSearch: false })
+    openPicker()
+    expect(await screen.findByText('Nina Berg')).toBeTruthy()
+    expect(spacesClient.searchDirectory).not.toHaveBeenCalled()
+    expect(orgClient.listOrganizationMembers).toHaveBeenCalledWith('org_1')
   })
 })
