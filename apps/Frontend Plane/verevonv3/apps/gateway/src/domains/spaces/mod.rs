@@ -7979,6 +7979,48 @@ mod tests {
         assert_eq!(body["data"]["unavailable"], json!([]));
     }
 
+    /// WS09-S2: the thread listing carries `data.agent_work` as an object. `steer_owner` is true only with
+    /// `SPACE_RUN_OWNER_STEER` on and an org positively not under Zero Data Retention; a ZDR org, an unknown
+    /// posture and the flag being off each give false.
+    #[tokio::test]
+    async fn thread_listing_steer_owner_needs_the_flag_and_a_positively_non_zdr_org() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        // (flag, org-core answer, expected steer_owner). `None` is an org-core failure, an unknown posture.
+        for (flag, answer, want) in [
+            (false, Some(false), false),
+            (true, Some(true), false),
+            (true, None, false),
+            (true, Some(false), true),
+        ] {
+            let (mut state, _app, _model_gateway, _auth, _user_core) = room_4b_fixture(
+                ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": 1}})),
+                ResponseTemplate::new(200).set_body_json(json!({})),
+                ResponseTemplate::new(200).set_body_json(json!({})),
+            )
+            .await;
+            let org = MockServer::start().await;
+            let posture = match answer {
+                Some(zdr) => ResponseTemplate::new(200).set_body_json(
+                    json!({"data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}}),
+                ),
+                None => ResponseTemplate::new(500).set_body_string("org-core is down"),
+            };
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/api/v1/organizations/org-1"))
+                .respond_with(posture)
+                .mount(&org)
+                .await;
+            state.org_core_url = org.uri();
+            state.space_features.run_owner_steer = flag;
+            let (status, body) =
+                room_4b_request(state, "GET", "/api/v1/spaces/space-room/threads", None).await;
+            assert_eq!(status, 200, "flag={flag} answer={answer:?}");
+            let agent_work = &body["data"]["agent_work"];
+            assert!(agent_work.is_object(), "{agent_work}");
+            assert_eq!(agent_work["steer_owner"], want, "flag={flag} answer={answer:?}");
+        }
+    }
+
     /// W3-FIX-15: the thread listing relays `title_source` and `pinned_source` on each `data.threads`
     /// row exactly as Model Gateway sent them. The BFF keeps no allowlist here, so any other field of
     /// the row survives too.
@@ -13831,6 +13873,145 @@ mod ws03_s5_ws04_gateway_tests {
             assert_eq!(features["system_entries"], want_system, "timeline={timeline} system={system}");
             assert_eq!(body["data"]["limits"]["max_people_mentions"], 20);
             assert_eq!(body["data"]["limits"]["max_agent_mentions"], 3);
+        }
+    }
+
+    /// WS19-S4: `features.canvas` is on only when both the canvas API and the canvas UI flags are on.
+    #[tokio::test]
+    async fn space_context_features_canvas_needs_both_the_api_and_ui_flags() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let room = json!([{"spaceRef": "space-room", "name": "Leveranse", "kind": "room", "lifecycle": "active"}]);
+        for (api, ui) in [(false, false), (true, false), (false, true), (true, true)] {
+            let (status, body) = json_route(
+                "/api/v1/spaces/space-room/context",
+                |state| {
+                    state.space_features.canvas_api = api;
+                    state.space_features.canvas_ui = ui;
+                },
+                json!([]),
+                room.clone(),
+            )
+            .await;
+            assert_eq!(status, 200);
+            assert_eq!(body["data"]["features"]["canvas"], api && ui, "api={api} ui={ui}");
+        }
+    }
+
+    /// WS04-S9: `features.directory_resolver` mirrors `SPACE_DIRECTORY_RESOLVER_API`.
+    #[tokio::test]
+    async fn space_context_features_mirror_the_directory_resolver_flag() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let room = json!([{"spaceRef": "space-room", "name": "Leveranse", "kind": "room", "lifecycle": "active"}]);
+        for flag in [false, true] {
+            let (status, body) = json_route(
+                "/api/v1/spaces/space-room/context",
+                |state| state.space_features.directory_resolver_api = flag,
+                json!([]),
+                room.clone(),
+            )
+            .await;
+            assert_eq!(status, 200);
+            assert_eq!(body["data"]["features"]["directory_resolver"], flag);
+        }
+    }
+
+    /// WS17-S6b: `features.private_panel` is reported on the room context and follows `SPACE_PRIVATE_PANEL_UI`.
+    #[tokio::test]
+    async fn space_context_features_follow_the_private_panel_flag() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let room = json!([{"spaceRef": "space-room", "name": "Leveranse", "kind": "room", "lifecycle": "active"}]);
+        for flag in [false, true] {
+            let (status, body) = json_route(
+                "/api/v1/spaces/space-room/context",
+                |state| state.space_features.private_panel_ui = flag,
+                json!([]),
+                room.clone(),
+            )
+            .await;
+            assert_eq!(status, 200);
+            assert_eq!(body["data"]["features"]["private_panel"], flag);
+        }
+    }
+
+    /// WS14-S7: `features.room_files` reports `durable`, `files_tab` (the durable flag and its UI flag) and
+    /// `turn_attachments` from their flags, and `limits.room_files` carries the R6 limits.
+    #[tokio::test]
+    async fn space_context_reports_the_room_files_features_and_limits() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let room = json!([{"spaceRef": "space-room", "name": "Leveranse", "kind": "room", "lifecycle": "active"}]);
+        // (durable, files tab UI, turn attachments UI)
+        for (durable, files_ui, turn) in [
+            (false, false, false),
+            (true, false, false),
+            (true, true, false),
+            (false, true, true),
+        ] {
+            let (status, body) = json_route(
+                "/api/v1/spaces/space-room/context",
+                |state| {
+                    state.space_features.room_files_api = durable;
+                    state.space_features.room_files_ui = files_ui;
+                    state.space_features.turn_attachments_ui = turn;
+                },
+                json!([]),
+                room.clone(),
+            )
+            .await;
+            assert_eq!(status, 200);
+            let files = &body["data"]["features"]["room_files"];
+            assert_eq!(files["durable"], durable, "durable={durable}");
+            assert_eq!(files["files_tab"], durable && files_ui, "durable={durable} files_ui={files_ui}");
+            assert_eq!(files["turn_attachments"], turn, "turn={turn}");
+        }
+        let (_, body) = json_route("/api/v1/spaces/space-room/context", |_| {}, json!([]), room).await;
+        let limits = &body["data"]["limits"]["room_files"];
+        assert_eq!(limits["max_files"], 10);
+        assert_eq!(limits["max_file_bytes"], 25 * 1024 * 1024);
+        assert_eq!(limits["max_request_bytes"], 100 * 1024 * 1024);
+        assert_eq!(
+            limits["allowed_extensions"],
+            json!(["pdf", "docx", "xlsx", "pptx", "txt", "md", "csv", "json"])
+        );
+        assert_eq!(limits["turn_inline_chars"], 60_000);
+        assert_eq!(limits["turn_total_chars"], 120_000);
+    }
+
+    /// WS13-S3: `features.message_search` is on only with both its API and UI flags; `entry_links`,
+    /// `command_palette` and `thread_fork` each mirror their own flag.
+    #[tokio::test]
+    async fn space_context_features_mirror_the_message_search_and_navigation_flags() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let room = json!([{"spaceRef": "space-room", "name": "Leveranse", "kind": "room", "lifecycle": "active"}]);
+        // (message search API, message search UI, entry links, command palette, thread fork)
+        for (search_api, search_ui, entry_links, palette, fork) in [
+            (false, false, false, false, false),
+            (true, false, true, false, false),
+            (false, true, false, true, true),
+            (true, true, true, true, true),
+        ] {
+            let (status, body) = json_route(
+                "/api/v1/spaces/space-room/context",
+                |state| {
+                    state.space_features.message_search_api = search_api;
+                    state.space_features.message_search_ui = search_ui;
+                    state.space_features.entry_links_ui = entry_links;
+                    state.space_features.command_palette_ui = palette;
+                    state.space_features.thread_fork_api = fork;
+                },
+                json!([]),
+                room.clone(),
+            )
+            .await;
+            assert_eq!(status, 200);
+            let features = &body["data"]["features"];
+            assert_eq!(
+                features["message_search"],
+                search_api && search_ui,
+                "api={search_api} ui={search_ui}"
+            );
+            assert_eq!(features["entry_links"], entry_links);
+            assert_eq!(features["command_palette"], palette);
+            assert_eq!(features["thread_fork"], fork);
         }
     }
 }

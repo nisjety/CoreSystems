@@ -1329,7 +1329,8 @@ mod tests {
             body["data"]["features"],
             json!({
                 "message_search": false, "entry_links": false, "command_palette": false,
-                "room_pins": false, "thread_fork": false, "attention": false
+                "room_pins": false, "thread_fork": false, "attention": false,
+                "personal_agents": false, "memory_declassify": false
             })
         );
         fx.state.space_features.message_search_api = true;
@@ -1346,5 +1347,14 @@ mod tests {
             assert_eq!(features[key], true, "{key}");
         }
         assert_eq!(features["attention"], false, "needs both attention flags");
+        // WS17-S5: personal_agents needs both of its flags. W3-FIX-14: memory_declassify mirrors its flag.
+        fx.state.space_features.personal_agents_api = true;
+        fx.state.space_features.space_memory_declassify_api = true;
+        let (_, _, body) = send(&fx, "GET", "/api/v1/spaces/features", None).await;
+        assert_eq!(body["data"]["features"]["personal_agents"], false, "needs the UI flag too");
+        assert_eq!(body["data"]["features"]["memory_declassify"], true);
+        fx.state.space_features.personal_agents_ui = true;
+        let (_, _, body) = send(&fx, "GET", "/api/v1/spaces/features", None).await;
+        assert_eq!(body["data"]["features"]["personal_agents"], true);
     }
 }

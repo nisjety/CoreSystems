@@ -2257,6 +2257,42 @@ mod tests").next().unwrap_or(&config);
             with_env(&vars("development", Some("0")), || assert!(!flag(), "{key} 0 is off"));
         }
     }
+
+    /// WS09-S2: the four `SPACE_RUN_*` flags are off by default and in production when unset, on in
+    /// development when unset, `1` and `true` turn them on in production, and an explicit `false` wins in development.
+    #[test]
+    fn ws09_s2_run_flags_default_off_in_production_and_on_in_dev() {
+        let default = super::SpaceFeatureFlags::default();
+        assert!(!default.run_live_text);
+        assert!(!default.run_live_view);
+        assert!(!default.run_manager_stop);
+        assert!(!default.run_owner_steer);
+        let keys = [
+            "SPACE_RUN_LIVE_TEXT",
+            "SPACE_RUN_LIVE_VIEW",
+            "SPACE_RUN_MANAGER_STOP",
+            "SPACE_RUN_OWNER_STEER",
+        ];
+        let vars = |app_env: &'static str, value: Option<&'static str>| {
+            let mut vars = vec![("APP_ENV", Some(app_env))];
+            vars.extend(keys.iter().map(|key| (*key, value)));
+            vars
+        };
+        let read = || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            [
+                flags.run_live_text,
+                flags.run_live_view,
+                flags.run_manager_stop,
+                flags.run_owner_steer,
+            ]
+        };
+        with_env(&vars("production", None), || assert_eq!(read(), [false; 4]));
+        with_env(&vars("development", None), || assert_eq!(read(), [true; 4]));
+        with_env(&vars("production", Some("true")), || assert_eq!(read(), [true; 4]));
+        with_env(&vars("production", Some("1")), || assert_eq!(read(), [true; 4]));
+        with_env(&vars("development", Some("false")), || assert_eq!(read(), [false; 4]));
+    }
 }
 
 #[cfg(test)]

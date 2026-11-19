@@ -408,9 +408,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_member_and_a_compliance_member_cannot_set_the_window() {
+    async fn a_member_and_a_viewer_cannot_set_the_window() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        for role in ["member", "compliance"] {
+        // Only an owner or an admin sets the window. The membership authority issues owner, admin,
+        // member and viewer, so those are the session roles that reach this gate ("compliance" is not one).
+        for role in ["member", "viewer"] {
             let up = Upstreams::start(role).await;
             let (status, body) = send(
                 up.state(),
@@ -441,8 +443,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compliance_places_a_hold_and_an_admin_cannot() {
+    async fn an_owner_places_a_hold_and_an_admin_cannot() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        // A hold is placed by an owner or a compliance member. The membership authority issues no
+        // "compliance" session role, so the owner stands in for the placing role here.
         let admin = Upstreams::start("admin").await;
         let (status, _) = send(
             admin.state(),
@@ -454,8 +458,8 @@ mod tests {
         assert_eq!(status, 403);
         assert_eq!(admin.org_core_requests().await, 0);
 
-        let compliance = Upstreams::start("compliance").await;
-        compliance
+        let owner = Upstreams::start("owner").await;
+        owner
             .org_core(
                 "POST",
                 ORG_CORE_HOLDS,
@@ -467,7 +471,7 @@ mod tests {
             )
             .await;
         let (status, body) = send(
-            compliance.state(),
+            owner.state(),
             "POST",
             "/api/v1/orgs/org-1/legal-holds",
             Some(thread_hold()),
