@@ -6888,6 +6888,283 @@ async fn a_wake_under_a_history_window_recalls_no_room_memory() {
     }
 }
 
+/// A thread's artifact as the answer that wrote it keeps it in `metadata.artifacts`.
+fn artifact_metadata(id: &str, title: &str, content: &str) -> prost_types::Struct {
+    use prost_types::{value::Kind, ListValue, Struct, Value};
+    let text = |value: &str| Value { kind: Some(Kind::StringValue(value.to_owned())) };
+    let artifact = Struct {
+        fields: [
+            ("id".to_owned(), text(id)),
+            ("kind".to_owned(), text("document")),
+            ("title".to_owned(), text(title)),
+            ("content".to_owned(), text(content)),
+            ("version".to_owned(), Value { kind: Some(Kind::NumberValue(1.0)) }),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    Struct {
+        fields: [(
+            "artifacts".to_owned(),
+            Value {
+                kind: Some(Kind::ListValue(ListValue {
+                    values: vec![Value { kind: Some(Kind::StructValue(artifact)) }],
+                })),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    }
+}
+
+/// The artifact revision table of an [`artifact_wake`], read in `on` mode: its heads hold `board-memo`, a person's
+/// revision from before the member's window. It counts the heads listings it answers and accepts every append.
+#[derive(Clone, Default)]
+struct RevisionHeads {
+    listings: Arc<AtomicUsize>,
+}
+
+#[tonic::async_trait]
+impl mpv1::artifact_revision_service_server::ArtifactRevisionService for RevisionHeads {
+    async fn append_artifact_revision(
+        &self,
+        _: TReq<mpv1::AppendArtifactRevisionRequest>,
+    ) -> Result<Response<mpv1::AppendArtifactRevisionResponse>, Status> {
+        Ok(Response::new(mpv1::AppendArtifactRevisionResponse {
+            revision: None,
+            outcome: mpv1::AppendOutcome::Appended as i32,
+        }))
+    }
+
+    async fn list_artifact_revisions(
+        &self,
+        _: TReq<mpv1::ListArtifactRevisionsRequest>,
+    ) -> Result<Response<mpv1::ListArtifactRevisionsResponse>, Status> {
+        self.listings.fetch_add(1, Ordering::SeqCst);
+        Ok(Response::new(mpv1::ListArtifactRevisionsResponse {
+            revisions: vec![mpv1::ArtifactRevision {
+                thread_id: "thread-wake".to_owned(),
+                artifact_id: "board-memo".to_owned(),
+                version: 1,
+                kind: "document".to_owned(),
+                title: "Board memo".to_owned(),
+                content: "PRE-WINDOW board memo text".to_owned(),
+                editor_kind: "user".to_owned(),
+                ..Default::default()
+            }],
+            has_more: false,
+        }))
+    }
+
+    async fn get_artifact_revision(
+        &self,
+        _: TReq<mpv1::GetArtifactRevisionRequest>,
+    ) -> Result<Response<mpv1::GetArtifactRevisionResponse>, Status> {
+        Err(Status::unimplemented("not used"))
+    }
+}
+
+async fn spawn_revision_heads(
+    heads: RevisionHeads,
+) -> mpv1::artifact_revision_service_client::ArtifactRevisionServiceClient<tonic::transport::Channel> {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(mpv1::artifact_revision_service_server::ArtifactRevisionServiceServer::new(heads))
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await
+            .ok();
+    });
+    let ch = Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    mpv1::artifact_revision_service_client::ArtifactRevisionServiceClient::new(ch)
+}
+
+/// What one [`artifact_wake`] showed inference and saved.
+struct ArtifactWake {
+    body: String,
+    /// Every prompt inference was given: the tool rounds and the answer.
+    prompts: Vec<Vec<(String, String)>>,
+    /// The tool names each unary `infer` offered.
+    offered: Vec<Vec<String>>,
+    /// The ids of the artifacts the answer was saved with.
+    saved: Vec<String>,
+    /// How many times the turn listed the revision table's heads.
+    head_listings: usize,
+}
+
+/// One wake of a room thread whose answer before the floor wrote `layoff-plan` and whose answer after it wrote
+/// `offsite-agenda`, on a replica whose shared store already holds `owner-notes`, as an owner's turn with no window
+/// leaves it, and whose revision table (in `on` mode) holds `board-memo` ([`RevisionHeads`]). The tool round reads
+/// the first three and rewrites `owner-notes`; the token carries `history_floor_at` (or no window).
+async fn artifact_wake(history_floor_at: Option<&str>) -> ArtifactWake {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let _wake_api = WakeApiOn::set();
+    let prompts: CapturedMessages = Arc::new(Mutex::new(Vec::new()));
+    let offers: CapturedOffers = Arc::new(Mutex::new(Vec::new()));
+    let call = |id: &str, name: &str, arguments: serde_json::Value| mpv1::ToolCall {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        arguments_json: arguments.to_string(),
+    };
+    let client = spawn_mock(MockOk {
+        captured_messages: Some(prompts.clone()),
+        captured_offers: Some(offers.clone()),
+        ..MockOk::planning(vec![vec![
+            call("read-1", "read_artifact", serde_json::json!({ "id": "layoff-plan" })),
+            call("read-2", "read_artifact", serde_json::json!({ "id": "owner-notes" })),
+            call("read-3", "read_artifact", serde_json::json!({ "id": "offsite-agenda" })),
+            call(
+                "update-1",
+                "update_artifact",
+                serde_json::json!({ "id": "owner-notes", "content": "Owner notes, rewritten by the wake" }),
+            ),
+        ]])
+    })
+    .await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    let floor = chrono::DateTime::parse_from_rfc3339("2026-11-18T09:30:00Z")
+        .expect("test instant")
+        .timestamp();
+    let turn = |id: &str, role: &str, content: &str, seconds: i64| SessionMessage {
+        message_id: id.to_owned(),
+        role: role.to_owned(),
+        post_kind: "turn".to_owned(),
+        content: content.to_owned(),
+        created_at: Some(prost_types::Timestamp { seconds, nanos: 0 }),
+        ..Default::default()
+    };
+    let mut before = turn("m2", "assistant", "PRE-WINDOW answer: the layoff plan is drafted", floor - 3_595);
+    before.metadata = Some(artifact_metadata("layoff-plan", "Layoff plan", "PRE-WINDOW layoff plan text"));
+    let mut inside = turn("m4", "assistant", "IN-WINDOW answer: the agenda is drafted", floor + 3_605);
+    inside.metadata = Some(artifact_metadata("offsite-agenda", "Offsite agenda", "IN-WINDOW agenda text"));
+    *session_handles.conversation_messages.lock().unwrap() = Some(vec![
+        turn("m1", "user", "PRE-WINDOW question about the layoff plan", floor - 3_600),
+        before,
+        turn("m3", "user", "IN-WINDOW question about the offsite", floor + 3_600),
+        inside,
+    ]);
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, _publisher) = make_state(client, session_client).await;
+    let revisions = RevisionHeads::default();
+    state.artifact_revision_client = spawn_revision_heads(revisions.clone()).await;
+    state.artifact_revisions_mode = model_gateway::artifact_revisions::ArtifactRevisionsMode::On;
+    state.artifact_versions.seed_persisted(
+        "thread-wake",
+        "owner-notes",
+        "Owner notes",
+        "PRE-WINDOW owner notes text",
+        1,
+    );
+    state.artifact_versions.remember_kind(
+        "thread-wake",
+        "owner-notes",
+        model_gateway::artifacts::ArtifactKind::Document,
+    );
+    let (app, _delegated_jwks) =
+        authenticated_user_router(build_router(state, None), "org_placeholder", "user_placeholder").await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(wake_body(
+            "@agent what is on the offsite agenda?",
+            history_floor_at,
+            serde_json::json!({ "features": ["tools", "artifacts"] }),
+        )))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    let offered = offers.lock().unwrap().iter().map(|(_, tools, _)| tools.clone()).collect();
+    let prompts = prompts.lock().unwrap().clone();
+    let saved = session_handles
+        .direct_completion_captures
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(_, request)| request.metadata.as_ref().map(struct_json))
+        .flat_map(|metadata| metadata["artifacts"].as_array().cloned().unwrap_or_default())
+        .filter_map(|artifact| artifact["id"].as_str().map(str::to_owned))
+        .collect();
+    let head_listings = revisions.listings.load(Ordering::SeqCst);
+    ArtifactWake { body, prompts, offered, saved, head_listings }
+}
+
+/// D18: the gateway's shared artifact store holds every artifact a turn of the thread wrote on this replica, from
+/// before the member's window too (an owner's turn with no window is enough to fill it), and the revision table's
+/// heads hold every artifact of the thread. A wake under a window lists no heads and reads only the artifacts of the
+/// turns inside it: the inventory in its prompt names no other, a read of one from before the window is refused and
+/// returns no text, and it cannot rewrite one into a new version saved with its answer. Under a window the gateway
+/// cannot read it sees no artifact, so read_artifact and update_artifact are not offered. With no window the wake
+/// seeds the heads and reads and rewrites every artifact, as before.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_wake_under_a_history_window_sees_only_the_artifacts_of_the_turns_inside_it() {
+    let shown = |wake: &ArtifactWake, needle: &str| {
+        wake.prompts.iter().flatten().any(|(_, content)| content.contains(needle))
+    };
+    let inventory = |wake: &ArtifactWake| -> Vec<String> {
+        wake.prompts
+            .iter()
+            .flatten()
+            .filter(|(role, content)| role == "system" && content.starts_with("Existing artifacts in THIS conversation"))
+            .map(|(_, content)| content.clone())
+            .collect()
+    };
+    let offers = |wake: &ArtifactWake, name: &str| wake.offered.iter().any(|tools| tools.iter().any(|tool| tool == name));
+
+    let open = artifact_wake(None).await;
+    assert!(open.body.contains("event: done"), "{}", open.body);
+    assert_eq!(open.head_listings, 1, "the heads are seeded");
+    let listed = inventory(&open);
+    assert!(!listed.is_empty(), "{:?}", open.prompts);
+    for id in ["board-memo", "layoff-plan", "offsite-agenda", "owner-notes"] {
+        assert!(listed.iter().all(|block| block.contains(id)), "{id}: {listed:?}");
+    }
+    for text in ["PRE-WINDOW layoff plan text", "PRE-WINDOW owner notes text", "IN-WINDOW agenda text"] {
+        assert!(shown(&open, text), "{text}: {:?}", open.prompts);
+    }
+    assert!(open.saved.iter().any(|id| id == "owner-notes"), "{:?}", open.saved);
+
+    let windowed = artifact_wake(Some("2026-11-18T09:30:00Z")).await;
+    assert!(windowed.body.contains("event: done"), "{}", windowed.body);
+    assert_eq!(windowed.head_listings, 0, "no heads are listed under a window");
+    let listed = inventory(&windowed);
+    assert!(!listed.is_empty(), "{:?}", windowed.prompts);
+    for block in &listed {
+        assert!(block.contains("offsite-agenda"), "{block}");
+        for hidden in ["board-memo", "layoff-plan", "owner-notes", "Board memo", "Layoff plan", "Owner notes"] {
+            assert!(!block.contains(hidden), "{hidden}: {block}");
+        }
+    }
+    assert!(shown(&windowed, "IN-WINDOW agenda text"), "the agenda is read: {:?}", windowed.prompts);
+    for hidden in ["PRE-WINDOW", "board-memo", "Board memo", "Layoff plan", "Owner notes"] {
+        assert!(!shown(&windowed, hidden), "{hidden}: {:?}", windowed.prompts);
+    }
+    assert!(offers(&windowed, "read_artifact"), "{:?}", windowed.offered);
+    assert!(windowed.saved.iter().all(|id| id != "owner-notes"), "{:?}", windowed.saved);
+
+    let unreadable = artifact_wake(Some("not an instant")).await;
+    assert!(unreadable.body.contains("event: done"), "{}", unreadable.body);
+    assert_eq!(unreadable.head_listings, 0, "no heads are listed under a window");
+    assert!(inventory(&unreadable).is_empty(), "{:?}", unreadable.prompts);
+    for hidden in ["PRE-WINDOW", "IN-WINDOW agenda text", "board-memo", "Board memo", "Layoff plan", "Owner notes", "Offsite agenda"] {
+        assert!(!shown(&unreadable, hidden), "{hidden}: {:?}", unreadable.prompts);
+    }
+    assert!(!unreadable.offered.is_empty(), "the tool round still runs");
+    assert!(!offers(&unreadable, "read_artifact"), "{:?}", unreadable.offered);
+    assert!(!offers(&unreadable, "update_artifact"), "{:?}", unreadable.offered);
+    assert!(unreadable.saved.iter().all(|id| id != "owner-notes"), "{:?}", unreadable.saved);
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_search_turn_keeps_prior_user_name_context() {

@@ -527,6 +527,18 @@ impl WakeWindow {
         matches!(self, Self::Open)
     }
 
+    /// Whether a turn read under this window reads the thread's artifacts from the gateway's shared store.
+    /// That store holds every artifact a turn of the thread wrote or rehydrated on this replica, and the
+    /// revision table's heads seed it with every artifact of the thread: from before the window too, and an
+    /// owner's turn with no window is enough to fill it. So only a read with no window uses it. Under a
+    /// window the turn starts from a store of its own ([`window_artifact_store`]), and its inventory, its
+    /// run's workspace (`read_artifact`, `update_artifact`, the sole-artifact prefetch, the deck tool) and
+    /// its selection edit see the artifacts of the turns inside the window alone.
+    #[must_use]
+    pub(crate) fn reads_shared_artifacts(self) -> bool {
+        matches!(self, Self::Open)
+    }
+
     /// The native compaction checkpoint a turn under this window persists with its answer: the one the
     /// provider returned, and none under a window (see [`Self::keeps_summaries`]).
     #[must_use]
@@ -561,6 +573,14 @@ pub(crate) fn withhold_memory_recall(
     if !window.recalls_room_memory() {
         defs.retain(|def| def.name != "recall_memory");
     }
+}
+
+/// D18: the artifact store a turn under `window` starts from, or `None` with no window, when the turn reads
+/// the shared store as before ([`WakeWindow::reads_shared_artifacts`]). It starts empty: the history read
+/// fills it with the artifacts of the turns the window admits (`sse::load_recent_thread_messages`), so under
+/// a window the gateway cannot read it stays empty.
+pub(crate) fn window_artifact_store(window: WakeWindow) -> Option<crate::artifacts::ArtifactVersionStore> {
+    (!window.reads_shared_artifacts()).then(crate::artifacts::ArtifactVersionStore::new)
 }
 
 /// The memory skip a turn under a history window records instead of searching

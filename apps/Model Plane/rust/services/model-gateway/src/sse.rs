@@ -4537,18 +4537,26 @@ pub async fn invoke_stream_sse(
         participants: &wake.participants,
         window: wake_window,
     });
+    // D18: under the member's history window the turn's artifacts are those of the turns inside the window
+    // alone, in a store of its own that the history read below fills (`WakeWindow::reads_shared_artifacts`).
+    // `None` for every other turn, which reads the shared store as before.
+    let window_artifacts = crate::space_sse::window_artifact_store(wake_window);
     // EP-3 S3: with the revision switch `on`, the table's heads are this turn's base, so a
     // revision another replica committed is what this turn revises. Runs before the metadata
-    // rehydration below; seeding never lowers a version, so the order only saves a write.
-    crate::artifact_revisions::seed_from_table_heads(
-        &state,
-        &model_bearer,
-        &org_id,
-        &session_run.thread_id,
-        effective_zdr,
-        retention_class.is_some(),
-    )
-    .await;
+    // rehydration below; seeding never lowers a version, so the order only saves a write. A turn
+    // under a window seeds nothing: the heads are the whole thread's, and its commit is still
+    // decided by the table's compare-and-set.
+    if window_artifacts.is_none() {
+        crate::artifact_revisions::seed_from_table_heads(
+            &state,
+            &model_bearer,
+            &org_id,
+            &session_run.thread_id,
+            effective_zdr,
+            retention_class.is_some(),
+        )
+        .await;
+    }
     let recent_thread = load_recent_thread_messages(
         &state,
         &org_id,
@@ -4570,13 +4578,15 @@ pub async fn invoke_stream_sse(
             recalls_room_memory: wake_window.recalls_room_memory(),
         },
         wake_history.as_ref(),
+        window_artifacts.as_ref(),
     )
     .await;
+    let turn_artifacts = turn_artifact_store(&state.artifact_versions, window_artifacts.as_ref());
     // EP-3 S6: a selection edit names the version it revises. It is admitted against the heads this turn has just seeded, refused before any model call when the head moved, and held for this run's tool rounds (see the spawn below).
     let selection_hold = match crate::selection_guard::admit(
         &session_run.run_id,
         context_refs.as_ref(),
-        &state.artifact_versions,
+        turn_artifacts,
         &session_run.thread_id,
     ) {
         Ok(hold) => hold,
@@ -5065,8 +5075,7 @@ pub async fn invoke_stream_sse(
     // infer → execute via gateway handlers → inject results), then stream the
     // final answer with tools withheld. Reuses gateway tool handlers — no new
     // runtime. Inference outage degrades to a normal ungrounded answer.
-    prompt.artifact_inventory = state
-        .artifact_versions
+    prompt.artifact_inventory = turn_artifacts
         .inventory_context(&session_run.thread_id)
         .map(|inventory| ChatMessage {
             role: "system".to_owned(), content: inventory, ..Default::default()
@@ -5423,7 +5432,10 @@ pub async fn invoke_stream_sse(
         let _selection_hold = selection_hold;
         // Keep tool writes private until the assistant message is durable.
         let committed_artifacts = session_state.artifact_versions.clone();
-        let artifact_base = committed_artifacts.fork_thread(&session_thread_id);
+        // D18: a turn under a history window starts from its own store, never the shared one. It still
+        // commits into the shared store, under its lock, and a hidden artifact it collides with reads as moved.
+        let artifact_base = turn_artifact_store(&committed_artifacts, window_artifacts.as_ref())
+            .fork_thread(&session_thread_id);
         let mut session_state = session_state;
         session_state.artifact_versions = artifact_base.fork_thread(&session_thread_id);
         // Frozen as of THIS instant, before this turn's own dispatch can
@@ -9438,12 +9450,38 @@ pub(crate) fn record_memory_prefetch_outcome(outcome: &'static str) {
     metrics::counter!(MEMORY_PREFETCH_OUTCOME_METRIC, "outcome" => outcome).increment(1);
 }
 
-/// Seed the artifact version store from one persisted turn's `metadata.artifacts`
+/// Restore one loaded turn's artifacts into the shared store, so a model-gateway restart does not strand
+/// every open conversation's `update_artifact` (see `ArtifactVersionStore::seed_persisted`). Under a
+/// member's history window (D18) they also go into the turn's own store (`own`,
+/// `space_sse::window_artifact_store`): the history read reaches here only with the turns the window
+/// admits, so that store holds their artifacts and nothing else.
+fn rehydrate_turn_artifacts(
+    state: &AppState,
+    own: Option<&crate::artifacts::ArtifactVersionStore>,
+    thread_id: &str,
+    metadata: Option<&prost_types::Struct>,
+) {
+    rehydrate_persisted_artifacts(&state.artifact_versions, thread_id, metadata);
+    if let Some(own) = own {
+        rehydrate_persisted_artifacts(own, thread_id, metadata);
+    }
+}
+
+/// The store a turn reads its artifacts from (its inventory, its selection edit, and the base its run's
+/// workspace is forked from): its own under a member's history window (D18, `own`), the shared one otherwise.
+fn turn_artifact_store<'a>(
+    shared: &'a crate::artifacts::ArtifactVersionStore,
+    own: Option<&'a crate::artifacts::ArtifactVersionStore>,
+) -> &'a crate::artifacts::ArtifactVersionStore {
+    own.unwrap_or(shared)
+}
+
+/// Seed an artifact version store from one persisted turn's `metadata.artifacts`
 /// (the shape `session_flow::turn_evidence_metadata` writes: a list of
 /// `{id, kind, title, content, version}`). Tolerant by design — a turn without
 /// artifacts, an older metadata shape, or a malformed entry is simply skipped.
 fn rehydrate_persisted_artifacts(
-    state: &AppState,
+    store: &crate::artifacts::ArtifactVersionStore,
     thread_id: &str,
     metadata: Option<&prost_types::Struct>,
 ) {
@@ -9475,7 +9513,7 @@ fn rehydrate_persisted_artifacts(
         if id.is_empty() {
             continue;
         }
-        state.artifact_versions.seed_persisted(
+        store.seed_persisted(
             thread_id,
             &id,
             &text("title"),
@@ -9485,12 +9523,12 @@ fn rehydrate_persisted_artifacts(
         // The gateway wrote this record, so a kept deck (EP-5 S3) is restored as a deck and a
         // later turn's `deck` ops continue it at the next version.
         if let Some(kind) = crate::deck_tool::stored_kind(&text("kind")) {
-            state.artifact_versions.remember_kind(thread_id, &id, kind);
+            store.remember_kind(thread_id, &id, kind);
         }
         // Research-to-deck reads a report's stamp back from the store (EP-5 S8).
         if crate::deck_tool::from_artifact_enabled() {
             if let Some(Kind::StructValue(stamp)) = fields.fields.get("provenance").and_then(|value| value.kind.as_ref()) {
-                state.artifact_versions.remember_provenance(thread_id, &id, version, crate::deck_tool::stamp_json(stamp));
+                store.remember_provenance(thread_id, &id, version, crate::deck_tool::stamp_json(stamp));
             }
         }
     }
@@ -9506,6 +9544,9 @@ async fn load_recent_thread_messages(
     summarizer: &SummarizerContext<'_>,
     // Wake mode (WS08-S3): the current turn is a stored post, pushed rather than spliced.
     wake: Option<&crate::space_sse::WakeHistory<'_>>,
+    // D18: the turn's own artifact store under a member's history window (`space_sse::window_artifact_store`);
+    // `None` for every other turn.
+    window_artifacts: Option<&crate::artifacts::ArtifactVersionStore>,
 ) -> RecentThread {
     use mp_contracts::model_plane::v1::ListConversationRequest;
 
@@ -9586,8 +9627,9 @@ async fn load_recent_thread_messages(
                 // Restore this turn's artifacts into the process-local version
                 // store, so a model-gateway restart does not strand every open
                 // conversation's `update_artifact` (see
-                // `ArtifactVersionStore::seed_persisted`).
-                rehydrate_persisted_artifacts(state, thread_id, message.metadata.as_ref());
+                // `ArtifactVersionStore::seed_persisted`), and under a history
+                // window into the turn's own store too (D18).
+                rehydrate_turn_artifacts(state, window_artifacts, thread_id, message.metadata.as_ref());
                 if summarizer.token_budget.is_some() && message.role == "assistant" {
                     if let Some(stored) =
                         crate::session_flow::persisted_head_summary(message.metadata.as_ref())
@@ -18649,7 +18691,7 @@ mod tests {
             ("version".into(), Value { kind: Some(Kind::NumberValue(2.0)) }),
         ].into_iter().collect() })) }] })) })].into_iter().collect() };
         let state = AppState::new();
-        super::rehydrate_persisted_artifacts(&state, "thread", Some(&metadata));
+        super::rehydrate_persisted_artifacts(&state.artifact_versions, "thread", Some(&metadata));
         assert_eq!(state.artifact_versions.kind_of("thread", "campaign"), Some(crate::artifacts::ArtifactKind::Document));
         assert_eq!(state.artifact_versions.current_version("thread", "campaign"), Some(2));
         assert_eq!(state.artifact_versions.kind_of("other", "campaign"), None);
@@ -18657,7 +18699,7 @@ mod tests {
         assert_eq!(state.artifact_versions.kind_of("thread", "campaign"), Some(crate::artifacts::ArtifactKind::Document));
         state.artifact_versions.next_version("thread", "campaign");
         state.artifact_versions.remember("thread", "campaign", "Campaign", "Newer plain prose");
-        super::rehydrate_persisted_artifacts(&state, "thread", Some(&metadata));
+        super::rehydrate_persisted_artifacts(&state.artifact_versions, "thread", Some(&metadata));
         assert_eq!(state.artifact_versions.content_of("thread", "campaign").as_deref(), Some("Newer plain prose"));
         assert_eq!(state.artifact_versions.kind_of("thread", "campaign"), Some(crate::artifacts::ArtifactKind::Document));
     }
@@ -18691,12 +18733,113 @@ mod tests {
             ("version".into(), Value { kind: Some(Kind::NumberValue(2.0)) }),
         ].into_iter().collect() })) }] })) })].into_iter().collect() };
         let state = AppState::new();
-        super::rehydrate_persisted_artifacts(&state, "thread", Some(&metadata));
+        super::rehydrate_persisted_artifacts(&state.artifact_versions, "thread", Some(&metadata));
         assert_eq!(state.artifact_versions.kind_of("thread", "deck-01test"), Some(crate::artifacts::ArtifactKind::Deck));
         assert_eq!(state.artifact_versions.current_version("thread", "deck-01test"), Some(2));
         let stored = state.artifact_versions.content_of("thread", "deck-01test").expect("the manifest is kept");
         assert_eq!(DeckManifest::from_untrusted_json(&stored).expect("it reads back"), deck);
         assert_eq!(state.artifact_versions.next_version("thread", "deck-01test"), 3);
+    }
+
+    /// D18: the shared store holds every artifact a turn of the thread wrote on this replica (here one an owner's turn
+    /// with no window left, and one a turn before the window carries). A wake under a window reads a store of its own
+    /// instead, filled by the history read from the turns the window admits: its inventory and its run's workspace hold
+    /// nothing from before the window, so read_artifact and update_artifact refuse those ids and name none of them, and
+    /// under a window the gateway cannot read it is empty, so neither tool is offered. The shared store still learns the
+    /// admitted versions, so the commit numbers on from them. With no window the turn reads the shared store, as before.
+    #[tokio::test]
+    async fn a_wake_under_a_history_window_reads_only_the_artifacts_of_the_turns_inside_it() {
+        use crate::space_sse::{split_room_posts, window_artifact_store, WakeHistory, WakeWindow};
+        use mp_contracts::model_plane::v1::{SessionMessage, ToolCall};
+        use prost_types::{value::Kind, ListValue, Struct, Value};
+        let text = |value: &str| Value { kind: Some(Kind::StringValue(value.into())) };
+        let carrying = |id: &str, title: &str, content: &str| Struct { fields: [("artifacts".into(), Value { kind: Some(Kind::ListValue(ListValue { values: vec![Value { kind: Some(Kind::StructValue(Struct { fields: [
+            ("id".into(), text(id)), ("kind".into(), text("document")),
+            ("title".into(), text(title)), ("content".into(), text(content)),
+            ("version".into(), Value { kind: Some(Kind::NumberValue(1.0)) }),
+        ].into_iter().collect() })) }] })) })].into_iter().collect() };
+        let floor = chrono::DateTime::parse_from_rfc3339("2026-11-18T09:30:00Z")
+            .expect("test instant")
+            .with_timezone(&chrono::Utc);
+        let answer = |id: &str, seconds: i64, metadata: Struct| SessionMessage {
+            message_id: id.to_owned(),
+            role: "assistant".to_owned(),
+            post_kind: "turn".to_owned(),
+            content: format!("answer {id}"),
+            created_at: Some(prost_types::Timestamp { seconds, nanos: 0 }),
+            metadata: Some(metadata),
+            ..Default::default()
+        };
+        let thread = || {
+            vec![
+                answer("m2", floor.timestamp() - 50, carrying("layoff-plan", "Layoff plan", "PRE-WINDOW layoff plan")),
+                answer("m4", floor.timestamp() + 50, carrying("offsite-agenda", "Offsite agenda", "IN-WINDOW agenda")),
+            ]
+        };
+        let hidden = ["layoff-plan", "Layoff plan", "owner-notes", "Owner notes", "PRE-WINDOW"];
+
+        for (window, admitted) in [
+            (WakeWindow::Since(floor), vec!["offsite-agenda".to_owned()]),
+            (WakeWindow::Unreadable, Vec::new()),
+        ] {
+            let state = AppState::new();
+            state.artifact_versions.seed_persisted("thread", "owner-notes", "Owner notes", "PRE-WINDOW owner notes", 1);
+            let own = window_artifact_store(window).expect("a turn under a window reads a store of its own");
+            let wake = WakeHistory { trigger_message_id: "m9", room_context: false, participants: &[], window };
+            for turn in split_room_posts(thread(), Some(&wake), &mut Vec::new()) {
+                super::rehydrate_turn_artifacts(&state, Some(&own), "thread", turn.metadata.as_ref());
+            }
+            let turn = super::turn_artifact_store(&state.artifact_versions, Some(&own));
+            let known: Vec<String> = turn.known_in_thread("thread").into_iter().map(|artifact| artifact.id).collect();
+            assert_eq!(known, admitted, "{window:?}");
+            let inventory = turn.inventory_context("thread").unwrap_or_default();
+            assert_eq!(inventory.is_empty(), admitted.is_empty(), "{window:?}: {inventory}");
+            for word in hidden {
+                assert!(!inventory.contains(word), "{window:?}: {inventory}");
+            }
+            // The shared store, which the turn read before, lists the owner's notes; it learns the admitted versions.
+            let shared = state.artifact_versions.inventory_context("thread").expect("the shared inventory");
+            assert!(shared.contains("owner-notes"), "{shared}");
+            assert_eq!(
+                state.artifact_versions.current_version("thread", "offsite-agenda"),
+                (!admitted.is_empty()).then_some(1),
+                "{window:?}"
+            );
+
+            // The run's workspace, forked from the turn's base as the spawn of `invoke_stream_sse` forks it.
+            let mut run = state.clone();
+            run.artifact_versions = super::turn_artifact_store(&state.artifact_versions, Some(&own))
+                .fork_thread("thread")
+                .fork_thread("thread");
+            for (name, args) in [
+                ("read_artifact", r#"{"id":"layoff-plan"}"#),
+                ("read_artifact", r#"{"id":"owner-notes"}"#),
+                ("read_artifact", "{}"),
+                ("update_artifact", r#"{"id":"owner-notes","content":"a new text"}"#),
+                ("update_artifact", r#"{"id":"layoff-plan","title":"Layoff plan","content":"a new text"}"#),
+            ] {
+                let call = ToolCall { id: "call-1".to_owned(), name: name.to_owned(), arguments_json: args.to_owned() };
+                let outcome = crate::tool_loop::dispatch_tool(&run, "run", "org", "user", "thread", "", &[], "",
+                    None, None, "", "", None, false, false, false, &call, None, None, None).await;
+                let said = format!("{} {}", outcome.output, outcome.error.clone().unwrap_or_default());
+                // A refusal may name the id the call asked for; it names nothing else from before the window.
+                for word in hidden.iter().filter(|word| !args.contains(*word)) {
+                    assert!(!said.contains(word), "{window:?} {name} {args}: {said}");
+                }
+                if args != "{}" {
+                    assert!(outcome.error.is_some(), "{window:?} {name} {args}: {said}");
+                }
+            }
+            assert_eq!(run.artifact_versions.current_version("thread", "owner-notes"), None, "{window:?}");
+            assert_eq!(run.artifact_versions.current_version("thread", "layoff-plan"), None, "{window:?}");
+        }
+
+        // No window: no store of its own, and the turn reads the shared store, as before.
+        assert!(window_artifact_store(WakeWindow::Open).is_none());
+        let state = AppState::new();
+        state.artifact_versions.seed_persisted("thread", "owner-notes", "Owner notes", "the owner's notes", 1);
+        let turn = super::turn_artifact_store(&state.artifact_versions, None);
+        assert!(turn.inventory_context("thread").is_some_and(|inventory| inventory.contains("owner-notes")));
     }
 
     // ── F-01: a failed provider stream must be reported, never silently
