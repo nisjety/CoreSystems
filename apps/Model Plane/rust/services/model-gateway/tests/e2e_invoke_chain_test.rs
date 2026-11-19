@@ -1142,8 +1142,17 @@ struct MockSessionHandles {
     /// (role, `thread_id`) per `append_message` call
     append_captures: Arc<Mutex<Vec<(String, String)>>>,
     conversation: Arc<Mutex<Vec<(String, String, String)>>>,
+    /// When set, the thread read answers these stored messages as they are, with their creation instants and post
+    /// kinds, instead of the role/content rows of `conversation` (the D18 wake window reads the instant).
+    conversation_messages: Arc<Mutex<Option<Vec<SessionMessage>>>>,
     context_assembly_requests: Arc<Mutex<Vec<(String, String, u32)>>>,
+    /// The D18 window (`history_floor_at`) of each context read, empty for none.
+    context_assembly_floors: Arc<Mutex<Vec<String>>>,
     context_segments: Arc<Mutex<Option<Vec<ContextSegment>>>>,
+    /// When set, a context read that names a window is answered as a session-core that applies it answers one:
+    /// these segments, and the window named back. When unset, the window is ignored as an older session-core
+    /// ignores the field: `context_segments`, and no window named.
+    context_segments_under_window: Arc<Mutex<Option<Vec<ContextSegment>>>>,
     append_missing_thread_once: Arc<Mutex<Option<String>>>,
     reserve_tool_action_captures: Arc<Mutex<Vec<ReserveToolActionRequest>>>,
     finalize_tool_action_captures: Arc<Mutex<Vec<FinalizeToolActionRequest>>>,
@@ -1221,8 +1230,11 @@ impl MockSessionCore {
             context_assembly_count: Arc::new(AtomicUsize::new(0)),
             append_captures: Arc::new(Mutex::new(Vec::new())),
             conversation: Arc::new(Mutex::new(Vec::new())),
+            conversation_messages: Arc::new(Mutex::new(None)),
             context_assembly_requests: Arc::new(Mutex::new(Vec::new())),
+            context_assembly_floors: Arc::new(Mutex::new(Vec::new())),
             context_segments: Arc::new(Mutex::new(None)),
+            context_segments_under_window: Arc::new(Mutex::new(None)),
             append_missing_thread_once: Arc::new(Mutex::new(None)),
             reserve_tool_action_captures: Arc::new(Mutex::new(Vec::new())),
             finalize_tool_action_captures: Arc::new(Mutex::new(Vec::new())),
@@ -1497,6 +1509,9 @@ impl SessionCore for MockSessionCore {
                 .collect();
             return Ok(Response::new(ListConversationResponse { messages, has_more: false, ..Default::default() }));
         }
+        if let Some(stored) = self.handles.conversation_messages.lock().unwrap().clone() {
+            return Ok(Response::new(ListConversationResponse { messages: stored, has_more: false, ..Default::default() }));
+        }
         let messages = self
             .handles
             .conversation
@@ -1627,12 +1642,27 @@ impl SessionCore for MockSessionCore {
             .fetch_add(1, Ordering::SeqCst);
         let req = request.into_inner();
         self.handles
+            .context_assembly_floors
+            .lock()
+            .unwrap()
+            .push(req.history_floor_at.clone());
+        self.handles
             .context_assembly_requests
             .lock()
             .unwrap()
             .push((req.thread_id, req.run_id, req.max_tokens));
         if self.handles.context_assembly_hangs.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
+        }
+        if !req.history_floor_at.is_empty() {
+            if let Some(segments) = self.handles.context_segments_under_window.lock().unwrap().clone() {
+                return Ok(Response::new(GetContextAssemblyResponse {
+                    segments,
+                    estimated_tokens: 123,
+                    persona_enabled: Some(true),
+                    history_floor_at: req.history_floor_at,
+                }));
+            }
         }
         let Some(segments) = self.handles.context_segments.lock().unwrap().clone() else {
             return Err(Status::unimplemented(
@@ -1643,6 +1673,7 @@ impl SessionCore for MockSessionCore {
             segments,
             estimated_tokens: 123,
             persona_enabled: Some(true),
+            history_floor_at: String::new(),
         }))
     }
 
@@ -6295,6 +6326,221 @@ async fn invoke_stream_uses_context_assembly_segments_before_inference() {
     // Managed-run lifecycle: the assembly is requested for the managed run id.
     assert_eq!(context_requests[0].1, "managed-run-for-thread-assembly");
     assert!(context_requests[0].2 >= 512);
+}
+
+/// Puts `SPACE_WAKE_API` on for one test and puts it back after, so the serial tests that follow see the switch
+/// they had.
+struct WakeApiOn(Option<std::ffi::OsString>);
+
+impl WakeApiOn {
+    fn set() -> Self {
+        let previous = std::env::var_os("SPACE_WAKE_API");
+        std::env::set_var("SPACE_WAKE_API", "on");
+        Self(previous)
+    }
+}
+
+impl Drop for WakeApiOn {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(value) => std::env::set_var("SPACE_WAKE_API", value),
+            None => std::env::remove_var("SPACE_WAKE_API"),
+        }
+    }
+}
+
+/// A wake token shaped as Control signs one (`v2.<key>.<payload>.<signature>`). The gateway reads the window off
+/// it and does not verify it (Session Core does), so only the shape and the claim matter here.
+fn wake_token(history_floor_at: Option<&str>) -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    let mut claims = serde_json::json!({ "decision_ref": "d-wake-1" });
+    if let Some(at) = history_floor_at {
+        claims["history_floor_at"] = serde_json::json!(at);
+    }
+    format!(
+        "v2.{}.{}.{}",
+        URL_SAFE_NO_PAD.encode("control-key"),
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims")),
+        URL_SAFE_NO_PAD.encode("signature")
+    )
+}
+
+/// What one wake of the thread below sent: the messages inference was given, and the window
+/// (`history_floor_at`, empty for none) of each context read the gateway asked session-core for.
+struct WakeTurn {
+    prompt: Vec<(String, String)>,
+    context_floors: Vec<String>,
+}
+
+/// One wake of the thread below, whose member's wake decision carries `history_floor_at` (or no window at all).
+/// The thread has two turns before the floor and two after it. With `session_core_applies_window`, a context read
+/// that names a window is answered as a session-core that applies it answers one: the turns inside the window, and
+/// the window named back. Without it, as a session-core that predates the field: every turn, and no window named.
+async fn wake_turn(history_floor_at: Option<&str>, session_core_applies_window: bool) -> WakeTurn {
+    use sha2::{Digest, Sha256};
+
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let _wake_api = WakeApiOn::set();
+    let captured_messages = Arc::new(Mutex::new(Vec::new()));
+    let client = spawn_mock(MockOk::capturing(captured_messages.clone())).await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    let floor = chrono::DateTime::parse_from_rfc3339("2026-11-18T09:30:00Z")
+        .expect("test instant")
+        .timestamp();
+    let stored = |id: &str, role: &str, content: &str, seconds: i64| SessionMessage {
+        message_id: id.to_owned(),
+        role: role.to_owned(),
+        post_kind: "turn".to_owned(),
+        content: content.to_owned(),
+        created_at: Some(prost_types::Timestamp { seconds, nanos: 0 }),
+        ..Default::default()
+    };
+    *session_handles.conversation_messages.lock().unwrap() = Some(vec![
+        stored("m1", "user", "PRE-WINDOW question about the layoff plan", floor - 3_600),
+        stored("m2", "assistant", "PRE-WINDOW answer quoting what Nina posted", floor - 3_595),
+        stored("m3", "user", "IN-WINDOW question about the offsite", floor + 3_600),
+        stored("m4", "assistant", "IN-WINDOW answer about the offsite", floor + 3_605),
+    ]);
+    let segment = |kind: &str, content: &str, estimated_tokens: u32| ContextSegment {
+        kind: kind.to_owned(),
+        content: content.to_owned(),
+        estimated_tokens,
+    };
+    *session_handles.context_segments.lock().unwrap() = Some(vec![
+        segment("user", "user:usr-1", 5),
+        segment("thread", "user: PRE-WINDOW question about the layoff plan", 9),
+        segment("thread", "assistant: PRE-WINDOW answer quoting what Nina posted", 9),
+        segment("thread", "user: IN-WINDOW question about the offsite", 8),
+        segment("thread", "assistant: IN-WINDOW answer about the offsite", 8),
+        segment("retrieval", "Offsite budget 2026", 7),
+    ]);
+    if session_core_applies_window {
+        *session_handles.context_segments_under_window.lock().unwrap() = Some(vec![
+            segment("user", "user:usr-1", 5),
+            segment("thread", "user: IN-WINDOW question about the offsite", 8),
+            segment("thread", "assistant: IN-WINDOW answer about the offsite", 8),
+            segment("retrieval", "Offsite budget 2026", 7),
+        ]);
+    }
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, _publisher) = make_state(client, session_client).await;
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+    let content = "@agent what did we decide about the offsite?";
+    let body = serde_json::json!({
+        "content": content,
+        "model": "m",
+        "thread_id": "thread-wake",
+        "wake_context": {
+            "space_id": "space-room", "space_decision_ref": "d-wake-1",
+            "recipient_audience_ref": "a-1", "recipient_audience_revision": 1,
+            "recipient_audience_hash": "h-1", "privacy_policy_ref": "p-1",
+            "authority_revision": 1, "resource_authorization_ref": "r-1",
+            "space_decision_token": wake_token(history_floor_at),
+            "action_schema_hash": "s-1", "payload_digest": "sha256:x", "idempotency_key": "k-1",
+            "trigger_message_id": "m-wake-trigger",
+            "trigger_content_digest": format!("sha256:{:x}", Sha256::digest(content.as_bytes())),
+            "agent_subject_id": "agent-1", "turn_origin": "direct",
+            "client_wake_id": "wake-id-0123456789abcdef"
+        }
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("event: done"), "{body}");
+    // The wake started one run from the stored post.
+    let starts = session_handles.managed_start_captures.lock().unwrap();
+    assert_eq!(starts.len(), 1);
+    assert!(starts[0].wake.is_some(), "the start carries the wake");
+    drop(starts);
+    let prompt = captured_messages
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .expect("infer_stream should be called");
+    let context_floors = session_handles.context_assembly_floors.lock().unwrap().clone();
+    WakeTurn {
+        prompt,
+        context_floors,
+    }
+}
+
+/// D18, the wake as a whole: what inference is sent for a wake whose member has a history window. The thread's
+/// turns reach the prompt by two reads: session-core's context assembly (its `[thread]` block, and the retrieval
+/// and memory queries made from the same turns) and the history read. The window is sent with the context read,
+/// session-core reads the thread inside it, and the gateway uses the assembly only when session-core names that
+/// window back: no turn from before the window reaches the model by either read, also from a session-core that
+/// ignores the field. The same thread under a decision with no window reaches the model by both.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_wake_under_a_history_window_sends_inference_no_turn_from_before_it() {
+    let times = |prompt: &[(String, String)], needle: &str| -> usize {
+        prompt.iter().map(|(_, content)| content.matches(needle).count()).sum()
+    };
+    let has_context_block = |prompt: &[(String, String)]| {
+        prompt
+            .iter()
+            .any(|(role, content)| role == "system" && content.contains("Verevon context assembly"))
+    };
+    let trigger = (
+        "user".to_owned(),
+        "@agent what did we decide about the offsite?".to_owned(),
+    );
+
+    // No window: no window is sent, and the whole thread reaches the model, as the context block and as history.
+    let open = wake_turn(None, true).await;
+    assert_eq!(open.context_floors, [""], "no window is sent");
+    assert_eq!(times(&open.prompt, "PRE-WINDOW question about the layoff plan"), 2, "{:?}", open.prompt);
+    assert_eq!(times(&open.prompt, "IN-WINDOW question about the offsite"), 2, "{:?}", open.prompt);
+
+    // A window: it is sent with the context read, and session-core's windowed answer is used. Nothing from before the
+    // window is in any message; the turns inside it are in the context block and in the history.
+    let windowed = wake_turn(Some("2026-11-18T09:30:00Z"), true).await;
+    assert_eq!(windowed.context_floors, ["2026-11-18T09:30:00Z"], "the window is sent");
+    let prompt = &windowed.prompt;
+    assert_eq!(times(prompt, "PRE-WINDOW"), 0, "{prompt:?}");
+    assert_eq!(times(prompt, "layoff"), 0, "{prompt:?}");
+    assert_eq!(times(prompt, "IN-WINDOW question about the offsite"), 2, "{prompt:?}");
+    assert_eq!(times(prompt, "IN-WINDOW answer about the offsite"), 2, "{prompt:?}");
+    assert!(has_context_block(prompt), "{prompt:?}");
+    assert_eq!(times(prompt, "user:usr-1"), 1, "{prompt:?}");
+    assert_eq!(times(prompt, "Offsite budget 2026"), 1, "{prompt:?}");
+    assert_eq!(prompt.last(), Some(&trigger), "the trigger is the last message");
+
+    // A session-core that ignores the window answers the whole thread and names no window: that assembly is not
+    // used at all, and the history still holds only the turns inside the window.
+    let older = wake_turn(Some("2026-11-18T09:30:00Z"), false).await;
+    assert_eq!(older.context_floors, ["2026-11-18T09:30:00Z"]);
+    let prompt = &older.prompt;
+    assert_eq!(times(prompt, "PRE-WINDOW"), 0, "{prompt:?}");
+    assert_eq!(times(prompt, "IN-WINDOW question about the offsite"), 1, "{prompt:?}");
+    assert!(!has_context_block(prompt), "{prompt:?}");
+    assert_eq!(times(prompt, "Offsite budget 2026"), 0, "{prompt:?}");
+    assert_eq!(prompt.last(), Some(&trigger));
+
+    // A window this gateway cannot read: no context read is made, and the model is shown no turn of the thread.
+    let unreadable = wake_turn(Some("not an instant"), true).await;
+    assert!(unreadable.context_floors.is_empty(), "no context read is made");
+    let prompt = &unreadable.prompt;
+    assert_eq!(times(prompt, "PRE-WINDOW"), 0, "{prompt:?}");
+    assert_eq!(times(prompt, "IN-WINDOW"), 0, "{prompt:?}");
+    assert!(!has_context_block(prompt), "{prompt:?}");
+    assert_eq!(prompt.last(), Some(&trigger));
 }
 
 #[tokio::test]

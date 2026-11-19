@@ -1058,6 +1058,18 @@ message GetContextAssemblyRequest {
   // one caller, unlike the multi-tenant Data Plane wire, so there is no
   // "caller said nothing" state worth distinguishing from `false`.
   bool sovereign_required = 7;
+
+  // D18: the caller's per-member room history window, for the run a Space
+  // wake started: the RFC 3339 instant the wake's Control decision signs as
+  // `history_floor_at`. No turn of the thread created before it is read for
+  // this assembly, so none reaches the `thread` segments or the retrieval and
+  // memory queries built from the thread's recent turns; the thread's stored
+  // evidence is read only from on or after it, and no memory learned in the
+  // room is recalled (its rows carry no instant to place against the window).
+  // Empty: no window, the owner's own read as before. A value that is
+  // not an RFC 3339 instant is refused (`INVALID_ARGUMENT`), never read as no
+  // window. It only narrows the owner's read, so it cannot widen anything.
+  string history_floor_at = 8;
 }
 
 message GetContextAssemblyResponse {
@@ -1076,6 +1088,13 @@ message GetContextAssemblyResponse {
   // on every response, so the caller can tell "unset" (fail open, treat as
   // enabled) from a genuine "off".
   optional bool persona_enabled = 3;
+
+  // D18: the window this assembly was read under (the request's
+  // `history_floor_at` as Session Core applied it, RFC 3339), empty for none.
+  // A caller that asked for a window and gets back no window, or another one,
+  // is talking to a Session Core that did not apply it and must not use the
+  // assembly.
+  string history_floor_at = 4;
 }
 
 // A single segment of the assembled context window.

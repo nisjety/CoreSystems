@@ -4510,6 +4510,13 @@ pub async fn invoke_stream_sse(
         &subscription_connection_id,
         &model,
     );
+    // D18: the member's history window, signed into the wake decision. `Open` for every turn that is not a wake.
+    let wake_window = req
+        .wake_context
+        .as_ref()
+        .map_or(crate::space_sse::WakeWindow::Open, |wake| {
+            crate::space_sse::WakeWindow::from_token(&wake.space_decision_token)
+        });
     let (context_assembly_messages, persona_enabled) = if conversation_only || retrieval_scope == crate::normalize::RetrievalScope::WebOnly { (None, true) } else { load_context_assembly_messages(
         &state,
         &session_run.thread_id,
@@ -4519,14 +4526,14 @@ pub async fn invoke_stream_sse(
         &model_bearer,
         data_plane_bearer.as_ref(),
         sovereign_retrieval,
+        wake_window,
     )
     .await };
     let wake_history = req.wake_context.as_ref().map(|wake| crate::space_sse::WakeHistory {
         trigger_message_id: &wake.trigger_message_id,
         room_context: mp_contracts::space_mentions::wake_room_context_enabled(),
         participants: &wake.participants,
-        // D18: the member's history window, signed into the wake decision.
-        window: crate::space_sse::WakeWindow::from_token(&wake.space_decision_token),
+        window: wake_window,
     });
     // EP-3 S3: with the revision switch `on`, the table's heads are this turn's base, so a
     // revision another replica committed is what this turn revises. Runs before the metadata
@@ -8774,7 +8781,17 @@ async fn load_context_assembly_messages(
     // retrieval fan-out inherits the same posture as every other Data Plane
     // call this turn makes, instead of falling back to a no-signal default.
     sovereign_required: bool,
+    // D18: the member's history window on a wake (`WakeWindow::Open` for every
+    // other turn). session-core's context read is the owner-bound one, so the
+    // window is sent with it (`history_floor_at`) and session-core reads the
+    // thread inside it; see `context_assembly_floor`.
+    window: crate::space_sse::WakeWindow,
 ) -> ContextAssemblyLoad {
+    let Some(floor) = context_assembly_floor(window) else {
+        // A window this gateway cannot read: the history shows the agent nothing
+        // of the thread, so nothing of it is read for the context either.
+        return (None, true);
+    };
     // session-core's gRPC interceptor requires the caller's verified session
     // bearer as `authorization` metadata (auth.rs extract_bearer); a bare call
     // 401s "verified caller credential required", silently dropping durable
@@ -8788,6 +8805,9 @@ async fn load_context_assembly_messages(
             workspace_id: String::new(),
             agent_id: String::new(),
             sovereign_required,
+            history_floor_at: floor
+                .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+                .unwrap_or_default(),
         },
         bearer,
     ) {
@@ -8838,6 +8858,14 @@ async fn load_context_assembly_messages(
     // unupgraded session-core replica during a rolling deploy, never a
     // deliberate "off" (which is always explicitly set).
     let persona_enabled = response.persona_enabled.unwrap_or(true);
+    // D18: an assembly that does not name the window it was asked for came from
+    // a session-core that did not apply it (one that predates the field, during
+    // a rolling deploy). Its thread block and memory rows may hold turns from
+    // before the window, so none of it is used; the persona flag still is.
+    if !context_assembly_applied_floor(floor, &response.history_floor_at) {
+        tracing::warn!(%thread_id, %run_id, "session-core context assembly did not apply the member's history window; the turn is answered without it");
+        return (None, persona_enabled);
+    }
 
     let context = render_context_assembly_block(
         &response.segments,
@@ -8882,9 +8910,39 @@ pub(crate) async fn load_thread_persona_enabled(
         bearer,
         None,
         sovereign_required,
+        // Only the persona flag is read; no context text reaches the run from here.
+        crate::space_sse::WakeWindow::Open,
     )
     .await
     .1
+}
+
+/// D18: the instant a context read is narrowed to under `window`: `Some(None)` with no window,
+/// `Some(Some(at))` for a window, and `None` for a window this gateway cannot read, which gets no
+/// context read at all.
+fn context_assembly_floor(
+    window: crate::space_sse::WakeWindow,
+) -> Option<Option<chrono::DateTime<chrono::Utc>>> {
+    match window {
+        crate::space_sse::WakeWindow::Open => Some(None),
+        crate::space_sse::WakeWindow::Since(at) => Some(Some(at)),
+        crate::space_sse::WakeWindow::Unreadable => None,
+    }
+}
+
+/// D18: whether a context assembly may be used for a read narrowed to `floor`. With no window,
+/// always. With one, only when the response names that same instant as the window it applied
+/// (`GetContextAssemblyResponse.history_floor_at`): an empty, unreadable or different answer is
+/// a session-core that did not apply it.
+fn context_assembly_applied_floor(
+    floor: Option<chrono::DateTime<chrono::Utc>>,
+    applied: &str,
+) -> bool {
+    let Some(floor) = floor else {
+        return true;
+    };
+    chrono::DateTime::parse_from_rfc3339(applied)
+        .is_ok_and(|applied| applied.with_timezone(&chrono::Utc) == floor)
 }
 
 /// Segment kinds that carry actual Data Plane evidence, as opposed to identity,
@@ -20492,6 +20550,62 @@ mod tests {
         assert!(only_history
             .without_sent_history(&history, "", "current question")
             .is_none());
+    }
+
+    /// D18: the context read of a wake is narrowed to the member's window. No window reads the
+    /// thread as before, a window sends its instant, and a window this gateway cannot read gets
+    /// no context read at all (`None`), never an unwindowed one.
+    #[test]
+    fn a_wake_window_names_the_instant_its_context_read_is_narrowed_to() {
+        use crate::space_sse::WakeWindow;
+        let floor = chrono::DateTime::parse_from_rfc3339("2026-11-18T09:30:15.123456789Z")
+            .expect("test instant")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(super::context_assembly_floor(WakeWindow::Open), Some(None));
+        assert_eq!(
+            super::context_assembly_floor(WakeWindow::Since(floor)),
+            Some(Some(floor))
+        );
+        assert_eq!(super::context_assembly_floor(WakeWindow::Unreadable), None);
+    }
+
+    /// D18: an assembly read under a window is used only when session-core names that window as
+    /// the one it applied. An older session-core ignores the field and answers the whole thread,
+    /// which must not reach the prompt.
+    #[test]
+    fn an_assembly_is_used_under_a_window_only_when_session_core_applied_that_window() {
+        let floor = chrono::DateTime::parse_from_rfc3339("2026-11-18T09:30:15.123456789Z")
+            .expect("test instant")
+            .with_timezone(&chrono::Utc);
+        // No window: whatever comes back is used, as before.
+        assert!(super::context_assembly_applied_floor(None, ""));
+        assert!(super::context_assembly_applied_floor(None, "2026-11-18T09:30:15Z"));
+        // The window it was asked for, in any offset: used.
+        assert!(super::context_assembly_applied_floor(
+            Some(floor),
+            "2026-11-18T09:30:15.123456789Z"
+        ));
+        // The form this gateway sends it in reads back as the same instant.
+        assert!(super::context_assembly_applied_floor(
+            Some(floor),
+            &floor.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+        ));
+        assert!(super::context_assembly_applied_floor(
+            Some(floor),
+            "2026-11-18T10:30:15.123456789+01:00"
+        ));
+        // No window named, another one, or something that is not an instant: not used.
+        for (applied, why) in [
+            ("", "a session-core that predates the field"),
+            ("2026-11-18T09:30:15Z", "another instant"),
+            ("2026-11-18T09:30:16.123456789Z", "a later instant"),
+            ("not an instant", "text that is no instant"),
+        ] {
+            assert!(
+                !super::context_assembly_applied_floor(Some(floor), applied),
+                "{why}"
+            );
+        }
     }
 
     /// Context assembly must delegate the END USER's Data Plane credential, and

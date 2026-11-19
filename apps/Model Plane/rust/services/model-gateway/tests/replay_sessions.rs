@@ -646,6 +646,7 @@ impl SessionCore for MockSessionCore {
             segments,
             estimated_tokens: 123,
             persona_enabled: Some(true),
+            history_floor_at: String::new(),
         }))
     }
 

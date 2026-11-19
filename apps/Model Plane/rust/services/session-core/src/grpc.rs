@@ -7761,7 +7761,7 @@ mod persona_db_tests {
             let thread = thread.to_owned();
             let svc = &svc;
             async move {
-                load_context_memory_rows(svc, MemoryRetention::Durable, &thread, None, &[])
+                load_context_memory_rows(svc, MemoryRetention::Durable, &thread, None, &[], None)
                     .await
                     .unwrap()
                     .into_iter()
@@ -9275,21 +9275,21 @@ async fn replay_thread_task(
     }
 }
 
-/// Recent non-empty thread messages (oldest-first) for context assembly.
-async fn load_thread_messages(
-    pool: &PgPool,
-    thread_id: &str,
-) -> Result<Vec<(String, String)>, Status> {
+/// The read [`load_thread_messages`] runs: `$1` the thread, `$2` the limit, `$3` the D18 floor
+/// (`NULL` for none).
+fn thread_messages_sql() -> String {
     // WS12-S4: the revision fold is always on. A deleted turn reaches the model as one static
     // system line and an edited one as its effective text plus a marker; the stored thread is
-    // never appended to. No audience ceiling here (the owner's own context read).
-    let sql = format!(
+    // never appended to. No audience ceiling here (the owner's own context read). D18: the floor
+    // is applied before the limit, so the newest turns inside the window are the ones read.
+    format!(
         "SELECT role, content, revision_state
          FROM (
              SELECT m.role, {fold_content} AS content, {fold_state} AS revision_state, m.sequence
              FROM messages m
              {fold_join}
              WHERE m.thread_id = $1 AND m.on_active_path AND m.post_kind <> 'post'
+               AND {floor}
              ORDER BY m.sequence DESC
              LIMIT $2
          ) recent
@@ -9297,10 +9297,24 @@ async fn load_thread_messages(
         fold_content = crate::space::revisions::FOLD_CONTENT_SQL,
         fold_state = crate::space::revisions::FOLD_STATE_SQL,
         fold_join = crate::space::revisions::fold_join_sql("NULL::BIGINT"),
-    );
-    let rows = sqlx::query_as::<_, (String, String, String)>(&sql)
+        floor = crate::space::audience_window::message_floor_sql(("NULL", "$3")),
+    )
+}
+
+/// Recent non-empty thread messages (oldest-first) for context assembly.
+///
+/// D18: `floor_at` is the caller's per-member history window on the run a Space wake started.
+/// A turn created before it is not read, so it reaches neither the `thread` segments nor the
+/// retrieval and memory queries built from these messages. `None` reads the thread as before.
+async fn load_thread_messages(
+    pool: &PgPool,
+    thread_id: &str,
+    floor_at: Option<DateTime<Utc>>,
+) -> Result<Vec<(String, String)>, Status> {
+    let rows = sqlx::query_as::<_, (String, String, String)>(&thread_messages_sql())
         .bind(thread_id)
         .bind(CONTEXT_MESSAGE_LIMIT)
+        .bind(floor_at)
         .fetch_all(pool)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -9541,12 +9555,16 @@ async fn append_letta_memory_rows(
     Some(append_letta_search_outcome(memory_rows, outcome, 8))
 }
 
+/// `floor_at`: the member's D18 history window the assembly is read under (see
+/// [`context_assembly_floor`]). Under it the thread's stored evidence is read only from on or
+/// after the floor, and no memory learned in the room is recalled.
 async fn load_context_memory_rows(
     svc: &SessionService,
     retention: MemoryRetention,
     thread_id: &str,
     user_id: Option<&str>,
     thread_messages: &[(String, String)],
+    floor_at: Option<DateTime<Utc>>,
 ) -> Result<Vec<(String, String)>, Status> {
     let thread_owner: Option<(String, String)> =
         sqlx::query_as("SELECT org_id, user_id FROM threads WHERE id = $1")
@@ -9576,17 +9594,21 @@ async fn load_context_memory_rows(
     };
 
     // The thread's own memory index is the user's content, so it is only used
-    // when the user's memory is.
+    // when the user's memory is. D18: its rows are the evidence earlier reads of
+    // this thread stored, so under a window only those stored on or after the
+    // floor are read.
     let mut rows = if access == crate::memory_control::MemoryAccess::Full {
         sqlx::query_as::<_, (String, String)>(
             "SELECT topic, content
              FROM memory_index
              WHERE thread_id = $1
+               AND ($3::TIMESTAMPTZ IS NULL OR created_at >= $3::TIMESTAMPTZ)
              ORDER BY updated_at DESC
              LIMIT $2",
         )
         .bind(thread_id)
         .bind(CONTEXT_MEMORY_LIMIT)
+        .bind(floor_at)
         .fetch_all(&svc.pool)
         .await
         .map_err(|e| Status::internal(e.to_string()))?
@@ -9594,16 +9616,22 @@ async fn load_context_memory_rows(
         Vec::new()
     };
 
-    let mut agent_rows = crate::dreaming::load_agent_memory_context_rows(
-        &svc.pool,
-        thread_id,
-        user_id,
-        crate::dreaming::AGENT_MEMORY_CONTEXT_LIMIT,
-        access,
-    )
-    .await
-    .map_err(|e| Status::internal(e.to_string()))?;
-    rows.append(&mut agent_rows);
+    // D18: for a room thread these rows are the room's memory or the thread's own, made from turns
+    // and posts this read cannot place against the member's window one by one (as
+    // `memory_scope::history_floor_admits_sql` does on a windowed member's own memory reads), so
+    // under a window they are all left out.
+    if floor_at.is_none() {
+        let mut agent_rows = crate::dreaming::load_agent_memory_context_rows(
+            &svc.pool,
+            thread_id,
+            user_id,
+            crate::dreaming::AGENT_MEMORY_CONTEXT_LIMIT,
+            access,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        rows.append(&mut agent_rows);
+    }
     // The semantic mirror holds the user's rows only, so it is skipped unless
     // the user's memory is in use.
     if access != crate::memory_control::MemoryAccess::Full {
@@ -9629,6 +9657,20 @@ async fn load_context_memory_rows(
     Ok(rows)
 }
 
+/// D18: the window a context assembly is read under (`GetContextAssemblyRequest.history_floor_at`).
+/// Empty is no window. Anything else must be an RFC 3339 instant: a value that is not one is
+/// refused, never read as no window, because the field only narrows and dropping it is the one way
+/// it could do harm.
+#[allow(clippy::result_large_err)]
+fn context_assembly_floor(raw: &str) -> Result<Option<DateTime<Utc>>, Status> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    DateTime::parse_from_rfc3339(raw)
+        .map(|at| Some(at.with_timezone(&Utc)))
+        .map_err(|_| Status::invalid_argument("history_floor_at is not an RFC 3339 instant"))
+}
+
 /// Core of `SessionCore::get_context_assembly`. Loads run metadata, recent
 /// messages, and memory buckets; fans out to retrieval/knowledge/graph; then
 /// assembles the budgeted context segments.
@@ -9638,6 +9680,8 @@ async fn get_context_assembly_inner(
     retention: MemoryRetention,
     dataplane_bearer: Option<&DelegatedDataPlaneBearer>,
 ) -> Result<Response<pb::GetContextAssemblyResponse>, Status> {
+    // D18: read before anything else, so a window this cannot read refuses the whole assembly.
+    let floor_at = context_assembly_floor(&req.history_floor_at)?;
     let thread_id = req.thread_id.clone();
     let run_id = req.run_id.clone();
 
@@ -9677,19 +9721,25 @@ async fn get_context_assembly_inner(
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-    let thread_messages = load_thread_messages(&svc.pool, &thread_id).await?;
+    let thread_messages = load_thread_messages(&svc.pool, &thread_id, floor_at).await?;
     let mut memory_rows = load_context_memory_rows(
         svc,
         retention,
         &thread_id,
         user_id.as_deref(),
         &thread_messages,
+        floor_at,
     )
     .await?;
     // EP-8 S10: on a run a verified wake addressed to a bound agent, that agent's own notes for
     // this Space, quoted, in the episodic bucket below every instruction layer. A ZDR or waived
-    // credential reads none; off, nothing is queried.
-    if crate::space_memory::agent_enabled() && retention == MemoryRetention::Durable && !run_id.is_empty() {
+    // credential reads none; off, nothing is queried. D18: an agent note is made from a whole run's
+    // context and has no source instant, so under a member's window none is recalled.
+    if crate::space_memory::agent_enabled()
+        && retention == MemoryRetention::Durable
+        && !run_id.is_empty()
+        && floor_at.is_none()
+    {
         let mut agent_notes = crate::space_memory::recall_agent_memory(
             &svc.pool,
             &thread_id,
@@ -9756,6 +9806,10 @@ async fn get_context_assembly_inner(
         segments,
         estimated_tokens,
         persona_enabled,
+        // D18: the window applied above, so a caller that asked for one can tell it was.
+        history_floor_at: floor_at
+            .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+            .unwrap_or_default(),
     }))
 }
 
@@ -14903,7 +14957,8 @@ mod tests {
     use super::{
         agent_run_thread_key, append_letta_memory_rows, assemble_segments,
         assistant_reply_slot_is_open, authorize_dataplane, claim_scheduled_step_inner,
-        complete_step_inner, derive_idempotency_hash, finalize_tool_action_inner,
+        complete_step_inner, context_assembly_floor, derive_idempotency_hash,
+        finalize_tool_action_inner, thread_messages_sql,
         normalize_thread_presentation_text, pb, persist_scheduled_run_bindings,
         record_scheduled_run_result_inner, thread_revise_payload_digest,
         record_scheduled_step_receipt_inner, reserve_tool_action_inner, resolve_dataplane_addr,
@@ -17698,6 +17753,46 @@ mod tests {
         assert!(
             indices.windows(2).all(|w| w[0] < w[1]),
             "history must read oldest→newest, got {indices:?}"
+        );
+    }
+
+    /// D18: the window a wake's context assembly is read under. Empty is no window, an instant in
+    /// any offset is that instant, and anything else is refused, never read as no window. The
+    /// instant the response names reads back as the instant applied.
+    #[test]
+    fn a_context_assembly_window_is_an_instant_or_refused() {
+        assert_eq!(context_assembly_floor("").expect("no window"), None);
+        let floor = DateTime::parse_from_rfc3339("2026-11-18T09:30:15.123456789Z")
+            .expect("test instant")
+            .with_timezone(&Utc);
+        for raw in [
+            "2026-11-18T09:30:15.123456789Z",
+            "2026-11-18T10:30:15.123456789+01:00",
+        ] {
+            assert_eq!(context_assembly_floor(raw).expect(raw), Some(floor), "{raw}");
+        }
+        for raw in [" ", "yesterday", "2026-11-18", "2026-11-18T09:30:15", "1763458215"] {
+            let refused = context_assembly_floor(raw).expect_err(raw);
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument, "{raw:?}");
+        }
+        let echoed = floor.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true);
+        assert_eq!(context_assembly_floor(&echoed).expect("the echo"), Some(floor));
+    }
+
+    /// D18: the context read applies the floor every windowed message read applies (`$3`, NULL for
+    /// none), inside the read and before its limit, so the newest turns inside the window are read
+    /// and no turn before it is.
+    #[test]
+    fn the_context_read_applies_the_window_before_its_limit() {
+        let flat = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        let sql = flat(&thread_messages_sql());
+        let floor = flat(&crate::space::audience_window::message_floor_sql(("NULL", "$3")));
+        assert!(floor.contains("m.created_at >= $3::TIMESTAMPTZ"), "{floor}");
+        let applied = sql.find(&format!("m.post_kind <> 'post' AND {floor}"));
+        let limit = sql.find("LIMIT $2").expect("the read has its limit");
+        assert!(
+            applied.is_some_and(|at| at < limit),
+            "the read does not apply the window before its limit: {sql}"
         );
     }
 
@@ -28538,11 +28633,79 @@ mod conversation_page_db_tests {
             .await
             .unwrap();
 
-        let window = load_thread_messages(&pool, &thread)
+        let window = load_thread_messages(&pool, &thread, None)
             .await
             .expect("context window");
         let shown: Vec<&str> = window.iter().map(|(_, content)| content.as_str()).collect();
         assert_eq!(shown, ["turn 0", "turn 2"]);
+
+        cleanup(&pool, &[thread.as_str()]).await;
+    }
+
+    /// D18: the context a wake's run is assembled with is read inside the member's window. A turn
+    /// created before the floor is in no `thread` segment, the response names the window it applied,
+    /// a window that is not an instant refuses the assembly, and with no window every turn is read.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn context_assembly_reads_no_turn_from_before_the_wake_floor_against_real_pg() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("ctx-floor-{suffix}");
+        let thread = format!("ctx-floor-thread-{suffix}");
+        let ids = seed_turns(&pool, &org, "ctx", &thread, 4).await;
+        // Turns 0 and 1 were created two hours ago and turns 2 and 3 now; the floor is between them.
+        for id in &ids[..2] {
+            sqlx::query("UPDATE messages SET created_at = NOW() - INTERVAL '2 hours' WHERE id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let floor = Utc::now() - chrono::Duration::hours(1);
+        let svc = service(pool.clone());
+        let assemble = |history_floor_at: String| {
+            let request = pb::GetContextAssemblyRequest {
+                thread_id: thread.clone(),
+                history_floor_at,
+                ..Default::default()
+            };
+            let svc = &svc;
+            async move {
+                get_context_assembly_inner(svc, request, MemoryRetention::Durable, None)
+                    .await
+                    .map(Response::into_inner)
+            }
+        };
+        let turns = |response: &pb::GetContextAssemblyResponse| -> Vec<String> {
+            response
+                .segments
+                .iter()
+                .filter(|segment| segment.kind == "thread")
+                .map(|segment| segment.content.clone())
+                .collect()
+        };
+
+        let open = assemble(String::new()).await.expect("an unwindowed assembly");
+        assert_eq!(
+            turns(&open),
+            ["user: turn 0", "user: turn 1", "user: turn 2", "user: turn 3"]
+        );
+        assert!(open.history_floor_at.is_empty(), "no window was applied");
+
+        let windowed = assemble(floor.to_rfc3339()).await.expect("a windowed assembly");
+        assert_eq!(turns(&windowed), ["user: turn 2", "user: turn 3"]);
+        assert_eq!(
+            DateTime::parse_from_rfc3339(&windowed.history_floor_at)
+                .expect("the applied window is an instant")
+                .with_timezone(&Utc),
+            floor,
+            "the response names the window it applied"
+        );
+
+        let refused = assemble("yesterday".to_owned())
+            .await
+            .expect_err("a window that is not an instant");
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
 
         cleanup(&pool, &[thread.as_str()]).await;
     }

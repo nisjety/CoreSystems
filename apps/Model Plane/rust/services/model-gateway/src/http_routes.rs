@@ -15741,6 +15741,9 @@ async fn get_thread_context(
                 // caller's own signed claim, rather than hardcoded, so the
                 // field says something true if that ever changes.
                 sovereign_required: claims.effective_sovereign_required(None),
+                // The owner's own inspector read carries no Space decision, so no
+                // D18 member window is known here (only a wake's decision signs one).
+                history_floor_at: String::new(),
             },
             &bearer,
         )?)
