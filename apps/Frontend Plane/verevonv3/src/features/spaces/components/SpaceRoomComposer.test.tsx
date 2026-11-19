@@ -2644,3 +2644,187 @@ describe('SpaceRoomComposer — markdown authoring (WS15-S3)', () => {
     expect(screen.queryByLabelText('Forhåndsvisning')).toBeNull()
   })
 })
+
+// WS08-S6: structured mentions in the room box. A person picked from the list is recorded by id; an agent
+// joins the address bar when addressed wake is on. A post carries the picks still in its words, and each agent
+// the server recorded as expected is woken from the stored post, one at a time.
+describe('SpaceRoomComposer — structured mentions and addressed wakes (WS08-S6)', () => {
+  const kari = { subject_type: 'user', subject_id: 'user-kari', display_name: 'Kari Nordmann', role: 'editor' }
+  const agent = {
+    subject_id: 'agent-1',
+    role: 'editor',
+    revision: 1,
+    identity_published: true,
+    name: 'Driftsassistent',
+    status: 'active',
+    definition_status: 'published',
+    delivery_targets: [],
+  }
+  const plainReceipt = { threadId: 'thr_m1', messageId: 'msg_m1', sequence: 1, deduplicated: false }
+  // The wake runner is module-level and keeps each message's wakes, so every case names its own message.
+  let messageCount = 0
+  const freshMessageId = (prefix: string) => `${prefix}_${++messageCount}`
+  const postedInput = (call = 0) =>
+    spacesClient.createSpacePost.mock.calls[call]?.[1] as { content: string; mentions?: unknown }
+
+  function renderMentions(agents: readonly unknown[] = [agent]) {
+    return render(() => (
+      <SpaceRoomComposer
+        journal={flushingPostJournal()}
+        spaceRef="room-1"
+        roster={() => [kari] as never}
+        agents={() => agents as never}
+        threads={() => []}
+        humanPostsEnabled={() => true}
+        viewerRole={() => 'editor'}
+        viewerSubjectId={() => 'user-me'}
+      />
+    ))
+  }
+
+  beforeEach(() => {
+    vi.stubEnv('VITE_SPACE_COMPOSER_DRAFTS', '')
+    spacesClient.createSpacePost.mockResolvedValue(plainReceipt)
+  })
+
+  afterEach(() => {
+    cleanup()
+    clearSpaceRoomFeatures()
+    window.sessionStorage.clear()
+  })
+
+  it('a person picked from the list goes into the post as a mention by id, and never sets the agent mention', async () => {
+    publishRoomFeatures({ mention_picker: true })
+    renderMentions()
+    typeInRoomBox('@Kar')
+    fireEvent.click(await screen.findByRole('option', { name: /Kari Nordmann/ }))
+    flush()
+    expect(roomBox().value).toBe('@Kari Nordmann ')
+    expect(screen.queryByText(/Vil invokere en agent/)).toBeNull()
+
+    submitRoomBox()
+    await waitFor(() => expect(spacesClient.createSpacePost).toHaveBeenCalledTimes(1))
+    expect(postedInput().content).toBe('@Kari Nordmann')
+    expect(postedInput().mentions).toEqual({ people: [{ subjectId: 'user-kari', label: 'Kari Nordmann' }], agents: [] })
+    expect(chatClient.streamChat).not.toHaveBeenCalled()
+  })
+
+  it('with the picker off, a person picked from the list is only text, and the post carries no mentions', async () => {
+    publishRoomFeatures({ mention_picker: false })
+    renderMentions()
+    typeInRoomBox('@Kar')
+    fireEvent.click(await screen.findByRole('option', { name: /Kari Nordmann/ }))
+    flush()
+
+    submitRoomBox()
+    await waitFor(() => expect(spacesClient.createSpacePost).toHaveBeenCalledTimes(1))
+    expect(postedInput().content).toBe('@Kari Nordmann')
+    expect(postedInput().mentions).toBeUndefined()
+    expect(screen.queryByRole('list', { name: 'Adressert til' })).toBeNull()
+    expect(screen.queryByText(/Vil invokere en agent/)).toBeNull()
+  })
+
+  it('with addressed wake on, an agent mention stays a Send: the post carries the agent, then the agent is woken from the stored post', async () => {
+    publishRoomFeatures({ mention_picker: true, addressed_wake: true })
+    const messageId = freshMessageId('msg_wake')
+    spacesClient.createSpacePost.mockResolvedValueOnce({
+      ...plainReceipt,
+      messageId,
+      mentions: { recorded: [{ subjectId: 'agent-1', kind: 'agent', wake: 'expected', ordinal: 0 }], rejected: [] },
+    })
+    renderMentions()
+    typeInRoomBox('@Drif')
+    fireEvent.click(await screen.findByRole('option', { name: /Driftsassistent/ }))
+    flush()
+    expect(screen.getByRole('list', { name: 'Adressert til' }).textContent).toContain('Driftsassistent')
+    expect(screen.getByRole('radio', { name: 'Send til rommet' }).getAttribute('aria-checked')).toBe('true')
+    expect(screen.getByRole('button', { name: 'Send' })).toBeTruthy()
+    expect(screen.getByText(/Agentene svarer etterpå/)).toBeTruthy()
+
+    submitRoomBox()
+    await waitFor(() => expect(spacesClient.createSpacePost).toHaveBeenCalledTimes(1))
+    expect(postedInput().content).toBe('@Driftsassistent')
+    expect(postedInput().mentions).toEqual({ people: [], agents: [{ subjectId: 'agent-1' }] })
+
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(1))
+    expect(chatClient.streamChat.mock.calls[0]?.[0]).toMatchObject({
+      content: '@Driftsassistent',
+      threadId: 'thr_m1',
+      mentionedAgentRef: 'agent-1',
+      wake: { messageId, clientWakeId: expect.any(String) },
+    })
+  })
+
+  it('a mention the server did not record is named in the box with its reason', async () => {
+    publishRoomFeatures({ mention_picker: true })
+    spacesClient.createSpacePost.mockResolvedValueOnce({
+      ...plainReceipt,
+      mentions: { recorded: [], rejected: [{ subjectId: 'user-kari', code: 'person_not_in_room' }] },
+    })
+    renderMentions()
+    typeInRoomBox('@Kar')
+    fireEvent.click(await screen.findByRole('option', { name: /Kari Nordmann/ }))
+    flush()
+
+    submitRoomBox()
+    const notice = await screen.findByText('Personen er ikke med i rommet, så omtalen ble ikke lagret.')
+    expect(notice.getAttribute('role')).toBe('status')
+  })
+
+  it('an agent the server recorded as refused is not woken, and keeps the reason it was refused for', async () => {
+    publishRoomFeatures({ mention_picker: true, addressed_wake: true })
+    const messageId = freshMessageId('msg_refused')
+    spacesClient.createSpacePost.mockResolvedValueOnce({
+      ...plainReceipt,
+      messageId,
+      mentions: {
+        recorded: [{ subjectId: 'agent-1', kind: 'agent', wake: 'refused', reason: 'respond_to_denied', ordinal: 0 }],
+        rejected: [],
+      },
+    })
+    renderMentions()
+    typeInRoomBox('@Drif')
+    fireEvent.click(await screen.findByRole('option', { name: /Driftsassistent/ }))
+    flush()
+
+    submitRoomBox()
+    await waitFor(() => expect(spaceWakeBoard.forMessage(messageId)).toHaveLength(1))
+    const [entry] = spaceWakeBoard.forMessage(messageId)
+    expect(entry?.state).toBe('refused')
+    expect(entry?.code).toBe('agent_respond_to_denied')
+    expect(chatClient.streamChat).not.toHaveBeenCalled()
+  })
+
+  it('a locked agent goes with every post, marked locked, until it is unlocked', async () => {
+    publishRoomFeatures({ mention_picker: true, addressed_wake: true })
+    renderMentions()
+    typeInRoomBox('@Drif')
+    fireEvent.click(await screen.findByRole('option', { name: /Driftsassistent/ }))
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Lås Driftsassistent' }))
+    flush()
+    expect(screen.getByRole('button', { name: 'Lås opp Driftsassistent' }).getAttribute('aria-pressed')).toBe('true')
+
+    typeInRoomBox('Se på lista')
+    submitRoomBox()
+    await waitFor(() => expect(spacesClient.createSpacePost).toHaveBeenCalledTimes(1))
+    expect(postedInput().content).toBe('Se på lista')
+    expect(postedInput().mentions).toEqual({ people: [], agents: [{ subjectId: 'agent-1', source: 'locked' }] })
+    // The post is accepted and the words leave the box; the lock stays on the bar for the next post.
+    await waitFor(() => expect(roomBox().value).toBe(''))
+    expect(screen.getByRole('list', { name: 'Adressert til' }).textContent).toContain('Driftsassistent')
+  })
+
+  it('editing the words so the @name leaves them removes the typed agent from the address bar', async () => {
+    publishRoomFeatures({ mention_picker: true, addressed_wake: true })
+    renderMentions()
+    typeInRoomBox('@Drif')
+    fireEvent.click(await screen.findByRole('option', { name: /Driftsassistent/ }))
+    flush()
+    expect(screen.getByRole('list', { name: 'Adressert til' })).toBeTruthy()
+
+    typeInRoomBox('Hei alle')
+    expect(screen.queryByRole('list', { name: 'Adressert til' })).toBeNull()
+    expect(spacesClient.createSpacePost).not.toHaveBeenCalled()
+  })
+})
