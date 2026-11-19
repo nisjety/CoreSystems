@@ -690,3 +690,50 @@ describe('SpaceRoomTimeline — the history notice (WS04-S11)', () => {
     expect(document.querySelectorAll('.verevon-space-restricted[data-variant="room"]')).toHaveLength(1)
   })
 })
+
+// WS18-S6: the room's own labels for a post an agent renamed or pinned. A label says who acted, as a fact, and is
+// drawn only when the listing names an agent as the last writer; an absent source is never an agent.
+describe('SpaceRoomTimeline — agent labels on a post (WS18-S6)', () => {
+  const flagsOf = (threadId: string): string[] =>
+    [...document.querySelectorAll(`.verevon-room-post[data-thread-id="${threadId}"] .verevon-room-post__flag`)].map(
+      (node) => node.textContent ?? '',
+    )
+
+  it('says a post was renamed by an agent only when the agent set its title last', async () => {
+    renderRoom([
+      { thread_id: 't1', space_id: 'room-1', title: 'Agentnavn', title_source: 'agent', latest_run_status: 'completed' },
+      { thread_id: 't2', space_id: 'room-1', title: 'Eierens navn', title_source: 'owner', latest_run_status: 'completed' },
+      { thread_id: 't3', space_id: 'room-1', title: 'Uten kilde', latest_run_status: 'completed' },
+    ])
+    await screen.findByText('Eierens navn')
+    expect(flagsOf('t1')).toEqual(['Omdøpt av en agent'])
+    expect(flagsOf('t2')).toEqual([])
+    expect(flagsOf('t3')).toEqual([])
+  })
+
+  it('says a pin was made by an agent in place of Pinned only when an agent made it', async () => {
+    renderRoom([
+      { thread_id: 't1', space_id: 'room-1', title: 'Agent festet', pinned: true, pinned_source: 'agent', latest_run_status: 'completed' },
+      { thread_id: 't2', space_id: 'room-1', title: 'Eier festet', pinned: true, pinned_source: 'owner', latest_run_status: 'completed' },
+      { thread_id: 't3', space_id: 'room-1', title: 'Festet uten kilde', pinned: true, latest_run_status: 'completed' },
+      { thread_id: 't4', space_id: 'room-1', title: 'Ikke festet', pinned: false, pinned_source: 'agent', latest_run_status: 'completed' },
+    ])
+    await screen.findByText('Ikke festet')
+    expect(flagsOf('t1')).toEqual(['Festet av en agent'])
+    expect(flagsOf('t2')).toEqual(['Festet'])
+    expect(flagsOf('t3')).toEqual(['Festet'])
+    expect(flagsOf('t4')).toEqual([])
+  })
+})
+
+// WS13-S4a: each post is a list item named by its thread, so a `?m=` link can scroll to it and outline it.
+describe('SpaceRoomTimeline — each post is a list item named by its thread (WS13-S4a)', () => {
+  it('gives each post an id from its thread, and says the thread on the element', async () => {
+    renderRoom([{ thread_id: 'abc-1', space_id: 'room-1', title: 'Sak', latest_run_status: 'completed' }])
+    await screen.findByText('Sak')
+    const post = document.getElementById('post-abc-1')
+    expect(post?.tagName).toBe('LI')
+    expect(post?.getAttribute('data-thread-id')).toBe('abc-1')
+    expect(post?.parentElement?.classList.contains('verevon-room-timeline')).toBe(true)
+  })
+})
