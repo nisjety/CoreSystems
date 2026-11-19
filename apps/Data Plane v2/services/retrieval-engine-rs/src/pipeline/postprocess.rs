@@ -906,7 +906,11 @@ mod tests {
             cand("unknown", 2.0),
         ];
         let kept = candidates_inside_window(nodes.clone(), HistoryFloor::Since(floor), &entered);
-        assert_eq!(ids(&kept), vec!["at", "after"], "order is kept; before and unknown are hidden");
+        assert_eq!(
+            ids(&kept),
+            vec!["at", "after"],
+            "order is kept; before and unknown are hidden"
+        );
 
         // No window changes nothing, even for a document with no instant.
         let open = candidates_inside_window(nodes.clone(), HistoryFloor::Open, &entered);

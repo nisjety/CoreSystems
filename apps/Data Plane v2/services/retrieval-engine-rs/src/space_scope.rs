@@ -112,7 +112,9 @@ impl HistoryFloor {
             // the Rust check then agree on the instant, and one window has one cache key.
             Some(at) => DateTime::<Utc>::from_timestamp_micros(at.timestamp_micros())
                 .map(Self::Since)
-                .ok_or_else(|| anyhow::anyhow!("Space decision history floor instant is not valid")),
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Space decision history floor instant is not valid")
+                }),
             None if revision > 0 => Ok(Self::Closed),
             None => Ok(Self::Open),
         }
@@ -604,8 +606,9 @@ struct SpaceBindingRow {
 #[cfg(test)]
 mod tests {
     use super::{
-        history_floor_of, verify_retrieval_space_decision, HistoryFloor, ResolvedSpaceRetrievalScope,
-        VerifiedSpaceAuthority, DECISION_VERSION, RETRIEVAL_AUDIENCE, SPACE_DOCUMENT_IDS_SQL,
+        history_floor_of, verify_retrieval_space_decision, HistoryFloor,
+        ResolvedSpaceRetrievalScope, VerifiedSpaceAuthority, DECISION_VERSION, RETRIEVAL_AUDIENCE,
+        SPACE_DOCUMENT_IDS_SQL,
     };
     use crate::pipeline::types::RetrievalFiltersInput;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -871,21 +874,35 @@ mod tests {
         assert_eq!(authority.history_floor.since(), None);
         assert!(!authority.history_floor.is_closed());
         // An explicit null is the same as absent: Control omits the claim when the member has no window.
-        let null = verify_with(serde_json::json!({ "history_floor_at": null, "history_floor_revision": 0 }))
-            .expect("null claims");
+        let null = verify_with(
+            serde_json::json!({ "history_floor_at": null, "history_floor_revision": 0 }),
+        )
+        .expect("null claims");
         assert_eq!(null.history_floor, HistoryFloor::Open);
     }
 
     #[test]
     fn a_signed_floor_instant_is_the_window_cut_to_the_precision_of_timestamptz() {
-        let authority = verify_with(serde_json::json!({ "history_floor_at": "2026-11-18T09:30:15.123456789Z" }))
-            .expect("a since_date window");
-        assert_eq!(authority.history_floor, HistoryFloor::Since(at("2026-11-18T09:30:15.123456Z")));
-        assert_eq!(authority.history_floor.since(), Some(at("2026-11-18T09:30:15.123456Z")));
+        let authority = verify_with(
+            serde_json::json!({ "history_floor_at": "2026-11-18T09:30:15.123456789Z" }),
+        )
+        .expect("a since_date window");
+        assert_eq!(
+            authority.history_floor,
+            HistoryFloor::Since(at("2026-11-18T09:30:15.123456Z"))
+        );
+        assert_eq!(
+            authority.history_floor.since(),
+            Some(at("2026-11-18T09:30:15.123456Z"))
+        );
         // An offset is read as the instant it names.
-        let offset = verify_with(serde_json::json!({ "history_floor_at": "2026-11-18T10:30:15+01:00" }))
-            .expect("an offset instant");
-        assert_eq!(offset.history_floor, HistoryFloor::Since(at("2026-11-18T09:30:15Z")));
+        let offset =
+            verify_with(serde_json::json!({ "history_floor_at": "2026-11-18T10:30:15+01:00" }))
+                .expect("an offset instant");
+        assert_eq!(
+            offset.history_floor,
+            HistoryFloor::Since(at("2026-11-18T09:30:15Z"))
+        );
     }
 
     #[test]
@@ -896,14 +913,22 @@ mod tests {
             "history_floor_at": "2026-11-18T09:30:00Z", "history_floor_revision": 5
         }))
         .expect("a since_join member window");
-        assert_eq!(member.history_floor, HistoryFloor::Since(at("2026-11-18T09:30:00Z")));
+        assert_eq!(
+            member.history_floor,
+            HistoryFloor::Since(at("2026-11-18T09:30:00Z"))
+        );
 
         // A WS04-S11 since_join room signs the revision alone. Nothing in Data can be placed against a
         // revision, so the window shows nothing (fail closed) instead of the whole room.
-        let room = verify_with(serde_json::json!({ "history_floor_revision": 5 })).expect("a since_join room");
+        let room = verify_with(serde_json::json!({ "history_floor_revision": 5 }))
+            .expect("a since_join room");
         assert_eq!(room.history_floor, HistoryFloor::Closed);
         assert!(room.history_floor.is_closed());
-        assert_eq!(room.history_floor.since(), None, "a closed window has no instant to bind");
+        assert_eq!(
+            room.history_floor.since(),
+            None,
+            "a closed window has no instant to bind"
+        );
     }
 
     // A floor narrows a read, so one that cannot be read as a window refuses the decision: it must never
@@ -911,24 +936,54 @@ mod tests {
     #[test]
     fn a_malformed_floor_refuses_the_decision() {
         for (claims, why) in [
-            (serde_json::json!({ "history_floor_at": "last tuesday" }), "text that is no instant"),
-            (serde_json::json!({ "history_floor_at": 1_700_000_000 }), "a bare number"),
+            (
+                serde_json::json!({ "history_floor_at": "last tuesday" }),
+                "text that is no instant",
+            ),
+            (
+                serde_json::json!({ "history_floor_at": 1_700_000_000 }),
+                "a bare number",
+            ),
             (serde_json::json!({ "history_floor_at": true }), "a boolean"),
             (serde_json::json!({ "history_floor_at": {} }), "an object"),
-            (serde_json::json!({ "history_floor_revision": "5" }), "a revision that is text"),
-            (serde_json::json!({ "history_floor_revision": 1.5 }), "a revision that is a fraction"),
+            (
+                serde_json::json!({ "history_floor_revision": "5" }),
+                "a revision that is text",
+            ),
+            (
+                serde_json::json!({ "history_floor_revision": 1.5 }),
+                "a revision that is a fraction",
+            ),
         ] {
             let error = verify_with(claims).expect_err(why);
-            assert!(error.to_string().contains("invalid Space decision claims"), "{why}: {error}");
+            assert!(
+                error.to_string().contains("invalid Space decision claims"),
+                "{why}: {error}"
+            );
         }
         for (claims, why) in [
-            (serde_json::json!({ "history_floor_at": "0001-01-01T00:00:00Z" }), "the zero time"),
-            (serde_json::json!({ "history_floor_at": "1970-01-01T00:00:00Z" }), "the Unix epoch"),
-            (serde_json::json!({ "history_floor_at": "1969-12-31T23:59:59Z" }), "before the epoch"),
-            (serde_json::json!({ "history_floor_revision": -1 }), "a negative revision"),
+            (
+                serde_json::json!({ "history_floor_at": "0001-01-01T00:00:00Z" }),
+                "the zero time",
+            ),
+            (
+                serde_json::json!({ "history_floor_at": "1970-01-01T00:00:00Z" }),
+                "the Unix epoch",
+            ),
+            (
+                serde_json::json!({ "history_floor_at": "1969-12-31T23:59:59Z" }),
+                "before the epoch",
+            ),
+            (
+                serde_json::json!({ "history_floor_revision": -1 }),
+                "a negative revision",
+            ),
         ] {
             let error = verify_with(claims).expect_err(why);
-            assert!(error.to_string().contains("history floor"), "{why}: {error}");
+            assert!(
+                error.to_string().contains("history floor"),
+                "{why}: {error}"
+            );
         }
     }
 
@@ -940,7 +995,9 @@ mod tests {
         let mut payload = retrieval_decision_payload();
         payload["history_floor_at"] = serde_json::json!("2026-11-18T09:30:00Z");
         let token = sign_decision(&signing, "control-current", &payload);
-        assert!(verify_retrieval_space_decision(&token, &keys, "org-1", "user-1", Utc::now()).is_ok());
+        assert!(
+            verify_retrieval_space_decision(&token, &keys, "org-1", "user-1", Utc::now()).is_ok()
+        );
 
         let parts: Vec<&str> = token.split('.').collect();
         for tampered_floor in [None, Some("2026-11-18T10:30:00Z")] {
@@ -948,7 +1005,10 @@ mod tests {
             match tampered_floor {
                 Some(floor) => forged["history_floor_at"] = serde_json::json!(floor),
                 None => {
-                    forged.as_object_mut().expect("object").remove("history_floor_at");
+                    forged
+                        .as_object_mut()
+                        .expect("object")
+                        .remove("history_floor_at");
                 }
             }
             let forged_token = format!(
@@ -958,9 +1018,20 @@ mod tests {
                 URL_SAFE_NO_PAD.encode(serde_json::to_vec(&forged).expect("payload")),
                 parts[3]
             );
-            let error = verify_retrieval_space_decision(&forged_token, &keys, "org-1", "user-1", Utc::now())
-                .expect_err("an edited payload under the old signature");
-            assert!(error.to_string().contains("invalid Space decision signature"), "{error}");
+            let error = verify_retrieval_space_decision(
+                &forged_token,
+                &keys,
+                "org-1",
+                "user-1",
+                Utc::now(),
+            )
+            .expect_err("an edited payload under the old signature");
+            assert!(
+                error
+                    .to_string()
+                    .contains("invalid Space decision signature"),
+                "{error}"
+            );
         }
     }
 
@@ -975,10 +1046,19 @@ mod tests {
         // A window with an instant shows a row at or after it, never one before it, and never a row whose
         // instant is unknown (fail closed).
         let window = HistoryFloor::Since(floor);
-        assert!(!window.admits(Some(before)), "a microsecond before the floor is hidden");
-        assert!(window.admits(Some(floor)), "the floor instant itself is shown");
+        assert!(
+            !window.admits(Some(before)),
+            "a microsecond before the floor is hidden"
+        );
+        assert!(
+            window.admits(Some(floor)),
+            "the floor instant itself is shown"
+        );
         assert!(window.admits(Some(after)));
-        assert!(!window.admits(None), "a hit with no reliable instant is hidden");
+        assert!(
+            !window.admits(None),
+            "a hit with no reliable instant is hidden"
+        );
         // A closed window shows nothing, whatever the instant.
         assert!(!HistoryFloor::Closed.admits(Some(after)));
         assert!(!HistoryFloor::Closed.admits(None));
@@ -990,8 +1070,12 @@ mod tests {
     fn the_window_of_a_scope_is_open_without_a_scope() {
         assert_eq!(history_floor_of(None), HistoryFloor::Open);
         let mut windowed = scope();
-        windowed.authority.history_floor = HistoryFloor::Since(Utc.with_ymd_and_hms(2026, 11, 18, 9, 30, 0).unwrap());
-        assert_eq!(history_floor_of(Some(&windowed)), windowed.authority.history_floor);
+        windowed.authority.history_floor =
+            HistoryFloor::Since(Utc.with_ymd_and_hms(2026, 11, 18, 9, 30, 0).unwrap());
+        assert_eq!(
+            history_floor_of(Some(&windowed)),
+            windowed.authority.history_floor
+        );
         assert_eq!(history_floor_of(Some(&scope())), HistoryFloor::Open);
     }
 
@@ -1013,27 +1097,48 @@ mod tests {
         let since_nine = window(HistoryFloor::Since(at("2026-11-18T09:00:00Z")));
         let since_ten = window(HistoryFloor::Since(at("2026-11-18T10:00:00Z")));
         let closed = window(HistoryFloor::Closed);
-        for (name, partition) in [("since nine", &since_nine), ("since ten", &since_ten), ("closed", &closed)] {
-            assert_ne!(partition, &open.cache_partition(), "{name} shares the open partition");
+        for (name, partition) in [
+            ("since nine", &since_nine),
+            ("since ten", &since_ten),
+            ("closed", &closed),
+        ] {
+            assert_ne!(
+                partition,
+                &open.cache_partition(),
+                "{name} shares the open partition"
+            );
         }
         assert_ne!(since_nine, since_ten, "two instants share a partition");
         assert_ne!(since_nine, closed);
         assert_ne!(since_ten, closed);
-        assert_eq!(since_nine, window(HistoryFloor::Since(at("2026-11-18T09:00:00Z"))), "one window, one key");
-        assert!(since_nine.starts_with(&open.cache_partition()), "the window extends the room and audience part");
+        assert_eq!(
+            since_nine,
+            window(HistoryFloor::Since(at("2026-11-18T09:00:00Z"))),
+            "one window, one key"
+        );
+        assert!(
+            since_nine.starts_with(&open.cache_partition()),
+            "the window extends the room and audience part"
+        );
     }
 
     // The room's document set is read with the window as a SQL predicate, so the bound counts only what
     // the member may see and a document that entered the room before the floor is never listed.
     #[test]
     fn the_room_document_set_is_read_inside_the_window() {
-        let sql = SPACE_DOCUMENT_IDS_SQL.split_whitespace().collect::<Vec<_>>().join(" ");
+        let sql = SPACE_DOCUMENT_IDS_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         for needle in [
             "WHERE org_id = $1 AND space_ref = $2 AND deleted_at IS NULL",
             "AND ($4::timestamptz IS NULL OR created_at >= $4::timestamptz)",
             "ORDER BY updated_at DESC LIMIT $3",
         ] {
-            assert!(sql.contains(needle), "the room document SQL lost `{needle}`: {sql}");
+            assert!(
+                sql.contains(needle),
+                "the room document SQL lost `{needle}`: {sql}"
+            );
         }
     }
 }

@@ -164,7 +164,10 @@ mod tests {
     // counts only pages the member may see, and a page created before the floor is never read.
     #[test]
     fn wiki_query_applies_the_history_window_to_the_pages_creation() {
-        let sql = wiki_search_sql().split_whitespace().collect::<Vec<_>>().join(" ");
+        let sql = wiki_search_sql()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(
             sql.contains("AND ($7::timestamptz IS NULL OR p.created_at >= $7::timestamptz) ORDER BY p.updated_at DESC LIMIT $6"),
             "{sql}"

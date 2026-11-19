@@ -13,7 +13,9 @@
 //! the exact SQL and the exact functions the handlers run.
 
 use chrono::{DateTime, Utc};
-use retrieval_engine::pipeline::postprocess::{NodePostprocessor, PostprocessCtx, SpaceHistoryGate};
+use retrieval_engine::pipeline::postprocess::{
+    NodePostprocessor, PostprocessCtx, SpaceHistoryGate,
+};
 use retrieval_engine::pipeline::types::{ScoredCandidate, ZdrMode};
 use retrieval_engine::search::wiki;
 use retrieval_engine::space_scope::{resolve_space_document_ids, HistoryFloor};
@@ -56,17 +58,27 @@ fn every_room_read_carries_the_window_as_a_predicate_on_the_instant_a_document_e
         ("SPACE_DOCUMENT_SQL", "$6"),
     ] {
         let sql = squashed(&sql_const(name));
-        let predicate =
-            format!("AND ({placeholder}::timestamptz IS NULL OR created_at >= {placeholder}::timestamptz)");
+        let predicate = format!(
+            "AND ({placeholder}::timestamptz IS NULL OR created_at >= {placeholder}::timestamptz)"
+        );
         assert!(
             sql.contains(&predicate),
             "{name} lost the history window predicate `{predicate}`:\n{sql}"
         );
         // The window never replaces the room predicate or the ownership predicate: it only narrows.
-        assert!(sql.contains("deleted_at IS NULL"), "{name} lost the liveness predicate:\n{sql}");
-        assert!(sql.contains("space_ref ="), "{name} lost the room predicate:\n{sql}");
+        assert!(
+            sql.contains("deleted_at IS NULL"),
+            "{name} lost the liveness predicate:\n{sql}"
+        );
+        assert!(
+            sql.contains("space_ref ="),
+            "{name} lost the room predicate:\n{sql}"
+        );
         // It is the instant the document ENTERED the room, never the latest edit.
-        assert!(!predicate.contains("updated_at"), "the window must not use the update instant");
+        assert!(
+            !predicate.contains("updated_at"),
+            "the window must not use the update instant"
+        );
     }
     // A listing's keyset cursor still pages on the update instant; the window is a separate predicate on
     // the creation instant, so a page boundary never moves a pre-floor document into the window.
@@ -91,7 +103,9 @@ fn test_db_url() -> Option<String> {
 
 async fn connect() -> PgPool {
     let url = test_db_url().expect("TEST_DATABASE_URL is required for this ignored test");
-    PgPool::connect(&url).await.expect("connect to TEST_DATABASE_URL")
+    PgPool::connect(&url)
+        .await
+        .expect("connect to TEST_DATABASE_URL")
 }
 
 const SPACE: &str = "space:org:history-room";
@@ -101,10 +115,12 @@ const FLOOR: &str = "2026-11-10T12:00:00Z";
 /// The tables these reads touch, shaped as the other room-file tests shape them. Existing tables are kept
 /// and given the columns this file needs, so the file coexists with the others on one disposable database.
 async fn setup(pool: &PgPool, org: &str) {
-    sqlx::query("CREATE TABLE IF NOT EXISTS documents (document_id TEXT PRIMARY KEY, org_id TEXT NOT NULL)")
-        .execute(pool)
-        .await
-        .expect("create documents");
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS documents (document_id TEXT PRIMARY KEY, org_id TEXT NOT NULL)",
+    )
+    .execute(pool)
+    .await
+    .expect("create documents");
     for column in [
         "source TEXT NOT NULL DEFAULT ''",
         "type TEXT NOT NULL DEFAULT ''",
@@ -120,10 +136,12 @@ async fn setup(pool: &PgPool, org: &str) {
         "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
         "deleted_at TIMESTAMPTZ",
     ] {
-        sqlx::query(&format!("ALTER TABLE documents ADD COLUMN IF NOT EXISTS {column}"))
-            .execute(pool)
-            .await
-            .expect("add documents column");
+        sqlx::query(&format!(
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS {column}"
+        ))
+        .execute(pool)
+        .await
+        .expect("add documents column");
     }
     sqlx::raw_sql(
         "CREATE TABLE IF NOT EXISTS knowledge_units (
@@ -191,11 +209,56 @@ async fn seed_document(
 /// The room every database test reads. `old` entered the room before the floor and was edited after it:
 /// the edit must not bring it back into the window.
 async fn seed_room(pool: &PgPool, org: &str) {
-    seed_document(pool, org, "old", SPACE, "2026-11-01 00:00:00+00", "2026-11-15 00:00:00+00", false).await;
-    seed_document(pool, org, "edge", SPACE, "2026-11-10 12:00:00+00", "2026-11-10 12:00:00+00", false).await;
-    seed_document(pool, org, "new", SPACE, "2026-11-12 00:00:00+00", "2026-11-12 00:00:00+00", false).await;
-    seed_document(pool, org, "gone", SPACE, "2026-11-13 00:00:00+00", "2026-11-13 00:00:00+00", true).await;
-    seed_document(pool, org, "elsewhere", OTHER_SPACE, "2026-11-13 00:00:00+00", "2026-11-13 00:00:00+00", false).await;
+    seed_document(
+        pool,
+        org,
+        "old",
+        SPACE,
+        "2026-11-01 00:00:00+00",
+        "2026-11-15 00:00:00+00",
+        false,
+    )
+    .await;
+    seed_document(
+        pool,
+        org,
+        "edge",
+        SPACE,
+        "2026-11-10 12:00:00+00",
+        "2026-11-10 12:00:00+00",
+        false,
+    )
+    .await;
+    seed_document(
+        pool,
+        org,
+        "new",
+        SPACE,
+        "2026-11-12 00:00:00+00",
+        "2026-11-12 00:00:00+00",
+        false,
+    )
+    .await;
+    seed_document(
+        pool,
+        org,
+        "gone",
+        SPACE,
+        "2026-11-13 00:00:00+00",
+        "2026-11-13 00:00:00+00",
+        true,
+    )
+    .await;
+    seed_document(
+        pool,
+        org,
+        "elsewhere",
+        OTHER_SPACE,
+        "2026-11-13 00:00:00+00",
+        "2026-11-13 00:00:00+00",
+        false,
+    )
+    .await;
 }
 
 fn local_ids(org: &str, ids: &[String]) -> Vec<String> {
@@ -227,18 +290,25 @@ async fn the_room_document_set_is_narrowed_to_the_window_before_any_search_runs(
     // A window: only what entered the room at or after the floor. `old` was edited after the floor and is
     // still hidden, because the edit does not remove the text the member must not see. `edge` entered at
     // exactly the floor instant and is shown.
-    assert_eq!(list(HistoryFloor::from_claims(Some(at(FLOOR)), 0).unwrap()).await, ["new", "edge"]);
+    assert_eq!(
+        list(HistoryFloor::from_claims(Some(at(FLOOR)), 0).unwrap()).await,
+        ["new", "edge"]
+    );
     // A later floor hides more.
     assert_eq!(
         list(HistoryFloor::from_claims(Some(at("2026-11-12T00:00:00Z")), 0).unwrap()).await,
         ["new"]
     );
     // A window that is a revision alone shows nothing, and does not read the table to say so.
-    assert!(list(HistoryFloor::from_claims(None, 4).unwrap()).await.is_empty());
-    // A floor after every document leaves an empty set, which the caller refuses like an empty room.
-    assert!(list(HistoryFloor::from_claims(Some(at("2026-12-01T00:00:00Z")), 0).unwrap())
+    assert!(list(HistoryFloor::from_claims(None, 4).unwrap())
         .await
         .is_empty());
+    // A floor after every document leaves an empty set, which the caller refuses like an empty room.
+    assert!(
+        list(HistoryFloor::from_claims(Some(at("2026-12-01T00:00:00Z")), 0).unwrap())
+            .await
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -257,50 +327,80 @@ async fn the_by_id_lookups_the_listing_and_the_file_read_hide_what_entered_befor
 
     // sources and freshness: the same predicate, so the two never disagree about what is in a room.
     let sources = |since: Option<DateTime<Utc>>| {
-        let (pool, org, ids, no_grants) = (pool.clone(), org.clone(), ids.clone(), no_grants.clone());
+        let (pool, org, ids, no_grants) =
+            (pool.clone(), org.clone(), ids.clone(), no_grants.clone());
         async move {
-            let rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(&sql_const("SOURCES_SQL"))
-                .bind(&ids)
-                .bind(&org)
-                .bind(Some("u1"))
-                .bind(&no_grants)
-                .bind(Some(SPACE))
-                .bind(since)
-                .fetch_all(&pool)
-                .await
-                .expect("sources query");
+            let rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+                &sql_const("SOURCES_SQL"),
+            )
+            .bind(&ids)
+            .bind(&org)
+            .bind(Some("u1"))
+            .bind(&no_grants)
+            .bind(Some(SPACE))
+            .bind(since)
+            .fetch_all(&pool)
+            .await
+            .expect("sources query");
             let mut found = local_ids(&org, &rows.into_iter().map(|row| row.0).collect::<Vec<_>>());
             found.sort();
             found
         }
     };
     let freshness = |since: Option<DateTime<Utc>>| {
-        let (pool, org, ids, no_grants) = (pool.clone(), org.clone(), ids.clone(), no_grants.clone());
+        let (pool, org, ids, no_grants) =
+            (pool.clone(), org.clone(), ids.clone(), no_grants.clone());
         async move {
-            let rows = sqlx::query_as::<_, (String, String, String, String)>(&sql_const("FRESHNESS_SQL"))
-                .bind(&ids)
-                .bind(&org)
-                .bind(Some("u1"))
-                .bind(&no_grants)
-                .bind(Some(SPACE))
-                .bind(since)
-                .fetch_all(&pool)
-                .await
-                .expect("freshness query");
+            let rows =
+                sqlx::query_as::<_, (String, String, String, String)>(&sql_const("FRESHNESS_SQL"))
+                    .bind(&ids)
+                    .bind(&org)
+                    .bind(Some("u1"))
+                    .bind(&no_grants)
+                    .bind(Some(SPACE))
+                    .bind(since)
+                    .fetch_all(&pool)
+                    .await
+                    .expect("freshness query");
             let mut found = local_ids(&org, &rows.into_iter().map(|row| row.0).collect::<Vec<_>>());
             found.sort();
             found
         }
     };
-    assert_eq!(sources(None).await, ["edge", "new", "old"], "no window shows the live room");
-    assert_eq!(sources(floor).await, ["edge", "new"], "the window hides the document before it");
+    assert_eq!(
+        sources(None).await,
+        ["edge", "new", "old"],
+        "no window shows the live room"
+    );
+    assert_eq!(
+        sources(floor).await,
+        ["edge", "new"],
+        "the window hides the document before it"
+    );
     assert_eq!(freshness(None).await, ["edge", "new", "old"]);
-    assert_eq!(freshness(floor).await, ["edge", "new"], "freshness agrees with sources");
+    assert_eq!(
+        freshness(floor).await,
+        ["edge", "new"],
+        "freshness agrees with sources"
+    );
 
     // The room listing.
     type ListRow = (
-        String, String, String, String, String, String, String, String, String,
-        Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
     );
     let listed = |since: Option<DateTime<Utc>>| {
         let (pool, org) = (pool.clone(), org.clone());
@@ -327,7 +427,15 @@ async fn the_by_id_lookups_the_listing_and_the_file_read_hide_what_entered_befor
     assert_eq!(listed(floor).await, ["new", "edge"]);
 
     // One room file: a document before the window answers like a missing id.
-    type DocRow = (String, String, String, String, String, Option<String>, String);
+    type DocRow = (
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        String,
+    );
     let read = |id: &'static str, since: Option<DateTime<Utc>>| {
         let (pool, org) = (pool.clone(), org.clone());
         async move {
@@ -343,9 +451,18 @@ async fn the_by_id_lookups_the_listing_and_the_file_read_hide_what_entered_befor
                 .expect("document query")
         }
     };
-    assert!(read("old", None).await.is_some(), "with no window the earlier file reads");
-    assert!(read("old", floor).await.is_none(), "inside the window the earlier file is the 404 of a missing id");
-    assert!(read("edge", floor).await.is_some(), "a file that entered at the floor instant reads");
+    assert!(
+        read("old", None).await.is_some(),
+        "with no window the earlier file reads"
+    );
+    assert!(
+        read("old", floor).await.is_none(),
+        "inside the window the earlier file is the 404 of a missing id"
+    );
+    assert!(
+        read("edge", floor).await.is_some(),
+        "a file that entered at the floor instant reads"
+    );
     assert!(read("new", floor).await.is_some());
 }
 
@@ -380,21 +497,35 @@ async fn the_history_gate_drops_a_surviving_candidate_whose_document_entered_bef
         let (pool, org) = (pool.clone(), org.clone());
         let nodes = candidates();
         async move {
-            let gate = SpaceHistoryGate { pool: &pool, org_id: &org, floor };
+            let gate = SpaceHistoryGate {
+                pool: &pool,
+                org_id: &org,
+                floor,
+            };
             let mut ctx = PostprocessCtx::new("what is in the room", ZdrMode::Disabled, false);
             gate.postprocess(nodes, &mut ctx)
                 .await
                 .expect("the gate reads")
                 .into_iter()
-                .map(|c| c.document_id.trim_start_matches(&format!("{org}:")).to_string())
+                .map(|c| {
+                    c.document_id
+                        .trim_start_matches(&format!("{org}:"))
+                        .to_string()
+                })
                 .collect::<Vec<_>>()
         }
     };
     // No window passes everything, including ids that are not documents: it is not this gate's to judge.
-    assert_eq!(survivors(HistoryFloor::Open).await, ["old", "edge", "new", "gone", "not-a-document"]);
+    assert_eq!(
+        survivors(HistoryFloor::Open).await,
+        ["old", "edge", "new", "gone", "not-a-document"]
+    );
     // A window keeps a candidate only when its document is live and entered the room at or after the floor.
     // A deleted document and an id with no `documents` row have no reliable instant here, so they are hidden.
-    assert_eq!(survivors(HistoryFloor::from_claims(Some(at(FLOOR)), 0).unwrap()).await, ["edge", "new"]);
+    assert_eq!(
+        survivors(HistoryFloor::from_claims(Some(at(FLOOR)), 0).unwrap()).await,
+        ["edge", "new"]
+    );
     assert!(survivors(HistoryFloor::Closed).await.is_empty());
 }
 
@@ -407,9 +538,21 @@ async fn the_room_wiki_hides_a_page_created_before_the_window_even_after_an_edit
     let workspace = "history-workspace";
     for (page, created, updated) in [
         // Created before the floor and edited after it: its current version is a whole-page snapshot.
-        ("page-old", "2026-11-01 00:00:00+00", "2026-11-15 00:00:00+00"),
-        ("page-edge", "2026-11-10 12:00:00+00", "2026-11-10 12:00:00+00"),
-        ("page-new", "2026-11-12 00:00:00+00", "2026-11-12 00:00:00+00"),
+        (
+            "page-old",
+            "2026-11-01 00:00:00+00",
+            "2026-11-15 00:00:00+00",
+        ),
+        (
+            "page-edge",
+            "2026-11-10 12:00:00+00",
+            "2026-11-10 12:00:00+00",
+        ),
+        (
+            "page-new",
+            "2026-11-12 00:00:00+00",
+            "2026-11-12 00:00:00+00",
+        ),
     ] {
         sqlx::query(
             "INSERT INTO wiki_pages (page_id, org_id, workspace_id, title, path, current_version_id,
@@ -442,18 +585,33 @@ async fn the_room_wiki_hides_a_page_created_before_the_window_even_after_an_edit
         let (pool, org, workspaces) = (pool.clone(), org.clone(), workspaces.clone());
         async move {
             let mut pages: Vec<String> = wiki::wiki_search_since(
-                &pool, "history window", &org, 20, None, &workspaces, &[], since,
+                &pool,
+                "history window",
+                &org,
+                20,
+                None,
+                &workspaces,
+                &[],
+                since,
             )
             .await
             .expect("wiki search")
             .into_iter()
-            .map(|page| page.page_id.trim_start_matches(&format!("{org}:")).to_string())
+            .map(|page| {
+                page.page_id
+                    .trim_start_matches(&format!("{org}:"))
+                    .to_string()
+            })
             .collect();
             pages.sort();
             pages
         }
     };
-    assert_eq!(found(None).await, ["page-edge", "page-new", "page-old"], "no window shows the room wiki");
+    assert_eq!(
+        found(None).await,
+        ["page-edge", "page-new", "page-old"],
+        "no window shows the room wiki"
+    );
     assert_eq!(found(Some(at(FLOOR))).await, ["page-edge", "page-new"]);
     // `wiki_search` is `wiki_search_since` with no window.
     let plain = wiki::wiki_search(&pool, "history window", &org, 20, None, &workspaces, &[])
