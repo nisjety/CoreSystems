@@ -28,3 +28,25 @@
 | D18 | D8 room history for new members | Confirmed as described: default sees past conversation; invite option hides it; admin can later reveal, optionally from a date; canvas follows the same rule | New feature: Control per-member history visibility (all / since-join / since-date), invite option, admin control; session-core + canvas honour it; SPA invite + admin UI |
 | D19 | Ownerless org agent admin | Yes: org admins get a management screen (edit/suspend/retire) | Control admin routes for org-visible ownerless agents; gateway + SPA admin UI |
 | D20 | ZDR deletes (skills/plugins/schedules) | Registry wins: allow deletes under ZDR (deletion removes content, does not persist it) | Revert the W3-DEC-ZDR2 refusal guards on the DELETE routes for skills/plugins/schedules; keep guards on create/update/publish/restore/import; fix registry rows to match (delete rows stay/become allowed, non-delete rows stay refuse) |
+
+## Round 3 (2026-11-19, after the D18 wake-leak review)
+
+| # | Topic | Decision | Work |
+|---|---|---|---|
+| D21a | Do wake under a member history window | Keep the refusal (`wake_history_window_do_unsupported`) | none (c5c70b6eb, 5d428eff2) |
+| D21b | Room files, knowledge retrieval, sandbox workspace vs D18 | Stay shared; only the conversation and canvas are windowed | Document in d18 spec; no code |
+| D21c | Post-floor content restating pre-floor turns | Acceptable; the window goes by creation time | Document in d18 spec |
+| D21d | Wake + regenerate/edit in one request | Refuse it | model-gateway check_wake refusal + SPA copy |
+| D21e | Private panel ("Privat assistent") | In-panel composer; replies private to the member | SPA composer in the panel over the existing private-turn path |
+| D21f | "Set as primary agent" | Primary agent is the room's default responder for messages that mention no agent (subject to its wake policy) | Control/binding field + wake routing + SPA |
+| D21g | Memory take-back after the dialog closes | Build it (retract a shared memory later from the memory list) | session-core/Control path + gateway + SPA |
+| D21h | Browser run Stop by its starter | Build it (starter can stop, not only admins) | Control decision + gateway + model-gateway/Quarry stop + SPA |
+| D21i | Compliance role and legal hold | Grant compliance access to legal-hold routes (view/set/lift) | Control role matrix + gateway + registry |
+| D21j | Convex status text for ZDR orgs | Stop storing it; closed status words only | convex-core + producers |
+| D21k | ZDR refusal envelope | Align to `{ error: { code, message, details } }` everywhere | gateway/BFF + SPA readers + registry |
+| D21l | Sidebar layout in localStorage under ZDR | Allowed (UI preference, no content) | none |
+| D21m | Canvas for members with a history window | View and save the current canvas; no browsing/restoring versions from before the window | Control canvas decision + wiki-store + SPA |
+| D21n | Data Plane canvas error codes | Fix: not-found first, then authority/ZDR; canvas_head_moved distinct from canvas_not_found | wiki-store + SPA copy |
+| D21o | SPACE_MEMBER_HISTORY_WINDOWS | Declared in Control compose; on in local dev, off by default in production | compose + flag registry |
+| D21p | Builder models for the full W1-W3 completion | Opus for hard (security / cross-plane), Haiku 5.5 max for simple (UI copy, mechanical) | - |
+| D21q | Merge of space-w3 | After the full Wave 1-3 audit completion | - |
