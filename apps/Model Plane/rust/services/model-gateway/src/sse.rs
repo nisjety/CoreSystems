@@ -3093,7 +3093,8 @@ pub async fn invoke_stream_sse(
         }
     }
     // A wake starts a durable run from a stored post (WS08-S3): refused, typed, for a zero-retention
-    // or waived turn before anything else, then checked against the post it was approved for.
+    // or waived turn before anything else, then checked against the post it was approved for. A Do
+    // wake under the member's history window (D18) is refused here too, before any run exists.
     if let Some(wake) = req.wake_context.as_ref() {
         if let Err(refusal) = crate::space_sse::check_wake(
             wake,
@@ -3101,6 +3102,7 @@ pub async fn invoke_stream_sse(
             req.thread_id.as_deref(),
             turn_posture.zdr() || turn_posture.retention_class().is_some(),
             mp_contracts::space_mentions::wake_api_enabled(),
+            features.iter().any(|feature| feature == "agentic"),
         ) {
             return match refusal {
                 crate::space_sse::WakeRefusal::Zdr => zdr_refusal_stream(

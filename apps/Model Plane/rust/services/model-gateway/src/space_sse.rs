@@ -343,6 +343,9 @@ pub(crate) enum WakeRefusal {
     Malformed,
     /// The request text is not the post the decision bound.
     ContentMismatch,
+    /// D18: a Do run (the `agentic` feature) under the member's history window
+    /// ([`WakeWindow::allows_do_run`]).
+    WindowedDoRun,
 }
 
 impl WakeRefusal {
@@ -354,6 +357,7 @@ impl WakeRefusal {
             Self::ThreadRequired => "wake_requires_thread",
             Self::Malformed => "wake_invalid",
             Self::ContentMismatch => "wake_content_mismatch",
+            Self::WindowedDoRun => "wake_history_window_do_unsupported",
         }
     }
 
@@ -365,6 +369,9 @@ impl WakeRefusal {
             Self::ThreadRequired => "A wake must name the thread its post lives in.",
             Self::Malformed => "The wake request is incomplete.",
             Self::ContentMismatch => "The request text is not the post this wake was approved for.",
+            Self::WindowedDoRun => {
+                "An agent cannot run a task here while part of this room's history is hidden from you. Ask it instead."
+            }
         }
     }
 }
@@ -383,14 +390,16 @@ fn valid_client_wake_id(id: &str) -> bool {
 }
 
 /// The wake guard of the invoke stream. Pure: `durable_refused` is "the turn is zero-retention or
-/// waived" and `api_enabled` is [`mp_contracts::space_mentions::wake_api_enabled`]. Authority is
-/// not decided here: Session Core verifies the signed decision, the caller and the stored post.
+/// waived", `api_enabled` is [`mp_contracts::space_mentions::wake_api_enabled`] and `agentic` is
+/// whether the turn asks for a Do run (the `agentic` feature). Authority is not decided here:
+/// Session Core verifies the signed decision, the caller and the stored post.
 pub(crate) fn check_wake(
     wake: &WakeContext,
     content: &str,
     thread_id: Option<&str>,
     durable_refused: bool,
     api_enabled: bool,
+    agentic: bool,
 ) -> Result<(), WakeRefusal> {
     if durable_refused {
         return Err(WakeRefusal::Zdr);
@@ -412,6 +421,10 @@ pub(crate) fn check_wake(
     }
     if wake_content_digest(content) != wake.trigger_content_digest {
         return Err(WakeRefusal::ContentMismatch);
+    }
+    // D18: decided here, before the run exists, so a refused Do wake leaves no run behind.
+    if agentic && !WakeWindow::from_token(&wake.space_decision_token).allows_do_run() {
+        return Err(WakeRefusal::WindowedDoRun);
     }
     Ok(())
 }
@@ -489,6 +502,17 @@ impl WakeWindow {
     /// no window offers it, as [`Self::keeps_summaries`] keeps summaries.
     #[must_use]
     pub(crate) fn offers_thread_reattach(self) -> bool {
+        matches!(self, Self::Open)
+    }
+
+    /// Whether a wake under this window may start a Do run (the `agentic` feature). A Do run returns
+    /// before any of the narrowing above: execution-core runs it from a run context the gateway reads
+    /// through the owner-bound conversation read, which knows no window, and offers it the memory recall
+    /// and the workspace tools, which know none either. So only a wake with no window starts one; under a
+    /// window, readable or not, the wake is refused before its run exists (`check_wake`), and the member
+    /// can ask the agent instead.
+    #[must_use]
+    pub(crate) fn allows_do_run(self) -> bool {
         matches!(self, Self::Open)
     }
 
@@ -1411,6 +1435,61 @@ mod tests {
             assert_eq!(names(&defs), ["count_words", "skill_file"]);
         }
         assert!(WakeWindow::Open.offers_thread_reattach());
+    }
+
+    /// A Do wake runs from reads no window narrows (the run context's thread read, the memory recall, the
+    /// workspace), so under a window, readable or not, the guard refuses it before its run exists. An Ask wake
+    /// under the same window, and a Do wake with no window, pass as before, and the guard's earlier refusals
+    /// still come first.
+    #[test]
+    fn a_do_wake_under_a_history_window_is_refused_by_the_wake_guard() {
+        let content = "@agent plan the offsite";
+        let wake_with = |claims: Value| -> WakeContext {
+            serde_json::from_value(json!({
+                "space_id": "space-room", "space_decision_ref": "d-wake-1",
+                "recipient_audience_ref": "a-1", "recipient_audience_revision": 1,
+                "recipient_audience_hash": "h-1", "privacy_policy_ref": "p-1",
+                "authority_revision": 1, "resource_authorization_ref": "r-1",
+                "space_decision_token": token_with(&claims),
+                "action_schema_hash": "s-1", "payload_digest": "sha256:x", "idempotency_key": "k-1",
+                "trigger_message_id": "m-trigger",
+                "trigger_content_digest": wake_content_digest(content),
+                "agent_subject_id": "agent-1", "turn_origin": "direct",
+                "client_wake_id": "wake-id-0123456789abcdef"
+            }))
+            .expect("a wake context")
+        };
+        let guard = |wake: &WakeContext, agentic: bool| {
+            check_wake(wake, content, Some("thread-1"), false, true, agentic)
+        };
+
+        let open = wake_with(json!({ "decision_ref": "d-wake-1" }));
+        assert_eq!(guard(&open, true), Ok(()), "a Do wake with no window");
+        assert_eq!(guard(&open, false), Ok(()));
+        for (claims, why) in [
+            (json!({ "history_floor_at": "2026-11-18T09:30:00Z" }), "a window"),
+            (json!({ "history_floor_at": "last tuesday" }), "a window the gateway cannot read"),
+        ] {
+            let windowed = wake_with(claims);
+            assert_eq!(guard(&windowed, true), Err(WakeRefusal::WindowedDoRun), "{why}");
+            assert_eq!(guard(&windowed, false), Ok(()), "{why}: an Ask wake is answered under it");
+        }
+        assert_eq!(WakeRefusal::WindowedDoRun.code(), "wake_history_window_do_unsupported");
+
+        let windowed = wake_with(json!({ "history_floor_at": "2026-11-18T09:30:00Z" }));
+        assert_eq!(
+            check_wake(&windowed, content, Some("thread-1"), true, true, true),
+            Err(WakeRefusal::Zdr),
+            "zero retention is decided first"
+        );
+        assert_eq!(
+            check_wake(&windowed, "another text", Some("thread-1"), false, true, true),
+            Err(WakeRefusal::ContentMismatch)
+        );
+
+        assert!(WakeWindow::Open.allows_do_run());
+        assert!(!WakeWindow::Since(at("2026-11-18T09:30:00Z")).allows_do_run());
+        assert!(!WakeWindow::Unreadable.allows_do_run());
     }
 
     // A turn inside the member's window can carry a summary persisted over turns before it: the head summary an

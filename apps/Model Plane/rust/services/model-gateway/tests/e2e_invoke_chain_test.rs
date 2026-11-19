@@ -6676,6 +6676,86 @@ async fn a_wake_under_a_history_window_sends_inference_no_turn_from_before_it() 
     assert_eq!(prompt.last(), Some(&trigger));
 }
 
+/// The body of one wake on `thread-wake`: `content` is the stored post, the decision's token carries
+/// `history_floor_at` (or no window), and `extra` adds request fields (`features`, `tools`).
+fn wake_body(content: &str, history_floor_at: Option<&str>, extra: serde_json::Value) -> String {
+    use sha2::{Digest, Sha256};
+    let mut body = serde_json::json!({
+        "content": content,
+        "model": "m",
+        "thread_id": "thread-wake",
+        "wake_context": {
+            "space_id": "space-room", "space_decision_ref": "d-wake-1",
+            "recipient_audience_ref": "a-1", "recipient_audience_revision": 1,
+            "recipient_audience_hash": "h-1", "privacy_policy_ref": "p-1",
+            "authority_revision": 1, "resource_authorization_ref": "r-1",
+            "space_decision_token": wake_token(history_floor_at),
+            "action_schema_hash": "s-1", "payload_digest": "sha256:x", "idempotency_key": "k-1",
+            "trigger_message_id": "m-wake-trigger",
+            "trigger_content_digest": format!("sha256:{:x}", Sha256::digest(content.as_bytes())),
+            "agent_subject_id": "agent-1", "turn_origin": "direct",
+            "client_wake_id": "wake-id-0123456789abcdef"
+        }
+    });
+    if let (Some(body), Some(extra)) = (body.as_object_mut(), extra.as_object()) {
+        body.extend(extra.clone());
+    }
+    body.to_string()
+}
+
+/// D18: a Do wake (the `agentic` feature) runs from reads no window narrows: the run context's thread read, the
+/// memory recall and the workspace tools. Under the member's window, readable or not, it is refused, typed, before
+/// any run exists. With no window the same wake starts its run, as before.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_do_wake_under_a_history_window_is_refused_before_any_run_exists() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let _wake_api = WakeApiOn::set();
+    for (floor, refused) in [
+        (None, false),
+        (Some("2026-11-18T09:30:00Z"), true),
+        (Some("not an instant"), true),
+    ] {
+        let client = spawn_mock(MockOk::default()).await;
+        let (mock_session, session_handles) = MockSessionCore::new();
+        let session_client = spawn_session_mock(mock_session).await;
+        let (mut state, _publisher) = make_state(client, session_client).await;
+        state.execution_client = unreachable_execution_client().await;
+        let (app, _delegated_jwks) =
+            authenticated_user_router(build_router(state, None), "org_placeholder", "user_placeholder")
+                .await;
+        let content = "@agent plan the offsite for us";
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/invoke/stream")
+            .header(AUTHORIZATION, "Bearer dev")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(wake_body(content, floor, serde_json::json!({ "features": ["agentic"] }))))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        let refusals: Vec<_> = error_frames(&body)
+            .into_iter()
+            .filter(|error| error["code"] == "wake_history_window_do_unsupported")
+            .collect();
+        if refused {
+            assert_eq!(refusals.len(), 1, "{floor:?}: {body}");
+            assert_eq!(managed_start_count(&session_handles), 0, "{floor:?}: no run is started");
+            assert_eq!(
+                session_handles.append_message_count.load(Ordering::SeqCst),
+                0,
+                "{floor:?}: nothing is written"
+            );
+        } else {
+            assert!(refusals.is_empty(), "{body}");
+            assert_eq!(managed_start_count(&session_handles), 1, "the Do wake starts its run: {body}");
+        }
+    }
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_search_turn_keeps_prior_user_name_context() {
