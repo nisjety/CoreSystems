@@ -7,6 +7,7 @@ import {
 import { ApiError, requestJson } from '../http'
 import { setDmListingEnabled, type SpaceDmParticipant } from './dm'
 import { setRoomDirectoryListed } from './directory'
+import { memberHistoryWindowFrom, type SpaceMemberHistoryWindow, type SpaceMembershipHistoryWindow } from './member-history-window'
 import { spacePinsFrom, type SpaceRoomPin } from './pins'
 import { spaceReactionsFrom, type SpaceReactionChip } from './reactions'
 import { spaceRunWorkFrom, type SpaceRunWork } from './run-work'
@@ -27,6 +28,13 @@ export type SpaceMembership = {
   /** WS04-S11: `full` or `since_join`. Absent on an older Control: unknown, not full. A label for
    * the timeline notice only; Session Core applies the floor, and the flags can still be off. */
   history_mode?: string
+  /**
+   * D18: the window the caller reads under, for the caller alone (never another member's). `hidden: true` is
+   * Control's own statement that earlier messages are hidden from this member. Absent on an older Control: read
+   * it with `ownHistoryWindowFrom`, which draws nothing unless it is well formed. A label for the timeline marker
+   * only; Control signs the floor and Session Core applies it.
+   */
+  history_window?: SpaceMembershipHistoryWindow
   /** WS04-S4: false while the room's recipient audience does not include the caller yet. Absent: unknown. */
   recipient_ready?: boolean
   revisions: {
@@ -104,6 +112,11 @@ export type SpaceContext = {
     room_files?: { turn_attachments?: boolean; durable?: boolean; files_tab?: boolean }
     /** WS17-S8: a room turn may offer the member's own personal memory for that one turn (rollout only; Control decides each turn). */
     personal_memory_turn?: boolean
+    /**
+     * D18: the invite's "share past conversation" choice and the member list's history control are offered
+     * (rollout only; Control decides every write). Absent means off, which is NOT the same as "on".
+     */
+    member_history_windows?: boolean
   }
   /**
    * WS12-S7: what the organisation's message policy lets this member do, as hints for which controls
@@ -1480,28 +1493,49 @@ function audienceStateOf(audience: { state?: unknown } | undefined): SpaceAudien
  * A `room_membership_unconfirmed` response means the grant was recorded and
  * Control has not accepted the roster yet, so the person is not a member: the
  * room should say that rather than showing them as present.
+ *
+ * D18: `options.sharePastConversation` is the invite's choice. Absent sends no choice, so the room's own
+ * history mode decides exactly as before. `true` shares the past. `false` joins the person without what was
+ * posted before the join: Control answers 503 `member_history_window_unavailable` while its switch is off, and
+ * then nobody was added. Only a boolean is a choice; anything else is not sent. A committed add answers the
+ * window the new member reads under (`historyWindow`), so a caller can confirm a "don't share" actually took.
  */
 export async function addSpaceMember(
   spaceRef: string,
   memberId: string,
   role?: string,
-): Promise<{ memberCount: number; changed: boolean; role?: string; audience?: SpaceAudienceState }> {
+  options?: { readonly sharePastConversation?: boolean },
+): Promise<{
+  memberCount: number
+  changed: boolean
+  role?: string
+  audience?: SpaceAudienceState
+  historyWindow?: SpaceMemberHistoryWindow
+}> {
   const response = await requestJson<{
     member_count?: number
     changed?: boolean
     role?: string
     audience?: { state?: unknown }
+    history_window?: unknown
   }>(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/members`, {
     method: 'POST',
     // `role` is honoured only with the Control member writer on (WS04-S6); absent means
     // Control's default.
-    body: JSON.stringify(role ? { member_id: memberId, role } : { member_id: memberId }),
+    body: JSON.stringify({
+      member_id: memberId,
+      ...(role ? { role } : {}),
+      ...(typeof options?.sharePastConversation === 'boolean'
+        ? { share_past_conversation: options.sharePastConversation }
+        : {}),
+    }),
   })
   return {
     memberCount: response.member_count ?? 0,
     changed: response.changed === true,
     role: response.role,
     audience: audienceStateOf(response.audience),
+    historyWindow: memberHistoryWindowFrom(response.history_window),
   }
 }
 

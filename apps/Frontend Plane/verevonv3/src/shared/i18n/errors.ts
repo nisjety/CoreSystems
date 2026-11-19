@@ -1416,6 +1416,10 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   room_role_forbidden: { no: 'Rollen din i dette rommet tillater ikke dette.', en: 'Your role in this room does not allow that.' },
   room_roster_derived: { no: 'Medlemmene i dette rommet følger organisasjonen og redigeres ikke her.', en: 'The members of this room follow the organization and are not edited here.' },
   room_sole_owner: { no: 'Rommet må ha minst én eier. Gjør noen andre til eier først.', en: 'The room needs at least one owner. Make someone else an owner first.' },
+  // D18 per-member room history (Control's codes, relayed by the gateway's room admin routes). The member list's history
+  // control and the invite word the "nothing was changed" half for themselves where it differs (nobody was added).
+  member_history_window_invalid: { no: 'Historikkvalget er ikke gyldig. Ingenting er endret.', en: 'The history choice is not valid. Nothing was changed.' },
+  member_history_window_unavailable: { no: 'Historikk per medlem er ikke slått på ennå. Ingenting er endret.', en: 'Per-member history is not turned on yet. Nothing was changed.' },
   // WS12 direct messages
   dm_disabled: { no: 'Direktemeldinger er ikke slått på.', en: 'Direct messages are not turned on.' },
   dm_not_entitled: { no: 'Organisasjonen din har ikke direktemeldinger slått på. Spør en administrator.', en: 'Your organization has not turned on direct messages. Ask an administrator.' },

@@ -1899,7 +1899,8 @@ describe('action registry', () => {
     // (memory.retract_from_space), W3-DEC-KIND2 +1 (memory.restore), W3-DEC-CANVAS +1 (spaces.set_agent_canvas_tools),
     // WS18-S5 +1 (spaces.set_agent_self_api), W3-DEC-ORGAGENT +3 (spaces.suspend_org_agent, spaces.reactivate_org_agent,
     // spaces.retire_org_agent), WS19-S4 +2 (spaces.save_canvas, spaces.restore_canvas_version), WS20-S5 +1 (spaces.browser_run.start).
-    expect(ids).toHaveLength(398)
+    // +1 after D18 registered spaces.set_member_history_window, the room admin's per-member history window (398 + 1 = 399).
+    expect(ids).toHaveLength(399)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

@@ -24,6 +24,8 @@ import { ws18SpaceActions } from './ws18'
 import { ws19SpaceActions } from './ws19'
 import { ws20SpaceActions } from './ws20'
 import { ep08SpaceActions } from './ep08'
+// D18 (per-member room history) is appended after EP-8 for the same reason: the order test pins the first entries.
+import { d18SpaceActions } from './d18'
 
 export const spaceActions = [
   ...baseSpaceActions,
@@ -46,4 +48,5 @@ export const spaceActions = [
   // EP-8 S7 is appended last, not sorted in: action-registry.test.ts pins the order of the first
   // Space entries (base, then ws01, ws03, ws04), and an earlier slot would move them.
   ...ep08SpaceActions,
+  ...d18SpaceActions,
 ] as const

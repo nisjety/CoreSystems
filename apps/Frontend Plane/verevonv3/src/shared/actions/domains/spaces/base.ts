@@ -96,6 +96,12 @@ const spaceAddMemberInput = z.object({
   // WS04-S6: the room role to grant. Absent means Control's default (editor). Honoured only
   // with the Control member writer on; the legacy path ignores it.
   role: z.enum(['viewer', 'editor', 'manager', 'owner']).optional(),
+  // D18: the invite's "share past conversation" choice. `true` (the default) leaves the room's own history mode in
+  // charge, exactly as before. `false` joins the person WITHOUT what was posted before the join: Control answers 503
+  // `member_history_window_unavailable` while its switch is off, and then nobody is added. The gateway's dispatcher
+  // (dispatchers.rs `dispatch_space_add_member`) must carry it to the route's `share_past_conversation`: a dispatcher that
+  // dropped it would add the person with the past shared. The browser's invite uses the REST route, which does.
+  sharePastConversation: z.boolean().default(true),
 })
 
 const spaceRemoveMemberInput = z.object({
@@ -239,7 +245,7 @@ export const baseSpaceActions = [
   {
     id: 'spaces.add_member',
     label: 'Add Space member',
-    description: 'Add one person to a named room. Gated to the room\'s owner or manager; the person must already be in the organization.',
+    description: 'Add one person to a named room. Gated to the room\'s owner or manager; the person must already be in the organization. With sharePastConversation false (the default is true) the person cannot read what was posted before they joined.',
     ownerPlane: 'application',
     risk: 'medium',
     requiresApproval: false,

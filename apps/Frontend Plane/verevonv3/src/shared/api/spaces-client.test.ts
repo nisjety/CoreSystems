@@ -59,6 +59,54 @@ describe('addSpaceMember', () => {
     mockedRequest.mockResolvedValueOnce({})
     await expect(addSpaceMember('space_1', 'user_2')).resolves.toMatchObject({ memberCount: 0, changed: false })
   })
+
+  // D18: the invite's "share past conversation" choice.
+  describe('the share past conversation choice (D18)', () => {
+    const bodyOf = () => JSON.parse(String((mockedRequest.mock.lastCall?.[1] as { body?: string } | undefined)?.body))
+
+    it('sends no choice at all unless a boolean is given, so the room’s own history mode decides as before', async () => {
+      mockedRequest.mockResolvedValue({ member_count: 3, changed: true })
+      await addSpaceMember('space_1', 'user_2')
+      expect(bodyOf()).toEqual({ member_id: 'user_2' })
+      await addSpaceMember('space_1', 'user_2', 'viewer', {})
+      expect(bodyOf()).toEqual({ member_id: 'user_2', role: 'viewer' })
+      // Anything that is not a boolean is not a choice: it must never degrade into "share".
+      await addSpaceMember('space_1', 'user_2', undefined, { sharePastConversation: 'false' as never })
+      expect(bodyOf()).toEqual({ member_id: 'user_2' })
+      await addSpaceMember('space_1', 'user_2', undefined, { sharePastConversation: undefined })
+      expect(bodyOf()).toEqual({ member_id: 'user_2' })
+    })
+
+    it('sends false as false and true as true, beside the role', async () => {
+      mockedRequest.mockResolvedValue({ member_count: 3, changed: true })
+      await addSpaceMember('space_1', 'user_2', 'editor', { sharePastConversation: false })
+      expect(bodyOf()).toEqual({ member_id: 'user_2', role: 'editor', share_past_conversation: false })
+      await addSpaceMember('space_1', 'user_2', undefined, { sharePastConversation: true })
+      expect(bodyOf()).toEqual({ member_id: 'user_2', share_past_conversation: true })
+      expect(mockedRequest).toHaveBeenLastCalledWith('/api/v1/spaces/space_1/members', {
+        method: 'POST',
+        body: JSON.stringify({ member_id: 'user_2', share_past_conversation: true }),
+      })
+    })
+
+    it('returns the window Control reports for a committed add, and none for one it did not', async () => {
+      mockedRequest.mockResolvedValueOnce({
+        member_count: 3,
+        changed: true,
+        role: 'editor',
+        history_window: { source: 'member', mode: 'since_join', since_at: null, revision: 1 },
+      })
+      await expect(addSpaceMember('space_1', 'user_2', 'editor', { sharePastConversation: false })).resolves.toMatchObject({
+        changed: true,
+        historyWindow: { source: 'member', mode: 'since_join', sinceAt: null, revision: 1 },
+      })
+      // A replay or an already-active member has no window; a malformed one is not trusted.
+      mockedRequest.mockResolvedValueOnce({ member_count: 3, changed: false })
+      expect((await addSpaceMember('space_1', 'user_2')).historyWindow).toBeUndefined()
+      mockedRequest.mockResolvedValueOnce({ member_count: 3, changed: true, history_window: { mode: 'since_join' } })
+      expect((await addSpaceMember('space_1', 'user_2')).historyWindow).toBeUndefined()
+    })
+  })
 })
 
 describe('removeSpaceMember', () => {

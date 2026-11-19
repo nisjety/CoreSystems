@@ -229,6 +229,8 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'spaces.update_room_details': exempt('human_identity_or_security', 'external_write'),
   'spaces.join_room': exempt('human_identity_or_security', 'external_write'),
   'spaces.update_room_settings': exempt('human_identity_or_security', 'external_write'),
+  // D18: who may read a room's past is a person's decision. A window only hides, but an agent never sets one.
+  'spaces.set_member_history_window': exempt('human_identity_or_security', 'external_write'),
   'social.create_draft': exempt('no_owner_executor', 'external_write'),
   'social.schedule_post': exempt('no_owner_executor', 'external_write'),
   'social.publish_post': exempt('irreversible_destructive', 'destructive'),

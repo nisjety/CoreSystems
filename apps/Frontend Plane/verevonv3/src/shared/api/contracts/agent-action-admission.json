@@ -4070,7 +4070,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:2d8a0e4a9c834097bfe9abf47571a7ed12e42026eb8cc392dc17b0d573dfb50b",
+      "schemaHash": "sha256:fc5d8c008c6e119cc272462181de3e9da41003cdbc32f15cb3759d3bffef6314",
       "zdr_allowed": false
     },
     {
@@ -4630,6 +4630,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:04909c96a7c1eeca070a07c6c760a21de47d7c1d9f51575dcfb91e72550221a2",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "spaces.set_member_history_window",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:96afd3c43a4ee37a92bfa67f111b8f6d700d215d9ae8f5fca7b1ef1b78db0093",
       "zdr_allowed": false
     },
     {
