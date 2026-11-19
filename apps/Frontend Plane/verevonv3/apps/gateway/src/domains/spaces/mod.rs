@@ -7979,6 +7979,41 @@ mod tests {
         assert_eq!(body["data"]["unavailable"], json!([]));
     }
 
+    /// W3-FIX-15: the thread listing relays `title_source` and `pinned_source` on each `data.threads`
+    /// row exactly as Model Gateway sent them. The BFF keeps no allowlist here, so any other field of
+    /// the row survives too.
+    #[tokio::test]
+    async fn space_threads_relay_title_and_pin_sources_unchanged() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _app, model_gateway, _auth, _user_core) = room_4b_fixture(
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": 1}})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+        )
+        .await;
+        let sent = json!([
+            {"thread_id": "thread-1", "space_id": "space-room", "title": "Innkjøp", "pinned": true,
+             "title_source": "agent", "pinned_source": "owner", "relayed_unchanged": "yes"},
+            {"thread_id": "thread-2", "space_id": "space-room", "title": "Møte", "pinned": false,
+             "title_source": "owner", "pinned_source": "agent"}
+        ]);
+        // The fixture's listing answer is mounted first and would win; answer the listing under test instead.
+        model_gateway.reset().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/threads"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"threads": sent})))
+            .mount(&model_gateway)
+            .await;
+        let (status, body) =
+            room_4b_request(state, "GET", "/api/v1/spaces/space-room/threads", None).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["threads"], sent);
+        assert_eq!(body["data"]["threads"][0]["title_source"], "agent");
+        assert_eq!(body["data"]["threads"][0]["pinned_source"], "owner");
+        assert_eq!(body["data"]["threads"][1]["title_source"], "owner");
+        assert_eq!(body["data"]["threads"][1]["pinned_source"], "agent");
+    }
+
     /// A member who has never opened the room has a marker of `null` — a real
     /// answer ("nothing is new yet"), distinct from the marker being unreadable.
     #[tokio::test]
@@ -8911,20 +8946,9 @@ mod tests {
         );
     }
 
-    /// Drive a room-membership request with a given Control-resolved room
-    /// role and a given Convex outcome for the sync action, with the Control
-    /// member writer on.
-    async fn room_membership_response(
-        role: &str,
-        method: &str,
-        body: Option<Value>,
-        sync: Value,
-    ) -> (u16, Value, MockServer) {
-        room_membership_response_with_writer(true, role, method, body, sync).await
-    }
-
-    /// As `room_membership_response`, with the Control member writer flag
-    /// (`membership_writer_api`) set by the caller.
+    /// Drive a room-membership request with a Control-resolved room role and a given Convex outcome
+    /// for the sync action, with the Control member writer flag (`membership_writer_api`) set by the
+    /// caller.
     async fn room_membership_response_with_writer(
         writer_on: bool,
         role: &str,
@@ -9836,12 +9860,32 @@ mod tests {
 
     /// Drive `POST /spaces/space-room/agents` with a given Control-resolved
     /// room role and given Convex step outcomes; returns (status, body) plus
-    /// the Application mock for request-shape assertions.
+    /// the Application mock for request-shape assertions. org-core answers the
+    /// ZDR posture read as not ZDR.
     async fn create_space_agent_response(
         role: &str,
         confirmation: Value,
         body: Value,
     ) -> (u16, Value, MockServer) {
+        let (status, parsed, application, _user_core, _org) =
+            create_space_agent_probe(role, org_zdr_posture(false), confirmation, body).await;
+        (status, parsed, application)
+    }
+
+    /// As `create_space_agent_response`, with org-core's answer to the ZDR posture read as given. Also
+    /// returns the Control (user-core) and org-core mocks, so a test can assert what each was asked.
+    async fn create_space_agent_probe(
+        role: &str,
+        org_core: ResponseTemplate,
+        confirmation: Value,
+        body: Value,
+    ) -> (u16, Value, MockServer, MockServer, MockServer) {
+        let org = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(org_core)
+            .mount(&org)
+            .await;
         let auth = MockServer::start().await;
         Mock::given(wm_method("GET"))
             .and(wm_path("/api/auth/get-session"))
@@ -9875,6 +9919,29 @@ mod tests {
             })))
             .mount(&application)
             .await;
+        // admit_for_bind (WS17-S5): the new definition is org-visible, so Control registers it, then admits it.
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(wm_body_partial_json(json!({"path": "spaceAgents:agentDefinitionForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": {"agentRef": "agent123", "visibility": "org"}
+            })))
+            .mount(&application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/agents/subjects"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "data": {"agent_subject_id": "agent-agent123", "visibility": "org"}
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/agent-admissions"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "data": {"agent_subject_id": "agent-agent123", "status": "admitted"}
+            })))
+            .mount(&user_core)
+            .await;
         Mock::given(wm_method("POST"))
             .and(wm_path("/api/action"))
             .and(wm_body_partial_json(
@@ -9888,6 +9955,7 @@ mod tests {
         state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
+        state.org_core_url = org.uri();
         let response = crate::build_router(state)
             .oneshot(
                 Request::builder()
@@ -9904,7 +9972,7 @@ mod tests {
         let parsed: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap_or(Value::Null);
-        (status, parsed, application)
+        (status, parsed, application, user_core, org)
     }
 
     #[tokio::test]
@@ -9979,6 +10047,123 @@ mod tests {
         assert_eq!(body["error"]["code"], "agent_membership_unconfirmed");
     }
 
+    /// Control was asked for nothing but the session's own org context (the middleware read), so a
+    /// refused create reached no membership, admission or registration call.
+    fn assert_control_asked_only_for_the_session(asked: &[wiremock::Request]) {
+        let paths: Vec<&str> = asked.iter().map(|request| request.url.path()).collect();
+        assert!(
+            paths.iter().all(|path| *path == "/api/v1/me/session-context"),
+            "a refused create must ask Control for nothing but the session: {paths:?}"
+        );
+    }
+
+    /// W3-DEC-ZDR / W3-DEC-ZDR2: a ZDR org's room agent create is refused with a typed 412 (with
+    /// `details.surface` room_agents) before any Control or Convex call.
+    #[tokio::test]
+    async fn a_zdr_org_cannot_create_a_room_agent_and_nothing_upstream_is_asked() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, application, user_core, _org) = create_space_agent_probe(
+            "owner",
+            org_zdr_posture(true),
+            json!({"status": "applied"}),
+            json!({"name": "Møtereferent", "instructions": "Skriv referat."}),
+        )
+        .await;
+
+        assert_eq!(status, 412, "{body}");
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert_eq!(body["error"]["details"]["surface"], "room_agents");
+        assert!(
+            application.received_requests().await.expect("convex calls").is_empty(),
+            "a ZDR refusal reaches no Convex read or write"
+        );
+        assert_control_asked_only_for_the_session(
+            &user_core.received_requests().await.expect("control calls"),
+        );
+    }
+
+    /// W3-DEC-ZDR: an org-core outage on the posture read is the typed, retryable 503. The create is
+    /// neither allowed nor guessed as not-ZDR.
+    #[tokio::test]
+    async fn a_zdr_posture_outage_refuses_the_room_agent_create_retryably() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, application, user_core, _org) = create_space_agent_probe(
+            "owner",
+            ResponseTemplate::new(500),
+            json!({"status": "applied"}),
+            json!({"name": "Møtereferent"}),
+        )
+        .await;
+
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(body["error"]["code"], "zdr_decision_unavailable");
+        assert_eq!(body["error"]["retryable"], true);
+        assert!(
+            application.received_requests().await.expect("convex calls").is_empty(),
+            "an unknown posture reaches no Convex write"
+        );
+        assert_control_asked_only_for_the_session(
+            &user_core.received_requests().await.expect("control calls"),
+        );
+    }
+
+    /// W3-DEC-ZDR: a request-level ZDR flag (`zdr: true` in the body) refuses the create before the
+    /// org-core posture read and before any Convex call.
+    #[tokio::test]
+    async fn a_body_zdr_flag_refuses_the_room_agent_create_before_any_upstream_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, application, user_core, org) = create_space_agent_probe(
+            "owner",
+            org_zdr_posture(false),
+            json!({"status": "applied"}),
+            json!({"name": "Møtereferent", "zdr": true}),
+        )
+        .await;
+
+        assert_eq!(status, 412, "{body}");
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert_eq!(body["error"]["details"]["surface"], "room_agents");
+        assert!(
+            application.received_requests().await.expect("convex calls").is_empty(),
+            "a body flag reaches no Convex read or write"
+        );
+        assert_control_asked_only_for_the_session(
+            &user_core.received_requests().await.expect("control calls"),
+        );
+        assert!(
+            org.received_requests().await.expect("org calls").is_empty(),
+            "the request flag decides before the org posture is read"
+        );
+    }
+
+    /// W3-DEC-ZDR: a non-ZDR org still reaches `spaceAgents:createSpaceAgentForGateway`, after exactly
+    /// one posture read.
+    #[tokio::test]
+    async fn a_non_zdr_org_still_creates_the_room_agent_through_convex() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, application, _user_core, org) = create_space_agent_probe(
+            "owner",
+            org_zdr_posture(false),
+            json!({"status": "applied"}),
+            json!({"name": "Møtereferent"}),
+        )
+        .await;
+
+        assert_eq!(status, 201, "{body}");
+        let convex = application.received_requests().await.expect("convex calls");
+        let write: Value = convex
+            .iter()
+            .find(|request| request.url.path() == "/api/mutation")
+            .map(|request| serde_json::from_slice::<Value>(&request.body).expect("mutation JSON"))
+            .expect("the room agent write");
+        assert_eq!(write["path"], "spaceAgents:createSpaceAgentForGateway");
+        assert_eq!(
+            org.received_requests().await.expect("org calls").len(),
+            1,
+            "one posture read, before the write"
+        );
+    }
+
     /// Drive `GET /spaces/space-room/agents/available` with a given
     /// Control-resolved room role and a given Application definitions list.
     async fn list_installable_space_agents_response(
@@ -10006,6 +10191,24 @@ mod tests {
             .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": {"space_ref": "space-room", "kind": "room", "role": role}
+            })))
+            .mount(&user_core)
+            .await;
+        // Control's visible subjects (`mine=1`) and its per-subject candidate answers (WS17-S5).
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/agents/subjects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"agents": [{"agent_subject_id": "agent-agent-1"}, {"agent_subject_id": "agent-agent-2"}]}
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/agent-candidates"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"candidates": [
+                    {"agent_subject_id": "agent-agent-1", "visible": true, "can_add": true, "reason": ""},
+                    {"agent_subject_id": "agent-agent-2", "visible": true, "can_add": true, "reason": ""}
+                ]}
             })))
             .mount(&user_core)
             .await;
@@ -10046,8 +10249,8 @@ mod tests {
         let (status, body, _application) = list_installable_space_agents_response(
             "owner",
             json!([
-                {"agentRef": "agent-1", "name": "Driftsassistent", "description": "", "definitionStatus": "active", "alreadyBound": true},
-                {"agentRef": "agent-2", "name": "Møtereferent", "description": "Skriver referat", "definitionStatus": "active", "alreadyBound": false}
+                {"agentRef": "agent-1", "subjectId": "agent-agent-1", "name": "Driftsassistent", "description": "", "definitionStatus": "active", "alreadyBound": true},
+                {"agentRef": "agent-2", "subjectId": "agent-agent-2", "name": "Møtereferent", "description": "Skriver referat", "definitionStatus": "active", "alreadyBound": false}
             ]),
         )
         .await;
@@ -10120,6 +10323,29 @@ mod tests {
                 "value": {"subjectId": "agent-agent2", "bindingRef": "sab_space-room_agent-agent2"}
             })))
             .mount(&application)
+            .await;
+        // admit_for_bind (WS17-S5): the existing definition is org-visible, so Control registers it, then admits it.
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(wm_body_partial_json(json!({"path": "spaceAgents:agentDefinitionForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": {"agentRef": "agent-2", "visibility": "org"}
+            })))
+            .mount(&application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/agents/subjects"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "data": {"agent_subject_id": "agent-agent2", "visibility": "org"}
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/agent-admissions"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "data": {"agent_subject_id": "agent-agent2", "status": "admitted"}
+            })))
+            .mount(&user_core)
             .await;
         Mock::given(wm_method("POST"))
             .and(wm_path("/api/action"))
