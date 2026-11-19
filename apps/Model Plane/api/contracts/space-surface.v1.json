@@ -721,7 +721,7 @@
       "idempotency": "n/a",
       "flag": null,
       "payload_allow_list": [],
-      "reason": "Space context (ids, role, entitlements)."
+      "reason": "Space context (ids, role, entitlements). D18: features.member_history_windows and the caller's own membership.history_window."
     },
     {
       "id": "bff:GET:/api/v1/spaces/{space_ref}/entries/{message_id}",
@@ -865,7 +865,7 @@
       "idempotency": "n/a",
       "flag": null,
       "payload_allow_list": [],
-      "reason": "Current Control membership fact."
+      "reason": "Current Control membership fact. D18: carries the caller's own history_window (source, mode, since_at, hidden), for the caller only, relayed unchanged."
     },
     {
       "id": "bff:GET:/api/v1/spaces/{space_ref}/memory",
@@ -1549,7 +1549,7 @@
       "idempotency": "unspecified",
       "flag": null,
       "payload_allow_list": [],
-      "reason": "Access list change (ids only, K4-14)."
+      "reason": "Access list change (ids only, K4-14). D18: the optional share_past_conversation boolean is forwarded to Control as given (a non-boolean is a 400 before Control) and a committed add answers history_window (a mode and an instant, no content); the history-window switch never gates it."
     },
     {
       "id": "bff:POST:/api/v1/spaces/{space_ref}/memory/declassify",
@@ -5327,7 +5327,7 @@
       "idempotency": "n/a",
       "flag": "WIKISTORE_SPACE_CANVAS",
       "payload_allow_list": [],
-      "reason": "Reads the room canvas head and its content under a Control canvas read decision (X-Space-Decision). The flag gate answers 404 while WIKISTORE_SPACE_CANVAS is off; a token with zdr=true is refused before the handler runs (403 zdr_persistence_forbidden)."
+      "reason": "Reads the room canvas head and its content under a Control canvas read decision (X-Space-Decision: a human decision, or an agent run-action decision). The flag gate answers 404 space_canvas_disabled while WIKISTORE_SPACE_CANVAS is off, before the credential is read. A token with zdr=true is refused before the handler runs, and a decision issued under zero data retention is refused once its signature verifies: both answer the Model Plane catalogue refusal zdr_durable_mutation_forbidden (412, surface room_canvas), reads included. D18: a decision that carries a member's history floor windows the read, and a canvas that predates the floor answers 403 space_history_floor_unsupported."
     },
     {
       "id": "data:GET:/v1/space-canvas/spaces/{space_ref}/versions",
@@ -5575,11 +5575,11 @@
       "decision_type": "membership",
       "min_role": "manager",
       "zdr_class": "n/a",
-      "basis": "registry",
+      "basis": "path-rule",
       "idempotency": "n/a",
       "flag": "member_history_windows",
       "payload_allow_list": [],
-      "reason": "D18: reads one member's history window (a mode and an instant, no content) for a room owner or manager; Control owns the rule and answers anyone else with a refusal. Allowed under every posture."
+      "reason": "Reads one member's history window (source, mode, since_at, revision) from Control for a room owner or manager: ids, a mode and an instant, no content."
     },
     {
       "id": "bff:PUT:/api/v1/spaces/{space_ref}/members/{subject_id}/history-window",
@@ -5593,11 +5593,47 @@
       "decision_type": "membership",
       "min_role": "manager",
       "zdr_class": "n/a",
-      "basis": "registry",
+      "basis": "path-rule",
       "idempotency": "last_write_wins",
       "flag": "member_history_windows",
       "payload_allow_list": [],
-      "reason": "D18: sets one member's history window, a mode (full, since_join or since_date) and an instant, no content, so allowed under every posture. A window only hides what a member reads; Control owns the role rule, the audit row and the floor every read signs."
+      "reason": "Sets one member's history window (full, since_join or since_date with an instant) through Control's actor-carrying writer: a mode and an instant with no content, so it is allowed under every ZDR posture (K4-14). Control applies the owner-or-manager rule, writes the audit row and signs the floor every read honours; a window can only hide, and the closed body (mode, since_at, expected_revision) never carries an organization, an actor or a floor."
+    },
+    {
+      "id": "ctl:GET:/api/v1/internal/spaces/:space_ref/members/:subject_id/history-window",
+      "kind": "route",
+      "plane": "control",
+      "service": "user-core",
+      "method": "GET",
+      "path": "/api/v1/internal/spaces/:space_ref/members/:subject_id/history-window",
+      "handler": "internal/http/space_member_history_window.go::getSpaceMemberHistoryWindow",
+      "route_class": "ReadMetadata",
+      "decision_type": "membership",
+      "min_role": "manager",
+      "zdr_class": "n/a",
+      "basis": "path-rule",
+      "idempotency": "n/a",
+      "flag": null,
+      "payload_allow_list": [],
+      "reason": "Reads one room member's history window (source, mode, since_at, revision) for a room owner or manager, under the gateway's signed delegation (scope spaces:membership:act). Anyone else is refused (403 room_role_forbidden; a caller outside the room gets 404 room_not_found) and a target that is not an active member answers 404 member_not_found. Ids, a mode and an instant, no content, so it is allowed under every ZDR posture. Not behind SPACE_MEMBER_HISTORY_WINDOWS: a stored window is always enforced and always readable."
+    },
+    {
+      "id": "ctl:PUT:/api/v1/internal/spaces/:space_ref/members/:subject_id/history-window",
+      "kind": "route",
+      "plane": "control",
+      "service": "user-core",
+      "method": "PUT",
+      "path": "/api/v1/internal/spaces/:space_ref/members/:subject_id/history-window",
+      "handler": "internal/http/space_member_history_window.go::putSpaceMemberHistoryWindow",
+      "route_class": "Config",
+      "decision_type": "membership",
+      "min_role": "manager",
+      "zdr_class": "n/a",
+      "basis": "path-rule",
+      "idempotency": "last_write_wins",
+      "flag": "SPACE_MEMBER_HISTORY_WINDOWS",
+      "payload_allow_list": [],
+      "reason": "Sets one room member's history window (full, since_join, or since_date with an instant) under the gateway's signed delegation (scope spaces:membership:act). Only a room owner or manager may (403 room_role_forbidden), for an active human member of a room that is not archived or derived (404 member_not_found, 409 room_archived, 409 room_roster_derived). Control owns the pair rule (422 member_history_window_invalid, details.field mode or since_at, no future instant) and the optimistic check (409 room_member_changed with details.current_revision). An effective change writes the row and one content-free user_audit_outbox row in one transaction; setting the same window again answers changed=false and writes nothing. A mode and an instant, no content, so it is allowed under every ZDR posture. A window can only hide what a member reads and is never an authorization input. SPACE_MEMBER_HISTORY_WINDOWS gates this write only (503 member_history_window_unavailable while it is off); stored rows are always enforced."
     }
   ]
 }
