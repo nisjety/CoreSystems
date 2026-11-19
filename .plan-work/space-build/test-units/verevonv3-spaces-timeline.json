@@ -1,0 +1,34 @@
+{
+  "area": "verevonv3-spaces-timeline",
+  "status": "tests-passing",
+  "commit": "9457e5afa b68917ae1 220783a74 7af9570b3",
+  "files": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.windows.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.runs.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomTimeline.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRunCard.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/entries/AgentCardEntry.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/entries/LinkPreviewCards.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/entries/SystemRowsGroup.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/sidepane/SpaceTurnList.test.tsx"
+  ],
+  "run_command": "cd \"apps/Frontend Plane/verevonv3\" && pnpm exec vitest run --pool=forks src/features/spaces/components/SpaceRoomTimeline src/features/spaces/components/entries src/features/spaces/components/sidepane src/features/spaces/components/SpaceRunCard.test.tsx src/features/spaces/components/SpaceLiveIndicator.test.tsx ; pnpm exec vitest run --pool=forks src/features/spaces ; pnpm exec tsc6 -p tsconfig.app.json ; pnpm exec eslint <the changed timeline and entry files>",
+  "result": "group: 16 files, 262 passing, 0 failing; new cases 87 (windows 13, runs 11, SpaceRunCard 18, AgentCardEntry 9, LinkPreviewCards+UnknownEntryCard 9, SystemRowsGroup 5, SpaceTurnList 19, SpaceRoomTimeline.test +3). Whole features/spaces: 117 files, 1833 passing. tsc6 -p tsconfig.app.json: 33 errors, all baseline (quarry-client.ts, RemoteSupportPage.tsx), 0 in spaces. eslint on changed files: 0 errors, 7 pre-existing warnings in SpaceRoomTimeline.tsx. SpaceLiveIndicator.test.tsx already covers WS02-S5 (9 cases pass), no new cases.",
+  "bugs_fixed": [
+    "WS15-S8 (SpaceRoomTimeline.tsx SpaceRoomPost): the visibility effect read the plain postEl ref in its compute step, before the list rendered, so a near post never registered and a windowed room never read its transcript; now read in the effect step. Regression: windows 'reads a post's transcript tail only once...' (fails on the old code).",
+    "WS15-S8 (SpaceRoomTimeline.tsx): same cause for the older-posts sentinel, so scrolling up never paged older posts; now read in the effect step. Regression: windows 'pages older posts when the reader has scrolled up...' (fails on the old code).",
+    "WS07-S11 (SpaceRoomTimeline.tsx): artifactsOn was captured at mount, so a room flag published later did not reach the chips; now read where used. Regression: windows 'takes the artifact chips away when the room turns the flag off...' (fails on the captured-value code).",
+    "WS15-S8 (SpaceRoomTimeline.tsx): untracked read of the pending-posts count in the component body (STRICT_READ_UNTRACKED on every timeline test); wrapped in untrack, no behaviour change."
+  ],
+  "not_run": [
+    "tests/e2e/space-timeline.spec.ts (WS15-S1 perf probe, jump pill at 390 and 1280 px; WS15-S8 1500-post probe): needs a live stack and Playwright, not run.",
+    "tests/e2e/space-run-live.mock.spec.ts (WS09-S5): e2e, not run.",
+    "src/features/chat/components/chat-markdown.test.ts (WS15-S4 image and raw img cases): chat area, not this group, not run.",
+    "src/features/spaces/lib/entry-registry.test.ts (WS15-S9 wire cases, WS18-S7 registry cases) and src/features/spaces/lib/space-timeline-store.test.ts (WS15-S8 loadEarlier and refresh, WS15-S11 de-dup and cap): lib files, not this group, not run by this builder.",
+    "src/shared/api/spaces-client timeline, run-stop and space-run-live-client tests: shared client group, not run by this builder.",
+    "src/features/spaces/components/SpaceRoomComposer.test.tsx (WS09-S8 server stopped frame read as stopped by a room manager): composer group, not run by this builder.",
+    "apps/Model Plane and apps/Frontend Plane gateway Rust tests for WS09-S8 and WS15-S11: other areas."
+  ],
+  "notes": "Owed clauses already in the tree and passing (not rewritten): WS01-S6 pending rows, WS01-S7b collapse, WS07-S7/S8 avatars and hover cards, WS07-S11 chip and sheet, WS11-S4 divider and jump, WS13-S8 pins, WS02-S5 indicator.\nThe WS15-S8 store-driven cases use the real createSpaceTimelineStore with getSpaceTimeline and loadSpaceTranscript mocked, and a fake IntersectionObserver.\nRun cards use a module stub of lib/space-run-store (as SpaceRunStrip.test.tsx does); SpaceRunCard uses a stub of spaces-client/run-stop.\nFiles committed path-limited; test-units and test-depth files are not committed (lead)."
+}

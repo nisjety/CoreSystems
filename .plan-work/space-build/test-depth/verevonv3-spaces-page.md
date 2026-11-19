@@ -1,0 +1,9 @@
+- P2 test-gap: the timeline post's own 403 restricted notice and preview fallback (WS01-S7a, second half) are not covered at page level; owned by the SpaceRoomTimeline test builder.
+- P2 pre-existing: SpaceRoomTimeline and SpaceRoomComposer read reactive values outside a tracking scope, so every SpacePage test run prints STRICT_READ_UNTRACKED diagnostics; not caused by this phase, owners are the timeline and composer.
+- P2 bug-found-not-fixed: SpaceRoomTimeline.windows.test.tsx:40 uses a syntax rejected under erasableSyntaxOnly (TS1294), adding two tsc6 errors beyond the 33 baseline; owner is the SpaceRoomTimeline test builder (untracked in this worktree, not touched here).
+- P2 test-gap: lib/space-tab-registry.test.ts has no WS19-S5 cases for lerret order or the flag; the cockpit test covers the rendered tab only; owner is the spaces lib tests.
+- P2 test-gap: src/shared/i18n/errors.test.ts has no entry_not_found no/en copy case for WS13-S4b; owner is shared i18n.
+- P3 follow-up: SpacePage.openRun calls window.matchMedia and the ?thread_id effect calls scrollIntoView without guards; both exist in browsers, but jsdom needs stubs (SpaceThreadPanel guards matchMedia with typeof, the page does not).
+- P3 follow-up: SpaceThreadPanel builds the selector [data-message-id="<id>"] without escaping; the page validates ?m= first, so only a server message id containing a quote could throw inside the animation frame; CSS.escape or a dataset comparison would close it.
+- P3 follow-up: SpaceEntryUnavailable's way-back link is a plain anchor, so following it reloads the app; a router link would keep the SPA state (unchanged, noted in the code-phase depth).
+- P2 test-gap: the ?m= permalink and the /spaces/:id/m/:messageId redirect have no e2e case in this group; tests/e2e/space-search.spec.ts covers the search path only and both need a live stack.

@@ -1,0 +1,23 @@
+{
+  "area": "verevonv3-spaces-page",
+  "status": "tests-passing",
+  "commit": "55f63c17b",
+  "files": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceEntryRedirect.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceEntryUnavailable.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCockpit.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/sidepane/SpaceThreadPanel.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacePage.test.tsx"
+  ],
+  "run_command": "cd \"apps/Frontend Plane/verevonv3\" && pnpm exec vitest run --pool=forks src/features/spaces/components/SpacePage.test.tsx src/features/spaces/components/SpacePage.identity.test.tsx src/features/spaces/components/SpaceCockpit.test.tsx src/features/spaces/components/sidepane/SpaceThreadPanel.test.tsx src/features/spaces/components/SpaceEntryRedirect.test.tsx src/features/spaces/components/SpaceEntryUnavailable.test.tsx ; pnpm exec tsc6 -p tsconfig.app.json ; pnpm exec eslint <the five changed test files>",
+  "result": "page group, 6 files: 225 passing, 0 failing. SpacePage.test.tsx 142 passing (30 new: WS08-S8, WS18-S6, WS09-S6, WS13-S4a, WS11-S4, WS13-S5, WS15-S8). SpaceEntryRedirect.test.tsx (new) 10 passing, SpaceEntryUnavailable.test.tsx (new) 7 passing. SpaceCockpit.test.tsx: +3 lerret cases (WS19-S5). SpaceThreadPanel.test.tsx: +6 ?m= cases (WS13-S4a). tsc6 -p tsconfig.app.json: 35 errors, 33 baseline (quarry-client 21, RemoteSupportPage 12) plus 2 in another builder's untracked SpaceRoomTimeline.windows.test.tsx; 0 in files touched here. eslint on the five touched files: clean.",
+  "bugs_fixed": [],
+  "not_run": [
+    "components/SpaceRoomTimeline.test.tsx: WS01-S7a timeline post shows the restricted notice on 403 and falls back to the preview on other errors (timeline owner, outside this group).",
+    "lib/space-tab-registry.test.ts: WS19-S5 #canvas resolves to lerret only with features.canvas on, and the tab is hidden with the flag off (lib test, outside this group).",
+    "src/shared/i18n/errors.test.ts: WS13-S4b entry_not_found has no and en copy (shared i18n owner).",
+    "components/sidepane/SpaceAuxPane.test.tsx: WS01-S7a Escape, keyboard resize and width persistence are listed as owed but the pane is not in this group; not re-checked here.",
+    "tests/e2e/space-thread-pane.spec.ts, tests/e2e/space-search.spec.ts, tests/e2e/space-entry*: need a live stack; not run."
+  ],
+  "notes": "Owed clauses in this group that already had tests were checked against the current files and left alone: WS01-S6, WS01-S7a, WS01-S7b, WS02-S5, WS04-S2.spa, WS07-S12, WS07-S13 (role visibility too), and WS07-S7/S8 at page level (SpacePage.identity.test.tsx).\nNo defect in this group's components needed a fix; the new tests exposed only jsdom gaps (no scrollIntoView or matchMedia), now stubbed in SpacePage.test.tsx.\nRun-strip and search cases need the run store and the search client mocked at the module boundary; search mocks return the parsed page shape.\nSpaceRoomTimeline.windows.test.tsx (untracked, another builder) uses a syntax rejected under erasableSyntaxOnly (TS1294) at line 40.\nNot committed: this JSON and the depth file (lead commits them)."
+}

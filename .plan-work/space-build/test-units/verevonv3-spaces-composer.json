@@ -1,0 +1,18 @@
+{
+  "area": "verevonv3-spaces-composer",
+  "status": "tests-passing",
+  "commit": "ad3c86a55",
+  "files": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceRoomComposer.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceConnectivityBanner.test.tsx"
+  ],
+  "run_command": "cd \"apps/Frontend Plane/verevonv3\" && pnpm exec vitest run --pool=forks src/features/spaces/components/SpaceRoomComposer.test.tsx src/features/spaces/components/SpaceRoomComposer.identity.test.tsx src/features/spaces/components/SpaceConnectivityBanner.test.tsx ; pnpm exec tsc6 -p tsconfig.app.json",
+  "result": "composer group, 3 files: 149 passing, 0 failing, 0 skipped. SpaceRoomComposer.test.tsx 137 passing (24 new cases; the 2 canAsk cases that were it.skip now run). SpaceConnectivityBanner.test.tsx 8 passing (WS01-S8 owed clauses present; 1 case strengthened). SpaceRoomComposer.identity.test.tsx 4 passing. tsc6 -p tsconfig.app.json: 34 error lines = 33 baseline + 1 in another builder's untracked SpaceRoomTimeline.windows.test.tsx; none in the group's files.",
+  "bugs_fixed": [],
+  "not_run": [
+    "components/sidepane/SpaceTurnList.test.tsx: the visible line for a refused or failed addressed wake (WS08-S6) is drawn there; this group asserts the wake board it reads (spaceWakeBoard.forMessage), not the DOM line.",
+    "components/SpacePage.test.tsx: WS09-S6 strip click-through (open the pane or scroll to #post-<id>) is owed there, outside this group.",
+    "components/SpaceRunCard.test.tsx: WS09-S8 Stop card and its retry key are owed there, outside this group."
+  ],
+  "notes": "Commits: ad5c5bb3c (WS12-S3 canAsk, WS13-S7), 6a455944f (WS15-S3), c839b7f34 (WS09-S2, WS09-S6, WS09-S8), 7e867be79 (WS08-S6), ad3c86a55 (banner unmount case).\nWS01-S6, WS01-S7b, WS01-S8 and WS03-S7 composer clauses were already in the file and pass; the not_run line for them in verevonv3-spaces.json is stale.\nNo owed composer test exposed a defect, so SpaceRoomComposer.tsx and SpaceConnectivityBanner.tsx are unchanged. The DEPTH-GW1-2 skip comments were stale (all five createEffect calls take two functions) and went with the unskip.\nBanner: the unmount case now proves the watcher stops (attached after a flush, detached on unmount); breaking the onSettled cleanup made it fail, and the source was restored to HEAD.\nThe 429 case runs the real queueInvocationInput with fetch stubbed to a 429 body; WS08-S6 wake cases use unique message ids because the wake runner is module-level.\nOther builders' files in this worktree were not touched or committed; the first tsc6 run hit a deleted probe file and was re-run cleanly."
+}

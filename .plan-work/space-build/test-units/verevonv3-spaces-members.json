@@ -1,0 +1,36 @@
+{
+  "area": "verevonv3-spaces-members",
+  "status": "tests-passing",
+  "commit": "86e3d4caa",
+  "files": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacesDirectoryPage.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpacesDirectoryPage.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceAgentPolicyEditor.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceAgentPolicyEditor.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/DirectoryPicker.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceMemberControls.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceBindAgentDialog.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/AgentAddDialog.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/WakeStatus.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceApprovalPanel.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceAgentWakePolicyEditor.test.tsx"
+  ],
+  "run_command": "cd \"apps/Frontend Plane/verevonv3\" && pnpm exec vitest run --pool=forks src/features/spaces/components/{DirectoryPicker,SpaceMemberControls,SpacesDirectoryPage,SpaceBindAgentDialog,AgentAddDialog,WakeStatus,SpaceApprovalPanel,SpaceApprovalScopePicker,SpaceStandingApprovals,SpaceAgentPolicyEditor,SpaceAgentWakePolicyEditor,SpaceRoomSettings,DmStartDialog}.test.tsx src/features/spaces/lib/wake-policy.test.ts src/features/spaces/lib/space-tool-policy.test.ts ; pnpm exec tsc6 -p tsconfig.app.json",
+  "result": "15 files, 228 passing, 0 failing. New: 7 files (DirectoryPicker, SpacesDirectoryPage, SpaceBindAgentDialog, AgentAddDialog, WakeStatus, SpaceAgentPolicyEditor, SpaceAgentWakePolicyEditor). Extended: 2 (SpaceMemberControls WS04-S9 block, SpaceApprovalPanel WS10-S1/S4/S8). Already covered and green: SpaceRoomSettings, DmStartDialog, SpaceApprovalScopePicker, SpaceStandingApprovals, wake-policy and space-tool-policy lib tests. tsc6 -p tsconfig.app.json: 33 errors, all pre-existing (quarry-client.ts 21, RemoteSupportPage.tsx 12), 0 in features/spaces.",
+  "bugs_fixed": [
+    "WS04-S8: components/SpacesDirectoryPage.tsx started its first read from the component body (REACTIVE_WRITE_IN_OWNED_SCOPE); the read now starts in onSettled.",
+    "WS04-S8: components/SpacesDirectoryPage.tsx kept the search box inside the ready-only block, so every debounced search tore it down and dropped focus; the box now stays mounted unless the directory is off or the feature is absent.",
+    "WS04-S8: components/SpacesDirectoryPage.tsx join answered room_not_found removed the row and wrote its sentence to that row, which was no longer drawn; the sentence now sits in the list alert.",
+    "WS10-S5b: components/SpaceAgentPolicyEditor.tsx 409 tool_policy_revision_conflict reloaded the layer and the reload cleared the conflict sentence; the sentence is now set after the reload."
+  ],
+  "not_run": [
+    "tests/e2e/space-approvals.spec.ts (apps/Frontend Plane/verevonv3/tests/e2e): needs a live stack (Playwright), covers WS10-S4 decide-once and WS10-S8 held-output release.",
+    "apps/Frontend Plane/verevonv3/src/shared/api/spaces-client/*.test.ts (directory, membership-writer, tool-policy, agent-policy): owed to the shared client builder, not this group.",
+    "apps/Frontend Plane/verevonv3/src/shared/i18n/errors.test.ts (room_archived, agent_not_addable, policy_conflict, tool_policy_revision_conflict copy): other builder's area.",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts and the agent-action-admission golden (WS04-S8, WS10-S4, WS10-S5b, WS12-S3, WS17-S5 ids): other builder's area.",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSpacesPanel.test.tsx (WS04-S8 Browse rooms link): outside the spaces folder.",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/sidepane/SpaceTurnList.tsx and MentionText.tsx (WS08-S6 viewer name and turn list): not in this group.",
+    "apps/Frontend Plane/verevonv3/apps/gateway/**, apps/Control Plane/user-core, apps/Model Plane/rust, apps/Application Plane/convex-core (gateway, Control, Rust and Convex owed tests for WS04-S2/S3/S6/S8/S9, WS08-S8, WS10-S1/S4/S5b/S8, WS12-S3, WS17-S5): other builders' areas, not run here."
+  ],
+  "notes": "Owed component clauses in this group are written and passing; the not_run lines for SpaceRoomSettings, SpaceMemberControls WS04-S3/S6, DmStartDialog, SpaceApprovalScopePicker and SpaceStandingApprovals were already covered, so those lines are stale.\nCommits (path-limited, test(space) and fix(space)): 77c409e31, a1e006d7c, a2b5d47b8, 6ef2e95b3, d516ceb0a, 86e3d4caa. The test-units and test-depth files are not committed.\nThe tsc6 run first flagged one new error in my own fixture (SpaceAgent requires delivery_targets); fixed with an 'as SpaceAgent' cast; the count is back to the 33 baseline.\nOpen, not fixed (P2): the directory search box is drawn during the first load even when the directory is off; the no-match text shows for a new query during the 250 ms debounce.\nOne commit attempt hit .git/worktrees/space-w3/index.lock held by another process; it cleared after one 8 s wait and the commit went through."
+}

@@ -1,0 +1,8 @@
+- P2 test-gap: WS08-S6 refused-wake reason is asserted on spaceWakeBoard (state refused, code agent_respond_to_denied); the visible WakeStatus line in sidepane/SpaceTurnList is not asserted in this group.
+- P2 test-gap: SpaceConnectivityBanner's unmount case never proved the watcher stopped; it now attaches after a flush and detaches on unmount, and breaking the onSettled cleanup makes it fail (verified, then restored to HEAD).
+- P2 pre-existing: the WS01-S6, WS01-S7b, WS01-S8 and WS03-S7 composer clauses listed as not_run were already in SpaceRoomComposer.test.tsx and pass; that not_run entry in verevonv3-spaces.json is stale.
+- P2 bug-found-not-fixed: SpaceRoomTimeline.windows.test.tsx:40 uses a syntax that erasableSyntaxOnly rejects (TS1294), so tsc6 reports one error outside this group; owner: the timeline test builder.
+- P3 test-gap: the markdown box's auto-grow (rows 2 to 10 from scrollHeight) is not asserted; jsdom has no layout and the owed clauses do not ask for it.
+- P3 follow-up: the typed-412 ZDR human-post case queries getByRole('status', { name: '' }), which matches any unnamed status; it passes but is loose and could be tied to the notice text.
+- P3 follow-up: the wake runner keeps per-message state at module scope, so a wake stream that never settles would hold later runs for the same message; the tests avoid it with unique message ids (owner: the spaces wake lib).
+- P3 pre-existing: createEffect in SpaceRoomComposer.tsx takes two functions at all five call sites (lines 272, 323, 335, 354, 695), so the old MISSING_EFFECT_FN skip comments were stale and were removed with the unskip.

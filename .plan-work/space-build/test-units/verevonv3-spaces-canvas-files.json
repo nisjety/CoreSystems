@@ -1,0 +1,35 @@
+{
+  "area": "verevonv3-spaces-canvas-files",
+  "status": "partial",
+  "commit": "f273f6095",
+  "files": [
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCanvasPanel.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCanvasDiff.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceCanvasHistory.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceAgentCanvasToolsToggle.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceAgentSelfApiToggle.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceAgentCanvasToolsToggle.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/components/SpaceAgentSelfApiToggle.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/lib/room-files.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-room-features.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-tab-registry.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/SpaceRoomMenu.test.tsx"
+  ],
+  "run_command": "cd \"apps/Frontend Plane/verevonv3\" && pnpm exec vitest run --pool=forks src/features/spaces/components/SpaceCanvasPanel.test.tsx src/features/spaces/components/SpaceCanvasDiff.test.tsx src/features/spaces/components/SpaceCanvasHistory.test.tsx src/features/spaces/components/SpaceAgentCanvasToolsToggle.test.tsx src/features/spaces/components/SpaceAgentSelfApiToggle.test.tsx src/features/spaces/components/SpaceWorkPanel.test.tsx src/features/spaces/components/SpaceActivityPanel.test.tsx src/features/spaces/components/SpaceKnowledgePanel.test.tsx src/features/spaces/components/SpaceFilesPanel.test.tsx src/features/spaces/lib/room-files.test.ts src/features/spaces/lib/space-room-features.test.ts src/features/spaces/lib/space-tab-registry.test.ts src/features/spaces/lib/space-canvas.test.ts src/features/spaces/lib/space-canvas-save.test.ts src/features/core/components/sidebar/SpaceRoomMenu.test.tsx src/features/spaces/lib/space-self-api.test.ts ; pnpm exec vitest run --pool=forks src/shared/i18n/errors.canvas.test.ts src/shared/i18n/errors.space-room-files.test.ts src/shared/i18n/gateway-error-codes.test.ts ; pnpm exec tsc6 -p tsconfig.app.json",
+  "result": "16 test files, 181 passing, 0 failing. 80 cases written or added in this group: 27 SpaceCanvasPanel (reads, saves and conflicts, restore, room-leave guard), 7 SpaceCanvasHistory, 4 SpaceCanvasDiff, 9 SpaceAgentCanvasToolsToggle, 8 SpaceAgentSelfApiToggle, 15 room-files, 3 Files-tab registry, 2 room-features republish of a flag block, 5 SpaceRoomMenu. Work, Activity and Knowledge panel WS03-S7 cases were already present and pass. Shared i18n canvas, room-files and gateway-code suites: 148 passing. tsc6 -p tsconfig.app.json (final run): 33 errors, all baseline (RemoteSupportPage.tsx 12, quarry-client.ts 21); none in this group's files. An earlier run also showed one error in another builder's untracked SpaceAgentPolicyEditor.test.tsx:68, which was gone by the final run.",
+  "bugs_fixed": [
+    "W3-DEC-CANVAS and WS18-S6: SpaceAgentCanvasToolsToggle.tsx and SpaceAgentSelfApiToggle.tsx kept the gateway's last confirmed value after a change, so a later agent-list read stating the other value did not show; the list value now replaces it (f273f6095, two regression cases; the failure was reproduced by a throwaway probe before the fix and the probe was deleted)."
+  ],
+  "not_run": [
+    "tests/e2e/space-canvas.spec.ts (WS19-S6, WS19-S7 owed): needs a live stack (Playwright against the dev gateway); not started.",
+    "tests/e2e/space-files.spec.ts (WS14-S9 owed): needs a live stack; not started.",
+    "src/features/spaces/components/SpacePage.test.tsx and SpaceCockpit.test.tsx (W3-DEC-CANVAS, WS18-S6, WS19-S5 lerret flag-on case): belong to the page group.",
+    "src/features/spaces/components/SpaceRoomTimeline.test.tsx (WS18-S6 provenance chips): belongs to the timeline group.",
+    "src/features/spaces/components/SpaceRoomComposer.test.tsx (WS14-S9 keep-in-room under the durable flag): belongs to the composer group.",
+    "src/shared/api/http.test.ts (WS19-S7 requestJsonPage), src/shared/api/spaces-client canvas, canvas-tools and self-api tests, src/shared/api/space-files-client.test.ts: shared API lane, not rerun here.",
+    "src/shared/actions/agent-self-api.test.ts (W3-DEC-CARD, WS18-S6 golden order), src/shared/actions/action-registry.test.ts (+1 count for the two set switches), apps/gateway/scripts/action-surface-contract.test.mjs: action lane.",
+    "scripts/tests/zdr-contract-sync.test.sh:235 pin and scripts/tests/space-self-api-registry-sync.test.sh: scripts lane.",
+    "apps/Frontend Plane/verevonv3/apps/gateway canvas.rs and agent_canvas_tools.rs tests, apps/Application Plane/convex-core space-agent-canvas-tools.test.cjs, model-gateway and execution-core canvas-tools Rust tests: gateway, Convex and Model Plane lanes."
+  ],
+  "notes": "Commits in this group: 0ca6b3b6f (room files, Files tab, republish), a425da680 (both switches), bb2fcff9e (diff and history), 9d079ffb7 (canvas panel), 6bba4283f (room menu), f273f6095 (switch fix). All path-limited; nothing staged outside these paths.\nNo test was mutation-checked against the code it guards; each passes against the code as it stands.\nThe WS03-S7 not_run entry for the Work, Activity and Knowledge panels is stale: the cases exist and pass.\nThe canvas panel suite mounts under the real router (createRouter), as useBeforeLeave needs its context; the leave guard uses real navigation.\nDocument visibility and the 15 s refresh are driven with a forced visibilityState and fake setInterval only.\nNo file of this group contributed to any tsc6 error in either run."
+}
