@@ -2,6 +2,7 @@ import { createMemo, createSignal, For, Show } from 'solid-js'
 
 import { Lock } from '@/shared/icons'
 import { createResource } from '@/shared/lib/create-resource-compat'
+import { chatThreadHref } from '@/features/chat/lib/chat-thread-deep-link'
 import { getChatThreadTranscript } from '@/shared/api/chat-client'
 import { hasErrorCode } from '@/shared/api/api-error'
 import { getSpacePrivatePanel, openSpacePrivatePanel } from '@/shared/api/spaces-client'
@@ -15,6 +16,9 @@ import '../space-private-panel.css'
  * which enforces the owner. Sharing is the only write, and it never happens here: a chosen turn
  * opens the reviewed share dialog, and a person posts the text to the room as themselves. Nothing
  * in this pane is visible to the room, and the room's memory is not read into it (SD-22 v1).
+ *
+ * The pane reads and shares; the conversation itself continues in Chat. Once the thread is open, "Continue in Chat"
+ * is the way there: the thread carries no title, so a person could not find it in the chat history by name.
  *
  * `features.private_panel` decides whether the room offers the pane at all; the gateway decides what
  * the pointer and the thread may show. Presentation only.
@@ -101,6 +105,16 @@ export function SpacePrivatePanel(props: SpacePrivatePanelProps) {
         </p>
       </header>
 
+      <Show when={!pointer.error ? pointer()?.threadId : undefined}>
+        {(threadId) => (
+          <p class="verevon-space-private-panel__continue">
+            <a link href={chatThreadHref(threadId())}>
+              {i18n.tr('Fortsett i Chat', 'Continue in Chat')}
+            </a>
+          </p>
+        )}
+      </Show>
+
       <Show when={!pointer.loading} fallback={
         <p class="verevon-space-private-panel__status" role="status">
           {i18n.tr('Henter den private samtalen …', 'Loading your private conversation …')}
@@ -162,8 +176,8 @@ export function SpacePrivatePanel(props: SpacePrivatePanelProps) {
                 <Show when={turns().length > 0} fallback={
                   <p class="verevon-space-private-panel__status">
                     {i18n.tr(
-                      'Ingen meldinger ennå. Samtalen ligger i Chat-historikken din, under navnet på rommet.',
-                      'No messages yet. The conversation is in your chat history, under the room’s name.',
+                      'Ingen meldinger ennå. Fortsett i Chat for å skrive til assistenten; samtalen ligger i Chat-historikken din.',
+                      'No messages yet. Continue in Chat to write to the assistant; the conversation is kept in your chat history.',
                     )}
                   </p>
                 }>

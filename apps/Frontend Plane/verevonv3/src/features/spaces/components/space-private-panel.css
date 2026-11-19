@@ -47,6 +47,11 @@
   font-size: 0.875rem;
 }
 
+.verevon-space-private-panel__continue {
+  margin: 0;
+  font-size: 0.875rem;
+}
+
 .verevon-space-private-panel__error {
   margin: 0;
   font-size: 0.875rem;

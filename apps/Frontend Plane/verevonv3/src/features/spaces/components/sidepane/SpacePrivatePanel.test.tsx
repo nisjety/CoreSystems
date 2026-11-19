@@ -141,6 +141,44 @@ describe('SpacePrivatePanel (WS17-S6)', () => {
     expect(document.body.textContent ?? '').not.toContain('Verktøyresultat')
   })
 
+  // The pane only reads and shares: the conversation continues in Chat. Without a link there, a person who had opened the
+  // private assistant had nowhere to write, and the thread has no title to find in the chat history.
+  it('links the open thread to Chat, by its id, once a thread is open', async () => {
+    spacesClient.getSpacePrivatePanel.mockResolvedValue(pointer(THREAD))
+    chatClient.getChatThreadTranscript.mockResolvedValue(transcript([{ role: 'user', content: 'Hei Kari' }]))
+    renderPanel()
+    const link = await screen.findByRole('link', { name: 'Fortsett i Chat' })
+    expect(link.getAttribute('href')).toBe(`/chat?thread_id=${THREAD}`)
+  })
+
+  it('offers no link before the thread is opened, and the link comes with the open', async () => {
+    spacesClient.getSpacePrivatePanel.mockResolvedValueOnce(pointer(null)).mockResolvedValue(pointer(THREAD))
+    spacesClient.openSpacePrivatePanel.mockResolvedValue(pointer(THREAD))
+    chatClient.getChatThreadTranscript.mockResolvedValue(transcript([]))
+    renderPanel()
+    expect(await screen.findByText('Den private samtalen for dette rommet er ikke åpnet ennå.')).toBeTruthy()
+    expect(screen.queryByRole('link', { name: 'Fortsett i Chat' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Åpne privat assistent' }))
+    flush()
+    expect((await screen.findByRole('link', { name: 'Fortsett i Chat' })).getAttribute('href')).toBe(`/chat?thread_id=${THREAD}`)
+  })
+
+  it('says an empty conversation continues in Chat, and does not promise a title the thread does not have', async () => {
+    spacesClient.getSpacePrivatePanel.mockResolvedValue(pointer(THREAD))
+    chatClient.getChatThreadTranscript.mockResolvedValue(transcript([]))
+    renderPanel()
+    expect(await screen.findByText(/Fortsett i Chat for å skrive til assistenten/)).toBeTruthy()
+    expect(document.body.textContent ?? '').not.toContain('under navnet på rommet')
+  })
+
+  it('offers no link when the pointer cannot be read', async () => {
+    spacesClient.getSpacePrivatePanel.mockRejectedValue(new ApiError('forbidden', 403, 'active_membership_required'))
+    renderPanel()
+    await screen.findByText(/Du er ikke lenger aktivt medlem/)
+    expect(screen.queryByRole('link', { name: 'Fortsett i Chat' })).toBeNull()
+  })
+
   it('offers Share to room on each turn only while canShare is true', async () => {
     spacesClient.getSpacePrivatePanel.mockResolvedValue(pointer(THREAD))
     chatClient.getChatThreadTranscript.mockResolvedValue(
