@@ -127,6 +127,7 @@ import { SpaceAgentActivityChip, SpaceMemberStatusChip } from './SpaceStatusChip
 import { SpaceWorkPanel } from './SpaceWorkPanel'
 import './space-room-layout.css'
 import './space-room-header.css'
+import './space-roster.css'
 
 // Mirrors the gateway's own gate (`CREATE_AGENT_ROLES`): creation is a
 // governed grant, so only roles that may grant get the entry points. The

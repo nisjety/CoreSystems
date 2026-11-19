@@ -1,0 +1,67 @@
+/*
+ * The room's member list in the Members tab: one row per person or agent, name first, the role and
+ * controls on the same line, and a member's history panel (D18) on its own line under the row.
+ * Matches the member picker beside it (global.css .verevon-space-member-picker).
+ */
+.verevon-space-roster {
+  display: flex;
+  flex-direction: column;
+  margin: 12px 0 0;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface);
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-space-roster__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+  border-top: 1px solid var(--verevon-border);
+  padding: 10px 12px;
+}
+
+.verevon-space-roster__row:first-child {
+  border-top: 0;
+}
+
+.verevon-space-roster__name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--verevon-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* "Person · Leder": pushes the controls to the end of the row. */
+.verevon-space-roster__meta {
+  margin-right: auto;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-space-roster__row > .verevon-space-member-history__panel {
+  flex-basis: 100%;
+  max-width: none;
+  margin: 4px 0 0;
+}
+
+.dark .verevon-space-roster {
+  border-color: rgb(255 255 255 / 10%);
+  background: var(--verevon-dark-surface);
+}
+
+.dark .verevon-space-roster__row {
+  border-top-color: rgb(255 255 255 / 10%);
+}
+
+.dark .verevon-space-roster__name {
+  color: var(--verevon-sidebar-text);
+}
+
+.dark .verevon-space-roster__meta {
+  color: rgb(255 255 255 / 72%);
+}
