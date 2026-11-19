@@ -81,6 +81,15 @@ export function canRemove(
   return null
 }
 
+/**
+ * D18: reading or setting one member's history window needs manager or above (Control's `CanManageRoom`).
+ * It only decides whether the control is OFFERED; Control re-decides every call. A window can only hide, so
+ * the rule is not part of the golden role matrix (no role is granted or removed).
+ */
+export function canSetMemberHistoryWindow(actorRole: string): boolean {
+  return roleRank(actorRole) >= RANK.manager
+}
+
 /** A self-join role is viewer or editor, never elevated. */
 export function canJoin(joinRole: string): RoleDenialCode | null {
   return joinRole === 'viewer' || joinRole === 'editor' ? null : 'room_not_joinable'

@@ -1,0 +1,144 @@
+/*
+ * Per-member room history (D18): the invite's "share past conversation" switch, the member list's history
+ * control, and the quiet marker above a timeline whose earlier messages are hidden from this member. Its own
+ * sheet on purpose: global.css is a shared monolith. Quiet like the settings around it: a window only hides.
+ */
+
+/* The invite's switch, inside the member picker. */
+.verevon-space-history-share {
+  display: grid;
+  gap: 2px;
+  margin: 0 0 10px;
+}
+
+.verevon-space-history-share__choice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  color: var(--verevon-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.verevon-space-history-share__choice input {
+  margin-top: 3px;
+}
+
+.verevon-space-history-share__hint {
+  margin: 0 0 0 24px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* What Control confirmed after a "don't share" invite. */
+.verevon-space-history-share__confirmed {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+/* One roster row's history control: the button sits in the row, and the panel opens under it. */
+.verevon-space-member-history__panel {
+  display: grid;
+  gap: 10px;
+  max-width: 520px;
+  margin: 8px 0;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface);
+  padding: 10px 12px;
+}
+
+.verevon-space-member-history__group {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.verevon-space-member-history__group legend {
+  padding: 0;
+  color: var(--verevon-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.verevon-space-member-history__choice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  color: var(--verevon-text);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.verevon-space-member-history__choice input[type='radio'] {
+  margin-top: 3px;
+}
+
+.verevon-space-member-history__hint {
+  display: block;
+  margin-top: 2px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-space-member-history__date {
+  display: block;
+  margin-top: 6px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 8px;
+  background: var(--verevon-surface);
+  padding: 6px 10px;
+  color: var(--verevon-text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.verevon-space-member-history__date[disabled] {
+  opacity: 0.6;
+}
+
+.verevon-space-member-history__date:focus-visible {
+  outline: 2px solid var(--verevon-accent-ink);
+  outline-offset: 2px;
+}
+
+.verevon-space-member-history__note {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-space-member-history__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* The marker: small, quiet, above the posts. Not a card: it explains an absence, it does not ask for anything. */
+.verevon-space-history-window {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin: 0 0 10px;
+  padding: 2px 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.verevon-space-history-window > svg {
+  flex: none;
+}
+
+.verevon-space-history-window__title {
+  color: var(--verevon-text-soft);
+  font-weight: 600;
+}

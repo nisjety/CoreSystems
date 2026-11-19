@@ -22,7 +22,9 @@ import {
   setSpaceAgentState,
   updateSpaceInstructions,
   withdrawSpaceAgent,
+  ownHistoryWindowFrom,
   type SpaceAgent,
+  type SpaceOwnHistoryWindow,
   type SpacePresence,
   type SpaceReadMarker,
   type SpaceRoomPin,
@@ -70,7 +72,9 @@ import {
   SpaceMemberRemoveButton,
   SpaceMemberRoleSelect,
 } from './SpaceMemberControls'
-import { canRemove, countActiveOwners } from '../lib/space-roles'
+import { SpaceMemberHistoryControl } from './SpaceMemberHistoryControl'
+import { ownWindowSignature } from '../lib/space-history-window'
+import { canRemove, canSetMemberHistoryWindow, countActiveOwners } from '../lib/space-roles'
 import { SpaceCreateAgentDialog } from './SpaceCreateAgentDialog'
 import { SpaceRoomComposer } from './SpaceRoomComposer'
 import { SpaceArchivedBanner, SpaceArchivedNotice, canArchiveRoom } from './SpaceRoomArchive'
@@ -270,6 +274,8 @@ export default function SpacePage() {
     setTimelineStore(undefined)
   }
   onCleanup(() => activeStore?.dispose())
+  // D18: the caller's own window, from Control's membership read. Absent (an older Control) or malformed draws nothing.
+  const ownHistoryWindow = () => (context.error ? undefined : ownHistoryWindowFrom(context()?.membership.history_window))
   // The listing waits for the context read: the rollout flag that picks the windowed timeline arrives with it.
   const [threads, { refetch: refetchThreads, mutate: mutateThreads }] = createResource(
     () => (context.error || context() !== undefined ? spaceRef() : undefined),
@@ -327,6 +333,22 @@ export default function SpacePage() {
     headStale = true
     return refetchThreads()
   }
+  // D18: when the caller's floor moves (an admin changed this member's window, or the room's mode did), everything this
+  // page already holds was read under the old floor. It is read again, never filtered here: the windowed store, its
+  // loaded pages and its transcripts are dropped and the listing is read under the new floor, so a page that was
+  // allowed to show earlier messages stops showing them without a reload. The first reading is only the baseline.
+  let floorSeen: string | undefined
+  createEffect(
+    () => (context.error || context() === undefined ? undefined : ownWindowSignature(ownHistoryWindow())),
+    (signature) => {
+      if (signature === undefined) return
+      const moved = floorSeen !== undefined && floorSeen !== signature
+      floorSeen = signature
+      if (!moved) return
+      dropTimelineStore()
+      void Promise.resolve(refetchThreadsFull()).catch(() => undefined)
+    },
+  )
   // `undefined`, not '': Solid skips a fetch only for false/null/undefined, and
   // an empty string is none of those — so the receipt resource fired on mount
   // and requested `/spaces/deletion-requests/` with no id, producing a 404 on
@@ -851,6 +873,7 @@ export default function SpacePage() {
                         liveArtifacts={liveArtifacts}
                         sharedReadAvailable={sharedReadAvailable}
                         historyMode={() => current().membership.history_mode}
+                        historyWindow={ownHistoryWindow}
                         roomPins={() => (threads.error ? [] : threads()?.pins ?? [])}
                         loading={() => threads.loading}
                         unavailable={threadsUnavailable}
@@ -957,6 +980,8 @@ export default function SpacePage() {
                         writerApi={writerApi()}
                         peopleSearch={current().features?.people_search === true}
                         directoryResolver={current().features?.directory_resolver === true}
+                        memberHistoryWindows={contextFeatureOn(current(), 'member_history_windows')}
+                        roomHistoryMode={current().membership.history_mode}
                         isOrganizationRoom={current().space.is_organization_room}
                         archived={roomIsArchived(current())}
                         onMembersChanged={() => {
@@ -996,6 +1021,7 @@ export default function SpacePage() {
                         threadId={threadId()}
                         thread={thread}
                         sharedReadAvailable={sharedReadAvailable}
+                        historyWindow={ownHistoryWindow}
                         messageId={selectedMessageId}
                         messageReviseEnabled={() => current().features?.message_revise === true}
                         reactionsEnabled={() => current().features?.reactions === true}
@@ -1138,6 +1164,8 @@ function SpaceConversationPanel(props: {
   readonly sharedReadAvailable?: () => boolean
   /** WS04-S11: the membership's `history_mode`, for the timeline's history notice. */
   readonly historyMode?: () => string | undefined
+  /** D18: the caller's own window (`membership.history_window`), for the marker above the posts. */
+  readonly historyWindow?: () => SpaceOwnHistoryWindow | undefined
   /** The listing's room pins (WS13-S8). */
   readonly roomPins?: () => readonly SpaceRoomPin[]
   readonly loading: () => boolean
@@ -1247,6 +1275,7 @@ function SpaceConversationPanel(props: {
             timeline={props.timeline}
             sharedReadAvailable={props.sharedReadAvailable}
             historyMode={props.historyMode}
+            historyWindow={props.historyWindow}
             roomPins={props.roomPins}
             agentWork={props.agentWork}
             liveArtifacts={artifactsOn() ? props.liveArtifacts.forThread : undefined}
@@ -2014,6 +2043,10 @@ function SpaceMembersPanel(props: {
   readonly peopleSearch?: boolean
   /** The gateway's composed people-and-agent directory is on (WS04-S9). */
   readonly directoryResolver?: boolean
+  /** D18: the gateway's `features.member_history_windows`: the invite's switch and each row's history control. */
+  readonly memberHistoryWindows?: boolean
+  /** The room's own history mode, so the invite's switch tells the truth about what "share" means here. */
+  readonly roomHistoryMode?: string
   /** The organization's own channel derives its roster from org-core, so it
    * has no editable member list — see `SpaceMemberControls`.
    *
@@ -2037,6 +2070,14 @@ function SpaceMembersPanel(props: {
   // Offered only for a named room somebody made, and only when the server said the writer is on.
   const writerRoom = () =>
     props.archived !== true && props.writerApi && props.kind !== 'personal' && props.isOrganizationRoom === false
+  // D18: a named, active room somebody made, a caller who may manage it, and the gateway's switch on. Control re-checks
+  // the role on every call; this only decides whether the control is offered. The caller's own row never gets one.
+  const historyRoom = () =>
+    props.memberHistoryWindows === true
+    && props.archived !== true
+    && props.kind === 'room'
+    && props.isOrganizationRoom === false
+    && canSetMemberHistoryWindow(props.role)
 
   return (
     <section class="verevon-space-view" aria-labelledby="space-members-title">
@@ -2098,6 +2139,8 @@ function SpaceMembersPanel(props: {
           writerApi={props.writerApi}
           peopleSearch={props.peopleSearch}
           directoryResolver={props.directoryResolver}
+          memberHistoryWindows={props.memberHistoryWindows}
+          roomHistoryMode={props.roomHistoryMode}
         />
       </Show>
 
@@ -2173,6 +2216,10 @@ function SpaceMembersPanel(props: {
                       member={member}
                       onChanged={props.onMembersChanged}
                     />
+                  </Show>
+                  {/* D18: what this person reads of the past. Last in the row, so its panel opens under the row. */}
+                  <Show when={historyRoom() && member.subject_type === 'user' && member.subject_id !== props.actorId}>
+                    <SpaceMemberHistoryControl spaceRef={props.spaceRef} member={member} />
                   </Show>
                 </li>
               )}

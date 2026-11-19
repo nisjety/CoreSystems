@@ -14,6 +14,7 @@ import {
   canChangeRole,
   canJoin,
   canRemove,
+  canSetMemberHistoryWindow,
   countActiveOwners,
   isElevatedRole,
   isRoomRole,
@@ -101,6 +102,15 @@ describe('role helpers', () => {
     expect(assignableRolesForChange('owner', 'owner', true, 2)).toEqual(['viewer', 'editor', 'manager', 'owner'])
     // Nobody promotes themselves.
     expect(assignableRolesForChange('editor', 'editor', true, 1)).toEqual(['viewer', 'editor'])
+  })
+
+  // D18: reading or setting one member's history window is a manager-or-owner decision (Control's CanManageRoom).
+  it('offers the member history window to a manager or an owner and to nobody below, nor to an unknown role', () => {
+    expect(canSetMemberHistoryWindow('owner')).toBe(true)
+    expect(canSetMemberHistoryWindow('manager')).toBe(true)
+    expect(canSetMemberHistoryWindow('editor')).toBe(false)
+    expect(canSetMemberHistoryWindow('viewer')).toBe(false)
+    for (const role of ['', 'admin', 'Owner', 'MANAGER']) expect(canSetMemberHistoryWindow(role), role).toBe(false)
   })
 
   it('counts only active human owners', () => {

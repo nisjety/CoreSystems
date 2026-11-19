@@ -2827,6 +2827,304 @@ describe('SpacePage', () => {
       expect(label.nextElementSibling?.textContent).toBe('42')
     })
   })
+
+  // D18: per-member room history. The page offers the invite's switch and each row's history control only behind
+  // `features.member_history_windows`, to an owner or manager, in a named room that is active. The marker follows
+  // Control's own `hidden: true` for the caller. Control and Session Core apply every floor; the page only says so.
+  describe('per-member room history (D18)', () => {
+    const roster = [
+      { subject_type: 'user', subject_id: 'user_1', role: 'owner', revision: 1, display_name: 'Sara Nilsen' },
+      { subject_type: 'user', subject_id: 'user_2', role: 'editor', revision: 1, display_name: 'Ola Hansen' },
+      { subject_type: 'user', subject_id: 'user_3', role: 'viewer', revision: 1, display_name: 'Nina Berg' },
+      { subject_type: 'service', subject_id: 'agent_1', role: 'editor', revision: 1, display_name: 'Verevon' },
+    ]
+    const since = new Date(2026, 10, 12, 0, 0, 0).toISOString()
+    const historyCtx = (
+      over: {
+        role?: string
+        features?: Record<string, boolean>
+        org?: boolean
+        archived?: boolean
+        window?: Record<string, unknown> | null
+        historyMode?: string
+      } = {},
+    ) => ({
+      space: {
+        space_ref: 'space_room_1', name: 'Leveranse', kind: 'room', lifecycle: 'active',
+        is_organization_room: over.org ?? false,
+      },
+      membership: {
+        space_ref: 'space_room_1', org_id: 'org_1', subject_id: 'user_1', kind: 'room', role: over.role ?? 'owner',
+        ...(over.historyMode ? { history_mode: over.historyMode } : {}),
+        ...(over.window === null || over.window === undefined ? {} : { history_window: over.window }),
+        revisions: { authority: 1, membership: 1, privacy: 1, recipient_audience: 1, entitlement: 1 },
+      },
+      ...(over.archived === undefined ? {} : { archived: over.archived }),
+      features: { human_posts: true, ...(over.features ?? {}) },
+    })
+    const open = async (ctx: ReturnType<typeof historyCtx>) => {
+      spacesClient.getSpaceContext.mockResolvedValue(ctx)
+      spacesClient.getSpaceThreads.mockResolvedValue({
+        ...ctx,
+        threads: [{ thread_id: 'thread_1', space_id: 'space_room_1', title: 'Innkjøp', preview: 'Forhåndsvisning', updated_at: '2026-10-27T10:00:00Z' }],
+      })
+      spacesClient.getSpaceRoster.mockResolvedValue(roster)
+      renderSpacePage('/spaces/space_room_1')
+      await screen.findByRole('heading', { name: 'Leveranse', level: 1 })
+    }
+    const historyButtons = (scope: { queryAllByRole: typeof screen.queryAllByRole }) =>
+      scope.queryAllByRole('button', { name: /^Historikk for / }).map((button) => button.getAttribute('aria-label'))
+
+    describe('the member list', () => {
+      it('offers an owner a history control on every other person, and on no agent and not on themselves', async () => {
+        await open(historyCtx({ features: { member_history_windows: true } }))
+        const members = await openMembersTab()
+        await members.findByText('Ola Hansen')
+        expect(historyButtons(members)).toEqual(['Historikk for Ola Hansen', 'Historikk for Nina Berg'])
+      })
+
+      it('offers a manager the same, and an editor or a viewer nothing', async () => {
+        await open(historyCtx({ role: 'manager', features: { member_history_windows: true } }))
+        let members = await openMembersTab()
+        await members.findByText('Ola Hansen')
+        expect(historyButtons(members)).toHaveLength(2)
+        cleanup()
+        for (const role of ['editor', 'viewer']) {
+          await open(historyCtx({ role, features: { member_history_windows: true } }))
+          members = await openMembersTab()
+          await members.findByText('Ola Hansen')
+          expect(historyButtons(members), role).toEqual([])
+          cleanup()
+        }
+      })
+
+      it('draws no control, and no switch, with the gateway switch off or silent', async () => {
+        const silent: Array<Record<string, boolean>> = [{ member_history_windows: false }, {}]
+        for (const features of silent) {
+          await open(historyCtx({ features }))
+          const members = await openMembersTab()
+          await members.findByText('Ola Hansen')
+          expect(historyButtons(members)).toEqual([])
+          fireEvent.click(await members.findByRole('button', { name: /Legg til personer/ }))
+          // The picker is open (its button now says Lukk) and still holds no switch.
+          await members.findByRole('button', { name: 'Lukk' })
+          expect(members.queryByRole('switch')).toBeNull()
+          expect(members.queryByText(/Del tidligere samtale/)).toBeNull()
+          cleanup()
+        }
+      })
+
+      it('offers the invite switch, on, to an owner when the gateway switch is on', async () => {
+        await open(historyCtx({ features: { member_history_windows: true } }))
+        const members = await openMembersTab()
+        fireEvent.click(await members.findByRole('button', { name: /Legg til personer/ }))
+        const share = (await members.findByRole('switch', { name: 'Del tidligere samtale' })) as HTMLInputElement
+        expect(share.checked).toBe(true)
+        expect(members.getByText('Nye medlemmer kan lese tidligere meldinger')).toBeTruthy()
+      })
+
+      it('tells the invite what the room’s own mode does with a shared invite', async () => {
+        await open(historyCtx({ features: { member_history_windows: true }, historyMode: 'since_join' }))
+        const members = await openMembersTab()
+        fireEvent.click(await members.findByRole('button', { name: /Legg til personer/ }))
+        expect(await members.findByText('Rommets egen innstilling avgjør hva nye medlemmer kan lese')).toBeTruthy()
+      })
+
+      it('offers neither in the organization room, an archived room or a personal Space', async () => {
+        const features = { member_history_windows: true }
+        await open(historyCtx({ org: true, features }))
+        let members = await openMembersTab()
+        await members.findByText('Ola Hansen')
+        expect(historyButtons(members)).toEqual([])
+        cleanup()
+        await open(historyCtx({ archived: true, features: { ...features, room_archive: true } }))
+        members = await openMembersTab()
+        await members.findByText('Ola Hansen')
+        expect(historyButtons(members)).toEqual([])
+        expect(members.queryByRole('button', { name: /Legg til personer/ })).toBeNull()
+        cleanup()
+        spacesClient.getSpaceContext.mockResolvedValue({ ...personalContext, features })
+        spacesClient.getSpaceThreads.mockResolvedValue({ ...personalContext, threads: [] })
+        spacesClient.getSpaceRoster.mockResolvedValue(roster)
+        renderSpacePage()
+        members = await openMembersTab()
+        await members.findByText('Ola Hansen')
+        expect(historyButtons(members)).toEqual([])
+        expect(members.queryByRole('switch')).toBeNull()
+      })
+
+      it('withholds both when the server did not say which room this is', async () => {
+        const ctx = historyCtx({ features: { member_history_windows: true } })
+        const { is_organization_room: _omitted, ...space } = ctx.space
+        spacesClient.getSpaceContext.mockResolvedValue({ ...ctx, space })
+        spacesClient.getSpaceThreads.mockResolvedValue({ ...ctx, space, threads: [] })
+        spacesClient.getSpaceRoster.mockResolvedValue(roster)
+        renderSpacePage('/spaces/space_room_1')
+        await screen.findByRole('heading', { name: 'Leveranse', level: 1 })
+        const members = await openMembersTab()
+        await members.findByText('Ola Hansen')
+        expect(historyButtons(members)).toEqual([])
+      })
+    })
+
+    describe('the marker above the conversation', () => {
+      const note = () => screen.queryAllByRole('note')
+
+      it('says earlier messages are hidden, with the date, when Control says so for the caller', async () => {
+        await open(
+          historyCtx({
+            role: 'editor',
+            window: { source: 'member', mode: 'since_date', since_at: since, hidden: true },
+          }),
+        )
+        const timeline = within(await screen.findByRole('list', { name: 'Samtaler i rommet' }))
+        expect(await timeline.findByText('Forhåndsvisning')).toBeTruthy()
+        expect(note()).toHaveLength(1)
+        expect(note()[0]?.textContent).toMatch(/Tidligere meldinger er skjult.*Du ser meldinger fra 12\.? nov\.? 2026\./i)
+      })
+
+      it('says so for a member who joined without the past, even with the gateway switch off', async () => {
+        // A stored window is enforced whatever the rollout switch says, so the member is still told why the room looks short.
+        await open(
+          historyCtx({
+            role: 'viewer',
+            features: { member_history_windows: false },
+            window: { source: 'member', mode: 'since_join', since_at: since, hidden: true },
+          }),
+        )
+        await screen.findByText('Forhåndsvisning')
+        expect(note()).toHaveLength(1)
+        expect(note()[0]?.textContent).toContain('Du ser meldinger fra du ble med.')
+      })
+
+      it('draws no marker when nothing is hidden, when the window is absent, or when it is not well formed', async () => {
+        for (const window of [
+          { source: 'member', mode: 'full', since_at: null, hidden: false },
+          { source: 'member', mode: 'since_join', since_at: null },
+          { source: 'member', mode: 'since_join', since_at: null, hidden: 'true' },
+          'hidden',
+          null,
+        ]) {
+          await open(historyCtx({ window: window as never }))
+          await screen.findByText('Forhåndsvisning')
+          expect(note(), JSON.stringify(window)).toHaveLength(0)
+          cleanup()
+        }
+      })
+
+      it('replaces the since-join notice instead of drawing both', async () => {
+        await open(
+          historyCtx({
+            historyMode: 'since_join',
+            window: { source: 'room', mode: 'since_join', since_at: since, hidden: true },
+          }),
+        )
+        await screen.findByText('Forhåndsvisning')
+        expect(note()).toHaveLength(1)
+        expect(document.querySelector('.verevon-space-restricted[data-variant="history"]')).toBeNull()
+      })
+
+      it('says it above the turns of an open thread too', async () => {
+        vi.stubEnv('VITE_SPACE_THREAD_PANE_UI', '')
+        const ctx = historyCtx({
+          features: { thread_pane: true },
+          window: { source: 'member', mode: 'since_join', since_at: since, hidden: true },
+        })
+        spacesClient.getSpaceContext.mockResolvedValue(ctx)
+        spacesClient.getSpaceThreads.mockResolvedValue({
+          ...ctx,
+          threads: [{ thread_id: 'thread_1', space_id: 'space_room_1', title: 'Innkjøp', preview: 'x', updated_at: '2026-10-27T10:00:00Z' }],
+        })
+        spacesClient.getSpaceThreadTranscript.mockResolvedValue({ threadId: 'thread_1', turns: [{ role: 'user', content: 'Etter at jeg ble med', authorSubjectId: 'user_9' }] })
+        renderSpacePage('/spaces/space_room_1?thread_id=thread_1')
+        const pane = within(await screen.findByRole('complementary', { name: 'Innkjøp' }))
+        expect(await pane.findByText('Etter at jeg ble med')).toBeTruthy()
+        expect(pane.getAllByRole('note')).toHaveLength(1)
+        expect(pane.getByRole('note').textContent).toContain('Tidligere meldinger er skjult')
+      })
+    })
+
+    describe('when the caller’s floor moves while the room is open', () => {
+      const postA = { thread_id: 'thread_a', space_id: 'space_room_1', title: 'Gammel sak', preview: 'Fra før gulvet', updated_at: '2026-10-01T10:00:00Z' }
+      const postB = { thread_id: 'thread_b', space_id: 'space_room_1', title: 'Ny sak', preview: 'Etter gulvet', updated_at: '2026-11-15T10:00:00Z' }
+      const timelineOf = (ctx: ReturnType<typeof historyCtx>, threads: unknown[]) => ({
+        page: { windowed: true, hasMore: false, nextBefore: null, nextAfter: null, newest: 'thread_b', totalPosts: threads.length },
+        systemEntries: [],
+        systemTruncated: false,
+        threads,
+        pinned: [],
+        refreshed: [],
+        head: { ...ctx, threads },
+      })
+
+      it('drops the windowed store and reads the room again under the new floor, so nothing read before it stays', async () => {
+        const before = historyCtx({
+          features: { timeline_windows: true },
+          window: { source: 'member', mode: 'full', since_at: null, hidden: false },
+        })
+        const after = historyCtx({
+          features: { timeline_windows: true },
+          window: { source: 'member', mode: 'since_date', since_at: since, hidden: true },
+        })
+        let recheck: (() => void) | undefined
+        vi.spyOn(window, 'setInterval').mockImplementation(((handler: TimerHandler, timeout?: number) => {
+          if (timeout === 30_000) recheck = handler as () => void
+          return 1 as unknown as number
+        }) as typeof window.setInterval)
+        spacesClient.getSpaceContext.mockResolvedValueOnce(before).mockResolvedValue(after)
+        // Every read of the first page answers what the server holds NOW: both posts first, only the newer one after the move.
+        let floorMoved = false
+        spacesClient.getSpaceTimeline.mockImplementation(async (_ref: string, request?: { after?: unknown; before?: unknown }) => {
+          if (request?.after || request?.before) return timelineOf(after, [])
+          return timelineOf(floorMoved ? after : before, floorMoved ? [postB] : [postA, postB])
+        })
+        spacesClient.getSpaceRoster.mockResolvedValue(roster)
+        renderSpacePage('/spaces/space_room_1')
+        const timeline = within(await screen.findByRole('list', { name: 'Samtaler i rommet' }))
+        expect(await timeline.findByText('Fra før gulvet')).toBeTruthy()
+        expect(screen.queryAllByRole('note')).toHaveLength(0)
+
+        floorMoved = true
+        expect(recheck).toBeTypeOf('function')
+        recheck!()
+        // The room is read again under the new floor and drawn again: what is on screen once it is back is the
+        // newer post alone. (While it is being read the timeline is away, so absence BEFORE this proves nothing.)
+        expect(await screen.findByText('Etter gulvet')).toBeTruthy()
+        expect(await screen.findByRole('note')).toBeTruthy()
+        expect(screen.queryByText('Fra før gulvet')).toBeNull()
+        expect(screen.queryByText('Gammel sak')).toBeNull()
+      })
+
+      it('does not read the room again for a recheck that carries the same floor', async () => {
+        const same = historyCtx({
+          features: { timeline_windows: true },
+          window: { source: 'member', mode: 'since_join', since_at: since, hidden: true },
+        })
+        let recheck: (() => void) | undefined
+        vi.spyOn(window, 'setInterval').mockImplementation(((handler: TimerHandler, timeout?: number) => {
+          if (timeout === 30_000) recheck = handler as () => void
+          return 1 as unknown as number
+        }) as typeof window.setInterval)
+        spacesClient.getSpaceContext.mockResolvedValue(same)
+        spacesClient.getSpaceTimeline.mockImplementation(async (_ref: string, request?: { after?: unknown }) =>
+          timelineOf(same, request?.after ? [] : [postA, postB]),
+        )
+        spacesClient.getSpaceRoster.mockResolvedValue(roster)
+        renderSpacePage('/spaces/space_room_1')
+        const timeline = within(await screen.findByRole('list', { name: 'Samtaler i rommet' }))
+        expect(await timeline.findByText('Fra før gulvet')).toBeTruthy()
+        const firstPageReads = () =>
+          spacesClient.getSpaceTimeline.mock.calls.filter(([, request]) => !(request as { after?: unknown } | undefined)?.after).length
+        const before = firstPageReads()
+        recheck!()
+        await waitFor(() => expect(spacesClient.getSpaceContext).toHaveBeenCalledTimes(2))
+        await new Promise((resolve) => setTimeout(resolve, 30))
+        // The head is re-read by the ordinary recheck; nothing is dropped, so the posts stay where they were.
+        expect(screen.getByText('Fra før gulvet')).toBeTruthy()
+        expect(firstPageReads() - before).toBeLessThanOrEqual(1)
+      })
+    })
+  })
 })
 
 // Mounts the page beside a navigate handle, so a test can move the same page to another room.

@@ -7,10 +7,18 @@ import { threadStatus, formatWhen } from '@/features/spaces/lib/space-thread-pre
 import { ApiError } from '@/shared/api/http'
 import { presentSpaceDenialText, readSpaceDenial } from '@/shared/api/space-denials'
 import { getSpaceThreadTranscript } from '@/shared/api/spaces-client'
-import type { SpaceAgent, SpaceMessagePolicyHints, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
+import type {
+  SpaceAgent,
+  SpaceMessagePolicyHints,
+  SpaceOwnHistoryWindow,
+  SpaceRosterMember,
+  SpaceThread,
+} from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { ThreadFollowControl } from '@/features/attention/components/ThreadFollowControl'
+import { ownWindowSignature } from '../../lib/space-history-window'
+import { SpaceHistoryWindowNote } from '../SpaceHistoryWindowNote'
 import { SpaceRestrictedNotice } from '../SpaceRestrictedNotice'
 import { SpaceTurnList, normalizeTranscriptTurns, resolveAuthorName } from './SpaceTurnList'
 import { createSpaceTurnLifecycle } from '../../lib/space-message-lifecycle'
@@ -55,6 +63,12 @@ export interface SpaceThreadPanelProps {
    * restricted notice and no turn text, including turns read before. Absent means available.
    */
   readonly sharedReadAvailable?: () => boolean
+  /**
+   * D18: the caller's own window (`membership.history_window`). Control's `hidden: true` draws the same quiet marker the
+   * timeline has, above the turns, because a thread that began before the floor is read from the floor on. Absent,
+   * malformed or not hidden: no marker. Presentation only: nothing here asks for the hidden turns.
+   */
+  readonly historyWindow?: () => SpaceOwnHistoryWindow | undefined
   /**
    * The pane's reply composer (WS01-S7b), drawn under the turns. The page passes it only while
    * `features.human_posts` is on; absent, the panel stays read-only. Not drawn for a thread that
@@ -126,6 +140,19 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
       mutate(undefined)
       void refetch()
     }),
+  )
+  // D18: when the caller's floor moves (an admin changed this member's window), the turns on screen were read under the
+  // old floor. They come off now and the thread is read again under the new one: read again, never filtered here.
+  let floorSeen: string | undefined
+  createEffect(
+    () => ownWindowSignature(props.historyWindow?.()),
+    (signature) => {
+      const moved = floorSeen !== undefined && floorSeen !== signature
+      floorSeen = signature
+      if (!moved) return
+      mutate(undefined)
+      void refetch()
+    },
   )
   // WS12-S7: edit and delete controls; a change re-reads this thread and the room's projection.
   const lifecycle = createSpaceTurnLifecycle({
@@ -224,6 +251,7 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
       </Show>
       <Show when={current()?.state === 'ok'}>
         <ThreadFollowControl spaceRef={props.spaceRef} threadId={props.threadId} />
+        <SpaceHistoryWindowNote window={() => props.historyWindow?.()} />
       </Show>
       <Switch
         fallback={

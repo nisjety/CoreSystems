@@ -30,6 +30,8 @@ import { SystemRowsGroup } from './entries/SystemRowsGroup'
 import type { SpaceSystemEntry } from '@/shared/api/spaces-client'
 import { SpaceRestrictedNotice } from './SpaceRestrictedNotice'
 import { SpaceHistoryNotice } from './SpaceHistoryNotice'
+import { SpaceHistoryWindowNote } from './SpaceHistoryWindowNote'
+import { ownWindowHidden } from '../lib/space-history-window'
 import { SpacePendingNewPost, SpacePendingReplies } from './SpacePendingPost'
 import type { SpaceJournalEntry } from '../lib/space-send-journal'
 import { spaceRoomFeatureWithDevOverride } from '../lib/space-room-features'
@@ -51,7 +53,7 @@ import { loadSpaceTranscript, updateSpaceThreadPresentation } from '@/shared/api
 import { markSpaceUnread } from '@/shared/api/spaces-attention-client'
 import { refreshSpaceAttention, spaceAttentionRoom } from '../lib/space-attention'
 import { firstUnreadIndex, markUnreadBeforeMs } from '../lib/space-unread'
-import type { SpaceAgent, SpaceAgentWork, SpaceMessagePolicyHints, SpaceRoomPin, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
+import type { SpaceAgent, SpaceAgentWork, SpaceMessagePolicyHints, SpaceOwnHistoryWindow, SpaceRoomPin, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
 import { createSpaceTurnLifecycle } from '../lib/space-message-lifecycle'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { announce } from '@/shared/a11y/announcer'
@@ -133,6 +135,12 @@ export interface SpaceRoomTimelineProps {
   readonly sharedReadAvailable?: () => boolean
   /** WS04-S11: the membership's `history_mode`. `since_join` shows the history notice. Absent: nothing. */
   readonly historyMode?: () => string | undefined
+  /**
+   * D18: the caller's own window (`membership.history_window`). Control's `hidden: true` draws one quiet marker above the
+   * posts, and then the broader WS04-S11 notice is not drawn beside it. Absent, malformed or not hidden: no marker.
+   * Presentation only: the page never asks for what is hidden, because Control signs the floor and Session Core applies it.
+   */
+  readonly historyWindow?: () => SpaceOwnHistoryWindow | undefined
   /**
    * Artifacts the sender's own live stream produced in a thread, held in memory
    * by the page until the next transcript read carries them. Absent while the
@@ -288,6 +296,8 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
     post.focus({ preventScroll: true })
   }
   const sharedRead = () => props.sharedReadAvailable?.() !== false
+  // D18: the marker is drawn only while the room's conversations are readable at all (the restricted notice says the rest).
+  const windowHidden = () => sharedRead() && ownWindowHidden(props.historyWindow?.())
   // Read where it is used, so a flag the room publishes after the timeline is drawn reaches the chips too.
   const artifactsOn = () => roomArtifactsEnabled()
   const pendingNewPosts = () =>
@@ -387,11 +397,17 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
     <Show
       when={orderedThreads().length > 0 || pendingNewPosts().length > 0}
       fallback={
-        <SpaceRoomIntro
-          spaceName={props.spaceName}
-          onStartConversation={props.onStartConversation}
-          onCreateAgent={props.onCreateAgent}
-        />
+        <>
+          {/* A member whose earlier messages are hidden may see an empty room: say why, above the intro. */}
+          <Show when={windowHidden()}>
+            <SpaceHistoryWindowNote window={() => props.historyWindow?.()} />
+          </Show>
+          <SpaceRoomIntro
+            spaceName={props.spaceName}
+            onStartConversation={props.onStartConversation}
+            onCreateAgent={props.onCreateAgent}
+          />
+        </>
       }
     >
       {/* Once for the whole room, above the posts: when Control has not enabled
@@ -399,7 +415,10 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
       <Show when={!sharedRead()}>
         <SpaceRestrictedNotice variant="room" />
       </Show>
-      <Show when={sharedRead() && props.historyMode?.() === 'since_join'}>
+      <Show when={windowHidden()}>
+        <SpaceHistoryWindowNote window={() => props.historyWindow?.()} />
+      </Show>
+      <Show when={sharedRead() && !windowHidden() && props.historyMode?.() === 'since_join'}>
         <SpaceHistoryNotice />
       </Show>
       <Show when={firstUnreadId()}>

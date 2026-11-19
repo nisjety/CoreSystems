@@ -13,11 +13,13 @@ import {
   searchDirectoryPeople,
   type DirectoryPerson,
   type SpaceAudienceState,
+  type SpaceMemberHistoryWindow,
   type SpaceRosterMember,
 } from '@/shared/api/spaces-client'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
 
+import { memberHistoryErrorMessage } from '../lib/space-history-window'
 import {
   assignableRolesForAdd,
   assignableRolesForChange,
@@ -25,6 +27,7 @@ import {
   isRoomRole,
   type RoomRole,
 } from '../lib/space-roles'
+import './space-history-window.css'
 
 const ROLE_LABELS: Record<RoomRole, { no: string; en: string }> = {
   viewer: { no: 'Leser', en: 'Viewer' },
@@ -79,7 +82,26 @@ export interface SpaceMemberControlsProps {
    * NOT the same as "on".
    */
   readonly directoryResolver?: boolean
+  /**
+   * D18: the gateway's `features.member_history_windows`. With it the picker offers the "share past conversation"
+   * switch, on by default, and every add states the choice. Without it no switch is drawn and the add sends no
+   * choice, exactly as before. `undefined` means the server did not say, which is NOT the same as "on".
+   */
+  readonly memberHistoryWindows?: boolean
+  /**
+   * The room's own history mode (`full` or `since_join`), only so the switch's line tells the truth about what
+   * "share" means in this room: with `since_join` the room's own setting decides, whatever the switch says.
+   */
+  readonly roomHistoryMode?: string
 }
+
+// One id per picker for the line that describes the switch, so a screen reader reads it with the switch.
+let shareHintCount = 0
+
+const ADD_FAILURE = {
+  no: 'Personen kunne ikke legges til. Ingenting er endret.',
+  en: 'That person could not be added. Nothing was changed.',
+} as const
 
 const SEARCH_DEBOUNCE_MS = 250
 const SEARCH_PAGE_SIZE = 20
@@ -98,6 +120,11 @@ export function SpaceMemberControls(props: SpaceMemberControlsProps) {
   const [actionError, setActionError] = createSignal('')
   const [audience, setAudience] = createSignal<SpaceAudienceState | undefined>(undefined)
   const [addRole, setAddRole] = createSignal<RoomRole>('editor')
+  // D18: the invite's choice. On unless the person turns it off, and on again every time the picker is closed.
+  const [shareHistory, setShareHistory] = createSignal(true)
+  const shareHintId = `space-history-share-hint-${(shareHintCount += 1)}`
+  // What Control confirmed after a "don't share" invite. Never a claim the answer did not carry.
+  const [hideOutcome, setHideOutcome] = createSignal<'confirmed' | 'unconfirmed' | ''>('')
   const addRoles = createMemo(() => (props.writerApi ? assignableRolesForAdd(props.actorRole ?? '') : []))
   const composed = () => props.directoryResolver === true
   const searching = () => props.peopleSearch === true && !composed()
@@ -190,21 +217,78 @@ export function SpaceMemberControls(props: SpaceMemberControlsProps) {
   async function run(
     id: string,
     change: () => Promise<{ audience?: SpaceAudienceState } | unknown>,
-    failure: { no: string; en: string },
+    failure: { no: string; en: string } | ((err: unknown) => string),
+    afterChange?: (result: unknown) => void,
   ) {
     if (busyId()) return
     setBusyId(id)
     setActionError('')
     setAudience(undefined)
+    setHideOutcome('')
     try {
       const result = await change()
       setAudience((result as { audience?: SpaceAudienceState } | undefined)?.audience)
+      afterChange?.(result)
       props.onChanged?.()
     } catch (err) {
-      setActionError(translateApiError(err, i18n.tr, failure))
+      setActionError(typeof failure === 'function' ? failure(err) : translateApiError(err, i18n.tr, failure))
     } finally {
       setBusyId(undefined)
     }
+  }
+
+  /**
+   * Adds one person. With D18 on, the add states the choice (`true` shares the past, `false` hides what was
+   * posted before the join); with it off nothing is sent, exactly as before. A "don't share" is never assumed
+   * to have taken: Control's answer must say the member reads since they joined, or the person is told it
+   * could not be confirmed. A refusal while Control's switch is off says nobody was added.
+   */
+  function addPerson(userId: string) {
+    // Only with the writer on, and only a role this caller may grant: otherwise the legacy add (no role) is unchanged.
+    const spaceRef = props.spaceRef
+    const role = addRoles().includes(addRole()) ? addRole() : undefined
+    const stated = props.memberHistoryWindows === true
+    const share = shareHistory()
+    const hide = stated && !share
+    void run(
+      userId,
+      () =>
+        stated
+          ? addSpaceMember(spaceRef, userId, role, { sharePastConversation: share })
+          : addSpaceMember(spaceRef, userId, role),
+      hide ? (err) => memberHistoryErrorMessage(err, i18n, 'invite') : ADD_FAILURE,
+      hide
+        ? (result) => {
+            const added = result as { changed?: boolean; historyWindow?: SpaceMemberHistoryWindow } | undefined
+            // An add that changed nothing made no claim to confirm (the person was already here).
+            if (added?.changed !== true) return
+            const confirmed = added.historyWindow
+            setHideOutcome(confirmed?.source === 'member' && confirmed.mode === 'since_join' ? 'confirmed' : 'unconfirmed')
+          }
+        : undefined,
+    )
+  }
+
+  const shareHint = () => {
+    if (!shareHistory()) {
+      return i18n.tr(
+        'Nye medlemmer ser bare meldinger fra de blir med',
+        'New members only see messages from when they join',
+      )
+    }
+    if (props.roomHistoryMode === 'since_join') {
+      return i18n.tr(
+        'Rommets egen innstilling avgjør hva nye medlemmer kan lese',
+        "The room's own setting decides what new members can read",
+      )
+    }
+    return i18n.tr('Nye medlemmer kan lese tidligere meldinger', 'New members can read earlier messages')
+  }
+
+  function togglePicker() {
+    // Closing the picker puts the switch back on: "don't share" is a choice for the people added now.
+    if (open()) setShareHistory(true)
+    setOpen((value) => !value)
   }
 
   return (
@@ -213,7 +297,7 @@ export function SpaceMemberControls(props: SpaceMemberControlsProps) {
         <button
           type="button"
           class="verevon-space-secondary-action"
-          onClick={() => setOpen((value) => !value)}
+          onClick={togglePicker}
         >
           <Users size={15} aria-hidden="true" />
           {open() ? i18n.tr('Lukk', 'Close') : i18n.tr('Legg til personer', 'Add people')}
@@ -241,6 +325,23 @@ export function SpaceMemberControls(props: SpaceMemberControlsProps) {
           {i18n.tr(
             'Endringen er lagret, men tilgangen er ikke bekreftet ennå. Den ordner seg automatisk.',
             'The change is saved, but access is not confirmed yet. It will settle automatically.',
+          )}
+        </p>
+      </Show>
+
+      <Show when={hideOutcome() === 'confirmed'}>
+        <p class="verevon-space-history-share__confirmed" role="status">
+          {i18n.tr(
+            'Personen er lagt til og ser bare meldinger fra de ble med.',
+            'The person was added and only sees messages from when they joined.',
+          )}
+        </p>
+      </Show>
+      <Show when={hideOutcome() === 'unconfirmed'}>
+        <p class="verevon-space-projection-error" role="alert">
+          {i18n.tr(
+            'Personen er lagt til, men vi kunne ikke bekrefte at tidligere meldinger er skjult for dem. Sjekk historikken deres i medlemslisten.',
+            'The person was added, but we could not confirm that earlier messages are hidden from them. Check their history in the member list.',
           )}
         </p>
       </Show>
@@ -314,6 +415,23 @@ export function SpaceMemberControls(props: SpaceMemberControlsProps) {
             </label>
           </Show>
 
+          <Show when={props.memberHistoryWindows === true}>
+            <div class="verevon-space-history-share">
+              <label class="verevon-space-history-share__choice">
+                <input
+                  type="checkbox"
+                  role="switch"
+                  aria-describedby={shareHintId}
+                  checked={shareHistory()}
+                  disabled={busyId() !== undefined}
+                  onChange={(event) => setShareHistory(event.currentTarget.checked)}
+                />
+                <span>{i18n.tr('Del tidligere samtale', 'Share past conversation')}</span>
+              </label>
+              <p id={shareHintId} class="verevon-space-history-share__hint">{shareHint()}</p>
+            </div>
+          </Show>
+
           <Show when={composed()}>
             <DirectoryPicker
               excludeMemberOf={props.spaceRef}
@@ -321,21 +439,7 @@ export function SpaceMemberControls(props: SpaceMemberControlsProps) {
               busyId={busyId()}
               pickLabel={i18n.tr('Legg til', 'Add')}
               pickingLabel={i18n.tr('Legger til …', 'Adding…')}
-              onPickPerson={(person) =>
-                void run(
-                  person.subjectId,
-                  () =>
-                    addSpaceMember(
-                      props.spaceRef,
-                      person.subjectId,
-                      addRoles().includes(addRole()) ? addRole() : undefined,
-                    ),
-                  {
-                    no: 'Personen kunne ikke legges til. Ingenting er endret.',
-                    en: 'That person could not be added. Nothing was changed.',
-                  },
-                )
-              }
+              onPickPerson={(person) => addPerson(person.subjectId)}
             />
           </Show>
 
@@ -353,23 +457,7 @@ export function SpaceMemberControls(props: SpaceMemberControlsProps) {
                     type="button"
                     class="verevon-space-agent__control"
                     disabled={busyId() !== undefined}
-                    onClick={() =>
-                      void run(
-                        member.userId,
-                        () =>
-                          addSpaceMember(
-                            props.spaceRef,
-                            member.userId,
-                            // Only with the writer on, and only a role this caller may grant:
-                            // otherwise the legacy add (no role) is unchanged.
-                            addRoles().includes(addRole()) ? addRole() : undefined,
-                          ),
-                        {
-                          no: 'Personen kunne ikke legges til. Ingenting er endret.',
-                          en: 'That person could not be added. Nothing was changed.',
-                        },
-                      )
-                    }
+                    onClick={() => addPerson(member.userId)}
                   >
                     <Show when={busyId() === member.userId} fallback={i18n.tr('Legg til', 'Add')}>
                       <Loader2 size={14} aria-hidden="true" />
