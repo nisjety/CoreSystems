@@ -2391,3 +2391,138 @@ describe('SpaceRoomComposer — platform commands (WS13-S7)', () => {
     expect(lastCommand).toBeLessThan(firstSkill)
   })
 })
+
+// WS15-S3: markdown authoring in the room box, behind `features.composer_markdown`: a format bar, a
+// Write/Preview toggle, a counter that always shows in a post, and the shortcuts. Off, the box is today's.
+describe('SpaceRoomComposer — markdown authoring (WS15-S3)', () => {
+  const receipt = { threadId: 'thr_md', messageId: 'msg_md_1', sequence: 1, deduplicated: false }
+  const formatBar = () => screen.queryByRole('toolbar', { name: 'Formatering' })
+  // The Preview state hides the textarea, so it is read by element rather than by role.
+  const bodyBox = () => document.querySelector('textarea') as HTMLTextAreaElement
+
+  function renderMarkdown(options: { humanPosts?: boolean; maxChars?: number } = {}) {
+    return render(() => (
+      <SpaceRoomComposer
+        journal={flushingPostJournal()}
+        spaceRef="room-1"
+        roster={() => []}
+        agents={() => []}
+        threads={() => []}
+        humanPostsEnabled={options.humanPosts ? () => true : undefined}
+        viewerRole={() => 'editor'}
+        postMaxChars={options.maxChars === undefined ? undefined : () => options.maxChars}
+      />
+    ))
+  }
+
+  beforeEach(() => {
+    vi.stubEnv('VITE_SPACE_COMPOSER_MARKDOWN', '')
+    vi.stubEnv('VITE_SPACE_COMPOSER_DRAFTS', '')
+    spacesClient.createSpacePost.mockResolvedValue(receipt)
+  })
+
+  afterEach(() => {
+    cleanup()
+    clearSpaceRoomFeatures()
+    window.sessionStorage.clear()
+  })
+
+  it('with the flag off there is no format bar, the box is two rows, and the counter shows only past 80%', () => {
+    publishRoomFeatures({})
+    renderMarkdown({ humanPosts: true, maxChars: 10 })
+    expect(formatBar()).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Forhåndsvis' })).toBeNull()
+    expect(bodyBox().getAttribute('rows')).toBe('2')
+
+    typeInRoomBox('x'.repeat(7))
+    expect(screen.queryByText('7 / 10')).toBeNull()
+    typeInRoomBox('x'.repeat(9))
+    expect(screen.getByText('9 / 10')).toBeTruthy()
+  })
+
+  it('with the flag on the format bar offers bold, italic, code, link, list and quote', () => {
+    publishRoomFeatures({ composer_markdown: true })
+    renderMarkdown()
+    const bar = formatBar() as HTMLElement
+    expect(bar).toBeTruthy()
+    expect(Array.from(bar.querySelectorAll('[data-format]')).map((button) => button.getAttribute('data-format')))
+      .toEqual(['bold', 'italic', 'code', 'link', 'bullet', 'quote'])
+    expect(within(bar).getByRole('button', { name: 'Fet (Ctrl+B)' })).toBeTruthy()
+    expect(within(bar).getByRole('button', { name: 'Lenke (Ctrl+K)' })).toBeTruthy()
+  })
+
+  it('Ctrl+B wraps the selected words in bold and keeps them in the box, and nothing is sent', () => {
+    publishRoomFeatures({ composer_markdown: true })
+    renderMarkdown({ humanPosts: true })
+    typeInRoomBox('hei alle')
+    bodyBox().setSelectionRange(0, 3)
+    fireEvent.keyDown(roomBox(), { key: 'b', ctrlKey: true })
+    flush()
+
+    expect(roomBox().value).toBe('**hei** alle')
+    expect([bodyBox().selectionStart, bodyBox().selectionEnd]).toEqual([2, 5])
+    expect(spacesClient.createSpacePost).not.toHaveBeenCalled()
+    expect(chatClient.streamChat).not.toHaveBeenCalled()
+  })
+
+  it('Preview renders the draft through the chat markdown and hides the box; Write brings the box back', () => {
+    publishRoomFeatures({ composer_markdown: true })
+    renderMarkdown({ humanPosts: true })
+    typeInRoomBox('Hei **alle**')
+    fireEvent.click(screen.getByRole('button', { name: 'Forhåndsvis' }))
+    flush()
+
+    expect(bodyBox().hidden).toBe(true)
+    const preview = screen.getByLabelText('Forhåndsvisning')
+    expect(within(preview).getByText('Hei **alle**')).toBeTruthy()
+    expect(formatBar()).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Skriv' }))
+    flush()
+    expect(bodyBox().hidden).toBe(false)
+    expect(screen.queryByLabelText('Forhåndsvisning')).toBeNull()
+    expect(roomBox().value).toBe('Hei **alle**')
+  })
+
+  it('in a post the counter always shows, and Send is disabled over the post limit', () => {
+    publishRoomFeatures({ composer_markdown: true })
+    renderMarkdown({ humanPosts: true, maxChars: 10 })
+    expect(screen.getByText('0 / 10')).toBeTruthy()
+
+    typeInRoomBox('x'.repeat(11))
+    expect(screen.getByRole('alert').textContent).toContain('11 / 10')
+    expect((screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(spacesClient.createSpacePost).not.toHaveBeenCalled()
+  })
+
+  it('Enter sends the post, and Shift+Enter keeps its newline and sends nothing', async () => {
+    publishRoomFeatures({ composer_markdown: true })
+    renderMarkdown({ humanPosts: true })
+    typeInRoomBox('Hei alle')
+
+    const shiftEnter = new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true, cancelable: true })
+    roomBox().dispatchEvent(shiftEnter)
+    flush()
+    expect(shiftEnter.defaultPrevented).toBe(false)
+    expect(spacesClient.createSpacePost).not.toHaveBeenCalled()
+    expect(roomBox().value).toBe('Hei alle')
+
+    fireEvent.keyDown(roomBox(), { key: 'Enter' })
+    await waitFor(() => expect(spacesClient.createSpacePost).toHaveBeenCalledTimes(1))
+    expect(spacesClient.createSpacePost.mock.calls[0]?.[1]).toMatchObject({ content: 'Hei alle' })
+  })
+
+  it('emptying the box leaves Preview', () => {
+    publishRoomFeatures({ composer_markdown: true })
+    renderMarkdown({ humanPosts: true })
+    typeInRoomBox('Hei')
+    fireEvent.click(screen.getByRole('button', { name: 'Forhåndsvis' }))
+    flush()
+    expect(bodyBox().hidden).toBe(true)
+
+    fireEvent.input(bodyBox(), { target: { value: '' } })
+    flush()
+    expect(bodyBox().hidden).toBe(false)
+    expect(screen.queryByLabelText('Forhåndsvisning')).toBeNull()
+  })
+})
