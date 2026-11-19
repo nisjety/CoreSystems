@@ -93,6 +93,14 @@ pub(crate) fn message_floor_sql((floor_rev, floor_at): (&str, &str)) -> String {
     )
 }
 
+/// D18: whether an instant (a run's start, an approval's request, an event's time) is inside a
+/// member's timestamp floor. `true` with no floor. This is the Rust copy of the `>= floor` predicate
+/// the SQL applies; reads that hold the instant check it again on the rows they return, so a
+/// predicate that drifts in SQL still cannot show a pre-floor row.
+pub(crate) fn floor_admits_at(at: DateTime<Utc>, floor_at: Option<DateTime<Utc>>) -> bool {
+    floor_at.map_or(true, |floor| at >= floor)
+}
+
 /// `audience_window(read)`: the window of a verified Space read, or the unbounded window for an
 /// owner-bound read.
 pub(crate) fn audience_window(read: Option<VerifiedSpaceRead>) -> AudienceWindow {
@@ -168,6 +176,17 @@ mod tests {
         assert_eq!(ceiling_only, AudienceWindow::ceiling_only(Some(7)));
         assert_eq!(ceiling_only.floor, None, "no floor claim: full history up to the ceiling");
         assert!(!ceiling_only.has_floor());
+    }
+
+    #[test]
+    fn a_floor_admits_an_instant_at_or_after_it_and_nothing_before_it() {
+        let floor = DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z").expect("rfc3339").with_timezone(&Utc);
+        let before = floor - chrono::Duration::milliseconds(1);
+        let after = floor + chrono::Duration::milliseconds(1);
+        assert!(floor_admits_at(before, None), "no floor admits every instant");
+        assert!(!floor_admits_at(before, Some(floor)), "a millisecond before the floor is hidden");
+        assert!(floor_admits_at(floor, Some(floor)), "the floor instant itself is admitted");
+        assert!(floor_admits_at(after, Some(floor)));
     }
 
     #[test]

@@ -3913,7 +3913,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 validate_approval_org(&req.org_id)?;
                 caller.authorize_org(&req.org_id)?;
                 retention_receipt::refuse_zdr_continuation(&caller)?;
-                let ceiling = crate::space::approval_member::verify_room_read(
+                let bounds = crate::space::approval_member::verify_room_read(
                     &self.pool,
                     &req.org_id,
                     caller.user_id(),
@@ -3933,7 +3933,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     &self.pool,
                     &req.org_id,
                     &req.space_id,
-                    ceiling,
+                    bounds,
                     &req.run_id,
                     "",
                     state,
@@ -4147,7 +4147,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 || !req.space_read_decision_token.is_empty();
             let row = if room {
                 retention_receipt::refuse_zdr_continuation(&caller)?;
-                let ceiling = crate::space::approval_member::verify_room_read(
+                let bounds = crate::space::approval_member::verify_room_read(
                     &self.pool,
                     &req.org_id,
                     caller.user_id(),
@@ -4161,7 +4161,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     &self.pool,
                     &req.org_id,
                     &req.space_id,
-                    ceiling,
+                    bounds,
                     "",
                     &req.approval_id,
                     "",
@@ -10910,6 +10910,25 @@ mod tests {
             )
         }
 
+        /// [`read_decision`] for a member whose D18 timestamp floor is `floor_at`, as Control signs a window's row.
+        fn read_decision_floored(org: &str, member: &str, space: &str, floor_at: DateTime<Utc>) -> String {
+            mint(
+                crate::grpc::CONTROL_SPACE_DECISION_AUDIENCE,
+                &["thread:read"],
+                false,
+                |claims| {
+                    claims["org_id"] = serde_json::json!(org);
+                    claims["subject_id"] = serde_json::json!(member);
+                    claims["space_ref"] = serde_json::json!(space);
+                    claims["history_floor_at"] = serde_json::json!(floor_at.to_rfc3339());
+                    claims["issued_at"] = serde_json::json!(Utc::now().to_rfc3339());
+                    claims["expires_at"] =
+                        serde_json::json!((Utc::now() + chrono::Duration::minutes(2)).to_rfc3339());
+                },
+                false,
+            )
+        }
+
         /// A Control approval decision for `member` in `space`: `action`, `schema` and `permission`
         /// say what it authorizes and `digest` what it commits to. Signed with the shared test key.
         fn approval_decision(
@@ -11185,6 +11204,63 @@ mod tests {
                 .expect("the owner's approval");
             assert_eq!(owned.decision_reason, "too risky");
             assert!(owned.context.is_some());
+            clean_world(&pool, &w).await;
+        }
+
+        /// WS10-S6 under a D18 window: a member with a timestamp floor reads only the approvals requested at or after it,
+        /// and the single read of one requested before it answers nothing (the same as an approval outside the view).
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+        async fn room_approvals_under_a_timestamp_floor_hide_what_was_requested_before_it() {
+            let Some(pool) = connect().await else {
+                return;
+            };
+            let _keys = StreamKeysEnv::publish();
+            let w = seed_world(&pool, "floor").await;
+            sqlx::query("UPDATE approvals SET requested_at = now() - interval '2 days' WHERE id = $1")
+                .bind(&w.decided)
+                .execute(&pool)
+                .await
+                .expect("request the decided approval two days ago");
+            let token = read_decision_floored(&w.org, "member-2", &w.space, Utc::now() - chrono::Duration::hours(1));
+            let member = VerifiedIdentity::user_for_test(&w.org, "member-2");
+            let (tx, _rx) = broadcast::channel::<proto::OrchestrationEvent>(8);
+            let svc = OrchestrationGrpc::new(pool.clone(), tx);
+
+            let listed = svc
+                .list_approvals(with_caller(
+                    proto::ListApprovalsRequest {
+                        org_id: w.org.clone(),
+                        run_id: String::new(),
+                        space_id: w.space.clone(),
+                        space_read_decision_ref: DECISION_REF.to_owned(),
+                        space_read_decision_token: token.clone(),
+                        ..Default::default()
+                    },
+                    member.clone(),
+                ))
+                .await
+                .expect("a windowed member reads the Space's approvals")
+                .into_inner();
+            let shown: BTreeSet<String> = listed.approvals.iter().map(|approval| approval.id.clone()).collect();
+            assert_eq!(shown, BTreeSet::from([w.open.clone()]), "the approval requested before the floor is hidden");
+
+            let single = svc
+                .get_approval(with_caller(
+                    proto::GetApprovalRequest {
+                        approval_id: w.decided.clone(),
+                        org_id: w.org.clone(),
+                        space_id: w.space.clone(),
+                        space_read_decision_ref: DECISION_REF.to_owned(),
+                        space_read_decision_token: token,
+                    },
+                    member,
+                ))
+                .await
+                .expect("an approval outside the window is not an error")
+                .into_inner()
+                .approval;
+            assert!(single.is_none(), "one requested before the floor is invisible: {single:?}");
             clean_world(&pool, &w).await;
         }
 

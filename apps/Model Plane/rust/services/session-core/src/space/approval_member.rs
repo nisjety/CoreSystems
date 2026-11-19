@@ -26,6 +26,7 @@ use tonic::Status;
 use tracing::warn;
 
 use crate::orchestration_store::ApprovalRow;
+use crate::space::audience_window::floor_admits_at;
 use crate::store::Pool;
 
 /// Typed refusal words on the `x-mp-error-code` trailer.
@@ -408,7 +409,16 @@ pub(crate) fn redact_for_room(approval: &mut pb::Approval) {
     approval.decision_reason.clear();
 }
 
-/// The caller's Space read, verified: the audience ceiling and the membership standing.
+/// What a verified Space read bounds a room approval read by: the audience ceiling and the member's own
+/// history floors (WS04-S11 revision floor, D18 timestamp floor; `None` for full history).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RoomReadBounds {
+    pub(crate) ceiling: i64,
+    pub(crate) floor: Option<i64>,
+    pub(crate) floor_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// The caller's Space read, verified: the audience ceiling, the member's history floors and the membership standing.
 #[allow(clippy::result_large_err)]
 pub(crate) async fn verify_room_read(
     pool: &Pool,
@@ -417,7 +427,7 @@ pub(crate) async fn verify_room_read(
     space_id: &str,
     decision_ref: &str,
     token: &str,
-) -> Result<Option<i64>, Status> {
+) -> Result<Option<RoomReadBounds>, Status> {
     if space_id.trim().is_empty() && decision_ref.trim().is_empty() && token.trim().is_empty() {
         return Ok(None);
     }
@@ -427,21 +437,26 @@ pub(crate) async fn verify_room_read(
     let read = crate::grpc::verify_thread_read_space_decision(token, decision_ref, org_id, user_id, space_id)?
         .ok_or_else(|| Status::invalid_argument("a Space read decision is required"))?;
     refuse_if_revoked(pool, user_id, space_id).await?;
-    Ok(Some(read.recipient_audience_revision))
+    Ok(Some(RoomReadBounds {
+        ceiling: read.recipient_audience_revision,
+        floor: read.history_floor,
+        floor_at: read.history_floor_at,
+    }))
 }
 
 const ROOM_APPROVAL_COLUMNS: &str = "a.id, a.run_id, a.plan_id, a.kind, a.status, a.requested_by, \
      a.decided_by, a.decision_reason, a.org_id, a.user_id, a.idempotency_key, a.metadata, \
      a.requested_at, a.decided_at, a.expires_at, a.continuation_mode, a.consumed_at";
 
-/// Approvals of persistent runs in a Space, inside the audience ceiling. `run_id` and
-/// `approval_id` narrow the read (empty keeps all); `status` keeps one state (empty keeps all).
+/// Approvals of persistent runs in a Space, inside the audience ceiling and the member's history floors. An approval
+/// requested before the member's timestamp floor, or of a run that started before it, is not returned (D18).
+/// `run_id` and `approval_id` narrow the read (empty keeps all); `status` keeps one state (empty keeps all).
 /// Newest first, at most [`sa::MAX_SPACE_APPROVALS`].
 pub(crate) async fn list_room_approvals(
     pool: &Pool,
     org_id: &str,
     space_id: &str,
-    ceiling: i64,
+    bounds: RoomReadBounds,
     run_id: &str,
     approval_id: &str,
     status: &str,
@@ -455,23 +470,32 @@ pub(crate) async fn list_room_approvals(
            AND t.archived_at IS NULL \
            AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $3) \
            AND r.retention_class = 'persistent' \
+           AND ($8::BIGINT IS NULL OR r.recipient_audience_revision IS NULL \
+                OR r.recipient_audience_revision >= $8::BIGINT) \
+           AND ($9::TIMESTAMPTZ IS NULL \
+                OR (r.created_at >= $9::TIMESTAMPTZ AND a.requested_at >= $9::TIMESTAMPTZ)) \
            AND ($4 = '' OR a.run_id = $4) AND ($5 = '' OR a.id = $5) AND ($6 = '' OR a.status = $6) \
          ORDER BY a.requested_at DESC, a.id DESC LIMIT $7"
     );
-    sqlx::query_as::<_, ApprovalRow>(&sql)
+    let mut rows = sqlx::query_as::<_, ApprovalRow>(&sql)
         .bind(org_id)
         .bind(space_id)
-        .bind(ceiling)
+        .bind(bounds.ceiling)
         .bind(run_id)
         .bind(approval_id)
         .bind(status)
         .bind(sa::MAX_SPACE_APPROVALS)
+        .bind(bounds.floor)
+        .bind(bounds.floor_at)
         .fetch_all(pool)
         .await
         .map_err(|error| {
             tracing::error!(%error, "Space approvals read failed");
             Status::unavailable("Space approvals unavailable")
-        })
+        })?;
+    // D18: the same rule on the rows read, so an approval requested before the floor is never returned.
+    rows.retain(|row| floor_admits_at(row.requested_at, bounds.floor_at));
+    Ok(rows)
 }
 
 #[derive(Debug, FromRow)]

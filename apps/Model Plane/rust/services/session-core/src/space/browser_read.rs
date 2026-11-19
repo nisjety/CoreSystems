@@ -30,6 +30,7 @@ use tonic::{Request, Response, Status};
 
 use crate::auth::{authorize_operation, identity, VerifiedIdentity};
 use crate::run_phase::ERROR_CODE_TRAILER;
+use crate::space::audience_window::floor_admits_at;
 
 /// The scope a service caller holds for these reads. A user credential needs no scope
 /// (`authorize_operation`); its org and, for [`resolve_run_space`], its ownership are checked instead.
@@ -175,25 +176,36 @@ const PROJECTED_EVENT_TYPES: &[&str] = &[
 /// One room browser run, joined to its thread, when it is a root browser run of this Space and org inside the
 /// decision's audience ceiling. Anything else is absent, so the caller answers NotFound: there is no oracle
 /// for a run id the viewer may not see.
+///
+/// D18: `$5` is the member's WS04-S11 revision floor and `$6` the timestamp floor (both NULL without a window). A
+/// run is admitted only when it is stamped at or after the revision floor and started at or after the timestamp
+/// floor, the same rule the Space run list applies (`run_service_grpc`).
 const ROOM_RUN_HEADER_SQL: &str = concat!(
     "SELECT r.id AS run_id, r.thread_id AS thread_id, r.user_id AS started_by, ",
     crate::run_phase::run_phase_sql!("r"),
     " AS phase, extract(epoch from r.created_at)::bigint AS started_at_unix, \
+     r.created_at AS created_at, \
      COALESCE(extract(epoch from r.ended_at)::bigint, 0) AS finished_at_unix \
      FROM runs r \
      JOIN threads t ON t.id = r.thread_id \
      JOIN managed_run_terminalization_outbox o ON o.run_id = r.id \
      WHERE r.id = $1 AND r.org_id = $2 AND t.org_id = $2 AND t.space_id = $3 \
        AND r.parent_run_id IS NULL AND o.configured_source = 'gateway_browser' \
-       AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $4)"
+       AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $4) \
+       AND ($5::BIGINT IS NULL OR r.recipient_audience_revision IS NULL \
+            OR r.recipient_audience_revision >= $5::BIGINT) \
+       AND ($6::TIMESTAMPTZ IS NULL OR r.created_at >= $6::TIMESTAMPTZ)"
 );
 
 /// The room's browser runs of one Space, newest first, keyset-paged by `(created_at, id)`. `$3` names one
-/// thread (empty for every thread), `$5` is the last run of the previous page (empty for the first).
+/// thread (empty for every thread), `$5` is the last run of the previous page (empty for the first). `$7` and
+/// `$8` are the member's revision and timestamp floors (D18; NULL without a window), applied as in
+/// [`ROOM_RUN_HEADER_SQL`].
 const ROOM_RUN_LIST_SQL: &str = concat!(
     "SELECT r.id AS run_id, r.thread_id AS thread_id, r.user_id AS started_by, ",
     crate::run_phase::run_phase_sql!("r"),
     " AS phase, extract(epoch from r.created_at)::bigint AS started_at_unix, \
+     r.created_at AS created_at, \
      COALESCE(extract(epoch from r.ended_at)::bigint, 0) AS finished_at_unix \
      FROM runs r \
      JOIN threads t ON t.id = r.thread_id \
@@ -202,6 +214,9 @@ const ROOM_RUN_LIST_SQL: &str = concat!(
        AND r.parent_run_id IS NULL AND o.configured_source = 'gateway_browser' \
        AND ($3 = '' OR r.thread_id = $3) \
        AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $4) \
+       AND ($7::BIGINT IS NULL OR r.recipient_audience_revision IS NULL \
+            OR r.recipient_audience_revision >= $7::BIGINT) \
+       AND ($8::TIMESTAMPTZ IS NULL OR r.created_at >= $8::TIMESTAMPTZ) \
        AND ($5 = '' OR (r.created_at, r.id) < \
             (SELECT c.created_at, c.id FROM runs c WHERE c.id = $5 AND c.org_id = $1)) \
      ORDER BY r.created_at DESC, r.id DESC \
@@ -218,21 +233,25 @@ const ROOM_RUN_ACTING_SQL: &str = "SELECT e.run_id AS run_id, e.event_type AS ev
     ORDER BY e.ts, e.id";
 
 /// One page of a run's projected events after the cursor `(ts, id)`, in time order. Only the projected types
-/// (`$3`) are read, so the database never returns an event type the projector would drop.
+/// (`$3`) are read, so the database never returns an event type the projector would drop. `$7` is the member's
+/// timestamp floor (D18; NULL without a window): an event before it is not read, whatever its run.
 const ROOM_TIMELINE_SQL: &str = "SELECT e.id AS id, e.ts AS ts, e.event_type AS event_type, e.payload AS payload \
     FROM events e \
     WHERE e.org_id = $1 AND e.run_id = $2 AND e.event_type = ANY($3) \
       AND ($4::timestamptz IS NULL OR (e.ts, e.id) > ($4::timestamptz, $5::text)) \
+      AND ($7::TIMESTAMPTZ IS NULL OR e.ts >= $7::TIMESTAMPTZ) \
     ORDER BY e.ts, e.id \
     LIMIT $6";
 
 /// The timestamp of the cursor event, which must belong to the same run.
 const EVENT_CURSOR_SQL: &str = "SELECT ts FROM events WHERE id = $1 AND org_id = $2 AND run_id = $3";
 
-/// Whether the run recorded an observation whose screenshot reference is this evidence id.
+/// Whether the run recorded an observation whose screenshot reference is this evidence id. `$4` is the member's
+/// timestamp floor (D18; NULL without a window): an observation before it does not authorize its screenshot.
 const ROOM_EVIDENCE_SQL: &str = "SELECT 1 FROM events \
     WHERE org_id = $1 AND run_id = $2 AND event_type = 'BROWSER_OBSERVATION_RECEIVED' \
       AND payload->>'screenshot_ref' = $3 \
+      AND ($4::TIMESTAMPTZ IS NULL OR ts >= $4::TIMESTAMPTZ) \
     LIMIT 1";
 
 /// A room browser run's header row (the list's rows and the timeline's header share the shape).
@@ -243,6 +262,8 @@ struct RunHeaderRow {
     started_by: String,
     phase: String,
     started_at_unix: i64,
+    /// The run's own start instant, checked against the member's timestamp floor (D18).
+    created_at: DateTime<Utc>,
     finished_at_unix: i64,
 }
 
@@ -264,11 +285,15 @@ struct TimelineRow {
     payload: Value,
 }
 
-/// The verdict of a room read: the caller it was verified for, the audience ceiling the decision names, and
-/// how long the verdict holds.
+/// The verdict of a room read: the caller it was verified for, the audience ceiling the decision names, the
+/// member's own history floors (D18 and WS04-S11; `None` for full history), and how long the verdict holds.
 struct RoomRead {
     org_id: String,
     audience_revision: i64,
+    /// WS04-S11: the revision floor. A run stamped with an older revision is not shown.
+    floor: Option<i64>,
+    /// D18: the timestamp floor. A run started before it, and any of its events before it, is not shown.
+    floor_at: Option<DateTime<Utc>>,
     valid_until_unix: i64,
 }
 
@@ -324,6 +349,8 @@ async fn authorize_room_read(
     Ok(RoomRead {
         org_id: caller.org_id().to_owned(),
         audience_revision: decision.recipient_audience_revision,
+        floor: decision.history_floor,
+        floor_at: decision.history_floor_at,
         valid_until_unix: decision
             .expires_at
             .timestamp()
@@ -521,8 +548,9 @@ fn fold_run_facts(rows: &[ActingRow]) -> HashMap<String, RunFacts> {
     facts
 }
 
-/// The run's header when it is a room browser run of this Space inside the audience ceiling. Otherwise
-/// NotFound: a run the viewer may not see is indistinguishable from a run that does not exist.
+/// The run's header when it is a room browser run of this Space inside the audience ceiling and the member's
+/// floors. Otherwise NotFound: a run the viewer may not see is indistinguishable from a run that does not exist.
+/// The evidence and timeline reads take their run through here, so a run before the floor is refused for each.
 #[allow(clippy::result_large_err)]
 async fn room_run_header(
     pool: &PgPool,
@@ -535,12 +563,15 @@ async fn room_run_header(
         .bind(&read.org_id)
         .bind(space_id)
         .bind(read.audience_revision)
+        .bind(read.floor)
+        .bind(read.floor_at)
         .fetch_optional(pool)
         .await
         .map_err(|error| {
             tracing::warn!(error = %error, "room browser run header read failed");
             Status::unavailable("browser run is unavailable")
         })?
+        .filter(|row| floor_admits_at(row.created_at, read.floor_at))
         .ok_or_else(|| Status::not_found("run not found"))
 }
 
@@ -675,12 +706,16 @@ impl SpaceBrowserRead for SpaceBrowserReadGrpc {
             .bind(read.audience_revision)
             .bind(&before_run_id)
             .bind(fetch)
+            .bind(read.floor)
+            .bind(read.floor_at)
             .fetch_all(&self.pool)
             .await
             .map_err(|error| {
                 tracing::warn!(error = %error, "list_room_browser_runs failed");
                 Status::unavailable("browser runs are unavailable")
             })?;
+        // D18: a run that started before the member's floor is not listed, whatever the SQL returned.
+        rows.retain(|row| floor_admits_at(row.created_at, read.floor_at));
         let more = rows.len() > limit as usize;
         rows.truncate(limit as usize);
         let next_run_id = if more {
@@ -762,12 +797,15 @@ impl SpaceBrowserRead for SpaceBrowserReadGrpc {
             .bind(after_ts)
             .bind(&after_event_id)
             .bind(fetch)
+            .bind(read.floor_at)
             .fetch_all(&self.pool)
             .await
             .map_err(|error| {
                 tracing::warn!(error = %error, "read_room_browser_timeline failed");
                 Status::unavailable("browser run timeline is unavailable")
             })?;
+        // D18: an event before the member's floor is not shown, whatever the SQL returned.
+        rows.retain(|row| floor_admits_at(row.ts, read.floor_at));
         let more = rows.len() > limit as usize;
         rows.truncate(limit as usize);
         let next_event_id = if more {
@@ -812,6 +850,7 @@ impl SpaceBrowserRead for SpaceBrowserReadGrpc {
             .bind(&read.org_id)
             .bind(&run_id)
             .bind(&evidence_id)
+            .bind(read.floor_at)
             .fetch_optional(&self.pool)
             .await
             .map_err(|error| {
@@ -1929,6 +1968,147 @@ mod tests {
             seed_event(&pool, &org, &first, "BROWSER_ACTION_DISPATCHED", 3, json!({"action_id": "a2", "screenshot_ref": "shot-from-action"})).await;
             let status = authorize_evidence(&pool, &org, VIEWER, &space, &first, "shot-from-action").await.expect_err("not an observation");
             assert_eq!(status.code(), tonic::Code::NotFound, "{status:?}");
+            cleanup(&pool, &org, &space).await;
+        }
+
+        /// A read token for a member whose D18 timestamp floor is `floor_at`, signed by Control as a window's own row.
+        fn read_token_floored(org: &str, user: &str, space: &str, revision: i64, floor_at: DateTime<Utc>) -> String {
+            mint(
+                crate::grpc::CONTROL_SPACE_DECISION_AUDIENCE,
+                &["thread:read"],
+                false,
+                |claims| {
+                    claims["org_id"] = json!(org);
+                    claims["subject_id"] = json!(user);
+                    claims["space_ref"] = json!(space);
+                    claims["recipient_audience_revision"] = json!(revision);
+                    claims["history_floor_at"] = json!(floor_at.to_rfc3339());
+                    claims["issued_at"] = json!(Utc::now().to_rfc3339());
+                    claims["expires_at"] = json!((Utc::now() + chrono::Duration::minutes(2)).to_rfc3339());
+                },
+                false,
+            )
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+        async fn a_member_with_a_timestamp_floor_reads_no_run_or_event_from_before_it_on_any_room_read() {
+            let Some(pool) = connect().await else { return };
+            let _keys = StreamKeysEnv::publish();
+            let (org, space, suffix) = ids("floor");
+            let (_, earlier) = seed_observed_run(&pool, &org, &space, &format!("earlier-{suffix}"), "shot-earlier").await;
+            let (_, later) = seed_observed_run(&pool, &org, &space, &format!("later-{suffix}"), "shot-later").await;
+            // The floor is an hour ago. The earlier run started two days ago; the later run started now.
+            sqlx::query("UPDATE runs SET created_at = now() - interval '2 days' WHERE id = $1")
+                .bind(&earlier)
+                .execute(&pool)
+                .await
+                .expect("date the earlier run before the floor");
+            // The later run's observation is dated before the floor as well: an event is floored on its own instant.
+            sqlx::query(
+                "UPDATE events SET ts = now() - interval '2 days' \
+                 WHERE run_id = $1 AND event_type = 'BROWSER_OBSERVATION_RECEIVED'",
+            )
+            .bind(&later)
+            .execute(&pool)
+            .await
+            .expect("date the observation before the floor");
+            let floor = Utc::now() - chrono::Duration::hours(1);
+            let token = read_token_floored(&org, VIEWER, &space, CEILING, floor);
+
+            // Without the window the member reads the earlier run, so the window is what hides it.
+            list_runs(&pool, &org, VIEWER, &space, "").await.expect("the unwindowed list reads");
+            read_timeline(&pool, &org, VIEWER, &space, &earlier).await.expect("the unwindowed timeline reads");
+
+            let store = SpaceBrowserReadGrpc::new(pool.clone());
+            let listed = store
+                .list_room_browser_runs(request_for(
+                    pb::ListRoomBrowserRunsRequest {
+                        space_id: space.clone(),
+                        thread_id: String::new(),
+                        limit: 0,
+                        before_run_id: String::new(),
+                        space_read_decision_ref: DECISION_REF.to_owned(),
+                        space_read_decision_token: token.clone(),
+                    },
+                    &org,
+                    VIEWER,
+                ))
+                .await
+                .expect("the windowed list reads")
+                .into_inner();
+            let ids_listed: Vec<&str> = listed.runs.iter().map(|run| run.run_id.as_str()).collect();
+            assert_eq!(ids_listed, vec![later.as_str()], "only the run started after the floor is listed");
+
+            // The earlier run is NotFound on its header, its timeline and its evidence, the same as a run that is absent.
+            let timeline = store
+                .read_room_browser_timeline(request_for(
+                    pb::ReadRoomBrowserTimelineRequest {
+                        space_id: space.clone(),
+                        run_id: earlier.clone(),
+                        after_event_id: String::new(),
+                        limit: 0,
+                        space_read_decision_ref: DECISION_REF.to_owned(),
+                        space_read_decision_token: token.clone(),
+                    },
+                    &org,
+                    VIEWER,
+                ))
+                .await
+                .expect_err("a run before the floor has no timeline");
+            assert_eq!(timeline.code(), tonic::Code::NotFound, "{timeline:?}, {NEEDS_DB}");
+            let evidence = store
+                .authorize_room_browser_evidence(request_for(
+                    pb::AuthorizeRoomBrowserEvidenceRequest {
+                        space_id: space.clone(),
+                        run_id: earlier.clone(),
+                        evidence_id: "shot-earlier".to_owned(),
+                        space_read_decision_ref: DECISION_REF.to_owned(),
+                        space_read_decision_token: token.clone(),
+                    },
+                    &org,
+                    VIEWER,
+                ))
+                .await
+                .expect_err("a screenshot of a run before the floor is not authorized");
+            assert_eq!(evidence.code(), tonic::Code::NotFound, "{evidence:?}");
+
+            // The later run's timeline omits the observation dated before the floor, and its screenshot is not authorized.
+            let kept = store
+                .read_room_browser_timeline(request_for(
+                    pb::ReadRoomBrowserTimelineRequest {
+                        space_id: space.clone(),
+                        run_id: later.clone(),
+                        after_event_id: String::new(),
+                        limit: 0,
+                        space_read_decision_ref: DECISION_REF.to_owned(),
+                        space_read_decision_token: token.clone(),
+                    },
+                    &org,
+                    VIEWER,
+                ))
+                .await
+                .expect("the later run reads")
+                .into_inner();
+            assert!(
+                kept.events.iter().all(|event| event.evidence_id != "shot-later"),
+                "the observation dated before the floor is not shown: {kept:?}"
+            );
+            let dated_before = store
+                .authorize_room_browser_evidence(request_for(
+                    pb::AuthorizeRoomBrowserEvidenceRequest {
+                        space_id: space.clone(),
+                        run_id: later.clone(),
+                        evidence_id: "shot-later".to_owned(),
+                        space_read_decision_ref: DECISION_REF.to_owned(),
+                        space_read_decision_token: token.clone(),
+                    },
+                    &org,
+                    VIEWER,
+                ))
+                .await
+                .expect_err("a screenshot whose observation is before the floor is not authorized");
+            assert_eq!(dated_before.code(), tonic::Code::NotFound, "{dated_before:?}");
             cleanup(&pool, &org, &space).await;
         }
     }

@@ -35,6 +35,7 @@ use sqlx::PgPool;
 use tonic::Status;
 
 use crate::auth::{authorize_operation, VerifiedIdentity, ZdrWaiver};
+use crate::space::audience_window::floor_admits_at;
 
 /// The most a validity window may reach past now, whatever the decision's own expiry: the caller
 /// asks again long before this.
@@ -60,38 +61,60 @@ struct AttachRow {
     waiver_connection_id: Option<String>,
     waiver_ack_id: Option<String>,
     started_at_unix: i64,
+    /// The run's start instant, checked against the member's timestamp floor (D18).
+    created_at: chrono::DateTime<Utc>,
 }
 
 /// The run joined to its thread, when it is a root run of a thread of this Space and org inside the
-/// decision's audience ceiling. Anything else is `NotFound`: there is no oracle for a run id the viewer
-/// may not see.
+/// decision's audience ceiling and the member's history floors. Anything else is `NotFound`: there is no
+/// oracle for a run id the viewer may not see. A run that started before the member's timestamp floor
+/// (D18) is refused the same way: its live output may be built from the history the window hides.
 async fn fetch_attach_row(
     pool: &PgPool,
     run_id: &str,
     org_id: &str,
     space_id: &str,
     audience_revision: i64,
+    floor_revision: Option<i64>,
+    floor_at: Option<chrono::DateTime<Utc>>,
 ) -> Result<AttachRow, Status> {
     let query = concat!(
         "SELECT r.thread_id AS thread_id, r.user_id AS owner_subject_id, ",
         crate::run_phase::run_phase_sql!("r"),
         " AS run_phase, r.retention_class AS retention_class, \
          r.waiver_connection_id AS waiver_connection_id, r.waiver_ack_id AS waiver_ack_id, \
-         extract(epoch from r.created_at)::bigint AS started_at_unix \
+         extract(epoch from r.created_at)::bigint AS started_at_unix, \
+         r.created_at AS created_at \
          FROM runs r JOIN threads t ON t.id = r.thread_id \
          WHERE r.id = $1 AND r.org_id = $2 AND t.org_id = $2 AND t.space_id = $3 \
            AND r.parent_run_id IS NULL \
-           AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $4)"
+           AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $4) \
+           AND ($5::BIGINT IS NULL OR r.recipient_audience_revision IS NULL \
+                OR r.recipient_audience_revision >= $5::BIGINT) \
+           AND ($6::TIMESTAMPTZ IS NULL OR r.created_at >= $6::TIMESTAMPTZ)"
     );
-    sqlx::query_as(query)
+    let row = sqlx::query_as::<_, AttachRow>(query)
         .bind(run_id)
         .bind(org_id)
         .bind(space_id)
         .bind(audience_revision)
+        .bind(floor_revision)
+        .bind(floor_at)
         .fetch_optional(pool)
         .await
         .map_err(|error| Status::internal(error.to_string()))?
-        .ok_or_else(|| Status::not_found("run not found"))
+        .ok_or_else(|| Status::not_found("run not found"))?;
+    admit_started_at(row, floor_at)
+}
+
+/// D18: a run that started before the member's timestamp floor is `NotFound`, the same answer as a run
+/// the viewer may not see. The SQL applies the same rule; this check holds on the row that was read.
+fn admit_started_at(row: AttachRow, floor_at: Option<chrono::DateTime<Utc>>) -> Result<AttachRow, Status> {
+    if floor_admits_at(row.created_at, floor_at) {
+        Ok(row)
+    } else {
+        Err(Status::not_found("run not found"))
+    }
 }
 
 /// The route a live view of this run is decided on. A persistent run names no connection, so its route
@@ -184,6 +207,8 @@ pub(crate) async fn authorize_room_run_attach(
         caller.org_id(),
         space_id,
         decision.recipient_audience_revision,
+        decision.history_floor,
+        decision.history_floor_at,
     )
     .await?;
     let (provider, connection) = live_route(&row, caller.zdr_waiver())?;
@@ -217,11 +242,23 @@ mod tests {
             waiver_connection_id: connection.map(str::to_owned),
             waiver_ack_id: ack.map(str::to_owned),
             started_at_unix: 0,
+            created_at: chrono::DateTime::from_timestamp(0, 0).expect("the epoch"),
         }
     }
 
     fn holder(connection: &str, ack: &str) -> VerifiedIdentity {
         VerifiedIdentity::user_for_test_with_waiver("org-1", "viewer-1", connection, ack)
+    }
+
+    #[test]
+    fn a_run_that_started_before_the_members_floor_is_not_found_and_one_after_it_is_served() {
+        let at = |secs: i64| chrono::DateTime::from_timestamp(1_800_000_000 + secs, 0).expect("valid test time");
+        let started = |secs: i64| AttachRow { created_at: at(secs), ..row("persistent", None, None) };
+        let floor = Some(at(100));
+        let refusal = admit_started_at(started(99), floor).err().map(|status| status.code());
+        assert_eq!(refusal, Some(tonic::Code::NotFound), "a run started before the floor is refused");
+        assert!(admit_started_at(started(100), floor).is_ok(), "a run started at the floor is served");
+        assert!(admit_started_at(started(0), None).is_ok(), "no floor admits every run the ceiling admits");
     }
 
     #[test]
@@ -282,7 +319,7 @@ mod tests {
         .await
         .expect("the waived run");
 
-        let fetched = fetch_attach_row(&pool, run, org, space, i64::MAX)
+        let fetched = fetch_attach_row(&pool, run, org, space, i64::MAX, None, None)
             .await
             .expect("the run is inside the audience");
         assert_eq!(fetched.retention_class, "zdr_waived");
@@ -314,7 +351,7 @@ mod tests {
         .await
         .expect("the persistent run");
 
-        let fetched = fetch_attach_row(&pool, run, org, space, i64::MAX)
+        let fetched = fetch_attach_row(&pool, run, org, space, i64::MAX, None, None)
             .await
             .expect("the run is inside the audience");
         let got = live_route(&fetched, None).expect("persistent");
