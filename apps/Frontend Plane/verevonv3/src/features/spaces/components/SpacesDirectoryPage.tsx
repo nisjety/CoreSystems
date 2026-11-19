@@ -1,5 +1,5 @@
 import { useNavigate } from '@solidjs/router'
-import { createSignal, For, onCleanup, Show } from 'solid-js'
+import { createSignal, For, onCleanup, onSettled, Show } from 'solid-js'
 
 import {
   getSpaceMembership,
@@ -171,21 +171,25 @@ export default function SpacesDirectoryPage() {
     } catch (err) {
       if (disposed) return
       setRoomProgress(room.spaceRef, null)
+      const message = translateApiError(err, i18n.tr, {
+        no: 'Du kunne ikke bli med i rommet. Ingenting er endret.',
+        en: 'You could not join the room. Nothing was changed.',
+      })
       if (hasErrorCode(err, 'room_not_found')) {
-        // The room closed, was archived or was removed since the list loaded.
+        // The room closed, was archived or was removed since the list loaded. Its row leaves the list, so
+        // the sentence goes where the list is: a row error on a row that is gone would never be seen.
         setRooms((current) => current.filter((item) => item.spaceRef !== room.spaceRef))
+        setLoadError(message)
+        return
       }
-      setRoomError(
-        room.spaceRef,
-        translateApiError(err, i18n.tr, {
-          no: 'Du kunne ikke bli med i rommet. Ingenting er endret.',
-          en: 'You could not join the room. Nothing was changed.',
-        }),
-      )
+      setRoomError(room.spaceRef, message)
     }
   }
 
-  void load('')
+  // The first read starts once the page is on screen: a write from the component body is not allowed in Solid 2.
+  onSettled(() => {
+    void load('')
+  })
 
   const roleLabel = (role: DirectoryRoom['joinRole']) =>
     role === 'editor' ? i18n.tr('redaktør', 'editor') : i18n.tr('leser', 'viewer')
@@ -200,7 +204,8 @@ export default function SpacesDirectoryPage() {
             'Rooms in your organization that are open to everyone. Private rooms are never listed, and joining gives access to that room only.',
           )}
         </p>
-        <Show when={state() === 'ready' && enabled()}>
+        {/* Kept mounted across a search: a reload must not tear the box down and lose the person's place in it. */}
+        <Show when={enabled() && state() !== 'feature_off'}>
           <label class="verevon-space-directory__search">
             <Search size={15} aria-hidden="true" />
             <span class="sr-only">{i18n.tr('Søk i rom', 'Search rooms')}</span>
@@ -313,9 +318,9 @@ export default function SpacesDirectoryPage() {
               {loadingMore() ? i18n.tr('Laster …', 'Loading…') : i18n.tr('Vis flere', 'Show more')}
             </button>
           </Show>
-          <Show when={loadError()}>
-            <p class="verevon-space-projection-error" role="alert">{loadError()}</p>
-          </Show>
+        </Show>
+        <Show when={loadError()}>
+          <p class="verevon-space-projection-error" role="alert">{loadError()}</p>
         </Show>
       </Show>
     </section>
