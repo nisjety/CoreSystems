@@ -6,12 +6,13 @@
 //! several of them also took `1`, `yes`, `on` or `true` in another case or with surrounding whitespace.
 //! A live environment that still sets one of those spellings now reads as off, silently.
 //!
-//! This module changes no reader and no switch value. [`warn_former_spellings`] logs one warning per
-//! such switch at startup, so the mismatch shows in the logs and not only as a missing route. Each
-//! listed switch is read once, by `build_state` in `config.rs`; the source scan in the tests keeps a
-//! handler from reading one from the environment per request.
+//! This module changes no reader and no switch value. [`warn_former_spellings`] writes one line per
+//! such switch to stderr at startup, so the mismatch shows in the logs and not only as a missing route.
+//! It is not a `tracing` event: the binary reads `RUST_LOG` as `error` when it is unset, and that level
+//! drops a `warn!`. Each listed switch is read once, by `build_state` in `config.rs`; the source scan in
+//! the tests keeps a handler from reading one from the environment per request.
 
-use tracing::warn;
+use std::io::Write;
 
 use crate::config::{
     BFF_EXACT_TRUE_SPACE_SWITCHES, BROWSER_EXACT_TRUE_SWITCHES, MODEL_PLANE_EXACT_TRUE_SWITCHES,
@@ -59,15 +60,27 @@ pub(crate) fn former_spellings(
         .collect()
 }
 
-/// Logs one warning for each listed switch that is set to a former spelling. Called once, at startup,
-/// before the listener opens. It changes no switch: each one keeps the reading it had.
+/// Writes the startup report to stderr: one line for each listed switch that is set to a former spelling.
+/// Called once, at startup, before the listener opens. It changes no switch: each one keeps the reading it
+/// had. Stderr is shown at every log level, as the startup refusals in `config.rs` are.
 pub(crate) fn warn_former_spellings() {
-    for (name, exact_value) in former_spellings(|name| std::env::var(name).ok()) {
-        warn!(
-            switch = name,
-            exact_value,
-            "switch is set to a value its exact reader does not take, so it reads as off; \
-             set it to exactly this value to turn it on"
+    write_former_spellings(&mut std::io::stderr().lock(), |name| {
+        std::env::var(name).ok()
+    });
+}
+
+/// Writes the report to `out` for any lookup. Each line names the switch and the exact value that turns it
+/// on. It never repeats the value the switch was set to.
+pub(crate) fn write_former_spellings(
+    out: &mut impl Write,
+    lookup: impl Fn(&str) -> Option<String>,
+) {
+    for (name, exact_value) in former_spellings(lookup) {
+        // A failed write to stderr must not stop the gateway from starting, so the error is dropped.
+        let _ = writeln!(
+            out,
+            "WARN: {name} is set to a value its exact reader does not take, so it reads as off; \
+             set it to exactly `{exact_value}` to turn it on"
         );
     }
 }
@@ -171,6 +184,68 @@ mod tests {
                 ("ALLOW_INSECURE_DEV_DEFAULTS", "1"),
             ]
         );
+    }
+
+    /// The report as written for the given `(name, value)` environment.
+    fn report(env: &[(&'static str, &'static str)]) -> String {
+        let mut out = Vec::new();
+        write_former_spellings(&mut out, |name| {
+            env.iter()
+                .find(|(set, _)| *set == name)
+                .map(|(_, value)| (*value).to_owned())
+        });
+        String::from_utf8(out).expect("the report is UTF-8")
+    }
+
+    /// One plain line per former spelling, in table order, each naming the switch and its exact value.
+    #[test]
+    fn the_report_writes_one_line_per_former_spelling_naming_the_exact_value() {
+        let text = report(&[("SPACE_TIMELINE_API", "1"), ("BROWSER_TAB_MENTIONS", "yes")]);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert!(
+            lines[0].starts_with(
+                "WARN: SPACE_TIMELINE_API is set to a value its exact reader does not take"
+            ),
+            "{text}"
+        );
+        assert!(
+            lines[0].ends_with("set it to exactly `true` to turn it on"),
+            "{text}"
+        );
+        assert!(
+            lines[1].starts_with("WARN: BROWSER_TAB_MENTIONS "),
+            "{text}"
+        );
+        assert!(
+            lines[1].ends_with("set it to exactly `true` to turn it on"),
+            "{text}"
+        );
+    }
+
+    /// Nothing is written for an exact value, an off word, or an unset environment.
+    #[test]
+    fn the_report_writes_nothing_for_an_exact_value_an_off_word_or_an_unset_environment() {
+        for (name, exact_value) in reported_switches() {
+            assert_eq!(report(&[(name, exact_value)]), "", "{name}={exact_value:?}");
+            for off in ["", "0", "false", "off", "no", "garbage"] {
+                assert_eq!(report(&[(name, off)]), "", "{name}={off:?}");
+            }
+        }
+        assert_eq!(report(&[]), "");
+    }
+
+    /// The line never repeats the value the switch was set to, and names the gate's exact `1`.
+    #[test]
+    fn the_report_names_the_gate_and_never_repeats_the_value_it_was_set_to() {
+        let text = report(&[("ALLOW_INSECURE_DEV_DEFAULTS", " TRUE ")]);
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(text.contains("ALLOW_INSECURE_DEV_DEFAULTS"), "{text}");
+        assert!(
+            text.ends_with("set it to exactly `1` to turn it on\n"),
+            "{text}"
+        );
+        assert!(!text.contains("TRUE"), "{text}");
     }
 
     /// The production source files of the crate, outside `config.rs` and this file.

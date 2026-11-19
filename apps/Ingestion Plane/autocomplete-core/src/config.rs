@@ -225,4 +225,59 @@ mod tests {
         assert!(!placeholder_token_refused(None, None));
         assert!(!placeholder_token_refused(None, Some("0")));
     }
+
+    /// Boot itself refuses the placeholder. `Settings::from_env` is the boot path, so this drives it
+    /// through the process environment. The lock keeps these changes from overlapping another test's,
+    /// and the guard restores each variable it touched, even when an assertion fails.
+    #[test]
+    fn boot_refuses_a_change_me_token_unless_the_insecure_switch_is_exactly_one() {
+        use std::sync::Mutex;
+
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+        struct RestoreEnv(Vec<(&'static str, Option<String>)>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                for (name, value) in &self.0 {
+                    match value {
+                        Some(value) => env::set_var(name, value),
+                        None => env::remove_var(name),
+                    }
+                }
+            }
+        }
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let _restore = RestoreEnv(
+            [
+                "AUTOCOMPLETE_HTTP_ADDR",
+                "AUTOCOMPLETE_INTERNAL_TOKEN",
+                "ALLOW_INSECURE_DEV_DEFAULTS",
+                "ISOLATED_E2E",
+            ]
+            .into_iter()
+            .map(|name| (name, env::var(name).ok()))
+            .collect(),
+        );
+        let boot = |token: &str, insecure: Option<&str>| {
+            env::set_var("AUTOCOMPLETE_HTTP_ADDR", "127.0.0.1:0");
+            env::set_var("AUTOCOMPLETE_INTERNAL_TOKEN", token);
+            env::remove_var("ISOLATED_E2E");
+            match insecure {
+                Some(value) => env::set_var("ALLOW_INSECURE_DEV_DEFAULTS", value),
+                None => env::remove_var("ALLOW_INSECURE_DEV_DEFAULTS"),
+            }
+            Settings::from_env()
+        };
+
+        let placeholder = "change-me-internal-service-secret";
+        let refused = boot(placeholder, None).expect_err("a change-me token must not boot");
+        let message = refused.to_string();
+        assert!(message.contains("change-me placeholder"), "{message}");
+        for insecure in ["true", "TRUE", "yes", " 1", "0"] {
+            assert!(boot(placeholder, Some(insecure)).is_err(), "{insecure:?}");
+        }
+        assert!(boot(placeholder, Some("1")).is_ok());
+        assert!(boot("shared-token-fixture-aaaaaaaaaaaaaaaaaaaa", None).is_ok());
+    }
 }

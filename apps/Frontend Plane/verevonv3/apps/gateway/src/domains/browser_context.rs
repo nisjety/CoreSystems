@@ -53,7 +53,7 @@ use super::browser::{
 /// Route path of the re-resolution (E3.3-c).
 pub(crate) const TAB_MENTIONS_PATH: &str =
     "/api/v1/browser/sessions/{session_id}/context/tab-mentions";
-/// Environment switch for the route. Off unless set to 1, true, yes or on.
+/// Environment switch for the route. Off unless set to exactly `true` (V3e-bff-3).
 pub(crate) const TAB_MENTIONS_FLAG: &str = "BROWSER_TAB_MENTIONS";
 /// Mentions one turn may carry.
 const MENTIONS_MAX: usize = 8;

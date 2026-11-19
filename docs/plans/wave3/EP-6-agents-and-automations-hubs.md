@@ -83,7 +83,7 @@ Design scope rule from the computed task: phase 1 is designed in full, phase 2 a
 | WS20-S7 outcome notice | partial | D2-841/846 (no emitter) | yes; manual fires get the same notice once it exists |
 | WS20-S8 guards | done (default off) | D2-877/882 (rollout default), D2-881 (renewal = new schedule) | yes; hub reuses Renew |
 | WS24-S5 model-access classification | done | none blocking | n/a phase 1 |
-| WS24-S6 admission table | partial (`MODEL_ACTION_ADMISSION` default `tickets_only`) | see W2-17 results | S11 waits |
+| WS24-S6 admission table | partial (`MODEL_ACTION_ADMISSION` unset, which reports mode `tickets_only`) | see W2-17 results | S11 waits |
 | WS25-S6 agent modes, strictest-wins resolve | partial (`AGENT_MODES` off) | see W2-41 results | S9 waits |
 | WS25-S7 org agent policy | done | none | DEC-14 join (OD-5) |
 | WS05-S1/S3 class vocabulary and registry binding | done | none | S7 tool allowlist binds to capability ids |

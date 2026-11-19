@@ -282,9 +282,13 @@ impl MessageRevisionService for MessageRevisionGrpc {
                 .fetch_optional(&self.pool)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
-            let (role, revision_state) =
-                row.ok_or_else(|| coded(Status::not_found("message not found"), "message_not_found"))?;
-            Ok(Response::new(pb::ResolveMessageTargetResponse { role, revision_state }))
+            let (role, revision_state) = row.ok_or_else(|| {
+                coded(Status::not_found("message not found"), "message_not_found")
+            })?;
+            Ok(Response::new(pb::ResolveMessageTargetResponse {
+                role,
+                revision_state,
+            }))
         }
         .await;
         record_metrics("resolve_message_target", started, result.is_ok());

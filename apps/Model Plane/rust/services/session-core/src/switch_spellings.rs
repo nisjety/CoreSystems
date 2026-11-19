@@ -224,7 +224,8 @@ mod tests {
     }
 
     /// The startup report writes one warning per unreadable mode switch, naming the switch, and
-    /// never the value the switch was set to.
+    /// never the value the switch was set to. A padded, cased `enforce` is unreadable too: it reads
+    /// as report, and the report names it.
     #[test]
     fn the_startup_report_names_each_unreadable_mode_switch_and_never_its_value() {
         let lines = crate::test_log_capture::CapturedLines::default();
@@ -232,7 +233,7 @@ mod tests {
             warn_unreadable_from(|set| {
                 [
                     (crate::write_policy::MODE_ENV, "maybe-a-junk-word"),
-                    (mp_contracts::skill_lint::MODE_ENV, "report"),
+                    (mp_contracts::skill_lint::MODE_ENV, " ENFORCE\r\n"),
                     (mp_contracts::retention::SPACE_ZDR_ENV, "true"),
                 ]
                 .into_iter()
@@ -241,22 +242,21 @@ mod tests {
             });
         });
         let logged = lines.lines();
-        assert_eq!(logged.len(), 2, "{logged:?}");
-        assert!(
-            logged[0].starts_with("WARN ")
-                && logged[0].contains(&format!("switch=\"{}\"", crate::write_policy::MODE_ENV)),
-            "{logged:?}"
-        );
-        assert!(
-            logged[1].starts_with("WARN ")
-                && logged[1].contains(&format!(
-                    "switch=\"{}\"",
-                    mp_contracts::retention::SPACE_ZDR_ENV
-                )),
-            "{logged:?}"
-        );
+        assert_eq!(logged.len(), 3, "{logged:?}");
+        let named = [
+            crate::write_policy::MODE_ENV,
+            mp_contracts::skill_lint::MODE_ENV,
+            mp_contracts::retention::SPACE_ZDR_ENV,
+        ];
+        for (line, name) in logged.iter().zip(named) {
+            assert!(
+                line.starts_with("WARN ") && line.contains(&format!("switch=\"{name}\"")),
+                "{logged:?}"
+            );
+        }
         for line in &logged {
             assert!(!line.contains("maybe-a-junk-word"), "{line}");
+            assert!(!line.contains("ENFORCE"), "{line}");
             assert!(!line.contains("true"), "{line}");
         }
     }
