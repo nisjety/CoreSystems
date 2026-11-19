@@ -6,12 +6,17 @@ import {
   createPersonalAgent,
   getPersonalAgentsFeature,
   listPersonalAgents,
+  listSpaces,
   setPrimaryPersonalAgent,
+  withdrawSpaceAgent,
   type PersonalAgent,
+  type PersonalAgentRoom,
 } from '@/shared/api/spaces-client'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { SpaceAgentAccessDialog } from '@/features/spaces/components/SpaceAgentAccessDialog'
+import { SpaceConfirmButton } from '@/features/spaces/components/SpaceConfirmButton'
+import { spaceDisplayName } from '@/features/spaces/lib/space-name'
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
 
 const MIN_NAME_LENGTH = 2
@@ -36,6 +41,19 @@ export function PersonalAgentsSection() {
   const [list, { refetch }] = createResource(
     () => (available() ? true : undefined),
     () => listPersonalAgents(),
+  )
+
+  // The rooms' names, so a row can say which room an agent is in. A failed read leaves the rooms unnamed, never hides them.
+  const [roomNames] = createResource(
+    () => (available() ? true : undefined),
+    async () => {
+      try {
+        const spaces = await listSpaces()
+        return new Map(spaces.map((space) => [space.space_ref, spaceDisplayName(space, i18n.tr)] as const))
+      } catch {
+        return new Map<string, string>()
+      }
+    },
   )
 
   const [name, setName] = createSignal('')
@@ -76,6 +94,41 @@ export function PersonalAgentsSection() {
     } finally {
       setCreating(false)
     }
+  }
+
+  // Taking an agent out of one room. Its owner may do it from here whatever their role in the room is, or whether they are
+  // still in it (the room card offers it to the room's owner and managers only); Control decides on every call. The agent
+  // is kept and can be added again.
+  const [withdrawing, setWithdrawing] = createSignal<string | null>(null)
+  const [withdrawError, setWithdrawError] = createSignal<string | null>(null)
+
+  async function withdrawFromRoom(agent: PersonalAgent, room: PersonalAgentRoom): Promise<void> {
+    if (withdrawing() !== null) return
+    setWithdrawing(`${agent.agentRef}
+${room.spaceRef}`)
+    setWithdrawError(null)
+    try {
+      await withdrawSpaceAgent(room.spaceRef, agent.agentRef)
+      await refetch()
+    } catch (error) {
+      setWithdrawError(
+        translateApiError(error, i18n.tr, {
+          no: 'Agenten kunne ikke tas ut av rommet. Den deltar fortsatt i rommet.',
+          en: 'The agent could not be taken out of the room. It is still taking part in the room.',
+        }),
+      )
+    } finally {
+      setWithdrawing(null)
+    }
+  }
+
+  const roomLabel = (spaceRef: string) =>
+    roomNames()?.get(spaceRef) ?? i18n.tr('Et rom du ikke er medlem av', 'A room you are not a member of')
+
+  const roomStateLabel = (state: PersonalAgentRoom['state']) => {
+    if (state === 'pending') return i18n.tr('Venter', 'Pending')
+    if (state === 'paused') return i18n.tr('På pause', 'Paused')
+    return i18n.tr('Aktiv', 'Active')
   }
 
   const [primaryBusy, setPrimaryBusy] = createSignal(false)
@@ -204,6 +257,14 @@ export function PersonalAgentsSection() {
         )}
       </Show>
 
+      <Show when={withdrawError()}>
+        {(message) => (
+          <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
+            {message()}
+          </p>
+        )}
+      </Show>
+
       <Show when={list.error ? undefined : list()}>
         <Show
           when={list()?.agents.length}
@@ -226,6 +287,38 @@ export function PersonalAgentsSection() {
                         {i18n.tr('Primær agent', 'Primary agent')}
                       </Show>
                     </p>
+                    <Show when={agent.rooms.length > 0}>
+                      <ul
+                        class="verevon-settings-subnote"
+                        aria-label={i18n.tr(
+                          `Rom ${agent.name.trim() || 'agenten'} er i`,
+                          `Rooms ${agent.name.trim() || 'the agent'} is in`,
+                        )}
+                      >
+                        <For each={agent.rooms}>
+                          {(room) => (
+                            <li>
+                              <span>{roomLabel(room.spaceRef)}</span>
+                              {' · '}
+                              <span>{roomStateLabel(room.state)}</span>{' '}
+                              <SpaceConfirmButton
+                                label={i18n.tr('Ta ut av rommet', 'Withdraw from room')}
+                                confirmLabel={i18n.tr(
+                                  `Bekreft at ${agent.name.trim() || 'agenten'} tas ut av ${roomLabel(room.spaceRef)}`,
+                                  `Confirm withdrawing ${agent.name.trim() || 'the agent'} from ${roomLabel(room.spaceRef)}`,
+                                )}
+                                consequence={i18n.tr(
+                                  'Du beholder agenten og kan legge den til i rommet igjen senere.',
+                                  'You keep the agent and can add it to the room again later.',
+                                )}
+                                disabled={withdrawing() !== null}
+                                onConfirm={() => void withdrawFromRoom(agent, room)}
+                              />
+                            </li>
+                          )}
+                        </For>
+                      </ul>
+                    </Show>
                   </div>
                   <div>
                     <SettingsButton settingsSize="sm" onClick={() => setAccessRef(agent.agentRef)}>

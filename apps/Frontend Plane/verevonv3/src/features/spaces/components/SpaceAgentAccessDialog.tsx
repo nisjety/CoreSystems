@@ -5,6 +5,7 @@ import { Loader2, X } from '@/shared/icons'
 import {
   getPersonalAgentAccess,
   updatePersonalAgentAccess,
+  type DirectoryPerson,
   type PersonalAgentAddPolicy,
   type PersonalAgentEntry,
   type PersonalAgentEntryRole,
@@ -13,6 +14,7 @@ import {
 import { hasErrorCode } from '@/shared/api/api-error'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
+import { DirectoryPicker } from './DirectoryPicker'
 
 /** The most people one agent's access list may name (the limit the gateway and Control enforce). */
 const MAX_ENTRIES = 200
@@ -59,6 +61,9 @@ export function SpaceAgentAccessDialog(props: SpaceAgentAccessDialogProps) {
   const [entries, setEntries] = createSignal<readonly PersonalAgentEntry[]>([])
   const [principalDraft, setPrincipalDraft] = createSignal('')
   const [roleDraft, setRoleDraft] = createSignal<PersonalAgentEntryRole>('collaborator')
+  // The names of people picked from the directory, by their id. The access read carries ids only, so a person added
+  // here is named for as long as the dialog lives; one that was already on the list shows by id until the gateway names them.
+  const [pickedNames, setPickedNames] = createSignal<ReadonlyMap<string, string>>(new Map())
   const [entryError, setEntryError] = createSignal<string | null>(null)
   const [saving, setSaving] = createSignal(false)
   const [saveError, setSaveError] = createSignal<string | null>(null)
@@ -94,16 +99,16 @@ export function SpaceAgentAccessDialog(props: SpaceAgentAccessDialogProps) {
     setSaved(false)
   }
 
-  function addEntry(): void {
-    const principalId = principalDraft().trim()
+  /** Puts one person on the draft list with the role chosen for a new person. False, with the reason shown, when it cannot. */
+  function addPrincipal(principalId: string): boolean {
     setEntryError(null)
     if (!principalId) {
       setEntryError(i18n.tr('Skriv inn id-en til personen.', 'Enter the id of the person.'))
-      return
+      return false
     }
     if (entries().some((entry) => entry.principalId === principalId)) {
       setEntryError(i18n.tr('Personen står allerede på listen.', 'That person is already on the list.'))
-      return
+      return false
     }
     if (entries().length >= MAX_ENTRIES) {
       setEntryError(
@@ -112,12 +117,26 @@ export function SpaceAgentAccessDialog(props: SpaceAgentAccessDialogProps) {
           `The list can hold at most ${MAX_ENTRIES} people.`,
         ),
       )
-      return
+      return false
     }
     setEntries([...entries(), { principalId, role: roleDraft() }])
-    setPrincipalDraft('')
     changed()
+    return true
   }
+
+  function addEntry(): void {
+    if (addPrincipal(principalDraft().trim())) setPrincipalDraft('')
+  }
+
+  // The directory answers with the person's Control subject id, which is what an access entry carries. A pick only
+  // changes the draft: nothing is stored until the person saves, and Control decides then.
+  function addPickedPerson(person: DirectoryPerson): void {
+    if (!addPrincipal(person.subjectId)) return
+    const name = person.displayName.trim() || person.email.trim()
+    if (name) setPickedNames(new Map(pickedNames()).set(person.subjectId, name))
+  }
+
+  const entryName = (principalId: string): string | undefined => pickedNames().get(principalId)
 
   function setEntryRole(index: number, role: PersonalAgentEntryRole): void {
     setEntries(entries().map((entry, at) => (at === index ? { ...entry, role } : entry)))
@@ -296,11 +315,14 @@ export function SpaceAgentAccessDialog(props: SpaceAgentAccessDialogProps) {
                     <For each={entries()}>
                       {(entry, index) => (
                         <li class="verevon-space-agent-access__row">
+                          <Show when={entryName(entry.principalId)}>
+                            {(name) => <strong>{name()}</strong>}
+                          </Show>
                           <code title={entry.principalId}>{shortPrincipal(entry.principalId)}</code>
                           <select
                             aria-label={i18n.tr(
-                              `Rolle for ${shortPrincipal(entry.principalId)}`,
-                              `Role for ${shortPrincipal(entry.principalId)}`,
+                              `Rolle for ${entryName(entry.principalId) ?? shortPrincipal(entry.principalId)}`,
+                              `Role for ${entryName(entry.principalId) ?? shortPrincipal(entry.principalId)}`,
                             )}
                             onChange={(event) =>
                               setEntryRole(index(), event.currentTarget.value === 'manager' ? 'manager' : 'collaborator')
@@ -322,20 +344,6 @@ export function SpaceAgentAccessDialog(props: SpaceAgentAccessDialogProps) {
                   </ul>
                 </Show>
                 <div class="verevon-space-agent-access__add">
-                  <input
-                    type="text"
-                    value={principalDraft()}
-                    maxlength={200}
-                    placeholder={i18n.tr('Person-id', 'Person id')}
-                    aria-label={i18n.tr('Person-id', 'Person id')}
-                    onInput={(event) => setPrincipalDraft(event.currentTarget.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') {
-                        event.preventDefault()
-                        addEntry()
-                      }
-                    }}
-                  />
                   <select
                     aria-label={i18n.tr('Rolle for ny person', 'Role for the new person')}
                     onChange={(event) =>
@@ -349,10 +357,41 @@ export function SpaceAgentAccessDialog(props: SpaceAgentAccessDialogProps) {
                       {i18n.tr('Leder', 'Manager')}
                     </option>
                   </select>
-                  <button type="button" onClick={() => addEntry()}>
-                    {i18n.tr('Legg til', 'Add')}
-                  </button>
                 </div>
+                {/* The people of the organization, by name: a person is picked, not typed as an id. People already on
+                    the list are left out. The id box below stays for a deployment where the people search is off. */}
+                <Show when={editable()}>
+                  <DirectoryPicker
+                    kinds={['person']}
+                    label={i18n.tr('Søk etter en person å gi tilgang', 'Search for a person to give access')}
+                    pickLabel={i18n.tr('Gi tilgang', 'Give access')}
+                    pickingLabel={i18n.tr('Gir tilgang …', 'Giving access…')}
+                    isExcluded={(subjectId) => entries().some((entry) => entry.principalId === subjectId)}
+                    onPickPerson={addPickedPerson}
+                  />
+                </Show>
+                <details class="verevon-space-agent-access__by-id">
+                  <summary>{i18n.tr('Legg til med person-id', 'Add by person id')}</summary>
+                  <div class="verevon-space-agent-access__add">
+                    <input
+                      type="text"
+                      value={principalDraft()}
+                      maxlength={200}
+                      placeholder={i18n.tr('Person-id', 'Person id')}
+                      aria-label={i18n.tr('Person-id', 'Person id')}
+                      onInput={(event) => setPrincipalDraft(event.currentTarget.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault()
+                          addEntry()
+                        }
+                      }}
+                    />
+                    <button type="button" onClick={() => addEntry()}>
+                      {i18n.tr('Legg til', 'Add')}
+                    </button>
+                  </div>
+                </details>
                 <Show when={entryError()}>
                   {(message) => <p class="verevon-space-projection-error" role="alert">{message()}</p>}
                 </Show>

@@ -164,3 +164,86 @@ describe('PersonalAgentsSection', () => {
     expect(ids()[3]).not.toBe(ids()[2])
   })
 })
+
+// WS17: an agent's owner takes it out of one room from here. The room card offers that to the room's owners and managers
+// only, so an owner who is an editor in the room, or who has left it, had no way to do it. Control decides each call.
+describe('PersonalAgentsSection: taking an agent out of one room', () => {
+  const SPACES = '/api/v1/spaces'
+  const WITHDRAW_ONE = '/api/v1/agents/agt_fake_1/rooms/space-1'
+  const ROOM_ROWS = [
+    { space_ref: 'space-1', state: 'active' },
+    { space_ref: 'space-2', state: 'paused' },
+  ]
+
+  /** One agent in two rooms. The owner is a member of `space-1` only. `withdraw` answers the DELETE. */
+  function stubRooms(withdraw: () => Response) {
+    let rooms = ROOM_ROWS
+    const fetchMock = stubFetch((url, init) => {
+      if (url === FEATURES) return json({ data: { features: { personal_agents: true } } })
+      if (url === AGENTS) return json({ data: { agents: [{ ...AGENT_ROW, rooms }], primary_subject_id: null } })
+      if (url === SPACES) {
+        return json({ data: { spaces: [{ space_ref: 'space-1', name: 'Leveranse', kind: 'room', lifecycle: 'active' }] } })
+      }
+      if (url === WITHDRAW_ONE && init?.method === 'DELETE') {
+        const answer = withdraw()
+        if (answer.ok) rooms = ROOM_ROWS.filter((room) => room.space_ref !== 'space-1')
+        return answer
+      }
+      return undefined
+    })
+    return fetchMock
+  }
+
+  async function armWithdraw() {
+    const buttons = await screen.findAllByRole('button', { name: 'Ta ut av rommet' })
+    fireEvent.click(buttons[0] as HTMLElement)
+    flush()
+    return screen.getByRole('button', { name: /Bekreft at Min agent tas ut av Leveranse/ })
+  }
+
+  it('lists each room by name with its state, and a room the owner is not in without a name', async () => {
+    signIn()
+    stubRooms(() => json({ data: {} }))
+    renderSection()
+
+    expect(await screen.findByText('Leveranse')).toBeTruthy()
+    expect(screen.getByText('Aktiv')).toBeTruthy()
+    expect(screen.getByText('Et rom du ikke er medlem av')).toBeTruthy()
+    expect(screen.getByText('På pause')).toBeTruthy()
+    expect(screen.getAllByRole('button', { name: 'Ta ut av rommet' })).toHaveLength(2)
+  })
+
+  it('takes the agent out of that one room after a confirmation, and the room is gone from the list', async () => {
+    signIn()
+    const fetchMock = stubRooms(() => json({ data: { agent_ref: 'agt_fake_1', space_ref: 'space-1', state: 'withdrawn', changed: true } }))
+    renderSection()
+
+    // The first press only asks; nothing is sent until it is confirmed.
+    const confirm = await armWithdraw()
+    expect(calls(fetchMock)).not.toContain(WITHDRAW_ONE)
+    expect(screen.getByText('Du beholder agenten og kan legge den til i rommet igjen senere.')).toBeTruthy()
+
+    fireEvent.click(confirm)
+    flush()
+
+    await waitFor(() => expect(screen.queryByText('Leveranse')).toBeNull())
+    const deletes = fetchMock.mock.calls.filter(
+      (call) => String(call[0]) === WITHDRAW_ONE && (call[1] as RequestInit | undefined)?.method === 'DELETE',
+    )
+    expect(deletes).toHaveLength(1)
+    // The other room is untouched.
+    expect(screen.getByText('Et rom du ikke er medlem av')).toBeTruthy()
+  })
+
+  it('says it failed, and keeps the room listed, when Control refuses the withdrawal', async () => {
+    signIn()
+    stubRooms(() => json({ error: { code: 'room_role_forbidden', message: 'no' } }, 403))
+    renderSection()
+
+    fireEvent.click(await armWithdraw())
+    flush()
+
+    expect((await screen.findByRole('alert')).textContent).toBeTruthy()
+    expect(screen.getByText('Leveranse')).toBeTruthy()
+  })
+})

@@ -8,7 +8,12 @@ import type { PersonalAgentAccess } from '@/shared/api/spaces-client'
 // The dialog reads one agent's access and saves the whole list it shows. Both calls are answered here, so no request
 // leaves the test. The mount case guards a crash: a one-argument createEffect threw MISSING_EFFECT_FN on mount and halted
 // the reactive system, which is why the access is drawn only once the read's effect has seeded the drafts.
-const access = vi.hoisted(() => ({ getPersonalAgentAccess: vi.fn(), updatePersonalAgentAccess: vi.fn() }))
+// The people picker reads the organization's directory; it is answered here too.
+const access = vi.hoisted(() => ({
+  getPersonalAgentAccess: vi.fn(),
+  updatePersonalAgentAccess: vi.fn(),
+  searchDirectory: vi.fn(),
+}))
 vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
   ...access,
@@ -44,9 +49,19 @@ function addPerson(principalId: string): void {
   flush()
 }
 
+const person = (subjectId: string, displayName: string, email: string) => ({
+  kind: 'person' as const,
+  subjectId,
+  displayName,
+  email,
+  isSelf: false,
+})
+
 beforeEach(() => {
   access.getPersonalAgentAccess.mockReset()
   access.updatePersonalAgentAccess.mockReset()
+  access.searchDirectory.mockReset()
+  access.searchDirectory.mockResolvedValue({ results: [], nextCursor: null })
 })
 
 afterEach(() => {
@@ -95,5 +110,79 @@ describe('SpaceAgentAccessDialog (WS17-S5)', () => {
     flush()
     expect(screen.getByText('sub-ola')).toBeTruthy()
     expect(access.updatePersonalAgentAccess).toHaveBeenCalledTimes(1)
+  })
+
+  // WS17: a person is found by name in the organization's directory and picked, not typed as an id.
+  describe('the people picker', () => {
+    it('lists the people the directory finds, but not people already on the list, and asks for people only', async () => {
+      access.getPersonalAgentAccess.mockResolvedValue(accessOf())
+      access.searchDirectory.mockResolvedValue({
+        results: [person('sub-kari', 'Kari Nordmann', 'kari@example.com'), person('sub-ola', 'Ola Hansen', 'ola@example.com')],
+        nextCursor: null,
+      })
+      renderDialog()
+      await screen.findByText('sub-kari')
+
+      expect(await screen.findByText('Ola Hansen')).toBeTruthy()
+      // sub-kari is already on the list, so she is not offered again.
+      expect(screen.queryByText('Kari Nordmann')).toBeNull()
+      expect(access.searchDirectory).toHaveBeenCalled()
+      expect(access.searchDirectory.mock.calls[0]?.[1]).toMatchObject({ kinds: ['person'] })
+    })
+
+    it('adds the picked person by their subject id, named, with the role chosen for a new person, and saves it', async () => {
+      access.getPersonalAgentAccess.mockResolvedValue(accessOf())
+      access.updatePersonalAgentAccess.mockResolvedValue(accessOf({ revision: 8 }))
+      access.searchDirectory.mockResolvedValue({
+        results: [person('sub-ola', 'Ola Hansen', 'ola@example.com')],
+        nextCursor: null,
+      })
+      renderDialog()
+      await screen.findByText('sub-kari')
+      await screen.findByText('Ola Hansen')
+
+      fireEvent.change(screen.getByRole('combobox', { name: 'Rolle for ny person' }), { target: { value: 'manager' } })
+      flush()
+      fireEvent.click(screen.getByRole('button', { name: 'Gi tilgang' }))
+      flush()
+
+      // The person is on the draft list by name, and is no longer offered by the picker.
+      expect(await screen.findByRole('combobox', { name: 'Rolle for Ola Hansen' })).toBeTruthy()
+      expect(screen.getAllByText('Ola Hansen')).toHaveLength(1)
+      expect(access.updatePersonalAgentAccess).not.toHaveBeenCalled()
+
+      fireEvent.click(screen.getByRole('button', { name: 'Lagre tilgang' }))
+      flush()
+      await waitFor(() => expect(access.updatePersonalAgentAccess).toHaveBeenCalledTimes(1))
+      const [, body] = access.updatePersonalAgentAccess.mock.calls[0] as [
+        string,
+        { entries: readonly { principalId: string; role: string }[]; expectedRevision: number },
+      ]
+      expect(body.expectedRevision).toBe(7)
+      expect(body.entries).toEqual([
+        { principalId: 'sub-kari', role: 'manager' },
+        { principalId: 'sub-ola', role: 'manager' },
+      ])
+    })
+
+    it('says the search failed when the directory does, and the id box still adds a person', async () => {
+      access.getPersonalAgentAccess.mockResolvedValue(accessOf())
+      access.searchDirectory.mockRejectedValue(new ApiError('off', 404, 'feature_disabled'))
+      renderDialog()
+      await screen.findByText('sub-kari')
+      // The failure is said, not shown as "no results"; the person can still add by id.
+      expect(await screen.findByRole('alert')).toBeTruthy()
+
+      addPerson('sub-ola')
+      expect(screen.getByText('sub-ola')).toBeTruthy()
+    })
+
+    it('is not offered to someone who may only see the access', async () => {
+      access.getPersonalAgentAccess.mockResolvedValue(accessOf({ role: 'collaborator' }))
+      renderDialog()
+      await screen.findByText('sub-kari')
+      expect(screen.queryByRole('searchbox')).toBeNull()
+      expect(access.searchDirectory).not.toHaveBeenCalled()
+    })
   })
 })
