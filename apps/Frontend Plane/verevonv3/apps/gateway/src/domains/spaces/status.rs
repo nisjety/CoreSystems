@@ -365,3 +365,477 @@ pub(super) async fn annotate_agents(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! WS11-S10.gw tests: the status routes through the real router, and the roster and agent
+    //! annotations called directly, with wiremock for auth-core, Control (user-core), org-core and
+    //! Application (Convex). No model is called.
+    use super::*;
+    use crate::middleware::AuthorizedMembership;
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    use wiremock::matchers::{body_partial_json, method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    struct Fx {
+        state: AppState,
+        _auth: MockServer,
+        _user_core: MockServer,
+        _org: MockServer,
+        application: MockServer,
+    }
+
+    /// `zdr`: org-core's answer for `org-1` (`None` is an outage, so an unknown posture). The
+    /// status flag is on.
+    async fn fx(zdr: Option<bool>) -> Fx {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": "member", "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        let org = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(match zdr {
+                Some(zdr) => ResponseTemplate::new(200).set_body_json(
+                    json!({"data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}}),
+                ),
+                None => ResponseTemplate::new(500),
+            })
+            .mount(&org)
+            .await;
+        let application = MockServer::start().await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.org_core_url = org.uri();
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.space_features.status_api = true;
+        Fx {
+            state,
+            _auth: auth,
+            _user_core: user_core,
+            _org: org,
+            application,
+        }
+    }
+
+    async fn mount_convex(fx: &Fx, route: &str, function: &str, template: ResponseTemplate) {
+        Mock::given(wm_method("POST"))
+            .and(wm_path(route))
+            .and(body_partial_json(json!({"path": function})))
+            .respond_with(template)
+            .mount(&fx.application)
+            .await;
+    }
+
+    fn value(value: Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"status": "success", "value": value}))
+    }
+
+    fn convex_error(message: &str) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"status": "error", "errorMessage": message}))
+    }
+
+    async fn call(fx: &Fx, method: &str, body: Option<Value>, zdr_header: bool) -> (u16, Value) {
+        let mut request = Request::builder()
+            .method(method)
+            .uri("/api/v1/spaces/status")
+            .header("cookie", "better-auth.session_token=session-1");
+        if body.is_some() {
+            request = request.header("content-type", "application/json");
+        }
+        if zdr_header {
+            request = request.header("x-zdr", "true");
+        }
+        let response = crate::build_router(fx.state.clone())
+            .oneshot(
+                request
+                    .body(match &body {
+                        Some(value) => Body::from(value.to_string()),
+                        None => Body::empty(),
+                    })
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let payload: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, payload)
+    }
+
+    /// Bodies of the Convex calls to one function.
+    async fn convex_calls(fx: &Fx, function: &str) -> Vec<Value> {
+        fx.application
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter_map(|request| serde_json::from_slice::<Value>(&request.body).ok())
+            .filter(|body| body["path"] == function)
+            .collect()
+    }
+
+    async fn convex_request_count(fx: &Fx) -> usize {
+        fx.application.received_requests().await.unwrap().len()
+    }
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    fn roster() -> Value {
+        json!({"data": {"members": [
+            {"subject_type": "user", "subject_id": "u-1", "role": "owner"},
+            {"subject_type": "user", "subject_id": "u-2", "role": "viewer"},
+            {"subject_type": "user", "subject_id": "u-1", "role": "owner"},
+            {"subject_type": "agent", "subject_id": "agent-1", "role": "editor"},
+            {"subject_type": "user", "role": "viewer"},
+        ]}})
+    }
+
+    // ---- the flag --------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn flag_off_is_404_space_status_disabled_and_the_annotations_leave_the_answers_alone() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = fx(Some(false)).await;
+        fx.state.space_features.status_api = false;
+        let (status, body) = call(&fx, "GET", None, false).await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "space_status_disabled");
+        let (status, body) = call(&fx, "PUT", Some(json!({"state": "away"})), false).await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "space_status_disabled");
+
+        let mut members = roster();
+        annotate_roster(&fx.state, &user(), "org-1", StatusCode::OK, &mut members).await;
+        assert_eq!(members, roster(), "flag off leaves the roster unannotated");
+        let mut agents = vec![json!({"subject_id": "agent-1"})];
+        annotate_agents(&fx.state, &user(), "org-1", "space-room", &mut agents).await;
+        assert_eq!(agents, vec![json!({"subject_id": "agent-1"})]);
+        assert_eq!(convex_request_count(&fx).await, 0, "no Application function is reached");
+    }
+
+    // ---- PUT -------------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn put_status_validates_state_and_maps_invalid_status() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false)).await;
+        mount_convex(
+            &fx,
+            "/api/mutation",
+            "spaceMemberStatus:setStatusForGateway",
+            value(json!({"state": "away", "text": null, "expiresAt": 1_900_000_000_000_i64})),
+        )
+        .await;
+        let (status, body) = call(
+            &fx,
+            "PUT",
+            Some(json!({"state": "away", "expires_at": 1_900_000_000_000_i64})),
+            false,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body["data"],
+            json!({"state": "away", "text": null, "expires_at": 1_900_000_000_000_i64})
+        );
+        let writes = convex_calls(&fx, "spaceMemberStatus:setStatusForGateway").await;
+        assert_eq!(writes[0]["args"]["externalAuthId"], "user-1");
+        assert_eq!(writes[0]["args"]["externalOrgId"], "org-1");
+        assert_eq!(writes[0]["args"]["state"], "away");
+        assert_eq!(writes[0]["args"]["expiresAt"], 1_900_000_000_000_i64);
+        assert!(writes[0]["args"].get("text").is_none(), "no text was sent, so none is forwarded");
+
+        for (body, code) in [
+            (json!({"state": "busy"}), "invalid_status"),
+            (json!({"state": ""}), "invalid_status"),
+            (json!({"state": "away", "org_id": "forged"}), "invalid_request"),
+            (json!({"state": "away", "user_id": "forged"}), "invalid_request"),
+            (json!({}), "invalid_request"),
+            (json!({"state": 3}), "invalid_request"),
+            (json!({"state": "away", "expires_at": "tomorrow"}), "invalid_request"),
+            (json!("away"), "invalid_request"),
+        ] {
+            let (status, got) = call(&fx, "PUT", Some(body.clone()), false).await;
+            assert_eq!(status, 400, "{body}");
+            assert_eq!(got["error"]["code"], code, "{body}");
+        }
+        assert_eq!(
+            convex_calls(&fx, "spaceMemberStatus:setStatusForGateway").await.len(),
+            1,
+            "no refused write reached Application"
+        );
+
+        // Application's own bound on the text or the expiry is the same typed 400; anything else is
+        // a 503 that says nothing changed and carries none of Application's words.
+        for (message, want_status, want_code) in [
+            ("Uncaught Error: invalid_status", 400, "invalid_status"),
+            ("Uncaught Error: internal stack trace", 503, "status_unavailable"),
+        ] {
+            let failing = self::fx(Some(false)).await;
+            mount_convex(
+                &failing,
+                "/api/mutation",
+                "spaceMemberStatus:setStatusForGateway",
+                convex_error(message),
+            )
+            .await;
+            let (status, got) = call(&failing, "PUT", Some(json!({"state": "dnd"})), false).await;
+            assert_eq!(status, want_status, "{message}");
+            assert_eq!(got["error"]["code"], want_code, "{message}");
+            assert!(!got.to_string().contains("stack trace"));
+        }
+    }
+
+    #[tokio::test]
+    async fn follow_and_status_text_refused_under_zdr_with_typed_412() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let write = "spaceMemberStatus:setStatusForGateway";
+
+        // A Zero Data Retention organization: the text is a durable write of content, refused
+        // typed before any Application call; a state-only write carries no content and goes on.
+        let zdr = fx(Some(true)).await;
+        mount_convex(&zdr, "/api/mutation", write, value(json!({"state": "dnd", "text": null, "expiresAt": null}))).await;
+        let (status, body) = call(&zdr, "PUT", Some(json!({"state": "away", "text": "In a meeting"})), false).await;
+        assert_eq!(status, 412, "{body}");
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert!(convex_calls(&zdr, write).await.is_empty());
+        let (status, body) = call(&zdr, "PUT", Some(json!({"state": "dnd"})), false).await;
+        assert_eq!(status, 200, "{body}");
+        let (status, _) = call(&zdr, "PUT", Some(json!({"state": "dnd", "text": "   "})), false).await;
+        assert_eq!(status, 200, "a blank text is no content");
+        assert_eq!(convex_calls(&zdr, write).await.len(), 2);
+
+        // An org-core outage is an unknown posture: text fails closed in its own words.
+        let unknown = fx(None).await;
+        mount_convex(&unknown, "/api/mutation", write, value(json!({"state": "away"}))).await;
+        let (status, body) =
+            call(&unknown, "PUT", Some(json!({"state": "away", "text": "Lunch"})), false).await;
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(body["error"]["code"], "zdr_decision_unavailable");
+        assert!(convex_calls(&unknown, write).await.is_empty());
+
+        // A request-level ZDR header alone refuses the text, even for an org that is not ZDR.
+        let open = fx(Some(false)).await;
+        mount_convex(
+            &open,
+            "/api/mutation",
+            write,
+            value(json!({"state": "away", "text": "Lunch", "expiresAt": null})),
+        )
+        .await;
+        let (status, body) =
+            call(&open, "PUT", Some(json!({"state": "away", "text": "Lunch"})), true).await;
+        assert_eq!(status, 412, "{body}");
+        assert!(convex_calls(&open, write).await.is_empty());
+
+        // A positively non-ZDR org reaches Application with the text.
+        let (status, body) =
+            call(&open, "PUT", Some(json!({"state": "away", "text": "Lunch"})), false).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"]["text"], "Lunch");
+        assert_eq!(convex_calls(&open, write).await[0]["args"]["text"], "Lunch");
+    }
+
+    // ---- GET -------------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_status_includes_text_only_when_org_not_zdr() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let read = "spaceMemberStatus:getOwnStatusForGateway";
+        // (org-core answer, includeText Application is asked for): an unknown posture fails closed.
+        for (zdr, include_text) in [(Some(false), true), (Some(true), false), (None, false)] {
+            let fx = fx(zdr).await;
+            mount_convex(
+                &fx,
+                "/api/query",
+                read,
+                value(json!({"state": "away", "text": "brb", "expiresAt": 1_900_000_000_000_i64})),
+            )
+            .await;
+            let (status, body) = call(&fx, "GET", None, false).await;
+            assert_eq!(status, 200, "{zdr:?}: {body}");
+            assert_eq!(
+                body["data"],
+                json!({"state": "away", "text": "brb", "expires_at": 1_900_000_000_000_i64})
+            );
+            let asked = convex_calls(&fx, read).await;
+            assert_eq!(asked[0]["args"]["includeText"], include_text, "{zdr:?}");
+            assert_eq!(asked[0]["args"]["externalAuthId"], "user-1");
+            assert_eq!(asked[0]["args"]["externalOrgId"], "org-1");
+        }
+
+        // No row, or an expired one, reads as cleared.
+        let fx = fx(Some(false)).await;
+        mount_convex(&fx, "/api/query", read, value(Value::Null)).await;
+        let (status, body) = call(&fx, "GET", None, false).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"], json!({"state": null, "text": null, "expires_at": null}));
+
+        // Application failing is a 503 that says so, never a cleared status.
+        let down = self::fx(Some(false)).await;
+        mount_convex(&down, "/api/query", read, ResponseTemplate::new(500)).await;
+        let (status, body) = call(&down, "GET", None, false).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "status_unavailable");
+    }
+
+    // ---- the roster annotation -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn roster_annotation_adds_status_to_user_members_only() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let lookup = "spaceMemberStatus:statusesForGateway";
+        let fx = fx(Some(false)).await;
+        mount_convex(
+            &fx,
+            "/api/query",
+            lookup,
+            value(json!([
+                {"externalAuthId": "u-1", "state": "away", "text": "brb", "expiresAt": 1_900_000_000_000_i64}
+            ])),
+        )
+        .await;
+        let mut body = roster();
+        annotate_roster(&fx.state, &user(), "org-1", StatusCode::OK, &mut body).await;
+        let members = body["data"]["members"].as_array().unwrap();
+        let away = json!({"state": "away", "text": "brb", "expires_at": 1_900_000_000_000_i64});
+        assert_eq!(members[0]["status"], away);
+        assert!(members[1]["status"].is_null(), "a member with no row reads as null, not as absent");
+        assert!(members[1].as_object().unwrap().contains_key("status"));
+        assert_eq!(members[2]["status"], away, "a repeated id is annotated too");
+        assert!(
+            members[3].get("status").is_none(),
+            "a service member is never annotated or asked about"
+        );
+        assert!(members[4].get("status").is_none(), "a user row with no id is left alone");
+        let asked = convex_calls(&fx, lookup).await;
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0]["args"]["subjectIds"], json!(["u-1", "u-2"]));
+        assert_eq!(asked[0]["args"]["includeText"], true);
+        assert_eq!(asked[0]["args"]["externalAuthId"], "user-1");
+        assert_eq!(asked[0]["args"]["externalOrgId"], "org-1");
+
+        // A Zero Data Retention org, or an unknown posture, never asks for the text.
+        for zdr in [Some(true), None] {
+            let fx = self::fx(zdr).await;
+            mount_convex(&fx, "/api/query", lookup, value(json!([]))).await;
+            let mut body = roster();
+            annotate_roster(&fx.state, &user(), "org-1", StatusCode::OK, &mut body).await;
+            assert_eq!(convex_calls(&fx, lookup).await[0]["args"]["includeText"], false, "{zdr:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_status_lookup_leaves_the_field_out_and_other_inputs_are_left_alone() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let lookup = "spaceMemberStatus:statusesForGateway";
+        let down = fx(Some(false)).await;
+        mount_convex(&down, "/api/query", lookup, ResponseTemplate::new(500)).await;
+        let mut body = roster();
+        annotate_roster(&down.state, &user(), "org-1", StatusCode::OK, &mut body).await;
+        assert_eq!(body, roster(), "could not check is never drawn as checked and none");
+
+        let quiet = fx(Some(false)).await;
+        mount_convex(&quiet, "/api/query", lookup, value(json!([]))).await;
+        // A refused roster, a blank org and a body with no members are each left untouched, with
+        // no lookup.
+        let mut refused = roster();
+        annotate_roster(&quiet.state, &user(), "org-1", StatusCode::FORBIDDEN, &mut refused).await;
+        assert_eq!(refused, roster());
+        let mut blank_org = roster();
+        annotate_roster(&quiet.state, &user(), "  ", StatusCode::OK, &mut blank_org).await;
+        assert_eq!(blank_org, roster());
+        let mut no_members = json!({"data": {"count": 0}});
+        annotate_roster(&quiet.state, &user(), "org-1", StatusCode::OK, &mut no_members).await;
+        assert_eq!(no_members, json!({"data": {"count": 0}}));
+        let mut only_agents = json!({"data": {"members": [{"subject_type": "agent", "subject_id": "a-1"}]}});
+        annotate_roster(&quiet.state, &user(), "org-1", StatusCode::OK, &mut only_agents).await;
+        assert_eq!(only_agents, json!({"data": {"members": [{"subject_type": "agent", "subject_id": "a-1"}]}}));
+        assert_eq!(convex_request_count(&quiet).await, 0);
+    }
+
+    // ---- the agent annotation --------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn agents_annotation_adds_activity_a_missing_id_reads_idle_and_a_failed_lookup_leaves_it_out() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let lookup = "spaceMemberStatus:agentActivityForGateway";
+        let fx = fx(Some(false)).await;
+        mount_convex(
+            &fx,
+            "/api/query",
+            lookup,
+            value(json!([{"agentId": "agent-1", "state": "working"}, {"agentId": "agent-3", "state": "waiting"}])),
+        )
+        .await;
+        let mut agents = vec![
+            json!({"subject_id": "agent-1", "name": "One"}),
+            json!({"subject_id": "agent-2", "name": "Two"}),
+            json!({"subject_id": "agent-1", "name": "One again"}),
+            json!({"name": "no id"}),
+        ];
+        annotate_agents(&fx.state, &user(), "org-1", "space-room", &mut agents).await;
+        assert_eq!(agents[0]["activity"], "working");
+        assert_eq!(agents[1]["activity"], "idle", "an agent Application has no row for is idle");
+        assert_eq!(agents[2]["activity"], "working");
+        assert!(agents[3].get("activity").is_none(), "an agent with no id is left alone");
+        assert_eq!(agents[0]["name"], "One", "the rest of the agent is untouched");
+        let asked = convex_calls(&fx, lookup).await;
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0]["args"]["agentIds"], json!(["agent-1", "agent-2"]));
+        assert_eq!(asked[0]["args"]["spaceRef"], "space-room");
+        assert_eq!(asked[0]["args"]["externalAuthId"], "user-1");
+        assert_eq!(asked[0]["args"]["externalOrgId"], "org-1");
+
+        // A failed lookup leaves the field out entirely: "unknown" is never drawn as "idle".
+        let down = self::fx(Some(false)).await;
+        mount_convex(&down, "/api/query", lookup, ResponseTemplate::new(500)).await;
+        let mut agents = vec![json!({"subject_id": "agent-1"})];
+        annotate_agents(&down.state, &user(), "org-1", "space-room", &mut agents).await;
+        assert_eq!(agents, vec![json!({"subject_id": "agent-1"})]);
+
+        // A blank org and an empty list ask nothing.
+        let quiet = self::fx(Some(false)).await;
+        mount_convex(&quiet, "/api/query", lookup, value(json!([]))).await;
+        let mut agents = vec![json!({"subject_id": "agent-1"})];
+        annotate_agents(&quiet.state, &user(), " ", "space-room", &mut agents).await;
+        assert_eq!(agents, vec![json!({"subject_id": "agent-1"})]);
+        let mut none: Vec<Value> = Vec::new();
+        annotate_agents(&quiet.state, &user(), "org-1", "space-room", &mut none).await;
+        assert!(none.is_empty());
+        assert_eq!(convex_request_count(&quiet).await, 0);
+    }
+}

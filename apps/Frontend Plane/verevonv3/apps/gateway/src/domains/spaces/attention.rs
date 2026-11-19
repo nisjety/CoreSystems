@@ -2287,4 +2287,196 @@ mod tests {
         assert_eq!(status, 503);
         assert_eq!(body["error"]["code"], "attention_unavailable");
     }
+
+    // ---- WS11-S7: the flag, the item state write and the thread follow --------------------------
+
+    #[tokio::test]
+    async fn every_attention_route_is_a_404_space_attention_disabled_with_the_flag_off() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = fx(Some(false), "editor").await;
+        fx.state.space_features.attention_api = false;
+        for (method, uri, body) in [
+            ("GET", "/api/v1/spaces/attention", None),
+            ("GET", "/api/v1/spaces/attention/items", None),
+            ("POST", "/api/v1/spaces/attention/items/item-1/state", Some(json!({"state": "done"}))),
+            ("GET", "/api/v1/spaces/room-a/threads/thread-1/follow", None),
+            ("PUT", "/api/v1/spaces/room-a/threads/thread-1/follow", Some(json!({"state": "following"}))),
+        ] {
+            let (status, got) = call(&fx, method, uri, body).await;
+            assert_eq!(status, 404, "{method} {uri}");
+            assert_eq!(got["error"]["code"], "space_attention_disabled", "{method} {uri}");
+        }
+        assert!(paths_seen(&fx.application).await.is_empty(), "no Convex function is reached");
+        assert!(
+            paths_seen(&fx.user_core).await.iter().all(|path| path == "/api/v1/me/session-context"),
+            "Control is asked only for the session context"
+        );
+        assert!(paths_seen(&fx.model_gateway).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn item_state_forwards_only_its_own_fields_and_refuses_the_rest_before_convex() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false), "editor").await;
+        mount_convex(
+            &fx,
+            "/api/mutation",
+            "spaceAttention:setItemStateForGateway",
+            value(json!({"itemId": "item-1", "state": "snoozed", "snoozedUntil": 1_900_000_000_000_i64})),
+        )
+        .await;
+        let uri = "/api/v1/spaces/attention/items/item-1/state";
+        let (status, body) = call(
+            &fx,
+            "POST",
+            uri,
+            Some(json!({"state": "snoozed", "snooze_until": 1_900_000_000_000_i64, "idempotency_key": "k-1"})),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body["data"],
+            json!({"item_id": "item-1", "state": "snoozed", "snoozed_until": 1_900_000_000_000_i64})
+        );
+        let (status, _) = call(&fx, "POST", uri, Some(json!({"state": "done"}))).await;
+        assert_eq!(status, 200);
+        let writes = convex_calls(&fx, "spaceAttention:setItemStateForGateway").await;
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0]["args"]["externalAuthId"], "user-1");
+        assert_eq!(writes[0]["args"]["externalOrgId"], "org-1");
+        assert_eq!(writes[0]["args"]["itemId"], "item-1");
+        assert_eq!(writes[0]["args"]["state"], "snoozed");
+        assert_eq!(writes[0]["args"]["snoozeUntil"], 1_900_000_000_000_i64);
+        assert!(writes[0]["args"].get("idempotencyKey").is_none(), "the key is accepted and ignored");
+        assert!(writes[1]["args"].get("snoozeUntil").is_none(), "a done item carries no snooze");
+
+        for (body, code) in [
+            (json!({"state": "later"}), "invalid_state"),
+            (json!({"state": "done", "snooze_until": 5}), "invalid_snooze"),
+            (json!({"state": "open", "snooze_until": 5}), "invalid_snooze"),
+            (json!({"state": "done", "org_id": "forged"}), "invalid_request"),
+            (json!({"state": "done", "user_id": "forged"}), "invalid_request"),
+            (json!({}), "invalid_request"),
+            (json!({"state": 3}), "invalid_request"),
+            (json!("done"), "invalid_request"),
+        ] {
+            let (status, got) = call(&fx, "POST", uri, Some(body.clone())).await;
+            assert_eq!(status, 400, "{body}");
+            assert_eq!(got["error"]["code"], code, "{body}");
+        }
+        // An id with a control character is not an item, and says so the way a missing one does.
+        let (status, got) = call(
+            &fx,
+            "POST",
+            "/api/v1/spaces/attention/items/%07/state",
+            Some(json!({"state": "done"})),
+        )
+        .await;
+        assert_eq!(status, 404);
+        assert_eq!(got["error"]["code"], "attention_item_not_found");
+        assert_eq!(
+            convex_calls(&fx, "spaceAttention:setItemStateForGateway").await.len(),
+            2,
+            "no refused write reached Convex"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_convex_item_state_failure_maps_to_its_typed_code_and_any_other_is_a_503() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let uri = "/api/v1/spaces/attention/items/item-1/state";
+        for (message, want_status, want_code) in [
+            ("Uncaught Error: attention_item_not_found", 404, "attention_item_not_found"),
+            ("Uncaught Error: invalid_snooze", 400, "invalid_snooze"),
+            ("Uncaught Error: invalid_item_state", 400, "invalid_state"),
+            ("Uncaught Error: the stack trace of something else", 503, "attention_unavailable"),
+        ] {
+            let fx = fx(Some(false), "editor").await;
+            mount_convex(
+                &fx,
+                "/api/mutation",
+                "spaceAttention:setItemStateForGateway",
+                ResponseTemplate::new(200).set_body_json(json!({"status": "error", "errorMessage": message})),
+            )
+            .await;
+            let (status, got) = call(&fx, "POST", uri, Some(json!({"state": "snoozed", "snooze_until": 5}))).await;
+            assert_eq!(status, want_status, "{message}");
+            assert_eq!(got["error"]["code"], want_code, "{message}");
+            assert!(!got.to_string().contains("stack trace"), "no raw Convex text reaches the browser");
+        }
+    }
+
+    #[tokio::test]
+    async fn setting_a_follow_is_refused_typed_under_zdr_and_clearing_one_is_allowed() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let uri = "/api/v1/spaces/room-a/threads/thread-1/follow";
+        let write = "spaceAttention:setThreadFollowForGateway";
+
+        let zdr = fx(Some(true), "editor").await;
+        mount_convex(&zdr, "/api/mutation", write, value(json!({"state": "none", "reason": null}))).await;
+        for state in ["following", "muted"] {
+            let (status, got) = call(&zdr, "PUT", uri, Some(json!({"state": state}))).await;
+            assert_eq!(status, 412, "{state}: {got}");
+            assert_eq!(got["error"]["code"], "zdr_durable_mutation_forbidden");
+        }
+        assert!(convex_calls(&zdr, write).await.is_empty(), "a refused set never reaches Application");
+        let (status, got) = call(&zdr, "PUT", uri, Some(json!({"state": "none"}))).await;
+        assert_eq!(status, 200, "{got}");
+        assert_eq!(got["data"], json!({"state": "none", "reason": null}));
+        let writes = convex_calls(&zdr, write).await;
+        assert_eq!(writes.len(), 1, "clearing removes data, so it is allowed under zero retention");
+        assert_eq!(writes[0]["args"]["state"], "none");
+        assert_eq!(writes[0]["args"]["spaceRef"], "room-a");
+        assert_eq!(writes[0]["args"]["threadId"], "thread-1");
+        assert_eq!(writes[0]["args"]["externalAuthId"], "user-1");
+        assert_eq!(writes[0]["args"]["externalOrgId"], "org-1");
+
+        // An org-core outage is an unknown posture: a set fails closed in its own words.
+        let unknown = fx(None, "editor").await;
+        mount_convex(&unknown, "/api/mutation", write, value(json!({"state": "following", "reason": "manual"}))).await;
+        let (status, got) = call(&unknown, "PUT", uri, Some(json!({"state": "following"}))).await;
+        assert_eq!(status, 503, "{got}");
+        assert_eq!(got["error"]["code"], "zdr_decision_unavailable");
+        assert!(convex_calls(&unknown, write).await.is_empty());
+
+        // A positively non-ZDR org reaches Application with the set.
+        let open = fx(Some(false), "editor").await;
+        mount_convex(&open, "/api/mutation", write, value(json!({"state": "following", "reason": "manual"}))).await;
+        let (status, got) = call(&open, "PUT", uri, Some(json!({"state": "following"}))).await;
+        assert_eq!(status, 200, "{got}");
+        assert_eq!(got["data"], json!({"state": "following", "reason": "manual"}));
+        assert_eq!(convex_calls(&open, write).await[0]["args"]["state"], "following");
+    }
+
+    #[tokio::test]
+    async fn a_follow_needs_a_live_membership_and_a_closed_state_and_reads_back_the_row() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let uri = "/api/v1/spaces/room-a/threads/thread-1/follow";
+        let stranger = fx(Some(false), "").await;
+        mount_convex(&stranger, "/api/query", "spaceAttention:getThreadFollowForGateway", value(json!({"state": "following"}))).await;
+        mount_convex(&stranger, "/api/mutation", "spaceAttention:setThreadFollowForGateway", value(json!({"state": "following"}))).await;
+        let (status, got) = call(&stranger, "GET", uri, None).await;
+        assert_eq!(status, 403);
+        assert_eq!(got["error"]["code"], "active_membership_required");
+        let (status, _) = call(&stranger, "PUT", uri, Some(json!({"state": "none"}))).await;
+        assert_eq!(status, 403);
+        assert!(paths_seen(&stranger.application).await.is_empty(), "a non-member reaches no Convex function");
+
+        let member = fx(Some(false), "viewer").await;
+        mount_convex(&member, "/api/query", "spaceAttention:getThreadFollowForGateway", value(json!({"state": "muted", "reason": "manual"}))).await;
+        mount_convex(&member, "/api/mutation", "spaceAttention:setThreadFollowForGateway", value(json!({"state": "following"}))).await;
+        let (status, got) = call(&member, "GET", uri, None).await;
+        assert_eq!(status, 200, "{got}");
+        assert_eq!(got["data"], json!({"state": "muted", "reason": "manual"}));
+        for (body, code) in [
+            (json!({"state": "maybe"}), "invalid_follow_state"),
+            (json!({}), "invalid_request"),
+            (json!({"state": "none", "user_id": "forged"}), "invalid_request"),
+        ] {
+            let (status, got) = call(&member, "PUT", uri, Some(body.clone())).await;
+            assert_eq!(status, 400, "{body}");
+            assert_eq!(got["error"]["code"], code, "{body}");
+        }
+        assert!(convex_calls(&member, "spaceAttention:setThreadFollowForGateway").await.is_empty());
+    }
 }
