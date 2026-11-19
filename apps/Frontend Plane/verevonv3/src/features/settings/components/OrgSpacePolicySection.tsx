@@ -82,6 +82,88 @@ const ENTITLEMENT_COPY: Record<string, EntitlementCopy> = {
     label: (tr) => tr('Bakgrunnsprosesser', 'Background processes'),
     help: (tr) => tr('Agenter kan la prosesser gå i bakgrunnen i et rom.', 'Agents can leave processes running in the background in a room.'),
   },
+  // The bits Control added after the first eight (entitlement_catalog.go, in its order). Each is off until an
+  // admin turns it on here, and Control refuses the feature until then, so the words must say what the switch gives.
+  run_control: {
+    group: 'agents',
+    label: (tr) => tr('Stoppe andres agentkjøringer', 'Stop other members’ agent runs'),
+    help: (tr) => tr(
+      'Romeiere og ledere kan stoppe en agentkjøring som et annet medlem har startet.',
+      'Room owners and managers can stop an agent run that another member started.',
+    ),
+  },
+  approval_grant: {
+    group: 'agents',
+    label: (tr) => tr('Faste godkjenningsregler', 'Standing approval rules'),
+    help: (tr) => tr(
+      'Medlemmer kan gjøre en godkjenning til en fast regel, slik at agenten slipper å spørre hver gang.',
+      'Members can turn an approval into a standing rule, so the agent does not have to ask every time.',
+    ),
+  },
+  dm_create: {
+    group: 'conversation',
+    label: (tr) => tr('Direktemeldinger', 'Direct messages'),
+    help: (tr) => tr(
+      'Medlemmer kan åpne direktemeldinger og gruppesamtaler med kolleger. Krever også at de kan skrive i og lese rom.',
+      'Members can open direct messages and group conversations with colleagues. Also needs them to be able to write in and read rooms.',
+    ),
+  },
+  message_revise: {
+    group: 'conversation',
+    label: (tr) => tr('Redigere og slette egne meldinger', 'Edit and delete your own messages'),
+    help: (tr) => tr(
+      'Medlemmer kan endre eller fjerne meldingene de selv har skrevet i rom.',
+      'Members can change or remove the messages they wrote themselves in rooms.',
+    ),
+  },
+  message_moderate: {
+    group: 'conversation',
+    label: (tr) => tr('Moderere andres meldinger', 'Moderate other members’ messages'),
+    help: (tr) => tr(
+      'Romeiere og ledere kan også slette meldinger som andre har skrevet.',
+      'Room owners and managers can also delete messages that others wrote.',
+    ),
+  },
+  personal_agent_admit: {
+    group: 'agents',
+    label: (tr) => tr('Personlige agenter i rom', 'Personal agents in rooms'),
+    help: (tr) => tr(
+      'Et rom kan ta imot en personlig agent som et medlem eier. Agenten får bare det rommet og Control gir den.',
+      'A room can admit a personal agent that a member owns. The agent gets only what the room and Control grant it.',
+    ),
+  },
+  memory_declassify: {
+    group: 'knowledge',
+    label: (tr) => tr('Dele personlig minne i et rom', 'Share personal memory to a room'),
+    help: (tr) => tr(
+      'Medlemmer kan velge å dele et personlig minne i et rom, og ta det tilbake.',
+      'Members can choose to share a personal memory to a room, and take it back.',
+    ),
+  },
+  memory_personal_turn: {
+    group: 'knowledge',
+    label: (tr) => tr('Personlig minne i romsvar', 'Personal memory in room answers'),
+    help: (tr) => tr(
+      'Et medlem kan velge å bruke sitt eget personlige minne for ett svar i en romtråd.',
+      'A member can choose to use their own personal memory for one answer in a room thread.',
+    ),
+  },
+  canvas: {
+    group: 'knowledge',
+    label: (tr) => tr('Lerret i rom', 'Room canvas'),
+    help: (tr) => tr(
+      'Rommet får et delt dokument (lerret) som medlemmer og agenter kan skrive i. Av som standard.',
+      'The room gets a shared document (canvas) that members and agents can write in. Off by default.',
+    ),
+  },
+  browser: {
+    group: 'agents',
+    label: (tr) => tr('Nettleserkjøring i rom', 'Browser runs in rooms'),
+    help: (tr) => tr(
+      'En agent kan surfe på nettet for et rom, begrenset til domenene medlemmet velger. Av som standard.',
+      'An agent can browse the web for a room, limited to the domains the member picks. Off by default.',
+    ),
+  },
 }
 
 const GROUPS: ReadonlyArray<{ id: EntitlementCopy['group']; title: (tr: Tr) => string }> = [

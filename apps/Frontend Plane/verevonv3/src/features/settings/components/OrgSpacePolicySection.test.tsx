@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-li
 import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { OrgSpacePolicySection } from '@/features/settings/components/OrgSpacePolicySection'
+import { I18nProvider, localeStorageKey } from '@/shared/i18n'
 import { clearSession, markSessionOnboardingComplete, setSessionUser } from '@/shared/session/session-store'
 
 // WS03-S6: the org-admin Space policy console. Control owns the policy and the role check; this
@@ -124,6 +125,34 @@ function stubGateway(overrides: Partial<Gateway> = {}): Gateway {
     return json({})
   }))
   return gateway
+}
+
+// The bits Control added after the first eight (entitlement_catalog.go, in its order). Every one of them is off until
+// an admin turns it on here, and Control refuses its feature until then.
+const LATER_KEYS = [
+  'run_control',
+  'approval_grant',
+  'dm_create',
+  'message_revise',
+  'message_moderate',
+  'personal_agent_admit',
+  'memory_declassify',
+  'canvas',
+  'browser',
+  'memory_personal_turn',
+] as const
+const ALL_KEYS = [...KEYS, ...LATER_KEYS] as const
+
+/** The switches as drawn: the group each sits under, its label and its help line. */
+function drawnFields(): Array<{ group: string; label: string; help: string }> {
+  return [...document.querySelectorAll('fieldset')].flatMap((fieldset) => {
+    const group = fieldset.querySelector('legend')?.textContent?.trim() ?? ''
+    return [...fieldset.querySelectorAll('.verevon-settings-field')].map((field) => ({
+      group,
+      label: field.querySelector('.verevon-settings-label')?.textContent?.trim() ?? '',
+      help: field.querySelector('.verevon-settings-help')?.textContent?.trim() ?? '',
+    }))
+  })
 }
 
 function signIn(role: 'owner' | 'admin' | 'member') {
@@ -248,6 +277,55 @@ describe('OrgSpacePolicySection', () => {
       stubGateway({ orgZdr: () => json({ id: 'org_1', metadata: { interactiveRetention: { zdr: true } } }) })
       await renderLoaded()
       expect(await screen.findByText(/Avviker fra rommenes personvernerklæring/)).toBeTruthy()
+    })
+  })
+
+  // Every Wave 3 feature is refused by Control until its bit is on, so the admin has to be able to find and read the
+  // switch: a raw key, an empty help line or one language only makes the enabling step hard to find.
+  describe('the bits added after the first eight (NO and EN)', () => {
+    async function drawIn(locale: 'no' | 'en') {
+      window.localStorage.setItem(localeStorageKey, locale)
+      stubGateway({ policy: () => json({ data: policyView({ entitlements: ALL_KEYS.map((key) => entitlement(key)) }) }) })
+      render(() => (
+        <I18nProvider>
+          <OrgSpacePolicySection />
+        </I18nProvider>
+      ))
+      await waitFor(() => expect(screen.getAllByRole('switch')).toHaveLength(ALL_KEYS.length))
+      const fields = drawnFields()
+      cleanup()
+      return fields
+    }
+
+    afterEach(() => window.localStorage.removeItem(localeStorageKey))
+
+    it('words every key Control sends, with no raw key and no empty help line, in both languages', async () => {
+      const no = await drawIn('no')
+      const en = await drawIn('en')
+      expect(no).toHaveLength(ALL_KEYS.length)
+      expect(en).toHaveLength(ALL_KEYS.length)
+      for (const field of [...no, ...en]) {
+        expect(field.label, 'a label is drawn').not.toBe('')
+        expect(field.label, `"${field.label}" is not a raw key`).not.toMatch(/_/)
+        expect(field.help, `"${field.label}" has a help line`).not.toBe('')
+      }
+      // Both languages say it in their own words: the same text twice would be a missing translation.
+      no.forEach((field, index) => {
+        expect(en[index]?.label, `label ${index} in English`).not.toBe(field.label)
+        expect(en[index]?.help, `help ${index} in English`).not.toBe(field.help)
+      })
+    })
+
+    it('places the later bits under conversation, knowledge or agents, not all under agents', async () => {
+      const en = await drawIn('en')
+      const countIn = (group: string) => en.filter((field) => field.group === group).length
+      // thread_create, thread_read, dm_create, message_revise, message_moderate
+      expect(countIn('Conversation')).toBe(5)
+      // retrieval_read, import_write, memory_declassify, memory_personal_turn, canvas
+      expect(countIn('Knowledge and files')).toBe(5)
+      // agent_action, schedule_fire, sandbox_capability, process_registry, run_control, approval_grant,
+      // personal_agent_admit, browser
+      expect(countIn('Agents')).toBe(8)
     })
   })
 

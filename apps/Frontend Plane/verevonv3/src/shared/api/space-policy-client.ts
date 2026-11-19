@@ -6,7 +6,10 @@ import { ApiError, requestJson } from './http'
 // the policy: every refusal is shown as the server worded it. No org, actor or role is ever
 // sent in a body (the gateway rejects them); the org is the path segment.
 
-/** The closed catalogue Control owns. Unknown keys from a newer server are shown by key name. */
+/**
+ * The closed catalogue Control owns (entitlement_catalog.go, in its order). The server's own list is what the console
+ * draws; this one names the keys the console has words for. Unknown keys from a newer server are shown by key name.
+ */
 export const SPACE_ENTITLEMENT_KEYS = [
   'thread_create',
   'thread_read',
@@ -16,6 +19,16 @@ export const SPACE_ENTITLEMENT_KEYS = [
   'schedule_fire',
   'sandbox_capability',
   'process_registry',
+  'run_control',
+  'approval_grant',
+  'dm_create',
+  'message_revise',
+  'message_moderate',
+  'personal_agent_admit',
+  'memory_declassify',
+  'canvas',
+  'browser',
+  'memory_personal_turn',
 ] as const
 
 export type SpaceEntitlementKey = (typeof SPACE_ENTITLEMENT_KEYS)[number]
@@ -105,7 +118,7 @@ export interface SpacePolicyWriteResult {
   policy: SpacePolicyView
 }
 
-/** Exactly one of `preset_id` or `entitlements` (all eight keys) is sent. */
+/** Exactly one of `preset_id` or `entitlements` (every key of the catalogue) is sent. */
 export type SpacePolicyWrite =
   | { preset_id: string; entitlements?: undefined }
   | { entitlements: Record<string, boolean>; preset_id?: undefined }
