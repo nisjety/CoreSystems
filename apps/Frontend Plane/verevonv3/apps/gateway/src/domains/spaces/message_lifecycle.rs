@@ -1555,3 +1555,654 @@ mod tests {
         assert!(mutations(&fx).await.is_empty());
     }
 }
+
+#[cfg(test)]
+mod revise_tests {
+    //! WS12-S7: the edit and delete routes' refusal order, the decision binding, the stale-authority
+    //! retry and the error mapping, driven through the real router against mock Auth, Control,
+    //! org-core, Application (Convex) and Model Gateway. No model is called.
+    use crate::config::AppState;
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
+    use tower::ServiceExt;
+    use wiremock::matchers::{body_partial_json, method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const MESSAGE: &str = "/api/v1/spaces/space-room/threads/thread-1/messages/msg-1";
+    const MODEL_MESSAGE: &str = "/v1/threads/thread-1/messages/msg-1";
+    const KEY: &str = "revise-key-0000000001";
+    /// The digest of the empty string: what a delete binds, since it carries no new text.
+    const EMPTY_DIGEST: &str =
+        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    struct Fx {
+        state: AppState,
+        user_core: MockServer,
+        application: MockServer,
+        model_gateway: MockServer,
+        org_core: MockServer,
+        _auth: MockServer,
+    }
+
+    /// Control's signed `model.thread.revise` decision, as the issuer answers it.
+    fn granted() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"data": {
+            "decision": {
+                "space_ref": "space-room", "decision_ref": "decision-2",
+                "recipient_audience_ref": "aud-1", "recipient_audience_revision": 1,
+                "recipient_audience_hash": "hash-1", "privacy_policy_ref": "policy-1",
+                "authority_revision": 1, "resource_authorization_ref": "res-1",
+                "action_schema_hash": "schema-1", "payload_digest": "digest-1",
+                "idempotency_key": "msg-rev-key-0000000000000001"
+            },
+            "token": "revise-token"
+        }}))
+    }
+
+    fn edited() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "message_id": "msg-1", "revision_state": "edited", "revision_no": 2,
+            "revised_at": "2026-11-02T10:00:00Z", "deduplicated": false
+        }))
+    }
+
+    fn deleted() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "message_id": "msg-1", "revision_state": "deleted", "revision_no": 1,
+            "revised_at": "2026-11-02T10:00:00Z", "deduplicated": false
+        }))
+    }
+
+    fn stale() -> ResponseTemplate {
+        ResponseTemplate::new(409).set_body_json(
+            json!({"error": {"code": "space_authority_stale", "message": "The audience moved."}}),
+        )
+    }
+
+    fn typed(status: u16, body: Value) -> ResponseTemplate {
+        ResponseTemplate::new(status).set_body_json(body)
+    }
+
+    /// `org_zdr`: org-core's answer for `org-1` (`None` is an outage, so an unknown posture).
+    /// `control`: what Control answers to the revise decision request. The revise flag is on and
+    /// the reactions flag is off.
+    async fn fx(org_zdr: Option<bool>, control: ResponseTemplate) -> Fx {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for slug in ["session-core", "model-gateway", "capability-core"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{slug}/token")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})))
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": "member", "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-revise-decision"))
+            .respond_with(control)
+            .mount(&user_core)
+            .await;
+        let org_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(match org_zdr {
+                Some(zdr) => ResponseTemplate::new(200)
+                    .set_body_json(json!({"metadata": {"interactiveRetention": {"zdr": zdr}}})),
+                None => ResponseTemplate::new(500),
+            })
+            .mount(&org_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(body_partial_json(json!({"path": "spaces:spacesForOrgForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef": "space-room", "name": "Room", "kind": "room", "lifecycle": "active"}
+            ]})))
+            .mount(&application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"status": "success", "value": {}})),
+            )
+            .mount(&application)
+            .await;
+        let model_gateway = MockServer::start().await;
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.model_gateway_url = model_gateway.uri();
+        state.org_core_url = org_core.uri();
+        state.space_features.message_revise_api = true;
+        state.space_features.reactions_api = false;
+        Fx {
+            state,
+            user_core,
+            application,
+            model_gateway,
+            org_core,
+            _auth: auth,
+        }
+    }
+
+    async fn mount_model(fx: &Fx, verb: &str, template: ResponseTemplate) {
+        Mock::given(wm_method(verb))
+            .and(wm_path(MODEL_MESSAGE))
+            .respond_with(template)
+            .mount(&fx.model_gateway)
+            .await;
+    }
+
+    async fn send(
+        fx: &Fx,
+        method: &str,
+        uri: &str,
+        body: Option<String>,
+        headers: &[(&str, &str)],
+    ) -> (u16, Value) {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", "better-auth.session_token=session-1");
+        if body.is_some() {
+            request = request.header("content-type", "application/json");
+        }
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = crate::build_router(fx.state.clone())
+            .oneshot(request.body(Body::from(body.unwrap_or_default())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let payload: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, payload)
+    }
+
+    async fn edit(fx: &Fx, body: Value) -> (u16, Value) {
+        send(fx, "PATCH", MESSAGE, Some(body.to_string()), &[]).await
+    }
+
+    async fn delete(fx: &Fx, uri: &str, key: Option<&str>) -> (u16, Value) {
+        let headers: Vec<(&str, &str)> = key.map(|key| ("idempotency-key", key)).into_iter().collect();
+        send(fx, "DELETE", uri, None, &headers).await
+    }
+
+    fn edit_body(content: &str) -> Value {
+        json!({"content": content, "idempotency_key": KEY})
+    }
+
+    /// The bodies Control received on the revise decision route.
+    async fn minted(fx: &Fx) -> Vec<Value> {
+        fx.user_core
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == "/api/v1/internal/spaces/thread-revise-decision")
+            .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
+            .collect()
+    }
+
+    /// The bodies model-gateway received on the message route with one method.
+    async fn model_calls(fx: &Fx, verb: &str) -> Vec<Value> {
+        fx.model_gateway
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == MODEL_MESSAGE && request.method.as_str() == verb)
+            .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
+            .collect()
+    }
+
+    async fn mutations(fx: &Fx) -> Vec<Value> {
+        fx.application
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == "/api/mutation")
+            .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
+            .collect()
+    }
+
+    /// Nothing but the session middleware reached Control, and no other service was called.
+    async fn assert_no_domain_calls(fx: &Fx) {
+        let control: Vec<String> = fx
+            .user_core
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|request| request.url.path().to_owned())
+            .collect();
+        assert!(
+            control.iter().all(|path| path == "/api/v1/me/session-context"),
+            "Control was called: {control:?}"
+        );
+        assert!(fx.application.received_requests().await.unwrap().is_empty());
+        assert!(fx.model_gateway.received_requests().await.unwrap().is_empty());
+    }
+
+    fn code(body: &Value) -> &str {
+        body["error"]["code"].as_str().unwrap_or_default()
+    }
+
+    // ---- edit ------------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn edit_mints_revise_decision_bound_to_digest() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false), granted()).await;
+        mount_model(&fx, "PATCH", edited()).await;
+        let (status, body) = edit(&fx, edit_body("  Hello **world**  ")).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body["data"],
+            json!({
+                "message_id": "msg-1", "revision_state": "edited", "revision_no": 2,
+                "revised_at": "2026-11-02T10:00:00Z", "deduplicated": false
+            })
+        );
+        // Control commits to the digest of the TRIMMED text, under one key for the whole attempt.
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest("Hello **world**".as_bytes())));
+        let asked = minted(&fx).await;
+        assert_eq!(asked.len(), 1);
+        assert_eq!(
+            asked[0],
+            json!({
+                "space_ref": "space-room", "thread_id": "thread-1", "message_id": "msg-1",
+                "action": "edit", "content_digest": digest, "idempotency_key": format!("msg-rev-{KEY}")
+            })
+        );
+        // model-gateway gets exactly those bytes plus the 12-field context rebuilt from Control's answer.
+        let sent = model_calls(&fx, "PATCH").await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["content"], "Hello **world**");
+        assert_eq!(sent[0].as_object().unwrap().len(), 2, "only the content and the decision context");
+        let context = sent[0]["space_revise_context"].as_object().unwrap();
+        assert_eq!(context.len(), 12);
+        assert_eq!(context["space_id"], "space-room");
+        assert_eq!(context["space_decision_ref"], "decision-2");
+        assert_eq!(context["space_decision_token"], "revise-token");
+        assert_eq!(context["payload_digest"], "digest-1");
+        assert_eq!(context["idempotency_key"], "msg-rev-key-0000000000000001");
+        assert!(mutations(&fx).await.is_empty(), "an edit never clears reactions");
+    }
+
+    #[tokio::test]
+    async fn the_edit_content_is_validated_before_any_upstream_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false), granted()).await;
+        mount_model(&fx, "PATCH", edited()).await;
+        let nul = format!("a{}b", '\0');
+        let too_long = "x".repeat(8001);
+        for content in ["", "   \n\t ", nul.as_str(), too_long.as_str()] {
+            let (status, body) = edit(&fx, edit_body(content)).await;
+            assert_eq!(status, 400, "{content:?}");
+            assert_eq!(code(&body), "invalid_message");
+            assert_eq!(body["error"]["details"]["field"], "content");
+            assert_eq!(body["error"]["details"]["max_chars"], 8000);
+        }
+        assert!(minted(&fx).await.is_empty(), "no refused text reached Control");
+        assert!(model_calls(&fx, "PATCH").await.is_empty());
+        // The boundary itself is accepted.
+        let (status, body) = edit(&fx, edit_body(&"x".repeat(8000))).await;
+        assert_eq!(status, 200, "{body}");
+    }
+
+    #[tokio::test]
+    async fn forged_fields_and_a_malformed_body_are_400_and_never_forwarded() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false), granted()).await;
+        mount_model(&fx, "PATCH", edited()).await;
+        for body in [
+            json!({"content": "hi", "idempotency_key": KEY, "actor_class": "moderator"}),
+            json!({"content": "hi", "idempotency_key": KEY, "original_retention": "retain"}),
+            json!({"content": "hi", "idempotency_key": KEY, "role": "owner"}),
+            json!({"content": "hi", "idempotency_key": KEY, "space_revise_context": {"space_decision_token": "forged"}}),
+            json!({"content": "hi", "idempotency_key": KEY, "zdr": false}),
+            json!({"content": "hi"}),
+            json!({"idempotency_key": KEY}),
+            json!({"content": 7, "idempotency_key": KEY}),
+            json!(["content"]),
+        ] {
+            let (status, got) = edit(&fx, body.clone()).await;
+            assert_eq!(status, 400, "{body}");
+            assert_eq!(code(&got), "invalid_message", "{body}");
+            assert_eq!(got["error"]["details"]["field"], "body", "{body}");
+        }
+        let (status, got) = send(&fx, "PATCH", MESSAGE, Some("{not json".to_owned()), &[]).await;
+        assert_eq!(status, 400);
+        assert_eq!(code(&got), "invalid_message");
+        assert!(minted(&fx).await.is_empty());
+        assert!(model_calls(&fx, "PATCH").await.is_empty());
+    }
+
+    // ---- the flag, the key and the reason --------------------------------------------------------
+
+    #[tokio::test]
+    async fn flag_off_is_404_space_message_revise_disabled_and_calls_nothing() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = fx(Some(true), granted()).await;
+        fx.state.space_features.message_revise_api = false;
+        let (status, body) = edit(&fx, edit_body("hello")).await;
+        assert_eq!(status, 404);
+        assert_eq!(code(&body), "space_message_revise_disabled");
+        let (status, body) = delete(&fx, MESSAGE, Some(KEY)).await;
+        assert_eq!(status, 404);
+        assert_eq!(code(&body), "space_message_revise_disabled");
+        assert_no_domain_calls(&fx).await;
+        assert!(
+            fx.org_core.received_requests().await.unwrap().is_empty(),
+            "the flag is read before the posture"
+        );
+    }
+
+    #[tokio::test]
+    async fn bad_moderation_reason_and_bad_idempotency_key_are_400() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false), granted()).await;
+        mount_model(&fx, "DELETE", deleted()).await;
+        let (status, body) =
+            delete(&fx, &format!("{MESSAGE}?moderation_reason=bogus"), Some(KEY)).await;
+        assert_eq!(status, 400);
+        assert_eq!(code(&body), "invalid_message");
+        assert_eq!(body["error"]["details"]["field"], "moderation_reason");
+        let long_key = "k".repeat(65);
+        for key in [
+            None,
+            Some("short"),
+            Some("has space in it 12345"),
+            Some("bang!bang!bang!bang!"),
+            Some(long_key.as_str()),
+        ] {
+            let (status, body) = delete(&fx, MESSAGE, key).await;
+            assert_eq!(status, 400, "{key:?}");
+            assert_eq!(code(&body), "invalid_idempotency_key", "{key:?}");
+        }
+        // A body key is checked the same way on an edit.
+        for key in ["short", "has space in it 12345"] {
+            let (status, body) = edit(&fx, json!({"content": "hi", "idempotency_key": key})).await;
+            assert_eq!(status, 400, "{key}");
+            assert_eq!(code(&body), "invalid_idempotency_key", "{key}");
+        }
+        assert!(minted(&fx).await.is_empty());
+        assert!(model_calls(&fx, "DELETE").await.is_empty());
+    }
+
+    // ---- Zero Data Retention ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn zdr_org_typed_412_no_upstream_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let zdr = fx(Some(true), granted()).await;
+        mount_model(&zdr, "PATCH", edited()).await;
+        mount_model(&zdr, "DELETE", deleted()).await;
+        let (status, body) = edit(&zdr, edit_body("hello")).await;
+        assert_eq!(status, 412, "{body}");
+        assert_eq!(code(&body), "zdr_durable_mutation_forbidden");
+        let (status, body) = delete(&zdr, MESSAGE, Some(KEY)).await;
+        assert_eq!(status, 412, "a delete of a stored message is a durable write too: {body}");
+        assert_eq!(code(&body), "zdr_durable_mutation_forbidden");
+        assert!(minted(&zdr).await.is_empty(), "no decision is minted for a ZDR caller");
+        assert!(zdr.model_gateway.received_requests().await.unwrap().is_empty());
+        assert!(zdr.application.received_requests().await.unwrap().is_empty());
+
+        // An unknown posture fails closed in its own words.
+        let unknown = fx(None, granted()).await;
+        mount_model(&unknown, "PATCH", edited()).await;
+        let (status, body) = edit(&unknown, edit_body("hello")).await;
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(code(&body), "zdr_decision_unavailable");
+        assert!(minted(&unknown).await.is_empty());
+        assert!(unknown.model_gateway.received_requests().await.unwrap().is_empty());
+
+        // A request-level header alone refuses; a positively non-ZDR org still edits.
+        let open = fx(Some(false), granted()).await;
+        mount_model(&open, "PATCH", edited()).await;
+        let (status, body) = send(
+            &open,
+            "PATCH",
+            MESSAGE,
+            Some(edit_body("hello").to_string()),
+            &[("x-zdr", "true")],
+        )
+        .await;
+        assert_eq!(status, 412, "{body}");
+        assert!(minted(&open).await.is_empty());
+        let (status, _) = edit(&open, edit_body("hello")).await;
+        assert_eq!(status, 200);
+    }
+
+    // ---- delete ----------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn delete_binds_the_empty_string_digest() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false), granted()).await;
+        mount_model(&fx, "DELETE", deleted()).await;
+        let (status, body) = delete(&fx, MESSAGE, Some(KEY)).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"]["revision_state"], "deleted");
+        assert_eq!(body["data"]["revision_no"], 1);
+        // The digest of the empty text; Control signs a delete against nothing else.
+        assert_eq!(EMPTY_DIGEST, format!("sha256:{}", hex::encode(Sha256::digest(b""))));
+        let asked = minted(&fx).await;
+        assert_eq!(
+            asked[0],
+            json!({
+                "space_ref": "space-room", "thread_id": "thread-1", "message_id": "msg-1",
+                "action": "delete", "content_digest": EMPTY_DIGEST, "idempotency_key": format!("msg-rev-{KEY}")
+            })
+        );
+        // Without a reason the call carries only the decision context.
+        let sent = model_calls(&fx, "DELETE").await;
+        assert_eq!(sent[0].as_object().unwrap().keys().collect::<Vec<_>>(), ["space_revise_context"]);
+        // A moderation reason from the closed set rides along; nothing else does.
+        let (status, _) = delete(&fx, &format!("{MESSAGE}?moderation_reason=spam"), Some(KEY)).await;
+        assert_eq!(status, 200);
+        let sent = model_calls(&fx, "DELETE").await;
+        assert_eq!(sent[1]["moderation_reason"], "spam");
+        assert_eq!(sent[1].as_object().unwrap().len(), 2);
+        for reason in ["policy_violation", "harassment", "privacy", "other"] {
+            let (status, _) =
+                delete(&fx, &format!("{MESSAGE}?moderation_reason={reason}"), Some(KEY)).await;
+            assert_eq!(status, 200, "{reason}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_landed_delete_clears_reactions_only_with_the_flag_on_and_never_after_a_refusal() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut on = fx(Some(false), granted()).await;
+        on.state.space_features.reactions_api = true;
+        mount_model(&on, "DELETE", deleted()).await;
+        let (status, _) = delete(&on, MESSAGE, Some(KEY)).await;
+        assert_eq!(status, 200);
+        let sent = mutations(&on).await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["path"], "spaceReactions:clearForMessageForGateway");
+        assert_eq!(sent[0]["args"]["messageId"], "msg-1");
+        assert_eq!(sent[0]["args"]["threadId"], "thread-1");
+        assert_eq!(sent[0]["args"]["spaceRef"], "space-room");
+        assert_eq!(sent[0]["args"]["externalOrgId"], "org-1");
+
+        // Flag off, or model-gateway refusing the delete: nothing is cleared.
+        let off = fx(Some(false), granted()).await;
+        mount_model(&off, "DELETE", deleted()).await;
+        let (status, _) = delete(&off, MESSAGE, Some(KEY)).await;
+        assert_eq!(status, 200);
+        assert!(mutations(&off).await.is_empty());
+        let mut refused = fx(Some(false), granted()).await;
+        refused.state.space_features.reactions_api = true;
+        mount_model(
+            &refused,
+            "DELETE",
+            typed(403, json!({"error": {"code": "message_revise_forbidden", "message": "no"}})),
+        )
+        .await;
+        let (status, _) = delete(&refused, MESSAGE, Some(KEY)).await;
+        assert_eq!(status, 403);
+        assert!(mutations(&refused).await.is_empty());
+    }
+
+    // ---- stale authority -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn stale_authority_retried_once() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        // One stale answer, then success: a fresh decision is minted and the call is resent once.
+        let once = fx(Some(false), granted()).await;
+        Mock::given(wm_method("PATCH"))
+            .and(wm_path(MODEL_MESSAGE))
+            .respond_with(stale())
+            .up_to_n_times(1)
+            .mount(&once.model_gateway)
+            .await;
+        mount_model(&once, "PATCH", edited()).await;
+        let (status, body) = edit(&once, edit_body("hello")).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(minted(&once).await.len(), 2, "one fresh decision per attempt");
+        assert_eq!(model_calls(&once, "PATCH").await.len(), 2);
+
+        // Two stale answers: the second is surfaced after exactly two decisions and two calls.
+        let twice = fx(Some(false), granted()).await;
+        mount_model(&twice, "PATCH", stale()).await;
+        let (status, body) = edit(&twice, edit_body("hello")).await;
+        assert_eq!(status, 409, "{body}");
+        assert_eq!(code(&body), "space_authority_stale");
+        assert_eq!(minted(&twice).await.len(), 2);
+        assert_eq!(model_calls(&twice, "PATCH").await.len(), 2);
+    }
+
+    // ---- Control's and model-gateway's refusals --------------------------------------------------
+
+    #[tokio::test]
+    async fn control_refusals_map_to_the_typed_revise_answers() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (template, want_status, want_code) in [
+            (typed(403, json!({"error": {"code": "anything", "message": "x"}})), 403, "space_message_revise_not_authorized"),
+            (typed(404, json!({"error": {"code": "space_not_found"}})), 404, "space_not_found"),
+            (typed(400, json!({"error": {"code": "invalid_request"}})), 400, "invalid_message"),
+            (typed(409, json!({"error": {"code": "room_archived"}})), 409, "room_archived"),
+            (typed(409, json!({"error": {"code": "something_else"}})), 409, "space_authority_stale"),
+            (typed(500, json!({"error": {"code": "boom"}})), 503, "space_decision_unavailable"),
+            (typed(401, json!({"error": {"code": "unauthorized"}})), 503, "space_decision_unavailable"),
+            // A 200 that is not a usable decision is the typed bad-decision answer, not a guess.
+            (typed(200, json!({"data": {"decision": {"decision_ref": "d"}, "token": "t"}})), 502, "invalid_space_decision"),
+            (typed(200, json!({"data": {"decision": {}, "token": ""}})), 502, "invalid_space_decision"),
+        ] {
+            let fx = fx(Some(false), template).await;
+            mount_model(&fx, "PATCH", edited()).await;
+            let (status, body) = edit(&fx, edit_body("hello")).await;
+            assert_eq!(status, want_status, "{want_code}: {body}");
+            assert_eq!(code(&body), want_code, "{body}");
+            assert!(
+                model_calls(&fx, "PATCH").await.is_empty(),
+                "{want_code}: no model call without a decision"
+            );
+            assert_eq!(minted(&fx).await.len(), 1, "{want_code}: a refused mint is not retried");
+        }
+    }
+
+    #[tokio::test]
+    async fn model_gateway_answers_reach_the_browser_as_bounded_typed_envelopes() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (template, want_status, want_code) in [
+            (typed(403, json!({"error": {"code": "message_revise_forbidden", "message": "Not yours."}})), 403, "message_revise_forbidden"),
+            (typed(409, json!({"error": {"code": "thread_run_active", "message": "A run is active."}})), 409, "thread_run_active"),
+            (typed(409, json!({"error": {"code": "message_already_deleted", "message": "Gone."}})), 409, "message_already_deleted"),
+            (typed(404, json!({"error": {"code": "message_not_found", "message": "No such message."}})), 404, "message_not_found"),
+            (typed(400, json!({"error": {"code": "revision_noop", "message": "No change."}})), 400, "revision_noop"),
+            // A ZDR catalogue code is rebuilt from the catalogue, not echoed.
+            (typed(412, json!({"error": {"code": "zdr_durable_mutation_forbidden", "message": "model words"}})), 412, "zdr_durable_mutation_forbidden"),
+            // The delegated bearer refused is an outage to the browser, never a signed-out user.
+            (typed(401, json!({"error": {"code": "unauthorized", "message": "x"}})), 503, "session_unavailable"),
+            (ResponseTemplate::new(500).set_body_string("<html>boom</html>"), 503, "session_unavailable"),
+            (typed(500, json!({"error": "plain string"})), 503, "session_unavailable"),
+            // A 200 without the message id or state is an unreadable answer.
+            (typed(200, json!({"revision_state": "edited"})), 502, "session_unavailable"),
+            (typed(200, json!({"message_id": "msg-1"})), 502, "session_unavailable"),
+        ] {
+            let fx = fx(Some(false), granted()).await;
+            mount_model(&fx, "PATCH", template).await;
+            let (status, body) = edit(&fx, edit_body("hello")).await;
+            assert_eq!(status, want_status, "{want_code}: {body}");
+            assert_eq!(code(&body), want_code, "{body}");
+            assert!(!body.to_string().contains("boom"), "no upstream text reaches the browser");
+            assert!(!body.to_string().contains("model words"), "a catalogue code is rebuilt");
+        }
+        // Only scalar details survive, and the message is bounded.
+        let fx = fx(Some(false), granted()).await;
+        mount_model(
+            &fx,
+            "PATCH",
+            typed(
+                409,
+                json!({"error": {
+                    "code": "revision_limit",
+                    "message": "m".repeat(400),
+                    "details": {"max_revisions": 20, "nested": {"a": 1}, "list": [1]}
+                }}),
+            ),
+        )
+        .await;
+        let (status, body) = edit(&fx, edit_body("hello")).await;
+        assert_eq!(status, 409);
+        assert_eq!(body["error"]["details"], json!({"max_revisions": 20}));
+        assert!(body["error"]["message"].as_str().unwrap().chars().count() <= 300);
+    }
+
+    // ---- the Space -------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn an_unknown_space_is_404_and_a_lifecycle_outage_is_503_with_no_decision_minted() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let unknown = fx(Some(false), granted()).await;
+        mount_model(&unknown, "PATCH", edited()).await;
+        let (status, body) = send(
+            &unknown,
+            "PATCH",
+            "/api/v1/spaces/space-nowhere/threads/thread-1/messages/msg-1",
+            Some(edit_body("hello").to_string()),
+            &[],
+        )
+        .await;
+        assert_eq!(status, 404, "{body}");
+        assert_eq!(code(&body), "space_not_found");
+        assert!(minted(&unknown).await.is_empty());
+
+        let mut down = fx(Some(false), granted()).await;
+        // A port nothing listens on: the lifecycle read fails to connect.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        down.state.application_convex_url = format!("http://{}", closed.local_addr().unwrap());
+        drop(closed);
+        let (status, body) = edit(&down, edit_body("hello")).await;
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(code(&body), "space_lifecycle_unavailable");
+        assert!(minted(&down).await.is_empty());
+    }
+}
