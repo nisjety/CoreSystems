@@ -448,6 +448,26 @@ services:
       SPACE_RUN_LIVE_VIEW: ${SPACE_RUN_LIVE_VIEW:-true}
       SPACE_RUN_LIVE_TEXT: ${SPACE_RUN_LIVE_TEXT:-true}
       SPACE_RUN_MANAGER_STOP: ${SPACE_RUN_MANAGER_STOP:-true}
+      # Wave 3 Space switches (all read through space_flag). Rollout controls only, never authorization inputs:
+      # Control's decisions and the owner planes' checks decide every use. On in development when unset and off
+      # in production, where the overlay pins each one. Each also needs its upstream plane's own switch.
+      # WS17-S5: the personal-agent routes (API) and features.personal_agents (API and UI together).
+      SPACE_PERSONAL_AGENTS_API: ${SPACE_PERSONAL_AGENTS_API:-true}
+      SPACE_PERSONAL_AGENTS_UI: ${SPACE_PERSONAL_AGENTS_UI:-true}
+      # WS17-S6: the owner's private panel routes, the spaces.open_private_panel action and features.private_panel.
+      SPACE_PRIVATE_PANEL_UI: ${SPACE_PRIVATE_PANEL_UI:-true}
+      # WS17-S7: declassify one personal memory into a room (memory.declassify_to_space) and features.memory_declassify.
+      SPACE_MEMORY_DECLASSIFY_API: ${SPACE_MEMORY_DECLASSIFY_API:-true}
+      # WS17-S8: the per-turn opt-in to use personal memory in one shared-room answer (features.personal_memory_turn).
+      SPACE_PERSONAL_MEMORY_TURN_API: ${SPACE_PERSONAL_MEMORY_TURN_API:-true}
+      # WS19-S4: the room canvas routes and actions (API) and features.canvas (API and UI together). Pilot only.
+      SPACE_CANVAS_API: ${SPACE_CANVAS_API:-true}
+      SPACE_CANVAS_UI: ${SPACE_CANVAS_UI:-true}
+      # W3-DEC-CANVAS: the per-binding canvas-tools switch (spaces.set_agent_canvas_tools, features.agent_canvas_tools).
+      SPACE_AGENT_CANVAS_TOOLS_API: ${SPACE_AGENT_CANVAS_TOOLS_API:-true}
+      # WS20-S4: the room browser run reads and start (API) and WS20-S5: the browser card and pane (UI).
+      SPACE_BROWSER_RUN_API: ${SPACE_BROWSER_RUN_API:-true}
+      SPACE_BROWSER_CARD: ${SPACE_BROWSER_CARD:-true}
     ports:
       - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:3185:3185"
     networks:

@@ -67,6 +67,16 @@ services:
             SPACE_HUMAN_MARKDOWN_UI: "false"
             SPACE_ROOM_DIRECTORY_API: "false"
             SPACE_TIMELINE_ANCHOR_UI: "false"
+            SPACE_PERSONAL_AGENTS_API: "false"
+            SPACE_PERSONAL_AGENTS_UI: "false"
+            SPACE_PRIVATE_PANEL_UI: "false"
+            SPACE_MEMORY_DECLASSIFY_API: "false"
+            SPACE_PERSONAL_MEMORY_TURN_API: "false"
+            SPACE_CANVAS_API: "false"
+            SPACE_CANVAS_UI: "false"
+            SPACE_AGENT_CANVAS_TOOLS_API: "false"
+            SPACE_BROWSER_RUN_API: "false"
+            SPACE_BROWSER_CARD: "false"
             MODEL_GATEWAY_DEV_BEARER: ""
             VEREVON_PUBLIC_ORIGIN: ${VEREVON_PUBLIC_ORIGIN:?VEREVON_PUBLIC_ORIGIN is required in production}
 
