@@ -147,6 +147,54 @@ describe('ArtifactsPanel review thread', () => {
     expect(screen.queryByText(/Kunne ikke gjennomgå/)).toBeNull()
     expect(runReviewMock).toHaveBeenCalledTimes(1)
   })
+
+  it('disables Review once the gateway has refused the thread, so the same refused request is not sent again', async () => {
+    runReviewMock.mockRejectedValueOnce(
+      new ApiError('A review is not available for this thread.', 409, 'side_chat_thread_retention_refused'),
+    )
+    render(() => (
+      <ArtifactsPanel
+        items={[item()]}
+        history={{ threadId: 'thread-1', temporary: false }}
+        reviewThreadId="thread-1"
+        connectionModel="gpt-5-codex"
+      />
+    ))
+    fireEvent.click(await vi.waitFor(() => {
+      flush()
+      return screen.getByRole('button', { name: REVIEW })
+    }))
+    await vi.waitFor(() => {
+      flush()
+      expect(screen.getByText(/ikke tilgjengelig for denne samtalen/)).toBeTruthy()
+    })
+    const review = screen.getByRole('button', { name: REVIEW }) as HTMLButtonElement
+    expect(review.disabled).toBe(true)
+    fireEvent.click(review)
+    flush()
+    expect(runReviewMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves Review enabled after a failure that is not a refusal of the thread, so the review can be tried again', async () => {
+    runReviewMock.mockRejectedValueOnce(new ApiError('Busy.', 503, 'review_unavailable'))
+    render(() => (
+      <ArtifactsPanel
+        items={[item()]}
+        history={{ threadId: 'thread-1', temporary: false }}
+        reviewThreadId="thread-1"
+        connectionModel="gpt-5-codex"
+      />
+    ))
+    fireEvent.click(await vi.waitFor(() => {
+      flush()
+      return screen.getByRole('button', { name: REVIEW })
+    }))
+    await vi.waitFor(() => {
+      flush()
+      expect(screen.getByText(/ikke tilgjengelig akkurat nå/)).toBeTruthy()
+    })
+    expect((screen.getByRole('button', { name: REVIEW }) as HTMLButtonElement).disabled).toBe(false)
+  })
 })
 
 describe('reviewRunFailureKind on a thread', () => {

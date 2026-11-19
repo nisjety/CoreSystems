@@ -1867,6 +1867,21 @@ describe('action registry', () => {
   })
 })
 
+describe('spaces.revoke_agent output contract (V3d-bff-2)', () => {
+  it('keeps the erase outcome the revoke answers with, and refuses a word outside the closed set', () => {
+    const output = spaceActions.find((action) => action.id === 'spaces.revoke_agent')?.outputSchema
+    expect(output).toBeDefined()
+
+    expect(output?.parse({ status: 'revoked', agent_memory_erase: 'held' })).toEqual({
+      status: 'revoked',
+      agent_memory_erase: 'held',
+    })
+    // Optional and additive: an answer without the outcome still parses.
+    expect(output?.parse({ status: 'revoked' })).toEqual({ status: 'revoked' })
+    expect(output?.safeParse({ status: 'revoked', agent_memory_erase: 'deleted' }).success).toBe(false)
+  })
+})
+
 describe('settings.update_preferences contract v2 (WS16-S2)', () => {
   const schema = () => {
     const action = getActionDescriptor('settings.update_preferences')

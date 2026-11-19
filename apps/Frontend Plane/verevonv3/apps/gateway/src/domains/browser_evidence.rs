@@ -107,11 +107,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
     router_with(state, region_attach)
 }
 
-/// The `BROWSER_REGION_ATTACH` grammar; `build_state` parses the switch with the
-/// same `crate::config::human_browse_enabled`.
+/// The `BROWSER_REGION_ATTACH` grammar: only the literal `true`, the same `crate::config::exact_true_flag`
+/// that `build_state` reads the switch with (through `env_exact_true`, V3e-bff-3).
 #[cfg(test)]
 fn region_attach_flag_on(value: Option<&str>) -> bool {
-    crate::config::human_browse_enabled(value)
+    crate::config::exact_true_flag(value)
 }
 
 fn router_with(state: AppState, region_attach: bool) -> Router<AppState> {
@@ -2581,13 +2581,14 @@ mod tests {
     }
 
     #[test]
-    fn region_attach_flag_defaults_off() {
+    fn region_attach_flag_defaults_off_and_reads_only_the_exact_true() {
+        assert!(region_attach_flag_on(Some("true")));
         assert!(!region_attach_flag_on(None));
         assert!(!region_attach_flag_on(Some("")));
         assert!(!region_attach_flag_on(Some("0")));
         assert!(!region_attach_flag_on(Some("false")));
-        assert!(region_attach_flag_on(Some("1")));
-        assert!(region_attach_flag_on(Some(" TRUE ")));
+        assert!(!region_attach_flag_on(Some("1")));
+        assert!(!region_attach_flag_on(Some(" TRUE ")));
     }
 
     #[test]

@@ -438,10 +438,10 @@ export type DashboardComposerBrowserContext = {
 
 /**
  * Build-time switch for the `@tab` chip and its payload field (E3.3-c).
- * Only `1` turns it on, like VITE_BROWSER_OMNIBOX_SEARCH.
+ * Only the literal `true` turns it on, the same word the gateway's BROWSER_TAB_MENTIONS takes (V3e-bff-3).
  */
 export function tabMentionChipsEnabled(): boolean {
-	return import.meta.env.VITE_BROWSER_TAB_MENTIONS === "1";
+	return import.meta.env.VITE_BROWSER_TAB_MENTIONS === "true";
 }
 
 /** Most browser regions one message carries (E3.3-d2b). */

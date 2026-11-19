@@ -372,9 +372,30 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     midRun.abandon(resendQueue)
     resendQueue = []
   }
+  // A Space room never takes the member's ChatGPT subscription while the BYO gateway switch is on (DEC-V-R8). Every send of the
+  // room is held to it: the composer's submit, a send-when-ready that waited, and a steered message sent again.
+  function subscriptionRouteWithheldNow(): boolean {
+    return selectedModel().provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER && subscriptionRouteWithheldOnSpace(true)
+  }
+  // Puts words back in the box, above anything typed since, as a cancelled send-when-ready does.
+  function keepInBox(words: string): void {
+    setText((current) => (current.trim() === '' ? words : `${words}\n\n${current}`))
+  }
   function sendNextResend(): void {
     const next = resendQueue.shift()
     if (!next) return
+    // Withheld like the composer's own send: nothing goes out, and the words of every message held for resending go back
+    // to the box, in the order they were sent.
+    if (subscriptionRouteWithheldNow()) {
+      const withheld = [next, ...resendQueue]
+      resendQueue = []
+      midRun.withhold(withheld, i18n.tr(
+        'Abonnementsmodeller kan ikke brukes i et delt Space. Meldingen er lagt tilbake i boksen.',
+        'ChatGPT subscription models cannot be used in a shared Space. The message is back in the box.',
+      ))
+      for (let index = withheld.length - 1; index >= 0; index -= 1) keepInBox(withheld[index]?.content ?? '')
+      return
+    }
     midRun.startTurn(true)
     void pipeline.send({
       content: next.content,
@@ -687,6 +708,11 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
       if (!send) return
       const ready = midRun.takeDeferred()
       if (!ready) return
+      // The send that waited is held to the composer's gate: on the subscription route it is not sent, and it goes back to the box.
+      if (subscriptionRouteWithheldNow()) {
+        giveBack(ready)
+        return
+      }
       midRun.startTurn(false)
       flushingDeferred = ready
       void pipeline.send({
@@ -1057,9 +1083,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     && (Boolean(askAgentRef()) || pickedSkills().length > 0)
   // A Space room never takes the member's ChatGPT subscription while the BYO gateway switch is on (DEC-V-R8): the turn would be
   // written under that one connection. The send is refused with the draft kept; the picker offers no subscription model here.
-  const subscriptionWithheld = () => effectiveMode() !== 'post'
-    && selectedModel().provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
-    && subscriptionRouteWithheldOnSpace(true)
+  const subscriptionWithheld = () => effectiveMode() !== 'post' && subscriptionRouteWithheldNow()
 
   // `override` is the text to send when the box was just rewritten and the signal has not flushed
   // yet (the request-to-add path appends a line naming the managers).
@@ -1240,7 +1264,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   // A message that was waiting for the agent goes back into the box: its words above anything typed
   // since, and its skills and mention picks beside any made since (the skill cap still holds).
   function giveBack(waiting: SpaceDeferredSend): void {
-    setText((current) => (current.trim() === '' ? waiting.content : `${waiting.content}\n\n${current}`))
+    keepInBox(waiting.content)
     const skills = waiting.skills ?? []
     if (skills.length > 0) {
       setPickedSkills((current) => {

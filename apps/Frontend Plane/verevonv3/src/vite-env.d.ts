@@ -10,7 +10,7 @@ interface ImportMetaEnv {
 	readonly VITE_BYO_GATEWAY?: string;
 	readonly VITE_AGENT_BUILDER?: string;
 	readonly VITE_BROWSER_OMNIBOX_SEARCH?: string;
-	/** "1" shows the composer's `@tab` chips and sends `browserContext` (E3.3-c). Default off. */
+	/** "true" shows the composer's `@tab` chips and sends `browserContext` (E3.3-c). Default off. */
 	readonly VITE_BROWSER_TAB_MENTIONS?: string;
 	/** "1" mounts the shared approval card in BrowserChrome and the chat deck (E3.2-b swap). Default off. */
 	readonly VITE_BROWSER_APPROVAL_CARD?: string;

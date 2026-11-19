@@ -216,6 +216,25 @@ describe('createSpaceMidRun: settling the turn (WS09-S2)', () => {
     expect(midRun.entries().map((entry) => entry.state)).toEqual(['resent', 'refused'])
   })
 
+  it('withholds a resend the room will not send, with the reason it gives, and leaves the message the run took alone', async () => {
+    const { queue, midRun } = setup()
+    queue
+      .mockResolvedValueOnce({ outcome: 'queued', pending: 1, persisted: true })
+      .mockResolvedValueOnce({ outcome: 'run_ended' })
+    await midRun.steer('Tatt', TARGET)
+    await midRun.steer('Ett', TARGET)
+    midRun.markDelivered(['Tatt'])
+    flush()
+
+    const held = midRun.settle()
+    midRun.withhold(held, 'Withheld.')
+    flush()
+
+    expect(held).toEqual([{ content: 'Ett', clientMessageId: 'cm-2' }])
+    expect(midRun.entries().map((entry) => entry.state)).toEqual(['delivered', 'refused'])
+    expect(midRun.entries()[1]?.note).toBe('Withheld.')
+  })
+
   it('starts a new turn with an empty strip, and a resend turn keeps only the entries that say they are being resent', async () => {
     const { queue, midRun } = setup()
     queue

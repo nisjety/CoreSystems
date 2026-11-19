@@ -1750,4 +1750,65 @@ describe('SpaceRoomComposer — owner mid-run steer (WS09-S2)', () => {
       actions: [{ id: 'sk-hms', name: 'HMS-runde', kind: 'skill' }],
     })
   })
+
+  // The gate of a send that waited (DEC-V-R8). The switch is read at the moment of each send, so it is turned on while the
+  // message waits: a subscription chosen with the switch off is the selection the gate must refuse when the send goes out.
+  describe('a send that waited on a subscription model while the BYO gateway switch is on', () => {
+    beforeEach(() => {
+      chatClient.listModels.mockResolvedValue([{
+        id: 'gpt-5.6-luna',
+        name: 'GPT 5.6 Luna Subscription',
+        provider: 'openai-codex-subscription',
+      }])
+      subscriptionsClient.listChatGptSubscriptions.mockResolvedValue([{
+        id: 'conn-subscription-1',
+        providerKey: 'openai-codex-subscription',
+        status: 'active',
+      }])
+    })
+
+    async function chooseSubscriptionModel() {
+      fireEvent.click(await screen.findByRole('button', { name: /choose ai model|velg ai-modell/i }))
+      fireEvent.click(await screen.findByRole('button', { name: /gpt 5\.6 luna subscription/i }))
+      flush()
+    }
+
+    it('does not send a send-when-ready on the subscription route, and gives its words back to the box', async () => {
+      publishSpaceThreads('room-1', [{ thread_id: 't1', space_id: 'room-1', latest_run_status: 'running' }])
+      flush()
+      renderInThread(STEER_ON)
+      await chooseSubscriptionModel()
+      typeAndSubmit('Oppdater lista')
+      expect(await screen.findByText(/Venter på at agenten blir ferdig/)).toBeTruthy()
+
+      vi.stubEnv('VITE_BYO_GATEWAY', 'true')
+      publishSpaceThreads('room-1', [{ thread_id: 't1', space_id: 'room-1', latest_run_status: 'completed' }])
+      flush()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      expect(chatClient.streamChat).not.toHaveBeenCalled()
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Oppdater lista')
+    })
+
+    it('does not send a steered message again on the subscription route, and keeps its words in the box', async () => {
+      const stream = scriptedStream()
+      chatClient.queueInvocationInput.mockResolvedValue({ outcome: 'run_ended' })
+      renderInThread(STEER_ON)
+      await chooseSubscriptionModel()
+      await ownTurnStreaming(stream)
+
+      typeAndSubmit('Legg til kolonne')
+      await waitFor(() => expect(stripState('Legg til kolonne')).toBe('resent'))
+
+      vi.stubEnv('VITE_BYO_GATEWAY', 'true')
+      stream.handlers().onDone?.({})
+      flush()
+      stream.finish()
+
+      await waitFor(() => expect(stripState('Legg til kolonne')).toBe('refused'))
+      expect(screen.getByText(/lagt tilbake i boksen/)).toBeTruthy()
+      expect(chatClient.streamChat).toHaveBeenCalledTimes(1)
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('Legg til kolonne')
+    })
+  })
 })

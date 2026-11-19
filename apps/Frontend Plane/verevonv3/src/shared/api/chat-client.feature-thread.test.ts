@@ -130,4 +130,19 @@ describe('translateText request body', () => {
     await expect(translateText('Hei', 'en', { threadId: 'thread 1' })).rejects.toThrow(ReasoningTranslateContractError)
     expect(fetchMock).not.toHaveBeenCalled()
   })
+
+  it('rejects a zero-retention refusal with its typed error, so the reader is told why and not that it is unavailable', async () => {
+    stubFetch(reply(412, { error: { code: 'zdr_connection_not_acknowledged', message: 'refused' } }))
+    await expect(translateText('Hei', 'en', { threadId: 'thread-1', model: 'gpt-5-codex' })).rejects.toMatchObject({
+      status: 412,
+      code: 'zdr_connection_not_acknowledged',
+    })
+  })
+
+  it('resolves to null while the switch is off (404), and for a 412 that is not a zero-retention refusal', async () => {
+    stubFetch(reply(404, { error: { code: 'reasoning_translate_disabled', message: 'off' } }))
+    await expect(translateText('Hei', 'en')).resolves.toBeNull()
+    stubFetch(reply(412, { error: { code: 'reasoning_translate_unavailable', message: 'x' } }))
+    await expect(translateText('Hei', 'en')).resolves.toBeNull()
+  })
 })

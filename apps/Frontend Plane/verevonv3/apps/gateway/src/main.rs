@@ -38,6 +38,7 @@ mod public_url;
 mod rate_limit;
 mod request_id;
 mod retention_decision;
+mod switch_spellings;
 mod upstream;
 mod utils;
 mod zdr;
@@ -52,6 +53,10 @@ async fn main() -> Result<()> {
     // RUST_LOG (capped for the dependencies that print URLs), the sticky ZDR
     // mark and the JSON log with the ZDR event filter. See `zdr_log`.
     zdr_log::init();
+
+    // V3e-bff-3: one warning for each switch set to a spelling its exact reader does not take. It
+    // changes no switch, and runs before any listener opens.
+    switch_spellings::warn_former_spellings();
 
     // Prometheus recorder for the /metrics endpoint (Phase 6 B13). Installed
     // once, globally, before the router so the request-tracking middleware and
@@ -657,6 +662,7 @@ mod tests {
             browser_region_attach: false,
             browser_tab_mentions: false,
             browser_turn_context: false,
+            browser_policy_admin_api: false,
             browser_region_attach_key: String::new(),
             auth_core_url: "http://127.0.0.1:1".into(),
             verevon_public_origin: "http://localhost:5173".into(),

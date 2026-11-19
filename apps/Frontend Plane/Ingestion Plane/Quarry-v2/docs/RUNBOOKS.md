@@ -1964,7 +1964,7 @@ What it is: a crawl or batch page (`POST /v1/internal/run_page` with a `crawl` c
 
 Status: built, dark. Nothing is deployed and the switch is off in every environment until the dev and evidence stacks set it.
 
-- **Switch.** Gateway `BROWSER_HUMAN_BROWSE` (`1`, `true`, `yes` or `on` turns it on; anything else, or unset, is off). It is read without `APP_ENV`. It only takes effect when `BROWSER_GRANT_ENFORCEMENT` is not `off`, because a human session needs a broker grant.
+- **Switch.** Gateway `BROWSER_HUMAN_BROWSE` (only the exact literal `true` turns it on; `1`, `yes` and `on` leave it off, as does anything else or unset). It is read without `APP_ENV`. It only takes effect when `BROWSER_GRANT_ENFORCEMENT` is not `off`, because a human session needs a broker grant.
 - **What changes when on.** A new session asks Model Gateway for a `human_browse` grant (no hosts; the broker's deny-list is the policy) and sends Quarry no `constraints` block, so no 12-step, 120-second or first-host literal reaches the run. If the grant is not issued (permissive mode), the session opens on the first-host policy, as before.
 - **Keep-alive.** `POST /api/v1/browser/sessions/{session_id}/keepalive` renews the session grant by one broker TTL and returns `{"data":{"expiresAt":...}}` only. A grant that cannot be renewed answers 409 `browser_session_expired`: reopen the session. The SPA runs this every 300 seconds only while the tab is visible and the session advertises `human_browsing`.
 - **Capabilities.** `human_browsing`, `tab_control` and `attach` are advertised only when Quarry's owner projection says so (`grantKind`, `tabControl`, `attachAvailable`). Until Quarry emits `grantKind`, no session advertises `human_browsing`.

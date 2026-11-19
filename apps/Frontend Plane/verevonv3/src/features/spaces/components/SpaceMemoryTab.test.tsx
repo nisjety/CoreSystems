@@ -99,4 +99,43 @@ describe('SpaceMemoryTab', () => {
     )
     await waitFor(() => expect(screen.queryByText('Vi leverer til Bergen på fredager.')).toBeNull())
   })
+
+  /** Opens the tab with one row and asks to delete it, leaving the in-place confirmation to the test. */
+  async function deleteFirstRowWith(failure: unknown) {
+    http.requestJson
+      .mockResolvedValueOnce({ memories: [row()], withheld: 0 })
+      .mockRejectedValueOnce(failure)
+    render(() => <SpaceMemoryTab spaceRef="room-1" />)
+    ;(await screen.findByRole('button', { name: 'Slett' })).click()
+    ;(await screen.findByRole('button', { name: 'Bekreft sletting av minnet' })).click()
+  }
+
+  it('says a legal hold kept the row, with its catalogue copy, not as a retryable failure', async () => {
+    await deleteFirstRowWith(
+      new ApiError('A legal hold covers this data.', 409, 'erasure_blocked_legal_hold', {
+        details: { retryable: false },
+      }),
+    )
+
+    expect(await screen.findByText(/juridisk tilbakeholdelse gjelder disse dataene/)).toBeTruthy()
+    expect(screen.queryByText(/Vi fikk ikke slettet minnet/)).toBeNull()
+    expect(screen.getByText('Vi leverer til Bergen på fredager.')).toBeTruthy()
+  })
+
+  it('says a hold check that could not be made is retryable, with its catalogue copy', async () => {
+    await deleteFirstRowWith(
+      new ApiError('Legal holds could not be checked.', 503, 'erasure_hold_check_unavailable', {
+        details: { retryable: true },
+      }),
+    )
+
+    expect(await screen.findByText(/Juridiske tilbakeholdelser kunne ikke kontrolleres/)).toBeTruthy()
+    expect(screen.queryByText(/Vi fikk ikke slettet minnet/)).toBeNull()
+  })
+
+  it('keeps the generic failure copy for any other delete failure', async () => {
+    await deleteFirstRowWith(new ApiError('boom', 500, null))
+
+    expect(await screen.findByText('Vi fikk ikke slettet minnet. Prøv igjen.')).toBeTruthy()
+  })
 })

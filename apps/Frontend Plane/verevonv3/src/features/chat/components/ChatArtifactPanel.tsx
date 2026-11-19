@@ -955,7 +955,8 @@ export function ArtifactViewer(props: {
             <button
               type="button"
               class="verevon-chat-artifact-action"
-              disabled={reviewing()}
+              // A typed refusal of the thread (DEC-V-R8) is not retried: the same thread is refused the same way again.
+              disabled={reviewing() || reviewFailure() === 'thread_refused'}
               aria-busy={reviewing() ? 'true' : undefined}
               title={i18n.tr(
                 'Gjennomgå denne versjonen. Gjennomgangen lagres ikke.',

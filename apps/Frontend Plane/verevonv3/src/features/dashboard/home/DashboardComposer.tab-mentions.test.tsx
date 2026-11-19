@@ -28,12 +28,16 @@ afterEach(() => {
 })
 
 describe('tabMentionChipsEnabled', () => {
-  it('is off unless VITE_BROWSER_TAB_MENTIONS is exactly 1', () => {
+  it('is on only for the exact word true in VITE_BROWSER_TAB_MENTIONS', () => {
     vi.stubEnv('VITE_BROWSER_TAB_MENTIONS', '')
     expect(tabMentionChipsEnabled()).toBe(false)
-    vi.stubEnv('VITE_BROWSER_TAB_MENTIONS', 'true')
-    expect(tabMentionChipsEnabled()).toBe(false)
     vi.stubEnv('VITE_BROWSER_TAB_MENTIONS', '1')
+    expect(tabMentionChipsEnabled()).toBe(false)
+    vi.stubEnv('VITE_BROWSER_TAB_MENTIONS', 'TRUE')
+    expect(tabMentionChipsEnabled()).toBe(false)
+    vi.stubEnv('VITE_BROWSER_TAB_MENTIONS', ' true')
+    expect(tabMentionChipsEnabled()).toBe(false)
+    vi.stubEnv('VITE_BROWSER_TAB_MENTIONS', 'true')
     expect(tabMentionChipsEnabled()).toBe(true)
   })
 })

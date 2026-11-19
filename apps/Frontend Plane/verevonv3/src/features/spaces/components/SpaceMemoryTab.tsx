@@ -1,7 +1,7 @@
 import { createEffect, createSignal, For, Show } from 'solid-js'
 
 import { ApiError, requestJson } from '@/shared/api/http'
-import { useI18n } from '@/shared/i18n'
+import { translateApiError, useI18n } from '@/shared/i18n'
 import { SpaceConfirmButton } from './SpaceConfirmButton'
 
 /**
@@ -69,6 +69,16 @@ export const spaceMemoryTabEnabled = (): boolean => import.meta.env.VITE_SPACE_M
 
 type TabStatus = 'loading' | 'ready' | 'restricted' | 'disabled' | 'error'
 
+/**
+ * The typed legal-hold refusals of a memory delete (V3d-bff-2): a hold (409 `erasure_blocked_legal_hold`) and a
+ * hold check that could not be made (503 `erasure_hold_check_unavailable`). Each has its catalogue copy, so a
+ * held row is not shown as a generic, retryable failure.
+ */
+const HOLD_REFUSAL_CODES: ReadonlySet<string> = new Set(['erasure_blocked_legal_hold', 'erasure_hold_check_unavailable'])
+
+const isHoldRefusal = (error: unknown): boolean =>
+  error instanceof ApiError && error.code !== null && HOLD_REFUSAL_CODES.has(error.code)
+
 export function SpaceMemoryTab(props: SpaceMemoryTabProps) {
   const i18n = useI18n()
   const [status, setStatus] = createSignal<TabStatus>('loading')
@@ -76,6 +86,7 @@ export function SpaceMemoryTab(props: SpaceMemoryTabProps) {
   const [withheld, setWithheld] = createSignal(0)
   const [deleting, setDeleting] = createSignal<string | undefined>(undefined)
   const [deleteFailed, setDeleteFailed] = createSignal(false)
+  const [deleteRefusal, setDeleteRefusal] = createSignal<string | undefined>(undefined)
   let callId = 0
 
   const statusForError = (error: unknown): TabStatus => {
@@ -111,6 +122,7 @@ export function SpaceMemoryTab(props: SpaceMemoryTabProps) {
   const remove = async (row: SpaceMemoryRow) => {
     setDeleting(row.memory_id)
     setDeleteFailed(false)
+    setDeleteRefusal(undefined)
     try {
       await deleteSpaceMemory(props.spaceRef, row.memory_id)
       setRows((current) => current.filter((entry) => entry.memory_id !== row.memory_id))
@@ -120,6 +132,7 @@ export function SpaceMemoryTab(props: SpaceMemoryTabProps) {
       if (error instanceof ApiError && error.status === 404) {
         setRows((current) => current.filter((entry) => entry.memory_id !== row.memory_id))
       } else {
+        if (isHoldRefusal(error)) setDeleteRefusal(translateApiError(error, i18n.tr))
         setDeleteFailed(true)
       }
     } finally {
@@ -193,7 +206,7 @@ export function SpaceMemoryTab(props: SpaceMemoryTabProps) {
         </Show>
         <Show when={deleteFailed()}>
           <p class="verevon-space-projection-error" role="alert">
-            {i18n.tr('Vi fikk ikke slettet minnet. Prøv igjen.', 'We could not delete that memory. Try again.')}
+            {deleteRefusal() ?? i18n.tr('Vi fikk ikke slettet minnet. Prøv igjen.', 'We could not delete that memory. Try again.')}
           </p>
         </Show>
         <Show

@@ -42,8 +42,10 @@ export function sideFeatureThreadOf(threadId: string | null | undefined, tempora
  * The typed refusals Model Gateway gives a side feature for the thread it names (DEC-V-R8): a Space thread, a thread holding
  * a zero-retention or waived run, a thread written under two connections, and a connection thread named without its model.
  * Each is refused before any model call, and the same thread is refused the same way again, so none is worth a retry.
+ * The golden test in `space-side-features.test.ts` keeps this list equal to the gateway's `thread_refusal_passes` and to the
+ * codes Model Gateway's `thread_connection.rs` sends.
  */
-const THREAD_REFUSAL_CODES: ReadonlySet<string> = new Set([
+export const THREAD_REFUSAL_CODES: ReadonlySet<string> = new Set([
   'scope_not_available_in_space',
   'side_chat_thread_retention_refused',
   'connection_ambiguous',

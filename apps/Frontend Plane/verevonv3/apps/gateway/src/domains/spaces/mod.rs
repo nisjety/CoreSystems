@@ -4134,13 +4134,7 @@ async fn apply_space_agent_state(
     // Control to converge. Pausing keeps the agent a member that may not be
     // invoked, which the gateway's own invocation path already enforces.
     if status == "revoked" && !confirm_space_agent_membership(state, &org_id, space_ref).await {
-        return (
-            StatusCode::BAD_GATEWAY,
-            Json(error(
-                "agent_revocation_unconfirmed",
-                "The agent was revoked here, but Control has not confirmed the room's roster yet. It may still appear as a member until it does.",
-            )),
-        );
+        return unconfirmed_revocation_answer(agent_memory_erase);
     }
 
     let mut answer = json!({
@@ -4154,6 +4148,24 @@ async fn apply_space_agent_state(
         answer["agent_memory_erase"] = json!(erase.as_str());
     }
     (StatusCode::OK, Json(json!({"data": answer})))
+}
+
+/// The answer when a revocation landed but Control has not confirmed the room's roster (V3d-bff-2). The erase
+/// ran before this check, so its outcome rides in `error.details`, as the success answer carries it: a closed
+/// word, never content or a count. A held or failed erase stays visible to the admin on this path too.
+fn unconfirmed_revocation_answer(
+    erase: Option<memory::AgentMemoryErase>,
+) -> (StatusCode, Json<Value>) {
+    const MESSAGE: &str = "The agent was revoked here, but Control has not confirmed the room's roster yet. It may still appear as a member until it does.";
+    let body = match erase {
+        Some(erase) => error_with_details(
+            "agent_revocation_unconfirmed",
+            MESSAGE,
+            json!({ "agent_memory_erase": erase.as_str() }),
+        ),
+        None => error("agent_revocation_unconfirmed", MESSAGE),
+    };
+    (StatusCode::BAD_GATEWAY, Json(body))
 }
 
 /// `PATCH /api/v1/spaces/{space_ref}/agents/{binding_ref}` — pause or resume.
@@ -5954,6 +5966,10 @@ async fn space_context(
                     "thread_fork": state.space_features.thread_fork_api,
                     "dm": state.space_features.dm_api,
                     "message_revise": state.space_features.message_revise_api,
+                    // V3d-bff-3: the gateway reads only its own SPACE_REACTIONS_API here. Convex
+                    // SPACE_REACTIONS and model-gateway SPACE_MESSAGE_REVISE_API are other services'
+                    // switches this gateway cannot read, so the control can show while an upstream
+                    // refuses the write. Gating on them is an owner decision (see config.rs).
                     "reactions": state.space_features.reactions_api,
                     "tool_policy_editor": state.space_features.tool_policy_editor,
                     "attention": state.space_features.attention_api
@@ -9239,6 +9255,17 @@ mod tests {
         method: &str,
         body: Option<Value>,
     ) -> (u16, Value, MockServer) {
+        space_agent_lifecycle_with_roster(role, method, body, "applied").await
+    }
+
+    /// The same binding-lifecycle request, with Application's answer to the roster declaration given (only
+    /// `applied` confirms the roster to the gateway).
+    async fn space_agent_lifecycle_with_roster(
+        role: &str,
+        method: &str,
+        body: Option<Value>,
+        roster: &str,
+    ) -> (u16, Value, MockServer) {
         let auth = MockServer::start().await;
         Mock::given(wm_method("GET"))
             .and(wm_path("/api/auth/get-session"))
@@ -9277,7 +9304,7 @@ mod tests {
         Mock::given(wm_method("POST"))
             .and(wm_path("/api/action"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "value": {"status": "applied"}
+                "value": {"status": roster}
             })))
             .mount(&application)
             .await;
@@ -9399,6 +9426,49 @@ mod tests {
                 .iter()
                 .any(|request| request.url.path() == "/api/action"),
             "revocation must re-declare the room's roster to Control"
+        );
+    }
+
+    /// V3d-bff-2: every erase outcome rides in the 502 answer's `error.details`, and the answer with no outcome
+    /// carries no details at all. The success answer carries the same closed words.
+    #[test]
+    fn an_unconfirmed_revocation_carries_its_erase_outcome_in_the_details() {
+        use super::memory::AgentMemoryErase;
+        for erase in [
+            AgentMemoryErase::Erased,
+            AgentMemoryErase::Held,
+            AgentMemoryErase::Unavailable,
+            AgentMemoryErase::NotApplicable,
+        ] {
+            let (status, axum::Json(body)) = super::unconfirmed_revocation_answer(Some(erase));
+            assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY);
+            assert_eq!(body["error"]["code"], "agent_revocation_unconfirmed");
+            assert_eq!(
+                body["error"]["details"],
+                json!({ "agent_memory_erase": erase.as_str() }),
+                "{body}"
+            );
+        }
+        let (status, axum::Json(body)) = super::unconfirmed_revocation_answer(None);
+        assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"]["code"], "agent_revocation_unconfirmed");
+        assert!(body["error"].get("details").is_none(), "{body}");
+    }
+
+    /// V3d-bff-2: a revoke whose roster Control does not confirm answers 502 with the erase outcome in its details,
+    /// so the admin is told what happened to the agent's notes. The memory feature is off in this harness, so no
+    /// erase is attempted and the outcome is `not_applicable`.
+    #[tokio::test]
+    async fn an_unconfirmed_roster_after_a_revoke_answers_502_with_the_erase_outcome() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, _application) =
+            space_agent_lifecycle_with_roster("manager", "DELETE", None, "pending").await;
+
+        assert_eq!(status, 502, "{body}");
+        assert_eq!(body["error"]["code"], "agent_revocation_unconfirmed");
+        assert_eq!(
+            body["error"]["details"]["agent_memory_erase"], "not_applicable",
+            "{body}"
         );
     }
 

@@ -4082,8 +4082,10 @@ function translateWireBody(request: ReasoningTranslateRequest): Record<string, u
  * the target are checked against the action contract before anything is sent, and a request the contract refuses rejects
  * with a `ReasoningTranslateContractError`, with nothing sent. The answer is for the reader's screen only: nothing is
  * stored, and the caller holds it in a component signal, never in the turn, a history cache or a composer. Resolves to
- * `null` while the gateway's reasoning-translation switch is off (404) and for a zero-retention turn (412). Other refusals
- * reject with the server's typed `ApiError`, such as `delegated_auth_unavailable` while the model's credentials are down.
+ * `null` while the gateway's reasoning-translation switch is off (404), and for a 412 that is not a zero-retention
+ * refusal. A zero-retention refusal (412 `zdr_*`, such as one from the connection's posture) rejects with its typed
+ * `ApiError`, so the reader is told why and not that the translation is merely unavailable. Other refusals reject with the
+ * server's typed `ApiError`, such as `delegated_auth_unavailable` while the model's credentials are down.
  *
  * `thread` names the thread the shown text belongs to and the model its connection serves (DEC-V-R8). The thread is sent
  * only when given, with the model when one is named, and a translation of a connection thread's text is answered on that
@@ -4102,7 +4104,8 @@ export async function translateText(
       body: JSON.stringify(translateWireBody(request)),
     })
   } catch (error) {
-    if (error instanceof ApiError && (error.status === 404 || error.status === 412)) return null
+    if (error instanceof ApiError && error.status === 404) return null
+    if (error instanceof ApiError && error.status === 412 && !isZdrCode(error.code)) return null
     throw error
   }
   // `requestJson` has already unwrapped the gateway's `{ data }` envelope, so the translation is read from `raw` itself.

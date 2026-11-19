@@ -602,14 +602,15 @@ pub(super) fn decorate_index_row(row: &mut Value, entry: &Value, hidden: &HashSe
 }
 
 /// New activity in a DM: clear every viewer's hide so it resurfaces. Best effort, after the post
-/// was accepted; a failure never changes the post's answer.
+/// was accepted; a failure never changes the post's answer, but it is counted and logged (V3d-bff-2),
+/// so a hidden DM that fails to resurface leaves a trace.
 pub(super) async fn resurface(
     state: &AppState,
     user: &AuthenticatedUser,
     org_id: &str,
     space_ref: &str,
 ) {
-    let _ = convex_call(
+    if let Err(cause) = convex_call(
         state,
         "mutation",
         "spaceDmHides:clearForSpaceForGateway",
@@ -619,7 +620,21 @@ pub(super) async fn resurface(
             "spaceRef": space_ref,
         }),
     )
-    .await;
+    .await
+    {
+        // Application's own text is dropped unread: only whether it refused is kept.
+        note_dm_hide_clear_failure(cause.is_some());
+    }
+}
+
+/// Counts and logs one DM hide clear that did not land after new activity (V3d-bff-2). The post has already been
+/// accepted and still answers as it did. `refused` says whether Application threw. The Space, the viewer and
+/// Application's text never reach the counter or the log.
+fn note_dm_hide_clear_failure(refused: bool) {
+    let reason = if refused { "refused" } else { "unavailable" };
+    metrics::counter!("verevon_space_dm_hide_clear_failures_total", "reason" => reason)
+        .increment(1);
+    tracing::warn!(reason, "hidden direct messages were not resurfaced");
 }
 
 /// A DM has no agents: the two agent-attach routes answer a typed 409 before Control or
@@ -649,7 +664,10 @@ pub(super) async fn agent_attach_refusal(
 
 #[cfg(test)]
 mod tests {
-    use super::{decorate_index_row, hidden_set, open_dm_core, parse_request, resurface, set_hidden};
+    use super::{
+        decorate_index_row, hidden_set, note_dm_hide_clear_failure, open_dm_core, parse_request,
+        resurface, set_hidden,
+    };
     use crate::config::AppState;
     use crate::middleware::{AuthenticatedUser, AuthorizedMembership};
     use axum::{
@@ -1094,6 +1112,74 @@ mod tests {
         let mut down = fx.state.clone();
         down.application_convex_url = "http://127.0.0.1:1".into();
         resurface(&down, &member(), "org-1", "space-dm-1").await;
+    }
+
+    /// V3d-bff-2: a hide clear that does not land is counted under its closed reason, and the post still
+    /// answers. Application refusing (a thrown error) and Application being unreachable are different rows.
+    #[tokio::test]
+    async fn a_dm_hide_clear_that_does_not_land_is_counted_by_its_reason() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _metrics = metrics::set_default_local_recorder(&recorder);
+        let refusing = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .and(body_partial_json(
+                json!({"path": "spaceDmHides:clearForSpaceForGateway"}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"status": "error", "errorMessage": "space_not_found"})),
+            )
+            .mount(&refusing)
+            .await;
+        let fx = fixture(eligible(), opened(true), Some(false)).await;
+        let mut refused = fx.state.clone();
+        refused.application_convex_url = refusing.uri();
+        resurface(&refused, &member(), "org-1", "space-dm-1").await;
+        let mut down = fx.state.clone();
+        down.application_convex_url = "http://127.0.0.1:1".into();
+        resurface(&down, &member(), "org-1", "space-dm-1").await;
+
+        let rendered = handle.render();
+        for reason in ["refused", "unavailable"] {
+            let row =
+                format!("verevon_space_dm_hide_clear_failures_total{{reason=\"{reason}\"}} 1");
+            assert!(rendered.lines().any(|line| line == row), "{rendered}");
+        }
+    }
+
+    /// V3d-bff-2: a failed hide clear logs one fixed sentence and its closed reason. The Space, the viewer and
+    /// Application's words never reach the log or the counter.
+    #[test]
+    fn a_failed_dm_hide_clear_logs_a_fixed_line_and_its_reason() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _metrics = metrics::set_default_local_recorder(&recorder);
+        let capture = crate::zdr_log::test_capture::Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
+            note_dm_hide_clear_failure(true);
+            note_dm_hide_clear_failure(false);
+        });
+        let log = capture.text();
+        let rendered = handle.render();
+        for reason in ["refused", "unavailable"] {
+            let line = format!("hidden direct messages were not resurfaced reason=\"{reason}\"");
+            assert!(log.contains(&line), "{log}");
+            let row =
+                format!("verevon_space_dm_hide_clear_failures_total{{reason=\"{reason}\"}} 1");
+            assert!(rendered.lines().any(|line| line == row), "{rendered}");
+        }
+        assert!(
+            !log.contains("space-dm-1") && !log.contains("user-1"),
+            "{log}"
+        );
     }
 
     #[tokio::test]

@@ -22,8 +22,8 @@
 //! cleaned of control characters, capped, and marked `labelSource: "page"` with
 //! the trust class `browser-scraped`. The target is origin and path only.
 //!
-//! Off by default: the route is mounted only when `BROWSER_TAB_MENTIONS` is
-//! `1|true|yes|on`, read once into `AppState` (never in a handler). The same
+//! Off by default: the route is mounted only when `BROWSER_TAB_MENTIONS` is the literal `true`,
+//! read once into `AppState` (never in a handler). The same
 //! switch gates `browser_context.resolve_tab_mentions` on the action surface (QF-7).
 
 use axum::{
@@ -66,11 +66,11 @@ const TAB_TRUST_CLASS: &str = "browser-scraped";
 // Router and flag
 // ---------------------------------------------------------------------------
 
-/// The `BROWSER_TAB_MENTIONS` grammar; `build_state` parses the switch with the
-/// same `crate::config::human_browse_enabled`.
+/// The `BROWSER_TAB_MENTIONS` grammar: only the literal `true`, the same `crate::config::exact_true_flag`
+/// that `build_state` reads the switch with (through `env_exact_true`, V3e-bff-3).
 #[cfg(test)]
 fn tab_mentions_flag_on(value: Option<&str>) -> bool {
-    crate::config::human_browse_enabled(value)
+    crate::config::exact_true_flag(value)
 }
 
 /// The browser-context routes. Wired in `main.rs` next to `browser_evidence`.
@@ -822,14 +822,15 @@ mod tests {
     }
 
     #[test]
-    fn tab_mentions_flag_defaults_off() {
+    fn tab_mentions_flag_defaults_off_and_reads_only_the_exact_true() {
+        assert!(tab_mentions_flag_on(Some("true")));
         assert!(!tab_mentions_flag_on(None));
         assert!(!tab_mentions_flag_on(Some("")));
         assert!(!tab_mentions_flag_on(Some("0")));
         assert!(!tab_mentions_flag_on(Some("off")));
-        assert!(tab_mentions_flag_on(Some("1")));
-        assert!(tab_mentions_flag_on(Some(" TRUE ")));
-        assert!(tab_mentions_flag_on(Some("on")));
+        assert!(!tab_mentions_flag_on(Some("1")));
+        assert!(!tab_mentions_flag_on(Some(" TRUE ")));
+        assert!(!tab_mentions_flag_on(Some("on")));
     }
 
     #[test]

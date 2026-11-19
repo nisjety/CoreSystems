@@ -38,6 +38,8 @@ use serde_json::{json, Value};
 use std::{future::Future, time::Duration};
 
 use super::{denial, space_lifecycle_by_ref};
+// The one hold definition of the BFF (V3d-bff-2), shared with the account erase in `domains::privacy`.
+use crate::domains::privacy::{hold_answer, HoldAnswer};
 use crate::{
     config::AppState,
     contracts::ActionActor,
@@ -349,32 +351,6 @@ impl AgentMemoryErase {
             Self::Unavailable => "unavailable",
             Self::NotApplicable => "not_applicable",
         }
-    }
-}
-
-/// The typed hold answers of model-gateway (V3d-bff-2). A legal hold is the code `erasure_blocked_legal_hold`
-/// with `details.retryable: false`; a hold-check outage is `erasure_hold_check_unavailable` with
-/// `details.retryable: true`. Both halves are read, as the Convex copy reads a legal hold
-/// (`isOwnerLegalHoldRefusal` in spaceDeletionReceipts.ts), so the two classify a hold the same way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HoldAnswer {
-    LegalHold,
-    HoldCheckUnavailable,
-}
-
-/// The typed hold answer of an upstream refusal, or `None` for every other answer. The upstream message is
-/// never read.
-fn hold_answer(response: &Value) -> Option<HoldAnswer> {
-    let error = response.get("error")?;
-    let code = error.get("code").and_then(Value::as_str)?;
-    let retryable = error
-        .get("details")
-        .and_then(|details| details.get("retryable"))
-        .and_then(Value::as_bool);
-    match (code, retryable) {
-        ("erasure_blocked_legal_hold", Some(false)) => Some(HoldAnswer::LegalHold),
-        ("erasure_hold_check_unavailable", Some(true)) => Some(HoldAnswer::HoldCheckUnavailable),
-        _ => None,
     }
 }
 

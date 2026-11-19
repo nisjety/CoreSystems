@@ -78,34 +78,72 @@ fn confirm_requested(body: &Option<Value>) -> bool {
         .unwrap_or(false)
 }
 
+const LEGAL_HOLD_CODE: &str = "erasure_blocked_legal_hold";
+const HOLD_CHECK_UNAVAILABLE_CODE: &str = "erasure_hold_check_unavailable";
+
+/// The typed legal-hold answers of an erasure upstream (V3d-bff-2). This is the one hold definition in the BFF:
+/// the Space memory erase (`spaces::memory`) reads it too, and it is the same as the Convex copy
+/// (`isOwnerLegalHoldRefusal`). A legal hold is the exact code `erasure_blocked_legal_hold` with
+/// `details.retryable: false`. A hold-check outage is `erasure_hold_check_unavailable` with
+/// `details.retryable: true`. The code alone is not a hold, and the upstream message is never read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HoldAnswer {
+    LegalHold,
+    HoldCheckUnavailable,
+}
+
+/// The typed hold answer of an upstream refusal, or `None` for every other answer.
+pub(crate) fn hold_answer(response: &Value) -> Option<HoldAnswer> {
+    let error = response.get("error")?;
+    let code = error.get("code").and_then(Value::as_str)?;
+    let retryable = error
+        .get("details")
+        .and_then(|details| details.get("retryable"))
+        .and_then(Value::as_bool);
+    match (code, retryable) {
+        (LEGAL_HOLD_CODE, Some(false)) => Some(HoldAnswer::LegalHold),
+        (HOLD_CHECK_UNAVAILABLE_CODE, Some(true)) => Some(HoldAnswer::HoldCheckUnavailable),
+        _ => None,
+    }
+}
+
 /// EP-9 C4: the two refusals an erasure upstream sends under a legal hold, rebuilt from fixed
 /// words so nothing of the upstream body (internal ids, counts of other people's holds) reaches
 /// the browser. Held is final until the hold is released in Control; unavailable is retryable.
-/// Every other answer passes through unchanged.
+/// Every other answer passes through unchanged, except a hold code without its flag: that is not
+/// a hold, but it cannot be told apart from an outage, so it is answered as unavailable and its
+/// words never pass (V3d-bff-2).
 fn map_erase_refusal(status: StatusCode, body: Value) -> (StatusCode, Json<Value>) {
-    let code = body
+    let carries_hold_code = body
         .get("error")
         .and_then(|error| error.get("code"))
-        .and_then(Value::as_str);
-    match code {
-        Some("erasure_blocked_legal_hold") => (
+        .and_then(Value::as_str)
+        .is_some_and(|code| code == LEGAL_HOLD_CODE || code == HOLD_CHECK_UNAVAILABLE_CODE);
+    match hold_answer(&body) {
+        Some(HoldAnswer::LegalHold) => (
             StatusCode::CONFLICT,
             Json(error_with_details(
-                "erasure_blocked_legal_hold",
+                LEGAL_HOLD_CODE,
                 "A legal hold covers this data, so nothing was erased. It can be erased once the hold is released.",
                 json!({ "retryable": false }),
             )),
         ),
-        Some("erasure_hold_check_unavailable") => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(error_with_details(
-                "erasure_hold_check_unavailable",
-                "Legal holds could not be checked, so nothing was erased. Try again shortly.",
-                json!({ "retryable": true }),
-            )),
-        ),
-        _ => (status, Json(body)),
+        Some(HoldAnswer::HoldCheckUnavailable) => hold_check_unavailable(),
+        None if carries_hold_code => hold_check_unavailable(),
+        None => (status, Json(body)),
     }
+}
+
+/// The retryable answer for a hold that could not be checked (or could not be read as a hold). Fixed words only.
+fn hold_check_unavailable() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(error_with_details(
+            HOLD_CHECK_UNAVAILABLE_CODE,
+            "Legal holds could not be checked, so nothing was erased. Try again shortly.",
+            json!({ "retryable": true }),
+        )),
+    )
 }
 
 async fn export(
@@ -208,23 +246,92 @@ mod tests {
         let upstream = json!({ "error": {
             "code": "erasure_blocked_legal_hold",
             "message": "internal hold lh_0123 on org-9",
-            "details": { "org_holds": 1, "thread_holds": 4 },
+            "details": { "org_holds": 1, "thread_holds": 4, "retryable": false },
         }});
         let (status, Json(body)) = map_erase_refusal(StatusCode::PRECONDITION_FAILED, upstream);
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["error"]["code"], "erasure_blocked_legal_hold");
         assert_eq!(body["error"]["details"], json!({ "retryable": false }));
-        assert!(!body.to_string().contains("lh_0123"), "upstream words never pass: {body}");
+        assert!(
+            !body.to_string().contains("lh_0123"),
+            "upstream words never pass: {body}"
+        );
+        assert!(
+            !body.to_string().contains("org_holds"),
+            "upstream counts never pass: {body}"
+        );
     }
 
     #[test]
     fn a_hold_check_outage_is_retryable() {
-        let upstream = json!({ "error": { "code": "erasure_hold_check_unavailable", "message": "org-core down" } });
+        let upstream = json!({ "error": {
+            "code": "erasure_hold_check_unavailable",
+            "message": "org-core down",
+            "details": { "retryable": true },
+        }});
         let (status, Json(body)) = map_erase_refusal(StatusCode::BAD_GATEWAY, upstream);
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"]["code"], "erasure_hold_check_unavailable");
         assert_eq!(body["error"]["details"]["retryable"], true);
         assert!(!body.to_string().contains("org-core"));
+    }
+
+    /// V3d-bff-2: the erase classifies a hold as the Space memory erase and the Convex copy do, the code AND its
+    /// `details.retryable` flag. A hold code without the flag (or with the other flag) is not a hold, and it is
+    /// answered as unavailable with none of its words: it cannot be told apart from an outage.
+    #[test]
+    fn a_hold_needs_the_code_and_its_flag_and_its_words_never_pass() {
+        let mut cases = Vec::new();
+        for (code, details) in [
+            ("erasure_blocked_legal_hold", None),
+            (
+                "erasure_blocked_legal_hold",
+                Some(json!({ "retryable": true, "org_holds": 2 })),
+            ),
+            (
+                "erasure_blocked_legal_hold",
+                Some(json!({ "retryable": "false", "thread_holds": 3 })),
+            ),
+            ("erasure_hold_check_unavailable", None),
+            (
+                "erasure_hold_check_unavailable",
+                Some(json!({ "retryable": false, "org_holds": 2 })),
+            ),
+        ] {
+            let mut error = json!({ "code": code, "message": "internal hold lh_0123 on org-9" });
+            if let Some(details) = details {
+                error["details"] = details;
+            }
+            cases.push(json!({ "error": error }));
+        }
+        for upstream in cases {
+            assert_eq!(hold_answer(&upstream), None, "{upstream}");
+            let (status, Json(body)) = map_erase_refusal(StatusCode::CONFLICT, upstream.clone());
+            assert_eq!(
+                status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{upstream} -> {body}"
+            );
+            assert_eq!(
+                body["error"]["code"], "erasure_hold_check_unavailable",
+                "{body}"
+            );
+            assert_eq!(
+                body["error"]["details"],
+                json!({ "retryable": true }),
+                "{body}"
+            );
+            let shown = body.to_string();
+            assert!(
+                !shown.contains("lh_0123")
+                    && !shown.contains("org_holds")
+                    && !shown.contains("thread_holds"),
+                "{shown}"
+            );
+        }
+        // A hold is only the typed pair, and an unrelated code with the flag is not one.
+        let other = json!({ "error": { "code": "forbidden", "details": { "retryable": false } } });
+        assert_eq!(hold_answer(&other), None);
     }
 
     #[test]

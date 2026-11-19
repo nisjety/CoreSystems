@@ -10,6 +10,13 @@ const envelopeStatusOutput = z.object({
   status: z.string(),
 })
 
+// spaces.revoke_agent also answers what its erase of the agent's notes came to (V3d-bff-2). Additive and
+// optional, and the same closed set the REST route and the SPA client read: never content or a count.
+const revokeAgentOutput = z.object({
+  status: z.string(),
+  agent_memory_erase: z.enum(['erased', 'held', 'unavailable', 'not_applicable']).optional(),
+})
+
 // The spaces.* schemas below all forward to the same domains::spaces route
 // handlers the direct REST routes use (apps/gateway/src/domains/spaces.rs,
 // exposed to the action dispatcher via pub(crate) rather than proxied a
@@ -223,7 +230,7 @@ export const baseSpaceActions = [
     requiresApproval: false,
     reversible: false,
     inputSchema: spaceRevokeAgentInput,
-    outputSchema: envelopeStatusOutput,
+    outputSchema: revokeAgentOutput,
   },
   {
     id: 'spaces.create_room',

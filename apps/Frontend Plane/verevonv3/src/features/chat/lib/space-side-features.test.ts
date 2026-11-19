@@ -1,5 +1,8 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  THREAD_REFUSAL_CODES,
   byoGatewaySwitchOn,
   isThreadRefusalCode,
   sideFeatureThreadOf,
@@ -9,6 +12,64 @@ import {
 
 afterEach(() => {
   vi.unstubAllEnvs()
+})
+
+// The golden list of the typed thread refusals (DEC-V-R8), each with the status the gateway relays it under and the status
+// Model Gateway sends it with. The SPA list, the gateway's `thread_refusal_passes` (apps/gateway/src/domains/ai.rs) and Model
+// Gateway's `thread_connection.rs` are read here, so a code added, renamed or moved on one side fails in this file.
+const GOLDEN_THREAD_REFUSALS: Readonly<Record<string, string>> = {
+  connection_ambiguous: 'CONFLICT',
+  scope_not_available_in_space: 'CONFLICT',
+  side_chat_model_required: 'BAD_REQUEST',
+  side_chat_thread_retention_refused: 'CONFLICT',
+}
+
+/** A file read with its line endings normalised to LF, from the SPA root (the working directory of the test run). */
+function sourceText(relative: string): string {
+  return readFileSync(resolve(process.cwd(), relative), 'utf8').replace(/\r\n/g, '\n')
+}
+
+/** The gateway's refusal table: each code `thread_refusal_passes` relays, under the status arm that lists it. */
+function gatewayThreadRefusals(): Record<string, string> {
+  const body = /fn thread_refusal_passes\(status: StatusCode, code: &str\) -> bool \{\n([\s\S]*?)\n\}\n/.exec(
+    sourceText('apps/gateway/src/domains/ai.rs'),
+  )?.[1] ?? ''
+  const refusals: Record<string, string> = {}
+  for (const arm of body.matchAll(/StatusCode::([A-Z_]+) => matches!\(\s*code,([^)]*)\)/g)) {
+    for (const code of (arm[2] ?? '').matchAll(/"([a-z_]+)"/g)) refusals[code[1] ?? ''] = arm[1] ?? ''
+  }
+  for (const arm of body.matchAll(/StatusCode::([A-Z_]+) => code == "([a-z_]+)"/g)) {
+    refusals[arm[2] ?? ''] = arm[1] ?? ''
+  }
+  return refusals
+}
+
+/** Every status Model Gateway's thread connection resolver sends with a code, as `typed(StatusCode::X, "code", ...)`. */
+function modelGatewayThreadStatuses(): Record<string, string[]> {
+  const sent: Record<string, string[]> = {}
+  const text = sourceText('../../Model Plane/rust/services/model-gateway/src/thread_connection.rs')
+  for (const match of text.matchAll(/StatusCode::([A-Z_]+),\s*"([a-z_]+)"/g)) {
+    const code = match[2] ?? ''
+    sent[code] = [...(sent[code] ?? []), match[1] ?? '']
+  }
+  return sent
+}
+
+describe('the typed thread refusal codes stay in step across the SPA, the gateway and Model Gateway (golden)', () => {
+  it('the SPA list is the golden list of codes', () => {
+    expect([...THREAD_REFUSAL_CODES].sort()).toEqual(Object.keys(GOLDEN_THREAD_REFUSALS).sort())
+  })
+
+  it('the gateway relays exactly the golden codes, each under its golden status', () => {
+    expect(gatewayThreadRefusals()).toEqual(GOLDEN_THREAD_REFUSALS)
+  })
+
+  it('Model Gateway sends each golden code, and only under its golden status', () => {
+    const sent = modelGatewayThreadStatuses()
+    for (const [code, status] of Object.entries(GOLDEN_THREAD_REFUSALS)) {
+      expect([...new Set(sent[code] ?? [])], code).toEqual([status])
+    }
+  })
 })
 
 describe('isThreadRefusalCode', () => {

@@ -27,6 +27,7 @@ import {
   isCouncilSubscriptionProvider,
   type CouncilRunInput,
 } from '@/shared/actions/ai-council'
+import { isThreadRefusalCode } from '@/features/chat/lib/space-side-features'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { CircleAlert, GitCompare, Loader2, X } from '@/shared/icons'
 import './ModelCouncilPanel.css'
@@ -50,6 +51,37 @@ export function councilUsd(value: number): string {
   if (value < 0.000001) return '< $0.000001'
   const [whole = '0', fraction = ''] = value.toFixed(value < 0.01 ? 6 : 4).split('.')
   return `$${whole}.${fraction.replace(/0+$/, '').padEnd(2, '0')}`
+}
+
+/**
+ * The line a failed council call shows. The council names no thread today. A typed refusal of a thread the council names
+ * (DEC-V-R8, `isThreadRefusalCode`) gets the council's own words: errors.ts words two of those codes for a side question, and
+ * the side chat panel words the other two, so a council must not show them. Nothing is retried for a refusal of the thread.
+ */
+export function councilFailureText(error: unknown, t: Translator): string {
+  if (error instanceof ApiError && error.code === 'model_council_disabled') {
+    return t.tr(
+      'Modellrådet er ikke slått på for denne installasjonen.',
+      'The model council is not turned on for this installation.',
+    )
+  }
+  if (error instanceof ApiError && error.code === 'delegated_auth_unavailable') {
+    return t.tr(
+      'Modelltilgangen er midlertidig utilgjengelig. Prøv igjen om litt.',
+      'Model access is temporarily unavailable. Try again shortly.',
+    )
+  }
+  if (error instanceof ApiError && isThreadRefusalCode(error.code)) {
+    return t.tr(
+      'Modellrådet er ikke tilgjengelig for denne samtalen. Forespørselen ble ikke sendt til en modell.',
+      'The model council is not available for this chat. The request was not sent to a model.',
+    )
+  }
+  const fallback = t.tr(
+    'Modellrådet kunne ikke fullføre spørsmålet. Prøv igjen.',
+    'The model council could not finish the question. Try again.',
+  )
+  return translateApiError(error, t.tr, { no: fallback, en: fallback })
 }
 
 function usageLine(usage: CouncilUsage, t: Translator): string {
@@ -293,23 +325,7 @@ export function ModelCouncilPanel(props: { onClose: () => void }) {
   }
 
   function failureText(error: unknown): string {
-    if (error instanceof ApiError && error.code === 'model_council_disabled') {
-      return i18n.tr(
-        'Modellrådet er ikke slått på for denne installasjonen.',
-        'The model council is not turned on for this installation.',
-      )
-    }
-    if (error instanceof ApiError && error.code === 'delegated_auth_unavailable') {
-      return i18n.tr(
-        'Modelltilgangen er midlertidig utilgjengelig. Prøv igjen om litt.',
-        'Model access is temporarily unavailable. Try again shortly.',
-      )
-    }
-    const fallback = i18n.tr(
-      'Modellrådet kunne ikke fullføre spørsmålet. Prøv igjen.',
-      'The model council could not finish the question. Try again.',
-    )
-    return translateApiError(error, i18n.tr, { no: fallback, en: fallback })
+    return councilFailureText(error, i18n)
   }
 
   // The estimate makes no model call, so it costs nothing and stores nothing.

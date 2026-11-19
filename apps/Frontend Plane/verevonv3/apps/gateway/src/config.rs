@@ -35,8 +35,8 @@ pub(crate) struct AppState {
     pub(crate) browser_human_browse: bool,
     /// `BROWSER_LIVE_VIEW_ONLY` (W3-E3.4-5, W3-E3.4-5b): whether the owner's view-only live
     /// routes (`/api/v1/browser/sessions/{id}/view/frames/ws` and `.../view/frames/stream`) are
-    /// served. Off unless set to `1`, `true`, `yes` or `on`, the words the flag registry documents
-    /// (see [`human_browse_enabled`]); while off they answer 404. Quarry honours the
+    /// served. Only the literal `true` turns it on (see [`env_exact_true`]); while off they answer
+    /// 404. Quarry honours the
     /// scope only with `QUARRY_EDGE__LIVE_VIEW_ONLY` on, so the gateway also drops input frames
     /// itself on the socket; the SSE stream carries no client frames at all.
     pub(crate) browser_live_view_only: bool,
@@ -61,16 +61,20 @@ pub(crate) struct AppState {
     pub(crate) browser_recipes: bool,
     /// `BROWSER_REGION_ATTACH` (E3.3-d, QF-7): whether a dragged page region can be attached
     /// (`POST /api/v1/browser/sessions/{id}/attachments/region`, `browser_region.attach`). Read
-    /// once here, never in a handler. Off unless set to `1`, `true`, `yes` or `on`, the words the
-    /// flag registry documents (see [`human_browse_enabled`]); while off the route is absent and the
-    /// action answers 404.
+    /// once here, never in a handler. Only the literal `true` turns it on (see [`env_exact_true`]);
+    /// while off the route is absent and the action answers 404.
     pub(crate) browser_region_attach: bool,
     /// `BROWSER_TAB_MENTIONS` (E3.3-c, QF-7): whether a turn's `@tab` mentions can be re-resolved
     /// (`POST /api/v1/browser/sessions/{id}/context/tab-mentions`,
-    /// `browser_context.resolve_tab_mentions`). Read once here, never in a handler. Off unless set
-    /// to `1`, `true`, `yes` or `on`, the words the flag registry documents (see
-    /// [`human_browse_enabled`]); while off the route is absent and the action answers 404.
+    /// `browser_context.resolve_tab_mentions`). Read once here, never in a handler. Only the literal
+    /// `true` turns it on (see [`env_exact_true`]); while off the route is absent and the action
+    /// answers 404.
     pub(crate) browser_tab_mentions: bool,
+    /// `BROWSER_POLICY_ADMIN_API` (WS7.H): whether the organization browser policy actions
+    /// (`browser.get_org_policy` and `browser.set_org_policy`) are served. Read once here, never in a
+    /// handler (V3e-bff-3). Only the literal `true` turns it on (see [`env_exact_true`]); while off both
+    /// answer 404 `browser_policy_admin_disabled` before any other check.
+    pub(crate) browser_policy_admin_api: bool,
     /// `BROWSER_TURN_CONTEXT` (QF-8, E3.3-c/-d): whether a chat turn may carry browser page
     /// context. Read once here, never in a handler. Exactly `true` enables it. Off or on, the
     /// chat send path drops any client-built `browser_tab_refs` / `browser_regions`; on, the
@@ -744,6 +748,21 @@ pub(crate) const BFF_EXACT_TRUE_SPACE_SWITCHES: [&str; 6] = [
     "SPACE_SYSTEM_ENTRIES_API",
 ];
 
+/// The default-off browser switches that read only the exact literal `true`, each through
+/// [`exact_true_flag`] or [`env_exact_true`] in `build_state` (V3e-bff-3). The startup report in
+/// `switch_spellings` lists them, so a former spelling such as `1`, `yes` or `TRUE` is logged.
+pub(crate) const BROWSER_EXACT_TRUE_SWITCHES: [&str; 9] = [
+    "BROWSER_HUMAN_BROWSE",
+    "BROWSER_RECIPES",
+    "BROWSER_CONSENT_API",
+    "BROWSER_DOWNLOADS",
+    "BROWSER_TURN_CONTEXT",
+    "BROWSER_LIVE_VIEW_ONLY",
+    "BROWSER_REGION_ATTACH",
+    "BROWSER_TAB_MENTIONS",
+    "BROWSER_POLICY_ADMIN_API",
+];
+
 /// Whether a Space switch reads only the exact literal `true`: a name in either list above. Every other
 /// Space flag keeps the lenient reading (see [`space_flag`]). Each of those is a default-on kill switch
 /// in the base compose, which `main.rs` pins, so the lenient words only ever read a switch on by default.
@@ -859,20 +878,15 @@ pub(crate) async fn build_state() -> Result<AppState> {
             &env::var("APP_ENV").unwrap_or_default(),
         ),
         browser_human_browse: exact_true_flag(env::var("BROWSER_HUMAN_BROWSE").ok().as_deref()),
-        browser_live_view_only: human_browse_enabled(
-            env::var("BROWSER_LIVE_VIEW_ONLY").ok().as_deref(),
-        ),
+        browser_live_view_only: env_exact_true("BROWSER_LIVE_VIEW_ONLY"),
         browser_consent_api: browser_consent_api_enabled(
             env::var("BROWSER_CONSENT_API").ok().as_deref(),
         ),
         browser_downloads: browser_downloads_enabled(env::var("BROWSER_DOWNLOADS").ok().as_deref()),
         browser_recipes: exact_true_flag(env::var("BROWSER_RECIPES").ok().as_deref()),
-        browser_region_attach: human_browse_enabled(
-            env::var("BROWSER_REGION_ATTACH").ok().as_deref(),
-        ),
-        browser_tab_mentions: human_browse_enabled(
-            env::var(crate::domains::browser_context::TAB_MENTIONS_FLAG).ok().as_deref(),
-        ),
+        browser_region_attach: env_exact_true("BROWSER_REGION_ATTACH"),
+        browser_tab_mentions: env_exact_true(crate::domains::browser_context::TAB_MENTIONS_FLAG),
+        browser_policy_admin_api: env_exact_true("BROWSER_POLICY_ADMIN_API"),
         browser_turn_context: browser_turn_context_enabled(
             env::var("BROWSER_TURN_CONTEXT").ok().as_deref(),
         ),
@@ -1396,19 +1410,11 @@ pub(crate) fn browser_grant_mode(raw: Option<&str>, app_env: &str) -> BrowserGra
     }
 }
 
-/// Parses a browser switch whose vocabulary the flag registry documents as `1`, `true`, `yes` or `on`:
-/// `BROWSER_LIVE_VIEW_ONLY`, `BROWSER_REGION_ATTACH` and `BROWSER_TAB_MENTIONS`. Surrounding space and
-/// case are ignored, as the registry's canonical reader ignores them. Unset, blank or any other word is
-/// off; the flag is never read against `APP_ENV`, so every environment defaults to off. The switches
-/// that read only the exact literal `true` use [`exact_true_flag`] instead.
-pub(crate) fn human_browse_enabled(raw: Option<&str>) -> bool {
-    raw.map(|value| value.trim().to_ascii_lowercase())
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
-}
-
 /// Parses a browser switch that reads only the exact literal `true`: `BROWSER_HUMAN_BROWSE` and
-/// `BROWSER_RECIPES` (V3d-bff-3). Not trimmed and not case-folded, so `1`, `yes`, `on`, `TRUE` and a
-/// padded `true` are off in every environment.
+/// `BROWSER_RECIPES` (V3d-bff-3), and, through [`env_exact_true`], `BROWSER_LIVE_VIEW_ONLY`,
+/// `BROWSER_REGION_ATTACH`, `BROWSER_TAB_MENTIONS` and `BROWSER_POLICY_ADMIN_API` (V3e-bff-3). Not
+/// trimmed and not case-folded, so `1`, `yes`, `on`, `TRUE` and a padded `true` are off in every
+/// environment. The flag is never read against `APP_ENV`: every environment defaults to off.
 pub(crate) fn exact_true_flag(raw: Option<&str>) -> bool {
     raw == Some("true")
 }
@@ -2427,26 +2433,46 @@ mod tests").next().unwrap_or(&config);
 
 #[cfg(test)]
 mod human_browse_flag_tests {
-    use super::{exact_true_flag, human_browse_enabled};
+    use super::{env_exact_true, exact_true_flag, BROWSER_EXACT_TRUE_SWITCHES};
 
-    /// The documented `1`/`true`/`yes`/`on` reader, for BROWSER_LIVE_VIEW_ONLY, BROWSER_REGION_ATTACH
-    /// and BROWSER_TAB_MENTIONS. Unset is off everywhere.
+    /// Runs `body` with `key` set to `value` (or unset), then restores it, on the shared env lock.
+    fn with_var<T>(key: &str, value: Option<&str>, body: impl FnOnce() -> T) -> T {
+        let _guard = super::TEST_ENV_LOCK.blocking_lock();
+        let saved = std::env::var_os(key);
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+        let out = body();
+        match saved {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+        out
+    }
+
+    /// The browser switches that `build_state` reads from the environment read only the exact literal
+    /// `true` (V3e-bff-3). Unset is off everywhere; `1`, `yes`, `on`, `TRUE`, `True`, a padded `true`
+    /// and an empty value are off too. The flag is never read against `APP_ENV`, so production is the same.
     #[test]
-    fn human_browse_flag_defaults_off_in_every_environment() {
-        // The flag is read without APP_ENV: unset is off everywhere, production included.
-        assert!(!human_browse_enabled(None));
-        assert!(!human_browse_enabled(Some("")));
-        assert!(!human_browse_enabled(Some("   ")));
-        assert!(!human_browse_enabled(Some("0")));
-        assert!(!human_browse_enabled(Some("off")));
-        assert!(!human_browse_enabled(Some("garbage")));
-        assert!(human_browse_enabled(Some("1")));
-        assert!(human_browse_enabled(Some(" TRUE ")));
-        assert!(human_browse_enabled(Some("yes")));
+    fn browser_switches_read_from_the_environment_are_on_only_for_the_exact_true() {
+        for key in BROWSER_EXACT_TRUE_SWITCHES {
+            assert!(!with_var(key, None, || env_exact_true(key)), "{key} unset");
+            assert!(
+                with_var(key, Some("true"), || env_exact_true(key)),
+                "{key}=true"
+            );
+            for value in ["", "   ", "0", "1", "yes", "on", "TRUE", "True", " true", "true "] {
+                assert!(
+                    !with_var(key, Some(value), || env_exact_true(key)),
+                    "{key}={value:?}"
+                );
+            }
+        }
     }
 
     /// BROWSER_HUMAN_BROWSE and BROWSER_RECIPES read only the literal `true` (V3d-bff-3): the padded,
-    /// cased and other-word spellings that `human_browse_enabled` accepts are off here.
+    /// cased and other-word spellings that the retired lenient readers took are off here.
     #[test]
     fn exact_true_browser_flags_read_only_the_literal_true() {
         assert!(exact_true_flag(Some("true")));

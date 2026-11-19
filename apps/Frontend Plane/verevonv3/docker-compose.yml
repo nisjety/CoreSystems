@@ -159,7 +159,10 @@ services:
       # a value in this base file would be inherited by the production overlay.
       BROWSER_GRANT_ENFORCEMENT: ${BROWSER_GRANT_ENFORCEMENT:-}
       BROWSER_HUMAN_BROWSE: ${BROWSER_HUMAN_BROWSE:-false}
-      # W3-E3.4-5: the owner's view-only live route for a browser session. Off answers 404. Only 1, true, yes or on turns it on.
+      # Exact literal true, default off in every environment: the recipe and the run trace routes.
+      BROWSER_RECIPES: ${BROWSER_RECIPES:-false}
+      RUN_TRACE_API: ${RUN_TRACE_API:-false}
+      # W3-E3.4-5: the owner's view-only live route for a browser session. Off answers 404. Only the literal true turns it on.
       BROWSER_LIVE_VIEW_ONLY: ${BROWSER_LIVE_VIEW_ONLY:-false}
       # WS7.H: the organisation browser policy admin routes. Off, or unset, answers 404 browser_policy_admin_disabled.
       BROWSER_POLICY_ADMIN_API: ${BROWSER_POLICY_ADMIN_API:-false}
@@ -291,6 +294,8 @@ services:
       # chat_snapshots_disabled. Pairs with MODEL_GATEWAY_THREAD_SHARES and SESSION_SNAPSHOT_GRANTS_ENABLED on the
       # Model Plane and VITE_CHAT_SNAPSHOTS on the frontend service. All default off.
       CHAT_SNAPSHOTS_ENABLED: ${CHAT_SNAPSHOTS_ENABLED:-false}
+      # Quarry v2 E4.6: the research run read and stop routes. Exact literal true, default off.
+      CHAT_RESEARCH_RUNS: ${CHAT_RESEARCH_RUNS:-false}
       # WS16-S6: stamps the viewer interface language on the model-bound body as the locale field. Off removes the field.
       CHAT_LOCALE_HINT: ${CHAT_LOCALE_HINT:-true}
       # W4-CC-8 (F-t3-057): the organisation's credential bindings (/api/v1/credential-bindings) and the custom REST

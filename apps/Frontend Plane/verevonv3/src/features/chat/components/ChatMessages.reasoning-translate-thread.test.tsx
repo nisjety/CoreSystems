@@ -18,6 +18,7 @@ vi.mock('@/shared/api/chat-client', async (importOriginal) => ({
   translateText: (text: string, targetLocale: string, scope?: ThreadScope) => translateMock(text, targetLocale, scope),
 }))
 
+import { ApiError } from '@/shared/api/api-error'
 import { ReasoningPopover } from './ChatMessages'
 import type { ChatTurn } from './chat-types'
 
@@ -71,5 +72,21 @@ describe('ReasoningPopover translation thread', () => {
     const [, , scope] = await translateReasoning({ featureThreadId: undefined, connectionModel: null })
     expect(scope?.threadId).toBeUndefined()
     expect(scope?.model).toBeUndefined()
+  })
+
+  // A zero-retention refusal (412 `zdr_*`) of the translation is the reason it is not available: its own words are shown, and
+  // the translation is not offered again. It is not the generic "not available right now" that a switched-off route shows.
+  it('shows the zero-retention refusal of the translation in its own words, with no retry', async () => {
+    translateMock.mockRejectedValueOnce(new ApiError('Refused.', 412, 'zdr_connection_not_acknowledged'))
+    render(() => <ReasoningPopover message={turn} featureThreadId="thread-1" connectionModel="gpt-5-codex" />)
+    fireEvent.click(screen.getByRole('button', { name: /Detaljer|Details/ }))
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Innsikt' }))
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Oversett' }))
+    await vi.waitFor(() => expect(screen.getByText(/ikke bekreftet for Zero Data Retention/)).toBeTruthy())
+    expect(screen.queryByText(/Oversettelse er ikke tilgjengelig akkurat nå/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Oversett' })).toBeNull()
+    expect(translateMock).toHaveBeenCalledTimes(1)
   })
 })

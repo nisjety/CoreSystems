@@ -135,6 +135,11 @@ export interface SpaceMidRun {
    * run never took, and each of `unsent` (found by `settle` but not sent yet), is marked `refused`.
    */
   readonly abandon: (unsent: readonly SpaceMidRunResend[]) => void
+  /**
+   * Messages that were to go out again and will not, because the room withholds the route they would take: each is marked
+   * `refused` with `note`, the reason it was not sent. The caller keeps the words.
+   */
+  readonly withhold: (unsent: readonly SpaceMidRunResend[], note: string) => void
   /** A new turn owns the strip: clear what the last run showed (a resend turn keeps its `resent` entries). */
   readonly startTurn: (resendOfQueued: boolean) => void
   readonly deferred: () => SpaceDeferredSend | undefined
@@ -308,6 +313,18 @@ export function createSpaceMidRun(options: {
         const withheld = entry.state === 'resent' && entry.clientMessageId !== undefined && named.has(entry.clientMessageId)
         if (!unread && !withheld) return entry
         return { ...entry, state: 'refused', accepted: false, note: options.tr(NOT_SENT_AGAIN_NOTE.no, NOT_SENT_AGAIN_NOTE.en) }
+      }))
+    },
+    withhold: (unsent, note) => {
+      const named = new Set<string>()
+      for (const item of unsent) {
+        if (item.clientMessageId) named.add(item.clientMessageId)
+      }
+      setEntries((current) => current.map((entry): QueuedInput => {
+        // Only a message held for a resend is withheld: an entry the run still owns is left as it is.
+        const held = entry.state === 'resent' && entry.clientMessageId !== undefined && named.has(entry.clientMessageId)
+        if (!held) return entry
+        return { ...entry, state: 'refused', accepted: false, note }
       }))
     },
     startTurn: (resendOfQueued) =>

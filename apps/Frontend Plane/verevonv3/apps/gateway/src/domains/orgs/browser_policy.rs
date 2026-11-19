@@ -37,20 +37,9 @@ const MAX_DOMAIN_BYTES: usize = 2048;
 /// The only fields a save may carry: the whole org-core document (WS7.H).
 const DOCUMENT_FIELDS: [&str; 4] = ["caps", "robots_max", "proxy_max", "domains"];
 
-/// `BROWSER_POLICY_ADMIN_API`: the organization browser policy. Off, or unset, answers 404
-/// `browser_policy_admin_disabled` before any other check. Read per request, as the agent
-/// toolset switch is.
-pub(crate) fn admin_api_enabled() -> bool {
-    flag_is_on(std::env::var("BROWSER_POLICY_ADMIN_API").ok().as_deref())
-}
-
-fn flag_is_on(value: Option<&str>) -> bool {
-    matches!(
-        value.map(str::trim),
-        Some("1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
-    )
-}
-
+/// The switch is `AppState::browser_policy_admin_api`, read once by `build_state` from
+/// `BROWSER_POLICY_ADMIN_API` (only the literal `true`, V3e-bff-3). Off answers 404
+/// `browser_policy_admin_disabled` before any other check. No handler reads the environment.
 fn disabled() -> GatewayJsonResponse {
     (
         StatusCode::NOT_FOUND,
@@ -100,7 +89,7 @@ pub(crate) async fn get_org_policy(
     user: &AuthenticatedUser,
     org_id: &str,
 ) -> GatewayJsonResponse {
-    if !admin_api_enabled() {
+    if !state.browser_policy_admin_api {
         return disabled();
     }
     if let Err(response) = require_active_org(user, org_id) {
@@ -138,7 +127,7 @@ pub(crate) async fn set_org_policy(
     if_match: i64,
     document: &Value,
 ) -> GatewayJsonResponse {
-    if !admin_api_enabled() {
+    if !state.browser_policy_admin_api {
         return disabled();
     }
     if let Err(response) = require_org_admin(state, user, org_id).await {
@@ -285,6 +274,7 @@ mod tests {
     fn state_for(org_core: &MockServer) -> AppState {
         let mut state = crate::tests::test_state(false);
         state.org_core_url = org_core.uri();
+        state.browser_policy_admin_api = true;
         state
     }
 
@@ -311,23 +301,11 @@ mod tests {
         org_core.received_requests().await.unwrap_or_default()
     }
 
-    #[test]
-    fn the_flag_reads_the_same_grammar_as_the_other_switches() {
-        for on in ["1", "true", "yes", "on", " on "] {
-            assert!(flag_is_on(Some(on)), "{on}");
-        }
-        for off in ["0", "false", "off", "", "2", "enabled"] {
-            assert!(!flag_is_on(Some(off)), "{off}");
-        }
-        assert!(!flag_is_on(None));
-    }
-
     #[tokio::test]
     async fn flag_off_answers_404_before_any_check_and_reaches_no_upstream() {
-        let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        std::env::remove_var("BROWSER_POLICY_ADMIN_API");
         let org_core = MockServer::start().await;
-        let state = state_for(&org_core);
+        let mut state = state_for(&org_core);
+        state.browser_policy_admin_api = false;
         // A plain member on a foreign org: only the flag check can answer 404 here.
         let (status, Json(body)) = get_org_policy(&state, &user("org-2", "member"), "org-1").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
@@ -339,8 +317,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_member_reads_the_view_and_is_told_they_cannot_manage_it() {
-        let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        std::env::set_var("BROWSER_POLICY_ADMIN_API", "1");
         let org_core = MockServer::start().await;
         Mock::given(wm_method("GET"))
             .and(wm_path(POLICY_PATH))
@@ -352,13 +328,10 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["data"]["revision"], 3);
         assert_eq!(body["data"]["can_manage"], false);
-        std::env::remove_var("BROWSER_POLICY_ADMIN_API");
     }
 
     #[tokio::test]
     async fn an_admin_reads_the_stored_document_with_can_manage_set() {
-        let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        std::env::set_var("BROWSER_POLICY_ADMIN_API", "1");
         let org_core = MockServer::start().await;
         Mock::given(wm_method("GET"))
             .and(wm_path(POLICY_PATH))
@@ -370,13 +343,10 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["data"]["can_manage"], true);
         assert_eq!(body["data"]["rev"], "abc123def456");
-        std::env::remove_var("BROWSER_POLICY_ADMIN_API");
     }
 
     #[tokio::test]
     async fn a_member_cannot_save_and_org_core_is_not_called() {
-        let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        std::env::set_var("BROWSER_POLICY_ADMIN_API", "1");
         let org_core = MockServer::start().await;
         let state = state_for(&org_core);
         let (status, Json(body)) =
@@ -384,13 +354,10 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["error"]["code"], "forbidden");
         assert!(org_core_calls(&org_core).await.is_empty());
-        std::env::remove_var("BROWSER_POLICY_ADMIN_API");
     }
 
     #[tokio::test]
     async fn an_admin_save_sends_the_revision_as_if_match_and_only_the_document() {
-        let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        std::env::set_var("BROWSER_POLICY_ADMIN_API", "1");
         let org_core = MockServer::start().await;
         Mock::given(wm_method("PUT"))
             .and(wm_path(POLICY_PATH))
@@ -413,13 +380,10 @@ mod tests {
             calls[0].headers.get("x-org-id").and_then(|v| v.to_str().ok()),
             Some("org-1")
         );
-        std::env::remove_var("BROWSER_POLICY_ADMIN_API");
     }
 
     #[tokio::test]
     async fn a_stale_revision_is_409_and_passes_through_unchanged() {
-        let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        std::env::set_var("BROWSER_POLICY_ADMIN_API", "1");
         let org_core = MockServer::start().await;
         let conflict = json!({"error": {
             "code": "revision_conflict",
@@ -436,13 +400,10 @@ mod tests {
             set_org_policy(&state, &user("org-1", "owner"), "org-1", 3, &document()).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body, conflict);
-        std::env::remove_var("BROWSER_POLICY_ADMIN_API");
     }
 
     #[tokio::test]
     async fn a_document_with_a_field_org_core_does_not_read_is_refused_before_org_core() {
-        let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        std::env::set_var("BROWSER_POLICY_ADMIN_API", "1");
         let org_core = MockServer::start().await;
         let state = state_for(&org_core);
         let admin = user("org-1", "admin");
@@ -466,13 +427,10 @@ mod tests {
             assert_eq!(body["error"]["details"]["field"], field, "{document}");
         }
         assert!(org_core_calls(&org_core).await.is_empty(), "no refused save reached org-core");
-        std::env::remove_var("BROWSER_POLICY_ADMIN_API");
     }
 
     #[tokio::test]
     async fn a_negative_revision_and_a_foreign_or_malformed_org_are_refused() {
-        let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        std::env::set_var("BROWSER_POLICY_ADMIN_API", "1");
         let org_core = MockServer::start().await;
         let state = state_for(&org_core);
         let (status, Json(body)) =
@@ -488,6 +446,5 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(body["error"]["details"]["field"], "orgId");
         assert!(org_core_calls(&org_core).await.is_empty());
-        std::env::remove_var("BROWSER_POLICY_ADMIN_API");
     }
 }

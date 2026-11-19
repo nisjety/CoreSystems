@@ -281,6 +281,7 @@ import type { ChatEffectClass } from '@/shared/chat/effect-class'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { planExecuteEnabled } from '@/shared/chat/plan-execute'
 import { noteChatStreamLost, noteChatStreamOk } from '../lib/chat-connectivity'
+import { byoGatewaySwitchOn, subscriptionRouteWithheldOnSpace } from '../lib/space-side-features'
 import { readPinnedMessages, togglePinnedMessage } from '../lib/chat-pinned-messages'
 import { CHAT_SURFACE_IDS, chatSurfaceSpec, isChatTab } from '../lib/chat-surfaces'
 import { useChatThreadDraft, type ChatDraftOutcome } from '../lib/chat-thread-draft'
@@ -563,6 +564,14 @@ export function useChatController() {
   // memory makes a newly-created scoped thread continue to send the selected
   // Space on later turns during this chat session without persisting a bearer.
   const scopedThreadRefs = new Map<string, string>()
+  /**
+   * The Space the open chat is in, or the one its first send goes to: the open thread's project, or, before a new chat's first
+   * send, the project picked for it. The composer's Space flag and every Space route gate read this, so a new chat in a project
+   * is a Space from its first send (DEC-V-R8), not only once its thread id exists.
+   */
+  const openChatSpaceRef = (): string | null => (
+    state.threadId ? (scopedThreadRefs.get(state.threadId) ?? null) : projectSpaceRef()
+  )
   /**
    * Whether the server keeps a message tree for conversations (WS17 S9). The switch is server-wide, so it is
    * learnt from a `connected` frame or a transcript whose turns carry a version, and never unlearnt. While it
@@ -5048,6 +5057,18 @@ export function useChatController() {
       const remaining = deferred.slice(1)
       setDeferredSends(remaining)
       untrack(() => {
+        // The queue survives opening another chat, so a held send goes out in the chat that is open now. A route that chat
+        // may not take (DEC-V-R8) is not sent: the words go back to the box, and the strip entry says why.
+        const refused = spaceRouteRefusal(next.options)
+        if (refused) {
+          // The strip entry that waits for this send is the oldest one still pending or resent under its words.
+          const waiting = state.queuedInputs.find((entry) =>
+            entry.content === next.content && (entry.state === 'pending' || entry.state === 'resent'))
+          if (waiting) noteQueuedInput(waiting.id, 'refused', refused)
+          setInput((current) => (current.trim() === '' ? next.content : `${next.content}\n\n${current}`))
+          showFeedbackNotice(refused)
+          return
+        }
         void sendContent(next.content, next.modelOverride, next.options)
       })
     },
@@ -5646,6 +5667,31 @@ export function useChatController() {
   }
 
   /**
+   * The notice for a route a Space thread may not send again (DEC-V-R8). With the BYO gateway switch on, a Space thread never
+   * takes the member's ChatGPT subscription or their own gateway, and a turn written under one of them is not sent on it again:
+   * a regenerate, continue, edit or re-run that would replay it is refused with the composer's words, before anything is
+   * truncated, aborted or sent. Null when the route may go out, which is always so while the switch is off or outside a Space.
+   */
+  const spaceRouteRefusal = (
+    route: Readonly<{ provider?: string; subscriptionConnectionId?: string; modelConnectionId?: string }>,
+  ): string | null => {
+    const onSpace = Boolean(openChatSpaceRef())
+    if (subscriptionRouteWithheldOnSpace(onSpace) && (route.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER || route.subscriptionConnectionId)) {
+      return i18n.tr(
+        'Abonnementsmodeller kan ikke brukes i et delt Space. Velg en annen modell.',
+        'ChatGPT subscription models cannot be used in a shared Space. Choose another model.',
+      )
+    }
+    if (onSpace && byoGatewaySwitchOn() && route.modelConnectionId) {
+      return i18n.tr(
+        'Din egen gateway kan ikke brukes i et delt Space. Velg en annen modell.',
+        'Your own gateway cannot be used in a shared Space. Choose another model.',
+      )
+    }
+    return null
+  }
+
+  /**
    * Whether a send on this thread goes through the server's version tree. A temporary chat keeps client-only
    * versions, and a Space thread keeps no tree, so neither does.
    */
@@ -5785,6 +5831,11 @@ export function useChatController() {
       showFeedbackNotice('Denne turen har dokumentert effekt og kan ikke regenereres på stedet. Start en ny tur eller bruk kvitteringen i Trace.')
       return
     }
+    const refused = spaceRouteRefusal(exchange.lastUser)
+    if (refused) {
+      showFeedbackNotice(refused)
+      return
+    }
     const threadId = state.threadId
     return withReplayConnection(exchange.lastUser, (subscriptionConnectionId) => {
       if (!isSameExchange(threadId, exchange)) return
@@ -5901,6 +5952,11 @@ export function useChatController() {
       showFeedbackNotice('Denne turen har dokumentert effekt og kan ikke fortsettes på stedet. Start en ny tur eller bruk kvitteringen i Trace.')
       return
     }
+    const refused = spaceRouteRefusal(lastUser)
+    if (refused) {
+      showFeedbackNotice(refused)
+      return
+    }
     const threadId = state.threadId
     return withReplayConnection(lastUser, (subscriptionConnectionId) => {
       if (!isSameExchange(threadId, exchange) || outgoingAssistant.status !== 'stopped') return
@@ -5954,6 +6010,14 @@ export function useChatController() {
       provider: user.provider ?? assistant.provider,
       subscriptionConnectionId: user.subscriptionConnectionId ?? assistant.subscriptionConnectionId,
     }
+    const refused = spaceRouteRefusal({
+      ...route,
+      modelConnectionId: user.modelConnectionId ?? assistant.modelConnectionId,
+    })
+    if (refused) {
+      showFeedbackNotice(refused)
+      return
+    }
     const resend = await Promise.all([
       toStreamAttachments(user.attachments),
       replayConnectionId(route),
@@ -6002,6 +6066,12 @@ export function useChatController() {
     const outgoingAssistant = state.turns[index + 1]
     if (isEffectfulChatTurn(outgoingAssistant?.effectClass)) {
       showFeedbackNotice('Denne turen har dokumentert effekt og kan ikke redigeres på stedet. Start en ny tur eller bruk kvitteringen i Trace.')
+      return
+    }
+    // The question's own route is replayed by the resend, so a Space thread refuses it before anything is discarded.
+    const refused = spaceRouteRefusal(original)
+    if (refused) {
+      showFeedbackNotice(refused)
       return
     }
     // A versioned edit names the question it replaces: the server moves the branch to that question's parent and
@@ -6427,10 +6497,10 @@ export function useChatController() {
     sourceScope,
     setSourceScope,
     retrievalScope,
-    spaceScoped: () => Boolean(scopedThreadRefs.get(state.threadId ?? '')),
+    spaceScoped: () => Boolean(openChatSpaceRef()),
     // WS18-S4: the project this page is writing to: the open thread's own project, or the
     // pick for a chat that has no thread yet. Null for every ordinary chat.
-    activeProjectRef: () => (state.threadId ? scopedThreadRefs.get(state.threadId) ?? null : projectSpaceRef()),
+    activeProjectRef: () => openChatSpaceRef(),
     projectSpaceRef,
     setProjectSpaceRef,
     setRetrievalScope,

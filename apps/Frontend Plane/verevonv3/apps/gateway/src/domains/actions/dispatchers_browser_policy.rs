@@ -80,8 +80,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_inputs_are_checked_before_the_gateway_is_called() {
-        let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        std::env::remove_var("BROWSER_POLICY_ADMIN_API");
+        // The flag is AppState::browser_policy_admin_api (off in test_state), never the environment.
         let state = crate::tests::test_state(false);
         let user = admin();
         let (status, body) = status_and_body(dispatch_browser_get_org_policy(&state, &user, &json!({}))).await;

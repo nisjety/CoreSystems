@@ -121,6 +121,7 @@ fn test_state(quarry_edge_url: String) -> AppState {
         browser_region_attach: false,
         browser_tab_mentions: false,
         browser_turn_context: false,
+        browser_policy_admin_api: false,
         browser_region_attach_key: String::new(),
         // Unroutable: the onboarding preview-token mint fails, so the
         // upstream calls go out unauthenticated — which is exactly the

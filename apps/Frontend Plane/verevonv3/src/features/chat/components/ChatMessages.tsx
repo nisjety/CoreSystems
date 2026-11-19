@@ -103,6 +103,7 @@ import { readerPolishOn } from '../lib/reader-polish'
 import { listConversations, type LiveTicket } from '@/shared/api/inbox-client'
 import { listNotifications, type Notification } from '@/shared/api/notifications-client'
 import { MIN_PLAN_JUSTIFICATION_CHARS, translateText } from '@/shared/api/chat-client'
+import { isZdrCode } from '@/shared/api/zdr-refusals'
 import { isThreadRefusalCode, sideFeaturesWithheldOnSpace } from '@/features/chat/lib/space-side-features'
 import {
   REASONING_TRANSLATE_MAX_CHARS,
@@ -2371,7 +2372,9 @@ export function ReasoningPopover(props: {
   const [showOriginal, setShowOriginal] = createSignal(false)
   const [translating, setTranslating] = createSignal(false)
   // 'refused' is the gateway's typed refusal of the thread the translation names (DEC-V-R8): the reason, and no retry.
-  const [translateFailure, setTranslateFailure] = createSignal<'failed' | 'unavailable' | 'refused' | null>(null)
+  // 'zdr' is a typed zero-retention refusal of the translation: its words are in `translateZdrNote`, and nothing is retried.
+  const [translateFailure, setTranslateFailure] = createSignal<'failed' | 'unavailable' | 'refused' | 'zdr' | null>(null)
+  const [translateZdrNote, setTranslateZdrNote] = createSignal('')
   // Offered on a settled turn that keeps its content, when the text fits the route and reads in the other language from the reader's.
   const translatable = createMemo(() => {
     if (!reasoningTranslateEnabled() || props.temporaryChat || props.message.streaming) return false
@@ -2408,7 +2411,17 @@ export function ReasoningPopover(props: {
         setShowOriginal(false)
       }
     } catch (error) {
-      setTranslateFailure(error instanceof ApiError && isThreadRefusalCode(error.code) ? 'refused' : 'failed')
+      if (error instanceof ApiError && isZdrCode(error.code)) {
+        // The zero-retention refusal is shown in its own words, with the next step; the request went to no model.
+        const zdrFallback = i18n.tr(
+          'Oversettelsen er ikke tilgjengelig for denne samtalen. Forespørselen ble ikke sendt til en modell.',
+          'A translation is not available for this chat. The request was not sent to a model.',
+        )
+        setTranslateZdrNote(translateApiError(error, i18n.tr, { no: zdrFallback, en: zdrFallback }))
+        setTranslateFailure('zdr')
+      } else {
+        setTranslateFailure(error instanceof ApiError && isThreadRefusalCode(error.code) ? 'refused' : 'failed')
+      }
     } finally {
       setTranslating(false)
     }
@@ -2506,7 +2519,7 @@ export function ReasoningPopover(props: {
                         </span>
                       </Show>
                     </Show>
-                    <Show when={heldTranslation() === null && translatable() && translateFailure() !== 'unavailable' && translateFailure() !== 'refused'}>
+                    <Show when={heldTranslation() === null && translatable() && translateFailure() !== 'unavailable' && translateFailure() !== 'refused' && translateFailure() !== 'zdr'}>
                       <button type="button" disabled={translating()} onClick={() => void translateReasoning()}>
                         {translating() ? i18n.tr('Oversetter…', 'Translating…') : i18n.tr('Oversett', 'Translate')}
                       </button>
@@ -2522,6 +2535,11 @@ export function ReasoningPopover(props: {
                           'Oversettelsen er ikke tilgjengelig for denne samtalen. Forespørselen ble ikke sendt til en modell.',
                           'A translation is not available for this chat. The request was not sent to a model.',
                         )}
+                      </span>
+                    </Show>
+                    <Show when={translateFailure() === 'zdr'}>
+                      <span class="verevon-chat-reasoning-translate__note" role="alert">
+                        {translateZdrNote()}
                       </span>
                     </Show>
                     <Show when={translateFailure() === 'failed'}>

@@ -10476,7 +10476,7 @@ pub(crate) mod tests {
             browser_consent_api: false,
             browser_downloads: false,
             browser_recipes: false, browser_region_attach: false, browser_tab_mentions: false,
-            browser_turn_context: false,
+            browser_turn_context: false, browser_policy_admin_api: false,
             browser_region_attach_key: String::new(),
             auth_core_url: "http://127.0.0.1:1".into(),
             verevon_public_origin: "http://localhost:5173".into(),
