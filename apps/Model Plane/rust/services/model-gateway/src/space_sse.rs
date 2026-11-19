@@ -483,6 +483,15 @@ impl WakeWindow {
         matches!(self, Self::Open)
     }
 
+    /// Whether a turn read under this window may offer `reattach_context`. That tool reads the whole
+    /// thread back through the owner-bound conversation read, which knows no window, and returns turns
+    /// the prompt does not carry: under a window those can be turns from before it. So only a read with
+    /// no window offers it, as [`Self::keeps_summaries`] keeps summaries.
+    #[must_use]
+    pub(crate) fn offers_thread_reattach(self) -> bool {
+        matches!(self, Self::Open)
+    }
+
     /// The native compaction checkpoint a turn under this window persists with its answer: the one the
     /// provider returned, and none under a window (see [`Self::keeps_summaries`]).
     #[must_use]
@@ -492,6 +501,18 @@ impl WakeWindow {
         } else {
             ""
         }
+    }
+}
+
+/// Takes `reattach_context` out of a turn's tools when its window does not allow it
+/// ([`WakeWindow::offers_thread_reattach`]), whether the gateway or the caller declared it. With no window the
+/// list is left exactly as it was.
+pub(crate) fn withhold_thread_reattach(
+    defs: &mut Vec<mp_contracts::model_plane::v1::ToolDefinition>,
+    window: WakeWindow,
+) {
+    if !window.offers_thread_reattach() {
+        defs.retain(|def| def.name != "reattach_context");
     }
 }
 
@@ -1364,6 +1385,32 @@ mod tests {
         assert_eq!(WakeWindow::Open.checkpoint_to_persist("checkpoint"), "checkpoint");
         assert_eq!(since.checkpoint_to_persist("checkpoint"), "");
         assert_eq!(WakeWindow::Unreadable.checkpoint_to_persist("checkpoint"), "");
+    }
+
+    /// `reattach_context` reads the whole thread with no window, so a wake under a window, readable or not, is
+    /// never offered it, even when the caller declared it. With no window the tool list is untouched.
+    #[test]
+    fn a_wake_under_a_window_is_not_offered_reattach_context() {
+        use mp_contracts::model_plane::v1::ToolDefinition;
+        let tools = || {
+            ["count_words", "reattach_context", "skill_file"]
+                .into_iter()
+                .map(|name| ToolDefinition { name: name.to_owned(), ..ToolDefinition::default() })
+                .collect::<Vec<_>>()
+        };
+        let names = |defs: &[ToolDefinition]| defs.iter().map(|def| def.name.clone()).collect::<Vec<_>>();
+
+        let mut open = tools();
+        withhold_thread_reattach(&mut open, WakeWindow::Open);
+        assert_eq!(names(&open), ["count_words", "reattach_context", "skill_file"]);
+
+        for window in [WakeWindow::Since(at("2026-11-18T09:30:00Z")), WakeWindow::Unreadable] {
+            assert!(!window.offers_thread_reattach());
+            let mut defs = tools();
+            withhold_thread_reattach(&mut defs, window);
+            assert_eq!(names(&defs), ["count_words", "skill_file"]);
+        }
+        assert!(WakeWindow::Open.offers_thread_reattach());
     }
 
     // A turn inside the member's window can carry a summary persisted over turns before it: the head summary an

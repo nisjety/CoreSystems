@@ -5157,6 +5157,10 @@ pub async fn invoke_stream_sse(
                 defs.push(builtin);
             }
         }
+        // D18: a wake under a history window never offers `reattach_context`, whoever declared it. Its read
+        // is the whole thread with no window, so it would hand the model turns from before the member's
+        // window. Not offered, a call to it is refused at dispatch as not available.
+        crate::space_sse::withhold_thread_reattach(&mut defs, wake_window);
         // MCP tools are intentionally not advertised in the inline loop. They
         // are effectful remote capabilities and must be routed through the
         // execution-core policy/HITL path; dispatch_tool also denies forged
