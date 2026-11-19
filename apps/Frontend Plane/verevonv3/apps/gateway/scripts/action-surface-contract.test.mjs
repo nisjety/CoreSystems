@@ -183,21 +183,69 @@ test('the live Space fragments are discovered and carry the moved base actions',
   assert.ok(ids.has('spaces.create_room'), 'base fragment ids must be read from domains/spaces');
 });
 
+// The WS11 attention, status and reminder actions (WS11-S3, S7, S10 and S11): the attention
+// tables, the member status row and the reminder row all live in the Application plane.
+const WS11_ACTION_IDS = [
+  'spaces.mark_all_read',
+  'spaces.mark_unread',
+  'spaces.set_notify_level',
+  'spaces.set_attention_item_state',
+  'spaces.set_thread_follow',
+  'spaces.set_status',
+  'spaces.create_reminder',
+  'spaces.cancel_reminder',
+];
+
 // WS01-S5 and WS03-S4. Independent of the whole-set equality test above (the registry/handlers
 // drift it reports predates the Space work): each new id is declared in its own fragment, is part
 // of the registry set, and has an execute_action arm that reaches a named dispatch_ function.
 for (const [fragment, ids] of [
   ['ws01.ts', ['spaces.create_post', 'spaces.reply_in_thread']],
   ['ws03.ts', ['spaces.set_effect_entitlements', 'spaces.apply_effect_preset']],
-  ['ws04.ts', ['spaces.update_room_details', 'spaces.change_member_role', 'spaces.leave_room']],
+  [
+    'ws04.ts',
+    [
+      'spaces.update_room_details',
+      'spaces.change_member_role',
+      'spaces.leave_room',
+      'spaces.join_room',
+      'spaces.update_room_settings',
+    ],
+  ],
   ['ws08.ts', ['spaces.set_agent_wake_policy']],
+  ['ws09.ts', ['spaces.stop_run']],
   ['ws10.ts', ['spaces.decide_approval', 'spaces.revoke_approval_grant']],
-  ['ws12.ts', ['spaces.open_dm', 'spaces.hide_space', 'spaces.toggle_reaction']],
+  ['ws11.ts', WS11_ACTION_IDS],
+  [
+    'ws12.ts',
+    [
+      'spaces.open_dm',
+      'spaces.hide_space',
+      'spaces.edit_message',
+      'spaces.delete_message',
+      'spaces.toggle_reaction',
+    ],
+  ],
   [
     'ws14.ts',
     ['space.files.attach', 'space.files.list', 'space.files.read_text', 'space.files.delete'],
   ],
   ['ws16.ts', ['spaces.update_sidebar']],
+  [
+    'ws17.ts',
+    [
+      'agents.create_personal',
+      'agents.update_access',
+      'agents.set_primary',
+      'spaces.withdraw_agent',
+      'spaces.open_private_panel',
+      'memory.declassify_to_space',
+      'memory.retract_from_space',
+    ],
+  ],
+  ['ws18.ts', ['spaces.set_agent_self_api', 'spaces.set_agent_canvas_tools']],
+  ['ws19.ts', ['spaces.save_canvas', 'spaces.restore_canvas_version']],
+  ['ws20.ts', ['spaces.browser_run.start']],
 ]) {
   test(`${fragment} action ids are in the registry set and reach a gateway dispatcher`, () => {
     const fragmentSource = fs.readFileSync(path.join(spaceFragmentsDirectory, fragment), 'utf8');
@@ -207,7 +255,7 @@ for (const [fragment, ids] of [
     for (const actionId of ids) {
       assert.ok(fragmentIds.has(actionId), `${actionId} is declared in ${fragment}`);
       assert.ok(registryIds.has(actionId), `${actionId} is in the registry set`);
-      const quotedId = actionId.replace('.', '\\.');
+      const quotedId = actionId.replaceAll('.', '\\.');
       assert.match(
         handlerSource,
         new RegExp(`"${quotedId}"[\\s\\S]{0,320}?=>[\\s\\S]{0,160}?dispatch_`),
@@ -300,6 +348,69 @@ test('spaces.set_agent_canvas_tools has a dispatcher arm and is not model execut
   assert.ok(row, 'spaces.set_agent_canvas_tools has a model-access row');
   assert.match(row[1], /^exempt\(/, 'spaces.set_agent_canvas_tools is a closed (access none) row');
   assert.doesNotMatch(row[1], /eligible:\s*true/, 'spaces.set_agent_canvas_tools must not be eligible');
+});
+
+// The Wave 2 and 3 Space actions below change what a person is, owns or decides, or move their own
+// UI state: none may become model executable. Each model-access row is a closed `exempt(...)` (access
+// none) with no `eligible: true`, so neither the catalog manifest nor the agent tool list offers them.
+test('the Wave 2 and Wave 3 Space actions are human-only: a closed model-access row each', () => {
+  const modelAccessSource = fs.readFileSync(
+    path.join(verevonDirectory, 'src/shared/actions/model-access.ts'),
+    'utf8',
+  );
+  for (const actionId of [
+    // WS04-S8: joining a room and changing its settings.
+    'spaces.join_room',
+    'spaces.update_room_settings',
+    // WS09-S8: stopping a run is an approval authority.
+    'spaces.stop_run',
+    // WS11: read position, attention state, status text and reminders are the person's own.
+    ...WS11_ACTION_IDS,
+    // WS12-S7: an edit or a delete of a message.
+    'spaces.edit_message',
+    'spaces.delete_message',
+    // WS17-S5 to S7b: personal agents, the private panel and personal memory leaving or returning.
+    'agents.create_personal',
+    'agents.update_access',
+    'agents.set_primary',
+    'spaces.withdraw_agent',
+    'spaces.open_private_panel',
+    'memory.declassify_to_space',
+    'memory.retract_from_space',
+    // WS18-S5: the self-API switch (the canvas-tools switch has its own test above).
+    'spaces.set_agent_self_api',
+    // WS19-S4: saving or restoring the room canvas.
+    'spaces.save_canvas',
+    'spaces.restore_canvas_version',
+    // WS20-S5: starting a browser run from a room.
+    'spaces.browser_run.start',
+  ]) {
+    const row = modelAccessSource.match(new RegExp(`'${actionId.replaceAll('.', '\\.')}':\\s*([^\\n]+)`));
+    assert.ok(row, `${actionId} has a model-access row`);
+    assert.match(row[1], /^exempt\(/, `${actionId} is a closed (access none) row`);
+    assert.doesNotMatch(row[1], /eligible:\s*true/, `${actionId} must not be eligible`);
+  }
+});
+
+// WS11-S3, S7, S10 and S11: the attention, status and reminder contracts name the Application plane
+// as their owner, because the rows they change live there and nowhere else.
+test('the WS11 attention, status and reminder actions are owned by the application plane', () => {
+  const fragmentSource = fs.readFileSync(path.join(spaceFragmentsDirectory, 'ws11.ts'), 'utf8');
+  for (const actionId of WS11_ACTION_IDS) {
+    const owner = fragmentSource.match(
+      new RegExp(`id:\\s*'${actionId.replaceAll('.', '\\.')}'[\\s\\S]*?ownerPlane:\\s*'([^']+)'`),
+    );
+    assert.ok(owner, `${actionId} names an owner plane`);
+    assert.equal(owner[1], 'application', `${actionId} is owned by the application plane`);
+  }
+});
+
+// WS09-S8: stopping a run has exactly one dispatcher arm in the live dispatch surface, so there is
+// one place that decides who may stop one.
+test('spaces.stop_run has exactly one dispatcher arm', () => {
+  const surface = dispatchSurfaceSource(fs.readFileSync(handlerPath, 'utf8'));
+  assert.equal([...surface.matchAll(/"spaces\.stop_run"/g)].length, 1);
+  assert.match(surface, /"spaces\.stop_run"[\s\S]{0,320}?=>[\s\S]{0,160}?dispatch_/);
 });
 
 // The dispatchers the two WS10-S4 ids reach are the Space route functions, so the scope rules, the
