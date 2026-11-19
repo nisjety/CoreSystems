@@ -108,12 +108,18 @@ class Settings(BaseSettings):
         default="http://stirling-pdf:8080", alias="STIRLING_PDF_URL"
     )
 
-    @field_validator("allow_insecure_dev_defaults", mode="before")
+    # The three gates of the legacy tenant path are read as the literal 1 only, as
+    # integration-corev2 and shipping-core read the same names. pydantic's bool would also take
+    # true, yes, on, t and y in any case, so a spelling those services refuse would open the legacy
+    # tenant path here. Any other string reads as off.
+    @field_validator(
+        "allow_legacy_tenant_key",
+        "allow_insecure_dev_defaults",
+        "isolated_e2e",
+        mode="before",
+    )
     @classmethod
-    def read_insecure_dev_defaults_exactly(cls, value: Any) -> Any:
-        # Model Plane and the BFF read this switch as the literal 1 only. pydantic's bool would
-        # also take true, yes, on, t and y in any case, so a spelling those planes refuse would
-        # open the legacy tenant path here. Any other string reads as off.
+    def read_gate_switch_exactly(cls, value: Any) -> Any:
         if isinstance(value, str):
             return value == "1"
         return value

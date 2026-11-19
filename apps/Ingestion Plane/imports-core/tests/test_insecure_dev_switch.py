@@ -103,3 +103,57 @@ def test_legacy_tenant_key_is_admitted_when_the_insecure_switch_is_the_literal_o
 
     assert context.org_id == "victim-org"
     assert context.service_name == "isolated-e2e"
+
+
+@pytest.mark.parametrize("field", ["allow_legacy_tenant_key", "isolated_e2e"])
+@pytest.mark.parametrize(
+    ("value", "opened"),
+    [
+        ("1", True),
+        ("true", False),
+        ("TRUE", False),
+        ("True", False),
+        ("yes", False),
+        ("on", False),
+        ("t", False),
+        ("y", False),
+        ("0", False),
+        ("false", False),
+        ("", False),
+        (" 1", False),
+        ("1 ", False),
+    ],
+)
+def test_legacy_and_isolated_switches_open_only_for_the_literal_one(
+    monkeypatch: pytest.MonkeyPatch, field: str, value: str, opened: bool
+) -> None:
+    switch = {
+        "allow_legacy_tenant_key": "ALLOW_LEGACY_TENANT_KEY",
+        "isolated_e2e": "ISOLATED_E2E",
+    }[field]
+    settings = _settings(monkeypatch, **{switch: value})
+
+    assert getattr(settings, field) is opened
+
+
+@pytest.mark.parametrize(
+    "switch",
+    ["ALLOW_LEGACY_TENANT_KEY", "ALLOW_INSECURE_DEV_DEFAULTS", "ISOLATED_E2E"],
+)
+@pytest.mark.parametrize("value", ["true", "TRUE", "yes", "on", "t", "y", "0"])
+def test_legacy_tenant_key_is_refused_when_any_one_gate_is_not_the_literal_one(
+    monkeypatch: pytest.MonkeyPatch, switch: str, value: str
+) -> None:
+    switches = {
+        "ALLOW_LEGACY_TENANT_KEY": "1",
+        "ALLOW_INSECURE_DEV_DEFAULTS": "1",
+        "ISOLATED_E2E": "1",
+    }
+    switches[switch] = value
+    settings = _settings(monkeypatch, **switches)
+    monkeypatch.setattr(auth_middleware, "get_settings", lambda: settings)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(auth_middleware.require_internal_auth(_legacy_request()))
+
+    assert exc.value.status_code == 401

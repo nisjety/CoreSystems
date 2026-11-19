@@ -43,13 +43,21 @@ impl Settings {
         let internal_token = env::var("AUTOCOMPLETE_INTERNAL_TOKEN")
             .ok()
             .filter(|value| !value.trim().is_empty());
+        let allow_insecure = env::var("ALLOW_INSECURE_DEV_DEFAULTS").ok();
         let isolated_insecure = isolated_insecure_from(
-            env::var("ALLOW_INSECURE_DEV_DEFAULTS").ok().as_deref(),
+            allow_insecure.as_deref(),
             env::var("ISOLATED_E2E").ok().as_deref(),
         );
         if internal_token.is_none() && !isolated_insecure {
             return Err(AppError::Config(
                 "AUTOCOMPLETE_INTERNAL_TOKEN is required outside isolated E2E".to_string(),
+            ));
+        }
+        if placeholder_token_refused(internal_token.as_deref(), allow_insecure.as_deref()) {
+            return Err(AppError::Config(
+                "AUTOCOMPLETE_INTERNAL_TOKEN is a change-me placeholder; set the real shared token \
+                 (or ALLOW_INSECURE_DEV_DEFAULTS=1 to override)"
+                    .to_string(),
             ));
         }
 
@@ -123,6 +131,15 @@ fn isolated_insecure_from(allow_insecure: Option<&str>, isolated_e2e: Option<&st
     switch_is_literal_one(allow_insecure) && switch_is_literal_one(isolated_e2e)
 }
 
+/// A `change-me*` token is a copied example placeholder. The BFF refuses that whole family for its
+/// internal key, and integration-corev2 refuses it for its service tokens, trimmed and in any case.
+/// Boot refuses it the same way unless `ALLOW_INSECURE_DEV_DEFAULTS` is exactly `1`; otherwise the
+/// placeholder would authorize every non-health request as its bearer token.
+fn placeholder_token_refused(internal_token: Option<&str>, allow_insecure: Option<&str>) -> bool {
+    internal_token.is_some_and(|token| token.trim().to_ascii_lowercase().starts_with("change-me"))
+        && !switch_is_literal_one(allow_insecure)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +180,49 @@ mod tests {
                 "{allow_insecure:?} {isolated_e2e:?}"
             );
         }
+    }
+
+    #[test]
+    fn change_me_placeholder_is_refused_unless_the_insecure_switch_is_exactly_one() {
+        for token in [
+            "change-me",
+            "change-me-internal-service-secret",
+            "CHANGE-ME-internal-service-secret",
+            "  change-me  ",
+        ] {
+            for allow_insecure in [
+                None,
+                Some(""),
+                Some("0"),
+                Some("true"),
+                Some("TRUE"),
+                Some("yes"),
+                Some("on"),
+                Some(" 1"),
+                Some("1 "),
+                Some("01"),
+            ] {
+                assert!(
+                    placeholder_token_refused(Some(token), allow_insecure),
+                    "{token:?} {allow_insecure:?}"
+                );
+            }
+            assert!(
+                !placeholder_token_refused(Some(token), Some("1")),
+                "{token:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tokens_without_the_change_me_prefix_are_not_refused_as_placeholders() {
+        for token in [
+            "shared-token-fixture-aaaaaaaaaaaaaaaaaaaa",
+            "changed-me-later",
+        ] {
+            assert!(!placeholder_token_refused(Some(token), None), "{token:?}");
+        }
+        assert!(!placeholder_token_refused(None, None));
+        assert!(!placeholder_token_refused(None, Some("0")));
     }
 }
