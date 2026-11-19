@@ -652,9 +652,12 @@ fn the_spa_subscription_frames_are_the_gateways_and_stay_out_of_every_other_list
 /// forwarder of the list its caller gave it.
 #[test]
 fn only_the_continue_handler_relays_upstream_error_codes() {
-    /// Every call of the relay `needle` (`name(`) in `source`: its last argument, and the text before
-    /// it. A name inside a string literal is not a call (a test's `matches("name(")` quotes it).
-    fn calls(source: &str, needle: &str) -> Vec<(String, String)> {
+    /// Every call of the relay `needle` (`name(`) in `source`: its relay-list argument, which is
+    /// `from_end` places before the last (0 for `proxy_sse_stream_with_data_plane`, whose last argument
+    /// is the list; 1 for `proxy_sse_stream_with_browser`, which takes the view-only `extra_headers`
+    /// after it), and the text before the call. A name inside a string literal is not a call (a
+    /// test's `matches("name(")` quotes it).
+    fn calls(source: &str, needle: &str, from_end: usize) -> Vec<(String, String)> {
         // Whole-line comments never carry a call.
         let source: String = source
             .lines()
@@ -677,9 +680,10 @@ fn only_the_continue_handler_relays_upstream_error_codes() {
                 continue; // the definition, or the name quoted in a string
             }
             let args = delimited(&source[at..], needle, '(', ')');
-            // Split at top-level commas and take the last non-empty argument.
+            // Split at top-level commas into the non-empty arguments, and take the one `from_end`
+            // places before the last.
             let mut depth = 0i32;
-            let mut last = String::new();
+            let mut all: Vec<String> = Vec::new();
             let mut current = String::new();
             for ch in args.chars() {
                 match ch {
@@ -688,16 +692,21 @@ fn only_the_continue_handler_relays_upstream_error_codes() {
                     _ => {}
                 }
                 if ch == ',' && depth == 0 {
-                    last = current.trim().to_owned();
+                    all.push(current.trim().to_owned());
                     current.clear();
                 } else {
                     current.push(ch);
                 }
             }
             if !current.trim().is_empty() {
-                last = current.trim().to_owned();
+                all.push(current.trim().to_owned());
             }
-            found.push((last, before.to_owned()));
+            let picked = all
+                .len()
+                .checked_sub(1 + from_end)
+                .map(|index| all[index].clone())
+                .unwrap_or_default();
+            found.push((picked, before.to_owned()));
         }
         found
     }
@@ -761,8 +770,11 @@ fn only_the_continue_handler_relays_upstream_error_codes() {
         } else {
             &source[..]
         };
-        for needle in ["proxy_sse_stream_with_data_plane(", "proxy_sse_stream_with_browser("] {
-            for (last, before) in calls(scanned, needle) {
+        for (needle, from_end) in [
+            ("proxy_sse_stream_with_data_plane(", 0),
+            ("proxy_sse_stream_with_browser(", 1),
+        ] {
+            for (last, before) in calls(scanned, needle, from_end) {
                 total += 1;
                 if last != "&[]" {
                     relaying.push((relative.clone(), last, enclosing_fn(&before)));
