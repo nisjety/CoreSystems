@@ -271,6 +271,8 @@ const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   'org-browser-policy': [],
   // Space policy renders its own live console (hidden when the gateway flag is off), so no shared status grid.
   'space-policy': [],
+  // Org agents render their own live list with the lifecycle controls (D19), so no shared status grid.
+  'org-agents': [],
   // Memory renders its own live list, so it carries no shared status grid.
   memory: [],
   // Learning renders its own proposals and ledger, so it carries no shared status grid.
@@ -553,6 +555,10 @@ function WorkspaceSettingsSection(props: {
       </Match>
       <Match when={props.section === 'space-policy'}>
         <OrgSpacePolicySection />
+      </Match>
+      {/* D19: the org agents have their own section. They sat under room policy, whose link is listed only while the
+          room-policy admin API is on, and the agent routes have no such switch, so an admin had no link to them. */}
+      <Match when={props.section === 'org-agents'}>
         <OrgAgentsSection />
       </Match>
       <Match when={props.section === 'memory'}>

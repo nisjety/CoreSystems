@@ -66,6 +66,7 @@ const settingsSidebarSections: SettingsLinkSection[] = [
   { id: 'browser-sites', label: 'Sites for the agent', icon: Globe2, href: '/settings/browser-sites' },
   { id: 'org-browser-policy', label: 'Browser policy', icon: ShieldCheck, href: '/settings/org-browser-policy' },
   { id: 'space-policy', label: 'Rom-policy', icon: Layers, href: '/settings/space-policy' },
+  { id: 'org-agents', label: 'Organisasjonens agenter', icon: UsersRound, href: '/settings/org-agents' },
   { id: 'finetune', label: 'Fine-tune jobs', icon: TestTubeDiagonal, href: '/settings/finetune' },
   { id: 'mcp', label: 'MCP-servere', icon: ServerCog, href: '/settings/mcp' },
   { id: 'skills', label: 'Ferdigheter', icon: Sparkles, href: '/settings/skills' },
@@ -139,6 +140,8 @@ export function SettingsExpandedSidebarPanel(props: { modelAccessEnabled: boolea
             (section.id !== 'browser-sites' || import.meta.env.VITE_BROWSER_SITES === 'true') &&
             (section.id !== 'org-browser-policy' || (import.meta.env.VITE_BROWSER_SITES === 'true' && hasWorkspaceAdminAccess(getSession()))) &&
             (section.id !== 'space-policy' || spacePolicyEnabled()) &&
+            // The org agent routes have no rollout switch of their own, so the link follows the admin role alone.
+            (section.id !== 'org-agents' || hasWorkspaceAdminAccess(getSession())) &&
             (section.id !== 'personal-agents' || personalAgentsEnabled()),
         )}
         activeSectionId={activeSectionId()}
@@ -328,6 +331,8 @@ function settingsSectionLabel(id: string, fallback: string, i18n: ReturnType<typ
       return i18n.tr('Nettleserpolicy', 'Browser policy')
     case 'space-policy':
       return i18n.tr('Rom-policy', 'Room policy')
+    case 'org-agents':
+      return i18n.tr('Organisasjonens agenter', 'Organization agents')
     case 'finetune':
       return i18n.tr('Finjusteringsjobber', 'Fine-tune jobs')
     case 'mcp':

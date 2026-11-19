@@ -99,6 +99,60 @@ describe('Settings sidebar: Rom-policy link', () => {
   })
 })
 
+const orgAgentsLink = () => screen.queryByRole('link', { name: /Organisasjonens agenter|Organization agents/ })
+
+// D19: the org agent routes have no rollout switch, and the section used to sit under room policy, whose link is listed
+// only while the room-policy admin API is on, so an admin had no link to the agents in a deployment with it off.
+describe('Settings sidebar: Organisasjonens agenter link', () => {
+  beforeEach(() => {
+    spacePolicy.probeSpacePolicyAdminAvailable.mockReset()
+  })
+  afterEach(() => {
+    cleanup()
+    clearSession()
+  })
+
+  it('is listed for an admin while the room-policy admin API is off, whatever that probe says', async () => {
+    signIn('admin')
+    spacePolicy.probeSpacePolicyAdminAvailable.mockResolvedValue(false)
+    renderPanel()
+    await waitFor(() => expect(spacePolicy.probeSpacePolicyAdminAvailable).toHaveBeenCalledTimes(1))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    flush()
+    expect(spacePolicyLink()).toBeNull()
+    expect(orgAgentsLink()?.getAttribute('href')).toBe('/settings/org-agents')
+  })
+
+  it('is listed for an owner when the probe fails outright', async () => {
+    signIn('owner')
+    spacePolicy.probeSpacePolicyAdminAvailable.mockRejectedValue(new Error('down'))
+    renderPanel()
+    await waitFor(() => expect(spacePolicy.probeSpacePolicyAdminAvailable).toHaveBeenCalledTimes(1))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    flush()
+    expect(orgAgentsLink()?.getAttribute('href')).toBe('/settings/org-agents')
+  })
+
+  it('is not listed for a member', async () => {
+    signIn('member')
+    renderPanel()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    flush()
+    expect(orgAgentsLink()).toBeNull()
+  })
+})
+
+describe('org-agents section registration', () => {
+  it('is a known workspace settings section with its own title and save label', () => {
+    expect(workspaceSettingsSectionIds).toContain('org-agents')
+    const section = workspaceSettingsSections.find((entry) => entry.id === 'org-agents')
+    expect(section?.label).toBe('Organisasjonens agenter')
+    expect(section?.title).toBe('Organisasjonens agenter')
+    expect(section?.saveLabel).toBeTruthy()
+    expect(section?.description).toBeTruthy()
+  })
+})
+
 describe('space-policy section registration', () => {
   it('is a known workspace settings section with its own title and save label', () => {
     expect(workspaceSettingsSectionIds).toContain('space-policy')

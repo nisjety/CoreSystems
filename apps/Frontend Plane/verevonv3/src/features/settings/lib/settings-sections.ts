@@ -22,6 +22,7 @@ export const workspaceSettingsSectionIds = [
   'browser-sites',
   'org-browser-policy',
   'space-policy',
+  'org-agents',
   'memory',
   'learning',
 ] as const
@@ -223,6 +224,14 @@ export const workspaceSettingsSections: SectionDetail[] = [
     description: 'Hva organisasjonen tillater i rom: samtale, kunnskap og agenter. Gjelder alle rom; en administrator endrer, Control Plane håndhever og logger.',
     saveLabel: 'Lagre rom-policy',
     keywords: ['rom', 'rooms', 'rompolicy', 'room policy', 'space policy', 'agenter i rom', 'kunnskap', 'knowledge'],
+  },
+  {
+    id: 'org-agents',
+    label: 'Organisasjonens agenter',
+    title: 'Organisasjonens agenter',
+    description: 'Agenter som er delt med hele organisasjonen. Eiere og administratorer kan suspendere, aktivere igjen eller avslutte dem; Control Plane håndhever og logger.',
+    saveLabel: 'Lagre agenter',
+    keywords: ['agent', 'agenter', 'organisasjonens agenter', 'org-agent', 'organization agents', 'suspender', 'suspend', 'aktiver igjen', 'reactivate', 'avslutt', 'retire'],
   },
   {
     id: 'memory',

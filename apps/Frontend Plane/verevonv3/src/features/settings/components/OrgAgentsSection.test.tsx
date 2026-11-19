@@ -92,6 +92,73 @@ describe('OrgAgentsSection visibility (W3-DEC-ORGAGENT)', () => {
   })
 })
 
+// The list holds ids and lifecycle only. The names come from the installations list, joined on `agent-<definition id>`.
+describe('OrgAgentsSection names (W3-DEC-ORGAGENT)', () => {
+  const INSTALLATIONS = '/api/v1/agents/installations'
+  const NAMED = { ...ACTIVE, agent_subject_id: 'agent-abc123' }
+  const UNHELD = { ...ACTIVE, agent_subject_id: 'agent-zzz999' }
+  const definitions = (...rows: Array<{ agent_ref: string; name?: string }>) =>
+    jsonResponse({ data: { definitions: rows.map((row) => ({ ...row, installations: [] })) } })
+
+  it('names an agent by its definition, with its id beside the name', async () => {
+    signIn('admin')
+    stubOrgAgents([NAMED], {
+      [`GET ${INSTALLATIONS}`]: () => definitions({ agent_ref: 'abc123', name: 'Salgsassistent' }),
+    })
+
+    render(() => <OrgAgentsSection />)
+
+    expect(await screen.findByText('Salgsassistent')).toBeTruthy()
+    expect(screen.getByText('agent-abc123')).toBeTruthy()
+  })
+
+  it('shows the id alone for an agent no room holds, and when the names cannot be read', async () => {
+    signIn('admin')
+    stubOrgAgents([NAMED, UNHELD], {
+      [`GET ${INSTALLATIONS}`]: () => definitions({ agent_ref: 'abc123', name: 'Salgsassistent' }),
+    })
+    render(() => <OrgAgentsSection />)
+    expect(await screen.findByText('Salgsassistent')).toBeTruthy()
+    // The agent no room holds has no name to show, and the list still draws it with its controls.
+    expect(screen.getByText('agent-zzz999')).toBeTruthy()
+    expect(screen.getAllByRole('button', { name: 'Suspender' })).toHaveLength(2)
+    cleanup()
+
+    stubOrgAgents([NAMED], {
+      [`GET ${INSTALLATIONS}`]: () => jsonResponse({ error: { code: 'upstream_unavailable', message: 'down' } }, 503),
+    })
+    render(() => <OrgAgentsSection />)
+    expect(await screen.findByText('agent-abc123')).toBeTruthy()
+    expect(screen.queryByText('Salgsassistent')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Suspender' })).toBeTruthy()
+  })
+
+  it('keeps the name on its row after a suspend takes the agent out of every room', async () => {
+    signIn('admin')
+    let suspended = false
+    const fetchMock = stubOrgAgents([], {
+      [`GET ${LIST}`]: () => jsonResponse({
+        data: { agents: [suspended ? { ...NAMED, lifecycle: 'suspended', revision: 4 } : NAMED] },
+      }),
+      [`GET ${INSTALLATIONS}`]: () => (suspended
+        ? definitions()
+        : definitions({ agent_ref: 'abc123', name: 'Salgsassistent' })),
+      'PUT /api/v1/orgs/org_1/agents/agent-abc123/suspend': () => {
+        suspended = true
+        return jsonResponse({ data: { ...CHANGED('suspended', 4), agent_subject_id: 'agent-abc123' } })
+      },
+    })
+
+    render(() => <OrgAgentsSection />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Suspender' }))
+    flush()
+
+    expect(await screen.findByRole('button', { name: 'Aktiver igjen' })).toBeTruthy()
+    expect(screen.getByText('Salgsassistent')).toBeTruthy()
+    expect(callsTo(fetchMock, 'GET', INSTALLATIONS)).toHaveLength(1)
+  })
+})
+
 describe('OrgAgentsSection changes (W3-DEC-ORGAGENT)', () => {
   it('suspends an active agent with the revision it read, and says what happened', async () => {
     signIn('admin')

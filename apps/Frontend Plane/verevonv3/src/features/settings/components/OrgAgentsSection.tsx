@@ -9,6 +9,7 @@ import {
   type OrgAgentView,
 } from '@/shared/api/org-agent-client'
 import { ApiError } from '@/shared/api/http'
+import { getAgentInstallations } from '@/shared/api/spaces-client'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { SpaceConfirmButton } from '@/features/spaces/components/SpaceConfirmButton'
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
@@ -36,6 +37,26 @@ export function OrgAgentsSection() {
   const askedOrg = () => (isAdmin() && orgId() ? orgId() : undefined)
 
   const [agents, { refetch }] = createResource(askedOrg, (id) => listOrgAgents(id))
+  // The org agent list holds ids and lifecycle only: Control keeps no names. The names live with the agent definitions,
+  // which the installations list carries for every agent a room holds, and `agent-<definition id>` is the subject id the
+  // two lists share. The names are read once per visit, so a name stays on its row after a suspend or a retire takes the
+  // agent out of every room (the later list would no longer name it). An agent no room held when the page opened shows
+  // by its id alone. A failed read leaves ids only: a name is a help to the admin, never a reason to hide the list.
+  const [installed] = createResource(askedOrg, async () => {
+    try {
+      return await getAgentInstallations()
+    } catch {
+      return []
+    }
+  })
+  const names = createMemo<ReadonlyMap<string, string>>(() => {
+    const byId = new Map<string, string>()
+    for (const definition of installed() ?? []) {
+      const name = definition.name?.trim()
+      if (name) byId.set(`agent-${definition.agent_ref}`, name)
+    }
+    return byId
+  })
   const [busyId, setBusyId] = createSignal<string | null>(null)
   const [notice, setNotice] = createSignal<string | null>(null)
   const [actionError, setActionError] = createSignal<string | null>(null)
@@ -139,7 +160,12 @@ export function OrgAgentsSection() {
               <For each={agents() ?? []}>
                 {(agent) => (
                   <li class="verevon-settings-list-row">
-                    <code>{agent.agent_subject_id}</code>
+                    <span>
+                      <Show when={names().get(agent.agent_subject_id)}>
+                        {(name) => <strong>{name()} </strong>}
+                      </Show>
+                      <code>{agent.agent_subject_id}</code>
+                    </span>
                     <span>{lifecycleLabel(agent.lifecycle)}</span>
                     <Show when={agent.lifecycle === 'active'}>
                       <SettingsButton
