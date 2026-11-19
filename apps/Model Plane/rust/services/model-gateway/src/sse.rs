@@ -6732,6 +6732,7 @@ pub async fn invoke_stream_sse(
                 seq,
                 &timing,
                 head_summary.as_ref(),
+                wake_window,
                 retention_class,
                 &tool_usage,
                 &sink,
@@ -7675,7 +7676,8 @@ pub async fn invoke_stream_sse(
                                                         .and_then(|receipt| receipt.clone())
                                                         .as_ref(),
                                                 ),
-                                                &chunk.compaction_summary,
+                                                // D18: none from a turn under a member's history window.
+                                                wake_window.checkpoint_to_persist(&chunk.compaction_summary),
                                                 effective_zdr,
                                             ),
                                             head_summary.as_ref().map(|new| &new.record),
@@ -9607,6 +9609,7 @@ async fn load_recent_thread_messages(
             bearer,
             summarizer,
             budget,
+            wake.map_or(crate::space_sse::WakeWindow::Open, |wake| wake.window),
         )
         .await;
     }
@@ -9801,6 +9804,9 @@ async fn budget_compacted_thread(
     bearer: &VerifiedModelBearer,
     summarizer: &SummarizerContext<'_>,
     budget: usize,
+    // D18: the member's history window on a wake; `WakeWindow::Open` for every other turn. Under one,
+    // no stored summary reached `stored` (`space_sse::split_room_posts`) and none is persisted.
+    window: crate::space_sse::WakeWindow,
 ) -> RecentThread {
     let plan =
         crate::compaction::prepare_budget_compaction(loaded, stored, pinned_message_ids, budget);
@@ -9822,7 +9828,12 @@ async fn budget_compacted_thread(
     let reused = plan.reused;
     let total = plan.messages.len();
     let transcript = crate::compaction::render_head_transcript(&plan.messages, head);
-    let generation = stored_generation + 1;
+    // A compaction that persists nothing runs as generation 0, as the message-count path's does.
+    let generation = if window.keeps_summaries() {
+        stored_generation + 1
+    } else {
+        0
+    };
     let summary = summarize_head(
         state,
         org_id,
@@ -9833,10 +9844,7 @@ async fn budget_compacted_thread(
         summarizer,
     )
     .await;
-    let head_summary = summary
-        .as_deref()
-        .and_then(|summary| plan.record(summary))
-        .map(|record| crate::compaction::NewHeadSummary { record, generation });
+    let head_summary = persisted_budget_summary(&plan, summary.as_deref(), generation, window);
     let compaction =
         lifecycle_events::compaction_facts(reused, Some(head), total, summary.as_deref());
     RecentThread {
@@ -9844,6 +9852,22 @@ async fn budget_compacted_thread(
         head_summary,
         compaction,
     }
+}
+
+/// The summary a token-budget turn persists with its answer, so later turns send the same bytes: the
+/// record of `summary` once it replaced the plan's head, at `generation`. D18: none from a turn read
+/// under a member's history window, whose summary covers only the turns inside the window
+/// (`space_sse::WakeWindow::keeps_summaries`).
+fn persisted_budget_summary(
+    plan: &crate::compaction::BudgetCompaction,
+    summary: Option<&str>,
+    generation: u64,
+    window: crate::space_sse::WakeWindow,
+) -> Option<crate::compaction::NewHeadSummary> {
+    summary
+        .filter(|_| window.keeps_summaries())
+        .and_then(|summary| plan.record(summary))
+        .map(|record| crate::compaction::NewHeadSummary { record, generation })
 }
 
 /// Match this org's skills (disk-loaded + learned) against the user's turn and
@@ -10898,6 +10922,9 @@ async fn run_infer_fallback(
     timing: &crate::turn_timing::TurnTiming,
     // A compaction summary written this turn, persisted with the answer.
     head_summary: Option<&crate::compaction::NewHeadSummary>,
+    // D18: the member's history window on a wake (`WakeWindow::Open` for every other turn). The
+    // answer's native compaction checkpoint is persisted only with no window, as on the streaming path.
+    wake_window: crate::space_sse::WakeWindow,
     // How the answer's content is retained, stated on its usage frame.
     retention_class: Option<crate::sse_events::RetentionClass>,
     // The tool phase's provider calls, which the fallback answer's total includes.
@@ -11157,7 +11184,7 @@ async fn run_infer_fallback(
                                     ),
                                     retrieval_decline,
                                 ),
-                                &resp.compaction_summary,
+                                wake_window.checkpoint_to_persist(&resp.compaction_summary),
                                 fallback_zdr,
                             ),
                             head_summary.map(|new| &new.record),
@@ -28956,6 +28983,37 @@ mod lifecycle_tests {
         assert_eq!(payload["scope"], "history");
         assert_eq!(payload["outcome"], "reused");
         assert!(payload.get("messages_compacted").is_none(), "an unmeasured count is omitted");
+    }
+
+    /// D18: a token-budget turn persists the summary it wrote, so later turns send the same bytes, but a turn
+    /// read under a member's history window does not: its summary covers only the turns inside the window, and
+    /// a later reader would reuse it for the whole head and lose the turns before the window.
+    #[test]
+    fn a_turn_under_a_history_window_persists_no_head_summary() {
+        use crate::space_sse::WakeWindow;
+        let mut loaded = vec![entry("", "system", "You are Verevon")];
+        loaded.extend((0..41).map(|index| {
+            let role = if index % 2 == 0 { "user" } else { "assistant" };
+            entry(&format!("m{index}"), role, &format!("turn {index} {}", "x".repeat(1_200)))
+        }));
+        let plan = prepare_budget_compaction(loaded, None, &[], 12_000);
+        assert!(plan.head.is_some(), "the thread is over budget");
+        let summary = Some("the earlier turns in brief");
+
+        // No window: the record of the summary that replaced the head, at its generation.
+        let record = plan.record("the earlier turns in brief").expect("a record");
+        assert_eq!(
+            persisted_budget_summary(&plan, summary, 4, WakeWindow::Open),
+            Some(crate::compaction::NewHeadSummary { record, generation: 4 })
+        );
+        assert_eq!(persisted_budget_summary(&plan, None, 4, WakeWindow::Open), None, "no summary, no record");
+        // A window, readable or not: nothing.
+        let floor = chrono::DateTime::parse_from_rfc3339("2026-11-18T09:30:00Z")
+            .expect("test instant")
+            .with_timezone(&chrono::Utc);
+        for window in [WakeWindow::Since(floor), WakeWindow::Unreadable] {
+            assert_eq!(persisted_budget_summary(&plan, summary, 0, window), None, "{window:?}");
+        }
     }
 
     #[test]

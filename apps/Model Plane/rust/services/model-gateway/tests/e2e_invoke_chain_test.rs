@@ -137,6 +137,11 @@ struct MockOk {
     model_access: Option<AccessAnswer>,
     /// The `access` meta `ListModels` answers with. None leaves it off.
     catalogue_access: Option<mpv1::ModelAccessMeta>,
+    /// Every `infer_stream` request, whole: the messages with their native checkpoints.
+    captured_stream_requests: Option<CapturedRequests>,
+    /// The native compaction checkpoint an answer returns, as a provider that compacted the prompt does:
+    /// on the final chunk of `infer_stream`, and on a unary answer that proposes no tool call.
+    answer_checkpoint: Option<String>,
 }
 
 /// How a test scripts the organisation's model policy.
@@ -189,6 +194,8 @@ impl MockOk {
             stream_gate: None,
             model_access: None,
             catalogue_access: None,
+            captured_stream_requests: None,
+            answer_checkpoint: None,
         }
     }
 
@@ -209,6 +216,8 @@ impl MockOk {
             stream_gate: None,
             model_access: None,
             catalogue_access: None,
+            captured_stream_requests: None,
+            answer_checkpoint: None,
         }
     }
 
@@ -229,6 +238,8 @@ impl MockOk {
             stream_gate: None,
             model_access: None,
             catalogue_access: None,
+            captured_stream_requests: None,
+            answer_checkpoint: None,
         }
     }
 
@@ -249,6 +260,8 @@ impl MockOk {
             stream_gate: None,
             model_access: None,
             catalogue_access: None,
+            captured_stream_requests: None,
+            answer_checkpoint: None,
         }
     }
 
@@ -370,6 +383,11 @@ impl InferenceCore for MockOk {
         } else {
             ("", "tool_use")
         };
+        let checkpoint = if tool_calls.is_empty() {
+            self.answer_checkpoint.clone().unwrap_or_default()
+        } else {
+            String::new()
+        };
         // A subscription round must name the pinned model and provider, or
         // the gateway rejects it as a route mismatch.
         let (model_used, provider_used) = if (self.refusal.is_some()
@@ -384,7 +402,7 @@ impl InferenceCore for MockOk {
             ("mock".to_owned(), String::new())
         };
         let mut response = Response::new(InferResponse {
-            compaction_summary: String::new(),
+            compaction_summary: checkpoint,
             request_id: String::new(),
             content: content.into(),
             model_used,
@@ -418,6 +436,9 @@ impl InferenceCore for MockOk {
     ) -> Result<Response<Self::InferStreamStream>, Status> {
         let request = request.into_inner();
         self.capture("infer_stream", &request);
+        if let Some(requests) = &self.captured_stream_requests {
+            requests.lock().unwrap().push(request.clone());
+        }
         // A subscription review offers no tools (the broker returns its
         // report as structured output), so it is streamed like an answer.
         let review = request.request_id.contains("-source-review-");
@@ -449,7 +470,7 @@ impl InferenceCore for MockOk {
                 service_tier_used: String::new(),
             }),
             Ok(InferChunk {
-                compaction_summary: String::new(),
+                compaction_summary: self.answer_checkpoint.clone().unwrap_or_default(),
                 reasoning_delta: String::new(),
                 request_id: "req-stream-ok".into(),
                 delta: "lo".into(),
@@ -6370,20 +6391,54 @@ fn wake_token(history_floor_at: Option<&str>) -> String {
 struct WakeTurn {
     prompt: Vec<(String, String)>,
     context_floors: Vec<String>,
+    /// The native compaction checkpoints the messages of every inference call carried.
+    checkpoints_sent: Vec<String>,
+    /// The metadata the answer was saved with, as JSON (`Null` for none); `None` when nothing was saved.
+    saved: Option<serde_json::Value>,
 }
+
+/// The native compaction checkpoint stored with the wake thread's newest answer (m4, inside the window): a
+/// provider wrote it over the whole thread, the turns before the window included.
+const STORED_CHECKPOINT: &str = "CHECKPOINT of m1-m4: the PRE-WINDOW layoff plan Nina posted, then the offsite";
+/// The native compaction checkpoint the wake's own answer comes back with.
+const ANSWER_CHECKPOINT: &str = "CHECKPOINT of the wake's own prompt";
 
 /// One wake of the thread below, whose member's wake decision carries `history_floor_at` (or no window at all).
 /// The thread has two turns before the floor and two after it. With `session_core_applies_window`, a context read
 /// that names a window is answered as a session-core that applies it answers one: the turns inside the window, and
 /// the window named back. Without it, as a session-core that predates the field: every turn, and no window named.
 async fn wake_turn(history_floor_at: Option<&str>, session_core_applies_window: bool) -> WakeTurn {
+    wake_turn_with(history_floor_at, session_core_applies_window, false).await
+}
+
+/// [`wake_turn`], and with `stream_refused` the answer stream is refused, so the answer comes by the unary
+/// fallback. The thread's newest answer carries [`STORED_CHECKPOINT`], and the wake's answer comes back with
+/// [`ANSWER_CHECKPOINT`].
+async fn wake_turn_with(
+    history_floor_at: Option<&str>,
+    session_core_applies_window: bool,
+    stream_refused: bool,
+) -> WakeTurn {
     use sha2::{Digest, Sha256};
 
     std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
     std::env::remove_var("ALLOWED_MODELS");
     let _wake_api = WakeApiOn::set();
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
-    let client = spawn_mock(MockOk::capturing(captured_messages.clone())).await;
+    let unary_requests: CapturedRequests = Arc::new(Mutex::new(Vec::new()));
+    let stream_requests: CapturedRequests = Arc::new(Mutex::new(Vec::new()));
+    let client = spawn_mock(MockOk {
+        captured_messages: Some(captured_messages.clone()),
+        captured_requests: Some(unary_requests.clone()),
+        captured_stream_requests: Some(stream_requests.clone()),
+        answer_checkpoint: Some(ANSWER_CHECKPOINT.to_owned()),
+        refusal: stream_refused.then(|| MockRefusal {
+            at: RefusalPoint::AnswerStream,
+            status: Status::unavailable("stream down"),
+        }),
+        ..MockOk::default()
+    })
+    .await;
     let (mock_session, session_handles) = MockSessionCore::new();
     let floor = chrono::DateTime::parse_from_rfc3339("2026-11-18T09:30:00Z")
         .expect("test instant")
@@ -6396,11 +6451,23 @@ async fn wake_turn(history_floor_at: Option<&str>, session_core_applies_window: 
         created_at: Some(prost_types::Timestamp { seconds, nanos: 0 }),
         ..Default::default()
     };
+    let mut newest_answer =
+        stored("m4", "assistant", "IN-WINDOW answer about the offsite", floor + 3_605);
+    newest_answer.metadata = Some(prost_types::Struct {
+        fields: [(
+            "native_compaction_summary".to_owned(),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::StringValue(STORED_CHECKPOINT.to_owned())),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    });
     *session_handles.conversation_messages.lock().unwrap() = Some(vec![
         stored("m1", "user", "PRE-WINDOW question about the layoff plan", floor - 3_600),
         stored("m2", "assistant", "PRE-WINDOW answer quoting what Nina posted", floor - 3_595),
         stored("m3", "user", "IN-WINDOW question about the offsite", floor + 3_600),
-        stored("m4", "assistant", "IN-WINDOW answer about the offsite", floor + 3_605),
+        newest_answer,
     ]);
     let segment = |kind: &str, content: &str, estimated_tokens: u32| ContextSegment {
         kind: kind.to_owned(),
@@ -6474,9 +6541,75 @@ async fn wake_turn(history_floor_at: Option<&str>, session_core_applies_window: 
         .cloned()
         .expect("infer_stream should be called");
     let context_floors = session_handles.context_assembly_floors.lock().unwrap().clone();
+    let checkpoints_sent = stream_requests
+        .lock()
+        .unwrap()
+        .iter()
+        .chain(unary_requests.lock().unwrap().iter())
+        .flat_map(|request| request.messages.iter())
+        .map(|message| message.compaction_summary.clone())
+        .filter(|checkpoint| !checkpoint.is_empty())
+        .collect();
+    let saved = session_handles
+        .direct_completion_captures
+        .lock()
+        .unwrap()
+        .last()
+        .map(|(_, request)| {
+            request
+                .metadata
+                .as_ref()
+                .map_or(serde_json::Value::Null, struct_json)
+        });
     WakeTurn {
         prompt,
         context_floors,
+        checkpoints_sent,
+        saved,
+    }
+}
+
+/// D18: a turn inside the member's window can carry a native compaction checkpoint that a provider wrote over the
+/// whole thread, the turns before the window included. A wake under a window sends inference no checkpoint, and the
+/// one its own answer comes back with covers only the turns inside the window: saved, a later reader would take it
+/// for the whole thread, so it is not saved, on the streamed path or the unary fallback. A wake with no window sends
+/// the stored checkpoint with its turn and saves its answer's, as before.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_wake_under_a_history_window_sends_and_saves_no_compaction_checkpoint() {
+    for stream_refused in [false, true] {
+        let path = if stream_refused { "fallback" } else { "streamed" };
+        let open = wake_turn_with(None, true, stream_refused).await;
+        assert!(
+            open.checkpoints_sent.iter().any(|sent| sent == STORED_CHECKPOINT),
+            "{path}: {:?}",
+            open.checkpoints_sent
+        );
+        let saved = open.saved.expect("the answer is saved");
+        assert_eq!(saved["native_compaction_summary"], ANSWER_CHECKPOINT, "{path}: {saved}");
+
+        // A window, and one this gateway cannot read. Under the first, the turn that carried the stored checkpoint
+        // is inside the window and reaches inference, without it.
+        for (floor, turn_shown) in [("2026-11-18T09:30:00Z", true), ("not an instant", false)] {
+            let windowed = wake_turn_with(Some(floor), true, stream_refused).await;
+            assert_eq!(
+                windowed
+                    .prompt
+                    .iter()
+                    .any(|(_, content)| content == "IN-WINDOW answer about the offsite"),
+                turn_shown,
+                "{path}, {floor}: {:?}",
+                windowed.prompt
+            );
+            assert!(
+                windowed.checkpoints_sent.is_empty(),
+                "{path}, {floor}: {:?}",
+                windowed.checkpoints_sent
+            );
+            let saved = windowed.saved.expect("the answer is saved");
+            assert!(saved.get("native_compaction_summary").is_none(), "{path}, {floor}: {saved}");
+            assert!(saved.get("head_summary").is_none(), "{path}, {floor}: {saved}");
+        }
     }
 }
 

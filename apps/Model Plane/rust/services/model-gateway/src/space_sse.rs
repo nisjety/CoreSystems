@@ -468,6 +468,31 @@ impl WakeWindow {
             Self::Unreadable => false,
         }
     }
+
+    /// Whether a turn read under this window uses the summaries persisted with the thread, and persists
+    /// the ones it writes.
+    ///
+    /// A summary stands in for the thread from its first turn to where it was written: the head summary
+    /// an earlier turn wrote (token-budget compaction) and the native compaction checkpoint a provider
+    /// returned with an answer. A turn inside a window can carry one written over turns from before it, so
+    /// under a window none is used. And what a turn under a window summarises covers only the turns inside
+    /// it: persisted, a later reader would take it for the whole head and lose the turns before the window.
+    /// So a turn under a window persists none. Only a read with no window keeps both, as before.
+    #[must_use]
+    pub(crate) fn keeps_summaries(self) -> bool {
+        matches!(self, Self::Open)
+    }
+
+    /// The native compaction checkpoint a turn under this window persists with its answer: the one the
+    /// provider returned, and none under a window (see [`Self::keeps_summaries`]).
+    #[must_use]
+    pub(crate) fn checkpoint_to_persist(self, checkpoint: &str) -> &str {
+        if self.keeps_summaries() {
+            checkpoint
+        } else {
+            ""
+        }
+    }
 }
 
 /// What a wake needs from the history read: the persisted trigger, whether the newest room
@@ -509,7 +534,8 @@ pub(crate) fn history_read_options(wake: Option<&WakeHistory<'_>>) -> (bool, u32
 /// Split a wake's history read into its conversation turns and the room posts newer than the last
 /// answer (other than the trigger). A read that is not a wake is returned unchanged. A post never
 /// reaches the model as a turn: with the fenced context off, posts are dropped here too (the
-/// server already filters them; this is the backstop).
+/// server already filters them; this is the backstop). Under a member's history window (D18), what
+/// is returned carries no persisted summary (see [`WakeWindow::keeps_summaries`]).
 pub(crate) fn split_room_posts(
     messages: Vec<SessionMessage>,
     wake: Option<&WakeHistory<'_>>,
@@ -519,10 +545,19 @@ pub(crate) fn split_room_posts(
         return messages;
     };
     // D18: only what the member's window shows reaches the model, turns and posts alike. This comes first,
-    // so the last answer and the posts after it are found among the messages the member can see.
+    // so the last answer and the posts after it are found among the messages the member can see. A turn
+    // inside the window can still carry a summary of turns before it, so under a window none is kept: the
+    // history read takes its head summary and each turn's native checkpoint from this metadata.
+    let keeps_summaries = wake.window.keeps_summaries();
     let messages: Vec<SessionMessage> = messages
         .into_iter()
         .filter(|message| wake.window.admits(created_at_of(message)))
+        .map(|mut message| {
+            if !keeps_summaries {
+                message.metadata = crate::session_flow::without_persisted_summaries(message.metadata);
+            }
+            message
+        })
         .collect();
     let last_answer = messages
         .iter()
@@ -1315,5 +1350,112 @@ mod tests {
         let plain = split_room_posts(thread(), None, &mut posts);
         assert_eq!(plain.len(), 8);
         assert!(posts.is_empty());
+    }
+
+    /// Only a read with no window keeps the summaries persisted with the thread: it reads them, and leaves the
+    /// ones it writes for later turns. Under a window, readable or not, a turn does neither, and its answer's
+    /// native checkpoint is not persisted.
+    #[test]
+    fn only_a_read_with_no_window_keeps_persisted_summaries() {
+        let since = WakeWindow::Since(at("2026-11-18T09:30:00Z"));
+        assert!(WakeWindow::Open.keeps_summaries());
+        assert!(!since.keeps_summaries());
+        assert!(!WakeWindow::Unreadable.keeps_summaries());
+        assert_eq!(WakeWindow::Open.checkpoint_to_persist("checkpoint"), "checkpoint");
+        assert_eq!(since.checkpoint_to_persist("checkpoint"), "");
+        assert_eq!(WakeWindow::Unreadable.checkpoint_to_persist("checkpoint"), "");
+    }
+
+    // A turn inside the member's window can carry a summary persisted over turns before it: the head summary an
+    // earlier turn wrote (token-budget compaction) and the native checkpoint a provider returned with an answer.
+    // Under a window the history read is given neither, so no summary of the turns before the window reaches the
+    // model. With no window, and on a read that is not a wake, both are read as before. The rest of a turn is kept.
+    #[test]
+    fn a_wake_under_a_window_reads_no_summary_persisted_with_the_thread() {
+        use crate::compaction::{prepare_budget_compaction, StoredHeadSummary};
+        use crate::session_flow::{
+            persisted_compaction_summary, persisted_head_summary, with_compaction_summary, with_head_summary,
+        };
+        let floor = at("2026-11-18T09:30:00Z");
+        let seconds = floor.timestamp();
+        // m4 is inside the window, and both its summaries cover m1..m3, two of them from before the window.
+        let head = StoredHeadSummary {
+            summary: "HEAD SUMMARY: the layoff plan Nina posted".to_owned(),
+            through_id: "m3".to_owned(),
+            pinned_ids: Vec::new(),
+        };
+        let checkpoint = "CHECKPOINT: the layoff plan Nina posted";
+        let thread = || {
+            let confidence = prost_types::Value {
+                kind: Some(prost_types::value::Kind::NumberValue(0.8)),
+            };
+            let evidence = prost_types::Struct {
+                fields: [("confidence".to_owned(), confidence)].into_iter().collect(),
+            };
+            let mut answer = stored("m4", "assistant", "turn", "", Some(seconds + 20));
+            answer.metadata =
+                with_head_summary(with_compaction_summary(Some(evidence), checkpoint, false), Some(&head), false);
+            vec![
+                stored("m1", "user", "turn", "u1", Some(seconds - 100)),
+                stored("m2", "assistant", "turn", "", Some(seconds - 50)),
+                stored("m3", "user", "turn", "u1", Some(seconds + 10)),
+                answer,
+            ]
+        };
+        let wake = |window| WakeHistory {
+            trigger_message_id: "m9",
+            room_context: false,
+            participants: &[],
+            window,
+        };
+        // What the history read takes from the turns it is given (`sse::load_recent_thread_messages`): the
+        // newest head summary, and each turn's native checkpoint.
+        let summaries = |turns: &[SessionMessage]| {
+            let head = turns.iter().rev().find_map(|m| persisted_head_summary(m.metadata.as_ref()));
+            let checkpoints: Vec<String> = turns
+                .iter()
+                .map(|m| persisted_compaction_summary(m.metadata.as_ref()))
+                .filter(|checkpoint| !checkpoint.is_empty())
+                .collect();
+            (head, checkpoints)
+        };
+
+        // No window, or a read that is not a wake: both are read, as before.
+        for read in [Some(wake(WakeWindow::Open)), None] {
+            let turns = split_room_posts(thread(), read.as_ref(), &mut Vec::new());
+            assert_eq!(turns.len(), 4);
+            assert_eq!(summaries(&turns), (Some(head.clone()), vec![checkpoint.to_owned()]));
+        }
+
+        // A window: the turns inside it are read without either summary, and the rest of each turn is kept.
+        let turns = split_room_posts(thread(), Some(&wake(WakeWindow::Since(floor))), &mut Vec::new());
+        assert_eq!(turns.iter().map(|m| m.message_id.as_str()).collect::<Vec<_>>(), ["m3", "m4"]);
+        assert_eq!(summaries(&turns), (None, Vec::new()));
+        let kept = turns[1].metadata.as_ref().expect("the turn's record is kept");
+        assert!(kept.fields.contains_key("confidence"), "{kept:?}");
+
+        // Why: the head summary names m3, which is inside the window, so a token-budget turn would reuse it in
+        // m3's place and send its text, the turns before the window with it. Read under the window, there is none.
+        let sent = |head: Option<&StoredHeadSummary>| -> String {
+            let mut loaded: Vec<IdentifiedMessage> = turns
+                .iter()
+                .map(|m| IdentifiedMessage {
+                    id: m.message_id.clone(),
+                    message: ChatMessage { role: m.role.clone(), content: m.content.clone(), ..Default::default() },
+                })
+                .collect();
+            loaded.push(IdentifiedMessage {
+                id: "m9".to_owned(),
+                message: ChatMessage {
+                    role: "user".to_owned(),
+                    content: "the trigger".to_owned(),
+                    ..Default::default()
+                },
+            });
+            let plan = prepare_budget_compaction(loaded, head, &[], 1_000_000);
+            plan.messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n")
+        };
+        assert!(sent(Some(&head)).contains("layoff"), "a head summary read under the window is sent");
+        assert!(!sent(summaries(&turns).0.as_ref()).contains("layoff"));
     }
 }

@@ -2556,6 +2556,18 @@ pub(crate) fn persisted_head_summary(
     })
 }
 
+/// D18: `metadata` without the summaries a turn persisted for later turns to reuse, its native
+/// compaction checkpoint and its token-budget head summary. Every other field of the turn is kept.
+pub(crate) fn without_persisted_summaries(
+    metadata: Option<prost_types::Struct>,
+) -> Option<prost_types::Struct> {
+    metadata.map(|mut metadata| {
+        metadata.fields.remove("native_compaction_summary");
+        metadata.fields.remove(HEAD_SUMMARY_KEY);
+        metadata
+    })
+}
+
 pub(crate) fn turn_evidence_metadata(
     grounding: Option<&crate::retrieval::Grounding>,
     citations: &[crate::sse_events::RecordedCitation],
