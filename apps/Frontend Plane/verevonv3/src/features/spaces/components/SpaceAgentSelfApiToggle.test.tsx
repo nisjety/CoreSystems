@@ -1,4 +1,5 @@
 import { cleanup, screen } from '@solidjs/testing-library'
+import { createSignal, flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { I18nProvider, localeStorageKey } from '@/shared/i18n'
@@ -84,6 +85,26 @@ describe('SpaceAgentSelfApiToggle (WS18-S6, W3-DEC-CARD)', () => {
     })
     expect(onChanged).toHaveBeenCalledOnce()
     expect(box().checked).toBe(true)
+  })
+
+  // The agent list is read again after a change. When it states the other value (another owner turned the switch off), the
+  // switch shows that value, not the one this card confirmed earlier.
+  it('after the agent list is read again it shows the value that list states, not an earlier confirmed change', async () => {
+    actions.executeAction.mockResolvedValue(confirmed())
+    const [enabled, setEnabled] = createSignal(false)
+    render(() => (
+      <SpaceAgentSelfApiToggle spaceRef={ROOM} bindingRef={BINDING} enabled={enabled()} orgId="org-1" actorId="user-kari" />
+    ))
+    fireEvent.click(box())
+    expect(await screen.findByText('Lagret.')).toBeTruthy()
+    expect(box().checked).toBe(true)
+
+    setEnabled(true)
+    flush()
+    setEnabled(false)
+    flush()
+
+    expect(box().checked).toBe(false)
   })
 
   it('a refusal puts the checkbox back and says why in the switch’s own words', async () => {

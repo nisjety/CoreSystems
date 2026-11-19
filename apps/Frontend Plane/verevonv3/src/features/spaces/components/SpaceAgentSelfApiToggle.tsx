@@ -1,4 +1,4 @@
-import { createSignal, For, Show } from 'solid-js'
+import { createEffect, createSignal, For, Show } from 'solid-js'
 
 import { spaceSelfApiOfferedRows } from '@/shared/actions/agent-self-api'
 import { useI18n } from '@/shared/i18n'
@@ -29,6 +29,14 @@ export function SpaceAgentSelfApiToggle(props: {
   const [notice, setNotice] = createSignal('')
   // The value the gateway confirmed for this card; the agent list's value applies until one lands.
   const [confirmed, setConfirmed] = createSignal<boolean | undefined>(undefined)
+  // The agent list is read again after a change. A value it states replaces the gateway's last answer, so a change another
+  // owner made shows here rather than the one this card confirmed earlier.
+  createEffect(
+    () => props.enabled,
+    () => {
+      setConfirmed(undefined)
+    },
+  )
   const checked = () => confirmed() ?? props.enabled
   let box: HTMLInputElement | undefined
 

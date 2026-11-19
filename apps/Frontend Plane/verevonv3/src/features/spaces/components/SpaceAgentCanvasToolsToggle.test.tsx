@@ -1,4 +1,5 @@
 import { cleanup, screen } from '@solidjs/testing-library'
+import { createSignal, flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { fireEvent } from '@/test/fire-event'
@@ -89,6 +90,26 @@ describe('SpaceAgentCanvasToolsToggle (W3-DEC-CANVAS)', () => {
       bindingRef: BINDING,
       enabled: false,
     })
+    expect(box().checked).toBe(false)
+  })
+
+  // The agent list is read again after a change. When it states the other value (another owner turned the switch off), the
+  // switch shows that value, not the one this card confirmed earlier.
+  it('after the agent list is read again it shows the value that list states, not an earlier confirmed change', async () => {
+    actions.executeAction.mockResolvedValue(confirmed())
+    const [enabled, setEnabled] = createSignal(false)
+    render(() => (
+      <SpaceAgentCanvasToolsToggle spaceRef={ROOM} bindingRef={BINDING} enabled={enabled()} orgId="org-1" actorId="user-kari" />
+    ))
+    fireEvent.click(box())
+    expect(await screen.findByText('Lagret.')).toBeTruthy()
+    expect(box().checked).toBe(true)
+
+    setEnabled(true)
+    flush()
+    setEnabled(false)
+    flush()
+
     expect(box().checked).toBe(false)
   })
 
