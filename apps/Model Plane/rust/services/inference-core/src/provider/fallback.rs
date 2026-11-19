@@ -132,7 +132,7 @@ pub enum HidingOverlay {
 
 /// Switch for the route note (WS27-S7): what the budget did to a Verevon call, carried on the wire. Off
 /// unless the literal `true`, read once at startup, as the other inference switches are.
-const ROUTE_NOTE_ENV: &str = "INFERENCE_ROUTE_NOTE";
+pub(crate) const ROUTE_NOTE_ENV: &str = "INFERENCE_ROUTE_NOTE";
 
 /// Whether an explicit env value turns the route note on. Pure so the policy is unit-testable without
 /// touching the process environment.

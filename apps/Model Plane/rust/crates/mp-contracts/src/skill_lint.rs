@@ -18,7 +18,8 @@
 //! and the same lint: a template may hold no placeholder but `{{input}}`, and a
 //! preset's settings are a closed object of visible composer controls.
 
-/// The switch both writers read. Only `report` and `enforce` turn the lint on.
+/// The switch both writers read. `report` and `enforce` are read exactly. Unset, blank and `off`
+/// (padding allowed) are off; any other set value, padded, cased or junk, reads as report.
 pub const MODE_ENV: &str = "SKILL_LINT_MODE";
 
 /// The prefix of the `skip_reason` a refused `UpsertAgentSkill` carries; the
@@ -178,14 +179,21 @@ pub enum Mode {
 }
 
 impl Mode {
-    /// Only the exact words `report` and `enforce` turn the lint on; anything
-    /// else, including an unset variable, leaves it off.
+    /// Unset, blank, or `off` once its surrounding whitespace is removed, is [`Mode::Off`]. The words
+    /// `report` and `enforce` are read exactly, never through padding or another casing. Any other set
+    /// value is [`Mode::Report`]: it counts what enforce would refuse and refuses nothing, so a value
+    /// this switch does not read can neither switch the lint off nor start refusing writes.
+    /// [`is_unreadable_mode`] names such a value at startup.
     #[must_use]
     pub fn from_env_value(value: Option<&str>) -> Self {
         match value {
+            None => Self::Off,
             Some("report") => Self::Report,
             Some("enforce") => Self::Enforce,
-            _ => Self::Off,
+            Some(raw) => match raw.trim() {
+                "" | "off" => Self::Off,
+                _ => Self::Report,
+            },
         }
     }
 
@@ -197,6 +205,15 @@ impl Mode {
             Self::Enforce => "enforce",
         }
     }
+}
+
+/// Whether a set `SKILL_LINT_MODE` value is neither blank nor one of the exact words `off`, `report`
+/// or `enforce`. [`Mode::from_env_value`] reads such a value as report, or as off when it is only
+/// padded `off`, so the startup report names it. The value is never logged: these are mode words,
+/// and the variable's name is enough.
+#[must_use]
+pub fn is_unreadable_mode(value: &str) -> bool {
+    !matches!(value, "off" | "report" | "enforce") && !value.trim().is_empty()
 }
 
 /// Runs every rule over `input` and returns the rules it breaks, in rule order.
@@ -476,12 +493,45 @@ mod tests {
         }
     }
 
+    /// The exact words are read exactly. Unset, blank and `off` (padded or not) are off. Every other
+    /// set value, padded, cased or junk, is report: it observes and never refuses, and it never
+    /// switches the lint off.
     #[test]
-    fn skill_lint_mode_is_only_the_exact_words() {
+    fn skill_lint_mode_reads_the_exact_words_and_a_set_unreadable_value_as_report() {
+        assert_eq!(Mode::from_env_value(None), Mode::Off);
+        for off in ["", " \r\n", "off", " off\r\n"] {
+            assert_eq!(Mode::from_env_value(Some(off)), Mode::Off, "{off:?}");
+        }
         assert_eq!(Mode::from_env_value(Some("report")), Mode::Report);
         assert_eq!(Mode::from_env_value(Some("enforce")), Mode::Enforce);
-        for other in [None, Some(""), Some("off"), Some("true"), Some("Enforce"), Some(" report")] {
-            assert_eq!(Mode::from_env_value(other), Mode::Off, "{other:?}");
+        for raw in [
+            " report",
+            "report\r\n",
+            "enforce\r\n",
+            "\tenforce",
+            "Enforce",
+            "ENFORCE",
+            "true",
+            "maybe",
+        ] {
+            assert_eq!(Mode::from_env_value(Some(raw)), Mode::Report, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn skill_lint_names_only_a_set_mode_value_it_does_not_read() {
+        for quiet in ["", " \r\n", "off", "report", "enforce"] {
+            assert!(!is_unreadable_mode(quiet), "{quiet:?}");
+        }
+        for named in [
+            " off ",
+            " report",
+            "enforce\r\n",
+            "ENFORCE",
+            "true",
+            "maybe",
+        ] {
+            assert!(is_unreadable_mode(named), "{named:?}");
         }
     }
 

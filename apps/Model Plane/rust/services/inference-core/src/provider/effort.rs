@@ -322,7 +322,7 @@ pub fn declared_support(family: Family, model: &str) -> Option<Support> {
 /// Switch for the Gemini effort wire. Off, a Gemini request carries no `thinkingConfig`
 /// and the catalogue lists no levels for Gemini. Only the literal `true` enables it, read
 /// once at startup.
-const GEMINI_EFFORT_ENV: &str = "INFERENCE_GEMINI_EFFORT_ENABLED";
+pub(crate) const GEMINI_EFFORT_ENV: &str = "INFERENCE_GEMINI_EFFORT_ENABLED";
 
 /// Whether the Gemini effort wire is on for this process.
 #[must_use]
@@ -450,7 +450,7 @@ pub fn budget_clamp_enabled() -> bool {
 /// Switch that lets the Codex ladder use Medium and XHigh. The subscription
 /// broker must accept those values first, so this goes on only after the
 /// broker's own switch. Off unless the literal `true`, read once at startup.
-const CODEX_WIDE_ENV: &str = "INFERENCE_CORE_CODEX_WIDE_EFFORT";
+pub(crate) const CODEX_WIDE_ENV: &str = "INFERENCE_CORE_CODEX_WIDE_EFFORT";
 
 /// Whether the Codex ladder is widened for this process.
 fn codex_wide_enabled() -> bool {

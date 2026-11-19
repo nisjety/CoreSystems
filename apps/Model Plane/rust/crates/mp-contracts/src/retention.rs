@@ -300,6 +300,9 @@ impl SpaceZdrMode {
     }
 }
 
+/// The environment variable that carries the Space ZDR mode, read by [`space_zdr_mode`].
+pub const SPACE_ZDR_ENV: &str = "SESSION_CORE_SPACE_ZDR";
+
 /// Parse the `SESSION_CORE_SPACE_ZDR` value. Only the word `enforce` enables enforcement, and it
 /// is read trimmed and case-folded, so `Enforce`, `ENFORCE` and ` enforce ` enforce too.
 ///
@@ -314,6 +317,17 @@ pub fn space_zdr_mode(raw: Option<&str>) -> SpaceZdrMode {
     } else {
         SpaceZdrMode::Observe
     }
+}
+
+/// Whether a set `SESSION_CORE_SPACE_ZDR` value is neither blank nor one of its two words, `enforce`
+/// or `observe`, once surrounding whitespace is removed and case is folded. [`space_zdr_mode`] reads
+/// such a value as observe, so the startup report names it. The value is never logged.
+#[must_use]
+pub fn space_zdr_mode_is_unreadable(raw: &str) -> bool {
+    let word = raw.trim();
+    !(word.is_empty()
+        || word.eq_ignore_ascii_case("enforce")
+        || word.eq_ignore_ascii_case("observe"))
 }
 
 #[cfg(test)]
@@ -587,6 +601,26 @@ mod tests {
             Some("enforce me"),
         ] {
             assert_eq!(space_zdr_mode(raw), SpaceZdrMode::Observe, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn space_zdr_mode_names_a_set_value_that_is_not_one_of_its_words() {
+        for word in ["", "   ", "enforce", " ENFORCE\r\n", "Observe", " observe "] {
+            assert!(!space_zdr_mode_is_unreadable(word), "{word:?}");
+        }
+        for raw in [
+            "true",
+            "1",
+            "on",
+            "yes",
+            "enforced",
+            "enforc",
+            "enforce me",
+            "off",
+            "maybe",
+        ] {
+            assert!(space_zdr_mode_is_unreadable(raw), "{raw:?}");
         }
     }
 

@@ -223,6 +223,18 @@ pub struct InferenceConfig {
     pub allow_non_eu_embedding: bool,
 }
 
+pub(crate) const ALLOW_GLOBAL_DEPLOYMENT_ENV: &str = "MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT";
+
+pub(crate) const ALLOW_GLOBAL_RESIDENCY_ENV: &str = "MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY";
+
+pub(crate) const ALLOW_NON_EU_EMBEDDING_ENV: &str = "MODEL_PLANE_ALLOW_NON_EU_EMBEDDING";
+
+pub(crate) const BYO_GATEWAY_ENV: &str = "INFERENCE_BYO_GATEWAY_ENABLED";
+
+pub(crate) const PROVIDER_BENCHING_ENV: &str = "INFERENCE_PROVIDER_BENCHING";
+
+pub(crate) const SAME_TIER_FALLBACK_ENV: &str = "INFERENCE_SAME_TIER_FALLBACK";
+
 impl InferenceConfig {
     /// Build configuration from environment variables.
     ///
@@ -309,13 +321,13 @@ impl InferenceConfig {
         let azure_openai_deployment_type = trimmed_env("AZURE_OPENAI_DEPLOYMENT_TYPE");
 
         // Deny-by-default, same shape as the EU embedding gate below.
-        let allow_global_deployment = truthy_env("MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT");
-        let allow_global_residency_providers = truthy_env("MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY");
+        let allow_global_deployment = truthy_env(ALLOW_GLOBAL_DEPLOYMENT_ENV);
+        let allow_global_residency_providers = truthy_env(ALLOW_GLOBAL_RESIDENCY_ENV);
 
         // Deny-by-default: only the exact literal `true` disables the EU
         // embedding residency gate. Mirrors the speech.rs MODEL_PLANE_ALLOW_NON_EU_TTS
         // shape but the embedding gate REJECTS rather than warn-and-fallback.
-        let allow_non_eu_embedding = truthy_env("MODEL_PLANE_ALLOW_NON_EU_EMBEDDING");
+        let allow_non_eu_embedding = truthy_env(ALLOW_NON_EU_EMBEDDING_ENV);
 
         Ok(Self {
             provider_order,
@@ -328,13 +340,13 @@ impl InferenceConfig {
             codex_subscription_internal_api_key: trimmed_env("CODEX_SUBSCRIPTION_INTERNAL_API_KEY"),
             codex_subscription_models: csv_env("CODEX_SUBSCRIPTION_MODELS", &[]),
             byo_gateway_enabled: byo_gateway_switch_on(
-                std::env::var("INFERENCE_BYO_GATEWAY_ENABLED").ok().as_deref(),
+                std::env::var(BYO_GATEWAY_ENV).ok().as_deref(),
             ),
             provider_benching: byo_gateway_switch_on(
-                std::env::var("INFERENCE_PROVIDER_BENCHING").ok().as_deref(),
+                std::env::var(PROVIDER_BENCHING_ENV).ok().as_deref(),
             ),
             same_tier_fallback: byo_gateway_switch_on(
-                std::env::var("INFERENCE_SAME_TIER_FALLBACK").ok().as_deref(),
+                std::env::var(SAME_TIER_FALLBACK_ENV).ok().as_deref(),
             ),
             customer_gateway_internal_api_key: trimmed_env("CUSTOMER_GATEWAY_INTERNAL_API_KEY")
                 .or_else(|| trimmed_env("CODEX_SUBSCRIPTION_INTERNAL_API_KEY")),
@@ -578,12 +590,14 @@ pub struct VertexGeminiConfig {
     pub credentials_file: String,
 }
 
+pub(crate) const VERTEX_GEMINI_ENABLED_ENV: &str = "VERTEX_GEMINI_ENABLED";
+
 impl VertexGeminiConfig {
     /// Read the settings from the environment.
     #[must_use]
     pub fn from_env() -> Self {
         Self {
-            enabled: vertex_switch_on(std::env::var("VERTEX_GEMINI_ENABLED").ok().as_deref()),
+            enabled: vertex_switch_on(std::env::var(VERTEX_GEMINI_ENABLED_ENV).ok().as_deref()),
             project: trimmed_env("VERTEX_GEMINI_PROJECT").unwrap_or_default(),
             location: trimmed_env("VERTEX_GEMINI_LOCATION").unwrap_or_default(),
             models: trimmed_env("VERTEX_GEMINI_MODELS")

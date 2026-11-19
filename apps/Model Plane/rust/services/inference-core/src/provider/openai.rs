@@ -18,7 +18,7 @@ const DEFAULT_OPENAI_BASE: &str = "https://api.openai.com/v1";
 
 /// Switch for sending `reasoning_effort` and raising the completion ceiling by
 /// the level's allowance. Off unless the literal `true`, read once at startup.
-const REASONING_EFFORT_ENV: &str = "INFERENCE_CORE_OPENAI_REASONING_EFFORT";
+pub(crate) const REASONING_EFFORT_ENV: &str = "INFERENCE_CORE_OPENAI_REASONING_EFFORT";
 
 /// Whether an explicit env value turns the switch on. Pure so the policy is
 /// unit-testable without touching the process environment; a stray `1` or `on`
@@ -29,7 +29,7 @@ fn parse_enabled(raw: Option<&str>) -> bool {
 
 /// Switch for sending `prompt_cache_key` to the first-party `OpenAI` endpoint.
 /// Off unless the literal `true`, read once at startup.
-const PROMPT_CACHE_KEY_ENV: &str = "INFERENCE_OPENAI_PROMPT_CACHE_KEY";
+pub(crate) const PROMPT_CACHE_KEY_ENV: &str = "INFERENCE_OPENAI_PROMPT_CACHE_KEY";
 
 fn prompt_cache_key_from_env() -> bool {
     parse_enabled(std::env::var(PROMPT_CACHE_KEY_ENV).ok().as_deref())

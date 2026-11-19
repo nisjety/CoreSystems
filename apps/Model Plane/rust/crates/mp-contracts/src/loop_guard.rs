@@ -70,13 +70,33 @@ pub enum LoopGuardMode {
     Enforce,
 }
 
+/// The environment switch of the guard, `LOOP_GUARD_MODE`: read by the gateway's inline loop and by
+/// execution-core's Do loop.
+pub const ENV: &str = "LOOP_GUARD_MODE";
+
+/// Whether a set mode-switch value is one the mode does not read. Such a value falls to the weaker
+/// reading without an error: this guard observes, and a strengthening switch stays off. Unset, empty,
+/// `off`, and `shadow` or `enforce` in any case with surrounding whitespace are read. `OFF` is not
+/// `off`: it is flagged, because it reads as `shadow` here.
+#[must_use]
+pub fn unreadable_mode_word(value: &str) -> bool {
+    let word = value.trim();
+    !(word.is_empty()
+        || word == "off"
+        || word.eq_ignore_ascii_case("shadow")
+        || word.eq_ignore_ascii_case("enforce"))
+}
+
 impl LoopGuardMode {
-    /// Parses the raw `LOOP_GUARD_MODE` value, if it is set.
+    /// Parses the raw `LOOP_GUARD_MODE` value, if it is set. `enforce` and `shadow` are read trimmed and
+    /// case-folded, as `SESSION_CORE_SPACE_ZDR` is, so `Enforce` and ` enforce ` enforce. Any other value
+    /// observes as `Shadow`; [`unreadable_mode_word`] lets the startup report warn about it.
     #[must_use]
     pub fn from_env_value(value: Option<&str>) -> Self {
         match value.map(str::trim) {
             None | Some("" | "off") => Self::Off,
-            Some("enforce") => Self::Enforce,
+            Some(word) if word.eq_ignore_ascii_case("enforce") => Self::Enforce,
+            Some(word) if word.eq_ignore_ascii_case("shadow") => Self::Shadow,
             Some(_) => Self::Shadow,
         }
     }
@@ -411,7 +431,14 @@ mod tests {
             LoopGuardMode::from_env_value(Some("enforce")),
             LoopGuardMode::Enforce
         );
-        for unknown in ["Enforce", "true", "1", "on", "enforce-all"] {
+        for word in ["Enforce", "ENFORCE", " enforce ", "\tEnforce\n"] {
+            assert_eq!(
+                LoopGuardMode::from_env_value(Some(word)),
+                LoopGuardMode::Enforce,
+                "{word:?} is read trimmed and in any case"
+            );
+        }
+        for unknown in ["true", "1", "on", "enforce-all", "enforced", "OFF"] {
             assert_eq!(
                 LoopGuardMode::from_env_value(Some(unknown)),
                 LoopGuardMode::Shadow,
@@ -421,6 +448,16 @@ mod tests {
         assert!(!LoopGuardMode::Off.observes());
         assert!(LoopGuardMode::Shadow.observes() && !LoopGuardMode::Shadow.enforces());
         assert!(LoopGuardMode::Enforce.observes() && LoopGuardMode::Enforce.enforces());
+    }
+
+    #[test]
+    fn unreadable_mode_word_flags_only_a_value_the_mode_does_not_read() {
+        for word in ["", "   ", "off", "shadow", "Shadow", " enforce ", "ENFORCE"] {
+            assert!(!unreadable_mode_word(word), "{word:?} is read");
+        }
+        for word in ["enforced", "true", "1", "on", "OFF", "Off", "enforce-all"] {
+            assert!(unreadable_mode_word(word), "{word:?} is not read");
+        }
     }
 
     #[test]

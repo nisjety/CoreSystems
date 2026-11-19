@@ -379,6 +379,8 @@ struct OpenAiTranscriptionResponse {
     language: String,
 }
 
+pub(crate) const NON_EU_TTS_ENV: &str = "MODEL_PLANE_ALLOW_NON_EU_TTS";
+
 impl OpenAiSpeechProvider {
     /// Construct a public OpenAI-compatible provider from explicit credentials.
     ///
@@ -426,8 +428,7 @@ impl OpenAiSpeechProvider {
         // the US. Gate it behind an explicit opt-in so the EU default
         // (`AZURE_OPENAI_ENDPOINT`, Sweden Central) is used unless an operator
         // accepts the cross-region transfer via `MODEL_PLANE_ALLOW_NON_EU_TTS`.
-        let allow_non_eu_tts =
-            non_eu_tts_opted_in(env_nonempty("MODEL_PLANE_ALLOW_NON_EU_TTS").as_deref());
+        let allow_non_eu_tts = non_eu_tts_opted_in(env_nonempty(NON_EU_TTS_ENV).as_deref());
         if !allow_non_eu_tts && env_nonempty("AZURE_OPENAI_TTS_ENDPOINT").is_some() {
             warn!(
                 "AZURE_OPENAI_TTS_ENDPOINT set but MODEL_PLANE_ALLOW_NON_EU_TTS is off; \

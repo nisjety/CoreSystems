@@ -216,7 +216,8 @@ where
                         tracing::warn!(error = %err, "authctx enforce: verification failed");
                         return Ok(error_response(&err));
                     }
-                    // Observe mode: log + try unverified decode for telemetry.
+                    // Observe mode: log, then decode without a check for telemetry. The claims are
+                    // attached as an unverified context, so `verified_claims()` returns nothing for them.
                     tracing::warn!(error = %err, "authctx observe: verification failed; trying unverified decode");
                     if let Ok(claims) = decode_unverified(&token) {
                         req.extensions_mut().insert(AuthCtx::observe(claims));
@@ -317,7 +318,20 @@ fn error_response(err: &AuthCtxError) -> Response<Body> {
 
 #[cfg(test)]
 mod tests {
-    use super::{enforce_from, Config};
+    use std::convert::Infallible;
+    use std::future::{ready, Ready};
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
+    use std::time::Duration;
+
+    use axum::body::Body;
+    use axum::http::{header, Request, Response, StatusCode};
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    use tower::{Layer, Service};
+
+    use super::{enforce_from, AuthCtxLayer, Config};
+    use crate::{AuthCtx, Verification};
 
     #[test]
     fn authctx_enforce_enforces_on_the_four_words_in_any_case() {
@@ -363,5 +377,149 @@ mod tests {
             (key == "AUTHCTX_ENFORCE").then(|| "1".to_owned())
         });
         assert!(cfg.enforce);
+    }
+
+    /// A handler stands in for the inner service. It records the `AuthCtx` each request carried, so
+    /// a test sees what a handler would read.
+    #[derive(Clone)]
+    struct Handler {
+        seen: Arc<Mutex<Vec<Option<AuthCtx>>>>,
+    }
+
+    impl Handler {
+        fn new() -> Self {
+            Self {
+                seen: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn seen(&self) -> Vec<Option<AuthCtx>> {
+            self.seen.lock().expect("handler lock").clone()
+        }
+    }
+
+    impl Service<Request<Body>> for Handler {
+        type Response = Response<Body>;
+        type Error = Infallible;
+        type Future = Ready<Result<Response<Body>, Infallible>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: Request<Body>) -> Self::Future {
+            let ctx = req.extensions().get::<AuthCtx>().cloned();
+            self.seen.lock().expect("handler lock").push(ctx);
+            ready(Ok(Response::new(Body::empty())))
+        }
+    }
+
+    fn config(enforce: bool) -> Config {
+        Config {
+            audience: "model-plane".to_owned(),
+            expected_issuer: "https://auth.fixture.invalid/api/convex-auth".to_owned(),
+            // Never fetched: the fixture token has no `kid`, so verification refuses it before the
+            // JWKS lookup, and the TTL never applies.
+            jwks_url: "http://127.0.0.1:9/jwks".to_owned(),
+            jwks_ttl: Duration::from_secs(1),
+            enforce,
+        }
+    }
+
+    /// A JWT with no `kid` in its header and a well-formed payload. Verification refuses it before
+    /// any key lookup, while observe mode can still decode the payload. The signature is a fixture
+    /// word and checks nothing.
+    fn token_without_kid() -> String {
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(
+            r#"{"user_id":"user-fixture","org_id":"org-fixture","sub":"user-fixture","iss":"https://auth.fixture.invalid/api/convex-auth","aud":"model-plane","iat":1,"exp":4102444800}"#,
+        );
+        format!("{header}.{payload}.fixture-signature")
+    }
+
+    fn request_with_bearer(token: &str) -> Request<Body> {
+        Request::builder()
+            .uri("/probe")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .expect("fixture request is well formed")
+    }
+
+    async fn drive(layer: &AuthCtxLayer, handler: Handler, req: Request<Body>) -> Response<Body> {
+        let mut service = layer.layer(handler);
+        std::future::poll_fn(|cx| service.poll_ready(cx))
+            .await
+            .expect("the middleware is ready");
+        service
+            .call(req)
+            .await
+            .expect("the probe handler is infallible")
+    }
+
+    /// Observe mode attaches the claims of a token that failed verification, marked unverified. A
+    /// handler that asks for verified claims gets none, so the forged org and user are unreachable
+    /// through the verified path.
+    #[tokio::test]
+    async fn observe_attaches_a_failed_token_as_unverified_and_withholds_verified_claims() {
+        let handler = Handler::new();
+        let layer = AuthCtxLayer::new(config(false));
+        let response = drive(
+            &layer,
+            handler.clone(),
+            request_with_bearer(&token_without_kid()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let seen = handler.seen();
+        assert_eq!(seen.len(), 1, "the handler ran once");
+        let ctx = seen[0]
+            .as_ref()
+            .expect("observe mode attaches the unverified context");
+        assert_eq!(ctx.verification(), Verification::Unverified);
+        assert!(
+            ctx.verified_claims().is_none(),
+            "a handler must not read an unverified context as verified"
+        );
+        let claims = ctx
+            .unverified_claims()
+            .expect("the observe context carries the unverified claims");
+        assert_eq!(claims.org_id, "org-fixture");
+    }
+
+    /// Enforce mode is unchanged: the same token is refused with 401 before the handler runs, so no
+    /// unverified context reaches a handler in enforce mode.
+    #[tokio::test]
+    async fn enforce_refuses_the_same_token_before_the_handler_runs() {
+        let handler = Handler::new();
+        let layer = AuthCtxLayer::new(config(true));
+        let response = drive(
+            &layer,
+            handler.clone(),
+            request_with_bearer(&token_without_kid()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            handler.seen().is_empty(),
+            "a refused request never reaches the handler"
+        );
+    }
+
+    /// Without a bearer token, observe mode attaches no context at all, so nothing a handler reads
+    /// can be mistaken for a verified one.
+    #[tokio::test]
+    async fn observe_without_a_token_attaches_no_context() {
+        let handler = Handler::new();
+        let layer = AuthCtxLayer::new(config(false));
+        let req = Request::builder()
+            .uri("/probe")
+            .body(Body::empty())
+            .expect("fixture request is well formed");
+        let response = drive(&layer, handler.clone(), req).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let seen = handler.seen();
+        assert_eq!(seen.len(), 1, "the handler ran once");
+        assert!(seen[0].is_none(), "no token, no context");
     }
 }

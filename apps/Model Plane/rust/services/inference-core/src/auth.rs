@@ -515,6 +515,8 @@ fn optional_u64(name: &'static str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+pub(crate) const API_KEY_PRINCIPAL_ENV: &str = "INFERENCE_API_KEY_PRINCIPAL";
+
 impl JwtVerifier {
     /// Load auth configuration and eagerly validate the JWKS document. The
     /// listener is never bound when verification material is missing or bad.
@@ -523,7 +525,7 @@ impl JwtVerifier {
     /// Returns an error for missing configuration, HTTP client construction,
     /// or an unavailable/malformed JWKS document.
     pub async fn from_env() -> anyhow::Result<Self> {
-        let raw = std::env::var("INFERENCE_API_KEY_PRINCIPAL").ok();
+        let raw = std::env::var(API_KEY_PRINCIPAL_ENV).ok();
         let accept_api_key = api_key_principal_enabled(raw.as_deref());
         Ok(Self::from_config(AuthConfig::from_env()?)
             .await?

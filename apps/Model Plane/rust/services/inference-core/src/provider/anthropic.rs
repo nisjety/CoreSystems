@@ -271,7 +271,7 @@ const fn estimated_tokens(bytes: usize) -> usize {
 /// with the Stable and Context blocks marked for caching (build plan WS02-S9).
 /// Off, the system prompt is the single joined string it always was. Only the
 /// literal `true` enables it, so a typo can never change the wire shape.
-const TIERED_SYSTEM_ENV: &str = "INFERENCE_ANTHROPIC_TIERED_SYSTEM";
+pub(crate) const TIERED_SYSTEM_ENV: &str = "INFERENCE_ANTHROPIC_TIERED_SYSTEM";
 
 fn tiered_system_enabled() -> bool {
     tiered_system_flag_enabled(std::env::var(TIERED_SYSTEM_ENV).ok().as_deref())
@@ -589,7 +589,7 @@ fn resolve_thinking_budget(model: &str, requested: i32, max_tokens: i32) -> Opti
 /// models, so a typo can never switch the wire shape.
 /// The Claude 5.5 models take the ladder wire whatever this says: they reject the
 /// budget form, so for them the switch has no meaning (see [`is_claude_5_5`]).
-const ADAPTIVE_THINKING_ENV: &str = "INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING";
+pub(crate) const ADAPTIVE_THINKING_ENV: &str = "INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING";
 
 fn adaptive_thinking_enabled() -> bool {
     adaptive_thinking_flag_enabled(std::env::var(ADAPTIVE_THINKING_ENV).ok().as_deref())
@@ -968,7 +968,11 @@ fn native_context_management_enabled() -> bool {
 /// other env-gated toggle in this codebase that gets tested at all follows
 /// the same split (a thin env-reading wrapper over a pure parser).
 fn context_management_flag_enabled(raw: Option<&str>) -> bool {
-    !matches!(raw.map(str::trim), Some("0" | "false" | "off" | "no"))
+    // An unset or blank value keeps the default, on. Any other value turns the native path off only
+    // when it is one of the shared explicit off words, trimmed and in any case.
+    !raw.is_some_and(|value| {
+        !value.trim().is_empty() && mp_contracts::loop_fold::is_explicit_off(value)
+    })
 }
 
 /// Whether `model` supports Anthropic's `compact_20260112` strategy.
@@ -3260,7 +3264,9 @@ mod native_context_management_tests {
         assert!(context_management_flag_enabled(None));
         assert!(context_management_flag_enabled(Some("1")));
         assert!(context_management_flag_enabled(Some("anything-else")));
-        for falsy in ["0", "false", "off", "no", "  off  "] {
+        assert!(context_management_flag_enabled(Some("")));
+        assert!(context_management_flag_enabled(Some("   ")));
+        for falsy in ["0", "false", "off", "no", "  off  ", "FALSE", " No ", "OFF"] {
             assert!(
                 !context_management_flag_enabled(Some(falsy)),
                 "{falsy:?} must disable the native path"

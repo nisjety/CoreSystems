@@ -11,9 +11,12 @@
 //! Two modes, controlled via [`Config::enforce`] (or the
 //! `AUTHCTX_ENFORCE` env var):
 //!
-//! - **Observe** (default): pass-through. Decode + (best-effort) verify
-//!   the JWT if present, attach claims to extensions, log drift between
-//!   the legacy `X-Org-ID` header and the JWT `org_id` claim. Requests
+//! - **Observe** (default): pass-through. Verify the JWT if present and
+//!   attach its claims to extensions, log drift between the legacy
+//!   `X-Org-ID` header and the JWT `org_id` claim. A token that fails
+//!   verification is still decoded without a check and attached as an
+//!   unverified [`AuthCtx`]; [`AuthCtx::verified_claims`] returns nothing
+//!   for it, so authorisation cannot read its claims by mistake. Requests
 //!   without a JWT are forwarded unchanged so the legacy header path
 //!   keeps working.
 //!
@@ -30,7 +33,7 @@ mod claims;
 mod jwks;
 mod layer;
 
-pub use claims::{AuthCtx, Claims};
+pub use claims::{AuthCtx, Claims, Verification};
 pub use jwks::JwksCache;
 pub use layer::{AuthCtxLayer, AuthCtxMiddleware, Config};
 

@@ -389,7 +389,7 @@ fn catalogue_overlay_refusal(policy: &RoutingPolicy, catalogue: &[ModelInfo]) ->
 
 /// The switch that makes a policy change a candidate (EP-14 S10). Read on each write; only the literal `true`
 /// enables it.
-const PROMOTION_REQUIRED_ENV: &str = "ROUTING_POLICY_PROMOTION_REQUIRED";
+pub(crate) const PROMOTION_REQUIRED_ENV: &str = "ROUTING_POLICY_PROMOTION_REQUIRED";
 
 fn promotion_required_from(raw: Option<&str>) -> bool {
     mp_contracts::loop_fold::switch_from(raw)

@@ -201,7 +201,7 @@ fn codex_reasoning_effort(resolved: Option<Resolved>) -> &'static str {
 /// tier with `speed_tier`, and only where the model's record declares the tier, so Quick no longer
 /// implies priority. Off unless the literal `true`, read once for the process as the Codex effort
 /// switches are.
-const SPEED_TIER_SPLIT_ENV: &str = "INFERENCE_SPEED_TIER_SPLIT";
+pub(crate) const SPEED_TIER_SPLIT_ENV: &str = "INFERENCE_SPEED_TIER_SPLIT";
 
 /// Whether the speed tier is split from Quick for this process.
 fn speed_tier_split_enabled() -> bool {
