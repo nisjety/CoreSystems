@@ -130,6 +130,27 @@ function scheduledNames(log) {
   return log.scheduled.map((entry) => getFunctionName(entry.fn));
 }
 
+/** Counts the rows each read of one table returns, through the same ctx the handler uses. */
+function countRowsRead(handle, table) {
+  const counts = [];
+  const realQuery = handle.ctx.db.query;
+  handle.ctx.db.query = (name) => {
+    const query = realQuery(name);
+    if (name === table) {
+      for (const method of ['collect', 'take', 'first']) {
+        const real = query[method];
+        query[method] = async (...args) => {
+          const result = await real.apply(query, args);
+          counts.push(Array.isArray(result) ? result.length : (result ? 1 : 0));
+          return result;
+        };
+      }
+    }
+    return query;
+  };
+  return () => counts.reduce((sum, count) => sum + count, 0);
+}
+
 /** Answers every owner call with `reply()` while `body` runs, and returns the requests sent. */
 async function withOwnerReply(reply, body) {
   const sent = [];
@@ -377,6 +398,70 @@ for (const owner of Object.keys(OWNERS)) {
     );
     assert.equal(rowOf(handle.tables, 'space_a', owner).deliveryState, 'closed');
   });
+
+  test(`${owner}: the claim reads only the due, claimable rows and never the acknowledged or closed history`, async () => {
+    // Forty finished deletions leave acknowledged or closed rows for the same owner.
+    const finished = Array.from({ length: 40 }, (_, index) => deletion(`space_old_${index}`, {
+      lifecycle: 'deleted',
+      rows: [{ owner, state: index % 2 === 0 ? 'acknowledged' : 'closed', attempts: 1, nextAttemptAt: 100 + index, lastDeliveryError: 'deletion_completed' }],
+    }));
+    const handle = harness(tablesOf(
+      ...finished,
+      deletion('space_b', { rows: [{ owner, state: 'pending', nextAttemptAt: 2_000 }], receipts: { [owner]: 'pending' } }),
+    ));
+    const rowsRead = countRowsRead(handle, 'spaceDeletionOwnerDeliveryEvents');
+
+    const claimed = await spaces[spec.claim]._handler(handle.ctx, { workerId: 'worker-1', now: NOW });
+    assert.equal(claimed.eventId, eventIdOf('space_b', owner));
+    assert.equal(rowsRead(), 1, 'only the one due pending row is read');
+  });
+
+  test(`${owner}: a delivery whose request is missing is closed with a warning that carries ids only, and the live one is claimed`, async (t) => {
+    const warn = t.mock.method(console, 'warn', () => {});
+    const handle = harness(tablesOf(
+      {
+        spaceDeletionOwnerDeliveryEvents: [{
+          _id: `orphan_${owner}`, eventId: eventIdOf('space_gone', owner), requestId: requestIdOf('space_gone'),
+          ownerPlane: owner, deliveryState: 'pending', deliveryAttempts: 0, nextAttemptAt: 1_000, createdAt: 0,
+        }],
+      },
+      deletion('space_b', { rows: [{ owner, state: 'pending', nextAttemptAt: 2_000 }], receipts: { [owner]: 'pending' } }),
+    ));
+
+    const claimed = await spaces[spec.claim]._handler(handle.ctx, { workerId: 'worker-1', now: NOW });
+    assert.equal(claimed.eventId, eventIdOf('space_b', owner));
+    const orphan = handle.tables.spaceDeletionOwnerDeliveryEvents.find((row) => row._id === `orphan_${owner}`);
+    assert.equal(orphan.deliveryState, 'closed');
+    assert.equal(orphan.lastDeliveryError, 'deletion_not_live');
+    assert.equal(warn.mock.callCount(), 1, 'the corrupt row is logged once');
+    const payload = warn.mock.calls[0].arguments[1];
+    assert.deepEqual(Object.keys(payload).sort(), ['eventId', 'reason', 'requestId', 'scope']);
+    assert.equal(payload.reason, 'deletion_not_live');
+    assert.equal(payload.scope, owner);
+    assert.equal(payload.eventId, eventIdOf('space_gone', owner));
+  });
+
+  test(`${owner}: a delivery whose Space is missing is closed with the same warning`, async (t) => {
+    const warn = t.mock.method(console, 'warn', () => {});
+    const requestOnly = deletion('space_gone', { rows: [] });
+    requestOnly.spaces = [];
+    const handle = harness(tablesOf(
+      requestOnly,
+      { spaceDeletionOwnerDeliveryEvents: [{
+        _id: `unspaced_${owner}`, eventId: eventIdOf('space_gone', owner), requestId: requestIdOf('space_gone'),
+        ownerPlane: owner, deliveryState: 'pending', deliveryAttempts: 0, nextAttemptAt: 1_000, createdAt: 0,
+      }] },
+      deletion('space_b', { rows: [{ owner, state: 'pending', nextAttemptAt: 2_000 }], receipts: { [owner]: 'pending' } }),
+    ));
+
+    const claimed = await spaces[spec.claim]._handler(handle.ctx, { workerId: 'worker-1', now: NOW });
+    assert.equal(claimed.eventId, eventIdOf('space_b', owner));
+    const row = handle.tables.spaceDeletionOwnerDeliveryEvents.find((candidate) => candidate._id === `unspaced_${owner}`);
+    assert.equal(row.deliveryState, 'closed');
+    assert.equal(row.lastDeliveryError, 'deletion_not_live');
+    assert.equal(warn.mock.callCount(), 1);
+    assert.equal(warn.mock.calls[0].arguments[1].reason, 'deletion_not_live');
+  });
 }
 
 test('completing a deletion closes every live owner delivery of that request and leaves an acknowledged one as it is', async () => {
@@ -431,4 +516,15 @@ test('the claim time is checked for the Model and Data owners, as before', async
     spaces.claimNextDataDeletionOwnerDelivery._handler(handle.ctx, { workerId: 'worker-1', now: 0 }),
     /claim time is invalid/,
   );
+});
+
+test('the claim time is checked for the Ingestion owner as well, even with no delivery to claim', async () => {
+  const handle = harness(tablesOf(deletion('space_a', { lifecycle: 'active', rows: [] })));
+  for (const now of [0, -1, 1.5, Number.NaN]) {
+    await assert.rejects(
+      spaces.claimNextIngestionDeletionOwnerDelivery._handler(handle.ctx, { workerId: 'worker-1', now }),
+      /claim time is invalid/,
+      String(now),
+    );
+  }
 });

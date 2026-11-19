@@ -22,7 +22,7 @@ const EVENT_ID = `space-deletion:${REQUEST_ID}:owner:model`;
 const HOLD_CODE = 'erasure_blocked_legal_hold';
 
 /** One personal Space being deleted, with its pending Model delivery and Model receipt. */
-function seedTables({ receiptStatus = 'pending' } = {}) {
+function seedTables({ receiptStatus = 'pending', deliveryAttempts = 0 } = {}) {
   return {
     spaces: [{
       _id: 'space_row', spaceRef: 'space_a', externalOrgId: 'org_a', kind: 'personal',
@@ -34,7 +34,7 @@ function seedTables({ receiptStatus = 'pending' } = {}) {
     }],
     spaceDeletionOwnerDeliveryEvents: [{
       _id: 'event_row', eventId: EVENT_ID, requestId: REQUEST_ID, ownerPlane: 'model',
-      deliveryState: 'pending', deliveryAttempts: 0, nextAttemptAt: 0, createdAt: 0,
+      deliveryState: 'pending', deliveryAttempts, nextAttemptAt: 0, createdAt: 0,
     }],
     spaceDeletionOwnerReceipts: [{
       _id: 'receipt_row', requestId: REQUEST_ID, ownerPlane: 'model', status: receiptStatus, updatedAt: 0,
@@ -402,4 +402,26 @@ test('with the permanent-refusal switch off, a refusal that clears on the retry 
   assert.equal(sent.length, 2);
   assert.equal(eventRow(handle.tables).deliveryState, 'acknowledged');
   assert.equal(receiptRow(handle.tables).status, 'partial');
+});
+
+test('a throw after the claim parks the Model delivery as failed_permanent once the claim count reaches the bound', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  // The claim takes the count to 12, the bound. The 200 answer over a blocked receipt throws on every attempt.
+  const handle = harness(seedTables({ receiptStatus: 'blocked_legal_hold', deliveryAttempts: 11 }));
+  let result;
+  const sent = await withModelReply(jsonReply(200, {
+    request_id: REQUEST_ID, owner_plane: 'model', owner_outcome: 'succeeded', remaining_work: [],
+  }), async () => {
+    result = await deliverOne._handler(handle.ctx, { workerId: 'worker-1' });
+  });
+
+  assert.deepEqual(result, { eventId: EVENT_ID, status: 'failed_permanent' });
+  assert.equal(sent.length, 1);
+  const event = eventRow(handle.tables);
+  assert.equal(event.deliveryAttempts, 12);
+  assert.equal(event.deliveryState, 'failed_permanent');
+  assert.equal(event.lastDeliveryError, 'delivery_retry_bound_reached');
+  assert.equal(event.leaseOwner, undefined);
+  assert.deepEqual(scheduledNames(handle.log), [], 'a parked delivery schedules no retry');
+  assert.equal(receiptRow(handle.tables).status, 'blocked_legal_hold', 'the refused answer does not move the receipt');
 });

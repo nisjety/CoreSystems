@@ -32,7 +32,8 @@ export const spaceDeletionTables = {
 
   // Leased, at-least-once delivery of immutable deletion intent to Control.
   // The receipt is authorization only; owner-plane purge receipts belong to a
-  // later deletion-coordinator protocol.
+  // later deletion-coordinator protocol. `closed` is terminal: the request is no longer
+  // pending authorization, so no claim selects the event (the reason is in lastDeliveryError).
   spaceDeletionAuthorizationEvents: defineTable({
     eventId: v.string(),
     requestId: v.string(),
@@ -41,6 +42,7 @@ export const spaceDeletionTables = {
       v.literal("claimed"),
       v.literal("acknowledged"),
       v.literal("failed"),
+      v.literal("closed"),
     ),
     deliveryAttempts: v.number(),
     leaseOwner: v.optional(v.string()),
@@ -82,12 +84,14 @@ export const spaceDeletionTables = {
   // the receipt, while a timeout/crash remains retryable and visibly pending.
   // `blocked_legal_hold` is a typed, non-retryable owner refusal: no claim
   // selects it until the re-drive re-arms it once the hold is lifted (flag
-  // SPACE_DELETION_HOLD_RELEASE, `spaces.ts`). `failed_permanent` is a typed,
-  // non-retryable owner refusal (400/401/403/412, parked only behind flag
-  // SPACE_DELETION_PERMANENT_REFUSAL_PARK): no claim selects it, and the reason
-  // code in `lastDeliveryError` is the only detail stored. `closed` is terminal: the
-  // deletion completed, or stopped being live, so no claim selects the row and no
-  // owner answer moves it. `lastDeliveryError` holds the closing reason code.
+  // SPACE_DELETION_HOLD_RELEASE, `spaces.ts`). `failed_permanent` is a parked
+  // delivery: a typed, non-retryable owner refusal (400/401/403/412, parked only behind
+  // flag SPACE_DELETION_PERMANENT_REFUSAL_PARK), or a claim that threw past its bound
+  // (`delivery_retry_bound_reached`). No claim selects it; the trusted ingress re-arms it
+  // with `rearmParkedDeletionOwnerDelivery`. The reason code in `lastDeliveryError` is the
+  // only detail stored. `closed` is terminal: the deletion completed, or stopped being live,
+  // so no claim selects the row and no owner answer moves it. `lastDeliveryError` holds the
+  // closing reason code.
   spaceDeletionOwnerDeliveryEvents: defineTable({
     eventId: v.string(),
     requestId: v.string(),

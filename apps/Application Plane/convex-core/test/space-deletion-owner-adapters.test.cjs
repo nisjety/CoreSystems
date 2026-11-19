@@ -44,7 +44,7 @@ const OWNERS = {
 };
 
 /** One personal Space being deleted, with a single owner's delivery and receipt. */
-function seedTables(owner, { receiptStatus = 'pending' } = {}) {
+function seedTables(owner, { receiptStatus = 'pending', deliveryAttempts = 0 } = {}) {
   return {
     spaces: [{
       _id: 'space_row', spaceRef: 'space_a', externalOrgId: 'org_a', kind: 'personal',
@@ -56,7 +56,7 @@ function seedTables(owner, { receiptStatus = 'pending' } = {}) {
     }],
     spaceDeletionOwnerDeliveryEvents: [{
       _id: 'event_row', eventId: OWNERS[owner].eventId, requestId: REQUEST_ID, ownerPlane: owner,
-      deliveryState: 'pending', deliveryAttempts: 0, nextAttemptAt: 0, createdAt: 0,
+      deliveryState: 'pending', deliveryAttempts, nextAttemptAt: 0, createdAt: 0,
     }],
     spaceDeletionOwnerReceipts: [{
       _id: 'receipt_row', requestId: REQUEST_ID, ownerPlane: owner, status: receiptStatus,
@@ -305,6 +305,39 @@ for (const owner of Object.keys(OWNERS)) {
     );
     assert.deepEqual(scheduledNames(handle.log), [spec.scheduled]);
     assert.equal(receiptRow(handle.tables).status, 'blocked_legal_hold', 'the refused answer does not move the receipt');
+  });
+
+  test(`${owner}: a throw after the claim parks the delivery as failed_permanent once the claim count reaches the bound`, async (t) => {
+    t.mock.method(console, 'error', () => {});
+    // The claim takes the count to 12, the bound. The 200 answer over a blocked receipt throws on every attempt.
+    const handle = harness(seedTables(owner, { receiptStatus: 'blocked_legal_hold', deliveryAttempts: 11 }));
+    let result;
+    const sent = await withOwnerReply(jsonReply(200, spec.success), async () => {
+      result = await spec.adapter.deliverOne._handler(handle.ctx, { workerId: 'worker-1' });
+    });
+
+    assert.deepEqual(result, { eventId: spec.eventId, status: 'failed_permanent' });
+    assert.equal(sent.length, 1, 'the owner is asked once for this claim');
+    assert.equal(eventRow(handle.tables).deliveryAttempts, 12);
+    assert.equal(eventRow(handle.tables).deliveryState, 'failed_permanent');
+    assert.equal(eventRow(handle.tables).lastDeliveryError, 'delivery_retry_bound_reached');
+    assert.equal(eventRow(handle.tables).leaseOwner, undefined);
+    assert.deepEqual(scheduledNames(handle.log), [], 'a parked delivery schedules no retry');
+    assert.equal(receiptRow(handle.tables).status, 'blocked_legal_hold', 'the refused answer does not move the receipt');
+  });
+
+  test(`${owner}: a throw below the claim bound still releases the delivery for a retry`, async (t) => {
+    t.mock.method(console, 'error', () => {});
+    const handle = harness(seedTables(owner, { receiptStatus: 'blocked_legal_hold', deliveryAttempts: 10 }));
+    let result;
+    await withOwnerReply(jsonReply(200, spec.success), async () => {
+      result = await spec.adapter.deliverOne._handler(handle.ctx, { workerId: 'worker-1' });
+    });
+
+    assert.equal(result.status, 'retry_scheduled');
+    assert.equal(eventRow(handle.tables).deliveryAttempts, 11);
+    assert.equal(eventRow(handle.tables).deliveryState, 'failed');
+    assert.deepEqual(scheduledNames(handle.log), [spec.scheduled]);
   });
 }
 

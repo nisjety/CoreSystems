@@ -17,8 +17,9 @@
  * emoji per message, and scopes every row by organization. A reaction grants nothing: it never
  * starts a run, never counts as an approval and nothing here is read by approval or wake code.
  *
- * Flag `SPACE_REACTIONS` (Convex env, set by startup.sh, off by default) is a rollout control only,
- * never an authorization input. Off, writes throw `reactions_disabled` and reads return nothing.
+ * Flag `SPACE_REACTIONS` (Convex env, set by startup.sh, off by default, on only for the exact literal
+ * `true`) is a rollout control only, never an authorization input. Off, writes throw
+ * `reactions_disabled` and reads return nothing.
  *
  * Errors are stable codes the gateway maps: `reactions_disabled`, `invalid_emoji`,
  * `reaction_limit`, `reaction_invalid:<field>`.
@@ -37,9 +38,13 @@ const MAX_ROWS_PER_THREAD = 4000;
 const CLEAR_BATCH = 500;
 const MAX_ID_CHARS = 200;
 
+/**
+ * The rollout switch, read exactly: only the literal `true` turns reactions on. Not trimmed and not
+ * case-folded, so `1`, `TRUE`, `yes` and a padded `true` are off, as the gateway's SPACE_REACTIONS_API
+ * reader is (V3e-bff-3).
+ */
 export function reactionsEnabled(): boolean {
-  const raw = (process.env.SPACE_REACTIONS || "").trim().toLowerCase();
-  return raw === "1" || raw === "true";
+  return process.env.SPACE_REACTIONS === "true";
 }
 
 // One pictographic element with an optional variation selector or skin tone; ZWJ joins several.

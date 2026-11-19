@@ -3,7 +3,8 @@
  * typed legal-hold refusal parks the delivery and blocks its receipt, as the Model
  * adapter does; with SPACE_DELETION_PERMANENT_REFUSAL_PARK on, a permanent refusal
  * (400, 401, 403, 412) parks it as `failed_permanent`, and with it off that refusal
- * retries as before; any throw after the claim releases it for retry. */
+ * retries as before; any throw after the claim releases it for retry, and parks it as
+ * `failed_permanent` once its claim count reaches the bound in `spaces.ts`. */
 import { v } from "convex/values";
 import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
@@ -35,8 +36,14 @@ export const deliverOne = internalAction({
   handler: async (ctx, args) => {
     const claimed = await ctx.runMutation(internal.spaces.claimNextIngestionDeletionOwnerDelivery, { now: Date.now(), workerId: args.workerId });
     if (!claimed) return { status: "idle" as const };
-    const release = async (reason: string) => {
-      const retryAt = await ctx.runMutation(internal.spaces.releaseIngestionDeletionOwnerDelivery, { eventId: claimed.eventId, workerId: args.workerId, now: Date.now(), error: reason });
+    // `afterThrow` marks a release after a throw. The mutation bounds those: past the bound
+    // the row parks as failed_permanent and nothing is scheduled.
+    const release = async (reason: string, afterThrow = false) => {
+      const retryAt = await ctx.runMutation(internal.spaces.releaseIngestionDeletionOwnerDelivery, { eventId: claimed.eventId, workerId: args.workerId, now: Date.now(), error: reason, afterThrow });
+      if (retryAt === null) {
+        console.error("[Space deletion] Ingestion delivery parked after repeated failures after the claim");
+        return { eventId: claimed.eventId, status: "failed_permanent" as const };
+      }
       await ctx.scheduler.runAfter(Math.max(0, retryAt - Date.now()), internal.spaceDeletionIngestion.deliverOne, { workerId: nextWorker(claimed.eventId) });
       return { status: "retry_scheduled" as const, retryAt };
     };
@@ -72,9 +79,10 @@ export const deliverOne = internalAction({
       return { eventId: claimed.eventId, status: outcome.status };
     } catch {
       // Only a release schedules the next attempt; without it an abandoned claim
-      // stays claimed. The logged text is fixed, so no upstream body is recorded.
+      // stays claimed, and the release parks it once the claim count passes its bound.
+      // The logged text is fixed, so no upstream body is recorded.
       console.error("[Space deletion] Ingestion delivery failed after the claim; releasing it for retry");
-      return await release("Ingestion Space deletion delivery failed before an owner receipt was recorded");
+      return await release("Ingestion Space deletion delivery failed before an owner receipt was recorded", true);
     }
   },
 });

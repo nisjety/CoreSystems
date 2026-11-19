@@ -5,7 +5,8 @@
  * successful deletion receipt. A typed legal-hold refusal is a definitive answer,
  * so it parks the delivery instead of retrying it. With SPACE_DELETION_PERMANENT_REFUSAL_PARK
  * on, a permanent refusal (400, 401, 403, 412) parks it as `failed_permanent`; with it off
- * that refusal retries as before. Any throw after the claim releases it for retry: deletion
+ * that refusal retries as before. Any throw after the claim releases it for retry, and parks
+ * it as `failed_permanent` once its claim count reaches the bound in `spaces.ts`: deletion
  * deliveries have no sweep to pick up an abandoned claim.
  */
 import { v } from "convex/values";
@@ -69,10 +70,16 @@ export const deliverOne = internalAction({
       now: Date.now(), workerId: args.workerId,
     });
     if (!claimed) return { status: "idle" as const };
-    const release = async (reason: string) => {
+    // `afterThrow` marks a release after a throw. The mutation bounds those: past the bound
+    // the row parks as failed_permanent and nothing is scheduled.
+    const release = async (reason: string, afterThrow = false) => {
       const retryAt = await ctx.runMutation(internal.spaces.releaseModelDeletionOwnerDelivery, {
-        eventId: claimed.eventId, workerId: args.workerId, now: Date.now(), error: reason,
+        eventId: claimed.eventId, workerId: args.workerId, now: Date.now(), error: reason, afterThrow,
       });
+      if (retryAt === null) {
+        console.error("[Space deletion] Model delivery parked after repeated failures after the claim");
+        return { eventId: claimed.eventId, status: "failed_permanent" as const };
+      }
       await ctx.scheduler.runAfter(Math.max(0, retryAt - Date.now()), internal.spaceDeletionModel.deliverOne, {
         workerId: nextWorker(claimed.eventId),
       });
@@ -131,9 +138,10 @@ export const deliverOne = internalAction({
     } catch {
       // A throw after the claim (a failed mutation, a receipt the state no longer
       // accepts) must not leave the delivery claimed: only a release schedules the
-      // next attempt. The logged text is fixed, so no upstream body is recorded.
+      // next attempt, and the release parks it once the claim count passes its bound.
+      // The logged text is fixed, so no upstream body is recorded.
       console.error("[Space deletion] Model delivery failed after the claim; releasing it for retry");
-      return await release("Model Space deletion delivery failed before an owner receipt was recorded");
+      return await release("Model Space deletion delivery failed before an owner receipt was recorded", true);
     }
   },
 });

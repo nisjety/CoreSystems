@@ -45,8 +45,8 @@ export function legalHoldReleaseEnabled(): boolean {
  * by default). Only the literal "true" turns it on. With it off a permanent owner
  * refusal (400, 401, 403, 412) releases the delivery for a retry like any other
  * non-200, so a bearer that is fixed later still lets the deletion complete. With
- * it on such a refusal parks the delivery as `failed_permanent`, which nothing in
- * this plane re-arms yet.
+ * it on such a refusal parks the delivery as `failed_permanent`; the trusted ingress
+ * re-arms it with `rearmParkedDeletionOwnerDelivery` once the bearer is fixed.
  */
 export function permanentRefusalParkEnabled(): boolean {
   return process.env.SPACE_DELETION_PERMANENT_REFUSAL_PARK === "true";

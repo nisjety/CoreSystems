@@ -81,9 +81,11 @@ export const deliverOne = internalAction({
     }
     const status = receiptStatus(receipt, claimed.request.requestId);
     if (!status) return release("Control Space deletion authorization receipt did not match the claimed request");
-    await ctx.runMutation(internal.spaces.acknowledgeDeletionAuthorizationClaim, {
+    // Application may refuse an authorized request whose Space it cannot fence. Report the
+    // outcome it recorded; for every other answer that is Control's own answer.
+    const acknowledged = await ctx.runMutation(internal.spaces.acknowledgeDeletionAuthorizationClaim, {
       eventId: claimed.eventId, workerId: args.workerId, now: Date.now(), status,
     });
-    return { eventId: claimed.eventId, status };
+    return { eventId: claimed.eventId, status: acknowledged.state };
   },
 });

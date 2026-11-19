@@ -18,7 +18,7 @@ const {
   validateEmoji,
 } = reactions;
 
-function withReactions(t, value = '1') {
+function withReactions(t, value = 'true') {
   const prior = process.env.SPACE_REACTIONS;
   if (value === null) delete process.env.SPACE_REACTIONS;
   else process.env.SPACE_REACTIONS = value;
@@ -110,8 +110,8 @@ test('groupForThread groups by message (sorted) and keeps first-use order inside
   ]);
 });
 
-test('reactionsEnabled accepts only 1 or true', (t) => {
-  for (const [value, expected] of [[null, false], ['', false], ['0', false], ['off', false], ['1', true], ['true', true], [' TRUE ', true]]) {
+test('reactionsEnabled accepts only the exact literal true', (t) => {
+  for (const [value, expected] of [[null, false], ['', false], ['0', false], ['off', false], ['1', false], ['yes', false], ['on', false], ['TRUE', false], [' true', false], ['true ', false], ['true', true]]) {
     withReactions(t, value);
     assert.equal(reactionsEnabled(), expected, String(value));
   }

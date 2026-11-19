@@ -158,8 +158,9 @@ services:
       # SPACE_DM_REGISTRATION + dm_create_entitled before a DM can exist.
       SPACE_DM_OPEN: ${SPACE_DM_OPEN:-0}
       # WS12-S8 flag SPACE_REACTIONS: message reactions (ids, one emoji, a time). Off
-      # by default everywhere; never an authorization input. On in dev with the
-      # gateway's SPACE_REACTIONS_API.
+      # by default everywhere, development included, and on only for the exact literal
+      # true (the gateway's SPACE_REACTIONS_API is read the same way). Never an
+      # authorization input.
       SPACE_REACTIONS: ${SPACE_REACTIONS:-0}
       # WS11-S6 flag SPACE_ATTENTION_INGEST: apply Space attention events from the
       # MODEL_PLANE_SPACE_EVENTS durable. Off by default everywhere (never an

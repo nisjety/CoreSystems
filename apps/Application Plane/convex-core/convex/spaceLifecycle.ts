@@ -37,7 +37,8 @@ export type SpaceDeliveryState =
   | 'failed'
   | 'rejected'
   | 'blocked_legal_hold'
-  | 'failed_permanent';
+  | 'failed_permanent'
+  | 'closed';
 
 export type SpaceLifecycleDelivery = Readonly<{
   attempts: number;
@@ -204,9 +205,10 @@ export function rearmSpaceLifecycleDeliveryAfterLegalHold(
 
 /**
  * An owner refused the erase in a way a retry cannot change (a bad bearer, a bad
- * request, an unmet precondition). The claim parks in `failed_permanent`, which
- * `canClaimSpaceLifecycleDelivery` never selects. The attempt count stays on the
- * row; nothing in this plane re-arms a permanently failed delivery yet.
+ * request, an unmet precondition), or a claim threw past its bound. The claim parks in
+ * `failed_permanent`, which `canClaimSpaceLifecycleDelivery` never selects. The attempt
+ * count stays on the row; only the operator re-arm (see
+ * `rearmSpaceLifecycleDeliveryAfterPermanentFailure`) moves a parked delivery again.
  */
 export function failSpaceLifecycleDeliveryPermanently(
   delivery: SpaceLifecycleDelivery,
@@ -223,6 +225,28 @@ export function failSpaceLifecycleDeliveryPermanently(
     attempts: delivery.attempts,
     nextAttemptAt: now,
     state: 'failed_permanent',
+  };
+}
+
+/**
+ * Re-arms a delivery parked as `failed_permanent`, once an operator has dealt with what
+ * parked it: it is claimable again at `now`. The attempt count is kept, so the parked
+ * claim stays in the history. Only `failed_permanent` may take this edge.
+ */
+export function rearmSpaceLifecycleDeliveryAfterPermanentFailure(
+  delivery: SpaceLifecycleDelivery,
+  now: number,
+): SpaceLifecycleDelivery {
+  if (delivery.state !== 'failed_permanent') {
+    throw new Error('only a delivery parked as failed_permanent may be re-armed');
+  }
+  if (!Number.isSafeInteger(now) || now <= 0) {
+    throw new Error('delivery re-arm time must be a positive safe integer');
+  }
+  return {
+    attempts: delivery.attempts,
+    nextAttemptAt: now,
+    state: 'pending',
   };
 }
 
