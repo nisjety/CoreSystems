@@ -328,3 +328,88 @@ describe('SpaceThreadPanel and the workspace posture (WS01-S7a)', () => {
     expect(spacesClient.getSpaceThreadTranscript).toHaveBeenCalledTimes(1)
   })
 })
+
+// `?m=` (WS13-S4a): a message the pane brings into view. The page passes the id; the pane decides whether the
+// transcript the viewer may read holds it, and says so neutrally when it does not.
+describe('SpaceThreadPanel reaches a message named by ?m= (WS13-S4a)', () => {
+  const turns = [
+    { role: 'user', content: 'Første melding', authorSubjectId: 'user-1', messageId: 'msg_1' },
+    { role: 'assistant', content: 'Svar med status', agentName: 'Lagerhjelpen', messageId: 'msg_2' },
+  ]
+  const scrollIntoView = vi.fn()
+
+  beforeEach(() => {
+    scrollIntoView.mockClear()
+    Object.defineProperty(Element.prototype, 'scrollIntoView', { configurable: true, value: scrollIntoView })
+  })
+
+  afterEach(() => {
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
+  })
+
+  it('scrolls to, focuses and outlines the named turn, and announces whose message it is', async () => {
+    spacesClient.getSpaceThreadTranscript.mockResolvedValue({ turns })
+    renderPanel('thr_1', { messageId: () => 'msg_2' })
+
+    expect(await screen.findByText('Svar med status')).toBeTruthy()
+    const target = document.querySelector('[data-message-id="msg_2"]') as HTMLElement
+    await waitFor(() => expect(target.getAttribute('data-highlight')).toBe('true'))
+    expect(scrollIntoView).toHaveBeenCalledWith(expect.objectContaining({ block: 'center' }))
+    expect(scrollIntoView.mock.contexts[0]).toBe(target)
+    expect(document.activeElement).toBe(target)
+    // The other turn is neither outlined nor the target.
+    expect(document.querySelector('[data-message-id="msg_1"]')?.hasAttribute('data-highlight')).toBe(false)
+    const status = document.querySelector('[data-entry-status="found"]')
+    expect(status?.textContent).toBe('Viser melding fra Lagerhjelpen')
+  })
+
+  it('takes the outline off after three seconds', async () => {
+    spacesClient.getSpaceThreadTranscript.mockResolvedValue({ turns })
+    renderPanel('thr_1', { messageId: () => 'msg_2' })
+    await screen.findByText('Svar med status')
+    const target = document.querySelector('[data-message-id="msg_2"]') as HTMLElement
+    await waitFor(() => expect(target.getAttribute('data-highlight')).toBe('true'))
+    await waitFor(() => expect(target.hasAttribute('data-highlight')).toBe(false), { timeout: 4000 })
+  })
+
+  it('says the message is not available to the viewer, neutrally, when the transcript does not hold it', async () => {
+    spacesClient.getSpaceThreadTranscript.mockResolvedValue({ turns })
+    renderPanel('thr_1', { messageId: () => 'msg_hidden_42' })
+
+    const status = await waitFor(() => {
+      const node = document.querySelector('[data-entry-status="missing"]')
+      expect(node).toBeTruthy()
+      return node as HTMLElement
+    })
+    expect(status.getAttribute('role')).toBe('status')
+    expect(status.textContent).toBe('Denne meldingen er ikke tilgjengelig for deg.')
+    // The id from the link is never echoed back, and no turn is outlined or scrolled to.
+    expect(document.body.textContent ?? '').not.toContain('msg_hidden_42')
+    expect(document.querySelector('[data-highlight]')).toBeNull()
+    expect(scrollIntoView).not.toHaveBeenCalled()
+  })
+
+  it('says the same neutral thing when shared reads are off, and makes no transcript call', async () => {
+    renderPanel('thr_1', { messageId: () => 'msg_2', sharedReadAvailable: () => false })
+    await waitFor(() => expect(document.querySelector('[data-entry-status="missing"]')).toBeTruthy())
+    expect(document.querySelector('[data-entry-status="missing"]')?.textContent).toBe(
+      'Denne meldingen er ikke tilgjengelig for deg.',
+    )
+    expect(spacesClient.getSpaceThreadTranscript).not.toHaveBeenCalled()
+  })
+
+  it('does not call a message missing while the transcript is still loading', async () => {
+    spacesClient.getSpaceThreadTranscript.mockReturnValue(new Promise(() => undefined))
+    renderPanel('thr_1', { messageId: () => 'msg_2' })
+    expect(await screen.findByText(/Henter samtalen/)).toBeTruthy()
+    expect(document.querySelector('[data-entry-status="missing"]')).toBeNull()
+  })
+
+  it('draws no entry status at all without a message id', async () => {
+    spacesClient.getSpaceThreadTranscript.mockResolvedValue({ turns })
+    renderPanel()
+    await screen.findByText('Svar med status')
+    expect(document.querySelector('[data-entry-status]')).toBeNull()
+    expect(scrollIntoView).not.toHaveBeenCalled()
+  })
+})

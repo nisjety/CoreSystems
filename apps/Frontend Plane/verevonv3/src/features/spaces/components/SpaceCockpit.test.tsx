@@ -3,6 +3,7 @@ import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { I18nProvider, localeStorageKey } from '@/shared/i18n'
+import { clearSpaceRoomFeatures, primeSpaceRoomFeatures } from '../lib/space-room-features'
 import { SpaceCockpit, useActiveSpaceTab } from './SpaceCockpit'
 
 afterEach(() => {
@@ -241,5 +242,49 @@ describe('SpaceCockpit artifacts tab (WS07-S12)', () => {
     vi.stubEnv('VITE_SPACE_ROOM_ARTIFACTS_UI', 'false')
     render(() => <SpaceCockpit />)
     expect(screen.getByRole('tab', { name: 'Samtaler' }).getAttribute('aria-selected')).toBe('true')
+  })
+})
+
+// WS19-S5: the room's canvas tab (lerret) sits second, after chat, and shows only while the room says `features.canvas`.
+describe('SpaceCockpit canvas tab (WS19-S5)', () => {
+  afterEach(() => {
+    clearSpaceRoomFeatures()
+  })
+
+  it('lists lerret second, after chat, and passes it the content the page supplies', () => {
+    primeSpaceRoomFeatures({ canvas: true })
+    render(() => (
+      <SpaceCockpit initialTab="chat" tabs={{ chat: <p>Tråder</p>, lerret: <p>Rommets lerret</p> }} />
+    ))
+    const labels = screen.getAllByRole('tab').map((tab) => tab.textContent)
+    expect(labels).toEqual(['Samtaler', 'Lerret', 'Arbeid', 'Kunnskap', 'Aktivitet', 'Agent', 'Medlemmer'])
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Lerret' }))
+    flush()
+    expect(screen.getByRole('tab', { name: 'Lerret' }).getAttribute('aria-selected')).toBe('true')
+    expect(screen.getByText('Rommets lerret')).toBeTruthy()
+    expect(document.getElementById('space-panel-lerret')?.hasAttribute('hidden')).toBe(false)
+  })
+
+  it('draws no lerret tab and no lerret panel when the room does not say features.canvas', () => {
+    primeSpaceRoomFeatures({ canvas: false })
+    render(() => <SpaceCockpit initialTab="chat" tabs={{ lerret: <p>Rommets lerret</p> }} />)
+    expect(screen.queryByRole('tab', { name: 'Lerret' })).toBeNull()
+    expect(document.getElementById('space-panel-lerret')).toBeNull()
+    expect(screen.queryByText('Rommets lerret')).toBeNull()
+  })
+
+  it('opens chat for a #lerret deep link when the flag is off, and lerret when it is on', () => {
+    primeSpaceRoomFeatures({})
+    window.location.hash = '#lerret'
+    const off = render(() => <SpaceCockpit />)
+    expect(screen.getByRole('tab', { name: 'Samtaler' }).getAttribute('aria-selected')).toBe('true')
+    off.unmount()
+
+    clearSpaceRoomFeatures()
+    primeSpaceRoomFeatures({ canvas: true })
+    window.location.hash = '#lerret'
+    render(() => <SpaceCockpit />)
+    expect(screen.getByRole('tab', { name: 'Lerret' }).getAttribute('aria-selected')).toBe('true')
   })
 })
