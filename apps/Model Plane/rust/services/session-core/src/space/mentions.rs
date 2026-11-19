@@ -7,14 +7,15 @@
 //! and this module checks the stored facts that decision cannot know:
 //!
 //! * the thread is the caller's own and lives in the decision's Space;
-//! * the trigger is the caller's own `post`, and its stored text hashes to the digest the
-//!   decision bound;
+//! * the trigger is the caller's own `post`, it lies inside the caller's history window (D18), and
+//!   its stored text hashes to the digest the decision bound;
 //! * the agent is an `expected` mention on that post.
 //!
 //! The decision's signature, subject, schema and payload digest are verified in `grpc.rs`
 //! (`verify_run_wake_space_decision`) beside the other decision verifiers. Everything here is
 //! ids, enums and digests: no message text reaches a log or an event.
 
+use chrono::{DateTime, Utc};
 use mp_contracts::model_plane::v1 as pb;
 use mp_contracts::space_mentions as sm;
 use sha2::{Digest as _, Sha256};
@@ -23,6 +24,7 @@ use tonic::metadata::MetadataValue;
 use tonic::Status;
 
 use crate::run_phase::ERROR_CODE_TRAILER;
+use crate::space::audience_window::message_floor_sql;
 
 // ---------------------------------------------------------------------------------------------
 // Input validation.
@@ -353,6 +355,14 @@ pub(crate) struct VerifiedWake {
     pub(crate) trigger_content_digest: String,
     pub(crate) agent_subject_id: String,
     pub(crate) turn_origin: String,
+    /// WS04-S11: the first recipient-audience revision the caller's since_join window starts at, from the
+    /// decision's `history_floor_revision` claim and under the same rollout switch as the transcript reads.
+    /// `None` is no revision floor.
+    pub(crate) history_floor: Option<i64>,
+    /// D18: the instant the caller's per-member window starts at (`history_floor_at`), honoured with no switch.
+    /// `None` is no window. A run a wake starts reads the room as the caller sees it, so the stored facts a
+    /// wake is checked against are read inside this window too.
+    pub(crate) history_floor_at: Option<DateTime<Utc>>,
 }
 
 /// A refusal carrying a typed code on the `x-mp-error-code` trailer.
@@ -452,10 +462,15 @@ pub(crate) fn known_turn_origin(origin: &str) -> bool {
 }
 
 /// Checks the stored facts of a verified wake: the thread is the caller's own and lives in the
-/// decision's Space; the trigger is the caller's own `post` and its text hashes to the bound
-/// digest; the agent is an `expected` mention on it. The run slot guard runs in the start
-/// transaction. Typed refusals: PermissionDenied `wake_owner_required`, FailedPrecondition
-/// `wake_trigger_mismatch`.
+/// decision's Space; the trigger is the caller's own `post`, lies inside the caller's history window
+/// and its text hashes to the bound digest; the agent is an `expected` mention on it. The run slot
+/// guard runs in the start transaction. Typed refusals: PermissionDenied `wake_owner_required`,
+/// FailedPrecondition `wake_trigger_mismatch`.
+///
+/// D18: a trigger the window hides (a post before the caller's floor, which a window that moved after
+/// the post can leave behind) is read as no row, so it is refused as `wake_trigger_mismatch`, the same
+/// refusal a missing post gets: the wake never starts a run on a post its caller can no longer read,
+/// and the refusal does not say whether the post exists.
 pub(crate) async fn check_wake_facts(
     pool: &PgPool,
     org_id: &str,
@@ -482,12 +497,15 @@ pub(crate) async fn check_wake_facts(
             "Control wake decision targets another Space",
         ));
     }
-    let trigger: Option<(String, String, Option<String>, String)> = sqlx::query_as(
-        "SELECT role, post_kind, author_subject_id, content FROM messages
-         WHERE id = $1 AND thread_id = $2",
-    )
+    let trigger: Option<(String, String, Option<String>, String)> = sqlx::query_as(&format!(
+        "SELECT m.role, m.post_kind, m.author_subject_id, m.content FROM messages m
+         WHERE m.id = $1 AND m.thread_id = $2 AND {floor}",
+        floor = message_floor_sql(("$3", "$4")),
+    ))
     .bind(&wake.trigger_message_id)
     .bind(thread_id)
+    .bind(wake.history_floor)
+    .bind(wake.history_floor_at)
     .fetch_optional(pool)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;

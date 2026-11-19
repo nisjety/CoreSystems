@@ -5529,6 +5529,13 @@ fn verify_run_wake_space_decision_with_key(
         trigger_content_digest: wake.trigger_content_digest.clone(),
         agent_subject_id: wake.agent_subject_id.clone(),
         turn_origin: wake.turn_origin.clone(),
+        // The caller's history window, signed with the decision and in no digest. A floor claim that does
+        // not parse already refused the whole decision above, so it is never read as no floor.
+        history_floor: crate::space::audience_window::history_floor_from_claim(
+            claims.history_floor_revision,
+            crate::space::audience_window::history_floor_enabled(),
+        ),
+        history_floor_at: claims.history_floor_at,
     })
 }
 

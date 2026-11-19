@@ -321,6 +321,8 @@ fn space_event_json(record: &SpaceEventRecord, space_id: &str) -> Value {
 // guard before the managed start, and the placement of the current turn in the loaded history.
 // ---------------------------------------------------------------------------------------------
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use chrono::{DateTime, Utc};
 use mp_contracts::model_plane::v1::{ChatMessage, SessionMessage};
 use sha2::{Digest, Sha256};
 
@@ -414,13 +416,77 @@ pub(crate) fn check_wake(
     Ok(())
 }
 
-/// What a wake needs from the history read: the persisted trigger, and whether the newest room
-/// posts are read as fenced context (`SPACE_WAKE_ROOM_CONTEXT`).
+/// D18: the history window the wake's Control decision carries, as the room context of the wake reads it.
+///
+/// A wake runs an agent as the member, and the agent is shown the thread: its turns and, with the fenced
+/// room context on, other members' recent posts. That read is the owner-bound one (it names no Space
+/// decision), so it applies no window of its own. The window the member's reads carry is signed into the
+/// wake decision, and this applies it to what the agent is shown: a message created before the instant is
+/// not put in front of the model, so the agent cannot quote or summarise what its member cannot see.
+///
+/// The gateway reads the claim off the token it forwards. It does not verify the token: Session Core
+/// verifies the same token, on the same request, before the run exists, and a token that fails never
+/// reaches this read. The claim is read only to NARROW, so a token this reads wrongly can hide more, never
+/// show more: a token it cannot read closes the window instead of opening it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WakeWindow {
+    /// The decision carries no window: the whole thread, as before.
+    Open,
+    /// The member's window starts at this instant: a message created at or after it is shown.
+    Since(DateTime<Utc>),
+    /// The decision names a window this gateway cannot read. Nothing of the thread is shown.
+    Unreadable,
+}
+
+impl WakeWindow {
+    /// The window of a signed wake token (`v2.<key>.<payload>.<signature>`).
+    #[must_use]
+    pub(crate) fn from_token(token: &str) -> Self {
+        let Some(claims) = token
+            .split('.')
+            .nth(2)
+            .and_then(|payload| URL_SAFE_NO_PAD.decode(payload).ok())
+            .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+        else {
+            return Self::Unreadable;
+        };
+        match claims.get("history_floor_at") {
+            None | Some(Value::Null) => Self::Open,
+            Some(Value::String(at)) => DateTime::parse_from_rfc3339(at)
+                .map_or(Self::Unreadable, |at| Self::Since(at.with_timezone(&Utc))),
+            Some(_) => Self::Unreadable,
+        }
+    }
+
+    /// Whether a message created at `created_at` is inside the window. A message with no instant has no
+    /// reliable place in it and is not shown under a window.
+    #[must_use]
+    pub(crate) fn admits(self, created_at: Option<DateTime<Utc>>) -> bool {
+        match self {
+            Self::Open => true,
+            Self::Since(floor) => created_at.is_some_and(|at| at >= floor),
+            Self::Unreadable => false,
+        }
+    }
+}
+
+/// What a wake needs from the history read: the persisted trigger, whether the newest room
+/// posts are read as fenced context (`SPACE_WAKE_ROOM_CONTEXT`), and the member's history window.
 #[derive(Clone, Copy)]
 pub(crate) struct WakeHistory<'a> {
     pub trigger_message_id: &'a str,
     pub room_context: bool,
     pub participants: &'a [WakeParticipant],
+    /// D18: the window of the wake decision; [`WakeWindow::Open`] for a member with none.
+    pub window: WakeWindow,
+}
+
+/// The instant a stored message was created, if the read carried one.
+fn created_at_of(message: &SessionMessage) -> Option<DateTime<Utc>> {
+    message
+        .created_at
+        .as_ref()
+        .and_then(|at| DateTime::<Utc>::from_timestamp(at.seconds, u32::try_from(at.nanos).ok()?))
 }
 
 /// One room post offered as quoted context.
@@ -452,6 +518,12 @@ pub(crate) fn split_room_posts(
     let Some(wake) = wake else {
         return messages;
     };
+    // D18: only what the member's window shows reaches the model, turns and posts alike. This comes first,
+    // so the last answer and the posts after it are found among the messages the member can see.
+    let messages: Vec<SessionMessage> = messages
+        .into_iter()
+        .filter(|message| wake.window.admits(created_at_of(message)))
+        .collect();
     let last_answer = messages
         .iter()
         .rposition(|m| m.post_kind != "post" && m.role == "assistant");
@@ -1098,5 +1170,150 @@ mod tests {
             crate::session_flow::with_work_summary(None, Some(&tampered), false).is_none(),
             "a value outside the closed shape is not stored"
         );
+    }
+
+    // ---- D18: the member's history window on the context a wake shows the agent ---------------
+
+    /// A token shaped as Control signs one (`v2.<key>.<payload>.<signature>`), over `claims`. The
+    /// signature is not read here: Session Core verifies it, so a test only needs the shape.
+    fn token_with(claims: &Value) -> String {
+        format!(
+            "v2.{}.{}.{}",
+            URL_SAFE_NO_PAD.encode("control-key"),
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).expect("claims")),
+            URL_SAFE_NO_PAD.encode("signature")
+        )
+    }
+
+    fn at(rfc3339: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(rfc3339).expect("test instant").with_timezone(&Utc)
+    }
+
+    #[test]
+    fn a_wake_token_names_its_window_and_one_it_cannot_read_closes_the_window() {
+        // No window, whether the claim is absent or null: the thread as before.
+        assert_eq!(WakeWindow::from_token(&token_with(&json!({ "decision_ref": "d-1" }))), WakeWindow::Open);
+        assert_eq!(
+            WakeWindow::from_token(&token_with(&json!({ "history_floor_at": null }))),
+            WakeWindow::Open
+        );
+        // A window: the instant, whatever offset it is written in.
+        let floor = "2026-11-18T09:30:15.123456Z";
+        assert_eq!(
+            WakeWindow::from_token(&token_with(&json!({ "history_floor_at": floor }))),
+            WakeWindow::Since(at(floor))
+        );
+        assert_eq!(
+            WakeWindow::from_token(&token_with(&json!({ "history_floor_at": "2026-11-18T10:30:15.123456+01:00" }))),
+            WakeWindow::Since(at(floor))
+        );
+        // A window it cannot read must not read as no window.
+        for (claims, why) in [
+            (json!({ "history_floor_at": "last tuesday" }), "text that is no instant"),
+            (json!({ "history_floor_at": 1_700_000_000 }), "a bare number"),
+            (json!({ "history_floor_at": true }), "a boolean"),
+            (json!({ "history_floor_at": {} }), "an object"),
+        ] {
+            assert_eq!(WakeWindow::from_token(&token_with(&claims)), WakeWindow::Unreadable, "{why}");
+        }
+        for (token, why) in [
+            (String::new(), "an empty token"),
+            ("v2.a.b".to_owned(), "three segments"),
+            ("v2.a.!!!.d".to_owned(), "a payload that is not base64"),
+            (format!("v2.a.{}.d", URL_SAFE_NO_PAD.encode("not json")), "a payload that is not JSON"),
+        ] {
+            assert_eq!(WakeWindow::from_token(&token), WakeWindow::Unreadable, "{why}");
+        }
+    }
+
+    #[test]
+    fn a_window_shows_a_message_only_when_it_was_created_inside_it() {
+        let floor = at("2026-11-18T09:30:00Z");
+        let before = floor - chrono::Duration::microseconds(1);
+        let after = floor + chrono::Duration::microseconds(1);
+        // Open shows everything, including a message with no instant.
+        assert!(WakeWindow::Open.admits(Some(before)));
+        assert!(WakeWindow::Open.admits(None));
+        // A window shows a message at or after it, never one before it, and never one with no instant.
+        let window = WakeWindow::Since(floor);
+        assert!(!window.admits(Some(before)));
+        assert!(window.admits(Some(floor)));
+        assert!(window.admits(Some(after)));
+        assert!(!window.admits(None), "a message with no reliable instant is not shown");
+        // A window that cannot be read shows nothing.
+        assert!(!WakeWindow::Unreadable.admits(Some(after)));
+        assert!(!WakeWindow::Unreadable.admits(None));
+    }
+
+    fn stored(id: &str, role: &str, post_kind: &str, author: &str, created: Option<i64>) -> SessionMessage {
+        SessionMessage {
+            message_id: id.to_owned(),
+            role: role.to_owned(),
+            post_kind: post_kind.to_owned(),
+            author_subject_id: author.to_owned(),
+            content: format!("text of {id}"),
+            created_at: created.map(|seconds| prost_types::Timestamp { seconds, nanos: 0 }),
+            ..Default::default()
+        }
+    }
+
+    // The agent a wake starts is shown the thread. Under the member's window it is shown only what the
+    // member could read: the turns and the other members' posts from before the window are not put in
+    // front of the model, so it cannot quote what its member cannot see.
+    #[test]
+    fn a_wake_under_a_window_shows_the_agent_no_turn_and_no_post_from_before_it() {
+        let floor = at("2026-11-18T09:30:00Z").timestamp();
+        let thread = || {
+            vec![
+                stored("m1", "user", "turn", "u1", Some(floor - 100)),
+                stored("m2", "assistant", "turn", "", Some(floor - 50)),
+                stored("m3", "user", "post", "u2", Some(floor - 40)),
+                stored("m4", "user", "turn", "u1", Some(floor)),
+                stored("m5", "assistant", "turn", "", Some(floor + 100)),
+                stored("m6", "user", "post", "u2", Some(floor + 200)),
+                stored("m7", "user", "post", "u1", Some(floor + 300)),
+                stored("m8", "user", "turn", "u1", None),
+            ]
+        };
+        let wake = |window| WakeHistory {
+            trigger_message_id: "m7",
+            room_context: true,
+            participants: &[],
+            window,
+        };
+        let ids = |messages: &[SessionMessage]| -> Vec<String> {
+            messages.iter().map(|m| m.message_id.clone()).collect()
+        };
+
+        // No window: every turn, and the one post newer than the last answer (the trigger is not quoted).
+        let mut posts = Vec::new();
+        let turns = split_room_posts(thread(), Some(&wake(WakeWindow::Open)), &mut posts);
+        assert_eq!(ids(&turns), ["m1", "m2", "m4", "m5", "m8"]);
+        assert_eq!(posts.iter().map(|p| p.content.as_str()).collect::<Vec<_>>(), ["text of m6"]);
+
+        // A window: the turns before it, the post before it and the message with no instant are gone.
+        let mut posts = Vec::new();
+        let turns = split_room_posts(thread(), Some(&wake(WakeWindow::Since(at("2026-11-18T09:30:00Z")))), &mut posts);
+        assert_eq!(ids(&turns), ["m4", "m5"]);
+        assert_eq!(posts.iter().map(|p| p.content.as_str()).collect::<Vec<_>>(), ["text of m6"]);
+
+        // A window later than the newest answer shows no turn at all, and still the later post.
+        let mut posts = Vec::new();
+        let late = WakeWindow::Since(at("2026-11-18T09:30:00Z") + chrono::Duration::seconds(150));
+        let turns = split_room_posts(thread(), Some(&wake(late)), &mut posts);
+        assert!(turns.is_empty());
+        assert_eq!(posts.iter().map(|p| p.content.as_str()).collect::<Vec<_>>(), ["text of m6"]);
+
+        // A window that cannot be read shows the agent nothing of the thread.
+        let mut posts = Vec::new();
+        let turns = split_room_posts(thread(), Some(&wake(WakeWindow::Unreadable)), &mut posts);
+        assert!(turns.is_empty());
+        assert!(posts.is_empty());
+
+        // A read that is not a wake is returned unchanged, whatever a window would say.
+        let mut posts = Vec::new();
+        let plain = split_room_posts(thread(), None, &mut posts);
+        assert_eq!(plain.len(), 8);
+        assert!(posts.is_empty());
     }
 }

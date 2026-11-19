@@ -123,6 +123,8 @@ fn wake_verifier_table() {
             trigger_content_digest: mentions::content_digest("hello room @agent-7"),
             agent_subject_id: "agent-7".to_owned(),
             turn_origin: "direct".to_owned(),
+            history_floor: None,
+            history_floor_at: None,
         }
     );
 
@@ -200,6 +202,74 @@ fn a_thread_append_decision_is_never_a_wake() {
     );
 }
 
+// D18: the caller's history window is signed with the wake decision, in no digest. The verified wake
+// carries the instant, so the stored facts of the wake are read inside the window.
+#[test]
+fn a_signed_history_window_rides_the_verified_wake_and_a_malformed_one_refuses_it() {
+    let key = signing_key();
+    let floor = "2026-11-18T09:30:00Z";
+    let windowed = sign_wake(unsigned_wake(), ORG, CALLER, THREAD, &key, |claims| {
+        claims["history_floor_at"] = json!(floor);
+    });
+    let verified = verify(&windowed, ORG, CALLER, THREAD).expect("a windowed member's wake verifies");
+    assert_eq!(
+        verified.history_floor_at,
+        Some(DateTime::parse_from_rfc3339(floor).expect("floor").with_timezone(&Utc))
+    );
+    assert_eq!(verified.history_floor, None, "no revision claim, so no revision floor");
+
+    // A revision claim is read under the same rollout switch as the transcript reads.
+    let revised = sign_wake(unsigned_wake(), ORG, CALLER, THREAD, &key, |claims| {
+        claims["history_floor_revision"] = json!(5);
+    });
+    let verified = verify(&revised, ORG, CALLER, THREAD).expect("a since_join member's wake verifies");
+    assert_eq!(
+        verified.history_floor,
+        crate::space::audience_window::history_floor_from_claim(
+            5,
+            crate::space::audience_window::history_floor_enabled()
+        )
+    );
+    assert_eq!(verified.history_floor_at, None);
+
+    // A floor that is not an instant refuses the wake. It must never read as no window.
+    for (bad, why) in [
+        (json!("the first Tuesday"), "text"),
+        (json!(1_700_000_000), "a bare number"),
+        (json!(true), "a boolean"),
+        (json!({}), "an object"),
+    ] {
+        let wake = sign_wake(unsigned_wake(), ORG, CALLER, THREAD, &key, |claims| {
+            claims["history_floor_at"] = bad.clone();
+        });
+        let status = verify(&wake, ORG, CALLER, THREAD).expect_err(why);
+        assert_eq!(status.code(), tonic::Code::PermissionDenied, "{why}");
+    }
+
+    // The floor is signed: removing it from the token, or moving it, no longer verifies.
+    let parts: Vec<&str> = windowed.space_decision_token.split('.').collect();
+    let mut claims: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[2]).expect("payload"))
+        .expect("claims");
+    for edit in [None, Some("2026-11-18T11:30:00Z")] {
+        match edit {
+            Some(moved) => claims["history_floor_at"] = json!(moved),
+            None => {
+                claims.as_object_mut().expect("object").remove("history_floor_at");
+            }
+        }
+        let mut forged = windowed.clone();
+        forged.space_decision_token = format!(
+            "{}.{}.{}.{}",
+            parts[0],
+            parts[1],
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims")),
+            parts[3]
+        );
+        let status = verify(&forged, ORG, CALLER, THREAD).expect_err("an edited floor under the old signature");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    }
+}
+
 fn lazy_pool() -> PgPool {
     sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgresql://unreachable.invalid/session")
@@ -258,6 +328,8 @@ async fn zdr_caller_gets_typed_refusal_and_no_rows() {
         trigger_content_digest: mentions::content_digest("x"),
         agent_subject_id: "agent-7".to_owned(),
         turn_origin: "direct".to_owned(),
+        history_floor: None,
+        history_floor_at: None,
     };
     let status = crate::terminalization::start_managed_run_with_wake_inner(
         &lazy_pool(),
@@ -419,6 +491,8 @@ impl World {
             trigger_content_digest: mentions::content_digest(content),
             agent_subject_id: agent.to_owned(),
             turn_origin: sm::ORIGIN_DIRECT.to_owned(),
+            history_floor: None,
+            history_floor_at: None,
         }
     }
 
@@ -675,6 +749,54 @@ async fn wake_requires_own_post_with_bound_digest() {
         .await
         .expect_err("another thread's post");
     assert_eq!(error_code(&status).as_deref(), Some("wake_trigger_mismatch"));
+    world.finish().await;
+}
+
+// D18: a wake never starts a run on a post the caller's window hides. The refusal is the one a missing
+// post gets, so it says nothing about whether the post exists.
+#[tokio::test]
+#[ignore = "needs DB harness"]
+async fn wake_refuses_a_trigger_the_callers_history_window_hides() {
+    let _flags = WakeFlags::set(true, true);
+    let Some(world) = World::new("floor").await else { return };
+    let thread = world.thread("owner-1").await;
+    let text = "@X what did we decide?";
+    let posted = world
+        .post(&thread, "owner-1", text, vec![agent("agent-x")])
+        .await
+        .expect("the post");
+    let check = |floor_at: Option<DateTime<Utc>>, floor: Option<i64>| {
+        let pool = world.pool.clone();
+        let org = world.org.clone();
+        let thread = thread.clone();
+        let mut wake = world.verified(&posted.message_id, text, "agent-x");
+        wake.history_floor_at = floor_at;
+        wake.history_floor = floor;
+        async move { mentions::check_wake_facts(&pool, &org, &thread, "owner-1", &wake).await }
+    };
+    let now = Utc::now();
+    check(None, None).await.expect("no window admits the wake");
+    check(Some(now - chrono::Duration::hours(1)), None)
+        .await
+        .expect("a window that opened before the post admits the wake");
+    // A window that opened after the post hides it: the post is before the caller's floor.
+    let status = check(Some(now + chrono::Duration::hours(1)), None)
+        .await
+        .expect_err("the post is before the window");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(error_code(&status).as_deref(), Some("wake_trigger_mismatch"));
+    // The same refusal as an id that names no message, so the refusal tells nothing about the post.
+    let missing = mentions::check_wake_facts(
+        &world.pool,
+        &world.org,
+        &thread,
+        "owner-1",
+        &world.verified("m-unknown", text, "agent-x"),
+    )
+    .await
+    .expect_err("a missing post");
+    assert_eq!(missing.code(), status.code());
+    assert_eq!(missing.message(), status.message());
     world.finish().await;
 }
 

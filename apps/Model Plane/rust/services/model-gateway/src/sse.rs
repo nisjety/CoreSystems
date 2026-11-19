@@ -4525,6 +4525,8 @@ pub async fn invoke_stream_sse(
         trigger_message_id: &wake.trigger_message_id,
         room_context: mp_contracts::space_mentions::wake_room_context_enabled(),
         participants: &wake.participants,
+        // D18: the member's history window, signed into the wake decision.
+        window: crate::space_sse::WakeWindow::from_token(&wake.space_decision_token),
     });
     // EP-3 S3: with the revision switch `on`, the table's heads are this turn's base, so a
     // revision another replica committed is what this turn revises. Runs before the metadata
