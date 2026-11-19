@@ -647,6 +647,18 @@ pub(crate) struct SpaceFeatureFlags {
     /// A rollout control, never an authorization input: Control's decision and Session Core's verification decide every
     /// use. On in development, off in production (`space_flag`).
     pub(crate) space_personal_memory_turn_api: bool,
+    /// `SPACE_MEMBER_HISTORY_WINDOWS` (D18, the gateway half; Control's user-core reads a switch of the same name for its
+    /// own writes, so one operator value can drive both): `PUT` and `GET
+    /// /api/v1/spaces/{space_ref}/members/{subject_id}/history-window` and `features.member_history_windows`, which the
+    /// SPA reads to show the invite's "share past conversation" choice and the member-list history control. Off answers
+    /// 404 `feature_disabled` on the two routes and reports the feature false. It never gates the invite's
+    /// `share_past_conversation` field: a "don't share" choice is always forwarded, and Control refuses it (503
+    /// `member_history_window_unavailable`) while its own switch is off, so the choice is never dropped and the past is
+    /// never shared by accident. A rollout control, never an authorization input: Control's live manager or owner role
+    /// decides who may read or change a member's window, and Control signs the floor every read honours. A mode and an
+    /// instant only, no content, so Zero Data Retention organizations are unaffected. On in development, off in
+    /// production (`space_flag`).
+    pub(crate) member_history_windows: bool,
     /// `SCIM_EDGE_ENABLED` (WS05-S8): the public, session-less SCIM edge `/api/v1/scim/v2/*`
     /// that forwards an identity provider's bearer token to org-core. Off (the default, in
     /// development too) answers the same 501 SCIM error as before the feature existed. A rollout
@@ -772,6 +784,7 @@ impl SpaceFeatureFlags {
             agent_self_api_api: space_flag("SPACE_AGENT_SELF_API_API"),
             agent_canvas_tools_api: space_flag("SPACE_AGENT_CANVAS_TOOLS_API"),
             space_personal_memory_turn_api: space_flag("SPACE_PERSONAL_MEMORY_TURN_API"),
+            member_history_windows: space_flag("SPACE_MEMBER_HISTORY_WINDOWS"),
             scim_edge: ScimEdgeConfig::from_env(),
         }
     }
@@ -1836,6 +1849,7 @@ mod tests").next().unwrap_or(&config);
         assert!(!flags.personal_agents_api);
         assert!(!flags.personal_agents_ui);
         assert!(!flags.private_panel_ui);
+        assert!(!flags.member_history_windows);
     }
 
     /// W3-DEC-CANVAS: `SPACE_AGENT_CANVAS_TOOLS_API` is off by default and in production when unset, honours an explicit
@@ -2229,6 +2243,25 @@ mod tests").next().unwrap_or(&config);
             assert!(!flags.personal_agents_ui);
             assert!(!flags.private_panel_ui);
         });
+    }
+
+    /// D18: `SPACE_MEMBER_HISTORY_WINDOWS` is off by default and in production when unset, on in development when unset,
+    /// and an explicit value wins in both. It is a rollout control only: the compose declarations below pin it off in
+    /// production, and Control's own switch of the same name still decides whether a window can be written.
+    #[test]
+    fn d18_member_history_windows_flag_follows_the_space_flag_rule() {
+        let key = "SPACE_MEMBER_HISTORY_WINDOWS";
+        assert!(!super::SpaceFeatureFlags::default().member_history_windows);
+        let vars = |env: &'static str, value: Option<&'static str>| vec![("APP_ENV", Some(env)), (key, value)];
+        let flag = || super::SpaceFeatureFlags::from_env().member_history_windows;
+        with_env(&vars("production", None), || assert!(!flag(), "production default"));
+        with_env(&vars("prod", None), || assert!(!flag(), "prod default"));
+        with_env(&vars("development", None), || assert!(flag(), "development default"));
+        with_env(&vars("production", Some("true")), || assert!(flag(), "explicit on in production"));
+        with_env(&vars("production", Some("1")), || assert!(flag(), "1 is on"));
+        with_env(&vars("development", Some("false")), || assert!(!flag(), "explicit off wins in development"));
+        with_env(&vars("development", Some("0")), || assert!(!flag(), "0 is off"));
+        with_env(&vars("development", Some("garbage")), || assert!(!flag(), "a set but unreadable value is off, never the dev default"));
     }
 
     /// WS04-S8.gw / WS08-S4: the room-directory, mention-record and addressed-wake flags default

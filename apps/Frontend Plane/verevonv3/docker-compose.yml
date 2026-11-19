@@ -468,6 +468,10 @@ services:
       # WS20-S4: the room browser run reads and start (API) and WS20-S5: the browser card and pane (UI).
       SPACE_BROWSER_RUN_API: ${SPACE_BROWSER_RUN_API:-true}
       SPACE_BROWSER_CARD: ${SPACE_BROWSER_CARD:-true}
+      # D18: per-member room history (PUT/GET .../members/{subject_id}/history-window and features.member_history_windows).
+      # Never gates the invite's share_past_conversation field, which is always forwarded. Rollout control only: Control's
+      # own switch of the same name (user-core) decides whether a window can be written, and its role check decides who.
+      SPACE_MEMBER_HISTORY_WINDOWS: ${SPACE_MEMBER_HISTORY_WINDOWS:-true}
     ports:
       - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:3185:3185"
     networks:

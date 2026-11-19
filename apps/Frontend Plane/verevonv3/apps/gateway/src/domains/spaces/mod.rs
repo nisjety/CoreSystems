@@ -1192,6 +1192,8 @@ fn module_routes() -> Router<AppState> {
         .merge(agent_canvas_tools::routes())
         .merge(private_panel::routes())
         .merge(memory_declassify::routes())
+        // D18: PUT and GET .../members/{subject_id}/history-window (behind `member_history_windows`).
+        .merge(room_admin::routes())
 }
 
 #[derive(Debug, Deserialize)]
@@ -6028,6 +6030,9 @@ async fn space_context(
                     "directory_resolver": state.space_features.directory_resolver_api,
                     "room_archive": state.space_features.room_archive_api,
                     "room_directory": state.space_features.room_directory_api,
+                    // D18: the invite's "share past conversation" choice and the member-list history control.
+                    // The two history-window routes answer 404 `feature_disabled` while this is false.
+                    "member_history_windows": state.space_features.member_history_windows,
                     "room_artifacts": state.space_features.room_artifacts,
                     "room_pins": state.space_features.room_pins,
                     "message_search": state.space_features.message_search_api

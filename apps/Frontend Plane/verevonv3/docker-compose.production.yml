@@ -77,6 +77,7 @@ services:
             SPACE_AGENT_CANVAS_TOOLS_API: "false"
             SPACE_BROWSER_RUN_API: "false"
             SPACE_BROWSER_CARD: "false"
+            SPACE_MEMBER_HISTORY_WINDOWS: "false"
             MODEL_GATEWAY_DEV_BEARER: ""
             VEREVON_PUBLIC_ORIGIN: ${VEREVON_PUBLIC_ORIGIN:?VEREVON_PUBLIC_ORIGIN is required in production}
 

@@ -25,15 +25,23 @@
 //! Every Control failure on these routes is relayed through [`relay_control_error`]: a typed body
 //! keeps its status and only `code`, `message` and scalar `details`; anything else is a 503.
 //! Adding, re-roling, removing and archiving share one per-user ceiling of 30 operations a minute.
+//!
+//! D18 (per-member room history) adds `PUT` and `GET /api/v1/spaces/{space_ref}/members/{subject_id}/history-window`
+//! behind `SpaceFeatureFlags::member_history_windows`, and the invite's optional `share_past_conversation` on the add
+//! route, on the same footing: Control owns the role rule, the audit row and the floor every read signs, this module
+//! checks no role and holds no state, and a window can only hide. See the D18 section below.
 
 use std::sync::OnceLock;
 
 use axum::{
     body::Bytes,
     extract::{Extension, Path, State},
-    http::StatusCode,
-    Json,
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
+    routing::put,
+    Json, Router,
 };
+use chrono::{DateTime, SecondsFormat, Utc};
 use reqwest::Method;
 use serde_json::{json, Map, Value};
 
@@ -319,7 +327,10 @@ fn with_audience_warning(mut body: Value, audience: &str) -> Value {
 }
 
 /// `POST /api/v1/spaces/{space_ref}/members` on the Control writer. `body.member_id` (or
-/// `subject_id`) names the person; `body.role` defaults to Control's own default (editor).
+/// `subject_id`) names the person; `body.role` defaults to Control's own default (editor). D18:
+/// `body.share_past_conversation` (a boolean) is the invite's choice: absent or true leaves the room's
+/// own history mode in charge, false joins the person without the conversation posted before their join.
+/// It is forwarded as given and the committed add answers `data.history_window` (see [`history_window_view`]).
 pub(crate) async fn add_member(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -353,6 +364,10 @@ pub(crate) async fn add_member(
         Ok(key) => key,
         Err(reply) => return reply,
     };
+    let share_past_conversation = match optional_share_past_conversation(body) {
+        Ok(choice) => choice,
+        Err(reply) => return reply,
+    };
     let mut payload = Map::new();
     payload.insert("subject_id".to_owned(), json!(member_id));
     if let Some(role) = role {
@@ -361,6 +376,11 @@ pub(crate) async fn add_member(
     let idempotency_key = key.clone();
     if let Some(key) = key {
         payload.insert("idempotency_key".to_owned(), json!(key));
+    }
+    // D18: the invite's choice goes to Control exactly as given, `false` included, and is never gated by the
+    // gateway's own window switch: a "don't share" is refused by Control while its switch is off, never dropped.
+    if let Some(share) = share_past_conversation {
+        payload.insert("share_past_conversation".to_owned(), json!(share));
     }
     if let Err(reply) = member_ops_allowed(state, &org_id, user).await {
         return reply;
@@ -384,12 +404,18 @@ pub(crate) async fn add_member(
         record_invite(state, user, &org_id, &space_ref, &member_id, idempotency_key.as_deref())
             .await;
     }
-    let out = json!({"data": {
+    let mut out = json!({"data": {
         "member_count": data.get("member_count").and_then(Value::as_u64).unwrap_or(0),
         "changed": data.get("changed").and_then(Value::as_bool).unwrap_or(false),
         "role": data.get("role").cloned().unwrap_or(Value::Null),
         "audience": { "state": audience },
     }});
+    // D18: the window the new member reads under, only when Control reports one (a committed add; a replay or an
+    // already-active member has none). It is a courtesy on a write that already stands, so a malformed one is left
+    // out rather than turned into an error, and a window is never made up here.
+    if let Some(window) = history_window_view(data.get("history_window")) {
+        out["data"]["history_window"] = window;
+    }
     (StatusCode::OK, Json(with_audience_warning(out, audience)))
 }
 
@@ -1093,6 +1119,352 @@ pub(super) async fn update_room_settings_route(
         Ok(body) => update_room_settings(&state, &user, &space_ref, &body).await,
         Err(reply) => reply,
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// D18: per-member room history visibility.
+//
+// Two additions on the member writer. The invite's choice is the optional `share_past_conversation` boolean of
+// `POST .../members` (absent or true: the room's own history mode decides, exactly as before; false: the person joins
+// without the conversation posted before their join). A room owner or manager can later set one member's window with
+// `PUT .../members/{subject_id}/history-window` (full, since_join, or since_date with an instant) and read it with `GET`
+// on the same path.
+//
+// Control owns all of it: the role rule (a room manager or owner), the audit row, the floor every read signs, and its
+// rollout switch `SPACE_MEMBER_HISTORY_WINDOWS`. This module checks no role, keeps no state, and sends Control only the
+// closed fields below, so a body can never carry an organization, an actor or a floor. A window can only HIDE: nothing here
+// widens what a member reads. It is a mode and an instant, no content, so a Zero Data Retention organization behaves the
+// same and no model is called. The gateway's own switch (`SpaceFeatureFlags::member_history_windows`) only decides
+// whether the two routes exist and whether the SPA offers the controls; it never gates the invite's choice.
+// ---------------------------------------------------------------------------------------------
+
+const MAX_WINDOW_SUBJECT_CHARS: usize = 200;
+const MAX_INSTANT_CHARS: usize = 64;
+
+/// The modes a person may request for one member. `room` is not one of them: only an invite writes it, inside Control.
+/// (A `matches!`, not a string table: the SPA's error-code scan reads every table of the gateway as a table of codes.)
+fn is_member_window_mode(mode: &str) -> bool {
+    matches!(mode, "full" | "since_join" | "since_date")
+}
+
+/// The only body fields of the admin change. Anything else is refused, never forwarded.
+fn is_member_window_field(field: &str) -> bool {
+    matches!(field, "mode" | "since_at" | "expected_revision")
+}
+
+/// Both history-window routes answer this when the gateway switch is off, before any Control call.
+fn member_history_windows_disabled() -> Reply {
+    (
+        StatusCode::NOT_FOUND,
+        Json(error(
+            "feature_disabled",
+            "Per-member room history is not enabled.",
+        )),
+    )
+}
+
+/// One reply as a response that no cache may keep: a window is Control's live authority answer.
+fn no_store(reply: Reply) -> Response {
+    let (status, body) = reply;
+    (status, [(header::CACHE_CONTROL, "no-store")], body).into_response()
+}
+
+/// The invite's choice. Absent or null is no choice and is not sent. A boolean is forwarded as given, `false` included.
+/// Anything else is refused here, so a malformed value can never degrade into the default and share the past.
+fn optional_share_past_conversation(body: &Value) -> Result<Option<bool>, Reply> {
+    match body.get("share_past_conversation") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(share)) => Ok(Some(*share)),
+        Some(_) => Err(invalid(
+            "share_past_conversation",
+            "share_past_conversation must be true or false.",
+        )),
+    }
+}
+
+/// The member a history-window route names: trimmed, non-empty and bounded. `.` and `..` are refused because a URL
+/// parser would collapse them out of the Control path, and so are a path separator and any control character: none of
+/// them is in a member id, and Control would answer such a path as an unknown route rather than an unknown member.
+fn window_subject(subject_id: &str) -> Result<String, Reply> {
+    let subject = subject_id.trim();
+    if subject.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(error("member_required", "A member is required.")),
+        ));
+    }
+    let separator_or_control = |c: char| c.is_control() || c == '/' || c == '\\';
+    if subject == "."
+        || subject == ".."
+        || subject.chars().count() > MAX_WINDOW_SUBJECT_CHARS
+        || subject.chars().any(separator_or_control)
+    {
+        return Err(invalid(
+            "subject_id",
+            "subject_id is not a valid member id.",
+        ));
+    }
+    Ok(subject.to_owned())
+}
+
+fn history_window_url(state: &AppState, space_ref: &str, subject_id: &str) -> String {
+    format!(
+        "{}/history-window",
+        members_url(state, space_ref, Some(subject_id))
+    )
+}
+
+/// An RFC 3339 instant as the one canonical string Control parses: UTC, `Z`, fractional seconds only when present.
+/// The same instant, so nothing is decided here; a bad string is None.
+fn canonical_instant(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.len() > MAX_INSTANT_CHARS {
+        return None;
+    }
+    DateTime::parse_from_rfc3339(raw).ok().map(|instant| {
+        instant
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(SecondsFormat::AutoSi, true)
+    })
+}
+
+/// The body of the admin change, checked for shape only and rebuilt from the closed fields: an object with `mode` (one
+/// of [`is_member_window_mode`]), an optional RFC 3339 `since_at` and an optional non-negative `expected_revision`. What
+/// the pair means (a `since_at` is required with `since_date`, not allowed with the others, and never in the future) is
+/// Control's rule and comes back as its typed 422 `member_history_window_invalid`.
+fn history_window_payload(body: &Value) -> Result<Value, Reply> {
+    let Some(fields) = body.as_object() else {
+        return Err(invalid("body", "The request body must be a JSON object."));
+    };
+    if fields.keys().any(|key| !is_member_window_field(key)) {
+        return Err(invalid(
+            "body",
+            "Only mode, since_at and expected_revision are accepted.",
+        ));
+    }
+    let mut payload = Map::new();
+    match fields.get("mode") {
+        Some(Value::String(mode)) if is_member_window_mode(mode.trim()) => {
+            payload.insert("mode".to_owned(), json!(mode.trim()));
+        }
+        _ => {
+            return Err(invalid(
+                "mode",
+                "mode must be full, since_join or since_date.",
+            ))
+        }
+    }
+    match fields.get("since_at") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(at)) => match canonical_instant(at) {
+            Some(instant) => {
+                payload.insert("since_at".to_owned(), json!(instant));
+            }
+            None => return Err(invalid("since_at", "since_at must be an RFC 3339 instant.")),
+        },
+        Some(_) => return Err(invalid("since_at", "since_at must be an RFC 3339 instant.")),
+    }
+    match fields.get("expected_revision") {
+        None | Some(Value::Null) => {}
+        Some(value) => match value.as_i64().filter(|revision| *revision >= 0) {
+            Some(revision) => {
+                payload.insert("expected_revision".to_owned(), json!(revision));
+            }
+            None => {
+                return Err(invalid(
+                    "expected_revision",
+                    "The expected revision must be a non-negative integer.",
+                ))
+            }
+        },
+    }
+    Ok(Value::Object(payload))
+}
+
+/// One member's window as Control reports it, rebuilt as exactly four fields: where the rule comes from (`source`,
+/// `member` or `room`), the mode, the instant it names (`since_at`, null when none) and the row's revision (what an
+/// `expected_revision` compares against). A field that is not a plain word, an RFC 3339 instant or a non-negative integer
+/// makes the whole window None: the callers then answer 502 (a read or a change, where the window IS the answer) or leave
+/// it out (an add, where it is a courtesy), and a window is never made up. The words are not checked against the
+/// vocabulary, so a mode Control adds later is not an outage here.
+fn history_window_view(window: Option<&Value>) -> Option<Value> {
+    let window = window?.as_object()?;
+    let word = |field: &str| {
+        window
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|word| is_error_code(word))
+    };
+    let since_at = match window.get("since_at") {
+        None | Some(Value::Null) => Value::Null,
+        Some(Value::String(at)) if canonical_instant(at).is_some() => json!(at.trim()),
+        Some(_) => return None,
+    };
+    let revision = match window.get("revision") {
+        None | Some(Value::Null) => 0,
+        Some(value) => value.as_u64()?,
+    };
+    Some(json!({
+        "source": word("source")?,
+        "mode": word("mode")?,
+        "since_at": since_at,
+        "revision": revision,
+    }))
+}
+
+/// A Control answer that is not a window. Never reported as a success: the person would act on a made-up window. It is
+/// the upstream layer's own 502 `upstream_unavailable` (the code the SPA already words, and the one a transport failure
+/// gets), not a code of its own: the right move for the person is the same, to read the window again.
+fn invalid_history_window_answer() -> Reply {
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(crate::envelope::upstream_unavailable()),
+    )
+}
+
+/// The success body of the change (`with_changed`) and of the read: `{space_ref, subject_id, [changed], history_window}`.
+/// The window is Control's, rebuilt; the two ids are the request's, so an answer is never relabelled.
+fn history_window_reply(
+    control: &Value,
+    space_ref: &str,
+    subject_id: &str,
+    with_changed: bool,
+) -> Reply {
+    let data = unwrap_data(control);
+    let Some(window) = history_window_view(data.get("history_window")) else {
+        return invalid_history_window_answer();
+    };
+    let mut out = json!({
+        "space_ref": space_ref,
+        "subject_id": subject_id,
+        "history_window": window,
+    });
+    if with_changed {
+        let changed = data.get("changed").and_then(Value::as_bool).unwrap_or(false);
+        out["changed"] = json!(changed);
+    }
+    (StatusCode::OK, Json(json!({ "data": out })))
+}
+
+/// `PUT /api/v1/spaces/{space_ref}/members/{subject_id}/history-window`: sets one member's window. Control answers
+/// who may (a room owner or manager), refuses an archived room (409 `room_archived`), a roster derived from the
+/// organization (409 `room_roster_derived`), a member who is not active in the room (404 `member_not_found`), a stale
+/// `expected_revision` (409 `room_member_changed`, `details.current_revision`), a bad pair (422
+/// `member_history_window_invalid`, `details.field`) and, while its own switch is off, every write (503
+/// `member_history_window_unavailable`). Every typed refusal passes through with its status. The organization and the
+/// acting user come from the session, never from the path or the body. It is set-to-state, so a repeat answers
+/// `changed:false`, and it shares the member-operation ceiling. A window changes what one member sees, never the
+/// recipient set, so no audience reconcile follows.
+pub(crate) async fn set_member_history_window(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    space_ref: &str,
+    subject_id: &str,
+    body: &Value,
+) -> Reply {
+    if !state.space_features.member_history_windows {
+        return member_history_windows_disabled();
+    }
+    let (org_id, space_ref) = match scope(state, user, space_ref).await {
+        Ok(scope) => scope,
+        Err(reply) => return reply,
+    };
+    let subject_id = match window_subject(subject_id) {
+        Ok(subject) => subject,
+        Err(reply) => return reply,
+    };
+    let payload = match history_window_payload(body) {
+        Ok(payload) => payload,
+        Err(reply) => return reply,
+    };
+    if let Err(reply) = member_ops_allowed(state, &org_id, user).await {
+        return reply;
+    }
+    let (status, Json(control)) = proxy_json(
+        state,
+        Method::PUT,
+        &history_window_url(state, &space_ref, &subject_id),
+        Some(payload),
+        Some(&org_id),
+        Some(&actor_of(user)),
+        None,
+    )
+    .await;
+    if !status.is_success() {
+        return relay_control_error(status, control);
+    }
+    history_window_reply(&control, &space_ref, &subject_id, true)
+}
+
+/// `GET /api/v1/spaces/{space_ref}/members/{subject_id}/history-window`: reads one member's window for a room owner or
+/// manager (Control's rule; anyone else is refused and a stranger to the room gets the answer of an unknown room). A
+/// member with no window of their own reads under the room's mode (`source: "room"`). A read is not a member operation
+/// and is not rate limited, so a member list can read one window per row.
+pub(crate) async fn get_member_history_window(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    space_ref: &str,
+    subject_id: &str,
+) -> Reply {
+    if !state.space_features.member_history_windows {
+        return member_history_windows_disabled();
+    }
+    let (org_id, space_ref) = match scope(state, user, space_ref).await {
+        Ok(scope) => scope,
+        Err(reply) => return reply,
+    };
+    let subject_id = match window_subject(subject_id) {
+        Ok(subject) => subject,
+        Err(reply) => return reply,
+    };
+    let (status, Json(control)) = proxy_json(
+        state,
+        Method::GET,
+        &history_window_url(state, &space_ref, &subject_id),
+        None,
+        Some(&org_id),
+        Some(&actor_of(user)),
+        None,
+    )
+    .await;
+    if !status.is_success() {
+        return relay_control_error(status, control);
+    }
+    history_window_reply(&control, &space_ref, &subject_id, false)
+}
+
+/// Axum handler for `PUT /api/v1/spaces/{space_ref}/members/{subject_id}/history-window`. The switch is checked before
+/// the body is read, and a malformed or oversized body is a typed 400 rather than the framework's plain-text rejection.
+pub(super) async fn put_member_history_window_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path((space_ref, subject_id)): Path<(String, String)>,
+    raw: Bytes,
+) -> Response {
+    if !state.space_features.member_history_windows {
+        return no_store(member_history_windows_disabled());
+    }
+    no_store(match parse_optional_body(&raw) {
+        Ok(body) => set_member_history_window(&state, &user, &space_ref, &subject_id, &body).await,
+        Err(reply) => reply,
+    })
+}
+
+/// Axum handler for `GET /api/v1/spaces/{space_ref}/members/{subject_id}/history-window`.
+pub(super) async fn get_member_history_window_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path((space_ref, subject_id)): Path<(String, String)>,
+) -> Response {
+    no_store(get_member_history_window(&state, &user, &space_ref, &subject_id).await)
+}
+
+/// The two history-window routes, merged by `module_routes` so they are session-gated like every module route.
+pub(super) fn routes() -> Router<AppState> {
+    Router::new().route(
+        "/api/v1/spaces/{space_ref}/members/{subject_id}/history-window",
+        put(put_member_history_window_route).get(get_member_history_window_route),
+    )
 }
 
 #[cfg(test)]
@@ -2383,5 +2755,879 @@ mod tests {
             vec![json!({"visibility": "org_public", "join_role": "viewer", "history_mode": "since_join", "idempotency_key": "set-key-1"})]
         );
         assert!(convex_requests(&fx).await.is_empty(), "a settings change does not alter the recipient set");
+    }
+
+    // ---- D18: per-member room history -----------------------------------------------------------------
+
+    const CONTROL_WINDOW: &str = "/api/v1/internal/spaces/space-room/members/user-2/history-window";
+    const WINDOW: &str = "/api/v1/spaces/space-room/members/user-2/history-window";
+
+    /// The gateway with its own history-window switch on and the caller holding `role`.
+    async fn fx_windows(role: &str) -> Fx {
+        let mut fx = fx(role).await;
+        fx.state.space_features.member_history_windows = true;
+        fx
+    }
+
+    /// Like `call`, but with a raw JSON body and the response headers.
+    async fn send(
+        fx: &Fx,
+        method: &str,
+        uri: &str,
+        raw: Option<&str>,
+        extra_headers: &[(&str, &str)],
+    ) -> (u16, Value, axum::http::HeaderMap) {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", "better-auth.session_token=session-1");
+        for (name, value) in extra_headers {
+            request = request.header(*name, *value);
+        }
+        if raw.is_some() {
+            request = request.header("content-type", "application/json");
+        }
+        let response = crate::build_router(fx.state.clone())
+            .oneshot(
+                request
+                    .body(match raw {
+                        Some(raw) => Body::from(raw.to_owned()),
+                        None => Body::empty(),
+                    })
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let headers = response.headers().clone();
+        let payload: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, payload, headers)
+    }
+
+    /// The one Control request with this method and path.
+    async fn control_request(fx: &Fx, method: &str, path: &str) -> wiremock::Request {
+        fx.user_core
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|request| request.method.as_str() == method && request.url.path() == path)
+            .unwrap_or_else(|| panic!("no Control {method} {path}"))
+    }
+
+    fn header_of(request: &wiremock::Request, name: &str) -> Option<String> {
+        request.headers.get(name).and_then(|value| value.to_str().ok()).map(str::to_owned)
+    }
+
+    fn membership_reads(requests: &[wiremock::Request]) -> usize {
+        requests.iter().filter(|request| request.url.path().ends_with("/membership")).count()
+    }
+
+    #[tokio::test]
+    async fn d18_the_history_window_routes_answer_404_feature_disabled_with_the_switch_off_and_call_nothing() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx("owner").await;
+        assert!(!fx.state.space_features.member_history_windows, "off by default");
+        let valid = json!({"mode": "since_date", "since_at": "2026-11-01T00:00:00Z"}).to_string();
+        for (method, raw) in [
+            ("PUT", Some(valid.as_str())),
+            // The switch comes before the body is read: a malformed body is still the 404.
+            ("PUT", Some("{not json")),
+            ("PUT", None),
+            ("GET", None),
+        ] {
+            let (status, body, headers) = send(&fx, method, WINDOW, raw, &[]).await;
+            assert_eq!(status, 404, "{method} {raw:?}");
+            assert_eq!(body["error"]["code"], "feature_disabled", "{method} {raw:?}");
+            assert_eq!(headers.get("cache-control").and_then(|value| value.to_str().ok()), Some("no-store"));
+        }
+        assert!(control_calls(&fx).await.is_empty());
+        assert!(convex_requests(&fx).await.is_empty());
+        assert_eq!(
+            membership_reads(&fx.user_core.received_requests().await.unwrap()),
+            0,
+            "the switch is checked before Control is asked anything"
+        );
+        // The functions the routes share answer the same way.
+        let user = crate::middleware::AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "User One".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        };
+        let (status, axum::Json(body)) =
+            super::set_member_history_window(&fx.state, &user, "space-room", "user-2", &json!({"mode": "full"})).await;
+        assert_eq!((status.as_u16(), &body["error"]["code"]), (404, &json!("feature_disabled")));
+        let (status, _) = super::get_member_history_window(&fx.state, &user, "space-room", "user-2").await;
+        assert_eq!(status.as_u16(), 404);
+        assert!(control_calls(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn d18_put_forwards_the_closed_fields_in_canonical_form_and_returns_the_rebuilt_window() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx_windows("owner").await;
+        mount_control(
+            &fx,
+            "PUT",
+            CONTROL_WINDOW,
+            control_ok(json!({
+                "space_ref": "space-room", "subject_id": "user-2", "changed": true,
+                "history_window": {
+                    "source": "member", "mode": "since_date", "since_at": "2026-11-01T08:00:00Z", "revision": 3,
+                    "set_by": "internal-user", "floor_token": "internal-secret"
+                },
+                "debug": "internal"
+            })),
+        )
+        .await;
+        mount_convex(&fx, "/api/action", reconcile("replaced")).await;
+        let request = json!({"mode": " since_date ", "since_at": " 2026-11-01T09:00:00+01:00 ", "expected_revision": 2});
+        let (status, body, headers) = send(
+            &fx,
+            "PUT",
+            WINDOW,
+            Some(&request.to_string()),
+            &[("x-org-id", "forged-org"), ("x-user-id", "forged-user"), ("x-delegation-signature", "forged")],
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            json!({"data": {
+                "space_ref": "space-room", "subject_id": "user-2", "changed": true,
+                "history_window": {"source": "member", "mode": "since_date", "since_at": "2026-11-01T08:00:00Z", "revision": 3}
+            }}),
+            "exactly four window fields come back: nothing else Control said"
+        );
+        assert_eq!(headers.get("cache-control").and_then(|value| value.to_str().ok()), Some("no-store"));
+        assert!(!body.to_string().contains("internal"), "{body}");
+        // Control got the closed fields only, the instant as one canonical UTC string, under the session's identity.
+        let sent = control_request(&fx, "PUT", CONTROL_WINDOW).await;
+        assert_eq!(
+            serde_json::from_slice::<Value>(&sent.body).unwrap(),
+            json!({"mode": "since_date", "since_at": "2026-11-01T08:00:00Z", "expected_revision": 2})
+        );
+        assert_eq!(header_of(&sent, "x-org-id").as_deref(), Some("org-1"), "the organization is the session's");
+        assert_eq!(header_of(&sent, "x-user-id").as_deref(), Some("user-1"), "the actor is the session's");
+        assert_eq!(header_of(&sent, "x-service-id").as_deref(), Some("verevon-gateway"));
+        let signature = header_of(&sent, "x-delegation-signature").expect("a signed delegation");
+        assert_ne!(signature, "forged");
+        assert!(header_of(&sent, "x-delegation-body-sha256").is_some());
+        assert!(
+            convex_requests(&fx).await.is_empty(),
+            "a window changes what one member sees, never the recipient set: no audience reconcile"
+        );
+    }
+
+    #[tokio::test]
+    async fn d18_put_sends_only_the_mode_for_full_and_since_join_and_leaves_the_pair_rule_to_control() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (mode, source, changed) in [("full", "member", true), ("since_join", "member", false)] {
+            let fx = fx_windows("manager").await;
+            mount_control(
+                &fx,
+                "PUT",
+                CONTROL_WINDOW,
+                control_ok(json!({
+                    "changed": changed,
+                    "history_window": {"source": source, "mode": mode, "since_at": null, "revision": 1}
+                })),
+            )
+            .await;
+            let (status, body, _) = send(&fx, "PUT", WINDOW, Some(&json!({"mode": mode}).to_string()), &[]).await;
+            assert_eq!(status, 200, "{mode}: {body}");
+            assert_eq!(body["data"]["changed"], changed, "{mode}");
+            assert_eq!(body["data"]["history_window"]["mode"], mode);
+            assert!(body["data"]["history_window"]["since_at"].is_null());
+            let sent = control_received(&fx, "PUT", CONTROL_WINDOW).await;
+            assert_eq!(sent, vec![json!({"mode": mode})], "an unsent field stays unsent");
+        }
+        // A pair Control refuses (an instant with a mode that takes none) is forwarded for Control to refuse:
+        // the gateway checks the shape of the instant, not what the pair means.
+        let fx = fx_windows("owner").await;
+        mount_control(
+            &fx,
+            "PUT",
+            CONTROL_WINDOW,
+            ResponseTemplate::new(422).set_body_json(json!({"error": {
+                "code": "member_history_window_invalid", "message": "since_at is only allowed with since_date",
+                "details": {"field": "since_at"}
+            }})),
+        )
+        .await;
+        let (status, body, _) = send(
+            &fx,
+            "PUT",
+            WINDOW,
+            Some(&json!({"mode": "full", "since_at": "2026-11-01T00:00:00Z"}).to_string()),
+            &[],
+        )
+        .await;
+        assert_eq!(status, 422, "{body}");
+        assert_eq!(body["error"]["code"], "member_history_window_invalid");
+        assert_eq!(body["error"]["details"], json!({"field": "since_at"}));
+        assert_eq!(
+            control_received(&fx, "PUT", CONTROL_WINDOW).await,
+            vec![json!({"mode": "full", "since_at": "2026-11-01T00:00:00Z"})]
+        );
+    }
+
+    #[tokio::test]
+    async fn d18_put_refuses_bad_bodies_before_control_is_called() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx_windows("owner").await;
+        let cases: Vec<(Value, &str)> = vec![
+            (json!({}), "mode"),
+            (json!({"since_at": "2026-11-01T00:00:00Z"}), "mode"),
+            (json!({"mode": null}), "mode"),
+            (json!({"mode": 3}), "mode"),
+            (json!({"mode": ""}), "mode"),
+            (json!({"mode": "forever"}), "mode"),
+            // `room` is the explicit no-override row only an invite writes; a person can never request it.
+            (json!({"mode": "room"}), "mode"),
+            (json!({"mode": "Full"}), "mode"),
+            (json!({"mode": "since_date", "since_at": "yesterday"}), "since_at"),
+            (json!({"mode": "since_date", "since_at": "2026-11-01"}), "since_at"),
+            (json!({"mode": "since_date", "since_at": "2026-11-01T09:00:00"}), "since_at"),
+            (json!({"mode": "since_date", "since_at": 1_730_000_000}), "since_at"),
+            (json!({"mode": "since_date", "since_at": ""}), "since_at"),
+            (json!({"mode": "since_date", "since_at": "9".repeat(80)}), "since_at"),
+            (json!({"mode": "since_date", "since_at": ["2026-11-01T00:00:00Z"]}), "since_at"),
+            (json!({"mode": "full", "expected_revision": -1}), "expected_revision"),
+            (json!({"mode": "full", "expected_revision": "3"}), "expected_revision"),
+            (json!({"mode": "full", "expected_revision": 1.5}), "expected_revision"),
+            (json!({"mode": "full", "org_id": "forged"}), "body"),
+            (json!({"mode": "full", "subject_id": "user-9"}), "body"),
+            (json!({"mode": "full", "actor_id": "forged"}), "body"),
+            (json!({"mode": "full", "history_floor_at": "2026-01-01T00:00:00Z"}), "body"),
+            (json!({"mode": "full", "idempotency_key": "k"}), "body"),
+            (json!(["full"]), "body"),
+            (json!("full"), "body"),
+        ];
+        for (body, field) in cases {
+            let (status, got, _) = send(&fx, "PUT", WINDOW, Some(&body.to_string()), &[]).await;
+            assert_eq!(status, 400, "{body}");
+            assert_eq!(got["error"]["code"], "invalid_request", "{body}");
+            assert_eq!(got["error"]["details"]["field"], field, "{body}");
+        }
+        assert!(control_calls(&fx).await.is_empty(), "nothing reached Control");
+        assert!(convex_requests(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn d18_put_answers_a_typed_400_for_a_missing_malformed_or_oversized_body() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx_windows("owner").await;
+        let oversized = format!("{}{{}}", " ".repeat(5000));
+        for (raw, field) in [
+            (None, "mode"),
+            (Some(""), "mode"),
+            (Some("   \n"), "mode"),
+            (Some("{not json"), "body"),
+            (Some("null"), "body"),
+            (Some(oversized.as_str()), "body"),
+        ] {
+            let (status, got, _) = send(&fx, "PUT", WINDOW, raw, &[]).await;
+            assert_eq!(status, 400, "{raw:?}");
+            assert_eq!(got["error"]["code"], "invalid_request", "a typed envelope, never the framework's text: {raw:?}");
+            assert_eq!(got["error"]["details"]["field"], field, "{raw:?}");
+        }
+        assert!(control_calls(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn d18_put_and_get_pass_every_typed_control_refusal_through_with_its_status() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let refusals: Vec<(u16, &str, Option<Value>)> = vec![
+            (400, "invalid_request", Some(json!({"field": "mode"}))),
+            (403, "room_role_forbidden", None),
+            (403, "room_delegation_required", None),
+            (404, "room_not_found", None),
+            (404, "member_not_found", None),
+            (409, "room_archived", None),
+            (409, "room_roster_derived", None),
+            (409, "room_member_changed", Some(json!({"current_revision": 7}))),
+            (422, "member_history_window_invalid", Some(json!({"field": "since_at"}))),
+            (503, "member_history_window_unavailable", None),
+            (503, "space_authority_unavailable", None),
+        ];
+        let put_body = json!({"mode": "since_date", "since_at": "2026-11-01T00:00:00Z"});
+        for (control_status, code, details) in refusals {
+            for (method, body) in [("PUT", Some(put_body.clone())), ("GET", None)] {
+                let fx = fx_windows("owner").await;
+                // Control's typed envelope always carries `details`, an empty object when a refusal has none.
+                let wanted = details.clone().unwrap_or_else(|| json!({}));
+                let mut with_extras = wanted.clone();
+                // What Control adds beyond scalars never reaches the browser.
+                with_extras["nested"] = json!({"x": 1});
+                with_extras["list"] = json!([1]);
+                mount_control(
+                    &fx,
+                    method,
+                    CONTROL_WINDOW,
+                    ResponseTemplate::new(control_status).set_body_json(json!({
+                        "error": {"code": code, "message": "Refused.", "details": with_extras},
+                        "debug": "internal trace", "token": "secret"
+                    })),
+                )
+                .await;
+                mount_convex(&fx, "/api/action", reconcile("replaced")).await;
+                let (status, got) = call(&fx, method, WINDOW, body, &[]).await;
+                assert_eq!(status, control_status, "{method} {code}");
+                assert_eq!(
+                    got,
+                    json!({"error": {"code": code, "message": "Refused.", "details": wanted}}),
+                    "{method} {code}"
+                );
+                assert!(convex_requests(&fx).await.is_empty(), "{method} {code}: a refusal reconciles nothing");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn d18_an_untyped_or_session_looking_control_failure_is_a_503_that_leaks_nothing() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let cases = [
+            ResponseTemplate::new(500).set_body_json(json!({"error": "boom-internal"})),
+            ResponseTemplate::new(403).set_body_json(json!({"error": "boom-internal"})),
+            // A typed 401 would read as an expired session in the SPA: it becomes the 503 as well.
+            ResponseTemplate::new(401).set_body_json(json!({"error": {"code": "unauthorized", "message": "boom-internal"}})),
+            ResponseTemplate::new(409).set_body_json(json!({"error": {"code": "Bad Code!", "message": "boom-internal"}})),
+        ];
+        for template in cases {
+            for (method, body) in [("PUT", Some(json!({"mode": "full"}))), ("GET", None)] {
+                let fx = fx_windows("owner").await;
+                mount_control(&fx, method, CONTROL_WINDOW, template.clone()).await;
+                let (status, got) = call(&fx, method, WINDOW, body, &[]).await;
+                assert_eq!(status, 503, "{method} {got}");
+                assert_eq!(got["error"]["code"], "room_admin_unavailable", "{method}");
+                assert!(!got.to_string().contains("boom-internal"), "{method} {got}");
+            }
+        }
+        // A body that is not JSON is reduced by the upstream layer to its own fixed words.
+        let fx = fx_windows("owner").await;
+        mount_control(&fx, "GET", CONTROL_WINDOW, ResponseTemplate::new(502).set_body_string("<html>boom-internal</html>")).await;
+        let (status, got) = call(&fx, "GET", WINDOW, None, &[]).await;
+        assert_eq!(status, 502, "{got}");
+        assert_eq!(got["error"]["code"], "upstream_error");
+        assert!(!got.to_string().contains("boom-internal"), "{got}");
+    }
+
+    #[tokio::test]
+    async fn d18_a_control_success_that_is_not_a_window_is_a_502_and_never_a_success() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let bad: Vec<Value> = vec![
+            json!({}),
+            json!({"data": {}}),
+            json!({"data": {"changed": true}}),
+            json!({"data": {"history_window": "full"}}),
+            json!({"data": {"history_window": null}}),
+            json!({"data": {"history_window": {"mode": "full"}}}),
+            json!({"data": {"history_window": {"source": "member"}}}),
+            json!({"data": {"history_window": {"source": "member", "mode": 7}}}),
+            json!({"data": {"history_window": {"source": "Member Row", "mode": "full"}}}),
+            json!({"data": {"history_window": {"source": "member", "mode": "since_date", "since_at": 5}}}),
+            json!({"data": {"history_window": {"source": "member", "mode": "since_date", "since_at": "not a date"}}}),
+            json!({"data": {"history_window": {"source": "member", "mode": "full", "revision": -1}}}),
+            json!({"data": {"history_window": {"source": "member", "mode": "full", "revision": "1"}}}),
+            json!({"data": {"history_window": {"source": "member", "mode": "full", "revision": 1.5}}}),
+        ];
+        for control_body in bad {
+            for (method, body) in [("PUT", Some(json!({"mode": "full"}))), ("GET", None)] {
+                let fx = fx_windows("owner").await;
+                mount_control(&fx, method, CONTROL_WINDOW, ResponseTemplate::new(200).set_body_json(control_body.clone())).await;
+                let (status, got) = call(&fx, method, WINDOW, body, &[]).await;
+                assert_eq!(status, 502, "{method} {control_body}");
+                // The upstream layer's own code, which the SPA already words: no code of its own for a should-never-happen.
+                assert_eq!(got["error"]["code"], "upstream_unavailable", "{method} {control_body}");
+                assert!(got.get("data").is_none(), "{method} {control_body}");
+            }
+        }
+        // A 200 whose body is not JSON at all is the same: the upstream layer reads it as an empty answer.
+        for (method, body) in [("PUT", Some(json!({"mode": "full"}))), ("GET", None)] {
+            let fx = fx_windows("owner").await;
+            mount_control(&fx, method, CONTROL_WINDOW, ResponseTemplate::new(200).set_body_string("<html>boom-internal</html>")).await;
+            let (status, got) = call(&fx, method, WINDOW, body, &[]).await;
+            assert_eq!(status, 502, "{method} {got}");
+            assert_eq!(got["error"]["code"], "upstream_unavailable", "{method}");
+            assert!(!got.to_string().contains("boom-internal"), "{method} {got}");
+        }
+    }
+
+    #[tokio::test]
+    async fn d18_get_reads_the_window_with_no_body_and_a_member_without_a_row_reads_under_the_room() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx_windows("manager").await;
+        mount_control(
+            &fx,
+            "GET",
+            CONTROL_WINDOW,
+            control_ok(json!({
+                "space_ref": "space-room", "subject_id": "user-2",
+                "history_window": {"source": "room", "mode": "since_join", "since_at": null, "revision": 0}
+            })),
+        )
+        .await;
+        let (status, body, headers) = send(
+            &fx,
+            "GET",
+            &format!("{WINDOW}?org_id=forged&mode=full"),
+            None,
+            &[("x-org-id", "forged-org")],
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            json!({"data": {
+                "space_ref": "space-room", "subject_id": "user-2",
+                "history_window": {"source": "room", "mode": "since_join", "since_at": null, "revision": 0}
+            }}),
+            "a read has no `changed`"
+        );
+        assert_eq!(headers.get("cache-control").and_then(|value| value.to_str().ok()), Some("no-store"));
+        let sent = control_request(&fx, "GET", CONTROL_WINDOW).await;
+        assert!(sent.body.is_empty(), "a read forwards no body");
+        assert_eq!(sent.url.query(), None, "nothing of the browser's query reaches Control");
+        assert_eq!(header_of(&sent, "x-org-id").as_deref(), Some("org-1"));
+        assert_eq!(header_of(&sent, "x-user-id").as_deref(), Some("user-1"));
+        assert!(convex_requests(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn d18_the_ids_in_the_answer_are_the_requests_and_a_changed_flag_defaults_to_false() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx_windows("owner").await;
+        // Control names other ids: the answer is never relabelled by them.
+        mount_control(
+            &fx,
+            "PUT",
+            CONTROL_WINDOW,
+            control_ok(json!({
+                "space_ref": "space-other", "subject_id": "user-9",
+                "history_window": {"source": "member", "mode": "full"}
+            })),
+        )
+        .await;
+        let (status, body, _) = send(&fx, "PUT", &format!("{ROOM}/members/user-2/history-window"), Some(&json!({"mode": "full"}).to_string()), &[]).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body["data"],
+            json!({
+                "space_ref": "space-room", "subject_id": "user-2", "changed": false,
+                "history_window": {"source": "member", "mode": "full", "since_at": null, "revision": 0}
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn d18_subject_ids_that_would_leave_the_control_path_or_are_not_ids_are_refused() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx_windows("owner").await;
+        let long = "u".repeat(201);
+        for (subject, code) in [
+            ("%2E%2E", "invalid_request"),
+            ("%2E", "invalid_request"),
+            ("%20", "member_required"),
+            ("%00", "invalid_request"),
+            ("user%0A2", "invalid_request"),
+            ("user%2F2", "invalid_request"),
+            ("user%5C2", "invalid_request"),
+            (long.as_str(), "invalid_request"),
+        ] {
+            for (method, raw) in [("PUT", Some(r#"{"mode":"full"}"#)), ("GET", None)] {
+                let (status, got, _) =
+                    send(&fx, method, &format!("{ROOM}/members/{subject}/history-window"), raw, &[]).await;
+                assert_eq!(status, 400, "{method} {subject}: {got}");
+                assert_eq!(got["error"]["code"], code, "{method} {subject}");
+            }
+        }
+        assert!(control_calls(&fx).await.is_empty(), "no refused id reached Control");
+    }
+
+    #[tokio::test]
+    async fn d18_the_history_window_path_takes_put_and_get_only_and_the_member_routes_still_work() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = fx_windows("owner").await;
+        fx.state.space_features.membership_writer_api = true;
+        for method in ["POST", "PATCH", "DELETE"] {
+            let (status, _, _) = send(&fx, method, WINDOW, Some(r#"{"mode":"full"}"#), &[]).await;
+            assert_eq!(status, 405, "{method}");
+        }
+        assert!(control_calls(&fx).await.is_empty());
+        // Both routes share the `members/{id}` segment: the role change and the removal still resolve.
+        mount_control(&fx, "PATCH", &format!("{CONTROL_MEMBERS}/user-2"), control_ok(json!({"role": "viewer", "from_role": "editor", "changed": true}))).await;
+        let (status, got) = call(&fx, "PATCH", &format!("{ROOM}/members/user-2"), Some(json!({"role": "viewer"})), &[]).await;
+        assert_eq!(status, 200, "{got}");
+        mount_control(&fx, "DELETE", &format!("{CONTROL_MEMBERS}/user-2"), control_ok(json!({"changed": true, "left": false, "member_count": 1}))).await;
+        mount_convex(&fx, "/api/action", reconcile("noop")).await;
+        let (status, got) = call(&fx, "DELETE", &format!("{ROOM}/members/user-2"), None, &[]).await;
+        assert_eq!(status, 200, "{got}");
+    }
+
+    /// The window routes move a mode and an instant, no content: a ZDR organization is not refused, and no model is called.
+    /// The positive control proves the fixture really is ZDR: a durable content write is refused with the typed 412.
+    #[tokio::test]
+    async fn d18_a_zdr_organization_may_set_and_read_a_window_and_no_model_is_called() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = fx_windows("owner").await;
+        let org = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"metadata": {"interactiveRetention": {"zdr": true}}}
+            })))
+            .mount(&org)
+            .await;
+        fx.state.org_core_url = org.uri();
+        let (status, _) = call(&fx, "PATCH", &format!("{ROOM}/instructions"), Some(json!({"instructions": "x"})), &[]).await;
+        assert_eq!(status, 412, "the fixture is a ZDR organization: a durable content write is refused");
+        mount_control(
+            &fx,
+            "PUT",
+            CONTROL_WINDOW,
+            control_ok(json!({"changed": true, "history_window": {"source": "member", "mode": "since_join", "since_at": null, "revision": 1}})),
+        )
+        .await;
+        mount_control(
+            &fx,
+            "GET",
+            CONTROL_WINDOW,
+            control_ok(json!({"history_window": {"source": "member", "mode": "since_join", "since_at": null, "revision": 1}})),
+        )
+        .await;
+        let (status, body, _) = send(&fx, "PUT", WINDOW, Some(r#"{"mode":"since_join"}"#), &[("x-zdr", "true")]).await;
+        assert_eq!(status, 200, "{body}");
+        let (status, body, _) = send(&fx, "GET", WINDOW, None, &[("x-zdr", "true")]).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(fx.model_gateway.received_requests().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn d18_canonical_instant_is_the_same_instant_in_utc_and_a_bad_string_is_none() {
+        assert_eq!(super::canonical_instant("2026-11-01T08:00:00Z").as_deref(), Some("2026-11-01T08:00:00Z"));
+        assert_eq!(super::canonical_instant(" 2026-11-01T09:00:00+01:00 ").as_deref(), Some("2026-11-01T08:00:00Z"));
+        assert_eq!(super::canonical_instant("2026-11-01T09:00:00.5+01:00").as_deref(), Some("2026-11-01T08:00:00.500Z"));
+        assert_eq!(super::canonical_instant("2026-10-31T23:30:00-05:00").as_deref(), Some("2026-11-01T04:30:00Z"));
+        for bad in ["", "  ", "2026-11-01", "2026-11-01T09:00:00", "yesterday", "2026-13-01T00:00:00Z", "2026-11-01T24:30:00Z"] {
+            assert_eq!(super::canonical_instant(bad), None, "{bad:?}");
+        }
+        assert_eq!(super::canonical_instant(&"9".repeat(65)), None);
+    }
+
+    #[test]
+    fn d18_history_window_view_rebuilds_four_fields_and_rejects_anything_that_is_not_a_window() {
+        let view = super::history_window_view(Some(&json!({
+            "source": "member", "mode": "since_date", "since_at": " 2026-11-01T08:00:00Z ", "revision": 4,
+            "set_by": "user-1", "extra": {"nested": true}
+        })))
+        .expect("a window");
+        assert_eq!(
+            view,
+            json!({"source": "member", "mode": "since_date", "since_at": "2026-11-01T08:00:00Z", "revision": 4})
+        );
+        // A missing revision is 0 and a missing or null instant is null: both are what a room-sourced window reports.
+        assert_eq!(
+            super::history_window_view(Some(&json!({"source": "room", "mode": "full"}))),
+            Some(json!({"source": "room", "mode": "full", "since_at": null, "revision": 0}))
+        );
+        // A mode the gateway does not know is a plain word and passes; a window is not an outage.
+        assert!(super::history_window_view(Some(&json!({"source": "member", "mode": "since_message"}))).is_some());
+        for bad in [
+            None,
+            Some(json!(null)),
+            Some(json!([])),
+            Some(json!("full")),
+            Some(json!({})),
+            Some(json!({"source": "member"})),
+            Some(json!({"mode": "full"})),
+            Some(json!({"source": "", "mode": "full"})),
+            Some(json!({"source": "member", "mode": "since join"})),
+            Some(json!({"source": "member", "mode": "full", "since_at": "soon"})),
+            Some(json!({"source": "member", "mode": "full", "revision": -2})),
+            Some(json!({"source": "member", "mode": "full", "revision": 1.25})),
+        ] {
+            assert_eq!(super::history_window_view(bad.as_ref()), None, "{bad:?}");
+        }
+    }
+
+    // ---- D18: the invite's choice on POST .../members -------------------------------------------------
+
+    #[tokio::test]
+    async fn d18_add_member_forwards_share_past_conversation_as_given_and_returns_the_window() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        // The gateway's own window switch is not what carries the choice: it is forwarded either way.
+        for windows_switch in [false, true] {
+            for (request_value, want_sent, window) in [
+                (
+                    Some(json!(false)),
+                    Some(false),
+                    json!({"source": "member", "mode": "since_join", "since_at": null, "revision": 1, "set_by": "user-1"}),
+                ),
+                (
+                    Some(json!(true)),
+                    Some(true),
+                    json!({"source": "room", "mode": "full", "since_at": null, "revision": 0}),
+                ),
+                (None, None, json!({"source": "room", "mode": "since_join", "since_at": null, "revision": 0})),
+                (
+                    Some(Value::Null),
+                    None,
+                    json!({"source": "room", "mode": "full", "since_at": null, "revision": 0}),
+                ),
+            ] {
+                let mut fx = fx_writer("owner").await;
+                fx.state.space_features.member_history_windows = windows_switch;
+                mount_control(
+                    &fx,
+                    "POST",
+                    CONTROL_MEMBERS,
+                    control_ok(json!({"member_count": 2, "changed": true, "role": "editor", "history_window": window})),
+                )
+                .await;
+                mount_convex(&fx, "/api/action", reconcile("noop")).await;
+                mount_convex(&fx, "/api/mutation", ResponseTemplate::new(200).set_body_json(json!({"value": {"recorded": true}}))).await;
+                let mut request = json!({"member_id": "user-2", "role": "viewer"});
+                if let Some(value) = &request_value {
+                    request["share_past_conversation"] = value.clone();
+                }
+                let (status, body) = call(&fx, "POST", &format!("{ROOM}/members"), Some(request), &[]).await;
+                assert_eq!(status, 200, "{request_value:?}: {body}");
+                let sent = control_received(&fx, "POST", CONTROL_MEMBERS).await;
+                assert_eq!(sent.len(), 1);
+                assert_eq!(
+                    sent[0].get("share_past_conversation").and_then(Value::as_bool),
+                    want_sent,
+                    "switch={windows_switch} {request_value:?}: forwarded exactly as given, absent when not chosen"
+                );
+                assert!(
+                    sent[0].get("share_past_conversation").is_none() || sent[0]["share_past_conversation"].is_boolean(),
+                    "only ever a boolean"
+                );
+                assert_eq!(sent[0]["subject_id"], "user-2");
+                // The window the member reads under comes back rebuilt, with nothing else Control said.
+                let got = &body["data"]["history_window"];
+                assert_eq!(got.as_object().map(|window| window.len()), Some(4), "{body}");
+                assert_eq!(got["source"], window["source"]);
+                assert_eq!(got["mode"], window["mode"]);
+                assert!(got["since_at"].is_null());
+                assert!(!body.to_string().contains("set_by"), "{body}");
+                // The rest of the answer is exactly what it was before D18.
+                assert_eq!(body["data"]["member_count"], 2);
+                assert_eq!(body["data"]["changed"], true);
+                assert_eq!(body["data"]["role"], "editor");
+                assert_eq!(body["data"]["audience"]["state"], "current");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn d18_add_member_answers_no_window_when_control_reports_none_and_never_makes_one_up() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        // A replay or an already-active member: Control answers no `history_window`.
+        let fx = fx_writer("owner").await;
+        mount_control(&fx, "POST", CONTROL_MEMBERS, control_ok(json!({"member_count": 2, "changed": false, "role": "editor"}))).await;
+        mount_convex(&fx, "/api/action", reconcile("noop")).await;
+        let (status, body) = call(&fx, "POST", &format!("{ROOM}/members"), Some(json!({"member_id": "user-2"})), &[]).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(body["data"].get("history_window").is_none(), "{body}");
+        // A malformed one is left out and the success stands: the add already committed in Control.
+        for malformed in [json!("full"), json!({"mode": 7}), json!({"source": "member", "mode": "full", "revision": -1}), json!([])] {
+            let fx = fx_writer("owner").await;
+            mount_control(
+                &fx,
+                "POST",
+                CONTROL_MEMBERS,
+                control_ok(json!({"member_count": 3, "changed": true, "role": "editor", "history_window": malformed})),
+            )
+            .await;
+            mount_convex(&fx, "/api/action", reconcile("noop")).await;
+            mount_convex(&fx, "/api/mutation", ResponseTemplate::new(200).set_body_json(json!({"value": {"recorded": true}}))).await;
+            let (status, body) = call(&fx, "POST", &format!("{ROOM}/members"), Some(json!({"member_id": "user-2", "share_past_conversation": false})), &[]).await;
+            assert_eq!(status, 200, "{malformed}: {body}");
+            assert_eq!(body["data"]["member_count"], 3);
+            assert_eq!(body["data"]["changed"], true);
+            assert!(body["data"].get("history_window").is_none(), "{malformed}: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn d18_add_member_refuses_a_choice_that_is_not_a_boolean_before_control_is_called() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx_writer("owner").await;
+        // A value that is not a boolean must never degrade into "no choice" and share the past.
+        for value in [json!("false"), json!("true"), json!("no"), json!(0), json!(1), json!([]), json!([false]), json!({}), json!({"value": false})] {
+            let (status, got) = call(
+                &fx,
+                "POST",
+                &format!("{ROOM}/members"),
+                Some(json!({"member_id": "user-2", "share_past_conversation": value})),
+                &[],
+            )
+            .await;
+            assert_eq!(status, 400, "{value}");
+            assert_eq!(got["error"]["code"], "invalid_request", "{value}");
+            assert_eq!(got["error"]["details"]["field"], "share_past_conversation", "{value}");
+        }
+        assert!(control_calls(&fx).await.is_empty(), "nothing reached Control");
+        assert!(convex_requests(&fx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn d18_add_member_passes_the_window_unavailable_refusal_through_and_adds_nobody() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (status_in, code) in [
+            (503u16, "member_history_window_unavailable"),
+            (503, "space_authority_unavailable"),
+            (403, "room_role_forbidden"),
+            (409, "room_archived"),
+        ] {
+            let fx = fx_writer("owner").await;
+            // Control's typed envelope always carries `details`, an empty object when a refusal has none.
+            let error = json!({"code": code, "message": "Refused.", "details": {}});
+            mount_control(&fx, "POST", CONTROL_MEMBERS, ResponseTemplate::new(status_in).set_body_json(json!({"error": error}))).await;
+            mount_convex(&fx, "/api/action", reconcile("replaced")).await;
+            mount_convex(&fx, "/api/mutation", ResponseTemplate::new(200).set_body_json(json!({"value": {"recorded": true}}))).await;
+            let (status, got) = call(
+                &fx,
+                "POST",
+                &format!("{ROOM}/members"),
+                Some(json!({"member_id": "user-2", "share_past_conversation": false})),
+                &[],
+            )
+            .await;
+            assert_eq!(status, status_in, "{code}");
+            assert_eq!(got, json!({"error": {"code": code, "message": "Refused.", "details": {}}}), "{code}");
+            assert!(
+                convex_requests(&fx).await.is_empty(),
+                "{code}: a refused add reconciles no audience and records no invite"
+            );
+        }
+    }
+
+    // ---- D18: the caller's own window on the membership read and the room context ----------------------
+
+    fn room_list() -> Value {
+        json!({"value": [{"spaceRef": "space-room", "name": "Leveranse", "kind": "room", "lifecycle": "active"}]})
+    }
+
+    /// Control answers the membership read with `data` (the one mock that wins over the fixture's plain one).
+    async fn mount_membership(fx: &Fx, template: ResponseTemplate) {
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(template)
+            .with_priority(1)
+            .mount(&fx.user_core)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn d18_the_membership_read_and_the_room_context_pass_the_callers_own_window_through_unchanged() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for window in [
+            json!({"source": "member", "mode": "since_date", "since_at": "2026-11-01T00:00:00Z", "hidden": true}),
+            json!({"source": "member", "mode": "since_join", "since_at": "2026-10-20T09:15:00Z", "hidden": true}),
+            json!({"source": "room", "mode": "full", "since_at": null, "hidden": false}),
+            json!({"source": "room", "mode": "since_join", "since_at": "2026-10-20T09:15:00Z", "hidden": false}),
+        ] {
+            let fx = fx_windows("viewer").await;
+            mount_membership(
+                &fx,
+                ResponseTemplate::new(200).set_body_json(json!({"data": {
+                    "space_ref": "space-room", "kind": "room", "role": "viewer", "history_window": window
+                }})),
+            )
+            .await;
+            mount_convex(&fx, "/api/query", ResponseTemplate::new(200).set_body_json(room_list())).await;
+            let (status, body) = call(&fx, "GET", &format!("{ROOM}/membership"), None, &[]).await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body["data"]["history_window"], window, "the membership read carries it unchanged");
+            assert_eq!(body["data"]["role"], "viewer");
+            let (status, body) = call(&fx, "GET", &format!("{ROOM}/context"), None, &[]).await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(
+                body["data"]["membership"]["history_window"], window,
+                "the room context carries the same window"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn d18_a_membership_without_a_window_stays_without_one_and_a_failed_read_makes_none_up() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        // An older Control that reports no window: none is added, in either route.
+        let fx = fx_windows("editor").await;
+        mount_convex(&fx, "/api/query", ResponseTemplate::new(200).set_body_json(room_list())).await;
+        let (status, body) = call(&fx, "GET", &format!("{ROOM}/membership"), None, &[]).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(body["data"].get("history_window").is_none(), "{body}");
+        let (status, body) = call(&fx, "GET", &format!("{ROOM}/context"), None, &[]).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(body["data"]["membership"].get("history_window").is_none(), "{body}");
+        // Control cannot read the window and fails the read (it answers 500 rather than an unwindowed membership):
+        // the gateway relays the failure and builds no membership of its own.
+        let fx = fx_windows("editor").await;
+        mount_membership(
+            &fx,
+            ResponseTemplate::new(500).set_body_json(json!({"error": "Space membership resolution failed"})),
+        )
+        .await;
+        mount_convex(&fx, "/api/query", ResponseTemplate::new(200).set_body_json(room_list())).await;
+        let (status, body) = call(&fx, "GET", &format!("{ROOM}/membership"), None, &[]).await;
+        assert_eq!(status, 500, "{body}");
+        assert!(body.get("data").is_none(), "{body}");
+        let (status, body) = call(&fx, "GET", &format!("{ROOM}/context"), None, &[]).await;
+        assert_eq!(status, 500, "{body}");
+        assert!(body.get("data").is_none(), "{body}");
+    }
+
+    #[tokio::test]
+    async fn d18_the_room_context_reports_member_history_windows_from_the_gateway_switch_alone() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        // (history-window switch, member writer switch): the feature mirrors the first and nothing else.
+        for (windows, writer) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut fx = fx("owner").await;
+            fx.state.space_features.member_history_windows = windows;
+            fx.state.space_features.membership_writer_api = writer;
+            mount_convex(&fx, "/api/query", ResponseTemplate::new(200).set_body_json(room_list())).await;
+            let (status, body) = call(&fx, "GET", &format!("{ROOM}/context"), None, &[]).await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body["data"]["features"]["member_history_windows"], windows, "windows={windows} writer={writer}");
+        }
+        // Off by default: a context from a default state reports the feature as false, not absent.
+        let fx = fx("owner").await;
+        mount_convex(&fx, "/api/query", ResponseTemplate::new(200).set_body_json(room_list())).await;
+        let (_, body) = call(&fx, "GET", &format!("{ROOM}/context"), None, &[]).await;
+        assert_eq!(body["data"]["features"]["member_history_windows"], false);
+    }
+
+    /// The two routes sit behind the session gate like every module route: no session is a 401 and no Control call.
+    #[tokio::test]
+    async fn d18_the_history_window_routes_need_a_session() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx_windows("owner").await;
+        mount_control(&fx, "GET", CONTROL_WINDOW, control_ok(json!({"history_window": {"source": "room", "mode": "full"}}))).await;
+        for (method, body) in [("PUT", Body::from(r#"{"mode":"full"}"#)), ("GET", Body::empty())] {
+            let response = crate::build_router(fx.state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(WINDOW)
+                        .header("content-type", "application/json")
+                        .body(body)
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 401, "{method}");
+        }
+        assert!(control_calls(&fx).await.is_empty(), "no session, no Control call");
     }
 }
