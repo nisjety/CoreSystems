@@ -101,12 +101,12 @@ describe('MemorySection profile card', () => {
 
     render(() => <MemorySection />)
     const text = (await screen.findByLabelText('Profiltekst')) as HTMLTextAreaElement
-    const save = screen.getByRole('button', { name: 'Lagre profil' })
+    const save = screen.getByRole('button', { name: 'Lagre minneprofil' })
     expect(save.hasAttribute('disabled')).toBe(true)
 
     fireEvent.input(text, { target: { value: '- Prefers tables, always' } })
     flush()
-    fireEvent.click(screen.getByRole('button', { name: 'Lagre profil' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Lagre minneprofil' }))
     flush()
 
     await waitFor(() => {
@@ -165,7 +165,7 @@ describe('MemorySection profile card', () => {
 
     expect(await screen.findByText(/Profilen vises ikke, brukes ikke og kan ikke endres herfra/)).toBeTruthy()
     expect(screen.queryByLabelText('Profiltekst')).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Lagre profil' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Lagre minneprofil' })).toBeNull()
   })
 
   it('takes a deleted memory out of the card by reading the profile again', async () => {

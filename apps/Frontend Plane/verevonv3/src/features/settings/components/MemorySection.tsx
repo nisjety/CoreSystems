@@ -567,7 +567,8 @@ export function MemorySection() {
                   }
                   onClick={() => void handleProfileSave()}
                 >
-                  {i18n.tr('Lagre profil', 'Save profile')}
+                  {/* Not "Lagre profil": the account page holds this card too, and its own save button is called that. */}
+                  {i18n.tr('Lagre minneprofil', 'Save memory profile')}
                 </SettingsButton>{' '}
                 <SettingsButton
                   settingsSize="sm"

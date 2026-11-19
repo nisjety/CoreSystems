@@ -40,6 +40,17 @@ const MEMORY_ROW = {
   updated_at: '2026-10-02T10:00:00Z',
   provenance: 'stated',
 }
+const MEMORY_PROFILE = {
+  profile: {
+    content: '- Prefers dark mode',
+    source_memory_ids: ['mem_ordinary'],
+    origin: 'built',
+    revision: 4,
+    updated_at: '2026-11-03T10:00:00Z',
+    sources_deleted_since_edit: 0,
+  },
+  skip_reason: '',
+}
 const MEMORY_ON = { state: 'on', reason: 'on', use_allowed: true, generation_allowed: true, hidden_rows: 0 }
 
 function json(body: unknown, status = 200): Response {
@@ -67,6 +78,7 @@ function stubGateway(features: Record<string, boolean>) {
       primarySubjectId = (JSON.parse(String(init?.body)) as { agent_ref: string | null }).agent_ref ? 'subj_fake_1' : null
       return json({ data: { primary_subject_id: primarySubjectId } })
     }
+    if (url === '/api/v1/memory/profile') return json(MEMORY_PROFILE)
     if (url === '/api/v1/memory/controls') return json(MEMORY_ON)
     if (url === '/api/v1/memory') return json({ memories: [MEMORY_ROW], degraded: false, degradation_reason: '' })
     return json({})
@@ -123,6 +135,17 @@ describe('the account page for an ordinary member (WS17)', () => {
     const section = document.getElementById('memory') as HTMLElement
     expect(within(section).getByRole('heading', { name: 'Minne' })).toBeTruthy()
     expect(await within(section).findByRole('button', { name: 'Del i et rom: Prefers dark mode' })).toBeTruthy()
+  })
+
+  // The memory card has a save button of its own. On this page the account's "Lagre profil" is the one that saves the
+  // name and preferences, so two buttons with that label would not say which one they save.
+  it('keeps the memory profile save button apart from the page save button', async () => {
+    stubGateway({ personal_agents: false })
+    render(() => <AccountSettingsPage />)
+
+    const section = (await screen.findByText('Prefers dark mode')).closest('#memory') as HTMLElement
+    expect(await within(section).findByRole('button', { name: 'Lagre minneprofil' })).toBeTruthy()
+    expect(screen.getAllByRole('button', { name: 'Lagre profil' })).toHaveLength(1)
   })
 
   it('leaves out the personal agents section, and its gap, while the gateway does not report the feature', async () => {
