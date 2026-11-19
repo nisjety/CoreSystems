@@ -101,4 +101,34 @@ describe('space tab registry (P-SPA1)', () => {
       }
     })
   })
+
+  // WS14-S9: the Files tab is shown when the gateway states room_files.files_tab exactly true, in the nested block.
+  describe('the Files tab (WS14-S9)', () => {
+    it('is listed, and #filer resolves to it, only while room_files.files_tab is true', () => {
+      primeSpaceRoomFeatures({ room_files: { files_tab: false, durable: true } })
+      expect(visibleSpaceTabs().map((tab) => tab.id)).not.toContain('filer')
+      expect(spaceTabFromHash('#filer')).toBe('chat')
+
+      primeSpaceRoomFeatures({ room_files: { files_tab: true, durable: false } })
+      expect(visibleSpaceTabs().map((tab) => tab.id)).toContain('filer')
+      expect(spaceTabFromHash('#filer')).toBe('filer')
+    })
+
+    it('stays hidden for a flag in the wrong place, or one that is not exactly true', () => {
+      for (const features of [undefined, { files_tab: true }, { room_files: { files_tab: 'true' } }, { room_files: true }]) {
+        primeSpaceRoomFeatures(features)
+        expect(visibleSpaceTabs().map((tab) => tab.id)).not.toContain('filer')
+        expect(spaceTabFromHash('#filer')).toBe('chat')
+      }
+    })
+
+    it('a dev build may show it with VITE_SPACE_ROOM_FILES, and a production build reads only the BFF', () => {
+      vi.stubEnv('DEV', true)
+      vi.stubEnv('VITE_SPACE_ROOM_FILES', 'true')
+      expect(visibleSpaceTabs().map((tab) => tab.id)).toContain('filer')
+
+      vi.stubEnv('DEV', false)
+      expect(visibleSpaceTabs().map((tab) => tab.id)).not.toContain('filer')
+    })
+  })
 })

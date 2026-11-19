@@ -1,3 +1,4 @@
+import { createMemo, createRoot, flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
@@ -8,6 +9,7 @@ import {
   roomIsArchived,
   spaceRoomFeature,
   spaceRoomFeatureWithDevOverride,
+  spaceRoomNestedFeature,
 } from './space-room-features'
 import { roomArtifactsEnabled } from './room-artifacts'
 import { spaceConnectivityBannerEnabled, spaceSendIdempotencyEnabled } from './space-connectivity'
@@ -136,5 +138,54 @@ describe('roomIsArchived and roomArchivedAt', () => {
     expect(roomArchivedAt({ archived: true, membership: { archived_at: ' 2026-10-31T09:30:00Z ' } })).toBe('2026-10-31T09:30:00Z')
     expect(roomArchivedAt({ archived: true, membership: { archived_at: '' } })).toBeNull()
     expect(roomArchivedAt({ archived: false, membership: { archived_at: '2026-10-31T09:30:00Z' } })).toBeNull()
+  })
+})
+
+// WS14-S9: a flag that is a block of flags (room_files) changes when any member does, so a reader of one member is
+// told. Before the fix only a top-level `true` was compared, so a change inside the block never reached the reader.
+describe('republish of a flag block (WS14-S9)', () => {
+  // The reader is a memo in its own root. Publishing writes reactive state, which Solid does not allow inside an owned
+  // scope, so the publish and the reads happen outside the root.
+  function readerOf(read: () => boolean): { readonly value: () => boolean; readonly dispose: () => void } {
+    let value: () => boolean = () => false
+    const dispose = createRoot((disposeRoot) => {
+      value = createMemo(read)
+      return disposeRoot
+    })
+    return { value: () => value(), dispose }
+  }
+
+  it('tells a reader of one member when that member changes, and not when the block is the same', () => {
+    publishSpaceRoomFeatures({ room_files: { files_tab: false, durable: false } })
+    let reads = 0
+    const filesTab = readerOf(() => {
+      reads += 1
+      return spaceRoomNestedFeature('room_files', 'files_tab')
+    })
+    expect(filesTab.value()).toBe(false)
+    const afterFirstRead = reads
+
+    // The same block again: nothing moved, so there is no republish and the reader is not run again.
+    publishSpaceRoomFeatures({ room_files: { files_tab: false, durable: false } })
+    flush()
+    expect(filesTab.value()).toBe(false)
+    expect(reads).toBe(afterFirstRead)
+
+    // One member of the block moved: the reader is told and reads the new answer.
+    publishSpaceRoomFeatures({ room_files: { files_tab: true, durable: false } })
+    flush()
+    expect(filesTab.value()).toBe(true)
+    expect(reads).toBeGreaterThan(afterFirstRead)
+    filesTab.dispose()
+  })
+
+  it('tells a reader of a member when the block moves from absent to present', () => {
+    publishSpaceRoomFeatures({ thread_pane: true })
+    const turnAttachments = readerOf(() => spaceRoomNestedFeature('room_files', 'turn_attachments'))
+    expect(turnAttachments.value()).toBe(false)
+    publishSpaceRoomFeatures({ thread_pane: true, room_files: { turn_attachments: true } })
+    flush()
+    expect(turnAttachments.value()).toBe(true)
+    turnAttachments.dispose()
   })
 })
