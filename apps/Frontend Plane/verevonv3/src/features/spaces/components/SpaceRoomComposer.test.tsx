@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library'
-import { For, flush } from 'solid-js'
+import { createSignal, For, flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiError } from '@/shared/api/http'
@@ -2374,6 +2374,8 @@ describe('SpaceRoomComposer — drafts (WS15-S2)', () => {
 
 describe('SpaceRoomComposer — personal memory for one room turn (WS17-S8)', () => {
   const MEMORY_LABEL = 'Bruk mitt personlige minne for dette svaret'
+  // Personal memory is recalled into an existing room thread, so the choice is offered only on a reply.
+  const REPLY = { threadId: 'thr_7', title: 'Innkjøp' } as const
 
   beforeEach(() => {
     vi.stubEnv('VITE_SPACE_COMPOSER_DRAFTS', '')
@@ -2386,18 +2388,47 @@ describe('SpaceRoomComposer — personal memory for one room turn (WS17-S8)', ()
   })
 
   it('is offered only while features.personal_memory_turn is on', () => {
-    renderRoom()
+    renderRoom({ replyTarget: REPLY })
     expect(screen.queryByRole('checkbox', { name: MEMORY_LABEL })).toBeNull()
     cleanup()
 
     publishRoomFeatures({ personal_memory_turn: true })
-    renderRoom()
+    renderRoom({ replyTarget: REPLY })
     expect(screen.getByRole('checkbox', { name: MEMORY_LABEL })).toBeTruthy()
+  })
+
+  // A turn that starts a new thread has no room thread to recall into: the gateway drops the choice and answers
+  // without personal memory, with nothing said. A box that does nothing must not be offered.
+  it('is not offered while the turn would start a new thread, and no choice is ever sent for one', async () => {
+    publishRoomFeatures({ personal_memory_turn: true })
+    const stream = scriptedStream()
+    renderRoom()
+    expect(screen.queryByRole('checkbox', { name: MEMORY_LABEL })).toBeNull()
+
+    typeInRoomBox('Hva fant vi sist?')
+    submitRoomBox()
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(1))
+    expect((chatClient.streamChat.mock.calls[0]?.[0] as { threadId?: unknown }).threadId).toBeUndefined()
+    expect((chatClient.streamChat.mock.calls[0]?.[0] as { usePersonalMemory?: unknown }).usePersonalMemory).toBeUndefined()
+    stream.finish()
   })
 
   it('is offered for an Ask turn, not for a Send turn', () => {
     publishRoomFeatures({ personal_memory_turn: true })
-    renderRoom({ humanPosts: true })
+    // A reply offers Ask only to the thread's starter, so the viewer is made the owner of the thread.
+    render(() => (
+      <SpaceRoomComposer
+        spaceRef="room-1"
+        roster={() => []}
+        agents={() => []}
+        threads={() => []}
+        humanPostsEnabled={() => true}
+        viewerRole={() => 'editor'}
+        viewerSubjectId={() => 'user_1'}
+        threadOwnerSubjectId={() => 'user_1'}
+        replyTarget={() => REPLY}
+      />
+    ))
     expect(screen.queryByRole('checkbox', { name: MEMORY_LABEL })).toBeNull()
     fireEvent.click(screen.getByRole('radio', { name: 'Spør Verevon' }))
     flush()
@@ -2407,7 +2438,7 @@ describe('SpaceRoomComposer — personal memory for one room turn (WS17-S8)', ()
   it('goes with the turn it was chosen for, and is unchecked again after the send', async () => {
     publishRoomFeatures({ personal_memory_turn: true })
     const first = scriptedStream()
-    renderRoom()
+    renderRoom({ replyTarget: REPLY })
     const memory = screen.getByRole('checkbox', { name: MEMORY_LABEL }) as HTMLInputElement
     fireEvent.click(memory)
     flush()
@@ -2416,7 +2447,7 @@ describe('SpaceRoomComposer — personal memory for one room turn (WS17-S8)', ()
     typeInRoomBox('Hva fant vi sist?')
     submitRoomBox()
     await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(1))
-    expect(chatClient.streamChat.mock.calls[0]?.[0]).toMatchObject({ usePersonalMemory: true })
+    expect(chatClient.streamChat.mock.calls[0]?.[0]).toMatchObject({ usePersonalMemory: true, threadId: 'thr_7' })
     expect(memory.checked).toBe(false)
 
     first.handlers().onDone?.({})
@@ -2430,6 +2461,45 @@ describe('SpaceRoomComposer — personal memory for one room turn (WS17-S8)', ()
     await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(2))
     expect((chatClient.streamChat.mock.calls[1]?.[0] as { usePersonalMemory?: unknown }).usePersonalMemory).toBeUndefined()
     second.finish()
+  })
+
+  // The choice is for one thread's answer: moving the reply to another thread, or to none, takes it back.
+  it('is unchecked again when the reply moves to another thread, and gone when the reply is cleared', () => {
+    publishRoomFeatures({ personal_memory_turn: true })
+    const [target, setTarget] = createSignal<{ threadId: string; title: string } | undefined>(REPLY)
+    render(() => (
+      <SpaceRoomComposer
+        spaceRef="room-1"
+        roster={() => []}
+        agents={() => []}
+        threads={() => []}
+        viewerRole={() => 'editor'}
+        replyTarget={target}
+      />
+    ))
+    const memory = () => screen.getByRole('checkbox', { name: MEMORY_LABEL }) as HTMLInputElement
+    fireEvent.click(memory())
+    flush()
+    expect(memory().checked).toBe(true)
+
+    // The same thread's row refreshing (a new object, the same thread) leaves the choice alone.
+    setTarget({ threadId: 'thr_7', title: 'Innkjøp (oppdatert)' })
+    flush()
+    expect(memory().checked).toBe(true)
+
+    setTarget({ threadId: 'thr_8', title: 'Leveranse' })
+    flush()
+    expect(memory().checked).toBe(false)
+
+    fireEvent.click(memory())
+    flush()
+    expect(memory().checked).toBe(true)
+    setTarget(undefined)
+    flush()
+    expect(screen.queryByRole('checkbox', { name: MEMORY_LABEL })).toBeNull()
+    setTarget(REPLY)
+    flush()
+    expect(memory().checked).toBe(false)
   })
 })
 

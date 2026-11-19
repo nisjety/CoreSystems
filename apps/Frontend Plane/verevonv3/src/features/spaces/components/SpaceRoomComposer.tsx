@@ -317,11 +317,15 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   const keepOffered = () =>
     roomFilesDurableEnabled() && canAddRoomFiles(props.viewerRole?.()) && !zdrRefused() && retentionAllowed()
   // WS17-S8: the member's choice to use their own personal memory for this one room turn. A per-turn opt-in:
-  // it is cleared with the send, and it does not carry over to another room. Offered only where the room's
-  // `features.personal_memory_turn` is on (see personalMemoryOffered).
+  // it is cleared with the send, and it does not carry over to another room or to another thread. Offered only
+  // where the room's `features.personal_memory_turn` is on and the turn replies into an existing thread (see
+  // personalMemoryOffered).
   const [personalMemoryTurn, setPersonalMemoryTurn] = createSignal(false)
+  // The reply target's thread as a memo, so the reset below follows a change of thread and not every refresh of the
+  // thread's own row (an effect's apply runs each time its compute does, equal value or not).
+  const replyThreadKey = createMemo(() => props.replyTarget?.()?.threadId?.trim() ?? '')
   createEffect(
-    () => props.spaceRef,
+    () => `${props.spaceRef}\n${replyThreadKey()}`,
     () => {
       setPersonalMemoryTurn(false)
     },
@@ -578,8 +582,15 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   // member's own words, so files never go with one; durable room files are the Files tab (WS14-S9).
   const attachAvailable = () => attachFlagOn() && effectiveMode() === 'ask' && !roleBlocked()
   // WS17-S8: the personal-memory choice is offered for an Ask turn only (a human post starts no model turn),
-  // where the room's flag is on and the member may post. Presentation only; Control decides each turn.
-  const personalMemoryOffered = () => spaceRoomFeature('personal_memory_turn') && effectiveMode() === 'ask' && !roleBlocked()
+  // where the room's flag is on and the member may post. It is offered only while the turn replies into an existing
+  // thread: personal memory is recalled into a room thread, and a turn that starts a new thread has none, so the
+  // gateway would drop the choice and answer without it, with nothing said. Offering a box that does nothing would
+  // be a lie. Presentation only; Control decides each turn.
+  const personalMemoryOffered = () =>
+    spaceRoomFeature('personal_memory_turn')
+    && effectiveMode() === 'ask'
+    && !roleBlocked()
+    && replyThreadKey() !== ''
   // The model catalogue, for the vision check only. It is the same request the picker and a send
   // already share; read at mount and only when images ride as parts of the turn.
   const [catalogueModels, setCatalogueModels] = createSignal<readonly ModelInfo[] | undefined>(undefined)
