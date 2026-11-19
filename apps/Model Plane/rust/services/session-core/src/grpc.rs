@@ -195,6 +195,445 @@ pub(crate) fn to_proto_timestamp(ts: DateTime<Utc>) -> prost_types::Timestamp {
     }
 }
 
+/// The `ListThreads` page query (V3e-sws-2). Parameters, as `list_threads` binds them: $1 org, $2 user,
+/// $3 page size, $4 Space, $5 origin, $6 audience ceiling (`NULL` = owner read), $7 thread id, $8 pinned
+/// cursor, $9 activity cursor, $10 thread cursor, $11 archive state, $12 starred only, $13 history floor
+/// (`NULL` = none), $14 agent subject. A Space listing lists a thread only for a message the reader may
+/// see from the floor on: the audience window's floor gate, the same one the attention headlines and
+/// the Space timeline state, so the three cannot disagree about which threads a `since_join` reader sees.
+/// The title and the preview are the effective text of the first and the latest turn the reader may see:
+/// the revision fold under the ceiling and from the floor on, as the timeline reads them. A deleted turn
+/// reads empty, and a turn stamped after the ceiling is not read (V3e-sws-2-rel2).
+fn thread_list_page_sql() -> String {
+    let thread_gate = crate::space::audience_window::floor_gate_message_sql("em", "$6", "$13");
+    format!(
+        "WITH page AS (
+                    SELECT t.id, t.session_key, t.created_at, t.presentation_title,
+                           t.presentation_preview, t.pinned_at, t.last_activity_at, t.space_id,
+                           t.origin, t.user_id, t.persona_enabled, t.archived_at,
+                           (t.starred_at IS NOT NULL) AS starred,
+                           (t.last_assistant_at IS NOT NULL AND t.last_assistant_at > t.last_read_at) AS unread,
+                           t.last_read_at,
+                           t.forked_from_thread_id
+                    FROM threads t
+                    WHERE t.org_id = $1
+                      AND ($6::BIGINT IS NULL
+                           OR (t.recipient_audience_revision IS NULL
+                               OR t.recipient_audience_revision <= $6))
+                      AND ($6::BIGINT IS NOT NULL OR t.user_id = $2)
+                      AND ($6::BIGINT IS NULL
+                           OR EXISTS (SELECT 1 FROM messages em
+                                      WHERE em.thread_id = t.id
+                                        AND {thread_gate}))
+                      AND (NULLIF($4, '') IS NULL OR t.space_id = $4)
+                      AND (NULLIF($5, '') IS NULL OR t.origin = $5)
+                      AND (NULLIF($7, '') IS NULL OR t.id = $7)
+                      AND ($11 = 'all' OR (($11 = 'archived') = (t.archived_at IS NOT NULL)))
+                      AND (NOT $12::BOOLEAN OR t.starred_at IS NOT NULL)
+                      AND (NULLIF($14, '') IS NULL
+                           OR EXISTS (SELECT 1 FROM runs ar
+                                      WHERE ar.thread_id = t.id AND ar.agent_subject_id = $14))
+                      AND ($8::BOOLEAN IS NULL
+                           OR ((t.pinned_at IS NOT NULL), t.last_activity_at, t.id)
+                              < ($8::BOOLEAN, $9::TIMESTAMPTZ, $10::TEXT))
+                    ORDER BY (t.pinned_at IS NOT NULL) DESC, t.last_activity_at DESC, t.id DESC
+                    LIMIT $3
+                 )
+                 SELECT
+                    page.id,
+                    page.session_key,
+                    page.created_at,
+                    COALESCE(page.presentation_title, first_user.content) AS title,
+                    COALESCE(page.presentation_preview, last_message.content) AS preview,
+                    page.pinned_at,
+                    page.last_activity_at,
+                    page.space_id,
+                    latest_run.id AS latest_run_id,
+                    latest_run.status AS latest_run_status,
+                    latest_run.updated_at AS latest_run_updated_at,
+                    page.origin,
+                    page.user_id,
+                    page.persona_enabled,
+                    page.archived_at,
+                    page.starred,
+                    page.unread,
+                    page.last_read_at,
+                    page.forked_from_thread_id,
+                    jsonb_build_object('reply_count', reply_stats.reply_count,
+                                       'last_author', reply_stats.last_author) AS reply_stats
+                 FROM page
+                 LEFT JOIN LATERAL (
+                    SELECT {fold_content} AS content
+                    FROM messages m
+                    {fold_join}
+                    WHERE m.thread_id = page.id AND m.role = 'user' AND m.on_active_path
+                      AND ($6::BIGINT IS NULL
+                           OR m.recipient_audience_revision IS NULL
+                           OR m.recipient_audience_revision <= $6)
+                      AND ($13::BIGINT IS NULL
+                           OR m.recipient_audience_revision IS NULL
+                           OR m.recipient_audience_revision >= $13)
+                    ORDER BY m.sequence ASC
+                    LIMIT 1
+                 ) first_user ON TRUE
+                 LEFT JOIN LATERAL (
+                    SELECT {fold_content} AS content
+                    FROM messages m
+                    {fold_join}
+                    WHERE m.thread_id = page.id AND m.on_active_path
+                      AND ($6::BIGINT IS NULL
+                           OR m.recipient_audience_revision IS NULL
+                           OR m.recipient_audience_revision <= $6)
+                      AND ($13::BIGINT IS NULL
+                           OR m.recipient_audience_revision IS NULL
+                           OR m.recipient_audience_revision >= $13)
+                    ORDER BY m.sequence DESC
+                    LIMIT 1
+                 ) last_message ON TRUE
+                 LEFT JOIN LATERAL (
+                    SELECT r.id, {run_phase} AS status, r.updated_at
+                    FROM runs r
+                    WHERE r.thread_id = page.id
+                      AND ($13::BIGINT IS NULL OR r.recipient_audience_revision IS NULL
+                           OR r.recipient_audience_revision >= $13::BIGINT)
+                    ORDER BY r.updated_at DESC, r.created_at DESC, r.id DESC
+                    LIMIT 1
+                 ) latest_run ON TRUE
+                 LEFT JOIN LATERAL (
+                    SELECT GREATEST(COUNT(*) FILTER (WHERE m.role = 'user') - 1, 0) AS reply_count,
+                           (SELECT lm.author_subject_id
+                            FROM messages lm
+                            WHERE lm.thread_id = page.id AND lm.role = 'user'
+                              AND lm.author_subject_id IS NOT NULL
+                              AND lm.on_active_path
+                              AND ($6::BIGINT IS NULL
+                                   OR lm.recipient_audience_revision IS NULL
+                                   OR lm.recipient_audience_revision <= $6)
+                              AND ($13::BIGINT IS NULL
+                                   OR lm.recipient_audience_revision IS NULL
+                                   OR lm.recipient_audience_revision >= $13)
+                            ORDER BY lm.sequence DESC
+                            LIMIT 1) AS last_author
+                    FROM messages m
+                    WHERE m.thread_id = page.id
+                      AND m.on_active_path
+                      AND ($6::BIGINT IS NULL
+                           OR m.recipient_audience_revision IS NULL
+                           OR m.recipient_audience_revision <= $6)
+                      AND ($13::BIGINT IS NULL
+                           OR m.recipient_audience_revision IS NULL
+                           OR m.recipient_audience_revision >= $13)
+                 ) reply_stats ON TRUE
+                 ORDER BY (page.pinned_at IS NOT NULL) DESC, page.last_activity_at DESC, page.id DESC",
+        thread_gate = thread_gate,
+        fold_content = crate::space::revisions::FOLD_CONTENT_SQL,
+        fold_join = crate::space::revisions::fold_join_sql("$6::BIGINT"),
+        run_phase = crate::run_phase::run_phase_sql!("r"),
+    )
+}
+
+#[cfg(test)]
+mod thread_list_page_sql_tests {
+    use super::*;
+
+    /// V3e-sws-2: the page binds $1..$14 and its Space gate is the audience window's floor gate, which
+    /// states the active path, the ceiling, the floor and the deletion check. The run-phase join is still
+    /// present. Checked on the statement text, so no database is needed.
+    #[test]
+    fn the_page_binds_fourteen_parameters_and_gates_a_space_listing_on_the_floor() {
+        let sql = thread_list_page_sql();
+        for n in 1..=14 {
+            assert!(sql.contains(&format!("${n}")), "${n} is bound");
+        }
+        assert!(!sql.contains("$15"), "no fifteenth parameter");
+        assert!(sql.contains("em.on_active_path"));
+        assert!(sql.contains("em.recipient_audience_revision <= $6::BIGINT"));
+        assert!(sql.contains("em.recipient_audience_revision >= $13::BIGINT"));
+        assert!(sql.contains("r.recipient_audience_revision >= $13::BIGINT"));
+        assert!(sql.contains("floor_gate_rev.action = 'deleted'"));
+        assert!(
+            sql.contains("AS status, r.updated_at"),
+            "the latest run keeps its phase"
+        );
+    }
+
+    /// The title and the preview laterals, in that order: from each one's fold select to its alias. The fold
+    /// is selected once in each lateral and nowhere else in the page, so the two selects are found in order.
+    fn title_and_preview_laterals(sql: &str) -> (&str, &str) {
+        let select = format!(
+            "SELECT {} AS content",
+            crate::space::revisions::FOLD_CONTENT_SQL
+        );
+        let starts: Vec<usize> = sql.match_indices(&select).map(|(at, _)| at).collect();
+        assert_eq!(
+            starts.len(),
+            2,
+            "the title and the preview each select the fold"
+        );
+        let title_end = sql.find(") first_user ON TRUE").expect("the title lateral");
+        let preview_end = sql
+            .find(") last_message ON TRUE")
+            .expect("the preview lateral");
+        (&sql[starts[0]..title_end], &sql[starts[1]..preview_end])
+    }
+
+    /// V3e-sws-2-rel2: the title and the preview read the effective text of their turn through the revision
+    /// fold under the reader's ceiling, as the timeline does, and keep the floor. A deleted turn then reads
+    /// empty, and a turn stamped after the ceiling is not read. Checked on the statement text, so no database
+    /// is needed.
+    #[test]
+    fn the_title_and_preview_read_the_revision_fold_under_the_ceiling_and_floor() {
+        let sql = thread_list_page_sql();
+        let fold = crate::space::revisions::fold_join_sql("$6::BIGINT");
+        let (title, preview) = title_and_preview_laterals(&sql);
+        for (name, lateral) in [("title", title), ("preview", preview)] {
+            assert!(
+                lateral.contains(&fold),
+                "the {name} joins the revision fold under the ceiling"
+            );
+            assert!(
+                lateral.contains("$6::BIGINT IS NULL"),
+                "the {name} is unbounded for an owner read"
+            );
+            assert!(
+                lateral.contains("m.recipient_audience_revision <= $6"),
+                "the {name} stops at the ceiling"
+            );
+            assert!(
+                lateral.contains("m.recipient_audience_revision >= $13"),
+                "the {name} keeps the floor"
+            );
+            assert!(
+                !lateral.contains("SELECT content"),
+                "the {name} reads no raw column"
+            );
+        }
+        assert!(
+            title.contains("m.role = 'user'"),
+            "the title is the first user turn"
+        );
+        assert!(
+            preview.contains("ORDER BY m.sequence DESC"),
+            "the preview is the latest turn"
+        );
+        assert!(sql.contains("COALESCE(page.presentation_title, first_user.content) AS title"));
+        assert!(
+            sql.contains("COALESCE(page.presentation_preview, last_message.content) AS preview")
+        );
+    }
+
+    /// Records one revision of `message` the way the revision log stores it: a delete carries no content, an
+    /// edit its new text, and each is stamped with the audience revision it was made under (V3e-sws-2-rel2).
+    async fn record_revision(
+        pool: &PgPool,
+        org: &str,
+        message: &str,
+        revision_no: i32,
+        action: &str,
+        content: Option<&str>,
+        audience: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO message_revisions (revision_id, org_id, thread_id, message_id, revision_no, \
+             action, actor_subject_id, actor_class, moderation_reason, content, content_digest, \
+             prev_content_digest, original_retention, idempotency_hash, space_id, \
+             recipient_audience_revision, authority_revision, resource_authorization_ref) \
+             VALUES ($1, $2, (SELECT thread_id FROM messages WHERE id = $3), $3, $4, $5, 'owner-a', \
+             'author', '', $6, $7, $8, 'retain', $9, (SELECT space_id FROM messages WHERE id = $3), \
+             $10, 1, 'resource-1')",
+        )
+        .bind(format!("rev-{message}-{revision_no}"))
+        .bind(org)
+        .bind(message)
+        .bind(revision_no)
+        .bind(action)
+        .bind(content)
+        .bind(format!("sha256:{action}-{message}-{revision_no}"))
+        .bind(format!("sha256:prev-{message}"))
+        .bind(format!("idem-{message}-{revision_no}"))
+        .bind(audience)
+        .execute(pool)
+        .await
+        .expect("record the revision");
+    }
+
+    /// The threads one page of `thread_list_page_sql` lists, as `(name, title, preview)` sorted by name, for a
+    /// Space read (`ceiling` and `floor`) or, with no ceiling, the owner's read. The name is the thread id less
+    /// `prefix`, so the expectations read as the names the test seeds.
+    async fn listed_threads(
+        pool: &PgPool,
+        org: &str,
+        space: &str,
+        prefix: &str,
+        ceiling: Option<i64>,
+        floor: Option<i64>,
+    ) -> Vec<(String, String, String)> {
+        use sqlx::Row as _;
+        let rows = sqlx::query(&thread_list_page_sql())
+            .bind(org)
+            .bind("owner-a")
+            .bind(10_i64)
+            .bind(space)
+            .bind("")
+            .bind(ceiling)
+            .bind("")
+            .bind(None::<bool>)
+            .bind(None::<DateTime<Utc>>)
+            .bind(None::<String>)
+            .bind("all")
+            .bind(false)
+            .bind(floor)
+            .bind("")
+            .fetch_all(pool)
+            .await
+            .expect("list the threads");
+        let mut listed: Vec<(String, String, String)> = rows
+            .iter()
+            .map(|row| {
+                let id: String = row.get("id");
+                (
+                    id.trim_start_matches(prefix).to_owned(),
+                    row.get::<Option<String>, _>("title").unwrap_or_default(),
+                    row.get::<Option<String>, _>("preview").unwrap_or_default(),
+                )
+            })
+            .collect();
+        listed.sort();
+        listed
+    }
+
+    /// The owned `(name, title, preview)` rows of an expectation, in the order `listed_threads` returns them.
+    fn expected_rows(rows: &[(&str, &str, &str)]) -> Vec<(String, String, String)> {
+        rows.iter()
+            .map(|(name, title, preview)| {
+                (
+                    (*name).to_owned(),
+                    (*title).to_owned(),
+                    (*preview).to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    /// V3e-sws-2-rel2 against Postgres: a listed thread's title and preview are the effective text of its first
+    /// and its latest turn under the reader's ceiling and floor. A deleted turn reads empty, a turn stamped after
+    /// the ceiling is not read, and an edit under the ceiling shows its new text. The owner read keeps every
+    /// stamp, and the same thread reads its first turn with the floor off; a deleted turn reads empty throughout.
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn the_listed_title_and_preview_read_the_fold_under_the_ceiling_and_floor() {
+        use crate::space::test_support::{
+            clean_space, connect, seed_space_message_at_revision, seed_space_thread,
+        };
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let suffix = mp_ids::new_ulid();
+        let org = format!("list-fold-{suffix}");
+        let space = format!("space-list-fold-{suffix}");
+        let prefix = format!("{suffix}-");
+        let id = |name: &str| format!("{prefix}{name}");
+        for name in [
+            "first-gone",
+            "latest-gone",
+            "newer-latest",
+            "edited-latest",
+            "joined",
+        ] {
+            seed_space_thread(&pool, &org, &space, &id(name), "owner-a").await;
+        }
+        // (thread, turn, text, audience revision the turn is stamped with)
+        let turns = [
+            ("first-gone", "fg1", "opening question", 1),
+            ("first-gone", "fg2", "the answer so far", 1),
+            ("latest-gone", "lg1", "first question", 1),
+            ("latest-gone", "lg2", "latest follow-up", 1),
+            ("newer-latest", "nl1", "first question, kept", 1),
+            ("newer-latest", "nl2", "turn after the decision", 9),
+            ("edited-latest", "el1", "opening", 1),
+            ("edited-latest", "el2", "draft wording", 2),
+            ("joined", "jn1", "before the join", 1),
+            ("joined", "jn2", "after the join", 4),
+        ];
+        for (thread, turn, text, revision) in turns {
+            let (thread, turn) = (id(thread), id(turn));
+            seed_space_message_at_revision(&pool, &space, &thread, &turn, text, revision).await;
+        }
+        // The first turn is deleted, the latest turn of one thread is deleted, and one turn is edited
+        // under the ceiling (stamped 3).
+        record_revision(&pool, &org, &id("fg1"), 1, "deleted", None, 1).await;
+        record_revision(&pool, &org, &id("lg2"), 1, "deleted", None, 1).await;
+        record_revision(
+            &pool,
+            &org,
+            &id("el2"),
+            1,
+            "edited",
+            Some("final wording"),
+            3,
+        )
+        .await;
+
+        // A Space read at ceiling 5, floor off (the switch off): every thread lists. A deleted turn reads empty,
+        // the edit reads its new text, and the turn stamped 9 is not read.
+        assert_eq!(
+            listed_threads(&pool, &org, &space, &prefix, Some(5), None).await,
+            expected_rows(&[
+                ("edited-latest", "opening", "final wording"),
+                ("first-gone", "", "the answer so far"),
+                ("joined", "before the join", "after the join"),
+                ("latest-gone", "first question", ""),
+                (
+                    "newer-latest",
+                    "first question, kept",
+                    "first question, kept"
+                ),
+            ]),
+            "the ceiling of 5 with the floor off"
+        );
+        // A ceiling of 2 also hides the edit (stamped 3) and the turn after the join (stamped 4).
+        assert_eq!(
+            listed_threads(&pool, &org, &space, &prefix, Some(2), None).await,
+            expected_rows(&[
+                ("edited-latest", "opening", "draft wording"),
+                ("first-gone", "", "the answer so far"),
+                ("joined", "before the join", "before the join"),
+                ("latest-gone", "first question", ""),
+                (
+                    "newer-latest",
+                    "first question, kept",
+                    "first question, kept"
+                ),
+            ]),
+            "the ceiling of 2 with the floor off"
+        );
+        // A floor of 3: only the thread with a turn from the join on lists, and it reads from there.
+        assert_eq!(
+            listed_threads(&pool, &org, &space, &prefix, Some(5), Some(3)).await,
+            expected_rows(&[("joined", "after the join", "after the join")]),
+            "the floor of 3 under the ceiling of 5"
+        );
+        // The owner read has no ceiling, so it keeps the turn stamped 9. A deleted turn still reads empty.
+        assert_eq!(
+            listed_threads(&pool, &org, &space, &prefix, None, None).await,
+            expected_rows(&[
+                ("edited-latest", "opening", "final wording"),
+                ("first-gone", "", "the answer so far"),
+                ("joined", "before the join", "after the join"),
+                ("latest-gone", "first question", ""),
+                (
+                    "newer-latest",
+                    "first question, kept",
+                    "turn after the decision"
+                ),
+            ]),
+            "the owner read with no ceiling"
+        );
+
+        clean_space(&pool, &org, &space).await;
+    }
+}
+
 fn clamp_thread_limit(limit: u32) -> i64 {
     if limit == 0 {
         return DEFAULT_THREAD_LIST_LIMIT;
@@ -3258,8 +3697,8 @@ fn skill_write_skipped(reason: &str) -> pb::UpsertAgentSkillResponse {
     }
 }
 
-/// The skill lint mode (`SKILL_LINT_MODE`), read once. Off unless the value is
-/// exactly `report` or `enforce`.
+/// The skill lint mode (`SKILL_LINT_MODE`), read once. `report` and `enforce` are read exactly;
+/// unset, blank and `off` are off, and any other set value is report (`Mode::from_env_value`).
 fn skill_lint_mode() -> mp_contracts::skill_lint::Mode {
     static MODE: std::sync::OnceLock<mp_contracts::skill_lint::Mode> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| {
@@ -3384,7 +3823,8 @@ struct StoredSkillText {
 
 /// The content policy for an undo that brings back an enabled learned skill. The
 /// snapshot's text is checked as the restore would store it. A snapshot that does
-/// not hold that text is refused rather than guessed at.
+/// not hold that text cannot be checked: `enforce` refuses the undo with
+/// `snapshot_unreadable`, and `report` counts it and lets the undo go ahead.
 #[allow(clippy::result_large_err)]
 fn snapshot_policy_check(snapshot: &serde_json::Value) -> Result<(), Status> {
     let mode = crate::write_policy::Mode::configured();
@@ -3393,8 +3833,13 @@ fn snapshot_policy_check(snapshot: &serde_json::Value) -> Result<(), Status> {
     if mode == crate::write_policy::Mode::Off || !enabled || person {
         return Ok(());
     }
-    let stored: SnapshotSkillText = serde_json::from_value(snapshot.clone())
-        .map_err(|_| Status::failed_precondition("snapshot_unreadable"))?;
+    let Ok(stored) = serde_json::from_value::<SnapshotSkillText>(snapshot.clone()) else {
+        return crate::write_policy::snapshot_unreadable(
+            mode,
+            crate::write_policy::Origin::BackgroundReview,
+        )
+        .map_err(Status::failed_precondition);
+    };
     let skill = crate::write_policy::SkillText {
         name: &stored.name,
         description: &stored.description,
@@ -3998,7 +4443,8 @@ fn space_decision_retention_gate(
 }
 
 fn configured_space_zdr_mode() -> SpaceZdrMode {
-    space_zdr_mode(env::var("SESSION_CORE_SPACE_ZDR").ok().as_deref())
+    let raw = env::var(mp_contracts::retention::SPACE_ZDR_ENV).ok();
+    space_zdr_mode(raw.as_deref())
 }
 
 fn verify_thread_space_decision_with_keys(
@@ -4957,6 +5403,9 @@ pub(crate) struct VerifiedRevise {
     pub(crate) moderate: bool,
     /// The org's retention rule for the original text: `true` purges it, `false` retains it.
     pub(crate) purge_original: bool,
+    /// V3e-sws-2: the history floor the revise decision signs. A target stamped before it is not
+    /// found. `None` when the switch is off, or when the decision carries no floor.
+    pub(crate) history_floor: Option<i64>,
 }
 
 /// The `sha256:` digest of a revise request's new text; of the empty string for a delete.
@@ -5127,6 +5576,12 @@ fn verify_revise_space_decision_with_key(
     Ok(VerifiedRevise {
         moderate: has(rev::PERMISSION_MODERATE),
         purge_original: purge,
+        // V3e-sws-2: honoured only when Control signs a floor on a revise decision. Control does not
+        // mint one yet, so this is `None` and the write path is unchanged until it does.
+        history_floor: crate::space::audience_window::history_floor_from_claim(
+            claims.history_floor_revision,
+            crate::space::audience_window::history_floor_enabled(),
+        ),
     })
 }
 
@@ -10759,118 +11214,7 @@ impl SessionCore for SessionService {
                 // {reply_count, last_author}: one JSON column so the row stays a flat struct.
                 reply_stats: Option<serde_json::Value>,
             }
-            let mut rows: Vec<ThreadListRow> = sqlx::query_as(
-                concat!("WITH page AS (
-                    SELECT t.id, t.session_key, t.created_at, t.presentation_title,
-                           t.presentation_preview, t.pinned_at, t.last_activity_at, t.space_id,
-                           t.origin, t.user_id, t.persona_enabled, t.archived_at,
-                           (t.starred_at IS NOT NULL) AS starred,
-                           (t.last_assistant_at IS NOT NULL AND t.last_assistant_at > t.last_read_at) AS unread,
-                           t.last_read_at,
-                           t.forked_from_thread_id
-                    FROM threads t
-                    WHERE t.org_id = $1
-                      AND ($6::BIGINT IS NULL
-                           OR (t.recipient_audience_revision IS NULL
-                               OR t.recipient_audience_revision <= $6))
-                      AND ($6::BIGINT IS NOT NULL OR t.user_id = $2)
-                      AND ($6::BIGINT IS NULL
-                           OR EXISTS (SELECT 1 FROM messages em
-                                      WHERE em.thread_id = t.id
-                                        AND ($13::BIGINT IS NULL
-                                             OR em.recipient_audience_revision IS NULL
-                                             OR em.recipient_audience_revision >= $13)))
-                      AND (NULLIF($4, '') IS NULL OR t.space_id = $4)
-                      AND (NULLIF($5, '') IS NULL OR t.origin = $5)
-                      AND (NULLIF($7, '') IS NULL OR t.id = $7)
-                      AND ($11 = 'all' OR (($11 = 'archived') = (t.archived_at IS NOT NULL)))
-                      AND (NOT $12::BOOLEAN OR t.starred_at IS NOT NULL)
-                      AND (NULLIF($14, '') IS NULL
-                           OR EXISTS (SELECT 1 FROM runs ar
-                                      WHERE ar.thread_id = t.id AND ar.agent_subject_id = $14))
-                      AND ($8::BOOLEAN IS NULL
-                           OR ((t.pinned_at IS NOT NULL), t.last_activity_at, t.id)
-                              < ($8::BOOLEAN, $9::TIMESTAMPTZ, $10::TEXT))
-                    ORDER BY (t.pinned_at IS NOT NULL) DESC, t.last_activity_at DESC, t.id DESC
-                    LIMIT $3
-                 )
-                 SELECT
-                    page.id,
-                    page.session_key,
-                    page.created_at,
-                    COALESCE(page.presentation_title, first_user.content) AS title,
-                    COALESCE(page.presentation_preview, last_message.content) AS preview,
-                    page.pinned_at,
-                    page.last_activity_at,
-                    page.space_id,
-                    latest_run.id AS latest_run_id,
-                    latest_run.status AS latest_run_status,
-                    latest_run.updated_at AS latest_run_updated_at,
-                    page.origin,
-                    page.user_id,
-                    page.persona_enabled,
-                    page.archived_at,
-                    page.starred,
-                    page.unread,
-                    page.last_read_at,
-                    page.forked_from_thread_id,
-                    jsonb_build_object('reply_count', reply_stats.reply_count,
-                                       'last_author', reply_stats.last_author) AS reply_stats
-                 FROM page
-                 LEFT JOIN LATERAL (
-                    SELECT content
-                    FROM messages
-                    WHERE thread_id = page.id AND role = 'user' AND on_active_path
-                      AND ($13::BIGINT IS NULL
-                           OR recipient_audience_revision IS NULL
-                           OR recipient_audience_revision >= $13)
-                    ORDER BY sequence ASC
-                    LIMIT 1
-                 ) first_user ON TRUE
-                 LEFT JOIN LATERAL (
-                    SELECT content
-                    FROM messages
-                    WHERE thread_id = page.id AND on_active_path
-                      AND ($13::BIGINT IS NULL
-                           OR recipient_audience_revision IS NULL
-                           OR recipient_audience_revision >= $13)
-                    ORDER BY sequence DESC
-                    LIMIT 1
-                 ) last_message ON TRUE
-                 LEFT JOIN LATERAL (
-                    SELECT r.id, ", crate::run_phase::run_phase_sql!("r"), " AS status, r.updated_at
-                    FROM runs r
-                    WHERE r.thread_id = page.id
-                    ORDER BY r.updated_at DESC, r.created_at DESC, r.id DESC
-                    LIMIT 1
-                 ) latest_run ON TRUE
-                 LEFT JOIN LATERAL (
-                    SELECT GREATEST(COUNT(*) FILTER (WHERE m.role = 'user') - 1, 0) AS reply_count,
-                           (SELECT lm.author_subject_id
-                            FROM messages lm
-                            WHERE lm.thread_id = page.id AND lm.role = 'user'
-                              AND lm.author_subject_id IS NOT NULL
-                              AND lm.on_active_path
-                              AND ($6::BIGINT IS NULL
-                                   OR lm.recipient_audience_revision IS NULL
-                                   OR lm.recipient_audience_revision <= $6)
-                              AND ($13::BIGINT IS NULL
-                                   OR lm.recipient_audience_revision IS NULL
-                                   OR lm.recipient_audience_revision >= $13)
-                            ORDER BY lm.sequence DESC
-                            LIMIT 1) AS last_author
-                    FROM messages m
-                    WHERE m.thread_id = page.id
-                      AND m.on_active_path
-                      AND ($6::BIGINT IS NULL
-                           OR m.recipient_audience_revision IS NULL
-                           OR m.recipient_audience_revision <= $6)
-                      AND ($13::BIGINT IS NULL
-                           OR m.recipient_audience_revision IS NULL
-                           OR m.recipient_audience_revision >= $13)
-                 ) reply_stats ON TRUE
-                 ORDER BY (page.pinned_at IS NOT NULL) DESC, page.last_activity_at DESC, page.id DESC"),
-            )
+            let mut rows: Vec<ThreadListRow> = sqlx::query_as(&thread_list_page_sql())
             .bind(&req.org_id)
             .bind(&req.user_id)
             .bind(limit + 1)
@@ -21315,6 +21659,35 @@ mod tests {
             None,
             "a missing description is a warning and never refuses"
         );
+    }
+
+    /// An undo whose snapshot does not hold a learned skill's text cannot be checked. Under `report`
+    /// it is counted and the undo goes ahead, as every report-mode finding does; under `enforce` it is
+    /// refused with the closed token; with the switch off nothing is read.
+    #[test]
+    fn an_undo_whose_snapshot_cannot_be_read_is_refused_only_under_enforce() {
+        let snapshot = serde_json::json!({
+            "id": "skill-1",
+            "org_id": "org-l",
+            "enabled": true,
+            "origin": "model_tool",
+            "name": 7
+        });
+        for mode in [
+            crate::write_policy::Mode::Off,
+            crate::write_policy::Mode::Report,
+        ] {
+            let _guard = crate::write_policy::force_mode_for_test(mode);
+            assert!(
+                super::snapshot_policy_check(&snapshot).is_ok(),
+                "{mode:?} never refuses an undo"
+            );
+        }
+        let _guard = crate::write_policy::force_mode_for_test(crate::write_policy::Mode::Enforce);
+        let status = super::snapshot_policy_check(&snapshot)
+            .expect_err("enforce refuses a snapshot it cannot read");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(status.message(), "snapshot_unreadable");
     }
 
     /// The refusal sits after the content policy and before the statement, so a

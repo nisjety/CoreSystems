@@ -33,12 +33,13 @@
 //! # The switch
 //!
 //! `SESSION_RETENTION_SWEEP` is `off`, `dry_run` or `enforce`; unset or empty is
-//! `off`. A value that is blank, or is `off` once its surrounding whitespace is
-//! removed, is also `off`: off does nothing, so padding cannot start a pass nobody
-//! asked for. `enforce` is read exactly, never through padding. Any other value is
-//! `dry_run`, never `enforce`, because this switch is the one that will delete data:
-//! a typo, or a padded `enforce`, must not widen it (a deliberate deviation from the
-//! strict "unknown means off" rule, stated in the ledger entry).
+//! `off`. A value that is blank, or is `off` in any case once its surrounding
+//! whitespace is removed, is also `off`: off does nothing, so neither padding nor a
+//! capital letter can start a pass nobody asked for. `enforce` is read exactly,
+//! never through padding. Any other value is `dry_run`, never `enforce`, because
+//! this switch is the one that will delete data: a typo, or a padded `enforce`,
+//! must not widen it (a deliberate deviation from the strict "unknown means off"
+//! rule, stated in the ledger entry).
 //!
 //! # Delete mode (C3)
 //!
@@ -187,18 +188,22 @@ pub(crate) enum Mode {
 const RECORDED_DRY_RUN: &str = "dry_run";
 const RECORDED_ENFORCE: &str = "enforce";
 
-/// Reads the switch (see the module docs). Unset is off, and so is a value that is blank or
-/// `off` once surrounding whitespace is removed: off does nothing. `enforce` is read exactly,
-/// with no trimming, so a padded `enforce` is `dry_run`. Anything else is `dry_run`, never
-/// `enforce`.
+/// Reads the switch (see the module docs). Unset is off, and so is a value that is blank or `off`
+/// in any case once surrounding whitespace is removed: off does nothing, so neither padding nor a
+/// capital letter can start a pass. `enforce` is read exactly, with no trimming, so a padded
+/// `enforce` is `dry_run`. Anything else is `dry_run`, never `enforce`.
 pub(crate) fn mode_from(raw: Option<&str>) -> Mode {
     match raw {
         None => Mode::Off,
         Some("enforce") => Mode::Enforce,
-        Some(value) => match value.trim() {
-            "" | "off" => Mode::Off,
-            _ => Mode::DryRun,
-        },
+        Some(value) => {
+            let word = value.trim();
+            if word.is_empty() || word.eq_ignore_ascii_case("off") {
+                Mode::Off
+            } else {
+                Mode::DryRun
+            }
+        }
     }
 }
 
@@ -1089,7 +1094,7 @@ mod tests {
 
     #[test]
     fn retention_sweep_switch_unset_blank_or_off_is_off() {
-        // Padded off is off: the operator asked for nothing, so nothing runs.
+        // Padded or cased off is off: the operator asked for nothing, so nothing runs.
         for raw in [
             None,
             Some(""),
@@ -1097,6 +1102,9 @@ mod tests {
             Some(" off "),
             Some("  "),
             Some("\toff\n"),
+            Some("Off"),
+            Some("OFF"),
+            Some(" oFf\r\n"),
         ] {
             assert_eq!(mode_from(raw), Mode::Off, "{raw:?}");
         }
@@ -1112,7 +1120,7 @@ mod tests {
         }
         // A typo, another casing or a boolean must never become enforce.
         for raw in [
-            "Enforce", "ENFORCE", "enforced", "true", "1", "on", "dry-run", "Off", "false",
+            "Enforce", "ENFORCE", "enforced", "true", "1", "on", "dry-run", "false", "offer",
         ] {
             assert_eq!(mode_from(Some(raw)), Mode::DryRun, "{raw}");
         }

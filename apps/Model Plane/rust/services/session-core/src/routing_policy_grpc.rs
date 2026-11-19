@@ -47,7 +47,7 @@ fn record_metrics(method: &'static str, started: Instant, is_ok: bool) {
 }
 
 /// The switch for the candidate RPCs, read once at boot. Only the literal `true` enables it.
-const CANDIDATES_ENV: &str = "SESSION_CORE_ROUTING_CANDIDATES_ENABLED";
+pub(crate) const CANDIDATES_ENV: &str = "SESSION_CORE_ROUTING_CANDIDATES_ENABLED";
 
 /// The page a candidate list returns when the caller names no limit, and the ceiling for any limit.
 const DEFAULT_LIST_LIMIT: i32 = 50;
@@ -200,7 +200,7 @@ fn list_limit(requested: i32) -> Result<i32, Status> {
 
 /// The switch for the per-organisation overlay RPCs (W4-BYO-3), read once at boot. Only the literal `true`
 /// enables it; off, both RPCs answer UNAVAILABLE and the table is never touched.
-const ORG_OVERLAY_ENV: &str = "SESSION_ORG_ROUTING_OVERLAY";
+pub(crate) const ORG_OVERLAY_ENV: &str = "SESSION_ORG_ROUTING_OVERLAY";
 
 /// The service scope that lets a service principal write an organisation's overlay. The gateway checks the
 /// organisation-admin role itself, as it does for every other org-admin write, and presents this scope for the

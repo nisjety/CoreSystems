@@ -17,8 +17,10 @@
 //! 3. The viewer holds no row in `space_membership_revocations` for this Space. This is the path that
 //!    closes a stream within one re-authorization interval of a removal.
 //! 4. The run is a ROOT run of a thread of THIS Space and org, inside the decision's audience
-//!    ceiling. A run anywhere else, or beyond the ceiling, is `NotFound`: there is no oracle for a
-//!    run id the viewer may not see.
+//!    ceiling. Under a `since_join` history floor (WS04-S11) it is also stamped at or after the floor,
+//!    and its thread holds a message the viewer may see from the floor on (V3e-sws-2). A run anywhere
+//!    else, beyond the ceiling, or before the floor is `NotFound`: there is no oracle for a run id the
+//!    viewer may not see.
 //! 5. The run's route. A persistent run names none. A zero-retention-waived run is admitted only to a
 //!    caller whose own waiver names the run's connection and acknowledgement, and the verdict then names
 //!    that route (provider and connection) so the gateway decides the posture on it. A zero-retention run,
@@ -35,6 +37,7 @@ use sqlx::PgPool;
 use tonic::Status;
 
 use crate::auth::{authorize_operation, VerifiedIdentity, ZdrWaiver};
+use crate::space::audience_window::floor_gate_message_sql;
 
 /// The most a validity window may reach past now, whatever the decision's own expiry: the caller
 /// asks again long before this.
@@ -62,32 +65,49 @@ struct AttachRow {
     started_at_unix: i64,
 }
 
+/// The statement of the attach read. Parameters: $1 run id, $2 org, $3 Space, $4 the audience ceiling,
+/// $5 the `since_join` history floor (WS04-S11), `NULL` when the switch is off or no floor is signed.
+///
+/// Under the floor (V3e-sws-2) the run must be stamped at or after it, and its thread must hold a message
+/// the viewer may see from the floor on: the thread gate the attention and timeline reads apply, and the
+/// same run-level stamp rule their runs use. With no floor both predicates are TRUE, so the answer is the
+/// one the ceiling alone gives.
+fn attach_row_sql() -> String {
+    format!(
+        "SELECT r.thread_id AS thread_id, r.user_id AS owner_subject_id, {phase} AS run_phase, \
+         r.retention_class AS retention_class, r.waiver_connection_id AS waiver_connection_id, \
+         r.waiver_ack_id AS waiver_ack_id, extract(epoch from r.created_at)::bigint AS started_at_unix \
+         FROM runs r JOIN threads t ON t.id = r.thread_id \
+         WHERE r.id = $1 AND r.org_id = $2 AND t.org_id = $2 AND t.space_id = $3 \
+           AND r.parent_run_id IS NULL \
+           AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $4) \
+           AND ($5::BIGINT IS NULL OR r.recipient_audience_revision IS NULL \
+                OR r.recipient_audience_revision >= $5::BIGINT) \
+           AND ($5::BIGINT IS NULL OR EXISTS (SELECT 1 FROM messages em \
+                WHERE em.thread_id = t.id AND {gate}))",
+        phase = crate::run_phase::run_phase_sql!("r"),
+        gate = floor_gate_message_sql("em", "$4", "$5"),
+    )
+}
+
 /// The run joined to its thread, when it is a root run of a thread of this Space and org inside the
-/// decision's audience ceiling. Anything else is `NotFound`: there is no oracle for a run id the viewer
-/// may not see.
+/// decision's audience ceiling and, under the history floor, visible from it (V3e-sws-2). Anything else
+/// is `NotFound`: there is no oracle for a run id the viewer may not see.
 async fn fetch_attach_row(
     pool: &PgPool,
     run_id: &str,
     org_id: &str,
     space_id: &str,
     audience_revision: i64,
+    history_floor: Option<i64>,
 ) -> Result<AttachRow, Status> {
-    let query = concat!(
-        "SELECT r.thread_id AS thread_id, r.user_id AS owner_subject_id, ",
-        crate::run_phase::run_phase_sql!("r"),
-        " AS run_phase, r.retention_class AS retention_class, \
-         r.waiver_connection_id AS waiver_connection_id, r.waiver_ack_id AS waiver_ack_id, \
-         extract(epoch from r.created_at)::bigint AS started_at_unix \
-         FROM runs r JOIN threads t ON t.id = r.thread_id \
-         WHERE r.id = $1 AND r.org_id = $2 AND t.org_id = $2 AND t.space_id = $3 \
-           AND r.parent_run_id IS NULL \
-           AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $4)"
-    );
-    sqlx::query_as(query)
+    let sql = attach_row_sql();
+    sqlx::query_as(&sql)
         .bind(run_id)
         .bind(org_id)
         .bind(space_id)
         .bind(audience_revision)
+        .bind(history_floor)
         .fetch_optional(pool)
         .await
         .map_err(|error| Status::internal(error.to_string()))?
@@ -176,6 +196,7 @@ pub(crate) async fn authorize_room_run_attach(
         caller.org_id(),
         space_id,
         decision.recipient_audience_revision,
+        decision.history_floor,
     )
     .await?;
     let (provider, connection) = live_route(&row, caller.zdr_waiver())?;
@@ -202,6 +223,8 @@ mod tests {
     use super::*;
     use crate::space::test_support;
     use mp_contracts::agentic_subscription::PROVIDER_ID;
+    use mp_ids::new_ulid;
+    use std::collections::BTreeSet;
 
     fn row(retention: &str, connection: Option<&str>, ack: Option<&str>) -> AttachRow {
         AttachRow {
@@ -257,6 +280,55 @@ mod tests {
         assert!(live_route(&row("zdr", None, None), None).is_err());
     }
 
+    /// The placeholders a statement names, by the number Postgres binds them with.
+    fn placeholders(sql: &str) -> BTreeSet<usize> {
+        let mut found = BTreeSet::new();
+        let mut rest = sql;
+        while let Some(at) = rest.find('$') {
+            let after = &rest[at + 1..];
+            let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+            if let Ok(number) = digits.parse::<usize>() {
+                found.insert(number);
+            }
+            rest = &after[digits.len()..];
+        }
+        found
+    }
+
+    /// V3e-sws-2-rel1: the attach read binds the history floor last, after the ceiling, and states both
+    /// floor predicates: the run's own stamp and the thread-level gate. Each keeps its no-floor branch
+    /// first, so a NULL floor (the switch off) is TRUE for every run. Checked on the statement text, so
+    /// no database is needed.
+    #[test]
+    fn the_attach_read_binds_the_history_floor_last_and_gates_the_run_and_its_thread() {
+        let sql = attach_row_sql();
+        assert_eq!(placeholders(&sql), (1..=5).collect::<BTreeSet<usize>>());
+        assert!(
+            sql.contains("t.recipient_audience_revision <= $4"),
+            "the thread ceiling stays: {sql}"
+        );
+        assert!(
+            sql.contains("($5::BIGINT IS NULL OR r.recipient_audience_revision IS NULL"),
+            "the run's own stamp is gated by the floor, no-floor branch first: {sql}"
+        );
+        assert!(
+            sql.contains("r.recipient_audience_revision >= $5::BIGINT"),
+            "a run stamped before the floor is refused: {sql}"
+        );
+        assert!(
+            sql.contains("($5::BIGINT IS NULL OR EXISTS (SELECT 1 FROM messages em"),
+            "the thread gate is the message gate under the floor, no-floor branch first: {sql}"
+        );
+        assert!(
+            sql.contains(&floor_gate_message_sql("em", "$4", "$5")),
+            "the thread gate states the ceiling, the active path, the floor and deletion: {sql}"
+        );
+        assert!(
+            sql.contains("em.thread_id = t.id"),
+            "the gate reads the run's own thread: {sql}"
+        );
+    }
+
     /// DB tier: a waived run is read with its receipt, and the verdict's route is the caller's waiver's
     /// provider and connection only when the connection and acknowledgement match. Needs the disposable
     /// Postgres harness (`space::test_support::connect`); not run in this pass.
@@ -277,7 +349,7 @@ mod tests {
         .await
         .expect("the waived run");
 
-        let fetched = fetch_attach_row(&pool, run, org, space, i64::MAX)
+        let fetched = fetch_attach_row(&pool, run, org, space, i64::MAX, None)
             .await
             .expect("the run is inside the audience");
         assert_eq!(fetched.retention_class, "zdr_waived");
@@ -309,10 +381,92 @@ mod tests {
         .await
         .expect("the persistent run");
 
-        let fetched = fetch_attach_row(&pool, run, org, space, i64::MAX)
+        let fetched = fetch_attach_row(&pool, run, org, space, i64::MAX, None)
             .await
             .expect("the run is inside the audience");
         let got = live_route(&fetched, None).expect("persistent");
         assert_eq!(got, (String::new(), String::new()));
+    }
+
+    /// V3e-sws-2-rel1 against Postgres: under a `since_join` floor a run is attached only when it is stamped
+    /// at or after the floor AND its thread holds a message from the floor on. A run stamped before the floor
+    /// is `NotFound` even on a thread with a post-floor message, and so is a run on a thread whose only
+    /// messages are earlier. A run from the floor on is read. With no floor (the switch off) every run is
+    /// read, as before.
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn a_late_joiner_cannot_attach_to_a_run_from_before_the_join() {
+        let Some(pool) = test_support::connect().await else {
+            return;
+        };
+        let suffix = new_ulid();
+        let org = format!("attach-floor-{suffix}");
+        let space = format!("space-attach-floor-{suffix}");
+        let early = format!("{suffix}-early");
+        let late = format!("{suffix}-late");
+        test_support::seed_space_thread(&pool, &org, &space, &early, "owner-1").await;
+        test_support::seed_space_thread(&pool, &org, &space, &late, "owner-1").await;
+        // The earlier thread holds one message stamped before the floor (3); the later thread holds one
+        // stamped from the floor on (4).
+        test_support::seed_space_message_at_revision(
+            &pool,
+            &space,
+            &early,
+            &format!("{suffix}-early-msg"),
+            "before the join",
+            2,
+        )
+        .await;
+        test_support::seed_space_message_at_revision(
+            &pool,
+            &space,
+            &late,
+            &format!("{suffix}-late-msg"),
+            "after the join",
+            4,
+        )
+        .await;
+        // Stamped from the floor on, but on the earlier thread: only the thread gate keeps it out.
+        let early_thread_run = format!("{suffix}-early-thread-run");
+        // Stamped before the floor, on the later thread: the thread gate passes, so only the run's own
+        // stamp keeps it out.
+        let early_stamp_run = format!("{suffix}-early-stamp-run");
+        let late_run = format!("{suffix}-late-run");
+        for (run, thread, revision) in [
+            (&early_thread_run, &early, 4_i64),
+            (&early_stamp_run, &late, 2_i64),
+            (&late_run, &late, 4_i64),
+        ] {
+            test_support::seed_space_run(&pool, &org, &space, thread, run, "running", "persistent")
+                .await;
+            sqlx::query("UPDATE runs SET recipient_audience_revision = $1 WHERE id = $2")
+                .bind(revision)
+                .bind(run)
+                .execute(&pool)
+                .await
+                .expect("stamp the run");
+        }
+
+        for run in [&early_thread_run, &early_stamp_run] {
+            let refused = fetch_attach_row(&pool, run, &org, &space, 5, Some(3))
+                .await
+                .err();
+            assert_eq!(
+                refused.map(|status| status.code()),
+                Some(tonic::Code::NotFound),
+                "a run the floor hides is not attached: {run}"
+            );
+        }
+        let fetched = fetch_attach_row(&pool, &late_run, &org, &space, 5, Some(3))
+            .await
+            .expect("a run from the floor on is attached");
+        assert_eq!(fetched.thread_id, late);
+
+        for run in [&early_thread_run, &early_stamp_run, &late_run] {
+            fetch_attach_row(&pool, run, &org, &space, 5, None)
+                .await
+                .expect("with no floor, the switch off, every run is read");
+        }
+        test_support::clean_space(&pool, &org, &space).await;
     }
 }

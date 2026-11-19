@@ -12,6 +12,12 @@
 //! Both purposes read the active path only (WS17 S8): a turn on an inactive branch is not
 //! part of the conversation the owner sees, so search never returns one.
 //!
+//! Both purposes also apply the WS12-S4 revision fold, as every product read does: a deleted
+//! message is never a hit, and an edited one shows its effective text in the snippet. The original
+//! text of a `retain` edit or delete stays in `messages.content`, so it is never a hit or a snippet
+//! on its own. An edited message is a hit only when its effective text matches as well (see
+//! [`search_sql`] for what the index prefilter does not find).
+//!
 //! `SESSION_CORE_MESSAGE_SEARCH_ENABLED` gates the query path only. Migration 0055
 //! builds the index whether or not the switch is on, so enabling search needs no
 //! migration.
@@ -57,20 +63,37 @@ const QUERY_CANCELED: &str = "57014";
 /// $11/$12 keyset position, $13 page rows + 1, $14 candidate cap, $15 Space history floor
 /// (`NULL` = none; a message stamped before it is not a hit, WS04-S11).
 ///
-/// The predicate on `to_tsvector('simple', left(m.content, 65536))` and the role filter
-/// match migration 0055's index expression, so the planner can use it. `ts_headline` runs
-/// on the page only, after the limit.
-pub(crate) const SEARCH_SQL: &str = "
+/// Built at run time because the WS12-S4 revision fold is
+/// [`crate::space::revisions::fold_join_sql`]. Its ceiling is `$5` too: `NULL` for an owner read,
+/// which admits every revision. A deleted message is not a candidate (`FOLD_NOT_DELETED_SQL`), and
+/// the snippet reads the effective text (`FOLD_CONTENT_SQL`), the same fold that ListConversation
+/// and the Space timeline apply. A `retain` edit or delete leaves the original text in
+/// `messages.content` (migration 0076), so that text is never a hit or a snippet on its own.
+///
+/// The predicate on `to_tsvector('simple', left(m.content, 65536))` and the role filter match
+/// migration 0055's index expression, so the planner can use it. It is the prefilter, and it reads
+/// the original text: an edited message is a candidate only when its original also matches, and its
+/// effective text must match too. So a word that only the edit introduced is not found, and neither
+/// is an edited message under `purge` (which blanks the original), until fold-aware indexing lands
+/// (a later decision in `docs/plans/space-hybrid-build-plan-2026-10-14.md`). `ts_headline` runs on
+/// the page only, after the limit.
+pub(crate) fn search_sql() -> String {
+    format!(
+        "
 WITH candidates AS (
-    SELECT m.id AS message_id, m.thread_id, m.role, m.content, m.created_at,
+    SELECT m.id AS message_id, m.thread_id, m.role, {fold_content} AS content, m.created_at,
            t.session_key, t.presentation_title, t.space_id, t.archived_at
     FROM messages m
     JOIN threads t ON t.id = m.thread_id
+    {fold_join}
     WHERE m.role IN ('user', 'assistant')
       AND m.on_active_path
       AND (m.copied_from_message_id IS NULL OR NULLIF($7, '') IS NOT NULL)
       AND (NOT $9::BOOLEAN OR m.post_kind = 'turn')
       AND to_tsvector('simple', left(m.content, 65536)) @@ to_tsquery('simple', $3)
+      AND {not_deleted}
+      AND (COALESCE(rv.action, '') <> 'edited'
+           OR to_tsvector('simple', left(COALESCE(rv.content, ''), 65536)) @@ to_tsquery('simple', $3))
       AND t.org_id = $1
       AND (CASE WHEN $5::BIGINT IS NULL
                 THEN t.user_id = $2 AND t.space_id IS NULL
@@ -123,7 +146,12 @@ SELECT page.thread_id,
                || ', MaxFragments=1, MaxWords=24, MinWords=8'
        ) AS snippet
 FROM page
-ORDER BY page.created_at DESC, page.message_id DESC";
+ORDER BY page.created_at DESC, page.message_id DESC",
+        fold_content = crate::space::revisions::FOLD_CONTENT_SQL,
+        fold_join = crate::space::revisions::fold_join_sql("$5::BIGINT"),
+        not_deleted = crate::space::revisions::FOLD_NOT_DELETED_SQL,
+    )
+}
 
 /// Read once, at boot, when the service is built: the switch is a deploy setting, and a
 /// restart is how a deploy changes it.
@@ -307,7 +335,8 @@ impl MessageSearchGrpc {
             .await
             .map_err(map_search_error)?;
         // One extra row tells the caller whether another page exists without a count query.
-        let mut rows: Vec<SearchRow> = sqlx::query_as(SEARCH_SQL)
+        let sql = search_sql();
+        let mut rows: Vec<SearchRow> = sqlx::query_as(&sql)
             .bind(&req.org_id)
             .bind(&req.user_id)
             .bind(&tsquery)
@@ -477,19 +506,21 @@ mod tests {
     fn the_query_matches_the_index_the_migration_builds() {
         // The planner uses the GIN index only when the predicate is the indexed expression
         // with the indexed partial filter. A change to either side must change both.
-        assert!(SEARCH_SQL
+        let sql = search_sql();
+        assert!(sql
             .contains("to_tsvector('simple', left(m.content, 65536)) @@ to_tsquery('simple', $3)"));
-        assert!(SEARCH_SQL.contains("m.role IN ('user', 'assistant')"));
+        assert!(sql.contains("m.role IN ('user', 'assistant')"));
     }
 
     #[test]
     fn the_highlight_markers_are_stripped_from_content_then_added_back() {
         // A snippet wraps a match in U+E000 and U+E001, and both are removed from stored
         // content first, so a marker in a snippet always means a match.
-        assert!(SEARCH_SQL.contains(
+        let sql = search_sql();
+        assert!(sql.contains(
             "replace(replace(left(page.content, 65536), chr(57344), ''), chr(57345), '')"
         ));
-        assert!(SEARCH_SQL.contains("'StartSel=' || chr(57344) || ', StopSel=' || chr(57345)"));
+        assert!(sql.contains("'StartSel=' || chr(57344) || ', StopSel=' || chr(57345)"));
     }
 
     async fn connect() -> PgPool {
@@ -727,10 +758,11 @@ mod tests {
     /// message stamped with no revision. Checked on the statement text (no database needed).
     #[test]
     fn the_space_history_floor_is_bound_last_and_admits_an_unstamped_message() {
-        assert!(SEARCH_SQL.contains("$15::BIGINT IS NULL"));
-        assert!(SEARCH_SQL.contains("m.recipient_audience_revision >= $15::BIGINT"));
+        let sql = search_sql();
+        assert!(sql.contains("$15::BIGINT IS NULL"));
+        assert!(sql.contains("m.recipient_audience_revision >= $15::BIGINT"));
         assert!(
-            !SEARCH_SQL.contains("$16"),
+            !sql.contains("$16"),
             "fifteen binds: the floor is the last one"
         );
     }
@@ -809,17 +841,203 @@ mod tests {
         clean_space(&pool, &org, &space).await;
     }
 
-    /// The message ids one Space search returns, bound exactly as `search()` binds them.
-    async fn space_search_ids(
+    /// Records one revision the way `revise_message` stores it: an edit carries its new text, a delete
+    /// none. Stamped at audience revision 1, so a reader at any higher ceiling sees it.
+    async fn record_revision(
+        pool: &PgPool,
+        org: &str,
+        space: &str,
+        thread: &str,
+        message: &str,
+        action: &str,
+        content: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO message_revisions (revision_id, org_id, thread_id, message_id, revision_no, \
+             action, actor_subject_id, actor_class, moderation_reason, content, content_digest, \
+             prev_content_digest, original_retention, idempotency_hash, space_id, \
+             recipient_audience_revision, authority_revision, resource_authorization_ref) \
+             VALUES ($1, $2, $3, $4, 1, $5, 'owner-a', 'author', '', $6, $7, $8, 'retain', $9, $10, \
+             1, 1, 'resource-1')",
+        )
+        .bind(format!("rev-{message}"))
+        .bind(org)
+        .bind(thread)
+        .bind(message)
+        .bind(action)
+        .bind(content)
+        .bind(format!("sha256:{message}-now"))
+        .bind(format!("sha256:{message}-before"))
+        .bind(format!("idem-{message}"))
+        .bind(space)
+        .execute(pool)
+        .await
+        .expect("record the revision");
+    }
+
+    /// The hits of one owner search for `query`: a UI search, or a recall search when `recall` is set.
+    async fn owner_search(
+        pool: &PgPool,
+        org: &str,
+        owner: &str,
+        query: &str,
+        recall: bool,
+    ) -> Vec<pb::SearchHit> {
+        let mut req = request(org, owner, query);
+        if recall {
+            req.get_mut().purpose = pb::SearchPurpose::Recall as i32;
+        }
+        service(pool.clone())
+            .search_messages(req)
+            .await
+            .expect("owner search")
+            .into_inner()
+            .hits
+    }
+
+    /// WS12-S4 against Postgres: a deleted message is not a hit on either purpose. An edited message that
+    /// keeps the searched word is found and shown by its effective text, and its original text is never a
+    /// hit or a snippet. An unrevised message is found as it was. The Space read at audience revision 5
+    /// gives the same for its deleted and edited messages.
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn search_hides_the_original_text_of_a_deleted_or_edited_message() {
+        let Some(pool) = crate::space::test_support::connect().await else {
+            return;
+        };
+        let suffix = new_ulid();
+        let org = format!("search-revise-{suffix}");
+        let owner = "reviser";
+        // One owner thread per message, so each message is the hit of its own thread.
+        let deleted_thread = format!("{suffix}-deleted");
+        let edited_thread = format!("{suffix}-edited");
+        let plain_thread = format!("{suffix}-plain");
+        for thread in [&deleted_thread, &edited_thread, &plain_thread] {
+            seed_thread(&pool, &org, owner, thread).await;
+        }
+        let deleted = format!("{suffix}-deleted-m");
+        let edited = format!("{suffix}-edited-m");
+        let plain = format!("{suffix}-plain-m");
+        seed_message(&pool, &deleted_thread, &deleted, "retired marker text").await;
+        seed_message(&pool, &edited_thread, &edited, "original wording stays").await;
+        seed_message(&pool, &plain_thread, &plain, "plain wording stays").await;
+        record_revision(&pool, &org, "", &deleted_thread, &deleted, "deleted", None).await;
+        record_revision(
+            &pool,
+            &org,
+            "",
+            &edited_thread,
+            &edited,
+            "edited",
+            Some("revised wording stays"),
+        )
+        .await;
+
+        // The deleted message's words, and the edited message's original-only word, find nothing.
+        for query in ["retired", "marker"] {
+            let ui = owner_search(&pool, &org, owner, query, false).await;
+            assert!(ui.is_empty(), "UI finds {query}");
+            let recalled = owner_search(&pool, &org, owner, query, true).await;
+            assert!(recalled.is_empty(), "recall finds {query}");
+        }
+        let original = owner_search(&pool, &org, owner, "original", false).await;
+        assert!(original.is_empty(), "an edit's original is found");
+
+        // A word both texts keep finds the edited message by its effective text, and the plain one too.
+        let hits = owner_search(&pool, &org, owner, "wording", false).await;
+        let mut threads: Vec<&str> = hits.iter().map(|hit| hit.thread_id.as_str()).collect();
+        threads.sort_unstable();
+        let mut expected = vec![edited_thread.as_str(), plain_thread.as_str()];
+        expected.sort_unstable();
+        assert_eq!(threads, expected);
+        let edited_hit = hits
+            .iter()
+            .find(|hit| hit.thread_id == edited_thread)
+            .expect("the edited message is a hit");
+        let edited_snippet = edited_hit.snippet.as_str();
+        assert!(edited_snippet.contains("revised"), "{edited_snippet}");
+        assert!(!edited_snippet.contains("original"), "{edited_snippet}");
+        assert!(edited_snippet.contains('\u{E000}'), "{edited_snippet}");
+        let plain_hit = hits
+            .iter()
+            .find(|hit| hit.thread_id == plain_thread)
+            .expect("the plain message is a hit");
+        let plain_snippet = plain_hit.snippet.as_str();
+        assert!(plain_snippet.contains('\u{E000}'), "{plain_snippet}");
+        let recalled = owner_search(&pool, &org, owner, "wording", true).await;
+        assert_eq!(recalled.len(), 2, "recall keeps both turns");
+
+        // The same on a Space read at audience revision 5: one deleted and one edited Space message.
+        let space = format!("space-revise-{suffix}");
+        let space_deleted_thread = format!("{suffix}-sd");
+        let space_edited_thread = format!("{suffix}-se");
+        seed_space_thread(&pool, &org, &space, &space_deleted_thread, owner).await;
+        seed_space_thread(&pool, &org, &space, &space_edited_thread, owner).await;
+        let space_deleted = format!("{suffix}-sd-m");
+        let space_edited = format!("{suffix}-se-m");
+        seed_space_message_at_revision(
+            &pool,
+            &space,
+            &space_deleted_thread,
+            &space_deleted,
+            "space marker text",
+            1,
+        )
+        .await;
+        seed_space_message_at_revision(
+            &pool,
+            &space,
+            &space_edited_thread,
+            &space_edited,
+            "space original wording",
+            1,
+        )
+        .await;
+        record_revision(
+            &pool,
+            &org,
+            &space,
+            &space_deleted_thread,
+            &space_deleted,
+            "deleted",
+            None,
+        )
+        .await;
+        record_revision(
+            &pool,
+            &org,
+            &space,
+            &space_edited_thread,
+            &space_edited,
+            "edited",
+            Some("space revised wording"),
+        )
+        .await;
+        let marker = space_search_rows(&pool, &org, &space, Some(5), None, "marker").await;
+        assert!(marker.is_empty(), "a deleted Space message is not a hit");
+        let original = space_search_rows(&pool, &org, &space, Some(5), None, "original").await;
+        assert!(original.is_empty(), "a Space edit's original is found");
+        let rows = space_search_rows(&pool, &org, &space, Some(5), None, "wording").await;
+        assert_eq!(rows.len(), 1, "only the edited Space message is a hit");
+        assert_eq!(rows[0].1, space_edited);
+        let snippet = rows[0].8.clone().unwrap_or_default();
+        assert!(snippet.contains("revised"), "{snippet}");
+        assert!(!snippet.contains("original"), "{snippet}");
+        clean_space(&pool, &org, &space).await;
+    }
+
+    /// The rows one Space search returns, bound exactly as `search()` binds them.
+    async fn space_search_rows(
         pool: &PgPool,
         org: &str,
         space: &str,
         ceiling: Option<i64>,
         floor: Option<i64>,
         query: &str,
-    ) -> Vec<String> {
+    ) -> Vec<SearchRow> {
         let tsquery = build_prefix_tsquery(query).expect("a word");
-        let rows: Vec<SearchRow> = sqlx::query_as(SEARCH_SQL)
+        let sql = search_sql();
+        let rows: Vec<SearchRow> = sqlx::query_as(&sql)
             .bind(org)
             .bind("owner-a")
             .bind(&tsquery)
@@ -838,16 +1056,64 @@ mod tests {
             .fetch_all(pool)
             .await
             .expect("space search");
-        let mut ids: Vec<String> = rows.into_iter().map(|row| row.1).collect();
+        rows
+    }
+
+    /// The message ids one Space search returns, sorted.
+    async fn space_search_ids(
+        pool: &PgPool,
+        org: &str,
+        space: &str,
+        ceiling: Option<i64>,
+        floor: Option<i64>,
+        query: &str,
+    ) -> Vec<String> {
+        let mut ids: Vec<String> = space_search_rows(pool, org, space, ceiling, floor, query)
+            .await
+            .into_iter()
+            .map(|row| row.1)
+            .collect();
         ids.sort();
         ids
+    }
+
+    /// WS12-S4: the search applies the fold every product read applies, so a deleted message is not a
+    /// candidate, the snippet reads the effective text, and an edited candidate's match reads the edit
+    /// too. Checked on the statement text (no database needed); the DB tier below proves the rows. For
+    /// a message with no revision row the fold is a no-op: the effective text is `messages.content`,
+    /// nothing is deleted, and the message matches on its own text, so such a search returns what it
+    /// always did.
+    #[test]
+    fn the_search_reads_through_the_revision_fold() {
+        let sql = search_sql();
+        // The fold itself, with the reader's ceiling `$5` (`NULL` for an owner read: every revision).
+        let fold = crate::space::revisions::fold_join_sql("$5::BIGINT");
+        assert!(sql.contains(fold.as_str()), "the fold join");
+        // A deleted message is never a candidate.
+        assert!(sql.contains(crate::space::revisions::FOLD_NOT_DELETED_SQL));
+        // The candidate's text is the effective text, which the match and the snippet read.
+        let content = format!("{} AS content", crate::space::revisions::FOLD_CONTENT_SQL);
+        assert!(sql.contains(content.as_str()));
+        assert!(!sql.contains("replace(replace(left(m.content"));
+        // An edited message is matched on its effective text as well as its original.
+        assert!(sql.contains("COALESCE(rv.action, '') <> 'edited'"));
+        assert!(sql.contains(
+            "to_tsvector('simple', left(COALESCE(rv.content, ''), 65536)) @@ to_tsquery('simple', $3)"
+        ));
+        // The fold sits before the deleted-message filter, and both sit before the ranking.
+        let fold_at = sql.find("LEFT JOIN LATERAL").expect("the fold join");
+        let deleted_at = sql
+            .find(crate::space::revisions::FOLD_NOT_DELETED_SQL)
+            .expect("the deleted-message filter");
+        let ranked_at = sql.find("ranked AS").expect("the ranking CTE");
+        assert!(fold_at < deleted_at && deleted_at < ranked_at);
     }
 
     /// The post predicate rides on the recall flag alone: it must stay in the statement and stay
     /// off for UI search (no database needed).
     #[test]
     fn the_post_predicate_is_gated_on_the_recall_flag() {
-        assert!(SEARCH_SQL.contains("(NOT $9::BOOLEAN OR m.post_kind = 'turn')"));
+        assert!(search_sql().contains("(NOT $9::BOOLEAN OR m.post_kind = 'turn')"));
     }
 
     /// WS06-S1: a ZDR credential's recall search is the typed durable-mutation refusal

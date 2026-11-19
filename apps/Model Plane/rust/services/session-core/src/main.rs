@@ -100,8 +100,8 @@ async fn main() -> Result<()> {
     info!("session-core starting");
     // Logs a retired spelling of an exact-literal switch; it changes no switch.
     switch_spellings::warn_former_spellings();
-    // Logs a CONTENT_WRITE_POLICY value other than the exact words; it changes no switch.
-    write_policy::warn_inexact_mode();
+    // Logs each mode switch set to a value its reader does not read exactly; it changes no switch.
+    switch_spellings::warn_unreadable_modes();
     // Per-thread run guard (WS09-S1): read once, never in a handler. ON unless
     // SPACE_RUN_THREAD_GUARD is switched off.
     let thread_run_guard = run_phase::guard_enabled_from_env();
@@ -334,8 +334,9 @@ async fn main() -> Result<()> {
     ));
 
     // WS10.S6: the run-trace consumer (durable `session-core-trace`) is off unless
-    // SESSION_CORE_TRACE_CONSUMER is 1/true/on, so a deployment that has not provisioned the
-    // stream is unaffected. The retention sweeper only deletes rows past their age.
+    // SESSION_CORE_TRACE_CONSUMER is the exact literal `true` (1 and on leave it off), so a
+    // deployment that has not provisioned the stream is unaffected. The retention sweeper only
+    // deletes rows past their age.
     let trace_pool = pool.clone();
     let trace_nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
     let trace_handle = tokio::spawn(async move {

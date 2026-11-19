@@ -18,11 +18,11 @@
 //! enabled skill is injected as trusted text. A person's own skill is never
 //! refused, only counted: the person wrote its text.
 //!
-//! The switch is `CONTENT_WRITE_POLICY`. Unset, blank or `off` runs no check at
-//! all. `report` runs the check, counts and logs what it would refuse, and lets
-//! the write through. `enforce` refuses it, and only the exact word does so: a
-//! set value the switch does not read runs as `report`, never as off, so a
-//! padded or mistyped value stays visible in the counters and the startup log.
+//! The switch is `CONTENT_WRITE_POLICY`. Unset, blank or `off` (padding allowed) runs
+//! no check at all. `report` runs the check, counts and logs what it would refuse, and
+//! lets the write through. `enforce` refuses it, and only the exact word does so: any
+//! other set value runs as `report`, never as off, so a padded or mistyped value stays
+//! visible in the counters and the startup log.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -58,7 +58,7 @@ impl Mode {
     /// Any other set value is [`Mode::Report`]: never off, so a value this switch does not read
     /// cannot silently disable the policy, and never enforce, so a typo cannot start refusing
     /// writes. This is the rule `SESSION_RETENTION_SWEEP` follows (`retention_sweeper::mode_from`).
-    /// [`warn_inexact_mode`] names such a value at startup.
+    /// [`is_unreadable_mode`] names such a value at startup.
     pub(crate) fn from_env_value(value: Option<&str>) -> Self {
         match value {
             None => Self::Off,
@@ -89,24 +89,9 @@ impl Mode {
 
 /// Whether `value` is set to something other than exactly `off`, `report` or `enforce`, and is
 /// not blank. [`Mode::from_env_value`] reads such a value as report, or as off when it is only
-/// padded `off`, so the startup log names it.
-fn is_inexact(value: Option<&str>) -> bool {
-    value.is_some_and(|raw| !matches!(raw, "off" | "report" | "enforce") && !raw.trim().is_empty())
-}
-
-/// Logs one warning at startup when [`MODE_ENV`] is set to a value other than exactly `off`,
-/// `report` or `enforce`. It names the mode the value reads as and never the value itself, and
-/// it changes nothing.
-pub(crate) fn warn_inexact_mode() {
-    let raw = std::env::var(MODE_ENV).ok();
-    if is_inexact(raw.as_deref()) {
-        tracing::warn!(
-            switch = MODE_ENV,
-            mode = Mode::from_env_value(raw.as_deref()).label(),
-            "switch is set to a value other than exactly off, report or enforce; it reads as the \
-             mode shown, and only the exact word enforce refuses writes"
-        );
-    }
+/// padded `off`, and the startup report names it (`switch_spellings::warn_unreadable_modes`).
+pub(crate) fn is_unreadable_mode(value: &str) -> bool {
+    !matches!(value, "off" | "report" | "enforce") && !value.trim().is_empty()
 }
 
 #[cfg(test)]
@@ -425,6 +410,38 @@ pub(crate) fn gate_skill(mode: Mode, origin: Origin, skill: &SkillText<'_>) -> R
     }
 }
 
+/// The token an undo carries when the snapshot it would restore does not hold the learned skill's
+/// text the content policy reads. Under `enforce` the undo is refused with it.
+pub(crate) const SNAPSHOT_UNREADABLE: &str = "snapshot_unreadable";
+
+/// Runs the policy for an undo whose snapshot cannot be read as a skill's text, so its text cannot
+/// be checked. Under `enforce` a learned skill's undo is refused with [`SNAPSHOT_UNREADABLE`]. Under
+/// `report` it is counted and logged under the same closed label and the undo goes ahead, as every
+/// report-mode finding does. A person's own skill is never refused.
+pub(crate) fn snapshot_unreadable(mode: Mode, origin: Origin) -> Result<(), &'static str> {
+    if mode == Mode::Off {
+        return Ok(());
+    }
+    counter!(
+        "mp_session_skill_policy_refused_total",
+        "code" => SNAPSHOT_UNREADABLE,
+        "origin" => origin.label(),
+        "mode" => mode.label()
+    )
+    .increment(1);
+    tracing::warn!(
+        code = SNAPSHOT_UNREADABLE,
+        origin = origin.label(),
+        mode = mode.label(),
+        "undo snapshot could not be read for the skill content policy"
+    );
+    if mode == Mode::Enforce && origin != Origin::User {
+        Err(SNAPSHOT_UNREADABLE)
+    } else {
+        Ok(())
+    }
+}
+
 /// The credential shapes execution-core's `scrub.rs` redacts. They are copied,
 /// not shared, because session-core does not depend on execution-core. A test
 /// holds every entry to the text in `mp-scrub` (which `scrub.rs` re-exports),
@@ -573,9 +590,8 @@ mod tests {
 
     #[test]
     fn only_a_value_other_than_the_exact_words_is_named_at_startup() {
-        assert!(!is_inexact(None));
         for quiet in ["", " \r\n", "off", "report", "enforce"] {
-            assert!(!is_inexact(Some(quiet)), "{quiet:?}");
+            assert!(!is_unreadable_mode(quiet), "{quiet:?}");
         }
         for named in [
             " off ",
@@ -585,8 +601,27 @@ mod tests {
             "true",
             "maybe",
         ] {
-            assert!(is_inexact(Some(named)), "{named:?}");
+            assert!(is_unreadable_mode(named), "{named:?}");
         }
+    }
+
+    /// An undo whose snapshot cannot be read is refused only under enforce, and only for a learned
+    /// skill: report counts it and lets the undo go ahead, and a person's own skill is never refused.
+    #[test]
+    fn an_unreadable_undo_snapshot_is_refused_only_under_enforce() {
+        assert_eq!(
+            snapshot_unreadable(Mode::Off, Origin::BackgroundReview),
+            Ok(())
+        );
+        assert_eq!(
+            snapshot_unreadable(Mode::Report, Origin::BackgroundReview),
+            Ok(())
+        );
+        assert_eq!(
+            snapshot_unreadable(Mode::Enforce, Origin::BackgroundReview),
+            Err(SNAPSHOT_UNREADABLE)
+        );
+        assert_eq!(snapshot_unreadable(Mode::Enforce, Origin::User), Ok(()));
     }
 
     #[test]

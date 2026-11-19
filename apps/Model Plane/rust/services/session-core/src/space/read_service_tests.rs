@@ -116,15 +116,17 @@ fn artifact_limit_defaults_and_clamps() {
 #[test]
 fn artifact_query_reads_only_the_indexed_predicate_and_never_content() {
     // The literal predicate of the partial index, so the planner can use it.
-    assert!(LIST_SPACE_ARTIFACTS_SQL.contains("jsonb_exists(m.metadata, 'artifacts')"));
-    assert!(LIST_SPACE_ARTIFACTS_SQL.contains("m.role = 'assistant'"));
-    assert!(LIST_SPACE_ARTIFACTS_SQL.contains("t.archived_at IS NULL"));
+    assert!(list_space_artifacts_sql().contains("jsonb_exists(m.metadata, 'artifacts')"));
+    assert!(list_space_artifacts_sql().contains("m.role = 'assistant'"));
+    assert!(list_space_artifacts_sql().contains("t.archived_at IS NULL"));
     // The audience ceiling applies to the thread and the message row.
-    assert!(LIST_SPACE_ARTIFACTS_SQL.contains("t.recipient_audience_revision <= $3"));
-    assert!(LIST_SPACE_ARTIFACTS_SQL.contains("m.recipient_audience_revision <= $3"));
+    assert!(list_space_artifacts_sql().contains("t.recipient_audience_revision <= $3"));
+    assert!(list_space_artifacts_sql().contains("m.recipient_audience_revision <= $3"));
+    // The version regex keeps single braces in the statement (the template doubles them).
+    assert!(list_space_artifacts_sql().contains("'^[0-9]{1,9}$'"));
     // Content is measured, never selected.
-    assert!(LIST_SPACE_ARTIFACTS_SQL.contains("char_length(COALESCE(a.elem->>'content', ''))"));
-    assert!(!LIST_SPACE_ARTIFACTS_SQL.contains("m.content"));
+    assert!(list_space_artifacts_sql().contains("char_length(COALESCE(a.elem->>'content', ''))"));
+    assert!(!list_space_artifacts_sql().contains("m.content"));
 }
 
 #[test]
@@ -134,7 +136,7 @@ fn artifact_query_applies_the_history_floor_before_the_count() {
     // before the window `count(*) OVER`, so the version count only counts rows the reader may
     // see. An unstamped message counts, and a `NULL` floor (the switch off, or no signed claim)
     // hides nothing. The floor is the ninth bind.
-    let sql = LIST_SPACE_ARTIFACTS_SQL;
+    let sql = list_space_artifacts_sql();
     let predicate = "m.recipient_audience_revision >= $9::BIGINT";
     assert!(sql.contains("$9::BIGINT IS NULL"));
     assert!(sql.contains(predicate));
@@ -150,6 +152,96 @@ fn artifact_query_applies_the_history_floor_before_the_count() {
     assert!(
         where_at < floor_at && floor_at < latest_at,
         "the floor filters art's rows, so the window count only counts visible rows"
+    );
+}
+
+#[test]
+fn artifact_query_folds_message_revisions_so_a_deleted_message_lists_nothing() {
+    // WS12-S4: the revision fold every sibling read applies (ListConversation, the Space timeline).
+    // `rv` is the latest revision the reader's ceiling allows, and a deletion always applies, so a
+    // deleted message is filtered out of `art` before the window count: none of its artifacts is
+    // listed and none of its versions counts toward `version_count`.
+    let sql = list_space_artifacts_sql();
+    assert!(
+        sql.contains("FROM message_revisions r"),
+        "the fold reads the revision log"
+    );
+    assert!(
+        sql.contains(
+            "r.action = 'deleted' OR $3::BIGINT IS NULL OR r.recipient_audience_revision <= $3::BIGINT"
+        ),
+        "a deletion always applies, an edit is bounded by the reader's ceiling"
+    );
+    let fold_at = sql.find("LEFT JOIN LATERAL").expect("the fold join");
+    let deleted_at = sql
+        .find("COALESCE(rv.action, '') <> 'deleted'")
+        .expect("the deleted-message filter");
+    let latest_at = sql.find("latest AS").expect("the CTE after art");
+    assert!(
+        fold_at < deleted_at && deleted_at < latest_at,
+        "the filter sits in art's WHERE, after the fold join and before the latest-version CTE"
+    );
+}
+
+#[test]
+fn artifact_query_lists_only_the_active_path() {
+    // V3e-sws-1-rel1: a turn rewound or regenerated away (`on_active_path = false`) is not part of
+    // the conversation the transcript shows, so `art` drops its rows before the latest-version pick
+    // and the window count. ListConversation, the timeline, attention and message search filter on
+    // the flag too, and they read it whatever the message-versions switch says: the switch gates the
+    // writes only. With every row on the path (the switch-off state, where no tree is written) the
+    // predicate removes nothing. It sits in `art`'s WHERE after the fold filter, so `count(*) OVER`
+    // counts only active-path rows.
+    let sql = list_space_artifacts_sql();
+    assert_eq!(
+        sql.matches("m.on_active_path").count(),
+        1,
+        "one predicate, in art's WHERE"
+    );
+    let where_at = sql
+        .find("WHERE m.space_id = $2")
+        .expect("art's WHERE clause");
+    let fold_at = sql
+        .find("COALESCE(rv.action, '') <> 'deleted'")
+        .expect("the deleted-message filter");
+    let path_at = sql
+        .find("AND m.on_active_path")
+        .expect("the active-path filter");
+    let latest_at = sql.find("latest AS").expect("the CTE after art");
+    assert!(
+        where_at < fold_at && fold_at < path_at && path_at < latest_at,
+        "the active-path filter sits in art's WHERE, after the fold filter and before the latest-version CTE"
+    );
+}
+
+/// The placeholder numbers a statement reads (`$n` as `n`), as a set.
+fn placeholder_numbers(sql: &str) -> std::collections::BTreeSet<usize> {
+    let mut numbers = std::collections::BTreeSet::new();
+    let mut rest = sql;
+    while let Some(at) = rest.find('$') {
+        rest = &rest[at + 1..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if let Ok(number) = digits.parse::<usize>() {
+            numbers.insert(number);
+        }
+    }
+    numbers
+}
+
+#[test]
+fn the_page_statement_reads_nine_binds_with_the_history_floor_last() {
+    // `artifact_page_rows` supplies nine values in this order: `$1` org, `$2` Space, `$3` the audience
+    // ceiling (the fold reads it too), `$4` the page size, `$5` to `$7` the cursor, `$8` the title
+    // length and `$9` the history floor. Each is read by the statement, and none beyond `$9`.
+    let sql = list_space_artifacts_sql();
+    assert_eq!(
+        placeholder_numbers(&sql),
+        (1..=9).collect::<std::collections::BTreeSet<usize>>(),
+        "nine binds, each read"
+    );
+    assert!(
+        sql.contains("$9::BIGINT IS NULL"),
+        "the history floor is NULL-tolerant"
     );
 }
 
@@ -462,6 +554,49 @@ mod db_tests {
         clean_space(&pool, &org, &space).await;
     }
 
+    /// Records the deletion of `message` the way the revision log stores it: a delete row carries
+    /// no content, and the fold reads it whatever the reader's ceiling.
+    async fn record_deletion(
+        pool: &PgPool,
+        org: &str,
+        space: &str,
+        thread: &str,
+        message: &str,
+        revision_no: i32,
+    ) {
+        sqlx::query(
+            "INSERT INTO message_revisions (revision_id, org_id, thread_id, message_id, revision_no, \
+             action, actor_subject_id, actor_class, moderation_reason, content, content_digest, \
+             prev_content_digest, original_retention, idempotency_hash, space_id, \
+             recipient_audience_revision, authority_revision, resource_authorization_ref) \
+             VALUES ($1, $2, $3, $4, $5, 'deleted', 'user-1', 'author', '', NULL, $6, $7, 'retain', \
+             $8, $9, 1, 1, 'resource-1')",
+        )
+        .bind(format!("rev-{message}-{revision_no}"))
+        .bind(org)
+        .bind(thread)
+        .bind(message)
+        .bind(revision_no)
+        .bind(format!("sha256:deleted-{message}"))
+        .bind(format!("sha256:prev-{message}"))
+        .bind(format!("idem-{message}-{revision_no}"))
+        .bind(space)
+        .execute(pool)
+        .await
+        .expect("record the deletion");
+    }
+
+    /// The `(artifact id, version, version count)` of each artifact of a handler response, sorted.
+    fn shown(page: &pb::ListSpaceArtifactsResponse) -> Vec<(String, i64, i64)> {
+        let mut shaped: Vec<(String, i64, i64)> = page
+            .artifacts
+            .iter()
+            .map(|a| (a.artifact_id.clone(), a.version, a.version_count))
+            .collect();
+        shaped.sort();
+        shaped
+    }
+
     /// The `(artifact id, version, version count)` of each row of a page, sorted by artifact id.
     fn shape(rows: &[ArtifactRow]) -> Vec<(String, i64, i64)> {
         let mut shaped: Vec<(String, i64, i64)> = Vec::new();
@@ -545,6 +680,154 @@ mod db_tests {
                 ("old".to_owned(), 1, 1),
                 ("shared".to_owned(), 2, 2)
             ]
+        );
+        clean_space(&pool, &org, &space).await;
+    }
+
+    /// WS12-S4 against Postgres: a deleted assistant message lists none of its artifacts and none of
+    /// its versions counts, so the version a reader sees is one a surviving answer carries.
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn space_room_read_hides_artifacts_of_a_deleted_message_and_its_versions() {
+        let Some(pool) = connect().await else { return };
+        let _keys = StreamKeysEnv::publish();
+        let (org, space) = ids("deleted");
+        let thread = format!("thread-{space}");
+        seed_space_thread(&pool, &org, &space, &thread, "owner-1").await;
+        let (first, second) = (format!("m1-{space}"), format!("m2-{space}"));
+        seed(
+            &pool,
+            &space,
+            &thread,
+            &first,
+            1,
+            300,
+            json!({"artifacts": [
+                artifact("a1", "document", 1, "first"),
+                artifact("a2", "code", 1, "only in the first answer"),
+            ]}),
+        )
+        .await;
+        seed(
+            &pool,
+            &space,
+            &thread,
+            &second,
+            1,
+            200,
+            json!({"artifacts": [artifact("a1", "document", 2, "second draft")]}),
+        )
+        .await;
+        let before = list(&pool, &org, &space, 4, 0, "").await;
+        assert_eq!(
+            shown(&before),
+            vec![("a1".to_owned(), 2, 2), ("a2".to_owned(), 1, 1)],
+            "{NEEDS_DB}"
+        );
+
+        // The second answer is deleted: its draft goes with it, so a1 falls back to the version the
+        // first answer carries, and that is the only one counted.
+        record_deletion(&pool, &org, &space, &thread, &second, 1).await;
+        let after = list(&pool, &org, &space, 4, 0, "").await;
+        assert_eq!(
+            shown(&after),
+            vec![("a1".to_owned(), 1, 1), ("a2".to_owned(), 1, 1)],
+            "{NEEDS_DB}"
+        );
+        let a1 = after
+            .artifacts
+            .iter()
+            .find(|a| a.artifact_id == "a1")
+            .expect("a1 is still listed");
+        assert_eq!(
+            a1.message_id, first,
+            "the surviving version is the first answer's"
+        );
+
+        // The first answer is deleted too: no artifact of the room remains.
+        record_deletion(&pool, &org, &space, &thread, &first, 1).await;
+        let none = list(&pool, &org, &space, 4, 0, "").await;
+        assert!(none.artifacts.is_empty(), "{NEEDS_DB}");
+        clean_space(&pool, &org, &space).await;
+    }
+
+    /// V3e-sws-1-rel1 against Postgres: a turn off the active path lists none of its artifacts and none
+    /// of its versions counts, so a regenerated-away draft cannot win the latest-version pick. Back on
+    /// the path the draft counts again, which is the full history the switch-off state holds.
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn space_room_read_hides_artifacts_of_a_turn_off_the_active_path() {
+        let Some(pool) = connect().await else { return };
+        let _keys = StreamKeysEnv::publish();
+        let (org, space) = ids("branch");
+        let thread = format!("thread-{space}");
+        seed_space_thread(&pool, &org, &space, &thread, "owner-1").await;
+        let (kept, regenerated) = (format!("m1-{space}"), format!("m2-{space}"));
+        seed(
+            &pool,
+            &space,
+            &thread,
+            &kept,
+            1,
+            300,
+            json!({"artifacts": [
+                artifact("a1", "document", 1, "first"),
+                artifact("a2", "code", 1, "kept"),
+            ]}),
+        )
+        .await;
+        seed(
+            &pool,
+            &space,
+            &thread,
+            &regenerated,
+            1,
+            200,
+            json!({"artifacts": [
+                artifact("a1", "document", 2, "regenerated draft"),
+                artifact("a3", "html", 1, "only on the regenerated branch"),
+            ]}),
+        )
+        .await;
+        sqlx::query("UPDATE messages SET on_active_path = FALSE WHERE id = $1")
+            .bind(&regenerated)
+            .execute(&pool)
+            .await
+            .expect("regenerate the turn away");
+
+        // Off the path: a1 shows the kept answer's version and counts only that one, a2 is listed,
+        // and a3, which exists only on the regenerated branch, is not listed at all.
+        let off = list(&pool, &org, &space, 4, 0, "").await;
+        assert_eq!(
+            shown(&off),
+            vec![("a1".to_owned(), 1, 1), ("a2".to_owned(), 1, 1)],
+            "{NEEDS_DB}"
+        );
+        let a1 = off
+            .artifacts
+            .iter()
+            .find(|a| a.artifact_id == "a1")
+            .expect("a1 is still listed");
+        assert_eq!(
+            a1.message_id, kept,
+            "the version the transcript shows is the kept answer's"
+        );
+
+        // Back on the path: the draft is the newest version of a1 and counts, and a3 is listed.
+        sqlx::query("UPDATE messages SET on_active_path = TRUE WHERE id = $1")
+            .bind(&regenerated)
+            .execute(&pool)
+            .await
+            .expect("put the turn back on the path");
+        let on = list(&pool, &org, &space, 4, 0, "").await;
+        assert_eq!(
+            shown(&on),
+            vec![
+                ("a1".to_owned(), 2, 2),
+                ("a2".to_owned(), 1, 1),
+                ("a3".to_owned(), 1, 1)
+            ],
+            "{NEEDS_DB}"
         );
         clean_space(&pool, &org, &space).await;
     }

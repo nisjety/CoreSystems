@@ -9,26 +9,30 @@
 //! as it does under its exact reader. [`warn_former_spellings`] logs one warning per such switch
 //! at startup, so the mismatch shows in the logs instead of only as a missing feature. The spelling
 //! test itself is the shared [`mp_contracts::loop_fold::former_spelling`]; only the names live here.
+//!
+//! The mode switches are read by their words instead (see [`MODE_SWITCHES`]). A set value that is
+//! not one of those words reads as the non-enforcing mode, and [`warn_unreadable_modes`] logs one
+//! warning for each such switch at startup.
 
 use tracing::warn;
 
-/// Each switch this service reads exactly, with the one value that turns it on. Keep each name
-/// in step with its reader.
+/// Each switch this service reads exactly, with the one value that turns it on. Each name is the
+/// reader's own constant, so a renamed reader fails to compile instead of leaving a dead entry.
 pub const EXACT_SWITCHES: &[(&str, &str)] = &[
-    ("SESSION_CORE_AUTHZ_DECISION_AUDIT", "true"),
-    ("SESSION_CORE_APPROVAL_NOTIFY", "true"),
-    ("DREAMING_LLM_EXTRACTION", "true"),
-    ("MEMORY_GROUNDING_ENABLED", "true"),
-    ("SPACE_ATTENTION_EMIT", "true"),
-    ("SPACE_REALTIME_EMIT", "true"),
-    ("SESSION_CORE_TRACE_CONSUMER", "true"),
-    ("SESSION_CORE_GDPR_THREAD_MEMORY_ERASURE", "true"),
-    ("SESSION_SPACE_MEMORY_ENABLED", "true"),
-    ("SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED", "true"),
-    ("APPROVAL_AUDIT_EVENTS_ENABLED", "true"),
-    ("SESSION_PROOF_WALKTHROUGH_ENABLED", "true"),
-    ("SESSION_CORE_ROUTING_CANDIDATES_ENABLED", "true"),
-    ("SESSION_ORG_ROUTING_OVERLAY", "true"),
+    (crate::audit_publisher::AUTHZ_DECISION_AUDIT_ENV, "true"),
+    (crate::audit_publisher::APPROVAL_NOTIFY_ENV, "true"),
+    (crate::dream_extractor::LLM_EXTRACTION_ENV, "true"),
+    (crate::memory_grounding::GROUNDING_ENABLED_ENV, "true"),
+    (crate::space::attention_outbox::EMIT_ENV, "true"),
+    (crate::space::events::EMIT_ENV, "true"),
+    (crate::trace_nats::CONSUMER_ENV, "true"),
+    (crate::gdpr::THREAD_MEMORY_ERASURE_ENV, "true"),
+    (crate::space_memory::SPACE_MEMORY_ENABLED_ENV, "true"),
+    (crate::tool_ledger::ENABLED_ENV, "true"),
+    (crate::orchestration_grpc::APPROVAL_AUDIT_EVENTS_ENV, "true"),
+    (crate::orchestration_grpc::PROOF_WALKTHROUGH_ENV, "true"),
+    (crate::routing_policy_grpc::CANDIDATES_ENV, "true"),
+    (crate::routing_policy_grpc::ORG_OVERLAY_ENV, "true"),
 ];
 
 /// The switches in [`EXACT_SWITCHES`] whose value, as `lookup` returns it, is a spelling the
@@ -55,6 +59,53 @@ pub fn warn_former_spellings() {
             exact_value,
             "switch is set to a value its exact reader does not take, so it reads as off; \
              set it to exactly this value to turn it on"
+        );
+    }
+}
+
+/// The mode switches this service reads by their words, each with the reader's own test for a set
+/// value that the reader does not read exactly. Such a value reads as the non-enforcing mode (report,
+/// or observe), or as off when it is only padded `off`, so it never turns enforcement on. Each name
+/// and test is the reader's own, so a renamed reader fails to compile instead of leaving a dead entry.
+pub const MODE_SWITCHES: &[(&str, fn(&str) -> bool)] = &[
+    (
+        crate::write_policy::MODE_ENV,
+        crate::write_policy::is_unreadable_mode,
+    ),
+    (
+        mp_contracts::skill_lint::MODE_ENV,
+        mp_contracts::skill_lint::is_unreadable_mode,
+    ),
+    (
+        mp_contracts::retention::SPACE_ZDR_ENV,
+        mp_contracts::retention::space_zdr_mode_is_unreadable,
+    ),
+];
+
+/// The names of the [`MODE_SWITCHES`] whose value, as `lookup` returns it, is set to a value its
+/// reader does not read.
+#[must_use]
+pub fn unreadable_modes(lookup: impl Fn(&str) -> Option<String>) -> Vec<&'static str> {
+    MODE_SWITCHES
+        .iter()
+        .filter(|(name, unreadable)| lookup(*name).is_some_and(|value| unreadable(value.as_str())))
+        .map(|(name, _)| *name)
+        .collect()
+}
+
+/// Logs one warning at startup for each mode switch set to a value its reader does not read. It
+/// names the switch and never the value, and it changes nothing.
+pub fn warn_unreadable_modes() {
+    warn_unreadable_from(|name| std::env::var(name).ok());
+}
+
+/// [`warn_unreadable_modes`] over any environment `lookup` reads.
+fn warn_unreadable_from(lookup: impl Fn(&str) -> Option<String>) {
+    for name in unreadable_modes(lookup) {
+        warn!(
+            switch = name,
+            "switch is set to a value that is not one of its words, so it reads as the non-enforcing \
+             mode; set it to one of its words, or unset it. The value is not logged"
         );
     }
 }
@@ -129,6 +180,85 @@ mod tests {
     #[test]
     fn an_unrecognised_value_is_not_reported_as_a_former_spelling() {
         assert!(names(&[("SPACE_REALTIME_EMIT", "maybe")]).is_empty());
+    }
+
+    /// The mode switches named for `value` set on one switch, and nothing else.
+    fn flagged(name: &str, value: &str) -> Vec<&'static str> {
+        unreadable_modes(|set| (set == name).then(|| value.to_owned()))
+    }
+
+    #[test]
+    fn a_mode_switch_is_named_for_a_set_value_its_reader_does_not_read_and_not_for_its_words() {
+        for name in [
+            crate::write_policy::MODE_ENV,
+            mp_contracts::skill_lint::MODE_ENV,
+        ] {
+            for word in ["", "   ", "off", "report", "enforce"] {
+                assert!(flagged(name, word).is_empty(), "{name}={word:?}");
+            }
+            for junk in [
+                " report",
+                "report\r\n",
+                "enforce\r\n",
+                "ENFORCE",
+                "enforced",
+                "true",
+                "maybe",
+                " off ",
+            ] {
+                assert_eq!(flagged(name, junk), vec![name], "{name}={junk:?}");
+            }
+        }
+        let zdr = mp_contracts::retention::SPACE_ZDR_ENV;
+        for word in ["", "   ", "enforce", " ENFORCE\r\n", "observe", " Observe "] {
+            assert!(flagged(zdr, word).is_empty(), "{zdr}={word:?}");
+        }
+        for junk in ["true", "1", "on", "enforced", "enforce me", "off"] {
+            assert_eq!(flagged(zdr, junk), vec![zdr], "{zdr}={junk:?}");
+        }
+    }
+
+    #[test]
+    fn an_unset_mode_switch_is_not_named() {
+        assert!(unreadable_modes(|_| None).is_empty());
+    }
+
+    /// The startup report writes one warning per unreadable mode switch, naming the switch, and
+    /// never the value the switch was set to.
+    #[test]
+    fn the_startup_report_names_each_unreadable_mode_switch_and_never_its_value() {
+        let lines = crate::test_log_capture::CapturedLines::default();
+        tracing::subscriber::with_default(lines.clone(), || {
+            warn_unreadable_from(|set| {
+                [
+                    (crate::write_policy::MODE_ENV, "maybe-a-junk-word"),
+                    (mp_contracts::skill_lint::MODE_ENV, "report"),
+                    (mp_contracts::retention::SPACE_ZDR_ENV, "true"),
+                ]
+                .into_iter()
+                .find(|(name, _)| *name == set)
+                .map(|(_, value)| value.to_owned())
+            });
+        });
+        let logged = lines.lines();
+        assert_eq!(logged.len(), 2, "{logged:?}");
+        assert!(
+            logged[0].starts_with("WARN ")
+                && logged[0].contains(&format!("switch=\"{}\"", crate::write_policy::MODE_ENV)),
+            "{logged:?}"
+        );
+        assert!(
+            logged[1].starts_with("WARN ")
+                && logged[1].contains(&format!(
+                    "switch=\"{}\"",
+                    mp_contracts::retention::SPACE_ZDR_ENV
+                )),
+            "{logged:?}"
+        );
+        for line in &logged {
+            assert!(!line.contains("maybe-a-junk-word"), "{line}");
+            assert!(!line.contains("true"), "{line}");
+        }
     }
 
     #[test]

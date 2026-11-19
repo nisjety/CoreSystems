@@ -612,16 +612,20 @@ pub fn build_approval_requested_body(signal: &ApprovalRequestedSignal<'_>) -> se
     })
 }
 
+pub(crate) const AUTHZ_DECISION_AUDIT_ENV: &str = "SESSION_CORE_AUTHZ_DECISION_AUDIT";
+
 /// Whether the authorization-decision audit is on: only the exact literal `true` (default off).
 #[must_use]
 pub fn authz_decision_audit_enabled() -> bool {
-    flag_on(std::env::var("SESSION_CORE_AUTHZ_DECISION_AUDIT").ok().as_deref())
+    flag_on(std::env::var(AUTHZ_DECISION_AUDIT_ENV).ok().as_deref())
 }
+
+pub(crate) const APPROVAL_NOTIFY_ENV: &str = "SESSION_CORE_APPROVAL_NOTIFY";
 
 /// Whether the approval-requested signal is on: only the exact literal `true` (default off).
 #[must_use]
 pub fn approval_notify_enabled() -> bool {
-    flag_on(std::env::var("SESSION_CORE_APPROVAL_NOTIFY").ok().as_deref())
+    flag_on(std::env::var(APPROVAL_NOTIFY_ENV).ok().as_deref())
 }
 
 /// The strict reading of an audit switch: only the exact literal `true`, with no trimming and no

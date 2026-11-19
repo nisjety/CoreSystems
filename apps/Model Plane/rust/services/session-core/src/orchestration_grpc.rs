@@ -381,7 +381,7 @@ fn approval_audit_events_enabled() -> bool {
     approval_audit_switch_from(std::env::var(APPROVAL_AUDIT_EVENTS_ENV).ok().as_deref())
 }
 
-const APPROVAL_AUDIT_EVENTS_ENV: &str = "APPROVAL_AUDIT_EVENTS_ENABLED";
+pub(crate) const APPROVAL_AUDIT_EVENTS_ENV: &str = "APPROVAL_AUDIT_EVENTS_ENABLED";
 
 /// The strict reading of the switch: only the exact literal `true`, with no trimming and no case
 /// folding.
@@ -1797,7 +1797,7 @@ fn retention_reason(provenance: &store::RunProvenanceRow) -> String {
 
 /// The switch of the browser walkthrough in a run's proof bundle (F-t3-050). Default off; only
 /// the literal `true` turns it on.
-const PROOF_WALKTHROUGH_ENV: &str = "SESSION_PROOF_WALKTHROUGH_ENABLED";
+pub(crate) const PROOF_WALKTHROUGH_ENV: &str = "SESSION_PROOF_WALKTHROUGH_ENABLED";
 
 /// Whether a run's proof bundle may carry the browser walkthrough. Read on each call, as the
 /// other orchestration switches are.
@@ -3915,7 +3915,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 validate_approval_org(&req.org_id)?;
                 caller.authorize_org(&req.org_id)?;
                 retention_receipt::refuse_zdr_continuation(&caller)?;
-                let ceiling = crate::space::approval_member::verify_room_read(
+                let window = crate::space::approval_member::verify_room_read(
                     &self.pool,
                     &req.org_id,
                     caller.user_id(),
@@ -3935,7 +3935,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     &self.pool,
                     &req.org_id,
                     &req.space_id,
-                    ceiling,
+                    window,
                     &req.run_id,
                     "",
                     state,
@@ -4149,7 +4149,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 || !req.space_read_decision_token.is_empty();
             let row = if room {
                 retention_receipt::refuse_zdr_continuation(&caller)?;
-                let ceiling = crate::space::approval_member::verify_room_read(
+                let window = crate::space::approval_member::verify_room_read(
                     &self.pool,
                     &req.org_id,
                     caller.user_id(),
@@ -4163,7 +4163,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     &self.pool,
                     &req.org_id,
                     &req.space_id,
-                    ceiling,
+                    window,
                     "",
                     &req.approval_id,
                     "",

@@ -39,6 +39,7 @@ use crate::grpc::{
     compact_thread_text, record_metrics, verify_thread_read_space_decision, THREAD_TITLE_MAX_CHARS,
 };
 use crate::run_phase::{ERROR_CODE_TRAILER, RUN_PHASE_SQL};
+use crate::space::audience_window::floor_gate_message_sql;
 
 const MAX_ID_BYTES: usize = 128;
 /// Spaces of one call queried at once.
@@ -139,16 +140,27 @@ fn floor_predicate(floor: &str) -> String {
     )
 }
 
-/// The thread-level floor gate of a headline (WS04-S11): under a floor a thread needs a message
-/// stamped at or after it, an unstamped message counting, the same gate `ListThreads` and the Space
-/// timeline apply. No floor (`NULL`: the switch off, or no signed claim) passes every thread. The
-/// thread is `t`; the floor is the placeholder `floor` that carries it.
+/// The thread-level floor gate (WS04-S11, V3e-sws-2): under a floor a thread needs a message the
+/// reader may see from the floor on (on the active path, not deleted, within the ceiling, at or after
+/// the floor), the same gate `ListThreads` and the Space timeline apply. No floor (`NULL`: the switch
+/// off, or no signed claim) passes every thread. The thread is `t`, the ceiling is `$3`, and the floor
+/// is the placeholder `floor` that carries it.
 fn thread_floor_predicate(floor: &str) -> String {
     format!(
         "({floor}::BIGINT IS NULL OR EXISTS (SELECT 1 FROM messages em
                  WHERE em.thread_id = t.id
-                   AND (em.recipient_audience_revision IS NULL
-                        OR em.recipient_audience_revision >= {floor}::BIGINT)))"
+                   AND {gate}))",
+        gate = floor_gate_message_sql("em", "$3", floor),
+    )
+}
+
+/// The run-level floor of an attention read of runs or approvals (V3e-sws-2): a run stamped before the
+/// floor is not the reader's, and an unstamped run passes, as an unstamped message does. The run is
+/// `r`; the floor is the placeholder `floor` that carries it.
+fn run_floor_predicate(floor: &str) -> String {
+    format!(
+        "({floor}::BIGINT IS NULL OR r.recipient_audience_revision IS NULL
+                 OR r.recipient_audience_revision >= {floor}::BIGINT)"
     )
 }
 
@@ -190,14 +202,17 @@ fn unread_sql() -> String {
 }
 
 /// The room's latest visible activity. Parameters: $1 org, $2 Space, $3 ceiling, $4 probe size,
-/// $5 history floor.
+/// $5 history floor. Under a floor the probe picks only threads the reader may see (V3e-sws-2), so a
+/// run of pre-join threads cannot fill it.
 fn latest_activity_sql() -> String {
     let latest = latest_visible_message("$5");
+    let thread_gate = thread_floor_predicate("$5");
     format!(
         "SELECT max(lm.created_at)
            FROM (SELECT t.id
                    FROM threads t
                   WHERE {THREAD_SCOPE} AND t.last_message_seq IS NOT NULL
+                    AND {thread_gate}
                   ORDER BY t.last_message_seq DESC
                   LIMIT $4) t
            JOIN LATERAL ({latest}) lm ON TRUE"
@@ -205,9 +220,12 @@ fn latest_activity_sql() -> String {
 }
 
 /// Root runs of the Space that are live right now. Parameters: $1 org, $2 Space, $3 ceiling,
-/// $4 window minutes. Persistent runs only: a zero-retention or waived run leaves no attention
-/// trace.
+/// $4 window minutes, $5 history floor. Persistent runs only: a zero-retention or waived run leaves no
+/// attention trace. Under a floor a run is counted only on a thread the reader may see, and only when
+/// the run is stamped at or after the floor (V3e-sws-2).
 fn working_sql() -> String {
+    let thread_gate = thread_floor_predicate("$5");
+    let run_gate = run_floor_predicate("$5");
     format!(
         "SELECT count(*)
            FROM runs r
@@ -216,16 +234,21 @@ fn working_sql() -> String {
             AND r.retention_class = 'persistent'
             AND ({RUN_PHASE_SQL}) IN ('queued', 'running')
             AND r.updated_at > now() - make_interval(mins => $4)
-            AND {THREAD_SCOPE}"
+            AND {THREAD_SCOPE}
+            AND {thread_gate}
+            AND {run_gate}"
     )
 }
 
 /// Approvals addressed to the viewer in this Space, oldest first. The addressee predicate of
 /// WS10-S6: the requester for a requester-addressed approval, the named member for a named one.
 /// An `any_editor` or `any_manager` approval is not listed: Session Core cannot see the viewer's
-/// role, so those wait for the role-aware read. Parameters: $1 org, $2 Space, $3 ceiling,
-/// $4 viewer, $5 row cap.
+/// role, so those wait for the role-aware read. Under a history floor an approval is named only on a
+/// thread the reader may see and only when its run is stamped at or after the floor (V3e-sws-2).
+/// Parameters: $1 org, $2 Space, $3 ceiling, $4 viewer, $5 row cap, $6 history floor.
 fn pending_sql() -> String {
+    let thread_gate = thread_floor_predicate("$6");
+    let run_gate = run_floor_predicate("$6");
     format!(
         "SELECT a.id, a.run_id, r.thread_id, a.requested_at, a.kind
            FROM approvals a
@@ -237,6 +260,8 @@ fn pending_sql() -> String {
             AND r.space_id = $2
             AND (a.expires_at IS NULL OR a.expires_at > now())
             AND {THREAD_SCOPE}
+            AND {thread_gate}
+            AND {run_gate}
           ORDER BY a.requested_at ASC, a.id ASC
           LIMIT $5"
     )
@@ -359,6 +384,7 @@ impl SpaceAttentionGrpc {
             .bind(&query.space_id)
             .bind(reach.ceiling)
             .bind(WORKING_WINDOW_MINUTES)
+            .bind(reach.floor)
             .fetch_one(&mut *tx)
             .await?;
         result.working_runs = u32::try_from(working.max(0)).unwrap_or(u32::MAX);
@@ -369,6 +395,7 @@ impl SpaceAttentionGrpc {
             .bind(reach.ceiling)
             .bind(user_id)
             .bind(i64::try_from(MAX_PENDING).unwrap_or(20))
+            .bind(reach.floor)
             .fetch_all(&mut *tx)
             .await?;
         result.pending = pending
@@ -586,7 +613,7 @@ mod tests {
     use super::*;
     use crate::grpc::VerifiedSpaceRead;
     use crate::space::audience_window::{history_floor_enabled_from, history_floor_from_claim};
-    use crate::space::test_support::{clean_space, connect, seed_space_thread};
+    use crate::space::test_support::{clean_space, connect, seed_space_run, seed_space_thread};
     use mp_ids::new_ulid;
     use std::collections::BTreeSet;
 
@@ -629,6 +656,34 @@ mod tests {
             headlines_sql().contains(thread_floor_predicate("$6").as_str()),
             "the thread-level floor gate is in the outer WHERE of the headline read"
         );
+    }
+
+    /// V3e-sws-2: the working-run count and the pending approvals bind the history floor last, after
+    /// the binds they had, and state the thread gate and the run-level floor. The thread gate also
+    /// states the ceiling, the active path and the deletion check, so a thread whose only floor-passing
+    /// message is above the ceiling or deleted is named by no headline and counts no run.
+    #[test]
+    fn the_working_and_pending_reads_bind_the_floor_last_and_gate_their_threads() {
+        assert_eq!(
+            placeholders(&working_sql()),
+            (1..=5).collect::<BTreeSet<usize>>()
+        );
+        assert!(working_sql().contains(thread_floor_predicate("$5").as_str()));
+        assert!(working_sql().contains(run_floor_predicate("$5").as_str()));
+        assert_eq!(
+            placeholders(&pending_sql()),
+            (1..=6).collect::<BTreeSet<usize>>()
+        );
+        assert!(pending_sql().contains(thread_floor_predicate("$6").as_str()));
+        assert!(pending_sql().contains(run_floor_predicate("$6").as_str()));
+        assert_eq!(
+            placeholders(&latest_activity_sql()),
+            (1..=5).collect::<BTreeSet<usize>>()
+        );
+        assert!(latest_activity_sql().contains(thread_floor_predicate("$5").as_str()));
+        assert!(headlines_sql().contains("floor_gate_rev.action = 'deleted'"));
+        assert!(headlines_sql().contains("em.on_active_path"));
+        assert!(headlines_sql().contains("em.recipient_audience_revision <= $3::BIGINT"));
     }
 
     /// The reach carries the floor a verified read signs. With the switch off the claim is dropped
@@ -812,6 +867,331 @@ mod tests {
         );
         assert_eq!(full.headlines.len(), 2, "the switch off names both threads");
 
+        clean_space(&pool, &org, &space).await;
+    }
+
+    /// V3e-sws-2 against Postgres (finding 127): under a `since_join` floor the thread gate of the headline
+    /// read names a thread only for a message the reader may see from the floor on. `above` holds a message
+    /// from the floor on stamped above the ceiling, `deleted` holds a message from the floor on that is
+    /// deleted, and `visible` holds one that stands. Each has a message from before the floor. Under the
+    /// floor only `visible` is named, titled by its message from the floor on. The switch off names all three.
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn attention_headline_gate_under_a_floor_names_only_a_thread_with_a_visible_message() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let suffix = new_ulid();
+        let org = format!("attention-gate-floor-{suffix}");
+        let space = format!("space-attention-gate-floor-{suffix}");
+        let viewer = "viewer-x";
+        let above = format!("{suffix}-above");
+        let deleted = format!("{suffix}-deleted");
+        let visible = format!("{suffix}-visible");
+        for thread in [&above, &deleted, &visible] {
+            seed_space_thread(&pool, &org, &space, thread, "owner-a").await;
+        }
+        let above_before = format!("{suffix}-above-before");
+        let above_late = format!("{suffix}-above-late");
+        let deleted_before = format!("{suffix}-deleted-before");
+        let deleted_late = format!("{suffix}-deleted-late");
+        let visible_before = format!("{suffix}-visible-before");
+        let visible_late = format!("{suffix}-visible-late");
+        seed_user_message(&pool, &space, &above, &above_before, "before the join", 2).await;
+        seed_user_message(&pool, &space, &above, &above_late, "above the ceiling", 6).await;
+        seed_user_message(
+            &pool,
+            &space,
+            &deleted,
+            &deleted_before,
+            "before the join",
+            2,
+        )
+        .await;
+        seed_user_message(
+            &pool,
+            &space,
+            &deleted,
+            &deleted_late,
+            "deleted after the join",
+            4,
+        )
+        .await;
+        seed_user_message(
+            &pool,
+            &space,
+            &visible,
+            &visible_before,
+            "before the join",
+            2,
+        )
+        .await;
+        seed_user_message(
+            &pool,
+            &space,
+            &visible,
+            &visible_late,
+            "visible after the join",
+            4,
+        )
+        .await;
+        // The deletion of the message from the floor on: a delete row, which is terminal.
+        sqlx::query(
+            "INSERT INTO message_revisions (revision_id, org_id, thread_id, message_id, revision_no, \
+             action, actor_subject_id, actor_class, moderation_reason, content, content_digest, \
+             prev_content_digest, original_retention, idempotency_hash, space_id, \
+             recipient_audience_revision, authority_revision, resource_authorization_ref) \
+             VALUES ($1, $2, $3, $4, 1, 'deleted', 'member-2', 'author', '', NULL, 'sha256:deleted', \
+             'sha256:prev', 'retain', $5, $6, 4, 1, 'resource-1')",
+        )
+        .bind(format!("{suffix}-deleted-rev"))
+        .bind(&org)
+        .bind(&deleted)
+        .bind(&deleted_late)
+        .bind(format!("{suffix}-deleted-idem"))
+        .bind(&space)
+        .execute(&pool)
+        .await
+        .expect("record the deletion of the message from the floor on");
+
+        let grpc = SpaceAttentionGrpc::new(pool.clone(), true);
+        let query = pb::SpaceAttentionQuery {
+            space_id: space.clone(),
+            headline_thread_ids: vec![above.clone(), deleted.clone(), visible.clone()],
+            ..Default::default()
+        };
+        // A member who joined at revision 3; the decision is at revision 5.
+        let on = history_floor_enabled_from(Some("true"));
+        let floored = grpc
+            .read_space(
+                &org,
+                viewer,
+                Rule::LastAuthor,
+                &query,
+                &Reach {
+                    ceiling: 5,
+                    floor: history_floor_from_claim(3, on),
+                },
+            )
+            .await
+            .expect("floored read");
+        assert_eq!(
+            headline_of(&floored, &above),
+            None,
+            "a message from the floor on above the ceiling is not visible, so no headline"
+        );
+        assert_eq!(
+            headline_of(&floored, &deleted),
+            None,
+            "a message from the floor on that is deleted is not visible, so no headline"
+        );
+        assert_eq!(
+            headline_of(&floored, &visible).as_deref(),
+            Some("visible after the join"),
+            "a visible message from the floor on names the thread, titled by it"
+        );
+        assert_eq!(
+            floored.headlines.len(),
+            1,
+            "only the thread with a visible message from the floor on is named"
+        );
+
+        // The switch off: the same signed claim is ignored, so all three threads are named.
+        let off = history_floor_from_claim(3, history_floor_enabled_from(Some("1")));
+        let full = grpc
+            .read_space(
+                &org,
+                viewer,
+                Rule::LastAuthor,
+                &query,
+                &Reach {
+                    ceiling: 5,
+                    floor: off,
+                },
+            )
+            .await
+            .expect("unfloored read");
+        assert!(
+            headline_of(&full, &above).is_some(),
+            "the switch off names the thread above the ceiling"
+        );
+        assert!(
+            headline_of(&full, &deleted).is_some(),
+            "the switch off names the thread whose floor message is deleted"
+        );
+        assert_eq!(
+            headline_of(&full, &visible).as_deref(),
+            Some("before the join"),
+            "the switch off titles the visible thread by its first turn"
+        );
+        assert_eq!(
+            full.headlines.len(),
+            3,
+            "the switch off names all three threads"
+        );
+
+        clean_space(&pool, &org, &space).await;
+    }
+
+    /// V3e-sws-2 against Postgres: under a `since_join` floor a run is neither counted nor named when
+    /// its thread holds only earlier messages, or when the run itself was stamped before the floor (even
+    /// on a thread that holds a message from the floor on). The approvals of such a run are not named to
+    /// the viewer. A run and an approval from the floor on are both answered. The switch off counts and
+    /// names them all.
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn attention_under_a_floor_counts_and_names_no_run_or_approval_the_reader_cannot_see() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let suffix = new_ulid();
+        let org = format!("attention-runs-floor-{suffix}");
+        let space = format!("space-attention-runs-floor-{suffix}");
+        let viewer = "viewer-x";
+        let early = format!("{suffix}-early");
+        let late = format!("{suffix}-late");
+        seed_space_thread(&pool, &org, &space, &early, "owner-a").await;
+        seed_space_thread(&pool, &org, &space, &late, "owner-a").await;
+        seed_user_message(
+            &pool,
+            &space,
+            &early,
+            &format!("{suffix}-early-msg"),
+            "earlier only",
+            2,
+        )
+        .await;
+        seed_user_message(
+            &pool,
+            &space,
+            &late,
+            &format!("{suffix}-late-msg"),
+            "after the join",
+            4,
+        )
+        .await;
+        let early_run = format!("{suffix}-early-run");
+        let late_run = format!("{suffix}-late-run");
+        seed_space_run(
+            &pool,
+            &org,
+            &space,
+            &early,
+            &early_run,
+            "running",
+            "persistent",
+        )
+        .await;
+        seed_space_run(
+            &pool,
+            &org,
+            &space,
+            &late,
+            &late_run,
+            "running",
+            "persistent",
+        )
+        .await;
+        // A run on the thread that holds a message from the floor on, stamped before the floor: the thread
+        // gate passes, so only the run-level floor keeps this run and its approval out.
+        let late_early_run = format!("{suffix}-late-early-run");
+        seed_space_run(
+            &pool,
+            &org,
+            &space,
+            &late,
+            &late_early_run,
+            "running",
+            "persistent",
+        )
+        .await;
+        // A run is stamped with the audience revision it was started under.
+        for (run, revision) in [
+            (&early_run, 2_i64),
+            (&late_run, 4_i64),
+            (&late_early_run, 2_i64),
+        ] {
+            sqlx::query("UPDATE runs SET recipient_audience_revision = $1 WHERE id = $2")
+                .bind(revision)
+                .bind(run)
+                .execute(&pool)
+                .await
+                .expect("stamp the run");
+        }
+        for (approval, run) in [
+            (format!("{suffix}-early-approval"), &early_run),
+            (format!("{suffix}-late-approval"), &late_run),
+            (format!("{suffix}-late-early-approval"), &late_early_run),
+        ] {
+            sqlx::query(
+                "INSERT INTO approvals (id, run_id, kind, status, org_id, user_id) \
+                 VALUES ($1, $2, 'plan', 'requested', $3, $4)",
+            )
+            .bind(approval)
+            .bind(run)
+            .bind(&org)
+            .bind(viewer)
+            .execute(&pool)
+            .await
+            .expect("seed an approval addressed to the viewer");
+        }
+
+        let grpc = SpaceAttentionGrpc::new(pool.clone(), true);
+        let query = pb::SpaceAttentionQuery {
+            space_id: space.clone(),
+            ..Default::default()
+        };
+        let on = history_floor_enabled_from(Some("true"));
+        let floored = grpc
+            .read_space(
+                &org,
+                viewer,
+                Rule::LastAuthor,
+                &query,
+                &Reach {
+                    ceiling: 5,
+                    floor: history_floor_from_claim(3, on),
+                },
+            )
+            .await
+            .expect("floored read");
+        assert_eq!(
+            floored.working_runs, 1,
+            "only the run stamped from the floor on is counted, not the one stamped before it"
+        );
+        let named: Vec<&str> = floored.pending.iter().map(|p| p.run_id.as_str()).collect();
+        assert_eq!(
+            named,
+            vec![late_run.as_str()],
+            "only the approval of a run from the floor on is named"
+        );
+
+        // The switch off: no floor, so the run and the approval before the floor are answered too.
+        let full = grpc
+            .read_space(
+                &org,
+                viewer,
+                Rule::LastAuthor,
+                &query,
+                &Reach {
+                    ceiling: 5,
+                    floor: None,
+                },
+            )
+            .await
+            .expect("unfloored read");
+        assert_eq!(full.working_runs, 3, "the switch off counts all three runs");
+        assert_eq!(
+            full.pending.len(),
+            3,
+            "the switch off names all three approvals"
+        );
+
+        sqlx::query("DELETE FROM approvals WHERE org_id = $1")
+            .bind(&org)
+            .execute(&pool)
+            .await
+            .expect("remove the test approvals");
         clean_space(&pool, &org, &space).await;
     }
 }

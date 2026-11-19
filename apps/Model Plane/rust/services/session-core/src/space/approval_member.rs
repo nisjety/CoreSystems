@@ -26,6 +26,7 @@ use tonic::Status;
 use tracing::warn;
 
 use crate::orchestration_store::ApprovalRow;
+use crate::space::audience_window::{audience_window, floor_gate_message_sql, AudienceWindow};
 use crate::store::Pool;
 
 /// Typed refusal words on the `x-mp-error-code` trailer.
@@ -402,7 +403,8 @@ pub(crate) fn redact_for_room(approval: &mut pb::Approval) {
     approval.decision_reason.clear();
 }
 
-/// The caller's Space read, verified: the audience ceiling and the membership standing.
+/// The caller's Space read, verified: the audience window it carries (the ceiling and, WS04-S11, the
+/// history floor the decision signs) and the membership standing.
 #[allow(clippy::result_large_err)]
 pub(crate) async fn verify_room_read(
     pool: &Pool,
@@ -411,7 +413,7 @@ pub(crate) async fn verify_room_read(
     space_id: &str,
     decision_ref: &str,
     token: &str,
-) -> Result<Option<i64>, Status> {
+) -> Result<Option<AudienceWindow>, Status> {
     if space_id.trim().is_empty() && decision_ref.trim().is_empty() && token.trim().is_empty() {
         return Ok(None);
     }
@@ -421,26 +423,26 @@ pub(crate) async fn verify_room_read(
     let read = crate::grpc::verify_thread_read_space_decision(token, decision_ref, org_id, user_id, space_id)?
         .ok_or_else(|| Status::invalid_argument("a Space read decision is required"))?;
     refuse_if_revoked(pool, user_id, space_id).await?;
-    Ok(Some(read.recipient_audience_revision))
+    Ok(Some(audience_window(Some(read))))
 }
 
 const ROOM_APPROVAL_COLUMNS: &str = "a.id, a.run_id, a.plan_id, a.kind, a.status, a.requested_by, \
      a.decided_by, a.decision_reason, a.org_id, a.user_id, a.idempotency_key, a.metadata, \
      a.requested_at, a.decided_at, a.expires_at, a.continuation_mode, a.consumed_at";
 
-/// Approvals of persistent runs in a Space, inside the audience ceiling. `run_id` and
-/// `approval_id` narrow the read (empty keeps all); `status` keeps one state (empty keeps all).
-/// Newest first, at most [`sa::MAX_SPACE_APPROVALS`].
-pub(crate) async fn list_room_approvals(
-    pool: &Pool,
-    org_id: &str,
-    space_id: &str,
-    ceiling: i64,
-    run_id: &str,
-    approval_id: &str,
-    status: &str,
-) -> Result<Vec<ApprovalRow>, Status> {
-    let sql = format!(
+/// The room read of approvals. Parameters: $1 org, $2 Space, $3 ceiling, $4 run id, $5 approval id,
+/// $6 status, $7 row cap, $8 history floor. Under a floor (WS04-S11, V3e-sws-2) an approval is listed
+/// only on a thread the reader may see (a message on the active path, not deleted, within the ceiling
+/// and from the floor on) and only when its run is stamped at or after the floor, so an approval asked
+/// before the join, with its reason and metadata, is not the late joiner's. With no floor both gates
+/// pass and the read is the ceiling-only read it was.
+fn room_approvals_sql() -> String {
+    let thread_gate = format!(
+        "($8::BIGINT IS NULL OR EXISTS (SELECT 1 FROM messages em
+            WHERE em.thread_id = t.id AND {gate}))",
+        gate = floor_gate_message_sql("em", "$3", "$8"),
+    );
+    format!(
         "SELECT {ROOM_APPROVAL_COLUMNS} \
          FROM approvals a \
          JOIN runs r ON r.id = a.run_id AND r.org_id = a.org_id \
@@ -449,17 +451,36 @@ pub(crate) async fn list_room_approvals(
            AND t.archived_at IS NULL \
            AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $3) \
            AND r.retention_class = 'persistent' \
+           AND ($8::BIGINT IS NULL OR r.recipient_audience_revision IS NULL \
+                OR r.recipient_audience_revision >= $8::BIGINT) \
+           AND {thread_gate} \
            AND ($4 = '' OR a.run_id = $4) AND ($5 = '' OR a.id = $5) AND ($6 = '' OR a.status = $6) \
          ORDER BY a.requested_at DESC, a.id DESC LIMIT $7"
-    );
+    )
+}
+
+/// Approvals of persistent runs in a Space, inside the audience window. `run_id` and `approval_id`
+/// narrow the read (empty keeps all); `status` keeps one state (empty keeps all). Newest first, at most
+/// [`sa::MAX_SPACE_APPROVALS`].
+pub(crate) async fn list_room_approvals(
+    pool: &Pool,
+    org_id: &str,
+    space_id: &str,
+    window: AudienceWindow,
+    run_id: &str,
+    approval_id: &str,
+    status: &str,
+) -> Result<Vec<ApprovalRow>, Status> {
+    let sql = room_approvals_sql();
     sqlx::query_as::<_, ApprovalRow>(&sql)
         .bind(org_id)
         .bind(space_id)
-        .bind(ceiling)
+        .bind(window.ceiling)
         .bind(run_id)
         .bind(approval_id)
         .bind(status)
         .bind(sa::MAX_SPACE_APPROVALS)
+        .bind(window.floor)
         .fetch_all(pool)
         .await
         .map_err(|error| {
@@ -564,4 +585,138 @@ fn project_authority(approval_id: &str, row: AuthorityRow) -> Option<pb::Resolve
         thread_resource_authorization_ref,
         authority_revision,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::space::audience_window::{history_floor_enabled_from, history_floor_from_claim};
+    use crate::space::test_support::{
+        clean_space, connect, seed_space_message_at_revision, seed_space_run, seed_space_thread,
+    };
+    use mp_ids::new_ulid;
+    use std::collections::BTreeSet;
+
+    /// V3e-sws-2: the room approval read binds the history floor last, after the ceiling and the
+    /// filters, and states the thread gate and the run-level floor. Checked on the statement text, so
+    /// no database is needed.
+    #[test]
+    fn the_room_approval_read_binds_the_floor_last_and_gates_thread_and_run() {
+        let sql = room_approvals_sql();
+        let placeholders: BTreeSet<usize> = sql
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '$')
+            .filter_map(|token| token.strip_prefix('$')?.parse::<usize>().ok())
+            .collect();
+        assert_eq!(placeholders, (1..=8).collect::<BTreeSet<usize>>());
+        assert!(sql.contains("em.on_active_path"));
+        assert!(sql.contains("em.recipient_audience_revision <= $3::BIGINT"));
+        assert!(sql.contains("em.recipient_audience_revision >= $8::BIGINT"));
+        assert!(sql.contains("floor_gate_rev.action = 'deleted'"));
+        assert!(sql.contains("r.recipient_audience_revision >= $8::BIGINT"));
+    }
+
+    /// V3e-sws-2 against Postgres: under a `since_join` floor a room approval asked before the join is
+    /// not listed, and neither is one whose thread holds only earlier messages. An approval of a run
+    /// from the floor on is listed, and the switch off lists both.
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn a_room_approval_read_under_a_floor_lists_no_approval_asked_before_the_join() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let suffix = new_ulid();
+        let org = format!("approvals-floor-{suffix}");
+        let space = format!("space-approvals-floor-{suffix}");
+        let early = format!("{suffix}-early");
+        let late = format!("{suffix}-late");
+        seed_space_thread(&pool, &org, &space, &early, "owner-a").await;
+        seed_space_thread(&pool, &org, &space, &late, "owner-a").await;
+        seed_space_message_at_revision(
+            &pool,
+            &space,
+            &early,
+            &format!("{suffix}-early-msg"),
+            "earlier only",
+            2,
+        )
+        .await;
+        seed_space_message_at_revision(
+            &pool,
+            &space,
+            &late,
+            &format!("{suffix}-late-msg"),
+            "after the join",
+            4,
+        )
+        .await;
+        let early_run = format!("{suffix}-early-run");
+        let late_run = format!("{suffix}-late-run");
+        seed_space_run(
+            &pool,
+            &org,
+            &space,
+            &early,
+            &early_run,
+            "running",
+            "persistent",
+        )
+        .await;
+        seed_space_run(
+            &pool,
+            &org,
+            &space,
+            &late,
+            &late_run,
+            "running",
+            "persistent",
+        )
+        .await;
+        for (run, revision) in [(&early_run, 2_i64), (&late_run, 4_i64)] {
+            sqlx::query("UPDATE runs SET recipient_audience_revision = $1 WHERE id = $2")
+                .bind(revision)
+                .bind(run)
+                .execute(&pool)
+                .await
+                .expect("stamp the run");
+        }
+        let early_approval = format!("{suffix}-early-approval");
+        let late_approval = format!("{suffix}-late-approval");
+        for (approval, run) in [(&early_approval, &early_run), (&late_approval, &late_run)] {
+            sqlx::query(
+                "INSERT INTO approvals (id, run_id, kind, status, org_id, user_id, decision_reason) \
+                 VALUES ($1, $2, 'plan', 'requested', $3, 'owner-a', 'asked before the join')",
+            )
+            .bind(approval)
+            .bind(run)
+            .bind(&org)
+            .execute(&pool)
+            .await
+            .expect("seed an approval");
+        }
+
+        let on = history_floor_enabled_from(Some("true"));
+        let floored = AudienceWindow::new(Some(5), history_floor_from_claim(3, on));
+        let listed = list_room_approvals(&pool, &org, &space, floored, "", "", "")
+            .await
+            .expect("floored room read");
+        let ids: Vec<&str> = listed.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![late_approval.as_str()],
+            "only the approval asked from the floor on is listed"
+        );
+
+        let full = AudienceWindow::new(Some(5), None);
+        let all = list_room_approvals(&pool, &org, &space, full, "", "", "")
+            .await
+            .expect("unfloored room read");
+        assert_eq!(all.len(), 2, "the switch off lists both approvals");
+
+        sqlx::query("DELETE FROM approvals WHERE org_id = $1")
+            .bind(&org)
+            .execute(&pool)
+            .await
+            .expect("remove the test approvals");
+        clean_space(&pool, &org, &space).await;
+    }
 }

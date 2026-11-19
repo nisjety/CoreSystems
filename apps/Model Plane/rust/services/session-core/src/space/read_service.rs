@@ -13,8 +13,11 @@
 //! user and this Space, then the audience ceiling the decision carries, applied to both the
 //! thread and the message row so a newer-audience message changes neither the list nor any
 //! count, and the `since_join` history floor (WS04-S11) applied to the message row the same way,
-//! so a late joiner never lists an artifact stamped before the floor. A ZDR caller reads no row
-//! and gets an empty page (a ZDR turn produces no artifact).
+//! so a late joiner never lists an artifact stamped before the floor. A deleted message (the
+//! WS12-S4 revision fold) lists none of its artifacts, so its versions count nowhere. A message
+//! off the active path (a turn rewound or regenerated away, V3e-sws-1-rel1) is the same: none of
+//! its artifacts is listed or counted. A ZDR caller reads no row and gets an empty page (a ZDR
+//! turn produces no artifact).
 //! Content is never returned: the summary carries `char_length` only, and the viewer reads the
 //! thread through the existing transcript route under its own authority.
 
@@ -112,25 +115,35 @@ fn clamp_artifact_limit(limit: u32) -> i64 {
     i64::from(limit)
 }
 
-/// One row per (thread, artifact) at its latest version.
+/// One row per (thread, artifact) at its latest version. Built at run time because the WS12-S4
+/// fold is [`crate::space::revisions::fold_join_sql`]; every other fragment is a literal.
 ///
 /// `art` explodes `metadata.artifacts` of the Space's assistant messages under the org join,
 /// the unarchived-thread filter, the audience ceiling (thread AND message) and the `since_join`
-/// history floor (message, WS04-S11: `$9`, `NULL` when the read carries none); the window
-/// count therefore only ever counts rows the caller may see. The artifact kinds are the ones
-/// the room can render (`document`, `code`, `html`); a non-object element, a missing id or any
-/// other kind is dropped. `version` falls back to 1 when it is not a small non-negative
-/// integer. The keyset filter applies after the latest-version pick so a page boundary never
-/// splits an artifact from its newest version. `jsonb_exists(m.metadata, 'artifacts')` is the
-/// literal predicate of the partial index `idx_messages_space_artifacts` (migration 0085).
-const LIST_SPACE_ARTIFACTS_SQL: &str = "
+/// history floor (message, WS04-S11: `$9`, `NULL` when the read carries none). The revision fold
+/// (`rv`, the join ListConversation and the Space timeline use) drops a deleted message's rows
+/// from `art`: a deletion is terminal (`revise_message` refuses a further revision) and always
+/// applies, whatever the ceiling, so none of its artifacts is listed and none of its versions is
+/// counted. The active-path filter (`m.on_active_path`, V3e-sws-1-rel1) drops a turn rewound or
+/// regenerated away the same way: the transcript does not show that turn, and every history reader
+/// filters on the flag whatever the message-versions switch says (the switch gates the writes only).
+/// The window count therefore only ever counts rows the caller may see. The artifact
+/// kinds are the ones the room can render (`document`, `code`, `html`); a non-object element, a
+/// missing id or any other kind is dropped. `version` falls back to 1 when it is not a small
+/// non-negative integer. The keyset filter applies after the latest-version pick so a page
+/// boundary never splits an artifact from its newest version. `jsonb_exists(m.metadata,
+/// 'artifacts')` is the literal predicate of the partial index `idx_messages_space_artifacts`
+/// (migration 0085), kept on the raw column so the index still serves the scan.
+fn list_space_artifacts_sql() -> String {
+    format!(
+        "
 WITH art AS (
     SELECT m.thread_id,
            m.id AS message_id,
            a.elem->>'id' AS artifact_id,
            a.elem->>'kind' AS kind,
            left(COALESCE(a.elem->>'title', ''), $8) AS title,
-           CASE WHEN (a.elem->>'version') ~ '^[0-9]{1,9}$'
+           CASE WHEN (a.elem->>'version') ~ '^[0-9]{{1,9}}$'
                 THEN (a.elem->>'version')::BIGINT ELSE 1 END AS version,
            char_length(COALESCE(a.elem->>'content', ''))::BIGINT AS size_chars,
            m.agent_name,
@@ -138,6 +151,7 @@ WITH art AS (
            count(*) OVER (PARTITION BY m.thread_id, a.elem->>'id') AS version_count
     FROM messages m
     JOIN threads t ON t.id = m.thread_id
+    {fold_join}
     CROSS JOIN LATERAL jsonb_array_elements(
         CASE WHEN jsonb_typeof(m.metadata->'artifacts') = 'array'
              THEN m.metadata->'artifacts' ELSE '[]'::jsonb END
@@ -145,6 +159,8 @@ WITH art AS (
     WHERE m.space_id = $2
       AND m.role = 'assistant'
       AND jsonb_exists(m.metadata, 'artifacts')
+      AND {not_deleted}
+      AND m.on_active_path
       AND t.org_id = $1
       AND t.space_id = $2
       AND t.archived_at IS NULL
@@ -169,7 +185,11 @@ FROM latest
 WHERE $5::TIMESTAMPTZ IS NULL
    OR (created_at, message_id, artifact_id) < ($5::TIMESTAMPTZ, $6::TEXT, $7::TEXT)
 ORDER BY created_at DESC, message_id DESC, artifact_id DESC
-LIMIT $4";
+LIMIT $4",
+        fold_join = crate::space::revisions::fold_join_sql("$3::BIGINT"),
+        not_deleted = crate::space::revisions::FOLD_NOT_DELETED_SQL,
+    )
+}
 
 type ArtifactRow = (
     String,
@@ -195,7 +215,8 @@ async fn artifact_page_rows(
     cursor: Option<&ArtifactCursor>,
     limit: i64,
 ) -> Result<Vec<ArtifactRow>, sqlx::Error> {
-    sqlx::query_as::<_, ArtifactRow>(LIST_SPACE_ARTIFACTS_SQL)
+    let sql = list_space_artifacts_sql();
+    sqlx::query_as::<_, ArtifactRow>(&sql)
         .bind(org_id)
         .bind(space_id)
         .bind(read.recipient_audience_revision)

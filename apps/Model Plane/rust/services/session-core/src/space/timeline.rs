@@ -12,8 +12,8 @@
 //! must be PRESENT (an absent decision is `permission_denied`, never an owner-bound fallback) and
 //! verified for exactly this org, this user and this Space, then the audience ceiling it carries
 //! and the `since_join` history floor it may carry (WS04-S11): a thread with no message stamped at
-//! or after the floor is not listed, and its title, preview and reply count read only messages from
-//! the floor on.
+//! or after the floor is not listed, and its title, preview, reply count, turn count and authors
+//! read only messages from the floor on.
 //! A thread is eligible only when its newest audience stamp (`activity_max_audience_revision`,
 //! else the thread's own revision, else 0) is at or below the ceiling, and the thread's own stamp
 //! is too: fail closed, so a count or a recent-author list never reveals a row the reader could
@@ -33,6 +33,7 @@ use crate::grpc::{
     compact_thread_text, to_proto_timestamp, verify_thread_read_space_decision,
     THREAD_PREVIEW_MAX_CHARS, THREAD_TITLE_MAX_CHARS,
 };
+use crate::space::audience_window::floor_gate_message_sql;
 
 const MAX_SPACE_ID_BYTES: usize = 128;
 const MAX_THREAD_ID_BYTES: usize = 128;
@@ -96,19 +97,28 @@ fn summary_from_row(row: TimelineRow, space_id: &str) -> pb::ThreadSummary {
 /// The eligible-thread predicate shared by the window, the pinned shelf, the refresh read and the
 /// count. `$1` org, `$2` space, `$3` audience ceiling, `$4` history floor (`NULL` = none). A thread
 /// with no message (no summary) is never listed, which also keeps an orphan thread's internal key
-/// out of the room. Under a floor a thread needs a message stamped at or after it, as `ListThreads`
-/// does, so a thread that holds only earlier messages is not listed to a `since_join` reader.
-const ELIGIBLE_SQL: &str = "t.org_id = $1 AND t.space_id = $2 AND t.archived_at IS NULL
+/// out of the room. Under a floor a thread needs a message the reader may see from the floor on (on
+/// the active path, not deleted, within the ceiling and at or after the floor), as `ListThreads` and
+/// the attention gate do (V3e-sws-2), so a thread that holds only earlier, or only deleted, messages
+/// is not listed to a `since_join` reader.
+fn eligible_sql() -> String {
+    format!(
+        "t.org_id = $1 AND t.space_id = $2 AND t.archived_at IS NULL
       AND t.last_message_seq IS NOT NULL
       AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $3)
       AND COALESCE(t.activity_max_audience_revision, t.recipient_audience_revision, 0) <= $3
       AND ($4::BIGINT IS NULL OR EXISTS (
             SELECT 1 FROM messages em
              WHERE em.thread_id = t.id
-               AND (em.recipient_audience_revision IS NULL OR em.recipient_audience_revision >= $4)))";
+               AND {gate}))",
+        gate = floor_gate_message_sql("em", "$3", "$4"),
+    )
+}
 
 /// The page query: `extra` narrows the eligible set, `order` is the inner (indexed) order, `limit`
 /// an integer literal, `outer_order` the order of the answer. Lateral joins run on page rows only.
+/// Under a floor the turn count, the last author and the recent authors count and name only the turns
+/// from the floor on (V3e-sws-2); with no floor they are the stored summary, as before.
 fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str) -> String {
     format!(
         "WITH page AS (
@@ -124,8 +134,35 @@ fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str) -> String {
          SELECT page.id, page.created_at,
                 COALESCE(page.presentation_title, fu.content) AS title,
                 COALESCE(page.presentation_preview, lm.content) AS preview,
-                page.pinned_at, page.last_activity_at, page.last_message_seq, page.turn_count,
-                page.last_role, page.last_author_subject_id, page.recent_author_subject_ids,
+                page.pinned_at, page.last_activity_at, page.last_message_seq,
+                CASE WHEN $4::BIGINT IS NULL THEN page.turn_count
+                     ELSE (SELECT count(*)::INTEGER FROM messages tm
+                            WHERE tm.thread_id = page.id AND tm.role IN ('user', 'assistant')
+                              AND (tm.recipient_audience_revision IS NULL
+                                   OR tm.recipient_audience_revision >= $4::BIGINT))
+                END AS turn_count,
+                page.last_role,
+                CASE WHEN $4::BIGINT IS NULL THEN page.last_author_subject_id
+                     ELSE (SELECT tm.author_subject_id FROM messages tm
+                            WHERE tm.thread_id = page.id AND tm.role = 'user'
+                              AND tm.author_subject_id IS NOT NULL
+                              AND (tm.recipient_audience_revision IS NULL
+                                   OR tm.recipient_audience_revision >= $4::BIGINT)
+                            ORDER BY tm.sequence DESC
+                            LIMIT 1)
+                END AS last_author_subject_id,
+                CASE WHEN $4::BIGINT IS NULL THEN page.recent_author_subject_ids
+                     ELSE COALESCE((SELECT array_agg(ra.author_subject_id ORDER BY ra.newest DESC)
+                                      FROM (SELECT tm.author_subject_id, max(tm.sequence) AS newest
+                                              FROM messages tm
+                                             WHERE tm.thread_id = page.id AND tm.role = 'user'
+                                               AND tm.author_subject_id IS NOT NULL
+                                               AND (tm.recipient_audience_revision IS NULL
+                                                    OR tm.recipient_audience_revision >= $4::BIGINT)
+                                             GROUP BY tm.author_subject_id
+                                             ORDER BY max(tm.sequence) DESC
+                                             LIMIT 5) ra), ARRAY[]::TEXT[])
+                END AS recent_author_subject_ids,
                 page.user_id AS owner_subject_id, page.origin, page.persona_enabled,
                 latest_run.id AS latest_run_id, latest_run.status AS latest_run_status,
                 latest_run.updated_at AS latest_run_updated_at, rc.reply_count
@@ -154,6 +191,8 @@ fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str) -> String {
             SELECT r.id, {run_phase} AS status, r.updated_at
             FROM runs r
             WHERE r.thread_id = page.id
+              AND ($4::BIGINT IS NULL OR r.recipient_audience_revision IS NULL
+                   OR r.recipient_audience_revision >= $4::BIGINT)
             ORDER BY r.updated_at DESC, r.created_at DESC, r.id DESC
             LIMIT 1
          ) latest_run ON TRUE
@@ -165,7 +204,7 @@ fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str) -> String {
               AND ($4::BIGINT IS NULL OR m.recipient_audience_revision IS NULL OR m.recipient_audience_revision >= $4)
          ) rc ON TRUE
          ORDER BY {outer_order}",
-        eligible = ELIGIBLE_SQL,
+        eligible = eligible_sql(),
         fold_content = crate::space::revisions::FOLD_CONTENT_SQL,
         fold_join = crate::space::revisions::fold_join_sql("$3::BIGINT"),
         run_phase = crate::run_phase::run_phase_sql!("r"),
@@ -385,7 +424,7 @@ pub(crate) async fn list_space_timeline(
             .map(|row| summary_from_row(row, &space_id))
             .collect();
         }
-        let sql = format!("SELECT count(*) FROM threads t WHERE {ELIGIBLE_SQL}");
+        let sql = format!("SELECT count(*) FROM threads t WHERE {}", eligible_sql());
         let total: i64 = sqlx::query_scalar(&sql)
             .bind(&req.org_id)
             .bind(&space_id)
@@ -441,7 +480,7 @@ mod tests {
     use super::*;
     use crate::space::audience_window::{history_floor_enabled_from, history_floor_from_claim};
     use crate::space::test_support::{
-        clean_space, connect, seed_space_message_at_revision, seed_space_thread,
+        clean_space, connect, seed_space_message_at_revision, seed_space_run, seed_space_thread,
     };
     use mp_ids::new_ulid;
 
@@ -450,15 +489,26 @@ mod tests {
     /// statement text, so no database is needed.
     #[test]
     fn the_history_floor_is_bound_fourth_and_every_message_join_applies_it() {
-        assert!(ELIGIBLE_SQL.contains("$4::BIGINT IS NULL"));
+        assert!(eligible_sql().contains("$4::BIGINT IS NULL"));
         let page = page_sql(
             "",
             "t.last_message_seq DESC",
             10,
             "page.last_message_seq DESC",
         );
-        // Three lateral joins and the eligible EXISTS each read messages under the floor.
-        assert_eq!(page.matches("recipient_audience_revision >= $4").count(), 4);
+        // Three lateral joins, the eligible EXISTS, the three floored thread columns (turn count, last
+        // author and recent authors) and the latest run (a run stamped before the floor is not shown)
+        // each read under the floor.
+        assert_eq!(page.matches("recipient_audience_revision >= $4").count(), 8);
+        assert!(page.contains("r.recipient_audience_revision >= $4::BIGINT"));
+        assert!(page.contains("CASE WHEN $4::BIGINT IS NULL THEN page.turn_count"));
+        assert!(page.contains("CASE WHEN $4::BIGINT IS NULL THEN page.last_author_subject_id"));
+        assert!(page.contains("CASE WHEN $4::BIGINT IS NULL THEN page.recent_author_subject_ids"));
+        // V3e-sws-2: the eligible gate states the ceiling, the active path and the deletion check.
+        let eligible = eligible_sql();
+        assert!(eligible.contains("em.on_active_path"));
+        assert!(eligible.contains("em.recipient_audience_revision <= $3::BIGINT"));
+        assert!(eligible.contains("floor_gate_rev.action = 'deleted'"));
         assert!(!page.contains("$5") && !page.contains("$6"));
         let window = page_sql(
             "AND ($5::BIGINT IS NULL OR t.last_message_seq < $5)
@@ -567,6 +617,208 @@ mod tests {
             .await
             .expect("zero-claim page");
         assert_eq!(zero_claim.len(), 2, "a zero claim is no floor");
+
+        clean_space(&pool, &org, &space).await;
+    }
+
+    /// V3e-sws-2 against Postgres: under a `since_join` floor a listed thread counts only the turns the
+    /// reader may see and names only the authors of those turns, its last author being the author of the
+    /// newest user turn from the floor on (none when there is none). The switch off keeps the stored
+    /// summary: every turn, and every author of the thread's history, newest first.
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn timeline_under_a_floor_counts_and_names_only_the_turns_the_reader_may_see() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let suffix = new_ulid();
+        let org = format!("timeline-turns-floor-{suffix}");
+        let space = format!("space-timeline-turns-floor-{suffix}");
+        let thread = format!("{suffix}-thread");
+        seed_space_thread(&pool, &org, &space, &thread, "owner-a").await;
+        // The earlier turn is written by another author, so the stored summary names both.
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content, space_id, recipient_audience_ref, \
+             recipient_audience_revision, recipient_audience_hash, authority_revision, \
+             resource_authorization_ref, author_subject_id) \
+             VALUES ($1, $2, 'user', 'before the join', $3, 'audience-1', 1, 'sha256:audience-1', 1, \
+             'resource-1', 'author-old')",
+        )
+        .bind(format!("{suffix}-before"))
+        .bind(&thread)
+        .bind(&space)
+        .execute(&pool)
+        .await
+        .expect("seed the earlier turn");
+        seed_space_message_at_revision(
+            &pool,
+            &space,
+            &thread,
+            &format!("{suffix}-after"),
+            "after the join",
+            4,
+        )
+        .await;
+        // Two runs of the thread: the one stamped at the floor, and an earlier-stamped one updated last.
+        let late_run = format!("{suffix}-late-run");
+        let early_run = format!("{suffix}-early-run");
+        seed_space_run(
+            &pool,
+            &org,
+            &space,
+            &thread,
+            &late_run,
+            "completed",
+            "persistent",
+        )
+        .await;
+        seed_space_run(
+            &pool,
+            &org,
+            &space,
+            &thread,
+            &early_run,
+            "completed",
+            "persistent",
+        )
+        .await;
+        for (run, revision) in [(&late_run, 4_i64), (&early_run, 2_i64)] {
+            sqlx::query("UPDATE runs SET recipient_audience_revision = $1 WHERE id = $2")
+                .bind(revision)
+                .bind(run)
+                .execute(&pool)
+                .await
+                .expect("stamp the run");
+        }
+        sqlx::query("UPDATE runs SET updated_at = now() + interval '1 minute' WHERE id = $1")
+            .bind(&early_run)
+            .execute(&pool)
+            .await
+            .expect("the pre-join run is the most recently updated");
+
+        // A thread whose only message from the floor on is an assistant reply. Its earlier user turn is
+        // by 'author-old', so under the floor no user turn is in view and no author is named.
+        let reply_only = format!("{suffix}-reply-only");
+        seed_space_thread(&pool, &org, &space, &reply_only, "owner-a").await;
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content, space_id, recipient_audience_ref, \
+             recipient_audience_revision, recipient_audience_hash, authority_revision, \
+             resource_authorization_ref, author_subject_id) \
+             VALUES ($1, $2, 'user', 'asked before the join', $3, 'audience-1', 1, 'sha256:audience-1', 1, \
+             'resource-1', 'author-old')",
+        )
+        .bind(format!("{suffix}-reply-ask"))
+        .bind(&reply_only)
+        .bind(&space)
+        .execute(&pool)
+        .await
+        .expect("seed the earlier user turn");
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content, space_id, recipient_audience_ref, \
+             recipient_audience_revision, recipient_audience_hash, authority_revision, \
+             resource_authorization_ref, author_subject_id) \
+             VALUES ($1, $2, 'assistant', 'answered after the join', $3, 'audience-1', 4, \
+             'sha256:audience-1', 1, 'resource-1', NULL)",
+        )
+        .bind(format!("{suffix}-reply-answer"))
+        .bind(&reply_only)
+        .bind(&space)
+        .execute(&pool)
+        .await
+        .expect("seed the reply from the floor on");
+
+        let sql = page_sql(
+            "",
+            "t.last_message_seq DESC",
+            10,
+            "page.last_message_seq DESC",
+        );
+        let on = history_floor_enabled_from(Some("true"));
+        let floored = fetch_rows(
+            &pool,
+            &sql,
+            &org,
+            &space,
+            5,
+            history_floor_from_claim(3, on),
+            Extra::None,
+        )
+        .await
+        .expect("floored page");
+        let shown = floored
+            .iter()
+            .find(|row| row.id == thread)
+            .expect("the thread has a turn from the floor on, so it is listed");
+        assert_eq!(
+            shown.turn_count, 1,
+            "only the turn from the floor on is counted"
+        );
+        assert_eq!(
+            shown.recent_author_subject_ids,
+            vec!["member-2".to_owned()],
+            "only the author of that turn is named"
+        );
+        assert_eq!(
+            shown.last_author_subject_id.as_deref(),
+            Some("member-2"),
+            "the last author is the author of the newest user turn from the floor on"
+        );
+        let reply = floored
+            .iter()
+            .find(|row| row.id == reply_only)
+            .expect("the thread has a reply from the floor on, so it is listed");
+        assert_eq!(
+            reply.turn_count, 1,
+            "only the reply from the floor on is counted"
+        );
+        assert_eq!(
+            reply.last_author_subject_id.clone().unwrap_or_default(),
+            "",
+            "no user turn from the floor on, so no last author is named"
+        );
+        assert!(
+            reply.recent_author_subject_ids.is_empty(),
+            "no author of an earlier turn is named"
+        );
+
+        // The switch off: the stored summary, every turn and every author.
+        let all = fetch_rows(&pool, &sql, &org, &space, 5, None, Extra::None)
+            .await
+            .expect("unfloored page");
+        let whole = all
+            .iter()
+            .find(|row| row.id == thread)
+            .expect("the thread is listed");
+        assert_eq!(whole.turn_count, 2, "the switch off counts every turn");
+        assert_eq!(
+            whole.recent_author_subject_ids,
+            vec!["member-2".to_owned(), "author-old".to_owned()],
+            "the switch off names every author, newest first"
+        );
+        let whole_reply = all
+            .iter()
+            .find(|row| row.id == reply_only)
+            .expect("the switch off lists the reply thread");
+        assert_eq!(
+            whole_reply.last_author_subject_id.as_deref(),
+            Some("author-old"),
+            "the switch off names the stored last author, the author of the earlier turn"
+        );
+        assert_eq!(
+            whole_reply.recent_author_subject_ids,
+            vec!["author-old".to_owned()],
+            "the switch off names the earlier turn's author"
+        );
+        assert_eq!(
+            shown.latest_run_id.as_deref(),
+            Some(late_run.as_str()),
+            "the latest run is the one stamped from the floor on"
+        );
+        assert_eq!(
+            whole.latest_run_id.as_deref(),
+            Some(early_run.as_str()),
+            "the switch off shows the most recently updated run"
+        );
 
         clean_space(&pool, &org, &space).await;
     }

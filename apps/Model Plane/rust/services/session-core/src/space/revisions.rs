@@ -168,6 +168,27 @@ impl MessageRevisionGrpc {
     }
 }
 
+/// The message address of `ResolveMessageTarget` (WS12-S4; V3e-sws-2). The role and the revision state
+/// of one message of a Space thread the read decision reaches. Parameters: $1 message, $2 thread, $3
+/// org, $4 Space, $5 ceiling, $6 history floor (`NULL` = none). A message stamped before the floor is
+/// not found, as it is not in the floored history read, so the reader learns neither its role nor its
+/// revision state. A deleted message stays addressable: its state is the answer.
+fn resolve_target_sql() -> String {
+    format!(
+        "SELECT m.role, {state} AS revision_state
+         FROM messages m
+         JOIN threads t ON t.id = m.thread_id
+         {join}
+         WHERE m.id = $1 AND m.thread_id = $2 AND t.org_id = $3 AND t.space_id = $4
+           AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $5)
+           AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $5)
+           AND ($6::BIGINT IS NULL OR m.recipient_audience_revision IS NULL
+                OR m.recipient_audience_revision >= $6::BIGINT)",
+        state = FOLD_STATE_SQL,
+        join = fold_join_sql("$5::BIGINT"),
+    )
+}
+
 #[tonic::async_trait]
 impl MessageRevisionService for MessageRevisionGrpc {
     async fn revise_message(
@@ -248,23 +269,16 @@ impl MessageRevisionService for MessageRevisionGrpc {
             )?
             .ok_or_else(|| Status::permission_denied("a Space read decision is required"))?;
             let ceiling = read.recipient_audience_revision;
-            let sql = format!(
-                "SELECT m.role, {state} AS revision_state
-                 FROM messages m
-                 JOIN threads t ON t.id = m.thread_id
-                 {join}
-                 WHERE m.id = $1 AND m.thread_id = $2 AND t.org_id = $3 AND t.space_id = $4
-                   AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $5)
-                   AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $5)",
-                state = FOLD_STATE_SQL,
-                join = fold_join_sql("$5::BIGINT"),
-            );
+            // V3e-sws-2: the history floor the read decision signs (WS04-S11); `None` is full history.
+            let floor = read.history_floor;
+            let sql = resolve_target_sql();
             let row: Option<(String, String)> = sqlx::query_as(&sql)
                 .bind(&req.message_id)
                 .bind(&req.thread_id)
                 .bind(&req.org_id)
                 .bind(&req.space_id)
                 .bind(ceiling)
+                .bind(floor)
                 .fetch_optional(&self.pool)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -306,6 +320,14 @@ fn validate_request(req: &pb::ReviseMessageRequest) -> Result<(), Status> {
         return Err(Status::invalid_argument("moderation_reason is not in the closed set"));
     }
     Ok(())
+}
+
+/// Whether a revise target stamped `stored` is in reach of the decision: no newer than the audience it
+/// was issued under and, under a `since_join` floor the decision signs (V3e-sws-2), at or after the
+/// floor. An unstamped message is in reach, as in every message read. A target out of reach is not
+/// found, so a revision cannot act on a message the reader could not read.
+fn revise_target_in_reach(stored: Option<i64>, request_revision: i64, floor: Option<i64>) -> bool {
+    stored.is_none_or(|rev| rev <= request_revision && floor.is_none_or(|from| rev >= from))
 }
 
 /// The threads the hold gate is asked about for a destructive revision: the message's own thread, always, and every
@@ -427,7 +449,9 @@ async fn revise_message(
     .await
     .map_err(internal)?;
     let (target_role, original_content, post_kind, author, _) = target
-        .filter(|(_, _, _, _, rev_no)| rev_no.is_none_or(|stored| stored <= request_revision))
+        .filter(|(_, _, _, _, rev_no)| {
+            revise_target_in_reach(*rev_no, request_revision, verified.history_floor)
+        })
         .ok_or_else(|| coded(Status::not_found("message not found"), "message_not_found"))?;
 
     // 4. A repeat of the same revision is answered with the stored row; the same key with other
@@ -727,8 +751,128 @@ async fn revise_message(
 mod tests {
     use super::*;
     use crate::grpc::thread_revise_payload_digest;
+    use crate::space::test_support::{
+        clean_space, connect, seed_space_message_at_revision, seed_space_thread,
+    };
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use ed25519_dalek::{Signer as _, SigningKey};
+    use mp_ids::new_ulid;
+
+    /// V3e-sws-2: a revise target is in reach from the floor up to the ceiling. An unstamped one is in
+    /// reach, and with no floor the answer is the ceiling alone, as it was.
+    #[test]
+    fn a_revise_target_is_in_reach_only_from_the_floor_up_to_the_ceiling() {
+        assert!(revise_target_in_reach(Some(3), 5, Some(3)), "at the floor");
+        assert!(
+            revise_target_in_reach(Some(5), 5, Some(3)),
+            "at the ceiling"
+        );
+        assert!(
+            !revise_target_in_reach(Some(2), 5, Some(3)),
+            "before the floor"
+        );
+        assert!(
+            !revise_target_in_reach(Some(6), 5, Some(3)),
+            "above the ceiling"
+        );
+        assert!(
+            revise_target_in_reach(None, 5, Some(3)),
+            "an unstamped message is in reach"
+        );
+        assert!(
+            revise_target_in_reach(Some(2), 5, None),
+            "no floor: the ceiling alone"
+        );
+        assert!(
+            !revise_target_in_reach(Some(6), 5, None),
+            "no floor: still not above the ceiling"
+        );
+    }
+
+    /// V3e-sws-2: the message address binds the history floor sixth, states it on the message, and
+    /// keeps the revision fold that gives the revision state. Checked on the statement text.
+    #[test]
+    fn the_message_address_binds_the_floor_sixth_and_keeps_the_revision_state() {
+        let sql = resolve_target_sql();
+        assert!(sql.contains("$6::BIGINT IS NULL"));
+        assert!(sql.contains("m.recipient_audience_revision >= $6::BIGINT"));
+        assert!(!sql.contains("$7"));
+        assert!(
+            sql.contains("LEFT JOIN LATERAL"),
+            "the state comes from the fold"
+        );
+        assert!(sql.contains("COALESCE(rv.action, '') AS revision_state"));
+    }
+
+    /// V3e-sws-2 against Postgres: a message stamped before a `since_join` floor is not found by the
+    /// message address, and one from the floor on is found with its role and revision state. The switch
+    /// off (no floor) finds both.
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn the_message_address_under_a_floor_finds_no_message_before_it() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let suffix = new_ulid();
+        let org = format!("resolve-floor-{suffix}");
+        let space = format!("space-resolve-floor-{suffix}");
+        let thread = format!("{suffix}-thread");
+        let early = format!("{suffix}-early");
+        let late = format!("{suffix}-late");
+        seed_space_thread(&pool, &org, &space, &thread, "owner-a").await;
+        seed_space_message_at_revision(&pool, &space, &thread, &early, "before the join", 2).await;
+        seed_space_message_at_revision(&pool, &space, &thread, &late, "after the join", 4).await;
+
+        let sql = resolve_target_sql();
+        let floored_early: Option<(String, String)> = sqlx::query_as(&sql)
+            .bind(&early)
+            .bind(&thread)
+            .bind(&org)
+            .bind(&space)
+            .bind(5_i64)
+            .bind(Some(3_i64))
+            .fetch_optional(&pool)
+            .await
+            .expect("floored address of the earlier message");
+        assert_eq!(
+            floored_early, None,
+            "a message before the floor is not addressable"
+        );
+
+        let floored_late: Option<(String, String)> = sqlx::query_as(&sql)
+            .bind(&late)
+            .bind(&thread)
+            .bind(&org)
+            .bind(&space)
+            .bind(5_i64)
+            .bind(Some(3_i64))
+            .fetch_optional(&pool)
+            .await
+            .expect("floored address of the later message");
+        assert_eq!(
+            floored_late,
+            Some(("user".to_owned(), String::new())),
+            "a message from the floor on is addressable, with its role and state"
+        );
+
+        let unfloored: Option<(String, String)> = sqlx::query_as(&sql)
+            .bind(&early)
+            .bind(&thread)
+            .bind(&org)
+            .bind(&space)
+            .bind(5_i64)
+            .bind(None::<i64>)
+            .fetch_optional(&pool)
+            .await
+            .expect("unfloored address of the earlier message");
+        assert_eq!(
+            unfloored,
+            Some(("user".to_owned(), String::new())),
+            "the switch off addresses the earlier message too"
+        );
+
+        clean_space(&pool, &org, &space).await;
+    }
 
     /// The file before its test module: the production code the source-order pins read.
     fn production_source(source: &str) -> &str {

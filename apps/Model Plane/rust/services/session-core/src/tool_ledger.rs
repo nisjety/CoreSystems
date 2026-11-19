@@ -17,7 +17,7 @@ use mp_contracts::zdr_refusal::Refusal;
 use sqlx::PgPool;
 use tonic::{Code, Status};
 
-const ENABLED_ENV: &str = "SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED";
+pub(crate) const ENABLED_ENV: &str = "SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED";
 
 /// How often the sweep looks for abandoned reservations.
 const INTERVAL: Duration = Duration::from_secs(60);

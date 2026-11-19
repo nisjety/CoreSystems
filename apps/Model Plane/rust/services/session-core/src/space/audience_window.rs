@@ -80,6 +80,26 @@ pub(crate) fn audience_window(read: Option<VerifiedSpaceRead>) -> AudienceWindow
     }
 }
 
+/// The message predicate of a thread-level floor gate (V3e-sws-2), on the message alias `message`.
+///
+/// Under a `since_join` floor a thread is listed, named or counted only for a message the reader may
+/// see from the floor on: on the active path, not deleted, at or below the ceiling and at or after the
+/// floor. An unstamped message passes the ceiling and the floor, as in every message read. With no
+/// floor (`floor` is `NULL`) the predicate is TRUE for every message, so each gate keeps the answer it
+/// gives without a floor. `ceiling` and `floor` are the placeholders that carry the two bounds.
+pub(crate) fn floor_gate_message_sql(message: &str, ceiling: &str, floor: &str) -> String {
+    format!(
+        "({floor}::BIGINT IS NULL OR ({message}.on_active_path
+            AND ({message}.recipient_audience_revision IS NULL
+                 OR {message}.recipient_audience_revision <= {ceiling}::BIGINT)
+            AND ({message}.recipient_audience_revision IS NULL
+                 OR {message}.recipient_audience_revision >= {floor}::BIGINT)
+            AND NOT EXISTS (SELECT 1 FROM message_revisions floor_gate_rev
+                             WHERE floor_gate_rev.message_id = {message}.id
+                               AND floor_gate_rev.action = 'deleted')))"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +154,37 @@ mod tests {
         assert_eq!(
             audience_window(Some(read)),
             AudienceWindow::new(Some(9), None)
+        );
+    }
+
+    /// V3e-sws-2: the floor gate's message predicate applies the ceiling, the active path and the
+    /// deletion check under a floor, and is TRUE for every message with no floor, so each gate keeps
+    /// the full-history answer it gives without one.
+    #[test]
+    fn the_floor_gate_message_predicate_applies_ceiling_path_and_deletion_only_under_a_floor() {
+        let sql = floor_gate_message_sql("em", "$3", "$6");
+        assert!(
+            sql.starts_with("($6::BIGINT IS NULL OR ("),
+            "the no-floor branch comes first: {sql}"
+        );
+        for part in [
+            "em.on_active_path",
+            "em.recipient_audience_revision <= $3::BIGINT",
+            "em.recipient_audience_revision >= $6::BIGINT",
+            "floor_gate_rev.action = 'deleted'",
+            "floor_gate_rev.message_id = em.id",
+        ] {
+            assert!(sql.contains(part), "the floor gate states {part}: {sql}");
+        }
+        let placeholders: Vec<&str> = sql
+            .split(|c: char| c == '(' || c == ')' || c.is_whitespace())
+            .filter(|token| token.starts_with('$'))
+            .collect();
+        assert!(
+            placeholders
+                .iter()
+                .all(|token| *token == "$3::BIGINT" || *token == "$6::BIGINT"),
+            "only the ceiling and the floor are bound: {placeholders:?}"
         );
     }
 }

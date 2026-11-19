@@ -773,7 +773,7 @@ fn optional_env(name: &str) -> Option<String> {
 /// is opt-in: default **OFF**, and only the exact literal `true` turns it on. Unset and every other
 /// value (`1`, `yes`, `on`, `TRUE`, a padded `true`) keep it off, which is what the compose default
 /// (`DREAMING_LLM_EXTRACTION:-0`) and the flag registry declare.
-const LLM_EXTRACTION_ENV: &str = "DREAMING_LLM_EXTRACTION";
+pub(crate) const LLM_EXTRACTION_ENV: &str = "DREAMING_LLM_EXTRACTION";
 
 /// Pure gate resolution, so the default-OFF contract is testable without mutating process env.
 /// The reader is [`mp_contracts::loop_fold::switch_from`], the strict reader that the default-off
