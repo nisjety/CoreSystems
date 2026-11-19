@@ -1085,3 +1085,600 @@ fn zdr_reply() -> Reply {
         zdr_refusal_body(ZDR_DURABLE_MUTATION_FORBIDDEN),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    //! WS19-S4, WS19-S6, W3-DEC-WIKIZDR and W3-FIX-9 through the real router. Session, Control (user-core), org-core,
+    //! Convex and wiki-store are doubles. Control answers each canvas decision by echoing the request's own Space, action
+    //! and idempotency key, so every derivation (create, save, restore and the read) is read off the wire.
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        Json,
+    };
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
+    use tower::ServiceExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, Request as WmRequest, Respond, ResponseTemplate};
+
+    use super::*;
+
+    const SPACE: &str = "space-room";
+    const CANVAS: &str = "canvas-1";
+    const TOKEN: &str = "decision-token-secret-xyz";
+    const COOKIE: &str = "better-auth.session_token=session-1";
+    const SAVE_ID: &str = "save-client-0000001";
+    const RESTORE_ID: &str = "restore-client-0001";
+    const CANVAS_URL: &str = "/api/v1/spaces/space-room/canvas";
+    const VERSIONS_URL: &str = "/api/v1/spaces/space-room/canvas/versions";
+    const RESTORE_URL: &str = "/api/v1/spaces/space-room/canvas/versions/ver-1/restore";
+    const WIKI_HEAD: &str = "/v1/space-canvas/spaces/space-room";
+    const WIKI_VERSIONS: &str = "/v1/space-canvas/spaces/space-room/versions";
+    const WIKI_RESTORE: &str = "/v1/space-canvas/spaces/space-room/versions/ver-1/restore";
+    const CONTROL_DECISION: &str = "/api/v1/internal/spaces/canvas-decision";
+
+    /// Every double a canvas call reaches. `decision` is Control's answer to each canvas decision; `None` grants each
+    /// one by echo. The canvas flag is on; a test that needs it off sets it.
+    struct Fixture {
+        state: AppState,
+        user_core: MockServer,
+        org_core: MockServer,
+        wiki: MockServer,
+        _others: Vec<MockServer>,
+    }
+
+    /// Control's answer to a canvas decision that matches its request: the request's own Space, action and key.
+    struct EchoDecision;
+
+    impl Respond for EchoDecision {
+        fn respond(&self, request: &WmRequest) -> ResponseTemplate {
+            let body: Value = request.body_json().unwrap_or(Value::Null);
+            let action = if body["op"] == "read" {
+                "data.canvas.read"
+            } else {
+                "data.canvas.write"
+            };
+            ResponseTemplate::new(200).set_body_json(json!({"data": {
+                "token": TOKEN,
+                "decision": {
+                    "space_ref": body["space_ref"],
+                    "action_id": action,
+                    "idempotency_key": body["idempotency_key"],
+                }
+            }}))
+        }
+    }
+
+    async fn fixture(org_zdr: bool, decision: Option<ResponseTemplate>) -> Fixture {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/data-plane/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"token": "data-plane-token"})))
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": "member", "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"role": "manager"}})))
+            .mount(&user_core)
+            .await;
+        let decisions = Mock::given(wm_method("POST")).and(wm_path(CONTROL_DECISION));
+        match decision {
+            Some(answer) => decisions.respond_with(answer).mount(&user_core).await,
+            None => decisions.respond_with(EchoDecision).mount(&user_core).await,
+        }
+        let org_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(org_record(org_zdr))
+            .mount(&org_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef": SPACE, "name": "Room", "kind": "room", "lifecycle": "active"}
+            ]})))
+            .mount(&application)
+            .await;
+        let wiki = MockServer::start().await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.org_core_url = org_core.uri();
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.wiki_store_url = wiki.uri();
+        state.space_features.canvas_api = true;
+        Fixture {
+            state,
+            user_core,
+            org_core,
+            wiki,
+            _others: vec![auth, application],
+        }
+    }
+
+    fn org_record(zdr: bool) -> ResponseTemplate {
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}}))
+    }
+
+    /// wiki-store's head: a canvas and its current version.
+    fn canvas_head() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"data": {
+            "canvas": {"canvas_id": CANVAS, "space_ref": SPACE},
+            "head": {"version_id": "ver-1"}
+        }}))
+    }
+
+    /// wiki-store's answer for a Space with no canvas yet.
+    fn no_canvas() -> ResponseTemplate {
+        ResponseTemplate::new(404).set_body_json(
+            json!({"error": {"code": "canvas_not_found", "message": "The Space has no canvas."}}),
+        )
+    }
+
+    /// wiki-store's answer to a write that landed.
+    fn saved() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"data": {"version": {"version_id": "ver-2"}}}))
+    }
+
+    async fn mount_wiki(wiki: &MockServer, verb: &str, route: &str, answer: ResponseTemplate) {
+        Mock::given(wm_method(verb))
+            .and(wm_path(route))
+            .respond_with(answer)
+            .mount(wiki)
+            .await;
+    }
+
+    /// One request through the real router with the session cookie. Returns the status and the raw body.
+    async fn call(
+        state: AppState,
+        method: &str,
+        uri: &str,
+        extra: &[(&str, &str)],
+        body: Option<Value>,
+    ) -> (u16, Vec<u8>) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", COOKIE);
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        for (name, value) in extra {
+            builder = builder.header(*name, *value);
+        }
+        let request = builder
+            .body(Body::from(body.map(|value| value.to_string()).unwrap_or_default()))
+            .expect("a request");
+        let response = crate::build_router(state)
+            .oneshot(request)
+            .await
+            .expect("the router answers");
+        let status = response.status().as_u16();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("a body")
+            .to_bytes()
+            .to_vec();
+        (status, bytes)
+    }
+
+    fn json_of(bytes: &[u8]) -> Value {
+        serde_json::from_slice(bytes).unwrap_or(Value::Null)
+    }
+
+    /// The JSON bodies a server recorded for one method and one exact path.
+    async fn bodies_of(server: &MockServer, verb: &str, path: &str) -> Vec<Value> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|request| request.method.as_str() == verb && request.url.path() == path)
+            .map(|request| request.body_json::<Value>().unwrap_or(Value::Null))
+            .collect()
+    }
+
+    /// Every canvas decision Control was asked for, reads and writes alike.
+    async fn decision_bodies(fixture: &Fixture) -> Vec<Value> {
+        bodies_of(&fixture.user_core, "POST", CONTROL_DECISION).await
+    }
+
+    /// The write decisions only: create, save and restore.
+    async fn write_decisions(fixture: &Fixture) -> Vec<Value> {
+        decision_bodies(fixture)
+            .await
+            .into_iter()
+            .filter(|body| body["op"] != "read")
+            .collect()
+    }
+
+    /// Calls Control receives for a Space, whatever the path under `/internal/spaces/`.
+    async fn control_space_calls(fixture: &Fixture) -> usize {
+        fixture
+            .user_core
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| request.url.path().contains("/internal/spaces/"))
+            .count()
+    }
+
+    async fn wiki_calls(fixture: &Fixture) -> usize {
+        fixture.wiki.received_requests().await.unwrap_or_default().len()
+    }
+
+    fn save_body(content: &str) -> Value {
+        json!({"content": content, "client_save_id": SAVE_ID})
+    }
+
+    fn restore_body() -> Value {
+        json!({"client_save_id": RESTORE_ID})
+    }
+
+    /// The `sha256:` commitment wiki-store recomputes from the body text.
+    fn sha256_of(content: &str) -> String {
+        format!("sha256:{}", hex::encode(Sha256::digest(content.as_bytes())))
+    }
+
+    // ---- WS19-S4: the flag, the zero-retention gate and the refusals -------------------------------------
+
+    #[tokio::test]
+    async fn the_canvas_is_404_and_calls_nothing_while_its_flag_is_off() {
+        let mut fixture = fixture(false, None).await;
+        fixture.state.space_features.canvas_api = false;
+        mount_wiki(&fixture.wiki, "GET", WIKI_HEAD, canvas_head()).await;
+        for (method, uri, body) in [
+            ("GET", CANVAS_URL, None),
+            ("GET", VERSIONS_URL, None),
+            ("POST", VERSIONS_URL, Some(save_body("text"))),
+            ("POST", RESTORE_URL, Some(restore_body())),
+        ] {
+            let (status, bytes) = call(fixture.state.clone(), method, uri, &[], body).await;
+            assert_eq!(status, 404, "{method} {uri}");
+            assert_eq!(json_of(&bytes)["error"]["code"], "space_canvas_disabled", "{method} {uri}");
+        }
+        assert_eq!(control_space_calls(&fixture).await, 0);
+        assert_eq!(wiki_calls(&fixture).await, 0);
+        assert!(fixture.org_core.received_requests().await.unwrap_or_default().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_request_or_an_org_under_zero_retention_is_412_before_any_control_call() {
+        let cases: Vec<(bool, Vec<(&str, &str)>)> = vec![(true, vec![]), (false, vec![("x-zdr", "true")])];
+        for (org_zdr, extra) in cases {
+            let fixture = fixture(org_zdr, None).await;
+            mount_wiki(&fixture.wiki, "GET", WIKI_HEAD, canvas_head()).await;
+            for (method, uri, body) in [
+                ("GET", CANVAS_URL, None),
+                ("POST", VERSIONS_URL, Some(save_body("text"))),
+            ] {
+                let (status, bytes) = call(fixture.state.clone(), method, uri, &extra, body).await;
+                let answer = json_of(&bytes);
+                assert_eq!(status, 412, "org_zdr={org_zdr} {method} {uri}");
+                assert_eq!(answer["error"]["code"], "zdr_durable_mutation_forbidden", "org_zdr={org_zdr} {method} {uri}");
+                assert_eq!(answer["error"]["details"]["surface"], "room_canvas", "org_zdr={org_zdr} {method} {uri}");
+            }
+            assert_eq!(control_space_calls(&fixture).await, 0, "org_zdr={org_zdr}");
+            assert_eq!(wiki_calls(&fixture).await, 0, "org_zdr={org_zdr}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_space_with_no_canvas_answers_200_with_a_null_canvas_and_head() {
+        let fixture = fixture(false, None).await;
+        mount_wiki(&fixture.wiki, "GET", WIKI_HEAD, no_canvas()).await;
+        let (status, bytes) = call(fixture.state.clone(), "GET", CANVAS_URL, &[], None).await;
+        assert_eq!(status, 200);
+        let answer = json_of(&bytes);
+        assert!(answer["data"]["canvas"].is_null());
+        assert!(answer["data"]["head"].is_null());
+        assert_eq!(answer["data"]["can_write"], true);
+        // The read decision names the read action and carries no canvas id and no expected version.
+        let reads = decision_bodies(&fixture).await;
+        assert_eq!(reads.len(), 1);
+        assert_eq!(reads[0]["op"], "read");
+        assert!(reads[0]["canvas_id"].is_null());
+        assert!(reads[0]["expected_version_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn a_control_refusal_of_the_read_is_canvas_read_not_authorized_with_its_reason_and_no_token() {
+        let refused = ResponseTemplate::new(403)
+            .set_body_json(json!({"code": "space_read_denied", "error": "Not allowed."}));
+        let fixture = fixture(false, Some(refused)).await;
+        mount_wiki(&fixture.wiki, "GET", WIKI_HEAD, canvas_head()).await;
+        let (status, bytes) = call(fixture.state.clone(), "GET", CANVAS_URL, &[], None).await;
+        assert_eq!(status, 403);
+        let answer = json_of(&bytes);
+        assert_eq!(answer["error"]["code"], "canvas_read_not_authorized");
+        assert_eq!(answer["error"]["details"]["reason"], "space_read_denied");
+        assert!(answer.get("data").is_none());
+        assert!(!String::from_utf8_lossy(&bytes).contains(TOKEN));
+        // Refused at the read decision, so the Data Plane is never reached.
+        assert_eq!(wiki_calls(&fixture).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_control_outage_or_a_400_is_space_decision_unavailable() {
+        for upstream in [400_u16, 500, 503] {
+            let answer_body = json!({"error": {"code": "upstream_error", "message": "Down."}});
+            let fixture = fixture(false, Some(ResponseTemplate::new(upstream).set_body_json(answer_body))).await;
+            mount_wiki(&fixture.wiki, "GET", WIKI_HEAD, canvas_head()).await;
+            let (status, bytes) = call(fixture.state.clone(), "GET", CANVAS_URL, &[], None).await;
+            assert_eq!(status, 503, "Control answered {upstream}");
+            assert_eq!(json_of(&bytes)["error"]["code"], "space_decision_unavailable", "Control answered {upstream}");
+            assert_eq!(wiki_calls(&fixture).await, 0, "Control answered {upstream}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_body_field_outside_the_contract_is_400_invalid_canvas_request_and_nothing_is_sent() {
+        let fixture = fixture(false, None).await;
+        mount_wiki(&fixture.wiki, "GET", WIKI_HEAD, canvas_head()).await;
+        let mut save = save_body("text");
+        save["authority"] = json!("forged");
+        let (status, bytes) = call(fixture.state.clone(), "POST", VERSIONS_URL, &[], Some(save)).await;
+        assert_eq!(status, 400);
+        assert_eq!(json_of(&bytes)["error"]["code"], "invalid_canvas_request");
+        let mut restore = restore_body();
+        restore["grant_id"] = json!("forged");
+        let (status, bytes) = call(fixture.state.clone(), "POST", RESTORE_URL, &[], Some(restore)).await;
+        assert_eq!(status, 400);
+        assert_eq!(json_of(&bytes)["error"]["code"], "invalid_canvas_request");
+        assert_eq!(control_space_calls(&fixture).await, 0);
+        assert_eq!(wiki_calls(&fixture).await, 0);
+    }
+
+    #[tokio::test]
+    async fn an_empty_expected_version_id_is_refused_before_any_control_call() {
+        let fixture = fixture(false, None).await;
+        mount_wiki(&fixture.wiki, "GET", WIKI_HEAD, canvas_head()).await;
+        let mut save = save_body("text");
+        save["expected_version_id"] = json!("");
+        let (status, bytes) = call(fixture.state.clone(), "POST", VERSIONS_URL, &[], Some(save)).await;
+        assert_eq!(status, 400);
+        assert_eq!(json_of(&bytes)["error"]["code"], "invalid_canvas_request");
+        let mut restore = restore_body();
+        restore["expected_version_id"] = json!("");
+        let (status, bytes) = call(fixture.state.clone(), "POST", RESTORE_URL, &[], Some(restore)).await;
+        assert_eq!(status, 400);
+        assert_eq!(json_of(&bytes)["error"]["code"], "invalid_canvas_request");
+        assert_eq!(control_space_calls(&fixture).await, 0);
+        assert_eq!(wiki_calls(&fixture).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_client_save_id_outside_the_pattern_is_refused_before_any_control_call() {
+        let fixture = fixture(false, None).await;
+        mount_wiki(&fixture.wiki, "GET", WIKI_HEAD, canvas_head()).await;
+        // Too short (15), too long (65) and a character outside `[A-Za-z0-9_-]`.
+        for bad_id in ["a".repeat(15), "a".repeat(65), format!("{}!", "a".repeat(20))] {
+            let save = json!({"content": "text", "client_save_id": bad_id});
+            let (status, bytes) = call(fixture.state.clone(), "POST", VERSIONS_URL, &[], Some(save)).await;
+            assert_eq!(status, 400, "save with client_save_id of {} characters", bad_id.len());
+            assert_eq!(json_of(&bytes)["error"]["code"], "invalid_canvas_request");
+            let restore = json!({"client_save_id": bad_id});
+            let (status, bytes) = call(fixture.state.clone(), "POST", RESTORE_URL, &[], Some(restore)).await;
+            assert_eq!(status, 400, "restore with client_save_id of {} characters", bad_id.len());
+            assert_eq!(json_of(&bytes)["error"]["code"], "invalid_canvas_request");
+        }
+        assert_eq!(control_space_calls(&fixture).await, 0);
+        assert_eq!(wiki_calls(&fixture).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_version_of_65536_bytes_is_accepted_and_one_more_byte_is_413_with_its_limit() {
+        let fixture = fixture(false, None).await;
+        mount_wiki(&fixture.wiki, "GET", WIKI_HEAD, no_canvas()).await;
+        mount_wiki(&fixture.wiki, "POST", WIKI_VERSIONS, saved()).await;
+        let at_limit = "a".repeat(65_536);
+        let (status, _) = call(fixture.state.clone(), "POST", VERSIONS_URL, &[], Some(save_body(&at_limit))).await;
+        assert_eq!(status, 200);
+        let sent = bodies_of(&fixture.wiki, "POST", WIKI_VERSIONS).await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["content"].as_str().map(str::len), Some(65_536));
+
+        let before = decision_bodies(&fixture).await.len();
+        let over = "a".repeat(65_537);
+        let (status, bytes) = call(fixture.state.clone(), "POST", VERSIONS_URL, &[], Some(save_body(&over))).await;
+        let answer = json_of(&bytes);
+        assert_eq!(status, 413);
+        assert_eq!(answer["error"]["code"], "canvas_too_large");
+        assert_eq!(answer["error"]["details"]["max_bytes"], 65_536);
+        assert_eq!(decision_bodies(&fixture).await.len(), before, "an oversize version reaches no Control call");
+        assert_eq!(bodies_of(&fixture.wiki, "POST", WIKI_VERSIONS).await.len(), 1);
+    }
+
+    // ---- WS19-S4: the derivation of each write, read off the decision on the wire ---------------------------
+
+    #[tokio::test]
+    async fn a_save_with_no_active_canvas_is_a_create_with_null_ids_and_the_content_digest() {
+        let fixture = fixture(false, None).await;
+        mount_wiki(&fixture.wiki, "GET", WIKI_HEAD, no_canvas()).await;
+        mount_wiki(&fixture.wiki, "POST", WIKI_VERSIONS, saved()).await;
+        let content = "The room canvas text.";
+        let mut save = save_body(content);
+        save["expected_version_id"] = json!("ver-old");
+        let (status, _) = call(fixture.state.clone(), "POST", VERSIONS_URL, &[], Some(save)).await;
+        assert_eq!(status, 200);
+        let writes = write_decisions(&fixture).await;
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0]["op"], "create");
+        assert!(writes[0]["canvas_id"].is_null());
+        assert!(writes[0]["expected_version_id"].is_null());
+        assert_eq!(writes[0]["content_digest"], sha256_of(content));
+    }
+
+    #[tokio::test]
+    async fn a_save_over_an_active_canvas_is_a_save_with_its_id_and_the_expected_version() {
+        let fixture = fixture(false, None).await;
+        mount_wiki(&fixture.wiki, "GET", WIKI_HEAD, canvas_head()).await;
+        mount_wiki(&fixture.wiki, "POST", WIKI_VERSIONS, saved()).await;
+        let mut save = save_body("text");
+        save["expected_version_id"] = json!("ver-1");
+        let (status, _) = call(fixture.state.clone(), "POST", VERSIONS_URL, &[], Some(save)).await;
+        assert_eq!(status, 200);
+        let writes = write_decisions(&fixture).await;
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0]["op"], "save");
+        assert_eq!(writes[0]["canvas_id"], CANVAS);
+        assert_eq!(writes[0]["expected_version_id"], "ver-1");
+        assert!(writes[0]["restore_from_version_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn a_save_sends_canvas_save_as_its_idempotency_key_on_the_decision_and_the_wire_body() {
+        let expected = format!("canvas-save-{SAVE_ID}");
+        for head in [canvas_head(), no_canvas()] {
+            let fixture = fixture(false, None).await;
+            mount_wiki(&fixture.wiki, "GET", WIKI_HEAD, head).await;
+            mount_wiki(&fixture.wiki, "POST", WIKI_VERSIONS, saved()).await;
+            let (status, _) = call(fixture.state.clone(), "POST", VERSIONS_URL, &[], Some(save_body("text"))).await;
+            assert_eq!(status, 200);
+            let writes = write_decisions(&fixture).await;
+            assert_eq!(writes.len(), 1);
+            assert_eq!(writes[0]["idempotency_key"], expected);
+            let wire = bodies_of(&fixture.wiki, "POST", WIKI_VERSIONS).await;
+            assert_eq!(wire.len(), 1);
+            assert_eq!(wire[0]["idempotency_key"], expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_restore_with_no_canvas_is_404_canvas_not_found_and_sends_no_write_decision() {
+        let fixture = fixture(false, None).await;
+        mount_wiki(&fixture.wiki, "GET", WIKI_HEAD, no_canvas()).await;
+        mount_wiki(&fixture.wiki, "POST", WIKI_RESTORE, saved()).await;
+        let (status, bytes) = call(fixture.state.clone(), "POST", RESTORE_URL, &[], Some(restore_body())).await;
+        assert_eq!(status, 404);
+        assert_eq!(json_of(&bytes)["error"]["code"], "canvas_not_found");
+        let sent = decision_bodies(&fixture).await;
+        assert_eq!(sent.len(), 1, "the read decision only");
+        assert_eq!(sent[0]["op"], "read");
+        assert!(bodies_of(&fixture.wiki, "POST", WIKI_RESTORE).await.is_empty());
+    }
+
+    /// A Data Plane 409 is relayed with its head, and no answer the gateway gives carries the decision token.
+    #[tokio::test]
+    async fn a_data_plane_409_head_moved_is_relayed_with_its_head_and_no_answer_carries_the_decision_token() {
+        let moved = ResponseTemplate::new(409).set_body_json(json!({"error": {
+            "code": "canvas_head_moved",
+            "message": "The canvas moved.",
+            "details": {"head": {"version_id": "ver-9"}}
+        }}));
+        let conflict = fixture(false, None).await;
+        mount_wiki(&conflict.wiki, "GET", WIKI_HEAD, canvas_head()).await;
+        mount_wiki(&conflict.wiki, "POST", WIKI_VERSIONS, moved).await;
+        let (status, bytes) = call(conflict.state.clone(), "POST", VERSIONS_URL, &[], Some(save_body("text"))).await;
+        let answer = json_of(&bytes);
+        assert_eq!(status, 409);
+        assert_eq!(answer["error"]["code"], "canvas_head_moved");
+        assert_eq!(answer["error"]["details"]["head"]["version_id"], "ver-9");
+        assert!(!String::from_utf8_lossy(&bytes).contains(TOKEN));
+
+        let success = fixture(false, None).await;
+        mount_wiki(&success.wiki, "GET", WIKI_HEAD, canvas_head()).await;
+        mount_wiki(&success.wiki, "POST", WIKI_VERSIONS, saved()).await;
+        let (read_status, read) = call(success.state.clone(), "GET", CANVAS_URL, &[], None).await;
+        let (written_status, written) =
+            call(success.state.clone(), "POST", VERSIONS_URL, &[], Some(save_body("text"))).await;
+        assert_eq!(read_status, 200);
+        assert_eq!(written_status, 200);
+        assert!(!String::from_utf8_lossy(&read).contains(TOKEN));
+        assert!(!String::from_utf8_lossy(&written).contains(TOKEN));
+    }
+
+    // ---- WS19-S6 and W3-DEC-WIKIZDR: the Data Plane's typed refusals are relayed -----------------------------
+
+    #[tokio::test]
+    async fn a_data_plane_403_history_floor_is_relayed_with_its_code_and_not_as_canvas_unavailable() {
+        let fixture = fixture(false, None).await;
+        let floor = ResponseTemplate::new(403).set_body_json(json!({"error": {
+            "code": "space_history_floor_unsupported",
+            "message": "This canvas cannot show its history."
+        }}));
+        mount_wiki(&fixture.wiki, "GET", WIKI_VERSIONS, floor).await;
+        let (status, bytes) = call(fixture.state.clone(), "GET", VERSIONS_URL, &[], None).await;
+        assert_eq!(status, 403);
+        assert_eq!(json_of(&bytes)["error"]["code"], "space_history_floor_unsupported");
+    }
+
+    #[test]
+    fn a_data_plane_412_zdr_refusal_is_relayed_unchanged_and_an_unlisted_refusal_is_canvas_unavailable() {
+        let refusal = json!({"error": {
+            "code": "zdr_durable_mutation_forbidden",
+            "message": "Zero Data Retention credentials cannot create, change, or delete durable state.",
+            "retryable": false,
+            "action": "none",
+            "details": {"surface": "room_canvas"}
+        }});
+        let (status, Json(relayed)) = data_plane_refusal(StatusCode::PRECONDITION_FAILED, refusal.clone());
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(relayed, refusal);
+
+        let (status, Json(answer)) =
+            data_plane_refusal(StatusCode::FORBIDDEN, json!({"error": {"code": "not_a_canvas_code"}}));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(answer["error"]["code"], "canvas_unavailable");
+    }
+
+    // ---- W3-FIX-9: a restore's key names the restore, a save's names the save -------------------------------
+
+    #[tokio::test]
+    async fn a_restore_sends_canvas_restore_as_its_idempotency_key_and_a_save_still_sends_canvas_save() {
+        let fixture = fixture(false, None).await;
+        mount_wiki(&fixture.wiki, "GET", WIKI_HEAD, canvas_head()).await;
+        mount_wiki(&fixture.wiki, "POST", WIKI_RESTORE, saved()).await;
+        mount_wiki(&fixture.wiki, "POST", WIKI_VERSIONS, saved()).await;
+
+        let (status, _) = call(fixture.state.clone(), "POST", RESTORE_URL, &[], Some(restore_body())).await;
+        assert_eq!(status, 200);
+        let restore_key = format!("canvas-restore-{RESTORE_ID}");
+        let writes = write_decisions(&fixture).await;
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0]["op"], "restore");
+        assert_eq!(writes[0]["canvas_id"], CANVAS);
+        assert_eq!(writes[0]["restore_from_version_id"], "ver-1");
+        assert_eq!(writes[0]["idempotency_key"], restore_key);
+        let wire = bodies_of(&fixture.wiki, "POST", WIKI_RESTORE).await;
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0]["idempotency_key"], restore_key);
+
+        let (status, _) = call(fixture.state.clone(), "POST", VERSIONS_URL, &[], Some(save_body("text"))).await;
+        assert_eq!(status, 200);
+        let saves: Vec<Value> = write_decisions(&fixture)
+            .await
+            .into_iter()
+            .filter(|body| body["op"] == "save")
+            .collect();
+        assert_eq!(saves.len(), 1);
+        assert_eq!(saves[0]["idempotency_key"], format!("canvas-save-{SAVE_ID}"));
+        let wire_saves = bodies_of(&fixture.wiki, "POST", WIKI_VERSIONS).await;
+        assert_eq!(wire_saves.len(), 1);
+        assert_eq!(wire_saves[0]["idempotency_key"], format!("canvas-save-{SAVE_ID}"));
+    }
+}

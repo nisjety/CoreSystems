@@ -2443,4 +2443,180 @@ mod tests {
         assert!(hits(&fixture.user_core, "/internal/spaces/").await.is_empty());
         assert!(hits(&fixture.model, "").await.is_empty());
     }
+
+    // ---- W3-DEC-BROWSER: a start that names no thread creates it first, under the send key (D4) --------------------
+
+    const THREAD_DECISION: &str = "/api/v1/internal/spaces/thread-decision";
+    const MODEL_THREADS: &str = "/v1/threads";
+    const NEW_THREAD: &str = "thread-new-1";
+    const SEND_KEY: &str = "space-browser-send-0123456789abcdef";
+
+    /// Control's thread decision for a run that names no thread: the fields the create reads, and the token.
+    fn thread_decided() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"data": {
+            "decision": {
+                "space_ref": SPACE,
+                "decision_ref": "thread-ref-1",
+                "recipient_audience_ref": "audience-1",
+                "recipient_audience_revision": 4,
+                "recipient_audience_hash": "audience-hash-1",
+                "privacy_policy_ref": "policy-1",
+                "authority_revision": 7,
+                "resource_authorization_ref": "resource-1",
+                "action_schema_hash": "schema-1",
+                "payload_digest": "payload-1",
+                "idempotency_key": SEND_KEY
+            },
+            "token": "thread-decision-token"
+        }}))
+    }
+
+    /// model-gateway's answer to the shared-room create: the thread id at the top level.
+    fn thread_created(thread: &str) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"thread_id": thread}))
+    }
+
+    /// model-gateway's 202 for a start on `thread`.
+    fn started_in(thread: &str) -> ResponseTemplate {
+        ResponseTemplate::new(202)
+            .set_body_json(json!({"run_id": RUN, "thread_id": thread, "plan_id": "plan-1"}))
+    }
+
+    /// A start that names no thread: the goal with surrounding space, one host, and the client send id.
+    fn new_thread_start() -> Value {
+        json!({
+            "goal": format!("  {GOAL} \n"),
+            "allowed_domains": ["example.com"],
+            "client_send_id": SEND,
+        })
+    }
+
+    /// Mounts Control's thread decision and model-gateway's create on a fixture. `threads` is the create's answer.
+    async fn mount_create(fixture: &Fixture, threads: ResponseTemplate) {
+        Mock::given(wm_method("POST"))
+            .and(wm_path(THREAD_DECISION))
+            .respond_with(thread_decided())
+            .mount(&fixture.user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path(MODEL_THREADS))
+            .respond_with(threads)
+            .mount(&fixture.model)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_start_that_names_no_thread_creates_it_under_the_send_key_and_starts_the_run_on_it() {
+        let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        fixture.state.space_features.browser_run = true;
+        mount_create(&fixture, thread_created(NEW_THREAD)).await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path(MODEL_START))
+            .respond_with(started_in(NEW_THREAD))
+            .mount(&fixture.model)
+            .await;
+        let (status, _, bytes) = send(fixture.state.clone(), "POST", ROOM_RUNS, Some(new_thread_start())).await;
+        assert_eq!(status, 202, "{}", json_of(&bytes));
+        assert_eq!(json_of(&bytes)["data"]["thread_id"], NEW_THREAD);
+
+        // The thread: Control's decision under the send key, then the create with the trimmed goal as its first post.
+        let thread_decisions = bodies(&fixture.user_core, "POST", THREAD_DECISION).await;
+        assert_eq!(thread_decisions.len(), 1);
+        assert_eq!(thread_decisions[0]["space_ref"], SPACE);
+        assert_eq!(thread_decisions[0]["session_key"], SEND_KEY);
+        assert_eq!(thread_decisions[0]["idempotency_key"], SEND_KEY);
+        let threads = bodies(&fixture.model, "POST", MODEL_THREADS).await;
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0]["space_context"]["space_id"], SPACE);
+        assert_eq!(threads[0]["session_key"], SEND_KEY);
+        assert_eq!(threads[0]["first_message"]["content"], GOAL);
+        assert_eq!(threads[0]["first_message"]["post_kind"], "post");
+        assert_eq!(threads[0]["first_message"]["client_message_id"], SEND_KEY);
+
+        // The run: the browser decision binds no thread, and the goal's append is minted for the created thread.
+        let browser = bodies(&fixture.user_core, "POST", "/api/v1/internal/spaces/browser-run-decision").await;
+        assert_eq!(browser.len(), 1);
+        assert_eq!(browser[0]["thread_id"], "");
+        assert_eq!(browser[0]["goal_digest"], GOAL_DIGEST);
+        assert_eq!(browser[0]["idempotency_key"], SEND_KEY);
+        let appends = bodies(&fixture.user_core, "POST", "/api/v1/internal/spaces/thread-append-decision").await;
+        assert_eq!(appends.len(), 1);
+        assert_eq!(appends[0]["thread_id"], NEW_THREAD);
+        assert_eq!(appends[0]["content_digest"], GOAL_DIGEST);
+        let starts = bodies(&fixture.model, "POST", MODEL_START).await;
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0]["thread_id"], NEW_THREAD);
+        assert_eq!(starts[0]["goal"], GOAL);
+        assert!(starts[0].get("space_context").is_none(), "the start carries decided authority, not a space context");
+    }
+
+    #[tokio::test]
+    async fn a_threads_412_is_the_zdr_refusal_and_no_decision_or_start_follows_it() {
+        let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        fixture.state.space_features.browser_run = true;
+        mount_create(
+            &fixture,
+            ResponseTemplate::new(412).set_body_json(json!({"error": {"code": "zdr_durable_mutation_forbidden"}})),
+        )
+        .await;
+        let (status, _, bytes) = send(fixture.state.clone(), "POST", ROOM_RUNS, Some(new_thread_start())).await;
+        assert_eq!(status, 412);
+        assert_eq!(json_of(&bytes)["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(hits(&fixture.user_core, "thread-decision").await.len(), 1);
+        assert!(hits(&fixture.user_core, "browser-run-decision").await.is_empty());
+        assert!(hits(&fixture.user_core, "thread-append-decision").await.is_empty());
+        assert!(hits(&fixture.model, "/v1/browser/grants").await.is_empty());
+        assert!(hits(&fixture.model, MODEL_START).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_threads_answer_without_a_valid_thread_id_is_502_and_no_decision_or_start_follows_it() {
+        for answer in [json!({"ok": true}), json!({"thread_id": "not a valid id"})] {
+            let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+            fixture.state.space_features.browser_run = true;
+            mount_create(&fixture, ResponseTemplate::new(200).set_body_json(answer.clone())).await;
+            let (status, _, bytes) = send(fixture.state.clone(), "POST", ROOM_RUNS, Some(new_thread_start())).await;
+            assert_eq!(status, 502, "{answer}");
+            assert_eq!(json_of(&bytes)["error"]["code"], "invalid_model_gateway_response", "{answer}");
+            assert!(hits(&fixture.user_core, "browser-run-decision").await.is_empty(), "{answer}");
+            assert!(hits(&fixture.model, MODEL_START).await.is_empty(), "{answer}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_retry_with_the_same_client_send_id_sends_the_same_keys_to_control_and_to_model_gateway() {
+        let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        fixture.state.space_features.browser_run = true;
+        mount_create(&fixture, thread_created(NEW_THREAD)).await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path(MODEL_START))
+            .respond_with(started_in(NEW_THREAD))
+            .mount(&fixture.model)
+            .await;
+        for _ in 0..2 {
+            let (status, _, _) = send(fixture.state.clone(), "POST", ROOM_RUNS, Some(new_thread_start())).await;
+            assert_eq!(status, 202);
+        }
+        let creates = bodies(&fixture.user_core, "POST", THREAD_DECISION).await;
+        let threads = bodies(&fixture.model, "POST", MODEL_THREADS).await;
+        let browser = bodies(&fixture.user_core, "POST", "/api/v1/internal/spaces/browser-run-decision").await;
+        let appends = bodies(&fixture.user_core, "POST", "/api/v1/internal/spaces/thread-append-decision").await;
+        let starts = bodies(&fixture.model, "POST", MODEL_START).await;
+        assert_eq!(creates.len(), 2);
+        assert_eq!(threads.len(), 2);
+        assert_eq!(browser.len(), 2);
+        assert_eq!(appends.len(), 2);
+        assert_eq!(starts.len(), 2);
+        assert!(creates.iter().all(|body| body["session_key"] == SEND_KEY && body["idempotency_key"] == SEND_KEY));
+        assert!(threads
+            .iter()
+            .all(|body| body["session_key"] == SEND_KEY && body["first_message"]["client_message_id"] == SEND_KEY));
+        assert!(browser.iter().all(|body| body["idempotency_key"] == SEND_KEY && body["thread_id"] == ""));
+        assert!(appends.iter().all(|body| {
+            body["idempotency_key"] == "space-browser-append-send-0123456789abcdef" && body["thread_id"] == NEW_THREAD
+        }));
+        assert!(starts.iter().all(|body| {
+            body["space_browser_authority"]["idempotency_key"] == SEND_KEY && body["thread_id"] == NEW_THREAD
+        }));
+    }
 }

@@ -913,4 +913,228 @@ mod tests {
             vec![json!({ "force": false })]
         );
     }
+
+    // ---- W3-DEC-KIND and W3-DEC-NOTES: a restore that names a Space, and the route's hop -----------------------
+
+    use serde_json::Value;
+
+    /// The doubles a restore reaches: the session and the two model tokens, model-gateway's restore hop, Control's
+    /// session context and claim route, and org-core's posture read.
+    struct RestoreStack {
+        model_gateway: MockServer,
+        user_core: MockServer,
+        org_core: MockServer,
+        state: crate::config::AppState,
+        _auth_core: MockServer,
+    }
+
+    fn org_record(zdr: bool) -> ResponseTemplate {
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}}))
+    }
+
+    fn claim_token(token: &str) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"data": {"token": token}}))
+    }
+
+    /// `claim` is Control's answer to `space-kind-evidence`; `org_zdr` is org-core's posture for the caller's org.
+    async fn restore_stack(claim: ResponseTemplate, org_zdr: bool) -> RestoreStack {
+        let auth_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.test", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth_core)
+            .await;
+        for audience in ["model-plane", "session-core"] {
+            Mock::given(method("GET"))
+                .and(path(format!("/api/{audience}/token")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "token": format!("{audience}-test-token"),
+                    "expiresInSeconds": 300,
+                })))
+                .mount(&auth_core)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": "member", "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/internal/spaces/space-kind-evidence"))
+            .respond_with(claim)
+            .mount(&user_core)
+            .await;
+        let org_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/organizations/org-1"))
+            .respond_with(org_record(org_zdr))
+            .mount(&org_core)
+            .await;
+        let model_gateway = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex(r"^/v1/memories/.+/restore$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"restored": true})))
+            .mount(&model_gateway)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth_core.uri();
+        state.user_core_url = user_core.uri();
+        state.org_core_url = org_core.uri();
+        state.model_gateway_url = model_gateway.uri();
+        RestoreStack {
+            model_gateway,
+            user_core,
+            org_core,
+            state,
+            _auth_core: auth_core,
+        }
+    }
+
+    /// The claim requests Control received for a restore.
+    async fn claim_requests(stack: &RestoreStack) -> Vec<Value> {
+        stack
+            .user_core
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|request| request.url.path() == "/api/v1/internal/spaces/space-kind-evidence")
+            .map(|request| request.body_json::<Value>().unwrap_or(Value::Null))
+            .collect()
+    }
+
+    async fn read_response(response: axum::response::Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("a body");
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    /// A POST through the real router with the session cookie and no body: the status only.
+    async fn post_through_router(state: crate::config::AppState, uri: &str) -> u16 {
+        use tower::ServiceExt;
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("cookie", "better-auth.session_token=session-1")
+            .body(axum::body::Body::empty())
+            .expect("a request");
+        let response = crate::build_router(state)
+            .oneshot(request)
+            .await
+            .expect("the router answers");
+        response.status().as_u16()
+    }
+
+    #[tokio::test]
+    async fn a_restore_that_names_no_space_forwards_no_claim_and_makes_no_control_call() {
+        let stack = restore_stack(claim_token("unused-claim"), false).await;
+        for hint in [None, Some("   ")] {
+            let response = super::restore_memory_core(
+                &stack.state,
+                &member(),
+                &axum::http::HeaderMap::new(),
+                "mem-1",
+                hint,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{hint:?}");
+        }
+        assert!(claim_requests(&stack).await.is_empty());
+        assert!(stack.org_core.received_requests().await.unwrap_or_default().is_empty());
+        let sent = forwarded(&stack.model_gateway, "/v1/memories/mem-1/restore").await;
+        assert_eq!(sent.len(), 2);
+        assert!(sent.iter().all(|body| body.get("space_kind_evidence").is_none()));
+    }
+
+    #[tokio::test]
+    async fn a_zdr_caller_who_names_a_space_is_refused_before_any_control_call() {
+        // The request's own ZDR flag refuses first.
+        let stack = restore_stack(claim_token("claim-token"), false).await;
+        let mut zdr_header = axum::http::HeaderMap::new();
+        zdr_header.insert("x-zdr", "true".parse().unwrap());
+        let (status, body) = read_response(
+            super::restore_memory_core(&stack.state, &member(), &zdr_header, "mem-1", Some("space-personal"))
+                .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert!(claim_requests(&stack).await.is_empty());
+        assert!(forwarded(&stack.model_gateway, "/v1/memories/mem-1/restore").await.is_empty());
+
+        // The organization's posture refuses the same way.
+        let stack = restore_stack(claim_token("claim-token"), true).await;
+        let (status, body) = read_response(
+            super::restore_memory_core(
+                &stack.state,
+                &member(),
+                &axum::http::HeaderMap::new(),
+                "mem-1",
+                Some("space-personal"),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert!(claim_requests(&stack).await.is_empty());
+        assert!(forwarded(&stack.model_gateway, "/v1/memories/mem-1/restore").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_control_refusal_forwards_the_restore_with_no_claim() {
+        let refused = ResponseTemplate::new(403).set_body_json(json!({"code": "space_membership_required"}));
+        let stack = restore_stack(refused, false).await;
+        let response = super::restore_memory_core(
+            &stack.state,
+            &member(),
+            &axum::http::HeaderMap::new(),
+            "mem-1",
+            Some("space-personal"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(claim_requests(&stack).await.len(), 1, "Control was asked once");
+        let sent = forwarded(&stack.model_gateway, "/v1/memories/mem-1/restore").await;
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].get("space_kind_evidence").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_control_token_is_forwarded_as_space_kind_evidence() {
+        let stack = restore_stack(claim_token("kind-claim-token"), false).await;
+        let response = super::restore_memory_core(
+            &stack.state,
+            &member(),
+            &axum::http::HeaderMap::new(),
+            "mem-1",
+            Some("space-personal"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(claim_requests(&stack).await, vec![json!({"space_ref": "space-personal"})]);
+        assert_eq!(
+            forwarded(&stack.model_gateway, "/v1/memories/mem-1/restore").await,
+            vec![json!({"space_kind_evidence": "kind-claim-token"})]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_restore_route_forwards_to_the_model_hop_with_the_memory_id_encoded() {
+        let stack = restore_stack(claim_token("unused-claim"), false).await;
+        // `row%201` is the id `row 1`: the route decodes it, and the hop encodes it again.
+        let status = post_through_router(stack.state.clone(), "/api/v1/memory/row%201/restore").await;
+        assert_eq!(status, 200);
+        assert_eq!(forwarded(&stack.model_gateway, "/v1/memories/row%201/restore").await.len(), 1);
+        assert!(claim_requests(&stack).await.is_empty(), "no Space is named, so Control is not asked");
+    }
 }

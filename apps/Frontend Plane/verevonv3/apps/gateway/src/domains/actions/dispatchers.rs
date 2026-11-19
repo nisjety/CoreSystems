@@ -9110,3 +9110,143 @@ mod ownership_share_tests {
         assert!(body.get("data").is_none());
     }
 }
+
+#[cfg(test)]
+mod memory_restore_action_tests {
+    //! W3-DEC-NOTES and W3-DEC-KIND through the `memory.restore` dispatcher: an empty `memoryId` is refused before any hop,
+    //! and the input's `spaceRef` is the Space the restore asks Control about. The session tokens, model-gateway, Control
+    //! and org-core are doubles.
+    use axum::http::StatusCode;
+    use http_body_util::BodyExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "User One".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    async fn read(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    /// The state and the doubles it points at. The auth-core server is returned too, so it lives as long as the state.
+    struct Stack {
+        model: MockServer,
+        user_core: MockServer,
+        state: AppState,
+        _auth_core: MockServer,
+        _org_core: MockServer,
+    }
+
+    /// The doubles a memory restore reaches: the two model tokens, model-gateway's restore hop, Control's claim route and
+    /// org-core's posture read (not zero retention).
+    async fn stack(claim: ResponseTemplate) -> Stack {
+        let auth_core = MockServer::start().await;
+        for audience in ["model-plane", "session-core"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{audience}/token")))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"token": format!("{audience}-test-token")})),
+                )
+                .mount(&auth_core)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/space-kind-evidence"))
+            .respond_with(claim)
+            .mount(&user_core)
+            .await;
+        let org_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"data": {"metadata": {"interactiveRetention": {"zdr": false}}}}),
+            ))
+            .mount(&org_core)
+            .await;
+        let model = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(path_regex(r"^/v1/memories/.+/restore$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"restored": true})))
+            .mount(&model)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth_core.uri();
+        state.user_core_url = user_core.uri();
+        state.org_core_url = org_core.uri();
+        state.model_gateway_url = model.uri();
+        Stack {
+            model,
+            user_core,
+            state,
+            _auth_core: auth_core,
+            _org_core: org_core,
+        }
+    }
+
+    /// The JSON bodies a server recorded for one exact path.
+    async fn bodies_at(server: &MockServer, path: &str) -> Vec<Value> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|request| request.url.path() == path)
+            .map(|request| request.body_json::<Value>().unwrap_or(Value::Null))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn memory_restore_refuses_an_empty_memory_id_before_any_hop() {
+        let stack = stack(ResponseTemplate::new(200).set_body_json(json!({"data": {"token": "unused"}}))).await;
+        for input in [json!({"memoryId": "   "}), json!({})] {
+            let (status, body) =
+                read(dispatch_memory_restore(&stack.state, &user(), &HeaderMap::new(), &input).await).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{input}");
+            assert_eq!(body["error"]["code"], "invalid_input", "{input}");
+            assert_eq!(
+                body["error"]["message"],
+                "memory.restore requires a non-empty 'memoryId'",
+                "{input}"
+            );
+        }
+        assert!(stack.model.received_requests().await.unwrap_or_default().is_empty());
+        assert!(stack.user_core.received_requests().await.unwrap_or_default().is_empty());
+    }
+
+    #[tokio::test]
+    async fn memory_restore_reads_the_space_ref_from_its_input_and_asks_control_for_the_claim() {
+        let stack = stack(ResponseTemplate::new(200).set_body_json(json!({"data": {"token": "kind-claim-token"}}))).await;
+        let input = json!({"memoryId": "mem-1", "spaceRef": " space-personal "});
+        let (status, body) =
+            read(dispatch_memory_restore(&stack.state, &user(), &HeaderMap::new(), &input).await).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["actionId"], "memory.restore");
+        assert_eq!(
+            bodies_at(&stack.user_core, "/api/v1/internal/spaces/space-kind-evidence").await,
+            vec![json!({"space_ref": "space-personal"})]
+        );
+        assert_eq!(
+            bodies_at(&stack.model, "/v1/memories/mem-1/restore").await,
+            vec![json!({"space_kind_evidence": "kind-claim-token"})]
+        );
+    }
+}
