@@ -1833,6 +1833,9 @@ mod tests").next().unwrap_or(&config);
         assert!(!flags.room_artifacts);
         assert!(!flags.send_idempotency_api);
         assert!(!flags.thread_pane_ui);
+        assert!(!flags.personal_agents_api);
+        assert!(!flags.personal_agents_ui);
+        assert!(!flags.private_panel_ui);
     }
 
     /// W3-DEC-CANVAS: `SPACE_AGENT_CANVAS_TOOLS_API` is off by default and in production when unset, honours an explicit
@@ -2185,6 +2188,46 @@ mod tests").next().unwrap_or(&config);
             assert!(!flags.people_search_api);
             assert!(!flags.membership_writer_api);
             assert!(!flags.room_archive_api);
+        });
+    }
+
+    /// WS17-S5 and WS17-S6b: the personal-agent API and UI switches and the private-panel switch are off in production
+    /// when unset, on in development, and honour an explicit value in both.
+    #[test]
+    fn ws17_s5_and_s6b_flags_follow_the_space_flag_rule() {
+        let keys = [
+            "SPACE_PERSONAL_AGENTS_API",
+            "SPACE_PERSONAL_AGENTS_UI",
+            "SPACE_PRIVATE_PANEL_UI",
+        ];
+        let vars = |app_env: &'static str, value: Option<&'static str>| {
+            let mut vars = vec![("APP_ENV", Some(app_env))];
+            vars.extend(keys.iter().map(|key| (*key, value)));
+            vars
+        };
+        with_env(&vars("production", None), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(!flags.personal_agents_api);
+            assert!(!flags.personal_agents_ui);
+            assert!(!flags.private_panel_ui);
+        });
+        with_env(&vars("development", None), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(flags.personal_agents_api);
+            assert!(flags.personal_agents_ui);
+            assert!(flags.private_panel_ui);
+        });
+        with_env(&vars("production", Some("true")), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(flags.personal_agents_api);
+            assert!(flags.personal_agents_ui);
+            assert!(flags.private_panel_ui);
+        });
+        with_env(&vars("development", Some("false")), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(!flags.personal_agents_api);
+            assert!(!flags.personal_agents_ui);
+            assert!(!flags.private_panel_ui);
         });
     }
 

@@ -355,3 +355,442 @@ fn unavailable() -> Reply {
         )),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    //! WS17-S6b (the refusal order, the read and the open answers) and W3-FIX-9 (creation through model-gateway,
+    //! then the pointer record), through the real router. The session, Control, org-core, Convex and model-gateway
+    //! are doubles, and every "no call" is checked by path or by the Convex operation named in the request body.
+    //!
+    //! The brief's WS17-S6b case "POST with no pointer gives 501 private_panel_creation_unavailable" is not written:
+    //! the handler no longer has that answer. W3-FIX-9 made the create real, so the code answers 200 (see the
+    //! `post_with_no_pointer_...` test below).
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+    use wiremock::matchers::{body_partial_json, method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    const ROUTE: &str = "/api/v1/spaces/space-room/private-panel";
+    const MEMBERSHIP: &str = "/api/v1/internal/spaces/space-room/membership";
+    const ORG_PATH: &str = "/api/v1/organizations/org-1";
+    const SPACE: &str = "space-room";
+
+    struct Fixture {
+        state: AppState,
+        auth: MockServer,
+        user_core: MockServer,
+        org_core: MockServer,
+        convex: MockServer,
+        model: MockServer,
+    }
+
+    async fn fixture() -> Fixture {
+        let auth = MockServer::start().await;
+        let user_core = MockServer::start().await;
+        let org_core = MockServer::start().await;
+        let convex = MockServer::start().await;
+        let model = MockServer::start().await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.org_core_url = org_core.uri();
+        state.application_convex_url = convex.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.model_gateway_url = model.uri();
+        state.space_features.private_panel_ui = true;
+        Fixture {
+            state,
+            auth,
+            user_core,
+            org_core,
+            convex,
+            model,
+        }
+    }
+
+    async fn answer(server: &MockServer, verb: &str, route: &str, response: ResponseTemplate) {
+        Mock::given(wm_method(verb))
+            .and(wm_path(route))
+            .respond_with(response)
+            .mount(server)
+            .await;
+    }
+
+    /// A Convex answer for one named operation, whichever endpoint (`query` or `mutation`) carries it.
+    async fn convex(f: &Fixture, operation: &str, response: ResponseTemplate) {
+        Mock::given(wm_method("POST"))
+            .and(body_partial_json(json!({ "path": operation })))
+            .respond_with(response)
+            .mount(&f.convex)
+            .await;
+    }
+
+    fn convex_value(value: Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({ "value": value }))
+    }
+
+    fn org_record(zdr: bool) -> ResponseTemplate {
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}}))
+    }
+
+    fn membership_ok() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"data": {"membership": "active"}}))
+    }
+
+    /// The session the router resolves for the caller: org-1, role member, and the session-core token the
+    /// create path mints.
+    async fn session(f: &Fixture) {
+        answer(
+            &f.auth,
+            "GET",
+            "/api/auth/get-session",
+            ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })),
+        )
+        .await;
+        for slug in ["session-core", "capability-core"] {
+            answer(
+                &f.auth,
+                "GET",
+                &format!("/api/{slug}/token"),
+                ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})),
+            )
+            .await;
+        }
+        answer(
+            &f.user_core,
+            "GET",
+            "/api/v1/me/session-context",
+            ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": "member", "onboardingStatus": "COMPLETED"
+            })),
+        )
+        .await;
+    }
+
+    /// The session, the organisation posture and Control's membership answer for org-1 and space-room.
+    async fn base(f: &Fixture, zdr: bool, membership: ResponseTemplate) {
+        session(f).await;
+        answer(&f.org_core, "GET", ORG_PATH, org_record(zdr)).await;
+        answer(&f.user_core, "GET", MEMBERSHIP, membership).await;
+    }
+
+    /// One request through the real router with the session cookie: the status and the JSON body.
+    async fn call(state: AppState, method: &str, uri: &str, body: Option<Value>) -> (u16, Value) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", "better-auth.session_token=session-1");
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let request = builder
+            .body(Body::from(body.map(|value| value.to_string()).unwrap_or_default()))
+            .expect("a request");
+        let response = crate::build_router(state)
+            .oneshot(request)
+            .await
+            .expect("the router answers");
+        let status = response.status().as_u16();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("a body")
+            .to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    async fn calls_to(server: &MockServer, part: &str) -> Vec<wiremock::Request> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|request| request.url.path().contains(part))
+            .collect()
+    }
+
+    /// Every Convex operation a server received, in arrival order, by the `path` in each body.
+    async fn convex_ops(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|request| serde_json::from_slice::<Value>(&request.body).ok())
+            .filter_map(|body| body.get("path").and_then(Value::as_str).map(str::to_owned))
+            .collect()
+    }
+
+    /// The `args` of every call to one Convex operation.
+    async fn convex_args(server: &MockServer, operation: &str) -> Vec<Value> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|request| serde_json::from_slice::<Value>(&request.body).ok())
+            .filter(|body| body.get("path").and_then(Value::as_str) == Some(operation))
+            .map(|body| body.get("args").cloned().unwrap_or(Value::Null))
+            .collect()
+    }
+
+    // ---- WS17-S6b: the refusal order on both routes ----------------------------------------------
+
+    /// The flag is the first refusal: 404 `feature_disabled` on both routes, and nothing upstream is called.
+    #[tokio::test]
+    async fn flag_off_is_404_feature_disabled_for_get_and_post_with_no_upstream_call() {
+        let mut f = fixture().await;
+        f.state.space_features.private_panel_ui = false;
+        base(&f, false, membership_ok()).await;
+        convex(&f, "spacePrivatePanels:getSpacePrivatePanelForGateway", convex_value(Value::Null)).await;
+        for method in ["GET", "POST"] {
+            let (status, body) = call(f.state.clone(), method, ROUTE, None).await;
+            assert_eq!(status, 404, "{method}");
+            assert_eq!(body["error"]["code"], "feature_disabled", "{method}");
+        }
+        assert!(calls_to(&f.user_core, "/membership").await.is_empty(), "no Control call");
+        assert!(calls_to(&f.org_core, ORG_PATH).await.is_empty(), "no org-core call");
+        assert!(convex_ops(&f.convex).await.is_empty(), "no Convex call");
+        assert!(calls_to(&f.model, "/v1/chat/conversation-threads").await.is_empty(), "no model call");
+    }
+
+    /// A ZDR org is refused on both routes with the typed 412 labelled `private_panel`, before any Control or Convex
+    /// call. The model is not reached either.
+    #[tokio::test]
+    async fn a_zdr_org_is_412_on_read_and_open_before_any_control_or_convex_call() {
+        let f = fixture().await;
+        base(&f, true, membership_ok()).await;
+        for method in ["GET", "POST"] {
+            let (status, body) = call(f.state.clone(), method, ROUTE, None).await;
+            assert_eq!(status, 412, "{method} {body}");
+            assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden", "{method}");
+            assert_eq!(body["error"]["details"]["surface"], "private_panel", "{method}");
+        }
+        assert!(calls_to(&f.user_core, "/membership").await.is_empty(), "no Control call");
+        assert!(convex_ops(&f.convex).await.is_empty(), "no Convex call");
+        assert!(calls_to(&f.model, "/v1/chat/conversation-threads").await.is_empty(), "no model call");
+    }
+
+    /// Control's 403 is the caller's lack of room membership: 403 `active_membership_required`, and no Convex read.
+    #[tokio::test]
+    async fn a_control_refusal_is_403_active_membership_required_with_no_convex_call() {
+        let f = fixture().await;
+        base(
+            &f,
+            false,
+            ResponseTemplate::new(403).set_body_json(json!({"error": {"code": "forbidden"}})),
+        )
+        .await;
+        for method in ["GET", "POST"] {
+            let (status, body) = call(f.state.clone(), method, ROUTE, None).await;
+            assert_eq!(status, 403, "{method}");
+            assert_eq!(body["error"]["code"], "active_membership_required", "{method}");
+        }
+        assert!(convex_ops(&f.convex).await.is_empty(), "no Convex call");
+        assert!(calls_to(&f.model, "/v1/chat/conversation-threads").await.is_empty(), "no model call");
+    }
+
+    /// A Control outage (500 or 503) is 503 `space_decision_unavailable`, and no Convex read is made.
+    #[tokio::test]
+    async fn a_control_outage_is_503_space_decision_unavailable_with_no_convex_call() {
+        for outage in [500_u16, 503] {
+            let f = fixture().await;
+            base(
+                &f,
+                false,
+                ResponseTemplate::new(outage).set_body_json(json!({"error": {"code": "unavailable"}})),
+            )
+            .await;
+            for method in ["GET", "POST"] {
+                let (status, body) = call(f.state.clone(), method, ROUTE, None).await;
+                assert_eq!(status, 503, "control {outage} {method}");
+                assert_eq!(body["error"]["code"], "space_decision_unavailable", "control {outage} {method}");
+            }
+            assert!(convex_ops(&f.convex).await.is_empty(), "control {outage}: no Convex call");
+        }
+    }
+
+    /// A blank, a tab-only or a control-character Space reference is 400 `invalid_space` on both routes, before any
+    /// Control, Convex or model call.
+    #[tokio::test]
+    async fn a_blank_or_control_character_space_ref_is_400_invalid_space_before_any_upstream() {
+        let f = fixture().await;
+        base(&f, false, membership_ok()).await;
+        for segment in ["%20", "%09", "%01room"] {
+            let uri = format!("/api/v1/spaces/{segment}/private-panel");
+            for method in ["GET", "POST"] {
+                let (status, body) = call(f.state.clone(), method, &uri, None).await;
+                assert_eq!(status, 400, "{method} {uri}");
+                assert_eq!(body["error"]["code"], "invalid_space", "{method} {uri}");
+            }
+        }
+        assert!(calls_to(&f.user_core, "/membership").await.is_empty(), "no Control call");
+        assert!(convex_ops(&f.convex).await.is_empty(), "no Convex call");
+        assert!(calls_to(&f.model, "/v1/chat/conversation-threads").await.is_empty(), "no model call");
+    }
+
+    // ---- WS17-S6b and W3-FIX-9: the read and the open answers ------------------------------------
+
+    /// GET with no pointer answers `thread_id: null` and never creates a thread or a pointer.
+    #[tokio::test]
+    async fn get_with_no_pointer_answers_thread_id_null() {
+        let f = fixture().await;
+        base(&f, false, membership_ok()).await;
+        convex(&f, "spacePrivatePanels:getSpacePrivatePanelForGateway", convex_value(Value::Null)).await;
+        let (status, body) = call(f.state.clone(), "GET", ROUTE, None).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body["data"],
+            json!({"space_ref": SPACE, "thread_id": null, "agent_subject_id": null})
+        );
+        assert!(calls_to(&f.model, "/v1/chat/conversation-threads").await.is_empty(), "a read never creates");
+        assert!(convex_args(&f.convex, "spacePrivatePanels:recordSpacePrivatePanelForGateway").await.is_empty());
+    }
+
+    /// POST with an existing pointer answers it and never creates: no model call and no pointer write.
+    #[tokio::test]
+    async fn post_with_an_existing_pointer_answers_it_and_never_creates() {
+        let f = fixture().await;
+        base(&f, false, membership_ok()).await;
+        convex(
+            &f,
+            "spacePrivatePanels:getSpacePrivatePanelForGateway",
+            convex_value(json!({"threadId": "thread-7", "agentSubjectId": "agent-9"})),
+        )
+        .await;
+        let (status, body) = call(f.state.clone(), "POST", ROUTE, None).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body["data"],
+            json!({"space_ref": SPACE, "thread_id": "thread-7", "agent_subject_id": "agent-9"})
+        );
+        assert!(calls_to(&f.model, "/v1/chat/conversation-threads").await.is_empty(), "no model call");
+        assert!(convex_args(&f.convex, "spacePrivatePanels:recordSpacePrivatePanelForGateway").await.is_empty());
+    }
+
+    /// W3-FIX-9: POST with no pointer creates the owner's thread through model-gateway under a `private-panel-` key
+    /// (a digest of the room reference), records the returned id, and answers 200 with it. This is the code as it
+    /// stands; it replaces the WS17-S6b 501 case.
+    #[tokio::test]
+    async fn post_with_no_pointer_creates_the_thread_through_the_model_and_records_it() {
+        let f = fixture().await;
+        base(&f, false, membership_ok()).await;
+        convex(&f, "spacePrivatePanels:getSpacePrivatePanelForGateway", convex_value(Value::Null)).await;
+        answer(
+            &f.model,
+            "POST",
+            "/v1/chat/conversation-threads",
+            ResponseTemplate::new(200).set_body_json(json!({"thread_id": "thread-new"})),
+        )
+        .await;
+        convex(
+            &f,
+            "spacePrivatePanels:recordSpacePrivatePanelForGateway",
+            convex_value(json!({"threadId": "thread-new", "agentSubjectId": null})),
+        )
+        .await;
+        let (status, body) = call(f.state.clone(), "POST", ROUTE, None).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"]["thread_id"], "thread-new");
+
+        let sent = calls_to(&f.model, "/v1/chat/conversation-threads").await;
+        assert_eq!(sent.len(), 1, "one model create");
+        let sent_body: Value = serde_json::from_slice(&sent[0].body).expect("a JSON body");
+        let digest = hex::encode(Sha256::digest(SPACE.as_bytes()));
+        assert_eq!(sent_body["session_key"], format!("{PRIVATE_SESSION_PREFIX}{digest}"));
+
+        let recorded = convex_args(&f.convex, "spacePrivatePanels:recordSpacePrivatePanelForGateway").await;
+        assert_eq!(recorded.len(), 1, "one pointer write");
+        assert_eq!(recorded[0]["threadId"], "thread-new", "the recorded id is the one the model returned");
+        assert_eq!(recorded[0]["spaceRef"], SPACE);
+        assert_eq!(recorded[0]["externalOrgId"], "org-1");
+    }
+
+    /// A model 412 keeps its catalogue code and is labelled `private_panel`; no pointer is written.
+    #[tokio::test]
+    async fn a_model_412_keeps_its_code_and_is_labelled_private_panel() {
+        let f = fixture().await;
+        base(&f, false, membership_ok()).await;
+        convex(&f, "spacePrivatePanels:getSpacePrivatePanelForGateway", convex_value(Value::Null)).await;
+        answer(
+            &f.model,
+            "POST",
+            "/v1/chat/conversation-threads",
+            ResponseTemplate::new(412).set_body_json(json!({"error": {
+                "code": "zdr_durable_mutation_forbidden",
+                "message": "Zero Data Retention credentials cannot create, change, or delete durable state.",
+                "retryable": false,
+                "action": "none"
+            }})),
+        )
+        .await;
+        let (status, body) = call(f.state.clone(), "POST", ROUTE, None).await;
+        assert_eq!(status, 412, "{body}");
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert_eq!(body["error"]["details"]["surface"], "private_panel");
+        assert!(convex_args(&f.convex, "spacePrivatePanels:recordSpacePrivatePanelForGateway").await.is_empty());
+    }
+
+    /// A model outage, or a reply with no usable thread id (missing, or blank), is 503 `private_panel_unavailable`,
+    /// and no pointer is recorded.
+    #[tokio::test]
+    async fn a_model_outage_or_a_reply_without_a_thread_id_is_503_and_records_nothing() {
+        let replies = [
+            ResponseTemplate::new(500).set_body_json(json!({"error": {"code": "internal", "message": "secret"}})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+            ResponseTemplate::new(200).set_body_json(json!({"thread_id": "   "})),
+        ];
+        for reply in replies {
+            let f = fixture().await;
+            base(&f, false, membership_ok()).await;
+            convex(&f, "spacePrivatePanels:getSpacePrivatePanelForGateway", convex_value(Value::Null)).await;
+            answer(&f.model, "POST", "/v1/chat/conversation-threads", reply).await;
+            let (status, body) = call(f.state.clone(), "POST", ROUTE, None).await;
+            assert_eq!(status, 503, "{body}");
+            assert_eq!(body["error"]["code"], "private_panel_unavailable");
+            assert!(!body.to_string().contains("secret"), "upstream text never crosses: {body}");
+            assert!(convex_args(&f.convex, "spacePrivatePanels:recordSpacePrivatePanelForGateway").await.is_empty());
+        }
+    }
+
+    /// A failed pointer record is 503 `private_panel_unavailable`: one attempt, no retry, and the answer carries no
+    /// pointer. The thread the model made is not handed to the browser as a pointer.
+    #[tokio::test]
+    async fn a_failed_record_is_503_and_the_answer_carries_no_pointer() {
+        let f = fixture().await;
+        base(&f, false, membership_ok()).await;
+        convex(&f, "spacePrivatePanels:getSpacePrivatePanelForGateway", convex_value(Value::Null)).await;
+        answer(
+            &f.model,
+            "POST",
+            "/v1/chat/conversation-threads",
+            ResponseTemplate::new(200).set_body_json(json!({"thread_id": "thread-new"})),
+        )
+        .await;
+        convex(
+            &f,
+            "spacePrivatePanels:recordSpacePrivatePanelForGateway",
+            ResponseTemplate::new(500).set_body_json(json!({"error": {"code": "internal"}})),
+        )
+        .await;
+        let (status, body) = call(f.state.clone(), "POST", ROUTE, None).await;
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(body["error"]["code"], "private_panel_unavailable");
+        assert!(body["data"].is_null(), "no pointer in the answer: {body}");
+        assert!(!body.to_string().contains("thread-new"), "{body}");
+        assert_eq!(
+            convex_args(&f.convex, "spacePrivatePanels:recordSpacePrivatePanelForGateway").await.len(),
+            1,
+            "one record attempt"
+        );
+    }
+}

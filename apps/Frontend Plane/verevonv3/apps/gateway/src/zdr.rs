@@ -414,8 +414,13 @@ pub(crate) async fn durable_write_refusal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::ResultCache;
     use axum::http::{HeaderMap, HeaderValue};
     use serde_json::json;
+    use wiremock::{
+        matchers::{method as wm_method, path as wm_path},
+        Mock, MockServer, ResponseTemplate,
+    };
 
     fn headers_with(zdr: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -536,6 +541,99 @@ mod tests {
             zdr_refusal_body("something_else")["error"]["code"],
             "zdr_durable_mutation_forbidden"
         );
+    }
+
+    /// The live guard state: the cache is a real in-memory one, so a cached answer would be seen if the guard
+    /// wrongly read it. org-core is the only other upstream.
+    fn live_guard_state(org_core: &MockServer) -> AppState {
+        AppState {
+            org_core_url: org_core.uri(),
+            cache: ResultCache::in_memory(),
+            ..AppState::for_tests()
+        }
+    }
+
+    /// Leaves the org-zdr cache holding `false`: the answer a cached read would trust.
+    async fn cache_says_not_zdr(state: &AppState) {
+        state
+            .cache
+            .store_for_secs(
+                &cache_key("org-zdr", &["org-1"]),
+                &Value::Bool(false),
+                ORG_ZDR_CACHE_SECS,
+            )
+            .await;
+    }
+
+    async fn org_core_answering(response: ResponseTemplate) -> MockServer {
+        let org_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(response)
+            .mount(&org_core)
+            .await;
+        org_core
+    }
+
+    fn org_with_zdr(zdr: bool) -> ResponseTemplate {
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}}))
+    }
+
+    /// W3-DEC-GWFIX: org-core is down, so the live read fails and the write is the typed, retryable 503 even though
+    /// the cache says not ZDR. The org-core request was made, so the answer came from the live read, not the cache.
+    #[tokio::test]
+    async fn durable_write_refusal_is_503_when_org_core_is_down_even_though_the_cache_says_not_zdr() {
+        let org_core = org_core_answering(ResponseTemplate::new(503)).await;
+        let state = live_guard_state(&org_core);
+        cache_says_not_zdr(&state).await;
+        let (status, axum::Json(body)) = durable_write_refusal(&state, &test_user(), None, None)
+            .await
+            .expect("a refusal");
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "zdr_decision_unavailable");
+        assert_eq!(org_core.received_requests().await.unwrap_or_default().len(), 1);
+    }
+
+    /// W3-DEC-GWFIX: org-core says ZDR, so the write is the typed 412 even though the cache says not ZDR.
+    #[tokio::test]
+    async fn durable_write_refusal_is_412_when_org_core_says_zdr_even_though_the_cache_says_not_zdr() {
+        let org_core = org_core_answering(org_with_zdr(true)).await;
+        let state = live_guard_state(&org_core);
+        cache_says_not_zdr(&state).await;
+        let (status, axum::Json(body)) = durable_write_refusal(&state, &test_user(), None, None)
+            .await
+            .expect("a refusal");
+        assert_eq!(status, axum::http::StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert_eq!(org_core.received_requests().await.unwrap_or_default().len(), 1);
+    }
+
+    /// The other half of the same rule: a live not-ZDR answer lets the write through, whatever the cache holds.
+    #[tokio::test]
+    async fn a_live_not_zdr_answer_lets_the_write_through() {
+        let org_core = org_core_answering(org_with_zdr(false)).await;
+        let state = live_guard_state(&org_core);
+        cache_says_not_zdr(&state).await;
+        assert!(durable_write_refusal(&state, &test_user(), None, None)
+            .await
+            .is_none());
+    }
+
+    /// W3-DEC-GWFIX: no authorized org scope is `Unknown` with no call at all, so the typed 503, and org-core is never
+    /// asked.
+    #[tokio::test]
+    async fn durable_write_refusal_with_no_authorized_org_is_503_without_an_org_core_call() {
+        let org_core = org_core_answering(org_with_zdr(false)).await;
+        let state = live_guard_state(&org_core);
+        let mut user = test_user();
+        user.authorized_membership = None;
+        let (status, axum::Json(body)) = durable_write_refusal(&state, &user, None, None)
+            .await
+            .expect("a refusal");
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "zdr_decision_unavailable");
+        assert!(org_core.received_requests().await.unwrap_or_default().is_empty());
     }
 }
 

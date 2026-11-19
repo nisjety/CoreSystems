@@ -979,3 +979,631 @@ pub(crate) async fn installable_agent_rows(
     }
     Ok(rows)
 }
+
+#[cfg(test)]
+mod tests {
+    //! WS17-S5 and W3-FIX-18 (the create guard), W3-DEC-GWFIX and W3-DEC-GWFIX2 (the registration relay of
+    //! `admit_for_bind`). The create route runs through the real router, so the flag, the membership, the ZDR
+    //! guard and its typed labels are checked on the wire. The helpers are called directly. Session, Control
+    //! (user-core), org-core and Convex are doubles, and every "no call" is checked by path or by the Convex
+    //! operation named in the request body.
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+    use wiremock::matchers::{body_partial_json, method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+    use crate::middleware::AuthorizedMembership;
+
+    const ORG: &str = "org-1";
+    const SPACE: &str = "space-room";
+    const ORG_PATH: &str = "/api/v1/organizations/org-1";
+    const SUBJECTS: &str = "/api/v1/internal/agents/subjects";
+    const ADMISSIONS: &str = "/api/v1/internal/spaces/space-room/agent-admissions";
+    const CREATE: &str = "spaceAgents:createPersonalAgentForGateway";
+    const ACTIVATE: &str = "spaceAgents:activateAgentForGateway";
+    const DEFINITION: &str = "spaceAgents:agentDefinitionForGateway";
+
+    struct Fixture {
+        state: AppState,
+        auth: MockServer,
+        user_core: MockServer,
+        org_core: MockServer,
+        convex: MockServer,
+    }
+
+    async fn fixture() -> Fixture {
+        let auth = MockServer::start().await;
+        let user_core = MockServer::start().await;
+        let org_core = MockServer::start().await;
+        let convex = MockServer::start().await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.org_core_url = org_core.uri();
+        state.application_convex_url = convex.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.space_features.personal_agents_api = true;
+        Fixture {
+            state,
+            auth,
+            user_core,
+            org_core,
+            convex,
+        }
+    }
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "User One".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some(ORG.to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: ORG.to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    async fn answer(server: &MockServer, verb: &str, route: &str, response: ResponseTemplate) {
+        Mock::given(wm_method(verb))
+            .and(wm_path(route))
+            .respond_with(response)
+            .mount(server)
+            .await;
+    }
+
+    /// A Convex answer for one named operation, whichever endpoint (`query` or `mutation`) carries it.
+    async fn convex(f: &Fixture, operation: &str, response: ResponseTemplate) {
+        Mock::given(wm_method("POST"))
+            .and(body_partial_json(json!({ "path": operation })))
+            .respond_with(response)
+            .mount(&f.convex)
+            .await;
+    }
+
+    fn convex_value(value: Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({ "value": value }))
+    }
+
+    /// Control's 200 envelope.
+    fn control(data: Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({ "data": data }))
+    }
+
+    fn org_record(zdr: bool) -> ResponseTemplate {
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}}))
+    }
+
+    /// The session the router resolves for the caller: org-1, role member.
+    async fn session(f: &Fixture) {
+        answer(
+            &f.auth,
+            "GET",
+            "/api/auth/get-session",
+            ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": ORG}
+            })),
+        )
+        .await;
+        for slug in ["session-core", "capability-core"] {
+            answer(
+                &f.auth,
+                "GET",
+                &format!("/api/{slug}/token"),
+                ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})),
+            )
+            .await;
+        }
+        answer(
+            &f.user_core,
+            "GET",
+            "/api/v1/me/session-context",
+            ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": ORG, "role": "member", "onboardingStatus": "COMPLETED"
+            })),
+        )
+        .await;
+    }
+
+    /// One request through the real router with the session cookie: the status and the JSON body.
+    async fn call(state: AppState, method: &str, uri: &str, body: Option<Value>) -> (u16, Value) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", "better-auth.session_token=session-1");
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let request = builder
+            .body(Body::from(body.map(|value| value.to_string()).unwrap_or_default()))
+            .expect("a request");
+        let response = crate::build_router(state)
+            .oneshot(request)
+            .await
+            .expect("the router answers");
+        let status = response.status().as_u16();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("a body")
+            .to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    async fn calls_to(server: &MockServer, part: &str) -> Vec<wiremock::Request> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|request| request.url.path().contains(part))
+            .collect()
+    }
+
+    /// Every Convex operation a server received, in arrival order, by the `path` in each body.
+    async fn convex_ops(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|request| serde_json::from_slice::<Value>(&request.body).ok())
+            .filter_map(|body| body.get("path").and_then(Value::as_str).map(str::to_owned))
+            .collect()
+    }
+
+    /// The `args` of every call to one Convex operation.
+    async fn convex_args(server: &MockServer, operation: &str) -> Vec<Value> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|request| serde_json::from_slice::<Value>(&request.body).ok())
+            .filter(|body| body.get("path").and_then(Value::as_str) == Some(operation))
+            .map(|body| body.get("args").cloned().unwrap_or(Value::Null))
+            .collect()
+    }
+
+    fn create_body() -> Value {
+        json!({"name": "Helper", "instructions": "Be brief.", "client_request_id": "req-1"})
+    }
+
+    /// The organisation definition Convex holds for `agent-1` at the given visibility.
+    async fn definition(f: &Fixture, visibility: &str) {
+        convex(
+            f,
+            DEFINITION,
+            convex_value(json!({
+                "agentRef": "agent-1",
+                "subjectId": "agent-agent-1",
+                "visibility": visibility,
+                "name": "Helper"
+            })),
+        )
+        .await;
+    }
+
+    async fn admit(f: &Fixture) -> Result<(), (StatusCode, Json<Value>)> {
+        admit_for_bind(&f.state, &user(), ORG, SPACE, "agent-1").await
+    }
+
+    /// `admit_for_bind` for an organisation definition whose registration answers `registration`. Returns the
+    /// refusal and how many admission calls Control received.
+    async fn bind_with_registration(registration: ResponseTemplate) -> (StatusCode, Value, usize) {
+        let f = fixture().await;
+        definition(&f, "org").await;
+        answer(&f.user_core, "POST", SUBJECTS, registration).await;
+        answer(&f.user_core, "POST", ADMISSIONS, control(json!({}))).await;
+        let (status, Json(body)) = admit(&f)
+            .await
+            .expect_err("a refused registration stops the bind");
+        let admissions = calls_to(&f.user_core, "agent-admissions").await.len();
+        (status, body, admissions)
+    }
+
+    // ---- W3-FIX-18: the ZDR guard on the create route -------------------------------------------
+
+    /// A ZDR org is refused with the typed 412, labelled with this surface, before any Control or Convex call.
+    #[tokio::test]
+    async fn a_zdr_org_is_refused_on_create_with_no_control_or_convex_call() {
+        let f = fixture().await;
+        session(&f).await;
+        answer(&f.org_core, "GET", ORG_PATH, org_record(true)).await;
+        convex(&f, CREATE, convex_value(json!({"agentRef": "agent-x", "subjectId": "agent-agent-x"}))).await;
+        answer(&f.user_core, "POST", SUBJECTS, control(json!({"revision": 1}))).await;
+        let (status, body) = call(f.state.clone(), "POST", "/api/v1/me/agents", Some(create_body())).await;
+        assert_eq!(status, 412, "{body}");
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert_eq!(body["error"]["details"]["surface"], "personal_agents");
+        assert!(convex_ops(&f.convex).await.is_empty(), "no Convex request");
+        assert!(calls_to(&f.user_core, "/api/v1/internal/").await.is_empty(), "no Control request");
+    }
+
+    /// A failed org posture read is the typed, retryable 503, and still no Control or Convex call.
+    #[tokio::test]
+    async fn an_org_posture_outage_is_503_zdr_decision_unavailable_on_create() {
+        let f = fixture().await;
+        session(&f).await;
+        answer(
+            &f.org_core,
+            "GET",
+            ORG_PATH,
+            ResponseTemplate::new(500).set_body_json(json!({"error": {"code": "internal"}})),
+        )
+        .await;
+        convex(&f, CREATE, convex_value(json!({"agentRef": "agent-x", "subjectId": "agent-agent-x"}))).await;
+        let (status, body) = call(f.state.clone(), "POST", "/api/v1/me/agents", Some(create_body())).await;
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(body["error"]["code"], "zdr_decision_unavailable");
+        assert!(convex_ops(&f.convex).await.is_empty(), "no Convex request");
+        assert!(calls_to(&f.user_core, "/api/v1/internal/").await.is_empty(), "no Control request");
+    }
+
+    /// A body `zdr: true` is refused before the organisation posture is read.
+    #[tokio::test]
+    async fn a_body_zdr_true_is_refused_on_create_without_an_org_core_lookup() {
+        let f = fixture().await;
+        session(&f).await;
+        answer(&f.org_core, "GET", ORG_PATH, org_record(false)).await;
+        let mut body = create_body();
+        body["zdr"] = json!(true);
+        let (status, reply) = call(f.state.clone(), "POST", "/api/v1/me/agents", Some(body)).await;
+        assert_eq!(status, 412, "{reply}");
+        assert_eq!(reply["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert!(calls_to(&f.org_core, ORG_PATH).await.is_empty(), "the body flag decides first");
+        assert!(convex_ops(&f.convex).await.is_empty(), "no Convex request");
+    }
+
+    /// A non-ZDR org passes the guard and reaches the Convex draft create, which is the first write.
+    #[tokio::test]
+    async fn a_non_zdr_org_still_reaches_the_convex_draft_create() {
+        let f = fixture().await;
+        session(&f).await;
+        answer(&f.org_core, "GET", ORG_PATH, org_record(false)).await;
+        convex(
+            &f,
+            CREATE,
+            ResponseTemplate::new(500).set_body_json(json!({"error": {"code": "internal"}})),
+        )
+        .await;
+        let (status, reply) = call(f.state.clone(), "POST", "/api/v1/me/agents", Some(create_body())).await;
+        assert_eq!(status, 503, "{reply}");
+        assert_eq!(reply["error"]["code"], "agent_registry_unavailable");
+        assert_eq!(convex_ops(&f.convex).await, vec![CREATE.to_owned()]);
+        assert!(calls_to(&f.user_core, "/api/v1/internal/").await.is_empty(), "the draft failed first");
+    }
+
+    // ---- WS17-S5: the create route --------------------------------------------------------------
+
+    /// A retry with the same client request id replays the draft (200) and runs the remaining steps again.
+    #[tokio::test]
+    async fn create_retry_replays_same_definition() {
+        let f = fixture().await;
+        session(&f).await;
+        answer(&f.org_core, "GET", ORG_PATH, org_record(false)).await;
+        convex(
+            &f,
+            CREATE,
+            convex_value(json!({
+                "agentRef": "agent-ref-1",
+                "subjectId": "agent-agent-ref-1",
+                "replayed": true
+            })),
+        )
+        .await;
+        answer(&f.user_core, "POST", SUBJECTS, control(json!({"revision": 3}))).await;
+        convex(&f, ACTIVATE, convex_value(Value::Null)).await;
+        let (status, reply) = call(f.state.clone(), "POST", "/api/v1/me/agents", Some(create_body())).await;
+        assert_eq!(status, 200, "{reply}");
+        assert_eq!(reply["data"]["agent_ref"], "agent-ref-1");
+        assert_eq!(reply["data"]["subject_id"], "agent-agent-ref-1");
+        assert_eq!(reply["data"]["revision"], 3);
+        assert_eq!(
+            convex_ops(&f.convex).await,
+            vec![CREATE.to_owned(), ACTIVATE.to_owned()],
+            "a replay runs the registration and the activation again"
+        );
+        let created = convex_args(&f.convex, CREATE).await;
+        assert_eq!(created[0]["clientRequestId"], "req-1");
+        assert_eq!(calls_to(&f.user_core, SUBJECTS).await.len(), 1);
+    }
+
+    /// A Control failure after the draft write answers a retryable 503 and never activates the draft.
+    #[tokio::test]
+    async fn create_control_failure_leaves_unlisted_draft_503() {
+        let f = fixture().await;
+        session(&f).await;
+        answer(&f.org_core, "GET", ORG_PATH, org_record(false)).await;
+        convex(
+            &f,
+            CREATE,
+            convex_value(json!({
+                "agentRef": "agent-ref-2",
+                "subjectId": "agent-agent-ref-2",
+                "replayed": false
+            })),
+        )
+        .await;
+        answer(
+            &f.user_core,
+            "POST",
+            SUBJECTS,
+            ResponseTemplate::new(500).set_body_json(json!({"error": {"code": "internal"}})),
+        )
+        .await;
+        convex(&f, ACTIVATE, convex_value(Value::Null)).await;
+        let (status, reply) = call(f.state.clone(), "POST", "/api/v1/me/agents", Some(create_body())).await;
+        assert_eq!(status, 503, "{reply}");
+        assert_eq!(reply["error"]["code"], "agent_registry_unavailable");
+        assert_eq!(
+            convex_ops(&f.convex).await,
+            vec![CREATE.to_owned()],
+            "the draft is written, the activation never is"
+        );
+    }
+
+    // ---- WS17-S5 and W3-DEC-GWFIX / W3-DEC-GWFIX2: admission on the bind -------------------------
+
+    /// Control's typed 403 `agent_access_forbidden` on the registration is relayed unchanged; admission is never asked.
+    #[tokio::test]
+    async fn a_registration_403_agent_access_forbidden_is_relayed_unchanged_with_no_admission() {
+        let refusal = json!({"error": {
+            "code": "agent_access_forbidden",
+            "message": "Only active members may register an agent."
+        }});
+        let (status, body, admissions) =
+            bind_with_registration(ResponseTemplate::new(403).set_body_json(refusal.clone())).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, refusal);
+        assert_eq!(admissions, 0, "no admission call");
+    }
+
+    /// Control's typed 422 `agent_policy_invalid` on the registration is relayed unchanged; admission is never asked.
+    #[tokio::test]
+    async fn a_registration_422_agent_policy_invalid_is_relayed_unchanged_with_no_admission() {
+        let refusal = json!({"error": {
+            "code": "agent_policy_invalid",
+            "message": "That access choice is not valid for this agent."
+        }});
+        let (status, body, admissions) =
+            bind_with_registration(ResponseTemplate::new(422).set_body_json(refusal.clone())).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body, refusal);
+        assert_eq!(admissions, 0, "no admission call");
+    }
+
+    /// A Control outage on the registration is the retryable 503, and admission is never asked.
+    #[tokio::test]
+    async fn a_registration_500_stays_503_agent_registry_unavailable_with_no_admission() {
+        let (status, body, admissions) = bind_with_registration(
+            ResponseTemplate::new(500).set_body_json(json!({"error": {"code": "internal"}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "agent_registry_unavailable");
+        assert_eq!(admissions, 0, "no admission call");
+    }
+
+    /// A registration 403 with any other code is not the typed relay: it is the retryable 503.
+    #[tokio::test]
+    async fn a_registration_403_with_another_code_stays_503() {
+        let (status, body, admissions) = bind_with_registration(
+            ResponseTemplate::new(403).set_body_json(json!({"error": {"code": "forbidden"}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "agent_registry_unavailable");
+        assert_eq!(admissions, 0, "no admission call");
+    }
+
+    /// A registration 422 with any other code is not the typed relay: it is the retryable 503.
+    #[tokio::test]
+    async fn a_registration_422_with_another_code_stays_503() {
+        let (status, body, admissions) = bind_with_registration(
+            ResponseTemplate::new(422).set_body_json(json!({"error": {"code": "validation_failed"}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "agent_registry_unavailable");
+        assert_eq!(admissions, 0, "no admission call");
+    }
+
+    /// `admit_for_bind` asks Control to admit the agent once, after reading the definition, and answers Ok only on
+    /// admission. The bind route calls it before its Convex bind mutation and stops on any refusal. The mutation
+    /// ordering itself lives in the bind route (`spaces/mod.rs`) and is not asserted here.
+    #[tokio::test]
+    async fn bind_calls_control_admission_before_convex() {
+        let f = fixture().await;
+        definition(&f, "owner").await;
+        answer(&f.user_core, "POST", ADMISSIONS, control(json!({"admitted": true}))).await;
+        assert!(admit(&f).await.is_ok());
+        let admissions = calls_to(&f.user_core, "agent-admissions").await;
+        assert_eq!(admissions.len(), 1, "one admission for one bind");
+        let sent: Value = serde_json::from_slice(&admissions[0].body).expect("a JSON body");
+        assert_eq!(sent["agent_subject_id"], "agent-agent-1");
+        assert_eq!(sent["idempotency_key"], "");
+        assert_eq!(
+            convex_ops(&f.convex).await,
+            vec![DEFINITION.to_owned()],
+            "the only Convex call here is the definition read"
+        );
+    }
+
+    /// Control's typed 403 `agent_not_addable` on the admission is relayed with its `details.reason`.
+    #[tokio::test]
+    async fn agent_not_addable_maps_reason() {
+        let f = fixture().await;
+        definition(&f, "owner").await;
+        let refusal = json!({"error": {
+            "code": "agent_not_addable",
+            "message": "This agent cannot be added to this room.",
+            "details": {"reason": "space_role_below_floor"}
+        }});
+        answer(&f.user_core, "POST", ADMISSIONS, ResponseTemplate::new(403).set_body_json(refusal.clone())).await;
+        let (status, Json(body)) = admit(&f)
+            .await
+            .expect_err("the admission refusal stops the bind");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, refusal);
+        assert_eq!(body["error"]["details"]["reason"], "space_role_below_floor");
+        assert!(
+            calls_to(&f.user_core, SUBJECTS).await.is_empty(),
+            "an owner definition is not registered again"
+        );
+    }
+
+    // ---- WS17-S5: the installable list, the access write and the primary agent ------------------
+
+    /// Control's per-subject answer decides each row: a personal agent Control does not show is dropped, a visible one
+    /// that cannot be added is blocked with Control's reason, an organisation definition Control does not know is
+    /// addable, and a bound one is already bound.
+    #[tokio::test]
+    async fn installable_list_drops_invisible_and_marks_blocked() {
+        let f = fixture().await;
+        answer(
+            &f.user_core,
+            "GET",
+            SUBJECTS,
+            control(json!({"agents": [
+                {"agent_subject_id": "agent-addable"},
+                {"agent_subject_id": "agent-blocked"},
+                {"agent_subject_id": "agent-bound"}
+            ]})),
+        )
+        .await;
+        convex(
+            &f,
+            "spaceAgents:listInstallableSpaceAgentsForGateway",
+            convex_value(json!([
+                {"subjectId": "agent-hidden", "agentRef": "hidden", "name": "Hidden", "visibility": "owner", "alreadyBound": false},
+                {"subjectId": "agent-blocked", "agentRef": "blocked", "name": "Blocked", "visibility": "owner", "alreadyBound": false},
+                {"subjectId": "agent-addable", "agentRef": "addable", "name": "Addable", "visibility": "owner", "alreadyBound": false},
+                {"subjectId": "agent-org-new", "agentRef": "org-new", "name": "Org", "visibility": "org", "alreadyBound": false},
+                {"subjectId": "agent-bound", "agentRef": "bound", "name": "Bound", "visibility": "owner", "alreadyBound": true}
+            ])),
+        )
+        .await;
+        answer(
+            &f.user_core,
+            "POST",
+            "/api/v1/internal/spaces/space-room/agent-candidates",
+            control(json!({"candidates": [
+                {"agent_subject_id": "agent-hidden", "visible": false, "can_add": false, "reason": ""},
+                {"agent_subject_id": "agent-blocked", "visible": true, "can_add": false, "reason": "space_role_below_floor"},
+                {"agent_subject_id": "agent-addable", "visible": true, "can_add": true, "reason": ""},
+                {"agent_subject_id": "agent-bound", "visible": true, "can_add": false, "reason": ""}
+            ]})),
+        )
+        .await;
+
+        let rows = installable_agent_rows(&f.state, &user(), ORG, SPACE)
+            .await
+            .ok()
+            .expect("the list answers");
+        let row = |agent: &str| {
+            rows.iter()
+                .find(|candidate| candidate["agent_ref"] == agent)
+                .cloned()
+        };
+        assert!(row("hidden").is_none(), "a personal agent Control does not show is dropped");
+        let blocked = row("blocked").expect("the blocked agent is listed");
+        assert_eq!(blocked["add_state"], "blocked");
+        assert_eq!(blocked["reason"], "space_role_below_floor");
+        assert_eq!(row("addable").expect("listed")["add_state"], "addable");
+        assert_eq!(
+            row("org-new").expect("listed")["add_state"],
+            "addable",
+            "an organisation definition Control does not know yet is addable"
+        );
+        assert_eq!(row("bound").expect("listed")["add_state"], "already_bound");
+        let asked = convex_args(&f.convex, "spaceAgents:listInstallableSpaceAgentsForGateway").await;
+        assert_eq!(
+            asked[0]["visibleOwnerAgentIds"],
+            json!(["agent-addable", "agent-blocked", "agent-bound"]),
+            "Convex receives Control's visible subject ids"
+        );
+    }
+
+    /// Control's stale-revision 409 on the access write is relayed with `details.current_revision`, and no Convex
+    /// projection is written.
+    #[tokio::test]
+    async fn access_put_conflict_is_409_with_revision() {
+        let f = fixture().await;
+        let conflict = json!({"error": {
+            "code": "agent_state_changed",
+            "message": "The agent changed. Reload and try again.",
+            "details": {"current_revision": 7}
+        }});
+        answer(
+            &f.user_core,
+            "PUT",
+            "/api/v1/internal/agents/subjects/agent-agent-1/access",
+            ResponseTemplate::new(409).set_body_json(conflict.clone()),
+        )
+        .await;
+        convex(
+            &f,
+            "spaceAgents:setAgentVisibilityProjectionForGateway",
+            convex_value(Value::Null),
+        )
+        .await;
+        let (status, Json(body)) = put_agent_access_core(
+            &f.state,
+            &user(),
+            "agent-1",
+            &json!({"visibility": "org", "add_policy": "anyone", "entries": [], "expected_revision": 6}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body, conflict);
+        assert_eq!(body["error"]["details"]["current_revision"], 7);
+        assert!(
+            convex_ops(&f.convex).await.is_empty(),
+            "the projection is written only after Control accepts"
+        );
+    }
+
+    /// Control shows the caller the agent first: a hidden agent answers 404 and is never made primary.
+    #[tokio::test]
+    async fn primary_agent_validated_at_control() {
+        let f = fixture().await;
+        answer(
+            &f.user_core,
+            "GET",
+            "/api/v1/internal/agents/subjects/agent-agent-9",
+            ResponseTemplate::new(404).set_body_json(json!({"error": {"code": "not_found"}})),
+        )
+        .await;
+        answer(
+            &f.user_core,
+            "GET",
+            "/api/v1/internal/agents/subjects/agent-agent-8",
+            control(json!({"agent_subject_id": "agent-agent-8"})),
+        )
+        .await;
+        convex(&f, "users:setPrimaryAgentForGateway", convex_value(Value::Null)).await;
+
+        let (status, Json(body)) =
+            set_primary_agent_core(&f.state, &user(), &json!({"agent_ref": "agent-9"})).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "agent_not_found");
+        assert!(convex_ops(&f.convex).await.is_empty(), "a hidden agent is never made primary");
+
+        let (status, _) =
+            set_primary_agent_core(&f.state, &user(), &json!({"agent_ref": "agent-8"})).await;
+        assert_eq!(status, StatusCode::OK);
+        let written = convex_args(&f.convex, "users:setPrimaryAgentForGateway").await;
+        assert_eq!(written[0]["agentSubjectId"], "agent-agent-8");
+    }
+}
