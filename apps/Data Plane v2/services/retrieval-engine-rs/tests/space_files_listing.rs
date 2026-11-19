@@ -185,6 +185,8 @@ async fn list(
         .bind(types)
         .bind(cursor_ts)
         .bind(cursor_id)
+        // D18: the member's history window; NULL is no window, which is what these tests read under.
+        .bind(None::<chrono::DateTime<chrono::Utc>>)
         .fetch_all(pool)
         .await
         .expect("listing query")
@@ -320,6 +322,8 @@ async fn space_document_returns_text_and_404s_missing_deleted_other_room_and_hid
                 .bind(format!("{org}:{id}"))
                 .bind(viewer)
                 .bind(granted)
+                // D18: no history window.
+                .bind(None::<chrono::DateTime<chrono::Utc>>)
                 .fetch_optional(&pool)
                 .await
                 .expect("document query")

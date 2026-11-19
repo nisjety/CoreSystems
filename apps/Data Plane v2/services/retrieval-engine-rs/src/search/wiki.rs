@@ -42,6 +42,7 @@ const WIKI_SEARCH_SQL: &str = "SELECT p.page_id, p.title, p.path, p.current_vers
                )
            )
        ))
+       AND ($7::timestamptz IS NULL OR p.created_at >= $7::timestamptz)
      ORDER BY p.updated_at DESC
      LIMIT $6";
 
@@ -49,6 +50,9 @@ fn wiki_search_sql() -> &'static str {
     WIKI_SEARCH_SQL
 }
 
+// The library entry for a caller with no history window. The binary's one caller reads the window off the
+// verified decision and goes through `wiki_search_since`, so within the binary this wrapper is unused.
+#[allow(dead_code)]
 pub async fn wiki_search(
     pool: &PgPool,
     query: &str,
@@ -57,6 +61,35 @@ pub async fn wiki_search(
     viewer: Option<&str>,
     allowed_workspaces: &[String],
     granted_ids: &[String],
+) -> anyhow::Result<Vec<WikiSearchResult>> {
+    wiki_search_since(
+        pool,
+        query,
+        org_id,
+        limit,
+        viewer,
+        allowed_workspaces,
+        granted_ids,
+        None,
+    )
+    .await
+}
+
+/// [`wiki_search`] inside a member's history window (D18). `since` is the instant a page must have been
+/// created at or after (`wiki_pages.created_at`), `None` for no window. A page is placed by the instant it
+/// was created, not by its latest edit: its current version is a whole-page snapshot that can carry text
+/// written before the floor, so a page created before the floor stays hidden after an edit. A closed window
+/// (no instant to bind) is the caller's to refuse before this is called: `None` here means no window.
+#[allow(clippy::too_many_arguments)] // `wiki_search`'s arguments plus the one window bound; a struct would move the same count
+pub async fn wiki_search_since(
+    pool: &PgPool,
+    query: &str,
+    org_id: &str,
+    limit: i32,
+    viewer: Option<&str>,
+    allowed_workspaces: &[String],
+    granted_ids: &[String],
+    since: Option<chrono::DateTime<chrono::Utc>>,
 ) -> anyhow::Result<Vec<WikiSearchResult>> {
     // Phase 1 RLS: a wiki search serves exactly one org (taken from the
     // verified caller claims), so it reads through an org-scoped transaction.
@@ -87,6 +120,7 @@ pub async fn wiki_search(
     .bind(allowed_workspaces)
     .bind(granted_ids)
     .bind(limit)
+    .bind(since)
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -124,5 +158,16 @@ mod tests {
         assert!(sql.contains("document_id = ANY($5)"));
         assert!(sql.contains("NOT EXISTS"));
         assert!(!sql.contains("visibility IN ('org', 'shared')"));
+    }
+
+    // D18: a member's history window is part of the query, not a filter on its result, so the limit
+    // counts only pages the member may see, and a page created before the floor is never read.
+    #[test]
+    fn wiki_query_applies_the_history_window_to_the_pages_creation() {
+        let sql = wiki_search_sql().split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            sql.contains("AND ($7::timestamptz IS NULL OR p.created_at >= $7::timestamptz) ORDER BY p.updated_at DESC LIMIT $6"),
+            "{sql}"
+        );
     }
 }

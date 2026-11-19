@@ -86,6 +86,7 @@ fn space_scope() -> ResolvedSpaceRetrievalScope {
         authority: VerifiedSpaceAuthority {
             authority_revision: 1,
             decision_ref: "decision-space-trace".into(),
+            history_floor: Default::default(),
             org_id: ORG.into(),
             privacy_policy_ref: "privacy-space-trace".into(),
             recipient_audience_hash: AUDIENCE_HASH.into(),

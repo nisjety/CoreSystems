@@ -41,6 +41,7 @@ use super::orchestrator::{apply_colqwen_scores, page_image_url};
 use crate::pipeline::types::{ScoredCandidate, ZdrMode};
 use crate::search::colqwen::ColqwenClient;
 use crate::search::rerank::RerankClient;
+use crate::space_scope::HistoryFloor;
 
 /// Stage names. Constants rather than inline literals because the orchestrator
 /// sums stage timings *by name* to reproduce the `PipelineTimings` buckets it
@@ -51,6 +52,7 @@ pub const STAGE_TRUNCATE_OVERFETCH: &str = "truncate:overfetch";
 pub const STAGE_TEXT_RERANK: &str = "text_rerank";
 pub const STAGE_RECENCY_DECAY: &str = "recency_decay";
 pub const STAGE_VISIBILITY_GATE: &str = "visibility_gate";
+pub const STAGE_SPACE_HISTORY_FLOOR: &str = "space_history_floor";
 pub const STAGE_TRUNCATE_TOP_N: &str = "truncate:top_n";
 pub const STAGE_ZDR_FILTER: &str = "zdr_filter";
 
@@ -590,6 +592,98 @@ impl NodePostprocessor for VisibilityGate<'_> {
 }
 
 // ---------------------------------------------------------------------------
+// Stage: the member's history window (D18)
+// ---------------------------------------------------------------------------
+
+/// The member's history window, applied to the candidates the arms returned (D18).
+///
+/// The room's document set is already narrowed to the window before the dense search runs
+/// (`space_scope::resolve_space_document_ids`), so a pre-floor document is not offered to the search at all.
+/// This is the second control behind that one, the way the visibility gate's `sources` check is behind the
+/// dense arm's `source` filter: it re-reads the instant each surviving candidate's document entered the room
+/// (`documents.created_at`) and drops any that lies before the floor, so a drift in the arm's filter, or a
+/// candidate that came from another arm, still cannot show a row before the floor.
+///
+/// It only removes, and it fails closed:
+///
+/// * `Open` is no window and returns the candidates untouched, with no query.
+/// * `Closed` is a window the engine cannot place any row against, so nothing survives.
+/// * `Since` keeps a candidate only when its document is a live `documents` row that entered the room at or
+///   after the floor. A candidate with no such row (a wiki page id, a deleted document) has no reliable
+///   source instant here and is dropped.
+///
+/// Enforcement: errors propagate. Returning unfiltered candidates because a lookup failed would show a
+/// member what their window hides.
+pub struct SpaceHistoryGate<'a> {
+    pub pool: &'a PgPool,
+    /// The requesting org; the org-scoped transaction supplies the org predicate the lookup does not carry.
+    pub org_id: &'a str,
+    /// The member's window from the verified decision; `Open` for an unscoped read.
+    pub floor: HistoryFloor,
+}
+
+/// Keeps the candidates the window admits. `entered` maps a document id to the instant it entered the room;
+/// a candidate with no entry has no reliable source instant and is dropped by a `Since` window. Pure, so the
+/// rule is tested without a database.
+fn candidates_inside_window(
+    nodes: Vec<ScoredCandidate>,
+    floor: HistoryFloor,
+    entered: &std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
+) -> Vec<ScoredCandidate> {
+    nodes
+        .into_iter()
+        .filter(|candidate| floor.admits(entered.get(&candidate.document_id).copied()))
+        .collect()
+}
+
+#[async_trait]
+impl NodePostprocessor for SpaceHistoryGate<'_> {
+    fn name(&self) -> &'static str {
+        STAGE_SPACE_HISTORY_FLOOR
+    }
+
+    async fn postprocess(
+        &self,
+        nodes: Vec<ScoredCandidate>,
+        _ctx: &mut PostprocessCtx<'_>,
+    ) -> anyhow::Result<Vec<ScoredCandidate>> {
+        match self.floor {
+            HistoryFloor::Open => return Ok(nodes),
+            HistoryFloor::Closed => return Ok(Vec::new()),
+            HistoryFloor::Since(_) => {}
+        }
+        let doc_ids: Vec<String> = nodes
+            .iter()
+            .map(|c| c.document_id.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        if doc_ids.is_empty() {
+            return Ok(nodes);
+        }
+        // Org-scoped like every read in this chain: the lookup has no org predicate of its own, and the
+        // transaction supplies one, so a candidate that leaked in from another tenant resolves to nothing.
+        let mut tx = pg_org_scope::begin_org_scoped(self.pool, self.org_id).await?;
+        let entered: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>> =
+            sqlx::query_as::<_, (String, chrono::DateTime<chrono::Utc>)>(
+                "SELECT document_id, created_at FROM documents
+                 WHERE document_id = ANY($1) AND deleted_at IS NULL",
+            )
+            .bind(&doc_ids)
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .collect();
+        tx.commit().await?;
+        let before = nodes.len();
+        let kept = candidates_inside_window(nodes, self.floor, &entered);
+        // Counts only: which documents, and how many a window hides, is not told to the reader.
+        tracing::debug!(before, after = kept.len(), "history window gate applied");
+        Ok(kept)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Stage: ZDR enforcement
 // ---------------------------------------------------------------------------
 
@@ -780,6 +874,88 @@ mod tests {
     // (`tests/zdr_behavior.rs`, `tests/ownership_filter.rs`) rather than here.
     // Asserting their branches against a hand-rolled copy of the same logic
     // would only prove the copy matches itself.
+
+    // --- SpaceHistoryGate (D18) ----------------------------------------------
+    //
+    // The window rule is a pure function over (candidates, floor, the instant each document
+    // entered the room), so it is asserted here without a database. The lookup that fills the map
+    // is the SQL of `tests/space_history_floor.rs`, which is gated on TEST_DATABASE_URL.
+
+    fn instant(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn the_window_keeps_only_candidates_that_entered_the_room_at_or_after_it() {
+        let floor = instant("2026-11-18T09:30:00Z");
+        let entered: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>> = [
+            ("before", floor - chrono::Duration::microseconds(1)),
+            ("at", floor),
+            ("after", floor + chrono::Duration::hours(2)),
+        ]
+        .into_iter()
+        .map(|(id, at)| (id.to_string(), at))
+        .collect();
+        // "unknown" has no row in `documents` (a wiki page id, a deleted document): no reliable instant.
+        let nodes = vec![
+            cand("before", 5.0),
+            cand("at", 4.0),
+            cand("after", 3.0),
+            cand("unknown", 2.0),
+        ];
+        let kept = candidates_inside_window(nodes.clone(), HistoryFloor::Since(floor), &entered);
+        assert_eq!(ids(&kept), vec!["at", "after"], "order is kept; before and unknown are hidden");
+
+        // No window changes nothing, even for a document with no instant.
+        let open = candidates_inside_window(nodes.clone(), HistoryFloor::Open, &entered);
+        assert_eq!(ids(&open), vec!["before", "at", "after", "unknown"]);
+        // A window the engine cannot place a row against shows nothing.
+        assert!(candidates_inside_window(nodes, HistoryFloor::Closed, &entered).is_empty());
+    }
+
+    // `Open` and `Closed` are decided without reading a row, so a pool that is never contacted proves the
+    // gate answers them before it touches the database (a `Since` window needs the lookup).
+    #[tokio::test]
+    async fn an_open_window_passes_every_candidate_and_a_closed_one_passes_none_without_a_lookup() {
+        let pool = sqlx::PgPool::connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .expect("lazy pool configuration");
+        let gate = |floor| SpaceHistoryGate {
+            pool: &pool,
+            org_id: "org-1",
+            floor,
+        };
+        let open = gate(HistoryFloor::Open)
+            .postprocess(vec![cand("a", 2.0), cand("b", 1.0)], &mut ctx())
+            .await
+            .expect("an open window never reads");
+        assert_eq!(ids(&open), vec!["a", "b"]);
+        let closed = gate(HistoryFloor::Closed)
+            .postprocess(vec![cand("a", 2.0), cand("b", 1.0)], &mut ctx())
+            .await
+            .expect("a closed window never reads");
+        assert!(closed.is_empty());
+        // No candidates under a real window: nothing to look up, so nothing is read either.
+        let none = gate(HistoryFloor::Since(instant("2026-11-18T09:30:00Z")))
+            .postprocess(Vec::new(), &mut ctx())
+            .await
+            .expect("no candidates, no lookup");
+        assert!(none.is_empty());
+        assert_eq!(gate(HistoryFloor::Open).name(), STAGE_SPACE_HISTORY_FLOOR);
+        // The stage name feeds the trace timings by name and must not collide with another stage.
+        for other in [
+            STAGE_VISUAL_RERANK,
+            STAGE_TRUNCATE_OVERFETCH,
+            STAGE_TEXT_RERANK,
+            STAGE_RECENCY_DECAY,
+            STAGE_VISIBILITY_GATE,
+            STAGE_TRUNCATE_TOP_N,
+            STAGE_ZDR_FILTER,
+        ] {
+            assert_ne!(STAGE_SPACE_HISTORY_FLOOR, other);
+        }
+    }
 
     #[test]
     fn elapsed_of_sums_only_the_named_stages() {

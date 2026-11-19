@@ -1438,6 +1438,8 @@ async fn retrieve_wiki(
     // GAP-1: pin org from the verified principal — never trust the body org_id.
     pin_request_org(auth.as_ref(), &mut req.org_id)?;
     let space_scope = resolved_space_scope(&pipeline, auth.as_ref(), &headers).await?;
+    // D18: the member's history window, `Open` for the unscoped read.
+    let floor = crate::space_scope::history_floor_of(space_scope.as_ref());
     let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
     let allowed_workspaces = match space_scope.as_ref() {
         // `wiki_search` treats an empty workspace list as UNCONSTRAINED, so a
@@ -1464,7 +1466,11 @@ async fn retrieve_wiki(
             })
             .unwrap_or_default(),
     };
-    let pages = wiki::wiki_search(
+    // A window the engine cannot place any page against shows no page (see `HistoryFloor`).
+    if floor.is_closed() {
+        return Ok(Json(serde_json::json!({"pages": [], "count": 0})));
+    }
+    let pages = wiki::wiki_search_since(
         &pipeline.pool,
         &req.query,
         &req.org_id,
@@ -1472,6 +1478,7 @@ async fn retrieve_wiki(
         viewer.as_deref(),
         &allowed_workspaces,
         &granted,
+        floor.since(),
     )
     .await?;
     Ok(Json(serde_json::json!({
@@ -1656,17 +1663,25 @@ async fn retrieve_pack(
 // documents that really are in the room. It is a separate clause from the
 // viewer predicate on purpose: that one stays about the reader, and a Space
 // never widens it.
+//
+// `$6` is the member's history window (D18): NULL for no window, otherwise the
+// instant a document must have entered the room at or after (`created_at`). A
+// document before it is absent exactly like one outside the room, so the lookup
+// cannot be used to learn what the window hides. A closed window never reaches
+// the query (see `retrieve_sources`).
 const SOURCES_SQL: &str = "SELECT document_id, title, source, type, status, zdr_classification
      FROM documents
      WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL
        AND ($3::text IS NULL OR owner_id = $3 OR visibility = 'org' OR document_id = ANY($4))
-       AND ($5::text IS NULL OR space_ref = $5)";
+       AND ($5::text IS NULL OR space_ref = $5)
+       AND ($6::timestamptz IS NULL OR created_at >= $6::timestamptz)";
 
 const FRESHNESS_SQL: &str = "SELECT document_id, title, updated_at::TEXT, status
      FROM documents
      WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL
        AND ($3::text IS NULL OR owner_id = $3 OR visibility = 'org' OR document_id = ANY($4))
-       AND ($5::text IS NULL OR space_ref = $5)";
+       AND ($5::text IS NULL OR space_ref = $5)
+       AND ($6::timestamptz IS NULL OR created_at >= $6::timestamptz)";
 
 #[derive(serde::Deserialize)]
 struct SourcesRequest {
@@ -1688,7 +1703,9 @@ async fn retrieve_sources(
     let space_ref = space_scope
         .as_ref()
         .map(|scope| scope.authority.space_ref.clone());
-    if req.document_ids.is_empty() {
+    // D18: the member's history window. A closed window answers like an empty room, with no query.
+    let floor = crate::space_scope::history_floor_of(space_scope.as_ref());
+    if req.document_ids.is_empty() || floor.is_closed() {
         return Ok(Json(serde_json::json!({"sources": []})));
     }
     // Per-user ownership: only return metadata for docs the viewer may see.
@@ -1707,6 +1724,7 @@ async fn retrieve_sources(
         .bind(&viewer)
         .bind(&granted)
         .bind(&space_ref)
+        .bind(floor.since())
         .fetch_all(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -1733,7 +1751,8 @@ async fn retrieve_sources(
 // and is cast in SQL so sqlx binds a plain String), and the extra columns are
 // the provenance a file library needs (uploader, creation time, the filename /
 // type / size / hash / extension / text length the upload stamped). The ORDER
-// BY gains the id as a tiebreaker so the cursor is a total order.
+// BY gains the id as a tiebreaker so the cursor is a total order. `$9` is the
+// member's history window (D18), the same bound the by-id lookups apply.
 const SPACE_DOCUMENTS_SQL: &str =
     "SELECT document_id, title, source, type, status, zdr_classification, updated_at::TEXT,
             owner_id, created_at::TEXT,
@@ -1744,23 +1763,29 @@ const SPACE_DOCUMENTS_SQL: &str =
        AND ($3::text IS NULL OR owner_id = $3 OR visibility = 'org' OR document_id = ANY($4))
        AND ($6::text[] IS NULL OR type = ANY($6))
        AND ($7::text IS NULL OR (updated_at, document_id) < ($7::text::timestamptz, $8::text))
+       AND ($9::timestamptz IS NULL OR created_at >= $9::timestamptz)
      ORDER BY updated_at DESC, document_id DESC
      LIMIT $5";
 
 // WS14-S5: one document's extracted text under the same Space, viewer and grant
 // predicate as the listing. Absent, deleted, out-of-room and not-visible are the
-// same empty result, so a caller learns nothing about which it was.
+// same empty result, so a caller learns nothing about which it was. A document
+// that entered the room before the member's history window (`$6`, D18) is one more
+// reason for that same empty result: its text is exactly what the window hides.
 const SPACE_DOCUMENT_SQL: &str =
     "SELECT document_id, title, type, status, zdr_classification, metadata->>'filename', content
      FROM documents
      WHERE org_id = $1 AND space_ref = $2 AND document_id = $3 AND deleted_at IS NULL
-       AND ($4::text IS NULL OR owner_id = $4 OR visibility = 'org' OR document_id = ANY($5))";
+       AND ($4::text IS NULL OR owner_id = $4 OR visibility = 'org' OR document_id = ANY($5))
+       AND ($6::timestamptz IS NULL OR created_at >= $6::timestamptz)";
 
+// `$4` is the member's history window (D18): a page is placed by the instant it was created.
 const SPACE_WIKI_PAGES_SQL: &str =
     "SELECT page_id, title, path, updated_at::TEXT
      FROM wiki_pages
      WHERE org_id = $1 AND workspace_id = $2 AND deleted_at IS NULL
        AND page_status = 'published'
+       AND ($4::timestamptz IS NULL OR created_at >= $4::timestamptz)
      ORDER BY updated_at DESC
      LIMIT $3";
 
@@ -1893,6 +1918,9 @@ async fn space_knowledge(
             AppError::forbidden("a Space decision is required to list a Space's knowledge")
         })?;
     let org_id = scope.authority.org_id.clone();
+    // D18: the member's history window. The listing shows the documents that entered the room, and the
+    // wiki pages that were created, at or after it. A closed window lists neither and reads nothing.
+    let floor = scope.authority.history_floor;
     let limit = req
         .limit
         .unwrap_or(SPACE_KNOWLEDGE_DEFAULT_LIMIT)
@@ -1928,18 +1956,23 @@ async fn space_knowledge(
     // decision rather than any request field, so they run inside an org-scoped
     // transaction. The SQL still binds org_id itself as the backstop.
     let mut tx = pg_org_scope::begin_org_scoped(&pipeline.pool, &org_id).await?;
-    let mut document_rows = sqlx::query_as::<_, SpaceDocumentRow>(SPACE_DOCUMENTS_SQL)
-        .bind(&org_id)
-        .bind(&scope.authority.space_ref)
-        .bind(&viewer)
-        .bind(&granted)
-        // One extra row tells a full page from a complete room.
-        .bind(limit + 1)
-        .bind(&types)
-        .bind(&cursor_updated_at)
-        .bind(&cursor_document_id)
-        .fetch_all(&mut *tx)
-        .await?;
+    let mut document_rows = if floor.is_closed() {
+        Vec::new()
+    } else {
+        sqlx::query_as::<_, SpaceDocumentRow>(SPACE_DOCUMENTS_SQL)
+            .bind(&org_id)
+            .bind(&scope.authority.space_ref)
+            .bind(&viewer)
+            .bind(&granted)
+            // One extra row tells a full page from a complete room.
+            .bind(limit + 1)
+            .bind(&types)
+            .bind(&cursor_updated_at)
+            .bind(&cursor_document_id)
+            .bind(floor.since())
+            .fetch_all(&mut *tx)
+            .await?
+    };
     let has_more = document_rows.len() as i64 > limit;
     document_rows.truncate(limit as usize);
     let next_cursor = if has_more {
@@ -1956,11 +1989,13 @@ async fn space_knowledge(
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let wiki_rows = match wiki_workspace {
+        Some(_) if floor.is_closed() => Vec::new(),
         Some(workspace) => {
             sqlx::query_as::<_, (String, String, String, String)>(SPACE_WIKI_PAGES_SQL)
                 .bind(&org_id)
                 .bind(workspace)
                 .bind(limit)
+                .bind(floor.since())
                 .fetch_all(&mut *tx)
                 .await?
         }
@@ -2065,17 +2100,24 @@ async fn space_document(
     let (viewer, granted) =
         resolve_viewer_grants_in_space(&pipeline, auth.as_ref(), &org_id, Some(&scope)).await;
 
+    // D18: the member's history window. A closed window reads nothing: the answer is the 404 of a missing id.
+    let floor = scope.authority.history_floor;
     let mut tx = pg_org_scope::begin_org_scoped(&pipeline.pool, &org_id).await?;
-    let row = sqlx::query_as::<_, (String, String, String, String, String, Option<String>, String)>(
-        SPACE_DOCUMENT_SQL,
-    )
-    .bind(&org_id)
-    .bind(&scope.authority.space_ref)
-    .bind(document_id)
-    .bind(&viewer)
-    .bind(&granted)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let row = if floor.is_closed() {
+        None
+    } else {
+        sqlx::query_as::<_, (String, String, String, String, String, Option<String>, String)>(
+            SPACE_DOCUMENT_SQL,
+        )
+        .bind(&org_id)
+        .bind(&scope.authority.space_ref)
+        .bind(document_id)
+        .bind(&viewer)
+        .bind(&granted)
+        .bind(floor.since())
+        .fetch_optional(&mut *tx)
+        .await?
+    };
     tx.commit().await?;
 
     let Some((did, title, dtype, status, zdr, filename, content)) = row else {
@@ -2132,6 +2174,11 @@ async fn retrieve_freshness(
     let space_ref = space_scope
         .as_ref()
         .map(|scope| scope.authority.space_ref.clone());
+    // D18: the same window as `retrieve_sources`, for the same reason: the two must agree about what is in a room.
+    let floor = crate::space_scope::history_floor_of(space_scope.as_ref());
+    if floor.is_closed() {
+        return Ok(Json(serde_json::json!({"freshness": []})));
+    }
     let (viewer, granted) =
         resolve_viewer_grants_in_space(&pipeline, auth.as_ref(), &req.org_id, space_scope.as_ref())
             .await;
@@ -2143,6 +2190,7 @@ async fn retrieve_freshness(
         .bind(&viewer)
         .bind(&granted)
         .bind(&space_ref)
+        .bind(floor.since())
         .fetch_all(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -3516,6 +3564,7 @@ mod space_files_tests {
             authority: VerifiedSpaceAuthority {
                 authority_revision: 1,
                 decision_ref: "decision-1".to_string(),
+                history_floor: Default::default(),
                 org_id: "org-1".to_string(),
                 privacy_policy_ref: "privacy:org-1".to_string(),
                 recipient_audience_hash: "audience-hash:user-1".to_string(),

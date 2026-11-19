@@ -1100,6 +1100,7 @@ mod space_label_tests {
             authority: VerifiedSpaceAuthority {
                 authority_revision: 1,
                 decision_ref: "decision-1".into(),
+                history_floor: Default::default(),
                 org_id: "org-1".into(),
                 privacy_policy_ref: "privacy-1".into(),
                 recipient_audience_hash: "audience-hash-1".into(),
