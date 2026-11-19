@@ -594,7 +594,7 @@ pub(crate) async fn execute_quarry_browser_mcp(
         Ok(Some(client)) => client,
         Ok(None) => {
             return browser_mcp_error(
-                "browser MCP unavailable: QUARRY_BROWSER_AGENT_ENABLED or QUARRY_EDGE_URL is not configured",
+                "browser MCP unavailable: set QUARRY_BROWSER_AGENT_ENABLED=true and QUARRY_EDGE_URL",
             );
         }
         Err(error) => return browser_mcp_error(format!("browser MCP unavailable: {error}")),

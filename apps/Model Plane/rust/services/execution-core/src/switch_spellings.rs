@@ -53,6 +53,9 @@ mod tests {
 
     const BROWSER_AGENT: &str = "QUARRY_BROWSER_AGENT_ENABLED";
 
+    /// Former spellings and their case variants: each reads as off where the switch is exact.
+    const FORMER_SPELLINGS: &[&str] = &["1", "TRUE", "True", "yes", "YES", "on", "ON", "enabled"];
+
     /// The names reported for the given `(name, value)` environment.
     fn names(env: &[(&'static str, &'static str)]) -> Vec<&'static str> {
         former_spellings(|name| {
@@ -149,20 +152,79 @@ mod tests {
     }
 
     #[test]
-    fn no_source_tells_an_operator_to_set_the_former_spelling() {
-        // The off-refusal used to say `=1`, which the exact reader reads as off.
+    fn no_source_tells_an_operator_to_set_a_former_spelling() {
+        // The off-refusal used to say `=1`, which the exact reader reads as off. Every former
+        // spelling is checked, not only `1`.
         let mut sources = Vec::new();
         rust_sources(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
             &mut sources,
         );
         assert!(!sources.is_empty(), "no sources were read");
-        let former = format!("{BROWSER_AGENT}=1");
+        for former in FORMER_SPELLINGS {
+            let set_it = format!("{BROWSER_AGENT}={former}");
+            for (path, text) in &sources {
+                assert!(
+                    !text.contains(set_it.as_str()),
+                    "{path} tells an operator to set {set_it}, which the exact reader reads as off"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_off_hint_names_the_exact_value() {
+        // A hint that only says the switch is "not configured" hides a value that is set but
+        // reads as off. Each off hint that names the switch must give the exact value to set.
+        let mut sources = Vec::new();
+        rust_sources(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut sources,
+        );
+        let exact = format!("{BROWSER_AGENT}=true");
+        let mut hints = 0;
         for (path, text) in &sources {
-            assert!(
-                !text.contains(former.as_str()),
-                "{path} tells an operator to set {former}, which the exact reader reads as off"
-            );
+            for line in text.lines() {
+                if line.contains("unavailable") && line.contains(BROWSER_AGENT) {
+                    hints += 1;
+                    assert!(
+                        line.contains(exact.as_str()),
+                        "{path} has an off hint that does not name the exact value: {}",
+                        line.trim()
+                    );
+                }
+            }
+        }
+        // The browser-agent loop, the recipe run's planner and the browser MCP tool each have one.
+        assert!(
+            hints >= 3,
+            "expected the three browser-agent off hints, found {hints}"
+        );
+    }
+
+    #[test]
+    fn the_operator_doc_never_tells_an_operator_to_set_a_former_spelling() {
+        // The wiring table names the switch. A line that shows a former spelling as its value
+        // must also say that the agent stays off: the doc may warn about a value, never ask for it.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../docs/core-research/execution-core.md");
+        let doc = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {} ({error})", path.display()));
+        let exact = format!("{BROWSER_AGENT}=true");
+        assert!(
+            doc.contains(exact.as_str()),
+            "{} must name the exact value {exact}",
+            path.display()
+        );
+        for line in doc.lines().filter(|line| line.contains(BROWSER_AGENT)) {
+            for former in FORMER_SPELLINGS {
+                let set_it = format!("{BROWSER_AGENT}={former}");
+                assert!(
+                    !line.contains(set_it.as_str()) || line.to_ascii_lowercase().contains("off"),
+                    "{} tells an operator to set {set_it} and does not say it stays off",
+                    path.display()
+                );
+            }
         }
     }
 }
