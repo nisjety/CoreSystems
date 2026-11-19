@@ -3424,6 +3424,12 @@ mod auxiliary_security_tests {
     }
 }
 
+// A PostgreSQL stand-in that records the parameters a query is sent with. It is shared with the integration
+// tests (`tests/common`), which is why it is included by path.
+#[cfg(test)]
+#[path = "../../tests/common/fake_pg.rs"]
+mod fake_pg;
+
 // WS14-S5: the room-file listing, the Space grants union and the keyset cursor.
 // The union tests build the real pipeline wiring from a minimal environment
 // (every backend is a closed local port, nothing is reached) with a recording
@@ -3484,6 +3490,14 @@ mod space_files_tests {
     }
 
     async fn pipeline_with(visibility: Arc<dyn VisibilityClient>) -> AppState {
+        pipeline_over(visibility, None).await
+    }
+
+    /// The pipeline wiring over `database`; with none, over a pool that is already closed, so nothing reaches one.
+    async fn pipeline_over(
+        visibility: Arc<dyn VisibilityClient>,
+        database: Option<sqlx::PgPool>,
+    ) -> AppState {
         let config: Config = envy::from_iter(vec![
             ("DATABASE_URL".to_string(), "postgres://unused:unused@127.0.0.1:1/unused".to_string()),
             ("QDRANT_URL".to_string(), "http://127.0.0.1:1".to_string()),
@@ -3496,8 +3510,14 @@ mod space_files_tests {
             ("MODEL_PLANE_INFERENCE_SERVICE_API_KEY".to_string(), "space-files-test-dummy-0001".to_string()),
         ])
         .expect("minimal environment deserializes with the production field defaults");
-        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pool configuration");
-        pool.close().await;
+        let pool = match database {
+            Some(pool) => pool,
+            None => {
+                let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pool configuration");
+                pool.close().await;
+                pool
+            }
+        };
         let qdrant = qdrant_client::Qdrant::from_url(&config.qdrant_url)
             .skip_compatibility_check()
             .build()
@@ -3829,5 +3849,303 @@ mod space_files_tests {
             panic!("a Space listing needs a verified Space decision");
         };
         assert_eq!(listing.status, axum::http::StatusCode::FORBIDDEN);
+    }
+
+    // ── D18: the member's history window, at the handler boundary ──────────────────────────────────────
+    //
+    // `tests/space_history_floor.rs` reads the SQL and, given a disposable PostgreSQL, runs it. Neither shows that a
+    // handler SENDS the window of the member's decision: sqlx binds are typed at run time, so a handler that binds
+    // no floor, or another one, compiles and keeps the SQL tests green. These run the real handlers with a real
+    // signed decision against `fake_pg`, which records the parameters of every statement it runs.
+
+    const FLOOR: &str = "2026-11-10T12:00:00Z";
+
+    /// The window a decision carries: none, an instant (a per-member since_date or a join) or a revision with no
+    /// instant (a since_join ROOM, which the engine cannot place a row against).
+    #[derive(Clone, Copy, Debug)]
+    enum Window {
+        Open,
+        Since(&'static str),
+        Closed,
+    }
+
+    impl Window {
+        fn claims(self) -> serde_json::Value {
+            match self {
+                Window::Open => serde_json::json!({}),
+                Window::Since(at) => serde_json::json!({ "history_floor_at": at }),
+                Window::Closed => serde_json::json!({ "history_floor_revision": 5 }),
+            }
+        }
+
+        /// The instant a read of the room is expected to bind; `None` is SQL NULL.
+        fn instant(self) -> Option<chrono::DateTime<chrono::Utc>> {
+            match self {
+                Window::Since(at) => Some(
+                    chrono::DateTime::parse_from_rfc3339(at)
+                        .expect("test instant")
+                        .with_timezone(&chrono::Utc),
+                ),
+                Window::Open | Window::Closed => None,
+            }
+        }
+    }
+
+    const WINDOWS: [Window; 3] = [Window::Open, Window::Since(FLOOR), Window::Closed];
+
+    fn b64(bytes: &[u8]) -> String {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        URL_SAFE_NO_PAD.encode(bytes)
+    }
+
+    const DECISION_KEY_ID: &str = "history-floor-test";
+
+    fn decision_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[41; 32])
+    }
+
+    /// Trusts the key `signed_decision` signs with. The variable is read only by the decision verifier, and every
+    /// test in this binary that sets it sets the same value, so setting it once is enough.
+    fn trust_decision_key() {
+        static TRUSTED: std::sync::Once = std::sync::Once::new();
+        TRUSTED.call_once(|| {
+            let public = b64(&decision_key().verifying_key().to_bytes());
+            std::env::set_var(
+                "CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON",
+                format!("{{\"{DECISION_KEY_ID}\":\"{public}\"}}"),
+            );
+        });
+    }
+
+    /// A retrieval decision for `user-1` of `org-1` in the room, signed as Control signs one, carrying `window`.
+    fn signed_decision(window: Window) -> String {
+        use ed25519_dalek::Signer as _;
+        let now = chrono::Utc::now();
+        let mut claims = serde_json::json!({
+            "decision_ref": "decision-1", "org_id": "org-1", "space_ref": SPACE, "subject_id": "user-1",
+            "service_audience": "data-plane-retrieval", "recipient_audience_ref": "audience:user-1",
+            "recipient_audience_hash": "audience-hash:user-1", "recipient_audience_revision": 1,
+            "privacy_policy_ref": "privacy:org-1", "resource_authorization_ref": "resource:1",
+            "authority_revision": 1, "permissions": ["retrieval:read"], "purpose": "assistant_collaboration",
+            "lawful_basis": "contract", "privacy_class": "internal", "retention_class": "standard",
+            "residency": "swedencentral", "deletion_scope": "space", "nonce": "nonce-1",
+            "issued_at": now.to_rfc3339(), "expires_at": (now + chrono::Duration::minutes(5)).to_rfc3339(),
+        });
+        for (name, value) in window.claims().as_object().expect("window claims") {
+            claims[name.as_str()] = value.clone();
+        }
+        let head = format!(
+            "v2.{}.{}",
+            b64(DECISION_KEY_ID.as_bytes()),
+            b64(&serde_json::to_vec(&claims).expect("claims"))
+        );
+        let signature = decision_key().sign(head.as_bytes());
+        format!("{head}.{}", b64(&signature.to_bytes()))
+    }
+
+    /// One room under one member's window: a pipeline whose database is the recording server, and the headers
+    /// that present the member's signed decision.
+    struct Room {
+        fake: fake_pg::FakePg,
+        pipeline: AppState,
+        headers: HeaderMap,
+    }
+
+    async fn room(window: Window) -> Room {
+        trust_decision_key();
+        let fake = fake_pg::FakePg::start().await;
+        // The room's Data binding, which the verified decision is resolved against.
+        fake.answer(
+            "FROM space_retrieval_bindings",
+            fake_pg::Reply {
+                columns: vec![
+                    ("workspace_id", fake_pg::OID_TEXT),
+                    ("collection_id", fake_pg::OID_TEXT),
+                    ("owner_resource_ref", fake_pg::OID_TEXT),
+                ],
+                rows: vec![vec![fake_pg::text("ws-1"), None, fake_pg::text("owner:1")]],
+            },
+        );
+        let pipeline = pipeline_over(recording(&[], &[]), Some(fake.pool())).await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-space-decision",
+            signed_decision(window).parse().expect("a header value"),
+        );
+        Room { fake, pipeline, headers }
+    }
+
+    #[tokio::test]
+    async fn the_by_id_lookups_send_the_members_floor_and_a_closed_window_reads_nothing() {
+        for window in WINDOWS {
+            let room = room(window).await;
+            retrieve_sources(
+                State(room.pipeline.clone()),
+                Some(user(&[])),
+                room.headers.clone(),
+                Json(SourcesRequest {
+                    org_id: "org-1".to_string(),
+                    document_ids: vec!["org-1:doc-1".to_string()],
+                }),
+            )
+            .await
+            .map_err(|error| error.error.to_string())
+            .unwrap_or_else(|error| panic!("{window:?}: the lookup runs: {error}"));
+            retrieve_freshness(
+                State(room.pipeline.clone()),
+                Some(user(&[])),
+                room.headers.clone(),
+                Json(FreshnessRequest {
+                    org_id: "org-1".to_string(),
+                    document_ids: vec!["org-1:doc-1".to_string()],
+                }),
+            )
+            .await
+            .map_err(|error| error.error.to_string())
+            .unwrap_or_else(|error| panic!("{window:?}: the freshness read runs: {error}"));
+
+            for (name, sql) in [("sources", SOURCES_SQL), ("freshness", FRESHNESS_SQL)] {
+                let runs = room.fake.runs_of(sql);
+                if matches!(window, Window::Closed) {
+                    assert!(runs.is_empty(), "{window:?} {name}: a closed window answers with no read");
+                    continue;
+                }
+                assert_eq!(runs.len(), 1, "{window:?} {name}: {:?}", room.fake.executed());
+                // `$5` is the room of the verified decision and `$6` is the member's window.
+                assert_eq!(runs[0].text(4).as_deref(), Some(SPACE), "{window:?} {name}");
+                assert_eq!(runs[0].instant(5), window.instant(), "{window:?} {name}: the window the read was sent");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_room_file_read_sends_the_members_floor_and_a_closed_window_answers_as_a_missing_file() {
+        for window in WINDOWS {
+            let room = room(window).await;
+            let response = space_document(
+                State(room.pipeline.clone()),
+                Some(user(&[])),
+                room.headers.clone(),
+                Json(SpaceDocumentRequest {
+                    document_id: "org-1:doc-1".to_string(),
+                    max_chars: None,
+                }),
+            )
+            .await
+            .map_err(|error| error.error.to_string())
+            .unwrap_or_else(|error| panic!("{window:?}: the read runs: {error}"));
+            // The server has no such row, so every window answers the 404 of a missing file.
+            assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND, "{window:?}");
+
+            let runs = room.fake.runs_of(SPACE_DOCUMENT_SQL);
+            if matches!(window, Window::Closed) {
+                assert!(runs.is_empty(), "a closed window reads nothing: {:?}", room.fake.executed());
+                continue;
+            }
+            assert_eq!(runs.len(), 1, "{window:?}: {:?}", room.fake.executed());
+            // `$2` is the room, `$3` the file, `$6` the member's window.
+            assert_eq!(runs[0].text(1).as_deref(), Some(SPACE), "{window:?}");
+            assert_eq!(runs[0].text(2).as_deref(), Some("org-1:doc-1"), "{window:?}");
+            assert_eq!(runs[0].instant(5), window.instant(), "{window:?}: the window the read was sent");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_room_listing_sends_the_members_floor_for_its_files_and_for_its_wiki_pages() {
+        for window in WINDOWS {
+            let room = room(window).await;
+            space_knowledge(
+                State(room.pipeline.clone()),
+                Some(user(&[])),
+                room.headers.clone(),
+                Json(SpaceKnowledgeRequest {
+                    limit: None,
+                    types: None,
+                    cursor: None,
+                }),
+            )
+            .await
+            .map_err(|error| error.error.to_string())
+            .unwrap_or_else(|error| panic!("{window:?}: the listing runs: {error}"));
+
+            let files = room.fake.runs_of(SPACE_DOCUMENTS_SQL);
+            let pages = room.fake.runs_of(SPACE_WIKI_PAGES_SQL);
+            if matches!(window, Window::Closed) {
+                assert!(
+                    files.is_empty() && pages.is_empty(),
+                    "a closed window lists nothing: {:?}",
+                    room.fake.executed()
+                );
+                continue;
+            }
+            assert_eq!(files.len(), 1, "{window:?}: {:?}", room.fake.executed());
+            assert_eq!(pages.len(), 1, "{window:?}: {:?}", room.fake.executed());
+            // The files: `$2` is the room and `$9` the window. The wiki pages: `$2` is the workspace and `$4` the window.
+            assert_eq!(files[0].text(1).as_deref(), Some(SPACE), "{window:?}");
+            assert_eq!(files[0].instant(8), window.instant(), "{window:?}: the window the file listing was sent");
+            assert_eq!(pages[0].text(1).as_deref(), Some("ws-1"), "{window:?}");
+            assert_eq!(pages[0].instant(3), window.instant(), "{window:?}: the window the wiki listing was sent");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_wiki_retrieval_sends_the_members_floor_and_a_closed_window_returns_no_page() {
+        for window in WINDOWS {
+            let room = room(window).await;
+            retrieve_wiki(
+                State(room.pipeline.clone()),
+                Some(user(&[])),
+                room.headers.clone(),
+                Json(WikiRetrieveRequest {
+                    org_id: "org-1".to_string(),
+                    query: "plan".to_string(),
+                    limit: 10,
+                }),
+            )
+            .await
+            .map_err(|error| error.error.to_string())
+            .unwrap_or_else(|error| panic!("{window:?}: the search runs: {error}"));
+
+            let runs = room.fake.runs_containing("FROM wiki_pages p");
+            if matches!(window, Window::Closed) {
+                assert!(runs.is_empty(), "a closed window searches nothing: {:?}", room.fake.executed());
+                continue;
+            }
+            assert_eq!(runs.len(), 1, "{window:?}: {:?}", room.fake.executed());
+            // `$7` is the member's window.
+            assert_eq!(runs[0].instant(6), window.instant(), "{window:?}: the window the search was sent");
+        }
+    }
+
+    // The room's document set is read once, when the decision is resolved, with the window of the decision. Every
+    // arm that pins itself to the set (the dense search, the by-id scope) starts from rows inside the window.
+    #[tokio::test]
+    async fn resolving_the_decision_reads_the_rooms_document_set_with_the_members_floor() {
+        for window in WINDOWS {
+            let room = room(window).await;
+            retrieve_sources(
+                State(room.pipeline.clone()),
+                Some(user(&[])),
+                room.headers.clone(),
+                Json(SourcesRequest {
+                    org_id: "org-1".to_string(),
+                    document_ids: vec!["org-1:doc-1".to_string()],
+                }),
+            )
+            .await
+            .map_err(|error| error.error.to_string())
+            .unwrap_or_else(|error| panic!("{window:?}: the lookup runs: {error}"));
+
+            let set = room
+                .fake
+                .runs_containing("SELECT document_id FROM documents WHERE org_id = $1 AND space_ref = $2");
+            if matches!(window, Window::Closed) {
+                assert!(set.is_empty(), "a closed window reads no set: {:?}", room.fake.executed());
+                continue;
+            }
+            assert_eq!(set.len(), 1, "{window:?}: {:?}", room.fake.executed());
+            assert_eq!(set[0].text(1).as_deref(), Some(SPACE), "{window:?}");
+            assert_eq!(set[0].instant(3), window.instant(), "{window:?}: the window the document set was read with");
+        }
     }
 }

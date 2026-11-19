@@ -5,6 +5,9 @@
 
 use sqlx::PgPool;
 
+// A PostgreSQL stand-in that records the parameters a query is sent with, for the hermetic tests.
+pub mod fake_pg;
+
 /// Creates the RLS runtime role and grants it the fixture schema.
 ///
 /// # Why a test fixture needs a database role at all

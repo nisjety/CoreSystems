@@ -622,6 +622,24 @@ pub struct SpaceHistoryGate<'a> {
     pub floor: HistoryFloor,
 }
 
+impl<'a> SpaceHistoryGate<'a> {
+    /// The gate of one retrieval: the window the verified Space scope carries, or none for an unscoped read.
+    /// This is the one place the chain's gate takes its window from, so a retrieval cannot build a gate that
+    /// forgets the member's window without this being the line that changed.
+    #[must_use]
+    pub fn for_scope(
+        pool: &'a PgPool,
+        org_id: &'a str,
+        scope: Option<&crate::space_scope::ResolvedSpaceRetrievalScope>,
+    ) -> Self {
+        Self {
+            pool,
+            org_id,
+            floor: crate::space_scope::history_floor_of(scope),
+        }
+    }
+}
+
 /// Keeps the candidates the window admits. `entered` maps a document id to the instant it entered the room;
 /// a candidate with no entry has no reliable source instant and is dropped by a `Since` window. Pure, so the
 /// rule is tested without a database.
@@ -959,6 +977,48 @@ mod tests {
         ] {
             assert_ne!(STAGE_SPACE_HISTORY_FLOOR, other);
         }
+    }
+
+    // The gate of a retrieval takes the window of the verified scope it runs under. A gate handed no window passes
+    // every candidate from before the floor, and nothing else in the chain looks at the instant.
+    #[tokio::test]
+    async fn the_gate_of_a_retrieval_carries_the_window_of_its_verified_scope() {
+        use crate::space_scope::{ResolvedSpaceRetrievalScope, VerifiedSpaceAuthority};
+        let pool = sqlx::PgPool::connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .expect("lazy pool configuration");
+        let scope = |floor| ResolvedSpaceRetrievalScope {
+            authority: VerifiedSpaceAuthority {
+                authority_revision: 1,
+                decision_ref: "decision-1".into(),
+                history_floor: floor,
+                org_id: "org-1".into(),
+                privacy_policy_ref: "privacy-1".into(),
+                recipient_audience_hash: "audience-hash-1".into(),
+                recipient_audience_ref: "audience-1".into(),
+                recipient_audience_revision: 1,
+                resource_authorization_ref: "resource-1".into(),
+                space_ref: "space:org-1:room".into(),
+            },
+            collection_id: None,
+            document_ids: Vec::new(),
+            document_ids_truncated: false,
+            owner_resource_ref: "owner-1".into(),
+            workspace_id: Some("workspace-1".into()),
+        };
+        for floor in [
+            HistoryFloor::Open,
+            HistoryFloor::Since(instant("2026-11-18T09:30:00Z")),
+            HistoryFloor::Closed,
+        ] {
+            let gate = SpaceHistoryGate::for_scope(&pool, "org-1", Some(&scope(floor)));
+            assert_eq!(gate.floor, floor);
+            assert_eq!(gate.org_id, "org-1");
+        }
+        // An unscoped read has no window.
+        assert_eq!(
+            SpaceHistoryGate::for_scope(&pool, "org-1", None).floor,
+            HistoryFloor::Open
+        );
     }
 
     #[test]

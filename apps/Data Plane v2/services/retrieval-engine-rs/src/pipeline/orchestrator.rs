@@ -1581,11 +1581,11 @@ impl RetrievalPipeline {
         // D18: the member's history window, re-checked on the candidates that survived. An enforcement
         // stage like the visibility gate, so it also runs before the truncation to `top_n`: a candidate
         // the window hides must not take one of the caller's slots. `Open` for an unscoped read.
-        let space_floor_stage = postprocess::SpaceHistoryGate {
-            pool: &self.pool,
-            org_id: &req.org_id,
-            floor: crate::space_scope::history_floor_of(req.space_scope.as_ref()),
-        };
+        let space_floor_stage = postprocess::SpaceHistoryGate::for_scope(
+            &self.pool,
+            &req.org_id,
+            req.space_scope.as_ref(),
+        );
         let top_n_trim = postprocess::Truncate {
             limit: top_n,
             label: postprocess::STAGE_TRUNCATE_TOP_N,

@@ -13,17 +13,22 @@
 //! the exact SQL and the exact functions the handlers run.
 
 use chrono::{DateTime, Utc};
+use common::fake_pg::{text, timestamptz, FakePg, Reply, OID_TEXT, OID_TIMESTAMPTZ};
 use retrieval_engine::pipeline::postprocess::{
     NodePostprocessor, PostprocessCtx, SpaceHistoryGate,
 };
 use retrieval_engine::pipeline::types::{ScoredCandidate, ZdrMode};
 use retrieval_engine::search::wiki;
-use retrieval_engine::space_scope::{resolve_space_document_ids, HistoryFloor};
+use retrieval_engine::space_scope::{
+    resolve_space_document_ids, resolve_space_retrieval_scope, HistoryFloor,
+    ResolvedSpaceRetrievalScope, VerifiedSpaceAuthority,
+};
 use sqlx::PgPool;
 
 mod common;
 
 const API_SOURCE: &str = include_str!("../src/api/mod.rs");
+const ORCHESTRATOR_SOURCE: &str = include_str!("../src/pipeline/orchestrator.rs");
 
 /// The string literal assigned to `const <name>: &str =` in `src/api/mod.rs`.
 fn sql_const(name: &str) -> String {
@@ -93,6 +98,215 @@ fn every_room_read_carries_the_window_as_a_predicate_on_the_instant_a_document_e
     );
     assert!(wiki_listing.contains("page_status = 'published'"));
     assert!(wiki_listing.contains("ORDER BY updated_at DESC LIMIT $3"));
+}
+
+// ─────────────── hermetic, against a server that records what it is sent ───────────────
+//
+// The shape check above reads the SQL; it cannot tell a read that binds the member's window from one that binds
+// nothing, because sqlx binds are typed at run time. These run the real functions (and, in `src/api/mod.rs`, the
+// real handlers) against `common::fake_pg`, which records the parameters of every statement, so a read that stops
+// binding the floor fails a default `cargo test`. The predicate itself is the SQL, and the gated tests below run that.
+
+fn scope_with(floor: HistoryFloor) -> ResolvedSpaceRetrievalScope {
+    ResolvedSpaceRetrievalScope {
+        authority: VerifiedSpaceAuthority {
+            authority_revision: 1,
+            decision_ref: "decision-1".into(),
+            history_floor: floor,
+            org_id: "org".into(),
+            privacy_policy_ref: "privacy-1".into(),
+            recipient_audience_hash: "audience-hash-1".into(),
+            recipient_audience_ref: "audience-1".into(),
+            recipient_audience_revision: 1,
+            resource_authorization_ref: "resource-1".into(),
+            space_ref: SPACE.into(),
+        },
+        collection_id: None,
+        document_ids: Vec::new(),
+        document_ids_truncated: false,
+        owner_resource_ref: "owner-1".into(),
+        workspace_id: Some("workspace-1".into()),
+    }
+}
+
+const ROOM_DOCUMENT_IDS: &str = "SELECT document_id FROM documents WHERE org_id = $1 AND space_ref = $2";
+
+fn room_document_ids() -> Reply {
+    Reply {
+        columns: vec![("document_id", OID_TEXT)],
+        rows: vec![vec![text("org:new")], vec![text("org:edge")]],
+    }
+}
+
+#[tokio::test]
+async fn the_room_document_set_read_binds_the_members_floor_and_a_closed_window_reads_nothing() {
+    let fake = FakePg::start().await;
+    fake.answer(ROOM_DOCUMENT_IDS, room_document_ids());
+    let pool = fake.pool();
+    let floor = at(FLOOR);
+
+    // No window: the read runs and its window parameter is NULL.
+    let (ids, truncated) = resolve_space_document_ids(&pool, "org", SPACE, HistoryFloor::Open)
+        .await
+        .expect("an open window reads the room");
+    assert_eq!(ids, ["org:new", "org:edge"]);
+    assert!(!truncated);
+    // A window: the same read, with the instant as its window parameter.
+    resolve_space_document_ids(&pool, "org", SPACE, HistoryFloor::from_claims(Some(floor), 0).unwrap())
+        .await
+        .expect("a window reads the room");
+    let runs = fake.runs_containing(ROOM_DOCUMENT_IDS);
+    assert_eq!(runs.len(), 2, "{:?}", fake.executed());
+    assert_eq!(runs[0].instant(3), None, "no window binds NULL");
+    assert_eq!(runs[1].instant(3), Some(floor), "a window binds its instant");
+    assert_eq!(runs[1].text(0).as_deref(), Some("org"));
+    assert_eq!(runs[1].text(1).as_deref(), Some(SPACE));
+
+    // A window the engine cannot place any document against reads nothing, and says so as an empty room.
+    let (ids, truncated) =
+        resolve_space_document_ids(&pool, "org", SPACE, HistoryFloor::from_claims(None, 4).unwrap())
+            .await
+            .expect("a closed window answers");
+    assert!(ids.is_empty() && !truncated);
+    assert_eq!(fake.runs_containing(ROOM_DOCUMENT_IDS).len(), 2, "a closed window ran no read");
+}
+
+#[tokio::test]
+async fn resolving_a_room_narrows_its_document_set_to_the_floor_of_the_verified_authority() {
+    const BINDING: &str = "FROM space_retrieval_bindings WHERE org_id = $1";
+    let fake = FakePg::start().await;
+    fake.answer(
+        BINDING,
+        Reply {
+            columns: vec![
+                ("workspace_id", OID_TEXT),
+                ("collection_id", OID_TEXT),
+                ("owner_resource_ref", OID_TEXT),
+            ],
+            rows: vec![vec![text("workspace-1"), None, text("owner-1")]],
+        },
+    );
+    fake.answer(ROOM_DOCUMENT_IDS, room_document_ids());
+    let pool = fake.pool();
+    let floor = at(FLOOR);
+
+    let windowed = resolve_space_retrieval_scope(&pool, scope_with(HistoryFloor::Since(floor)).authority)
+        .await
+        .expect("the room resolves");
+    assert_eq!(windowed.authority.history_floor, HistoryFloor::Since(floor));
+    assert_eq!(windowed.document_ids, ["org:new", "org:edge"]);
+    let runs = fake.runs_containing(ROOM_DOCUMENT_IDS);
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].instant(3), Some(floor), "the floor of the authority is the window of the document set");
+
+    // No window binds NULL; a closed window never reads the set.
+    resolve_space_retrieval_scope(&pool, scope_with(HistoryFloor::Open).authority)
+        .await
+        .expect("an unwindowed room resolves");
+    assert_eq!(fake.runs_containing(ROOM_DOCUMENT_IDS)[1].instant(3), None);
+    let closed = resolve_space_retrieval_scope(&pool, scope_with(HistoryFloor::Closed).authority)
+        .await
+        .expect("a closed room resolves");
+    assert!(closed.document_ids.is_empty());
+    assert_eq!(fake.runs_containing(ROOM_DOCUMENT_IDS).len(), 2);
+    assert_eq!(fake.runs_containing(BINDING).len(), 3, "each resolution reads its binding");
+}
+
+#[tokio::test]
+async fn the_history_gate_of_a_scoped_retrieval_drops_the_candidates_that_entered_the_room_before_its_floor() {
+    let fake = FakePg::start().await;
+    let floor = at(FLOOR);
+    fake.answer(
+        "SELECT document_id, created_at FROM documents WHERE document_id = ANY($1)",
+        Reply {
+            columns: vec![("document_id", OID_TEXT), ("created_at", OID_TIMESTAMPTZ)],
+            rows: vec![
+                vec![text("org:old"), timestamptz(floor - chrono::Duration::microseconds(1))],
+                vec![text("org:edge"), timestamptz(floor)],
+                vec![text("org:new"), timestamptz(floor + chrono::Duration::days(2))],
+            ],
+        },
+    );
+    let pool = fake.pool();
+    let candidates = || {
+        ["old", "edge", "new", "gone"]
+            .iter()
+            .map(|id| candidate(&format!("org:{id}")))
+            .collect::<Vec<_>>()
+    };
+    let survivors = |scope: Option<ResolvedSpaceRetrievalScope>| {
+        let (pool, nodes) = (pool.clone(), candidates());
+        async move {
+            let gate = SpaceHistoryGate::for_scope(&pool, "org", scope.as_ref());
+            let mut ctx = PostprocessCtx::new("what is in the room", ZdrMode::Disabled, false);
+            gate.postprocess(nodes, &mut ctx)
+                .await
+                .expect("the gate reads")
+                .into_iter()
+                .map(|c| c.document_id.trim_start_matches("org:").to_string())
+                .collect::<Vec<_>>()
+        }
+    };
+
+    // The window of the verified scope is the window of the gate: what the database says entered the room before
+    // it is dropped, and so is a candidate the database has no row for.
+    assert_eq!(survivors(Some(scope_with(HistoryFloor::Since(floor)))).await, ["edge", "new"]);
+    let lookups = fake.runs_containing("FROM documents WHERE document_id = ANY($1)");
+    assert_eq!(lookups.len(), 1);
+    // The lookup is org-scoped: the transaction it ran in was opened for the requesting org.
+    let scoped = fake.runs_containing("SELECT set_config($1, $2, true)");
+    assert_eq!(scoped.last().and_then(|run| run.text(1)).as_deref(), Some("org"));
+
+    // No window passes everything without reading; a closed one passes nothing without reading.
+    assert_eq!(survivors(Some(scope_with(HistoryFloor::Open))).await.len(), 4);
+    assert_eq!(survivors(None).await.len(), 4);
+    assert!(survivors(Some(scope_with(HistoryFloor::Closed))).await.is_empty());
+    assert_eq!(fake.runs_containing("FROM documents WHERE document_id = ANY($1)").len(), 1);
+}
+
+#[tokio::test]
+async fn the_room_wiki_search_binds_the_members_floor() {
+    let fake = FakePg::start().await;
+    let pool = fake.pool();
+    let floor = at(FLOOR);
+    let workspaces = vec!["workspace-1".to_string()];
+    for since in [None, Some(floor)] {
+        wiki::wiki_search_since(&pool, "history window", "org", 20, None, &workspaces, &[], since)
+            .await
+            .expect("the search runs");
+    }
+    // `wiki_search` is `wiki_search_since` with no window.
+    wiki::wiki_search(&pool, "history window", "org", 20, None, &workspaces, &[])
+        .await
+        .expect("the search runs");
+    let runs = fake.runs_containing("FROM wiki_pages");
+    assert_eq!(runs.len(), 3, "{:?}", fake.executed());
+    assert_eq!(runs[0].instant(6), None);
+    assert_eq!(runs[1].instant(6), Some(floor), "a window binds its instant");
+    assert_eq!(runs[2].instant(6), None, "no window binds NULL");
+    assert_eq!(runs[1].text(1).as_deref(), Some("history window"));
+}
+
+// The chain holds the history gate before the truncation to `top_n`, and builds it from the verified scope and
+// from nothing else: a gate written out by hand in the orchestrator is one whose window nothing here proves.
+#[test]
+fn the_retrieval_chain_builds_its_history_gate_from_the_verified_scope_and_runs_it_before_the_trim() {
+    let call = ORCHESTRATOR_SOURCE
+        .find("postprocess::SpaceHistoryGate::for_scope(")
+        .expect("the orchestrator no longer builds its history gate through `SpaceHistoryGate::for_scope`");
+    let call = &ORCHESTRATOR_SOURCE[call..];
+    let call = &call[..call.find(';').expect("the call ends")];
+    assert!(
+        call.contains("req.space_scope.as_ref()"),
+        "the gate is not given the request's verified scope: {call}"
+    );
+    assert!(
+        !ORCHESTRATOR_SOURCE.contains("SpaceHistoryGate {"),
+        "the orchestrator builds a history gate by hand"
+    );
+    let gate = ORCHESTRATOR_SOURCE.find("&space_floor_stage,").expect("the chain holds the history gate");
+    let trim = ORCHESTRATOR_SOURCE.find("&top_n_trim,").expect("the chain holds the top_n trim");
+    assert!(gate < trim, "a candidate the window hides must not take one of the caller's slots");
 }
 
 // ───────────────────────────── database (gated) ─────────────────────────────
