@@ -2578,6 +2578,23 @@
       "reason": "Reads one room browser evidence image (R4); the room read gate refuses a zero-retention credential (typed 412) before Session Core."
     },
     {
+      "id": "mg:POST:/v1/spaces/:space_id/browser/runs/:run_id/stop",
+      "kind": "route",
+      "plane": "model",
+      "service": "model-gateway",
+      "method": "POST",
+      "path": "/v1/spaces/:space_id/browser/runs/:run_id/stop",
+      "handler": "space_routes/browser.rs::room_browser_run_stop",
+      "decision_type": "browser-run-stop-decision",
+      "min_role": "authenticated",
+      "zdr_class": "refuse",
+      "basis": "guard:zdr_or_refuse",
+      "idempotency": "unspecified",
+      "flag": "SPACE_BROWSER_RUN_API",
+      "payload_allow_list": [],
+      "reason": "The starter's Stop of a room browser run (D21h): writes a RUN_CANCELLED receipt and a result turn under the caller's credential, so a zero-retention or waived token is refused (typed 412) before the decision is read. A Space under ZDR is still stopped (D23); only the result turn is left out."
+    },
+    {
       "id": "mg:PATCH:/v1/cron/:id",
       "kind": "route",
       "plane": "model",
