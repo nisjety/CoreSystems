@@ -6,9 +6,11 @@ import (
 	"time"
 )
 
-// D18 canvas rules. A canvas read carries the member's floor so the canvas verifier can window the canvas by time, and
-// stays refused while SPACE_CANVAS_HISTORY_WINDOW is off. A write under a floor is refused unless it only creates a
-// canvas. A run action never writes under a floor.
+// D18/D21m canvas rules. A canvas read or a save carries the member's timestamp floor so the canvas verifier can
+// window the canvas by time, and both stay refused while SPACE_CANVAS_HISTORY_WINDOW is off (ResolveSharedCanvasDecisionEvidence
+// gates on op; IssueCanvasDecision below trusts that gate and never re-checks it). A save under the older WS04-S11
+// revision floor is still refused outright: D21m touches only the timestamp floor. A restore is refused under any
+// floor, switch or not — D21m hides every version from before the window. A run action never writes under any floor.
 
 func canvasWindowInstant() time.Time {
 	return time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
@@ -100,26 +102,46 @@ func TestIssueCanvasReadCarriesTheTimestampFloorAndTheDigestIgnoresIt(t *testing
 	}
 }
 
-// A save or a restore is refused under any floor: a save answers a head-moved conflict that names the head, and a
-// restore re-heads an older version. Without a floor both are allowed for an editor.
-func TestIssueCanvasSaveAndRestoreAreRefusedUnderAnyFloor(t *testing.T) {
+// A restore is refused under any floor, timestamp or revision: it re-heads an older version, which D21m never
+// allows a windowed member to see. Without a floor it is allowed for an editor.
+func TestIssueCanvasRestoreIsRefusedUnderAnyFloor(t *testing.T) {
 	now := canvasWindowInstant().Add(24 * time.Hour)
+	request := canvasRestoreRequest()
+	if _, err := IssueCanvasDecision(validSharedCanvasEvidence("editor"), request, now); err != nil {
+		t.Fatalf("an unfloored editor's restore must be issued: %v", err)
+	}
 	floors := map[string]func(PersonalThreadDecisionEvidence) PersonalThreadDecisionEvidence{
 		"timestamp": withTimestampFloor,
 		"revision":  withRevisionFloor,
 	}
 	for name, floor := range floors {
-		for op, request := range map[string]CanvasDecisionRequest{"save": canvasSaveRequest(), "restore": canvasRestoreRequest()} {
-			t.Run(name+"/"+op, func(t *testing.T) {
-				if _, err := IssueCanvasDecision(validSharedCanvasEvidence("editor"), request, now); err != nil {
-					t.Fatalf("an unfloored editor's %s must be issued: %v", op, err)
-				}
-				_, err := IssueCanvasDecision(floor(validSharedCanvasEvidence("editor")), request, now)
-				if !errors.Is(err, ErrCanvasHistoryFloorUnsupported) {
-					t.Fatalf("a %s under a %s floor must be refused, got %v", op, name, err)
-				}
-			})
-		}
+		t.Run(name, func(t *testing.T) {
+			_, err := IssueCanvasDecision(floor(validSharedCanvasEvidence("editor")), request, now)
+			if !errors.Is(err, ErrCanvasHistoryFloorUnsupported) {
+				t.Fatalf("a restore under a %s floor must be refused, got %v", name, err)
+			}
+		})
+	}
+}
+
+// D21m: a save under a D18 timestamp floor alone is allowed and carries the floor (the current canvas is
+// current state, not history; fail-closed for an unwindowed build sits in ResolveSharedCanvasDecisionEvidence,
+// not here). A save under the older WS04-S11 revision floor is still refused outright.
+func TestIssueCanvasSaveIsAllowedUnderATimestampFloorButNotARevisionFloor(t *testing.T) {
+	now := canvasWindowInstant().Add(24 * time.Hour)
+	request := canvasSaveRequest()
+	if _, err := IssueCanvasDecision(validSharedCanvasEvidence("editor"), request, now); err != nil {
+		t.Fatalf("an unfloored editor's save must be issued: %v", err)
+	}
+	decision, err := IssueCanvasDecision(withTimestampFloor(validSharedCanvasEvidence("editor")), request, now)
+	if err != nil {
+		t.Fatalf("a save under a timestamp floor must be issued: %v", err)
+	}
+	if decision.HistoryFloorAt == nil || !decision.HistoryFloorAt.Equal(canvasWindowInstant()) {
+		t.Fatalf("the save must carry the member's floor, got %v", decision.HistoryFloorAt)
+	}
+	if _, err := IssueCanvasDecision(withRevisionFloor(validSharedCanvasEvidence("editor")), request, now); !errors.Is(err, ErrCanvasHistoryFloorUnsupported) {
+		t.Fatalf("a save under a revision floor must still be refused, got %v", err)
 	}
 }
 

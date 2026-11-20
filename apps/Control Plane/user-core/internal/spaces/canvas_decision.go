@@ -68,11 +68,12 @@ const CanvasHistoryFloorCode = "space_history_floor_unsupported"
 // is CanvasHistoryFloorCode.
 var ErrCanvasHistoryFloorUnsupported = errors.New(CanvasHistoryFloorCode)
 
-// SetCanvasHistoryWindow turns the SPACE_CANVAS_HISTORY_WINDOW rollout switch on or off (D18). On: a canvas READ
-// under a per-member timestamp floor is issued with history_floor_at, so the canvas verifier can window the canvas by
-// time. Off (the default): such a read is refused, as before. The switch must stay off until the canvas verifier
-// applies history_floor_at, because a verifier that ignores the claim would show the whole canvas. It only narrows a
-// read, so it is a rollout control and never an authorization input.
+// SetCanvasHistoryWindow turns the SPACE_CANVAS_HISTORY_WINDOW rollout switch on or off (D18/D21m). On: a canvas
+// read or save under a per-member timestamp floor is issued with history_floor_at, so wiki-store's verifier can
+// window it by time (it now does — see commits 1eb25d458, b174a3df6). Off: such a read or save is refused, as
+// before. A restore is always refused under any floor, switch or not: D21m hides every version from before the
+// window, floor or no floor. This only narrows what the member sees, so it is a rollout control and never an
+// authorization input.
 func (r *Repository) SetCanvasHistoryWindow(enabled bool) {
 	r.canvasHistoryWindow = enabled
 }
@@ -328,12 +329,16 @@ func canvasPayloadDigest(evidence PersonalThreadDecisionEvidence, request Canvas
 // recomputes the digest from the bytes it received.
 //
 // A member's history floor (D18) is carried on a read, so the canvas verifier can
-// window the canvas. A write under any floor is refused unless it only creates a
-// canvas: a save answers a head-moved conflict that names the current head (its
-// version id, number, time and author kind) and an unchanged answer that names the head's
-// version id, so a windowed member could learn pre-floor state; a restore makes an older
-// version the head, which the member would then read. A create writes new content only,
-// because no canvas, and so no pre-floor content, exists for it.
+// window the canvas. D21m: a save is windowed the same way — the current canvas is
+// current state, not history, so the member may read and save it; only a restore
+// makes an older version the head, which the member would then read, so restore stays
+// refused under any floor. A save under the older WS04-S11 revision floor is also still
+// refused: D21m addresses only the D18 timestamp floor. A create writes new content
+// only, because no canvas, and so no pre-floor content, exists for it.
+//
+// Fail-closed for save and read alike sits one layer up: ResolveSharedCanvasDecisionEvidence
+// refuses a D18 timestamp floor before it ever reaches here unless SPACE_CANVAS_HISTORY_WINDOW
+// is on, so this function never has to trust that wiki-store can actually window what it signs.
 func IssueCanvasDecision(evidence PersonalThreadDecisionEvidence, request CanvasDecisionRequest, now time.Time) (Decision, error) {
 	if err := request.Validate(); err != nil {
 		return Decision{}, err
@@ -345,7 +350,10 @@ func IssueCanvasDecision(evidence PersonalThreadDecisionEvidence, request Canvas
 	if err := evidence.ValidateForCanvas(write); err != nil {
 		return Decision{}, err
 	}
-	if write && request.Op != CanvasOpCreate && evidence.hasHistoryFloor() {
+	switch {
+	case request.Op == CanvasOpRestore && evidence.hasHistoryFloor():
+		return Decision{}, ErrCanvasHistoryFloorUnsupported
+	case request.Op == CanvasOpSave && evidence.HistoryFloorRevision > 0:
 		return Decision{}, ErrCanvasHistoryFloorUnsupported
 	}
 	action, schema, permission := canvasReadAction, canvasReadSchema, canvasReadPermission

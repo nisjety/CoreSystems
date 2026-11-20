@@ -428,22 +428,27 @@ func TestResolveSharedCanvasDecisionEvidenceLive(t *testing.T) {
 	f.exec(t, `UPDATE space_effect_policies SET canvas_entitled=TRUE WHERE org_id=$1`, f.org)
 
 	// An editor in the audience resolves both operations, with the canvas
-	// resource ref and the entitlement bit on.
-	for _, write := range []bool{false, true} {
-		evidence, err := f.repo.ResolveSharedCanvasDecisionEvidence(ctx, s.ref, f.org, s.editor, write)
+	// resource ref and the entitlement bit on. Op is read or create: neither
+	// is ever refused by the D21m floor gate, so this loop stays about the
+	// write/read split the resolver itself decides, not about the floor.
+	for _, tc := range []struct {
+		write bool
+		op    string
+	}{{false, CanvasOpRead}, {true, CanvasOpCreate}} {
+		evidence, err := f.repo.ResolveSharedCanvasDecisionEvidence(ctx, s.ref, f.org, s.editor, tc.write, tc.op)
 		if err != nil {
-			t.Fatalf("write=%v: %v", write, err)
+			t.Fatalf("write=%v: %v", tc.write, err)
 		}
 		if evidence.Membership.Role != "editor" || evidence.Membership.Kind != KindRoom || !evidence.CanvasEntitled ||
 			!strings.Contains(evidence.ResourceAuthorizationRef, ":canvas:") {
-			t.Fatalf("write=%v evidence = %+v", write, evidence)
+			t.Fatalf("write=%v evidence = %+v", tc.write, evidence)
 		}
 	}
 	// A viewer resolves a read but not a write; the role floor is the issuer's.
-	if _, err := f.repo.ResolveSharedCanvasDecisionEvidence(ctx, s.ref, f.org, s.viewer, false); err != nil {
+	if _, err := f.repo.ResolveSharedCanvasDecisionEvidence(ctx, s.ref, f.org, s.viewer, false, CanvasOpRead); err != nil {
 		t.Fatalf("viewer read: %v", err)
 	}
-	if _, err := f.repo.ResolveSharedCanvasDecisionEvidence(ctx, s.ref, f.org, s.viewer, true); err == nil {
+	if _, err := f.repo.ResolveSharedCanvasDecisionEvidence(ctx, s.ref, f.org, s.viewer, true, CanvasOpCreate); err == nil {
 		t.Fatal("a viewer resolved a canvas write")
 	}
 
@@ -451,9 +456,12 @@ func TestResolveSharedCanvasDecisionEvidenceLive(t *testing.T) {
 	// either operation.
 	late := f.user(t, "canvaslive-late", f.org)
 	f.member(t, s.ref, late, "editor", SourceMemberOps)
-	for _, write := range []bool{false, true} {
-		if _, err := f.repo.ResolveSharedCanvasDecisionEvidence(ctx, s.ref, f.org, late, write); !errors.Is(err, ErrNoCurrentMembership) {
-			t.Fatalf("non-recipient write=%v: err = %v, want ErrNoCurrentMembership", write, err)
+	for _, tc := range []struct {
+		write bool
+		op    string
+	}{{false, CanvasOpRead}, {true, CanvasOpCreate}} {
+		if _, err := f.repo.ResolveSharedCanvasDecisionEvidence(ctx, s.ref, f.org, late, tc.write, tc.op); !errors.Is(err, ErrNoCurrentMembership) {
+			t.Fatalf("non-recipient write=%v: err = %v, want ErrNoCurrentMembership", tc.write, err)
 		}
 	}
 
@@ -461,10 +469,10 @@ func TestResolveSharedCanvasDecisionEvidenceLive(t *testing.T) {
 	if _, err := f.repo.ArchiveSpace(ctx, f.archiveReq(s.ref, s.owner)); err != nil {
 		t.Fatalf("archive: %v", err)
 	}
-	if _, err := f.repo.ResolveSharedCanvasDecisionEvidence(ctx, s.ref, f.org, s.editor, false); err != nil {
+	if _, err := f.repo.ResolveSharedCanvasDecisionEvidence(ctx, s.ref, f.org, s.editor, false, CanvasOpRead); err != nil {
 		t.Fatalf("archived room canvas read: %v", err)
 	}
-	if _, err := f.repo.ResolveSharedCanvasDecisionEvidence(ctx, s.ref, f.org, s.editor, true); !errors.Is(err, ErrNoCurrentMembership) {
+	if _, err := f.repo.ResolveSharedCanvasDecisionEvidence(ctx, s.ref, f.org, s.editor, true, CanvasOpCreate); !errors.Is(err, ErrNoCurrentMembership) {
 		t.Fatalf("archived room canvas write: err = %v, want ErrNoCurrentMembership", err)
 	}
 
@@ -472,13 +480,13 @@ func TestResolveSharedCanvasDecisionEvidenceLive(t *testing.T) {
 	if _, err := f.repo.UnarchiveSpace(ctx, f.archiveReq(s.ref, s.manager)); err != nil {
 		t.Fatalf("unarchive: %v", err)
 	}
-	if _, err := f.repo.ResolveSharedCanvasDecisionEvidence(ctx, s.ref, f.org, s.editor, true); err != nil {
+	if _, err := f.repo.ResolveSharedCanvasDecisionEvidence(ctx, s.ref, f.org, s.editor, true, CanvasOpCreate); err != nil {
 		t.Fatalf("restored room canvas write: %v", err)
 	}
 
 	// The entitlement off makes the resolver fail with the typed refusal.
 	f.exec(t, `UPDATE space_effect_policies SET canvas_entitled=FALSE WHERE org_id=$1`, f.org)
-	_, err := f.repo.ResolveSharedCanvasDecisionEvidence(ctx, s.ref, f.org, s.editor, false)
+	_, err := f.repo.ResolveSharedCanvasDecisionEvidence(ctx, s.ref, f.org, s.editor, false, CanvasOpRead)
 	wantDenial(t, err, DenialEntitlementOff)
 }
 
@@ -488,7 +496,7 @@ func TestResolveSharedCanvasDecisionEvidenceRefusesAPersonalSpaceLive(t *testing
 	ctx := context.Background()
 	s := f.archiveFixtureRoom(t, "canvaslivep")
 	f.exec(t, `UPDATE registered_spaces SET space_kind='personal' WHERE space_ref=$1`, s.ref)
-	if _, err := f.repo.ResolveSharedCanvasDecisionEvidence(ctx, s.ref, f.org, s.owner, false); !errors.Is(err, ErrNoCurrentMembership) {
+	if _, err := f.repo.ResolveSharedCanvasDecisionEvidence(ctx, s.ref, f.org, s.owner, false, CanvasOpRead); !errors.Is(err, ErrNoCurrentMembership) {
 		t.Fatalf("personal Space: err = %v, want ErrNoCurrentMembership", err)
 	}
 }

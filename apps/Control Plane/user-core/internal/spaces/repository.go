@@ -1342,7 +1342,7 @@ func (r *Repository) ResolvePersonalCanvasDecisionEvidence(ctx context.Context, 
 // resolving, and binds the independent canvas_entitled bit with its own resource
 // reference. A read also resolves an archived room (WS04's read-class rule); a
 // write resolves only an active room, as every write-class resolver does.
-func (r *Repository) ResolveSharedCanvasDecisionEvidence(ctx context.Context, spaceRef, orgID, subjectID string, write bool) (PersonalThreadDecisionEvidence, error) {
+func (r *Repository) ResolveSharedCanvasDecisionEvidence(ctx context.Context, spaceRef, orgID, subjectID string, write bool, op string) (PersonalThreadDecisionEvidence, error) {
 	if r == nil || r.db == nil {
 		return PersonalThreadDecisionEvidence{}, fmt.Errorf("space authority repository unavailable")
 	}
@@ -1377,13 +1377,15 @@ func (r *Repository) ResolveSharedCanvasDecisionEvidence(ctx context.Context, sp
 	if err != nil {
 		return PersonalThreadDecisionEvidence{}, fmt.Errorf("resolve shared Space canvas authority: %w", err)
 	}
-	// D18: the member's floor is resolved for a read and a write alike. IssueCanvasDecision refuses a write under
-	// any floor except a create. A read under a timestamp floor is refused here unless the canvas window is on
-	// (SPACE_CANVAS_HISTORY_WINDOW), so a windowed member is never shown the canvas whole.
+	// D18/D21m: the member's floor is resolved for a read and a write alike. A read or a save under a D18
+	// timestamp floor is refused here unless the canvas window is on (SPACE_CANVAS_HISTORY_WINDOW), so a
+	// windowed member is never shown, or never has wiki-store window, the canvas on a build that cannot
+	// apply the floor it would be signed. A create needs no check: IssueCanvasDecision never refuses it.
+	// A restore needs no check here either: IssueCanvasDecision refuses it under any floor, switch or not.
 	if err := r.applyHistoryFloor(ctx, &evidence); err != nil {
 		return PersonalThreadDecisionEvidence{}, err
 	}
-	if !write {
+	if op == CanvasOpRead || op == CanvasOpSave {
 		if err := refuseCanvasTimestampFloor(evidence, r.CanvasHistoryWindowEnabled()); err != nil {
 			return PersonalThreadDecisionEvidence{}, err
 		}

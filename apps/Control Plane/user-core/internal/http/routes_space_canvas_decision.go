@@ -73,7 +73,7 @@ func (s *Server) issueCanvasDecision(c *gin.Context) {
 		return s.spaceRepo.ResolvePersonalCanvasDecisionEvidence(ctx, spaceRef, orgID, subjectID, write)
 	}
 	shared := func(ctx context.Context, spaceRef, orgID, subjectID string) (spaces.PersonalThreadDecisionEvidence, error) {
-		return s.spaceRepo.ResolveSharedCanvasDecisionEvidence(ctx, spaceRef, orgID, subjectID, write)
+		return s.spaceRepo.ResolveSharedCanvasDecisionEvidence(ctx, spaceRef, orgID, subjectID, write, request.Op)
 	}
 	var (
 		evidence   spaces.PersonalThreadDecisionEvidence

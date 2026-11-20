@@ -209,7 +209,7 @@ func TestCanvasRefusesAPerMemberTimestampFloorLive(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("set since_date: %v", err)
 	}
-	_, err := f.repo.ResolveSharedCanvasDecisionEvidence(ctx, s.ref, f.org, s.editor, false)
+	_, err := f.repo.ResolveSharedCanvasDecisionEvidence(ctx, s.ref, f.org, s.editor, false, CanvasOpRead)
 	if !errors.Is(err, ErrCanvasHistoryFloorUnsupported) {
 		t.Fatalf("a canvas read under a timestamp floor must be refused, not shown whole: %v", err)
 	}
