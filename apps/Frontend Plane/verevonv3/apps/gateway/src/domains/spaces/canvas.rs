@@ -322,7 +322,7 @@ async fn save_version_inner(
         DecisionFields {
             op,
             canvas_id,
-            expected_version_id,
+            expected_version_id: expected_version_id.clone(),
             restore_from_version_id: None,
             content_digest: Some(content_digest(&body.content)),
             idempotency_key: idempotency_key.clone(),
@@ -341,7 +341,13 @@ async fn save_version_inner(
         Method::POST,
         &url,
         Some(json!({
-            "expected_version_id": body.expected_version_id,
+            // D21n follow-up: a create (no active canvas) must send no expected_version_id, exactly
+            // as the decision above was signed with none — not the client's raw, possibly stale,
+            // body field. Before this, a client that still held an old version id from a Space
+            // whose canvas had since been purged would send it here unchanged, and wiki-store's now
+            // not-found-first order (1eb25d458) turned that into an unconditional canvas_not_found
+            // on every retry, including the one it should have let create.
+            "expected_version_id": expected_version_id,
             "content": body.content,
             "summary": body.summary,
             "idempotency_key": idempotency_key,
@@ -1531,6 +1537,11 @@ mod tests {
         assert!(writes[0]["canvas_id"].is_null());
         assert!(writes[0]["expected_version_id"].is_null());
         assert_eq!(writes[0]["content_digest"], sha256_of(content));
+        // The wiki-store wire body must match the decision: a create sends no
+        // expected_version_id either, not the client's stale "ver-old".
+        let sent = bodies_of(&fixture.wiki, "POST", WIKI_VERSIONS).await;
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0]["expected_version_id"].is_null());
     }
 
     #[tokio::test]
