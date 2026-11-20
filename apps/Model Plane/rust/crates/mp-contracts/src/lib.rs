@@ -47,6 +47,7 @@ pub mod skill_recovery;
 pub mod space_attention;
 pub mod space_approvals;
 pub mod space_browser;
+pub mod space_browser_stop;
 pub mod space_history;
 pub mod space_human_posts;
 pub mod space_memory;

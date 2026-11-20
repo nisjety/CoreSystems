@@ -289,6 +289,27 @@ pub fn verify_browser_run_decision(
     claims_json: &str,
     expect: &BrowserRunExpectation<'_>,
 ) -> Result<VerifiedBrowserRun, BrowserRunRefusal> {
+    let decision = open_decision(key, token)?;
+    let claims = parse_claims(claims_json)?;
+    check_claims(&claims)?;
+    bind(&decision, &claims, expect)?;
+    check_window(&decision, expect.now)?;
+    Ok(VerifiedBrowserRun {
+        decision_ref: decision.decision_ref,
+        recipient_audience_revision: decision.recipient_audience_revision,
+        expires_at: decision.expires_at,
+        claims,
+    })
+}
+
+/// Opens a Control Space decision envelope: the size bound, the version, the key id, the Ed25519
+/// signature over the first three segments, then the payload read and its shape checked. Shared by
+/// every Space decision this crate verifies (the browser run start and the starter stop, D21h), so
+/// the envelope rules exist once.
+pub(crate) fn open_decision(
+    key: &ControlDecisionKey,
+    token: &str,
+) -> Result<SignedDecision, BrowserRunRefusal> {
     if token.len() > MAX_TOKEN_BYTES {
         return Err(BrowserRunRefusal::Malformed);
     }
@@ -320,16 +341,7 @@ pub fn verify_browser_run_decision(
     let decision: SignedDecision =
         serde_json::from_slice(&payload).map_err(|_| BrowserRunRefusal::Malformed)?;
     check_shape(&decision)?;
-    let claims = parse_claims(claims_json)?;
-    check_claims(&claims)?;
-    bind(&decision, &claims, expect)?;
-    check_window(&decision, expect.now)?;
-    Ok(VerifiedBrowserRun {
-        decision_ref: decision.decision_ref,
-        recipient_audience_revision: decision.recipient_audience_revision,
-        expires_at: decision.expires_at,
-        claims,
-    })
+    Ok(decision)
 }
 
 /// Reads the claims document strictly and within its size bound.
@@ -452,7 +464,10 @@ fn bind(
     Ok(())
 }
 
-fn check_window(decision: &SignedDecision, now: DateTime<Utc>) -> Result<(), BrowserRunRefusal> {
+pub(crate) fn check_window(
+    decision: &SignedDecision,
+    now: DateTime<Utc>,
+) -> Result<(), BrowserRunRefusal> {
     if now >= decision.expires_at {
         return Err(BrowserRunRefusal::Window);
     }
@@ -463,7 +478,7 @@ fn check_window(decision: &SignedDecision, now: DateTime<Utc>) -> Result<(), Bro
 }
 
 /// Writes one length-prefixed text field: name, NUL, 8-byte big-endian length, value.
-fn write_field(digest: &mut Sha256, name: &str, value: &str) {
+pub(crate) fn write_field(digest: &mut Sha256, name: &str, value: &str) {
     digest.update(name.as_bytes());
     digest.update([0u8]);
     digest.update((value.len() as u64).to_be_bytes());
@@ -471,7 +486,7 @@ fn write_field(digest: &mut Sha256, name: &str, value: &str) {
 }
 
 /// Writes one revision: name, NUL, 8-byte big-endian value (Control's `writeDigestRevisions`).
-fn write_revision(digest: &mut Sha256, name: &str, value: i64) {
+pub(crate) fn write_revision(digest: &mut Sha256, name: &str, value: i64) {
     digest.update(name.as_bytes());
     digest.update([0u8]);
     digest.update((value as u64).to_be_bytes());
