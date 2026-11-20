@@ -263,7 +263,8 @@ func CanvasRunActionWrite(actionID string) (write bool, canvas bool) {
 // is refused. A read under a D18 timestamp floor
 // is decided by ApplyCanvasRunActionFloor, which holds the SPACE_CANVAS_HISTORY_WINDOW
 // rollout switch. Archived rooms need no check here, because the agent evidence
-// resolvers read active rooms only. The agent gate (ValidateForAgentAction) still runs
+// resolvers read active rooms only; the run-action handlers answer an active member of
+// an archived room the typed 409 room_archived for a canvas row (D22ar). The agent gate (ValidateForAgentAction) still runs
 // first, so an agent's canvas read needs an editor.
 func (e PersonalThreadDecisionEvidence) ValidateForCanvasRunAction(write bool) error {
 	if err := e.ValidateForCanvas(write); err != nil {

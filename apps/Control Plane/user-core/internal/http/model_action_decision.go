@@ -63,7 +63,7 @@ func (s *Server) issueModelActionView(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "model action authority is unavailable"})
 		return
 	}
-	evidence, ok := s.resolveRunActionEvidence(c, authority.SpaceRef, authority.OrgID, authority.SubjectID)
+	evidence, ok := s.resolveRunActionEvidence(c, authority.SpaceRef, authority.OrgID, authority.SubjectID, "")
 	if !ok {
 		return
 	}
@@ -150,7 +150,7 @@ func (s *Server) issueRunActionDecision(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "run action authority is unavailable"})
 		return
 	}
-	evidence, ok := s.resolveRunActionEvidence(c, authority.SpaceRef, authority.OrgID, authority.SubjectID)
+	evidence, ok := s.resolveRunActionEvidence(c, authority.SpaceRef, authority.OrgID, authority.SubjectID, strings.TrimSpace(request.ActionID))
 	if !ok {
 		return
 	}
@@ -202,9 +202,14 @@ func (s *Server) issueRunActionDecision(c *gin.Context) {
 
 // resolveRunActionEvidence loads current Space evidence for a resolved run
 // authority, writing the fail-closed response and returning ok=false on error.
-func (s *Server) resolveRunActionEvidence(c *gin.Context, spaceRef, orgID, subjectID string) (spaces.PersonalThreadDecisionEvidence, bool) {
+// actionID is the run action being decided ("" for the action view); a canvas
+// run action in an archived room answers the typed 409 room_archived (D22ar).
+func (s *Server) resolveRunActionEvidence(c *gin.Context, spaceRef, orgID, subjectID, actionID string) (spaces.PersonalThreadDecisionEvidence, bool) {
 	evidence, err := s.spaceRepo.ResolveAgentActionDecisionEvidence(c.Request.Context(), spaceRef, orgID, subjectID)
 	if errors.Is(err, spaces.ErrNoCurrentMembership) {
+		if s.refuseArchivedCanvasRunAction(c, actionID, spaceRef, orgID, subjectID) {
+			return spaces.PersonalThreadDecisionEvidence{}, false
+		}
 		c.JSON(http.StatusForbidden, gin.H{"error": "current Space authority required"})
 		return spaces.PersonalThreadDecisionEvidence{}, false
 	}
@@ -213,6 +218,25 @@ func (s *Server) resolveRunActionEvidence(c *gin.Context, spaceRef, orgID, subje
 		return spaces.PersonalThreadDecisionEvidence{}, false
 	}
 	return evidence, true
+}
+
+// refuseArchivedCanvasRunAction answers a canvas run action (space.canvas.read or
+// space.canvas.write) with the typed 409 room_archived when the agent evidence
+// resolver found no row because the room is archived and the run's subject is an
+// active member of it (D22ar), the shape refuseArchivedWrite gives thread writes.
+// Every other action, a non-member, another organization's room, an unknown room
+// and a failed archive lookup keep the unchanged fail-closed 403, byte for byte.
+// It reports true when it wrote the response.
+func (s *Server) refuseArchivedCanvasRunAction(c *gin.Context, actionID, spaceRef, orgID, subjectID string) bool {
+	if _, canvas := spaces.CanvasRunActionWrite(actionID); !canvas {
+		return false
+	}
+	archived, err := s.spaceRepo.ArchivedForMember(c.Request.Context(), spaceRef, orgID, subjectID)
+	if err != nil || !archived {
+		return false
+	}
+	abortTypedError(c, http.StatusConflict, spaces.CodeRoomArchived, "this room is archived", nil)
+	return true
 }
 
 // refuseCanvasHistoryFloor answers the typed refusal of a canvas run action in a
@@ -247,7 +271,7 @@ func (s *Server) checkCurrentRunActionAuthority(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "valid run action authority is required"})
 		return
 	}
-	evidence, ok := s.resolveRunActionEvidence(c, decision.SpaceRef, decision.OrgID, decision.SubjectID)
+	evidence, ok := s.resolveRunActionEvidence(c, decision.SpaceRef, decision.OrgID, decision.SubjectID, decision.ActionID)
 	if !ok {
 		return
 	}

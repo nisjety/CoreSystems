@@ -249,6 +249,55 @@ func TestRunActionCanvasFloorRefusalIsTypedLive(t *testing.T) {
 	issuedRunActionDecision(t, postRunActionDecision(owner, room.Org, "space.canvas.read", canvasReadSchemaHash))
 }
 
+// D22ar (pure tier): the typed archived-room answer is for canvas rows only, and a
+// failed archive lookup never writes it; the caller then keeps the generic 403.
+func TestRefuseArchivedCanvasRunActionOnlyTypesACanvasRowItCouldCheck(t *testing.T) {
+	s := &Server{} // no repository: ArchivedForMember answers an error
+	for _, actionID := range []string{"", "tickets.create", "space.canvas.read", "space.canvas.write"} {
+		c, w := newGinJSONCtx(`{}`)
+		if s.refuseArchivedCanvasRunAction(c, actionID, "room-1", "org-1", "user-1") {
+			t.Fatalf("%q: wrote a refusal without a successful archive lookup: %d %s", actionID, w.Code, w.Body.String())
+		}
+		if w.Body.Len() != 0 {
+			t.Fatalf("%q: wrote %s", actionID, w.Body.String())
+		}
+	}
+}
+
+// D22ar: once the room is archived, a canvas run action (read or write) answers the
+// typed 409 room_archived with no token, at issuance and at the effect-time check,
+// the shape thread writes get. tickets.create keeps the unchanged untyped 403, and a
+// subject who is not a member of the archived room learns nothing: the same 403.
+func TestRunActionCanvasArchivedRoomRefusalIsTypedLive(t *testing.T) {
+	room, repo, exec, _ := canvasRunActionRoom(t, "d22ar")
+	editor := runActionServer(repo, liveRunAuthority(t, repo, room, room.Editor))
+	decision := issuedRunActionDecision(t, postRunActionDecision(editor, room.Org, "space.canvas.read", canvasReadSchemaHash))
+	// The run binding is read while the room is still active; only its subject differs.
+	outsider := liveRunAuthority(t, repo, room, room.Editor)
+	outsider.SubjectID = room.Prefix + "-stranger"
+
+	exec(`UPDATE registered_spaces SET registration_state='archived', archived_at=NOW(), archived_by=$2 WHERE space_ref=$1`, room.Room, room.Owner)
+	for actionID, hash := range map[string]string{"space.canvas.read": canvasReadSchemaHash, "space.canvas.write": canvasWriteSchemaHash} {
+		w := postRunActionDecision(editor, room.Org, actionID, hash)
+		wantApprovalError(t, w, http.StatusConflict, spaces.CodeRoomArchived)
+		if strings.Contains(w.Body.String(), `"token"`) {
+			t.Fatalf("%s: an archived-room refusal carried a token: %s", actionID, w.Body.String())
+		}
+	}
+	wantApprovalError(t, postRunActionCheck(t, editor, decision), http.StatusConflict, spaces.CodeRoomArchived)
+
+	// A non-canvas row keeps the generic refusal, byte for byte.
+	if w := postRunActionDecision(editor, room.Org, "tickets.create", ticketsCreateSchemaHash); w.Code != http.StatusForbidden ||
+		w.Body.String() != `{"error":"current Space authority required"}` {
+		t.Fatalf("archived-room tickets.create: %d %s", w.Code, w.Body.String())
+	}
+	// A subject with no membership in the room is not told it is archived.
+	if w := postRunActionDecision(runActionServer(repo, outsider), room.Org, "space.canvas.read", canvasReadSchemaHash); w.Code != http.StatusForbidden ||
+		w.Body.String() != `{"error":"current Space authority required"}` {
+		t.Fatalf("archived-room canvas read by a non-member: %d %s", w.Code, w.Body.String())
+	}
+}
+
 // W3-FIX-12: a floor read that fails answers 503 for a canvas run action, on issue
 // and on the effect-time check; it never issues or authorizes without the floor.
 func TestRunActionCanvasFloorReadFailureFailsClosedLive(t *testing.T) {
