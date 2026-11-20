@@ -376,6 +376,16 @@ func (r *Repository) UpdateAgentAccess(ctx context.Context, req AgentAccessReque
 		return nil, AgentError(409, CodeAgentStateChanged, "the agent changed since it was read",
 			map[string]any{"current_revision": revision})
 	}
+	// D24 (a gap a D22as builder found): an owner flipping their agent to org visibility
+	// (AgentAccessClearsOwner below) must not lock themselves out just because the access
+	// list they submitted does not name them. The access list, not ownership, now governs
+	// their edit rights (D10), so keep them as a manager unless they are already listed.
+	if AgentAccessClearsOwner(owner != nil, visibility, req.Visibility) && len(entries) < maxAgentAccessEntries {
+		if _, listed := seen[req.ActorID]; !listed {
+			entries = append(entries, AgentAccessEntry{PrincipalID: req.ActorID, Role: AgentAccessManager})
+			seen[req.ActorID] = struct{}{}
+		}
+	}
 	if len(entries) > 0 {
 		principals := make([]string, 0, len(entries))
 		for _, entry := range entries {

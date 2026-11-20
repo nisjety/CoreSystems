@@ -315,3 +315,51 @@ func TestOwnerToOrgFlipClearsTheOwnerLive(t *testing.T) {
 		t.Fatalf("org owner edits the now ownerless agent: %v", err)
 	}
 }
+
+// D24: a flip submitted with no entries (as above) must not lock the former owner out.
+// They stay on the access list as a manager, so they can still edit the agent they just
+// gave up ownership of, without needing an org owner/admin to restore their access.
+func TestOwnerToOrgFlipKeepsTheFormerOwnerAsManagerLive(t *testing.T) {
+	f := newRoomLiveFixture(t)
+	f.agentCleanup(t)
+	ctx := context.Background()
+	outbox := &txAuditOutbox{}
+	f.repo.SetPolicyAuditOutbox(outbox)
+	owner := f.user(t, "d24-owner", f.org)
+	id := f.agentID("d24flip")
+	f.registerAgent(t, owner, id, AgentVisibilityOwner, AgentAddPolicyOwnerOnly)
+
+	if _, err := f.repo.UpdateAgentAccess(ctx, AgentAccessRequest{
+		OrgID: f.org, ActorID: owner, AgentSubjectID: id, ExpectedRevision: 1,
+		Visibility: AgentVisibilityOrg, AddPolicy: AgentAddPolicyAnyone,
+	}); err != nil {
+		t.Fatalf("owner-to-org flip with no entries: %v", err)
+	}
+	var role string
+	if err := f.pool.QueryRow(ctx,
+		`SELECT role FROM agent_subject_access WHERE org_id=$1 AND agent_subject_id=$2 AND principal_id=$3`,
+		f.org, id, owner).Scan(&role); err != nil {
+		t.Fatalf("former owner must be on the access list after the flip: %v", err)
+	}
+	if role != AgentAccessManager {
+		t.Fatalf("former owner's role = %q, want manager", role)
+	}
+	// Now ownerless with the former owner as manager: they edit it like any manager, no
+	// ResolveOrgRole needed, and flipping again does not duplicate their entry.
+	if _, err := f.repo.UpdateAgentAccess(ctx, AgentAccessRequest{
+		OrgID: f.org, ActorID: owner, AgentSubjectID: id, ExpectedRevision: 2,
+		Visibility: AgentVisibilityOrg, AddPolicy: AgentAddPolicyNobody,
+		Entries: []AgentAccessEntry{{PrincipalID: owner, Role: AgentAccessManager}},
+	}); err != nil {
+		t.Fatalf("former owner, now a manager, edits the agent: %v", err)
+	}
+	var count int
+	if err := f.pool.QueryRow(ctx,
+		`SELECT count(*) FROM agent_subject_access WHERE org_id=$1 AND agent_subject_id=$2 AND principal_id=$3`,
+		f.org, id, owner).Scan(&count); err != nil {
+		t.Fatalf("count access rows: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("former owner's access row count = %d, want exactly 1 (no duplicate)", count)
+	}
+}
