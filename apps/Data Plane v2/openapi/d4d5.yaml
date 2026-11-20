@@ -919,7 +919,7 @@ paths:
               required: [content, idempotency_key]
               properties:
                 expected_version_id: { type: [string, 'null'], maxLength: 128 }
-                content: { type: string, maxLength: 65536 }
+                content: { type: string, minLength: 1, maxLength: 65536, description: "Markdown, 1 to 65536 bytes. No empty version exists: a canvas is cleared by saving a one-character document such as a single newline (D22aq)." }
                 summary: { type: [string, 'null'], maxLength: 200 }
                 idempotency_key: { type: string, maxLength: 256 }
       responses:

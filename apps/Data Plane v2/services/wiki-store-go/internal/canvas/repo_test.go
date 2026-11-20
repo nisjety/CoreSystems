@@ -51,6 +51,40 @@ func TestValidateContentBoundsAndEncoding(t *testing.T) {
 	}
 }
 
+// TestValidateContentAcceptsAOneCharacterClear (D22aq): a canvas is cleared by saving a one-character document, so every
+// one-character document is valid content, whitespace and multi-byte characters included. The minimum still refuses empty
+// content, and a lone NUL is still refused.
+func TestValidateContentAcceptsAOneCharacterClear(t *testing.T) {
+	cases := map[string]struct {
+		content string
+		ok      bool
+	}{
+		"a newline":                    {"\n", true},
+		"a space":                      {" ", true},
+		"a hyphen":                     {"-", true},
+		"a two-byte character":         {"é", true},
+		"a four-byte character":        {"\U0001F5D2", true},
+		"empty":                        {"", false},
+		"a NUL byte":                   {"\x00", false},
+		"half of a two-byte character": {"\xc3", false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateContent(tc.content)
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("a one-character clear %q was refused: %v", tc.content, err)
+				}
+				return
+			}
+			requireCanvasError(t, err, CodeInvalidRequest)
+		})
+	}
+	if MinContentBytes != 1 {
+		t.Fatalf("MinContentBytes = %d, want 1: no empty version exists, and a one-character clear must pass", MinContentBytes)
+	}
+}
+
 func TestNormalizeSummaryCountsCharactersAndBlankBecomesNil(t *testing.T) {
 	// 200 characters are 400 bytes here, so a byte count would refuse them. The limit counts characters.
 	two := strings.Repeat("é", MaxSummaryChars)

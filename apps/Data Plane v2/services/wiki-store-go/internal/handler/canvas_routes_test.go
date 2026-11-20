@@ -577,6 +577,35 @@ func TestCanvasSaveRefusesAnUnknownBodyField(t *testing.T) {
 	wantCanvasRefusal(t, rec, http.StatusBadRequest, canvas.CodeInvalidRequest)
 }
 
+// TestCanvasSaveTakesAOneCharacterClearAndRefusesAnEmptyOne (D22aq): a clear is a save of a one-character document, which the save
+// route takes like any save over the canvas. An empty document is refused as a bad request before the decision is read.
+func TestCanvasSaveTakesAOneCharacterClearAndRefusesAnEmptyOne(t *testing.T) {
+	bearer := canvasBearer(t, canvasTestOrg, []string{"wiki.write"}, false)
+	for name, content := range map[string]string{"a newline": "\n", "a space": " ", "a two-byte character": "é"} {
+		t.Run(name, func(t *testing.T) {
+			store := fakeStoreWithCanvas()
+			key := "clear-" + strings.ReplaceAll(name, " ", "-")
+			claims := canvasHumanClaims(canvasTestOrg, canvasTestSpace, key, true)
+			op := spacedecision.CanvasOp{Op: spacedecision.OpSave, Schema: spacedecision.SchemaCanvasWrite, CanvasID: fakeCanvasID,
+				ExpectedVersionID: fakeVersionID, ContentDigest: canvas.ContentDigest(content), IdempotencyKey: key}
+			rec := serveCanvas(t, fakeCanvasRouter(t, store), http.MethodPost, canvasSpacePath+"/versions", bearer,
+				canvasHumanToken(t, claims, op),
+				canvasBody(t, map[string]any{"expected_version_id": fakeVersionID, "content": content, "idempotency_key": key}))
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("a one-character clear = %d, want 201; body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+	store := fakeStoreWithCanvas()
+	rec := serveCanvas(t, fakeCanvasRouter(t, store), http.MethodPost, canvasSpacePath+"/versions", bearer, "",
+		canvasBody(t, map[string]any{"expected_version_id": fakeVersionID, "content": "", "idempotency_key": "clear-empty"}))
+	wantCanvasRefusal(t, rec, http.StatusBadRequest, canvas.CodeInvalidRequest)
+	if store.probed != 0 {
+		t.Fatalf("an empty save reached the store probe")
+	}
+}
+
 func decodeCanvasErrorBody(t *testing.T, rec *httptest.ResponseRecorder) canvasErrorBody {
 	t.Helper()
 	var body canvasErrorBody

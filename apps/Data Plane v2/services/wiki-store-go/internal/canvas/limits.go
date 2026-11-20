@@ -12,6 +12,10 @@ import (
 // MaxRequestBodyBytes with http.MaxBytesReader.
 const (
 	// MinContentBytes and MaxContentBytes bound one version's Markdown. The cap keeps a whole read inside one tool result.
+	//
+	// No empty version exists. A canvas is cleared (D22aq, a manager action decided by Control) by saving a one-character
+	// document, for example a single newline: an ordinary save that clears the text, keeps the history and can be restored
+	// from. The one-byte minimum stays for every write, the clear included.
 	MinContentBytes = 1
 	MaxContentBytes = 65536
 
@@ -37,7 +41,8 @@ const (
 )
 
 // ValidateContent accepts 1 to MaxContentBytes bytes of valid UTF-8 with no NUL byte. Oversize is CodeTooLarge (413);
-// every other failure is CodeInvalidRequest (400).
+// every other failure is CodeInvalidRequest (400). A one-character document, whitespace included, is valid: it is how a
+// canvas is cleared (D22aq).
 func ValidateContent(content string) error {
 	switch {
 	case len(content) < MinContentBytes:

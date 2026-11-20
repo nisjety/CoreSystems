@@ -374,6 +374,37 @@ func TestCanvasRestoreRecordsItsSourceAndIsUnchangedForMatchingText(t *testing.T
 	}
 }
 
+// TestCanvasClearIsAOneCharacterSaveThatKeepsHistory (D22aq): a manager clears the canvas by saving a one-character document. The
+// clear is an ordinary edit of one byte, the text before it stays in the history, and a restore brings it back. An empty save is
+// still refused and stores nothing.
+func TestCanvasClearIsAOneCharacterSaveThatKeepsHistory(t *testing.T) {
+	pool := setupCanvasPool(t)
+	repo := NewRepo(pool)
+	ctx := context.Background()
+	base := createCanvas(ctx, t, repo, "org-a", "space-a", "# Plan\n\nA long room document.\n")
+	v1 := base.Version.VersionID
+
+	_, err := saveCanvas(ctx, repo, "org-a", "space-a", base.CanvasID, ptr(v1), "", "clear-empty", canvasAuthor())
+	requireCanvasError(t, err, CodeInvalidRequest)
+
+	cleared, err := saveCanvas(ctx, repo, "org-a", "space-a", base.CanvasID, ptr(v1), "\n", "clear-1", canvasAuthor())
+	if err != nil || !cleared.Inserted || cleared.Version.ChangeKind != changeEdit || cleared.Version.ContentBytes != 1 {
+		t.Fatalf("the clear = %+v, %v; want an inserted one-byte edit", cleared, err)
+	}
+	head, err := repo.Head(ctx, "org-a", "space-a", nil)
+	if err != nil || head.Head == nil || head.Head.Content != "\n" {
+		t.Fatalf("the head after the clear = %+v, %v; want the one-character document", head, err)
+	}
+
+	restored, err := restoreCanvas(ctx, repo, "org-a", "space-a", base.CanvasID, v1, ptr(cleared.Version.VersionID), "undo-clear")
+	if err != nil || !restored.Inserted {
+		t.Fatalf("restoring the text before the clear = %+v, %v; want an inserted restore", restored, err)
+	}
+	if n := versionsOfCanvas(ctx, t, pool, base.CanvasID); n != 3 {
+		t.Fatalf("the canvas holds %d versions, want 3 (create, clear, restore; the empty save stored nothing)", n)
+	}
+}
+
 // TestCanvasIdsFromAnotherOrgOrSpaceAreNotFound presents version and canvas ids that belong to another org or Space. Each one
 // is not found, and the refused writes store nothing.
 func TestCanvasIdsFromAnotherOrgOrSpaceAreNotFound(t *testing.T) {
