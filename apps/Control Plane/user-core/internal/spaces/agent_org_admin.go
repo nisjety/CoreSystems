@@ -355,3 +355,58 @@ func buildOrgAgentAuditPayload(event string, facts orgAgentAuditFacts, now time.
 	}
 	return encoded, nil
 }
+
+// orgAgentAccessAuditFacts is everything the audit payload of an org-admin access edit
+// (D19/D22as) or an owner clear carries. Ids, policy words, counts and revisions only:
+// never the principals on the access list.
+type orgAgentAccessAuditFacts struct {
+	OrgID          string
+	ActorID        string
+	ActorOrgRole   string
+	Authority      string
+	AgentID        string
+	FromVisibility string
+	ToVisibility   string
+	FromAddPolicy  string
+	ToAddPolicy    string
+	EntriesChanged bool
+	EntryCount     int
+	OwnerCleared   bool
+	RevisionBefore int64
+	RevisionAfter  int64
+}
+
+// buildOrgAgentAccessAuditPayload renders the org_agent_access_changed audit-core event,
+// in the shape of the lifecycle events above.
+func buildOrgAgentAccessAuditPayload(facts orgAgentAccessAuditFacts, now time.Time) ([]byte, error) {
+	payload := map[string]any{
+		"event_id":    fmt.Sprintf("org-agent-access:%s:%d", facts.AgentID, facts.RevisionAfter),
+		"occurred_at": now.UTC().Format(time.RFC3339Nano),
+		"org_id":      facts.OrgID,
+		"user_id":     facts.ActorID,
+		"actor_role":  facts.ActorOrgRole,
+		"plane":       "control",
+		"producer":    "user-core",
+		"event":       "org_agent_access_changed",
+		"subject":     "org:" + facts.OrgID,
+		"resource_id": facts.AgentID,
+		"outcome":     "ok",
+		"details": map[string]any{
+			"authority":       facts.Authority,
+			"from_visibility": facts.FromVisibility,
+			"to_visibility":   facts.ToVisibility,
+			"from_add_policy": facts.FromAddPolicy,
+			"to_add_policy":   facts.ToAddPolicy,
+			"entries_changed": facts.EntriesChanged,
+			"entry_count":     facts.EntryCount,
+			"owner_cleared":   facts.OwnerCleared,
+			"revision_before": facts.RevisionBefore,
+			"revision_after":  facts.RevisionAfter,
+		},
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("encode org agent access audit event: %w", err)
+	}
+	return encoded, nil
+}

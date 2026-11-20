@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -236,12 +237,56 @@ type AgentAccessRequest struct {
 	AddPolicy        string
 	Entries          []AgentAccessEntry
 	ExpectedRevision int64
+	// ResolveOrgRole (D19/D22as) returns the actor's canonical organization role from
+	// the membership authority. It is called only when the agent is ownerless and
+	// org-visible and the actor is neither its owner nor a manager on its list, so the
+	// owner and manager paths never depend on it. nil means no org-admin path.
+	ResolveOrgRole func(ctx context.Context) (string, error)
+}
+
+// Who an access edit was authorized as (D19/D22as). agentAccessAuthorityOrgAdmin is a
+// canonical org owner or admin editing an ownerless org-visible agent.
+const (
+	agentAccessAuthorityOwner    = "owner"
+	agentAccessAuthorityManager  = "manager"
+	agentAccessAuthorityOrgAdmin = "org_admin"
+)
+
+// AuditSubjectOrgAgentAccessChanged is the audit subject of an access edit made through
+// org-admin authority, or of an owner giving up ownership by flipping to org visibility.
+const AuditSubjectOrgAgentAccessChanged = "verevon.audit.v2.control.user-core.org_agent_access_changed"
+
+// AgentAccessEditAuthority decides who may edit an agent's access. The owner and a
+// manager on the access list always may. A canonical org owner or admin may edit an
+// ownerless org-visible agent (D19/D22as): nobody else can, so without this path such an
+// agent could not be edited at all. It returns "" when the actor may not edit.
+func AgentAccessEditAuthority(isOwner bool, access string, ownerless bool, actorOrgRole string) string {
+	switch {
+	case isOwner:
+		return agentAccessAuthorityOwner
+	case access == AgentAccessManager:
+		return agentAccessAuthorityManager
+	case ownerless && (actorOrgRole == "owner" || actorOrgRole == "admin"):
+		return agentAccessAuthorityOrgAdmin
+	}
+	return ""
+}
+
+// AgentAccessClearsOwner reports whether an access edit gives up the agent's owner
+// (D22as): an owner-visible agent with an owner that becomes org-visible becomes an
+// organization agent, and an organization agent has no owner (D10).
+func AgentAccessClearsOwner(hasOwner bool, fromVisibility, toVisibility string) bool {
+	return hasOwner && fromVisibility == AgentVisibilityOwner && toVisibility == AgentVisibilityOrg
 }
 
 // UpdateAgentAccess replaces an agent's visibility, add policy and access list. Its
 // owner, or a manager on its access list, may edit, and only at the revision the
-// editor read. Every listed principal must be an active organization member. The
-// revision moves only when something changed. The owner never changes here.
+// editor read. A canonical org owner or admin may also edit an ownerless org-visible
+// agent (D19/D22as). Every listed principal must be an active organization member. The
+// revision moves only when something changed. The owner never changes here, except that
+// an owner flipping their agent from owner to org visibility clears the owner (D22as).
+// An org-admin edit and an owner clear each write one org_agent_access_changed audit row
+// in the same transaction.
 func (r *Repository) UpdateAgentAccess(ctx context.Context, req AgentAccessRequest) (*AgentView, error) {
 	req.OrgID = strings.TrimSpace(req.OrgID)
 	req.ActorID = strings.TrimSpace(req.ActorID)
@@ -308,8 +353,18 @@ func (r *Repository) UpdateAgentAccess(ctx context.Context, req AgentAccessReque
 	if !active || (!isOwner && access == "" && visibility != AgentVisibilityOrg) {
 		return nil, agentNotFound()
 	}
-	if !CanEditAgentAccess(isOwner, access) {
-		return nil, AgentError(403, CodeAgentAccessForbidden, "only the owner or a manager may change this agent", nil)
+	ownerless := owner == nil && visibility == AgentVisibilityOrg
+	actorOrgRole := ""
+	if !CanEditAgentAccess(isOwner, access) && ownerless && req.ResolveOrgRole != nil {
+		role, roleErr := req.ResolveOrgRole(ctx)
+		if roleErr != nil {
+			return nil, AgentError(503, CodeAgentRegistryUnavailable, "the organization role could not be verified", nil)
+		}
+		actorOrgRole = strings.ToLower(strings.TrimSpace(role))
+	}
+	authority := AgentAccessEditAuthority(isOwner, access, ownerless, actorOrgRole)
+	if authority == "" {
+		return nil, AgentError(403, CodeAgentAccessForbidden, "only the owner, a manager or an organization admin may change this agent", nil)
 	}
 	if owner == nil && req.Visibility == AgentVisibilityOwner {
 		// D10: an organization agent has no owner, so it cannot become owner-visible. The owner CHECK
@@ -343,12 +398,21 @@ func (r *Repository) UpdateAgentAccess(ctx context.Context, req AgentAccessReque
 		return nil, err
 	}
 	entriesChanged := !sameAgentEntries(current, entries)
+	clearOwner := AgentAccessClearsOwner(owner != nil, visibility, req.Visibility)
 	changed := entriesChanged || visibility != req.Visibility || addPolicy != req.AddPolicy
+	audited := changed && (authority == agentAccessAuthorityOrgAdmin || clearOwner)
+	if audited && r.policyAudit == nil {
+		// The audit row is part of the change, as for the org-admin lifecycle actions.
+		return nil, AgentError(503, CodeAgentRegistryUnavailable, "agent registry is unavailable", nil)
+	}
+	revisionBefore := revision
 	if changed {
 		if _, err := tx.Exec(ctx, `
-			UPDATE agent_subjects SET visibility=$3, add_policy=$4, revision=revision+1, updated_at=NOW()
+			UPDATE agent_subjects SET visibility=$3, add_policy=$4,
+			       owner_user_id=CASE WHEN $5 THEN NULL ELSE owner_user_id END,
+			       revision=revision+1, updated_at=NOW()
 			WHERE org_id=$1 AND agent_subject_id=$2`,
-			req.OrgID, req.AgentSubjectID, req.Visibility, req.AddPolicy); err != nil {
+			req.OrgID, req.AgentSubjectID, req.Visibility, req.AddPolicy, clearOwner); err != nil {
 			return nil, fmt.Errorf("update agent subject: %w", err)
 		}
 		revision++
@@ -368,8 +432,27 @@ func (r *Repository) UpdateAgentAccess(ctx context.Context, req AgentAccessReque
 			}
 		}
 	}
+	if audited {
+		payload, err := buildOrgAgentAccessAuditPayload(orgAgentAccessAuditFacts{
+			OrgID: req.OrgID, ActorID: req.ActorID, ActorOrgRole: actorOrgRole, Authority: authority,
+			AgentID: req.AgentSubjectID, FromVisibility: visibility, ToVisibility: req.Visibility,
+			FromAddPolicy: addPolicy, ToAddPolicy: req.AddPolicy, EntriesChanged: entriesChanged,
+			EntryCount: len(entries), OwnerCleared: clearOwner,
+			RevisionBefore: revisionBefore, RevisionAfter: revision,
+		}, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		if err := r.policyAudit.EnqueueAuditTx(ctx, tx,
+			fmt.Sprintf("org-agent-access:%s:%d", req.AgentSubjectID, revision), AuditSubjectOrgAgentAccessChanged, payload); err != nil {
+			return nil, fmt.Errorf("enqueue org agent access audit: %w", err)
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit agent access update: %w", err)
+	}
+	if clearOwner {
+		ownerID = ""
 	}
 	return &AgentView{
 		AgentSubjectID: req.AgentSubjectID, OwnerUserID: ownerID, Visibility: req.Visibility,

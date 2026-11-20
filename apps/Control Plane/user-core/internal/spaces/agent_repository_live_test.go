@@ -435,12 +435,10 @@ func TestRegisterOwnerVisibleAgentStaysOwnerDerivedLive(t *testing.T) {
 // (owner_user_id NULL) agent into an owner-visible one -- D10's "an
 // organization agent has no owner, so it cannot become owner-visible" rule.
 //
-// NOTE: in production, no path grants the first manager entry on a truly
-// ownerless agent (CanEditAgentAccess needs isOwner or a listed manager, and
-// nothing ever lists one on an owner_user_id=NULL row), so this case cannot
-// currently arise through the HTTP surface. The access-list row is seeded
-// directly here to exercise the guard itself in isolation; see the test
-// report for this observation.
+// NOTE: since D19/D22as a canonical org owner or admin may edit an ownerless
+// org agent and list its first manager, so this case can arise through the
+// HTTP surface. The access-list row is still seeded directly here to exercise
+// the guard itself in isolation.
 func TestGrantingOwnerVisibilityOnAnOwnerlessAgentLive(t *testing.T) {
 	f := newRoomLiveFixture(t)
 	f.agentCleanup(t)

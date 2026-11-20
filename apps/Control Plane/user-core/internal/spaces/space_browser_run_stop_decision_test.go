@@ -89,7 +89,10 @@ func TestBrowserRunStopDecisionRefusals(t *testing.T) {
 		mutate func(*PersonalThreadDecisionEvidence)
 		want   DenialCode
 	}{
-		{"personal Space", func(e *PersonalThreadDecisionEvidence) { e.Membership.Kind = KindPersonal; e.Membership.Role = RoleOwner }, DenialKindUnsupported},
+		{"personal Space", func(e *PersonalThreadDecisionEvidence) {
+			e.Membership.Kind = KindPersonal
+			e.Membership.Role = RoleOwner
+		}, DenialKindUnsupported},
 		{"direct message", func(e *PersonalThreadDecisionEvidence) { e.Membership.Kind = KindDM }, DenialKindUnsupported},
 		{"group direct message", func(e *PersonalThreadDecisionEvidence) { e.Membership.Kind = KindGroupDM }, DenialKindUnsupported},
 		{"zero data retention", func(e *PersonalThreadDecisionEvidence) { e.Privacy.ZeroDataRetention = true }, DenialZDRForbidsEffect},

@@ -3,6 +3,7 @@ package spaces
 import (
 	"encoding/json"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -114,5 +115,99 @@ func assertExactKeys(t *testing.T, name string, m map[string]any, want []string)
 		if got[i] != wantSorted[i] {
 			t.Fatalf("%s: keys = %v, want exactly %v", name, got, wantSorted)
 		}
+	}
+}
+
+// D19/D22as: who may edit an agent's access. The owner and a listed manager
+// always may; a canonical org owner or admin only for an ownerless org agent.
+func TestAgentAccessEditAuthority(t *testing.T) {
+	tests := []struct {
+		name      string
+		isOwner   bool
+		access    string
+		ownerless bool
+		orgRole   string
+		want      string
+	}{
+		{"owner", true, "", false, "", agentAccessAuthorityOwner},
+		{"owner who is also an org admin", true, "", false, "admin", agentAccessAuthorityOwner},
+		{"listed manager", false, AgentAccessManager, false, "member", agentAccessAuthorityManager},
+		{"listed manager of an ownerless agent", false, AgentAccessManager, true, "admin", agentAccessAuthorityManager},
+		{"org admin, ownerless agent", false, "", true, "admin", agentAccessAuthorityOrgAdmin},
+		{"org owner, ownerless agent", false, "", true, "owner", agentAccessAuthorityOrgAdmin},
+		{"org admin, owned agent", false, "", false, "admin", ""},
+		{"org member, ownerless agent", false, "", true, "member", ""},
+		{"org viewer, ownerless agent", false, "", true, "viewer", ""},
+		{"compliance, ownerless agent", false, "", true, "compliance", ""},
+		{"collaborator, ownerless agent", false, AgentAccessCollaborator, true, "member", ""},
+		{"unresolved role, ownerless agent", false, "", true, "", ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := AgentAccessEditAuthority(test.isOwner, test.access, test.ownerless, test.orgRole); got != test.want {
+				t.Fatalf("AgentAccessEditAuthority = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+// D22as: only an owner-to-org flip of an owned agent gives up the owner.
+func TestAgentAccessClearsOwner(t *testing.T) {
+	tests := []struct {
+		name     string
+		hasOwner bool
+		from, to string
+		want     bool
+	}{
+		{"owner to org", true, AgentVisibilityOwner, AgentVisibilityOrg, true},
+		{"owner stays owner", true, AgentVisibilityOwner, AgentVisibilityOwner, false},
+		{"legacy owned org agent stays org", true, AgentVisibilityOrg, AgentVisibilityOrg, false},
+		{"ownerless org agent", false, AgentVisibilityOrg, AgentVisibilityOrg, false},
+		{"ownerless agent asked to become owner-visible", false, AgentVisibilityOrg, AgentVisibilityOwner, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := AgentAccessClearsOwner(test.hasOwner, test.from, test.to); got != test.want {
+				t.Fatalf("AgentAccessClearsOwner = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+// D19/D22as: the access-edit audit payload names policy words, counts and
+// revisions, never a principal on the access list.
+func TestBuildOrgAgentAccessAuditPayloadIsMinimal(t *testing.T) {
+	raw, err := buildOrgAgentAccessAuditPayload(orgAgentAccessAuditFacts{
+		OrgID: "org-1", ActorID: "user-1", ActorOrgRole: "admin", Authority: agentAccessAuthorityOrgAdmin,
+		AgentID: "agent-xyz123", FromVisibility: AgentVisibilityOrg, ToVisibility: AgentVisibilityOrg,
+		FromAddPolicy: AgentAddPolicyAnyone, ToAddPolicy: AgentAddPolicyNobody,
+		EntriesChanged: true, EntryCount: 2, RevisionBefore: 4, RevisionAfter: 5,
+	}, time.Date(2026, 11, 20, 3, 4, 5, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("buildOrgAgentAccessAuditPayload: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	assertExactKeys(t, "top-level payload", payload, []string{
+		"event_id", "occurred_at", "org_id", "user_id", "actor_role", "plane",
+		"producer", "event", "subject", "resource_id", "outcome", "details",
+	})
+	details, ok := payload["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("details is not an object: %T", payload["details"])
+	}
+	assertExactKeys(t, "details", details, []string{
+		"authority", "from_visibility", "to_visibility", "from_add_policy", "to_add_policy",
+		"entries_changed", "entry_count", "owner_cleared", "revision_before", "revision_after",
+	})
+	if payload["event"] != "org_agent_access_changed" || payload["event_id"] != "org-agent-access:agent-xyz123:5" ||
+		details["authority"] != "org_admin" || details["to_add_policy"] != AgentAddPolicyNobody {
+		t.Fatalf("payload drifted: %+v", payload)
+	}
+	if !strings.HasSuffix(AuditSubjectOrgAgentAccessChanged, ".org_agent_access_changed") ||
+		!strings.HasPrefix(AuditSubjectOrgAgentAccessChanged, "verevon.audit.v2.control.user-core.") {
+		t.Fatalf("audit subject %q is outside user-core's authority prefix", AuditSubjectOrgAgentAccessChanged)
 	}
 }

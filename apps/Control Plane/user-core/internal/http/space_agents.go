@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -166,6 +167,17 @@ func (s *Server) updateAgentAccess(c *gin.Context) {
 		AddPolicy:        body.AddPolicy,
 		Entries:          body.Entries,
 		ExpectedRevision: *body.ExpectedRevision,
+		// D19/D22as: a canonical org owner or admin may edit an ownerless org-visible
+		// agent. The role is read from the membership authority only when the repository
+		// needs it, never from the body.
+		ResolveOrgRole: func(ctx context.Context) (string, error) {
+			role, err := s.orgAdminRole(ctx, strings.TrimSpace(c.GetString("user_id")), strings.TrimSpace(c.GetString("org_id")))
+			if errors.Is(err, ErrMembershipNotFound) {
+				// Not a canonical member: no org role, so a plain 403, not a 503.
+				return "", nil
+			}
+			return role, err
+		},
 	})
 	if err != nil {
 		writeAgentError(c, err)

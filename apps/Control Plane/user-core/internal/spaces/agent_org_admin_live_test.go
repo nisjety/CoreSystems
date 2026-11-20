@@ -217,3 +217,101 @@ func TestOrgAgentLifecycleFailsClosedWithoutPolicyAuditLive(t *testing.T) {
 		t.Fatalf("a fail-closed refusal touched the room admission: %s", got)
 	}
 }
+
+// D19/D22as live proof: a canonical org admin edits an ownerless org agent's
+// access (one audit row), a plain member cannot, and an unverifiable org role
+// fails closed with 503 and writes nothing.
+func TestOrgAdminEditsAnOwnerlessOrgAgentAccessLive(t *testing.T) {
+	f := newRoomLiveFixture(t)
+	f.agentCleanup(t)
+	ctx := context.Background()
+	outbox := &txAuditOutbox{}
+	f.repo.SetPolicyAuditOutbox(outbox)
+	registrar := f.user(t, "d22as-reg", f.org)
+	admin := f.user(t, "d22as-admin", f.org)
+	member := f.user(t, "d22as-member", f.org)
+	id := f.agentID("d22asorg")
+	f.registerAgent(t, registrar, id, AgentVisibilityOrg, AgentAddPolicyAnyone)
+	role := func(r string, err error) func(context.Context) (string, error) {
+		return func(context.Context) (string, error) { return r, err }
+	}
+	edit := func(actor string, resolve func(context.Context) (string, error)) (*AgentView, error) {
+		return f.repo.UpdateAgentAccess(ctx, AgentAccessRequest{
+			OrgID: f.org, ActorID: actor, AgentSubjectID: id, ExpectedRevision: 1,
+			Visibility: AgentVisibilityOrg, AddPolicy: AgentAddPolicyNobody,
+			Entries:        []AgentAccessEntry{{PrincipalID: member, Role: AgentAccessManager}},
+			ResolveOrgRole: resolve,
+		})
+	}
+
+	_, err := edit(member, role("member", nil))
+	wantRoomErr(t, err, 403, CodeAgentAccessForbidden)
+	_, err = edit(admin, role("", fmt.Errorf("authority down")))
+	wantRoomErr(t, err, 503, CodeAgentRegistryUnavailable)
+	if outbox.calls != 0 || f.agentDefinitionRevision(t, id) != 1 {
+		t.Fatalf("a refused edit wrote: outbox calls=%d revision=%d", outbox.calls, f.agentDefinitionRevision(t, id))
+	}
+
+	view, err := edit(admin, role("admin", nil))
+	if err != nil || view.Revision != 2 || view.AddPolicy != AgentAddPolicyNobody || view.OwnerUserID != "" {
+		t.Fatalf("org admin edit: %+v %v", view, err)
+	}
+	if outbox.calls != 1 || f.auditOutboxCount(t, fmt.Sprintf("org-agent-access:%s:2", id)) != 1 {
+		t.Fatalf("org admin edit must write exactly one audit row: calls=%d", outbox.calls)
+	}
+	// The member is now a listed manager and edits without any org-role lookup or audit.
+	if _, err := f.repo.UpdateAgentAccess(ctx, AgentAccessRequest{
+		OrgID: f.org, ActorID: member, AgentSubjectID: id, ExpectedRevision: 2,
+		Visibility: AgentVisibilityOrg, AddPolicy: AgentAddPolicyAnyone,
+		Entries: []AgentAccessEntry{{PrincipalID: member, Role: AgentAccessManager}},
+		ResolveOrgRole: func(context.Context) (string, error) {
+			t.Fatal("a listed manager's edit must not read the org role")
+			return "", nil
+		},
+	}); err != nil {
+		t.Fatalf("listed manager edit: %v", err)
+	}
+	if outbox.calls != 1 {
+		t.Fatalf("a manager's edit is not an org-admin edit: outbox calls=%d", outbox.calls)
+	}
+}
+
+// D22as live proof: an owner flipping their agent from owner to org visibility
+// gives up the owner (the column is NULL afterwards), with one audit row; after
+// that an org admin may edit it like any ownerless org agent.
+func TestOwnerToOrgFlipClearsTheOwnerLive(t *testing.T) {
+	f := newRoomLiveFixture(t)
+	f.agentCleanup(t)
+	ctx := context.Background()
+	outbox := &txAuditOutbox{}
+	f.repo.SetPolicyAuditOutbox(outbox)
+	owner := f.user(t, "d22as-owner", f.org)
+	admin := f.user(t, "d22as-admin2", f.org)
+	id := f.agentID("d22asflip")
+	f.registerAgent(t, owner, id, AgentVisibilityOwner, AgentAddPolicyOwnerOnly)
+
+	view, err := f.repo.UpdateAgentAccess(ctx, AgentAccessRequest{
+		OrgID: f.org, ActorID: owner, AgentSubjectID: id, ExpectedRevision: 1,
+		Visibility: AgentVisibilityOrg, AddPolicy: AgentAddPolicyAnyone,
+	})
+	if err != nil || view.OwnerUserID != "" || view.Visibility != AgentVisibilityOrg || view.Revision != 2 {
+		t.Fatalf("owner-to-org flip: %+v %v", view, err)
+	}
+	var ownerCol *string
+	if err := f.pool.QueryRow(ctx, `SELECT owner_user_id FROM agent_subjects WHERE agent_subject_id=$1`, id).Scan(&ownerCol); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if ownerCol != nil {
+		t.Fatalf("owner_user_id = %q after the flip, want NULL", *ownerCol)
+	}
+	if outbox.calls != 1 {
+		t.Fatalf("the owner clear must write one audit row: calls=%d", outbox.calls)
+	}
+	if _, err := f.repo.UpdateAgentAccess(ctx, AgentAccessRequest{
+		OrgID: f.org, ActorID: admin, AgentSubjectID: id, ExpectedRevision: 2,
+		Visibility: AgentVisibilityOrg, AddPolicy: AgentAddPolicyNobody,
+		ResolveOrgRole: func(context.Context) (string, error) { return "owner", nil },
+	}); err != nil {
+		t.Fatalf("org owner edits the now ownerless agent: %v", err)
+	}
+}
