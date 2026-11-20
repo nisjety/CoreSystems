@@ -973,6 +973,51 @@ struct StartGuardInner {
     /// Local proof of this gateway's outstanding browser dispatch, not durable
     /// authority: absence after a restart or on another replica fails closed.
     dispatches: HashMap<String, (BrowserDispatchState, Instant)>,
+    /// run id -> the stop notice of this process's live browser dispatch of that run (D21h). A Stop
+    /// that durably cancelled the run on someone's behalf (the starter's Stop, a room manager's
+    /// Stop) signals it, so the dispatch revokes its derived grant at once and stops waiting,
+    /// instead of learning of the cancel at its next five-minute heartbeat. Local only: a dispatch
+    /// on another replica still learns it from that heartbeat.
+    stop_notices: HashMap<String, DispatchStopNotice>,
+}
+
+/// One live dispatch's stop notice, bound to the run's owner so a signal names the run it stops.
+#[derive(Debug)]
+struct DispatchStopNotice {
+    org_id: String,
+    owner_id: String,
+    notify: std::sync::Arc<tokio::sync::Notify>,
+    /// Which registration this is, so an older watch dropping late never removes a newer one.
+    serial: u64,
+}
+
+/// Held by a live dispatch for as long as it runs. Dropping it (every exit of the dispatch task,
+/// a panic included) removes the notice, so a finished dispatch is never signalled.
+pub(crate) struct DispatchStopWatch {
+    guard: std::sync::Arc<RunStartGuard>,
+    run_id: String,
+    serial: u64,
+    notify: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl DispatchStopWatch {
+    /// Resolves once a Stop signalled this dispatch. A signal sent before the first wait is kept.
+    pub(crate) async fn stopped(&self) {
+        self.notify.notified().await;
+    }
+}
+
+impl Drop for DispatchStopWatch {
+    fn drop(&mut self) {
+        let mut inner = self.guard.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if inner
+            .stop_notices
+            .get(&self.run_id)
+            .is_some_and(|notice| notice.serial == self.serial)
+        {
+            inner.stop_notices.remove(&self.run_id);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1068,6 +1113,54 @@ impl RunStartGuard {
     fn forget_dispatch(&self, run_id: &str) {
         let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         inner.dispatches.remove(run_id);
+    }
+
+    /// Registers the stop notice of a dispatch this process is about to run for `run_id`, owned by
+    /// `(org_id, owner_id)`. The dispatch holds the returned watch until it ends.
+    pub(crate) fn watch_dispatch_stop(
+        self: &std::sync::Arc<Self>,
+        run_id: &str,
+        org_id: &str,
+        owner_id: &str,
+    ) -> DispatchStopWatch {
+        static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if inner.stop_notices.len() < START_GUARD_MAX_ENTRIES {
+            inner.stop_notices.insert(
+                run_id.to_owned(),
+                DispatchStopNotice {
+                    org_id: org_id.to_owned(),
+                    owner_id: owner_id.to_owned(),
+                    notify: notify.clone(),
+                    serial,
+                },
+            );
+        }
+        drop(inner);
+        DispatchStopWatch {
+            guard: self.clone(),
+            run_id: run_id.to_owned(),
+            serial,
+            notify,
+        }
+    }
+
+    /// Tells this process's live dispatch of `run_id` that its run was durably cancelled, so it
+    /// revokes its grant now and stops. Call only AFTER Session Core recorded the cancel. The owner
+    /// must be the run's (`org_id`, `owner_id`), as Session Core reported or verified it, so a
+    /// signal never reaches another owner's dispatch. `false` when no such dispatch runs here (it
+    /// ended, it is parked, or it runs on another replica).
+    pub(crate) fn signal_dispatch_stop(&self, run_id: &str, org_id: &str, owner_id: &str) -> bool {
+        let inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match inner.stop_notices.get(run_id) {
+            Some(notice) if notice.org_id == org_id && notice.owner_id == owner_id => {
+                notice.notify.notify_one();
+                true
+            }
+            _ => false,
+        }
     }
 
     fn check_fingerprint(&self, run_key: &str, fingerprint: &str) -> FingerprintCheck {
@@ -2039,6 +2132,8 @@ async fn room_browser_grant(
 /// host or URL (the broker stores it as the revoke reason).
 const REVOKE_REASON_START_FAILED: &str = "run_start_failed";
 const REVOKE_REASON_RUN_ENDED: &str = "run_ended";
+/// A Stop on another route durably cancelled the run, and its dispatch revoked at once (D21h).
+const REVOKE_REASON_RUN_STOPPED: &str = "run_stopped";
 
 /// Best-effort revoke of a run grant this route derived. A run grant the
 /// caller presented (`parent_grant_id` is `None`) is never touched: it is not
@@ -2906,6 +3001,11 @@ async fn browser_run_start_inner(
     let revoke_org = org_id.clone();
     let revoke_grant = browser_grant.clone();
     state.run_start_guard.begin_dispatch(&dispatch_run_id);
+    // D21h: a Stop that durably cancelled this run on another route (the starter's room Stop, a
+    // room manager's Stop) reaches this dispatch through its notice; see the select below.
+    let stop_watch = state
+        .run_start_guard
+        .watch_dispatch_stop(&dispatch_run_id, &org_id, &user_id);
     tokio::spawn(async move {
         let mut execution_request = tonic::Request::new(ExecuteStepRequest {
             run_id: dispatch_run_id.clone(),
@@ -2974,6 +3074,16 @@ async fn browser_run_start_inner(
             loop {
                 tokio::select! {
                     result = &mut execution => break result,
+                    () = stop_watch.stopped() => {
+                        // Session Core already recorded the cancel (the signaller's contract), and
+                        // execution-core's latch was set where the caller could set it. Revoke the
+                        // run grant now so Quarry refuses any further action, and stop waiting: as
+                        // with a run found terminal at a heartbeat, no late outcome is accepted.
+                        info!(run_id = %dispatch_run_id, "browser run stopped by a durable cancel; revoking its grant now");
+                        terminal_state.run_start_guard.forget_dispatch(&dispatch_run_id);
+                        revoke_derived_run_grant(&terminal_state, &revoke_bearer, &revoke_org, &revoke_grant, REVOKE_REASON_RUN_STOPPED).await;
+                        return;
+                    }
                     _ = heartbeat.tick() => match crate::session_flow::heartbeat_browser_agent_run(
                         &terminal_state,
                         &terminal_run,
@@ -3300,43 +3410,101 @@ async fn browser_run_control(
             }
         }
         BrowserRunControlAction::Stop => {
-            let request = authenticated_execution_request(
-                CancelRunRequest {
-                    run_id: run_id.clone(),
-                    reason: "user_stop".to_owned(),
-                },
+            match stop_owned_browser_run(
+                &state,
+                &run_id,
+                "user_stop",
                 &execution_bearer,
                 &session_bearer,
-            )?;
-            let resp = execution_client
-                .cancel_run(request)
-                .await
-                .map_err(|e| grpc_status_to_http(&e))?
-                .into_inner();
-            if !resp.cancelled {
-                "running"
-            } else if state.run_start_guard.request_dispatch_stop(&run_id) {
-                // The local dispatcher has received the parked response, so it
-                // cannot still be executing a browser step. Session Core owns
-                // the terminal receipt and may reject a competing terminal.
-                match crate::session_flow::cancel_browser_agent_run_authenticated(
-                    &state, &run_id, "user_stop", &session_bearer,
-                ).await {
-                    Ok(true) => { state.run_start_guard.forget_dispatch(&run_id); "cancelled" }
-                    Ok(false) => { state.run_start_guard.forget_dispatch(&run_id); "terminal" }
-                    Err(_) => {
-                        state.run_start_guard.restore_parked(&run_id);
-                        return Err((StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "browser_stop_not_confirmed" }))));
-                    }
-                }
-            } else {
-                // Latch acceptance alone is not a durable cancellation receipt.
-                "stopping"
+            )
+            .await?
+            {
+                OwnedBrowserStop::NotLatched => "running",
+                OwnedBrowserStop::Stopping => "stopping",
+                OwnedBrowserStop::Cancelled => "cancelled",
+                OwnedBrowserStop::AlreadyTerminal => "terminal",
             }
         }
     };
 
     Ok(Json(json!({ "status": status })))
+}
+
+/// What the owner's Stop of a browser run did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OwnedBrowserStop {
+    /// Execution Core did not take the latch (it holds no live loop for the run).
+    NotLatched,
+    /// The latch is set and the dispatch is still in flight: not yet a durable cancel.
+    Stopping,
+    /// The run was parked here; this call recorded its durable cancel.
+    Cancelled,
+    /// The run was parked here and Session Core reports it already terminal.
+    AlreadyTerminal,
+}
+
+/// The owner's Stop of a browser run (`POST /v1/browser/runs/:run_id/control {stop}` and the room
+/// starter's Stop, D21h): Execution Core `CancelRun` with the caller's own delegated execution and
+/// session bearers, which sets the loop's latch, then `request_dispatch_stop`. A run whose dispatch
+/// here is parked is cancelled durably now with `reason`; otherwise the latch alone is not a durable
+/// receipt and the answer is [`OwnedBrowserStop::Stopping`]. The caller must be the run's owner:
+/// Execution Core and Session Core both check it.
+pub(crate) async fn stop_owned_browser_run(
+    state: &AppState,
+    run_id: &str,
+    reason: &'static str,
+    execution_bearer: &VerifiedExecutionBearer,
+    session_bearer: &VerifiedSessionBearer,
+) -> Result<OwnedBrowserStop, ApiError> {
+    let request = authenticated_execution_request(
+        CancelRunRequest {
+            run_id: run_id.to_owned(),
+            reason: reason.to_owned(),
+        },
+        execution_bearer,
+        session_bearer,
+    )?;
+    let resp = state
+        .execution_client
+        .clone()
+        .cancel_run(request)
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+    if !resp.cancelled {
+        return Ok(OwnedBrowserStop::NotLatched);
+    }
+    if !state.run_start_guard.request_dispatch_stop(run_id) {
+        // Latch acceptance alone is not a durable cancellation receipt.
+        return Ok(OwnedBrowserStop::Stopping);
+    }
+    // The local dispatcher has received the parked response, so it
+    // cannot still be executing a browser step. Session Core owns
+    // the terminal receipt and may reject a competing terminal.
+    match crate::session_flow::cancel_browser_agent_run_authenticated(
+        state,
+        run_id,
+        reason,
+        session_bearer,
+    )
+    .await
+    {
+        Ok(true) => {
+            state.run_start_guard.forget_dispatch(run_id);
+            Ok(OwnedBrowserStop::Cancelled)
+        }
+        Ok(false) => {
+            state.run_start_guard.forget_dispatch(run_id);
+            Ok(OwnedBrowserStop::AlreadyTerminal)
+        }
+        Err(_) => {
+            state.run_start_guard.restore_parked(run_id);
+            Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "browser_stop_not_confirmed" })),
+            ))
+        }
+    }
 }
 
 pub(crate) fn authenticated_browser_request<T>(
@@ -3392,6 +3560,29 @@ fn authenticated_execution_request<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D21h: a Stop that durably cancelled a run reaches this process's live dispatch only for that
+    /// run's owner, wakes it even when the signal comes before the dispatch waits, and no longer
+    /// reaches it once the dispatch has ended.
+    #[tokio::test]
+    async fn a_dispatch_stop_signal_reaches_only_the_live_dispatch_of_its_owner() {
+        let guard = std::sync::Arc::new(RunStartGuard::default());
+        assert!(!guard.signal_dispatch_stop("run-1", "org-a", "user-a"), "no dispatch yet");
+        let watch = guard.watch_dispatch_stop("run-1", "org-a", "user-a");
+        assert!(!guard.signal_dispatch_stop("run-1", "org-b", "user-a"), "another org");
+        assert!(!guard.signal_dispatch_stop("run-1", "org-a", "user-b"), "another owner");
+        assert!(!guard.signal_dispatch_stop("run-2", "org-a", "user-a"), "another run");
+        assert!(guard.signal_dispatch_stop("run-1", "org-a", "user-a"));
+        tokio::time::timeout(Duration::from_secs(1), watch.stopped())
+            .await
+            .expect("a signal sent before the wait is kept");
+        // A newer dispatch of the same run id survives the older watch's drop.
+        let newer = guard.watch_dispatch_stop("run-1", "org-a", "user-a");
+        drop(watch);
+        assert!(guard.signal_dispatch_stop("run-1", "org-a", "user-a"), "the newer watch stays");
+        drop(newer);
+        assert!(!guard.signal_dispatch_stop("run-1", "org-a", "user-a"), "an ended dispatch");
+    }
 
     #[test]
     fn parked_browser_stop_requires_a_confirmed_dispatch_response() {
@@ -6545,6 +6736,8 @@ mod tests {
                             }
                             Ok(tonic::Response::new(RunDetail {
                                 run_id: r.into_inner().run_id,
+                                thread_id: "thread-of-run".to_owned(),
+                                agent_id: "browser-agent".to_owned(),
                                 status,
                                 ..Default::default()
                             }))
@@ -6649,6 +6842,62 @@ mod tests {
             restricted_unimplemented: Arc<AtomicBool>,
             capabilities_unimplemented: Arc<AtomicBool>,
             capability_bearer: Arc<Mutex<Option<String>>>,
+            /// ExecuteStep never answers: the dispatch stays in flight (D21h stop tests).
+            execute_hangs: Arc<AtomicBool>,
+            /// Execution Core CancelRun calls (the stop latch).
+            latches: Arc<Mutex<Vec<CancelRunRequest>>>,
+        }
+
+        /// SpaceBrowserRead as far as the starter's Stop reads it: ResolveRunSpace answers
+        /// `space`, or PermissionDenied (another member's run) when `denied` is set.
+        #[derive(Clone, Default)]
+        struct FakeSpaceBrowserRead {
+            space: Arc<Mutex<String>>,
+            denied: Arc<AtomicBool>,
+        }
+
+        impl tonic::server::NamedService for FakeSpaceBrowserRead {
+            const NAME: &'static str = "model_plane.v1.SpaceBrowserRead";
+        }
+
+        impl<B> Service<http::Request<B>> for FakeSpaceBrowserRead
+        where
+            B: Body + Send + 'static,
+            B::Error: Into<StdError> + Send + 'static,
+        {
+            type Response = http::Response<tonic::body::BoxBody>;
+            type Error = std::convert::Infallible;
+            type Future = BoxFuture<Self::Response, Self::Error>;
+
+            fn poll_ready(
+                &mut self,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Result<(), Self::Error>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, request: http::Request<B>) -> Self::Future {
+                let this = self.clone();
+                match request.uri().path() {
+                    "/model_plane.v1.SpaceBrowserRead/ResolveRunSpace" => Box::pin(async move {
+                        Ok(serve_unary(
+                            request,
+                            move |_: tonic::Request<mp_contracts::model_plane::v1::ResolveRunSpaceRequest>| async move {
+                                if this.denied.load(Ordering::SeqCst) {
+                                    return Err(Status::permission_denied("run access denied"));
+                                }
+                                Ok(tonic::Response::new(
+                                    mp_contracts::model_plane::v1::ResolveRunSpaceResponse {
+                                        space_id: this.space.lock().expect("space").clone(),
+                                    },
+                                ))
+                            },
+                        )
+                        .await)
+                    }),
+                    _ => Box::pin(async move { Ok(unimplemented_rpc()) }),
+                }
+            }
         }
 
         #[tonic::async_trait]
@@ -6683,6 +6932,9 @@ mod tests {
                     .lock()
                     .expect("executes")
                     .push(request.into_inner());
+                if self.execute_hangs.load(Ordering::SeqCst) {
+                    std::future::pending::<()>().await;
+                }
                 Err(Status::unavailable("the fake executes nothing"))
             }
 
@@ -6703,11 +6955,16 @@ mod tests {
                 Err(Status::unimplemented("not used"))
             }
 
+            /// The latch: recorded, and taken (D21h stop tests).
             async fn cancel_run(
                 &self,
-                _: tonic::Request<CancelRunRequest>,
+                request: tonic::Request<CancelRunRequest>,
             ) -> Result<Response<CancelRunResponse>, Status> {
-                Err(Status::unimplemented("not used"))
+                self.latches.lock().expect("latches").push(request.into_inner());
+                Ok(Response::new(CancelRunResponse {
+                    cancelled: true,
+                    receipt_id: String::new(),
+                }))
             }
 
             async fn pause_run(
@@ -6732,6 +6989,7 @@ mod tests {
             runs: FakeRuns,
             lifecycle: FakeLifecycle,
             execution: FakeExecution,
+            space_read: FakeSpaceBrowserRead,
             _tasks: Vec<tokio::task::JoinHandle<()>>,
             _auth: wiremock::MockServer,
         }
@@ -6754,15 +7012,17 @@ mod tests {
                 let runs = FakeRuns::default();
                 let lifecycle = FakeLifecycle::default();
                 let execution = FakeExecution::default();
+                let space_read = FakeSpaceBrowserRead::default();
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                     .await
                     .expect("bind fake session core");
                 let address = listener.local_addr().expect("fake session core address");
-                let (s, r, l, e) = (
+                let (s, r, l, e, sbr) = (
                     session.clone(),
                     runs.clone(),
                     lifecycle.clone(),
                     execution.clone(),
+                    space_read.clone(),
                 );
                 let server = tokio::spawn(async move {
                     let _ = tonic::transport::Server::builder()
@@ -6770,6 +7030,7 @@ mod tests {
                         .add_service(r)
                         .add_service(ManagedRunLifecycleServer::new(l))
                         .add_service(ExecutionCoreServer::new(e))
+                        .add_service(sbr)
                         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
                             listener,
                         ))
@@ -6781,6 +7042,10 @@ mod tests {
                 state.session_client = SessionCoreClient::new(channel.clone());
                 state.managed_run_client = ManagedRunLifecycleClient::new(channel.clone());
                 state.run_client = RunServiceClient::new(channel.clone());
+                state.space_browser_read_client =
+                    mp_contracts::model_plane::v1::space_browser_read_client::SpaceBrowserReadClient::new(
+                        channel.clone(),
+                    );
                 state.execution_client = ExecutionCoreClient::new(channel);
 
                 let auth = wiremock::MockServer::start().await;
@@ -6810,6 +7075,7 @@ mod tests {
                     runs,
                     lifecycle,
                     execution,
+                    space_read,
                     _tasks: vec![broker_task, server],
                     _auth: auth,
                 }
@@ -6904,6 +7170,268 @@ mod tests {
 
         fn run_key() -> String {
             keyed_run_key("org-a", "user-a", "session-1", "retry-1")
+        }
+
+        const STOP_KEY_ID: &str = "control-space-decision-test";
+
+        /// Turns the starter's Stop on with a test Control key; returns the signing key.
+        fn enable_starter_stop(state: &mut AppState) -> ed25519_dalek::SigningKey {
+            use base64::Engine as _;
+            let signing = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+            let public = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(signing.verifying_key().to_bytes());
+            state.space_browser_run = crate::space_routes::browser::SpaceBrowserRunPolicy::from_values(
+                Some("1"),
+                Some(STOP_KEY_ID),
+                Some(&public),
+            )
+            .expect("the stop policy");
+            signing
+        }
+
+        /// A Control `model.space.browser_run_stop` decision for `subject` on `run_id` in
+        /// `space-room-1`, valid now, and the body the BFF forwards.
+        fn stop_body(
+            signing: &ed25519_dalek::SigningKey,
+            subject: &str,
+            run_id: &str,
+            zdr: bool,
+        ) -> crate::space_routes::browser::SpaceBrowserAuthority {
+            use base64::Engine as _;
+            use ed25519_dalek::Signer as _;
+            use mp_contracts::space_browser_stop as stop;
+            let now = chrono::Utc::now();
+            let mut fields = json!({
+                "decision_ref": "decision-stop-1",
+                "org_id": "org-a",
+                "space_ref": "space-room-1",
+                "subject_id": subject,
+                "service_audience": stop::BROWSER_RUN_STOP_AUDIENCE,
+                "action_id": stop::BROWSER_RUN_STOP_ACTION_ID,
+                "action_schema_hash": stop::BROWSER_RUN_STOP_SCHEMA,
+                "payload_digest": "",
+                "idempotency_key": "stop-1",
+                "recipient_audience_ref": "audience:space-room-1:4",
+                "recipient_audience_hash": "sha256:audience-hash",
+                "privacy_policy_ref": "privacy:org-a:5",
+                "resource_authorization_ref": "control:space-room-1:browser-run-stop:7",
+                "authority_revision": 7,
+                "membership_revision": 3,
+                "privacy_revision": 5,
+                "recipient_audience_revision": 4,
+                "entitlement_revision": 6,
+                "permissions": [stop::PERMISSION_STOP],
+                "purpose": "ai_run",
+                "lawful_basis": "contract",
+                "privacy_class": "shared_space",
+                "retention_class": "ephemeral",
+                "residency": "eu",
+                "deletion_scope": "run",
+                "zero_data_retention": zdr,
+                "issued_at": now.to_rfc3339(),
+                "expires_at": (now + chrono::TimeDelta::seconds(120)).to_rfc3339(),
+                "nonce": "nonce-1"
+            });
+            let decision: mp_contracts::space_browser::SignedDecision =
+                serde_json::from_value(fields.clone()).expect("a decision");
+            let claims = stop::BrowserRunStopClaims { run_id: run_id.to_owned() };
+            fields["payload_digest"] = json!(stop::stop_payload_digest(&decision, &claims));
+            let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+            let signed = format!(
+                "v2.{}.{}",
+                b64.encode(STOP_KEY_ID),
+                b64.encode(serde_json::to_vec(&fields).expect("serializes"))
+            );
+            let signature = signing.sign(signed.as_bytes());
+            serde_json::from_value(json!({
+                "decision_token": format!("{signed}.{}", b64.encode(signature.to_bytes())),
+                "claims": { "run_id": run_id },
+                "idempotency_key": "stop-1",
+            }))
+            .expect("the stop body")
+        }
+
+        async fn starter_stop(
+            h: &Harness,
+            space_id: &str,
+            run_id: &str,
+            body: crate::space_routes::browser::SpaceBrowserAuthority,
+        ) -> (StatusCode, Value) {
+            use axum::response::IntoResponse as _;
+            let response = crate::space_routes::browser::room_browser_run_stop(
+                State(h.state.clone()),
+                Extension(browser_claims(false)),
+                VerifiedExecutionBearer::for_test("execution-token"),
+                VerifiedSessionBearer::for_test("session-token"),
+                Path((space_id.to_owned(), run_id.to_owned())),
+                Json(body),
+            )
+            .await
+            .into_response();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .expect("body");
+            (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+        }
+
+        /// D21h end to end: the starter's Stop takes the owner's latch with the caller's own
+        /// bearers, records the durable cancel as `starter_stop`, makes the in-flight dispatch
+        /// revoke its grant at once, and writes the room's result turn.
+        #[tokio::test]
+        async fn the_starter_stops_their_room_browser_run() {
+            let mut h = Harness::new(true).await;
+            let signing = enable_starter_stop(&mut h.state);
+            *h.space_read.space.lock().expect("space") = "space-room-1".to_owned();
+            h.execution.execute_hangs.store(true, Ordering::SeqCst);
+            let Json(started) = h
+                .start(Some("retry-1"), browser_request("session-1"))
+                .await
+                .expect("start");
+            let run_id = started["run_id"].as_str().expect("run id").to_owned();
+            assert!(eventually(|| h.dispatches().len() == 1).await);
+            let appends_before = h.session.appends.lock().expect("appends").len();
+
+            let (status, body) = starter_stop(
+                &h,
+                "space-room-1",
+                &run_id,
+                stop_body(&signing, "user-a", &run_id, false),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["status"], "cancelled");
+            assert_eq!(body["result_turn"], "written");
+
+            let latches = h.execution.latches.lock().expect("latches").clone();
+            assert_eq!(latches.len(), 1, "the owner's latch");
+            assert_eq!(latches[0].reason, "starter_stop");
+            let cancels = h.runs.cancels.lock().expect("cancels").clone();
+            assert_eq!(cancels.len(), 1, "one durable cancel");
+            assert_eq!(cancels[0].reason, "starter_stop");
+            assert!(eventually(|| h.revokes() == 1).await, "the grant is revoked at once");
+            let appends = h.session.appends.lock().expect("appends").clone();
+            assert_eq!(appends.len(), appends_before + 1, "one result turn");
+            let turn = appends.last().expect("the result turn");
+            assert_eq!(turn.thread_id, "thread-of-run");
+            assert!(turn.content.contains("stopped"), "{}", turn.content);
+        }
+
+        /// D21h + D23: a Space under zero data retention is still stopped; only the result turn
+        /// is left out.
+        #[tokio::test]
+        async fn a_zero_retention_space_is_stopped_without_a_result_turn() {
+            let mut h = Harness::new(true).await;
+            let signing = enable_starter_stop(&mut h.state);
+            *h.space_read.space.lock().expect("space") = "space-room-1".to_owned();
+            let appends_before = h.session.appends.lock().expect("appends").len();
+            let (status, body) = starter_stop(
+                &h,
+                "space-room-1",
+                "run-x",
+                stop_body(&signing, "user-a", "run-x", true),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["status"], "cancelled");
+            assert_eq!(body["result_turn"], "skipped_zdr");
+            assert_eq!(h.runs.cancels.lock().expect("cancels").len(), 1);
+            assert_eq!(h.session.appends.lock().expect("appends").len(), appends_before);
+        }
+
+        /// D21h: a run that is not the caller's (Session Core's owner check refuses it), a run of
+        /// another Space, a decision for another member, and a decision for another run are all
+        /// refused before anything is stopped.
+        #[tokio::test]
+        async fn a_run_that_is_not_the_starters_is_never_stopped() {
+            let mut h = Harness::new(true).await;
+            let signing = enable_starter_stop(&mut h.state);
+            *h.space_read.space.lock().expect("space") = "space-room-1".to_owned();
+
+            h.space_read.denied.store(true, Ordering::SeqCst);
+            let (status, body) =
+                starter_stop(&h, "space-room-1", "run-x", stop_body(&signing, "user-a", "run-x", false)).await;
+            assert_eq!((status, body["error"]["code"].clone()), (StatusCode::FORBIDDEN, json!("browser_run_not_yours")));
+            h.space_read.denied.store(false, Ordering::SeqCst);
+
+            *h.space_read.space.lock().expect("space") = "space-room-2".to_owned();
+            let (status, body) =
+                starter_stop(&h, "space-room-1", "run-x", stop_body(&signing, "user-a", "run-x", false)).await;
+            assert_eq!((status, body["error"]["code"].clone()), (StatusCode::FORBIDDEN, json!("browser_run_not_yours")));
+            *h.space_read.space.lock().expect("space") = "space-room-1".to_owned();
+
+            let (status, body) =
+                starter_stop(&h, "space-room-1", "run-x", stop_body(&signing, "user-b", "run-x", false)).await;
+            assert_eq!((status, body["error"]["code"].clone()), (StatusCode::FORBIDDEN, json!("space_browser_stop_not_authorized")));
+            let (status, body) =
+                starter_stop(&h, "space-room-1", "run-x", stop_body(&signing, "user-a", "run-y", false)).await;
+            assert_eq!((status, body["error"]["code"].clone()), (StatusCode::FORBIDDEN, json!("space_browser_stop_not_authorized")));
+            let (status, _) =
+                starter_stop(&h, "space-room-2", "run-x", stop_body(&signing, "user-a", "run-x", false)).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "a decision for another Space");
+
+            assert!(h.execution.latches.lock().expect("latches").is_empty());
+            assert!(h.runs.cancels.lock().expect("cancels").is_empty());
+        }
+
+        /// D21h: the caller's live zero-retention posture is refused first, typed, and the switch
+        /// off is 404; neither reads the decision.
+        #[tokio::test]
+        async fn a_zero_retention_caller_or_the_switch_off_is_refused_first() {
+            use axum::response::IntoResponse as _;
+            let mut h = Harness::new(true).await;
+            let signing = enable_starter_stop(&mut h.state);
+            let response = crate::space_routes::browser::room_browser_run_stop(
+                State(h.state.clone()),
+                Extension(browser_claims(true)),
+                VerifiedExecutionBearer::for_test("execution-token"),
+                VerifiedSessionBearer::for_test("session-token"),
+                Path(("space-room-1".to_owned(), "run-x".to_owned())),
+                Json(stop_body(&signing, "user-a", "run-x", false)),
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+            h.state.space_browser_run = crate::space_routes::browser::SpaceBrowserRunPolicy::off();
+            let (status, _) =
+                starter_stop(&h, "space-room-1", "run-x", stop_body(&signing, "user-a", "run-x", false)).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert!(h.runs.cancels.lock().expect("cancels").is_empty());
+        }
+
+        /// D21h: a Stop on another route that durably cancelled the run (the starter's room Stop, a
+        /// room manager's Stop) signals this process's in-flight dispatch, which revokes the derived
+        /// grant at once instead of at its next five-minute heartbeat, and stops. A signal for
+        /// another owner reaches nothing.
+        #[tokio::test]
+        async fn a_durable_stop_signal_revokes_the_in_flight_dispatch_grant_at_once() {
+            let h = Harness::new(true).await;
+            h.execution.execute_hangs.store(true, Ordering::SeqCst);
+            let Json(body) = h
+                .start(Some("retry-1"), browser_request("session-1"))
+                .await
+                .expect("keyed start");
+            let run_id = body["run_id"].as_str().expect("run id").to_owned();
+            assert!(eventually(|| h.dispatches().len() == 1).await, "one dispatch in flight");
+            assert_eq!(h.revokes(), 0);
+
+            assert!(
+                !h.state.run_start_guard.signal_dispatch_stop(&run_id, "org-a", "user-b"),
+                "another owner's signal reaches nothing"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(h.revokes(), 0);
+
+            assert!(h.state.run_start_guard.signal_dispatch_stop(&run_id, "org-a", "user-a"));
+            assert!(eventually(|| h.revokes() == 1).await, "the derived grant is revoked at once");
+            assert!(
+                eventually(|| !h.state.run_start_guard.signal_dispatch_stop(&run_id, "org-a", "user-a")).await,
+                "the stopped dispatch is gone"
+            );
+            assert!(
+                !h.state.run_start_guard.request_dispatch_stop(&run_id),
+                "the dispatch state is forgotten"
+            );
         }
 
         #[tokio::test]

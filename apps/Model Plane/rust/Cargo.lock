@@ -2349,6 +2349,7 @@ dependencies = [
  "blake3",
  "chrono",
  "dashmap",
+ "ed25519-dalek",
  "futures",
  "hmac 0.12.1",
  "hyper-util",

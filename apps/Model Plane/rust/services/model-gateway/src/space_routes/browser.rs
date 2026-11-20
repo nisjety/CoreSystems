@@ -25,15 +25,19 @@ use axum::{
     extract::{Path, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Extension, Json, Router,
 };
 use chrono::Utc;
 use mp_contracts::model_plane::v1::{
     browser_broker_client::BrowserBrokerClient, space_browser_read_client::SpaceBrowserReadClient,
     AuthorizeRoomBrowserEvidenceRequest, CountActiveRoomBrowserRunsRequest, DeriveRunGrantRequest,
-    DeriveRunGrantResponse, ListRoomBrowserRunsRequest, ReadRoomBrowserTimelineRequest,
-    RoomBrowserEvent, RoomBrowserRun, RoomBrowserRunHeader,
+    DeriveRunGrantResponse, GetRunRequest, ListRoomBrowserRunsRequest,
+    ReadRoomBrowserTimelineRequest, ResolveRunSpaceRequest, RoomBrowserEvent, RoomBrowserRun,
+    RoomBrowserRunHeader,
+};
+use mp_contracts::space_browser_stop::{
+    verify_browser_run_stop_decision, BrowserRunStopExpectation, VerifiedBrowserRunStop,
 };
 use mp_contracts::space_browser::{
     capacity_admits, check_audience_revisions_agree, goal_digest, profile_request_admitted,
@@ -47,8 +51,10 @@ use serde_json::{json, Value};
 use tonic::transport::Channel;
 use tracing::warn;
 
-use crate::auth::{Claims, VerifiedBrowserBearer, VerifiedSessionBearer};
-use crate::browser_run::{authenticated_browser_request, keyed_room_run_key};
+use crate::auth::{Claims, VerifiedBrowserBearer, VerifiedExecutionBearer, VerifiedSessionBearer};
+use crate::browser_run::{
+    authenticated_browser_request, keyed_room_run_key, stop_owned_browser_run, OwnedBrowserStop,
+};
 use crate::quarry::QuarryError;
 use crate::session_flow::{SessionRun, ThreadSpaceContext};
 use crate::state::AppState;
@@ -614,6 +620,10 @@ pub fn router() -> Router<AppState> {
             "/v1/spaces/:space_id/browser/runs/:run_id/evidence/:evidence_id",
             get(read_room_browser_evidence),
         )
+        .route(
+            "/v1/spaces/:space_id/browser/runs/:run_id/stop",
+            post(room_browser_run_stop),
+        )
 }
 
 /// The Control read decision a room read carries in its query string, as `artifacts.rs` carries it. The pair is
@@ -1092,6 +1102,457 @@ async fn read_room_browser_evidence(
         bytes,
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------------------------
+// The starter's Stop (owner decision D21h).
+// ---------------------------------------------------------------------------------------------
+
+/// The agent id every browser run is started under (`browser_run.rs`).
+const BROWSER_AGENT_ID: &str = "browser-agent";
+/// The durable cancel reason of a starter's Stop.
+const STARTER_STOP_REASON: &str = "starter_stop";
+/// The result turn outcome of a stopped room run.
+const STOPPED_OUTCOME: &str = "stopped";
+
+/// The one 403 for a stop decision that does not verify, whatever the reason.
+fn stop_not_authorized() -> ApiError {
+    typed_error(
+        StatusCode::FORBIDDEN,
+        "space_browser_stop_not_authorized",
+        "stopping this browser run is not authorized",
+    )
+}
+
+/// The one 403 for a run that is not the caller's in this Space: another member's run, a run of
+/// another Space, or a run with no Space. It never says which.
+fn run_not_theirs() -> ApiError {
+    typed_error(
+        StatusCode::FORBIDDEN,
+        "browser_run_not_yours",
+        "only the member who started this browser run can stop it here",
+    )
+}
+
+fn stop_unavailable() -> ApiError {
+    typed_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "browser_stop_unavailable",
+        "the browser run could not be stopped; retry the request",
+    )
+}
+
+/// The refusal of a stop decision: a window refusal re-mints (409), everything else is one 403.
+fn stop_refusal_for(reason: BrowserRunRefusal) -> ApiError {
+    warn!(reason = reason.label(), "room browser run stop refused");
+    match reason {
+        BrowserRunRefusal::Stale | BrowserRunRefusal::Window => typed_error(
+            StatusCode::CONFLICT,
+            "space_authority_stale",
+            "the Space authority changed; retry the request",
+        ),
+        BrowserRunRefusal::Malformed
+        | BrowserRunRefusal::Untrusted
+        | BrowserRunRefusal::Mismatch
+        | BrowserRunRefusal::Policy => stop_not_authorized(),
+    }
+}
+
+/// Verifies the starter stop decision: the switch, the key, then every check in
+/// `mp_contracts::space_browser_stop`.
+fn verify_stop(
+    policy: &SpaceBrowserRunPolicy,
+    decision_token: &str,
+    claims_json: &str,
+    expect: &BrowserRunStopExpectation<'_>,
+) -> Result<VerifiedBrowserRunStop, ApiError> {
+    if !policy.enabled() {
+        return Err(typed_error(
+            StatusCode::NOT_FOUND,
+            "feature_unavailable",
+            "room browser runs are not enabled",
+        ));
+    }
+    let Some(key) = policy.control_key.as_ref() else {
+        return Err(typed_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "space_decision_unavailable",
+            "the Space decision key is not configured",
+        ));
+    };
+    verify_browser_run_stop_decision(key, decision_token, claims_json, expect)
+        .map_err(stop_refusal_for)
+}
+
+/// The Session Core run read refusals of the stop's ownership check. A run that is not the caller's
+/// (Session Core answers PermissionDenied for another owner and for an unknown run alike) is the one
+/// `browser_run_not_yours`.
+fn stop_read_refusal(status: &tonic::Status) -> ApiError {
+    warn!(code = ?status.code(), "room browser run stop ownership read refused");
+    if Refusal::from_status(status).is_some() {
+        return room_zdr_refused();
+    }
+    match status.code() {
+        tonic::Code::Unauthenticated => {
+            typed_error(StatusCode::UNAUTHORIZED, "unauthorized", "authentication required")
+        }
+        tonic::Code::PermissionDenied | tonic::Code::NotFound => run_not_theirs(),
+        tonic::Code::InvalidArgument => room_invalid(),
+        _ => stop_unavailable(),
+    }
+}
+
+/// The run must be in the Space the path and the decision name: `resolved` is the run's own Space
+/// as Session Core reported it to its owner.
+fn check_run_in_space(resolved: &str, space_id: &str) -> Result<(), ApiError> {
+    if !resolved.is_empty() && resolved == space_id {
+        Ok(())
+    } else {
+        Err(run_not_theirs())
+    }
+}
+
+/// The run must be a browser run: the starter's Stop never ends another kind of run of theirs.
+fn check_browser_run(agent_id: &str) -> Result<(), ApiError> {
+    if agent_id == BROWSER_AGENT_ID {
+        Ok(())
+    } else {
+        Err(run_not_theirs())
+    }
+}
+
+/// Whether the stop writes the room's result turn: only when this request recorded the cancel, and
+/// never into a Space under zero data retention (D23: the decision is issued there, but nothing new
+/// is retained for the run).
+#[must_use]
+fn writes_stop_result_turn(cancelled_here: bool, space_zdr: bool) -> bool {
+    cancelled_here && !space_zdr
+}
+
+/// The owner-scoped reads of the run: its Space (ResolveRunSpace answers only the run's owner) and
+/// its detail (GetRun, owner-scoped too). Returns the run's thread id.
+async fn resolve_starter_run(
+    state: &AppState,
+    bearer: &VerifiedSessionBearer,
+    (org_id, user_id): (&str, &str),
+    space_id: &str,
+    run_id: &str,
+) -> Result<String, ApiError> {
+    let mut browser_read: SpaceBrowserReadClient<Channel> = state.space_browser_read_client.clone();
+    let request = session_request(
+        ResolveRunSpaceRequest {
+            run_id: run_id.to_owned(),
+            org_id: org_id.to_owned(),
+            user_id: user_id.to_owned(),
+        },
+        bearer,
+    )?;
+    let resolved = match tokio::time::timeout(ROOM_READ_TIMEOUT, browser_read.resolve_run_space(request))
+        .await
+    {
+        Ok(Ok(reply)) => reply.into_inner().space_id,
+        Ok(Err(status)) => return Err(stop_read_refusal(&status)),
+        Err(_elapsed) => return Err(stop_unavailable()),
+    };
+    check_run_in_space(&resolved, space_id)?;
+    let request = session_request(
+        GetRunRequest {
+            run_id: run_id.to_owned(),
+        },
+        bearer,
+    )?;
+    let detail = match tokio::time::timeout(ROOM_READ_TIMEOUT, state.run_client.clone().get_run(request))
+        .await
+    {
+        Ok(Ok(reply)) => reply.into_inner(),
+        Ok(Err(status)) => return Err(stop_read_refusal(&status)),
+        Err(_elapsed) => return Err(stop_unavailable()),
+    };
+    check_browser_run(&detail.agent_id)?;
+    Ok(detail.thread_id)
+}
+
+/// `POST /v1/spaces/:space_id/browser/runs/:run_id/stop` (owner decision D21h): the member who
+/// started a room browser run stops it, whatever their room role, with no browser or run-control
+/// entitlement.
+///
+/// Order, each step failing closed: the caller's live zero-retention posture (412, before anything
+/// else: the stop drives Execution Core and writes a durable cancel and a result turn under this
+/// credential, and Execution Core refuses a zero-retention caller), the rollout switch (404), the
+/// request shape and a user principal (400/403), the Control `model.space.browser_run_stop` decision
+/// bound to the path's Space and run and to the caller (403, 409 to re-mint), then the run's
+/// ownership: Session Core must report the run in THIS Space to its owner, the caller, and it must be
+/// a browser run (403 `browser_run_not_yours`). Control cannot see who started a run, so this check
+/// is what makes the decision "the starter's".
+///
+/// Then the owner's own Stop ([`stop_owned_browser_run`], with the caller's delegated execution and
+/// session bearers, reason `starter_stop`), the durable cancel in Session Core under the same reason
+/// when the run was not parked here, the signal to this process's live dispatch so it revokes the
+/// derived grant at once (D16 revoke path), and the room's result turn for the stopped run.
+///
+/// A Space under zero data retention (the decision says so, D23) is still stopped: stopping is the
+/// safe direction. Only the result turn is left out there.
+pub(crate) async fn room_browser_run_stop(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    execution_bearer: VerifiedExecutionBearer,
+    bearer: VerifiedSessionBearer,
+    Path((space_id, run_id)): Path<(String, String)>,
+    Json(body): Json<SpaceBrowserAuthority>,
+) -> Response {
+    // 1. The caller's live zero-retention posture. A waiver names a model connection, never a
+    //    browser route, so it is refused as a route mismatch (`zdr_or_refuse`).
+    match crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(false)) {
+        Ok(false) => {}
+        Ok(true) => {
+            return (
+                StatusCode::PRECONDITION_FAILED,
+                Json(Refusal::feature_not_supported("browser_run_control").json_body()),
+            )
+                .into_response()
+        }
+        Err(refusal) => return refusal.into_response(),
+    }
+    // 2. The rollout switch, the same as the start and the room reads.
+    if !state.space_browser_run.enabled() {
+        return typed_error(
+            StatusCode::NOT_FOUND,
+            "feature_unavailable",
+            "room browser runs are not enabled",
+        )
+        .into_response();
+    }
+    // 3. Shape and a user principal.
+    let space_id = space_id.trim().to_owned();
+    let run_id = run_id.trim().to_owned();
+    if !room_id_ok(&space_id) || !room_id_ok(&run_id) {
+        return room_invalid().into_response();
+    }
+    let org_id = claims.org_id.trim();
+    let user_id = claims.user_id.trim();
+    if org_id.is_empty() || user_id.is_empty() {
+        return stop_not_authorized().into_response();
+    }
+    // 4. The Control decision, bound to this Space, this run and this caller.
+    let claims_json = body.claims.to_string();
+    let expect = BrowserRunStopExpectation {
+        org_id,
+        subject_id: user_id,
+        space_ref: &space_id,
+        run_id: &run_id,
+        idempotency_key: &body.idempotency_key,
+        now: Utc::now(),
+    };
+    let verified = match verify_stop(
+        &state.space_browser_run,
+        &body.decision_token,
+        &claims_json,
+        &expect,
+    ) {
+        Ok(verified) => verified,
+        Err(refusal) => return refusal.into_response(),
+    };
+    // 5. The run is the caller's, in this Space, and a browser run.
+    let thread_id =
+        match resolve_starter_run(&state, &bearer, (org_id, user_id), &space_id, &run_id).await {
+            Ok(thread_id) => thread_id,
+            Err(refusal) => return refusal.into_response(),
+        };
+    // 6. The owner's Stop: Execution Core's latch with the caller's own bearers, and a parked
+    //    dispatch here cancelled durably at once. A latch that cannot be set does not hold the stop
+    //    back: the durable cancel and the grant revoke below end the run regardless.
+    let owned = match stop_owned_browser_run(
+        &state,
+        &run_id,
+        STARTER_STOP_REASON,
+        &execution_bearer,
+        &bearer,
+    )
+    .await
+    {
+        Ok(owned) => Some(owned),
+        Err((status, _)) if status == StatusCode::SERVICE_UNAVAILABLE => {
+            // A parked dispatch whose durable cancel could not be confirmed: the same answer as the
+            // owner's Stop, so the starter retries.
+            return stop_unavailable().into_response();
+        }
+        Err((status, _)) => {
+            warn!(%status, "room browser run stop: execution latch not set");
+            None
+        }
+    };
+    // 7. The durable cancel, unless the parked path above already recorded it.
+    let cancelled_here = match owned {
+        Some(OwnedBrowserStop::Cancelled) => true,
+        Some(OwnedBrowserStop::AlreadyTerminal) => false,
+        Some(OwnedBrowserStop::NotLatched | OwnedBrowserStop::Stopping) | None => {
+            match crate::session_flow::cancel_browser_agent_run_authenticated(
+                &state,
+                &run_id,
+                STARTER_STOP_REASON,
+                &bearer,
+            )
+            .await
+            {
+                Ok(cancelled) => cancelled,
+                Err(error) => {
+                    warn!(%error, "room browser run stop: durable cancel not confirmed");
+                    return stop_unavailable().into_response();
+                }
+            }
+        }
+    };
+    // 8. The live dispatch here revokes the derived grant now and stops waiting. On another
+    //    replica it learns of the cancel at its next heartbeat.
+    let dispatch = if state
+        .run_start_guard
+        .signal_dispatch_stop(&run_id, org_id, user_id)
+    {
+        "local"
+    } else {
+        "none"
+    };
+    // 9. The room's result turn for the stopped run.
+    let result_turn = if !writes_stop_result_turn(cancelled_here, verified.zero_data_retention) {
+        if cancelled_here {
+            "skipped_zdr"
+        } else {
+            "none"
+        }
+    } else {
+        let (content, metadata) = result_turn(&run_id, STOPPED_OUTCOME, "");
+        match crate::session_flow::append_assistant_message_authenticated(
+            &state,
+            &thread_id,
+            &content,
+            &bearer,
+            None,
+            Some(metadata),
+        )
+        .await
+        {
+            Ok(()) => "written",
+            Err(error) => {
+                // The run is already cancelled; a lost result turn is logged, never a failed stop.
+                warn!(%error, "room browser run stop: result turn could not be appended");
+                "failed"
+            }
+        }
+    };
+    let status = if cancelled_here { "cancelled" } else { "already_terminal" };
+    tracing::info!(
+        run_id = %run_id,
+        decision_ref = %verified.decision_ref,
+        outcome = status,
+        dispatch,
+        result_turn,
+        "room browser run stopped by its starter"
+    );
+    Json(json!({
+        "run_id": run_id,
+        "status": status,
+        "cancelled": cancelled_here,
+        "result_turn": result_turn,
+    }))
+    .into_response()
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+
+    fn code(error: ApiError) -> (StatusCode, String) {
+        let (status, Json(body)) = error;
+        (status, body["error"]["code"].as_str().unwrap_or_default().to_owned())
+    }
+
+    /// D21h: every verification failure is one 403, and only the window re-mints.
+    #[test]
+    fn a_stop_decision_refusal_is_one_403_and_a_window_refusal_re_mints() {
+        for reason in [
+            BrowserRunRefusal::Malformed,
+            BrowserRunRefusal::Untrusted,
+            BrowserRunRefusal::Mismatch,
+            BrowserRunRefusal::Policy,
+        ] {
+            assert_eq!(
+                code(stop_refusal_for(reason)),
+                (StatusCode::FORBIDDEN, "space_browser_stop_not_authorized".to_owned()),
+                "{reason:?}"
+            );
+        }
+        assert_eq!(code(stop_refusal_for(BrowserRunRefusal::Window)).0, StatusCode::CONFLICT);
+    }
+
+    /// D21h: with the switch off the stop is 404 before any key is read.
+    #[test]
+    fn the_stop_is_unavailable_while_the_switch_is_off() {
+        let expect = BrowserRunStopExpectation {
+            org_id: "org-1",
+            subject_id: "user-2",
+            space_ref: "space-room-1",
+            run_id: "run-browser-1",
+            idempotency_key: "stop-1",
+            now: Utc::now(),
+        };
+        let refused = verify_stop(&SpaceBrowserRunPolicy::off(), "v2.a.b.c", "{}", &expect)
+            .expect_err("off");
+        assert_eq!(code(refused), (StatusCode::NOT_FOUND, "feature_unavailable".to_owned()));
+    }
+
+    /// D21h: the run must be in the path's Space; a run of another Space or of no Space is not
+    /// the starter's to stop here, and the answer never says which.
+    #[test]
+    fn a_run_of_another_space_or_none_is_not_theirs() {
+        assert!(check_run_in_space("space-room-1", "space-room-1").is_ok());
+        for resolved in ["space-room-2", ""] {
+            assert_eq!(
+                code(check_run_in_space(resolved, "space-room-1").expect_err(resolved)),
+                (StatusCode::FORBIDDEN, "browser_run_not_yours".to_owned())
+            );
+        }
+    }
+
+    /// D21h: only a browser run is stopped through this route.
+    #[test]
+    fn only_a_browser_run_is_stopped_here() {
+        assert!(check_browser_run(BROWSER_AGENT_ID).is_ok());
+        assert!(check_browser_run("general-v1").is_err());
+    }
+
+    /// D21h: another member's run (Session Core's owner check answers PermissionDenied, and an
+    /// unknown run alike) is the one `browser_run_not_yours`; a ZDR refusal stays the typed 412.
+    #[test]
+    fn a_session_core_owner_refusal_is_not_theirs() {
+        for status in [
+            tonic::Status::permission_denied("run access denied"),
+            tonic::Status::not_found("run not found"),
+        ] {
+            assert_eq!(
+                code(stop_read_refusal(&status)),
+                (StatusCode::FORBIDDEN, "browser_run_not_yours".to_owned())
+            );
+        }
+        assert_eq!(
+            code(stop_read_refusal(&tonic::Status::unavailable("down"))).0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let zdr = Refusal::feature_not_supported("browser_run").grpc_status(tonic::Code::FailedPrecondition);
+        assert_eq!(stop_read_refusal(&zdr).0, StatusCode::PRECONDITION_FAILED);
+    }
+
+    /// D21h + D23: the result turn is written only by the request that cancelled, and never into a
+    /// Space under zero data retention.
+    #[test]
+    fn the_result_turn_is_written_once_and_never_under_space_zdr() {
+        assert!(writes_stop_result_turn(true, false));
+        assert!(!writes_stop_result_turn(true, true));
+        assert!(!writes_stop_result_turn(false, false));
+        assert!(!writes_stop_result_turn(false, true));
+        let (content, metadata) = result_turn("run-browser-1", STOPPED_OUTCOME, "");
+        assert_eq!(content, "The browser run ended: stopped.");
+        assert!(format!("{metadata:?}").contains("stopped"));
+    }
 }
 
 #[cfg(test)]

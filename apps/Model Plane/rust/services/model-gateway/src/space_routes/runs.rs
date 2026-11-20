@@ -457,6 +457,16 @@ async fn stop_live_producer(
     owner_org_id: &str,
     owner_user_id: &str,
 ) -> &'static str {
+    // A browser run's producer is its dispatch, which registers no stream in the cancel registry:
+    // without this signal a manager's Stop left its grant live and its dispatch waiting until the
+    // next five-minute heartbeat (D21h item 4). The dispatch revokes the derived grant (D16 path)
+    // and stops. Owner-bound: Session Core reported this owner.
+    if state
+        .run_start_guard
+        .signal_dispatch_stop(run_id, owner_org_id, owner_user_id)
+    {
+        return "local_browser";
+    }
     match state
         .run_control
         .cancel_run(&state.cancels, run_id, owner_org_id, owner_user_id)

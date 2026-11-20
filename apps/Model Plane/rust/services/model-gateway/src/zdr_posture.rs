@@ -1001,6 +1001,9 @@ pub(crate) mod tests {
             ("space_routes/posts.rs", "append_space_post"),
             // A manager's Stop writes a RUN_CANCELLED receipt on someone else's run (WS09-S8).
             ("space_routes/runs.rs", "room_run_stop"),
+            // The starter's Stop of a room browser run writes a RUN_CANCELLED receipt and a result
+            // turn under the caller's credential (D21h).
+            ("space_routes/browser.rs", "room_browser_run_stop"),
             // A member's approval decision keeps its free-text reason (WS10-S6).
             ("space_routes/approvals.rs", "decide_space_approval"),
             // A thread goal is user content in a durable store (EP-7 S1).
