@@ -480,7 +480,7 @@ func (s *Server) listMembers(c *gin.Context) {
 
 // inviteMember adds or records an invitation for a user to join an organization.
 // POST /orgs/:id/members/invite
-// Body: { "email": "...", "role": "admin"|"member"|"viewer" }
+// Body: { "email": "...", "role": "admin"|"member"|"viewer"|"compliance" }
 func (s *Server) inviteMember(c *gin.Context) {
 	orgID := c.Param("id")
 	var req struct {
@@ -497,9 +497,8 @@ func (s *Server) inviteMember(c *gin.Context) {
 	}
 
 	// Validate role
-	validRoles := map[string]bool{"owner": true, "admin": true, "member": true, "viewer": true}
-	if !validRoles[role] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid role; must be admin, member, or viewer"})
+	if !org.IsCanonicalOrgRole(role) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid role; must be admin, member, viewer, or compliance"})
 		return
 	}
 
@@ -767,8 +766,8 @@ func (s *Server) reconcileOrganizationMember(c *gin.Context) {
 		return
 	}
 	role := strings.ToLower(strings.TrimSpace(req.Role))
-	if action == "upsert" && role != "owner" && role != "admin" && role != "member" && role != "viewer" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be owner, admin, member, or viewer"})
+	if action == "upsert" && !org.IsCanonicalOrgRole(role) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be owner, admin, member, viewer, or compliance"})
 		return
 	}
 	applied, err := s.orgService.ReconcileOrganizationMember(c.Request.Context(), orgID, req.UserID, role, action, req.Revision)

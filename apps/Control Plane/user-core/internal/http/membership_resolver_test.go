@@ -83,6 +83,42 @@ func TestResolveMembershipUsesExactCanonicalAuthRole(t *testing.T) {
 	}
 }
 
+// D21i: every one of the five canonical org roles, compliance included, is
+// passed through exactly; anything else fails closed.
+func TestResolveMembershipAcceptsTheFiveCanonicalRoles(t *testing.T) {
+	tests := []struct {
+		role    string
+		wantErr bool
+	}{
+		{role: "owner"},
+		{role: "admin"},
+		{role: "member"},
+		{role: "viewer"},
+		{role: "compliance"},
+		{role: "Compliance"},
+		{role: "auditor", wantErr: true},
+		{role: "superadmin", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.role, func(t *testing.T) {
+			server := membershipServer(t, func(w stdhttp.ResponseWriter, _ *stdhttp.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"version":"v1","member":true,"role":"` + test.role + `"}`))
+			})
+			_, role, err := server.resolveMembershipFromAuthCore(context.Background(), "user-1", "org-1")
+			if test.wantErr {
+				if err == nil || role != "" {
+					t.Fatalf("role/error = %q/%v, want an authority error", role, err)
+				}
+				return
+			}
+			if err != nil || role != strings.ToLower(test.role) {
+				t.Fatalf("role/error = %q/%v, want %q", role, err, strings.ToLower(test.role))
+			}
+		})
+	}
+}
+
 func TestResolveMembershipRetriesOneTransientAuthorityTransportFailure(t *testing.T) {
 	attempts := 0
 	server := membershipServer(t, func(w stdhttp.ResponseWriter, _ *stdhttp.Request) {

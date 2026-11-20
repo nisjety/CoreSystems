@@ -54,6 +54,16 @@ var catalog = []CatalogEntry{
 	{Key: "integrations:manage", Group: "Integrations", Label: "Manage integrations",
 		Description: "Connect or disconnect data sources."},
 
+	// Compliance (D21i). Legal holds are enforced by org-core's retention
+	// routes against the membership role (read: owner, admin, compliance;
+	// place/release: owner, compliance); these keys describe that grant.
+	{Key: "legal_holds:read", Group: "Compliance", Label: "View legal holds",
+		Description: "See the organisation's legal holds."},
+	{Key: "legal_holds:manage", Group: "Compliance", Label: "Place and release legal holds",
+		Description: "Place a legal hold or lift one. Owners and compliance members by default, never admins."},
+	{Key: "compliance_audit:read", Group: "Compliance", Label: "Read compliance audit",
+		Description: "Read the audit trail of retention and legal-hold changes."},
+
 	// Support (Ticketing)
 	{Key: "support:recurrence:read", Group: "Support", Label: "View support-recurrence similarity candidates",
 		Description: "See semantic similarity candidates for a support ticket (preview)."},

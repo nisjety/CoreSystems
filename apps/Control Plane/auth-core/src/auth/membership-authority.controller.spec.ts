@@ -62,6 +62,19 @@ describe('MembershipAuthorityController', () => {
     expect(() => buildMembershipDecision({ role: 'superuser' })).toThrow();
   });
 
+  it('accepts compliance as a fifth canonical role (D21i)', () => {
+    expect(buildMembershipDecision({ role: 'Compliance' })).toEqual({
+      version: 'v1',
+      member: true,
+      role: 'compliance',
+    });
+    expect(
+      buildMembershipList('org-1', [{ userId: 'user-1', role: 'compliance' }]),
+    ).toMatchObject({
+      members: [{ user_id: 'user-1', role: 'compliance', status: 'active' }],
+    });
+  });
+
   it('requires a dedicated Application reconciler credential', () => {
     expect(() => requireApplicationReconcilerSecret('')).toThrow();
     expect(() =>

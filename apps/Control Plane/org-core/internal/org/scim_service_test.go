@@ -358,3 +358,65 @@ func TestSCIMListUsersRefusesFiltersOtherThanUserNameAndExternalId(t *testing.T)
 		}
 	}
 }
+
+func TestSCIMReactivationRoleRestoresTheHeldRoleButNeverOwner(t *testing.T) {
+	tests := []struct {
+		held string
+		want string
+	}{
+		{held: "owner", want: "admin"},
+		{held: "admin", want: "admin"},
+		{held: "member", want: "member"},
+		{held: "viewer", want: "viewer"},
+		// D21i: compliance comes back as compliance.
+		{held: "compliance", want: "compliance"},
+		{held: "", want: "member"},
+		{held: "superuser", want: "member"},
+		{held: "Compliance", want: "member"},
+	}
+	for _, test := range tests {
+		t.Run(test.held, func(t *testing.T) {
+			if got := scimReactivationRole(test.held); got != test.want {
+				t.Fatalf("scimReactivationRole(%q) = %q, want %q", test.held, got, test.want)
+			}
+		})
+	}
+}
+
+func TestIsCanonicalOrgRoleNamesTheFiveBaseRoles(t *testing.T) {
+	tests := []struct {
+		role string
+		want bool
+	}{
+		{"owner", true},
+		{"admin", true},
+		{"member", true},
+		{"viewer", true},
+		{"compliance", true},
+		{"", false},
+		{"superadmin", false},
+		{"Compliance", false},
+		{"compliance ", false},
+	}
+	for _, test := range tests {
+		t.Run(test.role, func(t *testing.T) {
+			if got := IsCanonicalOrgRole(test.role); got != test.want {
+				t.Fatalf("IsCanonicalOrgRole(%q) = %v, want %v", test.role, got, test.want)
+			}
+		})
+	}
+}
+
+func TestComplianceDefaultPermissionsAreTheLeast(t *testing.T) {
+	compliance := defaultRolePermissions["compliance"]
+	for _, forbidden := range []string{"org:update", "org:delete", "members:invite", "members:remove", "billing:manage", "roles:manage", "resources:read", "resources:create"} {
+		for _, got := range compliance {
+			if got == forbidden {
+				t.Fatalf("compliance must not hold %q", forbidden)
+			}
+		}
+	}
+	if len(compliance) == 0 {
+		t.Fatal("compliance needs a default permission row")
+	}
+}

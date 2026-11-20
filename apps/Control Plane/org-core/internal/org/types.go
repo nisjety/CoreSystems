@@ -494,4 +494,22 @@ var defaultRolePermissions = map[string][]string{
 	"viewer": {
 		"org:read", "resources:read",
 	},
+	// compliance (D21i) is the least-privileged role: it reads the
+	// organisation and its member list and acts on legal holds, nothing else.
+	"compliance": {
+		"org:read", "members:read", "legal_holds:read", "legal_holds:manage", "compliance_audit:read",
+	},
+}
+
+// canonicalOrgRoles are the five base organisation roles Auth Core may grant
+// (auth-core migration 031, org-core migration 033). Any other value is a
+// custom role name or a mistake.
+var canonicalOrgRoles = map[string]bool{
+	"owner": true, "admin": true, "member": true, "viewer": true, "compliance": true,
+}
+
+// IsCanonicalOrgRole reports whether role (already lower-cased and trimmed) is
+// one of the five base organisation roles.
+func IsCanonicalOrgRole(role string) bool {
+	return canonicalOrgRoles[role]
 }

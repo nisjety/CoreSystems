@@ -123,7 +123,8 @@ func (s *Server) resolveMembershipFromAuthCore(
 		return "", "", fmt.Errorf("canonical membership grant omitted role")
 	}
 	role := strings.ToLower(strings.TrimSpace(*decision.Role))
-	if role != "owner" && role != "admin" && role != "member" && role != "viewer" {
+	// D21i: compliance is the fifth canonical org role (least rights).
+	if role != "owner" && role != "admin" && role != "member" && role != "viewer" && role != "compliance" {
 		return "", "", fmt.Errorf("canonical membership authority returned unsupported role")
 	}
 	return requestedOrgID, role, nil

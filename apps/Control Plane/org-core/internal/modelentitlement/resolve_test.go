@@ -513,3 +513,37 @@ func TestServicePutValidatesBeforeTouchingTheStore(t *testing.T) {
 		t.Fatalf("the store must receive the normalised policy, got %+v", store.putRequest.OrgDefault)
 	}
 }
+
+// D21i: compliance resolves like viewer: it never manages the policy, gets the
+// organisation default, and a compliance role override applies to it alone.
+// (The vendored matrix carries no compliance row yet: adding one is a
+// three-file change owned by the Model Plane contract.)
+func TestResolveTreatsComplianceLikeViewer(t *testing.T) {
+	orgDefault := &Policy{AllowMode: AllowModeListed, Allow: []string{"m-a"}, Deny: []string{}}
+	override := Policy{AllowMode: AllowModeListed, Allow: []string{"m-b"}, Deny: []string{}}
+	tests := []struct {
+		name      string
+		set       *PolicySet
+		wantState string
+		wantLayer string
+	}{
+		{name: "no policy", set: nil, wantState: StateNone},
+		{name: "org default", set: &PolicySet{Revision: 3, OrgDefault: orgDefault}, wantState: StateOrg, wantLayer: LayerOrgDefault},
+		{name: "compliance override", set: &PolicySet{Revision: 4, OrgDefault: orgDefault, Roles: map[string]Policy{"compliance": override}}, wantState: StateRole, wantLayer: LayerRoleOverride},
+		{name: "viewer override does not reach compliance", set: &PolicySet{Revision: 5, OrgDefault: orgDefault, Roles: map[string]Policy{"viewer": override}}, wantState: StateOrg, wantLayer: LayerOrgDefault},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := Resolve(test.set, Caller{UserID: "u-comp", Role: " Compliance "})
+			if got.Role != "compliance" || got.CanManage {
+				t.Fatalf("role=%q can_manage=%v, want compliance and false", got.Role, got.CanManage)
+			}
+			if got.State != test.wantState {
+				t.Fatalf("state=%q want %q", got.State, test.wantState)
+			}
+			if test.wantLayer != "" && (len(got.Sources) != 1 || got.Sources[0].Layer != test.wantLayer) {
+				t.Fatalf("sources=%v want layer %q", got.Sources, test.wantLayer)
+			}
+		})
+	}
+}

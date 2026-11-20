@@ -222,6 +222,27 @@ describe('ScimProvisioningController (WS05-S8)', () => {
     );
   });
 
+  it('restores a compliance role org-core names on reactivation (D21i)', async () => {
+    queue(
+      [{ id: ORG }],
+      [{ id: 'user-1' }],
+      [{ id: 'member-1', role: 'compliance' }],
+      commandResult(1),
+    );
+    const result = await controller().provision(
+      TOKEN,
+      provisionBody({ role: 'compliance' }),
+    );
+
+    expect(result).toMatchObject({ memberId: 'member-1', role: 'compliance' });
+    const insert = mockStatements.find((s) =>
+      s.text.includes('INSERT INTO member'),
+    );
+    expect(insert?.values).toEqual(
+      expect.arrayContaining([ORG, 'user-1', 'compliance']),
+    );
+  });
+
   it('answers an existing membership without binding a second audit row', async () => {
     queue(
       [{ id: ORG }],

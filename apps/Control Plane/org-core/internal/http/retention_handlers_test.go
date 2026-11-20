@@ -296,6 +296,47 @@ func TestHoldsArePlacedAndReleasedByOwnerOrCompliance(t *testing.T) {
 	}
 }
 
+// D21i: compliance is a canonical org role whose only grants are reading,
+// placing and lifting legal holds. It views, sets and lifts a hold on its own,
+// and nothing else in retention opens to it.
+func TestComplianceViewsSetsAndLiftsALegalHold(t *testing.T) {
+	harness := newRetentionHarness(t, map[string]string{"u-comp": "compliance", "u-viewer": "viewer"}, nil)
+	orgHold := jsonBody(map[string]any{"scope": "thread", "thread_id": "thr-9", "hold_ref": "Matter 2026-21"})
+
+	steps := []struct {
+		name   string
+		method string
+		path   func(holdID string) string
+		user   string
+		body   []byte
+		want   int
+	}{
+		{"compliance lists an empty hold set", http.MethodGet, func(string) string { return legalHoldsV1Path }, "u-comp", nil, http.StatusOK},
+		{"a viewer cannot list holds", http.MethodGet, func(string) string { return legalHoldsV1Path }, "u-viewer", nil, http.StatusForbidden},
+		{"a viewer cannot place a hold", http.MethodPost, func(string) string { return legalHoldsV1Path }, "u-viewer", orgHold, http.StatusForbidden},
+		{"compliance places a hold", http.MethodPost, func(string) string { return legalHoldsV1Path }, "u-comp", orgHold, http.StatusCreated},
+		{"compliance lists the hold", http.MethodGet, func(string) string { return legalHoldsV1Path }, "u-comp", nil, http.StatusOK},
+		{"a viewer cannot lift the hold", http.MethodPost, func(id string) string { return legalHoldsV1Path + "/" + id + "/release" }, "u-viewer", nil, http.StatusForbidden},
+		{"compliance lifts the hold", http.MethodPost, func(id string) string { return legalHoldsV1Path + "/" + id + "/release" }, "u-comp", nil, http.StatusOK},
+		{"compliance cannot read the retention window", http.MethodGet, func(string) string { return retentionV1Path }, "u-comp", nil, http.StatusForbidden},
+	}
+	holdID := ""
+	for _, step := range steps {
+		response := harness.do(step.method, step.path(holdID), step.user, step.body)
+		if response.Code != step.want {
+			t.Fatalf("%s: status=%d want %d body=%s", step.name, response.Code, step.want, response.Body.String())
+		}
+		if step.name == "compliance places a hold" {
+			holdID = decodeBody(t, response)["hold"].(map[string]any)["id"].(string)
+		}
+		if step.name == "compliance lists the hold" {
+			if holds := decodeBody(t, response)["holds"].([]any); len(holds) != 1 {
+				t.Fatalf("compliance must see the one hold, got %d", len(holds))
+			}
+		}
+	}
+}
+
 func TestThreadHoldOnAZDRThreadIsRefusedWithTheTypedCode(t *testing.T) {
 	harness := newRetentionHarness(t, map[string]string{"u-owner": "owner"}, zdrThreads{"thr-zdr": true})
 	response := harness.do(http.MethodPost, legalHoldsV1Path, "u-owner", jsonBody(map[string]any{"scope": "thread", "thread_id": "thr-zdr", "hold_ref": "Matter"}))

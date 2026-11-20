@@ -17,7 +17,13 @@ import { and, asc, eq } from 'drizzle-orm';
 import { db } from '../db';
 import { member } from '../db/schema';
 
-const allowedRoles = new Set(['owner', 'admin', 'member', 'viewer']);
+const allowedRoles = new Set([
+  'owner',
+  'admin',
+  'member',
+  'viewer',
+  'compliance',
+]);
 const placeholderPrefixes = [
   'test',
   'placeholder',

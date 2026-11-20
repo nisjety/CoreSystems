@@ -501,14 +501,7 @@ func (s *Service) reactivateSCIMUser(ctx context.Context, auth *SCIMTokenAuth, r
 	if err := s.domainVerifiedFor(ctx, auth.OrgID, domain); err != nil {
 		return nil, err
 	}
-	role := rec.RoleAtDeactivation
-	switch role {
-	case "owner": // SCIM never restores an owner
-		role = "admin"
-	case "admin", "member", "viewer":
-	default:
-		role = "member"
-	}
+	role := scimReactivationRole(rec.RoleAtDeactivation)
 	res, err := s.scimProvisioner.ProvisionMember(ctx, SCIMProvisionRequest{
 		OperationID:    scimOperationID(auth.OrgID, rec.SCIMID, true, rec.Revision),
 		OrganizationID: auth.OrgID, ActorUserID: auth.CreatedBy, Email: rec.UserName, Role: role,
@@ -521,6 +514,26 @@ func (s *Service) reactivateSCIMUser(ctx context.Context, auth *SCIMTokenAuth, r
 		Active: true, Revision: rec.Revision + 1, Update: true,
 		Event: IdentityEventSCIMUserReactivated, EventOn: true,
 	})
+}
+
+// scimReactivationRole is the role a reactivated SCIM user gets back: the role
+// held at deactivation, except that SCIM never restores an owner (capped at
+// admin) and an unknown or empty role becomes member.
+//
+// D21i SCIM mapping for compliance: restored as compliance, like admin. The
+// role was granted by an owner or admin before the identity provider
+// deprovisioned the person, and it carries fewer rights than admin. A SCIM
+// create never grants compliance (it is always member), and nothing an identity
+// provider sends can name it.
+func scimReactivationRole(roleAtDeactivation string) string {
+	switch roleAtDeactivation {
+	case "owner":
+		return "admin"
+	case "admin", "member", "viewer", "compliance":
+		return roleAtDeactivation
+	default:
+		return "member"
+	}
 }
 
 // DeleteSCIMUser is DELETE /Users/{id}: deprovision if active, keep a tombstone.

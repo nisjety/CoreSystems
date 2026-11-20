@@ -242,4 +242,29 @@ describe('captureMembershipAuditOperation', () => {
       },
     });
   });
+
+  it('captures a role change to compliance, the fifth canonical role (D21i)', async () => {
+    const findMember = jest.fn().mockResolvedValue([member]);
+
+    await expect(
+      captureMembershipAuditOperationResult(
+        {
+          path: '/organization/update-member-role',
+          body: {
+            organizationId: 'org-1',
+            memberId: 'member-1',
+            role: 'compliance',
+          },
+        },
+        'actor-1',
+        findMember,
+      ),
+    ).resolves.toMatchObject({
+      status: 'captured',
+      operation: {
+        previousRole: 'member',
+        member: { role: 'compliance' },
+      },
+    });
+  });
 });

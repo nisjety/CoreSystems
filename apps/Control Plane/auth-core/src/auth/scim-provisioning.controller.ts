@@ -40,8 +40,10 @@ import { auth } from './auth';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const EMAIL = /^[^\s@]{1,64}@[^\s@]{1,255}\.[^\s@]{2,63}$/;
-// owner is never granted through SCIM; admin only restores a prior admin.
-const PROVISION_ROLES = new Set(['member', 'viewer', 'admin']);
+// owner is never granted through SCIM; admin and compliance only restore the
+// role a person held when they were deprovisioned (org-core decides that; a
+// SCIM create is always `member`).
+const PROVISION_ROLES = new Set(['member', 'viewer', 'admin', 'compliance']);
 
 function credentialMatches(expected: string, received?: string): boolean {
   const expectedDigest = createHash('sha256').update(expected).digest();

@@ -16,7 +16,9 @@ import (
 // organization_members.role value.
 var defaultCapabilitiesByBaseRole = map[string][]string{
 	"owner": allCatalogKeys(),
-	"admin": allCatalogKeys(),
+	// An admin may be the subject of a matter, so it never lifts a legal hold
+	// (org-core retention_handlers.go legalHoldWriteRoles).
+	"admin": allCatalogKeysExcept("legal_holds:manage"),
 	"member": {
 		"org:read",
 		"members:read",
@@ -30,6 +32,30 @@ var defaultCapabilitiesByBaseRole = map[string][]string{
 		"members:read",
 		"resources:read",
 	},
+	// compliance (D21i) is the least-privileged base role: no workspace
+	// content, no billing, no integrations; only the organisation, its member
+	// list, legal holds and the compliance audit.
+	"compliance": {
+		"org:read",
+		"members:read",
+		"legal_holds:read",
+		"legal_holds:manage",
+		"compliance_audit:read",
+	},
+}
+
+func allCatalogKeysExcept(excluded ...string) []string {
+	skip := make(map[string]bool, len(excluded))
+	for _, key := range excluded {
+		skip[key] = true
+	}
+	keys := make([]string, 0, len(catalog))
+	for _, entry := range catalog {
+		if !skip[entry.Key] {
+			keys = append(keys, entry.Key)
+		}
+	}
+	return keys
 }
 
 func allCatalogKeys() []string {
@@ -45,7 +71,7 @@ func allCatalogKeys() []string {
 // which the caller (org-core's own organization handlers, via the gateway's
 // already-resolved authorized_membership.role) already has in hand. This
 // deliberately does not look up the member itself: organization_members.role
-// holds either one of the four base tiers (owner/admin/member/viewer) or a
+// holds either one of the five base tiers (owner/admin/member/viewer/compliance) or a
 // custom role name, so resolving "what does this role grant" only needs the
 // role string, not a fresh membership lookup.
 //

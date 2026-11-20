@@ -43,7 +43,13 @@ export type MembershipAuditOperationCaptureResult =
   | Readonly<{ status: 'bad_request' }>
   | Readonly<{ status: 'invalid' }>;
 
-const CANONICAL_PROJECT_ROLES = new Set(['owner', 'admin', 'member', 'viewer']);
+const CANONICAL_PROJECT_ROLES = new Set([
+  'owner',
+  'admin',
+  'member',
+  'viewer',
+  'compliance',
+]);
 const MEMBERSHIP_MUTATION_PATHS = new Set([
   '/organization/update-member-role',
   '/organization/remove-member',
