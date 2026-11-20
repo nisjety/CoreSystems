@@ -127,3 +127,13 @@ Owed from the dat-group pass (D21n/D21m/D22ar), for the next ctl and gw/spa batc
 - gw: Control's 400 `canvas_decision_invalid` is mapped to 503 — unchecked, carried over from the ledger, needs a look.
 - sc/registry: the golden canvas-read row says `min_role: viewer`, but the editor floor for agent rows always wins — misleading row, needs a fix once the gw/spa legs land.
 - spa: distinct copy for `canvas_not_found` on save/restore (removed, keep draft, offer create — not a conflict); `SpaceCanvasHistory` shows the window note and only offers restore/compare on listed versions; a manager "clear" action that saves a single newline (D22aq).
+
+## Round 7 (2026-11-20, D21m resolved; a real cross-plane gap logged, not yet fixed)
+
+| # | Topic | Decision | Work |
+|---|---|---|---|
+| D26 | D21m save-under-floor leak concern | Resolved: a windowed GET already shows the current head unconditionally (shipped in b174a3df6), so the save-conflict answer the original refusal worried about is a strict subset of what a plain read already exposes. Save is now issued under the D18 timestamp floor (still refused under the older WS04-S11 revision floor, and restore stays refused under any floor) | user-core canvas_decision.go + repository.go (eb2782604) |
+
+Open, not yet fixed — logged so it is not lost, needs its own pass across run+sc:
+- **D23's ZDR-stop promise is not fully delivered end to end.** Control issues the starter-stop decision under ZDR (D23) and model-gateway's new route checks it, but execution-core's `CancelRun` and session-core's `ResolveRunSpace` both refuse a ZDR caller outright, so a ZDR starter still cannot actually stop a run today. Needs a run+sc pass to decide exactly what relaxes (stop-only, not every RPC those refusals guard) before touching either refusal.
+- Parked runs (awaiting approval) are not revoked immediately by any Stop path, owner or starter: the grant lives until its TTL. Cross-replica revoke is also local to the replica that handled the Stop (up to 5 minutes elsewhere). Both pre-exist D21h, surfaced while building it.
