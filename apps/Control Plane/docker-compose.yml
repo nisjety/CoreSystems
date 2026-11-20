@@ -499,6 +499,16 @@ services:
             # WS04-S11: sign a history floor on shared thread-read decisions for since_join
             # rooms. Strict literal true; off by default and in production. 0 + restart: full history.
             SPACE_HISTORY_WINDOW_CLAIM: ${SPACE_HISTORY_WINDOW_CLAIM:-false}
+            # D18/D21o: per-member history windows (the invite's don't-share choice and the admin
+            # change). Strict literal true; gates the writes only, never an authorization input;
+            # stored rows are always enforced once written regardless of this switch. On in local
+            # dev so the invite option and the member history control are usable; stays off in
+            # production (not declared in docker-compose.production.yml) pending a release decision.
+            SPACE_MEMBER_HISTORY_WINDOWS: ${SPACE_MEMBER_HISTORY_WINDOWS:-true}
+            # D18/D21o: signs a canvas read's history_floor_at for wiki-store to window (verify.go
+            # already applies it). Strict literal true; on in local dev alongside the member windows
+            # switch above; off in production until SPACE_MEMBER_HISTORY_WINDOWS itself ships there.
+            SPACE_CANVAS_HISTORY_WINDOW: ${SPACE_CANVAS_HISTORY_WINDOW:-true}
             # WS12-S1: Control accepts the dm/group_dm kinds and serves
             # POST /api/v1/internal/spaces/dm-eligibility. Strict literal true; off by
             # default and in production. 0 + restart: no new DMs, existing DMs keep resolving.

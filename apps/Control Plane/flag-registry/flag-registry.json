@@ -2220,6 +2220,20 @@
       "codePath": "apps/Control Plane/user-core/internal/spaces/decision_audit.go"
     },
     {
+      "name": "SPACE_CANVAS_HISTORY_WINDOW",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "true",
+      "stage": "dark",
+      "purpose": "D18/D21o: signs history_floor_at onto a canvas read decision for wiki-store to window. Off, the decision carries no floor and the canvas shows whole even to a windowed member. Only the literal true turns it on.",
+      "onDefaultReason": "Dev default on alongside SPACE_MEMBER_HISTORY_WINDOWS; wiki-store's verifier already applies history_floor_at. Not declared in docker-compose.production.yml, so false in production until that flag ships there.",
+      "declarations": [
+        { "service": "user-core", "env": "SPACE_CANVAS_HISTORY_WINDOW", "default": "true" }
+      ],
+      "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
+    },
+    {
       "name": "SPACE_DM_REGISTRATION",
       "kind": "switch",
       "owner": "control-plane",
@@ -2255,6 +2269,21 @@
       "purpose": "WS04-S10: durable Space membership events, a ledger outbox with PubAck publish and a 10-minute re-announce. Needs the shared NATS connection. Off, handlers keep their inline publish. Only the literal true turns it on.",
       "declarations": [
         { "service": "user-core", "env": "SPACE_MEMBERSHIP_EVENTS_SWEEPER", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
+    },
+    {
+      "name": "SPACE_MEMBER_HISTORY_WINDOWS",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "true",
+      "stage": "dark",
+      "purpose": "D18/D21o: per-member room history windows. Off refuses the invite's don't-share choice and the admin history-window change (503); gates those writes only, never an authorization input. A stored window is enforced regardless.",
+      "onDefaultReason": "Dev default on in both the gateway (already declared true/false in verevonv3 compose) and now user-core, so the dev UI stops reading the feature as on while Control was still off. False in production (verevonv3 docker-compose.production.yml) until a release decision.",
+      "declarations": [
+        { "service": "gateway", "env": "SPACE_MEMBER_HISTORY_WINDOWS", "default": "true" },
+        { "service": "user-core", "env": "SPACE_MEMBER_HISTORY_WINDOWS", "default": "true" }
       ],
       "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
     },
