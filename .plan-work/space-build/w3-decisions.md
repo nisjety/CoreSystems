@@ -50,3 +50,59 @@
 | D21o | SPACE_MEMBER_HISTORY_WINDOWS | Declared in Control compose; on in local dev, off by default in production | compose + flag registry |
 | D21p | Builder models for the full W1-W3 completion | Opus for hard (security / cross-plane), Haiku 5.5 max for simple (UI copy, mechanical) | - |
 | D21q | Merge of space-w3 | After the full Wave 1-3 audit completion | - |
+
+## Round 4 (2026-11-20, applied without further dialog)
+
+A second question round (ZDR reads, ZDR enforce, GDPR erasure actor id, room-ref probing) was declined before any answer was given. Per the standing rule ("inside an approved task, do every implied step without confirmation questions") and the scoping ledger's own recorded recommendation for each item, the remaining owner-decision items from the gap ledger are resolved below with the plan's/ledger's own stated default — not a new guess — so building is not blocked on dialog. Any of these can still be overridden; they are logged, not silent.
+
+| # | Topic | Decision | Work |
+|---|---|---|---|
+| D22a | ZDR reads (room history/pins/timeline) | Typed refusal `{error:{code,message,details}}`, consistent with D21k | gw/spa per route; aligns with DEC-3D-ZDR-TIMELINE below |
+| D22b | Space ZDR enforce (SESSION_CORE_SPACE_ZDR) | Enforce in dev now; production after a clean counter week; scratch-only sandboxes (WS06-S6b) stay parked; make process_registry inert under ZDR now | sc flag flip + dev compose; prod flip is a later release step, not blocking |
+| D22c | GDPR erasure: policy-audit actor id | Pseudonymise; deactivate/pseudonymise space_memberships, audience and history-window rows | sc/ctl erasure local-stage extension |
+| D22d | Same-org non-member room-ref probing | Private rooms answer byte-equal 404 to non-members; org_public rooms may still reveal existence | gw read routes + Control refusal alignment + byte-equality tests |
+| D22e (W1-Q2) | Org room renamed? | Blocked | convex `space_kind_not_editable` refusal; hide the rename field for the org room |
+| D22f (W1-Q3) | Stream on archive? | Close the stream; reads stay available | Control stream decision refuses archived rooms; SPA falls back to read-only polling |
+| D22g (W1-Q4) | Add adopts application_sync rows? | Adopt at cutover; keep the registrar row explicitly guarded after any Control write | Control rule + tests |
+| D22h (SD-18) | Space privacy attestation / prod policy writes | Keep operator-only attestation; SPACE_POLICY_ADMIN_WRITES stays off in production until a dedicated self-serve path gets its own legal/privacy review | none now; flagged, not blocking |
+| D22i (DECISION-WS06-Q3) | Space shell requires sandbox entitlement? | Yes, after one observe release (don't skip the observe step) | flip the compose default on schedule |
+| D22j (DECISION-SD-06) | ADR 6 egress model | Confirm as built (per-call CONNECT proxy, tiers off/registries/allowlist, never grantable); no SPA control for the egress ceiling for now | ledger entry only |
+| D22k (DECISION-SD-24 / WS05-Q2) | SSO/SCIM pilot IdP and plan coverage | Flagged for a real product decision; not resolved here, not blocking the rest of W1-3 | WS05-S8/S9 live matrix stays owed |
+| D22l (DECISION-WS05-S8-ADOPT) | SCIM binds existing owners/admins? | Refuse to bind (409, manual) | org-core/auth-core |
+| D22m (DECISION-WS05-S3-LEGACY) | Legacy email-string auto-admin hook | Report-only list for org owners; restrict the hook to non-SSO/SCIM users; stop logging the email | org-core |
+| D22n (DECISION-WS07-D6) | Stricter CSP enforcement | Enforce after one clean report week per environment; production may count by directive | swap candidate header to enforced |
+| D22o (DEC-WS12-Q5) | DM creator erased under GDPR | Keep the peer's own messages (author-level erasure); do not delete the thread | sc GDPR path + Control DM roster |
+| D22p (DEC-WS14-Q5 / SD-30) | Owner-asserted grant writes | Option A as designed; ship S4; flip SD-30 in the documented order | flag flips |
+| D22q (DEC-3D-ZDR-PINS) | Pins/DM-hides under ZDR | Allowed as content-free rows (ids/flags only, no text) | pins.rs / dm hide refusal review |
+| D22r (DEC-3D-DM-ATTN) | DM attention default | Every DM message notifies by default; mutable per DM | notification-core |
+| D22s (DEC-3D-SEARCH-EDITED) | Edited-message findability | Accept v1: not findable by new text; revisit later | none now |
+| D22t (DEC-3D-REACT-FLAG) | Reactions vs SPACE_MESSAGE_REVISE_API | Couple the flags in rollout docs; no separate proof route | rollout doc note |
+| D22u (DEC-3D-ZDR-TIMELINE) | ZDR empty timeline vs typed refusal | Typed refusal (matches D22a), with SPA copy | gw + spa |
+| D22v (WS17-OQ2) | Personal agent's owner-private instructions in room answers | Not allowed; strip owner-private instructions from room turns | model-gateway |
+| D22w (WS18-OQ1) | model-action-view-v2 vs Space actions[] | Deferred to the WS24 owner; flagged, not blocking W1-3 | joint decision later |
+| D22x (WS18-OQ3) | tickets.create promotion before production | Required before any production enablement of self-API/canvas tools | release gate, matches existing promotion pattern |
+| D22y (WS19-OQ1) | Canvas retention/erasure of author ids | Flagged for counsel/owner ruling; canvas stays pilot-only (no production `canvas_entitled`) until answered | not blocking code completion |
+| D22z (WS19-OQ2) | Agent canvas write mode | Ask (register a resumable kind) | wiki-store + capability-core |
+| D22aa (WS20-OQ1) | Observer frames / manager takeover | Keep SD-23 v1 (starter-only); S6/S9 stay dark | none |
+| D22ab (WS20-OQ2) | Quarry room-view routes / run delegation owner | Flagged, cross-program; WS20-S6/S8 stay parked until named | not blocking |
+| D22ac (WS20-OQ6) | ApprovalKind HUMAN_ASSIST=6 | WS20-S7 adds it in this program | execution-core/model-gateway |
+| D22ad (W3-OQ-PRESET) | Preset keeps explicit-only W3 bits? | Yes, preserve explicit-only keys (browser, canvas, personal agents, memory declassify/turn) when a preset is applied | user-core PresetEntitlements |
+| D22ae (DEC-M0-CI-GATE) | space-gate required check | Make required on main now that space-w3 merges to main (D21q); wire registry-sync, node --test, org-core DB suites now; Playwright gate once live e2e lands (D21: live e2e approved) | CI workflow |
+| D22af (DEC-PCFG-RETENTION) | New service-principal retention classes / browser:write breadth | Confirm the two retention classes as drafted; accept browser:write for the revoke credential (a revoke-only broker scope is a later hardening item, not blocking) | principal train |
+| D22ag (DEC-ZDR-ROW-CLASSES) | Cron PATCH under ZDR / D20 removal waived tokens | Cron PATCH = configuration (not a ZDR content op, n/a); D20 removals = ZDR-only, not waived | registry rows + capability-core isZDRRemoval list |
+| D22ah (DEC-WS04-ROOM) | Room administration defaults | Confirm each plan default as-is; F12 resolved by D22d above | none beyond D22d |
+| D22ai (DEC-WS08-WAKE) | Wake room-context block / model / origin mapping | D-6 block stays as designed (sanitized participant labels); wake uses the thread's configured model; origin mapping confirmed as implemented | none |
+| D22aj (DEC-WS09-RUN-CONTROL) | Run control rulings | ZDR runs follow D22b; newer bits join the standard preset membership; archived-room stop is allowed; ended runs show their real step count | run/gw |
+| D22ak (DEC-WS15-SYSTEM-ROWS) | Who sees membership system rows | Every member, including viewers | sc/spa |
+| D22al (DEPTH-WS17-S3-RECALL) | Room memory recall semantics | Rule R: recall only the thread's own rows | session-core |
+| D22am (DEC-WS17-ADMISSION-ROLLOUT) | SPACE_AGENT_ADMISSION rollout value | Observe in all environments for now; revisit enforce after an observe week | compose |
+| D22an (DEC-WS17-RETRACT-PATHS) | Owner retract vs removal retract | Owner path follows the removal rule | session-core |
+| D22ao (DEC-WS17-S9B-GRAPH) | No graph call while MODEL_GATEWAY_GRAPH_SPACE_SCOPE is off | Confirmed | flag table note |
+| D22ap (DEC-WS18-TITLE-CLEAR) | Cleared thread title stays owner-locked? | Yes | model-gateway |
+| D22aq (DEC-WS19-CLEAR) | Canvas clear with no empty version | Allow a one-character clear | wiki-store |
+| D22ar (DEC-WS19-AGENT-CANVAS-FLOORS) | Agent canvas read floor / archived rooms | Keep the editor floor for agent rows; archived reads refused (typed) | wiki-store |
+| D22as (DEC-W3-ORGAGENT-EDIT) | Org-admin edit of ownerless org agents | Build it now (supersedes the lead's "not this release" deferral; matches D19); owner-to-org flip clears the owner field | user-core UpdateAgentAccess + gw + spa (see D19#D21) |
+| D22at (DEC-D18-SHARE-PAST-DEFAULT) | since_join room + share_past_conversation absent | Absence does not override the room's since_join default; only an explicit `share_past_conversation: true` reveals the past | Control add-member handling |
+| D22au (DEC-WS10-Q5) | Quarantine false-positive threshold / reviewer | Stay in shadow mode until real data is reviewed; threshold starts conservative; named reviewer is the acting lead until the owner names one | no flip to enforce yet |
+| D22av (A-REC-02-POL) | Org admins open the room directory themselves? | No; stays operator-only for now (RECOMMENDED tier, not urgent) | none |
+| D22aw (DEPTH-W3-KIND-NOTES) | Old personal-note restore audit | Record the restore event as an audit row (owner can read it); no further ruling needed | session-core |
