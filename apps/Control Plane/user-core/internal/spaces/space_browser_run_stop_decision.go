@@ -24,10 +24,14 @@ import (
 // It needs no entitlement bit: stopping is the safe direction, and a person
 // who could start a run must always be able to stop it, even after the org
 // turned browser_entitled or run_control_entitled off. An archived room still
-// issues it (D22aj: an archived room's run may still be stopped). Space zero
-// data retention refuses it, as the D21h design asks: a ZDR Space cannot have
-// started a browser run (the start decision refuses ZDR), and the
-// model-gateway route checks ZDR first anyway.
+// issues it (D22aj: an archived room's run may still be stopped). It is
+// issued under Space zero data retention too (D23, fixing a gap a D21h
+// builder found): a ZDR Space cannot START a browser run (the start decision
+// refuses ZDR), but an org can turn ZDR on while a run from before that is
+// still active, and "stopping is always allowed" must hold then too. The
+// decision still carries ZeroDataRetention for the verifier's own use; the
+// model-gateway route's live ZDR check (D21h's gw leg) is about the run
+// itself, not about whether its starter may stop it.
 //
 // It is NOT a run-control or thread grant. Action, schema, audience,
 // permission and digest header all differ from model.run.control and
@@ -110,9 +114,8 @@ func (e PersonalThreadDecisionEvidence) ValidateForBrowserRunStop() error {
 	if err := e.Privacy.Validate(); err != nil {
 		return err
 	}
-	if e.Privacy.ZeroDataRetention {
-		return zdrForbidsDenial("browser_run_stop", "a browser run stop decision is not issued under zero data retention")
-	}
+	// D23: no ZDR refusal here — see the file comment. Issued either way; the
+	// decision's ZeroDataRetention field still carries the fact for the verifier.
 	return nil
 }
 

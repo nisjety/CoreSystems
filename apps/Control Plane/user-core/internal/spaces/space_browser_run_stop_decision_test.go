@@ -95,7 +95,6 @@ func TestBrowserRunStopDecisionRefusals(t *testing.T) {
 		}, DenialKindUnsupported},
 		{"direct message", func(e *PersonalThreadDecisionEvidence) { e.Membership.Kind = KindDM }, DenialKindUnsupported},
 		{"group direct message", func(e *PersonalThreadDecisionEvidence) { e.Membership.Kind = KindGroupDM }, DenialKindUnsupported},
-		{"zero data retention", func(e *PersonalThreadDecisionEvidence) { e.Privacy.ZeroDataRetention = true }, DenialZDRForbidsEffect},
 		{"no recipient audience", func(e *PersonalThreadDecisionEvidence) { e.RecipientAudienceHash = "" }, DenialAuthorityIncomplete},
 		{"no resource authorization", func(e *PersonalThreadDecisionEvidence) { e.ResourceAuthorizationRef = " " }, DenialAuthorityIncomplete},
 	}
@@ -104,11 +103,24 @@ func TestBrowserRunStopDecisionRefusals(t *testing.T) {
 			evidence := browserRunStopRoomEvidence()
 			test.mutate(&evidence)
 			_, _, err := IssueBrowserRunStopDecision(evidence, validBrowserRunStopRequest(), now)
-			denial := wantDenial(t, err, test.want)
-			if test.want == DenialZDRForbidsEffect && denial.Effect != "browser_run_stop" {
-				t.Fatalf("effect = %q, want browser_run_stop", denial.Effect)
-			}
+			wantDenial(t, err, test.want)
 		})
+	}
+}
+
+// D23: stopping is always allowed, even under Zero Data Retention — a run from
+// before the org turned ZDR on can still be active, and its starter must still
+// be able to stop it. The decision still signs the fact for the verifier to use.
+func TestBrowserRunStopDecisionIsIssuedUnderZeroDataRetention(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	evidence := browserRunStopRoomEvidence()
+	evidence.Privacy.ZeroDataRetention = true
+	decision, _, err := IssueBrowserRunStopDecision(evidence, validBrowserRunStopRequest(), now)
+	if err != nil {
+		t.Fatalf("IssueBrowserRunStopDecision under ZDR: %v", err)
+	}
+	if !decision.ZeroDataRetention {
+		t.Fatal("a ZDR Space's stop decision must sign ZeroDataRetention=true for the verifier")
 	}
 }
 
