@@ -352,3 +352,39 @@ func TestRunPayloadDigestMatchesTheRustPayloadDigest(t *testing.T) {
 		})
 	}
 }
+
+// TestRunCheckEnvelopeAndCheckAuthoritySplitCheckCanvas (D21n) is the agent decision's split: the addressee first, the action and
+// its one permission after the not-found answers, zero data retention last.
+func TestRunCheckEnvelopeAndCheckAuthoritySplitCheckCanvas(t *testing.T) {
+	now := verifyNow
+	cases := map[string]struct {
+		edit          func(*RunClaims)
+		envelopeOK    bool
+		authorityOK   bool
+		checkCanvasOK bool
+	}{
+		"the route's own decision": {func(*RunClaims) {}, true, true, true},
+		"another subject":          {func(c *RunClaims) { c.SubjectID = "user-other" }, false, true, false},
+		"another Space":            {func(c *RunClaims) { c.SpaceRef = "space-other" }, false, true, false},
+		"the write action":         {func(c *RunClaims) { c.ActionID = ActionRunCanvasWrite }, true, false, false},
+		"an extra permission": {func(c *RunClaims) {
+			c.Permissions = []string{PermissionCanvasRead, PermissionCanvasWrite}
+		}, true, false, false},
+		"zero data retention": {func(c *RunClaims) { c.ZeroDataRetention = true }, true, true, false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			c := wellFormedRunClaims(now)
+			tc.edit(&c)
+			if err := c.CheckEnvelope("org-1", "user-2", "space-room-1"); (err == nil) != tc.envelopeOK {
+				t.Fatalf("CheckEnvelope = %v, want ok %v", err, tc.envelopeOK)
+			}
+			if err := c.CheckAuthority(false); (err == nil) != tc.authorityOK {
+				t.Fatalf("CheckAuthority = %v, want ok %v", err, tc.authorityOK)
+			}
+			if err := c.CheckCanvas("org-1", "user-2", "space-room-1", false); (err == nil) != tc.checkCanvasOK {
+				t.Fatalf("CheckCanvas = %v, want ok %v", err, tc.checkCanvasOK)
+			}
+		})
+	}
+}

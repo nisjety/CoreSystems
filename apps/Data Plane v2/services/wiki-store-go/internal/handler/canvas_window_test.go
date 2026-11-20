@@ -26,25 +26,30 @@ func windowedHumanClaims(org, space, key string, write bool, at time.Time) space
 }
 
 // TestCanvasRestoreUnderAWindowIsRefusedBeforeTheStore: a restore makes an older version the head, so a windowed member may not restore.
-// The refusal comes after the decision is verified and before the store is read.
+// The refusal comes after the not-found probe and before the store is written.
 func TestCanvasRestoreUnderAWindowIsRefusedBeforeTheStore(t *testing.T) {
-	router := canvasRouter(t, canvas.NewRepo(nil), true)
+	store := fakeStoreWithCanvas()
+	defer store.wantStoreUntouched(t)
+	router := fakeCanvasRouter(t, store)
 	bearer := canvasBearer(t, canvasTestOrg, []string{"wiki.write"}, false)
 	at := time.Now().UTC().Add(-time.Hour)
 	claims := windowedHumanClaims(canvasTestOrg, canvasTestSpace, "restore-window-1", true, at)
-	op := spacedecision.CanvasOp{Op: spacedecision.OpRestore, Schema: spacedecision.SchemaCanvasWrite,
-		RestoreFromVersionID: "version-1", IdempotencyKey: "restore-window-1"}
+	op := spacedecision.CanvasOp{Op: spacedecision.OpRestore, Schema: spacedecision.SchemaCanvasWrite, CanvasID: fakeCanvasID,
+		RestoreFromVersionID: fakeVersionID, IdempotencyKey: "restore-window-1"}
 	rec := serveCanvas(t, router, http.MethodPost, canvasSpacePath+"/versions/version-1/restore", bearer,
 		canvasHumanToken(t, claims, op), canvasBody(t, map[string]any{"idempotency_key": "restore-window-1"}))
 	wantCanvasRefusal(t, rec, http.StatusForbidden, spacedecision.CodeHistoryFloor)
 }
 
 // TestCanvasAgentWriteUnderAWindowIsRefusedBeforeTheStore: Control never issues an agent write under a window, so a run-action decision
-// that carries one is refused before the store is read, whatever the operation.
+// that carries one is refused after the not-found probe and before the store is written, whatever the operation.
 func TestCanvasAgentWriteUnderAWindowIsRefusedBeforeTheStore(t *testing.T) {
-	router := canvasRouter(t, canvas.NewRepo(nil), true)
+	store := fakeStoreWithCanvas()
+	defer store.wantStoreUntouched(t)
+	router := fakeCanvasRouter(t, store)
 	bearer := canvasBearer(t, canvasTestOrg, []string{"wiki.write"}, false)
-	run := canvasRunClaims(canvasTestOrg, canvasTestSpace, "agent-window-1", true, nil)
+	run := canvasRunClaims(canvasTestOrg, canvasTestSpace, "agent-window-1", true,
+		runWriteArgs(saveBody{Content: "# Room\n", IdempotencyKey: "agent-window-1"}))
 	at := time.Now().UTC().Add(-time.Hour)
 	run.HistoryFloorAt = &at
 	decision := signCanvasEnvelope(t, spacedecision.RunEnvelopeVersion, run)

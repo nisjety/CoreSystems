@@ -158,10 +158,21 @@ func (c RunClaims) validate(now time.Time) error {
 // agent decision carries no Space kind. A timestamp floor on a canvas read is a window the repository applies (canvas.Floor),
 // and a floor on a write is refused by the handler, so neither is a refusal here.
 func (c RunClaims) CheckCanvas(orgID, subjectID, spaceRef string, write bool) error {
-	action, schema, permission := ActionRunCanvasRead, SchemaRunCanvasRead, PermissionCanvasRead
-	if write {
-		action, schema, permission = ActionRunCanvasWrite, SchemaRunCanvasWrite, PermissionCanvasWrite
+	if err := c.CheckEnvelope(orgID, subjectID, spaceRef); err != nil {
+		return err
 	}
+	if err := c.CheckAuthority(write); err != nil {
+		return err
+	}
+	if c.ZeroDataRetention {
+		return refuse(CodeDecisionMismatch, "the Space decision is issued under zero data retention")
+	}
+	return nil
+}
+
+// CheckEnvelope binds a verified agent decision to its addressee: the caller's org and subject, the path's Space and the canvas
+// audience. A canvas route runs it before its not-found answers (D21n).
+func (c RunClaims) CheckEnvelope(orgID, subjectID, spaceRef string) error {
 	mismatch := func(message string) error { return refuse(CodeDecisionMismatch, message) }
 	switch {
 	case c.OrgID != orgID:
@@ -172,12 +183,23 @@ func (c RunClaims) CheckCanvas(orgID, subjectID, spaceRef string, write bool) er
 		return mismatch("the Space decision was issued to another user")
 	case c.ServiceAudience != AudienceCanvas:
 		return mismatch("the Space decision was issued for another service")
+	}
+	return nil
+}
+
+// CheckAuthority binds an agent decision already bound by CheckEnvelope to the golden action, schema and the one permission of a
+// read or a write. It does not look at zero data retention, which the route answers last.
+func (c RunClaims) CheckAuthority(write bool) error {
+	action, schema, permission := ActionRunCanvasRead, SchemaRunCanvasRead, PermissionCanvasRead
+	if write {
+		action, schema, permission = ActionRunCanvasWrite, SchemaRunCanvasWrite, PermissionCanvasWrite
+	}
+	mismatch := func(message string) error { return refuse(CodeDecisionMismatch, message) }
+	switch {
 	case c.ActionID != action || c.ActionSchemaHash != schema:
 		return mismatch("the Space decision authorizes another action")
 	case !slices.Equal(c.Permissions, []string{permission}):
 		return mismatch("the Space decision lacks the canvas permission")
-	case c.ZeroDataRetention:
-		return mismatch("the Space decision is issued under zero data retention")
 	}
 	return nil
 }

@@ -442,3 +442,38 @@ func TestCheckCanvasRefusesADecisionForAnotherCaller(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckEnvelopeAndCheckAuthoritySplitCheckCanvas (D21n): a canvas route binds the addressee (CheckEnvelope) before its not-found
+// answers and the operation (CheckAuthority) after them, then answers zero data retention last. Each half checks only its own fields.
+func TestCheckEnvelopeAndCheckAuthoritySplitCheckCanvas(t *testing.T) {
+	now := verifyNow
+	cases := map[string]struct {
+		edit          func(*Claims)
+		envelopeOK    bool
+		authorityOK   bool
+		checkCanvasOK bool
+	}{
+		"the route's own decision": {func(*Claims) {}, true, true, true},
+		"another org":              {func(c *Claims) { c.OrgID = "org-other" }, false, true, false},
+		"another audience":         {func(c *Claims) { c.ServiceAudience = "documents-api" }, false, true, false},
+		"another action":           {func(c *Claims) { c.ActionID = ActionCanvasWrite }, true, false, false},
+		"no canvas permission":     {func(c *Claims) { c.Permissions = []string{"thread:read"} }, true, false, false},
+		"a kind with no canvas":    {func(c *Claims) { c.SpaceKind = "dm" }, true, false, false},
+		"zero data retention":      {func(c *Claims) { c.ZeroDataRetention = true }, true, true, false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			c := wellFormedClaims(now)
+			tc.edit(&c)
+			if err := c.CheckEnvelope("org-1", "user-2", "space-room-1"); (err == nil) != tc.envelopeOK {
+				t.Fatalf("CheckEnvelope = %v, want ok %v", err, tc.envelopeOK)
+			}
+			if err := c.CheckAuthority(false); (err == nil) != tc.authorityOK {
+				t.Fatalf("CheckAuthority = %v, want ok %v", err, tc.authorityOK)
+			}
+			if err := c.CheckCanvas("org-1", "user-2", "space-room-1", false); (err == nil) != tc.checkCanvasOK {
+				t.Fatalf("CheckCanvas = %v, want ok %v", err, tc.checkCanvasOK)
+			}
+		})
+	}
+}

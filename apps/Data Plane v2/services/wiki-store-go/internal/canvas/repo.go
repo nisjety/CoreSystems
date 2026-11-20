@@ -622,7 +622,8 @@ func writeTx(ctx context.Context, tx pgx.Tx, w writeOp) (WriteResult, error) {
 				return WriteResult{}, err
 			}
 			if !found {
-				return WriteResult{}, &Error{Code: CodeHeadMoved, Message: "the canvas head moved"}
+				// The competing canvas is gone again (no writer can purge under the Space lock, so this is defensive).
+				return WriteResult{}, canvasNotFound()
 			}
 		default:
 			return WriteResult{}, fmt.Errorf("create canvas: %w", insErr)
@@ -751,6 +752,10 @@ func writeTx(ctx context.Context, tx pgx.Tx, w writeOp) (WriteResult, error) {
 // Space lock and the canvas row lock, so no purge or concurrent writer can change the answer before the write. An empty
 // CanvasID is a create: the Space must still have no canvas, and a purged Space is fenced and cannot take one. A save or
 // restore must find exactly its canvas. Every refusal stores nothing.
+//
+// The two refusals name two situations (D21n). canvas_not_found: the Space holds no canvas the write could land in, because none
+// was created, it was purged, or the Space is fenced. canvas_head_moved: a canvas exists, but it is not the head the caller opened
+// (another write moved the head, a create raced another create, or the canvas was replaced). Only head_moved names a head.
 func bindDecidedCanvas(ctx context.Context, tx pgx.Tx, w writeOp, cv Canvas, found bool) error {
 	if w.canvasID == "" {
 		if found {
@@ -758,27 +763,30 @@ func bindDecidedCanvas(ctx context.Context, tx pgx.Tx, w writeOp, cv Canvas, fou
 		}
 		if w.expected != nil {
 			// The editor opened a canvas that is gone: never created here, or purged.
-			return &Error{Code: CodeHeadMoved, Message: "the canvas head moved"}
+			return canvasNotFound()
 		}
 		fenced, err := spaceCanvasFenced(ctx, tx, w.orgID, w.spaceRef)
 		if err != nil {
 			return err
 		}
 		if fenced {
-			return &Error{Code: CodeCanvasNotFound, Message: "the Space has no canvas"}
+			return canvasNotFound()
 		}
 		return nil
 	}
 	if !found {
-		if w.op == opRestore {
-			return &Error{Code: CodeCanvasNotFound, Message: "the Space has no canvas"}
-		}
-		return &Error{Code: CodeHeadMoved, Message: "the canvas head moved"}
+		// The canvas the decision named is gone, for a save and a restore alike.
+		return canvasNotFound()
 	}
 	if cv.CanvasID != w.canvasID {
 		return headMovedAt(ctx, tx, w.orgID, cv)
 	}
 	return nil
+}
+
+// canvasNotFound is the typed refusal of a Space that holds no canvas.
+func canvasNotFound() *Error {
+	return &Error{Code: CodeCanvasNotFound, Message: "the Space has no canvas"}
 }
 
 // headMovedAt is the typed head-moved refusal, naming the canvas's current head.

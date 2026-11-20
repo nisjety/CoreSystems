@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -21,15 +22,36 @@ const canvasDecisionHeader = "X-Space-Decision"
 // CanvasHandler serves the room canvas (WS19-S3). While the flag is off every canvas route answers 404 space_canvas_disabled.
 // With the flag on, a request needs a verified bearer that carries no ZDR posture and a Control decision bound to the route.
 // The repository trusts no author or provenance it is handed: both come from the verified decision.
+//
+// Every route refuses in one order (D21n), each step stopping before the next: the flag (404), the bearer (401), its scope (403)
+// and its ZDR posture (412, a property of the credential, refused before any store read), the request shape (400), the decision
+// envelope (its signature and life, then its org, subject, Space and audience), then not-found (canvas_not_found or
+// canvas_version_not_found), then authority (a route that takes no agent decision, the action and permission, the payload digest,
+// the history floor), then a decision issued under zero data retention (412), and last the write's own conflicts (409).
 type CanvasHandler struct {
-	repo    *canvas.Repo
+	repo    canvasStore
 	enabled bool
 	keys    spacedecision.KeySet
 }
 
+// canvasStore is the part of the canvas repository the routes use. *canvas.Repo implements it. The route tests give the handler
+// a store that answers the not-found probe without a database.
+type canvasStore interface {
+	Probe(ctx context.Context, orgID, spaceRef, versionID string) (canvas.Probe, error)
+	Head(ctx context.Context, orgID, spaceRef string, knownVersionID *string, floor canvas.Floor) (canvas.HeadView, error)
+	ListVersions(ctx context.Context, orgID, spaceRef string, before *int, limit int, floor canvas.Floor) (canvas.VersionPage, error)
+	GetVersion(ctx context.Context, orgID, spaceRef, versionID string, floor canvas.Floor) (canvas.Version, error)
+	Save(ctx context.Context, in canvas.SaveInput) (canvas.WriteResult, error)
+	Restore(ctx context.Context, in canvas.RestoreInput) (canvas.WriteResult, error)
+}
+
 // NewCanvasHandler returns the canvas handler. keys is read only when the flag is on.
 func NewCanvasHandler(repo *canvas.Repo, enabled bool, keys spacedecision.KeySet) *CanvasHandler {
-	return &CanvasHandler{repo: repo, enabled: enabled, keys: keys}
+	return newCanvasHandler(repo, enabled, keys)
+}
+
+func newCanvasHandler(store canvasStore, enabled bool, keys spacedecision.KeySet) *CanvasHandler {
+	return &CanvasHandler{repo: store, enabled: enabled, keys: keys}
 }
 
 // MountCanvasRoutes installs the canvas routes beside the wiki routes. The flag gate runs before the credential, so with the
@@ -92,13 +114,20 @@ func (h *CanvasHandler) GetCanvas(w http.ResponseWriter, r *http.Request) {
 		}
 		known = &raw
 	}
-	caller, refused := h.authorizeCaller(r, bearer, spaceRef, false, true)
+	caller, refused := h.verifyCaller(r, bearer, spaceRef)
 	if refused != nil {
 		refused.write(w)
 		return
 	}
-	if digestRefusal := caller.checkRead(); digestRefusal != nil {
-		digestRefusal.write(w)
+	if _, ok := h.probeCanvas(w, r, bearer.OrgID, spaceRef, "", false); !ok {
+		return
+	}
+	if refused := firstRefusal(
+		func() *canvasRefusal { return caller.authorize(false, true) },
+		caller.checkRead,
+		caller.refuseZDR,
+	); refused != nil {
+		refused.write(w)
 		return
 	}
 	view, err := h.repo.Head(r.Context(), bearer.OrgID, spaceRef, known, caller.floor())
@@ -148,13 +177,20 @@ func (h *CanvasHandler) ListVersions(w http.ResponseWriter, r *http.Request) {
 		}
 		before = &n
 	}
-	caller, refused := h.authorizeCaller(r, bearer, spaceRef, false, false)
+	caller, refused := h.verifyCaller(r, bearer, spaceRef)
 	if refused != nil {
 		refused.write(w)
 		return
 	}
-	if digestRefusal := checkCanvasDigest(caller.user, readOp(caller.user)); digestRefusal != nil {
-		digestRefusal.write(w)
+	if _, ok := h.probeCanvas(w, r, bearer.OrgID, spaceRef, "", false); !ok {
+		return
+	}
+	if refused := firstRefusal(
+		func() *canvasRefusal { return caller.authorize(false, false) },
+		caller.checkRead,
+		caller.refuseZDR,
+	); refused != nil {
+		refused.write(w)
 		return
 	}
 	page, err := h.repo.ListVersions(r.Context(), bearer.OrgID, spaceRef, before, limit, caller.floor())
@@ -184,13 +220,20 @@ func (h *CanvasHandler) GetVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	spaceRef := chi.URLParam(r, "space_ref")
 	versionID := chi.URLParam(r, "version_id")
-	caller, refused := h.authorizeCaller(r, bearer, spaceRef, false, false)
+	caller, refused := h.verifyCaller(r, bearer, spaceRef)
 	if refused != nil {
 		refused.write(w)
 		return
 	}
-	if digestRefusal := checkCanvasDigest(caller.user, readOp(caller.user)); digestRefusal != nil {
-		digestRefusal.write(w)
+	if _, ok := h.probeCanvas(w, r, bearer.OrgID, spaceRef, versionID, false); !ok {
+		return
+	}
+	if refused := firstRefusal(
+		func() *canvasRefusal { return caller.authorize(false, false) },
+		caller.checkRead,
+		caller.refuseZDR,
+	); refused != nil {
+		refused.write(w)
 		return
 	}
 	v, err := h.repo.GetVersion(r.Context(), bearer.OrgID, spaceRef, versionID, caller.floor())
@@ -222,33 +265,23 @@ func (h *CanvasHandler) SaveVersion(w http.ResponseWriter, r *http.Request) {
 		writeCanvasStoreError(w, err)
 		return
 	}
-	caller, refused := h.authorizeCaller(r, bearer, spaceRef, true, true)
+	caller, refused := h.verifyCaller(r, bearer, spaceRef)
 	if refused != nil {
 		refused.write(w)
 		return
 	}
-	// An agent write under a floor is refused before the store is read: Control never issues one.
-	if caller.agent {
-		if floorRefusal := caller.refuseWriteUnderFloor(false); floorRefusal != nil {
-			floorRefusal.write(w)
-			return
-		}
-	}
-	// The head read below returns no content and feeds only the operation and canvas id that the digest binds. Save runs
-	// after the digest matches, and it refuses unless the canvas it finds under the Space lock is this same canvas (WS19-S8).
-	activeID, err := h.repo.ActiveCanvasID(r.Context(), bearer.OrgID, spaceRef)
-	if err != nil {
-		writeCanvasStoreError(w, err)
+	// The probe returns no content and feeds only the not-found answer and the operation and canvas id that the digest binds.
+	// Save runs after the digest matches, and it refuses unless the canvas it finds under the Space lock is this same canvas
+	// (WS19-S8).
+	probe, ok := h.probeCanvas(w, r, bearer.OrgID, spaceRef, "", true)
+	if !ok {
 		return
 	}
-	if activeID == "" && body.ExpectedVersionID != nil {
-		writeCanvasError(w, http.StatusConflict, canvas.CodeHeadMoved, "the canvas head moved since you opened it",
-			map[string]any{"head": nil})
-		return
-	}
-	// A save over an existing canvas is refused under a floor. A create is allowed: no canvas exists to hold pre-floor text.
-	if floorRefusal := caller.refuseWriteUnderFloor(activeID == ""); floorRefusal != nil {
-		floorRefusal.write(w)
+	activeID := probe.CanvasID
+	// A save that names a head of a canvas the Space no longer holds, or a create into a purged Space, is not found: there is
+	// no head that moved (D21n). A create into a Space with no canvas goes on.
+	if activeID == "" && (body.ExpectedVersionID != nil || probe.Fenced) {
+		writeCanvasError(w, http.StatusNotFound, canvas.CodeCanvasNotFound, "the Space has no canvas", nil)
 		return
 	}
 	op := spacedecision.CanvasOp{
@@ -262,8 +295,15 @@ func (h *CanvasHandler) SaveVersion(w http.ResponseWriter, r *http.Request) {
 		op.CanvasID = activeID
 		op.ExpectedVersionID = derefString(body.ExpectedVersionID)
 	}
-	if digestRefusal := caller.checkWrite(op, runWriteArgs(body), body.IdempotencyKey); digestRefusal != nil {
-		digestRefusal.write(w)
+	if refused := firstRefusal(
+		func() *canvasRefusal { return caller.authorize(true, true) },
+		func() *canvasRefusal { return caller.checkWrite(op, runWriteArgs(body), body.IdempotencyKey) },
+		// A save over an existing canvas is refused under a floor. A create is allowed: no canvas exists to hold pre-floor
+		// text. An agent write under any floor is refused: Control never issues one.
+		func() *canvasRefusal { return caller.refuseWriteUnderFloor(activeID == "") },
+		caller.refuseZDR,
+	); refused != nil {
+		refused.write(w)
 		return
 	}
 	res, err := h.repo.Save(r.Context(), canvas.SaveInput{
@@ -301,26 +341,16 @@ func (h *CanvasHandler) RestoreVersion(w http.ResponseWriter, r *http.Request) {
 		writeCanvasStoreError(w, err)
 		return
 	}
-	caller, refused := h.authorizeCaller(r, bearer, spaceRef, true, false)
+	caller, refused := h.verifyCaller(r, bearer, spaceRef)
 	if refused != nil {
 		refused.write(w)
 		return
 	}
-	// A restore makes an older version the head, so no windowed member may restore.
-	if floorRefusal := caller.refuseWriteUnderFloor(false); floorRefusal != nil {
-		floorRefusal.write(w)
+	probe, ok := h.probeCanvas(w, r, bearer.OrgID, spaceRef, versionID, false)
+	if !ok {
 		return
 	}
-	claims := caller.user
-	activeID, err := h.repo.ActiveCanvasID(r.Context(), bearer.OrgID, spaceRef)
-	if err != nil {
-		writeCanvasStoreError(w, err)
-		return
-	}
-	if activeID == "" {
-		writeCanvasError(w, http.StatusNotFound, canvas.CodeCanvasNotFound, "the Space has no canvas", nil)
-		return
-	}
+	activeID := probe.CanvasID
 	op := spacedecision.CanvasOp{
 		Op:                   spacedecision.OpRestore,
 		Schema:               spacedecision.SchemaCanvasWrite,
@@ -329,10 +359,17 @@ func (h *CanvasHandler) RestoreVersion(w http.ResponseWriter, r *http.Request) {
 		RestoreFromVersionID: versionID,
 		IdempotencyKey:       body.IdempotencyKey,
 	}
-	if digestRefusal := checkCanvasDigest(claims, op); digestRefusal != nil {
-		digestRefusal.write(w)
+	if refused := firstRefusal(
+		func() *canvasRefusal { return caller.authorize(true, false) },
+		func() *canvasRefusal { return checkCanvasDigest(caller.user, op) },
+		// A restore makes an older version the head, so no windowed member may restore.
+		func() *canvasRefusal { return caller.refuseWriteUnderFloor(false) },
+		caller.refuseZDR,
+	); refused != nil {
+		refused.write(w)
 		return
 	}
+	claims := caller.user
 	res, err := h.repo.Restore(r.Context(), canvas.RestoreInput{
 		OrgID:                bearer.OrgID,
 		SpaceRef:             spaceRef,

@@ -19,11 +19,11 @@ type canvasCaller struct {
 	run   spacedecision.RunClaims
 }
 
-// authorizeCaller verifies the decision a canvas request carries and binds it to the route, as authorize does for a human. agentOK
-// says whether the route accepts an agent decision at all. A route that does not accept one refuses a run-action envelope before any
-// verification, with space_decision_mismatch. A decision issued under zero data retention is refused with the catalogue
-// refusal once its signature verifies, before the binding checks.
-func (h *CanvasHandler) authorizeCaller(r *http.Request, bearer *authctx.Claims, spaceRef string, write, agentOK bool) (canvasCaller, *canvasRefusal) {
+// verifyCaller verifies the decision envelope a canvas request carries (D21n, the step before not-found): the header is present,
+// the bearer is a user, the signature and life verify, and the decision is addressed to this org, subject, Space and the canvas
+// audience. It decides nothing about the operation: authorize, the digest, the floor and refuseZDR do that after the route has
+// answered its not-found refusals.
+func (h *CanvasHandler) verifyCaller(r *http.Request, bearer *authctx.Claims, spaceRef string) (canvasCaller, *canvasRefusal) {
 	token := strings.TrimSpace(r.Header.Get(canvasDecisionHeader))
 	if token == "" || len(token) > spacedecision.MaxEnvelopeBytes {
 		return canvasCaller{}, refusalOf(http.StatusBadRequest, "space_decision_required",
@@ -35,18 +35,11 @@ func (h *CanvasHandler) authorizeCaller(r *http.Request, bearer *authctx.Claims,
 	}
 	now := time.Now().UTC()
 	if strings.HasPrefix(token, spacedecision.RunEnvelopeVersion+".") {
-		if !agentOK {
-			return canvasCaller{}, refusalOf(http.StatusForbidden, spacedecision.CodeDecisionMismatch,
-				"this canvas route does not accept an agent Space decision")
-		}
 		run, err := spacedecision.VerifyRunAction(token, h.keys, now)
 		if err != nil {
 			return canvasCaller{}, refusalFromErr(err)
 		}
-		if run.ZeroDataRetention {
-			return canvasCaller{}, canvasZDRRefusal()
-		}
-		if err := run.CheckCanvas(bearer.OrgID, bearer.UserID, spaceRef, write); err != nil {
+		if err := run.CheckEnvelope(bearer.OrgID, bearer.UserID, spaceRef); err != nil {
 			return canvasCaller{}, refusalFromErr(err)
 		}
 		return canvasCaller{agent: true, run: run}, nil
@@ -55,13 +48,73 @@ func (h *CanvasHandler) authorizeCaller(r *http.Request, bearer *authctx.Claims,
 	if err != nil {
 		return canvasCaller{}, refusalFromErr(err)
 	}
-	if claims.ZeroDataRetention {
-		return canvasCaller{}, canvasZDRRefusal()
-	}
-	if err := claims.CheckCanvas(bearer.OrgID, bearer.UserID, spaceRef, write); err != nil {
+	if err := claims.CheckEnvelope(bearer.OrgID, bearer.UserID, spaceRef); err != nil {
 		return canvasCaller{}, refusalFromErr(err)
 	}
 	return canvasCaller{user: claims}, nil
+}
+
+// authorize binds a verified decision to the route's operation. agentOK says whether the route accepts an agent decision at all;
+// one that does not refuses a run-action decision with space_decision_mismatch. Then the action, schema, permission and Space kind
+// must be the route's.
+func (c canvasCaller) authorize(write, agentOK bool) *canvasRefusal {
+	if c.agent {
+		if !agentOK {
+			return refusalOf(http.StatusForbidden, spacedecision.CodeDecisionMismatch,
+				"this canvas route does not accept an agent Space decision")
+		}
+		if err := c.run.CheckAuthority(write); err != nil {
+			return refusalFromErr(err)
+		}
+		return nil
+	}
+	if err := c.user.CheckAuthority(write); err != nil {
+		return refusalFromErr(err)
+	}
+	return nil
+}
+
+// refuseZDR answers a decision issued under zero data retention with the catalogue refusal. It is the last refusal before the
+// store is used (D21n): a decision Control signed under ZDR is refused once the route knows the canvas exists and the decision is
+// the route's own.
+func (c canvasCaller) refuseZDR() *canvasRefusal {
+	if (c.agent && c.run.ZeroDataRetention) || (!c.agent && c.user.ZeroDataRetention) {
+		return canvasZDRRefusal()
+	}
+	return nil
+}
+
+// firstRefusal runs the checks in order and returns the first refusal.
+func firstRefusal(checks ...func() *canvasRefusal) *canvasRefusal {
+	for _, check := range checks {
+		if refused := check(); refused != nil {
+			return refused
+		}
+	}
+	return nil
+}
+
+// probeCanvas answers a route's not-found refusals (D21n), after the decision envelope and before authority. versionID names the
+// version the route reads or restores ("" for none). createOK is set for the save route, where a Space with no canvas is a create,
+// not a refusal; the save route decides its own not-found answers from the probe. It reports false when it wrote an answer.
+func (h *CanvasHandler) probeCanvas(w http.ResponseWriter, r *http.Request, orgID, spaceRef, versionID string, createOK bool) (canvas.Probe, bool) {
+	probe, err := h.repo.Probe(r.Context(), orgID, spaceRef, versionID)
+	if err != nil {
+		writeCanvasStoreError(w, err)
+		return canvas.Probe{}, false
+	}
+	if probe.CanvasID == "" {
+		if createOK {
+			return probe, true
+		}
+		writeCanvasError(w, http.StatusNotFound, canvas.CodeCanvasNotFound, "the Space has no canvas", nil)
+		return canvas.Probe{}, false
+	}
+	if versionID != "" && !probe.VersionFound {
+		writeCanvasError(w, http.StatusNotFound, canvas.CodeVersionNotFound, "the version is not in this canvas", nil)
+		return canvas.Probe{}, false
+	}
+	return probe, true
 }
 
 // author is the verified principal that stamps a version: the user for a human decision, and for an agent decision the run, with

@@ -866,6 +866,11 @@ paths:
   # ── Room canvas (WS19-S3, Go service :8011; flag WIKISTORE_SPACE_CANVAS, off by default) ──
   # Each route needs a bearer with wiki.read (reads) or wiki.write (writes), a token without zdr=true, and an
   # X-Space-Decision header holding a Control decision bound to the route. Answers are {data} or {error:{code,message,details}}.
+  # Refusal order on every route (D21n), each stopping before the next: flag 404, bearer 401, scope 403, ZDR bearer 412, request
+  # shape 400/413, decision envelope (signature, life, org, subject, Space, audience: 400 space_decision_required or 403
+  # space_decision_invalid / space_decision_mismatch), not-found 404 (canvas_not_found, canvas_version_not_found), authority 403
+  # (route or action mismatch, digest, history floor), ZDR decision 412, then the write's conflicts 409. canvas_not_found means the
+  # Space holds no canvas (never created, purged or fenced); canvas_head_moved means a canvas exists whose head is not the one sent.
   /v1/space-canvas/spaces/{space_ref}:
     get:
       summary: Read the room canvas head (unchanged when known_version_id is already the head)
@@ -892,6 +897,8 @@ paths:
       responses:
         '200': { description: One page of versions }
         '400': { description: invalid_canvas_request or invalid_cursor }
+        '403': { description: "space_decision_invalid, space_decision_mismatch, space_decision_digest_mismatch or space_history_floor_unsupported" }
+        '404': { description: canvas_not_found }
         '412': { description: "zdr_durable_mutation_forbidden (details.surface room_canvas), reads included" }
     post:
       summary: Save a canvas version (compare-and-swap on expected_version_id)
@@ -917,7 +924,8 @@ paths:
         '201': { description: "Created, with deduplicated true on an idempotent replay" }
         '400': { description: invalid_canvas_request }
         '403': { description: Decision refusal }
-        '409': { description: "canvas_head_moved (details.head, null when the Space has no canvas yet) or idempotency_key_conflict" }
+        '404': { description: "canvas_not_found: expected_version_id names a head but the Space holds no canvas, or the Space was purged" }
+        '409': { description: "canvas_head_moved (details.head names the current head) or idempotency_key_conflict" }
         '412': { description: "zdr_durable_mutation_forbidden (details.surface room_canvas)" }
         '413': { description: canvas_too_large (details.max_bytes) }
         '429': { description: canvas_rate_limited or canvas_run_write_limit }
@@ -933,6 +941,7 @@ paths:
         - { name: X-Space-Decision, in: header, required: true, schema: { type: string, maxLength: 16384 } }
       responses:
         '200': { description: OK }
+        '403': { description: "space_decision_invalid, space_decision_mismatch, space_decision_digest_mismatch or space_history_floor_unsupported" }
         '404': { description: canvas_version_not_found or canvas_not_found }
         '412': { description: "zdr_durable_mutation_forbidden (details.surface room_canvas)" }
 
@@ -958,8 +967,9 @@ paths:
       responses:
         '200': { description: Unchanged }
         '201': { description: Created }
-        '404': { description: canvas_not_found or canvas_version_not_found }
-        '409': { description: canvas_head_moved or idempotency_key_conflict }
+        '403': { description: "space_decision_invalid, space_decision_mismatch, space_decision_digest_mismatch or space_history_floor_unsupported" }
+        '404': { description: "canvas_not_found (no canvas, or it was purged) or canvas_version_not_found" }
+        '409': { description: "canvas_head_moved (details.head) or idempotency_key_conflict" }
         '412': { description: "zdr_durable_mutation_forbidden (details.surface room_canvas)" }
 
   # ── Room canvas purge (WS19-S8; Space-deletion coordinator only; not behind WIKISTORE_SPACE_CANVAS) ──

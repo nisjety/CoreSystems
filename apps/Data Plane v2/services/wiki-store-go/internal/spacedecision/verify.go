@@ -204,10 +204,22 @@ func (c Claims) validate(now time.Time) error {
 // decision issued under zero data retention is refused. A history floor is not a refusal here: a read under one is
 // windowed by the canvas repository (canvas.Floor), and the handler refuses the writes a floor forbids.
 func (c Claims) CheckCanvas(orgID, subjectID, spaceRef string, write bool) error {
-	action, schema, permission := ActionCanvasRead, SchemaCanvasRead, PermissionCanvasRead
-	if write {
-		action, schema, permission = ActionCanvasWrite, SchemaCanvasWrite, PermissionCanvasWrite
+	if err := c.CheckEnvelope(orgID, subjectID, spaceRef); err != nil {
+		return err
 	}
+	if err := c.CheckAuthority(write); err != nil {
+		return err
+	}
+	if c.ZeroDataRetention {
+		return refuse(CodeDecisionMismatch, "the Space decision is issued under zero data retention")
+	}
+	return nil
+}
+
+// CheckEnvelope binds a verified decision to its addressee: the caller's org and subject, the path's Space and the canvas
+// audience. It is the part of CheckCanvas a canvas route runs before it decides whether the canvas or version exists (D21n), so a
+// decision for another caller or Space never learns whether this Space has a canvas.
+func (c Claims) CheckEnvelope(orgID, subjectID, spaceRef string) error {
 	mismatch := func(message string) error { return refuse(CodeDecisionMismatch, message) }
 	switch {
 	case c.OrgID != orgID:
@@ -218,12 +230,24 @@ func (c Claims) CheckCanvas(orgID, subjectID, spaceRef string, write bool) error
 		return mismatch("the Space decision was issued to another user")
 	case c.ServiceAudience != AudienceCanvas:
 		return mismatch("the Space decision was issued for another service")
+	}
+	return nil
+}
+
+// CheckAuthority binds a decision already bound by CheckEnvelope to the operation: the read or write action, its schema and
+// permission, and a Space kind that has a canvas. A canvas route runs it after the not-found answers (D21n). It does not look at
+// zero data retention, which the route answers last with the catalogue refusal.
+func (c Claims) CheckAuthority(write bool) error {
+	action, schema, permission := ActionCanvasRead, SchemaCanvasRead, PermissionCanvasRead
+	if write {
+		action, schema, permission = ActionCanvasWrite, SchemaCanvasWrite, PermissionCanvasWrite
+	}
+	mismatch := func(message string) error { return refuse(CodeDecisionMismatch, message) }
+	switch {
 	case c.ActionID != action || c.ActionSchemaHash != schema:
 		return mismatch("the Space decision authorizes another action")
 	case !slices.Contains(c.Permissions, permission):
 		return mismatch("the Space decision lacks the canvas permission")
-	case c.ZeroDataRetention:
-		return mismatch("the Space decision is issued under zero data retention")
 	}
 	switch c.SpaceKind {
 	case "personal", "room", "project", "case":

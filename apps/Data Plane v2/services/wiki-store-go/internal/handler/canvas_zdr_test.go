@@ -91,20 +91,18 @@ func TestCanvasRoutesRefuseAZDRBearerWithTheCatalogueRefusalBeforeAnyHandler(t *
 }
 
 // TestCanvasRoutesRefuseAZDRHumanDecisionWithTheSameCatalogueRefusal: a human decision issued under zero data retention, presented by a
-// bearer that is not restrictive, gets the same 412 on every route. The decision is otherwise correct for its route (the action, the
-// Space and the subject all match), so only the zero-retention check refuses it. Without that check the route would go on to the digest.
+// bearer that is not restrictive, gets the same 412 on every route once the canvas exists. The decision is otherwise correct for its
+// route (the action, the Space, the subject and the digest all match), so only the zero-retention check refuses it, and the store is
+// not used past the not-found probe (D21n: not-found, then authority, then ZDR).
 func TestCanvasRoutesRefuseAZDRHumanDecisionWithTheSameCatalogueRefusal(t *testing.T) {
-	router := canvasRouter(t, canvas.NewRepo(nil), true)
 	bearer := canvasBearer(t, canvasTestOrg, []string{"wiki.read", "wiki.write"}, false)
 	for _, route := range canvasRoutes {
 		t.Run(route.name, func(t *testing.T) {
-			claims := canvasHumanClaims(canvasTestOrg, canvasTestSpace, "zdr-decision-key-1", route.write)
-			claims.ZeroDataRetention = true
-			// The ZDR refusal comes before the digest is compared, so the digest is never read here.
-			claims.PayloadDigest = canvasWrongDigest()
-			decision := signCanvasEnvelope(t, spacedecision.EnvelopeVersion, claims)
-			rec := serveCanvas(t, router, route.method, route.path, bearer, decision, route.body)
+			store := fakeStoreWithCanvas()
+			decision := canvasRouteHumanToken(t, route, "zdr-decision-key-1", func(c *spacedecision.Claims) { c.ZeroDataRetention = true })
+			rec := serveCanvas(t, fakeCanvasRouter(t, store), route.method, route.path, bearer, decision, route.body)
 			wantCanvasZDRRefusal(t, rec)
+			store.wantStoreUntouched(t)
 		})
 	}
 }
@@ -112,18 +110,17 @@ func TestCanvasRoutesRefuseAZDRHumanDecisionWithTheSameCatalogueRefusal(t *testi
 // TestCanvasAgentDecisionWithZDRGetsTheCatalogueRefusalOnTheRoutesThatAcceptOne: the head read and the save accept an agent decision,
 // and an agent decision issued under zero data retention gets the same 412 there rather than a decision mismatch.
 func TestCanvasAgentDecisionWithZDRGetsTheCatalogueRefusalOnTheRoutesThatAcceptOne(t *testing.T) {
-	router := canvasRouter(t, canvas.NewRepo(nil), true)
 	bearer := canvasBearer(t, canvasTestOrg, []string{"wiki.read", "wiki.write"}, false)
 	for _, route := range canvasRoutes {
 		if !route.agent {
 			continue
 		}
 		t.Run(route.name, func(t *testing.T) {
-			run := canvasRunClaims(canvasTestOrg, canvasTestSpace, "zdr-agent-key-1", route.write, nil)
-			run.ZeroDataRetention = true
-			decision := signCanvasEnvelope(t, spacedecision.RunEnvelopeVersion, run)
-			rec := serveCanvas(t, router, route.method, route.path, bearer, decision, route.body)
+			store := fakeStoreWithCanvas()
+			decision := canvasRouteRunToken(t, route, func(r *spacedecision.RunClaims) { r.ZeroDataRetention = true })
+			rec := serveCanvas(t, fakeCanvasRouter(t, store), route.method, route.path, bearer, decision, route.body)
 			wantCanvasZDRRefusal(t, rec)
+			store.wantStoreUntouched(t)
 		})
 	}
 }

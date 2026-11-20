@@ -592,8 +592,8 @@ func TestCanvasWritesNeverTouchTheWikiTables(t *testing.T) {
 	}
 }
 
-// TestCanvasWriteForAPurgedCanvasIsRefusedAndStoresNothing sends a save and a restore decided for a purged canvas. The save is
-// canvas_head_moved. The restore finds no active canvas in the Space, so it is canvas_not_found, as the code answers it.
+// TestCanvasWriteForAPurgedCanvasIsRefusedAndStoresNothing sends a save, a create that names a head and a restore decided for a
+// purged canvas. The Space holds no canvas, so each is canvas_not_found (D21n): no head moved, the canvas is gone.
 func TestCanvasWriteForAPurgedCanvasIsRefusedAndStoresNothing(t *testing.T) {
 	pool := setupCanvasPool(t)
 	repo := NewRepo(pool)
@@ -605,7 +605,9 @@ func TestCanvasWriteForAPurgedCanvasIsRefusedAndStoresNothing(t *testing.T) {
 	}
 
 	_, err := saveCanvas(ctx, repo, "org-a", "space-a", c.CanvasID, ptr(v1), "late save", "late-save", canvasAuthor())
-	requireCanvasError(t, err, CodeHeadMoved)
+	requireCanvasError(t, err, CodeCanvasNotFound)
+	_, err = saveCanvas(ctx, repo, "org-a", "space-a", "", ptr(v1), "late create", "late-create", canvasAuthor())
+	requireCanvasError(t, err, CodeCanvasNotFound)
 	_, err = restoreCanvas(ctx, repo, "org-a", "space-a", c.CanvasID, v1, ptr(v1), "late-restore")
 	requireCanvasError(t, err, CodeCanvasNotFound)
 

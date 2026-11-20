@@ -3,8 +3,9 @@ package handler
 // Route tests for the room canvas (WS19-S3 and WS19-S9 handler entries). The helpers in this file are shared by the canvas test
 // files of this package: they mint the bearers, sign the Control decisions with a fixed test key, build the router and send one
 // request. The routes run the production handlers. A route that reaches the canvas store is built over a store with no pool, so a
-// request that gets past its refusals panics there, and serveCanvas reports that as a failure. Tests that need a live store are
-// gated on WIKI_TEST_DATABASE_URL.
+// request that gets past its refusals panics there, and serveCanvas reports that as a failure. A refusal decided after the not-found
+// probe (D21n) is tested over fakeCanvasStore, which answers the probe and records any store call past it. Tests that need a live
+// store are gated on WIKI_TEST_DATABASE_URL.
 
 import (
 	"context"
@@ -241,6 +242,147 @@ func canvasRouter(t *testing.T, repo *canvas.Repo, enabled bool) http.Handler {
 	return router
 }
 
+// The ids the fake store's canvas holds.
+const (
+	fakeCanvasID  = "canvas-1"
+	fakeVersionID = "version-1"
+)
+
+// fakeCanvasStore answers the not-found probe of the canvas routes from fixed facts, with no database, and records every store
+// call past the probe. A test that expects a refusal asserts that nothing past the probe ran. Its reads and writes answer fixed
+// results, so a request that passes every refusal gets a 200 or 201.
+type fakeCanvasStore struct {
+	probe   canvas.Probe
+	mu      sync.Mutex
+	probed  int
+	reached []string
+	// err, when set, is what every call past the probe answers.
+	err error
+}
+
+// fakeStoreWithCanvas is a store whose Space holds canvas-1 with version-1.
+func fakeStoreWithCanvas() *fakeCanvasStore {
+	return &fakeCanvasStore{probe: canvas.Probe{CanvasID: fakeCanvasID, VersionFound: true}}
+}
+
+func (f *fakeCanvasStore) Probe(_ context.Context, _, _, versionID string) (canvas.Probe, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.probed++
+	p := f.probe
+	if versionID == "" {
+		p.VersionFound = false
+	}
+	return p, nil
+}
+
+func (f *fakeCanvasStore) record(call string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reached = append(f.reached, call)
+	return f.err
+}
+
+func (f *fakeCanvasStore) Head(_ context.Context, _, spaceRef string, _ *string, _ canvas.Floor) (canvas.HeadView, error) {
+	if err := f.record("head"); err != nil {
+		return canvas.HeadView{}, err
+	}
+	head := fakeVersionID
+	v := canvas.Version{VersionID: fakeVersionID, CanvasID: fakeCanvasID, VersionNo: 1, Content: "# Room\n"}
+	return canvas.HeadView{Canvas: canvas.Canvas{CanvasID: fakeCanvasID, SpaceRef: spaceRef, State: "active",
+		HeadVersionID: &head, HeadVersionNo: 1}, Head: &v}, nil
+}
+
+func (f *fakeCanvasStore) ListVersions(_ context.Context, _, _ string, _ *int, _ int, _ canvas.Floor) (canvas.VersionPage, error) {
+	if err := f.record("list"); err != nil {
+		return canvas.VersionPage{}, err
+	}
+	return canvas.VersionPage{Versions: []canvas.Version{{VersionID: fakeVersionID, CanvasID: fakeCanvasID, VersionNo: 1}}}, nil
+}
+
+func (f *fakeCanvasStore) GetVersion(_ context.Context, _, _, versionID string, _ canvas.Floor) (canvas.Version, error) {
+	if err := f.record("get-version"); err != nil {
+		return canvas.Version{}, err
+	}
+	return canvas.Version{VersionID: versionID, CanvasID: fakeCanvasID, VersionNo: 1, Content: "# Room\n"}, nil
+}
+
+func (f *fakeCanvasStore) Save(_ context.Context, in canvas.SaveInput) (canvas.WriteResult, error) {
+	if err := f.record("save"); err != nil {
+		return canvas.WriteResult{}, err
+	}
+	return canvas.WriteResult{CanvasID: fakeCanvasID, Inserted: true, HeadVersionID: "version-2",
+		Version: canvas.Version{VersionID: "version-2", CanvasID: fakeCanvasID, VersionNo: 2, AuthorKind: in.Author.Kind}}, nil
+}
+
+func (f *fakeCanvasStore) Restore(_ context.Context, _ canvas.RestoreInput) (canvas.WriteResult, error) {
+	if err := f.record("restore"); err != nil {
+		return canvas.WriteResult{}, err
+	}
+	return canvas.WriteResult{CanvasID: fakeCanvasID, Inserted: true, HeadVersionID: "version-2",
+		Version: canvas.Version{VersionID: "version-2", CanvasID: fakeCanvasID, VersionNo: 2, ChangeKind: "restore"}}, nil
+}
+
+// wantStoreUntouched asserts that no store call past the probe ran.
+func (f *fakeCanvasStore) wantStoreUntouched(t *testing.T) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.reached) != 0 {
+		t.Fatalf("the route used the store past its probe (%v) where it must refuse first", f.reached)
+	}
+}
+
+// fakeCanvasRouter mounts the room canvas routes, flag on, over a fake store.
+func fakeCanvasRouter(t *testing.T, store *fakeCanvasStore) http.Handler {
+	t.Helper()
+	_, verifier := canvasTestSigner(t)
+	router := chi.NewRouter()
+	MountCanvasRoutes(router, authctx.Middleware(verifier), newCanvasHandler(store, true, canvasDecisionKeys()))
+	return router
+}
+
+// canvasRouteOp is the operation the handler derives for route over the fake store's canvas (canvas-1), with the route's own body,
+// so a decision signed for it matches the digest the handler recomputes.
+func canvasRouteOp(route canvasRoute, idempotencyKey string) spacedecision.CanvasOp {
+	switch route.name {
+	case "save":
+		return spacedecision.CanvasOp{Op: spacedecision.OpSave, Schema: spacedecision.SchemaCanvasWrite, CanvasID: fakeCanvasID,
+			ContentDigest: canvas.ContentDigest("# Room\n"), IdempotencyKey: "save-key-1"}
+	case "restore":
+		return spacedecision.CanvasOp{Op: spacedecision.OpRestore, Schema: spacedecision.SchemaCanvasWrite, CanvasID: fakeCanvasID,
+			RestoreFromVersionID: fakeVersionID, IdempotencyKey: "restore-key-1"}
+	default:
+		return canvasReadOp(idempotencyKey)
+	}
+}
+
+// canvasRouteHumanToken signs a human decision that is correct for route over the fake store's canvas. edit, when set, changes the
+// claims before the digest is computed and the decision is signed.
+func canvasRouteHumanToken(t *testing.T, route canvasRoute, key string, edit func(*spacedecision.Claims)) string {
+	t.Helper()
+	claims := canvasHumanClaims(canvasTestOrg, canvasTestSpace, key, route.write)
+	if edit != nil {
+		edit(&claims)
+	}
+	return canvasHumanToken(t, claims, canvasRouteOp(route, key))
+}
+
+// canvasRouteRunToken signs an agent decision that is correct for route (head read or save) with the route's own body.
+func canvasRouteRunToken(t *testing.T, route canvasRoute, edit func(*spacedecision.RunClaims)) string {
+	t.Helper()
+	key, args := "agent-read-key-1", []spacedecision.RunArgument(nil)
+	if route.write {
+		key = "save-key-1"
+		args = runWriteArgs(saveBody{Content: "# Room\n", IdempotencyKey: key})
+	}
+	run := canvasRunClaims(canvasTestOrg, canvasTestSpace, key, route.write, args)
+	if edit != nil {
+		edit(&run)
+	}
+	return signCanvasEnvelope(t, spacedecision.RunEnvelopeVersion, run)
+}
+
 // serveCanvas sends one request through router. A handler that reaches a store with no pool panics, which means it ran where its
 // route must refuse first, so a panic here fails the test.
 func serveCanvas(t *testing.T, router http.Handler, method, path, bearer, decision, body string) *httptest.ResponseRecorder {
@@ -431,9 +573,11 @@ func decodeCanvasErrorBody(t *testing.T, rec *httptest.ResponseRecorder) canvasE
 }
 
 // TestCanvasReadsRefuseADecisionWhoseDigestIsNotTheRequest: the handler recomputes the read digest from the verified claims, and a
-// digest the decision does not match is 403 space_decision_digest_mismatch. The check runs before the store is read.
+// digest the decision does not match is 403 space_decision_digest_mismatch. The check runs after the not-found probe and before the
+// store is read.
 func TestCanvasReadsRefuseADecisionWhoseDigestIsNotTheRequest(t *testing.T) {
-	router := canvasRouter(t, canvas.NewRepo(nil), true)
+	store := fakeStoreWithCanvas()
+	router := fakeCanvasRouter(t, store)
 	bearer := canvasBearer(t, canvasTestOrg, []string{"wiki.read"}, false)
 	claims := canvasHumanClaims(canvasTestOrg, canvasTestSpace, "read-key-1", false)
 	claims.PayloadDigest = canvasWrongDigest()
@@ -447,6 +591,7 @@ func TestCanvasReadsRefuseADecisionWhoseDigestIsNotTheRequest(t *testing.T) {
 			wantCanvasRefusal(t, rec, http.StatusForbidden, spacedecision.CodeDigestMismatch)
 		})
 	}
+	store.wantStoreUntouched(t)
 }
 
 // TestCanvasRoutesRefuseADecisionIssuedForAnotherSpace: a decision is bound to the Space it names, so one issued for another Space
@@ -496,9 +641,11 @@ func TestCanvasRoutesRefuseADecisionThatIsNotControlSigned(t *testing.T) {
 }
 
 // TestCanvasListGetVersionAndRestoreRefuseAnAgentDecision: only the head read and the save take an agent decision. The other three
-// refuse it as a mismatch before the decision is verified.
+// refuse it as a mismatch, an authority refusal decided after the not-found probe (D21n) and before the store is used.
 func TestCanvasListGetVersionAndRestoreRefuseAnAgentDecision(t *testing.T) {
-	router := canvasRouter(t, canvas.NewRepo(nil), true)
+	store := fakeStoreWithCanvas()
+	router := fakeCanvasRouter(t, store)
+	defer store.wantStoreUntouched(t)
 	bearer := canvasBearer(t, canvasTestOrg, []string{"wiki.read", "wiki.write"}, false)
 	read := signCanvasEnvelope(t, spacedecision.RunEnvelopeVersion, canvasRunClaims(canvasTestOrg, canvasTestSpace, "agent-read-key-1", false, nil))
 	write := signCanvasEnvelope(t, spacedecision.RunEnvelopeVersion, canvasRunClaims(canvasTestOrg, canvasTestSpace, "agent-write-key-1", true, nil))
@@ -513,6 +660,163 @@ func TestCanvasListGetVersionAndRestoreRefuseAnAgentDecision(t *testing.T) {
 		t.Run(route.name, func(t *testing.T) {
 			rec := serveCanvas(t, router, route.method, route.path, bearer, decision, route.body)
 			wantCanvasRefusal(t, rec, http.StatusForbidden, spacedecision.CodeDecisionMismatch)
+		})
+	}
+}
+
+// canvasAuthorityFailures are decisions whose envelope binds to the route (signed, unexpired, this org, user, Space and audience)
+// but whose authority or posture does not: each is refused only once the route knows the canvas exists (D21n). human is the human
+// decision for the route; agent, when set, is an agent decision instead.
+func canvasAuthorityFailures(t *testing.T, route canvasRoute) map[string]string {
+	t.Helper()
+	failures := map[string]string{
+		"zero data retention decision": canvasRouteHumanToken(t, route, "order-zdr", func(c *spacedecision.Claims) {
+			c.ZeroDataRetention = true
+		}),
+		"the other action": canvasHumanToken(t, canvasHumanClaims(canvasTestOrg, canvasTestSpace, "order-action", !route.write),
+			canvasRouteOp(route, "order-action")),
+		"no canvas kind": canvasRouteHumanToken(t, route, "order-kind", func(c *spacedecision.Claims) { c.SpaceKind = "dm" }),
+	}
+	// A decision signed over a digest no request computes.
+	digest := canvasHumanClaims(canvasTestOrg, canvasTestSpace, "order-digest", route.write)
+	digest.PayloadDigest = canvasWrongDigest()
+	failures["digest mismatch"] = signCanvasEnvelope(t, spacedecision.EnvelopeVersion, digest)
+	if route.agent {
+		failures["agent zero data retention decision"] = canvasRouteRunToken(t, route, func(r *spacedecision.RunClaims) {
+			r.ZeroDataRetention = true
+		})
+	} else {
+		failures["agent decision on a human route"] = signCanvasEnvelope(t, spacedecision.RunEnvelopeVersion,
+			canvasRunClaims(canvasTestOrg, canvasTestSpace, "order-agent", false, nil))
+	}
+	return failures
+}
+
+// TestCanvasRoutesAnswerNotFoundBeforeAuthorityAndZDR (D21n): a decision addressed to this caller and Space, but wrong for the
+// operation or issued under zero data retention, is answered canvas_not_found when the Space holds no canvas, on every route. A save
+// is not found only when it names a head (expected_version_id) or the Space is fenced; a plain create goes on to authority.
+func TestCanvasRoutesAnswerNotFoundBeforeAuthorityAndZDR(t *testing.T) {
+	bearer := canvasBearer(t, canvasTestOrg, []string{"wiki.read", "wiki.write"}, false)
+	for _, route := range canvasRoutes {
+		body := route.body
+		if route.name == "save" {
+			body = `{"expected_version_id":"version-1","content":"# Room\n","idempotency_key":"save-key-1"}`
+		}
+		for name, decision := range canvasAuthorityFailures(t, route) {
+			t.Run(route.name+"/"+name, func(t *testing.T) {
+				store := &fakeCanvasStore{}
+				rec := serveCanvas(t, fakeCanvasRouter(t, store), route.method, route.path, bearer, decision, body)
+				wantCanvasRefusal(t, rec, http.StatusNotFound, canvas.CodeCanvasNotFound)
+				store.wantStoreUntouched(t)
+			})
+		}
+	}
+
+	// A create into a purged (fenced) Space is not found before its authority is looked at.
+	save := canvasRoutes[3]
+	store := &fakeCanvasStore{probe: canvas.Probe{Fenced: true}}
+	claims := canvasHumanClaims(canvasTestOrg, canvasTestSpace, "fenced-create", true)
+	claims.PayloadDigest = canvasWrongDigest()
+	rec := serveCanvas(t, fakeCanvasRouter(t, store), save.method, save.path, bearer,
+		signCanvasEnvelope(t, spacedecision.EnvelopeVersion, claims), save.body)
+	wantCanvasRefusal(t, rec, http.StatusNotFound, canvas.CodeCanvasNotFound)
+	store.wantStoreUntouched(t)
+}
+
+// TestCanvasVersionRoutesAnswerVersionNotFoundBeforeAuthority (D21n): the get-version and restore routes answer
+// canvas_version_not_found for a version the active canvas does not hold, before any authority or ZDR refusal.
+func TestCanvasVersionRoutesAnswerVersionNotFoundBeforeAuthority(t *testing.T) {
+	bearer := canvasBearer(t, canvasTestOrg, []string{"wiki.read", "wiki.write"}, false)
+	for _, route := range canvasRoutes {
+		if route.name != "get version" && route.name != "restore" {
+			continue
+		}
+		for name, decision := range canvasAuthorityFailures(t, route) {
+			t.Run(route.name+"/"+name, func(t *testing.T) {
+				store := &fakeCanvasStore{probe: canvas.Probe{CanvasID: fakeCanvasID}}
+				rec := serveCanvas(t, fakeCanvasRouter(t, store), route.method, route.path, bearer, decision, route.body)
+				wantCanvasRefusal(t, rec, http.StatusNotFound, canvas.CodeVersionNotFound)
+				store.wantStoreUntouched(t)
+			})
+		}
+	}
+}
+
+// TestCanvasRoutesAnswerAuthorityWhenTheCanvasExists (D21n): with the canvas and version present, the same decisions get their own
+// refusal: a mismatch or digest refusal as 403, and a decision issued under zero data retention as the catalogue 412. None reaches
+// the store past the probe.
+func TestCanvasRoutesAnswerAuthorityWhenTheCanvasExists(t *testing.T) {
+	bearer := canvasBearer(t, canvasTestOrg, []string{"wiki.read", "wiki.write"}, false)
+	want := map[string]struct {
+		status int
+		code   string
+	}{
+		"digest mismatch":                    {http.StatusForbidden, spacedecision.CodeDigestMismatch},
+		"zero data retention decision":       {http.StatusPreconditionFailed, canvasZDRCode},
+		"the other action":                   {http.StatusForbidden, spacedecision.CodeDecisionMismatch},
+		"no canvas kind":                     {http.StatusForbidden, spacedecision.CodeDecisionMismatch},
+		"agent zero data retention decision": {http.StatusPreconditionFailed, canvasZDRCode},
+		"agent decision on a human route":    {http.StatusForbidden, spacedecision.CodeDecisionMismatch},
+	}
+	for _, route := range canvasRoutes {
+		for name, decision := range canvasAuthorityFailures(t, route) {
+			t.Run(route.name+"/"+name, func(t *testing.T) {
+				store := fakeStoreWithCanvas()
+				rec := serveCanvas(t, fakeCanvasRouter(t, store), route.method, route.path, bearer, decision, route.body)
+				wantCanvasRefusal(t, rec, want[name].status, want[name].code)
+				store.wantStoreUntouched(t)
+			})
+		}
+	}
+}
+
+// TestCanvasDecisionEnvelopeIsRefusedBeforeTheNotFoundProbe (D21n): a decision for another Space, an unsigned one and a service
+// bearer are refused before the store is asked whether the canvas exists, so they never learn it.
+func TestCanvasDecisionEnvelopeIsRefusedBeforeTheNotFoundProbe(t *testing.T) {
+	bearer := canvasBearer(t, canvasTestOrg, []string{"wiki.read"}, false)
+	other := canvasHumanToken(t, canvasHumanClaims(canvasTestOrg, "space-room-2", "envelope-1", false), canvasReadOp("envelope-1"))
+	signed := strings.Split(canvasHumanToken(t, canvasHumanClaims(canvasTestOrg, canvasTestSpace, "envelope-2", false),
+		canvasReadOp("envelope-2")), ".")
+	forged := signed[0] + "." + signed[1] + "." + signed[2] + "." + base64.RawURLEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))
+	for _, tc := range []struct {
+		name, bearer, decision, code string
+	}{
+		{"another Space", bearer, other, spacedecision.CodeDecisionMismatch},
+		{"not Control-signed", bearer, forged, spacedecision.CodeDecisionInvalid},
+		{"service bearer", canvasServiceBearer(t, "service:other-plane", canvasTestOrg, []string{"wiki.read"}),
+			canvasHumanToken(t, canvasHumanClaims(canvasTestOrg, canvasTestSpace, "envelope-3", false), canvasReadOp("envelope-3")),
+			spacedecision.CodeDecisionMismatch},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakeCanvasStore{}
+			rec := serveCanvas(t, fakeCanvasRouter(t, store), http.MethodGet, canvasSpacePath, tc.bearer, tc.decision, "")
+			wantCanvasRefusal(t, rec, http.StatusForbidden, tc.code)
+			if store.probed != 0 {
+				t.Fatalf("the route probed the store %d times before refusing the envelope", store.probed)
+			}
+		})
+	}
+}
+
+// TestCanvasCorrectDecisionsReachTheStore: the decisions the order tests break, sent intact over the fake store's canvas, pass
+// every refusal on their route, so the refusals above are the decisions' own and not a broken fixture.
+func TestCanvasCorrectDecisionsReachTheStore(t *testing.T) {
+	bearer := canvasBearer(t, canvasTestOrg, []string{"wiki.read", "wiki.write"}, false)
+	for _, route := range canvasRoutes {
+		t.Run(route.name, func(t *testing.T) {
+			store := fakeStoreWithCanvas()
+			rec := serveCanvas(t, fakeCanvasRouter(t, store), route.method, route.path, bearer,
+				canvasRouteHumanToken(t, route, "intact-1", nil), route.body)
+			if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+				t.Fatalf("an intact decision = %d; body=%s", rec.Code, rec.Body.String())
+			}
+			if route.agent {
+				store := fakeStoreWithCanvas()
+				rec := serveCanvas(t, fakeCanvasRouter(t, store), route.method, route.path, bearer, canvasRouteRunToken(t, route, nil), route.body)
+				if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+					t.Fatalf("an intact agent decision = %d; body=%s", rec.Code, rec.Body.String())
+				}
+			}
 		})
 	}
 }
