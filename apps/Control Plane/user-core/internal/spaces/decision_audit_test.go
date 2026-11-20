@@ -261,3 +261,12 @@ func TestAuditStringsAreClamped(t *testing.T) {
 		t.Fatalf("resource_id length = %d, want %d", got, maxAuditDetailString)
 	}
 }
+
+// D21h: the starter browser run stop issuer is audited like every issuer
+// route, and an issued stop is effect-bound (it ends a run).
+func TestDecisionAuditRouteForCoversTheBrowserRunStopDecision(t *testing.T) {
+	route, row, ok := DecisionAuditRouteFor("/api/v1/internal/spaces/browser-run-stop-decision")
+	if !ok || route != "/browser-run-stop-decision" || row.Name != "space_browser_run_stop" || !row.EffectBound {
+		t.Fatalf("browser-run-stop-decision = %q %+v %v, want an effect-bound space_browser_run_stop row", route, row, ok)
+	}
+}

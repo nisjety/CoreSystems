@@ -1,0 +1,52 @@
+{
+  "comment": "Shared Control and Model Plane vector for the starter browser run stop decision payload digest (D21h, model.space.browser_run_stop, audience model-plane-model-gateway, schema sha256:space-browser-run-stop-v1, permission space:browser:stop). Control's copy is browserRunStopPayloadDigest in space_browser_run_stop_decision.go; the model-gateway verifier (mp-contracts space_browser.rs) must recompute the same bytes and pin these digests. Change them only on an intended wire change, on both sides. Each length-prefixed field is name, NUL, 8-byte big-endian length, value; the five revisions are name, NUL, 8-byte big-endian value. Each vector's user_id replaces input.user_id. The digests were computed by a standalone script, independent of the Go code; TestBrowserRunStopDigestGolden must confirm them.",
+  "header": "model.space.browser_run_stop\\x00v1\\x00",
+  "action": "model.space.browser_run_stop",
+  "audience": "model-plane-model-gateway",
+  "schema": "sha256:space-browser-run-stop-v1",
+  "permission": "space:browser:stop",
+  "input": {
+    "org_id": "org-1",
+    "user_id": "user-2",
+    "space_id": "space-room-1",
+    "recipient_audience_ref": "audience:space-room-1:4",
+    "recipient_audience_hash": "sha256:audience-hash",
+    "privacy_policy_ref": "privacy:org-1:5",
+    "resource_authorization_ref": "control:space-room-1:browser-run-stop:7",
+    "authority_revision": 7,
+    "membership_revision": 3,
+    "privacy_revision": 5,
+    "recipient_audience_revision": 4,
+    "entitlement_revision": 6
+  },
+  "vectors": [
+    {
+      "name": "starter_stop",
+      "user_id": "user-2",
+      "run_id": "run-browser-1",
+      "idempotency_key": "stop-1",
+      "payload_digest": "sha256:2fcfd1146917ada8062dc35ebdd7c79c29aabd0b20a744f66b662accf5e698ae"
+    },
+    {
+      "name": "other_run",
+      "user_id": "user-2",
+      "run_id": "run-browser-2",
+      "idempotency_key": "stop-1",
+      "payload_digest": "sha256:c2f667d8939a629809a6939496f616cebf17f304d9004103fecaf72c9786600b"
+    },
+    {
+      "name": "other_member",
+      "user_id": "user-3",
+      "run_id": "run-browser-1",
+      "idempotency_key": "stop-1",
+      "payload_digest": "sha256:53b2d91f96ed4385433c82a3519d7f49a35e92d952ad86cf11d82e31ac1a8f8e"
+    },
+    {
+      "name": "retry_new_key",
+      "user_id": "user-2",
+      "run_id": "run-browser-1",
+      "idempotency_key": "stop-2",
+      "payload_digest": "sha256:5e6d0d03896fa6930c2030e92c0423f74ecffeeb4c80444f4117f3cf477d11cd"
+    }
+  ]
+}

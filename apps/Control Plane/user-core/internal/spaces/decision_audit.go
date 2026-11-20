@@ -102,6 +102,7 @@ var decisionAuditRoutes = map[string]DecisionAuditRoute{
 	"/memory-decision":                  {Name: "space_memory", EffectBound: true},
 	"/canvas-decision":                  {Name: "space_canvas", EffectBound: true},
 	"/browser-run-decision":             {Name: "space_browser_run", EffectBound: true},
+	"/browser-run-stop-decision":        {Name: "space_browser_run_stop", EffectBound: true},
 	"/memory-declassify-decision":       {Name: "memory_declassify", EffectBound: true},
 	"/memory-personal-context-decision": {Name: "memory_personal_context"},
 	"/thread-read-decision":             {Name: "thread_read"},

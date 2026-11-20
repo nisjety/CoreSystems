@@ -60,6 +60,9 @@ func TestOnlyTheReadSurfacesResolveAnArchivedRoom(t *testing.T) {
 		// WS09-S7: stopping a live run is allowed in an archived room (a run
 		// started before the archive must still be stoppable).
 		"ResolveSharedRunControlDecisionEvidence",
+		// D21h (with D22aj): a starter may stop their own browser run in an
+		// archived room, for the same reason.
+		"ResolveSharedBrowserRunStopDecisionEvidence",
 		"ResolveSharedThreadReadDecisionEvidence",
 		// WS19-S2: a canvas read resolves an archived room; a canvas write takes
 		// active only (pinned in TestArchivedStateSetsInTheReadSurfacesAreExact).
@@ -85,7 +88,7 @@ func TestArchivedStateSetsInTheReadSurfacesAreExact(t *testing.T) {
 	for _, name := range []string{
 		"RosterForSpace", "SpacesForSubject",
 		"ResolveSharedRetrievalDecisionEvidence", "ResolveSharedThreadReadDecisionEvidence",
-		"ResolveSharedRunControlDecisionEvidence", "fenceActiveSpaces",
+		"ResolveSharedRunControlDecisionEvidence", "ResolveSharedBrowserRunStopDecisionEvidence", "fenceActiveSpaces",
 	} {
 		body := funcs[name]
 		if !regexp.MustCompile(`registration_state IN \('active',\s*'archived'\)`).MatchString(body) {
