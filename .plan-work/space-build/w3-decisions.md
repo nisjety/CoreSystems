@@ -113,3 +113,17 @@ A second question round (ZDR reads, ZDR enforce, GDPR erasure actor id, room-ref
 |---|---|---|---|
 | D23 | Starter browser-run stop decision vs ZDR | Issued under ZDR too — stopping is always the safe direction; the gateway's live ZDR check (D21h gw leg) covers the run itself, not the stop ask | user-core: removed the ZDR refusal from ValidateForBrowserRunStop; decision still signs ZeroDataRetention for the verifier (cb0726b29) |
 | D24 | Owner-to-org agent flip dropping the former owner's access | Keep the former owner on the access list as a manager unless they already listed themselves; the access list, not ownership, governs edits (D10) | user-core: UpdateAgentAccess auto-adds the actor as manager on a flip with no self-entry (c207d11a2) |
+
+## Round 6 (2026-11-20, defect found by the dat-group D21n/D21m builder, fixed same pass)
+
+| # | Topic | Decision | Work |
+|---|---|---|---|
+| D25 | Gateway canvas create forwarding a stale `expected_version_id` | Send the same null the decision was signed with, not the client's raw body field | gateway canvas.rs save_version_inner (79e1b136b) |
+
+Owed from the dat-group pass (D21n/D21m/D22ar), for the next ctl and gw/spa batches:
+- ctl: `IssueCanvasDecision` (canvas_decision.go:347) must issue, not refuse, a windowed save/restore decision, carrying the floor (D21m); keep refusing agent writes under a floor.
+- ctl: agent canvas reads in an archived room need the typed 409 `room_archived` (D22ar), mirroring `refuseArchivedWrite`.
+- gw: the save/restore relay must cope with the new 404 `canvas_not_found` (D21n); confirm `list_versions_inner` already passes `meta.window`/`current` through unchanged (D21m).
+- gw: Control's 400 `canvas_decision_invalid` is mapped to 503 — unchecked, carried over from the ledger, needs a look.
+- sc/registry: the golden canvas-read row says `min_role: viewer`, but the editor floor for agent rows always wins — misleading row, needs a fix once the gw/spa legs land.
+- spa: distinct copy for `canvas_not_found` on save/restore (removed, keep draft, offer create — not a conflict); `SpaceCanvasHistory` shows the window note and only offers restore/compare on listed versions; a manager "clear" action that saves a single newline (D22aq).
