@@ -106,3 +106,10 @@ A second question round (ZDR reads, ZDR enforce, GDPR erasure actor id, room-ref
 | D22au (DEC-WS10-Q5) | Quarantine false-positive threshold / reviewer | Stay in shadow mode until real data is reviewed; threshold starts conservative; named reviewer is the acting lead until the owner names one | no flip to enforce yet |
 | D22av (A-REC-02-POL) | Org admins open the room directory themselves? | No; stays operator-only for now (RECOMMENDED tier, not urgent) | none |
 | D22aw (DEPTH-W3-KIND-NOTES) | Old personal-note restore audit | Record the restore event as an audit row (owner can read it); no further ruling needed | session-core |
+
+## Round 5 (2026-11-20, defects found by the ctl-group D21/D22 builder, fixed same pass)
+
+| # | Topic | Decision | Work |
+|---|---|---|---|
+| D23 | Starter browser-run stop decision vs ZDR | Issued under ZDR too — stopping is always the safe direction; the gateway's live ZDR check (D21h gw leg) covers the run itself, not the stop ask | user-core: removed the ZDR refusal from ValidateForBrowserRunStop; decision still signs ZeroDataRetention for the verifier (cb0726b29) |
+| D24 | Owner-to-org agent flip dropping the former owner's access | Keep the former owner on the access list as a manager unless they already listed themselves; the access list, not ownership, governs edits (D10) | user-core: UpdateAgentAccess auto-adds the actor as manager on a flip with no self-entry (c207d11a2) |
