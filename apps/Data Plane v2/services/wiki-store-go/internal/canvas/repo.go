@@ -7,7 +7,7 @@
 //
 // The package enforces the head compare-and-swap, idempotency, limits, and the org and Space scope of every row. It does
 // not decide authority: the HTTP layer verifies the Control-signed Space decision and sets Author and Provenance from it
-// before it calls a write. A read under a member's history floor is windowed per canvas (see Floor in window.go).
+// before it calls a write. A member's history floor windows the version history, never the current head (see Floor in window.go).
 package canvas
 
 import (
@@ -54,7 +54,7 @@ const (
 	CodeInvalidCursor          = "invalid_cursor"
 	CodeRateLimited            = "canvas_rate_limited"
 	CodeRunWriteLimit          = "canvas_run_write_limit"
-	// CodeHistoryFloor is the refusal of a canvas that predates the reader's history window (window.go). It is the wire code
+	// CodeHistoryFloor is the refusal of a version written before the reader's history window (window.go). It is the wire code
 	// Control's decision refusal uses, so one code names the floor on both planes.
 	CodeHistoryFloor = "space_history_floor_unsupported"
 )
@@ -125,6 +125,8 @@ type Version struct {
 	ContentSHA256         string
 	CreatedAt             time.Time
 	Content               string
+	// Current is set by ListVersions on the canvas's current head.
+	Current bool
 }
 
 // HeadView is a canvas and its head. When the caller already holds the head, Unchanged is set, Head is nil and no content
@@ -136,10 +138,12 @@ type HeadView struct {
 }
 
 // VersionPage is one page of history, newest first and without content. NextBefore is the cursor for the next page, nil
-// when there is none.
+// when there is none. Under a history floor, HiddenBefore reports that the canvas holds versions the window withholds, so the
+// list is never silently short (D21m).
 type VersionPage struct {
-	Versions   []Version
-	NextBefore *int
+	Versions     []Version
+	NextBefore   *int
+	HiddenBefore bool
 }
 
 // SaveInput is one save. CanvasID is the canvas the Control decision named: the Space's active canvas for a save, or ""
@@ -168,6 +172,9 @@ type RestoreInput struct {
 	IdempotencyKey       string
 	Author               Author
 	Provenance           Provenance
+	// Floor is the restoring member's history window. A version written before it, other than the current head, is refused
+	// with CodeHistoryFloor (D21m). The zero Floor windows nothing.
+	Floor Floor
 }
 
 // WriteResult reports a save or restore. Inserted, Deduplicated and Unchanged are mutually exclusive. Version is set
@@ -340,6 +347,7 @@ func (r *Repo) Restore(ctx context.Context, in RestoreInput) (WriteResult, error
 		canvasID:    in.CanvasID,
 		expected:    in.ExpectedVersionID,
 		restoreFrom: in.RestoreFromVersionID,
+		floor:       in.Floor,
 		idemKey:     in.IdempotencyKey,
 		author:      in.Author,
 		prov:        in.Provenance,
@@ -347,9 +355,9 @@ func (r *Repo) Restore(ctx context.Context, in RestoreInput) (WriteResult, error
 }
 
 // Head returns the Space's canvas and its head. When knownVersionID already names the head, the result is Unchanged and
-// carries no content. The 15-second poll uses that path. Under a floor the canvas predates, Head answers CodeHistoryFloor,
-// and that holds for the Unchanged answer too, since it names the head.
-func (r *Repo) Head(ctx context.Context, orgID, spaceRef string, knownVersionID *string, floor Floor) (HeadView, error) {
+// carries no content. The 15-second poll uses that path. A history floor does not apply: every member who may read the canvas
+// reads its current head (D21m).
+func (r *Repo) Head(ctx context.Context, orgID, spaceRef string, knownVersionID *string) (HeadView, error) {
 	if err := validateScope(orgID, spaceRef); err != nil {
 		return HeadView{}, err
 	}
@@ -364,15 +372,6 @@ func (r *Repo) Head(ctx context.Context, orgID, spaceRef string, knownVersionID 
 		if cv.HeadVersionID == nil {
 			return HeadView{}, fmt.Errorf("canvas %s has no head", cv.CanvasID)
 		}
-		if floor.Set() {
-			admitted, err := windowAdmits(ctx, tx, orgID, cv.CanvasID, floor)
-			if err != nil {
-				return HeadView{}, err
-			}
-			if !admitted {
-				return HeadView{}, hiddenCanvasError()
-			}
-		}
 		if knownVersionID != nil && *knownVersionID == *cv.HeadVersionID {
 			return HeadView{Canvas: cv, Unchanged: true}, nil
 		}
@@ -385,8 +384,8 @@ func (r *Repo) Head(ctx context.Context, orgID, spaceRef string, knownVersionID 
 }
 
 // ListVersions returns one page of history, newest first and without content. before is the version number the previous
-// page ended at. Nil starts from the newest version. Under a floor the canvas predates, it answers CodeHistoryFloor and lists
-// nothing: a version number, size or parent id of a version written after the floor can still reveal pre-floor history.
+// page ended at. Nil starts from the newest version. Under a floor it lists only the versions inside the window, plus the current
+// head (marked Current) wherever it falls, and sets HiddenBefore when the canvas holds versions the window withholds (D21m).
 func (r *Repo) ListVersions(ctx context.Context, orgID, spaceRef string, before *int, limit int, floor Floor) (VersionPage, error) {
 	if err := validateScope(orgID, spaceRef); err != nil {
 		return VersionPage{}, err
@@ -403,11 +402,14 @@ func (r *Repo) ListVersions(ctx context.Context, orgID, spaceRef string, before 
 		if !found {
 			return VersionPage{}, &Error{Code: CodeCanvasNotFound, Message: "the Space has no canvas"}
 		}
+		// The window filter: the head, or a version inside every floor that is set. With no floor the instant is null and the
+		// revision zero, so every version passes.
 		rows, err := tx.Query(ctx, `SELECT `+versionCols+` FROM space_canvas_versions
 			WHERE org_id = $1 AND canvas_id = $2
 			  AND ($3::integer IS NULL OR version_no < $3::integer)
+			  AND (version_id = $5 OR (($6::timestamptz IS NULL OR created_at >= $6::timestamptz) AND audience_revision >= $7))
 			ORDER BY version_no DESC
-			LIMIT $4`, orgID, cv.CanvasID, before, limit+1)
+			LIMIT $4`, orgID, cv.CanvasID, before, limit+1, headVersionID(cv), floor.At, floor.Revision)
 		if err != nil {
 			return VersionPage{}, fmt.Errorf("list canvas versions: %w", err)
 		}
@@ -418,23 +420,22 @@ func (r *Repo) ListVersions(ctx context.Context, orgID, spaceRef string, before 
 			if err != nil {
 				return VersionPage{}, fmt.Errorf("read canvas version: %w", err)
 			}
+			v.Current = v.VersionID == headVersionID(cv)
 			versions = append(versions, v)
 		}
 		if err := rows.Err(); err != nil {
 			return VersionPage{}, fmt.Errorf("list canvas versions: %w", err)
 		}
-		// The gate runs after the rows it guards (rows is exhausted here, so the connection is free): every listed version
-		// was committed before the gate's statement starts.
+		page := VersionPage{Versions: versions}
 		if floor.Set() {
-			admitted, err := windowAdmits(ctx, tx, orgID, cv.CanvasID, floor)
-			if err != nil {
-				return VersionPage{}, err
-			}
-			if !admitted {
-				return VersionPage{}, hiddenCanvasError()
+			// rows is exhausted here, so the connection is free for the second statement.
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM space_canvas_versions
+				WHERE org_id = $1 AND canvas_id = $2 AND version_id <> $3
+				  AND (($4::timestamptz IS NOT NULL AND created_at < $4::timestamptz) OR audience_revision < $5))`,
+				orgID, cv.CanvasID, headVersionID(cv), floor.At, floor.Revision).Scan(&page.HiddenBefore); err != nil {
+				return VersionPage{}, fmt.Errorf("read canvas history window: %w", err)
 			}
 		}
-		page := VersionPage{Versions: versions}
 		if len(versions) > limit {
 			// The extra row only signals that another page exists; it is not returned.
 			page.Versions = versions[:limit]
@@ -446,8 +447,7 @@ func (r *Repo) ListVersions(ctx context.Context, orgID, spaceRef string, before 
 }
 
 // GetVersion returns one version with its content. A version of another Space, another org or an unknown id is not
-// found. Under a floor the version's canvas predates, it answers CodeHistoryFloor: the content of a later version can
-// still hold text written before the floor.
+// found. Under a floor, a version written before the window answers CodeHistoryFloor unless it is the current head (D21m).
 func (r *Repo) GetVersion(ctx context.Context, orgID, spaceRef, versionID string, floor Floor) (Version, error) {
 	if err := validateScope(orgID, spaceRef); err != nil {
 		return Version{}, err
@@ -472,12 +472,15 @@ func (r *Repo) GetVersion(ctx context.Context, orgID, spaceRef, versionID string
 			return Version{}, fmt.Errorf("read canvas version: %w", err)
 		}
 		if floor.Set() {
-			admitted, err := windowAdmits(ctx, tx, orgID, v.CanvasID, floor)
+			inWindow, found, err := versionInWindow(ctx, tx, orgID, v.CanvasID, v.VersionID, floor)
 			if err != nil {
 				return Version{}, err
 			}
-			if !admitted {
-				return Version{}, hiddenCanvasError()
+			if !found {
+				return Version{}, &Error{Code: CodeVersionNotFound, Message: "the version is not in this canvas"}
+			}
+			if !inWindow {
+				return Version{}, hiddenVersionError()
 			}
 		}
 		return v, nil
@@ -553,6 +556,7 @@ type writeOp struct {
 	expected    *string
 	content     string // save: the new text
 	restoreFrom string // restore: the version whose text is copied
+	floor       Floor  // restore: the member's history window
 	summary     *string
 	idemKey     string
 	author      Author
@@ -591,6 +595,18 @@ func writeTx(ctx context.Context, tx pgx.Tx, w writeOp) (WriteResult, error) {
 		}
 		if err != nil {
 			return WriteResult{}, fmt.Errorf("load restore source: %w", err)
+		}
+		// A version written before the member's window cannot be restored: it would show its text as the new head (D21m).
+		// The current head is exempt; restoring it is unchanged. Checked under the Space lock, after not-found and before the
+		// head compare-and-swap.
+		if w.floor.Set() {
+			inWindow, _, err := versionInWindow(ctx, tx, w.orgID, cv.CanvasID, w.restoreFrom, w.floor)
+			if err != nil {
+				return WriteResult{}, err
+			}
+			if !inWindow {
+				return WriteResult{}, hiddenVersionError()
+			}
 		}
 		content = src.Content
 		digest = src.ContentSHA256

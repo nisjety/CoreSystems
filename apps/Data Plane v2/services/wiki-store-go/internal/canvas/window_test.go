@@ -27,19 +27,19 @@ func TestFloorSetWindowsOnlyWhenAFloorIsNamed(t *testing.T) {
 	}
 }
 
-// TestFloorAdmitsOnlyACanvasWhollyInsideTheWindow checks the earliest version of a canvas against every floor. The boundary is
-// inclusive: a canvas created at the floor's instant, or under the floor's revision, is inside the window.
-func TestFloorAdmitsOnlyACanvasWhollyInsideTheWindow(t *testing.T) {
+// TestFloorAdmitsOnlyAVersionInsideTheWindow checks one version against every floor (D21m windows per version). The boundary is
+// inclusive: a version created at the floor's instant, or under the floor's revision, is inside the window.
+func TestFloorAdmitsOnlyAVersionInsideTheWindow(t *testing.T) {
 	at := time.Date(2026, time.November, 1, 10, 0, 0, 0, time.UTC)
 	justBefore := at.Add(-time.Nanosecond)
 	later := at.Add(time.Hour)
 	cases := map[string]struct {
 		floor     Floor
-		oldestAt  time.Time
-		oldestRev int64
+		createdAt time.Time
+		revision  int64
 		wantAdmit bool
 	}{
-		"no floor admits any canvas":                   {Floor{}, justBefore, 1, true},
+		"no floor admits any version":                  {Floor{}, justBefore, 1, true},
 		"instant: created at the instant":              {Floor{At: &at}, at, 1, true},
 		"instant: created after it":                    {Floor{At: &at}, later, 1, true},
 		"instant: created a tick before it":            {Floor{At: &at}, justBefore, 9, false},
@@ -51,18 +51,18 @@ func TestFloorAdmitsOnlyACanvasWhollyInsideTheWindow(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			if got := tc.floor.admits(tc.oldestAt, tc.oldestRev); got != tc.wantAdmit {
-				t.Fatalf("admits(%v, %d) = %v, want %v", tc.oldestAt, tc.oldestRev, got, tc.wantAdmit)
+			if got := tc.floor.admits(tc.createdAt, tc.revision); got != tc.wantAdmit {
+				t.Fatalf("admits(%v, %d) = %v, want %v", tc.createdAt, tc.revision, got, tc.wantAdmit)
 			}
 		})
 	}
 }
 
-// TestHiddenCanvasIsTheFloorRefusal: a canvas the window hides answers the wire code Control's decision refusal uses, so one code names
-// the floor on both planes.
-func TestHiddenCanvasIsTheFloorRefusal(t *testing.T) {
-	err := hiddenCanvasError()
+// TestHiddenVersionIsTheFloorRefusal: a version the window hides answers the wire code Control's decision refusal uses, so one code
+// names the floor on both planes.
+func TestHiddenVersionIsTheFloorRefusal(t *testing.T) {
+	err := hiddenVersionError()
 	if err.Code != CodeHistoryFloor || CodeHistoryFloor != "space_history_floor_unsupported" {
-		t.Fatalf("hidden canvas code = %q, want space_history_floor_unsupported", err.Code)
+		t.Fatalf("hidden version code = %q, want space_history_floor_unsupported", err.Code)
 	}
 }

@@ -27,7 +27,7 @@ func signPayloadWith(t *testing.T, version string, signer testSigner, claims any
 }
 
 // TestVerifyCarriesTheHistoryFloorInstant: a signed history_floor_at is read, so the canvas repository can window the read with it.
-// A verifier that dropped it would show the whole canvas.
+// A verifier that dropped it would show the whole version history.
 func TestVerifyCarriesTheHistoryFloorInstant(t *testing.T) {
 	signer := newTestSigner("floor-carry")
 	keys := KeySet{signer.id: signer.public()}
@@ -48,7 +48,7 @@ func TestVerifyCarriesTheHistoryFloorInstant(t *testing.T) {
 	}
 }
 
-// TestVerifyLeavesAnAbsentFloorUnset: a decision that names no floor reads as unfloored, so the whole canvas is shown to it.
+// TestVerifyLeavesAnAbsentFloorUnset: a decision that names no floor reads as unfloored, so the whole version history is shown to it.
 func TestVerifyLeavesAnAbsentFloorUnset(t *testing.T) {
 	signer := newTestSigner("floor-absent")
 	keys := KeySet{signer.id: signer.public()}

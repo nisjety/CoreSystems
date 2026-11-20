@@ -96,9 +96,11 @@ func firstRefusal(checks ...func() *canvasRefusal) *canvasRefusal {
 
 // probeCanvas answers a route's not-found refusals (D21n), after the decision envelope and before authority. versionID names the
 // version the route reads or restores ("" for none). createOK is set for the save route, where a Space with no canvas is a create,
-// not a refusal; the save route decides its own not-found answers from the probe. It reports false when it wrote an answer.
-func (h *CanvasHandler) probeCanvas(w http.ResponseWriter, r *http.Request, orgID, spaceRef, versionID string, createOK bool) (canvas.Probe, bool) {
-	probe, err := h.repo.Probe(r.Context(), orgID, spaceRef, versionID)
+// not a refusal; the save route decides its own not-found answers from the probe. The probe reports whether the version lies in the
+// caller's history window, which the route refuses later, as authority (refuseOutsideWindow). It reports false when it wrote an
+// answer.
+func (h *CanvasHandler) probeCanvas(w http.ResponseWriter, r *http.Request, caller canvasCaller, orgID, spaceRef, versionID string, createOK bool) (canvas.Probe, bool) {
+	probe, err := h.repo.Probe(r.Context(), orgID, spaceRef, versionID, caller.floor())
 	if err != nil {
 		writeCanvasStoreError(w, err)
 		return canvas.Probe{}, false
@@ -136,21 +138,24 @@ func (c canvasCaller) floor() canvas.Floor {
 	return canvas.Floor{At: c.user.HistoryFloorAt, Revision: c.user.HistoryFloorRevision}
 }
 
-// floored reports whether the decision's member has a history window that windows the canvas.
-func (c canvasCaller) floored() bool { return c.floor().Set() }
-
-// refuseWriteUnderFloor refuses a write that a history floor forbids. Control issues a floored decision for a create only: a
-// create writes new text, and a canvas that does not exist holds no pre-floor text. A save or a restore under a floor is refused,
-// because a save answers a head-moved or unchanged result that names the head, and a restore makes an older version the head.
-// An agent write under any floor is refused, because Control never issues one. create is false for a restore and for a save
-// over an existing canvas.
-func (c canvasCaller) refuseWriteUnderFloor(create bool) *canvasRefusal {
-	if !c.floored() {
-		return nil
-	}
-	if c.agent || !create {
+// refuseAgentWriteUnderFloor refuses an agent write under any history floor: Control never issues one, because a run action's
+// canvas operation travels in the agent's arguments and cannot be told apart from a save over pre-window text. A human under a
+// floor may save over the current canvas and may create one (D21m); only restoring a version from before the window is refused
+// (refuseOutsideWindow).
+func (c canvasCaller) refuseAgentWriteUnderFloor() *canvasRefusal {
+	if c.agent && c.floor().Set() {
 		return refusalOf(http.StatusForbidden, spacedecision.CodeHistoryFloor,
-			"a canvas save or restore is not available under this member's history window")
+			"an agent canvas write is not available under this member's history window")
+	}
+	return nil
+}
+
+// refuseOutsideWindow refuses reading or restoring a version written before the caller's history window (D21m). The probe has
+// already found the version; InWindow is set for a version inside the window and for the current head.
+func refuseOutsideWindow(probe canvas.Probe) *canvasRefusal {
+	if !probe.InWindow {
+		return refusalOf(http.StatusForbidden, spacedecision.CodeHistoryFloor,
+			"this version was written before this member's history window, so it is not shown")
 	}
 	return nil
 }

@@ -389,7 +389,7 @@ func TestCanvasIdsFromAnotherOrgOrSpaceAreNotFound(t *testing.T) {
 	requireCanvasError(t, err, CodeVersionNotFound)
 	_, err = repo.GetVersion(ctx, "org-b", "space-a", mine.Version.VersionID, Floor{})
 	requireCanvasError(t, err, CodeVersionNotFound)
-	_, err = repo.Head(ctx, "org-b", "space-a", nil, Floor{})
+	_, err = repo.Head(ctx, "org-b", "space-a", nil)
 	requireCanvasError(t, err, CodeCanvasNotFound)
 
 	// A restore may copy only from a version of the canvas it names.

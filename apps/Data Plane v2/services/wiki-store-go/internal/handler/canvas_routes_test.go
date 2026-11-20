@@ -256,22 +256,29 @@ type fakeCanvasStore struct {
 	mu      sync.Mutex
 	probed  int
 	reached []string
+	// probeFloor, listFloor and restoreFloor are the floors the store was handed, for the window tests.
+	probeFloor   canvas.Floor
+	listFloor    canvas.Floor
+	restoreFloor canvas.Floor
+	// hiddenBefore is what a list answers for HiddenBefore.
+	hiddenBefore bool
 	// err, when set, is what every call past the probe answers.
 	err error
 }
 
-// fakeStoreWithCanvas is a store whose Space holds canvas-1 with version-1.
+// fakeStoreWithCanvas is a store whose Space holds canvas-1 with version-1, inside any window.
 func fakeStoreWithCanvas() *fakeCanvasStore {
-	return &fakeCanvasStore{probe: canvas.Probe{CanvasID: fakeCanvasID, VersionFound: true}}
+	return &fakeCanvasStore{probe: canvas.Probe{CanvasID: fakeCanvasID, VersionFound: true, InWindow: true}}
 }
 
-func (f *fakeCanvasStore) Probe(_ context.Context, _, _, versionID string) (canvas.Probe, error) {
+func (f *fakeCanvasStore) Probe(_ context.Context, _, _, versionID string, floor canvas.Floor) (canvas.Probe, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.probed++
+	f.probeFloor = floor
 	p := f.probe
 	if versionID == "" {
-		p.VersionFound = false
+		p.VersionFound, p.InWindow = false, false
 	}
 	return p, nil
 }
@@ -283,7 +290,7 @@ func (f *fakeCanvasStore) record(call string) error {
 	return f.err
 }
 
-func (f *fakeCanvasStore) Head(_ context.Context, _, spaceRef string, _ *string, _ canvas.Floor) (canvas.HeadView, error) {
+func (f *fakeCanvasStore) Head(_ context.Context, _, spaceRef string, _ *string) (canvas.HeadView, error) {
 	if err := f.record("head"); err != nil {
 		return canvas.HeadView{}, err
 	}
@@ -293,11 +300,15 @@ func (f *fakeCanvasStore) Head(_ context.Context, _, spaceRef string, _ *string,
 		HeadVersionID: &head, HeadVersionNo: 1}, Head: &v}, nil
 }
 
-func (f *fakeCanvasStore) ListVersions(_ context.Context, _, _ string, _ *int, _ int, _ canvas.Floor) (canvas.VersionPage, error) {
+func (f *fakeCanvasStore) ListVersions(_ context.Context, _, _ string, _ *int, _ int, floor canvas.Floor) (canvas.VersionPage, error) {
+	f.mu.Lock()
+	f.listFloor = floor
+	f.mu.Unlock()
 	if err := f.record("list"); err != nil {
 		return canvas.VersionPage{}, err
 	}
-	return canvas.VersionPage{Versions: []canvas.Version{{VersionID: fakeVersionID, CanvasID: fakeCanvasID, VersionNo: 1}}}, nil
+	return canvas.VersionPage{Versions: []canvas.Version{{VersionID: fakeVersionID, CanvasID: fakeCanvasID, VersionNo: 1, Current: true}},
+		HiddenBefore: f.hiddenBefore}, nil
 }
 
 func (f *fakeCanvasStore) GetVersion(_ context.Context, _, _, versionID string, _ canvas.Floor) (canvas.Version, error) {
@@ -315,7 +326,10 @@ func (f *fakeCanvasStore) Save(_ context.Context, in canvas.SaveInput) (canvas.W
 		Version: canvas.Version{VersionID: "version-2", CanvasID: fakeCanvasID, VersionNo: 2, AuthorKind: in.Author.Kind}}, nil
 }
 
-func (f *fakeCanvasStore) Restore(_ context.Context, _ canvas.RestoreInput) (canvas.WriteResult, error) {
+func (f *fakeCanvasStore) Restore(_ context.Context, in canvas.RestoreInput) (canvas.WriteResult, error) {
+	f.mu.Lock()
+	f.restoreFloor = in.Floor
+	f.mu.Unlock()
 	if err := f.record("restore"); err != nil {
 		return canvas.WriteResult{}, err
 	}

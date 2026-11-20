@@ -871,6 +871,9 @@ paths:
   # space_decision_invalid / space_decision_mismatch), not-found 404 (canvas_not_found, canvas_version_not_found), authority 403
   # (route or action mismatch, digest, history floor), ZDR decision 412, then the write's conflicts 409. canvas_not_found means the
   # Space holds no canvas (never created, purged or fenced); canvas_head_moved means a canvas exists whose head is not the one sent.
+  # History window (D21m): a member with a history floor reads and saves the current canvas like any member. Only history is
+  # windowed: the version list shows the versions inside the window plus the current head, and meta.window says so; reading or
+  # restoring a version written before the window is 403 space_history_floor_unsupported (the current head is always allowed).
   /v1/space-canvas/spaces/{space_ref}:
     get:
       summary: Read the room canvas head (unchanged when known_version_id is already the head)
@@ -880,8 +883,8 @@ paths:
         - { name: known_version_id, in: query, required: false, schema: { type: string } }
         - { name: X-Space-Decision, in: header, required: true, schema: { type: string, maxLength: 16384 } }
       responses:
-        '200': { description: "Head with content, or unchanged" }
-        '403': { description: "space_decision_invalid, space_decision_mismatch, space_decision_digest_mismatch or space_history_floor_unsupported" }
+        '200': { description: "Head with content, or unchanged. A history window never hides the current head." }
+        '403': { description: "space_decision_invalid, space_decision_mismatch or space_decision_digest_mismatch" }
         '404': { description: canvas_not_found or space_canvas_disabled }
         '412': { description: "zdr_durable_mutation_forbidden (details.surface room_canvas), reads included" }
 
@@ -895,7 +898,7 @@ paths:
         - { name: cursor, in: query, required: false, schema: { type: integer, minimum: 1 } }
         - { name: X-Space-Decision, in: header, required: true, schema: { type: string, maxLength: 16384 } }
       responses:
-        '200': { description: One page of versions }
+        '200': { description: "One page of versions; each has current (true on the head). Under a history window, meta.window is {starts_at (RFC 3339 or null for a revision-only window), hidden_before (older versions were withheld)} and only versions inside the window plus the head are listed" }
         '400': { description: invalid_canvas_request or invalid_cursor }
         '403': { description: "space_decision_invalid, space_decision_mismatch, space_decision_digest_mismatch or space_history_floor_unsupported" }
         '404': { description: canvas_not_found }
@@ -941,7 +944,7 @@ paths:
         - { name: X-Space-Decision, in: header, required: true, schema: { type: string, maxLength: 16384 } }
       responses:
         '200': { description: OK }
-        '403': { description: "space_decision_invalid, space_decision_mismatch, space_decision_digest_mismatch or space_history_floor_unsupported" }
+        '403': { description: "space_decision_invalid, space_decision_mismatch, space_decision_digest_mismatch, or space_history_floor_unsupported for a version written before the member's history window (not the head)" }
         '404': { description: canvas_version_not_found or canvas_not_found }
         '412': { description: "zdr_durable_mutation_forbidden (details.surface room_canvas)" }
 
@@ -967,7 +970,7 @@ paths:
       responses:
         '200': { description: Unchanged }
         '201': { description: Created }
-        '403': { description: "space_decision_invalid, space_decision_mismatch, space_decision_digest_mismatch or space_history_floor_unsupported" }
+        '403': { description: "space_decision_invalid, space_decision_mismatch, space_decision_digest_mismatch, or space_history_floor_unsupported for a source version written before the member's history window (not the head)" }
         '404': { description: "canvas_not_found (no canvas, or it was purged) or canvas_version_not_found" }
         '409': { description: "canvas_head_moved (details.head) or idempotency_key_conflict" }
         '412': { description: "zdr_durable_mutation_forbidden (details.surface room_canvas)" }

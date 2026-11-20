@@ -119,8 +119,8 @@ type Claims struct {
 	Nonce                     string    `json:"nonce"`
 	SpaceKind                 string    `json:"space_kind,omitempty"`
 	// HistoryFloorAt (D18) is the instant the member's history window starts at. Control sets it only when the member has a
-	// per-member window (Decision.HistoryFloorAt). A verifier that ignores it shows the whole canvas, so this one reads it:
-	// the canvas repository windows the read with it (canvas.Floor).
+	// per-member window (Decision.HistoryFloorAt). A verifier that ignores it shows the whole version history, so this one reads it:
+	// the canvas repository windows the history with it (canvas.Floor, D21m).
 	HistoryFloorAt *time.Time `json:"history_floor_at,omitempty"`
 }
 
