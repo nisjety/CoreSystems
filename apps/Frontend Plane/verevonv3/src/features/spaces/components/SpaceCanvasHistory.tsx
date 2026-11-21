@@ -3,6 +3,7 @@ import { createEffect, createSignal, For, Show } from 'solid-js'
 import {
   getSpaceCanvasVersion,
   listSpaceCanvasVersions,
+  type SpaceCanvasHistoryWindow,
   type SpaceCanvasVersion,
   type SpaceRosterMember,
 } from '@/shared/api/spaces-client'
@@ -23,6 +24,9 @@ import { SpaceCanvasDiff } from './SpaceCanvasDiff'
  * The version history of the room canvas (WS19-S7): the versions newest first, without text, in pages of 50, and a
  * comparison of any two versions, older first. A person who may write sees Restore on every version but the head. The
  * list is read when it opens and again whenever the head on screen changes, so a save or a restore shows at once.
+ *
+ * D21m: a member with a history window sees only the versions inside it (plus the current head) and a note that says
+ * so. Restore is not offered there: Control refuses a restore under any window. Comparison stays, on listed versions only.
  *
  * Presentation only. The gateway and the owning planes decide what may be read; the restore itself is the panel's
  * write, and this component only asks the person to confirm it.
@@ -49,6 +53,7 @@ export function SpaceCanvasHistory(props: SpaceCanvasHistoryProps) {
   const tr = i18n.tr
   const [versions, setVersions] = createSignal<readonly SpaceCanvasVersion[]>([])
   const [nextCursor, setNextCursor] = createSignal<string | null>(null)
+  const [historyWindow, setHistoryWindow] = createSignal<SpaceCanvasHistoryWindow | null>(null)
   const [status, setStatus] = createSignal<LoadStatus>('loading')
   const [failure, setFailure] = createSignal<unknown>(null)
   const [moreBusy, setMoreBusy] = createSignal(false)
@@ -81,6 +86,7 @@ export function SpaceCanvasHistory(props: SpaceCanvasHistoryProps) {
       if (id !== callId) return
       setVersions(page.versions)
       setNextCursor(page.nextCursor)
+      setHistoryWindow(page.window ?? null)
       setMoreFailed(false)
       setFailure(null)
       setStatus('ready')
@@ -192,6 +198,29 @@ export function SpaceCanvasHistory(props: SpaceCanvasHistoryProps) {
         </div>
       </Show>
 
+      <Show when={historyWindow()}>
+        {(windowed) => (
+          <p class="verevon-space-canvas__hint" role="note">
+            {windowed().startsAt
+              ? tr(
+                  `Du ser versjoner fra ${formatWhenWithTime(windowed().startsAt as string, { locale: i18n.locale() })}, slik historikken i rommet er delt med deg.`,
+                  `You see versions from ${formatWhenWithTime(windowed().startsAt as string, { locale: i18n.locale() })}, as the room's history is shared with you.`,
+                )
+              : tr(
+                  'Du ser bare versjonene som historikken i rommet er delt med deg for.',
+                  "You see only the versions the room's history is shared with you for.",
+                )}{' '}
+            {windowed().hiddenBefore
+              ? tr('Eldre versjoner er skjult. ', 'Older versions are hidden. ')
+              : ''}
+            {tr(
+              'Du kan se og lagre det nåværende lerretet, men ikke gjenopprette versjoner.',
+              'You can view and save the current canvas, but not restore versions.',
+            )}
+          </p>
+        )}
+      </Show>
+
       <Show when={status() === 'ready' && versions().length === 0}>
         <p class="verevon-space-canvas__hint">{tr('Lerretet har ingen versjoner ennå.', 'The canvas has no versions yet.')}</p>
       </Show>
@@ -218,7 +247,7 @@ export function SpaceCanvasHistory(props: SpaceCanvasHistoryProps) {
                   <input type="checkbox" checked={isPicked(version)} onChange={() => togglePick(version)} />
                   {tr('Velg for sammenligning', 'Select to compare')}
                 </label>
-                <Show when={props.canRestore && version.versionId !== props.headVersionId}>
+                <Show when={props.canRestore && historyWindow() === null && version.versionId !== props.headVersionId}>
                   <button
                     type="button"
                     class="verevon-space-secondary-action"

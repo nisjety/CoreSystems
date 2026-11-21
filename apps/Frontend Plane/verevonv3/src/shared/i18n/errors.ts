@@ -1698,7 +1698,9 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   canvas_rate_limited: { no: 'Du har lagret for ofte på kort tid. Vent litt og prøv igjen.', en: 'You have saved too often in a short time. Wait a moment and try again.' },
   canvas_run_write_limit: { no: 'Agenten har nådd grensen for lagringer i denne kjøringen.', en: 'The agent has reached its save limit for this run.' },
   invalid_canvas_request: { no: 'Forespørselen til lerretet er ikke gyldig. Ingenting er endret.', en: 'The canvas request is not valid. Nothing was changed.' },
-  space_history_floor_unsupported: { no: 'Lerret er ikke tilgjengelig i rom som viser historikk fra din innmeldingsdato.', en: 'Canvas is not available in rooms that show history from your join date.' },
+  // D21m: under a member's history window the current canvas can be read and saved; what is refused is a version from
+  // before the window (a restore), or the whole canvas where the window is not rolled out yet.
+  space_history_floor_unsupported: { no: 'Dette ligger utenfor historikken rommet deler med deg. Ingenting er endret.', en: 'This is outside the history the room shares with you. Nothing was changed.' },
   space_decision_required: { no: 'Tilgangen til lerretet kunne ikke bekreftes. Last siden på nytt og prøv igjen.', en: 'Access to the canvas could not be confirmed. Reload the page and try again.' },
   space_decision_invalid: { no: 'Tilgangen til lerretet kunne ikke bekreftes. Last siden på nytt og prøv igjen.', en: 'Access to the canvas could not be confirmed. Reload the page and try again.' },
   space_decision_mismatch: { no: 'Tilgangen til lerretet kunne ikke bekreftes. Last siden på nytt og prøv igjen.', en: 'Access to the canvas could not be confirmed. Reload the page and try again.' },

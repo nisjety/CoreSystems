@@ -38,6 +38,11 @@ import { SpaceCanvasDiff } from './SpaceCanvasDiff'
 import { SpaceCanvasHistory } from './SpaceCanvasHistory'
 import './space-canvas.css'
 
+/** The typed 404 a save or a restore answers when the room's canvas is gone (D21n), never a head conflict. */
+function isCanvasRemoved(error: unknown): boolean {
+  return error instanceof ApiError && error.code === 'canvas_not_found'
+}
+
 /**
  * The room's Canvas tab (WS19): the one shared Markdown document of this Space. Read by everyone in the room;
  * a member who may write (the gateway says so with `can_write`) sees Edit, or Create canvas in a room with none.
@@ -460,6 +465,16 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
         await loadLatest(spaceRef, content)
         return
       }
+      // D21n: the canvas was removed under the draft. That is not a conflict: the draft stays, it is no longer written
+      // over any version, and the next save creates the canvas with it.
+      if (isCanvasRemoved(error)) {
+        pendingSave = null
+        if (spaceRef !== props.spaceRef) return
+        setEditing((current) =>
+          current ? { ...current, busy: false, baseVersionId: null, conflict: null, failure: { error } } : current,
+        )
+        return
+      }
       if (!isAmbiguousSaveFailure(error)) pendingSave = null
       if (spaceRef !== props.spaceRef) return
       setEditing((current) => (current ? { ...current, busy: false, failure: { error } } : current))
@@ -529,6 +544,13 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
       if (isStaleSaveRefusal(error)) {
         pendingRestore = null
         await loadLatestForRestore(spaceRef, target)
+      } else if (isCanvasRemoved(error)) {
+        // D21n: there is no canvas to restore into any more; the panel shows the room as it now is.
+        pendingRestore = null
+        if (spaceRef === props.spaceRef) {
+          setHistoryOpen(false)
+          void read(spaceRef, false)
+        }
       } else {
         if (!isAmbiguousSaveFailure(error)) pendingRestore = null
         if (spaceRef === props.spaceRef) setRestoreFailure({ error })
@@ -774,7 +796,12 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
             <Show when={session().failure}>
               {(failure) => (
                 <p class="verevon-space-canvas__error" role="alert">
-                  {canvasErrorMessage(failure().error, tr)}
+                  {isCanvasRemoved(failure().error)
+                    ? tr(
+                        'Lerretet ble fjernet mens du redigerte. Teksten din er fortsatt her, og Lagre oppretter et nytt lerret med den.',
+                        'The canvas was removed while you were editing. Your text is still here, and Save creates a new canvas with it.',
+                      )
+                    : canvasErrorMessage(failure().error, tr)}
                 </p>
               )}
             </Show>

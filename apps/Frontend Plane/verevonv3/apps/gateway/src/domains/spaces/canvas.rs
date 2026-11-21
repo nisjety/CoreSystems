@@ -815,6 +815,10 @@ async fn canvas_decision(
     if status == StatusCode::FORBIDDEN {
         return Err(refused(intent, &response));
     }
+    // Control's 400 `canvas_decision_invalid` stays the 503 outage on purpose (checked for D21n): every field the
+    // browser supplies is held to a stricter shape here (`check_save`, `check_restore`, `valid_version_id`) than
+    // Control's `CanvasDecisionRequest.Validate`, so a 400 can only mean gateway and Control have drifted, which the
+    // browser cannot fix by changing its request.
     if !status.is_success() {
         return Err(decision_unavailable());
     }
@@ -841,6 +845,13 @@ fn refused(intent: Intent, body: &Value) -> Reply {
     let reason = control_reason(body);
     match reason.as_str() {
         "space_zdr_forbids_effect" => zdr_reply(),
+        // D21m: a restore under the member's history window (or a save under a WS04-S11 revision floor). The same
+        // code wiki-store answers for the same case, so the browser has one sentence for it.
+        "space_history_floor_unsupported" => refuse(
+            StatusCode::FORBIDDEN,
+            "space_history_floor_unsupported",
+            "This is outside your history window in this room. Nothing was changed.",
+        ),
         "space_entitlement_off" | "space_policy_not_provisioned" => (
             StatusCode::FORBIDDEN,
             Json(error_with_details(
@@ -868,10 +879,12 @@ fn refused(intent: Intent, body: &Value) -> Reply {
     }
 }
 
-/// Control's denial code when the body carries a well-formed one (a lowercase token), else a fixed word.
+/// Control's denial code when the body carries a well-formed one (a lowercase token), else a fixed word. A Space
+/// denial puts it at the top level; a typed refusal (`abortTypedError`) puts it under `error.code`.
 fn control_reason(body: &Value) -> String {
     body.get("code")
         .and_then(Value::as_str)
+        .or_else(|| body.pointer("/error/code").and_then(Value::as_str))
         .filter(|code| {
             !code.is_empty()
                 && code.len() <= 64
@@ -1691,5 +1704,76 @@ mod tests {
         let wire_saves = bodies_of(&fixture.wiki, "POST", WIKI_VERSIONS).await;
         assert_eq!(wire_saves.len(), 1);
         assert_eq!(wire_saves[0]["idempotency_key"], format!("canvas-save-{SAVE_ID}"));
+    }
+
+    // ---- D21n / D21m: the relay under the not-found-first order and the member's history window ----------
+
+    /// Control under D21m: reads and saves are issued (echoed); a restore under the member's history window is the
+    /// typed refusal `refuseCanvasHistoryFloor` writes, `{error:{code}}`.
+    struct WindowedRestoreRefused;
+
+    impl Respond for WindowedRestoreRefused {
+        fn respond(&self, request: &WmRequest) -> ResponseTemplate {
+            let body: Value = request.body_json().unwrap_or(Value::Null);
+            if body["op"] == "restore" {
+                return ResponseTemplate::new(403).set_body_json(json!({"error": {
+                    "code": "space_history_floor_unsupported",
+                    "message": "this room's history window does not apply to the canvas",
+                    "details": {}
+                }}));
+            }
+            EchoDecision.respond(request)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_restore_control_refuses_under_the_history_window_is_its_typed_code_and_nothing_is_written() {
+        let fixture = fixture(false, None).await;
+        fixture.user_core.reset().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": "member", "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&fixture.user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path(CONTROL_DECISION))
+            .respond_with(WindowedRestoreRefused)
+            .mount(&fixture.user_core)
+            .await;
+        mount_wiki(&fixture.wiki, "GET", WIKI_HEAD, canvas_head()).await;
+        let (status, bytes) = call(fixture.state.clone(), "POST", RESTORE_URL, &[], Some(restore_body())).await;
+        assert_eq!(status, 403);
+        assert_eq!(json_of(&bytes)["error"]["code"], "space_history_floor_unsupported");
+        assert!(bodies_of(&fixture.wiki, "POST", WIKI_RESTORE).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_save_whose_canvas_was_removed_after_the_head_read_relays_404_canvas_not_found() {
+        let fixture = fixture(false, None).await;
+        mount_wiki(&fixture.wiki, "GET", WIKI_HEAD, canvas_head()).await;
+        mount_wiki(&fixture.wiki, "POST", WIKI_VERSIONS, no_canvas()).await;
+        let (status, bytes) = call(fixture.state.clone(), "POST", VERSIONS_URL, &[], Some(save_body("text"))).await;
+        assert_eq!(status, 404);
+        assert_eq!(json_of(&bytes)["error"]["code"], "canvas_not_found");
+        assert!(!String::from_utf8_lossy(&bytes).contains(TOKEN));
+    }
+
+    #[tokio::test]
+    async fn the_version_list_passes_meta_window_and_each_rows_current_through_unchanged() {
+        let fixture = fixture(false, None).await;
+        let page = json!({
+            "data": [{"version_id": "ver-9", "version_no": 9, "current": true}],
+            "meta": {
+                "limit": 20,
+                "next_cursor": null,
+                "window": {"starts_at": "2026-11-01T00:00:00Z", "hidden_before": true}
+            }
+        });
+        mount_wiki(&fixture.wiki, "GET", WIKI_VERSIONS, ResponseTemplate::new(200).set_body_json(page.clone())).await;
+        let (status, bytes) = call(fixture.state.clone(), "GET", VERSIONS_URL, &[], None).await;
+        assert_eq!(status, 200);
+        assert_eq!(json_of(&bytes), page);
     }
 }

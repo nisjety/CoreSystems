@@ -36,7 +36,7 @@ describe('canvasErrorMessage', () => {
 
   it('gives the history-floor sentence exactly for space_history_floor_unsupported', () => {
     expect(canvasErrorMessage({ code: 'space_history_floor_unsupported', status: 403 }, en)).toBe(
-      'Canvas is not available in rooms that show history from your join date.',
+      'This is outside the history the room shares with you. Nothing was changed.',
     )
   })
 

@@ -172,6 +172,21 @@ describe('listSpaceCanvasVersions (WS19-S5, WS19-S7)', () => {
     expect((await listSpaceCanvasVersions('room 1')).nextCursor).toBeNull()
   })
 
+  it('reads meta.window as the member history window (D21m), and null when the history is whole', async () => {
+    stubFetch(200, {
+      data: [version()],
+      meta: { limit: 50, next_cursor: null, window: { starts_at: '2026-11-01T00:00:00Z', hidden_before: true } },
+    })
+    expect((await listSpaceCanvasVersions('room 1')).window).toEqual({
+      startsAt: '2026-11-01T00:00:00Z',
+      hiddenBefore: true,
+    })
+    stubFetch(200, { data: [version()], meta: { limit: 50, next_cursor: null, window: { starts_at: null, hidden_before: false } } })
+    expect((await listSpaceCanvasVersions('room 1')).window).toEqual({ startsAt: null, hiddenBefore: false })
+    stubFetch(200, { data: [version()], meta: { limit: 50, next_cursor: null } })
+    expect((await listSpaceCanvasVersions('room 1')).window).toBeNull()
+  })
+
   it('throws the typed ApiError on 403', async () => {
     stubFetch(403, { error: { code: 'space_read_not_authorized', message: 'no' } })
     await expect(listSpaceCanvasVersions('room 1')).rejects.toMatchObject({

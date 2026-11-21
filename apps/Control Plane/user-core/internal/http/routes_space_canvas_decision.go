@@ -98,6 +98,13 @@ func (s *Server) issueCanvasDecision(c *gin.Context) {
 		ContentDigest: request.ContentDigest, IdempotencyKey: request.IdempotencyKey, Nonce: nonce,
 	}, time.Now().UTC())
 	if err != nil {
+		// D21m: a restore under any history floor, or a save under a WS04-S11 revision
+		// floor, is the typed space_history_floor_unsupported refusal (the same answer
+		// the run-action route and wiki-store give), not an anonymous 403, so the
+		// gateway and the SPA can say why instead of "you cannot change the canvas".
+		if refuseCanvasHistoryFloor(c, err) {
+			return
+		}
 		writeSpaceIssuerDenial(c, err, spaceCanvasDeniedMessage)
 		return
 	}

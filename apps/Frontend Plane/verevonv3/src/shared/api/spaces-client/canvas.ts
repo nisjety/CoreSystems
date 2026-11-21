@@ -3,7 +3,7 @@
 // decision, and that decision never reaches the browser. Presentation-free here: the gateway and the owning
 // planes decide who may read or write, and a refusal arrives as an ApiError carrying its typed code.
 //   GET  /api/v1/spaces/{ref}/canvas?known_version_id=      {data:{canvas, head, can_write}}, or {data:{unchanged, head_version_id}}
-//   GET  /api/v1/spaces/{ref}/canvas/versions?limit&cursor  {data:[version without text], meta:{limit, next_cursor}}
+//   GET  /api/v1/spaces/{ref}/canvas/versions?limit&cursor  {data:[version without text, current], meta:{limit, next_cursor, window?}}
 //   GET  /api/v1/spaces/{ref}/canvas/versions/{version_id}  {data:version with its text}
 // Writes are not here. A save and a restore go through the action registry (`spaces.save_canvas`,
 // `spaces.restore_canvas_version`, see features/spaces/lib/space-canvas-save.ts), and their answer is read by
@@ -67,10 +67,22 @@ export type SpaceCanvasWriteResult =
   | { readonly unchanged: false; readonly canvasId: string; readonly version: SpaceCanvasVersion; readonly deduplicated: boolean }
   | { readonly unchanged: true; readonly canvasId: string; readonly headVersionId: string }
 
+/**
+ * A member's history window on the canvas (D21m): the history lists only versions from `startsAt` on, plus the current
+ * head wherever it falls, and `hiddenBefore` says older versions exist that the window withholds. Absent for a member
+ * who sees the whole history. Restoring a version is refused under any window (Control), so a windowed history offers
+ * comparison only.
+ */
+export type SpaceCanvasHistoryWindow = {
+  readonly startsAt: string | null
+  readonly hiddenBefore: boolean
+}
+
 /** One page of history, newest first. `nextCursor` names the next older page, or is null at the end. */
 export type SpaceCanvasVersionPage = {
   readonly versions: readonly SpaceCanvasVersion[]
   readonly nextCursor: string | null
+  readonly window: SpaceCanvasHistoryWindow | null
 }
 
 type Wire = Readonly<Record<string, unknown>>
@@ -191,7 +203,11 @@ export async function listSpaceCanvasVersions(
   }
   const next = meta?.next_cursor
   const nextCursor = typeof next === 'number' && Number.isFinite(next) ? String(next) : text(next)
-  return { versions, nextCursor }
+  const windowWire = wireRecord(meta?.window)
+  const window = windowWire
+    ? { startsAt: text(windowWire.starts_at), hiddenBefore: windowWire.hidden_before === true }
+    : null
+  return { versions, nextCursor, window }
 }
 
 /** One version with its text, for the comparison and the restore confirmation. */

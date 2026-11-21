@@ -458,6 +458,29 @@ describe('SpaceCanvasPanel: creating and saving (WS19-S6)', () => {
     expect(second?.[3]).toEqual({ idempotencyKey: first?.[3].idempotencyKey })
   })
 
+  it('a save refused because the canvas was removed keeps the draft, says so, and the next save is a create', async () => {
+    spacesClient.getSpaceCanvas.mockResolvedValue(viewRead(1, 'Plan A'))
+    actions.executeAction
+      .mockRejectedValueOnce(new ApiError('gone', 404, 'canvas_not_found'))
+      .mockResolvedValueOnce(stored(1))
+    renderPanel()
+    fireEvent.click(await screen.findByRole('button', { name: 'Rediger' }))
+    fireEvent.input(textarea(), { target: { value: 'Plan B' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Lagre' }))
+
+    expect(await screen.findByText(/Lerretet ble fjernet mens du redigerte/)).toBeTruthy()
+    expect(textarea().value).toBe('Plan B')
+    // Not a conflict: no banner, and the draft is no longer written over the removed version.
+    expect(screen.queryByRole('button', { name: 'Lagre min tekst som ny versjon' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Lagre' }))
+    expect(await screen.findByText('Lagret som versjon 1.')).toBeTruthy()
+    const [first, second] = actions.executeAction.mock.calls
+    expect(first?.[2]).toMatchObject({ expectedVersionId: 'v1' })
+    expect(second?.[2]).toMatchObject({ expectedVersionId: null })
+    expect(second?.[3].idempotencyKey).not.toBe(first?.[3].idempotencyKey)
+  })
+
   it('a quiet refresh during an edit keeps the draft and says a newer version was saved', async () => {
     spacesClient.getSpaceCanvas
       .mockResolvedValueOnce(viewRead(1, 'Plan A'))
@@ -553,6 +576,21 @@ describe('SpaceCanvasPanel: differences, history and restore (WS19-S7)', () => {
     expect(String(restores[0]?.[2].clientSaveId)).toMatch(/^canvas-restore-/)
     expect(restores[0]?.[3]).toEqual({ idempotencyKey: restores[0]?.[2].clientSaveId })
     expect(actions.executeAction.mock.calls.some((call) => call[0] === 'spaces.save_canvas')).toBe(false)
+  })
+
+  it('a restore refused because the canvas was removed reads the room again and shows it has no canvas', async () => {
+    spacesClient.getSpaceCanvas.mockResolvedValueOnce(viewRead(2, 'Nyeste tekst')).mockResolvedValue(emptyRead(true))
+    spacesClient.listSpaceCanvasVersions.mockResolvedValue({ versions: [version(2), version(1)], nextCursor: null })
+    actions.executeAction.mockRejectedValue(new ApiError('gone', 404, 'canvas_not_found'))
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    renderPanel()
+    fireEvent.click(await screen.findByRole('button', { name: 'Historikk' }))
+    await screen.findByText(/Versjon 1, lagret av Ola/)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Gjenopprett' }))
+
+    expect(await screen.findByRole('button', { name: 'Opprett lerret' })).toBeTruthy()
+    expect(screen.getByText('Rommet har ikke et lerret ennå.')).toBeTruthy()
   })
 
   it('a restore refused as a moved head loads the latest and shows the banner with the version it was to restore', async () => {

@@ -201,3 +201,32 @@ describe('SpaceCanvasHistory (WS19-S7)', () => {
     expect(spacesClient.listSpaceCanvasVersions).toHaveBeenCalledTimes(2)
   })
 })
+
+// D21m: a member with a history window sees only the versions inside it, a note that says so, and no Restore (Control
+// refuses a restore under any window). Comparison of the listed versions stays.
+describe('SpaceCanvasHistory under a history window (D21m)', () => {
+  it('says the history is windowed and older versions are hidden, and offers no Restore', async () => {
+    spacesClient.listSpaceCanvasVersions.mockResolvedValue({
+      versions: [version(3), version(2)],
+      nextCursor: null,
+      window: { startsAt: '2026-11-01T00:00:00Z', hiddenBefore: true },
+    })
+    renderHistory({ canRestore: true })
+    await screen.findByText(/Versjon 3, lagret av Ola/)
+
+    const note = screen.getByRole('note').textContent ?? ''
+    expect(note).toContain('Du ser versjoner fra')
+    expect(note).toContain('Eldre versjoner er skjult.')
+    expect(note).toContain('men ikke gjenopprette versjoner')
+    expect(screen.queryByRole('button', { name: 'Gjenopprett' })).toBeNull()
+    expect(screen.getAllByRole('checkbox')).toHaveLength(2)
+  })
+
+  it('shows no note and keeps Restore for a member who sees the whole history', async () => {
+    spacesClient.listSpaceCanvasVersions.mockResolvedValue({ versions: [version(3), version(2)], nextCursor: null, window: null })
+    renderHistory({ canRestore: true })
+    await screen.findByText(/Versjon 3, lagret av Ola/)
+    expect(screen.queryByRole('note')).toBeNull()
+    expect(screen.getAllByRole('button', { name: 'Gjenopprett' })).toHaveLength(1)
+  })
+})
