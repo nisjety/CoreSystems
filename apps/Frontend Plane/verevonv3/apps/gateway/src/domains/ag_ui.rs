@@ -79,6 +79,13 @@ pub(crate) async fn stream_agent_ui(
                 .into_response();
         }
     };
+    // WS18-S4: a project start is refused with the project switch off, before any upstream call, as on the native stream.
+    // It reads the normalised body, so a run's `threadId` and `spaceRef` (in `forwardedProps` or `data`) count the way the
+    // injector reads them.
+    if !state.space_features.chat_projects && crate::domains::chat::streams::is_project_start(&body)
+    {
+        return crate::domains::chat::streams::chat_projects_disabled().into_response();
+    }
     // Keep the AG-UI adapter on the same governed ingress path as native chat:
     // normalize retention and support context, resolve Space persona/context,
     // and require the delegated audiences needed by Model Gateway's typed
@@ -1543,6 +1550,45 @@ mod tests {
             let production = source.split("mod tests {").next().unwrap_or(source);
             assert!(!production.contains("\"wake_context\""), "{name} must not build wake_context itself");
             assert!(!production.contains("get(\"wake\")"), "{name} must not read the browser's wake field");
+        }
+    }
+
+    /// WS18-S4: the AG-UI stream takes the same project-start gate as the native stream. With the switch off a run that
+    /// starts a chat in a Space (a Space reference and no thread) is refused 404 `chat_projects_disabled` before any
+    /// upstream call, whether the body is the legacy `content` shape or a run whose Space sits in `forwardedProps`.
+    #[tokio::test]
+    async fn a_project_start_on_the_ag_ui_stream_is_refused_with_the_switch_off() {
+        let upstream = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&upstream)
+            .await;
+        for body in [
+            json!({"content": "x", "spaceRef": "space-1"}),
+            json!({
+                "messages": [{"role": "user", "content": "x"}],
+                "forwardedProps": {"spaceRef": "space-1"}
+            }),
+        ] {
+            let mut state = crate::tests::test_state(false);
+            state.auth_core_url = upstream.uri();
+            state.model_gateway_url = upstream.uri();
+            state.user_core_url = upstream.uri();
+            state.org_core_url = upstream.uri();
+            let response = stream_agent_ui(
+                State(state),
+                Extension(forged_body_user()),
+                HeaderMap::new(),
+                Json(body.clone()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{body}");
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let parsed: Value = serde_json::from_slice(&bytes).expect("JSON");
+            assert_eq!(parsed["error"]["code"], "chat_projects_disabled", "{body}");
         }
     }
 

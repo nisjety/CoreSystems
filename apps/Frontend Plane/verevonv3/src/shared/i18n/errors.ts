@@ -708,6 +708,32 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   zdr_waiver_route_mismatch: { no: REFUSAL_TEXT.zdr_waiver_route_mismatch.no, en: REFUSAL_TEXT.zdr_waiver_route_mismatch.en },
 
 
+  // Project chats (WS18-S4): the gateway's own switch, off until Dreaming excludes Space threads. A project start is refused
+  // with this code before anything is sent. It is not a zero-retention refusal, so it is not in the catalogue table above.
+  chat_projects_disabled: {
+    no: 'Prosjektsamtaler er ikke slått på i denne løsningen, så samtalen ble ikke startet. Start en vanlig samtale i stedet.',
+    en: 'Project chats are not turned on in this environment, so the conversation was not started. Start a regular conversation instead.',
+  },
+
+  // A browser-site choice made with an approval (WS21-S6): the decision is refused before anything is sent, so the approval
+  // is not decided and the person can approve or reject again without the choice.
+  invalid_remember: {
+    no: 'Valget for å huske nettstedet er ikke gyldig. Velg bare lesing eller lesing og handling, eller godkjenn uten å huske.',
+    en: 'The choice to remember this site is not valid. Choose reading only or reading and acting, or approve without remembering.',
+  },
+  remember_needs_allow: {
+    no: 'Du kan bare huske nettstedet når du godkjenner. Avslå uten å huske, eller godkjenn først.',
+    en: 'A site can only be remembered when you approve. Reject without remembering, or approve first.',
+  },
+  remember_not_offered: {
+    no: 'Dette nettstedet kan ikke huskes for denne forespørselen. Godkjenn eller avslå uten å huske.',
+    en: 'This site cannot be remembered for this request. Approve or reject without remembering.',
+  },
+  remember_above_ceiling: {
+    no: 'Du kan ikke huske nettstedet med mer tilgang enn organisasjonen tillater. Velg bare lesing, eller godkjenn uten å huske.',
+    en: 'You cannot remember this site with more access than the organisation allows. Choose reading only, or approve without remembering.',
+  },
+
   // Rooms (Spaces), agents, schedules and instructions (gateway `spaces.rs`, `agent_actions.rs`,
 
   // `orgs/instructions.rs`, `persona.rs`). Written for the person at the screen: what happened and

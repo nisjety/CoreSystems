@@ -23,8 +23,8 @@ use url::Url;
 
 use quarry_core::crawl_denial::CrawlDenialReason;
 use quarry_core::crawl_scope::{
-    CrawlContext, CrawlFieldError, CrawlKind, CrawlReport, CrawlScope, DenialCounts, RobotsMode,
-    ScopeMode, CRAWL_CONTRACT_VERSION, MAX_LINKS_EVALUATED,
+    CrawlContext, CrawlFieldError, CrawlKind, CrawlReport, CrawlScope, DenialCounts, DomainRules,
+    RobotsMode, ScopeMode, CRAWL_CONTRACT_VERSION, MAX_LINKS_EVALUATED,
 };
 
 use crate::crawl_frontier::{glob_match, normalize_url};
@@ -146,6 +146,64 @@ enum Section {
     PageDirectory,
 }
 
+/// The reason a link the org's domain rules refuse carries in its denial (EP-9, O-23).
+pub const ORG_DOMAIN_RULE_REASON: &str = "org_domain_rule";
+
+/// The org's web domain rules, compiled: the hosts a crawl never follows, and in allowlist mode the only hosts it does.
+#[derive(Debug)]
+struct DomainGate {
+    open: bool,
+    deny: HashSet<String>,
+    allow: HashSet<String>,
+}
+
+impl DomainGate {
+    fn new(rules: &DomainRules) -> Self {
+        Self {
+            open: rules.mode == DomainRules::MODE_OPEN,
+            deny: rules.deny.iter().cloned().collect(),
+            allow: rules.allow.iter().cloned().collect(),
+        }
+    }
+
+    /// Whether the rules refuse a link on `host`. The match is exact, as org-core's rules are. A host with no canonical
+    /// form (an IP literal, a name with no dot) is refused under either mode: the rules cannot be applied to it.
+    fn refuses(&self, host: &str) -> bool {
+        let Some(host) = gate_host(host) else {
+            return true;
+        };
+        if self.deny.contains(&host) {
+            return true;
+        }
+        !self.open && !self.allow.contains(&host)
+    }
+}
+
+/// The canonical host the org's rules name: lower case, no trailing dot, only letters, digits, hyphens and dots, at
+/// least one dot, no empty label, and a last label that is not all digits (which also keeps out IPv4 forms).
+fn gate_host(host: &str) -> Option<String> {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty()
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
+        || !host.contains('.')
+    {
+        return None;
+    }
+    let mut last = "";
+    for label in host.split('.') {
+        if label.is_empty() || label.starts_with('-') || label.ends_with('-') {
+            return None;
+        }
+        last = label;
+    }
+    if last.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(host)
+}
+
 /// A crawl scope with its patterns compiled.
 #[derive(Debug)]
 pub struct CompiledScope {
@@ -160,6 +218,7 @@ pub struct CompiledScope {
     deny_extensions: Vec<String>,
     include: Vec<Pattern>,
     exclude: Vec<Pattern>,
+    domain_gate: Option<DomainGate>,
 }
 
 /// Outcome of one link.
@@ -242,6 +301,7 @@ impl CompiledScope {
             deny_extensions,
             include,
             exclude,
+            domain_gate: ctx.scope.domain_rules.as_ref().map(DomainGate::new),
         })
     }
 
@@ -423,6 +483,17 @@ impl CompiledScope {
                 })
             }
         };
+        // EP-9 O-23: the org's web domain rules come before every scope rule, so a host they refuse is never
+        // followed whatever the crawl's own switches say.
+        if self
+            .domain_gate
+            .as_ref()
+            .is_some_and(|gate| gate.refuses(&host))
+        {
+            return deny(CrawlDenialReason::NotCrawlable {
+                reason: ORG_DOMAIN_RULE_REASON.into(),
+            });
+        }
         if !self.scope.allow_external_links
             && !cx.roots.iter().any(|r| host_matches(r, &host, false))
         {
@@ -1110,6 +1181,196 @@ mod tests {
             });
             let accepted = frontier.enqueue(&format!("https://{host}/page"), 1).is_ok();
             prop_assert_eq!(accepted, host_matches(root, host, true));
+        }
+    }
+}
+
+/// EP-9 O-23: the org's web domain rules decide every followed link.
+#[cfg(test)]
+mod domain_rule_tests {
+    use super::*;
+
+    fn ctx(scope_mode: ScopeMode, rules: Option<DomainRules>) -> CrawlContext {
+        CrawlContext {
+            seed_hosts: vec!["example.com".into()],
+            scope: CrawlScope {
+                allow_external_links: true,
+                domain_rules: rules,
+                ..CrawlScope::default()
+            },
+            scope_mode,
+            ..CrawlContext::default()
+        }
+    }
+
+    fn rules(mode: &str, deny: &[&str], allow: &[&str]) -> DomainRules {
+        DomainRules {
+            mode: mode.to_owned(),
+            deny: deny.iter().map(|h| (*h).to_owned()).collect(),
+            allow: allow.iter().map(|h| (*h).to_owned()).collect(),
+        }
+    }
+
+    fn run(ctx: CrawlContext, hrefs: &[&str]) -> FilterOutcome {
+        let scope = CompiledScope::compile(&ctx).expect("context compiles");
+        let hrefs: Vec<String> = hrefs.iter().map(|h| (*h).to_string()).collect();
+        scope.evaluate(&Url::parse("https://example.com/").unwrap(), &hrefs, None)
+    }
+
+    fn denied(out: &FilterOutcome) -> u32 {
+        out.report
+            .denials
+            .counts
+            .get("not_crawlable")
+            .copied()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn a_link_on_a_denied_host_is_dropped_under_enforce_and_counted() {
+        let out = run(
+            ctx(
+                ScopeMode::Enforce,
+                Some(rules("open", &["bad.example"], &[])),
+            ),
+            &["https://good.example/a", "https://bad.example/b", "/same"],
+        );
+        assert_eq!(
+            out.links,
+            vec![
+                "https://good.example/a".to_string(),
+                "https://example.com/same".to_string()
+            ]
+        );
+        assert_eq!(denied(&out), 1);
+        assert_eq!(out.report.links_denied, 1);
+        let sample = &out.report.denials.samples[0];
+        assert!(
+            sample.message.contains(ORG_DOMAIN_RULE_REASON),
+            "{}",
+            sample.message
+        );
+    }
+
+    #[test]
+    fn observe_keeps_every_link_and_reports_what_enforce_would_drop() {
+        let out = run(
+            ctx(
+                ScopeMode::Observe,
+                Some(rules("open", &["bad.example"], &[])),
+            ),
+            &["https://good.example/a", "https://bad.example/b"],
+        );
+        assert_eq!(out.links.len(), 2, "observe drops nothing");
+        assert_eq!(
+            out.report.links_denied, 1,
+            "and says what enforce would drop"
+        );
+    }
+
+    #[test]
+    fn a_denied_host_stays_denied_in_its_other_spellings() {
+        let out = run(
+            ctx(
+                ScopeMode::Enforce,
+                Some(rules("open", &["bad.example"], &[])),
+            ),
+            &[
+                "https://BAD.example/a",
+                "https://bad.example./b",
+                "https://bad.example:8443/c",
+            ],
+        );
+        assert!(out.links.is_empty(), "{:?}", out.links);
+        assert_eq!(denied(&out), 3);
+    }
+
+    #[test]
+    fn a_rule_on_a_host_does_not_reach_its_subdomains() {
+        let out = run(
+            ctx(
+                ScopeMode::Enforce,
+                Some(rules("open", &["bad.example"], &[])),
+            ),
+            &["https://sub.bad.example/a"],
+        );
+        assert_eq!(out.links.len(), 1, "org-core's rules are exact");
+    }
+
+    #[test]
+    fn allowlist_mode_follows_only_the_listed_hosts() {
+        let out = run(
+            ctx(
+                ScopeMode::Enforce,
+                Some(rules("allowlist", &[], &["example.com", "docs.example"])),
+            ),
+            &["/page", "https://docs.example/a", "https://other.example/b"],
+        );
+        assert_eq!(
+            out.links,
+            vec![
+                "https://example.com/page".to_string(),
+                "https://docs.example/a".to_string()
+            ]
+        );
+        assert_eq!(denied(&out), 1);
+    }
+
+    #[test]
+    fn a_host_with_no_canonical_form_is_refused_under_either_mode() {
+        for mode in ["open", "allowlist"] {
+            let out = run(
+                ctx(ScopeMode::Enforce, Some(rules(mode, &[], &["example.com"]))),
+                &[
+                    "http://10.0.0.1/a",
+                    "http://[::1]/b",
+                    "http://intranet/c",
+                    "/ok",
+                ],
+            );
+            assert_eq!(
+                out.links,
+                vec!["https://example.com/ok".to_string()],
+                "{mode}"
+            );
+            assert_eq!(denied(&out), 3, "{mode}");
+        }
+    }
+
+    #[test]
+    fn without_rules_nothing_changes() {
+        let hrefs = [
+            "https://good.example/a",
+            "https://bad.example/b",
+            "http://10.0.0.1/c",
+        ];
+        let with_none = run(ctx(ScopeMode::Enforce, None), &hrefs);
+        let with_open = run(
+            ctx(ScopeMode::Enforce, Some(rules("open", &[], &[]))),
+            &["https://good.example/a", "https://bad.example/b"],
+        );
+        assert_eq!(with_none.links.len(), 3);
+        assert_eq!(
+            with_open.links.len(),
+            2,
+            "open with nothing blocked follows every canonical host"
+        );
+    }
+
+    #[test]
+    fn gate_hosts_are_canonical_or_none() {
+        assert_eq!(gate_host("Example.COM.").as_deref(), Some("example.com"));
+        for refused in [
+            "",
+            "localhost",
+            "10.0.0.1",
+            "127.1",
+            "a..b",
+            "-a.example",
+            "ex ample.com",
+            "[::1]",
+        ] {
+            assert_eq!(gate_host(refused), None, "{refused:?}");
         }
     }
 }

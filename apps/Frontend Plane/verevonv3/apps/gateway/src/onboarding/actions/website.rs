@@ -4,8 +4,8 @@ use serde_json::json;
 
 use crate::{
     audience_tokens::get_audience_token, config::AppState, contracts::WebsiteIngestRequest,
-    envelope::error, middleware::AuthenticatedUser, public_url::normalize_public_http_url,
-    upstream::proxy_bearer_json,
+    domains::web_domain_policy::guard_crawl, envelope::error, middleware::AuthenticatedUser,
+    public_url::normalize_public_http_url, upstream::proxy_bearer_json,
 };
 
 pub(crate) async fn start_website_ingest(
@@ -30,12 +30,19 @@ pub(crate) async fn start_website_ingest(
     // `auto_commit`/`brief` params were dead — the orchestrator never read
     // them). `ingest: true` is the real durable-persist knob: the onboarding
     // website becomes user-owned knowledge in the Data Plane.
-    let request_body = json!({
+    let mut request_body = json!({
         "url": url,
         "max_pages": input.max_pages.unwrap_or(8).clamp(1, 20),
         "max_depth": 1,
         "ingest": true,
     });
+
+    // P2-bff-01 rel1 (EP-9 O-23): the website is a crawl. The org's web domain rules judge its seed host and ride on the
+    // crawl for Quarry to apply to every link it follows. A refused seed, or rules that cannot be read, ends the start
+    // with a typed refusal before anything is sent. Off (`WEB_DOMAIN_POLICY_BFF`, the default), the body is what it was.
+    if let Some(refusal) = guard_crawl(&state, &user, &headers, &mut request_body).await {
+        return refusal;
+    }
 
     let cookie = headers
         .get(axum::http::header::COOKIE)

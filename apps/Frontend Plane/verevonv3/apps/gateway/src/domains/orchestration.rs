@@ -992,29 +992,77 @@ pub(crate) async fn decide_approval(
     headers: HeaderMap,
     Path(approval_id): Path<String>,
     Json(mut body): Json<Value>,
-) -> impl IntoResponse {
+) -> (StatusCode, Json<Value>) {
     // ZDR-Z-19e: the connection of a waived run is read off the body (and removed, so the closed
     // decision body below never sees it) and asked of Auth Core afresh; none named is today's path.
     let connection = take_continuation_connection(&state, &mut body);
+    // WS21-S6: "remember" is read off the body before the closed decision body is rebuilt, so it is never sent
+    // upstream. A value that is neither `read` nor `act` is refused before anything is read or sent.
+    let remember = match remember_request(&body) {
+        Ok(remember) => remember,
+        Err(refusal) => return refusal,
+    };
     let upstream_body = match decide_upstream_body(body) {
         Ok(upstream_body) => upstream_body,
         Err(refusal) => return refusal,
     };
+    // The switch and the approve are checked before any upstream call, so a refused remember sends nothing.
+    if remember.is_some() {
+        if let Err(refusal) = remember_preconditions(&state, &upstream_body) {
+            return refusal;
+        }
+    }
     let retention =
         match continuation_retention_of(&state, &user, &headers, connection.as_ref()).await {
             Ok(retention) => retention,
             Err(refusal) => return refusal,
         };
-    mg_post_decide_with_retry_under(
+    let path = format!("/v1/orchestration/approvals/{}/decide", enc(&approval_id));
+    let Some(level) = remember else {
+        return mg_post_decide_with_retry_under(
+            &state,
+            &user,
+            &headers,
+            &path,
+            upstream_body,
+            DECIDE_RETRY_TIMEOUT,
+            &retention,
+        )
+        .await;
+    };
+    // The host and the ceiling come from the approval's own record, read by the same call `get_approval` makes.
+    let host =
+        match remember_host_of(&state, &user, &headers, &approval_id, &retention, &level).await {
+            Ok(host) => host,
+            Err(refusal) => return refusal,
+        };
+    let (status, Json(mut decided)) = mg_post_decide_with_retry_under(
         &state,
         &user,
         &headers,
-        &format!("/v1/orchestration/approvals/{}/decide", enc(&approval_id)),
+        &path,
         upstream_body,
         DECIDE_RETRY_TIMEOUT,
         &retention,
     )
-    .await
+    .await;
+    if !status.is_success() {
+        return (status, Json(decided));
+    }
+    // The decision has succeeded, so nothing below can undo or fail it. A waived or zero-retention decision writes
+    // no preference (ZDR), and a failed write answers `remembered: false`. The log carries the approval id and the
+    // outcome only, never the host.
+    let remembered = if writes_site_preference(&retention) {
+        let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+        crate::domains::browser_sites::remember_site(&state, &user, &org_id, &host, &level).await
+    } else {
+        false
+    };
+    tracing::info!(approval_id = %approval_id, remembered, "decide_approval: site choice outcome");
+    if let Some(object) = decided.as_object_mut() {
+        object.insert("remembered".to_owned(), Value::Bool(remembered));
+    }
+    (status, Json(decided))
 }
 
 /// The longest reason a decision may carry.
@@ -1040,6 +1088,11 @@ struct DecideBody {
     /// allowed (both refuse it while APPROVAL_EDIT_ENABLED is off).
     #[serde(default)]
     edit: Option<DecideEditBody>,
+    /// "Remember this site" (WS21-S6): `read` or `act`, with an approve of a `browser_site_consent` approval, the
+    /// member's own choice for that approval's host. Read and checked before the body is rebuilt, so it is never
+    /// forwarded upstream; the host and the ceiling come from the approval record, never from this body.
+    #[serde(default)]
+    remember: Option<String>,
 }
 
 /// The edit a decision may carry, in the SPA's camelCase. `patch` holds the mail fields the
@@ -1111,6 +1164,16 @@ fn decide_upstream_body(raw: Value) -> Result<Value, (StatusCode, Json<Value>)> 
     if !matches!(body.decision.as_str(), "approve" | "reject") {
         return Err(invalid_chat_request("the decision is approve or reject"));
     }
+    if body
+        .remember
+        .as_deref()
+        .is_some_and(|level| !matches!(level, "read" | "act"))
+    {
+        return Err(remember_refusal(
+            "invalid_remember",
+            "Remember is read or act.",
+        ));
+    }
     if body.reason.chars().count() > DECIDE_REASON_MAX_CHARS {
         return Err(invalid_chat_request("the reason is too long"));
     }
@@ -1145,6 +1208,111 @@ fn decide_upstream_body(raw: Value) -> Result<Value, (StatusCode, Json<Value>)> 
         upstream["edit"] = edit;
     }
     Ok(upstream)
+}
+
+/// The level a decision asks to remember (WS21-S6): absent or `null` asks for nothing, `read` or `act` asks for that
+/// level, and any other value is a typed 422 before anything is read or sent.
+fn remember_request(raw: &Value) -> Result<Option<String>, (StatusCode, Json<Value>)> {
+    match raw.get("remember") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(level)) if matches!(level.as_str(), "read" | "act") => {
+            Ok(Some(level.clone()))
+        }
+        Some(_) => Err(remember_refusal(
+            "invalid_remember",
+            "Remember is read or act.",
+        )),
+    }
+}
+
+/// A typed 422 for a remember the gateway will not make. The message is fixed text, never the host or the record.
+fn remember_refusal(code: &'static str, message: &'static str) -> (StatusCode, Json<Value>) {
+    (StatusCode::UNPROCESSABLE_ENTITY, Json(error(code, message)))
+}
+
+/// The checks a remember makes before anything is read or sent: the BFF switch (a 404 while it is off, as the route
+/// is absent) and an approve (`remember_needs_allow` for a reject).
+fn remember_preconditions(
+    state: &AppState,
+    upstream_body: &Value,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if !state.space_features.browser_sites_enabled {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(error("not_found", "The requested resource was not found.")),
+        ));
+    }
+    if upstream_body["decision"] != "approve" {
+        return Err(remember_refusal(
+            "remember_needs_allow",
+            "Only an approval can remember a site.",
+        ));
+    }
+    Ok(())
+}
+
+/// The host and the highest level of a `browser_site_consent` approval, read off the upstream record (WS21-S6):
+/// `None` for any other cause, a blank host, or a level other than `read` or `act`.
+fn browser_site_consent_of(record: &Value) -> Option<(String, String)> {
+    let cause = record.get("approval")?.get("cause")?;
+    if cause.get("code")?.as_str()? != "browser_site_consent" {
+        return None;
+    }
+    let host = cause.get("host")?.as_str()?.trim();
+    let ceiling = cause.get("max_level")?.as_str()?;
+    if host.is_empty() || !matches!(ceiling, "read" | "act") {
+        return None;
+    }
+    Some((host.to_owned(), ceiling.to_owned()))
+}
+
+/// The host a remember names, read from the approval's own `browser_site_consent` record (WS21-S6) by the same
+/// upstream call `get_approval` makes, under the decision's retention. Any other cause, or a record with no host,
+/// is `remember_not_offered`; `act` above a `read` ceiling is `remember_above_ceiling`, never a silent downgrade.
+async fn remember_host_of(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    approval_id: &str,
+    retention: &TurnRetention,
+    level: &str,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    let path = format!("/v1/orchestration/approvals/{}", enc(approval_id));
+    let (status, Json(record)) = mg_proxy_with(
+        state,
+        user,
+        headers,
+        Method::GET,
+        &path,
+        None,
+        false,
+        retention,
+    )
+    .await;
+    if !status.is_success() {
+        return Err((status, Json(record)));
+    }
+    let Some((host, ceiling)) = browser_site_consent_of(&record) else {
+        return Err(remember_refusal(
+            "remember_not_offered",
+            "Only a browser site consent can remember a site.",
+        ));
+    };
+    if level == "act" && ceiling == "read" {
+        return Err(remember_refusal(
+            "remember_above_ceiling",
+            "The site policy allows read only for this site.",
+        ));
+    }
+    Ok(host)
+}
+
+/// Whether a decision may write the member's site preference: never for a waived or zero-retention run (ZDR).
+fn writes_site_preference(retention: &TurnRetention) -> bool {
+    matches!(
+        retention,
+        TurnRetention::Unchanged | TurnRetention::Persistent
+    )
 }
 
 async fn approve_plan(
@@ -2059,6 +2227,7 @@ mod tests {
             model_entitlement_admin_enabled: false,
             zdr_effective_posture_read: false,
             zdr_waiver_ui_enabled: false,
+            auth_step_up_route_enabled: false,
             retention_decision_service_api_key: None,
             agent_definition_versions: false,
             chat_process_output_enabled: false,
@@ -3174,6 +3343,371 @@ mod tests {
             let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON");
             assert_eq!(body, upstream_body);
         }
+    }
+
+    /// WS21-S6: a remember is the route being absent while the BFF switch is off (404, nothing sent), and a reject with
+    /// a remember is 422 `remember_needs_allow`. A value that is neither `read` nor `act`, or is not a string, is 422
+    /// `invalid_remember` before anything is sent.
+    #[tokio::test]
+    async fn remember_is_refused_while_the_switch_is_off_and_on_a_reject() {
+        use axum::{
+            extract::{Path, State},
+            Extension,
+        };
+        use wiremock::{matchers::any, Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let mut state = test_state(false);
+        state.auth_core_url = server.uri();
+        state.model_gateway_url = server.uri();
+        state.org_core_url = server.uri();
+
+        let (status, Json(body)) = super::decide_approval(
+            State(state.clone()),
+            Extension(test_user()),
+            HeaderMap::new(),
+            Path("apr-1".to_owned()),
+            Json(json!({"decision": "approve", "remember": "read"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"]["code"], "not_found");
+
+        state.space_features.browser_sites_enabled = true;
+        let (status, Json(body)) = super::decide_approval(
+            State(state.clone()),
+            Extension(test_user()),
+            HeaderMap::new(),
+            Path("apr-1".to_owned()),
+            Json(json!({"decision": "reject", "remember": "read"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["error"]["code"], "remember_needs_allow");
+
+        for remember in [json!("always"), json!(""), json!(true), json!(1)] {
+            let (status, Json(body)) = super::decide_approval(
+                State(state.clone()),
+                Extension(test_user()),
+                HeaderMap::new(),
+                Path("apr-1".to_owned()),
+                Json(json!({"decision": "approve", "remember": remember})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(body["error"]["code"], "invalid_remember");
+        }
+        // Dropping the server verifies that no request reached it.
+    }
+
+    /// WS21-S6: a host or an org named in the body is an unknown key and is refused, and `remember` itself is never
+    /// forwarded upstream, so an approve with or without one is the same closed body.
+    #[test]
+    fn remember_is_read_once_and_never_forwarded() {
+        for extra in [
+            json!({"host": "evil.example"}),
+            json!({"org_id": "org-other"}),
+            json!({"organizationId": "org-other"}),
+        ] {
+            let mut body = json!({"decision": "approve", "remember": "read"});
+            body.as_object_mut()
+                .expect("an object")
+                .extend(extra.as_object().expect("an object").clone());
+            let (status, Json(refusal)) =
+                decide_upstream_body(body).expect_err("an unknown key is refused");
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(refusal["error"]["code"], "invalid_request");
+        }
+        assert_eq!(
+            decide_upstream_body(json!({"decision": "approve", "remember": "act"}))
+                .expect("accepted"),
+            json!({"decision": "approve", "reason": ""})
+        );
+        let (status, Json(refusal)) =
+            decide_upstream_body(json!({"decision": "approve", "remember": "always"}))
+                .expect_err("a level outside read and act is refused");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refusal["error"]["code"], "invalid_remember");
+    }
+
+    /// WS21-S6: only `read` or `act` asks for a level, absent or `null` asks for nothing, and the host and ceiling come
+    /// from a `browser_site_consent` record with a host and a read or act level, and from no other cause.
+    #[test]
+    fn remember_asks_for_read_or_act_and_only_a_site_consent_record_names_a_site() {
+        use serde_json::Value;
+        assert_eq!(
+            super::remember_request(&json!({"decision": "approve"})).expect("absent"),
+            None
+        );
+        assert_eq!(
+            super::remember_request(&json!({"remember": null})).expect("null"),
+            None
+        );
+        assert_eq!(
+            super::remember_request(&json!({"remember": "read"})).expect("read"),
+            Some("read".to_owned())
+        );
+        assert_eq!(
+            super::remember_request(&json!({"remember": "act"})).expect("act"),
+            Some("act".to_owned())
+        );
+        for remember in [
+            json!(""),
+            json!("READ"),
+            json!("always"),
+            json!(true),
+            json!(["read"]),
+        ] {
+            let (status, Json(refusal)) =
+                super::remember_request(&json!({ "remember": remember })).expect_err("refused");
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(refusal["error"]["code"], "invalid_remember");
+        }
+
+        let record = |code: &str, host: Value, max_level: Value| json!({"approval": {"id": "apr-1", "cause": {"code": code, "host": host, "max_level": max_level}}});
+        assert_eq!(
+            super::browser_site_consent_of(&record(
+                "browser_site_consent",
+                json!(" shop.example.com "),
+                json!("act")
+            )),
+            Some(("shop.example.com".to_owned(), "act".to_owned()))
+        );
+        assert_eq!(
+            super::browser_site_consent_of(&record(
+                "browser_site_consent",
+                json!("shop.example.com"),
+                json!("read")
+            )),
+            Some(("shop.example.com".to_owned(), "read".to_owned()))
+        );
+        for refused in [
+            record(
+                "browser_human_assist",
+                json!("shop.example.com"),
+                json!("act"),
+            ),
+            record("browser_site_consent", json!("   "), json!("act")),
+            record(
+                "browser_site_consent",
+                json!("shop.example.com"),
+                json!("all"),
+            ),
+            record(
+                "browser_site_consent",
+                json!("shop.example.com"),
+                Value::Null,
+            ),
+            json!({"approval": {"id": "apr-1", "cause": null}}),
+            json!({"id": "apr-1"}),
+        ] {
+            assert_eq!(super::browser_site_consent_of(&refused), None, "{refused}");
+        }
+    }
+
+    /// WS21-S6: a waived or zero-retention decision never writes a site preference (ZDR); a persistent or unchanged one may.
+    #[test]
+    fn a_waived_or_zero_retention_decision_writes_no_site_preference() {
+        use crate::retention_decision::TurnRetention;
+        assert!(super::writes_site_preference(&TurnRetention::Unchanged));
+        assert!(super::writes_site_preference(&TurnRetention::Persistent));
+        assert!(!super::writes_site_preference(&TurnRetention::Zdr));
+        assert!(!super::writes_site_preference(&TurnRetention::Waived {
+            decision_token: "signed-decision-1".to_owned(),
+        }));
+    }
+
+    /// WS21-S6: an approve with "remember" writes the member's choice once, for the host the approval record names, at
+    /// the level asked for, and answers `remembered: true`. When that write fails the granted decision still answers,
+    /// with `remembered: false`.
+    #[tokio::test]
+    async fn remember_writes_the_record_host_once_and_a_failed_write_keeps_the_decision() {
+        use axum::{
+            extract::{Path, State},
+            Extension,
+        };
+        use wiremock::{
+            matchers::{body_json, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        for (pref_status, remembered) in [(200_u16, true), (500_u16, false)] {
+            let server = MockServer::start().await;
+            mount_token_mocks(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/v1/orchestration/approvals/apr-1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "approval": {"id": "apr-1", "status": "PENDING", "cause": {
+                        "code": "browser_site_consent", "host": "shop.example.com", "max_level": "act"
+                    }}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/v1/orchestration/approvals/apr-1/decide"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"approval": {"id": "apr-1", "status": "GRANTED"}})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/organizations/org-test/browser-sites/me"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "organization_id": "org-test", "user_id": "user-test", "revision": 3, "prefs": []
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("PUT"))
+                .and(path(
+                    "/api/v1/organizations/org-test/browser-sites/me/shop.example.com",
+                ))
+                .and(body_json(json!({"expected_revision": 3, "level": "read"})))
+                .respond_with(
+                    ResponseTemplate::new(pref_status).set_body_json(json!({"level": "read"})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let mut state = test_state(false);
+            state.auth_core_url = server.uri();
+            state.model_gateway_url = server.uri();
+            state.org_core_url = server.uri();
+            state.space_features.browser_sites_enabled = true;
+            let (status, Json(body)) = super::decide_approval(
+                State(state),
+                Extension(test_user()),
+                HeaderMap::new(),
+                Path("apr-1".to_owned()),
+                Json(json!({"decision": "approve", "remember": "read"})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["approval"]["status"], "GRANTED");
+            assert_eq!(body["remembered"], json!(remembered));
+        }
+    }
+
+    /// WS21-S6: `act` above a `read` ceiling is refused and never downgraded, and a record that is not a site consent is
+    /// `remember_not_offered`. Both are refused before the decision is sent.
+    #[tokio::test]
+    async fn remember_above_the_ceiling_or_on_another_cause_sends_no_decision() {
+        use axum::{
+            extract::{Path, State},
+            Extension,
+        };
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        for (cause, max_level, code) in [
+            ("browser_site_consent", "read", "remember_above_ceiling"),
+            ("browser_human_assist", "act", "remember_not_offered"),
+        ] {
+            let server = MockServer::start().await;
+            mount_token_mocks(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/v1/orchestration/approvals/apr-1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "approval": {"id": "apr-1", "cause": {
+                        "code": cause, "host": "shop.example.com", "max_level": max_level
+                    }}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/v1/orchestration/approvals/apr-1/decide"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"approval": {"id": "apr-1"}})),
+                )
+                .expect(0)
+                .mount(&server)
+                .await;
+
+            let mut state = test_state(false);
+            state.auth_core_url = server.uri();
+            state.model_gateway_url = server.uri();
+            state.org_core_url = server.uri();
+            state.space_features.browser_sites_enabled = true;
+            let (status, Json(body)) = super::decide_approval(
+                State(state),
+                Extension(test_user()),
+                HeaderMap::new(),
+                Path("apr-1".to_owned()),
+                Json(json!({"decision": "approve", "remember": "act"})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(body["error"]["code"], code);
+        }
+    }
+
+    /// WS21-S6: a decision without "remember" reads no approval record, calls no org-core route, and answers exactly what
+    /// the upstream answered, with no `remembered` key.
+    #[tokio::test]
+    async fn a_decision_without_remember_is_byte_identical() {
+        use axum::{
+            extract::{Path, State},
+            Extension,
+        };
+        use wiremock::{
+            matchers::{method, path, path_regex},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        mount_token_mocks(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/orchestration/approvals/apr-1/decide"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"approval": {"id": "apr-1", "status": "GRANTED"}})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        // No approval record is read and no org-core route is called. The token mints a decision makes are not guarded.
+        Mock::given(method("GET"))
+            .and(path("/v1/orchestration/approvals/apr-1"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(path_regex("^/api/v1/organizations/"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let mut state = test_state(false);
+        state.auth_core_url = server.uri();
+        state.model_gateway_url = server.uri();
+        state.org_core_url = server.uri();
+        state.space_features.browser_sites_enabled = true;
+        let (status, Json(body)) = super::decide_approval(
+            State(state),
+            Extension(test_user()),
+            HeaderMap::new(),
+            Path("apr-1".to_owned()),
+            Json(json!({"decision": "approve"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({"approval": {"id": "apr-1", "status": "GRANTED"}})
+        );
     }
 }
 

@@ -26,7 +26,8 @@ use crate::{
     audience_tokens::ModelServiceAudience,
     config::AppState,
     domains::chat::shared::{
-        model_token, proxy_model_json_with_session, retention_refusal_response, session_token,
+        best_effort_capability_token, model_token, proxy_model_json_with_session,
+        proxy_model_json_with_session_and_capability, retention_refusal_response, session_token,
         waived_decision, waived_service_token,
     },
     middleware::{require_session, AuthenticatedUser},
@@ -395,14 +396,19 @@ async fn wide_research_estimate(
 ) -> impl IntoResponse {
     let token = model_token(&state, &user, &headers).await;
     let session_token = session_token(&state, &user, &headers).await;
+    // The capability bearer lets model-gateway read the org's enforced agent policy for its item cap
+    // (`wide_research_estimate_route` takes it as `VerifiedCapabilityBearer`). Best effort, as the chat stream
+    // is: with no bearer model-gateway answers its own typed refusal, so the BFF widens nothing by sending none.
+    let capability_token = best_effort_capability_token(&state, &user, &headers).await;
     let url = format!("{}/v1/research/wide/estimate", state.model_gateway_url);
-    let (status, body) = proxy_model_json_with_session(
+    let (status, body) = proxy_model_json_with_session_and_capability(
         &state,
         Method::POST,
         &url,
         serde_json::to_value(&body).ok(),
         token.as_deref(),
         session_token.as_deref(),
+        capability_token.as_deref(),
         &user,
     )
     .await;
@@ -435,5 +441,130 @@ mod wide_research_tests {
             "model": "verevon-balance"
         }))
         .is_err());
+    }
+
+    /// Auth-core stand-in: the model-plane and session-core mints answer a token, and the capability-core mint
+    /// answers `capability`.
+    async fn auth_core(capability: wiremock::ResponseTemplate) -> wiremock::MockServer {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let auth = MockServer::start().await;
+        for (route, token) in [
+            ("/api/model-plane/token", "model-token"),
+            ("/api/session-core/token", "session-token"),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "token": token,
+                    "expiresInSeconds": 300,
+                })))
+                .mount(&auth)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/api/capability-core/token"))
+            .respond_with(capability)
+            .mount(&auth)
+            .await;
+        auth
+    }
+
+    /// One estimate of three items through the handler, as a signed-in member of org-test.
+    async fn estimate(
+        auth: &wiremock::MockServer,
+        model: &wiremock::MockServer,
+    ) -> axum::response::Response {
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.model_gateway_url = model.uri();
+        let user = AuthenticatedUser {
+            user_id: "user-test".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "User Test".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-test".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-test".to_owned(),
+                role: "member".to_owned(),
+            }),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            "better-auth.session=verified".parse().expect("cookie"),
+        );
+        let body: WideResearchEstimateBody =
+            serde_json::from_value(serde_json::json!({"item_count": 3})).expect("an estimate body");
+        wide_research_estimate(State(state), Extension(user), headers, Json(body))
+            .await
+            .into_response()
+    }
+
+    /// model-gateway answers the estimate only when the capability bearer arrives. A call without it finds no
+    /// mock and is refused, so the 200 proves the bearer was forwarded in `x-capability-authorization`.
+    #[tokio::test]
+    async fn the_estimate_forwards_the_capability_bearer_so_an_enforced_org_cap_can_be_read() {
+        use wiremock::{
+            matchers::{header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let auth = auth_core(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "token": "capability-token",
+            "expiresInSeconds": 300,
+        })))
+        .await;
+        let model = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/research/wide/estimate"))
+            .and(header(
+                "x-capability-authorization",
+                "Bearer capability-token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"item_count": 3},
+            })))
+            .expect(1)
+            .mount(&model)
+            .await;
+
+        let response = estimate(&auth, &model).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// A capability mint that fails sends the estimate with no bearer, and the call still goes out: model-gateway
+    /// answers its own typed refusal for that, and the BFF refuses nothing itself.
+    #[tokio::test]
+    async fn a_failed_capability_mint_still_sends_the_estimate_without_the_bearer() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let auth = auth_core(ResponseTemplate::new(503)).await;
+        let model = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/research/wide/estimate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"item_count": 3},
+            })))
+            .expect(1)
+            .mount(&model)
+            .await;
+
+        let response = estimate(&auth, &model).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let received = model.received_requests().await.expect("recording on");
+        assert_eq!(received.len(), 1);
+        assert!(received[0]
+            .headers
+            .get("x-capability-authorization")
+            .is_none());
     }
 }

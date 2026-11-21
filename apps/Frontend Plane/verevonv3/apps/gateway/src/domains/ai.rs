@@ -121,24 +121,9 @@ pub(crate) async fn assistant_navigation(
     headers: HeaderMap,
     Json(request): Json<AssistantNavigationRequest>,
 ) -> (StatusCode, Json<Value>) {
-    assistant_navigation_with_switch(
-        state,
-        user,
-        headers,
-        request,
-        assistant_navigation_enabled(),
-    )
-    .await
-}
-
-fn assistant_navigation_enabled_for(value: Option<&str>) -> bool {
-    value == Some("true")
-}
-
-fn assistant_navigation_enabled() -> bool {
-    assistant_navigation_enabled_for(
-        std::env::var("ASSISTANT_NAVIGATION_ENABLED").ok().as_deref(),
-    )
+    // Read once at startup into `SpaceFeatureFlags`, exact `true` only (see `build_state`).
+    let enabled = state.space_features.assistant_navigation_enabled;
+    assistant_navigation_with_switch(state, user, headers, request, enabled).await
 }
 
 pub(crate) async fn assistant_navigation_with_switch(
@@ -962,8 +947,7 @@ mod tests {
     };
 
     use super::{
-        assistant_navigation_enabled_for, named_feature_field, proxy_dictate, proxy_speech, router,
-        routes, AI_AUDIO_BODY_LIMIT_BYTES,
+        named_feature_field, proxy_dictate, proxy_speech, router, routes, AI_AUDIO_BODY_LIMIT_BYTES,
     };
     use crate::domains::chat::shared::tests::{assert_rule_answer, credential_rule_cases};
     use crate::middleware::{AuthenticatedUser, AuthorizedMembership};
@@ -1282,25 +1266,15 @@ mod tests {
             .expect("request")
     }
 
-    fn enable_navigation() {
-        // Process-global on purpose: the handler reads the env var per call,
-        // like the other gateway feature switches. Tests run serially in this
-        // repo's gateway lane, so this cannot race the "disabled" case.
-        std::env::set_var("ASSISTANT_NAVIGATION_ENABLED", "true");
-    }
-
-    #[test]
-    fn navigation_switch_is_the_literal_true_and_nothing_else() {
-        assert!(assistant_navigation_enabled_for(Some("true")));
-        assert!(!assistant_navigation_enabled_for(None));
-        assert!(!assistant_navigation_enabled_for(Some("false")));
-        assert!(!assistant_navigation_enabled_for(Some("TRUE")));
-        assert!(!assistant_navigation_enabled_for(Some("1")));
+    /// The state with the navigation switch on. The handler reads the switch from `SpaceFeatureFlags`, which
+    /// `build_state` fills once at startup (exact `true` only), so a test turns it on in the state it builds.
+    fn navigation_enabled(mut state: crate::config::AppState) -> crate::config::AppState {
+        state.space_features.assistant_navigation_enabled = true;
+        state
     }
 
     #[tokio::test]
     async fn navigation_disabled_does_not_call_upstream() {
-        enable_navigation();
         let (auth, org, model) = upstreams().await;
         let state = state_for(&auth, &org, &model);
         let (status, body) = super::assistant_navigation_with_switch(
@@ -1320,9 +1294,8 @@ mod tests {
 
     #[tokio::test]
     async fn navigation_requires_session_and_rejects_extra_input() {
-        enable_navigation();
         let (auth, org, model) = upstreams().await;
-        let state = state_for(&auth, &org, &model);
+        let state = navigation_enabled(state_for(&auth, &org, &model));
         let unauthenticated = router(state.clone())
             .with_state(state.clone())
             .oneshot(navigation_request(json!({"prompt":"Finn kunnskap"})))
@@ -1349,9 +1322,8 @@ mod tests {
 
     #[tokio::test]
     async fn navigation_sends_verified_credentials_and_fail_closed_zdr() {
-        enable_navigation();
         let (auth, org, model) = upstreams().await;
-        let state = state_for(&auth, &org, &model);
+        let state = navigation_enabled(state_for(&auth, &org, &model));
         // A known ZDR org and an unknown org (lookup failure) must both raise ZDR.
         for org_id in ["org-zdr", "org-missing"] {
             let app = routes()
@@ -1407,7 +1379,6 @@ mod tests {
 
     #[tokio::test]
     async fn navigation_refuses_without_delegated_inference_credential() {
-        enable_navigation();
         let (_, org, model) = upstreams().await;
         let auth = MockServer::start().await;
         Mock::given(method("GET"))
@@ -1417,7 +1388,7 @@ mod tests {
             })))
             .mount(&auth)
             .await;
-        let state = state_for(&auth, &org, &model);
+        let state = navigation_enabled(state_for(&auth, &org, &model));
         let response = routes()
             .layer(Extension(member_of("org-open")))
             .with_state(state)

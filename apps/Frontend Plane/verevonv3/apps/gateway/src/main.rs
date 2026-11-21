@@ -739,6 +739,7 @@ mod tests {
             model_entitlement_admin_enabled: false,
             zdr_effective_posture_read: false,
             zdr_waiver_ui_enabled: false,
+            auth_step_up_route_enabled: false,
             retention_decision_service_api_key: None,
             agent_definition_versions: false,
             chat_process_output_enabled: false,

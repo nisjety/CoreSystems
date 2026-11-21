@@ -136,12 +136,17 @@ fn invalid_source_ref(message: &'static str) -> BodyRefusal {
     }
 }
 
-/// Adds `artifact_promote: true` to a successful composer-capabilities answer when the promote
-/// switch is on (EP-3 S8). The switch is the BFF's own, so the gateway cannot report it; the SPA
-/// reads one capabilities answer either way. Off, or for any answer that is not a success, the
-/// response passes through untouched, so a capability is never offered on a guess.
-pub(super) async fn with_promote_capability(response: Response, enabled: bool) -> Response {
-    if !enabled || !response.status().is_success() {
+/// Adds the BFF's own capabilities to a successful composer-capabilities answer: `artifact_promote: true` while the
+/// promote switch is on (EP-3 S8), and `chat_projects: true` while the project switch is on (WS18-S4). Each switch is
+/// the BFF's own, so the gateway cannot report it; the SPA reads one capabilities answer either way. A switch that is
+/// off adds nothing. With both off, or for any answer that is not a success, the response passes through untouched, so
+/// a capability is never offered on a guess.
+pub(super) async fn with_bff_capabilities(
+    response: Response,
+    promote: bool,
+    chat_projects: bool,
+) -> Response {
+    if (!promote && !chat_projects) || !response.status().is_success() {
         return response;
     }
     let (mut parts, body) = response.into_parts();
@@ -160,7 +165,12 @@ pub(super) async fn with_promote_capability(response: Response, enabled: bool) -
     let Some(data) = payload.get_mut("data").and_then(Value::as_object_mut) else {
         return Response::from_parts(parts, axum::body::Body::from(bytes));
     };
-    data.insert("artifact_promote".to_owned(), Value::Bool(true));
+    if promote {
+        data.insert("artifact_promote".to_owned(), Value::Bool(true));
+    }
+    if chat_projects {
+        data.insert("chat_projects".to_owned(), Value::Bool(true));
+    }
     // The body changed length; the old header would truncate or stall the reply.
     parts.headers.remove(axum::http::header::CONTENT_LENGTH);
     Response::from_parts(parts, axum::body::Body::from(payload.to_string()))
@@ -434,10 +444,10 @@ mod tests {
         let answer = || {
             (StatusCode::OK, Json(json!({ "data": { "artifact_history": true } }))).into_response()
         };
-        let on = body_json(with_promote_capability(answer(), true).await).await;
+        let on = body_json(with_bff_capabilities(answer(), true, false).await).await;
         assert_eq!(on, json!({ "data": { "artifact_history": true, "artifact_promote": true } }));
 
-        let off = body_json(with_promote_capability(answer(), false).await).await;
+        let off = body_json(with_bff_capabilities(answer(), false, false).await).await;
         assert_eq!(off, json!({ "data": { "artifact_history": true } }));
 
         // A failed capabilities read stays a failure: nothing is offered on a guess.
@@ -446,8 +456,48 @@ mod tests {
             Json(crate::envelope::error("not_found", "No such route.")),
         )
             .into_response();
-        let failed = with_promote_capability(failed, true).await;
+        let failed = with_bff_capabilities(failed, true, true).await;
         assert_eq!(failed.status(), StatusCode::NOT_FOUND);
+        assert!(body_json(failed).await["data"].is_null());
+    }
+
+    /// WS18-S4 (D-f06-C): `chat_projects` is offered only while the project switch is on, on a successful answer, and it
+    /// is offered beside `artifact_promote`, never instead of it.
+    #[tokio::test]
+    async fn capabilities_gain_chat_projects_only_with_the_switch_on() {
+        let answer = || {
+            (
+                StatusCode::OK,
+                Json(json!({ "data": { "artifact_history": true } })),
+            )
+                .into_response()
+        };
+        let on = body_json(with_bff_capabilities(answer(), false, true).await).await;
+        assert_eq!(
+            on,
+            json!({ "data": { "artifact_history": true, "chat_projects": true } })
+        );
+
+        let both = body_json(with_bff_capabilities(answer(), true, true).await).await;
+        assert_eq!(
+            both,
+            json!({ "data": { "artifact_history": true, "artifact_promote": true, "chat_projects": true } })
+        );
+
+        let off = body_json(with_bff_capabilities(answer(), false, false).await).await;
+        assert_eq!(off, json!({ "data": { "artifact_history": true } }));
+
+        // A failed read of a project-enabled gateway is still a failure: nothing is offered on a guess.
+        let failed = (
+            StatusCode::BAD_GATEWAY,
+            Json(crate::envelope::error(
+                "upstream_error",
+                "Upstream returned 502.",
+            )),
+        )
+            .into_response();
+        let failed = with_bff_capabilities(failed, false, true).await;
+        assert_eq!(failed.status(), StatusCode::BAD_GATEWAY);
         assert!(body_json(failed).await["data"].is_null());
     }
 }

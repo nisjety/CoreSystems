@@ -785,6 +785,13 @@ const ADDED_CODES = [
   'zdr_connection_not_acknowledged',
   'zdr_posture_mismatch',
   'zdr_waiver_route_mismatch',
+  // WS18-S4: the project-start refusal of the chat turns while the gateway's project switch is off.
+  'chat_projects_disabled',
+  // WS21-S6 (F-f06-09): the refusals of a browser-site choice made with an approval, before the decision is sent.
+  'invalid_remember',
+  'remember_needs_allow',
+  'remember_not_offered',
+  'remember_above_ceiling',
 ] as readonly string[]
 
 // An internal id in a sentence: snake_case or UPPER_SNAKE words, plus the names

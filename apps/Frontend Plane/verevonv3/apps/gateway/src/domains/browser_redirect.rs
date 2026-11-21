@@ -20,10 +20,7 @@ use crate::{
     public_url::normalize_public_http_url,
 };
 
-use super::{
-    browser::quarry_call,
-    browser_sites::{enabled_from_env as browser_sites_enabled, explain_site_for_member},
-};
+use super::{browser::quarry_call, browser_sites::explain_site_for_member};
 
 const MAX_REDIRECTS: usize = 5;
 const RESOLUTION_TIMEOUT: Duration = Duration::from_secs(8);
@@ -92,6 +89,10 @@ enum ProbeResult {
 
 /// Give the frontend an exact destination for an in-context choice. The next
 /// start still needs a fresh broker decision, including after the user consents.
+///
+/// `can_request_access` is the offer to request access. Each caller ANDs it with
+/// `SpaceFeatureFlags::browser_sites_enabled` (read once at startup), so the offer is made only while the
+/// browser-site routes exist.
 fn denied(redirect: bool, host: Option<&str>, can_request_access: bool) -> Response {
     let code = if redirect {
         "browser_redirect_access_denied"
@@ -105,7 +106,7 @@ fn denied(redirect: bool, host: Option<&str>, can_request_access: bool) -> Respo
     };
     let details = json!({
         "host": host.filter(|host| valid_policy_host(host)),
-        "canRequestAccess": can_request_access && browser_sites_enabled(),
+        "canRequestAccess": can_request_access,
     });
     (
         StatusCode::FORBIDDEN,
@@ -146,7 +147,11 @@ pub(super) async fn direct_access_denied(
     .ok()
     .flatten();
     match access {
-        Some(access) => denied(false, Some(host), access.can_request_access()),
+        Some(access) => denied(
+            false,
+            Some(host),
+            access.can_request_access() && state.space_features.browser_sites_enabled,
+        ),
         None => original,
     }
 }
@@ -182,7 +187,11 @@ pub(super) async fn resolve_start_url(
         Ok(Err(ResolutionError::DestinationDenied {
             host,
             can_request_access,
-        })) => Err(denied(true, Some(&host), can_request_access)),
+        })) => Err(denied(
+            true,
+            Some(&host),
+            can_request_access && state.space_features.browser_sites_enabled,
+        )),
         Ok(Err(ResolutionError::Unverifiable)) => Err((
             StatusCode::BAD_GATEWAY,
             Json(error(

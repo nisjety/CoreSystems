@@ -46,7 +46,7 @@ use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 use quarry_core::crawl_scope::{
-    CrawlContext, CrawlScope, MAX_EXTENSIONS, MAX_PATTERNS, MAX_PATTERN_CHARS,
+    CrawlContext, CrawlScope, DomainRules, MAX_EXTENSIONS, MAX_PATTERNS, MAX_PATTERN_CHARS,
     MAX_PATTERN_TOTAL_CHARS,
 };
 use quarry_core::web_policy::{OrgInput, RobotsMax};
@@ -113,6 +113,8 @@ pub const FIELDS: &[(&str, &[&str])] = &[
     ),
     // W3-E3.5-3: also in RESERVED_KEYS, which refuses it while the flag is off.
     ("webhook", &["webhook"]),
+    // EP-9 O-23: the org's web domain rules, sent by the gateway for a signed-in person. They only narrow the crawl.
+    ("domain_rules", &["domain_rules", "domainRules"]),
 ];
 
 /// Keys that would change what a request may do. Refused in both modes.
@@ -1183,6 +1185,38 @@ pub fn parse_body(body: &[u8], settings: CrawlRequestSettings) -> Result<ParsedC
         }
     };
 
+    // EP-9 O-23: the org's web domain rules. They can only narrow what the crawl follows, so any caller may send them;
+    // the gateway sends the signed-in person's org's rules. A malformed object is a 400 naming the field.
+    let domain_rules = match lookup(object, "domain_rules") {
+        None => None,
+        Some((path, value)) => match serde_json::from_value::<DomainRules>(value.clone()) {
+            Ok(rules) => {
+                let mut rule_errors = Vec::new();
+                rules.validate_into(path, &mut rule_errors);
+                if rule_errors.is_empty() {
+                    Some(rules)
+                } else {
+                    for error in rule_errors {
+                        invalid.push(RequestField::new(
+                            error.field,
+                            "invalid_option",
+                            error.message,
+                        ));
+                    }
+                    None
+                }
+            }
+            Err(_) => {
+                invalid.push(RequestField::new(
+                    path,
+                    "invalid_type",
+                    "must be an object with a mode and lists of hosts",
+                ));
+                None
+            }
+        },
+    };
+
     // The regular expressions are compiled here, so a bad pattern is a 400 at the
     // handoff and never reaches the orchestrator. Runs only when the patterns above
     // are clean, so one request does not produce the same error twice.
@@ -1228,6 +1262,7 @@ pub fn parse_body(body: &[u8], settings: CrawlRequestSettings) -> Result<ParsedC
             exclude_paths,
             deny_extensions,
             legacy: false,
+            domain_rules,
         },
         sitemap,
         scrape_options,
@@ -1921,6 +1956,61 @@ mod tests {
                 lenient()
             )),
             vec![("deny_extensions[0]".to_owned(), "invalid_option")]
+        );
+    }
+
+    #[test]
+    fn domain_rules_are_read_checked_and_only_narrow_the_scope() {
+        let ok = parse(
+            json!({
+                "url": "https://e.test/",
+                "domain_rules": { "mode": "allowlist", "deny": ["bad.example"], "allow": ["e.test"] }
+            }),
+            strict(),
+        )
+        .unwrap();
+        let rules = ok.scope.domain_rules.expect("rules");
+        assert_eq!(rules.mode, "allowlist");
+        assert_eq!(rules.deny, ["bad.example"]);
+        assert_eq!(rules.allow, ["e.test"]);
+        // The camelCase spelling is the same option, and a request without rules is what it was.
+        assert!(parse(
+            json!({ "url": "https://e.test/", "domainRules": { "mode": "open" } }),
+            strict()
+        )
+        .unwrap()
+        .scope
+        .domain_rules
+        .is_some());
+        assert!(parse(json!({ "url": "https://e.test/" }), strict())
+            .unwrap()
+            .scope
+            .domain_rules
+            .is_none());
+        // A bad mode, a bad host, an unknown key and a non-object are each a 400 naming the field.
+        assert_eq!(
+            codes(&parse(
+                json!({ "url": "https://e.test/", "domain_rules": { "mode": "closed", "deny": ["Bad.Example"] } }),
+                lenient()
+            )),
+            vec![
+                ("domain_rules.mode".to_owned(), "invalid_option"),
+                ("domain_rules.deny[0]".to_owned(), "invalid_option"),
+            ]
+        );
+        assert_eq!(
+            codes(&parse(
+                json!({ "url": "https://e.test/", "domain_rules": { "mode": "open", "block": [] } }),
+                lenient()
+            )),
+            vec![("domain_rules".to_owned(), "invalid_type")]
+        );
+        assert_eq!(
+            codes(&parse(
+                json!({ "url": "https://e.test/", "domain_rules": "all" }),
+                lenient()
+            )),
+            vec![("domain_rules".to_owned(), "invalid_type")]
         );
     }
 

@@ -759,6 +759,12 @@ mod tests {
     use wiremock::matchers::{method as wm_method, path as wm_path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    /// R-spa-15: every test that reaches `note_erase_failure`'s warning holds this lock across that call. tracing
+    /// caches a callsite's interest process-wide, so a concurrent test that hits the warning with no subscriber
+    /// can cache it as never in the middle of the capture test's events. Re-arming the cache inside the capture
+    /// only narrows that window; the lock closes it.
+    static ERASE_WARNING_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// The Space is resolved server side: the model-gateway call is built from the path
     /// `space_ref` alone, and the decision rides in the body, never the URL.
     #[test]
@@ -905,6 +911,8 @@ mod tests {
     /// V3d-bff-2: a settled erase reports the outcome the revoke's answer carries.
     #[test]
     fn a_settled_erase_reports_the_outcome_the_revoke_answers_with() {
+        // R-spa-15: settle_erase_pass warns on a refusal, so it runs under the lock like the capture test.
+        let _warnings = ERASE_WARNING_LOCK.blocking_lock();
         assert_eq!(
             settle_erase_pass(ErasePass::Erased(0)),
             AgentMemoryErase::Erased
@@ -973,6 +981,7 @@ mod tests {
 
     #[test]
     fn a_held_erase_and_an_outage_are_counted_apart() {
+        let _warnings = ERASE_WARNING_LOCK.blocking_lock();
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         let _guard = metrics::set_default_local_recorder(&recorder);
@@ -1031,6 +1040,7 @@ mod tests {
 
     #[test]
     fn a_revocation_erase_failure_logs_only_fixed_words() {
+        let _warnings = ERASE_WARNING_LOCK.blocking_lock();
         let capture = crate::zdr_log::test_capture::Capture::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(capture.clone())
@@ -1047,6 +1057,9 @@ mod tests {
             "details": {"retryable": true},
         }});
         tracing::subscriber::with_default(subscriber, || {
+            // Re-register callsites under this capture so a cached "never" interest from another test
+            // on the same process cannot drop the warnings (R-spa-15).
+            tracing::callsite::rebuild_interest_cache();
             note_erase_failure(StatusCode::CONFLICT, erase_failure_reason(&held));
             note_erase_failure(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -1093,6 +1106,7 @@ mod tests {
     /// Runs the retry rule over scripted passes, each answering with the next script entry. A call past
     /// the script panics, so each test also pins how many passes ran. Returns the outcome and that count.
     async fn run_scripted(script: Vec<ErasePass>) -> (ErasePass, usize) {
+        let _warnings = ERASE_WARNING_LOCK.lock().await;
         let calls = std::cell::Cell::new(0_usize);
         let script = std::cell::RefCell::new(script.into_iter());
         let outcome = run_erase_with_outage_retry(Duration::ZERO, || {
@@ -1144,11 +1158,18 @@ mod tests {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         let _guard = metrics::set_default_local_recorder(&recorder);
+        // Each settle holds the lock on its own: run_scripted takes the same lock, and it is not reentrant.
         let (held_after_outage, _) = run_scripted(vec![outage_pass(), held_pass()]).await;
-        settle_erase_pass(held_after_outage);
+        {
+            let _warnings = ERASE_WARNING_LOCK.lock().await;
+            settle_erase_pass(held_after_outage);
+        }
         let (erased_after_outage, _) =
             run_scripted(vec![outage_pass(), ErasePass::Erased(1)]).await;
-        settle_erase_pass(erased_after_outage);
+        {
+            let _warnings = ERASE_WARNING_LOCK.lock().await;
+            settle_erase_pass(erased_after_outage);
+        }
         let rendered = handle.render();
         let row = |reason: &str, count: u64| {
             format!("verevon_space_agent_erase_failures_total{{reason=\"{reason}\"}} {count}")
@@ -1179,6 +1200,7 @@ mod tests {
         binding_status: &str,
         erase: ResponseTemplate,
     ) -> (u16, Value, usize) {
+        let _warnings = ERASE_WARNING_LOCK.lock().await;
         let auth = MockServer::start().await;
         Mock::given(wm_method("GET"))
             .and(wm_path("/api/auth/get-session"))

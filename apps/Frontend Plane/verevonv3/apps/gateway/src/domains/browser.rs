@@ -659,13 +659,20 @@ fn default_include_screenshot() -> bool {
 }
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
-    classed_routes(&state.rate_limiter)
-        .route_layer(axum::middleware::from_fn_with_state(state, require_session))
+    classed_routes(
+        &state.rate_limiter,
+        state.space_features.browser_sites_enabled,
+    )
+    .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 
 /// Every browser route with its rate class applied, before the session layer.
-/// Split out so the route-to-class assignment is testable without a session.
-fn classed_routes(limiter: &crate::rate_limit::RateLimiter) -> Router<AppState> {
+/// Split out so the route-to-class assignment is testable without a session. `browser_sites_on` is
+/// `SpaceFeatureFlags::browser_sites_enabled`, read once at startup.
+fn classed_routes(
+    limiter: &crate::rate_limit::RateLimiter,
+    browser_sites_on: bool,
+) -> Router<AppState> {
     // Two rate classes, each its own per-organization bucket (see
     // `rate_limit::RateClass`): starting a session or an AI run is scarce and
     // expensive; everything done inside an open session is not, and must keep
@@ -813,9 +820,7 @@ fn classed_routes(limiter: &crate::rate_limit::RateLimiter) -> Router<AppState> 
         ))
         // WS21-S6: the org site policy and the member's own choices. Absent unless
         // BROWSER_DO_ENABLED is the literal `true`, and under this router's session layer.
-        .merge(crate::domains::browser_sites::routes(
-            crate::domains::browser_sites::enabled_from_env(),
-        ))
+        .merge(crate::domains::browser_sites::routes(browser_sites_on))
 }
 
 /// Reports whether an attempt can be made, not whether Quarry has enforced a
@@ -900,7 +905,7 @@ pub(crate) async fn create_session(
         effective_profile_scope(profile_id, requested_persistent_profile, body.scope);
     let assistant_task_grant = body.purpose == Some(BrowserSessionPurpose::AssistantTask)
         && state.browser_grant_mode.issues_grants()
-        && assistant_task_grants_enabled();
+        && state.space_features.browser_assistant_task_grants;
     if assistant_task_grant
         && (requested_persistent_profile || profile_scope != BrowserProfileScope::Ephemeral)
     {
@@ -2551,15 +2556,8 @@ pub(crate) async fn start_ai_run(
     Path(session_id): Path<String>,
     Json(body): Json<StartAiRunBody>,
 ) -> Response {
-    start_ai_run_with_switch(
-        state,
-        user,
-        headers,
-        session_id,
-        body,
-        browser_ai_run_real_grant_enabled(),
-    )
-    .await
+    let real_grant_switch = state.space_features.browser_ai_run_real_grant;
+    start_ai_run_with_switch(state, user, headers, session_id, body, real_grant_switch).await
 }
 
 /// `start_ai_run` with the `BROWSER_AI_RUN_REAL_GRANT` switch passed in, so the
@@ -2972,21 +2970,6 @@ fn ai_run_requested_domains(body: &StartAiRunBody, start_url: Option<&str>) -> O
         Some(domains) if !domains.is_empty() => Some(domains.to_vec()),
         _ => start_url.and_then(hostname).map(|host| vec![host]),
     }
-}
-
-/// Whether a workspace AI run starts under a real broker grant (WS21-S7). Read
-/// per request and exact, like the other switches here: only the word `true`
-/// enables it.
-fn browser_ai_run_real_grant_enabled() -> bool {
-    browser_ai_run_real_grant_from(std::env::var("BROWSER_AI_RUN_REAL_GRANT").ok().as_deref())
-}
-
-fn browser_ai_run_real_grant_from(value: Option<&str>) -> bool {
-    value == Some("true")
-}
-
-fn assistant_task_grants_enabled() -> bool {
-    std::env::var("BROWSER_ASSISTANT_TASK_GRANTS").ok().as_deref() == Some("true")
 }
 
 /// Where a workspace AI run's grant comes from.
@@ -9197,18 +9180,17 @@ pub(crate) mod tests {
         async fn assistant_redirect_requests_access_without_starting_a_browser() {
             let up = upstreams().await;
             mount_assistant_redirect(&up, "ask").await;
+            let app_state = state(&up, BrowserGrantMode::Strict);
+            let sites_on = app_state.space_features.browser_sites_enabled;
             let (status, body) = create_with_body(
-                state(&up, BrowserGrantMode::Strict),
+                app_state,
                 json!({"url": "https://example.com/", "purpose": "assistant_task"}),
             )
             .await;
             assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
             assert_eq!(body["error"]["code"], "browser_redirect_access_denied");
             assert_eq!(body["error"]["details"]["host"], "docs.example.org");
-            assert_eq!(
-                body["error"]["details"]["canRequestAccess"],
-                crate::domains::browser_sites::enabled_from_env()
-            );
+            assert_eq!(body["error"]["details"]["canRequestAccess"], sites_on);
             assert!(requests_to(&up.model, "POST", "/v1/browser/grants").await.is_empty());
             assert!(requests_to(&up.quarry, "POST", "/v1/agent/runs").await.is_empty());
         }
@@ -9222,18 +9204,17 @@ pub(crate) mod tests {
                 .respond_with(ResponseTemplate::new(403))
                 .mount(&up.model)
                 .await;
+            let app_state = state(&up, BrowserGrantMode::Strict);
+            let sites_on = app_state.space_features.browser_sites_enabled;
             let (status, body) = create_with_body(
-                state(&up, BrowserGrantMode::Strict),
+                app_state,
                 json!({"url": "https://example.com/docs", "purpose": "assistant_task"}),
             )
             .await;
             assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
             assert_eq!(body["error"]["code"], "browser_grant_denied");
             assert_eq!(body["error"]["details"]["host"], "example.com");
-            assert_eq!(
-                body["error"]["details"]["canRequestAccess"],
-                crate::domains::browser_sites::enabled_from_env()
-            );
+            assert_eq!(body["error"]["details"]["canRequestAccess"], sites_on);
             assert!(requests_to(&up.quarry, "POST", "/v1/browser/redirect-hop").await.is_empty());
             assert!(requests_to(&up.quarry, "POST", "/v1/agent/runs").await.is_empty());
         }
@@ -10551,6 +10532,7 @@ pub(crate) mod tests {
             model_entitlement_admin_enabled: false,
             zdr_effective_posture_read: false,
             zdr_waiver_ui_enabled: false,
+            auth_step_up_route_enabled: false,
             retention_decision_service_api_key: None,
             agent_definition_versions: false,
             chat_process_output_enabled: false,
@@ -10575,7 +10557,7 @@ pub(crate) mod tests {
             std::env::remove_var("GATEWAY_RATE_CLASSES");
             std::env::set_var("GATEWAY_RATE_LIMIT_RPM_BROWSER_START", "1");
             let state = test_app_state();
-            let app = classed_routes(&state.rate_limiter)
+            let app = classed_routes(&state.rate_limiter, false)
                 .route_layer(axum::middleware::from_fn(
                     |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
                         // What `require_session` does for a member of org_a.
@@ -11254,25 +11236,6 @@ pub(crate) mod tests {
             viewport: DEFAULT_VIEWPORT,
             control_mode: BrowserControlMode::AgentControl,
             zdr,
-        }
-    }
-
-    #[test]
-    fn browser_ai_run_real_grant_switch_is_on_only_for_the_exact_word_true() {
-        assert!(browser_ai_run_real_grant_from(Some("true")));
-        for value in [
-            None,
-            Some(""),
-            Some("1"),
-            Some("TRUE"),
-            Some(" true"),
-            Some("true "),
-            Some("yes"),
-        ] {
-            assert!(
-                !browser_ai_run_real_grant_from(value),
-                "{value:?} must not enable the switch"
-            );
         }
     }
 

@@ -15,6 +15,7 @@ use crate::{
     audience_tokens::get_onboarding_preview_token,
     config::AppState,
     contracts::CrawlPreviewRequest,
+    domains::web_domain_policy::guard_crawl,
     middleware::AuthenticatedUser,
     onboarding::crawl_preview::{
         dedupe::{Admission, SnippetLedger},
@@ -66,8 +67,25 @@ pub(crate) async fn crawl_preview(
         .to_owned();
     let token = get_onboarding_preview_token(&state, &user.user_id, &cookie).await;
     let state_clone = state.clone();
+    let user_clone = user.clone();
+    let headers_clone = headers.clone();
     let output = stream! {
-        let crawl_job = create_crawl_job(&state_clone, token.as_deref(), &url, max_pages).await;
+        // P2-bff-01 rel1 (EP-9 O-23): the preview is a crawl. Its seed host is judged under the org's web domain rules
+        // before anything is fetched, and the rules ride on the crawl job for Quarry to apply to every link it follows.
+        // A refused seed, or rules that cannot be read, ends the preview here: neither the seed scrape nor the crawl
+        // job runs. Off (`WEB_DOMAIN_POLICY_BFF`, the default), the body is what it was.
+        let mut crawl_body = json!({ "url": url, "max_pages": max_pages, "max_depth": 1 });
+        if let Some((_, Json(refusal))) =
+            guard_crawl(&state_clone, &user_clone, &headers_clone, &mut crawl_body).await
+        {
+            yield Ok::<Event, std::convert::Infallible>(sse_json("warning", json!({
+                "code": refusal["error"]["code"],
+                "message": refusal["error"]["message"],
+            })));
+            yield Ok(sse_json("done", json!({ "count": 0, "pages": 0, "elements": 0, "status": "failed" })));
+            return;
+        }
+        let crawl_job = create_crawl_job(&state_clone, token.as_deref(), &crawl_body).await;
         match crawl_job {
             Ok(job_id) => {
                 yield Ok::<Event, std::convert::Infallible>(sse_json("started", json!({ "jobId": job_id, "url": url, "target": max_pages })));

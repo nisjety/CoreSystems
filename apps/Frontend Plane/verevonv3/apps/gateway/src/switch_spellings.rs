@@ -15,7 +15,8 @@
 use std::io::Write;
 
 use crate::config::{
-    BFF_EXACT_TRUE_SPACE_SWITCHES, BROWSER_EXACT_TRUE_SWITCHES, MODEL_PLANE_EXACT_TRUE_SWITCHES,
+    BFF_EXACT_TRUE_SPACE_SWITCHES, BFF_EXACT_TRUE_SWITCHES, BROWSER_EXACT_TRUE_SWITCHES,
+    MODEL_PLANE_EXACT_TRUE_SWITCHES,
 };
 
 /// The one switch read only as the exact literal `1`: the second dev gate, which Model Plane reads the
@@ -23,13 +24,14 @@ use crate::config::{
 pub(crate) const EXACT_ONE_SWITCHES: [&str; 1] = ["ALLOW_INSECURE_DEV_DEFAULTS"];
 
 /// Every switch this report covers, each with the exact value that turns it on, in table order: the Model
-/// Plane mirrors, the BFF-only Space controls and the browser switches (all read as `true`), then the one
-/// gate read as `1`.
+/// Plane mirrors, the BFF-only Space controls, the browser switches and the other BFF switches (all read as
+/// `true`), then the one gate read as `1`.
 pub(crate) fn reported_switches() -> Vec<(&'static str, &'static str)> {
     let true_switches = MODEL_PLANE_EXACT_TRUE_SWITCHES
         .iter()
         .chain(BFF_EXACT_TRUE_SPACE_SWITCHES.iter())
         .chain(BROWSER_EXACT_TRUE_SWITCHES.iter())
+        .chain(BFF_EXACT_TRUE_SWITCHES.iter())
         .map(|name| (*name, "true"));
     true_switches
         .chain(EXACT_ONE_SWITCHES.iter().map(|name| (*name, "1")))

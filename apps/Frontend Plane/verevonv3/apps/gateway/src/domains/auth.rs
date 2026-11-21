@@ -98,8 +98,16 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         )
         // Platform super-admin: cross-org user directory (all users, every org).
         // Role-gated inside the handler; auth-core re-checks via its admin plugin.
-        .route("/api/v1/admin/users", get(protected::admin_list_users))
-        .route_layer(axum::middleware::from_fn_with_state(state, require_session));
+        .route("/api/v1/admin/users", get(protected::admin_list_users));
+    // F-f03-15: the password re-check behind a high-risk approval. Off (the default) the route is not registered, so a
+    // request to it answers 404 as it did before the route existed.
+    let protected_routes = if state.auth_step_up_route_enabled {
+        protected_routes.route("/api/v1/auth/step-up", post(protected::step_up))
+    } else {
+        protected_routes
+    };
+    let protected_routes =
+        protected_routes.route_layer(axum::middleware::from_fn_with_state(state, require_session));
 
     Router::new().merge(public_routes).merge(protected_routes)
 }

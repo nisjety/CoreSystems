@@ -29,6 +29,7 @@ use crate::{
     audience_tokens::get_audience_token,
     cache_admission::CacheAdmission,
     config::AppState,
+    domains::web_domain_policy as domain_policy,
     envelope::{error, ok},
     middleware::{require_session, AuthenticatedUser},
     rate_limit::{with_rate_class, RateClass},
@@ -143,6 +144,11 @@ pub(crate) async fn search_web(
     // URL / bare-domain path → scrape the page so the searchbar can "open" links.
     if !public_only && is_url_input(&query) {
         let target = normalize_url(&query);
+        // O-23: a URL or bare-domain query is a single-page fetch, so the org's rules judge its host before
+        // any upstream call. Off (the default), nothing is asked.
+        if let Some(refusal) = refuse_blocked_target(&state, &user, &headers, &target).await {
+            return refusal;
+        }
         let url = format!("{}/v1/scrape", state.quarry_edge_url);
         let mut browser_payload = json!({
             "url": target,
@@ -271,7 +277,7 @@ pub(crate) async fn search_web(
         match state.cache.lookup_scoped(key, scope).await {
             Some(hit) if hit.fresh => {
                 crate::observability::record_result_cache("search-web", "hit");
-                return (StatusCode::OK, Json(ok(hit.data)));
+                return serve_search(&state, &user, &headers, hit.data).await;
             }
             Some(hit) => stale = Some(hit.data),
             None => crate::observability::record_result_cache("search-web", "miss"),
@@ -364,12 +370,14 @@ pub(crate) async fn search_web(
                 state.cache.store_scoped(key, scope, &cached_payload).await;
                 crate::observability::record_result_cache("search-web", "store");
             }
-            (StatusCode::OK, Json(ok(cached_payload)))
+            // The stored payload stays whole: the org's rules are applied as it is served, so a rule changed
+            // later binds the next read of the same entry.
+            serve_search(&state, &user, &headers, cached_payload).await
         }
         Err(envelope) => match stale {
             Some(data) => {
                 crate::observability::record_result_cache("search-web", "stale_hit");
-                (StatusCode::OK, Json(ok(data)))
+                serve_search(&state, &user, &headers, data).await
             }
             None => envelope,
         },
@@ -407,6 +415,12 @@ async fn search_similar(
         .and_then(Value::as_u64)
         .unwrap_or(10)
         .clamp(1, 50);
+    // O-23: a seed URL is a page this search reads, so the org's rules judge its host first.
+    if let Some(seed) = url_in {
+        if let Some(refusal) = refuse_blocked_target(&state, &user, &headers, seed).await {
+            return refusal;
+        }
+    }
     let token = quarry_token(&state, &user, &headers).await;
     let url = format!("{}/v1/search/similar", state.quarry_edge_url);
     let mut payload = json!({ "limit": limit });
@@ -428,10 +442,8 @@ async fn search_similar(
     {
         Ok(data) => {
             let results = data.get("results").cloned().unwrap_or_else(|| json!([]));
-            (
-                StatusCode::OK,
-                Json(ok(json!({ "mode": "similar", "results": results }))),
-            )
+            let payload = json!({ "mode": "similar", "results": results });
+            serve_hits(&state, &user, &headers, payload, &[("results", "url")]).await
         }
         Err(envelope) => envelope,
     }
@@ -475,10 +487,10 @@ async fn search_images(
     )
     .await
     {
-        Ok(data) => (
-            StatusCode::OK,
-            Json(ok(json!({ "images": sanitize_images(data.get("images")) }))),
-        ),
+        Ok(data) => {
+            let payload = json!({ "images": sanitize_images(data.get("images")) });
+            serve_hits(&state, &user, &headers, payload, &[("images", "url")]).await
+        }
         Err(envelope) => envelope,
     }
 }
@@ -577,10 +589,10 @@ async fn search_videos(
     )
     .await
     {
-        Ok(data) => (
-            StatusCode::OK,
-            Json(ok(json!({ "videos": sanitize_videos(data.get("videos")) }))),
-        ),
+        Ok(data) => {
+            let payload = json!({ "videos": sanitize_videos(data.get("videos")) });
+            serve_hits(&state, &user, &headers, payload, &[("videos", "url")]).await
+        }
         Err(envelope) => as_video_error(envelope),
     }
 }
@@ -708,7 +720,7 @@ async fn search_answer_stream(
     {
         payload["zdr"] = json!(true);
     }
-    proxy_sse_stream(
+    let response = proxy_sse_stream(
         &state,
         Method::POST,
         &url,
@@ -719,7 +731,76 @@ async fn search_answer_stream(
         false,
         None,
     )
+    .await;
+    // O-23: the sources are known before any text is, so the org's rules judge them first. Off (the default),
+    // the stream is forwarded exactly as it came.
+    domain_policy::guard_answer_stream(&state, &user, &headers, response).await
+}
+
+// ── org web domain rules (O-23) ─────────────────────────────────────────────
+
+/// The refusal of a request for one page whose host the org's rules do not allow, or `None` when the page may be
+/// read: the switch is off, Model Gateway's mode does not bind, or the host is allowed. A rules read that fails is a
+/// typed 503, never a pass. Under `shadow` the would-be refusal is only counted in the log.
+async fn refuse_blocked_target(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    target: &str,
+) -> Option<(StatusCode, Json<Value>)> {
+    match domain_policy::check_urls(state, user, headers, &[target.to_owned()]).await {
+        Ok(None) => None,
+        Ok(Some(checked)) => {
+            if checked.allows(target) {
+                return None;
+            }
+            tracing::info!(
+                enforced = checked.binds(),
+                "org web domain policy (BFF): a single-page fetch of a host the organisation does not allow"
+            );
+            checked.binds().then(domain_policy::blocked_response)
+        }
+        Err(_) => Some(domain_policy::unavailable_response()),
+    }
+}
+
+/// A keyword search payload as it is served: the org's rules drop the hits and the citations on refused hosts, and a
+/// synthesised answer that lost a source is withheld (its text cannot be cut back). Off (the default), the payload is
+/// returned as it is.
+async fn serve_search(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    mut data: Value,
+) -> (StatusCode, Json<Value>) {
+    match domain_policy::filter_hits(
+        state,
+        user,
+        headers,
+        &mut data,
+        &[("results", "url"), ("citations", "url")],
+    )
     .await
+    {
+        Ok(0) => {}
+        Ok(_) => domain_policy::withhold_answer(&mut data),
+        Err(_) => return domain_policy::unavailable_response(),
+    }
+    (StatusCode::OK, Json(ok(data)))
+}
+
+/// A vertical's payload as it is served, with the hits on refused hosts dropped.
+async fn serve_hits(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    mut data: Value,
+    arrays: &[(&str, &str)],
+) -> (StatusCode, Json<Value>) {
+    match domain_policy::filter_hits(state, user, headers, &mut data, arrays).await {
+        Ok(_) => (StatusCode::OK, Json(ok(data))),
+        Err(_) => domain_policy::unavailable_response(),
+    }
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -1586,5 +1667,584 @@ mod tests {
         assert_eq!(scrapes.len(), 1, "one scrape serves the fetch");
         assert_eq!(scrapes[0]["formats"], json!(["markdown"]));
         assert!(scrapes[0].get("maxPages").is_none(), "{}", scrapes[0]);
+    }
+}
+
+/// O-23: the org's web domain rules bind the BFF's web search (web, similar, images, videos, the answer stream), and a
+/// URL query is refused before any upstream call. Model Gateway (wiremock) answers the domain check; quarry-edge
+/// (wiremock) answers the search.
+#[cfg(test)]
+mod web_domain_rules_tests {
+    use super::*;
+    use crate::middleware::AuthorizedMembership;
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    const BLOCKED: &str = "blocked.example";
+    const ALLOWED: &str = "allowed.example";
+
+    /// Model Gateway's domain check: the mode it reports, and `deny` for the blocked host and `allow` for any other.
+    struct DomainCheck {
+        /// `None` is a Model Gateway whose check fails with a 500.
+        mode: Option<&'static str>,
+    }
+
+    impl Respond for DomainCheck {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let Some(mode) = self.mode else {
+                return ResponseTemplate::new(500);
+            };
+            let body: Value = serde_json::from_slice(&request.body).unwrap_or_default();
+            let mut verdicts = serde_json::Map::new();
+            for host in body["hosts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                let verdict = if host == BLOCKED { "deny" } else { "allow" };
+                verdicts.insert(host.to_owned(), json!(verdict));
+            }
+            ResponseTemplate::new(200).set_body_json(json!({ "mode": mode, "verdicts": verdicts }))
+        }
+    }
+
+    struct World {
+        state: AppState,
+        model: MockServer,
+        quarry: MockServer,
+        _aux: Vec<MockServer>,
+    }
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-o23".to_owned(),
+            user_email: "user@o23.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-o23".to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org-o23".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    /// `check`: the mode Model Gateway reports, or `None` for a Model Gateway whose check fails with 500.
+    async fn world(switch: bool, check: Option<&'static str>) -> World {
+        world_with(switch, check, true).await
+    }
+
+    /// [`world`], where the keyword search either does or does not return a hit on the blocked host.
+    async fn world_with(
+        switch: bool,
+        check: Option<&'static str>,
+        blocked_in_search: bool,
+    ) -> World {
+        let auth = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/[a-z-]+/token$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "token": "t" })))
+            .mount(&auth)
+            .await;
+        let org_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/v1/organizations/.+$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "org-o23",
+                "metadata": { "interactiveRetention": { "zdr": false } }
+            })))
+            .mount(&org_core)
+            .await;
+        let model = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/web/domain-check"))
+            .respond_with(DomainCheck { mode: check })
+            .mount(&model)
+            .await;
+        let quarry = MockServer::start().await;
+        let mut hits = vec![
+            json!({ "title": "a", "url": format!("https://{ALLOWED}/a"), "provider": "searxng" }),
+        ];
+        let mut cited = vec![json!({ "url": format!("https://{ALLOWED}/a") })];
+        if blocked_in_search {
+            hits.push(json!({ "title": "b", "url": format!("https://{BLOCKED}/b"), "provider": "searxng" }));
+            cited.push(json!({ "url": format!("https://{BLOCKED}/b") }));
+        }
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": hits,
+                "answer": "built from both sources",
+                "citations": cited
+            })))
+            .mount(&quarry)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "markdown": "page text", "metadata": { "title": "t" } }
+            })))
+            .mount(&quarry)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/search/similar"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [
+                    { "title": "a", "url": format!("https://{ALLOWED}/a") },
+                    { "title": "b", "url": format!("https://{BLOCKED}/b") }
+                ]
+            })))
+            .mount(&quarry)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/search/images"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "images": [
+                    { "img_src": "https://cdn.example/1.png", "source_url": format!("https://{ALLOWED}/p") },
+                    { "img_src": "https://cdn.example/2.png", "source_url": format!("https://{BLOCKED}/p") }
+                ]
+            })))
+            .mount(&quarry)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/search/videos"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "videos": [
+                    { "url": format!("https://{ALLOWED}/v") },
+                    { "url": format!("https://{BLOCKED}/v") }
+                ]
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.org_core_url = org_core.uri();
+        state.model_gateway_url = model.uri();
+        state.quarry_edge_url = quarry.uri();
+        state.cache = crate::cache::ResultCache::in_memory();
+        state.space_features.web_domain_policy_bff = switch;
+        World {
+            state,
+            model,
+            quarry,
+            _aux: vec![auth, org_core],
+        }
+    }
+
+    async fn calls(server: &MockServer, request_path: &str) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| request.url.path() == request_path)
+            .count()
+    }
+
+    async fn web(world: &World, body: Value) -> (StatusCode, Value) {
+        let (status, Json(value)) = search_web(
+            State(world.state.clone()),
+            Extension(user()),
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await;
+        (status, value)
+    }
+
+    fn result_urls(value: &Value) -> Vec<String> {
+        value["data"]["results"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|hit| hit["url"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_denied_host_hit_is_removed_and_the_answer_built_from_it_is_withheld() {
+        let world = world(true, Some("enforce")).await;
+        let (status, value) = web(
+            &world,
+            json!({ "query": "rust news", "includeAnswer": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result_urls(&value), [format!("https://{ALLOWED}/a")]);
+        let citations = value["data"]["citations"].as_array().expect("citations");
+        assert_eq!(citations.len(), 1, "the blocked citation is dropped too");
+        assert_eq!(
+            value["data"]["answer"],
+            Value::Null,
+            "text built from a blocked page is withheld"
+        );
+        assert_eq!(value["data"]["answerStatus"], "unavailable");
+        assert_eq!(value["data"]["answerReason"], "org_domain_rules");
+    }
+
+    #[tokio::test]
+    async fn an_allowed_search_is_unchanged() {
+        let world = world_with(true, Some("enforce"), false).await;
+        let (status, value) = web(
+            &world,
+            json!({ "query": "clean query", "includeAnswer": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result_urls(&value), [format!("https://{ALLOWED}/a")]);
+        assert_eq!(
+            value["data"]["answer"], "built from both sources",
+            "nothing was dropped, so the answer stays"
+        );
+        assert_eq!(value["data"]["citations"].as_array().map(Vec::len), Some(1));
+        assert_eq!(calls(&world.model, "/v1/web/domain-check").await, 1);
+    }
+
+    #[tokio::test]
+    async fn shadow_logs_and_changes_nothing() {
+        let world = world(true, Some("shadow")).await;
+        let (status, value) = web(
+            &world,
+            json!({ "query": "rust news", "includeAnswer": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result_urls(&value).len(), 2, "shadow drops nothing");
+        assert_eq!(value["data"]["answer"], "built from both sources");
+        assert_eq!(
+            calls(&world.model, "/v1/web/domain-check").await,
+            1,
+            "shadow still reads the verdicts"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_gateway_mode_off_changes_nothing() {
+        let world = world(true, Some("off")).await;
+        let (_, value) = web(
+            &world,
+            json!({ "query": "rust news", "includeAnswer": true }),
+        )
+        .await;
+        assert_eq!(result_urls(&value).len(), 2);
+        assert_eq!(value["data"]["answer"], "built from both sources");
+    }
+
+    #[tokio::test]
+    async fn the_switch_off_never_calls_model_gateway_and_changes_nothing() {
+        let world = world(false, Some("enforce")).await;
+        let (status, value) = web(
+            &world,
+            json!({ "query": "rust news", "includeAnswer": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result_urls(&value).len(), 2);
+        assert_eq!(value["data"]["answer"], "built from both sources");
+        let (status, _) = web(&world, json!({ "query": format!("https://{BLOCKED}/x") })).await;
+        assert_eq!(status, StatusCode::OK, "a URL query is fetched as before");
+        assert_eq!(calls(&world.model, "/v1/web/domain-check").await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_url_or_bare_domain_query_on_a_denied_host_is_refused_before_any_upstream_call() {
+        let world = world(true, Some("enforce")).await;
+        for query in [format!("https://{BLOCKED}/page"), BLOCKED.to_owned()] {
+            let (status, value) = web(&world, json!({ "query": query })).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{query}");
+            assert_eq!(value["error"]["code"], "org_site_blocked", "{query}");
+        }
+        assert_eq!(
+            calls(&world.quarry, "/v1/scrape").await,
+            0,
+            "no upstream call was made"
+        );
+        assert_eq!(calls(&world.quarry, "/v1/search").await, 0);
+        let (status, _) = web(
+            &world,
+            json!({ "query": format!("https://{ALLOWED}/page") }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "an allowed host is fetched");
+        assert_eq!(calls(&world.quarry, "/v1/scrape").await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_denied_url_query_is_only_logged_under_shadow() {
+        let world = world(true, Some("shadow")).await;
+        let (status, _) = web(
+            &world,
+            json!({ "query": format!("https://{BLOCKED}/page") }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(calls(&world.quarry, "/v1/scrape").await, 1);
+    }
+
+    #[tokio::test]
+    async fn rules_that_cannot_be_read_stop_the_search_with_a_typed_503() {
+        let world = world(true, None).await;
+        let (status, value) = web(&world, json!({ "query": "rust news" })).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(value["error"]["code"], "org_site_check_unavailable");
+        let (status, value) = web(
+            &world,
+            json!({ "query": format!("https://{ALLOWED}/page") }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(value["error"]["code"], "org_site_check_unavailable");
+        assert_eq!(
+            calls(&world.quarry, "/v1/scrape").await,
+            0,
+            "a URL fetch never runs on an unreadable rule set"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_cached_entry_is_whole_and_the_rules_apply_as_it_is_served() {
+        let world = world(true, Some("enforce")).await;
+        let (_, first) = web(&world, json!({ "query": "cached query" })).await;
+        let (_, second) = web(&world, json!({ "query": "cached query" })).await;
+        assert_eq!(
+            calls(&world.quarry, "/v1/search").await,
+            1,
+            "the second read is a cache hit"
+        );
+        assert_eq!(result_urls(&first), result_urls(&second));
+        assert_eq!(
+            result_urls(&second),
+            [format!("https://{ALLOWED}/a")],
+            "the hit is filtered on the cached read too"
+        );
+    }
+
+    #[tokio::test]
+    async fn similar_images_and_videos_drop_the_denied_hosts() {
+        let world = world(true, Some("enforce")).await;
+        let (status, Json(similar)) = search_similar(
+            State(world.state.clone()),
+            Extension(user()),
+            HeaderMap::new(),
+            Json(json!({ "text": "like this" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(similar["data"]["results"].as_array().map(Vec::len), Some(1));
+        let (_, Json(images)) = search_images(
+            State(world.state.clone()),
+            Extension(user()),
+            HeaderMap::new(),
+            Json(json!({ "query": "cats" })),
+        )
+        .await;
+        let images = images["data"]["images"].as_array().expect("images");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0]["url"], format!("https://{ALLOWED}/p"));
+        let (_, Json(videos)) = search_videos(
+            State(world.state.clone()),
+            Extension(user()),
+            HeaderMap::new(),
+            Json(json!({ "query": "cats" })),
+        )
+        .await;
+        let videos = videos["data"]["videos"].as_array().expect("videos");
+        assert_eq!(videos.len(), 1);
+        assert_eq!(videos[0]["url"], format!("https://{ALLOWED}/v"));
+
+        let (status, Json(refused)) = search_similar(
+            State(world.state.clone()),
+            Extension(user()),
+            HeaderMap::new(),
+            Json(json!({ "url": format!("https://{BLOCKED}/seed") })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "a denied seed URL is not read"
+        );
+        assert_eq!(refused["error"]["code"], "org_site_blocked");
+    }
+
+    async fn stream_world(
+        switch: bool,
+        mode: &'static str,
+        citations: Value,
+    ) -> (World, MockServer) {
+        let sse = format!(
+            "event: citations\ndata: {citations}\n\nevent: delta\ndata: {{\"delta\":\"hello\"}}\n\nevent: done\ndata: {{\"answer\":\"hello\"}}\n\n"
+        );
+        stream_world_sse(switch, mode, sse).await
+    }
+
+    /// [`stream_world`] with the exact SSE body Quarry answers.
+    async fn stream_world_sse(
+        switch: bool,
+        mode: &'static str,
+        sse: String,
+    ) -> (World, MockServer) {
+        let world = world(switch, Some(mode)).await;
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/answer/stream"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse),
+            )
+            .mount(&quarry)
+            .await;
+        let mut world = world;
+        world.state.quarry_edge_url = quarry.uri();
+        (world, quarry)
+    }
+
+    async fn answer_text(world: &World) -> String {
+        let response = search_answer_stream(
+            State(world.state.clone()),
+            Extension(user()),
+            HeaderMap::new(),
+            Json(json!({ "query": "what is rust" })),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[tokio::test]
+    async fn the_answer_stream_ends_in_a_typed_error_before_any_text_when_a_source_is_denied() {
+        let citations = json!([{ "url": format!("https://{ALLOWED}/a") }, { "url": format!("https://{BLOCKED}/b") }]);
+        let (world, _quarry) = stream_world(true, "enforce", citations).await;
+        let text = answer_text(&world).await;
+        assert!(text.contains("event: error"), "{text}");
+        assert!(text.contains("org_site_blocked"), "{text}");
+        assert!(
+            !text.contains("event: delta"),
+            "no text is sent from a blocked source: {text}"
+        );
+        assert!(
+            !text.contains(BLOCKED),
+            "the blocked host is not echoed: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_answer_stream_with_only_allowed_sources_is_forwarded_whole() {
+        let citations = json!([{ "url": format!("https://{ALLOWED}/a") }]);
+        let (world, _quarry) = stream_world(true, "enforce", citations).await;
+        let text = answer_text(&world).await;
+        assert!(
+            text.contains("event: citations")
+                && text.contains("event: delta")
+                && text.contains("event: done"),
+            "{text}"
+        );
+        assert!(!text.contains("event: error"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn the_answer_stream_is_untouched_under_shadow_and_with_the_switch_off() {
+        let citations = json!([{ "url": format!("https://{BLOCKED}/b") }]);
+        for (switch, mode) in [(true, "shadow"), (true, "off"), (false, "enforce")] {
+            let (world, _quarry) = stream_world(switch, mode, citations.clone()).await;
+            let text = answer_text(&world).await;
+            assert!(
+                text.contains("event: delta") && !text.contains("event: error"),
+                "{switch} {mode}: {text}"
+            );
+            if !switch {
+                assert_eq!(calls(&world.model, "/v1/web/domain-check").await, 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_answer_stream_ends_in_a_typed_error_when_the_rules_cannot_be_read() {
+        let citations = json!([{ "url": format!("https://{ALLOWED}/a") }]);
+        let (mut world, _quarry) = stream_world(true, "enforce", citations).await;
+        let model = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&model)
+            .await;
+        world.state.model_gateway_url = model.uri();
+        let text = answer_text(&world).await;
+        assert!(text.contains("org_site_check_unavailable"), "{text}");
+        assert!(!text.contains("event: delta"), "{text}");
+    }
+
+    /// What Quarry's answer cache replays: an empty `citations` event, the cached text, then `done` with `cached: true`.
+    const CACHED_REPLAY: &str = "event: citations\ndata: []\n\nevent: delta\ndata: {\"delta\":\"cached words\"}\n\nevent: done\ndata: {\"answer\":\"cached words\",\"cached\":true}\n\n";
+
+    #[tokio::test]
+    async fn a_cached_replay_names_no_source_so_enforcement_refuses_it_before_any_text() {
+        let (world, _quarry) = stream_world_sse(true, "enforce", CACHED_REPLAY.to_owned()).await;
+        let text = answer_text(&world).await;
+        assert!(text.contains("event: error"), "{text}");
+        assert!(text.contains("org_site_sources_unknown"), "{text}");
+        assert!(
+            !text.contains("event: delta") && !text.contains("cached words"),
+            "no cached text goes out: {text}"
+        );
+        assert_eq!(
+            calls(&world.model, "/v1/web/domain-check").await,
+            1,
+            "only the mode is read, once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cached_replay_that_is_only_a_done_with_text_is_refused_too() {
+        let sse = "event: citations\ndata: []\n\nevent: done\ndata: {\"answer\":\"cached words\",\"cached\":true}\n\n";
+        let (world, _quarry) = stream_world_sse(true, "enforce", sse.to_owned()).await;
+        let text = answer_text(&world).await;
+        assert!(text.contains("org_site_sources_unknown"), "{text}");
+        assert!(!text.contains("cached words"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_cached_replay_passes_under_shadow_mode_off_and_with_the_switch_off() {
+        for (switch, mode) in [(true, "shadow"), (true, "off"), (false, "enforce")] {
+            let (world, _quarry) = stream_world_sse(switch, mode, CACHED_REPLAY.to_owned()).await;
+            let text = answer_text(&world).await;
+            assert_eq!(text, CACHED_REPLAY, "{switch} {mode}: forwarded as it came");
+            if !switch {
+                assert_eq!(calls(&world.model, "/v1/web/domain-check").await, 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cached_replay_is_refused_when_the_rules_cannot_be_read() {
+        let (mut world, _quarry) =
+            stream_world_sse(true, "enforce", CACHED_REPLAY.to_owned()).await;
+        let model = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&model)
+            .await;
+        world.state.model_gateway_url = model.uri();
+        let text = answer_text(&world).await;
+        assert!(text.contains("org_site_check_unavailable"), "{text}");
+        assert!(!text.contains("cached words"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_true_no_source_answer_is_forwarded_unchanged_under_enforcement() {
+        let sse = "event: citations\ndata: []\n\nevent: done\ndata: {\"answer\":\"\",\"cached\":false}\n\n";
+        let (world, _quarry) = stream_world_sse(true, "enforce", sse.to_owned()).await;
+        let text = answer_text(&world).await;
+        assert_eq!(text, sse);
+        assert_eq!(
+            calls(&world.model, "/v1/web/domain-check").await,
+            0,
+            "no text, nothing to judge"
+        );
     }
 }

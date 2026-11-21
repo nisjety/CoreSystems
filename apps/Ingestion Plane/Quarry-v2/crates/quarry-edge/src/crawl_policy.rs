@@ -172,6 +172,13 @@ pub fn handoff_scope(
     }
 }
 
+/// EP-9 O-23: whether a crawl that carries the org's web domain rules cannot run under `switch`. With the scope off the
+/// crawl is a legacy one with no context to carry the rules to a page, so the handoff refuses it rather than let it
+/// follow every link.
+pub fn domain_rules_need_scope(switch: CrawlScopeSwitch, has_rules: bool) -> bool {
+    has_rules && matches!(switch, CrawlScopeSwitch::Off)
+}
+
 impl HandoffScope {
     /// The wire name of the scope mode.
     /// WS14.S6: the patterns, the domain switch and the extension list the caller
@@ -182,6 +189,18 @@ impl HandoffScope {
         self.scope.exclude_paths = requested.exclude_paths.clone();
         self.scope.deny_extensions = requested.deny_extensions.clone();
         self.scope.crawl_entire_domain = requested.crawl_entire_domain;
+        // EP-9 O-23: the org's web domain rules ride in the scope, so the scope mode decides how far they bind: under
+        // `enforce` a link on a refused host is dropped before the orchestrator enqueues it, under `observe` it is
+        // only counted in the report, and with the scope off the handoff refuses a request that carries them (see
+        // [`domain_rules_need_scope`]).
+        self.scope.domain_rules = requested.domain_rules.clone();
+        if requested.domain_rules.is_some() {
+            if self.legacy {
+                self.warnings.push("domain_rules_not_applied_legacy");
+            } else if self.scope_mode == ScopeMode::Observe {
+                self.warnings.push("domain_rules_reported_not_enforced");
+            }
+        }
         let has_patterns = !requested.include_paths.is_empty() || !requested.exclude_paths.is_empty();
         if !requested.crawl_entire_domain {
             self.warnings.push("same_directory_only");
@@ -310,6 +329,53 @@ mod tests {
         assert_eq!(e["scope_mode"], "observe");
         assert_eq!(e["legacy"], false);
         assert_eq!(e["warnings"][0], "external_links_followed");
+    }
+
+    #[test]
+    fn domain_rules_ride_in_the_scope_and_say_how_far_they_bind() {
+        use quarry_core::crawl_scope::DomainRules;
+        let rules = DomainRules {
+            mode: "allowlist".to_owned(),
+            deny: vec!["bad.example".to_owned()],
+            allow: vec!["good.example".to_owned()],
+        };
+        let requested = CrawlScope {
+            domain_rules: Some(rules.clone()),
+            ..CrawlScope::default()
+        };
+        let enforce =
+            handoff_scope(CrawlScopeSwitch::Enforce, false, false).with_request_scope(&requested);
+        assert_eq!(enforce.scope.domain_rules, Some(rules.clone()));
+        assert!(
+            enforce.warnings.is_empty(),
+            "enforce binds, so there is nothing to warn about"
+        );
+        assert_eq!(
+            enforce.scope_value()["domain_rules"]["deny"][0],
+            "bad.example"
+        );
+        let observe =
+            handoff_scope(CrawlScopeSwitch::Observe, false, false).with_request_scope(&requested);
+        assert!(observe
+            .warnings
+            .contains(&"domain_rules_reported_not_enforced"));
+        let off = handoff_scope(CrawlScopeSwitch::Off, false, false).with_request_scope(&requested);
+        assert!(off.warnings.contains(&"domain_rules_not_applied_legacy"));
+        let none = handoff_scope(CrawlScopeSwitch::Enforce, false, false)
+            .with_request_scope(&CrawlScope::default());
+        assert!(none.scope.domain_rules.is_none());
+        assert!(
+            none.scope_value().get("domain_rules").is_none(),
+            "a crawl with no rules serialises as before"
+        );
+    }
+
+    #[test]
+    fn a_crawl_with_domain_rules_needs_the_scope_switch_on() {
+        assert!(domain_rules_need_scope(CrawlScopeSwitch::Off, true));
+        assert!(!domain_rules_need_scope(CrawlScopeSwitch::Off, false));
+        assert!(!domain_rules_need_scope(CrawlScopeSwitch::Observe, true));
+        assert!(!domain_rules_need_scope(CrawlScopeSwitch::Enforce, true));
     }
 
     #[test]

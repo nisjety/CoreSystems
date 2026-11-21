@@ -5,6 +5,7 @@ use axum::{
     Json,
 };
 use chrono::{DateTime, Utc};
+use futures_util::StreamExt;
 use reqwest::{Method, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -16,7 +17,7 @@ use crate::{
     upstream::authorized_org_id,
 };
 
-use super::shared;
+use super::{json_handlers, shared};
 
 /// One page of the chat list. Session Core pages on a keyset cursor, so the
 /// list has no cap that also decides which threads can be opened: a thread past
@@ -58,6 +59,10 @@ struct ChatThreadSummary {
     /// absent on the wire (a pre-persona thread row) reads as enabled.
     #[serde(default = "default_true")]
     persona_enabled: bool,
+    /// The thread's memory mode (WS07-S6), relayed only as `inherit` or `off`. Absent when Model Gateway
+    /// states none: the switch is off, or the caller is zero retention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_mode: Option<String>,
     /// Session Core's newest run projection. The Chat surface uses this only
     /// for a quiet history-rail status hint; the run endpoint remains the
     /// authority for detailed state and actions.
@@ -126,6 +131,10 @@ pub(crate) struct SaveThreadRequest {
     /// per-thread persona override (persona spec).
     #[serde(default)]
     pub(crate) persona_enabled: Option<bool>,
+    /// The thread's own memory mode (WS07-S6), sent as `memoryMode`. Absent leaves it as it is. Only a
+    /// closed value is forwarded: see [`forwardable_memory_mode`].
+    #[serde(default)]
+    pub(crate) memory_mode: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -160,7 +169,9 @@ pub(crate) struct ThreadListQuery {
     agent: Option<String>,
 }
 
-/// What one ListThreads call asks Model Gateway for. `limit` is the page size.
+/// What one ListThreads call asks Model Gateway for. `limit` is the page size. `all_origins` leaves the origin
+/// unfiltered, so every origin comes back, and the answer is never passed to `chat_history_sessions`. Only a clear's
+/// workspace erase asks for that, because the durable clear deletes every origin.
 struct ThreadListRequest<'a> {
     cursor: Option<&'a str>,
     limit: usize,
@@ -168,6 +179,7 @@ struct ThreadListRequest<'a> {
     thread_id: Option<&'a str>,
     starred_only: bool,
     agent: Option<&'a str>,
+    all_origins: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -216,6 +228,8 @@ struct DurableThreadSummary {
     origin: String,
     #[serde(default = "default_true", alias = "personaEnabled")]
     persona_enabled: bool,
+    #[serde(default, alias = "memoryMode")]
+    memory_mode: String,
     #[serde(default, alias = "latestRunId")]
     latest_run_id: String,
     #[serde(default, alias = "latestRunStatus")]
@@ -274,6 +288,7 @@ pub(super) async fn list_threads(
         thread_id: None,
         starred_only: query.starred_only.unwrap_or(false),
         agent,
+        all_origins: false,
     };
     let (sessions, next_cursor) =
         match fetch_durable_threads(&state, &user, &headers, request).await {
@@ -395,22 +410,35 @@ pub(crate) async fn save_thread(
         return bad_request("thread_id is required.");
     }
 
+    // WS07-S6: a memory mode is forwarded only as one of its two closed values, and never for a zero-retention
+    // caller. Session Core keeps no mode for one, so the gateway refuses the write itself, typed, before any call.
+    // A posture that cannot be established fails closed inside `durable_write_refusal`.
+    let memory_mode = body
+        .memory_mode
+        .as_deref()
+        .and_then(forwardable_memory_mode);
+    if memory_mode.is_some() {
+        if let Some(refusal) =
+            crate::zdr::durable_write_refusal(&state, &user, Some(&headers), None).await
+        {
+            return refusal.into_response();
+        }
+    }
     if body.title.is_some()
         || body.preview.is_some()
         || body.pinned.is_some()
         || body.persona_enabled.is_some()
+        || memory_mode.is_some()
     {
-        if let Err(response) = update_durable_presentation(
-            &state,
-            &user,
-            &headers,
-            &thread_id,
+        let presentation = presentation_body(
             body.title.as_deref(),
             body.preview.as_deref(),
             body.pinned,
             body.persona_enabled,
-        )
-        .await
+            memory_mode,
+        );
+        if let Err(response) =
+            post_durable_presentation(&state, &user, &headers, &thread_id, presentation).await
         {
             return response;
         }
@@ -496,6 +524,14 @@ pub(crate) async fn delete_thread(
     if thread_id.is_empty() {
         return bad_request("thread_id is required.");
     }
+    // The thread's workspace goes first: model-gateway erases it only while Session Core still knows the thread
+    // (F-f06-01). A workspace that was not erased never blocks the delete; it is left to the retention sweep, and
+    // the log names the thread only. With the switch off nothing is erased and nothing is logged.
+    if !json_handlers::erase_thread_workspace(&state, &user, &headers, &thread_id).await
+        && shared::sandbox_thread_workspace_enabled(&state)
+    {
+        tracing::info!(thread_id = %thread_id, "thread workspace erase deferred to retention");
+    }
     if let Err(response) = delete_durable_thread(&state, &user, &headers, &thread_id).await {
         return response;
     }
@@ -507,6 +543,7 @@ pub(crate) async fn delete_thread(
         thread_id: None,
         starred_only: false,
         agent: None,
+        all_origins: false,
     };
     let (sessions, _) = match fetch_durable_threads(&state, &user, &headers, request).await {
         Ok(page) => page,
@@ -527,10 +564,89 @@ pub(crate) async fn clear_threads(
     if let Err(response) = scope_for(&state, &user).await {
         return response;
     }
+    // Each listed thread's workspace is erased before the durable clear, for the same reason as one delete
+    // (F-f06-01). A thread past CLEAR_WORKSPACE_ERASE_CAP, and a thread whose erase did not succeed, is left to
+    // the retention sweep; the response says nothing of either.
+    if json_handlers::workspace_erase_applies(&state, &user, &headers).await {
+        let thread_ids = listed_thread_ids_for_workspace_erase(&state, &user, &headers).await;
+        let (state_ref, user_ref, headers_ref) = (&state, &user, &headers);
+        let deferred = erase_workspaces_bounded(thread_ids, |thread_id| async move {
+            json_handlers::erase_thread_workspace(state_ref, user_ref, headers_ref, &thread_id)
+                .await
+        })
+        .await;
+        if deferred > 0 {
+            tracing::info!(
+                count = deferred,
+                "thread workspace erase deferred to retention"
+            );
+        }
+    }
     if let Err(response) = delete_durable_threads(&state, &user, &headers).await {
         return response;
     }
     Json(ok(ThreadsResponse { sessions: vec![] })).into_response()
+}
+
+/// The most threads whose workspace one clear erases before the durable clear (F-f06-03). A thread past this cap
+/// falls to the retention sweep.
+const CLEAR_WORKSPACE_ERASE_CAP: usize = 500;
+/// The page size of the listing a clear erases workspaces from: the thread list's own page size.
+const CLEAR_WORKSPACE_PAGE_SIZE: usize = 50;
+/// The most workspace erases one clear runs at a time.
+const WORKSPACE_ERASE_CONCURRENCY: usize = 4;
+
+/// The thread ids a clear erases workspaces for: every origin's threads, because the durable clear deletes every
+/// origin (Session Core's `DeleteThreads` takes the owner's whole set). These are the caller's threads as Session
+/// Core pages them, archived ones included, at most [`CLEAR_WORKSPACE_ERASE_CAP`]. A page error ends the listing,
+/// and the threads listed so far are kept.
+async fn listed_thread_ids_for_workspace_erase(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> Vec<String> {
+    let mut thread_ids: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    // A page budget of the cap over the page size, so a listing that keeps returning a cursor still ends.
+    for _ in 0..(CLEAR_WORKSPACE_ERASE_CAP / CLEAR_WORKSPACE_PAGE_SIZE) {
+        let request = ThreadListRequest {
+            cursor: cursor.as_deref(),
+            limit: CLEAR_WORKSPACE_PAGE_SIZE,
+            archived: Some("all"),
+            thread_id: None,
+            starred_only: false,
+            agent: None,
+            all_origins: true,
+        };
+        let Ok((sessions, next_cursor)) =
+            fetch_durable_threads(state, user, headers, request).await
+        else {
+            break;
+        };
+        // Not `chat_history_sessions`: that keeps chat threads only, and the clear deletes the other origins as well.
+        thread_ids.extend(sessions.into_iter().map(|session| session.thread_id));
+        thread_ids.truncate(CLEAR_WORKSPACE_ERASE_CAP);
+        if thread_ids.len() == CLEAR_WORKSPACE_ERASE_CAP || next_cursor.is_empty() {
+            break;
+        }
+        cursor = Some(next_cursor);
+    }
+    thread_ids
+}
+
+/// Erases workspaces, at most [`WORKSPACE_ERASE_CONCURRENCY`] at a time, and returns how many were not erased.
+/// Those are left to the retention sweep.
+async fn erase_workspaces_bounded<F, Fut>(thread_ids: Vec<String>, erase: F) -> usize
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    futures_util::stream::iter(thread_ids)
+        .map(erase)
+        .buffer_unordered(WORKSPACE_ERASE_CONCURRENCY)
+        .filter(|erased| std::future::ready(!*erased))
+        .count()
+        .await
 }
 
 /// The body of `POST /api/v1/chat/threads/{id}/fork`: the assistant turn to copy up to, and a title.
@@ -1161,11 +1277,10 @@ async fn fetch_durable_threads(
         Ok(token) => token,
         Err(error) => return Err(shared::delegated_auth_unavailable(error).into_response()),
     };
-    // origin=chat is requested here AND re-checked in chat_history_sessions
-    // below: the request-side filter is the efficient path, the response-side
-    // check is what actually enforces the invariant if session-core or
-    // model-gateway ever ignores the query parameter -- the same
-    // belt-and-braces shape this codebase already uses for ZDR.
+    // A chat listing requests origin=chat here AND re-checks it in chat_history_sessions below: the request-side
+    // filter is the efficient path, the response-side check is what enforces the invariant if session-core or
+    // model-gateway ever ignores the query parameter -- the same belt-and-braces shape this codebase already uses for
+    // ZDR. An all-origins listing requests no origin, so chat_history_sessions is never applied to its answer.
     let url = durable_thread_list_url(&state.model_gateway_url, &request);
     let (status, Json(payload)) = shared::proxy_model_json_with_session(
         state,
@@ -1215,6 +1330,7 @@ async fn read_durable_thread(
         thread_id: Some(thread_id),
         starred_only: false,
         agent: None,
+        all_origins: false,
     };
     let (sessions, _) = fetch_durable_threads(state, user, headers, request).await?;
     Ok(chat_history_sessions(sessions)
@@ -1223,7 +1339,11 @@ async fn read_durable_thread(
 }
 
 fn durable_thread_list_url(base: &str, request: &ThreadListRequest<'_>) -> String {
-    let mut params = vec![format!("limit={}", request.limit), "origin=chat".to_owned()];
+    let mut params = vec![format!("limit={}", request.limit)];
+    // Session Core reads an absent origin as no filter, so an all-origins listing leaves the parameter out.
+    if !request.all_origins {
+        params.push("origin=chat".to_owned());
+    }
     if let Some(thread_id) = request.thread_id {
         params.push(format!("thread_id={}", urlencoding::encode(thread_id)));
     }
@@ -1263,6 +1383,8 @@ fn durable_to_summary(item: DurableThreadSummary, now: &str) -> Option<ChatThrea
         space_ref: item.space_id.trim().to_owned(),
         origin: item.origin.trim().to_owned(),
         persona_enabled: item.persona_enabled,
+        // Only a closed mode is relayed. A value this gateway does not know is absent, never a default.
+        memory_mode: forwardable_memory_mode(&item.memory_mode).map(str::to_owned),
         latest_run_id: item.latest_run_id,
         latest_run_status: item.latest_run_status,
         latest_run_updated_at: item.latest_run_updated_at,
@@ -1300,18 +1422,44 @@ pub(crate) async fn update_durable_presentation(
         user,
         headers,
         thread_id,
-        json!({
-            "title": title,
-            "preview": preview,
-            "pinned": pinned,
-            // model-gateway's `UpdateThreadPresentationBody` is
-            // `#[serde(rename_all = "camelCase", deny_unknown_fields)]` —
-            // this key must be camelCase, unlike the single-word fields
-            // above where snake_case and camelCase happen to coincide.
-            "personaEnabled": persona_enabled,
-        }),
+        presentation_body(title, preview, pinned, persona_enabled, None),
     )
     .await
+}
+
+/// The memory mode the gateway forwards (WS07-S6): only `inherit` or `off`. Any other value is `None`, so a
+/// value this gateway does not know never reaches Model Gateway, and the mode is never inferred or defaulted.
+pub(crate) fn forwardable_memory_mode(value: &str) -> Option<&'static str> {
+    match value {
+        "inherit" => Some("inherit"),
+        "off" => Some("off"),
+        _ => None,
+    }
+}
+
+/// The body of a presentation write. `memoryMode` is in it only when a mode is asked for, so a write that names
+/// none sends the body it always sent.
+fn presentation_body(
+    title: Option<&str>,
+    preview: Option<&str>,
+    pinned: Option<bool>,
+    persona_enabled: Option<bool>,
+    memory_mode: Option<&str>,
+) -> Value {
+    let mut body = json!({
+        "title": title,
+        "preview": preview,
+        "pinned": pinned,
+        // model-gateway's `UpdateThreadPresentationBody` is
+        // `#[serde(rename_all = "camelCase", deny_unknown_fields)]` —
+        // this key must be camelCase, unlike the single-word fields
+        // above where snake_case and camelCase happen to coincide.
+        "personaEnabled": persona_enabled,
+    });
+    if let Some(mode) = memory_mode {
+        body["memoryMode"] = json!(mode);
+    }
+    body
 }
 
 /// Star and unread state, written through the same Session Core presentation
@@ -2014,6 +2162,7 @@ mod tests {
                 created_at: now.to_owned(),
                 pinned: false,
                 persona_enabled: true,
+                memory_mode: String::new(),
                 space_id: "space_room_1".to_owned(),
                 origin: "space".to_owned(),
                 latest_run_id: String::new(),
@@ -2040,6 +2189,7 @@ mod tests {
                 created_at: now.to_owned(),
                 pinned: false,
                 persona_enabled: true,
+                memory_mode: String::new(),
                 space_id: String::new(),
                 origin: "chat".to_owned(),
                 latest_run_id: String::new(),
@@ -2085,6 +2235,7 @@ mod tests {
                     created_at: now.to_owned(),
                     pinned: false,
                     persona_enabled: true,
+                    memory_mode: String::new(),
                     space_id: String::new(),
                     origin: origin.to_owned(),
                     latest_run_id: String::new(),
@@ -2135,6 +2286,7 @@ mod tests {
                 created_at: now.to_owned(),
                 pinned: false,
                 persona_enabled: true,
+                memory_mode: String::new(),
                 space_id: String::new(),
                 origin: String::new(),
                 latest_run_id: String::new(),
@@ -2167,6 +2319,7 @@ mod tests {
                 created_at: "2026-08-10T10:00:00Z".to_owned(),
                 pinned: true,
                 persona_enabled: true,
+                memory_mode: String::new(),
                 space_id: "space_1".to_owned(),
                 origin: "space".to_owned(),
                 latest_run_id: "run_1".to_owned(),
@@ -2242,6 +2395,124 @@ mod tests {
 
         let summary = durable_to_summary(legacy, now).expect("valid record");
         assert!(summary.persona_enabled);
+    }
+
+    /// WS07-S6: the gateway forwards a memory mode only as `inherit` or `off`, and reads it in camelCase.
+    #[test]
+    fn memory_mode_is_read_in_camel_case_and_forwarded_only_when_closed() {
+        let body: SaveThreadRequest =
+            serde_json::from_value(json!({"memoryMode": "off"})).expect("valid request");
+        assert_eq!(
+            body.memory_mode
+                .as_deref()
+                .and_then(super::forwardable_memory_mode),
+            Some("off")
+        );
+        assert_eq!(super::forwardable_memory_mode("inherit"), Some("inherit"));
+        for value in ["", "on", "Off", " off", "inherit ", "true", "null"] {
+            assert_eq!(super::forwardable_memory_mode(value), None, "{value:?}");
+        }
+    }
+
+    /// A write that names no memory mode sends the presentation body it always sent: no `memoryMode` key.
+    #[test]
+    fn presentation_body_names_a_memory_mode_only_when_one_is_asked_for() {
+        let without = super::presentation_body(Some("Title"), None, Some(true), Some(false), None);
+        assert!(without.get("memoryMode").is_none());
+        assert_eq!(without["title"], "Title");
+        assert_eq!(without["pinned"], true);
+        assert_eq!(without["personaEnabled"], false);
+        let with = super::presentation_body(None, None, None, None, Some("off"));
+        assert_eq!(with["memoryMode"], "off");
+    }
+
+    /// The listing relays a thread's memory mode only when it is closed; an absent or unknown one stays absent.
+    #[test]
+    fn thread_summary_relays_only_a_closed_memory_mode() {
+        let now = "2026-08-16T12:00:00Z";
+        let wire = |extra: Value| -> Value {
+            let mut record = json!({"thread_id": "thread-1", "title": "T", "updated_at": now});
+            record
+                .as_object_mut()
+                .expect("object")
+                .extend(extra.as_object().expect("object").clone());
+            let item: DurableThreadSummary =
+                serde_json::from_value(record).expect("a summary record");
+            serde_json::to_value(durable_to_summary(item, now).expect("a summary")).expect("json")
+        };
+        assert_eq!(wire(json!({"memoryMode": "off"}))["memoryMode"], "off");
+        assert_eq!(
+            wire(json!({"memoryMode": "inherit"}))["memoryMode"],
+            "inherit"
+        );
+        assert!(wire(json!({"memoryMode": "bogus"}))
+            .get("memoryMode")
+            .is_none());
+        assert!(wire(json!({"memoryMode": ""})).get("memoryMode").is_none());
+        assert!(wire(json!({})).get("memoryMode").is_none());
+    }
+
+    /// WS07-S6: a zero-retention caller asking for a memory mode is refused with the catalogue's typed refusal
+    /// before any call reaches Model Gateway.
+    #[tokio::test]
+    async fn a_zero_retention_caller_is_refused_a_memory_mode_before_any_call() {
+        use axum::{
+            extract::{Extension, Path, State},
+            http::{HeaderMap, HeaderValue, StatusCode},
+            Json,
+        };
+        use http_body_util::BodyExt;
+        use wiremock::MockServer;
+
+        use crate::middleware::{AuthenticatedUser, AuthorizedMembership};
+
+        let model = MockServer::start().await;
+        let mut state = crate::tests::test_state(false);
+        state.model_gateway_url = model.uri();
+        let user = AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "Chat User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-zdr", HeaderValue::from_static("true"));
+        let body = SaveThreadRequest {
+            title: None,
+            preview: None,
+            pinned: None,
+            persona_enabled: None,
+            memory_mode: Some("off".to_owned()),
+        };
+        let response = super::save_thread(
+            State(state),
+            Extension(user),
+            headers,
+            Path("thread-1".to_owned()),
+            Json(body),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let payload: Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(payload["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert!(model
+            .received_requests()
+            .await
+            .expect("recording on")
+            .is_empty());
     }
 
     #[test]
@@ -2636,6 +2907,7 @@ mod thread_paging_tests {
                 created_at: "2026-10-28T09:00:00Z".to_owned(),
                 pinned: false,
                 persona_enabled: true,
+                memory_mode: String::new(),
                 space_id: String::new(),
                 origin: "chat".to_owned(),
                 latest_run_id: String::new(),
@@ -2664,6 +2936,7 @@ mod thread_paging_tests {
                 thread_id: None,
                 starred_only: true,
                 agent: None,
+                all_origins: false,
             },
         );
         assert!(url.ends_with("&starred_only=true"));
@@ -2680,6 +2953,7 @@ mod thread_paging_tests {
                 thread_id: Some("thread-81"),
                 starred_only: false,
                 agent: None,
+                all_origins: false,
             },
         );
         assert_eq!(
@@ -2701,6 +2975,7 @@ mod thread_paging_tests {
                 thread_id: Some("thread-81"),
                 starred_only: false,
                 agent: None,
+                all_origins: false,
             },
         );
         assert!(url.contains("thread_id=thread-81"));
@@ -2718,12 +2993,31 @@ mod thread_paging_tests {
                 thread_id: None,
                 starred_only: false,
                 agent: None,
+                all_origins: false,
             },
         );
         assert_eq!(
             url,
             "http://model-gateway/v1/threads?limit=50&origin=chat&cursor=abc-_123"
         );
+    }
+
+    #[test]
+    fn an_all_origins_listing_leaves_the_origin_out_of_the_query() {
+        // A clear's workspace erase lists every origin, because the durable clear deletes every origin.
+        let url = durable_thread_list_url(
+            "http://model-gateway",
+            &ThreadListRequest {
+                cursor: None,
+                limit: 50,
+                archived: Some("all"),
+                thread_id: None,
+                starred_only: false,
+                agent: None,
+                all_origins: true,
+            },
+        );
+        assert_eq!(url, "http://model-gateway/v1/threads?limit=50&archived=all");
     }
 
     #[test]
@@ -3028,3 +3322,607 @@ mod fork_handler_tests {
 #[cfg(test)]
 #[path = "history_relay_tests.rs"]
 mod relay_tests;
+
+/// F-f06-03: a thread delete and a clear erase the thread workspaces first, through the person's own sandbox
+/// credential, and a failed erase never fails the delete. Every test that reads the switch holds
+/// `TEST_ENV_LOCK`, as the other switch tests do.
+#[cfg(test)]
+mod workspace_erase_tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    use axum::{
+        extract::{Extension, Path, State},
+        http::{header::COOKIE, HeaderMap, HeaderValue, StatusCode},
+        response::Response,
+    };
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use wiremock::{
+        matchers::{method, path, path_regex},
+        Mock, MockServer, Request, ResponseTemplate,
+    };
+
+    use super::{
+        clear_threads, delete_thread, erase_workspaces_bounded, CLEAR_WORKSPACE_ERASE_CAP,
+    };
+    use crate::{
+        config::AppState,
+        domains::chat::json_handlers,
+        middleware::{AuthenticatedUser, AuthorizedMembership},
+    };
+
+    const SESSION_COOKIE: &str = "better-auth.session_token=session-1";
+
+    fn member() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "Chat User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    fn cookied() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(COOKIE, HeaderValue::from_static(SESSION_COOKIE));
+        headers
+    }
+
+    /// The same caller, asking for zero retention on the request itself.
+    fn cookied_with_zdr() -> HeaderMap {
+        let mut headers = cookied();
+        headers.insert("x-zdr", HeaderValue::from_static("true"));
+        headers
+    }
+
+    /// The upstreams one delete or clear reaches. Auth Core mints every audience as `minted-token`. Org-core answers
+    /// the organisation's standing posture, `org_zdr`. Model-gateway answers an empty thread list, a durable delete
+    /// that succeeds and a workspace erase that succeeds, unless a test mounts its own answer first.
+    struct Upstreams {
+        auth: MockServer,
+        org_core: MockServer,
+        model_gateway: MockServer,
+    }
+
+    impl Upstreams {
+        async fn start(org_zdr: bool) -> Self {
+            let auth = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/api/[a-z-]+/token$"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "token": "minted-token",
+                    "expiresInSeconds": 300,
+                })))
+                .mount(&auth)
+                .await;
+            let org_core = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/organizations/org-1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {
+                    "id": "org-1",
+                    "metadata": { "interactiveRetention": { "zdr": org_zdr } },
+                    "retention_posture": { "effective_zdr": org_zdr },
+                }})))
+                .mount(&org_core)
+                .await;
+            let model_gateway = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1/threads"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({ "threads": [], "next_cursor": "" })),
+                )
+                .mount(&model_gateway)
+                .await;
+            Mock::given(method("DELETE"))
+                .and(path_regex(r"^/v1/threads(/[^/]+)?$"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+                .mount(&model_gateway)
+                .await;
+            Mock::given(method("DELETE"))
+                .and(path_regex(r"^/v1/threads/[^/]+/workspace$"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({ "files_deleted": 0 })),
+                )
+                .mount(&model_gateway)
+                .await;
+            Self {
+                auth,
+                org_core,
+                model_gateway,
+            }
+        }
+
+        fn state(&self) -> AppState {
+            let mut state = crate::tests::test_state(false);
+            state.auth_core_url = self.auth.uri();
+            state.org_core_url = self.org_core.uri();
+            state.model_gateway_url = self.model_gateway.uri();
+            state
+        }
+
+        /// The same state with the thread workspace switch on (`SANDBOX_THREAD_WORKSPACE_ENABLED=true`).
+        fn workspace_state(&self) -> AppState {
+            let mut state = self.state();
+            state.space_features.sandbox_thread_workspace_enabled = true;
+            state
+        }
+
+        async fn gateway_calls(&self) -> Vec<String> {
+            calls(&self.model_gateway).await
+        }
+    }
+
+    async fn requests(server: &MockServer) -> Vec<Request> {
+        server.received_requests().await.expect("recording on")
+    }
+
+    /// Every request a server received, as `METHOD /path`, in the order it arrived.
+    async fn calls(server: &MockServer) -> Vec<String> {
+        requests(server)
+            .await
+            .iter()
+            .map(|request| format!("{} {}", request.method, request.url.path()))
+            .collect()
+    }
+
+    fn workspace_erases(calls: &[String]) -> usize {
+        calls
+            .iter()
+            .filter(|call| call.starts_with("DELETE /v1/threads/") && call.ends_with("/workspace"))
+            .count()
+    }
+
+    async fn body_of(response: Response) -> Value {
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    }
+
+    /// Answers each page of the thread list with 50 chat threads and a cursor for the next page, so only the cap
+    /// ends the listing. A page named by `fail_page` answers 500 instead.
+    fn pager(
+        fail_page: Option<usize>,
+    ) -> impl Fn(&Request) -> ResponseTemplate + Send + Sync + 'static {
+        move |request: &Request| {
+            let cursor = request
+                .url
+                .query_pairs()
+                .find(|(key, _)| key == "cursor")
+                .map(|(_, value)| value.into_owned());
+            let page: usize = cursor
+                .as_deref()
+                .and_then(|cursor| cursor.strip_prefix("page-"))
+                .and_then(|index| index.parse().ok())
+                .unwrap_or(0);
+            if fail_page == Some(page) {
+                return ResponseTemplate::new(500);
+            }
+            let threads: Vec<Value> = (page * 50..page * 50 + 50)
+                .map(|n| {
+                    json!({
+                        "thread_id": format!("thr_{n}"),
+                        "title": "A thread",
+                        "origin": "chat",
+                        "updated_at": "2026-11-20T10:00:00Z",
+                    })
+                })
+                .collect();
+            ResponseTemplate::new(200).set_body_json(json!({
+                "threads": threads,
+                "next_cursor": format!("page-{}", page + 1),
+            }))
+        }
+    }
+
+    /// Answers a thread listing the way Session Core does: an `origin` query parameter keeps only the threads of that
+    /// origin, and no `origin` parameter lists every origin. Each of three origins has one thread.
+    fn every_origin_listing(request: &Request) -> ResponseTemplate {
+        let wanted = request
+            .url
+            .query_pairs()
+            .find(|(key, _)| key == "origin")
+            .map(|(_, value)| value.into_owned());
+        let threads: Vec<Value> = [
+            ("thr_chat", "chat"),
+            ("thr_space", "space"),
+            ("thr_support", "support"),
+        ]
+        .into_iter()
+        .filter(|(_, origin)| match wanted.as_deref() {
+            Some(wanted) => wanted == *origin,
+            None => true,
+        })
+        .map(|(thread_id, origin)| {
+            json!({
+                "thread_id": thread_id,
+                "title": "A thread",
+                "origin": origin,
+                "updated_at": "2026-11-20T10:00:00Z",
+            })
+        })
+        .collect();
+        ResponseTemplate::new(200).set_body_json(json!({ "threads": threads, "next_cursor": "" }))
+    }
+
+    #[tokio::test]
+    async fn the_workspace_is_erased_before_the_thread_is_deleted() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let upstreams = Upstreams::start(false).await;
+
+        let response = delete_thread(
+            State(upstreams.workspace_state()),
+            Extension(member()),
+            cookied(),
+            Path("thr_1".to_owned()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let calls = upstreams.gateway_calls().await;
+        let erased = calls
+            .iter()
+            .position(|call| call == "DELETE /v1/threads/thr_1/workspace")
+            .expect("the workspace was erased");
+        let deleted = calls
+            .iter()
+            .position(|call| call == "DELETE /v1/threads/thr_1")
+            .expect("the thread was deleted");
+        assert!(erased < deleted, "{calls:?}");
+
+        // The erase carries the person's own sandbox credential, as the reset route sends it.
+        let erase = requests(&upstreams.model_gateway)
+            .await
+            .into_iter()
+            .find(|request| request.url.path() == "/v1/threads/thr_1/workspace")
+            .expect("the erase request");
+        assert_eq!(
+            erase
+                .headers
+                .get("x-sandbox-authorization")
+                .expect("the sandbox credential")
+                .to_str()
+                .expect("ascii"),
+            "Bearer minted-token"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_erase_that_fails_never_blocks_the_delete() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let upstreams = Upstreams::start(false).await;
+        Mock::given(method("DELETE"))
+            .and(path_regex(r"^/v1/threads/[^/]+/workspace$"))
+            .respond_with(ResponseTemplate::new(500))
+            .with_priority(1)
+            .mount(&upstreams.model_gateway)
+            .await;
+
+        let response = delete_thread(
+            State(upstreams.workspace_state()),
+            Extension(member()),
+            cookied(),
+            Path("thr_1".to_owned()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(upstreams
+            .gateway_calls()
+            .await
+            .contains(&"DELETE /v1/threads/thr_1".to_owned()));
+
+        // The answer carries the deleted id and the sidebar's sessions, and nothing about the workspace.
+        let body = body_of(response).await;
+        let mut keys: Vec<&str> = body["data"]
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["deleted", "sessions"]);
+        assert_eq!(body["data"]["deleted"], "thr_1");
+    }
+
+    #[tokio::test]
+    async fn with_the_switch_off_the_delete_makes_the_calls_it_always_made() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let upstreams = Upstreams::start(false).await;
+
+        let response = delete_thread(
+            State(upstreams.state()),
+            Extension(member()),
+            cookied(),
+            Path("thr_1".to_owned()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert_eq!(
+            upstreams.gateway_calls().await,
+            ["DELETE /v1/threads/thr_1", "GET /v1/threads"]
+        );
+        // No sandbox credential is minted, and no organisation is read for a workspace that is not erased.
+        assert!(calls(&upstreams.auth)
+            .await
+            .iter()
+            .all(|call| !call.contains("sandbox-manager")));
+        assert!(requests(&upstreams.org_core).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn with_the_switch_off_a_clear_lists_and_erases_nothing() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let upstreams = Upstreams::start(false).await;
+
+        let response =
+            clear_threads(State(upstreams.state()), Extension(member()), cookied()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert_eq!(upstreams.gateway_calls().await, ["DELETE /v1/threads"]);
+        assert!(requests(&upstreams.org_core).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_zero_retention_delete_mints_no_sandbox_credential_and_erases_nothing() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        // A request that asks for zero retention, and an organisation under it: each has no workspace.
+        for (upstreams, headers) in [
+            (Upstreams::start(false).await, cookied_with_zdr()),
+            (Upstreams::start(true).await, cookied()),
+        ] {
+            let response = delete_thread(
+                State(upstreams.workspace_state()),
+                Extension(member()),
+                headers,
+                Path("thr_1".to_owned()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let gateway = upstreams.gateway_calls().await;
+            assert_eq!(workspace_erases(&gateway), 0, "{gateway:?}");
+            assert!(gateway.contains(&"DELETE /v1/threads/thr_1".to_owned()));
+            assert!(calls(&upstreams.auth)
+                .await
+                .iter()
+                .all(|call| !call.contains("sandbox-manager")));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_clear_erases_at_most_500_workspaces_read_in_pages_of_50() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let upstreams = Upstreams::start(false).await;
+        Mock::given(method("GET"))
+            .and(path("/v1/threads"))
+            .respond_with(pager(None))
+            .with_priority(1)
+            .mount(&upstreams.model_gateway)
+            .await;
+
+        let response = clear_threads(
+            State(upstreams.workspace_state()),
+            Extension(member()),
+            cookied(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let calls = upstreams.gateway_calls().await;
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| *call == "GET /v1/threads")
+                .count(),
+            CLEAR_WORKSPACE_ERASE_CAP / 50,
+        );
+        assert_eq!(workspace_erases(&calls), CLEAR_WORKSPACE_ERASE_CAP);
+        // The first 500 listed threads are erased; the one past the cap is left to the retention sweep.
+        assert!(calls.contains(&"DELETE /v1/threads/thr_499/workspace".to_owned()));
+        assert!(!calls.contains(&"DELETE /v1/threads/thr_500/workspace".to_owned()));
+        // Every erase comes before the durable clear.
+        let clear = calls
+            .iter()
+            .position(|call| call == "DELETE /v1/threads")
+            .expect("the durable clear");
+        let last_erase = calls
+            .iter()
+            .rposition(|call| call.ends_with("/workspace"))
+            .expect("an erase");
+        assert!(last_erase < clear, "{calls:?}");
+    }
+
+    #[tokio::test]
+    async fn a_listing_page_error_stops_the_listing_and_keeps_what_was_listed() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let upstreams = Upstreams::start(false).await;
+        Mock::given(method("GET"))
+            .and(path("/v1/threads"))
+            .respond_with(pager(Some(1)))
+            .with_priority(1)
+            .mount(&upstreams.model_gateway)
+            .await;
+
+        let response = clear_threads(
+            State(upstreams.workspace_state()),
+            Extension(member()),
+            cookied(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let calls = upstreams.gateway_calls().await;
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| *call == "GET /v1/threads")
+                .count(),
+            2,
+            "{calls:?}"
+        );
+        assert_eq!(workspace_erases(&calls), 50);
+        assert!(calls.contains(&"DELETE /v1/threads".to_owned()));
+    }
+
+    /// The clear's listing asks for no origin, so it covers every origin the durable clear deletes: the workspace of a
+    /// space thread and of a support thread is erased as a chat thread's is, and before the durable clear.
+    #[tokio::test]
+    async fn a_clear_erases_the_workspace_of_every_origin_before_the_durable_clear() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let upstreams = Upstreams::start(false).await;
+        Mock::given(method("GET"))
+            .and(path("/v1/threads"))
+            .respond_with(every_origin_listing)
+            .with_priority(1)
+            .mount(&upstreams.model_gateway)
+            .await;
+
+        let response = clear_threads(
+            State(upstreams.workspace_state()),
+            Extension(member()),
+            cookied(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let received = requests(&upstreams.model_gateway).await;
+        let listing = received
+            .iter()
+            .find(|request| request.method.as_str() == "GET")
+            .expect("the thread listing");
+        assert!(
+            listing.url.query_pairs().all(|(key, _)| key != "origin"),
+            "{}",
+            listing.url
+        );
+        let calls = upstreams.gateway_calls().await;
+        for thread_id in ["thr_chat", "thr_space", "thr_support"] {
+            assert!(
+                calls.contains(&format!("DELETE /v1/threads/{thread_id}/workspace")),
+                "{calls:?}"
+            );
+        }
+        assert_eq!(workspace_erases(&calls), 3, "{calls:?}");
+        // Every erase comes before the durable clear.
+        let clear = calls
+            .iter()
+            .position(|call| call == "DELETE /v1/threads")
+            .expect("the durable clear");
+        let last_erase = calls
+            .iter()
+            .rposition(|call| call.ends_with("/workspace"))
+            .expect("an erase");
+        assert!(last_erase < clear, "{calls:?}");
+    }
+
+    #[tokio::test]
+    async fn a_missing_sandbox_credential_erases_nothing_and_still_deletes() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let upstreams = Upstreams::start(false).await;
+        Mock::given(method("GET"))
+            .and(path("/api/sandbox-manager/token"))
+            .respond_with(ResponseTemplate::new(503))
+            .with_priority(1)
+            .mount(&upstreams.auth)
+            .await;
+
+        let response = delete_thread(
+            State(upstreams.workspace_state()),
+            Extension(member()),
+            cookied(),
+            Path("thr_1".to_owned()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let calls = upstreams.gateway_calls().await;
+        assert_eq!(workspace_erases(&calls), 0, "{calls:?}");
+        assert!(calls.contains(&"DELETE /v1/threads/thr_1".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn the_erase_is_true_only_for_a_2xx_and_makes_no_call_while_switched_off() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let upstreams = Upstreams::start(false).await;
+        {
+            assert!(
+                !json_handlers::erase_thread_workspace(
+                    &upstreams.state(),
+                    &member(),
+                    &cookied(),
+                    "thr_1",
+                )
+                .await
+            );
+            // Nothing is sent: no workspace call, no sandbox mint and no organisation read.
+            assert!(upstreams.gateway_calls().await.is_empty());
+            assert!(requests(&upstreams.auth).await.is_empty());
+            assert!(requests(&upstreams.org_core).await.is_empty());
+        }
+        assert!(
+            json_handlers::erase_thread_workspace(
+                &upstreams.workspace_state(),
+                &member(),
+                &cookied(),
+                "thr_1",
+            )
+            .await
+        );
+        Mock::given(method("DELETE"))
+            .and(path_regex(r"^/v1/threads/[^/]+/workspace$"))
+            .respond_with(ResponseTemplate::new(404))
+            .with_priority(1)
+            .mount(&upstreams.model_gateway)
+            .await;
+        assert!(
+            !json_handlers::erase_thread_workspace(
+                &upstreams.workspace_state(),
+                &member(),
+                &cookied(),
+                "thr_1",
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn erasing_runs_at_most_four_at_a_time_and_counts_what_was_not_erased() {
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let thread_ids: Vec<String> = (0..20).map(|n| format!("thr_{n}")).collect();
+        let deferred = erase_workspaces_bounded(thread_ids, |thread_id| {
+            let (in_flight, peak) = (in_flight.clone(), peak.clone());
+            async move {
+                let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                // Two yields keep each erase in flight while the others start.
+                tokio::task::yield_now().await;
+                tokio::task::yield_now().await;
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                // The even-numbered threads are the ones that were not erased.
+                thread_id
+                    .trim_start_matches("thr_")
+                    .parse::<usize>()
+                    .expect("a numbered id")
+                    % 2
+                    == 1
+            }
+        })
+        .await;
+        assert_eq!(peak.load(Ordering::SeqCst), 4);
+        assert_eq!(deferred, 10);
+    }
+}

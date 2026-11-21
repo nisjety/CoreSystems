@@ -28,6 +28,8 @@ pub const MAX_PATTERN_TOTAL_CHARS: usize = 8192;
 pub const MAX_LINKS_EVALUATED: usize = 5000;
 /// Seed hosts per request.
 pub const MAX_SEED_HOSTS: usize = 100;
+/// Hosts in each of the org's domain-rule lists (the cap org-core puts on its rules).
+pub const MAX_DOMAIN_RULE_HOSTS: usize = 500;
 /// Extension entries in `deny_extensions`.
 pub const MAX_EXTENSIONS: usize = 100;
 /// Denial samples kept per code, per page.
@@ -70,6 +72,63 @@ pub enum RobotsMode {
     Ignore,
 }
 
+/// The org's web domain rules, as a crawl carries them (EP-9, O-23). Hosts are canonical and exact, as org-core stores
+/// them: a rule on a host does not reach its subdomains. A link whose host is in `deny` is never followed. In
+/// `allowlist` mode a link whose host is not in `allow` is not followed either; in `open` mode only `deny` binds. A
+/// link whose host has no canonical form (an IP literal, a name with no dot) is refused under either mode, because the
+/// rules cannot be applied to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DomainRules {
+    /// `open` or `allowlist`.
+    pub mode: String,
+    /// Hosts the org blocked.
+    #[serde(default)]
+    pub deny: Vec<String>,
+    /// Hosts the org listed.
+    #[serde(default)]
+    pub allow: Vec<String>,
+}
+
+impl DomainRules {
+    /// The mode that opens every host not blocked.
+    pub const MODE_OPEN: &'static str = "open";
+    /// The mode that reaches only the listed hosts.
+    pub const MODE_ALLOWLIST: &'static str = "allowlist";
+
+    /// Push one field error per rejected field, under `base`.
+    pub fn validate_into(&self, base: &str, errs: &mut Vec<CrawlFieldError>) {
+        if self.mode != Self::MODE_OPEN && self.mode != Self::MODE_ALLOWLIST {
+            errs.push(CrawlFieldError::new(
+                format!("{base}.mode"),
+                "must be open or allowlist",
+            ));
+        }
+        for (list_name, list) in [("deny", &self.deny), ("allow", &self.allow)] {
+            if list.len() > MAX_DOMAIN_RULE_HOSTS {
+                errs.push(CrawlFieldError::new(
+                    format!("{base}.{list_name}"),
+                    format!("at most {MAX_DOMAIN_RULE_HOSTS} hosts"),
+                ));
+            }
+            for (i, host) in list.iter().enumerate() {
+                let ok = valid_host_token(host)
+                    && host.contains('.')
+                    && !host.ends_with('.')
+                    && host.chars().all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.'
+                    });
+                if !ok {
+                    errs.push(CrawlFieldError::new(
+                        format!("{base}.{list_name}[{i}]"),
+                        "must be a lower-case dotted host name without scheme, path or port",
+                    ));
+                }
+            }
+        }
+    }
+}
+
 /// The scope of one crawl. Defaults: same host only (`www.` equivalent),
 /// external links off, subdomains off, whole domain, built-in extension list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +148,10 @@ pub struct CrawlScope {
     pub deny_extensions: Option<Vec<String>>,
     /// Set by the orchestrator for jobs accepted before scope existed.
     pub legacy: bool,
+    /// The org's web domain rules (EP-9, O-23). Absent for a crawl that carries none, which then serialises exactly as
+    /// it did before the field existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain_rules: Option<DomainRules>,
 }
 
 impl Default for CrawlScope {
@@ -101,6 +164,7 @@ impl Default for CrawlScope {
             exclude_paths: Vec::new(),
             deny_extensions: None,
             legacy: false,
+            domain_rules: None,
         }
     }
 }
@@ -254,6 +318,9 @@ impl CrawlScope {
                 base.to_string(),
                 format!("patterns hold at most {MAX_PATTERN_TOTAL_CHARS} characters in total"),
             ));
+        }
+        if let Some(rules) = &self.domain_rules {
+            rules.validate_into(&format!("{base}.domain_rules"), errs);
         }
         if let Some(list) = &self.deny_extensions {
             if list.len() > MAX_EXTENSIONS {
@@ -591,5 +658,62 @@ mod tests {
         );
         assert_eq!(counts.robots.len(), 1);
         assert_eq!(counts.robots[0].code, "robots_unreachable");
+    }
+
+    #[test]
+    fn a_scope_without_domain_rules_serialises_as_before() {
+        let value = serde_json::to_value(CrawlScope::default()).unwrap();
+        assert!(value.get("domain_rules").is_none(), "{value}");
+    }
+
+    #[test]
+    fn domain_rules_round_trip_and_validate() {
+        let ctx = CrawlContext::from_json(serde_json::json!({
+            "scope": { "domain_rules": { "mode": "allowlist", "deny": ["bad.example"], "allow": ["good.example"] } }
+        }))
+        .expect("valid rules");
+        let rules = ctx.scope.domain_rules.as_ref().expect("rules");
+        assert_eq!(rules.mode, "allowlist");
+        assert_eq!(rules.deny, ["bad.example"]);
+        let back = serde_json::to_value(&ctx.scope).unwrap();
+        assert_eq!(back["domain_rules"]["allow"][0], "good.example");
+    }
+
+    #[test]
+    fn domain_rules_refuse_an_unknown_mode_key_and_a_bad_host_by_path() {
+        let errs = CrawlContext::from_json(serde_json::json!({
+            "scope": { "domain_rules": { "mode": "closed", "deny": ["Bad.Example", "https://x.example/"], "allow": [] } }
+        }))
+        .unwrap_err();
+        let fields: Vec<&str> = errs.iter().map(|e| e.field.as_str()).collect();
+        assert!(
+            fields.contains(&"crawl.scope.domain_rules.mode"),
+            "{fields:?}"
+        );
+        assert!(
+            fields.contains(&"crawl.scope.domain_rules.deny[0]"),
+            "{fields:?}"
+        );
+        assert!(
+            fields.contains(&"crawl.scope.domain_rules.deny[1]"),
+            "{fields:?}"
+        );
+        let unknown = CrawlContext::from_json(serde_json::json!({
+            "scope": { "domain_rules": { "mode": "open", "block": [] } }
+        }))
+        .unwrap_err();
+        assert_eq!(unknown[0].field, "crawl");
+    }
+
+    #[test]
+    fn domain_rule_lists_are_capped() {
+        let hosts: Vec<String> = (0..=MAX_DOMAIN_RULE_HOSTS)
+            .map(|n| format!("h{n}.example"))
+            .collect();
+        let errs = CrawlContext::from_json(serde_json::json!({
+            "scope": { "domain_rules": { "mode": "open", "deny": hosts, "allow": [] } }
+        }))
+        .unwrap_err();
+        assert_eq!(errs[0].field, "crawl.scope.domain_rules.deny");
     }
 }

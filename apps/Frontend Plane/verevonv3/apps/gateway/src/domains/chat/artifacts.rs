@@ -68,7 +68,12 @@ pub(super) async fn get_composer_capabilities(
 ) -> Response {
     let url = format!("{}/v1/chat/composer-capabilities", state.model_gateway_url);
     let response = relay(&state, &user, &headers, Method::GET, &url, None).await;
-    super::documents::with_promote_capability(response, state.space_features.chat_artifact_promote).await
+    super::documents::with_bff_capabilities(
+        response,
+        state.space_features.chat_artifact_promote,
+        state.space_features.chat_projects,
+    )
+    .await
 }
 
 /// The person's edit of a text artifact (EP-3 S4): the new text, an optional title and the head the

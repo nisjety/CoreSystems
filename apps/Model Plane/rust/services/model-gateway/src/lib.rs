@@ -160,6 +160,7 @@ pub mod verevon_actions;
 pub mod verification;
 pub mod vision;
 pub mod web_bundle;
+pub mod web_domain_routes;
 pub mod web_extraction;
 pub mod zdr_features;
 pub mod zdr_posture;

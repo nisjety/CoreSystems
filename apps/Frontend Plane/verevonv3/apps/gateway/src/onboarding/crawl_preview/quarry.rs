@@ -100,18 +100,14 @@ fn seed_event(frame: Value, event_name: &str) -> (String, Value) {
 pub(super) async fn create_crawl_job(
     state: &AppState,
     token: Option<&str>,
-    url: &str,
-    max_pages: u32,
+    body: &Value,
 ) -> Result<String> {
     // Edge crawl handoff. The old direct-control body also carried `org_id`
     // and `auto_commit`; org now comes from the verified JWT claims and
-    // `auto_commit` was a dead param the orchestrator never read. `ingest` is
-    // deliberately absent: a preview stays working-set only.
-    let body = json!({
-        "url": url,
-        "max_pages": max_pages,
-        "max_depth": 1,
-    });
+    // `auto_commit` was a dead param the orchestrator never read. The caller
+    // builds the body and judges its seed under the org's web domain rules
+    // first, so the rules ride on it. `ingest` is deliberately absent: a
+    // preview stays working-set only.
     let response = bearer(
         state
             .client
@@ -119,7 +115,7 @@ pub(super) async fn create_crawl_job(
         token,
     )
     .header("content-type", "application/json")
-    .json(&body)
+    .json(body)
     .send()
     .await?;
     let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));

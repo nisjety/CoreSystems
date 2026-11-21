@@ -4,3 +4,6 @@ pub(crate) mod lookup;
 pub(crate) mod recommendation;
 pub(crate) mod session;
 pub(crate) mod theme;
+
+#[cfg(test)]
+mod crawl_guard_tests;

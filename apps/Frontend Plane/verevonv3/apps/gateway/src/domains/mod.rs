@@ -63,3 +63,4 @@ pub mod social;
 pub mod spaces;
 pub mod studio;
 pub mod tickets;
+pub mod web_domain_policy;

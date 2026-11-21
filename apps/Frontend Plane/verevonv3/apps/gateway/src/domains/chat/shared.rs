@@ -340,7 +340,7 @@ pub(crate) async fn sandbox_token(
     body: &Value,
 ) -> Option<String> {
     let zdr = crate::domains::ag_ui::turn_requests_zdr(headers, body);
-    if !sandbox_token_offered(sandbox_thread_workspace_enabled(), body, zdr) {
+    if !sandbox_token_offered(sandbox_thread_workspace_enabled(state), body, zdr) {
         return None;
     }
     get_model_service_token(
@@ -359,29 +359,16 @@ fn sandbox_token_offered(switched_on: bool, body: &Value, zdr: bool) -> bool {
     is_space_scoped_turn(body) || (switched_on && !zdr)
 }
 
-/// Whether the thread workspace is switched on for this gateway
-/// (`SANDBOX_THREAD_WORKSPACE_ENABLED`, WS22-S3). Read per turn and exact, like
-/// the browser switch: only the word `true` enables it.
-fn sandbox_thread_workspace_enabled() -> bool {
-    sandbox_thread_workspace_enabled_from(
-        std::env::var("SANDBOX_THREAD_WORKSPACE_ENABLED")
-            .ok()
-            .as_deref(),
-    )
-}
-
-fn sandbox_thread_workspace_enabled_from(value: Option<&str>) -> bool {
-    value == Some("true")
+/// Whether the thread workspace is switched on for this gateway (`SANDBOX_THREAD_WORKSPACE_ENABLED`,
+/// WS22-S3). Read once at startup into `SpaceFeatureFlags`, exact: only the word `true` enables it.
+pub(super) fn sandbox_thread_workspace_enabled(state: &AppState) -> bool {
+    state.space_features.sandbox_thread_workspace_enabled
 }
 
 /// Whether the agent browser's Do tools are switched on for this gateway (`BROWSER_DO_ENABLED`,
-/// WS21-S2). Read per turn and exact, like the other switches here: only the word `true` enables it.
-fn browser_do_enabled() -> bool {
-    browser_do_enabled_from(std::env::var("BROWSER_DO_ENABLED").ok().as_deref())
-}
-
-fn browser_do_enabled_from(value: Option<&str>) -> bool {
-    value == Some("true")
+/// WS21-S2). Read once at startup into `SpaceFeatureFlags`, exact: only the word `true` enables it.
+fn browser_do_enabled(state: &AppState) -> bool {
+    state.space_features.browser_do_enabled
 }
 
 /// Whether a turn may be offered the agent browser: the switch is on, the turn asks for the agentic
@@ -410,7 +397,7 @@ pub(crate) async fn browser_token(
     body: &Value,
     zdr: bool,
 ) -> Option<String> {
-    if !browser_do_offered(browser_do_enabled(), body, zdr) {
+    if !browser_do_offered(browser_do_enabled(state), body, zdr) {
         return None;
     }
     get_model_service_token(
@@ -434,7 +421,7 @@ pub(crate) async fn skipped_site_browser_token(
     headers: &HeaderMap,
     zdr: bool,
 ) -> Option<String> {
-    if zdr || !browser_do_enabled() {
+    if zdr || !browser_do_enabled(state) {
         return None;
     }
     get_model_service_token(
@@ -1239,12 +1226,11 @@ pub(crate) mod tests {
     };
 
     use super::{
-        apply_org_zdr_posture, browser_do_enabled_from, browser_do_offered, browser_token,
-        data_plane_authorization_value, delegated_auth_unavailable, dev_bypass_model_token,
-        is_space_scoped_turn, normalized_model_body, proxy_model_json_with_data_plane,
+        apply_org_zdr_posture, browser_do_offered, browser_token, data_plane_authorization_value,
+        delegated_auth_unavailable, dev_bypass_model_token, is_space_scoped_turn,
+        normalized_model_body, proxy_model_json_with_data_plane,
         proxy_model_json_with_data_plane_request_timeout, proxy_model_json_with_session,
-        proxy_model_json_with_session_and_capability, sandbox_thread_workspace_enabled_from,
-        sandbox_token, sandbox_token_offered,
+        proxy_model_json_with_session_and_capability, sandbox_token, sandbox_token_offered,
     };
 
     fn test_state(allow_dev_auth_bypass: bool) -> AppState {
@@ -1337,6 +1323,7 @@ pub(crate) mod tests {
             model_entitlement_admin_enabled: false,
             zdr_effective_posture_read: false,
             zdr_waiver_ui_enabled: false,
+            auth_step_up_route_enabled: false,
             retention_decision_service_api_key: None,
             agent_definition_versions: false,
             chat_process_output_enabled: false,
@@ -1479,8 +1466,6 @@ pub(crate) mod tests {
             Mock, MockServer, ResponseTemplate,
         };
 
-        let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        let _switch = SandboxThreadSwitch::set(None);
         let auth_core = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/sandbox-manager/token"))
@@ -1539,38 +1524,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// Sets `SANDBOX_THREAD_WORKSPACE_ENABLED` for one test and restores it after. Callers hold
-    /// `TEST_ENV_LOCK`.
-    struct SandboxThreadSwitch(Option<std::ffi::OsString>);
-
-    impl SandboxThreadSwitch {
-        fn set(value: Option<&str>) -> Self {
-            let previous = std::env::var_os("SANDBOX_THREAD_WORKSPACE_ENABLED");
-            match value {
-                Some(value) => std::env::set_var("SANDBOX_THREAD_WORKSPACE_ENABLED", value),
-                None => std::env::remove_var("SANDBOX_THREAD_WORKSPACE_ENABLED"),
-            }
-            Self(previous)
-        }
-    }
-
-    impl Drop for SandboxThreadSwitch {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => std::env::set_var("SANDBOX_THREAD_WORKSPACE_ENABLED", value),
-                None => std::env::remove_var("SANDBOX_THREAD_WORKSPACE_ENABLED"),
-            }
-        }
-    }
-
-    #[test]
-    fn the_thread_workspace_switch_is_on_only_for_the_exact_word_true() {
-        assert!(sandbox_thread_workspace_enabled_from(Some("true")));
-        for value in [None, Some(""), Some("1"), Some("TRUE"), Some(" true")] {
-            assert!(!sandbox_thread_workspace_enabled_from(value), "{value:?}");
-        }
-    }
-
     #[test]
     fn a_sandbox_credential_is_offered_to_a_personal_turn_only_while_switched_on_and_not_zdr() {
         let personal = json!({"content": "hello"});
@@ -1591,7 +1544,6 @@ pub(crate) mod tests {
         };
 
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        let _switch = SandboxThreadSwitch::set(Some("true"));
         let auth_core = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/sandbox-manager/token"))
@@ -1605,6 +1557,7 @@ pub(crate) mod tests {
 
         let mut state = test_state(false);
         state.auth_core_url = auth_core.uri();
+        state.space_features.sandbox_thread_workspace_enabled = true;
         let user = browser_test_user();
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(
@@ -1635,33 +1588,11 @@ pub(crate) mod tests {
             .is_none());
         // With the switch off, a personal turn gets none either.
         {
-            let _off = SandboxThreadSwitch::set(None);
-            assert!(sandbox_token(&state, &user, &headers, &personal)
+            let mut off = state.clone();
+            off.space_features.sandbox_thread_workspace_enabled = false;
+            assert!(sandbox_token(&off, &user, &headers, &personal)
                 .await
                 .is_none());
-        }
-    }
-
-    /// Sets `BROWSER_DO_ENABLED` for one test and restores it after. Callers hold `TEST_ENV_LOCK`.
-    struct BrowserSwitch(Option<std::ffi::OsString>);
-
-    impl BrowserSwitch {
-        fn set(value: Option<&str>) -> Self {
-            let previous = std::env::var_os("BROWSER_DO_ENABLED");
-            match value {
-                Some(value) => std::env::set_var("BROWSER_DO_ENABLED", value),
-                None => std::env::remove_var("BROWSER_DO_ENABLED"),
-            }
-            Self(previous)
-        }
-    }
-
-    impl Drop for BrowserSwitch {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => std::env::set_var("BROWSER_DO_ENABLED", value),
-                None => std::env::remove_var("BROWSER_DO_ENABLED"),
-            }
         }
     }
 
@@ -1678,14 +1609,6 @@ pub(crate) mod tests {
                 organization_id: "org-test".to_owned(),
                 role: "member".to_owned(),
             }),
-        }
-    }
-
-    #[test]
-    fn the_browser_switch_is_on_only_for_the_exact_word_true() {
-        assert!(browser_do_enabled_from(Some("true")));
-        for value in [None, Some(""), Some("1"), Some("TRUE"), Some(" true")] {
-            assert!(!browser_do_enabled_from(value), "{value:?}");
         }
     }
 
@@ -1716,7 +1639,6 @@ pub(crate) mod tests {
         };
 
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        let _switch = BrowserSwitch::set(None);
         let auth_core = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/browser-broker/token"))
@@ -1758,7 +1680,6 @@ pub(crate) mod tests {
         };
 
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        let _switch = BrowserSwitch::set(Some("true"));
         let auth_core = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/browser-broker/token"))
@@ -1771,6 +1692,7 @@ pub(crate) mod tests {
 
         let mut state = test_state(false);
         state.auth_core_url = auth_core.uri();
+        state.space_features.browser_do_enabled = true;
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(
             axum::http::header::COOKIE,

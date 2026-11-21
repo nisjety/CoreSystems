@@ -6,8 +6,8 @@
 //! any member reads, sets or forgets their own choice for one host. It decides nothing about who
 //! may browse, and it forwards no host that a client did not name in the path or the query.
 //!
-//! The routes exist when `BROWSER_DO_ENABLED` or `BROWSER_SITES_ENABLED` is the literal `true`, read when the
-//! browser router is built. Off, they are absent, so an operator cannot set a policy that no run
+//! The routes exist when `BROWSER_DO_ENABLED` or `BROWSER_SITES_ENABLED` is the literal `true`, read once at
+//! startup (`SpaceFeatureFlags::from_env`). Off, they are absent, so an operator cannot set a policy that no run
 //! enforces yet. org-core still answers every semantic rule (canonical hosts, the choice limit,
 //! revisions); the checks here only keep malformed or unknown fields from reaching it.
 
@@ -67,21 +67,11 @@ pub(crate) fn routes(enabled: bool) -> Router<AppState> {
         )
 }
 
-/// Browser-site settings can be enabled for the assistant without enabling chat browser tools.
-/// Both switches are exact: only the literal `true` enables the routes.
-pub(crate) fn enabled_from_env() -> bool {
-    browser_sites_enabled(
-        std::env::var("BROWSER_DO_ENABLED").ok().as_deref(),
-        std::env::var("BROWSER_SITES_ENABLED").ok().as_deref(),
-    )
-}
-
-fn browser_sites_enabled(browser_do: Option<&str>, browser_sites: Option<&str>) -> bool {
-    switch_enabled(browser_do) || switch_enabled(browser_sites)
-}
-
-fn switch_enabled(value: Option<&str>) -> bool {
-    value == Some("true")
+/// Browser-site settings can be enabled for the assistant without enabling chat browser tools. The two
+/// switches are read once, by `SpaceFeatureFlags::from_env` in `build_state`, and each is on only for the
+/// exact literal `true`. The routes exist when either one is on.
+pub(crate) fn routes_enabled(browser_do: bool, browser_sites: bool) -> bool {
+    browser_do || browser_sites
 }
 
 /// GET /api/v1/orgs/:id/browser-sites: the organisation's policy, for the admin settings view.
@@ -247,6 +237,58 @@ async fn delete_my_choice(
         None,
     )
     .await
+}
+
+/// WS21-S6: records the member's own choice for `host` after an approval of a `browser_site_consent` pause was granted
+/// with "remember". The host and the level come from the approval record, never from the request. org-core refuses a
+/// choice that names no policy revision, so this first reads the revision the member decides against from the
+/// member's own `/me`, then writes the choice with the identity `put_my_choice` uses. Any failure answers `false`:
+/// the decision that already succeeded is never undone or failed by this write.
+pub(crate) async fn remember_site(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    host: &str,
+    level: &str,
+) -> bool {
+    let host = host.trim();
+    if require_active_org(user, org_id).is_err()
+        || !valid_host(host)
+        || !matches!(level, "read" | "act")
+    {
+        return false;
+    }
+    let actor = actor_for(user);
+    let (read_status, Json(current)) = proxy_json(
+        state,
+        Method::GET,
+        &org_core_url(state, org_id, "/me"),
+        None,
+        Some(org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    let revision = current
+        .get("revision")
+        .and_then(Value::as_i64)
+        .filter(|revision| read_status.is_success() && *revision >= 0);
+    let Some(revision) = revision else {
+        return false;
+    };
+    let suffix = format!("/me/{}", urlencoding::encode(host));
+    let body = serde_json::json!({ "expected_revision": revision, "level": level });
+    let (write_status, _) = proxy_json(
+        state,
+        Method::PUT,
+        &org_core_url(state, org_id, &suffix),
+        Some(body),
+        Some(org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    write_status.is_success()
 }
 
 fn org_core_url(state: &AppState, org_id: &str, suffix: &str) -> String {
@@ -432,9 +474,7 @@ mod tests {
     use crate::config::AppState;
     use crate::middleware::require_session;
 
-    use super::{
-        browser_sites_enabled, routes, switch_enabled, valid_host, validate_choice_body, validate_policy_body,
-    };
+    use super::{routes, routes_enabled, valid_host, validate_choice_body, validate_policy_body};
 
     const COOKIE: &str = "better-auth.session_token=session-1";
     const ORG_CORE_SITES: &str = "/api/v1/organizations/org-1/browser-sites";
@@ -761,19 +801,9 @@ mod tests {
 
     #[test]
     fn assistant_site_settings_do_not_require_chat_browser_tools() {
-        assert!(browser_sites_enabled(None, Some("true")));
-        assert!(browser_sites_enabled(Some("true"), None));
-        assert!(!browser_sites_enabled(None, None));
-        assert!(!browser_sites_enabled(Some("false"), Some("TRUE")));
-    }
-
-    #[test]
-    fn the_switch_is_the_literal_true_and_nothing_else() {
-        assert!(switch_enabled(Some("true")));
-        assert!(!switch_enabled(Some("TRUE")));
-        assert!(!switch_enabled(Some("1")));
-        assert!(!switch_enabled(Some(" true")));
-        assert!(!switch_enabled(None));
+        assert!(routes_enabled(false, true));
+        assert!(routes_enabled(true, false));
+        assert!(!routes_enabled(false, false));
     }
 
     #[test]

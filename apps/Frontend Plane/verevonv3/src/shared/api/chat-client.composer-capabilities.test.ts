@@ -26,6 +26,7 @@ describe('getComposerCapabilities', () => {
           artifact_promote: true,
           deep_research_knowledge: true,
           wide_research: true,
+          chat_projects: true,
         },
       }),
     )
@@ -39,6 +40,7 @@ describe('getComposerCapabilities', () => {
       artifactPromote: true,
       deepResearchKnowledge: true,
       wideResearch: true,
+      chatProjects: true,
     })
     expect(String(fetchMock.mock.calls[0]![0])).toMatch(/\/api\/v1\/chat\/composer-capabilities$/)
   })
@@ -59,6 +61,25 @@ describe('getComposerCapabilities', () => {
   ])('does not offer deep research over knowledge for %s', async (_label, value) => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(reply(200, { deep_research_knowledge: value })))
     expect((await getComposerCapabilities()).deepResearchKnowledge).toBe(false)
+  })
+
+  // WS18-S4: project chats are offered only on the literal true the gateway answers (its own switch, added beside the rest).
+  it('offers project chats only when the gateway answers chat_projects true', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(reply(200, { chat_projects: true })))
+    await expect(getComposerCapabilities()).resolves.toEqual({
+      ...NO_COMPOSER_CAPABILITIES,
+      chatProjects: true,
+    })
+  })
+
+  it.each([
+    ['false', false],
+    ['the string "true"', 'true'],
+    ['1', 1],
+    ['null', null],
+  ])('does not offer project chats for %s', async (_label, value) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(reply(200, { chat_projects: value })))
+    expect((await getComposerCapabilities()).chatProjects).toBe(false)
   })
 
   it('reads an answer without the field (an older gateway) as not offered', async () => {

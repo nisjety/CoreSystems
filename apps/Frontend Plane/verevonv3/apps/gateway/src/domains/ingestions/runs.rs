@@ -250,7 +250,7 @@ pub(crate) async fn create_run(
     }
 
     match kind.as_str() {
-        "crawl" => create_crawl(&state, &body, token, user_id).await,
+        "crawl" => create_crawl(&state, &user, &headers, &body, token, user_id).await,
         "batch" => create_batch(&state, &body, token, user_id).await,
         "extract" => create_extract(&state, &body, token, user_id).await,
         _ => create_scrape(&state, &body, token, user_id).await,
@@ -259,6 +259,8 @@ pub(crate) async fn create_run(
 
 async fn create_crawl(
     state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
     body: &Value,
     token: Option<&str>,
     user_id: &str,
@@ -277,7 +279,14 @@ async fn create_crawl(
         .unwrap_or(12)
         .clamp(1, 50);
 
-    let request = json!({ "url": url, "max_pages": max_pages });
+    let mut request = json!({ "url": url, "max_pages": max_pages });
+    // O-23: the org's web domain rules judge the seed host and ride on the request for Quarry to apply to every link
+    // it follows. Off (`WEB_DOMAIN_POLICY_BFF`, the default), the request is what it was.
+    if let Some(refusal) =
+        crate::domains::web_domain_policy::guard_crawl(state, user, headers, &mut request).await
+    {
+        return axum::response::IntoResponse::into_response(refusal);
+    }
     let (status, resp) = quarry_call(
         state,
         Method::POST,
@@ -1276,5 +1285,185 @@ mod batch_forward_tests {
         let response = create_batch(&state, &both, None, "user-1").await;
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert!(sent_bodies(&quarry).await.is_empty());
+    }
+}
+
+/// O-23: the Ingestions UI's crawl run asks the org's web domain rules like every other crawl start: a denied seed never
+/// reaches Quarry, an allowed one carries the rules, rules that cannot be read stop it, and with the switch off Model
+/// Gateway is never asked.
+#[cfg(test)]
+mod crawl_domain_rules_tests {
+    use super::*;
+    use http_body_util::BodyExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path, path_regex};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    struct DomainCheck;
+
+    impl Respond for DomainCheck {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let body: Value = serde_json::from_slice(&request.body).unwrap_or_default();
+            let verdicts: serde_json::Map<String, Value> = body["hosts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(|host| {
+                    let verdict = if host == "blocked.example" {
+                        "deny"
+                    } else {
+                        "allow"
+                    };
+                    (host.to_owned(), json!(verdict))
+                })
+                .collect();
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "mode": "enforce", "verdicts": verdicts }))
+        }
+    }
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-run".to_owned(),
+            user_email: "user@run.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-run".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-run".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    struct World {
+        state: AppState,
+        model: MockServer,
+        quarry: MockServer,
+        _auth: MockServer,
+    }
+
+    async fn world(switch: bool, rules_status: u16) -> World {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(path_regex(r"^/api/[a-z-]+/token$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "token": "t" })))
+            .mount(&auth)
+            .await;
+        let model = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/web/domain-check"))
+            .respond_with(DomainCheck)
+            .mount(&model)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/web/domain-rules"))
+            .respond_with(ResponseTemplate::new(rules_status).set_body_json(json!({
+                "mode": "enforce",
+                "rules": { "mode": "open", "deny": ["blocked.example"], "allow": [], "revision": 1 }
+            })))
+            .mount(&model)
+            .await;
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/crawl"))
+            .respond_with(
+                ResponseTemplate::new(202).set_body_json(json!({ "data": { "job_id": "job-1" } })),
+            )
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.model_gateway_url = model.uri();
+        state.quarry_edge_url = quarry.uri();
+        state.space_features.web_domain_policy_bff = switch;
+        World {
+            state,
+            model,
+            quarry,
+            _auth: auth,
+        }
+    }
+
+    async fn run_crawl(world: &World, url: &str) -> (StatusCode, Value) {
+        let response = create_run(
+            State(world.state.clone()),
+            Extension(user()),
+            HeaderMap::new(),
+            Json(json!({ "kind": "crawl", "url": url })),
+        )
+        .await;
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    async fn crawl_bodies(world: &World) -> Vec<Value> {
+        world
+            .quarry
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| request.url.path() == "/v1/crawl")
+            .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_allowed_seed_carries_the_rules_and_a_denied_seed_never_reaches_quarry() {
+        let world = world(true, 200).await;
+        let (status, _) = run_crawl(&world, "https://good.example/").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let sent = crawl_bodies(&world).await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0]["domain_rules"],
+            json!({ "mode": "open", "deny": ["blocked.example"], "allow": [] })
+        );
+        assert_eq!(
+            sent[0]["max_pages"], 12,
+            "the rest of the body is what it was"
+        );
+
+        let (status, body) = run_crawl(&world, "https://blocked.example/start").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "org_site_blocked");
+        assert_eq!(
+            crawl_bodies(&world).await.len(),
+            1,
+            "the denied seed was not sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn rules_that_cannot_be_read_stop_the_run_and_the_switch_off_asks_nothing() {
+        let unreadable = world(true, 503).await;
+        let (status, body) = run_crawl(&unreadable, "https://good.example/").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "org_site_check_unavailable");
+        assert!(crawl_bodies(&unreadable).await.is_empty());
+
+        let off = world(false, 200).await;
+        let (status, _) = run_crawl(&off, "https://blocked.example/start").await;
+        assert_eq!(status, StatusCode::CREATED);
+        let sent = crawl_bodies(&off).await;
+        assert!(sent[0].get("domain_rules").is_none());
+        assert!(off
+            .model
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
     }
 }

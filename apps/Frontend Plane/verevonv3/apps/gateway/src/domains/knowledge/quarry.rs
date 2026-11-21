@@ -696,6 +696,22 @@ pub(super) async fn start_crawl(
         }
     };
 
+    // O-23: a whole-site crawl carries the org's web domain rules for Quarry to apply to every link it follows, and
+    // its seed host is judged first. Off (`WEB_DOMAIN_POLICY_BFF`, the default), the body is what it was.
+    let mut request_body = request_body;
+    if kind == "crawl" {
+        if let Some(refusal) = crate::domains::web_domain_policy::guard_crawl(
+            &state,
+            &user,
+            &headers,
+            &mut request_body,
+        )
+        .await
+        {
+            return refusal.into_response();
+        }
+    }
+
     let cookie = shared::cookie_header(&headers);
     let token = shared::quarry_token(&state, &user, &cookie).await;
     let url = format!("{}{}", state.quarry_edge_url, endpoint);
@@ -1847,6 +1863,108 @@ mod tests {
                 assert!(forwarded.get("ignore_robots_txt").is_none(), "switch off");
             }
         }
+    }
+
+    /// O-23: the UI's whole-site crawl asks the org's rules too: a denied seed never reaches Quarry, an allowed one
+    /// carries the rules, and with the switch off Model Gateway is never asked.
+    #[tokio::test]
+    async fn start_crawl_applies_the_orgs_web_domain_rules_behind_the_bff_switch() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let model = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/web/domain-check"))
+            .respond_with(|request: &wiremock::Request| {
+                let body: Value = serde_json::from_slice(&request.body).unwrap_or_default();
+                let verdicts: serde_json::Map<String, Value> = body["hosts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(|host| {
+                        (
+                            host.to_owned(),
+                            json!(if host == "blocked.example" {
+                                "deny"
+                            } else {
+                                "allow"
+                            }),
+                        )
+                    })
+                    .collect();
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "mode": "enforce", "verdicts": verdicts }))
+            })
+            .mount(&model)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/web/domain-rules"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "mode": "enforce",
+                "rules": { "mode": "open", "deny": ["blocked.example"], "allow": [], "revision": 1 }
+            })))
+            .mount(&model)
+            .await;
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/crawl"))
+            .respond_with(
+                ResponseTemplate::new(202).set_body_json(json!({ "data": { "job_id": "job-1" } })),
+            )
+            .mount(&quarry)
+            .await;
+        let state_with = |switch: bool| {
+            let mut state = crate::tests::test_state(false);
+            state.model_gateway_url = model.uri();
+            state.quarry_edge_url = quarry.uri();
+            state.space_features.web_domain_policy_bff = switch;
+            state
+        };
+        let crawl = |state: AppState, url: &'static str| async move {
+            start_crawl(
+                State(state),
+                Extension(preview_user()),
+                HeaderMap::new(),
+                Json(json!({ "url": url })),
+            )
+            .await
+            .status()
+        };
+
+        assert_eq!(
+            crawl(state_with(true), "https://blocked.example/").await,
+            StatusCode::FORBIDDEN
+        );
+        assert!(
+            quarry.received_requests().await.unwrap().is_empty(),
+            "a denied seed never reaches Quarry"
+        );
+
+        assert_eq!(
+            crawl(state_with(true), "https://good.example/").await,
+            StatusCode::OK
+        );
+        let received = quarry.received_requests().await.unwrap();
+        let forwarded: Value = serde_json::from_slice(&received[0].body).unwrap();
+        assert_eq!(
+            forwarded["domain_rules"],
+            json!({ "mode": "open", "deny": ["blocked.example"], "allow": [] })
+        );
+
+        let asked = model.received_requests().await.unwrap().len();
+        assert_eq!(
+            crawl(state_with(false), "https://blocked.example/").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            model.received_requests().await.unwrap().len(),
+            asked,
+            "off never asks Model Gateway"
+        );
+        let received = quarry.received_requests().await.unwrap();
+        let forwarded: Value = serde_json::from_slice(&received[1].body).unwrap();
+        assert!(forwarded.get("domain_rules").is_none());
     }
 
     #[test]

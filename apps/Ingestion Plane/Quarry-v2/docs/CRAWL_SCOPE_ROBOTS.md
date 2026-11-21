@@ -190,3 +190,15 @@ A crawl started while `QUARRY_EDGE__CRAWL_SCOPE_MODE` is `off` is stamped with `
 The edge keeps the same table as `scope_skew` (`crates/quarry-edge/src/crawl_request.rs`), and its unit tests pin the cases. Nothing calls `scope_skew` on the request path yet: the orchestrator makes the decision in production.
 
 Known gap, not changed by this section: a scheduled crawl (`startScheduledChild` in `services/quarry-orchestrator/internal/workflows/scheduled.go`) builds its child input with `CrawlInputFromParams`, which does not run the dispatcher's refusal. A scheduled crawl that names `scope_mode: enforce` and carries no scope therefore runs legacy-unscoped today. It is open as depth row W23-b-U64-1 (next round: move the check into `CrawlInputFromParams` in `workflows/inputs.go`).
+
+## 14. The org's web domain rules on a crawl (EP-9 O-23, built dark)
+
+`POST /v1/crawl` accepts `domain_rules` (also `domainRules`): `{ "mode": "open" | "allowlist", "deny": [host...], "allow": [host...] }`. The Verevon gateway sends the signed-in person's org's rules (Model Gateway `POST /v1/web/domain-rules`, org-core's browser-site policy) when its own `WEB_DOMAIN_POLICY_BFF` switch is on and Model Gateway's `WEB_DOMAIN_POLICY_MODE` is `enforce`. The rules can only narrow a crawl, so any caller may send them.
+
+- Hosts are canonical (lower case, dotted, no scheme, path or port) and exact, as org-core stores them: a rule on a host does not reach its subdomains. At most 500 hosts per list.
+- The edge stamps the rules into the job's `scope.domain_rules`; the orchestrator carries them to every page run in the `crawl` context; `CompiledScope::evaluate` checks them for every link before any other scope rule. A link on a `deny` host is refused, and in `allowlist` mode so is a link on a host not in `allow`. A link whose host has no canonical form (an IP literal, a name with no dot) is refused under either mode.
+- A refused link is counted as `not_crawlable` with the reason `org_domain_rule`. The scope mode decides how far it binds, as for every other scope rule: `enforce` drops the link before the orchestrator enqueues it, `observe` keeps every link and the report says what `enforce` would drop. **Deploy note: set `QUARRY_EDGE__CRAWL_SCOPE_MODE=enforce` for the rules to bind.**
+- With `QUARRY_EDGE__CRAWL_SCOPE_MODE=off` a request that carries `domain_rules` is a 400 `unsupported_option`: the crawl would be a legacy one with no context to carry the rules to a page.
+- A crawl with no `domain_rules` is byte-identical to one built before the field existed (`skip_serializing_if` on the Rust side, `omitempty` on the Go side).
+- Not covered: a scheduled crawl (its saved body does not keep `domain_rules`) and `POST /v1/batch`, whose pages' links are never followed.
+- ZDR: the rules are hosts only. The count of hosts is logged at the handoff, never the hosts.

@@ -495,6 +495,178 @@ pub async fn drop_denied_results_in(
     refused
 }
 
+/// What one host is called in a domain-check answer when the org's rules let it through.
+pub const DOMAIN_ALLOW: &str = "allow";
+
+/// What one host is called in a domain-check answer when the org's rules refuse it, or cannot be read for it.
+pub const DOMAIN_DENY: &str = "deny";
+
+/// The most distinct hosts one domain-check call may name: org-core's own resolve limit.
+pub const MAX_DOMAIN_CHECK_HOSTS: usize = MAX_RESOLVE_HOSTS;
+
+/// The word a domain-check or domain-rules answer uses for the switch, so the caller knows whether the verdicts bind.
+#[must_use]
+pub fn mode_label(mode: WebDomainPolicyMode) -> &'static str {
+    match mode {
+        WebDomainPolicyMode::Off => "off",
+        WebDomainPolicyMode::Shadow => "shadow",
+        WebDomainPolicyMode::Enforce => "enforce",
+    }
+}
+
+/// The verdict of the org's rules for each host a caller names (the BFF's web search and crawl, EP-9 O-23), keyed by the
+/// host exactly as the caller sent it. Under `off` nothing is read and every host is allowed. Under `shadow` and
+/// `enforce` the rules are read: a host the rules refuse, a host with no canonical form (an IP literal, a name with no
+/// dot) and a host org-core cannot answer for are all `deny`, so an outage of org-core narrows and never widens. The
+/// caller decides whether a `deny` binds from the mode it is told. Only canonical hosts go to org-core, and the log
+/// carries a count, never a host.
+pub async fn domain_verdicts(
+    mode: WebDomainPolicyMode,
+    checker: &SiteChecker,
+    owner: &SiteOwner<'_>,
+    org_id: &str,
+    hosts: &[String],
+) -> std::collections::BTreeMap<String, &'static str> {
+    let mut answer = std::collections::BTreeMap::new();
+    if mode == WebDomainPolicyMode::Off {
+        for host in hosts {
+            answer.insert(host.clone(), DOMAIN_ALLOW);
+        }
+        return answer;
+    }
+    let canonical: Vec<String> = hosts
+        .iter()
+        .filter_map(|host| mp_contracts::site_policy::canonical_host(host))
+        .collect();
+    let verdicts = checker.verdicts(owner, org_id, &canonical).await;
+    let mut refused = 0_usize;
+    for host in hosts {
+        let allowed = mp_contracts::site_policy::canonical_host(host)
+            .is_some_and(|canonical| verdicts.allows_host(&canonical));
+        if !allowed {
+            refused += 1;
+        }
+        answer.insert(
+            host.clone(),
+            if allowed { DOMAIN_ALLOW } else { DOMAIN_DENY },
+        );
+    }
+    if refused > 0 {
+        tracing::info!(
+            %org_id,
+            refused,
+            enforced = mode == WebDomainPolicyMode::Enforce,
+            "org web domain policy: hosts a domain check refused"
+        );
+    }
+    answer
+}
+
+/// The org's domain rules as a crawl carries them: the hosts an admin blocked, the hosts an admin listed, and whether
+/// a host that is neither is reachable (`open`) or not (`allowlist`, and any other mode, which narrows). Hosts are
+/// canonical and exact, as org-core stores them: a rule on a host does not reach its subdomains.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct OrgDomainRules {
+    /// `open` or `allowlist`.
+    pub mode: String,
+    /// The hosts a `block` rule names.
+    pub deny: Vec<String>,
+    /// The hosts a `read` or `act` rule names.
+    pub allow: Vec<String>,
+    /// The policy revision the rules were read at.
+    pub revision: i64,
+}
+
+/// The answer of org-core's read of one organisation's rules (`browsersites.PolicySet`). Only the fields a crawl needs.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct OrgPolicySet {
+    #[serde(default)]
+    organization_id: String,
+    #[serde(default)]
+    revision: i64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    rules: Vec<OrgPolicyRule>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct OrgPolicyRule {
+    host: String,
+    rule: String,
+}
+
+impl SiteChecker {
+    /// The org's domain rules, read now (a crawl starts rarely, so the answer is not cached). Any failure is an error: a
+    /// crawl that cannot read the rules does not start. Rules that name a host with no canonical form are an error too,
+    /// because a rule this build cannot read must not be dropped silently.
+    ///
+    /// # Errors
+    /// A text naming why the rules could not be read. It carries no host and no body.
+    pub async fn rules(
+        &self,
+        owner: &SiteOwner<'_>,
+        org_id: &str,
+    ) -> Result<OrgDomainRules, String> {
+        if !routable_org_id(org_id) {
+            return Err("the organisation id does not name a rules path".to_owned());
+        }
+        let base = owner.base_url.trim().trim_end_matches('/');
+        if base.is_empty() || owner.service_token.trim().is_empty() {
+            return Err("org-core is not configured for this service".to_owned());
+        }
+        let response = self
+            .http
+            .get(format!("{base}/internal/orgs/{org_id}/browser-sites/rules"))
+            .header("x-service-id", owner.service_id)
+            .header("x-service-token", owner.service_token)
+            .send()
+            .await
+            .map_err(|error| format!("org-core rules request failed: {error}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("org-core rules returned HTTP {status}"));
+        }
+        let set: OrgPolicySet = response
+            .json()
+            .await
+            .map_err(|error| format!("org-core rules answer is unreadable: {error}"))?;
+        if !set.organization_id.is_empty() && set.organization_id != org_id {
+            return Err(format!(
+                "org-core answered for organisation '{}', not '{org_id}'",
+                set.organization_id
+            ));
+        }
+        let mut deny = Vec::new();
+        let mut allow = Vec::new();
+        for rule in &set.rules {
+            let Some(host) = mp_contracts::site_policy::canonical_host(&rule.host) else {
+                return Err("org-core rules name a host this build cannot read".to_owned());
+            };
+            match rule.rule.as_str() {
+                "block" => deny.push(host),
+                "read" | "act" => allow.push(host),
+                _ => return Err("org-core rules carry a rule this build does not know".to_owned()),
+            }
+        }
+        deny.sort();
+        deny.dedup();
+        allow.sort();
+        allow.dedup();
+        let mode = if set.mode == "open" {
+            "open"
+        } else {
+            "allowlist"
+        };
+        Ok(OrgDomainRules {
+            mode: mode.to_owned(),
+            deny,
+            allow,
+            revision: set.revision,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -813,5 +985,72 @@ mod tests {
         assert_eq!(dropped, 0);
         assert_eq!(replies[0].results.len(), 1);
         assert_eq!(requests(&server).await, 0);
+    }
+
+    /// The path org-core's `browsersites` rules read is served at (`getBrowserSiteRulesInternal` in org-core's
+    /// `internal/http`, which its own tests pin), the same service credential headers as the resolve read, and the answer
+    /// shape org-core marshals (`organization_id`, `revision`, `mode`, `rules` as `host` and `rule`).
+    #[tokio::test]
+    async fn the_rules_read_asks_org_cores_rules_path_with_the_service_headers() {
+        const RULES_PATH: &str = "/internal/orgs/org-a/browser-sites/rules";
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(RULES_PATH))
+            .and(header("x-service-id", "model-gateway"))
+            .and(header("x-service-token", "test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "organization_id": ORG,
+                "revision": 4,
+                "mode": "allowlist",
+                "rules": [
+                    {"host": "Docs.Example.com", "rule": "read"},
+                    {"host": "bad.example.com", "rule": "block"}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let base = server.uri();
+        let rules = SiteChecker::default()
+            .rules(&owner(&base), ORG)
+            .await
+            .expect("org-core's rules answer is read");
+        assert_eq!(rules.mode, "allowlist");
+        assert_eq!(rules.revision, 4);
+        assert_eq!(rules.allow, ["docs.example.com"]);
+        assert_eq!(rules.deny, ["bad.example.com"]);
+
+        let sent = server.received_requests().await.unwrap_or_default();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].method.as_str(), "GET");
+        assert_eq!(sent[0].url.path(), RULES_PATH);
+        assert_eq!(sent[0].url.query(), None, "the rules read carries no query");
+        assert!(sent[0].body.is_empty(), "the rules read carries no body");
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn the_rules_read_fails_without_the_service_headers_org_core_requires() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/internal/orgs/org-a/browser-sites/rules"))
+            .and(header("x-service-id", "model-gateway"))
+            .and(header("x-service-token", "test-token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"mode": "open", "rules": []})),
+            )
+            .mount(&server)
+            .await;
+        let base = server.uri();
+        let wrong = SiteOwner {
+            base_url: &base,
+            service_id: "model-gateway",
+            service_token: "another-token",
+        };
+        let error = SiteChecker::default()
+            .rules(&wrong, ORG)
+            .await
+            .expect_err("a different token is not the credential org-core holds");
+        assert!(error.contains("HTTP 404"), "{error}");
     }
 }

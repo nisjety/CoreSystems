@@ -1,18 +1,19 @@
 use axum::{
     extract::{DefaultBodyLimit, Extension, Path, Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{post, MethodRouter},
     Json,
 };
 use reqwest::Method;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::{
     audience_tokens::ModelServiceAudience,
     config::AppState,
     domains::chat::shared,
+    envelope::error_with_details,
     middleware::AuthenticatedUser,
     upstream::{proxy_sse_stream_with_browser, proxy_sse_stream_with_session},
 };
@@ -60,12 +61,48 @@ pub(super) fn stream_route() -> MethodRouter<AppState> {
     post(stream_chat).layer(DefaultBodyLimit::max(stream_body_limit_bytes()))
 }
 
+/// A project start (WS18-S4): the first send of a chat in a project. The SPA names `space_ref` and no `thread_id` on
+/// that send (Session Core mints the durable id), while every follow-up carries its `thread_id`, and a project thread's
+/// follow-up carries its `space_ref` as well. So a follow-up, a turn that names no Space and the Space-room routes are
+/// never one. A thread is the snake `thread_id` only (see `existing_thread_id_of`): a camelCase `threadId` names none, so
+/// a turn that carries only that is a project start. Shared with the JSON turn and the AG-UI stream, which take the same
+/// body (after their own normalisation).
+pub(crate) fn is_project_start(body: &Value) -> bool {
+    let Some(object) = body.as_object() else {
+        return false;
+    };
+    let names_space = ["space_ref", "spaceRef"].iter().any(|key| {
+        object
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    });
+    names_space && crate::domains::spaces::existing_thread_id_of(object).is_none()
+}
+
+/// The answer to a project start while the project switch is off: a typed 404, sent before any upstream call.
+pub(crate) fn chat_projects_disabled() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(error_with_details(
+            "chat_projects_disabled",
+            "Project chats are not turned on for this gateway.",
+            json!({}),
+        )),
+    )
+}
+
 async fn stream_chat(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
+    // WS18-S4: with the project switch off a project start is refused before the retention decision, the
+    // bearers and every upstream call. Follow-ups and turns that name no Space pass exactly as before.
+    if !state.space_features.chat_projects && is_project_start(&body) {
+        return chat_projects_disabled().into_response();
+    }
     // ZDR-Z-19b: the turn's retention is decided FIRST, from the raw body, so one answer serves every
     // bearer below (model-gateway refuses delegated bearers that differ in `zdr` or `zdr_waiver`).
     // A refusal is answered as the stream answers every pre-upstream refusal and nothing is sent.
@@ -856,5 +893,200 @@ mod tests {
     #[test]
     fn an_explicit_limit_above_the_derived_one_wins() {
         assert_eq!(limit(Some("3145728"), Some("33554432")), 32 * 1024 * 1024);
+    }
+
+    fn app_with(state: crate::config::AppState) -> Router {
+        Router::new()
+            .route("/api/v1/chat/stream", stream_route())
+            .layer(Extension(member()))
+            .with_state(state)
+    }
+
+    fn turn(body: &str) -> Request {
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/chat/stream")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_owned()))
+            .expect("request")
+    }
+
+    #[test]
+    fn only_a_space_turn_with_no_thread_is_a_project_start() {
+        use super::is_project_start;
+        assert!(is_project_start(
+            &serde_json::json!({"content": "x", "space_ref": "space-1"})
+        ));
+        assert!(is_project_start(
+            &serde_json::json!({"spaceRef": "space-1", "threadId": null})
+        ));
+        // A thread is the snake `thread_id`, trimmed and non-empty: a blank one names none.
+        assert!(is_project_start(
+            &serde_json::json!({"space_ref": "space-1", "thread_id": "  "})
+        ));
+        assert!(!is_project_start(
+            &serde_json::json!({"space_ref": "space-1", "thread_id": "thread-1"})
+        ));
+        assert!(!is_project_start(
+            &serde_json::json!({"spaceRef": "space-1", "thread_id": " thread-1 "})
+        ));
+        // A camelCase `threadId` is read by nothing downstream, so it names no thread: the turn is a project start.
+        assert!(is_project_start(
+            &serde_json::json!({"space_ref": "space-1", "threadId": "thread-1"})
+        ));
+        assert!(is_project_start(
+            &serde_json::json!({"spaceRef": "space-1", "threadId": "thread-1"})
+        ));
+        assert!(!is_project_start(&serde_json::json!({"content": "x"})));
+        assert!(!is_project_start(&serde_json::json!({"space_ref": "  "})));
+    }
+
+    /// WS18-S4: with the project switch off a project start is a typed 404 `chat_projects_disabled` sent before any
+    /// upstream call. A follow-up on its thread, and a turn that names no Space, are not refused by that gate.
+    #[tokio::test]
+    async fn a_project_start_is_refused_with_the_switch_off_and_nothing_else_is() {
+        // Every upstream points at one server that must receive nothing: the refusal comes before any call.
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&upstream)
+            .await;
+        let pointed_at_upstream = || {
+            let mut state = crate::tests::test_state(false);
+            state.auth_core_url = upstream.uri();
+            state.model_gateway_url = upstream.uri();
+            state.user_core_url = upstream.uri();
+            state.org_core_url = upstream.uri();
+            state
+        };
+        // A camelCase `threadId` is read by nothing downstream, so a turn that names only that is a project start too.
+        for body in [
+            r#"{"content":"x","space_ref":"space-1"}"#,
+            r#"{"content":"x","spaceRef":"space-1"}"#,
+            r#"{"content":"x","space_ref":"space-1","threadId":"thread-1"}"#,
+            r#"{"content":"x","spaceRef":"space-1","threadId":"thread-1"}"#,
+        ] {
+            let refused = app_with(pointed_at_upstream())
+                .oneshot(turn(body))
+                .await
+                .expect("response");
+            assert_eq!(refused.status(), StatusCode::NOT_FOUND, "{body}");
+            let bytes = axum::body::to_bytes(refused.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON");
+            assert_eq!(parsed["error"]["code"], "chat_projects_disabled", "{body}");
+            assert_eq!(parsed["error"]["details"], serde_json::json!({}), "{body}");
+        }
+
+        // A follow-up on its thread (the snake `thread_id`) and a turn that names no Space are not refused by the gate.
+        for body in [
+            r#"{"content":"x","space_ref":"space-1","thread_id":"thread-1"}"#,
+            r#"{"content":"x","spaceRef":"space-1","thread_id":"thread-1"}"#,
+            r#"{"content":"x"}"#,
+            r#"{"content":"x","space_ref":"   "}"#,
+        ] {
+            let response = app_with(crate::tests::test_state(false))
+                .oneshot(turn(body))
+                .await
+                .expect("response");
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(!text.contains("chat_projects_disabled"), "{body}: {text}");
+        }
+
+        // With the switch on the same start is let through to the turn, which then fails upstream, not here.
+        let mut on = crate::tests::test_state(false);
+        on.space_features.chat_projects = true;
+        let response = app_with(on)
+            .oneshot(turn(r#"{"content":"x","space_ref":"space-1"}"#))
+            .await
+            .expect("response");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert!(!String::from_utf8_lossy(&bytes).contains("chat_projects_disabled"));
+    }
+
+    /// WS18-S4: the JSON turn (`POST /api/v1/chat/invoke`) takes the same body and the same retention decision, so a
+    /// project start is refused there with the same typed 404, before any upstream call, while the switch is off.
+    #[tokio::test]
+    async fn a_project_start_on_the_json_turn_is_refused_with_the_switch_off() {
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&upstream)
+            .await;
+        // The snake Space reference, and the camelCase `threadId` that names no thread: both are project starts here.
+        for body in [
+            r#"{"content":"x","space_ref":"space-1"}"#,
+            r#"{"content":"x","spaceRef":"space-1","threadId":"thread-1"}"#,
+        ] {
+            let mut state = crate::tests::test_state(false);
+            state.auth_core_url = upstream.uri();
+            state.model_gateway_url = upstream.uri();
+            state.user_core_url = upstream.uri();
+            state.org_core_url = upstream.uri();
+            let router = Router::new()
+                .route(
+                    "/api/v1/chat/invoke",
+                    axum::routing::post(crate::domains::chat::json_handlers::invoke_chat),
+                )
+                .layer(Extension(member()))
+                .with_state(state);
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/chat/invoke")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{body}");
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON");
+            assert_eq!(parsed["error"]["code"], "chat_projects_disabled", "{body}");
+        }
+    }
+
+    /// WS18-S4: a Space-room post is not a chat turn, so the project switch does not answer it. With the switch off the
+    /// room route runs as it did: a valid post is answered by its own route and reaches Control for its Space decision,
+    /// and it is never answered `chat_projects_disabled`. The room route takes only `content` and `client_send_id` (its
+    /// body denies unknown fields, and the Space is in the path), so the post names no Space in its body.
+    #[tokio::test]
+    async fn a_space_room_post_is_not_answered_as_a_project_refusal_with_the_switch_off() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = crate::domains::spaces::human_posts::tests::fixture(
+            crate::domains::spaces::human_posts::tests::org_posture(false),
+            crate::domains::spaces::human_posts::tests::active_space(),
+        )
+        .await;
+        assert!(!fx.state.space_features.chat_projects);
+        let (_status, _json, raw) = crate::domains::spaces::human_posts::tests::send(
+            &fx.state,
+            "/api/v1/spaces/space-room/threads",
+            None,
+            serde_json::json!({
+                "content": "hello",
+                "client_send_id": "send_id_0123456789ab",
+            }),
+        )
+        .await;
+        assert!(!raw.contains("chat_projects_disabled"), "{raw}");
+        assert!(
+            !crate::domains::spaces::human_posts::tests::control_calls(&fx)
+                .await
+                .is_empty(),
+            "the room route reached Control: {raw}"
+        );
     }
 }

@@ -1685,6 +1685,23 @@ async fn crawl_handoff(
             }]),
         ));
     }
+    // EP-9 O-23: the org's web domain rules ride in the crawl scope. A crawl that runs with the scope switch
+    // off is a legacy one with no context to carry them to a page, so it is refused instead of following
+    // every link.
+    if crate::crawl_policy::domain_rules_need_scope(
+        crate::crawl_policy::CrawlScopeSwitch::current(),
+        req.scope.domain_rules.is_some(),
+    ) {
+        return Err(crawl_request_refusal(
+            &request_id,
+            crate::crawl_request::Refusal::Invalid(vec![crate::crawl_request::RequestField {
+                path: "domain_rules".to_owned(),
+                code: "unsupported_option",
+                message: "domain_rules need the crawl scope (QUARRY_EDGE__CRAWL_SCOPE_MODE observe or enforce)"
+                    .to_owned(),
+            }]),
+        ));
+    }
     // WS7.E: the seed is gated by the web policy before the handoff. A denial is a 403 and
     // the orchestrator is never called. The durable refusal above already decided ZDR, so
     // the decision is taken for a non-ZDR run.
@@ -1757,6 +1774,17 @@ async fn crawl_handoff(
     // WS14.S7a: an allowed override runs the crawl with robots ignored (`effective.robots`).
     if robots_override.is_some() {
         scope.robots = quarry_core::crawl_scope::RobotsMode::Ignore;
+    }
+    // EP-9 O-23: how many hosts the org's rules name, never which. The links they drop are counted in each
+    // page's crawl report (`not_crawlable`, reason `org_domain_rule`) under `enforce` and only reported under
+    // `observe`.
+    if let Some(rules) = scope.scope.domain_rules.as_ref() {
+        tracing::info!(
+            deny_hosts = rules.deny.len(),
+            allow_hosts = rules.allow.len(),
+            enforced = scope.scope_mode == quarry_core::crawl_scope::ScopeMode::Enforce,
+            "crawl carries the org's web domain rules"
+        );
     }
     let origin = crate::handoff::run_origin_from_request(&claims, &headers);
     let idempotency_key = crate::handoff::idempotency_key_from_request(&headers);

@@ -17,6 +17,18 @@ type CrawlScope struct {
 	// Legacy is set by the handoff for a crawl accepted with the scope switch
 	// off. The workflow then sends no context and runs as it did before scope.
 	Legacy bool `json:"legacy,omitempty"`
+	// DomainRules are the org's web domain rules the edge stamped on the crawl (EP-9, O-23). The workflow carries them
+	// to every page run untouched, and the edge drops each followed link they refuse. Absent for a crawl that carries
+	// none, which then marshals exactly as it did before the field existed.
+	DomainRules *DomainRules `json:"domain_rules,omitempty"`
+}
+
+// DomainRules is quarry-core's DomainRules: the org's hosts a crawl never follows, and in allowlist mode the only
+// hosts it does. The orchestrator does not read it; it keeps the wire shape so the rules survive the round trip.
+type DomainRules struct {
+	Mode  string   `json:"mode"`
+	Deny  []string `json:"deny"`
+	Allow []string `json:"allow"`
 }
 
 // Crawl kinds and the scope and robots values a context may carry.

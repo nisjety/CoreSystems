@@ -1,6 +1,7 @@
 use axum::{
+    body::Body,
     extract::{Extension, State},
-    http::{HeaderMap, StatusCode},
+    http::{header::CACHE_CONTROL, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -9,7 +10,7 @@ use serde_json::{json, Value};
 
 use crate::{
     config::AppState,
-    envelope::{error, ok, unwrap_data},
+    envelope::{error, error_with_details, ok, unwrap_data},
     middleware::AuthenticatedUser,
     upstream::{
         browser_origin, proxy_auth, proxy_json, proxy_session_json, user_core_delegation_headers,
@@ -331,6 +332,134 @@ async fn proxy_two_factor(
     .await
 }
 
+/// The most body `POST /api/v1/auth/step-up` reads: one password field and its JSON (F-f03-15).
+const STEP_UP_BODY_LIMIT_BYTES: usize = 2 * 1024;
+/// The longest password the step-up route forwards, in bytes. Auth Core refuses a longer one too.
+const STEP_UP_PASSWORD_MAX_BYTES: usize = 1024;
+
+/// `POST /api/v1/auth/step-up` (F-f03-15): the signed-in person re-confirms their password before a high-risk
+/// approval. The gateway checks only the shape of the body. Auth Core re-verifies the password, records the proof for
+/// the session and answers, and that answer is relayed with its status, as it came. Nothing here verifies, stores or
+/// logs the password or the answer, and every answer is `Cache-Control: no-store`.
+pub(super) async fn step_up(
+    State(state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let Ok(bytes) = axum::body::to_bytes(body, STEP_UP_BODY_LIMIT_BYTES).await else {
+        return step_up_refused("body_too_large");
+    };
+    let password = match step_up_password(&bytes) {
+        Ok(password) => password,
+        Err(reason) => return step_up_refused(reason),
+    };
+    let mut request = state
+        .client
+        .post(format!("{}/api/v2/auth/step-up", state.auth_core_url))
+        .json(&json!({ "password": password }));
+    let cookie = cookie_header(&headers);
+    if !cookie.is_empty() {
+        request = request.header("cookie", cookie);
+    }
+    if let Some(origin) = browser_origin(&headers) {
+        request = request.header("origin", origin);
+    }
+    let upstream = match request.send().await {
+        Ok(upstream) => upstream,
+        Err(failure) => {
+            tracing::warn!(
+                error_class = crate::zdr_log::class_reqwest(&failure),
+                "step-up: auth-core unreachable"
+            );
+            return step_up_unavailable();
+        }
+    };
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    if !relays_step_up_status(status) {
+        return step_up_unavailable();
+    }
+    let Ok(answer) = upstream.json::<Value>().await else {
+        return step_up_unavailable();
+    };
+    no_store((status, Json(answer)).into_response())
+}
+
+/// The password of a step-up body, when the body is exactly one `password` string of 1 to 1024 bytes. Otherwise the
+/// closed reason it was refused for, which never echoes the body.
+fn step_up_password(bytes: &[u8]) -> Result<String, &'static str> {
+    let body: Value = serde_json::from_slice(bytes).map_err(|_| "body_not_json")?;
+    let Some(fields) = body.as_object() else {
+        return Err("body_not_an_object");
+    };
+    if fields.keys().any(|key| key != "password") {
+        return Err("unexpected_field");
+    }
+    let Some(password) = fields.get("password") else {
+        return Err("password_missing");
+    };
+    let Some(password) = password.as_str() else {
+        return Err("password_not_a_string");
+    };
+    if password.is_empty() || password.len() > STEP_UP_PASSWORD_MAX_BYTES {
+        return Err("password_length");
+    }
+    Ok(password.to_owned())
+}
+
+/// The typed refusal of a step-up body that is not exactly one password (400). `reason` is a closed word, never the
+/// body.
+fn step_up_refused(reason: &'static str) -> Response {
+    no_store(
+        (
+            StatusCode::BAD_REQUEST,
+            Json(error_with_details(
+                "invalid_request",
+                "Send the password to confirm, and nothing else.",
+                json!({ "reason": reason }),
+            )),
+        )
+            .into_response(),
+    )
+}
+
+/// The refusal when Auth Core cannot be asked, or answers with something this route does not relay (502).
+fn step_up_unavailable() -> Response {
+    no_store(
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "step_up_unavailable",
+                "The password confirmation is unavailable. Try again shortly.",
+            )),
+        )
+            .into_response(),
+    )
+}
+
+/// The statuses relayed from Auth Core: its success, its typed refusals (400 validation, 401 wrong password or no
+/// session, 403 `STEP_UP_METHOD_UNAVAILABLE`, 429 `RATE_LIMITED`) and its 503 `STEP_UP_UNAVAILABLE`.
+fn relays_step_up_status(status: StatusCode) -> bool {
+    status.is_success()
+        || matches!(
+            status,
+            StatusCode::BAD_REQUEST
+                | StatusCode::UNAUTHORIZED
+                | StatusCode::FORBIDDEN
+                | StatusCode::TOO_MANY_REQUESTS
+                | StatusCode::SERVICE_UNAVAILABLE
+        )
+}
+
+/// Marks an answer `Cache-Control: no-store`: a proof, and a refusal of one, is never cached.
+fn no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
 fn merge_session_user_profile(body: &mut Value, user: &AuthenticatedUser) {
     if let Some(data) = body.get_mut("data") {
         merge_session_user_profile(data, user);
@@ -455,4 +584,397 @@ pub(super) async fn admin_list_users(
         browser_origin(&headers).as_deref(),
     )
     .await
+}
+
+/// F-f03-15: the step-up route relays Auth Core's password re-check, and never keeps, logs or re-verifies the
+/// password. The handler is driven directly with a wiremock Auth Core, and the router with the switch on and off.
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::{
+        body::Body,
+        extract::{Extension, State},
+        http::{header::CACHE_CONTROL, HeaderMap, HeaderValue, Request, StatusCode},
+        response::Response,
+    };
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+    use wiremock::{
+        matchers::{body_json, header, method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    use super::{step_up, STEP_UP_PASSWORD_MAX_BYTES};
+    use crate::{
+        config::AppState,
+        middleware::{AuthenticatedUser, AuthorizedMembership},
+    };
+
+    const SESSION_COOKIE: &str = "better-auth.session_token=session-1";
+    /// The password every test sends: distinctive, so a log that carried it is easy to recognise.
+    const PASSWORD: &str = "pw-canary-7f3a9c-correct";
+    /// The two tests that reach the step-up warning hold this lock. tracing computes a callsite's interest from the
+    /// thread that registers it, so a test without a capture that registers the warning first would hide it from
+    /// the capturing test.
+    static WARNING_CAPTURE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn member() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "Chat User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    fn cookied() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            HeaderValue::from_static(SESSION_COOKIE),
+        );
+        headers
+    }
+
+    fn password_body() -> String {
+        json!({ "password": PASSWORD }).to_string()
+    }
+
+    /// An Auth Core whose step-up route answers `answer` to the call a test makes.
+    async fn auth_core(answer: ResponseTemplate) -> MockServer {
+        let auth = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v2/auth/step-up"))
+            .respond_with(answer)
+            .mount(&auth)
+            .await;
+        auth
+    }
+
+    fn state_with(auth: &MockServer) -> AppState {
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state
+    }
+
+    /// Calls the handler as the session middleware leaves it: a verified caller, the browser's headers and a body.
+    async fn call(
+        state: AppState,
+        headers: HeaderMap,
+        body: &str,
+    ) -> (StatusCode, HeaderMap, Value) {
+        let response: Response = step_up(
+            State(state),
+            Extension(member()),
+            headers,
+            Body::from(body.to_owned()),
+        )
+        .await;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        (
+            status,
+            headers,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    async fn auth_calls(auth: &MockServer) -> usize {
+        auth.received_requests().await.expect("recording on").len()
+    }
+
+    #[tokio::test]
+    async fn a_proof_is_relayed_with_auth_cores_status_and_is_never_cached() {
+        let answer = json!({ "data": {
+            "method": "password",
+            "stepUpAt": "2026-11-20T10:00:00.000Z",
+            "expiresAt": "2026-11-20T10:02:00.000Z",
+            "expiresInSeconds": 120,
+        }});
+        // The mock answers only the exact body under the caller's cookie, so a different request fails the test.
+        let auth = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v2/auth/step-up"))
+            .and(header("cookie", SESSION_COOKIE))
+            .and(body_json(json!({ "password": PASSWORD })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(answer.clone()))
+            .expect(1)
+            .mount(&auth)
+            .await;
+
+        let (status, headers, body) = call(state_with(&auth), cookied(), &password_body()).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body, answer);
+        assert_eq!(
+            headers
+                .get(CACHE_CONTROL)
+                .expect("cache-control")
+                .to_str()
+                .expect("ascii"),
+            "no-store"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_cores_refusals_are_relayed_with_their_status_and_body() {
+        for (status, code) in [
+            (400, "VALIDATION_ERROR"),
+            (401, "INVALID_PASSWORD"),
+            (403, "STEP_UP_METHOD_UNAVAILABLE"),
+            (429, "RATE_LIMITED"),
+            (503, "STEP_UP_UNAVAILABLE"),
+        ] {
+            let refusal = json!({ "code": code, "message": "Auth Core's words." });
+            let auth =
+                auth_core(ResponseTemplate::new(status).set_body_json(refusal.clone())).await;
+            let (relayed, _, body) = call(state_with(&auth), cookied(), &password_body()).await;
+            assert_eq!(relayed.as_u16(), status, "{code}");
+            assert_eq!(body, refusal, "{code}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unrelayed_answer_and_an_unreachable_auth_core_are_step_up_unavailable() {
+        let _capture = WARNING_CAPTURE.lock().await;
+        let auth = auth_core(ResponseTemplate::new(500).set_body_string("boom")).await;
+        let (status, headers, body) = call(state_with(&auth), cookied(), &password_body()).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"]["code"], "step_up_unavailable");
+        assert_eq!(
+            headers
+                .get(CACHE_CONTROL)
+                .expect("cache-control")
+                .to_str()
+                .expect("ascii"),
+            "no-store"
+        );
+
+        let mut unreachable = crate::tests::test_state(false);
+        unreachable.auth_core_url = "http://127.0.0.1:1".to_owned();
+        let (status, _, body) = call(unreachable, cookied(), &password_body()).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"]["code"], "step_up_unavailable");
+    }
+
+    #[tokio::test]
+    async fn a_body_that_is_not_exactly_one_password_is_refused_before_auth_core() {
+        let too_long =
+            json!({ "password": "x".repeat(STEP_UP_PASSWORD_MAX_BYTES + 1) }).to_string();
+        let oversized = json!({ "password": "x".repeat(3 * 1024) }).to_string();
+        for (body, reason) in [
+            ("not json", "body_not_json"),
+            ("[\"password\"]", "body_not_an_object"),
+            ("{}", "password_missing"),
+            ("{\"password\":5}", "password_not_a_string"),
+            ("{\"password\":\"\"}", "password_length"),
+            (too_long.as_str(), "password_length"),
+            ("{\"password\":\"a\",\"remember\":true}", "unexpected_field"),
+            ("{\"pass\":\"a\"}", "unexpected_field"),
+            (oversized.as_str(), "body_too_large"),
+        ] {
+            let auth = auth_core(ResponseTemplate::new(201).set_body_json(json!({}))).await;
+            let (status, _, answer) = call(state_with(&auth), cookied(), body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{reason}");
+            assert_eq!(answer["error"]["code"], "invalid_request", "{reason}");
+            assert_eq!(answer["error"]["details"]["reason"], reason);
+            assert_eq!(auth_calls(&auth).await, 0, "{reason}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_password_of_exactly_the_longest_allowed_length_is_forwarded() {
+        let longest = "x".repeat(STEP_UP_PASSWORD_MAX_BYTES);
+        let auth = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v2/auth/step-up"))
+            .and(body_json(json!({ "password": longest.clone() })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "data": {} })))
+            .expect(1)
+            .mount(&auth)
+            .await;
+        let body = json!({ "password": longest }).to_string();
+        let (status, _, _) = call(state_with(&auth), cookied(), &body).await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn the_password_is_never_logged_on_any_path() {
+        let _capture = WARNING_CAPTURE.lock().await;
+        #[derive(Clone, Default)]
+        struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for LogBuffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        // Callsites other tests hit while no capture was set keep a cached "never"; rebuild so every warning here reaches
+        // this buffer, and probe so the assertions below can tell a dead capture from a clean log.
+        tracing::callsite::rebuild_interest_cache();
+        tracing::warn!(probe = "capture", "step-up-capture-probe");
+
+        // A relayed refusal, a body refused before any call, and a transport failure.
+        let auth = auth_core(
+            ResponseTemplate::new(401).set_body_json(json!({ "code": "INVALID_PASSWORD" })),
+        )
+        .await;
+        let _ = call(state_with(&auth), cookied(), &password_body()).await;
+        let refused_body = format!("{{\"password\":\"{PASSWORD}\",\"extra\":1}}");
+        let _ = call(state_with(&auth), cookied(), &refused_body).await;
+        let mut unreachable = crate::tests::test_state(false);
+        unreachable.auth_core_url = "http://127.0.0.1:1".to_owned();
+        let _ = call(unreachable, cookied(), &password_body()).await;
+
+        let logged = String::from_utf8_lossy(&buffer.0.lock().unwrap()).into_owned();
+        assert!(
+            logged.contains("step-up-capture-probe"),
+            "the capture is not live: {logged}"
+        );
+        assert!(
+            logged.contains("step-up: auth-core unreachable"),
+            "{logged}"
+        );
+        assert!(
+            !logged.contains(PASSWORD),
+            "the password was logged: {logged}"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_the_switch_off_the_route_does_not_exist() {
+        let auth = auth_core(ResponseTemplate::new(201).set_body_json(json!({}))).await;
+        let state = state_with(&auth);
+        assert!(!state.auth_step_up_route_enabled);
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/step-up")
+                    .header("cookie", SESSION_COOKIE)
+                    .header("content-type", "application/json")
+                    .body(Body::from(password_body()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(auth_calls(&auth).await, 0);
+    }
+
+    #[tokio::test]
+    async fn with_the_switch_on_the_route_needs_a_signed_in_session() {
+        let auth = auth_core(ResponseTemplate::new(201).set_body_json(json!({}))).await;
+        let mut state = state_with(&auth);
+        state.auth_step_up_route_enabled = true;
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/step-up")
+                    .header("content-type", "application/json")
+                    .body(Body::from(password_body()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(auth_calls(&auth).await, 0);
+    }
+
+    #[tokio::test]
+    async fn with_the_switch_on_a_signed_in_person_reaches_auth_core_through_the_session() {
+        let auth = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"},
+            })))
+            .mount(&auth)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v2/auth/step-up"))
+            .and(header("cookie", SESSION_COOKIE))
+            .and(body_json(json!({ "password": PASSWORD })))
+            .respond_with(
+                ResponseTemplate::new(201)
+                    .set_body_json(json!({ "data": { "method": "password" } })),
+            )
+            .expect(1)
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1", "orgId": "org-1", "role": "owner", "onboardingStatus": "COMPLETED",
+            })))
+            .mount(&user_core)
+            .await;
+        let mut state = state_with(&auth);
+        state.user_core_url = user_core.uri();
+        state.auth_step_up_route_enabled = true;
+
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/step-up")
+                    .header("cookie", SESSION_COOKIE)
+                    .header("content-type", "application/json")
+                    .body(Body::from(password_body()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[test]
+    fn the_step_up_switch_is_on_only_for_the_exact_word_true() {
+        assert!(crate::config::auth_step_up_route_enabled_from(Some("true")));
+        for value in [
+            None,
+            Some(""),
+            Some(" true"),
+            Some("true "),
+            Some("1"),
+            Some("TRUE"),
+            Some("yes"),
+            Some("false"),
+        ] {
+            assert!(
+                !crate::config::auth_step_up_route_enabled_from(value),
+                "{value:?}"
+            );
+        }
+    }
 }
