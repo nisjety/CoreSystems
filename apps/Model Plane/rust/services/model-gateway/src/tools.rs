@@ -191,6 +191,9 @@ pub async fn handle_code_interpreter(
     // The `/skills` mounts of the turn's matched skills (WS19-S8). Derived by the gateway from the
     // turn's own matches, never from the model's arguments; empty on every turn without them.
     skill_mounts: &[SkillMount],
+    // The calling turn's own capability bearer, which makes the org's hook rules readable (F-f06-04). `None` where the
+    // caller holds none; a durable read then answers from the snapshot inside its bound or refuses.
+    capability_bearer: Option<&str>,
 ) -> Result<String, String> {
     if code.trim().is_empty() {
         return Err("code_interpreter requires non-empty 'code'".to_owned());
@@ -209,6 +212,14 @@ pub async fn handle_code_interpreter(
     // (rejecting absolute paths and traversal) since it owns the workspace.
     if let Some(files_in) = files_in.filter(|value| !value.is_null()) {
         tool_input["files_in"] = files_in.clone();
+    }
+    // The org's hook rules travel with this step (F-f06-04): made readable with the caller's own bearer before the
+    // request is built, so a refused read sends nothing to execution-core.
+    if let Err(code) =
+        crate::runtime_registries::require_org_hooks(state, org_id, capability_bearer).await
+    {
+        let (_, message) = crate::runtime_registries::ORG_HOOKS_UNAVAILABLE_ANSWER;
+        return Err(format!("{code}: {message}"));
     }
     let mut request = tonic::Request::new(ExecuteStepRequest {
         run_id: run_id.to_owned(),
@@ -245,6 +256,8 @@ pub async fn handle_code_interpreter(
         skill_mounts: skill_mounts.to_vec(),
         // Only a browser_agent step reads a connector selection (QF-16).
         connector_scope: None,
+        // A code_interpreter step is an ordinary step, never an MCP-app side call.
+        side_call: false,
     });
     request.metadata_mut().insert(
         "authorization",
@@ -1352,6 +1365,34 @@ mod tests {
     /// The options-taking handler exists so a caller can narrow the search to
     /// the turn's language and recency; this pins that they actually reach
     /// the edge under the names it reads, rather than stopping at the gateway.
+    /// F-f06-04: `code_interpreter` makes the org's hook rules readable with the caller's own bearer before the step
+    /// carries them, so a refused read sends nothing to execution-core.
+    #[test]
+    fn code_interpreter_makes_the_hook_rules_readable_before_it_builds_the_step() {
+        let source = include_str!("tools.rs").replace("\r\n", "\n");
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("the test module is in this file");
+        let from = production
+            .find("pub async fn handle_code_interpreter(")
+            .expect("handle_code_interpreter is in the production text");
+        let rest = &production[from..];
+        let body = &rest[..rest.find("\n}\n").expect("the function ends")];
+        let require = body.find("require_org_hooks(").expect("the rules are read");
+        let built = body
+            .find("let mut request = tonic::Request::new(ExecuteStepRequest {")
+            .expect("the step is built");
+        let carried = body
+            .find("hook_context: crate::runtime_registries::hook_context_json")
+            .expect("the step carries the rules");
+        assert!(require < built && built < carried, "{body}");
+        assert!(
+            body[require..built].contains("capability_bearer"),
+            "the caller's own capability bearer is the one read"
+        );
+    }
+
     #[tokio::test]
     async fn web_search_options_reach_the_edge() {
         let quarry = MockServer::start().await;
@@ -2139,6 +2180,7 @@ mod tests {
                 files_in,
                 attachments.run_attachments(),
                 &[],
+                None,
             )
             .await
         }
@@ -2229,6 +2271,7 @@ mod tests {
                 None,
                 attachments.run_attachments(),
                 &[],
+                None,
             )
             .await
         }

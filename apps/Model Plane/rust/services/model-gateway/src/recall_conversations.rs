@@ -137,22 +137,34 @@ pub fn refusal_from_controls(controls: Option<&MemoryControls>) -> Option<String
     }
 }
 
-/// The refusal for the person's memory state, read from Session Core on the caller's own credential. A read
-/// that fails is a refusal too.
+/// The controls read the recall gate asks Session Core for. A named thread (F-f06-07) asks for that thread's own
+/// decision, with its memory mode and containment folded in; an empty `thread_id` is the user-level view it always was.
+#[must_use]
+pub fn controls_request(org_id: &str, user_id: &str, thread_id: &str) -> GetMemoryControlsRequest {
+    GetMemoryControlsRequest {
+        org_id: org_id.to_owned(),
+        user_id: user_id.to_owned(),
+        thread_id: thread_id.to_owned(),
+    }
+}
+
+/// The refusal for the person's memory state in one thread, read from Session Core on the caller's own credential
+/// (F-f06-07). A thread set off refuses the offer and the call alike, and Session Core's reason word reaches the model
+/// unchanged. A read that fails is a refusal too. The thread id is not logged here.
 pub async fn memory_refusal(
     state: &AppState,
     org_id: &str,
     user_id: &str,
+    thread_id: &str,
     bearer: &str,
 ) -> Option<String> {
-    let request = GetMemoryControlsRequest {
-        org_id: org_id.to_owned(),
-        user_id: user_id.to_owned(),
-    };
     match state
         .memory_client
         .clone()
-        .get_memory_controls(with_authorization(request, bearer))
+        .get_memory_controls(with_authorization(
+            controls_request(org_id, user_id, thread_id),
+            bearer,
+        ))
         .await
     {
         Ok(response) => refusal_from_controls(response.into_inner().controls.as_ref()),
@@ -186,8 +198,14 @@ pub async fn outcome(state: &AppState, call: &ToolCall, caller: &RecallCaller<'_
     if caller.waived {
         return answered(call, unavailable("waived"));
     }
-    if let Some(reason) =
-        memory_refusal(state, caller.org_id, caller.user_id, caller.session_bearer).await
+    if let Some(reason) = memory_refusal(
+        state,
+        caller.org_id,
+        caller.user_id,
+        caller.thread_id,
+        caller.session_bearer,
+    )
+    .await
     {
         return answered(call, unavailable(&reason));
     }
@@ -457,6 +475,40 @@ mod tests {
             refusal_from_controls(None).as_deref(),
             Some(MEMORY_UNAVAILABLE)
         );
+    }
+
+    /// F-f06-07: the controls read names the thread the turn is in, so a thread set off refuses the offer and the call
+    /// alike. Without a thread the request is the user-level view it has always been.
+    #[test]
+    fn the_controls_read_names_the_turns_thread() {
+        let named = controls_request("org_test", "user_test", "thread_now");
+        assert_eq!(named.org_id, "org_test");
+        assert_eq!(named.user_id, "user_test");
+        assert_eq!(named.thread_id, "thread_now");
+        assert_eq!(controls_request("org_test", "user_test", "").thread_id, "");
+    }
+
+    /// F-f06-07: a thread's own refusal reaches the model as Session Core's word, unchanged, in the same answer shape
+    /// as the user's own refusals. A thread whose memory is allowed stays offered, and an agent run's thread keeps the
+    /// owner's reads (its writes are refused elsewhere).
+    #[test]
+    fn a_thread_refusal_reaches_the_model_as_session_cores_word() {
+        for reason in ["thread_off", "space_scope"] {
+            let controls = MemoryControls {
+                use_allowed: false,
+                reason: reason.to_owned(),
+                ..Default::default()
+            };
+            let refusal = refusal_from_controls(Some(&controls)).expect("refused");
+            assert_eq!(refusal, reason);
+            assert_eq!(reason_of(&unavailable(&refusal)), reason);
+        }
+        let agent_run = MemoryControls {
+            use_allowed: true,
+            reason: "agent_run_scope".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(refusal_from_controls(Some(&agent_run)), None);
     }
 
     /// Each snippet is bounded in characters, and the whole result in the length of its serialized form, so

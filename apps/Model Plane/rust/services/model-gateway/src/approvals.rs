@@ -942,6 +942,46 @@ pub(crate) async fn read_through_approval_for_owner_authenticated(
     cache_durable_approval_for_owner(store, &durable, approval_id, org_id, owner_user_id)
 }
 
+/// The durable approval as Session Core records it, read with the caller's verified session bearer (F-f03-14). The
+/// step-up gate of a grant needs the approval's cause, and the gateway cache keeps none, so the gate reads the record
+/// here. This is the same authenticated read the HTTP decide route makes before a grant. Session Core filters it to
+/// the bearer's own approvals, so a caller other than the owner gets not-found.
+///
+/// # Errors
+/// Returns an authentication, transport, or durable-store status when the record cannot be read, or `data_loss` when
+/// the record is not the one asked for.
+pub(crate) async fn read_durable_approval_authenticated(
+    client: &mut OrchestrationCoreServiceClient<Channel>,
+    approval_id: &str,
+    org_id: &str,
+    bearer: &str,
+) -> Result<Approval, Status> {
+    let response = client
+        .get_approval(authenticated_session_request(
+            GetApprovalRequest {
+                approval_id: approval_id.to_owned(),
+                org_id: org_id.to_owned(),
+                ..Default::default()
+            },
+            bearer,
+        )?)
+        .await
+        .map_err(|error| {
+            warn!(%error, approval_id, org_id, "durable approval read for a grant failed");
+            error
+        })?
+        .into_inner();
+    let durable = response
+        .approval
+        .ok_or_else(|| Status::not_found("approval not found"))?;
+    if durable.id != approval_id || durable.org_id != org_id {
+        return Err(Status::data_loss(
+            "durable approval response did not match the authenticated scope",
+        ));
+    }
+    Ok(durable)
+}
+
 /// Lists pending approvals for an org, optionally scoped to a run.
 ///
 /// Merges the warm in-memory cache with a fresh durable read-through from

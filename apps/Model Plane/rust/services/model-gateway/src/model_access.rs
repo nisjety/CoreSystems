@@ -17,17 +17,27 @@
 //! # When inference-core cannot say
 //!
 //! A typed refusal in the status (`model_entitlement_unavailable`: the answer
-//! could not be read and inference-core fails closed) is the turn's refusal. Any
-//! other failure of the question, including a build of inference-core that does
-//! not know it, is not a verdict: the turn goes on and the same policy is
-//! applied where it always is, at inference-core's own pre-check, which refuses
+//! could not be read and inference-core fails closed) is the turn's refusal. By
+//! default any other failure of the question, including a build of inference-core
+//! that does not know it, is not a verdict: the turn goes on and the same policy
+//! is applied where it always is, at inference-core's own pre-check, which refuses
 //! under `enforce` whatever the gateway asked. What that costs is only the rows a
 //! refused turn leaves behind, never a model call.
+//!
+//! With `MODEL_GATEWAY_MODEL_ACCESS_FAIL_CLOSED=true` (the exact literal, read once
+//! per process, off by default) the gateway refuses for itself as well: every
+//! failure of the question becomes the turn's `model_entitlement_unavailable`
+//! refusal, before any durable call, except `Unimplemented` and `NotFound`. Those
+//! come from an inference-core that does not know the RPC yet, during a rolling
+//! deploy, and keep the default above. Off, nothing here changes. The switch
+//! applies to every caller of [`admit`] (the invoke transports, council and
+//! agent-API runs); embeddings are not gated and never ask.
 //!
 //! Everything here is content-free: the question carries an organisation id, a
 //! model id and a provider hint, and a refusal names a model id and a reason.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use axum::{http::StatusCode, Json};
@@ -37,7 +47,7 @@ use mp_contracts::model_plane::v1::{
     ModelPolicyDoc, PrivacyTier, ReasoningEffort, SurfaceDefault,
 };
 use serde_json::{json, Map, Value};
-use tonic::{metadata::MetadataMap, transport::Channel, Status};
+use tonic::{metadata::MetadataMap, transport::Channel, Code, Status};
 
 /// The product surface whose defaults the gateway asks for.
 pub const CHAT_SURFACE: &str = "chat";
@@ -45,6 +55,27 @@ pub const CHAT_SURFACE: &str = "chat";
 /// How long the question may take. It is on the path of every turn, and
 /// inference-core's own answer is cached, so a slow one is a sick one.
 const ASK_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The switch that makes a question nobody can answer refuse the turn at the gateway.
+pub const FAIL_CLOSED_ENV: &str = "MODEL_GATEWAY_MODEL_ACCESS_FAIL_CLOSED";
+
+/// Whether a question that cannot be answered refuses the turn, read once per process so a turn
+/// cannot see it change. Only the exact literal `true` turns it on.
+fn fail_closed() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| fail_closed_from(std::env::var(FAIL_CLOSED_ENV).ok().as_deref()))
+}
+
+/// The strict reading of [`FAIL_CLOSED_ENV`]: nothing but the literal `true`.
+fn fail_closed_from(raw: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(raw)
+}
+
+/// Whether a status is an inference-core that does not know the question yet, which keeps the
+/// default however the switch is set: the RPC is unimplemented, or its route is not found.
+fn is_unknown_rpc(code: Code) -> bool {
+    matches!(code, Code::Unimplemented | Code::NotFound)
+}
 
 /// What admission decided for a turn it let through. The default changes nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -88,7 +119,7 @@ pub async fn admit(
     model: &str,
     provider_hint: &str,
 ) -> Result<Admitted, Refusal> {
-    let outcome = admit_inner(client, auth, org_id, model, provider_hint).await;
+    let outcome = admit_inner(client, auth, org_id, model, provider_hint, fail_closed()).await;
     let label = match &outcome {
         Ok(Some(_)) => "admitted",
         Ok(None) => "unchecked",
@@ -99,15 +130,17 @@ pub async fn admit(
     outcome.map(Option::unwrap_or_default)
 }
 
-/// [`admit`] without the count: `None` when no verdict was available.
+/// [`admit`] without the count: `None` when no verdict was available. `fail_closed` is the
+/// switch, passed in so that a test can set it.
 async fn admit_inner(
     client: &InferenceCoreClient<Channel>,
     auth: &MetadataMap,
     org_id: &str,
     model: &str,
     provider_hint: &str,
+    fail_closed: bool,
 ) -> Result<Option<Admitted>, Refusal> {
-    let Some(answer) = ask(client, auth, org_id, model, provider_hint).await? else {
+    let Some(answer) = ask(client, auth, org_id, model, provider_hint, fail_closed).await? else {
         return Ok(None);
     };
     let mut admitted = judge(&answer, model)?;
@@ -116,7 +149,8 @@ async fn admit_inner(
         // The default is a model like any other: a policy that names one the
         // caller may not use is refused here, not at inference-core after the
         // turn's rows exist.
-        if let Some(answer) = ask(client, auth, org_id, default, provider_hint).await? {
+        if let Some(answer) = ask(client, auth, org_id, default, provider_hint, fail_closed).await?
+        {
             admitted = judge(&answer, default)?;
         }
         admitted.model = Some(default.to_owned());
@@ -131,13 +165,15 @@ fn is_unnamed(model: &str) -> bool {
     model.is_empty() || model.eq_ignore_ascii_case("default")
 }
 
-/// The question, and the answer when there is one to read.
+/// The question, and the answer when there is one to read. With `fail_closed`, a question that
+/// fails for any reason but an unknown RPC is the turn's refusal; without it, it is no verdict.
 async fn ask(
     client: &InferenceCoreClient<Channel>,
     auth: &MetadataMap,
     org_id: &str,
     model: &str,
     provider_hint: &str,
+    fail_closed: bool,
 ) -> Result<Option<GetModelAccessResponse>, Refusal> {
     let mut request = tonic::Request::new(GetModelAccessRequest {
         org_id: org_id.to_owned(),
@@ -152,6 +188,13 @@ async fn ask(
         Ok(answer) => Ok(Some(answer.into_inner())),
         Err(status) => match Refusal::from_status(&status) {
             Some(refusal) => Err(refusal),
+            None if fail_closed && !is_unknown_rpc(status.code()) => {
+                tracing::warn!(
+                    grpc_code = ?status.code(),
+                    "model admission: inference-core gave no verdict; the turn is refused (fail closed)"
+                );
+                Err(Refusal::unavailable())
+            }
             None => {
                 tracing::warn!(
                     grpc_code = ?status.code(),
@@ -534,6 +577,14 @@ pub fn route_error(status: &Status) -> (StatusCode, Json<Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mp_contracts::model_plane::v1 as pb;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::net::TcpListener;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::transport::{Endpoint, Server};
+    use tonic::{Request, Response};
 
     fn answer(enforced: bool, allowed: bool, reason: &str) -> GetModelAccessResponse {
         GetModelAccessResponse {
@@ -871,5 +922,314 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(body["error"]["code"], "model_access_unavailable");
         assert!(!body.to_string().contains("db-7"));
+    }
+
+    /// An inference-core stand-in that fails every `GetModelAccess` with `status` and counts the
+    /// questions it is asked. Admission calls no other RPC, so each of those refuses.
+    #[derive(Clone)]
+    struct FailingAccess {
+        status: Status,
+        asked: Arc<AtomicUsize>,
+    }
+
+    fn not_asked<T>() -> Result<Response<T>, Status> {
+        Err(Status::unimplemented("admission asks only GetModelAccess"))
+    }
+
+    #[tonic::async_trait]
+    impl pb::inference_core_server::InferenceCore for FailingAccess {
+        type InferStreamStream =
+            Pin<Box<dyn futures::Stream<Item = Result<pb::InferChunk, Status>> + Send>>;
+        type StreamVideoGenerationContentStream = Pin<
+            Box<
+                dyn futures::Stream<Item = Result<pb::StreamVideoGenerationContentResponse, Status>>
+                    + Send,
+            >,
+        >;
+
+        async fn infer(
+            &self,
+            _: Request<pb::InferRequest>,
+        ) -> Result<Response<pb::InferResponse>, Status> {
+            not_asked()
+        }
+
+        async fn infer_stream(
+            &self,
+            _: Request<pb::InferRequest>,
+        ) -> Result<Response<Self::InferStreamStream>, Status> {
+            not_asked()
+        }
+
+        async fn create_embedding(
+            &self,
+            _: Request<pb::CreateEmbeddingRequest>,
+        ) -> Result<Response<pb::CreateEmbeddingResponse>, Status> {
+            not_asked()
+        }
+
+        async fn get_model_access(
+            &self,
+            _: Request<pb::GetModelAccessRequest>,
+        ) -> Result<Response<pb::GetModelAccessResponse>, Status> {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            Err(self.status.clone())
+        }
+
+        async fn list_models(
+            &self,
+            _: Request<pb::ListModelsRequest>,
+        ) -> Result<Response<pb::ListModelsResponse>, Status> {
+            not_asked()
+        }
+
+        async fn synthesize_speech(
+            &self,
+            _: Request<pb::SynthesizeSpeechRequest>,
+        ) -> Result<Response<pb::SynthesizeSpeechResponse>, Status> {
+            not_asked()
+        }
+
+        async fn transcribe_speech(
+            &self,
+            _: Request<pb::TranscribeSpeechRequest>,
+        ) -> Result<Response<pb::TranscribeSpeechResponse>, Status> {
+            not_asked()
+        }
+
+        async fn list_speech_voices(
+            &self,
+            _: Request<pb::ListSpeechVoicesRequest>,
+        ) -> Result<Response<pb::ListSpeechVoicesResponse>, Status> {
+            not_asked()
+        }
+
+        async fn translate_text(
+            &self,
+            _: Request<pb::TranslateTextRequest>,
+        ) -> Result<Response<pb::TranslateTextResponse>, Status> {
+            not_asked()
+        }
+
+        async fn batch_translate_text(
+            &self,
+            _: Request<pb::BatchTranslateTextRequest>,
+        ) -> Result<Response<pb::BatchTranslateTextResponse>, Status> {
+            not_asked()
+        }
+
+        async fn detect_text_language(
+            &self,
+            _: Request<pb::DetectTextLanguageRequest>,
+        ) -> Result<Response<pb::DetectTextLanguageResponse>, Status> {
+            not_asked()
+        }
+
+        async fn list_translation_languages(
+            &self,
+            _: Request<pb::ListTranslationLanguagesRequest>,
+        ) -> Result<Response<pb::ListTranslationLanguagesResponse>, Status> {
+            not_asked()
+        }
+
+        async fn generate_image(
+            &self,
+            _: Request<pb::GenerateImageRequest>,
+        ) -> Result<Response<pb::GenerateImageResponse>, Status> {
+            not_asked()
+        }
+
+        async fn analyze_image(
+            &self,
+            _: Request<pb::AnalyzeImageRequest>,
+        ) -> Result<Response<pb::AnalyzeImageResponse>, Status> {
+            not_asked()
+        }
+
+        async fn extract_image_text(
+            &self,
+            _: Request<pb::ExtractImageTextRequest>,
+        ) -> Result<Response<pb::ExtractImageTextResponse>, Status> {
+            not_asked()
+        }
+
+        async fn analyze_document(
+            &self,
+            _: Request<pb::AnalyzeDocumentRequest>,
+        ) -> Result<Response<pb::AnalyzeDocumentResponse>, Status> {
+            not_asked()
+        }
+
+        async fn analyze_language(
+            &self,
+            _: Request<pb::AnalyzeLanguageRequest>,
+        ) -> Result<Response<pb::AnalyzeLanguageResponse>, Status> {
+            not_asked()
+        }
+
+        async fn create_realtime_session(
+            &self,
+            _: Request<pb::CreateRealtimeSessionRequest>,
+        ) -> Result<Response<pb::CreateRealtimeSessionResponse>, Status> {
+            not_asked()
+        }
+
+        async fn create_video_generation_job(
+            &self,
+            _: Request<pb::CreateVideoGenerationJobRequest>,
+        ) -> Result<Response<pb::CreateVideoGenerationJobResponse>, Status> {
+            not_asked()
+        }
+
+        async fn get_video_generation_job(
+            &self,
+            _: Request<pb::GetVideoGenerationJobRequest>,
+        ) -> Result<Response<pb::GetVideoGenerationJobResponse>, Status> {
+            not_asked()
+        }
+
+        async fn stream_video_generation_content(
+            &self,
+            _: Request<pb::StreamVideoGenerationContentRequest>,
+        ) -> Result<Response<Self::StreamVideoGenerationContentStream>, Status> {
+            not_asked()
+        }
+    }
+
+    /// A client for a stand-in that fails every question with `status`, and the count of the
+    /// questions it is asked.
+    async fn client_failing_with(
+        status: Status,
+    ) -> (InferenceCoreClient<Channel>, Arc<AtomicUsize>) {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the stand-in");
+        let address = listener.local_addr().expect("the stand-in's address");
+        let service = FailingAccess {
+            status,
+            asked: Arc::clone(&asked),
+        };
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(pb::inference_core_server::InferenceCoreServer::new(service))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = Endpoint::from_shared(format!("http://{address}"))
+            .expect("the stand-in's endpoint")
+            .connect()
+            .await
+            .expect("connect to the stand-in");
+        (InferenceCoreClient::new(channel), asked)
+    }
+
+    /// Every code a failed question can carry. `Ok` is not a failure.
+    const FAILURES: [Code; 16] = [
+        Code::Cancelled,
+        Code::Unknown,
+        Code::InvalidArgument,
+        Code::DeadlineExceeded,
+        Code::NotFound,
+        Code::AlreadyExists,
+        Code::PermissionDenied,
+        Code::ResourceExhausted,
+        Code::FailedPrecondition,
+        Code::Aborted,
+        Code::OutOfRange,
+        Code::Unimplemented,
+        Code::Internal,
+        Code::Unavailable,
+        Code::DataLoss,
+        Code::Unauthenticated,
+    ];
+
+    #[tokio::test]
+    async fn an_unreachable_policy_refuses_the_turn_before_any_durable_call_with_the_switch_on() {
+        let (client, asked) = client_failing_with(Status::unavailable("down")).await;
+        let refusal = admit_inner(&client, &MetadataMap::new(), "org-1", "gpt-x", "", true)
+            .await
+            .expect_err("the turn ends here, before any thread or run row");
+        assert_eq!(refusal.code(), "model_entitlement_unavailable");
+        assert_eq!(refusal.reason(), None);
+        let (status, Json(body)) = http(&refusal);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "model_entitlement_unavailable");
+        let questions = asked.load(Ordering::SeqCst);
+        assert_eq!(questions, 1, "one question, and no retry");
+    }
+
+    #[tokio::test]
+    async fn with_the_switch_on_every_failure_but_an_unknown_rpc_refuses_the_turn() {
+        for code in FAILURES {
+            let (client, asked) = client_failing_with(Status::new(code, "down")).await;
+            let outcome = ask(&client, &MetadataMap::new(), "org-1", "gpt-x", "", true).await;
+            if is_unknown_rpc(code) {
+                assert!(matches!(outcome, Ok(None)), "{code:?} keeps the default");
+            } else {
+                let refusal = outcome.expect_err("refused");
+                assert_eq!(refusal.code(), "model_entitlement_unavailable", "{code:?}");
+            }
+            assert_eq!(asked.load(Ordering::SeqCst), 1, "{code:?}: one question");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_older_inference_core_keeps_the_default_with_the_switch_on() {
+        for code in [Code::Unimplemented, Code::NotFound] {
+            let (client, _) = client_failing_with(Status::new(code, "no such rpc")).await;
+            let outcome = ask(&client, &MetadataMap::new(), "org-1", "gpt-x", "", true).await;
+            assert!(matches!(outcome, Ok(None)), "{code:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn with_the_switch_off_every_failure_keeps_the_default() {
+        for code in FAILURES {
+            let (client, asked) = client_failing_with(Status::new(code, "down")).await;
+            let outcome = ask(&client, &MetadataMap::new(), "org-1", "gpt-x", "", false).await;
+            assert!(matches!(outcome, Ok(None)), "{code:?} with the switch off");
+            assert_eq!(asked.load(Ordering::SeqCst), 1, "{code:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn with_the_switch_off_an_unreachable_policy_admits_the_turn_as_it_did() {
+        let (client, _) = client_failing_with(Status::unavailable("down")).await;
+        let admitted = admit_inner(&client, &MetadataMap::new(), "org-1", "gpt-x", "", false)
+            .await
+            .expect("the turn goes on to inference-core's pre-check");
+        assert_eq!(admitted, None);
+    }
+
+    #[tokio::test]
+    async fn a_typed_refusal_on_the_status_is_the_refusal_whatever_the_switch() {
+        let typed = Refusal::not_entitled("gpt-x", Reason::ExplicitlyDenied).grpc_status();
+        let auth = MetadataMap::new();
+        for fail_closed in [false, true] {
+            let (client, _) = client_failing_with(typed.clone()).await;
+            let outcome = ask(&client, &auth, "org-1", "gpt-x", "", fail_closed).await;
+            let refusal = outcome.expect_err("the policy named the model");
+            assert_eq!(refusal.code(), "model_not_entitled");
+            assert_eq!(refusal.reason(), Some(Reason::ExplicitlyDenied));
+        }
+    }
+
+    #[test]
+    fn the_switch_is_the_exact_literal_true_and_off_otherwise() {
+        assert!(fail_closed_from(Some("true")));
+        for raw in [
+            None,
+            Some(""),
+            Some("false"),
+            Some("TRUE"),
+            Some(" true"),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+        ] {
+            assert!(!fail_closed_from(raw), "{raw:?}");
+        }
     }
 }

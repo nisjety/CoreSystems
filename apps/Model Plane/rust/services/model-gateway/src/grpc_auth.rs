@@ -60,6 +60,9 @@ pub struct VerifiedIdentity {
     session_bearer: Option<Arc<str>>,
     inference_bearer: Option<Arc<str>>,
     execution_bearer: Option<Arc<str>>,
+    /// The step-up proof of the ingress token, read from the same signature check as the identity
+    /// (F-f03-14). Never read from a metadata header, and never printed by `Debug`.
+    step_up: Option<crate::auth::StepUpClaim>,
 }
 
 impl fmt::Debug for VerifiedIdentity {
@@ -108,9 +111,23 @@ impl VerifiedIdentity {
         self.kind == PrincipalKind::Service
     }
 
+    /// The step-up proof the verified ingress token carried, if any (F-f03-14). The gate reads it
+    /// and keeps nothing of it.
+    #[must_use]
+    pub(crate) fn step_up(&self) -> Option<&crate::auth::StepUpClaim> {
+        self.step_up.as_ref()
+    }
+
     #[must_use]
     pub fn has_scope(&self, scope: &str) -> bool {
         self.scopes.iter().any(|candidate| candidate == scope)
+    }
+
+    /// Whether the verified scopes make this caller an org admin, by the rule the HTTP routes and capability-core
+    /// apply (`ownership::is_admin_claim`): `admin`, `org:admin`, or any scope ending in `:admin`.
+    #[must_use]
+    pub fn is_org_admin(&self) -> bool {
+        crate::ownership::is_admin_claim(&self.scopes, None)
     }
 
     #[allow(clippy::result_large_err)]
@@ -256,6 +273,7 @@ impl VerifiedIdentity {
             session_bearer: None,
             inference_bearer: None,
             execution_bearer: None,
+            step_up: None,
         }
     }
 
@@ -279,6 +297,7 @@ impl VerifiedIdentity {
             session_bearer: None,
             inference_bearer: None,
             execution_bearer: None,
+            step_up: None,
         }
     }
 
@@ -382,6 +401,10 @@ struct Claims {
     org_zdr: Option<bool>,
     #[serde(default)]
     zdr_waiver: Option<crate::auth::ZdrWaiverClaim>,
+    /// The step-up proof (F-f03-14), read as raw JSON so a malformed one never refuses the token:
+    /// `validate_identity` keeps it only when it is a well-formed [`crate::auth::StepUpClaim`].
+    #[serde(default)]
+    step_up: Option<serde_json::Value>,
 }
 
 pub(crate) struct AuthConfig {
@@ -608,6 +631,9 @@ fn validate_identity(claims: Claims, leeway_secs: u64) -> Result<VerifiedIdentit
         return Err(Status::unauthenticated("invalid caller credential"));
     }
     let scopes: Arc<[String]> = claims.scopes.into();
+    let step_up = claims
+        .step_up
+        .and_then(|value| serde_json::from_value::<crate::auth::StepUpClaim>(value).ok());
     match claims.principal_type.as_str() {
         "" | "user"
             if !claims.user_id.trim().is_empty()
@@ -628,6 +654,7 @@ fn validate_identity(claims: Claims, leeway_secs: u64) -> Result<VerifiedIdentit
                 session_bearer: None,
                 inference_bearer: None,
                 execution_bearer: None,
+                step_up,
             })
         }
         "service"
@@ -651,6 +678,7 @@ fn validate_identity(claims: Claims, leeway_secs: u64) -> Result<VerifiedIdentit
                 session_bearer: None,
                 inference_bearer: None,
                 execution_bearer: None,
+                step_up,
             })
         }
         _ => Err(Status::unauthenticated("invalid caller credential")),
@@ -1151,5 +1179,85 @@ mod tests {
             .get::<VerifiedIdentity>()
             .expect("identity")
             .is_service());
+    }
+
+    /// F-f03-14: the step-up proof is read from the one signature check, into the identity. It is absent unless the
+    /// verified token carries it, and a metadata header never supplies one.
+    #[tokio::test]
+    async fn the_step_up_proof_is_read_from_the_verified_token_only() {
+        let verifier = test_verifier().await;
+        let at = i64::try_from(now()).expect("time") - 10;
+        let mut stepped_up = user_claims("model-gateway");
+        stepped_up["step_up"] = json!({ "at": at, "method": "password" });
+        let mut request = Request::new(());
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {}", sign(&stepped_up, "key-1"))
+                .parse()
+                .expect("metadata"),
+        );
+        request
+            .metadata_mut()
+            .insert("x-step-up", "password".parse().expect("metadata"));
+        let request = verifier.intercept(request).expect("valid token");
+        let identity = request
+            .extensions()
+            .get::<VerifiedIdentity>()
+            .expect("identity");
+        assert_eq!(
+            identity.step_up(),
+            Some(&crate::auth::StepUpClaim {
+                at,
+                method: "password".to_owned(),
+            })
+        );
+
+        let mut plain = Request::new(());
+        plain.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {}", sign(&user_claims("model-gateway"), "key-1"))
+                .parse()
+                .expect("metadata"),
+        );
+        plain
+            .metadata_mut()
+            .insert("x-step-up", "password".parse().expect("metadata"));
+        let plain = verifier.intercept(plain).expect("valid token");
+        assert_eq!(
+            plain
+                .extensions()
+                .get::<VerifiedIdentity>()
+                .expect("identity")
+                .step_up(),
+            None,
+            "a header is never a step-up proof"
+        );
+    }
+
+    /// F-f03-14: a malformed step-up proof is dropped, so it never refuses a token that verifies. The gate then sees
+    /// no fresh proof and refuses a grant that needs one, which is the fail-closed direction.
+    #[tokio::test]
+    async fn a_malformed_step_up_proof_is_dropped_and_never_refuses_the_token() {
+        let verifier = test_verifier().await;
+        let mut malformed = user_claims("model-gateway");
+        malformed["step_up"] = json!({ "at": "yesterday" });
+        let mut request = Request::new(());
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {}", sign(&malformed, "key-1"))
+                .parse()
+                .expect("metadata"),
+        );
+        let request = verifier
+            .intercept(request)
+            .expect("a malformed proof does not refuse the token");
+        assert_eq!(
+            request
+                .extensions()
+                .get::<VerifiedIdentity>()
+                .expect("identity")
+                .step_up(),
+            None
+        );
     }
 }

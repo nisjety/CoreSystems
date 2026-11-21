@@ -84,6 +84,12 @@ pub struct OrgQuotaLimits {
     /// checked against one window, so the window must reach back far enough
     /// that neither cap is measured over less spend than its own period names.
     pub reset_period: ResetPeriod,
+    /// The reset period of the cost ceiling's own row, `None` when no cost ceiling is set. Read
+    /// when each cap is measured over its own window (F-f02-04), so a daily cost cap is not held to
+    /// the lifetime window a token row without a period would widen it to.
+    pub cost_period: ResetPeriod,
+    /// The reset period of the token ceiling's own row, `None` when no token ceiling is set.
+    pub token_period: ResetPeriod,
 }
 
 impl OrgQuotaLimits {
@@ -137,6 +143,12 @@ pub fn limits_from_rows(body: &str) -> OrgQuotaLimits {
             (Some(row), None) | (None, Some(row)) => ResetPeriod::parse(&row.reset_period),
             (None, None) => ResetPeriod::None,
         },
+        cost_period: cost.map_or(ResetPeriod::None, |row| {
+            ResetPeriod::parse(&row.reset_period)
+        }),
+        token_period: tokens.map_or(ResetPeriod::None, |row| {
+            ResetPeriod::parse(&row.reset_period)
+        }),
     }
 }
 
@@ -451,6 +463,42 @@ mod tests {
             ResetPeriod::Daily
         );
         assert_eq!(limits_from_rows("{}").reset_period, ResetPeriod::None);
+    }
+
+    #[test]
+    fn each_cap_carries_its_own_reset_period_beside_the_widest() {
+        // F-f02-04: the per-cap windows read each row's own period; the widest stays for the shared window.
+        let daily_cost_lifetime_tokens = limits_from_rows(
+            r#"{"quotas":[
+            {"org_id":"o","key":"max_cost_per_run_usd_micros","value":0,"limit":5000000,"reset_period":"daily"},
+            {"org_id":"o","key":"max_tokens_per_run","value":0,"limit":1000,"reset_period":"none"}
+        ]}"#,
+        );
+        assert_eq!(daily_cost_lifetime_tokens.cost_period, ResetPeriod::Daily);
+        assert_eq!(daily_cost_lifetime_tokens.token_period, ResetPeriod::None);
+        assert_eq!(daily_cost_lifetime_tokens.reset_period, ResetPeriod::None);
+
+        let monthly_tokens_daily_cost = limits_from_rows(
+            r#"{"quotas":[
+            {"org_id":"o","key":"max_cost_per_run_usd_micros","value":0,"limit":5000000,"reset_period":"daily"},
+            {"org_id":"o","key":"max_tokens_per_run","value":0,"limit":1000,"reset_period":"monthly"}
+        ]}"#,
+        );
+        assert_eq!(monthly_tokens_daily_cost.cost_period, ResetPeriod::Daily);
+        assert_eq!(monthly_tokens_daily_cost.token_period, ResetPeriod::Monthly);
+        assert_eq!(monthly_tokens_daily_cost.reset_period, ResetPeriod::Monthly);
+
+        // A cap that is not set has no period: its row is absent, or reads as unset (0 or less).
+        let tokens_only = limits_from_rows(
+            r#"{"quotas":[
+            {"org_id":"o","key":"max_tokens_per_run","value":0,"limit":1000,"reset_period":"daily"},
+            {"org_id":"o","key":"max_cost_per_run_usd_micros","value":0,"limit":0,"reset_period":"monthly"}
+        ]}"#,
+        );
+        assert_eq!(tokens_only.cost_period, ResetPeriod::None);
+        assert_eq!(tokens_only.token_period, ResetPeriod::Daily);
+        assert_eq!(limits_from_rows("{}").cost_period, ResetPeriod::None);
+        assert_eq!(limits_from_rows("{}").token_period, ResetPeriod::None);
     }
 
     #[test]

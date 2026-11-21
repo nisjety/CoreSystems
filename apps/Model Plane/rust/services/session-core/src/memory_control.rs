@@ -1738,6 +1738,7 @@ mod tests {
                 pb::GetMemoryControlsRequest {
                     org_id: org.clone(),
                     user_id: "user-a".into(),
+                    ..Default::default()
                 },
                 identity(),
             ))
@@ -1882,6 +1883,7 @@ mod tests {
                 pb::GetMemoryControlsRequest {
                     org_id: org.clone(),
                     user_id: "user-a".into(),
+                    ..Default::default()
                 },
                 VerifiedIdentity::user_for_test_with_zdr(&org, "user-a", true),
             ))

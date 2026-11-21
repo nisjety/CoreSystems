@@ -1204,6 +1204,8 @@ struct MockSessionHandles {
     /// Refuse `StartManagedRun` as Session Core does when the Space thread already has a live
     /// root run: `Aborted` with `x-mp-error-code: thread_run_active` (WS09-S1).
     refuse_start_thread_run_active: Arc<AtomicBool>,
+    /// Refuse `StartManagedRun` with a quota refusal, after a regenerate or an edit has moved the branch (P2-sc-12-rel1).
+    refuse_managed_start: Arc<AtomicBool>,
 }
 
 struct MockSessionCore {
@@ -1249,6 +1251,7 @@ impl MockSessionCore {
             append_script: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             append_request_captures: Arc::new(Mutex::new(Vec::new())),
             refuse_start_thread_run_active: Arc::new(AtomicBool::new(false)),
+            refuse_managed_start: Arc::new(AtomicBool::new(false)),
         };
         (
             Self {
@@ -1743,6 +1746,9 @@ impl ManagedRunLifecycle for MockManagedRunLifecycle {
         &self,
         request: TReq<StartManagedRunRequest>,
     ) -> Result<Response<StartManagedRunResponse>, Status> {
+        if self.handles.refuse_managed_start.load(Ordering::SeqCst) {
+            return Err(Status::resource_exhausted("managed run quota is spent"));
+        }
         if self
             .handles
             .refuse_start_thread_run_active
@@ -3110,6 +3116,13 @@ impl MessageTreeService for MockMessageTree {
         if req.expected_leaf_message_id != leaf {
             return Err(Status::aborted("active_leaf_stale"));
         }
+        if req.to_root {
+            // A move to the root names no turn. The mock keeps no active path to clear, so it answers an empty one.
+            return Ok(Response::new(SetActiveLeafResponse {
+                active_leaf_message_id: String::new(),
+                active_path: Vec::new(),
+            }));
+        }
         let Some(target) = turns.iter().position(|(id, _, _)| *id == req.target_message_id) else {
             return Err(Status::invalid_argument(
                 "target_message_id does not name a message in this thread",
@@ -3245,6 +3258,151 @@ async fn edit_creates_sibling_user_turn() {
         .unwrap()
         .iter()
         .any(|(role, _, content)| role == "user" && content == "second question, edited"));
+    std::env::remove_var("MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED");
+    clear_model_auth_env();
+}
+
+/// P2-sc-12-rel1: a move to the root commits before the managed start. When the start is refused after the edit is
+/// appended, the thread goes back to the leaf the move expected, compared with the edit that is now its leaf, so the
+/// transcript does not read empty. Both moves are recorded in order, and the failure is the start's own.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_root_edit_whose_managed_start_is_refused_puts_the_thread_back_on_its_leaf() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
+    std::env::remove_var("ALLOWED_MODELS");
+    let (mock_session, session_handles) = MockSessionCore::new();
+    seed_thread(
+        &session_handles,
+        "thread-1",
+        &[("user", "first question"), ("assistant", "first answer")],
+    );
+    session_handles
+        .refuse_managed_start
+        .store(true, Ordering::SeqCst);
+    let session_client = spawn_session_mock(mock_session).await;
+    let resp = invoke_with_versions(
+        r#"{"content":"first question, edited","model":"m","thread_id":"thread-1","edit_of_message_id":"thread-1-m0"}"#,
+        Some("true"),
+        session_client,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let body = String::from_utf8_lossy(&bytes).into_owned();
+    assert!(body.contains("session-core managed start failed"), "{body}");
+
+    let moves = session_handles
+        .set_active_leaf_captures
+        .lock()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        moves.len(),
+        2,
+        "the root move, then the move back: {moves:?}"
+    );
+    assert!(
+        moves[0].to_root,
+        "the edit of the first turn moves to the root"
+    );
+    assert!(moves[0].target_message_id.is_empty());
+    assert_eq!(moves[0].expected_leaf_message_id, "thread-1-m1");
+    assert!(
+        moves[1].exact && !moves[1].to_root,
+        "the restore is an exact move"
+    );
+    assert_eq!(
+        moves[1].target_message_id, "thread-1-m1",
+        "the thread goes back to the leaf the move expected"
+    );
+    assert_eq!(
+        moves[1].expected_leaf_message_id, "thread-1-m2",
+        "compared with the edit, which the append made the leaf"
+    );
+    let user_appends = session_handles
+        .append_rpc_captures
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(role, _)| role == "user")
+        .count();
+    assert_eq!(
+        user_appends, 1,
+        "the edit is appended before the start that is refused"
+    );
+    std::env::remove_var("MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED");
+    clear_model_auth_env();
+}
+
+/// P2-sc-12-rel1: the same restore for an edit of a later turn, which moves the leaf to the turn before it. The edit is
+/// appended beside the turn it replaces, the start is refused, and the thread goes back to the leaf the move expected.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_edit_of_a_later_turn_whose_managed_start_is_refused_puts_the_thread_back_on_its_leaf() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
+    std::env::remove_var("ALLOWED_MODELS");
+    let (mock_session, session_handles) = MockSessionCore::new();
+    seed_thread(
+        &session_handles,
+        "thread-1",
+        &[
+            ("user", "first question"),
+            ("assistant", "first answer"),
+            ("user", "second question"),
+            ("assistant", "second answer"),
+        ],
+    );
+    session_handles
+        .refuse_managed_start
+        .store(true, Ordering::SeqCst);
+    let session_client = spawn_session_mock(mock_session).await;
+    let resp = invoke_with_versions(
+        r#"{"content":"second question, edited","model":"m","thread_id":"thread-1","edit_of_message_id":"thread-1-m2"}"#,
+        Some("true"),
+        session_client,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let body = String::from_utf8_lossy(&bytes).into_owned();
+    assert!(body.contains("session-core managed start failed"), "{body}");
+
+    let moves = session_handles
+        .set_active_leaf_captures
+        .lock()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        moves.len(),
+        2,
+        "the move to the parent, then the move back: {moves:?}"
+    );
+    assert!(!moves[0].to_root && !moves[0].exact);
+    assert_eq!(moves[0].target_message_id, "thread-1-m1");
+    assert_eq!(moves[0].expected_leaf_message_id, "thread-1-m3");
+    assert!(
+        moves[1].exact && !moves[1].to_root,
+        "the restore is an exact move"
+    );
+    assert_eq!(
+        moves[1].target_message_id, "thread-1-m3",
+        "the thread goes back to the leaf the move expected"
+    );
+    assert_eq!(
+        moves[1].expected_leaf_message_id, "thread-1-m4",
+        "compared with the edit, which the append made the leaf"
+    );
+    let user_appends = session_handles
+        .append_rpc_captures
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(role, _)| role == "user")
+        .count();
+    assert_eq!(
+        user_appends, 1,
+        "the edit is appended before the start that is refused"
+    );
     std::env::remove_var("MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED");
     clear_model_auth_env();
 }
@@ -5186,6 +5344,126 @@ async fn invoke_stream_agentic_resolves_the_run_budget_on_the_server_per_route()
                 "zero rounds would be read as execution-core's 12: refused (subscription={subscription})"
             );
         }
+    }
+}
+
+/// A Do run's `RunAgent` request for one agentic turn of `body`, sent with the cost-core bearer the budget guard
+/// checks the turn with. `authenticated_user_router` carries no cost bearer, so a turn that names a token cap would be
+/// refused at the guard before any run exists. The caller points `COST_CORE_URL` at a cost-core that allows every check.
+async fn run_agent_request_checked_by_cost_core(body: &str) -> mpv1::RunAgentRequest {
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, _session_handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, _publisher) = make_state(client, session_client).await;
+    let captured: CapturedRunAgentRequests = Arc::new(Mutex::new(Vec::new()));
+    state.execution_client = spawn_capturing_execution_mock(captured.clone()).await;
+    let (_jwks, tokens) =
+        signed_delegated_user_tokens("org_placeholder", "user_placeholder", false).await;
+    let (private_pem, _) = zdr_route_test_keypair();
+    let now = token_now();
+    let cost_token = encode_test_token(
+        &serde_json::json!({
+            "sub": "user_placeholder",
+            "iss": TEST_AUTH_ISSUER,
+            "aud": "cost-core",
+            "exp": now + 300,
+            "nbf": now - 5,
+            "org_id": "org_placeholder",
+            "user_id": "user_placeholder",
+            "principal_type": "user",
+            "zdr": false
+        }),
+        private_pem,
+    );
+    let app = with_delegated_user_tokens(build_router(state, None), tokens).layer(
+        middleware::from_fn(move |mut request: Request<Body>, next: Next| {
+            let cost_token = cost_token.clone();
+            async move {
+                request.headers_mut().insert(
+                    "x-cost-authorization",
+                    HeaderValue::from_str(&format!("Bearer {cost_token}"))
+                        .expect("signed JWT is valid HTTP header content"),
+                );
+                next.run(request).await
+            }
+        }),
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_owned()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 1, "exactly one RunAgent dispatch");
+    captured[0].clone()
+}
+
+/// F-f04-08: a Do run states the smaller of its request's token cap and the org's, and does so only while
+/// MODEL_GATEWAY_DO_RUN_CAP is the literal `true`. With the switch off, or with no cap in force, the field is the
+/// wire's 0, which execution-core reads as no cap. This drives the real dispatch from the invoke route, so it fails if
+/// the request's cap stops reaching the dispatch or the switch stops gating it.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_do_run_states_its_token_cap_only_under_the_switch() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "true");
+    std::env::remove_var("ALLOWED_MODELS");
+    // A turn that names a cap is checked against cost-core first; this cost-core allows every check.
+    let cost_core = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/budget/check"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "allowed": true })),
+        )
+        .mount(&cost_core)
+        .await;
+    let cost_core_url = cost_core.uri();
+    let _cost_core = EnvGuard::set("COST_CORE_URL", Some(cost_core_url.as_str()));
+    let _cost_audience = EnvGuard::set("COST_CORE_AUTH_AUDIENCE", None);
+    let capped =
+        r#"{"content":"plan this safely","model":"m","features":["agentic"],"max_tokens":300}"#;
+    let uncapped = r#"{"content":"plan this safely","model":"m","features":["agentic"]}"#;
+
+    {
+        let _switch = EnvGuard::set("MODEL_GATEWAY_DO_RUN_CAP", None);
+        assert_eq!(
+            run_agent_request_checked_by_cost_core(capped)
+                .await
+                .max_run_tokens,
+            0,
+            "unset, the run states no cap though its request names one"
+        );
+    }
+    {
+        let _switch = EnvGuard::set("MODEL_GATEWAY_DO_RUN_CAP", Some("True"));
+        assert_eq!(
+            run_agent_request_checked_by_cost_core(capped)
+                .await
+                .max_run_tokens,
+            0,
+            "only the literal true turns it on"
+        );
+    }
+    {
+        let _switch = EnvGuard::set("MODEL_GATEWAY_DO_RUN_CAP", Some("true"));
+        assert_eq!(
+            run_agent_request_checked_by_cost_core(capped)
+                .await
+                .max_run_tokens,
+            300,
+            "the request's cap is stated"
+        );
+        assert_eq!(
+            run_agent_request_checked_by_cost_core(uncapped)
+                .await
+                .max_run_tokens,
+            0,
+            "a turn that names no cap states none"
+        );
     }
 }
 

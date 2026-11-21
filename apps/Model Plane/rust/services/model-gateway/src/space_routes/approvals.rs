@@ -3,7 +3,8 @@
 //! Thin relays of Session Core's `OrchestrationService`. Authority is Session Core's: each route
 //! forwards the caller's verified bearer plus the Control-signed decision and holds none of its
 //! own. User principals only. Request URLs and bodies are never logged by these handlers, and
-//! refusals carry fixed words, never the upstream text.
+//! refusals carry fixed words, never the upstream text. A member's grant passes the approval
+//! step-up gate before Session Core records it (P2-mg-02-rel1, owner decision D0-025).
 //!
 //! - `GET /v1/spaces/:space_id/approvals` (query: `run_id`, `status`, `space_read_decision_ref`,
 //!   `space_read_decision_token`): the redacted room view.
@@ -26,16 +27,18 @@ use axum::{
     routing::{get, patch, post},
     Extension, Json, Router,
 };
+use chrono::Utc;
 use mp_contracts::model_plane::v1::{
-    Addressee, AddresseeKind, ApprovalDecisionSource, ApprovalScope, ApprovalState,
-    DecideApprovalRequest, ListApprovalsRequest, RerouteApprovalRequest,
+    Addressee, AddresseeKind, Approval, ApprovalCause, ApprovalDecisionSource, ApprovalScope,
+    ApprovalState, DecideApprovalRequest, ListApprovalsRequest, RerouteApprovalRequest,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::auth::{Claims, VerifiedSessionBearer};
+use crate::auth::{Claims, StepUpClaim, VerifiedSessionBearer, VerifiedStepUp};
 use crate::http_routes::{
-    approval_value, authenticated_session_request, require_non_zdr_durable_mutation,
+    approval_value, authenticated_session_request, enforce_step_up_at,
+    require_non_zdr_durable_mutation, ApprovalStepUpGate, HttpJsonError,
 };
 use crate::state::AppState;
 
@@ -172,6 +175,40 @@ fn require_user(claims: &Claims) -> Result<(), Response> {
     }
 }
 
+/// The step-up gate of a member's grant (P2-mg-02-rel1, F-f03-14, owner decision D0-025).
+///
+/// The member cannot read the approval's cause: Session Core's owner read keeps only the
+/// requester's approvals (`get_approval_for_org` filters on the caller's user id), so this route
+/// never learns whether the cause asks for a fresh re-authentication. The gate is therefore given
+/// the cause it must assume, one that asks for step-up. Every member grant without a fresh one is
+/// then handled as the HTTP decide route handles such a grant: refused under `enforce` with
+/// `step_up_required`, counted under `shadow` and allowed under `off`. A denial never needs one.
+/// Under `shadow` the count lands on the `unclassified_gate` label, the cause the gate cannot read.
+/// Nothing about the claim is logged.
+fn member_grant_step_up(
+    gate: ApprovalStepUpGate,
+    target_state: ApprovalState,
+    claim: Option<&StepUpClaim>,
+    now: i64,
+    approval_id: &str,
+) -> Result<(), HttpJsonError> {
+    let assumed_cause = Approval {
+        cause: Some(ApprovalCause {
+            step_up_required: true,
+            ..ApprovalCause::default()
+        }),
+        ..Approval::default()
+    };
+    enforce_step_up_at(
+        gate,
+        Some(&assumed_cause),
+        target_state,
+        claim,
+        now,
+        approval_id,
+    )
+}
+
 async fn list_space_approvals(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -231,6 +268,7 @@ async fn decide_space_approval(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     bearer: VerifiedSessionBearer,
+    step_up: Option<Extension<VerifiedStepUp>>,
     Path((space_id, approval_id)): Path<(String, String)>,
     Json(body): Json<DecideBody>,
 ) -> Response {
@@ -260,6 +298,18 @@ async fn decide_space_approval(
     let reason = body.reason.unwrap_or_default();
     if reason.len() > MAX_REASON_BYTES {
         return invalid("reason is too long");
+    }
+    // P2-mg-02-rel1: a member's grant passes the step-up gate before Session Core records it. With
+    // the switch off the gate changes nothing; a denial never needs a fresh re-authentication.
+    let step_up_claim = step_up.and_then(|Extension(VerifiedStepUp(claim))| claim);
+    if let Err(refusal) = member_grant_step_up(
+        ApprovalStepUpGate::from_env(),
+        decision,
+        step_up_claim.as_ref(),
+        Utc::now().timestamp(),
+        &approval_id,
+    ) {
+        return refusal.into_response();
     }
     let request = match authenticated_session_request(
         DecideApprovalRequest {
@@ -332,5 +382,116 @@ async fn reroute_space_approval(
         }))
         .into_response(),
         Err(status) => status_response(&status),
+    }
+}
+
+#[cfg(test)]
+mod member_step_up_tests {
+    use super::*;
+
+    const NOW: i64 = 1_800_000_000;
+
+    fn claim_at(at: i64) -> StepUpClaim {
+        StepUpClaim {
+            at,
+            method: "password".to_owned(),
+        }
+    }
+
+    /// P2-mg-02-rel1: under `enforce` a member's grant with no fresh re-authentication is refused
+    /// with the HTTP route's own typed refusal, and the same grant with a fresh one goes through.
+    #[test]
+    fn a_member_grant_without_a_fresh_step_up_is_refused_under_enforce() {
+        let (status, Json(body)) = member_grant_step_up(
+            ApprovalStepUpGate::Enforce,
+            ApprovalState::Granted,
+            None,
+            NOW,
+            "appr_1",
+        )
+        .expect_err("a member grant needs a fresh re-authentication under enforce");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "step_up_required");
+        assert_eq!(body["error"]["details"]["method"], "password");
+    }
+
+    #[test]
+    fn a_member_grant_with_a_fresh_step_up_passes_under_enforce() {
+        let fresh = claim_at(NOW);
+        assert!(member_grant_step_up(
+            ApprovalStepUpGate::Enforce,
+            ApprovalState::Granted,
+            Some(&fresh),
+            NOW,
+            "appr_1",
+        )
+        .is_ok());
+    }
+
+    /// The freshness window is the one the HTTP route reads: at most 120 seconds old.
+    #[test]
+    fn a_stale_step_up_does_not_pass_a_member_grant() {
+        let stale = claim_at(NOW - 121);
+        assert!(member_grant_step_up(
+            ApprovalStepUpGate::Enforce,
+            ApprovalState::Granted,
+            Some(&stale),
+            NOW,
+            "appr_1",
+        )
+        .is_err());
+        let edge = claim_at(NOW - 120);
+        assert!(member_grant_step_up(
+            ApprovalStepUpGate::Enforce,
+            ApprovalState::Granted,
+            Some(&edge),
+            NOW,
+            "appr_1",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_member_denial_never_needs_a_step_up() {
+        assert!(member_grant_step_up(
+            ApprovalStepUpGate::Enforce,
+            ApprovalState::Denied,
+            None,
+            NOW,
+            "appr_1",
+        )
+        .is_ok());
+    }
+
+    /// With the switch off, or in shadow, a member's grant is let through exactly as it always was.
+    #[test]
+    fn off_and_shadow_let_a_member_grant_through() {
+        for gate in [ApprovalStepUpGate::Off, ApprovalStepUpGate::Shadow] {
+            assert!(
+                member_grant_step_up(gate, ApprovalState::Granted, None, NOW, "appr_1").is_ok()
+            );
+        }
+    }
+
+    /// The gate must run before Session Core records the grant, so a refusal never reaches the
+    /// grant. Pinned against the handler's source, as the ZDR inventory pins its handlers.
+    #[test]
+    fn the_member_gate_runs_before_session_core_records_the_grant() {
+        let source = include_str!("approvals.rs");
+        let handler = source
+            .split("\nasync fn decide_space_approval(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nasync fn reroute_space_approval(").next())
+            .expect("the member decide handler");
+        let gate = handler
+            .find("member_grant_step_up(")
+            .expect("the member step-up gate");
+        let upstream = handler
+            .find(".decide_approval(")
+            .expect("the Session Core decide call");
+        assert!(
+            gate < upstream,
+            "the member step-up gate must run before Session Core records the grant"
+        );
     }
 }

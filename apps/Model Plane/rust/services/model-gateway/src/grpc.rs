@@ -10,9 +10,10 @@ use chrono::Utc;
 use mp_contracts::model_plane::v1::InferPurpose;
 use mp_contracts::model_plane::v1::{
     model_gateway_server::{ModelGateway, ModelGatewayServer},
-    AppendThreadMessageRequest, AppendThreadMessageResponse, ApproveApprovalRequest,
-    ApproveApprovalResponse, ChatMessage, CheckPermissionRequest, CheckPermissionResponse,
-    CreateTaskRequest, CreateTaskResponse, DenyApprovalRequest, DenyApprovalResponse,
+    AppendThreadMessageRequest, AppendThreadMessageResponse, Approval, ApprovalState,
+    ApproveApprovalRequest, ApproveApprovalResponse, ChatMessage, CheckPermissionRequest,
+    CheckPermissionResponse, CreateTaskRequest, CreateTaskResponse, DenyApprovalRequest,
+    DenyApprovalResponse,
     EnterPlanModeRequest, EnterPlanModeResponse, ExecuteCommandRequest, ExecuteCommandResponse,
     ExitPlanModeRequest, ExitPlanModeResponse, ExportTrajectoriesRequest,
     ExportTrajectoriesResponse, ExtractStructuredRequest, ExtractStructuredResponse, ExtractStructuredResult, FetchRequest,
@@ -55,6 +56,7 @@ use tracing::{info, warn};
 use crate::{
     approvals, coordinator,
     grpc_auth::{self, RpcAccess, VerifiedIdentity},
+    http_routes::{self, ApprovalStepUpGate},
     lsp,
     quarry::{QuarryError, RenderHints},
     runtime_registries, session_flow, skills,
@@ -392,6 +394,36 @@ fn authorize_rpc<T: TenantScopedRequest>(
     access: RpcAccess,
 ) -> Result<VerifiedIdentity, Status> {
     grpc_auth::authorize_request(request, request.get_ref().requested_org_id(), access)
+}
+
+/// The step-up verdict for a gRPC grant (F-f03-14), on the record already read. `off` decides nothing. `shadow` counts
+/// and never refuses, so a record it could not read lets the grant through as it always did. `enforce` refuses a grant
+/// whose cause asks for a fresh re-authentication, with none fresh, as `failed_precondition`.
+#[allow(clippy::result_large_err)]
+fn grant_step_up_verdict(
+    gate: ApprovalStepUpGate,
+    prior: Result<Approval, Status>,
+    claim: Option<&crate::auth::StepUpClaim>,
+    now: i64,
+    approval_id: &str,
+) -> Result<(), Status> {
+    if gate == ApprovalStepUpGate::Off {
+        return Ok(());
+    }
+    let prior = match prior {
+        Ok(prior) => prior,
+        Err(_) if gate == ApprovalStepUpGate::Shadow => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    http_routes::enforce_step_up_at(
+        gate,
+        Some(&prior),
+        ApprovalState::Granted,
+        claim,
+        now,
+        approval_id,
+    )
+    .map_err(|_| Status::failed_precondition("step_up_required"))
 }
 
 #[allow(clippy::result_large_err)]
@@ -1958,6 +1990,26 @@ impl ModelGateway for GatewayService {
             }
             Err(error) => return Err(approvals::resolve_err_to_status(error)),
         };
+        // F-f03-14: a grant whose cause asks for a fresh re-authentication is refused without one, as the HTTP route
+        // refuses it. The cache keeps no cause, so the Session Core record is read, and only while the switch is on:
+        // with it off this RPC makes no extra call.
+        let step_up_gate = ApprovalStepUpGate::from_env();
+        if step_up_gate != ApprovalStepUpGate::Off {
+            let prior = approvals::read_durable_approval_authenticated(
+                &mut self.state.orchestration_client.clone(),
+                &req.approval_id,
+                &req.org_id,
+                session_bearer,
+            )
+            .await;
+            grant_step_up_verdict(
+                step_up_gate,
+                prior,
+                identity.step_up(),
+                Utc::now().timestamp(),
+                &req.approval_id,
+            )?;
+        }
         approvals::require_fresh_approval_delivery(preview.transitioned)?;
         if preview.transitioned {
             approvals::persist_approval_decision_authenticated(
@@ -2605,18 +2657,45 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<RegisterHookRequest>,
     ) -> Result<Response<RegisterHookResponse>, Status> {
-        authorize_rpc(&request, RpcAccess::Write)?;
-        runtime_registries::handle_register_hook(&self.state.hooks, request.into_inner())
-            .map(Response::new)
+        let identity = authorize_rpc(&request, RpcAccess::Write)?;
+        // WS25-S8 (P2-mg-04-rel1): with HOOKS_DURABLE on, the rule is stored in capability-core and never in the in-memory
+        // map that the readers stop consulting once an org has a snapshot. Off, the in-memory registry takes it as before.
+        let caller = runtime_registries::HookWriteCaller {
+            zdr: identity.zdr_for(&crate::zdr_posture::Route::plain(false))?,
+            admin: identity.is_org_admin(),
+        };
+        let bearer = forwarded_capability_bearer(&identity, &request).unwrap_or_default();
+        runtime_registries::register_hook_for(
+            runtime_registries::hooks_durable(),
+            &self.state.hooks,
+            &self.state.http_client,
+            &self.state.capability_core_base_url,
+            &bearer,
+            caller,
+            request.into_inner(),
+        )
+        .await
+        .map(Response::new)
     }
 
     async fn list_hooks(
         &self,
         request: Request<ListHooksRequest>,
     ) -> Result<Response<ListHooksResponse>, Status> {
-        authorize_rpc(&request, RpcAccess::Read)?;
-        runtime_registries::handle_list_hooks(&self.state.hooks, request.into_inner())
-            .map(Response::new)
+        let identity = authorize_rpc(&request, RpcAccess::Read)?;
+        // WS25-S8 (P2-mg-04-rel1): with HOOKS_DURABLE on, the org's rules are read from capability-core, refreshed first,
+        // and refused typed when they cannot be known. Off, the in-memory registry answers as before.
+        let bearer = forwarded_capability_bearer(&identity, &request).unwrap_or_default();
+        runtime_registries::list_hooks_for(
+            runtime_registries::hooks_durable(),
+            &self.state.hooks,
+            &self.state.http_client,
+            &self.state.capability_core_base_url,
+            &bearer,
+            request.into_inner(),
+        )
+        .await
+        .map(Response::new)
     }
 
     async fn check_permission(
@@ -3445,6 +3524,21 @@ mod tests {
             forwarded_capability_bearer(&service, &request).as_deref(),
             Some("junk")
         );
+    }
+
+    /// The local admin gate reads the verified scopes the way the HTTP routes and capability-core do: `admin`,
+    /// `org:admin`, or any scope ending in `:admin`. Any other scope is not admin.
+    #[test]
+    fn org_admin_is_read_from_the_verified_scopes_as_capability_core_reads_them() {
+        let with = |scopes: &[&str]| {
+            crate::grpc_auth::VerifiedIdentity::service_for_test("org-1", "user-1", scopes, false)
+        };
+        assert!(with(&["admin"]).is_org_admin());
+        assert!(with(&["org:admin"]).is_org_admin());
+        assert!(with(&["space:admin"]).is_org_admin());
+        assert!(!with(&["gateway:write"]).is_org_admin());
+        assert!(!with(&["administrator", "adminx"]).is_org_admin());
+        assert!(!with(&[]).is_org_admin());
     }
 
     #[test]
@@ -6636,5 +6730,163 @@ mod screen_content_tests {
                 false,
             ));
         assert!(screen_content_caller(&service).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod approval_grant_step_up_tests {
+    use super::{grant_step_up_verdict, ApprovalStepUpGate};
+    use crate::auth::StepUpClaim;
+    use mp_contracts::model_plane::v1::{Approval, ApprovalCause};
+    use tonic::{Code, Status};
+
+    const NOW: i64 = 1_800_000_000;
+
+    fn asks_for_step_up() -> Approval {
+        Approval {
+            id: "appr_1".to_owned(),
+            cause: Some(ApprovalCause {
+                code: "owner_effect_reserved".to_owned(),
+                step_up_required: true,
+                ..ApprovalCause::default()
+            }),
+            ..Approval::default()
+        }
+    }
+
+    fn claim_at(at: i64) -> StepUpClaim {
+        StepUpClaim {
+            at,
+            method: "password".to_owned(),
+        }
+    }
+
+    /// F-f03-14: under `enforce` a gRPC grant of a step-up cause with no fresh claim is refused as a
+    /// `failed_precondition` with the typed message; the same grant with a fresh claim goes through.
+    #[test]
+    fn a_grant_without_a_fresh_claim_is_refused_under_enforce() {
+        let refused = grant_step_up_verdict(
+            ApprovalStepUpGate::Enforce,
+            Ok(asks_for_step_up()),
+            None,
+            NOW,
+            "appr_1",
+        )
+        .expect_err("refused without a fresh claim");
+        assert_eq!(refused.code(), Code::FailedPrecondition);
+        assert_eq!(refused.message(), "step_up_required");
+
+        assert!(grant_step_up_verdict(
+            ApprovalStepUpGate::Enforce,
+            Ok(asks_for_step_up()),
+            Some(&claim_at(NOW - 5)),
+            NOW,
+            "appr_1",
+        )
+        .is_ok());
+    }
+
+    /// F-f03-14: a stale claim does not stand in for a fresh one under `enforce`.
+    #[test]
+    fn a_stale_claim_is_refused_under_enforce() {
+        assert_eq!(
+            grant_step_up_verdict(
+                ApprovalStepUpGate::Enforce,
+                Ok(asks_for_step_up()),
+                Some(&claim_at(NOW - 3_600)),
+                NOW,
+                "appr_1",
+            )
+            .expect_err("a stale claim is refused")
+            .code(),
+            Code::FailedPrecondition
+        );
+    }
+
+    /// F-f03-14: under `shadow` the grant is observed and allowed, so nothing a client does changes. The missing fresh
+    /// claim is counted once, on the recorder this thread sees.
+    #[test]
+    fn a_grant_without_a_fresh_claim_is_allowed_and_counted_under_shadow() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            assert!(grant_step_up_verdict(
+                ApprovalStepUpGate::Shadow,
+                Ok(asks_for_step_up()),
+                None,
+                NOW,
+                "appr_1",
+            )
+            .is_ok());
+        });
+        let rendered = handle.render();
+        assert!(
+            rendered.lines().any(|line| {
+                line.starts_with("approval_step_up_missing_total{") && line.ends_with(" 1")
+            }),
+            "the missing claim is counted once:\n{rendered}"
+        );
+    }
+
+    /// F-f03-14: with the switch off the gRPC grant is exactly as it was, claim or none.
+    #[test]
+    fn a_grant_is_allowed_under_off_with_or_without_a_claim() {
+        for claim in [None, Some(claim_at(NOW - 5))] {
+            assert!(grant_step_up_verdict(
+                ApprovalStepUpGate::Off,
+                Ok(asks_for_step_up()),
+                claim.as_ref(),
+                NOW,
+                "appr_1",
+            )
+            .is_ok());
+        }
+    }
+
+    /// F-f03-14: a cause that asks for no step-up needs none, under any gate.
+    #[test]
+    fn a_grant_whose_cause_asks_no_step_up_needs_none() {
+        let plain = Approval {
+            id: "appr_2".to_owned(),
+            cause: Some(ApprovalCause {
+                code: "hook_ask".to_owned(),
+                ..ApprovalCause::default()
+            }),
+            ..Approval::default()
+        };
+        for gate in [ApprovalStepUpGate::Shadow, ApprovalStepUpGate::Enforce] {
+            assert!(grant_step_up_verdict(gate, Ok(plain.clone()), None, NOW, "appr_2").is_ok());
+        }
+    }
+
+    /// F-f03-14: when the record cannot be read, `enforce` fails closed with the read's own status, and `shadow` and
+    /// `off` let the grant through as they always did.
+    #[test]
+    fn an_unreadable_record_fails_closed_under_enforce_and_passes_under_shadow() {
+        let unreadable = || Err(Status::unavailable("durable approval store unavailable"));
+        assert_eq!(
+            grant_step_up_verdict(
+                ApprovalStepUpGate::Enforce,
+                unreadable(),
+                None,
+                NOW,
+                "appr_1"
+            )
+            .expect_err("an unreadable record refuses under enforce")
+            .code(),
+            Code::Unavailable
+        );
+        assert!(grant_step_up_verdict(
+            ApprovalStepUpGate::Shadow,
+            unreadable(),
+            None,
+            NOW,
+            "appr_1"
+        )
+        .is_ok());
+        assert!(
+            grant_step_up_verdict(ApprovalStepUpGate::Off, unreadable(), None, NOW, "appr_1")
+                .is_ok()
+        );
     }
 }

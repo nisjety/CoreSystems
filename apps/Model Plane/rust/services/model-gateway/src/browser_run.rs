@@ -22,8 +22,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use axum::{
-    extract::{Path, State},
+    extract::{rejection::JsonRejection, Path, State},
     http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Extension, Json, Router,
 };
@@ -66,7 +67,7 @@ async fn dispatch_browser_step(
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/v1/browser/runs/capabilities", get(browser_run_capabilities))
-        .route("/v1/browser/runs", post(browser_run_start))
+        .route("/v1/browser/runs", post(browser_run_start_route))
         .route(
             "/v1/browser/runs/:run_id/control",
             post(browser_run_control),
@@ -2240,6 +2241,77 @@ async fn browser_run_start(
     }
 }
 
+/// `POST /v1/browser/runs`: the route. It reads the verified browser bearer and the body as results, so the
+/// request is answered in the order the handler checks it. With `ZDR_TYPED_REFUSALS_ENABLED` on, a ZDR caller
+/// with no browser bearer gets the typed `browser_run` refusal rather than a bare 401. Otherwise the rejection
+/// that the first failing extractor gives comes out as it always has.
+async fn browser_run_start_route(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    data_plane_bearer: Option<Extension<VerifiedBearer>>,
+    execution_bearer: VerifiedExecutionBearer,
+    session_bearer: VerifiedSessionBearer,
+    inference_bearer: VerifiedInferenceBearer,
+    browser_bearer: Result<VerifiedBrowserBearer, StatusCode>,
+    capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    headers: HeaderMap,
+    body: Result<Json<BrowserRunStartRequest>, JsonRejection>,
+) -> Response {
+    let browser_bearer = match browser_bearer {
+        Ok(bearer) => bearer,
+        Err(rejection) => {
+            let request_zdr = body.as_ref().ok().map(|Json(req)| req.zdr);
+            return zdr_refusal_before_bearer(
+                crate::zdr_posture::typed_refusals_enabled(),
+                &claims,
+                request_zdr,
+            )
+            .unwrap_or_else(|| rejection.into_response());
+        }
+    };
+    let Json(req) = match body {
+        Ok(body) => body,
+        Err(rejection) => return rejection.into_response(),
+    };
+    match browser_run_start(
+        State(state),
+        Extension(claims),
+        data_plane_bearer,
+        execution_bearer,
+        session_bearer,
+        inference_bearer,
+        browser_bearer,
+        capability_bearer,
+        headers,
+        Json(req),
+    )
+    .await
+    {
+        Ok(answer) => answer.into_response(),
+        Err(refusal) => refusal.into_response(),
+    }
+}
+
+/// The answer to a request that has no browser bearer, when the typed refusals are on and the body reads.
+/// `request_zdr` is the request's own `zdr` flag, and `None` when the body did not read, which decides nothing
+/// here. A ZDR caller gets the typed refusal; a caller the posture refuses gets that refusal; any other caller,
+/// and every caller while the switch is off, gets `None`, so the bearer's own rejection answers as before.
+/// Nothing is read from the bearer, and no grant, thread or run is touched.
+fn zdr_refusal_before_bearer(
+    typed_refusals: bool,
+    claims: &Claims,
+    request_zdr: Option<bool>,
+) -> Option<Response> {
+    if !typed_refusals {
+        return None;
+    }
+    match browser_run_zdr_blocked(claims, request_zdr?) {
+        Ok(true) => Some(browser_run_zdr_refused().into_response()),
+        Ok(false) => None,
+        Err(error) => Some(error.into_response()),
+    }
+}
+
 pub(crate) const RECIPE_ENV: &str = "MODEL_GATEWAY_BROWSER_RECIPE";
 
 // Cohesive single-flow handler (validate → thread → run → dispatch); splitting
@@ -2259,18 +2331,30 @@ async fn browser_run_start_inner(
 ) -> Result<Json<Value>, ApiError> {
     reject_unbound_space(&req)?;
     if browser_run_zdr_blocked(&claims, req.zdr)? {
-        return Err((
-            StatusCode::PRECONDITION_FAILED,
-            Json(
-                mp_contracts::zdr_refusal::Refusal::feature_not_supported("browser_run")
-                    .json_body(),
-            ),
-        ));
+        return Err(browser_run_zdr_refused());
     }
     // The org's pause and mode cap bind a standalone browser run as they bind a Do turn (D2-1119, WS25-S9). A browser
     // run clicks and types, so a lockdown or read-only cap refuses it. Read after the ZDR refusal and before any grant,
     // thread or run write.
     admit_standalone_browser_run(&state, &claims.org_id, capability_bearer.as_ref()).await?;
+    // The org's hook rules travel with the run's dispatch (F-f06-04), and the browser step is sent them unconditionally.
+    // They are made readable here, before any grant, thread or run is written, so a refused start leaves nothing behind.
+    // With HOOKS_DURABLE off nothing is read.
+    crate::runtime_registries::require_org_hooks(
+        &state,
+        &claims.org_id,
+        capability_bearer
+            .as_ref()
+            .map(|Extension(bearer)| bearer.as_str()),
+    )
+    .await
+    .map_err(|code| {
+        let (status, message) = crate::runtime_registries::ORG_HOOKS_UNAVAILABLE_ANSWER;
+        (
+            status,
+            Json(json!({ "error": { "code": code, "message": message, "details": {} } })),
+        )
+    })?;
     let data_plane_bearer = data_plane_bearer
         .map(|Extension(value)| value)
         .ok_or_else(|| {
@@ -2620,6 +2704,8 @@ async fn browser_run_start_inner(
             // BrowserRunStartRequest carries no turn connector selection, so a
             // run started here is never offered a one-time-code fill (QF-16).
             connector_scope: None,
+            // A browser run is an ordinary step, never an MCP-app side call.
+            side_call: false,
         });
         let authorization = format!("Bearer {}", execution_bearer.as_str())
             .parse()
@@ -2847,6 +2933,14 @@ fn browser_run_finalization(outcome: BrowserExecutionOutcome) -> BrowserRunFinal
 /// token is refused as a route mismatch here.
 fn browser_run_zdr_blocked(claims: &Claims, request_zdr: bool) -> Result<bool, ApiError> {
     crate::zdr_posture::zdr_or_refuse(claims, &crate::zdr_posture::Route::plain(request_zdr))
+}
+
+/// The typed refusal of a browser run under ZDR: `feature_not_supported` for `browser_run`.
+fn browser_run_zdr_refused() -> ApiError {
+    (
+        StatusCode::PRECONDITION_FAILED,
+        Json(mp_contracts::zdr_refusal::Refusal::feature_not_supported("browser_run").json_body()),
+    )
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -4658,6 +4752,45 @@ mod tests {
         assert!(unavailable.get("max_planner_tokens").is_none());
     }
 
+    /// F-f06-04: a standalone browser run makes the org's hook rules readable after the org's admission and before any
+    /// grant, thread or run is written, so a refused start leaves nothing behind. Its step is sent the rules the read
+    /// returned.
+    #[test]
+    fn a_browser_run_makes_the_hook_rules_readable_before_it_writes_anything() {
+        let source = include_str!("browser_run.rs").replace("\r\n", "\n");
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("the test module is in this file");
+        let from = production
+            .find("async fn browser_run_start_inner(")
+            .expect("browser_run_start_inner is in the production text");
+        let rest = &production[from..];
+        let body = &rest[..rest.find("\n}\n").expect("the function ends")];
+        let admitted = body
+            .find("admit_standalone_browser_run(")
+            .expect("the org's pause is read");
+        let require = body.find("require_org_hooks(").expect("the rules are read");
+        let granted = body
+            .find("resolve_browser_grant(")
+            .expect("the run grant is resolved");
+        let prepared = [
+            "prepare_idempotent_browser_run(",
+            "prepare_managed_run_authenticated(",
+        ]
+        .iter()
+        .map(|needle| body.find(needle).expect("the run is prepared"))
+        .min()
+        .expect("two run preparations");
+        let carried = body
+            .find("hook_context_json(&state.hooks, &org_id)")
+            .expect("the step carries the rules");
+        assert!(
+            admitted < require && require < granted && granted < prepared && prepared < carried,
+            "admission, rules, grant, run, then the step: {body}"
+        );
+    }
+
     #[test]
     fn origin_mapping_covers_every_run_source() {
         let expected = [
@@ -5616,6 +5749,122 @@ mod tests {
 
         assert!(browser_run_zdr_blocked(&claims, false).expect("a ZDR token decides"));
     }
+
+    /// The status and the body of an answer, read whole.
+    async fn response_parts(response: axum::response::Response) -> (StatusCode, Vec<u8>) {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .expect("a small body");
+        (status, body.to_vec())
+    }
+
+    #[tokio::test]
+    async fn a_zdr_caller_without_a_bearer_gets_the_typed_refusal_only_while_the_switch_is_on() {
+        let zdr = browser_claims(true);
+        let (status, body) = response_parts(
+            zdr_refusal_before_bearer(true, &zdr, Some(true)).expect("the typed refusal answers"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).expect("a JSON body"),
+            mp_contracts::zdr_refusal::Refusal::feature_not_supported("browser_run").json_body()
+        );
+        // Off, the bearer's own rejection answers, as it always has.
+        assert!(zdr_refusal_before_bearer(false, &zdr, Some(true)).is_none());
+        // A body that did not read decides nothing: the bearer's rejection answers.
+        assert!(zdr_refusal_before_bearer(true, &zdr, None).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_persistent_run_without_a_browser_bearer_is_the_bare_401() {
+        let persistent = browser_claims(false);
+        assert!(zdr_refusal_before_bearer(true, &persistent, Some(false)).is_none());
+        let response = browser_run_start_route(
+            State(AppState::new()),
+            Extension(browser_claims(false)),
+            None,
+            VerifiedExecutionBearer::for_test("execution-token"),
+            VerifiedSessionBearer::for_test("session-token"),
+            VerifiedInferenceBearer::for_test("inference-token"),
+            Err(StatusCode::UNAUTHORIZED),
+            None,
+            HeaderMap::new(),
+            Ok(Json(browser_request("session-1"))),
+        )
+        .await;
+        let (status, body) = response_parts(response).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(
+            body.is_empty(),
+            "the bearer's own rejection carries no body"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_waived_caller_without_a_browser_bearer_takes_the_same_answer_as_the_posture() {
+        let waived = Claims {
+            zdr_waiver: Some(crate::auth::ZdrWaiverClaim {
+                version: 1,
+                provider: "openai-codex-subscription".to_owned(),
+                connection: "conn_sub".to_owned(),
+            }),
+            ..browser_claims(false)
+        };
+        let expected = match browser_run_zdr_blocked(&waived, false) {
+            Ok(false) => None,
+            Ok(true) => Some(StatusCode::PRECONDITION_FAILED),
+            Err((status, _)) => Some(status),
+        };
+        let answer = zdr_refusal_before_bearer(true, &waived, Some(false));
+        assert_eq!(answer.as_ref().map(|response| response.status()), expected);
+    }
+
+    #[tokio::test]
+    async fn a_zdr_start_with_a_browser_bearer_is_the_same_typed_refusal_and_writes_nothing() {
+        let broker = session_broker(
+            &["example.com"],
+            Ok(derived_run("run-1", "session-1", &["example.com"])),
+        );
+        let (mut state, broker_handle) = state_with_browser_broker(broker).await;
+        let (channel, connections, session_handle) = counting_session_core().await;
+        state.session_client =
+            mp_contracts::model_plane::v1::session_core_client::SessionCoreClient::new(
+                channel.clone(),
+            );
+        state.managed_run_client =
+            mp_contracts::model_plane::v1::managed_run_lifecycle_client::ManagedRunLifecycleClient::new(
+                channel,
+            );
+        let response = browser_run_start_route(
+            State(state),
+            Extension(browser_claims(true)),
+            Some(Extension(VerifiedBearer::for_test("data-plane-token"))),
+            VerifiedExecutionBearer::for_test("execution-token"),
+            VerifiedSessionBearer::for_test("session-token"),
+            VerifiedInferenceBearer::for_test("inference-token"),
+            Ok(VerifiedBrowserBearer::for_test("browser-user-token")),
+            None,
+            HeaderMap::new(),
+            Ok(Json(browser_request("session-1"))),
+        )
+        .await;
+        broker_handle.abort();
+        session_handle.abort();
+        let (status, body) = response_parts(response).await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).expect("a JSON body"),
+            mp_contracts::zdr_refusal::Refusal::feature_not_supported("browser_run").json_body()
+        );
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            0,
+            "no thread or run write before the refusal"
+        );
+    }
+
     /// A Session Core stand-in that counts connections and drops each one, so
     /// any thread or run write fails and is visible as a connection.
     async fn counting_session_core() -> (

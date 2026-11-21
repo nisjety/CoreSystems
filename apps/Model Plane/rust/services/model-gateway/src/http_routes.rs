@@ -171,6 +171,14 @@ mod attention_state_tests {
         assert_eq!(attention_reason_name(3), Some("input"));
         assert_eq!(attention_reason_name(4), None);
     }
+
+    /// The crash-park reason (O-02) is named `parked`, and the goal reason keeps its name beside it.
+    #[test]
+    fn a_crash_park_reason_is_named_parked() {
+        assert_eq!(attention_reason_name(5), Some("goal"));
+        assert_eq!(attention_reason_name(6), Some("parked"));
+        assert_eq!(attention_reason_name(7), None);
+    }
 }
 
 #[cfg(test)]
@@ -310,6 +318,11 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
         .route("/v1/invoke/:request_id/cancel", post(invoke_cancel))
         // Mid-run user input, delivered at the next tool-round boundary.
         .route("/v1/invoke/:request_id/queue", post(invoke_queue_input))
+        // O-01: take back a queued mid-run message the run has not read yet, by its client message id.
+        .route(
+            "/v1/invoke/:request_id/queue/:client_message_id",
+            delete(invoke_retract_queued_input),
+        )
         // chat-parity §1: reload a thread's conversation (cross-device resume).
         .route("/v1/threads", get(list_threads).delete(delete_threads))
         // Conversation search over the owner's own threads (build plan WS17 S3).
@@ -518,6 +531,10 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
         .merge(dataplane_routes())
         // TOON compact-context encoding
         .route("/v1/toon/encode", post(toon_encode))
+        // EP-9 O-23: the org's web domain rules, asked by the BFF for its web search and its crawl. The handlers are in
+        // `web_domain_routes`; the routes are written here so the ZDR route lint reads them.
+        .route("/v1/web/domain-check", post(crate::web_domain_routes::domain_check))
+        .route("/v1/web/domain-rules", post(crate::web_domain_routes::domain_rules))
         // Wave 7 — fine-tuning lifecycle (gap-model.md §14.9 PAR-30/31/32 v1).
         // POST is admin-gated; GETs are open within the org.
         .route(
@@ -3749,14 +3766,14 @@ pub(crate) const APPROVAL_STEP_UP_ENV: &str = "APPROVAL_STEP_UP_ENFORCED";
 /// `enforce` are read trimmed and case-folded, as `SESSION_CORE_SPACE_ZDR` is, so a mis-cased word
 /// keeps its mode. Any other value stays off, and the startup report warns about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ApprovalStepUpGate {
+pub(crate) enum ApprovalStepUpGate {
     Off,
     Shadow,
     Enforce,
 }
 
 impl ApprovalStepUpGate {
-    fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         Self::from_raw(std::env::var(APPROVAL_STEP_UP_ENV).ok().as_deref())
     }
 
@@ -3775,17 +3792,29 @@ impl ApprovalStepUpGate {
 const STEP_UP_MAX_AGE_SECS: i64 = 120;
 const STEP_UP_CLOCK_SKEW_SECS: i64 = 30;
 
-fn step_up_is_fresh(claim: Option<&StepUpClaim>, now: i64) -> bool {
+pub(crate) fn step_up_is_fresh(claim: Option<&StepUpClaim>, now: i64) -> bool {
     claim.is_some_and(|claim| {
         let age = now - claim.at;
         (-STEP_UP_CLOCK_SKEW_SECS..=STEP_UP_MAX_AGE_SECS).contains(&age)
     })
 }
 
+/// Whether the decision this gateway records says the caller re-authenticated (F-f03-13): a grant,
+/// with a fresh step-up claim on the verified token. It describes the token, so it is set under every
+/// gate mode, and a denial never sets it. Provenance only: the step-up gate decides whether a grant may
+/// happen, and this only records that the claim was there.
+pub(crate) fn decision_step_up_verified(
+    target_state: ApprovalState,
+    claim: Option<&StepUpClaim>,
+    now: i64,
+) -> bool {
+    matches!(target_state, ApprovalState::Granted) && step_up_is_fresh(claim, now)
+}
+
 /// Whether a decision is a grant its approval's cause makes conditional on a fresh
 /// re-authentication, and the caller brought none. A denial never needs one: refusing a call is
 /// always within the caller's authority.
-fn step_up_missing(
+pub(crate) fn step_up_missing(
     target_state: ApprovalState,
     prior: Option<&Approval>,
     claim: Option<&StepUpClaim>,
@@ -3818,9 +3847,60 @@ fn step_up_required_error() -> HttpJsonError {
     )
 }
 
+/// The step-up gate of a decision (WS13 S5, F-f03-14), for the HTTP decide route, the gRPC approval RPC and the Space
+/// member decide route. A grant whose cause asks for a fresh re-authentication, with none fresh, is refused under
+/// `enforce`, counted under `shadow` and allowed under `off`. A denial never needs one. Nothing about the claim is
+/// logged: only the approval id and the verdict.
+pub(crate) fn enforce_step_up(
+    prior_approval: Option<&Approval>,
+    target_state: ApprovalState,
+    claim: Option<&StepUpClaim>,
+    approval_id: &str,
+) -> Result<(), HttpJsonError> {
+    enforce_step_up_at(
+        ApprovalStepUpGate::from_env(),
+        prior_approval,
+        target_state,
+        claim,
+        Utc::now().timestamp(),
+        approval_id,
+    )
+}
+
+/// [`enforce_step_up`] under a given gate and clock, so each mode and each age is testable without the process
+/// environment.
+pub(crate) fn enforce_step_up_at(
+    gate: ApprovalStepUpGate,
+    prior_approval: Option<&Approval>,
+    target_state: ApprovalState,
+    claim: Option<&StepUpClaim>,
+    now: i64,
+    approval_id: &str,
+) -> Result<(), HttpJsonError> {
+    if !step_up_missing(target_state, prior_approval, claim, now) {
+        return Ok(());
+    }
+    match gate {
+        ApprovalStepUpGate::Off => Ok(()),
+        ApprovalStepUpGate::Shadow => {
+            let cause = prior_approval
+                .and_then(|approval| approval.cause.as_ref())
+                .map_or("", |cause| CauseCode::from_wire(&cause.code).as_str());
+            metrics::counter!("approval_step_up_missing_total", "cause" => cause).increment(1);
+            info!(approval_id = %approval_id, "a grant lacks a fresh step-up (shadow)");
+            Ok(())
+        }
+        ApprovalStepUpGate::Enforce => {
+            info!(approval_id = %approval_id, "a grant lacks a fresh step-up; refused");
+            Err(step_up_required_error())
+        }
+    }
+}
+
 /// The durable decision this gateway records for a decision (build plan WS13 S3). The source is
 /// always USER: the body has no field for it, so a client-supplied value cannot reach the record.
 /// `rule_proposed` is set only for an "Always" this gateway accepted (build plan WS13 S7).
+/// `step_up_verified` is the gateway's own reading of the verified token (F-f03-13), never a client's.
 fn user_decision_request(
     approval_id: String,
     target_state: ApprovalState,
@@ -3829,6 +3909,7 @@ fn user_decision_request(
     reason: String,
     scope: &str,
     rule_proposed: bool,
+    step_up_verified: bool,
 ) -> DecideApprovalRequest {
     DecideApprovalRequest {
         approval_id,
@@ -3841,6 +3922,7 @@ fn user_decision_request(
         decision_source: ApprovalDecisionSource::User as i32,
         scope: approval_scope_code(scope),
         rule_proposed,
+        step_up_verified,
         ..Default::default()
     }
 }
@@ -3910,29 +3992,16 @@ async fn decide_approval(
         approval_cause::rule_proposals_enabled(),
     )?;
     let step_up_claim = step_up.and_then(|Extension(VerifiedStepUp(claim))| claim);
-    if step_up_missing(
-        target_state,
+    enforce_step_up(
         prior_approval.as_ref(),
+        target_state,
         step_up_claim.as_ref(),
-        Utc::now().timestamp(),
-    ) {
-        match ApprovalStepUpGate::from_env() {
-            ApprovalStepUpGate::Off => {}
-            ApprovalStepUpGate::Shadow => {
-                let cause = prior_approval
-                    .as_ref()
-                    .and_then(|approval| approval.cause.as_ref())
-                    .map_or("", |cause| CauseCode::from_wire(&cause.code).as_str());
-                metrics::counter!("approval_step_up_missing_total", "cause" => cause).increment(1);
-                info!(approval_id = %approval_id, "a grant lacks a fresh step-up (shadow)");
-            }
-            ApprovalStepUpGate::Enforce => {
-                info!(approval_id = %approval_id, "a grant lacks a fresh step-up; refused");
-                return Err(step_up_required_error());
-            }
-        }
-    }
+        &approval_id,
+    )?;
     let edited = edit.is_some();
+    // F-f03-13: a grant made with a fresh re-authentication is recorded as verified, in every gate mode.
+    let step_up_verified =
+        decision_step_up_verified(target_state, step_up_claim.as_ref(), Utc::now().timestamp());
     let mut decision = user_decision_request(
         approval_id,
         target_state,
@@ -3941,6 +4010,7 @@ async fn decide_approval(
         body.reason,
         scope,
         asks_rule,
+        step_up_verified,
     );
     decision.edit = edit;
     let resp = state
@@ -5475,9 +5545,18 @@ impl AiChatMetering {
 /// The switch, read once per process.
 fn ai_chat_metering() -> AiChatMetering {
     static MODE: std::sync::OnceLock<AiChatMetering> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| {
-        AiChatMetering::parse(env::var("MODEL_GATEWAY_AI_CHAT_METERING").ok().as_deref())
-    })
+    *MODE.get_or_init(|| AiChatMetering::parse(env::var(AI_CHAT_METERING_ENV).ok().as_deref()))
+}
+
+/// The environment switch of the `/v1/ai/chat` metering, read once by [`ai_chat_metering`] and listed in
+/// `switch_spellings::MODE_SWITCHES`.
+pub(crate) const AI_CHAT_METERING_ENV: &str = "MODEL_GATEWAY_AI_CHAT_METERING";
+
+/// Whether a set `MODEL_GATEWAY_AI_CHAT_METERING` is a value [`AiChatMetering::parse`] does not read: anything but the
+/// exact `service`, `all` or `off`, with no trimming and no folding. Such a value meters nothing, so the startup report
+/// names it. A blank value reads as unset.
+pub(crate) fn unreadable_ai_chat_metering(value: &str) -> bool {
+    !(value.trim().is_empty() || matches!(value, "service" | "all" | "off"))
 }
 
 /// The validated sampling parameters of one `/v1/ai/chat` call.
@@ -7068,8 +7147,14 @@ async fn ai_images(
         "generate" | "image" | "text_to_image" => {
             generate_image(state, claims, req, &inference_bearer).await
         }
-        "analyze" | "vision" => analyze_image(state, claims, req, &inference_bearer).await,
-        "ocr" | "extract_text" => extract_image_text(state, claims, req, &inference_bearer).await,
+        "analyze" | "vision" => {
+            let attachments = crate::attachment_policy::AttachmentPolicy::from_env();
+            analyze_image(state, claims, req, &inference_bearer, &attachments).await
+        }
+        "ocr" | "extract_text" => {
+            let attachments = crate::attachment_policy::AttachmentPolicy::from_env();
+            extract_image_text(state, claims, req, &inference_bearer, &attachments).await
+        }
         _ => Err((
             StatusCode::BAD_REQUEST,
             Json(json!({
@@ -7085,7 +7170,8 @@ async fn ai_images_analyze(
     inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiImagesRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    analyze_image(state, claims, req, &inference_bearer).await
+    let attachments = crate::attachment_policy::AttachmentPolicy::from_env();
+    analyze_image(state, claims, req, &inference_bearer, &attachments).await
 }
 
 async fn ai_images_ocr(
@@ -7094,7 +7180,8 @@ async fn ai_images_ocr(
     inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiImagesRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    extract_image_text(state, claims, req, &inference_bearer).await
+    let attachments = crate::attachment_policy::AttachmentPolicy::from_env();
+    extract_image_text(state, claims, req, &inference_bearer, &attachments).await
 }
 
 async fn generate_image(
@@ -7170,6 +7257,7 @@ async fn analyze_image(
     claims: Claims,
     req: AiImagesRequest,
     inference_bearer: &VerifiedInferenceBearer,
+    attachments: &crate::attachment_policy::AttachmentPolicy,
 ) -> Result<Json<Value>, HttpJsonError> {
     let request_id = new_ulid();
     // AnalyzeImageRequest carries no ZDR flag: a ZDR posture is refused as an attachment, and a
@@ -7187,8 +7275,13 @@ async fn analyze_image(
         .prompt
         .or(req.input)
         .unwrap_or_else(|| "Describe this image in detail.".to_owned());
-    let (image_url, image_data) =
-        image_input(req.url, req.image_url, req.content_base64, req.image_base64)?;
+    let (image_url, image_data) = image_input(
+        attachments,
+        req.url,
+        req.image_url,
+        req.content_base64,
+        req.image_base64,
+    )?;
 
     let resp = state
         .inference_client
@@ -7227,6 +7320,7 @@ async fn extract_image_text(
     claims: Claims,
     req: AiImagesRequest,
     inference_bearer: &VerifiedInferenceBearer,
+    attachments: &crate::attachment_policy::AttachmentPolicy,
 ) -> Result<Json<Value>, HttpJsonError> {
     // ExtractImageTextRequest carries no ZDR flag: a ZDR posture is refused as an attachment, and a
     // waived token (one connection) as a route mismatch (see `zdr_posture`).
@@ -7240,8 +7334,13 @@ async fn extract_image_text(
         ));
     }
     let request_id = new_ulid();
-    let (image_url, image_data) =
-        image_input(req.url, req.image_url, req.content_base64, req.image_base64)?;
+    let (image_url, image_data) = image_input(
+        attachments,
+        req.url,
+        req.image_url,
+        req.content_base64,
+        req.image_base64,
+    )?;
 
     let resp = state
         .inference_client
@@ -7273,6 +7372,7 @@ async fn extract_image_text(
 }
 
 fn image_input(
+    attachments: &crate::attachment_policy::AttachmentPolicy,
     url: Option<String>,
     image_url: Option<String>,
     content_base64: Option<String>,
@@ -7291,6 +7391,16 @@ fn image_input(
         ));
     }
     if content_base64.trim().is_empty() {
+        // A hosted image: the provider fetches this address itself, so it meets the operator's list
+        // (CHAT_ATTACHMENT_HOSTED_IMAGE_HOSTS) before any call, as a hosted chat attachment does.
+        if let Err(refusal) = attachments.check_hosted_image_url(&url) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": { "code": refusal.code.as_str(), "message": refusal.message }
+                })),
+            ));
+        }
         return Ok((url, Vec::new()));
     }
     let image_data = STANDARD.decode(content_base64).map_err(|_| {
@@ -9574,6 +9684,8 @@ async fn get_thread_workspace(
             GetThreadWorkspaceRequest {
                 lease_id: lease.lease_id,
                 backend_id: lease.backend_id,
+                // The same posture the acquire above carried: sandbox-manager refuses the read for a ZDR caller (F-f02-05).
+                zdr,
             },
             &bearer,
         )?)
@@ -11230,7 +11342,41 @@ pub(crate) fn approval_value(approval: &Approval) -> Value {
     if approval.revision > 0 {
         value["revision"] = json!(approval.revision);
     }
+    // F-f03-16: present only on a decided approval while session-core's decision record is on, so every
+    // other approval projects exactly as before. Closed words and the rule id only: never the grant id,
+    // who decided, the decision reason or any other free text.
+    if let Some(decision) = approval.decision.as_ref() {
+        value["decision"] = json!({
+            "source": decision_source_word(decision.source),
+            "scope": decision_scope_word(decision.scope),
+            "rule_id": empty_to_null(&decision.rule_id),
+            "step_up_verified": decision.step_up_verified,
+        });
+    }
     value
+}
+
+/// The closed word for who recorded a decision (F-f03-16). A number this build does not know reads as
+/// `unattributed`, the same as a decision that recorded no source.
+fn decision_source_word(source: i32) -> &'static str {
+    match ApprovalDecisionSource::try_from(source) {
+        Ok(ApprovalDecisionSource::User) => "user",
+        Ok(ApprovalDecisionSource::PostureAuto) => "posture_auto",
+        Ok(ApprovalDecisionSource::StandingGrant) => "standing_grant",
+        Ok(ApprovalDecisionSource::Timeout) => "timeout",
+        Ok(ApprovalDecisionSource::System) => "system",
+        _ => "unattributed",
+    }
+}
+
+/// The closed word for how far a decision reaches (F-f03-16). UNSPECIFIED reads as `once`, as it does
+/// everywhere else in the Model Plane.
+fn decision_scope_word(scope: i32) -> &'static str {
+    match ApprovalScope::try_from(scope) {
+        Ok(ApprovalScope::Thread) => "thread",
+        Ok(ApprovalScope::Run) => "run",
+        _ => "once",
+    }
 }
 
 /// The scopes this process offers a person (build plan WS13 S6): `once` alone while standing scopes
@@ -11258,6 +11404,8 @@ fn approval_cause_value(cause: &ApprovalCause) -> Value {
         "assist_kind": empty_to_null(&cause.assist_kind),
         "assist_origin": empty_to_null(&cause.assist_origin),
         "host": empty_to_null(&cause.host),
+        // The highest level a site-consent pause's policy allows (WS21-S6); null for any other cause.
+        "max_level": empty_to_null(&cause.max_level),
         "scope_options": offered_scope_options(cause),
         "step_up_required": step_up_projected(cause, ApprovalStepUpGate::from_env()),
         // Always is offered exactly when the decide route would accept `promote` (build plan WS13
@@ -11348,6 +11496,49 @@ mod approval_step_up_tests {
         ));
     }
 
+    /// F-f03-13: the decision records a fresh re-authentication for a grant only.
+    #[test]
+    fn a_fresh_grant_records_step_up_verified() {
+        assert!(decision_step_up_verified(
+            ApprovalState::Granted,
+            Some(&claim_at(NOW)),
+            NOW,
+        ));
+        assert!(decision_step_up_verified(
+            ApprovalState::Granted,
+            Some(&claim_at(NOW - STEP_UP_MAX_AGE_SECS)),
+            NOW,
+        ));
+    }
+
+    #[test]
+    fn a_denial_with_a_fresh_claim_records_no_step_up() {
+        assert!(!decision_step_up_verified(
+            ApprovalState::Denied,
+            Some(&claim_at(NOW)),
+            NOW,
+        ));
+        assert!(!decision_step_up_verified(
+            ApprovalState::TimedOut,
+            Some(&claim_at(NOW)),
+            NOW,
+        ));
+    }
+
+    #[test]
+    fn a_stale_or_absent_claim_records_no_step_up() {
+        assert!(!decision_step_up_verified(
+            ApprovalState::Granted,
+            Some(&claim_at(NOW - STEP_UP_MAX_AGE_SECS - 1)),
+            NOW,
+        ));
+        assert!(!decision_step_up_verified(
+            ApprovalState::Granted,
+            None,
+            NOW
+        ));
+    }
+
     #[test]
     fn a_grant_whose_cause_asks_no_step_up_needs_none() {
         let plain = Approval {
@@ -11423,6 +11614,82 @@ mod approval_step_up_tests {
         assert_eq!(body["error"]["details"]["method"], "password");
     }
 
+    /// F-f03-14: one gate for every route. Under `off` and `shadow` a grant that needs step-up with no claim goes
+    /// through (shadow also counts it); under `enforce` it is refused with the typed error.
+    #[test]
+    fn enforce_step_up_at_is_off_or_shadow_allows_and_enforce_refuses() {
+        let asked = approval_needing_step_up();
+        for gate in [ApprovalStepUpGate::Off, ApprovalStepUpGate::Shadow] {
+            assert!(enforce_step_up_at(
+                gate,
+                Some(&asked),
+                ApprovalState::Granted,
+                None,
+                NOW,
+                "appr_1",
+            )
+            .is_ok());
+        }
+        let refused = enforce_step_up_at(
+            ApprovalStepUpGate::Enforce,
+            Some(&asked),
+            ApprovalState::Granted,
+            None,
+            NOW,
+            "appr_1",
+        )
+        .expect_err("a grant without a fresh claim is refused under enforce");
+        let (status, Json(body)) = refused;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "step_up_required");
+    }
+
+    /// F-f03-14: under `enforce` a fresh claim lets the grant through, and a stale one does not.
+    #[test]
+    fn enforce_step_up_at_lets_a_fresh_grant_through_and_refuses_a_stale_one() {
+        let asked = approval_needing_step_up();
+        assert!(enforce_step_up_at(
+            ApprovalStepUpGate::Enforce,
+            Some(&asked),
+            ApprovalState::Granted,
+            Some(&claim_at(NOW)),
+            NOW,
+            "appr_1",
+        )
+        .is_ok());
+        assert!(enforce_step_up_at(
+            ApprovalStepUpGate::Enforce,
+            Some(&asked),
+            ApprovalState::Granted,
+            Some(&claim_at(NOW - STEP_UP_MAX_AGE_SECS - 1)),
+            NOW,
+            "appr_1",
+        )
+        .is_err());
+    }
+
+    /// F-f03-14: a denial never needs step-up, under any gate. Refusing a call is always within the caller's authority,
+    /// so the deny path is unchanged.
+    #[test]
+    fn a_denial_is_never_refused_by_the_step_up_gate() {
+        let asked = approval_needing_step_up();
+        for gate in [
+            ApprovalStepUpGate::Off,
+            ApprovalStepUpGate::Shadow,
+            ApprovalStepUpGate::Enforce,
+        ] {
+            assert!(enforce_step_up_at(
+                gate,
+                Some(&asked),
+                ApprovalState::Denied,
+                None,
+                NOW,
+                "appr_1",
+            )
+            .is_ok());
+        }
+    }
+
     /// Every production caller of session-core's `DecideApproval` in the Model Plane, reviewed
     /// (build plan WS13 S5, K3-22). A new caller fails here until it is listed with its reason, so
     /// a path that can record a grant outside the HTTP step-up gate cannot appear unnoticed.
@@ -11441,17 +11708,20 @@ mod approval_step_up_tests {
             // wait budget runs out. Neither is a grant.
             "execution-core/src/browser_events.rs",
             // The chat posture records the interactive user's decision for them (POSTURE_AUTO),
-            // a grant that never passes the HTTP gate. Tracked as a depth finding.
+            // a grant that never passes the HTTP gate. A step-up cause is refused there before it is
+            // recorded (DEC-F03-3, F-f03-12), so only a cause that asks for no fresh re-authentication
+            // is granted this way.
             "execution-core/src/runtime_loop/mod.rs",
             // The gateway's durable persist of a decision it has already resolved.
             "model-gateway/src/approvals.rs",
-            // The gRPC approval RPCs persist a grant through the same helper, outside the HTTP
-            // gate. Tracked as a depth finding.
+            // The gRPC approval RPC persists a grant through the same helper. It runs the step-up
+            // gate (`enforce_step_up_at`, F-f03-14) on the durable record before it persists.
             "model-gateway/src/grpc.rs",
             // The HTTP decide route, where the step-up gate sits.
             "model-gateway/src/http_routes.rs",
             // Main's Space member decide route (WS10 S6), merged 2026-11-02. It carries a Control
-            // decision, not the step-up gate; whether a member grant needs step-up is a depth item.
+            // decision and does not run the step-up gate yet: a member cannot read the approval's
+            // cause through Session Core (F-f03-14 blocked; owner decision D0-025).
             "model-gateway/src/space_routes/approvals.rs",
         ]
         .into_iter()
@@ -11550,6 +11820,7 @@ mod approval_rule_tests {
             String::new(),
             scope,
             true,
+            false,
         );
         assert_eq!(request.scope, ApprovalScope::Thread as i32);
         assert_eq!(request.decision_source, ApprovalDecisionSource::User as i32);
@@ -11882,6 +12153,25 @@ mod approval_value_tests {
     }
 
     #[test]
+    fn approval_value_projects_a_site_consent_level_and_null_for_any_other_cause() {
+        let consent = approval_cause::for_browser_site_consent(
+            "run_1",
+            "browser.open",
+            "{}",
+            "example.com",
+            "read",
+        );
+        let value = approval_value(&Approval {
+            cause: Some(consent),
+            ..Approval::default()
+        });
+        assert_eq!(value["cause"]["code"], "browser_site_consent");
+        assert_eq!(value["cause"]["host"], "example.com");
+        assert_eq!(value["cause"]["max_level"], "read");
+        assert!(approval_value(&approval_with_cause())["cause"]["max_level"].is_null());
+    }
+
+    #[test]
     fn decide_ignores_client_supplied_decision_source() {
         let body: DecideApprovalBody = serde_json::from_value(json!({
             "decision": "approve",
@@ -11898,10 +12188,93 @@ mod approval_value_tests {
             body.reason,
             "once",
             false,
+            false,
         );
         assert_eq!(request.decision_source, ApprovalDecisionSource::User as i32);
         assert_eq!(request.scope, ApprovalScope::Once as i32);
         assert_eq!(request.decided_by, "user-1");
+    }
+
+    /// F-f03-16: a decided approval carries its record as closed words and the rule id. The grant id,
+    /// the decider and the free-text reason never reach the projection.
+    #[test]
+    fn approval_value_projects_the_decision_record_and_never_the_grant_id() {
+        let value = approval_value(&Approval {
+            id: "appr_1".to_owned(),
+            state: ApprovalState::Granted as i32,
+            decided_by: "user_1".to_owned(),
+            decision: Some(mp_contracts::model_plane::v1::ApprovalDecisionRecord {
+                source: ApprovalDecisionSource::StandingGrant as i32,
+                scope: ApprovalScope::Thread as i32,
+                rule_id: "rule_1".to_owned(),
+                grant_id: "apg_secret_grant".to_owned(),
+                step_up_verified: true,
+                cause_code: "provider_write".to_owned(),
+            }),
+            ..Approval::default()
+        });
+        assert_eq!(
+            value["decision"],
+            json!({
+                "source": "standing_grant",
+                "scope": "thread",
+                "rule_id": "rule_1",
+                "step_up_verified": true,
+            })
+        );
+        assert!(
+            !value["decision"].to_string().contains("apg_secret_grant"),
+            "{value}"
+        );
+        assert!(!value.to_string().contains("apg_secret_grant"), "{value}");
+    }
+
+    #[test]
+    fn approval_value_reads_closed_decision_words_and_defaults() {
+        let record = |source: ApprovalDecisionSource, scope: ApprovalScope| {
+            approval_value(&Approval {
+                decision: Some(mp_contracts::model_plane::v1::ApprovalDecisionRecord {
+                    source: source as i32,
+                    scope: scope as i32,
+                    ..Default::default()
+                }),
+                ..Approval::default()
+            })["decision"]
+                .clone()
+        };
+        assert_eq!(
+            record(ApprovalDecisionSource::User, ApprovalScope::Run)["source"],
+            "user"
+        );
+        assert_eq!(
+            record(ApprovalDecisionSource::PostureAuto, ApprovalScope::Once)["source"],
+            "posture_auto"
+        );
+        assert_eq!(
+            record(ApprovalDecisionSource::Timeout, ApprovalScope::Once)["source"],
+            "timeout"
+        );
+        assert_eq!(
+            record(ApprovalDecisionSource::System, ApprovalScope::Once)["source"],
+            "system"
+        );
+        let unrecorded = record(ApprovalDecisionSource::Unspecified, ApprovalScope::Unspecified);
+        assert_eq!(unrecorded["source"], "unattributed");
+        assert_eq!(unrecorded["scope"], "once", "UNSPECIFIED reads as once");
+        assert_eq!(unrecorded["rule_id"], Value::Null);
+        assert_eq!(unrecorded["step_up_verified"], false);
+        assert_eq!(
+            record(ApprovalDecisionSource::User, ApprovalScope::Run)["scope"],
+            "run"
+        );
+    }
+
+    #[test]
+    fn approval_value_has_no_decision_key_unless_a_record_is_set() {
+        assert!(approval_value(&Approval::default())
+            .get("decision")
+            .is_none());
+        assert!(approval_value(&approval_with_cause()).get("decision").is_none());
     }
 
     #[test]
@@ -14739,6 +15112,255 @@ where
     }
 }
 
+/// The 503 for a take-back while `MODEL_GATEWAY_QUEUE_RETRACT` is off (or the send receipts it needs
+/// are not on): typed, so the client reads "this deployment does not take messages back" and shows the
+/// tray read-only.
+fn queue_retract_disabled() -> HttpJsonError {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": {
+            "code": "queue_retract_disabled",
+            "message": "taking back a queued message is not enabled on this deployment",
+        }})),
+    )
+}
+
+/// Take back a message the person sent while a run was streaming, and leave a text-free "retracted"
+/// note in the thread (O-01, DEC-F01-03).
+///
+/// `DELETE /v1/invoke/:request_id/queue/:client_message_id`. The message is named by the
+/// `client_message_id` it was sent under (the send receipt), so this needs the receipts the queue route
+/// writes with `MODEL_GATEWAY_SEND_RECEIPTS` on, and answers the typed 503 `queue_retract_disabled`
+/// without them or with `MODEL_GATEWAY_QUEUE_RETRACT` off.
+///
+/// Three answers, one per outcome the SPA acts on:
+/// - 200 `retracted: true`: the run had not taken the message and now never will; session-core marked
+///   the stored copy withdrawn (its text is gone and the thread view shows one "retracted" note).
+/// - 409 `already_delivered`: the run took it first (a tool round read it), or the run's answer is about
+///   to be stored and the message is handed over to a resend (the take-back stays open until then: a
+///   message typed while the answer streams was never read by the run); it stays, and the SPA marks it
+///   delivered. Only the queue says this: a message it has
+///   already given back is never reported as delivered. If session-core then refuses the withdrawal
+///   because an answer follows the stored copy, the answer is 200 `retracted: true, withdrawn: false`
+///   with `reason: "message_already_answered"`.
+/// - 404 `not_found`: no live message of this caller under that id.
+///
+/// The owner replica decides (the queue registry's own lock settles a race with a delivery), over the
+/// run-control bus when the stream is on another replica; only ids travel. ZDR and waived tokens are
+/// refused before anything is asked (such a turn has no queue). The thread comes from the stream's own
+/// registration, never from the request.
+async fn invoke_retract_queued_input(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path((request_id, client_message_id)): Path<(String, String)>,
+) -> Response {
+    // Taking a message back changes a run's durable state: a ZDR or a waived token cannot do that.
+    if let Err(rejection) = require_non_zdr_durable_mutation(&claims) {
+        return rejection.into_response();
+    }
+    if !crate::queued_input::queue_retract_enabled()
+        || !crate::queued_input::send_receipts_enabled()
+    {
+        return queue_retract_disabled().into_response();
+    }
+    retract_queued_input(
+        &state,
+        &claims,
+        &bearer,
+        &request_id,
+        client_message_id.trim(),
+    )
+    .await
+    .unwrap_or_else(IntoResponse::into_response)
+}
+
+/// [`invoke_retract_queued_input`] past its gates, in the order that keeps the stored copy and the queue
+/// in step: learn the stream's thread, let the owner's queue decide, and only then withdraw the stored
+/// message. The queue is asked first because it is the authority on whether the run has read the
+/// message; a withdrawal after a delivery would erase something the run answered.
+async fn retract_queued_input(
+    state: &AppState,
+    claims: &Claims,
+    bearer: &VerifiedModelBearer,
+    request_id: &str,
+    client_message_id: &str,
+) -> Result<Response, HttpJsonError> {
+    use crate::queued_input::{stream_thread, RetractOutcome, StreamThread};
+    use crate::run_control::RetractRoute;
+
+    let answer = |status: StatusCode, mut body: serde_json::Value| {
+        body["request_id"] = json!(request_id);
+        body["client_message_id"] = json!(client_message_id);
+        (status, Json(body)).into_response()
+    };
+    if !crate::queued_input::valid_client_message_id(client_message_id) {
+        return Ok(answer(
+            StatusCode::BAD_REQUEST,
+            json!({"retracted": false, "error": "client_message_id is not a valid message id"}),
+        ));
+    }
+    let thread_id = match stream_thread(
+        &state.queued_inputs,
+        &state.run_control,
+        request_id,
+        &claims.org_id,
+        &claims.user_id,
+    )
+    .await
+    {
+        StreamThread::Here { thread_id, .. } | StreamThread::Peer { thread_id, .. } => thread_id,
+        StreamThread::Gone => {
+            return Ok(answer(
+                StatusCode::NOT_FOUND,
+                json!({"retracted": false, "error": "not_found"}),
+            ));
+        }
+        // The stream may be live and hold the message: nothing is claimed either way.
+        StreamThread::Unavailable => {
+            let (status, body) = run_control_unavailable(request_id);
+            return Ok(answer(status, body));
+        }
+    };
+    let msg = match crate::queued_input::retract_bus_message(claims, request_id, client_message_id)
+    {
+        Ok(msg) => msg,
+        Err(refusal) => return Ok(crate::zdr_posture::http(&refusal).into_response()),
+    };
+    let outcome = match state
+        .run_control
+        .retract_input(&state.queued_inputs, &msg)
+        .await
+    {
+        RetractRoute::Local(outcome) | RetractRoute::Peer(outcome) => outcome,
+        RetractRoute::NotFound => RetractOutcome::NotFound,
+        RetractRoute::Unavailable => {
+            let (status, body) = run_control_unavailable(request_id);
+            return Ok(answer(status, body));
+        }
+    };
+    match outcome {
+        RetractOutcome::NotFound => {
+            return Ok(answer(
+                StatusCode::NOT_FOUND,
+                json!({"retracted": false, "error": "not_found"}),
+            ));
+        }
+        RetractOutcome::AlreadyDelivered => {
+            return Ok(answer(
+                StatusCode::CONFLICT,
+                json!({"retracted": false, "error": "already_delivered"}),
+            ));
+        }
+        RetractOutcome::Retracted => {}
+    }
+
+    // The run will never read it. Mark the stored copy withdrawn; a repeat of this call finds the
+    // message already taken back in the queue and runs this again, so a failure here is retryable.
+    let withdrawn = state
+        .message_withdrawal_client
+        .clone()
+        .withdraw_message(authenticated_session_request(
+            mp_contracts::model_plane::v1::WithdrawMessageRequest {
+                org_id: claims.org_id.clone(),
+                thread_id: thread_id.clone(),
+                client_message_id: client_message_id.to_owned(),
+            },
+            bearer,
+        )?)
+        .await;
+    match withdrawn {
+        Ok(stored) => {
+            let stored = stored.into_inner();
+            Ok(answer(
+                StatusCode::OK,
+                json!({
+                    "retracted": true,
+                    "withdrawn": true,
+                    "message_id": stored.message_id,
+                    "already_withdrawn": stored.already_withdrawn,
+                    "thread_id": thread_id,
+                }),
+            ))
+        }
+        // A catalogue refusal keeps its own code (a zero-retention or waived credential).
+        Err(status) if mp_contracts::zdr_refusal::Refusal::from_status(&status).is_some() => {
+            Err(branch_thread_error(&status))
+        }
+        // An answer already follows the stored copy, but the queue has given the message back, so the
+        // run never read it: the take-back close (`close_retractions`, just before the run's answer is
+        // stored) is what keeps the queue from handing a message back once the answer exists, so this is
+        // only a take-back that passed the queue just before that close and was overtaken by the stored
+        // answer. It is NOT a
+        // delivery: the queue no longer holds it, the done frame will not name it, and the SPA must
+        // not resend it. The take-back stands; the stored copy could not be marked withdrawn, which
+        // the answer says with a typed reason (the SPA shows no note, and nothing is lost).
+        Err(status)
+            if status.code() == tonic::Code::FailedPrecondition
+                && status.message() == "message_already_answered" =>
+        {
+            tracing::warn!(
+                %request_id,
+                %thread_id,
+                "queued message taken back after its thread was answered: left stored, not withdrawn"
+            );
+            Ok(answer(
+                StatusCode::OK,
+                json!({
+                    "retracted": true,
+                    "withdrawn": false,
+                    "reason": "message_already_answered",
+                    "thread_id": thread_id,
+                }),
+            ))
+        }
+        // The message was never stored under that id (nothing to withdraw): it is out of the queue, so
+        // the take-back stands, and the thread has no row to mark.
+        Err(status)
+            if status.code() == tonic::Code::NotFound
+                && status.message() == "message not found" =>
+        {
+            Ok(answer(
+                StatusCode::OK,
+                json!({"retracted": true, "withdrawn": false, "thread_id": thread_id}),
+            ))
+        }
+        Err(status) => {
+            tracing::warn!(
+                code = ?status.code(),
+                %request_id,
+                %thread_id,
+                "queued message taken back but not marked withdrawn"
+            );
+            match status.code() {
+                tonic::Code::Unavailable
+                | tonic::Code::DeadlineExceeded
+                | tonic::Code::Internal
+                | tonic::Code::Unknown => Ok(answer(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({
+                        "retracted": true,
+                        "withdrawn": false,
+                        "error": "withdrawal_not_recorded",
+                        "retryable": true,
+                    }),
+                )),
+                // Any other refusal (a permission, an invalid request): the queue has already given the
+                // message back, so the run never reads it. The error keeps its own status and envelope, and
+                // also says the take-back stands, so the client never reads "refused" for a message the
+                // queue no longer holds (it would otherwise be resent at the run's end, against the take-back).
+                _ => {
+                    let (code, Json(mut body)) =
+                        session_thread_error("session-core withdraw_message failed", &status);
+                    body["retracted"] = json!(true);
+                    body["withdrawn"] = json!(false);
+                    Err((code, Json(body)))
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct ModelDescriptor {
     id: String,
@@ -15119,6 +15741,11 @@ struct ThreadMessage {
     /// The ChatGPT subscription connection this turn was written under (DEC-V-R8). The same rules as `model_connection_id`.
     #[serde(skip_serializing_if = "String::is_empty")]
     subscription_connection_id: String,
+    /// The person took this message back before the run read it (O-01): a text-free note stands where it
+    /// was, `content` is empty and no evidence travels. Present only with `MODEL_GATEWAY_QUEUE_RETRACT`
+    /// on and only on such a row, so every other transcript keeps its shape.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    retracted: bool,
 }
 
 /// The connection id a turn carries on the wire, or none. A connection is named only on the owner's own personal read,
@@ -15364,8 +15991,8 @@ fn attention_state_name(state: i32) -> Option<&'static str> {
 }
 
 /// The wire name of an attention reason (WS16 S1): the pending row behind a waiting state, or
-/// `goal` for a thread goal that stopped (EP-7 S5). Tag 4 is reserved for the parked loop of WS03,
-/// so this build names nothing for it.
+/// `goal` for a thread goal that stopped (EP-7 S5), or `parked` for a crash-parked run whose notice is due (O-02).
+/// Tag 4 is reserved for the parked loop of WS03, so this build names nothing for it.
 fn attention_reason_name(reason: i32) -> Option<&'static str> {
     use mp_contracts::model_plane::v1::AttentionReason;
     match AttentionReason::try_from(reason).ok()? {
@@ -15374,6 +16001,7 @@ fn attention_reason_name(reason: i32) -> Option<&'static str> {
         AttentionReason::Plan => Some("plan"),
         AttentionReason::Input => Some("input"),
         AttentionReason::Goal => Some("goal"),
+        AttentionReason::Parked => Some("parked"),
     }
 }
 
@@ -15466,6 +16094,10 @@ struct ThreadSummaryResponse {
     /// `true` here for a pre-persona session-core replica during a rolling
     /// deploy — fail open, never silently disable persona fleet-wide.
     persona_enabled: bool,
+    /// The thread's own memory mode (WS07-S6): `inherit` or `off`. Omitted while the thread-memory-mode
+    /// switch is off, and for a caller that has no mode to show.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    memory_mode: String,
     /// The thread this one was forked from; omitted for a thread that was not forked.
     #[serde(skip_serializing_if = "String::is_empty")]
     forked_from_thread_id: String,
@@ -15551,6 +16183,10 @@ struct UpdateThreadPresentationBody {
     /// `None` leaves it as it is.
     #[serde(default)]
     unread: Option<bool>,
+    /// The thread's own memory mode (WS07-S6): `inherit` or `off`. `None` leaves it as it is. Refused
+    /// while the thread-memory-mode switch is off; Session Core refuses it for a zero-retention caller.
+    #[serde(default)]
+    memory_mode: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -15792,6 +16428,7 @@ async fn list_threads(
             origin: thread.origin,
             owner_subject_id: thread.owner_subject_id,
             persona_enabled: thread.persona_enabled,
+            memory_mode: memory_mode_for_listing(thread.memory_mode, thread_memory_mode_enabled()),
             archived_at: timestamp_to_rfc3339(thread.archived_at),
             starred: thread.starred,
             unread: thread.unread,
@@ -15817,6 +16454,68 @@ async fn list_threads(
     }))
 }
 
+/// The switch that lets a thread carry its own memory mode (WS07-S6): the presentation update accepts
+/// `memoryMode`, and the listing shows each thread's mode. Read once per process, so a request cannot see
+/// it change. Only the literal `true` turns it on.
+pub(crate) const THREAD_MEMORY_MODE_ENV: &str = "MODEL_GATEWAY_THREAD_MEMORY_MODE";
+
+/// Whether the per-thread memory mode is on in this process (WS07-S6), read once.
+fn thread_memory_mode_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| thread_memory_mode_enabled_with(&|key| std::env::var(key).ok()))
+}
+
+/// [`thread_memory_mode_enabled`] over an injected lookup, so the parsing is testable.
+fn thread_memory_mode_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    mp_contracts::loop_fold::switch_from(get(THREAD_MEMORY_MODE_ENV).as_deref())
+}
+
+/// The memory mode a listing carries for one thread (WS07-S6). While the switch is off the field is
+/// empty, which the wire omits, so the listing keeps the shape it had before the mode existed.
+fn memory_mode_for_listing(stored: String, enabled: bool) -> String {
+    if enabled {
+        stored
+    } else {
+        String::new()
+    }
+}
+
+/// The memory mode a presentation update asks for, checked before Session Core is asked (WS07-S6). An
+/// absent field stays `None`, so a body without it is what it always was. While the switch is off a
+/// present field is refused as a feature this deployment does not enable. Otherwise only `inherit` and
+/// `off` pass. Session Core stays the authority for the write and for zero retention.
+fn checked_thread_memory_mode(
+    requested: Option<&str>,
+    enabled: bool,
+) -> Result<Option<String>, HttpJsonError> {
+    let Some(mode) = requested else {
+        return Ok(None);
+    };
+    if !enabled {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "memory_mode is not enabled on this deployment"})),
+        ));
+    }
+    match mode {
+        "inherit" | "off" => Ok(Some(mode.to_owned())),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "memory_mode must be \"inherit\" or \"off\""})),
+        )),
+    }
+}
+
+/// Session Core's refusal of a presentation update. A typed catalogue refusal of a memory-mode write, such
+/// as the one a zero-retention caller gets, keeps its code, status and body unchanged, and the gateway
+/// never retries it. Every other refusal keeps the mapping this route has always had.
+fn presentation_update_error(error: &tonic::Status, memory_mode_asked: bool) -> HttpJsonError {
+    match mp_contracts::zdr_refusal::Refusal::from_status(error) {
+        Some(refusal) if memory_mode_asked => crate::zdr_posture::http(&refusal),
+        _ => session_thread_error("session-core update_thread_presentation failed", error),
+    }
+}
+
 /// Persist user-facing title, preview, and pin state through Session Core.
 /// The Model Gateway derives tenant/user scope exclusively from verified claims;
 /// callers cannot select another user's thread presentation.
@@ -15837,6 +16536,10 @@ async fn update_thread_presentation(
         ));
     }
 
+    let memory_mode =
+        checked_thread_memory_mode(body.memory_mode.as_deref(), thread_memory_mode_enabled())?;
+    let memory_mode_asked = memory_mode.is_some();
+
     let response = state
         .session_client
         .clone()
@@ -15851,14 +16554,12 @@ async fn update_thread_presentation(
                 archived: body.archived,
                 starred: body.starred,
                 unread: body.unread,
-                memory_mode: None,
+                memory_mode,
             },
             &bearer,
         )?)
         .await
-        .map_err(|error| {
-            session_thread_error("session-core update_thread_presentation failed", &error)
-        })?
+        .map_err(|error| presentation_update_error(&error, memory_mode_asked))?
         .into_inner();
 
     Ok(Json(UpdateThreadPresentationResponse {
@@ -16571,6 +17272,9 @@ async fn list_thread_messages(
                 include_human_posts: true,
                 post_context_cap: 0,
                 include_first,
+                // The thread view alone shows the text-free note of a message the person took back
+                // (O-01); with the switch off the read is what it always was.
+                include_withdrawn_notes: crate::queued_input::queue_retract_enabled(),
             },
             &bearer,
         )?)
@@ -16676,6 +17380,7 @@ async fn list_thread_messages(
                     owner_read,
                     byo_enabled,
                 ),
+                retracted: m.withdrawn,
             })
             .collect();
 
@@ -16765,6 +17470,8 @@ async fn branch_thread(
                 target_message_id: body.target_message_id,
                 expected_leaf_message_id: body.expected_leaf_message_id,
                 exact: body.exact,
+                // A client branch move names its turn; the root move is the edit's own (WS17 S9).
+                to_root: false,
             },
             &bearer,
         )?)
@@ -17218,6 +17925,7 @@ async fn create_memory(
                 memory_id: String::new(),
                 // The person's own write behind verified user claims (WS26-S4).
                 origin: "user".to_owned(),
+                run_id: String::new(),
             },
             &bearer,
         )?)
@@ -17815,6 +18523,8 @@ async fn get_memory_controls(
             GetMemoryControlsRequest {
                 org_id: claims.org_id.clone(),
                 user_id: claims.user_id.clone(),
+                // The user-level view the settings page reads (F-f06-07).
+                thread_id: String::new(),
             },
             &bearer,
         )?)
@@ -18810,7 +19520,8 @@ async fn invoke(
             if let Some(goal) = version_move.goal {
                 normalized.content = goal;
             }
-            Some((thread_id, turn))
+            // The leaf the move left: a managed start that fails below puts the thread back on it (P2-sc-12-rel1).
+            Some((thread_id, turn, version_move.previous_leaf_message_id))
         }
         None => None,
     };
@@ -18818,7 +19529,7 @@ async fn invoke(
     // so a later regenerate or edit of it replays on the same connection, and the subscription connection (DEC-V-R8),
     // so a side question on the thread is answered on it. Nothing is recorded for a ZDR turn.
     let started = session_flow::with_user_turn_connections(&normalized.model_connection_id, &normalized.subscription_connection_id, effective_zdr, async { match version_thread.as_ref() {
-        Some((thread_id, turn)) => {
+        Some((thread_id, turn, previous_leaf_message_id)) => {
             session_flow::prepare_version_run_authenticated(
                 &state,
                 thread_id,
@@ -18826,6 +19537,7 @@ async fn invoke(
                 &claims.user_id,
                 &normalized.content,
                 turn,
+                previous_leaf_message_id,
                 &managed_start_key,
                 &model_bearer,
             )
@@ -21256,6 +21968,415 @@ mod run_owner_publish_tests {
         state
     }
 
+    /// Session Core's `MessageWithdrawalService` stand-in: records what it is asked and answers with
+    /// the scripted refusal, or with success.
+    #[derive(Clone, Default)]
+    struct FakeWithdrawal {
+        asked: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
+        refuse: Arc<std::sync::Mutex<Option<tonic::Status>>>,
+    }
+
+    #[tonic::async_trait]
+    impl mp_contracts::model_plane::v1::message_withdrawal_service_server::MessageWithdrawalService
+        for FakeWithdrawal
+    {
+        async fn withdraw_message(
+            &self,
+            request: tonic::Request<mp_contracts::model_plane::v1::WithdrawMessageRequest>,
+        ) -> Result<
+            tonic::Response<mp_contracts::model_plane::v1::WithdrawMessageResponse>,
+            tonic::Status,
+        > {
+            let req = request.into_inner();
+            self.asked.lock().unwrap().push((
+                req.org_id,
+                req.thread_id,
+                req.client_message_id.clone(),
+            ));
+            if let Some(status) = self.refuse.lock().unwrap().clone() {
+                return Err(status);
+            }
+            Ok(tonic::Response::new(
+                mp_contracts::model_plane::v1::WithdrawMessageResponse {
+                    message_id: format!("stored-{}", req.client_message_id),
+                    already_withdrawn: false,
+                    withdrawn_at: None,
+                },
+            ))
+        }
+    }
+
+    impl FakeWithdrawal {
+        fn asked(&self) -> Vec<(String, String, String)> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    /// A state whose stream `req-1` of `org-a/user-a` runs on this replica, with `fake` as Session Core.
+    async fn streaming_with_withdrawal(fake: &FakeWithdrawal) -> AppState {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind withdrawal stand-in");
+        let address = listener.local_addr().expect("withdrawal stand-in address");
+        let served = fake.clone();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(
+                    mp_contracts::model_plane::v1::message_withdrawal_service_server::MessageWithdrawalServiceServer::new(
+                        served,
+                    ),
+                )
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .expect("withdrawal stand-in endpoint")
+            .connect()
+            .await
+            .expect("connect withdrawal stand-in");
+        let mut state = streaming(false).await;
+        state.message_withdrawal_client =
+            mp_contracts::model_plane::v1::message_withdrawal_service_client::MessageWithdrawalServiceClient::new(
+                channel,
+            );
+        state
+    }
+
+    async fn take_back(
+        state: &AppState,
+        who: &Claims,
+        id: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = retract_queued_input(
+            state,
+            who,
+            &VerifiedModelBearer::for_test("session-core-token"),
+            "req-1",
+            id,
+        )
+        .await
+        .unwrap_or_else(IntoResponse::into_response);
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).expect("a JSON answer"),
+        )
+    }
+
+    fn queue(state: &AppState, id: &str, text: &str) {
+        let queued = state
+            .queued_inputs
+            .enqueue_checked("req-1", "org-a", "user-a", text, None, id);
+        assert!(matches!(
+            queued,
+            crate::queued_input::EnqueueOutcome::Queued { .. }
+        ));
+    }
+
+    /// The happy path: the queue gives the message back (the run never reads it) and the stored copy is
+    /// withdrawn on the stream's own thread, once.
+    #[tokio::test]
+    async fn a_waiting_message_is_taken_out_of_the_queue_and_withdrawn_on_the_streams_thread() {
+        let fake = FakeWithdrawal::default();
+        let state = streaming_with_withdrawal(&fake).await;
+        queue(&state, "msg-1", "use EUR");
+        queue(&state, "msg-2", "and NOK");
+
+        let (status, answer) = take_back(&state, &claims("org-a", "user-a"), "msg-1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(answer["retracted"], true);
+        assert_eq!(answer["withdrawn"], true);
+        assert_eq!(answer["client_message_id"], "msg-1");
+        assert_eq!(answer["message_id"], "stored-msg-1");
+        assert_eq!(
+            fake.asked(),
+            [(
+                "org-a".to_owned(),
+                "thread-1".to_owned(),
+                "msg-1".to_owned()
+            )]
+        );
+        assert_eq!(
+            state.queued_inputs.drain("req-1"),
+            ["and NOK"],
+            "the run reads only the message that stayed"
+        );
+    }
+
+    /// A message the loop already took is delivered: nothing is withdrawn, and the answer says so.
+    #[tokio::test]
+    async fn a_delivered_message_is_not_withdrawn_and_the_answer_says_it_was_delivered() {
+        let fake = FakeWithdrawal::default();
+        let state = streaming_with_withdrawal(&fake).await;
+        queue(&state, "msg-1", "use EUR");
+        assert_eq!(state.queued_inputs.drain_receipted("req-1").len(), 1);
+
+        let (status, answer) = take_back(&state, &claims("org-a", "user-a"), "msg-1").await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(answer["retracted"], false);
+        assert_eq!(answer["error"], "already_delivered");
+        assert!(fake.asked().is_empty(), "the stored copy is left alone");
+    }
+
+    /// An id the stream never accepted, a stranger's take-back and a stream that is gone all answer 404,
+    /// and none of them reaches the stored copy.
+    #[tokio::test]
+    async fn an_unknown_message_a_stranger_and_a_gone_stream_are_not_found() {
+        let fake = FakeWithdrawal::default();
+        let state = streaming_with_withdrawal(&fake).await;
+        queue(&state, "msg-1", "use EUR");
+
+        let (status, answer) = take_back(&state, &claims("org-a", "user-a"), "msg-9").await;
+        assert_eq!(
+            (status, answer["error"].as_str()),
+            (StatusCode::NOT_FOUND, Some("not_found"))
+        );
+        for who in [claims("org-b", "user-a"), claims("org-a", "user-b")] {
+            let (status, _) = take_back(&state, &who, "msg-1").await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "{}/{}",
+                who.org_id,
+                who.user_id
+            );
+        }
+        let (status, _) = take_back(&state, &claims("org-a", "user-a"), "not a valid id").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            state.queued_inputs.drain("req-1"),
+            ["use EUR"],
+            "the message stayed queued"
+        );
+        state.queued_inputs.finish("req-1");
+        let (status, _) = take_back(&state, &claims("org-a", "user-a"), "msg-1").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(fake.asked().is_empty());
+    }
+
+    /// The stored record's backstop: Session Core says an answer follows the stored copy after the queue
+    /// has already given the message back. The run never read it (the queue no longer holds it), so the
+    /// answer must not be `already_delivered`: that would make the SPA mark a message delivered that is in
+    /// no queue, no done frame and no model context. The take-back stands, with a typed reason.
+    #[tokio::test]
+    async fn a_message_session_core_says_was_answered_after_the_queue_gave_it_back_is_not_a_delivery() {
+        let fake = FakeWithdrawal::default();
+        *fake.refuse.lock().unwrap() = Some(tonic::Status::failed_precondition(
+            "message_already_answered",
+        ));
+        let state = streaming_with_withdrawal(&fake).await;
+        queue(&state, "msg-1", "use EUR");
+
+        let (status, answer) = take_back(&state, &claims("org-a", "user-a"), "msg-1").await;
+        assert_ne!(status, StatusCode::CONFLICT, "never reported as delivered");
+        assert_ne!(answer["error"].as_str(), Some("already_delivered"));
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            (
+                answer["retracted"].as_bool(),
+                answer["withdrawn"].as_bool(),
+                answer["reason"].as_str()
+            ),
+            (Some(true), Some(false), Some("message_already_answered"))
+        );
+        assert!(
+            state.queued_inputs.drain("req-1").is_empty(),
+            "and the run will not read it either"
+        );
+    }
+
+    /// A take-back while the answer streams (the tool rounds are over, the answer is not yet about to be
+    /// stored) is honoured: nothing read the message, so it is taken out and withdrawn, and the done frame
+    /// never names it for a resend.
+    #[tokio::test]
+    async fn a_take_back_while_the_answer_streams_is_honoured_and_never_resent() {
+        let fake = FakeWithdrawal::default();
+        let state = streaming_with_withdrawal(&fake).await;
+        queue(&state, "msg-1", "use EUR");
+
+        let (status, answer) = take_back(&state, &claims("org-a", "user-a"), "msg-1").await;
+        assert_eq!(
+            (status, answer["retracted"].as_bool(), answer["withdrawn"].as_bool()),
+            (StatusCode::OK, Some(true), Some(true))
+        );
+        assert_ne!(answer["error"].as_str(), Some("already_delivered"));
+        assert!(state.queued_inputs.close_retractions("req-1"));
+        assert_eq!(
+            state.queued_inputs.close_and_undelivered("req-1"),
+            Some(Vec::new()),
+            "a message taken back is not named for a resend"
+        );
+    }
+
+    /// A refusal from Session Core that is not retryable (a permission, an invalid request) comes after the
+    /// queue gave the message back: the answer keeps its own status and says the take-back stands, so the
+    /// client never reads it as a refusal that leaves the message to be resent.
+    #[tokio::test]
+    async fn a_non_retryable_withdrawal_refusal_still_says_the_take_back_stands() {
+        let fake = FakeWithdrawal::default();
+        *fake.refuse.lock().unwrap() = Some(tonic::Status::permission_denied("not yours"));
+        let state = streaming_with_withdrawal(&fake).await;
+        queue(&state, "msg-1", "use EUR");
+
+        let (status, answer) = take_back(&state, &claims("org-a", "user-a"), "msg-1").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            (answer["retracted"].as_bool(), answer["withdrawn"].as_bool()),
+            (Some(true), Some(false))
+        );
+        assert!(
+            state.queued_inputs.drain("req-1").is_empty(),
+            "the run will not read it either"
+        );
+    }
+
+    /// The close just before the run's answer is stored ends take-backs: a message still waiting
+    /// answers `already_delivered` without asking Session Core, and the done frame still names it so
+    /// the SPA resends it (the lost-message window between the stored answer and the done frame).
+    #[tokio::test]
+    async fn a_take_back_after_the_loops_final_answer_is_already_delivered_and_still_named_for_resend() {
+        let fake = FakeWithdrawal::default();
+        let state = streaming_with_withdrawal(&fake).await;
+        queue(&state, "msg-1", "use EUR");
+        assert!(state.queued_inputs.close_retractions("req-1"));
+
+        let (status, answer) = take_back(&state, &claims("org-a", "user-a"), "msg-1").await;
+        assert_eq!(
+            (status, answer["error"].as_str()),
+            (StatusCode::CONFLICT, Some("already_delivered"))
+        );
+        assert!(fake.asked().is_empty(), "the stored copy is left alone");
+        assert_eq!(
+            state.queued_inputs.close_and_undelivered("req-1"),
+            Some(vec!["msg-1".to_owned()]),
+            "the done frame still names it for a resend"
+        );
+    }
+
+    /// The message is out of the queue but the stored copy could not be marked: a retryable 503 that
+    /// claims the take-back, and the retry (the queue answers `Retracted` again) completes it.
+    #[tokio::test]
+    async fn a_withdrawal_that_could_not_be_recorded_is_retryable_and_completes_on_the_retry() {
+        let fake = FakeWithdrawal::default();
+        *fake.refuse.lock().unwrap() =
+            Some(tonic::Status::unavailable("session-core is restarting"));
+        let state = streaming_with_withdrawal(&fake).await;
+        queue(&state, "msg-1", "use EUR");
+
+        let (status, answer) = take_back(&state, &claims("org-a", "user-a"), "msg-1").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            (answer["retracted"].as_bool(), answer["retryable"].as_bool()),
+            (Some(true), Some(true))
+        );
+        assert!(
+            state.queued_inputs.drain("req-1").is_empty(),
+            "the run will not read it either way"
+        );
+
+        *fake.refuse.lock().unwrap() = None;
+        let (status, answer) = take_back(&state, &claims("org-a", "user-a"), "msg-1").await;
+        assert_eq!(
+            (status, answer["withdrawn"].as_bool()),
+            (StatusCode::OK, Some(true))
+        );
+        assert_eq!(fake.asked().len(), 2);
+    }
+
+    /// A message Session Core holds nothing for (it was never stored under that id) is still taken back
+    /// from the queue: the take-back stands, and there is no row to mark.
+    #[tokio::test]
+    async fn a_message_with_no_stored_copy_is_still_taken_back() {
+        let fake = FakeWithdrawal::default();
+        *fake.refuse.lock().unwrap() = Some(tonic::Status::not_found("message not found"));
+        let state = streaming_with_withdrawal(&fake).await;
+        queue(&state, "msg-1", "use EUR");
+
+        let (status, answer) = take_back(&state, &claims("org-a", "user-a"), "msg-1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            (answer["retracted"].as_bool(), answer["withdrawn"].as_bool()),
+            (Some(true), Some(false))
+        );
+    }
+
+    /// The route refuses a ZDR token before it asks anything, and answers the typed 503 while the
+    /// switch is off (the default), without touching the queue.
+    #[tokio::test]
+    async fn the_take_back_route_refuses_zdr_and_is_typed_off_by_default() {
+        let fake = FakeWithdrawal::default();
+        let state = streaming_with_withdrawal(&fake).await;
+        queue(&state, "msg-1", "use EUR");
+        let route = |who: Claims| {
+            let state = state.clone();
+            async move {
+                invoke_retract_queued_input(
+                    State(state),
+                    Extension(who),
+                    VerifiedModelBearer::for_test("session-core-token"),
+                    Path(("req-1".to_owned(), "msg-1".to_owned())),
+                )
+                .await
+            }
+        };
+        let mut zdr = claims("org-a", "user-a");
+        zdr.zdr = true;
+        let refused = route(zdr).await;
+        assert_eq!(
+            refused.status(),
+            StatusCode::PRECONDITION_FAILED,
+            "a ZDR token has no queue to take back from"
+        );
+
+        // Switch off (not set in the test environment): the typed 503, and nothing is taken back.
+        if !crate::queued_input::queue_retract_enabled() {
+            let off = route(claims("org-a", "user-a")).await;
+            assert_eq!(off.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let bytes = axum::body::to_bytes(off.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["error"]["code"], "queue_retract_disabled");
+        }
+        assert_eq!(state.queued_inputs.drain("req-1"), ["use EUR"]);
+        assert!(fake.asked().is_empty());
+    }
+
+    /// The thread view's wire shape: a retracted note carries the flag and no text, and every other
+    /// turn keeps the shape it had (the flag is absent unless set).
+    #[test]
+    fn a_retracted_note_is_flagged_on_the_wire_and_every_other_turn_is_unchanged() {
+        let turn = |retracted: bool| ThreadMessage {
+            message_id: "m1".to_owned(),
+            role: "user".to_owned(),
+            content: String::new(),
+            agent_name: String::new(),
+            author_subject_id: String::new(),
+            post_kind: String::new(),
+            created_at: None,
+            metadata: None,
+            version: None,
+            entry: None,
+            mentions: Vec::new(),
+            revision: None,
+            model_connection_id: String::new(),
+            subscription_connection_id: String::new(),
+            retracted,
+        };
+        assert_eq!(
+            serde_json::to_value(turn(true)).unwrap(),
+            serde_json::json!({"message_id": "m1", "role": "user", "content": "", "retracted": true})
+        );
+        assert_eq!(
+            serde_json::to_value(turn(false)).unwrap(),
+            serde_json::json!({"message_id": "m1", "role": "user", "content": ""})
+        );
+    }
+
     #[tokio::test]
     async fn a_message_is_stored_under_its_id_before_it_is_queued_and_the_answer_is_the_receipt() {
         let state = streaming(false).await;
@@ -21997,6 +23118,9 @@ pub(crate) mod speech_route_tests {
         transcribe: Arc<Mutex<Vec<pb::TranscribeSpeechRequest>>>,
         synthesize: Arc<Mutex<Vec<pb::SynthesizeSpeechRequest>>>,
         infer: Arc<Mutex<Vec<pb::InferRequest>>>,
+        /// The image analysis and OCR calls, kept so the hosted-address tests see what reached the provider.
+        vision: Arc<Mutex<Vec<pb::AnalyzeImageRequest>>>,
+        ocr: Arc<Mutex<Vec<pb::ExtractImageTextRequest>>>,
     }
 
     impl SpeechInference {
@@ -22026,6 +23150,14 @@ pub(crate) mod speech_route_tests {
 
         pub(crate) fn cleanups(&self) -> Vec<pb::InferRequest> {
             self.infer.lock().expect("clean-up capture").clone()
+        }
+
+        fn vision_calls(&self) -> Vec<pb::AnalyzeImageRequest> {
+            self.vision.lock().expect("vision capture").clone()
+        }
+
+        fn ocr_calls(&self) -> Vec<pb::ExtractImageTextRequest> {
+            self.ocr.lock().expect("ocr capture").clone()
         }
     }
 
@@ -22168,16 +23300,37 @@ pub(crate) mod speech_route_tests {
 
         async fn analyze_image(
             &self,
-            _request: tonic::Request<pb::AnalyzeImageRequest>,
+            request: tonic::Request<pb::AnalyzeImageRequest>,
         ) -> Result<tonic::Response<pb::AnalyzeImageResponse>, tonic::Status> {
-            unused()
+            self.vision
+                .lock()
+                .expect("vision capture")
+                .push(request.into_inner());
+            Ok(tonic::Response::new(pb::AnalyzeImageResponse {
+                description: "A quarterly chart.".to_owned(),
+                model_used: "vision-model".to_owned(),
+                provider_used: "azure-openai".to_owned(),
+                input_tokens: 3,
+                output_tokens: 5,
+                ..Default::default()
+            }))
         }
 
         async fn extract_image_text(
             &self,
-            _request: tonic::Request<pb::ExtractImageTextRequest>,
+            request: tonic::Request<pb::ExtractImageTextRequest>,
         ) -> Result<tonic::Response<pb::ExtractImageTextResponse>, tonic::Status> {
-            unused()
+            self.ocr
+                .lock()
+                .expect("ocr capture")
+                .push(request.into_inner());
+            Ok(tonic::Response::new(pb::ExtractImageTextResponse {
+                text: "Kvartal 3".to_owned(),
+                page_count: 1,
+                model_used: "vision-model".to_owned(),
+                provider_used: "azure-openai".to_owned(),
+                ..Default::default()
+            }))
         }
 
         async fn analyze_document(
@@ -22538,6 +23691,177 @@ pub(crate) mod speech_route_tests {
         )
         .await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    /// The image analysis and OCR routes forward a hosted address to the provider, which fetches it. The
+    /// address meets the operator's list (`CHAT_ATTACHMENT_HOSTED_IMAGE_HOSTS`) before any call, as a hosted
+    /// chat attachment does. With the list unset, or the attachment contract switched off, both routes serve
+    /// the address as they did before.
+    mod hosted_image_address_tests {
+        use super::*;
+        use crate::attachment_policy::{AttachmentPolicy, ENABLED_VAR, HOSTED_IMAGE_HOSTS_VAR};
+
+        /// The two routes that forward an image address to the provider.
+        #[derive(Clone, Copy, Debug)]
+        enum Route {
+            Analyze,
+            Ocr,
+        }
+
+        const ROUTES: [Route; 2] = [Route::Analyze, Route::Ocr];
+
+        impl Route {
+            /// Sends one image body through the route to a fresh stand-in, judged by `attachments`.
+            async fn send(
+                self,
+                inference: &SpeechInference,
+                attachments: &AttachmentPolicy,
+                body: Value,
+            ) -> Result<Json<Value>, HttpJsonError> {
+                let state = state_with(inference.clone()).await;
+                let req: AiImagesRequest =
+                    serde_json::from_value(body).expect("an image body parses");
+                match self {
+                    Self::Analyze => {
+                        analyze_image(state, claims(false), req, &bearer(), attachments).await
+                    }
+                    Self::Ocr => {
+                        extract_image_text(state, claims(false), req, &bearer(), attachments).await
+                    }
+                }
+            }
+
+            /// The address and the bytes of each call that reached the provider, in order.
+            fn forwarded(self, inference: &SpeechInference) -> Vec<(String, Vec<u8>)> {
+                match self {
+                    Self::Analyze => inference
+                        .vision_calls()
+                        .into_iter()
+                        .map(|call| (call.image_url, call.image_data))
+                        .collect(),
+                    Self::Ocr => inference
+                        .ocr_calls()
+                        .into_iter()
+                        .map(|call| (call.image_url, call.image_data))
+                        .collect(),
+                }
+            }
+        }
+
+        fn policy(vars: &[(&str, &str)]) -> AttachmentPolicy {
+            let vars: Vec<(String, String)> = vars
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect();
+            AttachmentPolicy::from_getter(&move |key| {
+                vars.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+            })
+        }
+
+        fn hosted(url: &str) -> Value {
+            json!({ "url": url, "mime_type": "image/png" })
+        }
+
+        #[tokio::test]
+        async fn a_hosted_address_off_the_list_is_refused_before_any_call_on_both_routes() {
+            let list = policy(&[(HOSTED_IMAGE_HOSTS_VAR, "cdn.example.org")]);
+            for route in ROUTES {
+                for url in [
+                    "http://cdn.example.org/a.png",
+                    "https://10.0.0.1/a.png",
+                    "https://user@cdn.example.org/a.png",
+                    "https://evil.example.net/a.png",
+                    "https://cdn.example.org\\@10.0.0.1/a.png",
+                ] {
+                    let inference = SpeechInference::default();
+                    let (status, Json(body)) = route
+                        .send(&inference, &list, hosted(url))
+                        .await
+                        .expect_err("a hosted address off the list is refused");
+                    let case = format!("{route:?} {url}");
+                    assert_eq!(status, StatusCode::BAD_REQUEST, "{case}");
+                    assert_eq!(
+                        body["error"]["code"], "attachment_encoding_invalid",
+                        "{case}"
+                    );
+                    assert_eq!(
+                        body["error"]["message"], "The image address is not allowed.",
+                        "{case}"
+                    );
+                    assert!(
+                        !body.to_string().contains(url),
+                        "{case}: the address is never echoed"
+                    );
+                    assert!(
+                        route.forwarded(&inference).is_empty(),
+                        "{case}: nothing reaches the provider"
+                    );
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn a_listed_https_address_reaches_the_provider_unchanged_on_both_routes() {
+            let list = policy(&[(HOSTED_IMAGE_HOSTS_VAR, "cdn.example.org")]);
+            let url = "https://cdn.example.org/a.png";
+            for route in ROUTES {
+                let inference = SpeechInference::default();
+                route
+                    .send(&inference, &list, hosted(url))
+                    .await
+                    .expect("a listed address is served");
+                assert_eq!(
+                    route.forwarded(&inference),
+                    vec![(url.to_owned(), Vec::new())],
+                    "{route:?}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn with_no_list_or_the_contract_off_a_hosted_address_is_served_as_before() {
+            let unset = policy(&[]);
+            let contract_off = policy(&[
+                (ENABLED_VAR, "0"),
+                (HOSTED_IMAGE_HOSTS_VAR, "cdn.example.org"),
+            ]);
+            let url = "http://anywhere.test/a.png";
+            for route in ROUTES {
+                for attachments in [&unset, &contract_off] {
+                    let inference = SpeechInference::default();
+                    route
+                        .send(&inference, attachments, hosted(url))
+                        .await
+                        .expect("the address is served as before");
+                    assert_eq!(
+                        route.forwarded(&inference),
+                        vec![(url.to_owned(), Vec::new())],
+                        "{route:?}"
+                    );
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn inline_bytes_are_not_judged_by_the_list() {
+            let list = policy(&[(HOSTED_IMAGE_HOSTS_VAR, "cdn.example.org")]);
+            for route in ROUTES {
+                let inference = SpeechInference::default();
+                let body = json!({
+                    "content_base64": STANDARD.encode(b"png-bytes"),
+                    "mime_type": "image/png",
+                });
+                route
+                    .send(&inference, &list, body)
+                    .await
+                    .expect("inline bytes are served");
+                assert_eq!(
+                    route.forwarded(&inference),
+                    vec![(String::new(), b"png-bytes".to_vec())],
+                    "{route:?}"
+                );
+            }
+        }
     }
 }
 
@@ -24215,6 +25539,7 @@ mod thread_messages_page_tests {
                 revision: None,
                 model_connection_id: String::new(),
                 subscription_connection_id: String::new(),
+                retracted: false,
             }],
             has_more: None,
             omitted_before: None,
@@ -24253,6 +25578,7 @@ mod thread_messages_page_tests {
             }),
             model_connection_id: String::new(),
             subscription_connection_id: String::new(),
+            retracted: false,
         })
         .expect("the turn serialises");
         assert_eq!(
@@ -24638,6 +25964,157 @@ mod fork_route_tests {
 }
 
 #[cfg(test)]
+mod thread_memory_mode_tests {
+    use super::*;
+
+    /// A lookup that answers the switch's name with `value` and nothing else.
+    fn switch_env(value: Option<&'static str>) -> impl Fn(&str) -> Option<String> {
+        move |key| {
+            if key == THREAD_MEMORY_MODE_ENV {
+                value.map(str::to_owned)
+            } else {
+                None
+            }
+        }
+    }
+
+    fn listed(memory_mode: String) -> ThreadSummaryResponse {
+        ThreadSummaryResponse {
+            thread_id: "t-1".to_owned(),
+            session_key: "k".to_owned(),
+            title: "title".to_owned(),
+            preview: "preview".to_owned(),
+            created_at: "2026-11-20T00:00:00Z".to_owned(),
+            updated_at: "2026-11-20T00:00:00Z".to_owned(),
+            pinned: false,
+            space_id: String::new(),
+            owner_subject_id: String::new(),
+            latest_run_id: String::new(),
+            latest_run_status: String::new(),
+            latest_run_updated_at: None,
+            origin: "chat".to_owned(),
+            persona_enabled: true,
+            memory_mode,
+            forked_from_thread_id: String::new(),
+            archived_at: String::new(),
+            starred: false,
+            unread: false,
+            attention_state: None,
+            attention_since: None,
+            attention_unseen: None,
+            reply_count: 0,
+            last_author_subject_id: String::new(),
+            last_message_seq: 0,
+            recent_author_subject_ids: Vec::new(),
+            last_role: String::new(),
+            turn_count: 0,
+            goal_status: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_switch_is_only_the_literal_true_and_defaults_off() {
+        assert!(!thread_memory_mode_enabled_with(&switch_env(None)));
+        for value in ["", "1", "on", "yes", "TRUE", " true", "true ", "false"] {
+            assert!(
+                !thread_memory_mode_enabled_with(&switch_env(Some(value))),
+                "{value:?}"
+            );
+        }
+        assert!(thread_memory_mode_enabled_with(&switch_env(Some("true"))));
+    }
+
+    #[test]
+    fn a_body_without_memory_mode_is_what_it_was() {
+        assert_eq!(
+            checked_thread_memory_mode(None, false).expect("absent"),
+            None
+        );
+        assert_eq!(
+            checked_thread_memory_mode(None, true).expect("absent"),
+            None
+        );
+    }
+
+    #[test]
+    fn memory_mode_is_refused_while_the_switch_is_off() {
+        let (status, body) = checked_thread_memory_mode(Some("off"), false)
+            .expect_err("refused with the switch off");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.0["error"],
+            "memory_mode is not enabled on this deployment"
+        );
+    }
+
+    #[test]
+    fn with_the_switch_on_only_inherit_and_off_pass() {
+        assert_eq!(
+            checked_thread_memory_mode(Some("inherit"), true).expect("inherit"),
+            Some("inherit".to_owned())
+        );
+        assert_eq!(
+            checked_thread_memory_mode(Some("off"), true).expect("off"),
+            Some("off".to_owned())
+        );
+        for refused in ["", "on", "paused", "OFF", " off"] {
+            let (status, body) =
+                checked_thread_memory_mode(Some(refused), true).expect_err(refused);
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{refused:?}");
+            assert_eq!(
+                body.0["error"],
+                "memory_mode must be \"inherit\" or \"off\""
+            );
+        }
+    }
+
+    #[test]
+    fn the_body_takes_memory_mode_in_camel_case() {
+        let body: UpdateThreadPresentationBody =
+            serde_json::from_value(json!({"memoryMode": "off"})).expect("a memoryMode body parses");
+        assert_eq!(body.memory_mode.as_deref(), Some("off"));
+        let bare: UpdateThreadPresentationBody =
+            serde_json::from_value(json!({"pinned": true})).expect("a body without it parses");
+        assert_eq!(bare.memory_mode, None);
+        assert!(
+            serde_json::from_value::<UpdateThreadPresentationBody>(json!({"memory_mode": "off"}))
+                .is_err(),
+            "the key is camelCase, as the body's other keys are"
+        );
+    }
+
+    #[test]
+    fn the_listing_shows_a_mode_only_while_the_switch_is_on() {
+        let shown = serde_json::to_value(listed(memory_mode_for_listing("off".to_owned(), true)))
+            .expect("serialises");
+        assert_eq!(shown["memory_mode"], "off");
+        let hidden = serde_json::to_value(listed(memory_mode_for_listing("off".to_owned(), false)))
+            .expect("serialises");
+        assert!(hidden.get("memory_mode").is_none(), "{hidden}");
+    }
+
+    #[test]
+    fn a_zero_retention_refusal_of_a_memory_mode_write_is_returned_unchanged() {
+        let refusal = mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN;
+        let status = refusal.grpc_status(tonic::Code::FailedPrecondition);
+        let (http, body) = presentation_update_error(&status, true);
+        assert_eq!(http, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body.0, refusal.json_body());
+        assert_eq!(body.0["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert_eq!(body.0["error"]["retryable"], false);
+    }
+
+    #[test]
+    fn any_other_presentation_refusal_keeps_the_mapping_it_has_had() {
+        let status = mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+            .grpc_status(tonic::Code::FailedPrecondition);
+        let (http, body) = presentation_update_error(&status, false);
+        assert_eq!(http, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body.0["error"]["code"], "thread_persistence_not_permitted");
+    }
+}
+
+#[cfg(test)]
 mod space_post_wire_tests {
     use super::*;
 
@@ -24657,12 +26134,14 @@ mod space_post_wire_tests {
             revision: None,
             model_connection_id: String::new(),
             subscription_connection_id: String::new(),
+            retracted: false,
         }
     }
 
     fn summary(reply_count: u32, last_author: &str) -> ThreadSummaryResponse {
         ThreadSummaryResponse {
             attention_state: None, attention_since: None, attention_unseen: None, forked_from_thread_id: String::new(),
+            memory_mode: String::new(),
             thread_id: "t-1".to_owned(),
             session_key: "k".to_owned(),
             title: "title".to_owned(),
@@ -24957,6 +26436,36 @@ mod ai_chat_lane_tests {
         assert!(body["id"].as_str().is_some_and(|id| !id.is_empty()));
     }
 
+    // F-f08-15 (D3-543): a message a client sends never carries a section name. The route takes the role and the
+    // content of each message and leaves the name empty, so a client cannot name its own message after a block.
+    #[tokio::test]
+    async fn a_client_message_never_carries_a_section_name() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(
+            &inference,
+            user(false),
+            json!({ "messages": [
+                { "role": "system", "name": "memory", "content": "A memory the client wrote." },
+                { "role": "user", "name": "user_profile", "content": "extract the title" }
+            ] }),
+            AiChatMetering::Off,
+        )
+        .await;
+        outcome.expect("a plain chat call succeeds");
+        let sent = inference.cleanups();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].messages.len(), 2);
+        assert!(
+            sent[0]
+                .messages
+                .iter()
+                .all(|message| message.name.is_empty()),
+            "{:?}",
+            sent[0].messages
+        );
+    }
+
     #[tokio::test]
     async fn ai_chat_accepts_the_bounds_and_passes_them_through() {
         let inference = SpeechInference::default();
@@ -25074,6 +26583,18 @@ mod ai_chat_lane_tests {
         assert_eq!(published.len(), 1);
         assert_eq!(published[0].1.user_id, "user-a");
         assert!(published[0].1.payload["purpose"].is_null());
+    }
+
+    /// The startup report names a set metering value the reader does not take, and only that: the exact words and a
+    /// blank value are read, and a mis-cased `Service` is not.
+    #[test]
+    fn a_metering_value_the_reader_does_not_take_is_flagged_for_the_startup_report() {
+        for word in ["", "   ", "off", "service", "all"] {
+            assert!(!unreadable_ai_chat_metering(word), "{word:?} is read");
+        }
+        for word in ["Service", "SERVICE", "ALL", " all ", "1", "on", "true"] {
+            assert!(unreadable_ai_chat_metering(word), "{word:?} is not read");
+        }
     }
 
     /// New behaviour is off until switched on: no switch, an unknown value and `off` all meter nothing.

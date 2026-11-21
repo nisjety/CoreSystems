@@ -250,6 +250,13 @@ message IndexMemoryRequest {
   // other value, is read as "model_tool", so only "user" may write org-wide
   // memory.
   string origin = 7;
+
+  // The run that issued this save (EP-8 S10). The execution loop sets it from
+  // its own run, never from the model's input. With SESSION_CORE_AGENT_MEMORY_RUN_BOUND
+  // on, session-core writes an AGENT_SELF note only when this run is a live wake
+  // run of an agent on the thread, and an empty value writes nothing. Every other
+  // caller leaves it empty. An identifier only, never logged with content.
+  string run_id = 8;
 }
 
 message IndexMemoryResponse {
@@ -386,6 +393,12 @@ message GetMemoryControlsRequest {
 
   // The user whose controls are read. A user caller may only read their own.
   string user_id = 2;
+
+  // Optional thread (F-f06-07). When set, the controls answer the thread-aware decision for it: the thread's own
+  // memory mode and its containment are folded in, so use_allowed and reason say what a recall in that thread would
+  // do. The caller must own the thread (a service caller reads it for the thread's owner). Empty keeps the user-level
+  // view that the settings page reads.
+  string thread_id = 3;
 }
 
 // Request to set one user's memory state.
@@ -425,8 +438,9 @@ message MemoryControls {
 
   // Closed token for what decided the above: "on", "user_paused", "user_off",
   // "org_disabled", "zdr", "policy_unavailable". The thread-scoped tokens
-  // "space_scope" and "agent_run_scope" come from a thread's own recall or
-  // write (SearchMemory, IndexMemory), not from this message.
+  // "thread_off", "space_scope" and "agent_run_scope" come from a thread's own
+  // memory mode and containment: a recall or write in that thread (SearchMemory,
+  // IndexMemory), or this message when GetMemoryControlsRequest names the thread.
   string reason = 7;
 
   // How many of the user's rows the list hides under this decision (a count,

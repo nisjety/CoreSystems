@@ -7,6 +7,9 @@
 //! read it, interpolated with its off default, and no compose file pins it. The production overlay must not pin any of
 //! them: a deployment that turns on `MODEL_ACTION_ADMISSION=table` with Spaces has to be able to turn the refusal on
 //! through its runtime environment, without editing the overlay.
+//!
+//! The dev-only keys (O-05) are pinned here too: the production overlay requires each of them in the `:?` form, so a
+//! production deployment cannot start on an unset key or on a default.
 
 /// One interpolated switch: its name, the services that read it, and the text of its off default.
 const SWITCHES: [(&str, &[&str], &str); 3] = [
@@ -74,6 +77,12 @@ fn entries(block: &[String], variable: &str) -> Vec<String> {
 /// The entry of an off, interpolated declaration: `VARIABLE: ${VARIABLE:-<off>}`.
 fn off_entry(variable: &str, off: &str) -> String {
     format!("{variable}: ${{{variable}:-{off}}}")
+}
+
+/// The entry of a required declaration: `VARIABLE: ${SOURCE:?SOURCE is required}`, which refuses to start with the
+/// source unset.
+fn required_entry(variable: &str, source: &str) -> String {
+    format!("{variable}: ${{{source}:?{source} is required}}")
 }
 
 /// The services (two-space keys under `services:`) whose block sets `variable`, sorted.
@@ -181,5 +190,48 @@ fn no_compose_file_turns_a_switch_on_or_pins_it_to_another_value() {
                 );
             }
         }
+    }
+}
+
+/// The dev-only keys (O-05, DEC-F02-3, DEC-F04-10) are required in the production overlay in the `:?` form, so a
+/// production deployment fails at interpolation rather than starting on an unset or defaulted key. The attestation pair
+/// is set on the execution-core block; the model-execution service key reaches execution-core through the ingestion key
+/// it feeds. No production line gives any of them a default.
+#[test]
+fn the_production_overlay_requires_the_dev_only_keys_in_the_strict_form() {
+    let production =
+        compose("docker-compose.production.yml").expect("the production overlay is readable");
+    let execution = service_block(&production, "execution-core");
+    assert!(
+        !execution.is_empty(),
+        "the execution-core block is in the production overlay"
+    );
+    for variable in [
+        "EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY",
+        "EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID",
+    ] {
+        assert_eq!(
+            entries(&execution, variable),
+            vec![required_entry(variable, variable)],
+            "the production execution-core requires {variable} in the :? form"
+        );
+    }
+    assert_eq!(
+        entries(&execution, "INGESTION_SERVICE_API_KEY"),
+        vec![required_entry(
+            "INGESTION_SERVICE_API_KEY",
+            "MODEL_EXECUTION_SERVICE_API_KEY"
+        )],
+        "the production execution-core requires MODEL_EXECUTION_SERVICE_API_KEY in the :? form"
+    );
+    for source in [
+        "EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY",
+        "EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID",
+        "MODEL_EXECUTION_SERVICE_API_KEY",
+    ] {
+        assert!(
+            !production.contains(&format!("${{{source}:-")),
+            "no production line gives {source} a default"
+        );
     }
 }

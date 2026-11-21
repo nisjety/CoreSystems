@@ -61,10 +61,20 @@ fn map_thread_ownership_error(error: &sqlx::Error) -> Status {
 }
 
 /// The status of a revocation erasure that failed (V3-sc-1): a legal-hold refusal keeps its typed code, and
-/// anything else is internal with the message it always had.
+/// anything else is internal with the message it always had. An erasure whose audit row could not be written was
+/// rolled back, so no note went without its record and the caller may retry: unavailable, as a manager's
+/// single-row delete is (F-f08-08).
 fn agent_erasure_status(error: anyhow::Error) -> Status {
-    match error.downcast::<crate::gdpr::ErasureHoldError>() {
-        Ok(hold) => hold.into_status(),
+    let error = match error.downcast::<crate::gdpr::ErasureHoldError>() {
+        Ok(hold) => return hold.into_status(),
+        Err(other) => other,
+    };
+    match error.downcast::<crate::dreaming::SpaceMemoryDeleteError>() {
+        Ok(crate::dreaming::SpaceMemoryDeleteError::AuditUnavailable(_)) => {
+            tracing::warn!("agent memory erasure refused: audit row not written");
+            Status::unavailable("audit unavailable")
+        }
+        Ok(other) => Status::internal(other.to_string()),
         Err(other) => Status::internal(other.to_string()),
     }
 }
@@ -395,9 +405,36 @@ impl MemoryGrpc {
             memory_id,
         )
         .await?;
-        let deleted = crate::dreaming::delete_space_memory(&self.pool, org_id, space_id, memory_id)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        // The actor is the caller `authorize_space_memory` verified against the signed decision's
+        // subject, and the decision reference is the one that signature bound to this row.
+        let audit = crate::audit_publisher::SpaceMemoryDeleteAudit {
+            org_id,
+            actor_user_id: user_id,
+            space_id,
+            memory_id,
+            scope: "",
+            decision_ref: req.space_control_decision_ref.trim(),
+            occurred_at: Utc::now(),
+        };
+        let deleted = crate::dreaming::delete_space_memory_audited(
+            &self.pool, org_id, space_id, memory_id, &audit,
+        )
+        .await
+        .map_err(|error| match error {
+            crate::dreaming::SpaceMemoryDeleteError::Store(error) => {
+                Status::internal(error.to_string())
+            }
+            // The delete was rolled back, so the row is still there. The log names no content.
+            crate::dreaming::SpaceMemoryDeleteError::AuditUnavailable(_) => {
+                tracing::warn!(
+                    org_id,
+                    space_id,
+                    memory_id,
+                    "space memory delete refused: audit row not written"
+                );
+                Status::unavailable("audit unavailable")
+            }
+        })?;
         if !deleted {
             return Err(Status::not_found("memory not found"));
         }
@@ -430,6 +467,17 @@ fn authorize_memory_preflight(
         caller.require_service_scope(service_scope)?;
     }
     Ok(())
+}
+
+/// The scope a memory write must hold (P2-sc-08-rel1). With the agent switch on, an agent's own note asks the narrow
+/// note scope, which only Execution Core holds. Every other write, and every write with the switch off, asks
+/// `memory:write` as it always has.
+fn memory_write_scope(agent_on: bool, topic: &str) -> &'static str {
+    if agent_on && crate::space_memory::is_agent_self_topic(topic) {
+        crate::space_memory::AGENT_NOTE_WRITE_SCOPE
+    } else {
+        MEMORY_WRITE_SCOPE
+    }
 }
 
 /// Authorization for the user-scoped `ListMemory`/`DeleteMemory` RPCs.
@@ -821,7 +869,11 @@ impl MemoryService for MemoryGrpc {
         if req.content.trim().is_empty() {
             return Err(Status::invalid_argument("content is required"));
         }
-        authorize_memory_preflight(&caller, req.org_id.trim(), MEMORY_WRITE_SCOPE)?;
+        authorize_memory_preflight(
+            &caller,
+            req.org_id.trim(),
+            memory_write_scope(crate::space_memory::agent_enabled(), &req.topic),
+        )?;
         let owner_user_id = self
             .authorize_thread(&caller, req.org_id.trim(), req.thread_id.trim())
             .await?;
@@ -899,8 +951,12 @@ impl MemoryService for MemoryGrpc {
                     crate::space_memory::Skip::Waived.agent_refusal(),
                 ));
             }
+            // P2-sc-08-rel1: the claimed origin is the caller's word, so it cannot prove the turn. Only the execution
+            // loop's identity writes an agent's note; a person's bearer is refused whatever origin it claims.
             let origin = write_policy::Origin::from_wire(&req.origin);
-            if origin != write_policy::Origin::ModelTool {
+            if origin != write_policy::Origin::ModelTool
+                || !crate::space_memory::is_agent_note_writer(&caller)
+            {
                 return Err(Status::failed_precondition(
                     crate::space_memory::Skip::NotAgentTurn.agent_refusal(),
                 ));
@@ -919,6 +975,9 @@ impl MemoryService for MemoryGrpc {
                 req.org_id.trim(),
                 &owner_user_id,
                 req.thread_id.trim(),
+                // The run that issued the save, named by the execution loop; the agent is still read from its row.
+                req.run_id.trim(),
+                crate::space_memory::agent_run_bound(),
                 &req.content,
             )
             .await
@@ -1295,10 +1354,27 @@ impl MemoryService for MemoryGrpc {
                 "space_id and agent_subject_id name no agent",
             ));
         }
-        let erased =
-            crate::space_memory::erase_agent_memory(&self.pool, org_id, space_id, agent_subject_id)
-                .await
-                .map_err(agent_erasure_status)?;
+        // The actor is the caller `authorize_space_memory` verified (a person, the caller's own user), under the decision
+        // that authority was checked against. Each erased note's audit row names them, as a manager's single-row delete
+        // names them (F-f08-08), when SESSION_CORE_SPACE_MEMORY_DELETE_AUDIT is on.
+        let actor = crate::audit_publisher::SpaceMemoryDeleteAudit {
+            org_id,
+            actor_user_id: user_id,
+            space_id,
+            memory_id: "",
+            scope: "",
+            decision_ref: req.space_control_decision_ref.trim(),
+            occurred_at: Utc::now(),
+        };
+        let erased = crate::space_memory::erase_agent_memory(
+            &self.pool,
+            org_id,
+            space_id,
+            agent_subject_id,
+            &actor,
+        )
+        .await
+        .map_err(agent_erasure_status)?;
         // Ids and a count only, never content: who erased which agent's notes in which Space.
         tracing::info!(
             org_id,
@@ -1335,7 +1411,20 @@ impl MemoryService for MemoryGrpc {
         // A ZDR caller is not refused: it is answered `zdr`, which reads and
         // writes nothing.
         authorize_user_memory_preflight(&caller, org_id, user_id, MEMORY_CONTROLS_READ_SCOPE)?;
-        let controls = memory_controls_view(&self.pool, caller.zdr(), org_id, user_id).await?;
+        // A named thread (F-f06-07) is read the way SearchMemory reads one: the caller must own it (a service
+        // caller reads it for its owner), and the answer is that thread's decision. The owner is the user the
+        // controls describe, so a thread of another user is refused rather than answered under this user's name.
+        let thread_id = req.thread_id.trim();
+        if !thread_id.is_empty() {
+            let owner_user_id = self.authorize_thread(&caller, org_id, thread_id).await?;
+            if owner_user_id != user_id {
+                return Err(Status::permission_denied(
+                    "the thread belongs to another user",
+                ));
+            }
+        }
+        let controls =
+            memory_controls_view(&self.pool, caller.zdr(), org_id, user_id, thread_id).await?;
         Ok(Response::new(GetMemoryControlsResponse {
             controls: Some(controls),
         }))
@@ -1435,7 +1524,7 @@ impl MemoryService for MemoryGrpc {
         crate::memory_control::set_state(&self.pool, org_id, user_id, state, caller.principal_id())
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
-        let controls = memory_controls_view(&self.pool, false, org_id, user_id).await?;
+        let controls = memory_controls_view(&self.pool, false, org_id, user_id, "").await?;
         Ok(Response::new(SetMemoryControlsResponse {
             controls: Some(controls),
         }))
@@ -1752,17 +1841,22 @@ fn semantic_only_ids(erased: &[String], listed: &[MemoryEntry]) -> Vec<String> {
     ids
 }
 
-/// The state and the decision it produces, as the wire message. Content-free.
+/// The state and the decision it produces, as the wire message. Content-free. A named `thread_id` (F-f06-07) makes
+/// the decision the thread's own, through the same gate SearchMemory uses; empty is the user-level decision.
 async fn memory_controls_view(
     pool: &PgPool,
     zdr: bool,
     org_id: &str,
     user_id: &str,
+    thread_id: &str,
 ) -> Result<MemoryControls, Status> {
     let internal = |error: sqlx::Error| Status::internal(error.to_string());
-    let decision = crate::memory_control::resolve(pool, zdr, org_id, user_id)
-        .await
-        .map_err(internal)?;
+    let decision = if thread_id.is_empty() {
+        crate::memory_control::resolve(pool, zdr, org_id, user_id).await
+    } else {
+        crate::memory_control::resolve_for_thread(pool, zdr, org_id, user_id, thread_id).await
+    }
+    .map_err(internal)?;
     // A ZDR caller's stored state is neither read nor reported.
     let stored = if zdr {
         None
@@ -1896,7 +1990,69 @@ mod tests {
             user_id: String::new(),
             memory_id: String::new(),
             origin: String::new(),
+            run_id: String::new(),
         }
+    }
+
+    /// P2-sc-08-rel1: an agent's own note asks its narrow scope, which the generic `memory:write` does not reach. The
+    /// preflight refuses a service that holds only `memory:write`; the loop's identity passes it. A person passes the
+    /// preflight as before and is refused by the writer check. With the switch off, every save asks what it always asked.
+    #[test]
+    fn an_agent_note_asks_its_own_scope_and_only_the_loop_writes_it() {
+        assert_eq!(memory_write_scope(false, "AGENT_SELF"), MEMORY_WRITE_SCOPE);
+        assert_eq!(
+            memory_write_scope(true, "AGENT_SELF"),
+            crate::space_memory::AGENT_NOTE_WRITE_SCOPE
+        );
+        assert_eq!(
+            memory_write_scope(true, " agent_self "),
+            crate::space_memory::AGENT_NOTE_WRITE_SCOPE
+        );
+        assert_eq!(memory_write_scope(true, "USER"), MEMORY_WRITE_SCOPE);
+        assert_eq!(memory_write_scope(true, "SPACE"), MEMORY_WRITE_SCOPE);
+
+        let orchestrator = VerifiedIdentity::service_for_test_as(
+            "org-1",
+            "service:orchestrator-core",
+            &[MEMORY_WRITE_SCOPE],
+            false,
+        );
+        let refused = authorize_memory_preflight(
+            &orchestrator,
+            "org-1",
+            memory_write_scope(true, "AGENT_SELF"),
+        )
+        .expect_err("memory:write does not reach an agent's own note");
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+        assert!(authorize_memory_preflight(
+            &orchestrator,
+            "org-1",
+            memory_write_scope(true, "MEMORY")
+        )
+        .is_ok());
+
+        let the_loop = VerifiedIdentity::service_for_test_as(
+            "org-1",
+            "service:execution-core",
+            &[crate::space_memory::AGENT_NOTE_WRITE_SCOPE],
+            false,
+        );
+        assert!(authorize_memory_preflight(
+            &the_loop,
+            "org-1",
+            memory_write_scope(true, "AGENT_SELF")
+        )
+        .is_ok());
+        assert!(crate::space_memory::is_agent_note_writer(&the_loop));
+
+        let person = VerifiedIdentity::user_for_test("org-1", "owner-1");
+        assert!(authorize_memory_preflight(
+            &person,
+            "org-1",
+            memory_write_scope(true, "AGENT_SELF")
+        )
+        .is_ok());
+        assert!(!crate::space_memory::is_agent_note_writer(&person));
     }
 
     fn list_request(org_id: &str, user_id: &str) -> ListMemoryRequest {
@@ -1984,6 +2140,105 @@ mod tests {
             MemoryGrpc::new_with_ownership_for_test(pool, Some(letta), ownership.clone()),
             ownership,
         )
+    }
+
+    /// F-f06-07: a named thread another user owns is refused before any memory is read. Only the ownership lookup runs.
+    #[tokio::test]
+    async fn a_named_thread_of_another_user_is_refused_before_any_memory_read() {
+        let auth = MockServer::start().await;
+        let (service, ownership) = guarded_service(&auth.uri(), "user-b");
+        let refused = service
+            .get_memory_controls(request(
+                GetMemoryControlsRequest {
+                    org_id: "org-a".to_owned(),
+                    user_id: "user-a".to_owned(),
+                    thread_id: "thread-b".to_owned(),
+                },
+                VerifiedIdentity::user_for_test("org-a", "user-a"),
+            ))
+            .await
+            .expect_err("another user's thread is not answered");
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+        assert_eq!(ownership.calls.load(Ordering::SeqCst), 1);
+        assert!(auth.received_requests().await.unwrap().is_empty());
+    }
+
+    /// F-f06-07: a service reads a named thread for its owner only. A thread of another user is refused, because the
+    /// controls would describe a user the thread does not belong to.
+    #[tokio::test]
+    async fn a_service_reads_a_named_thread_only_for_its_owner() {
+        let auth = MockServer::start().await;
+        let (service, _ownership) = guarded_service(&auth.uri(), "user-b");
+        let refused = service
+            .get_memory_controls(request(
+                GetMemoryControlsRequest {
+                    org_id: "org-a".to_owned(),
+                    user_id: "user-a".to_owned(),
+                    thread_id: "thread-b".to_owned(),
+                },
+                VerifiedIdentity::service_for_test("org-a", &[MEMORY_CONTROLS_READ_SCOPE], false),
+            ))
+            .await
+            .expect_err("a thread of another user is refused");
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+        assert!(
+            refused.message().contains("another user"),
+            "{}",
+            refused.message()
+        );
+    }
+
+    /// F-f06-07: a ZDR owner asking about a named thread gets the ZDR decision and reads no state. The pool is
+    /// unreachable, so a read would fail rather than answer.
+    #[tokio::test]
+    async fn a_zdr_owner_gets_the_zdr_decision_for_a_named_thread_without_reading_state() {
+        let auth = MockServer::start().await;
+        let (service, ownership) = guarded_service(&auth.uri(), "user-a");
+        let controls = service
+            .get_memory_controls(request(
+                GetMemoryControlsRequest {
+                    org_id: "org-a".to_owned(),
+                    user_id: "user-a".to_owned(),
+                    thread_id: "thread-a".to_owned(),
+                },
+                VerifiedIdentity::user_for_test_with_zdr("org-a", "user-a", true),
+            ))
+            .await
+            .expect("the ZDR decision needs no read")
+            .into_inner()
+            .controls
+            .expect("the controls are answered");
+        assert_eq!(controls.reason, "zdr");
+        assert!(!controls.use_allowed);
+        assert_eq!(controls.state, MemoryState::Unspecified as i32);
+        assert_eq!(
+            ownership.calls.load(Ordering::SeqCst),
+            1,
+            "the thread is the owner's"
+        );
+    }
+
+    /// F-f06-07: an empty thread id is the user-level view it always was, and looks up no thread.
+    #[tokio::test]
+    async fn an_empty_thread_id_keeps_the_user_level_view_and_looks_up_no_thread() {
+        let auth = MockServer::start().await;
+        let (service, ownership) = guarded_service(&auth.uri(), "user-a");
+        let controls = service
+            .get_memory_controls(request(
+                GetMemoryControlsRequest {
+                    org_id: "org-a".to_owned(),
+                    user_id: "user-a".to_owned(),
+                    thread_id: String::new(),
+                },
+                VerifiedIdentity::user_for_test_with_zdr("org-a", "user-a", true),
+            ))
+            .await
+            .expect("the ZDR view needs no read")
+            .into_inner()
+            .controls
+            .expect("the controls are answered");
+        assert_eq!(controls.reason, "zdr");
+        assert_eq!(ownership.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -2375,6 +2630,78 @@ mod tests {
             .expect("the user's other thread is still answered")
             .into_inner();
         assert_eq!(open_search.skip_reason, "");
+    }
+
+    /// F-f06-07: a named thread's answer is that thread's own decision. A thread set off says so, the user's other
+    /// thread is answered as before, an agent run's thread keeps the owner's reads and refuses writes, and an empty
+    /// thread id is the user-level answer.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn a_named_thread_answers_its_own_memory_decision() {
+        let pool = scratch_pool().await;
+        let org = format!("thread-controls-{}", mp_ids::new_ulid());
+        let off = seed_reset_thread(&pool, &org, "user-a").await;
+        let open = seed_reset_thread(&pool, &org, "user-a").await;
+        let run = seed_agent_run_thread(&pool, &org, "user-a").await;
+        sqlx::query("UPDATE threads SET memory_mode = 'off' WHERE id = $1")
+            .bind(&off)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let service = MemoryGrpc::new(pool.clone(), None);
+
+        let answer = |thread: &str| {
+            service.get_memory_controls(request(
+                GetMemoryControlsRequest {
+                    org_id: org.clone(),
+                    user_id: "user-a".to_owned(),
+                    thread_id: thread.to_owned(),
+                },
+                VerifiedIdentity::user_for_test(&org, "user-a"),
+            ))
+        };
+        let set_off = answer(&off)
+            .await
+            .expect("a thread set off is answered")
+            .into_inner()
+            .controls
+            .expect("controls");
+        assert!(!set_off.use_allowed);
+        assert_eq!(set_off.reason, "thread_off");
+
+        let other = answer(&open)
+            .await
+            .expect("the user's other thread is answered")
+            .into_inner()
+            .controls
+            .expect("controls");
+        assert!(other.use_allowed);
+        assert_eq!(other.reason, "on");
+
+        let agent = answer(&run)
+            .await
+            .expect("an agent run's thread is answered")
+            .into_inner()
+            .controls
+            .expect("controls");
+        assert!(
+            agent.use_allowed,
+            "an agent run's thread still reads the owner's memory"
+        );
+        assert_eq!(agent.reason, "agent_run_scope");
+        assert!(!agent.generation_allowed, "and writes none");
+
+        let user_level = answer("")
+            .await
+            .expect("the user-level view is answered")
+            .into_inner()
+            .controls
+            .expect("controls");
+        assert!(
+            user_level.use_allowed,
+            "a thread set off does not change the user's own view"
+        );
+        assert_eq!(user_level.reason, "on");
     }
 
     /// EP-8 S2, under the Space plan's containment (WS17-S1, merged from main): a Space
@@ -3413,6 +3740,19 @@ mod tests {
             assert_eq!(failed.code(), tonic::Code::Internal);
             assert_eq!(failed.message(), sqlx::Error::PoolTimedOut.to_string());
             assert_eq!(trailer(&failed), None);
+        }
+
+        /// F-f08-08 (rel1): a revocation whose audit row could not be written was rolled back, so the caller may retry.
+        /// The status is unavailable, with the audit's own message and no content.
+        #[test]
+        fn a_revocation_whose_audit_row_cannot_be_written_is_retryable() {
+            let refused = agent_erasure_status(anyhow::Error::from(
+                crate::dreaming::SpaceMemoryDeleteError::AuditUnavailable(
+                    sqlx::Error::PoolTimedOut,
+                ),
+            ));
+            assert_eq!(refused.code(), tonic::Code::Unavailable);
+            assert_eq!(refused.message(), "audit unavailable");
         }
     }
 }

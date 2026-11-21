@@ -15,7 +15,11 @@
 //! it for `code_interpreter`: execution-core authorises the caller and the run
 //! owner again, asks capability-core for a signed decision, and dispatches the
 //! `mcp__` name through `execute_mcp` with the signed class. The gateway never
-//! decides the class; it only refuses earlier than execution-core would.
+//! decides the class; it only refuses earlier than execution-core would. The step
+//! is marked `side_call`: execution-core creates no approval for it (a pause comes
+//! back as `app_call_requires_chat`), writes no checkpoint or run snapshot, and
+//! reads the tool's class and digest from the registry binding of this very call,
+//! not from its in-process view of the run.
 //!
 //! Nothing is stored here. The output is scrubbed and capped before the app sees
 //! it, and the audit line carries ids, the tool, the class and the outcome, never
@@ -33,6 +37,7 @@ use mp_contracts::tool_class::{effective_floor, ApprovalFloor, SideEffectClass};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::runtime_registries::{ORG_HOOKS_UNAVAILABLE_CODE, ORG_HOOKS_UNAVAILABLE_MESSAGE};
 use crate::state::AppState;
 
 /// The switch: only the literal `true` turns the route on.
@@ -159,6 +164,8 @@ pub enum AppCallError {
     ExecutionUnavailable,
     /// The call ran and did not complete.
     Failed,
+    /// The org's durable hook rules cannot be read, so the call's step cannot carry them (F-f06-04).
+    HooksUnavailable,
 }
 
 impl AppCallError {
@@ -172,6 +179,7 @@ impl AppCallError {
             Self::Unavailable => "registry_unavailable",
             Self::ExecutionUnavailable => "execution_unavailable",
             Self::Failed => "tool_call_failed",
+            Self::HooksUnavailable => ORG_HOOKS_UNAVAILABLE_CODE,
         }
     }
 
@@ -187,6 +195,7 @@ impl AppCallError {
             Self::Unavailable => "the run or the tool registry is unavailable",
             Self::ExecutionUnavailable => "the tool could not be run right now",
             Self::Failed => "the tool call did not complete",
+            Self::HooksUnavailable => ORG_HOOKS_UNAVAILABLE_MESSAGE,
         }
     }
 
@@ -197,7 +206,9 @@ impl AppCallError {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::RequiresChat => StatusCode::FORBIDDEN,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
-            Self::Unavailable | Self::ExecutionUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Unavailable | Self::ExecutionUnavailable | Self::HooksUnavailable => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::Failed => StatusCode::BAD_GATEWAY,
         }
     }
@@ -586,6 +597,11 @@ async fn execute_step(
     call: &ValidatedCall,
     bearers: &ViewerBearers<'_>,
 ) -> Result<ExecuteStepResponse, AppCallError> {
+    // The org's hook rules travel with this step (F-f06-04). They are made readable with the viewer's own capability
+    // bearer before the step is built; a refusal sends nothing to execution-core.
+    crate::runtime_registries::require_org_hooks(state, org_id, Some(bearers.capability))
+        .await
+        .map_err(|_| AppCallError::HooksUnavailable)?;
     let mut request = tonic::Request::new(ExecuteStepRequest {
         run_id: call.run_id.clone(),
         step_id: format!("app-{}", mp_ids::new_ulid()),
@@ -604,6 +620,11 @@ async fn execute_step(
         attachments: Vec::new(),
         skill_mounts: Vec::new(),
         connector_scope: None,
+        // Outside the run loop (F-f10-21): execution-core creates no approval, writes no
+        // checkpoint and no run snapshot for it, and takes the tool's class and digest from
+        // the registry binding of this very call. A pause comes back as FAILED_PRECONDITION
+        // `app_call_requires_chat`. Set here only, never from the app's request body.
+        side_call: true,
     });
     insert_bearer(&mut request, "authorization", bearers.execution)?;
     insert_bearer(&mut request, "x-session-authorization", bearers.session)?;
@@ -618,15 +639,23 @@ async fn execute_step(
         Ok(Ok(response)) => Ok(response.into_inner()),
         Ok(Err(status)) => {
             tracing::warn!(code = ?status.code(), "mcp app call: ExecuteStep refused or failed");
-            Err(match status.code() {
-                tonic::Code::PermissionDenied | tonic::Code::NotFound => AppCallError::NotFound,
-                tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
-                    AppCallError::ExecutionUnavailable
-                }
-                _ => AppCallError::Failed,
-            })
+            Err(execute_step_error(status.code(), status.message()))
         }
         Err(_) => Err(AppCallError::ExecutionUnavailable),
+    }
+}
+
+/// What an `ExecuteStep` refusal means to the app. execution-core answers a side call that would
+/// have paused for a person `FAILED_PRECONDITION` with the typed word [`REQUIRES_CHAT`]; any other
+/// failed precondition (a retention refusal, say) stays a failed call.
+fn execute_step_error(code: tonic::Code, message: &str) -> AppCallError {
+    match code {
+        tonic::Code::FailedPrecondition if message == REQUIRES_CHAT => AppCallError::RequiresChat,
+        tonic::Code::PermissionDenied | tonic::Code::NotFound => AppCallError::NotFound,
+        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => {
+            AppCallError::ExecutionUnavailable
+        }
+        _ => AppCallError::Failed,
     }
 }
 
@@ -902,6 +931,80 @@ mod tests {
         assert_eq!(
             AppCallError::Invalid(BAD_NAME).status(),
             StatusCode::BAD_REQUEST
+        );
+        // F-f06-04: an org whose hook rules cannot be read is the typed, retryable 503, not a failed call.
+        assert_eq!(
+            AppCallError::HooksUnavailable.code(),
+            "org_hooks_unavailable"
+        );
+        assert_eq!(
+            AppCallError::HooksUnavailable.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    /// F-f06-04: the call's hook rules are made readable with the viewer's own capability bearer before the step is
+    /// built, so a refused read sends nothing to execution-core.
+    #[test]
+    fn execute_step_makes_the_hook_rules_readable_before_it_builds_the_step() {
+        let source = include_str!("mcp_app_calls.rs").replace("\r\n", "\n");
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("the test module is in this file");
+        let from = production
+            .find("async fn execute_step(")
+            .expect("execute_step is in the production text");
+        let rest = &production[from..];
+        let body = &rest[..rest.find("\n}\n").expect("the function ends")];
+        let require = body.find("require_org_hooks(").expect("the rules are read");
+        let carried = body
+            .find("hook_context: crate::runtime_registries::hook_context_json")
+            .expect("the step carries the rules");
+        assert!(require < carried, "{body}");
+        assert!(
+            body[require..carried].contains("Some(bearers.capability)"),
+            "the viewer's own capability bearer is the one read"
+        );
+    }
+
+    /// execution-core's side-call refusal word is the app's requires-chat answer; any other failed
+    /// precondition stays a failed call, and the other codes keep their meaning.
+    #[test]
+    fn a_side_call_refusal_maps_to_requires_chat_and_nothing_else_does() {
+        use tonic::Code;
+        assert_eq!(
+            execute_step_error(Code::FailedPrecondition, "app_call_requires_chat"),
+            AppCallError::RequiresChat
+        );
+        assert_eq!(
+            execute_step_error(Code::FailedPrecondition, "zero-retention refused"),
+            AppCallError::Failed
+        );
+        // The word alone, on another code, is not the refusal.
+        assert_eq!(
+            execute_step_error(Code::Internal, "app_call_requires_chat"),
+            AppCallError::Failed
+        );
+        assert_eq!(
+            execute_step_error(Code::InvalidArgument, "side_call_invalid"),
+            AppCallError::Failed
+        );
+        assert_eq!(
+            execute_step_error(Code::PermissionDenied, ""),
+            AppCallError::NotFound
+        );
+        assert_eq!(
+            execute_step_error(Code::NotFound, ""),
+            AppCallError::NotFound
+        );
+        assert_eq!(
+            execute_step_error(Code::Unavailable, ""),
+            AppCallError::ExecutionUnavailable
+        );
+        assert_eq!(
+            execute_step_error(Code::DeadlineExceeded, ""),
+            AppCallError::ExecutionUnavailable
         );
     }
 }

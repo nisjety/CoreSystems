@@ -94,10 +94,10 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
             "a ZDR turn writes no thread: the answer is returned, and it is not appended to one",
         ),
     ),
-    (
-        "space_append_context",
-        Treatment::Inert("it appends to a durable thread, which a ZDR turn never writes"),
-    ),
+    // A follow-up's Space context scopes its retrieval with the Space's own read decision while
+    // MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL is on (`sse.rs`). It only narrows retrieval and writes no
+    // thread: a ZDR turn appends to none (the `thread_id` row), and the field carries opaque references.
+    ("space_append_context", Treatment::Honored),
     ("space_context", Treatment::Honored),
     // A wake starts a durable run from a stored post. The invoke stream refuses it first with the
     // same code (`space_sse::check_wake`); this row keeps the table total and the answer the same.

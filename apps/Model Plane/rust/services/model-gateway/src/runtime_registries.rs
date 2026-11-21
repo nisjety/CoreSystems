@@ -24,6 +24,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use axum::http::StatusCode;
 use dashmap::DashMap;
 use mp_ids::new_ulid;
 use serde::Deserialize;
@@ -44,6 +45,7 @@ use mp_contracts::model_plane::v1::{
 };
 
 use crate::mcp_jsonrpc::McpToolDef;
+use crate::state::AppState;
 
 // Declared here, and not in lib.rs, because this module is its only user and
 // lib.rs is owned by no slice of WS05; moving the line there is a pure rename.
@@ -3480,6 +3482,18 @@ pub fn hook_context_json(reg: &HookRegistry, org_id: &str) -> String {
 /// [`hook_context_json`] for a run whose verdicts are only observed (`HOOKS_DO_RUNS=shadow`): the
 /// context carries `observe_only`, so execution-core logs what the rules would decide and enforces none.
 fn hook_context_json_observing(reg: &HookRegistry, org_id: &str, observe_only: bool) -> String {
+    hook_context_json_for(hooks_durable(), reg, org_id, observe_only)
+}
+
+/// [`hook_context_json_observing`] with `HOOKS_DURABLE` stated by the caller, so both modes are testable in one
+/// process. With the switch on and no snapshot for the org, the org's rules are unknown: the context denies every
+/// tool ([`deny_all_hook_context`]) instead of falling back to the in-memory map, which would fail open (F-f06-04).
+fn hook_context_json_for(
+    durable: bool,
+    reg: &HookRegistry,
+    org_id: &str,
+    observe_only: bool,
+) -> String {
     // The registry is a DashMap, whose iteration order is arbitrary. Sorting by priority, highest
     // first, then by id, makes one registry always serialise to the same bytes.
     let mut hooks: Vec<Hook> = match reg.durable.get(org_id) {
@@ -3489,6 +3503,7 @@ fn hook_context_json_observing(reg: &HookRegistry, org_id: &str, observe_only: b
             .filter(|hook| hook.enabled)
             .cloned()
             .collect(),
+        None if durable => return deny_all_hook_context(observe_only),
         None => reg
             .inner
             .iter()
@@ -3524,6 +3539,22 @@ fn hook_context_json_observing(reg: &HookRegistry, org_id: &str, observe_only: b
     if rules.is_empty() {
         return String::new();
     }
+    if observe_only {
+        return json!({ "rules": rules, "observe_only": true }).to_string();
+    }
+    json!({ "rules": rules }).to_string()
+}
+
+/// The context of an org whose durable rules are unknown (F-f06-04): one rule that denies every tool, with the closed
+/// reason [`ORG_HOOKS_UNAVAILABLE_CODE`], which passes execution-core's slug check. Shadow mode marks it observe-only,
+/// so it is logged and enforced nowhere.
+fn deny_all_hook_context(observe_only: bool) -> String {
+    let rules = json!([{
+        "event": "pre_tool_use",
+        "tools": "*",
+        "decision": "deny",
+        "reason": ORG_HOOKS_UNAVAILABLE_CODE,
+    }]);
     if observe_only {
         return json!({ "rules": rules, "observe_only": true }).to_string();
     }
@@ -4021,6 +4052,65 @@ pub async fn proxy_list_hooks(
     })
 }
 
+/// `RegisterHook` for the switch the caller states (WS25-S8, P2-mg-04-rel1). With `durable` on, the rule goes to
+/// capability-core through [`proxy_register_hook`]; with it off, the in-memory registry takes it through
+/// [`handle_register_hook`], as before HOOKS_DURABLE existed. The gRPC layer passes [`hooks_durable`]. With the switch on
+/// nothing is written to the in-memory map, because the readers stop reading that map once an org has a snapshot.
+///
+/// # Errors
+///
+/// The refusal of [`proxy_register_hook`] when durable, or of [`handle_register_hook`] otherwise.
+pub async fn register_hook_for(
+    durable: bool,
+    reg: &HookRegistry,
+    http_client: &reqwest::Client,
+    capability_core_base_url: &str,
+    capability_bearer: &str,
+    caller: HookWriteCaller,
+    req: RegisterHookRequest,
+) -> Result<RegisterHookResponse, Status> {
+    if !durable {
+        return handle_register_hook(reg, req);
+    }
+    proxy_register_hook(
+        reg,
+        http_client,
+        capability_core_base_url,
+        capability_bearer,
+        caller,
+        req,
+    )
+    .await
+}
+
+/// `ListHooks` for the switch the caller states (WS25-S8, P2-mg-04-rel1). With `durable` on, the org's rules are read
+/// through [`proxy_list_hooks`], which awaits [`ensure_org_hooks`] first and refuses when they cannot be known; with it
+/// off, the in-memory registry answers through [`handle_list_hooks`], as before.
+///
+/// # Errors
+///
+/// The refusal of [`proxy_list_hooks`] when durable. Otherwise infallible, as [`handle_list_hooks`] is.
+pub async fn list_hooks_for(
+    durable: bool,
+    reg: &HookRegistry,
+    http_client: &reqwest::Client,
+    capability_core_base_url: &str,
+    capability_bearer: &str,
+    req: ListHooksRequest,
+) -> Result<ListHooksResponse, Status> {
+    if !durable {
+        return handle_list_hooks(reg, req);
+    }
+    proxy_list_hooks(
+        reg,
+        http_client,
+        capability_core_base_url,
+        capability_bearer,
+        req,
+    )
+    .await
+}
+
 /// `HOOKS_DURABLE` (WS25-S8): whether the org's hook rules are read from and written to capability-core. Only the
 /// literal `true` turns it on, so a typo or a stray `1` leaves the in-memory registry in place.
 #[must_use]
@@ -4036,6 +4126,72 @@ pub fn hooks_durable() -> bool {
     static DURABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *DURABLE.get_or_init(|| {
         hooks_durable_from_env_value(std::env::var(HOOKS_DURABLE_ENV).ok().as_deref())
+    })
+}
+
+/// The typed code of a Do run, a continuation, a tool call or a browser run refused because the org's durable hook
+/// rules cannot be read (F-f06-04). Retryable: a later attempt may find capability-core answering.
+pub const ORG_HOOKS_UNAVAILABLE_CODE: &str = "org_hooks_unavailable";
+
+/// The words a person reads with [`ORG_HOOKS_UNAVAILABLE_CODE`]. The code is the contract; the words are copy.
+pub const ORG_HOOKS_UNAVAILABLE_MESSAGE: &str =
+    "The organisation's hook rules cannot be read right now, so this action cannot run. Try again shortly.";
+
+/// The status and words of that refusal: `503`, as a policy that cannot be read is answered, and retryable.
+pub const ORG_HOOKS_UNAVAILABLE_ANSWER: (StatusCode, &str) = (
+    StatusCode::SERVICE_UNAVAILABLE,
+    ORG_HOOKS_UNAVAILABLE_MESSAGE,
+);
+
+/// Makes the org's durable hook rules readable before a reader uses them (F-f06-04). With `HOOKS_DURABLE` off this
+/// does nothing and the in-memory registry is read as before. With it on, the rules are refreshed under the D8 bounds
+/// by [`ensure_org_hooks`], with the caller's own capability bearer, and a read with no answer inside its bound is
+/// refused with [`ORG_HOOKS_UNAVAILABLE_CODE`]. The reader then refuses its own action, typed, rather than running
+/// without rules.
+///
+/// # Errors
+///
+/// Returns [`ORG_HOOKS_UNAVAILABLE_CODE`] when durable mode is on and the org's rules cannot be known.
+pub async fn require_org_hooks(
+    state: &AppState,
+    org_id: &str,
+    capability_bearer: Option<&str>,
+) -> Result<(), &'static str> {
+    require_org_hooks_for(
+        hooks_durable(),
+        &state.hooks,
+        &state.http_client,
+        &state.capability_core_base_url,
+        org_id,
+        capability_bearer.unwrap_or_default(),
+    )
+    .await
+}
+
+/// [`require_org_hooks`] with the switch stated by the caller, so both modes are testable in one process.
+async fn require_org_hooks_for(
+    durable: bool,
+    reg: &HookRegistry,
+    http_client: &reqwest::Client,
+    capability_core_base_url: &str,
+    org_id: &str,
+    capability_bearer: &str,
+) -> Result<(), &'static str> {
+    if !durable {
+        return Ok(());
+    }
+    ensure_org_hooks(
+        reg,
+        http_client,
+        capability_core_base_url,
+        org_id,
+        capability_bearer,
+    )
+    .await
+    .map_err(|error| {
+        // The reason says what failed; the caller's bearer is never part of it.
+        tracing::warn!(%org_id, %error, "org hook rules cannot be read; the action is refused");
+        ORG_HOOKS_UNAVAILABLE_CODE
     })
 }
 
@@ -4850,6 +5006,490 @@ mod tests {
         .await
         .expect_err("past the bound the rules are unknown");
         assert!(reg.durable.get("org-a").is_none());
+    }
+
+    /// F-f06-04: with the switch on and no snapshot, the context denies every tool. The in-memory rule that
+    /// would otherwise be sent is never the answer while the org's durable rules are unknown.
+    #[test]
+    fn durable_context_without_a_snapshot_denies_every_tool() {
+        let reg = HookRegistry::new();
+        register(&reg, "org", hook("pre_tool", "shell", "deny", true));
+        let ctx: Value =
+            serde_json::from_str(&hook_context_json_for(true, &reg, "org", false)).expect("json");
+        assert_eq!(
+            ctx,
+            json!({"rules": [{
+                "event": "pre_tool_use",
+                "tools": "*",
+                "decision": "deny",
+                "reason": "org_hooks_unavailable",
+            }]})
+        );
+        let shadow: Value =
+            serde_json::from_str(&hook_context_json_for(true, &reg, "org", true)).expect("json");
+        assert_eq!(
+            shadow["observe_only"], true,
+            "shadow mode only logs the denial"
+        );
+        assert!(ctx.get("observe_only").is_none());
+    }
+
+    /// The deny-all reason passes execution-core's slug check (`policy_reason_code`, runtime_loop/mod.rs): a lowercase
+    /// letter, then lowercase letters, digits or underscores, at most 64 characters. Otherwise it would show as
+    /// `policy_denied`, and the refusal would lose its reason.
+    #[test]
+    fn deny_all_reason_passes_execution_cores_slug_check() {
+        let ctx: Value = serde_json::from_str(&deny_all_hook_context(false)).expect("json");
+        let reason = ctx["rules"][0]["reason"].as_str().expect("a reason");
+        let mut chars = reason.chars();
+        let is_slug = reason.len() <= 64
+            && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+        assert!(is_slug, "{reason} must survive as a deny reason code");
+        assert_eq!(reason, ORG_HOOKS_UNAVAILABLE_CODE);
+    }
+
+    /// With the switch on and a snapshot present, the rules are the snapshot's, exactly as before the fallback.
+    #[test]
+    fn durable_context_with_a_snapshot_carries_its_rules_unchanged() {
+        let reg = HookRegistry::new();
+        reg.durable.insert(
+            "org".to_owned(),
+            snapshot_at(
+                Instant::now(),
+                3,
+                true,
+                vec![durable_rule("a", "pre_tool", "shell", "deny", 0)],
+            ),
+        );
+        let ctx: Value =
+            serde_json::from_str(&hook_context_json_for(true, &reg, "org", false)).expect("json");
+        assert_eq!(
+            ctx,
+            json!({"rules": [{
+                "event": "pre_tool_use",
+                "tools": "shell",
+                "decision": "deny",
+                "reason": "policy",
+            }]})
+        );
+    }
+
+    /// An org whose snapshot holds no enabled rule is known to have none: no context, not the deny-all.
+    #[test]
+    fn durable_context_for_an_org_known_to_have_no_rules_is_empty() {
+        let reg = HookRegistry::new();
+        reg.durable.insert(
+            "org".to_owned(),
+            snapshot_at(Instant::now(), 3, false, Vec::new()),
+        );
+        assert_eq!(hook_context_json_for(true, &reg, "org", false), "");
+    }
+
+    /// With the switch off the in-memory registry is the source, exactly as before HOOKS_DURABLE existed.
+    #[test]
+    fn durable_off_reads_the_in_memory_registry_as_before() {
+        let reg = HookRegistry::new();
+        register(&reg, "org", hook("pre_tool", "shell", "deny", true));
+        assert_eq!(
+            hook_context_json_for(false, &reg, "org", false),
+            hook_context_json(&reg, "org")
+        );
+        assert_eq!(hook_context_json_for(false, &reg, "org_b", false), "");
+    }
+
+    /// F-f06-04: a durable refusal is the typed 503 with the closed code, and nothing else is in the answer.
+    #[test]
+    fn org_hooks_refusal_is_a_typed_503_with_the_closed_code() {
+        assert_eq!(ORG_HOOKS_UNAVAILABLE_CODE, "org_hooks_unavailable");
+        let (status, message) = ORG_HOOKS_UNAVAILABLE_ANSWER;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(message, ORG_HOOKS_UNAVAILABLE_MESSAGE);
+        assert!(!message.is_empty());
+    }
+
+    #[tokio::test]
+    async fn require_org_hooks_is_a_no_op_while_durable_is_off() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let reg = HookRegistry::new();
+        let client = reqwest::Client::new();
+        require_org_hooks_for(false, &reg, &client, &server.uri(), "org-a", "")
+            .await
+            .expect("durable off reads nothing and refuses nothing");
+        assert!(server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn require_org_hooks_refuses_typed_when_durable_and_the_rules_are_unknown() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let reg = HookRegistry::new();
+        let client = reqwest::Client::new();
+        assert_eq!(
+            require_org_hooks_for(true, &reg, &client, &server.uri(), "org-a", "token").await,
+            Err(ORG_HOOKS_UNAVAILABLE_CODE)
+        );
+        assert!(reg.durable.get("org-a").is_none());
+    }
+
+    /// A fresh snapshot answers the reader on its own: no request is made, so the caller's bearer is not needed.
+    #[tokio::test]
+    async fn require_org_hooks_answers_from_a_snapshot_inside_its_bound() {
+        let server = wiremock::MockServer::start().await;
+        let reg = HookRegistry::new();
+        reg.durable.insert(
+            "org-a".to_owned(),
+            snapshot_at(
+                Instant::now(),
+                1,
+                true,
+                vec![durable_rule("a", "pre_tool", "shell", "deny", 0)],
+            ),
+        );
+        let client = reqwest::Client::new();
+        require_org_hooks_for(true, &reg, &client, &server.uri(), "org-a", "token")
+            .await
+            .expect("a fresh snapshot is read without asking capability-core");
+        assert!(server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
+    }
+
+    /// With the switch on and no snapshot, the org's rules are read with the caller's own bearer, and the answer is
+    /// what the action then reads.
+    #[tokio::test]
+    async fn require_org_hooks_reads_an_unknown_org_with_the_callers_bearer() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/org-hooks"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer caller-token",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+                "org_id": "org-a",
+                "revision": 6,
+                "rules": [{
+                    "id": "ohr_6", "event": "pre_tool", "tool_matcher": "shell", "decision": "deny",
+                    "reason": "no shell", "priority": 0, "enabled": true, "created_by": "user-admin"
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let reg = HookRegistry::new();
+        let client = reqwest::Client::new();
+        require_org_hooks_for(true, &reg, &client, &server.uri(), "org-a", "caller-token")
+            .await
+            .expect("capability-core answers the caller's own bearer");
+        assert_eq!(org_hook_revision(&reg, "org-a"), 6);
+        let ctx: Value =
+            serde_json::from_str(&hook_context_json_for(true, &reg, "org-a", false)).expect("json");
+        assert_eq!(ctx["rules"][0]["tools"], "shell");
+    }
+
+    fn register_request(org_id: &str, scope: &str) -> RegisterHookRequest {
+        RegisterHookRequest {
+            request_id: "req-1".to_owned(),
+            org_id: org_id.to_owned(),
+            hook: Some(Hook {
+                event: "pre_tool".to_owned(),
+                tool_scope: scope.to_owned(),
+                enabled: true,
+                decision: "deny".to_owned(),
+                reason: "no shell".to_owned(),
+                priority: 10,
+                ..Hook::default()
+            }),
+        }
+    }
+
+    fn list_request(org_id: &str) -> ListHooksRequest {
+        ListHooksRequest {
+            request_id: "req-2".to_owned(),
+            org_id: org_id.to_owned(),
+            event_filter: String::new(),
+        }
+    }
+
+    /// One rule as capability-core writes and lists it, with the org revision it was written at.
+    fn stored_rule_json(id: &str, scope: &str, revision: i64) -> Value {
+        json!({
+            "id": id, "event": "pre_tool", "tool_matcher": scope, "decision": "deny",
+            "reason": "no shell", "priority": 10, "enabled": true, "created_by": "user-admin",
+            "revision": revision,
+        })
+    }
+
+    /// With the switch off, a rule is stored in the in-memory registry and listed back from it, exactly as before
+    /// HOOKS_DURABLE existed, and capability-core is never asked.
+    #[tokio::test]
+    async fn register_and_list_for_switch_off_are_the_in_memory_registry() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+        let reg = HookRegistry::new();
+        let client = reqwest::Client::new();
+        let stored = register_hook_for(
+            false,
+            &reg,
+            &client,
+            &server.uri(),
+            "admin-token",
+            HookWriteCaller {
+                zdr: false,
+                admin: true,
+            },
+            register_request("org-a", "shell"),
+        )
+        .await
+        .expect("off: the in-memory registry takes the rule");
+        assert_eq!(stored.hook.expect("the rule").event, "pre_tool");
+        let listed = list_hooks_for(
+            false,
+            &reg,
+            &client,
+            &server.uri(),
+            "admin-token",
+            list_request("org-a"),
+        )
+        .await
+        .expect("off: the in-memory registry answers");
+        assert_eq!(listed.hooks.len(), 1);
+        assert!(server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
+    }
+
+    /// With the switch on, a rule is stored in capability-core under the caller's bearer and read back into the
+    /// snapshot. Nothing lands in the in-memory map, which the readers no longer consult once an org has a snapshot.
+    #[tokio::test]
+    async fn register_for_switch_on_stores_in_capability_core_and_never_in_memory() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/v1/org-hooks"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer admin-token",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(stored_rule_json("ohr_7", "shell", 7)),
+            )
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/org-hooks"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer admin-token",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+                "org_id": "org-a",
+                "revision": 7,
+                "rules": [stored_rule_json("ohr_7", "shell", 7)],
+            })))
+            .mount(&server)
+            .await;
+        let reg = HookRegistry::new();
+        let client = reqwest::Client::new();
+        let written = register_hook_for(
+            true,
+            &reg,
+            &client,
+            &server.uri(),
+            "admin-token",
+            HookWriteCaller {
+                zdr: false,
+                admin: true,
+            },
+            register_request("org-a", "shell"),
+        )
+        .await
+        .expect("on: capability-core stores the rule");
+        let written = written.hook.expect("the stored rule");
+        assert_eq!((written.hook_id.as_str(), written.revision), ("ohr_7", 7));
+        assert!(
+            reg.inner.is_empty(),
+            "a durable write must not land in the in-memory map"
+        );
+        assert_eq!(org_hook_revision(&reg, "org-a"), 7);
+        let listed = list_hooks_for(
+            true,
+            &reg,
+            &client,
+            &server.uri(),
+            "admin-token",
+            list_request("org-a"),
+        )
+        .await
+        .expect("on: the listing reads the snapshot");
+        let ids: Vec<&str> = listed
+            .hooks
+            .iter()
+            .map(|hook| hook.hook_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["ohr_7"]);
+    }
+
+    /// With the switch on and no snapshot, the listing asks capability-core with the caller's bearer before it answers,
+    /// and an in-memory rule is never listed in its place.
+    #[tokio::test]
+    async fn list_for_switch_on_refreshes_before_it_answers_and_ignores_the_in_memory_map() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/org-hooks"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer caller-token",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+                "org_id": "org-a",
+                "revision": 4,
+                "rules": [stored_rule_json("ohr_4", "shell", 4)],
+            })))
+            .mount(&server)
+            .await;
+        let reg = HookRegistry::new();
+        register(&reg, "org-a", hook("pre_tool", "stale", "deny", true));
+        let client = reqwest::Client::new();
+        let listed = list_hooks_for(
+            true,
+            &reg,
+            &client,
+            &server.uri(),
+            "caller-token",
+            list_request("org-a"),
+        )
+        .await
+        .expect("on: the rules are read from capability-core");
+        let ids: Vec<&str> = listed
+            .hooks
+            .iter()
+            .map(|hook| hook.hook_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["ohr_4"]);
+        assert_eq!(
+            server.received_requests().await.unwrap_or_default().len(),
+            1,
+            "one refresh, made with the caller's bearer"
+        );
+    }
+
+    /// With the switch on and the rules unknown (no snapshot, capability-core failing), the listing is refused as
+    /// unavailable and does not fall back to the in-memory map.
+    #[tokio::test]
+    async fn list_for_switch_on_refuses_when_the_rules_are_unknown() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let reg = HookRegistry::new();
+        register(&reg, "org-a", hook("pre_tool", "shell", "deny", true));
+        let client = reqwest::Client::new();
+        let error = list_hooks_for(
+            true,
+            &reg,
+            &client,
+            &server.uri(),
+            "caller-token",
+            list_request("org-a"),
+        )
+        .await
+        .expect_err("the rules cannot be known");
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert!(reg.durable.get("org-a").is_none());
+    }
+
+    /// With the switch on and no capability bearer (a caller whose credential capability-core is never shown), the
+    /// write is refused as unavailable: nothing is sent and nothing lands in the in-memory map.
+    #[tokio::test]
+    async fn register_for_switch_on_without_a_capability_bearer_stores_nothing() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+        let reg = HookRegistry::new();
+        let client = reqwest::Client::new();
+        let error = register_hook_for(
+            true,
+            &reg,
+            &client,
+            &server.uri(),
+            "",
+            HookWriteCaller {
+                zdr: false,
+                admin: true,
+            },
+            register_request("org-a", "shell"),
+        )
+        .await
+        .expect_err("no capability bearer, no write");
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert!(server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
+        assert!(reg.inner.is_empty());
+    }
+
+    /// P2-mg-04-rel1: the gRPC `RegisterHook` and `ListHooks` reach the switch-aware dispatch and never the in-memory
+    /// handlers directly. Called straight, a handler would keep a rule registered over gRPC in a map the readers stop
+    /// consulting once HOOKS_DURABLE is on and an org has a snapshot.
+    #[test]
+    fn grpc_hook_rpcs_go_through_the_switch_aware_dispatch() {
+        let source = include_str!("grpc.rs").replace("\r\n", "\n");
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("the test module is in this file");
+        for (signature, dispatch) in [
+            (
+                "async fn register_hook(",
+                "runtime_registries::register_hook_for(",
+            ),
+            (
+                "async fn list_hooks(",
+                "runtime_registries::list_hooks_for(",
+            ),
+        ] {
+            let from = production
+                .find(signature)
+                .expect("the RPC is in the production text");
+            let rest = &production[from..];
+            let body = &rest[..rest.find("\n    }\n").expect("the RPC ends")];
+            assert!(
+                body.contains(dispatch),
+                "{signature} must call {dispatch}:\n{body}"
+            );
+            assert!(
+                body.contains("runtime_registries::hooks_durable()"),
+                "{signature} must state the HOOKS_DURABLE switch:\n{body}"
+            );
+            assert!(
+                !body.contains("runtime_registries::handle_"),
+                "{signature} must not call an in-memory handler:\n{body}"
+            );
+        }
     }
 
     #[test]

@@ -31,6 +31,28 @@ pub const MAX_USER_PROFILE_BYTES: usize = 6_144;
 /// Largest thread-goal recitation, in bytes (EP-7 S1); the gateway composes it within the same
 /// bound (`thread_goal_routes::MAX_RECITATION_BYTES`).
 pub const MAX_GOAL_RECITATION_BYTES: usize = 8_192;
+/// Most tagged authored sections one run context may carry (F-f08-16).
+pub const MAX_AUTHORED_SECTIONS: usize = 8;
+
+/// The closed set of authored-section tags (F-f08-16). They are the section labels the
+/// session store renders; the gateway tags the sections from its own layers and the
+/// executor refuses any other tag at the boundary.
+pub const TAG_PLATFORM: &str = "platform_instructions";
+pub const TAG_ORG: &str = "org_instructions";
+pub const TAG_SPACE: &str = "space_instructions";
+pub const TAG_PERSONA: &str = "persona";
+/// The reply-tone sentence when the personal block carries no persona text. Never `org_instructions`.
+pub const TAG_TONE: &str = "tone";
+pub const TAG_AGENT: &str = "agent_role_instructions";
+/// Every tag a section may carry.
+pub const AUTHORED_SECTION_TAGS: [&str; 6] = [
+    TAG_PLATFORM,
+    TAG_ORG,
+    TAG_SPACE,
+    TAG_PERSONA,
+    TAG_TONE,
+    TAG_AGENT,
+];
 
 /// Why a run context was refused at the boundary. The token is closed: it is
 /// the only text that leaves the refusing service.
@@ -58,6 +80,12 @@ pub enum RunContextRefusal {
     GoalRecitationTooLarge,
     /// A prior turn has a role other than `user` or `assistant`.
     HistoryRoleNotAllowed,
+    /// More than [`MAX_AUTHORED_SECTIONS`] authored sections (F-f08-16).
+    AuthoredSectionsTooMany,
+    /// An authored section carries a tag outside [`AUTHORED_SECTION_TAGS`] (F-f08-16).
+    AuthoredSectionTagNotAllowed,
+    /// The authored sections' text together exceeds [`MAX_AUTHORED_INSTRUCTION_BYTES`] (F-f08-16).
+    AuthoredSectionsTooLarge,
 }
 
 impl RunContextRefusal {
@@ -76,6 +104,9 @@ impl RunContextRefusal {
             Self::ZdrGoalRecitation => "run_context_zdr_goal_recitation",
             Self::GoalRecitationTooLarge => "run_context_goal_recitation_too_large",
             Self::HistoryRoleNotAllowed => "run_context_history_role_not_allowed",
+            Self::AuthoredSectionsTooMany => "run_context_authored_sections_too_many",
+            Self::AuthoredSectionTagNotAllowed => "run_context_authored_section_tag_not_allowed",
+            Self::AuthoredSectionsTooLarge => "run_context_authored_sections_too_large",
         }
     }
 }
@@ -106,6 +137,20 @@ pub fn validate(context: Option<&RunContext>, zdr: bool) -> Result<(), RunContex
     }
     if context.authored_instructions.len() > MAX_AUTHORED_INSTRUCTION_BYTES {
         return Err(RunContextRefusal::InstructionsTooLarge);
+    }
+    // The sections carry no more than the instructions may (a ZDR run may carry either).
+    if context.authored_sections.len() > MAX_AUTHORED_SECTIONS {
+        return Err(RunContextRefusal::AuthoredSectionsTooMany);
+    }
+    let mut section_bytes = 0usize;
+    for section in &context.authored_sections {
+        if !AUTHORED_SECTION_TAGS.contains(&section.tag.as_str()) {
+            return Err(RunContextRefusal::AuthoredSectionTagNotAllowed);
+        }
+        section_bytes = section_bytes.saturating_add(section.text.len());
+    }
+    if section_bytes > MAX_AUTHORED_INSTRUCTION_BYTES {
+        return Err(RunContextRefusal::AuthoredSectionsTooLarge);
     }
     if context.history.len() > MAX_HISTORY_MESSAGES {
         return Err(RunContextRefusal::HistoryTooLong);
@@ -533,6 +578,96 @@ mod tests {
         );
     }
 
+    fn section(tag: &str, text: &str) -> crate::model_plane::v1::AuthoredSection {
+        crate::model_plane::v1::AuthoredSection {
+            tag: tag.to_owned(),
+            text: text.to_owned(),
+        }
+    }
+
+    #[test]
+    fn authored_sections_are_judged_by_tag_count_and_size() {
+        // Every tag of the closed set is allowed, in a ZDR run as well as a persistent one.
+        let all = RunContext {
+            authored_sections: AUTHORED_SECTION_TAGS
+                .iter()
+                .map(|tag| section(tag, "text"))
+                .collect(),
+            ..Default::default()
+        };
+        assert_eq!(validate(Some(&all), false), Ok(()));
+        assert_eq!(validate(Some(&all), true), Ok(()));
+
+        let unknown = RunContext {
+            authored_sections: vec![section(TAG_ORG, "ok"), section("system_override", "x")],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate(Some(&unknown), false),
+            Err(RunContextRefusal::AuthoredSectionTagNotAllowed)
+        );
+        // An empty tag and a near-miss are as unknown as any other.
+        for tag in ["", "ORG_INSTRUCTIONS", "org_instructions "] {
+            let near = RunContext {
+                authored_sections: vec![section(tag, "x")],
+                ..Default::default()
+            };
+            assert_eq!(
+                validate(Some(&near), false),
+                Err(RunContextRefusal::AuthoredSectionTagNotAllowed),
+                "tag {tag:?}"
+            );
+        }
+
+        let many = RunContext {
+            authored_sections: (0..=MAX_AUTHORED_SECTIONS)
+                .map(|_| section(TAG_ORG, "a"))
+                .collect(),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate(Some(&many), false),
+            Err(RunContextRefusal::AuthoredSectionsTooMany)
+        );
+        let at_the_limit = RunContext {
+            authored_sections: (0..MAX_AUTHORED_SECTIONS)
+                .map(|_| section(TAG_ORG, "a"))
+                .collect(),
+            ..Default::default()
+        };
+        assert_eq!(validate(Some(&at_the_limit), false), Ok(()));
+
+        let half = MAX_AUTHORED_INSTRUCTION_BYTES / 2;
+        let exactly = RunContext {
+            authored_sections: vec![
+                section(TAG_PLATFORM, &"x".repeat(half)),
+                section(TAG_ORG, &"x".repeat(half)),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(validate(Some(&exactly), false), Ok(()));
+        let heavy = RunContext {
+            authored_sections: vec![
+                section(TAG_PLATFORM, &"x".repeat(half)),
+                section(TAG_ORG, &"x".repeat(half + 1)),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate(Some(&heavy), false),
+            Err(RunContextRefusal::AuthoredSectionsTooLarge)
+        );
+    }
+
+    #[test]
+    fn the_section_tags_are_distinct_and_never_a_bare_org() {
+        let mut tags = AUTHORED_SECTION_TAGS.to_vec();
+        tags.sort_unstable();
+        tags.dedup();
+        assert_eq!(tags.len(), AUTHORED_SECTION_TAGS.len());
+        assert!(!AUTHORED_SECTION_TAGS.contains(&"org"));
+    }
+
     #[test]
     fn every_refusal_has_a_distinct_closed_token() {
         let all = [
@@ -547,6 +682,9 @@ mod tests {
             RunContextRefusal::HistoryRoleNotAllowed,
             RunContextRefusal::ZdrGoalRecitation,
             RunContextRefusal::GoalRecitationTooLarge,
+            RunContextRefusal::AuthoredSectionsTooMany,
+            RunContextRefusal::AuthoredSectionTagNotAllowed,
+            RunContextRefusal::AuthoredSectionsTooLarge,
         ];
         let mut tokens: Vec<&str> = all.iter().map(|r| r.token()).collect();
         tokens.sort_unstable();

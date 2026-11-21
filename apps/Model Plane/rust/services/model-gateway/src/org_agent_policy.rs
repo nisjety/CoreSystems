@@ -685,7 +685,9 @@ pub fn resolve_turn(
 }
 
 /// The rung cap the cache holds for an org, when the switch enforces it and the policy is held. `None` when the switch
-/// does not enforce, the policy is not held, or the org sets no cap.
+/// does not enforce, the policy is not held, or the org sets no cap. An org whose mode cap is `read_only` or `lockdown`
+/// is held to the read-only rung whatever its rung cap says (F-f10-25): a run states that rung, and execution-core holds
+/// the run's sandbox egress at off for it, so a mode that allows no write must not leave the egress open.
 #[must_use]
 pub fn held_rung_cap(
     mode: PolicyMode,
@@ -693,7 +695,13 @@ pub fn held_rung_cap(
     org_id: &str,
 ) -> Option<AutonomyRung> {
     match mode {
-        PolicyMode::Enforce => cache.policy(org_id).and_then(|policy| policy.rung_cap),
+        PolicyMode::Enforce => cache.policy(org_id).and_then(|policy| {
+            if matches!(policy.mode_cap, AgentMode::ReadOnly | AgentMode::Lockdown) {
+                clamp_rung(policy.rung_cap, Some(AutonomyRung::ReadOnly))
+            } else {
+                policy.rung_cap
+            }
+        }),
         PolicyMode::Off | PolicyMode::Shadow => None,
     }
 }
@@ -1023,6 +1031,77 @@ mod tests {
             Some(AutonomyRung::WorkspaceWrite)
         );
         assert_eq!(held_rung_cap(PolicyMode::Shadow, &cache, "org-held"), None);
+    }
+
+    #[test]
+    fn org_agent_policy_a_read_only_or_lockdown_mode_cap_holds_the_rung_to_read_only() {
+        use AutonomyRung::{DangerFullAccess, ReadOnly, WorkspaceWrite};
+        let cache = OrgPolicyCache::new();
+        let hold = |org: &str, body: Value| {
+            cache.store(
+                org,
+                OrgPolicy::from_settings(1, "sha256:1", &settings(body)),
+                Instant::now(),
+            );
+        };
+        // A read-only or lockdown mode cap states the read-only rung with no rung cap of its own, so the run's egress is
+        // held at off by execution-core. A grant wider than read-only is held to it, and no grant states it.
+        hold("org-ro", json!({"mode_cap": "read_only"}));
+        hold("org-lockdown", json!({"mode_cap": "lockdown"}));
+        hold("org-bundle", json!({"mode_cap": "auto", "lockdown": true}));
+        for org in ["org-ro", "org-lockdown", "org-bundle"] {
+            let cap = dispatch_rung_cap(PolicyMode::Enforce, &cache, org);
+            assert_eq!(
+                held_rung_cap(PolicyMode::Enforce, &cache, org),
+                Some(ReadOnly),
+                "{org}"
+            );
+            assert_eq!(cap, Some(ReadOnly), "{org}");
+            assert_eq!(
+                clamp_rung(Some(DangerFullAccess), cap),
+                Some(ReadOnly),
+                "{org}"
+            );
+            assert_eq!(clamp_rung(None, cap), Some(ReadOnly), "{org}");
+        }
+        // The read-only mode cap keeps the read-only rung whatever wider rung cap it also carries.
+        hold(
+            "org-ro-ww",
+            json!({"mode_cap": "read_only", "rung_cap": "workspace_write"}),
+        );
+        assert_eq!(
+            held_rung_cap(PolicyMode::Enforce, &cache, "org-ro-ww"),
+            Some(ReadOnly)
+        );
+        // Under auto and ask_first the mode cap states no rung: the org's rung cap is what the run is held to, and no
+        // rung cap states nothing.
+        hold("org-auto", json!({"mode_cap": "auto"}));
+        hold("org-ask", json!({"mode_cap": "ask_first"}));
+        hold(
+            "org-ask-ww",
+            json!({"mode_cap": "ask_first", "rung_cap": "workspace_write"}),
+        );
+        hold(
+            "org-auto-ro",
+            json!({"mode_cap": "auto", "rung_cap": "read_only"}),
+        );
+        assert_eq!(held_rung_cap(PolicyMode::Enforce, &cache, "org-auto"), None);
+        assert_eq!(held_rung_cap(PolicyMode::Enforce, &cache, "org-ask"), None);
+        assert_eq!(
+            held_rung_cap(PolicyMode::Enforce, &cache, "org-ask-ww"),
+            Some(WorkspaceWrite)
+        );
+        assert_eq!(
+            held_rung_cap(PolicyMode::Enforce, &cache, "org-auto-ro"),
+            Some(ReadOnly)
+        );
+        // Off and shadow read nothing, whatever the held policy says.
+        for mode in [PolicyMode::Off, PolicyMode::Shadow] {
+            for org in ["org-ro", "org-lockdown", "org-ask-ww"] {
+                assert_eq!(held_rung_cap(mode, &cache, org), None, "{mode:?} {org}");
+                assert_eq!(dispatch_rung_cap(mode, &cache, org), None, "{mode:?} {org}");
+            }
+        }
     }
 
     #[test]

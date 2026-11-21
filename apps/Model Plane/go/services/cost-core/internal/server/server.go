@@ -122,6 +122,13 @@ type budgetCheckRequest struct {
 	// Since starts the window the caps are checked against (RFC 3339). Zero
 	// keeps the lifetime totals.
 	Since time.Time `json:"since,omitempty"`
+	// SinceCost and SinceTokens start the window each cap is checked against, so a
+	// cost cap and a token cap can each reset on their own period (F-f02-04). Zero
+	// falls back to Since. An older cost-core refuses these fields, because it
+	// decodes with DisallowUnknownFields, so it is deployed before the gateway
+	// switch that sends them.
+	SinceCost   time.Time `json:"since_cost,omitempty"`
+	SinceTokens time.Time `json:"since_tokens,omitempty"`
 }
 
 // budgetCheckResponse is the JSON shape returned by the budget-check endpoint.
@@ -219,6 +226,11 @@ func (s *Server) Handler(protect func(http.Handler) http.Handler) http.Handler {
 	return root
 }
 
+// ScopeBudgetCheck is the only scope an api_key principal carries at
+// cost-core (O-18): it allows POST /api/v1/budget/check for the key's own
+// principal and nothing else.
+const ScopeBudgetCheck = "cost:budget:check"
+
 // CostAuthorizer applies route-level authorization after token verification.
 // User principals may read data only within their signed organization and may
 // check their own budget. Ledger writes require cost:write; service org-wide
@@ -232,6 +244,19 @@ func CostAuthorizer(principal authctx.Principal, r *http.Request) error {
 			return nil
 		}
 		return errors.New("user principal is not authorized for this cost operation")
+	}
+	if principal.PrincipalType == authctx.PrincipalTypeAPIKey {
+		// An api_key principal (O-18) reaches cost-core only when
+		// COST_CORE_ACCEPT_API_KEY is on, and it may call exactly one thing:
+		// the budget check for its own key, with the scope the key exchange
+		// mints for the cost-core audience. No read, no ledger write.
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/budget/check" {
+			return errors.New("api key principal is not authorized for this cost operation")
+		}
+		if !principal.HasScope(ScopeBudgetCheck) {
+			return errors.New("cost:budget:check scope is required")
+		}
+		return nil
 	}
 	if principal.PrincipalType != "service" {
 		return errors.New("unsupported principal type")
@@ -567,6 +592,19 @@ func (s *Server) handleBudgetCheck(w http.ResponseWriter, r *http.Request) {
 			}
 			req.UserID = principal.ActorID
 		}
+		if principal.PrincipalType == authctx.PrincipalTypeAPIKey {
+			// O-18: a key principal checks its own spend only. The ledger rows
+			// of a key turn are attributed to "apikey:<key_id>", so the scope is
+			// forced from the verified token (the owner's id, a sibling key or
+			// an org-wide empty scope can never be read through a key), and the
+			// organization was pinned to the token's above.
+			keyUser := authctx.APIKeySubjectPrefix + principal.KeyID
+			if principal.KeyID == "" || (req.UserID != "" && req.UserID != keyUser) {
+				httpError(w, http.StatusForbidden, "user scope does not match verified token")
+				return
+			}
+			req.UserID = keyUser
+		}
 	}
 	if req.OrgID == "" {
 		httpError(w, http.StatusBadRequest, "org_id is required")
@@ -594,30 +632,57 @@ func (s *Server) handleBudgetCheck(w http.ResponseWriter, r *http.Request) {
 	// A windowed check (since set) counts only the spend from that instant, so
 	// a capped org is admitted again when its period resets. Without since the
 	// totals stay lifetime, as before.
-	var usage *ledger.Usage
-	var usageErr error
-	switch {
-	case !req.Since.IsZero():
-		usage, usageErr = s.ledger.Aggregate(r.Context(), ledger.AggregateFilter{OrgID: req.OrgID, UserID: req.UserID, Since: req.Since})
-	case req.UserID == "":
-		usage, usageErr = s.ledger.Aggregate(r.Context(), ledger.AggregateFilter{OrgID: req.OrgID})
-	default:
-		usage, usageErr = s.ledger.GetUsage(r.Context(), req.OrgID, req.UserID)
+	// Each cap is measured over its own window (F-f02-04): the cost cap from SinceCost and the token
+	// cap from SinceTokens, each falling back to Since. Equal windows, which is every request without
+	// the per-cap fields, keep the one read they always made.
+	costSince := req.Since
+	if !req.SinceCost.IsZero() {
+		costSince = req.SinceCost
 	}
-
-	if usageErr != nil && !errors.Is(usageErr, ledger.ErrUsageNotFound) {
-		slog.Error("budget ledger read failed", "org_id", req.OrgID, "error", usageErr)
-		httpError(w, http.StatusServiceUnavailable, "budget state is unavailable")
-		return
+	tokenSince := req.Since
+	if !req.SinceTokens.IsZero() {
+		tokenSince = req.SinceTokens
 	}
 
 	// max_tokens caps metered tokens only: a subscription entry keeps its
 	// real token counts at cost 0 and must never exhaust the cap.
 	var currentCost float64
 	var currentTokens int64
-	if usageErr == nil && usage != nil {
-		currentCost = usage.TotalCostUSD
-		currentTokens = usage.MeteredInputTokens + usage.MeteredOutputTokens
+	if costSince.Equal(tokenSince) {
+		var usage *ledger.Usage
+		var usageErr error
+		switch {
+		case !costSince.IsZero():
+			usage, usageErr = s.ledger.Aggregate(r.Context(), ledger.AggregateFilter{OrgID: req.OrgID, UserID: req.UserID, Since: costSince})
+		case req.UserID == "":
+			usage, usageErr = s.ledger.Aggregate(r.Context(), ledger.AggregateFilter{OrgID: req.OrgID})
+		default:
+			usage, usageErr = s.ledger.GetUsage(r.Context(), req.OrgID, req.UserID)
+		}
+
+		if usageErr != nil && !errors.Is(usageErr, ledger.ErrUsageNotFound) {
+			slog.Error("budget ledger read failed", "org_id", req.OrgID, "error", usageErr)
+			httpError(w, http.StatusServiceUnavailable, "budget state is unavailable")
+			return
+		}
+		if usageErr == nil && usage != nil {
+			currentCost = usage.TotalCostUSD
+			currentTokens = usage.MeteredInputTokens + usage.MeteredOutputTokens
+		}
+	} else {
+		costUsage, costErr := s.ledger.Aggregate(r.Context(), ledger.AggregateFilter{OrgID: req.OrgID, UserID: req.UserID, Since: costSince})
+		tokenUsage, tokenErr := s.ledger.Aggregate(r.Context(), ledger.AggregateFilter{OrgID: req.OrgID, UserID: req.UserID, Since: tokenSince})
+		if err := errors.Join(costErr, tokenErr); err != nil {
+			slog.Error("budget ledger read failed", "org_id", req.OrgID, "error", err)
+			httpError(w, http.StatusServiceUnavailable, "budget state is unavailable")
+			return
+		}
+		if costUsage != nil {
+			currentCost = costUsage.TotalCostUSD
+		}
+		if tokenUsage != nil {
+			currentTokens = tokenUsage.MeteredInputTokens + tokenUsage.MeteredOutputTokens
+		}
 	}
 
 	err := budgetDecision(req.MaxCostUSD, req.MaxTokens, currentCost, currentTokens)

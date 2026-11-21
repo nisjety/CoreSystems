@@ -295,6 +295,8 @@ pub(crate) struct DeckTurn<'a> {
     pub sandbox_bearer: Option<&'a VerifiedSandboxBearer>,
     pub inference_bearer: &'a str,
     pub session_bearer: &'a str,
+    // The turn's capability bearer: the build's step reads the org's hook rules with it (F-f06-04).
+    pub capability_bearer: Option<&'a str>,
     pub run_id: &'a str,
     pub org_id: &'a str,
     pub user_id: &'a str,
@@ -969,6 +971,7 @@ async fn run_build(
         // the turn's resolved template: the builder reads the manifest and the theme.
         &[],
         &mounts,
+        turn.capability_bearer,
     )
     .await
 }

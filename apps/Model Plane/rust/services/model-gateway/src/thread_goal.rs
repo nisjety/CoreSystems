@@ -28,7 +28,7 @@ use mp_contracts::model_plane::v1::{
     thread_goal_service_client::ThreadGoalServiceClient, BindGoalTurnRunRequest,
     ClaimGoalTurnRequest, ClaimGoalTurnResponse, GetGoalTurnForJudgeRequest,
     GetGoalTurnForJudgeResponse, InferRequest, JudgeToolCall, ListRunToolCallsForJudgeRequest,
-    RecordGoalVerdictRequest, RunUsage, SettleGoalTurnRequest, ThreadGoal,
+    RecordGoalVerdictRequest, RunUsage, SettleGoalTurnRequest, ThreadGoal, TopUpGoalTurnRequest,
 };
 use tonic::transport::Channel;
 
@@ -521,6 +521,142 @@ async fn send_settle(
         Err(status) => {
             tracing::warn!(code = ?status.code(), turn_no, "goal turn settle failed; its lease will expire");
             None
+        }
+    }
+}
+
+/// The switch for the segment top-up (F-f09-11), read at each call as the other goal switches are.
+pub(crate) const SEGMENT_TOPUP_ENV: &str = "MODEL_GATEWAY_GOAL_SEGMENT_TOPUP";
+
+/// Whether a goal run's /continue segments debit their usage to the goal: only the literal `true`, so
+/// with the switch off the continuation is exactly what it was. It also needs the goal switch, since
+/// session-core answers `thread_goals_disabled` otherwise.
+#[must_use]
+pub(crate) fn segment_topup_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(SEGMENT_TOPUP_ENV).ok().as_deref())
+}
+
+/// How long a top-up may delay the end of a continuation's stream; a slower one is a warning and the
+/// segment goes undebited (the goal is under-counted, never over-counted).
+const TOP_UP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Whether a continuation segment asks for a top-up: the switch is on, the dispatch is a continuation
+/// of a paused run, and the run is neither zero-retention nor waived (no goal exists for one). An
+/// ordinary turn never tops up; its first segment is settled by the goal turn ledger.
+#[must_use]
+pub(crate) fn should_top_up(switch_on: bool, continuing: bool, zdr: bool, waived: bool) -> bool {
+    switch_on && continuing && !zdr && !waived
+}
+
+/// What one continuation segment spent, as a top-up states it: the metered tokens and the priced cost.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SegmentUsage {
+    tokens: MeteredTokens,
+    cost_usd_micros: Option<u64>,
+    cost_basis: &'static str,
+}
+
+impl SegmentUsage {
+    /// The segment's usage from the executor's answer. `None` when the answer carried no usage: the
+    /// round tally of a progress stream may span the whole run, so it is never used here (a segment
+    /// with no usage goes undebited rather than risk a double count).
+    #[must_use]
+    pub(crate) fn of_segment(
+        usage: Option<&RunUsage>,
+        cost_usd: Option<f64>,
+        route: CostBasis,
+        provider_hint: &str,
+        subscription_connection_id: &str,
+    ) -> Option<Self> {
+        let usage = usage?;
+        Some(Self {
+            tokens: metered_tokens(usage, provider_hint, subscription_connection_id),
+            cost_usd_micros: cost_usd.and_then(usd_to_micros),
+            cost_basis: route.as_str(),
+        })
+    }
+
+    /// Whether the segment spent anything a goal counts; a subscription segment that spent no metered
+    /// token and no priced cost has nothing to add, so no call is made.
+    #[must_use]
+    pub(crate) fn has_spend(&self) -> bool {
+        self.tokens != MeteredTokens::default()
+            || self.cost_usd_micros.is_some_and(|micros| micros > 0)
+    }
+}
+
+/// The goal turn top-up client (F-f09-11): `TopUpGoalTurn` with the owner's session bearer, so
+/// session-core's owner, org and ZDR checks apply as to a settle.
+pub(crate) struct GoalTopUp {
+    client: ThreadGoalServiceClient<Channel>,
+    bearer: VerifiedSessionBearer,
+    org_id: String,
+}
+
+impl GoalTopUp {
+    pub(crate) fn new(
+        client: ThreadGoalServiceClient<Channel>,
+        bearer: &VerifiedSessionBearer,
+        org_id: &str,
+    ) -> Self {
+        Self {
+            client,
+            bearer: bearer.clone(),
+            org_id: org_id.to_owned(),
+        }
+    }
+
+    fn request(
+        &self,
+        run_id: &str,
+        segment_key: &str,
+        usage: &SegmentUsage,
+    ) -> TopUpGoalTurnRequest {
+        TopUpGoalTurnRequest {
+            org_id: self.org_id.clone(),
+            run_id: run_id.to_owned(),
+            segment_key: segment_key.to_owned(),
+            metered_input_tokens: usage.tokens.input,
+            metered_output_tokens: usage.tokens.output,
+            cost_usd_micros: usage
+                .cost_usd_micros
+                .map_or(-1, |micros| i64::try_from(micros).unwrap_or(i64::MAX)),
+            cost_basis: usage.cost_basis.to_owned(),
+        }
+    }
+
+    /// Debit one continuation segment's usage to the goal its run belongs to; the goal as session-core
+    /// answered, or `None`. A run in no goal (`NotFound`) is the common case and is ignored quietly; any
+    /// other failure is a warning carrying ids and the status code only. Idempotent per `segment_key`.
+    pub(crate) async fn top_up(
+        &self,
+        run_id: &str,
+        segment_key: &str,
+        usage: &SegmentUsage,
+    ) -> Option<ThreadGoal> {
+        if !usage.has_spend() {
+            return None;
+        }
+        let request = crate::sse::authenticated_session_request(
+            self.request(run_id, segment_key, usage),
+            &self.bearer,
+        )
+        .ok()?;
+        let mut client = self.client.clone();
+        match tokio::time::timeout(TOP_UP_TIMEOUT, client.top_up_goal_turn(request)).await {
+            Ok(Ok(response)) => {
+                let response = response.into_inner();
+                response.goal.filter(|_| response.found)
+            }
+            Ok(Err(status)) if status.code() == tonic::Code::NotFound => None,
+            Ok(Err(status)) => {
+                tracing::warn!(code = ?status.code(), %run_id, %segment_key, "goal segment top-up failed; the segment goes undebited");
+                None
+            }
+            Err(_) => {
+                tracing::warn!(%run_id, %segment_key, "goal segment top-up timed out; the segment goes undebited");
+                None
+            }
         }
     }
 }
@@ -1061,6 +1197,51 @@ mod tests {
     }
 
     #[test]
+    fn a_goal_turns_run_token_cap_is_the_smaller_of_the_request_the_org_and_the_goal() {
+        // F-f04-08: the Do run states min(request, org, goal allowance). The goal half is `goal_turn_cap`'s
+        // token figure, already clamped to the org's ceiling, so it can only lower what the request states.
+        let org = RunCeiling {
+            usd: None,
+            tokens: Some(500),
+        };
+        let with_goal = |tokens: u64| {
+            goal_turn_cap(
+                GoalAllowance {
+                    tokens: Some(tokens),
+                    cost_usd_micros: None,
+                },
+                org,
+            )
+            .tokens
+        };
+        // The goal's remaining allowance wins where it is the smallest of the three.
+        assert_eq!(
+            crate::budget::run_token_cap(true, Some(800), Some(500), with_goal(120)),
+            Some(120)
+        );
+        // The org's ceiling wins where the goal has more than it, and the request still lowers both.
+        assert_eq!(
+            crate::budget::run_token_cap(true, Some(800), Some(500), with_goal(9_000)),
+            Some(500)
+        );
+        assert_eq!(
+            crate::budget::run_token_cap(true, Some(300), Some(500), with_goal(9_000)),
+            Some(300)
+        );
+        // A goal with nothing left never reads as the wire's 0, which is no cap: it is held at one token.
+        assert_eq!(with_goal(0), Some(0));
+        assert_eq!(
+            crate::budget::run_token_cap(true, Some(800), Some(500), with_goal(0)),
+            Some(1)
+        );
+        // With the switch off the Do run states nothing, whatever the goal has left.
+        assert_eq!(
+            crate::budget::run_token_cap(false, Some(800), Some(500), with_goal(120)),
+            None
+        );
+    }
+
+    #[test]
     fn subscription_leg_counts_zero_metered_tokens() {
         let usage = RunUsage {
             legs: vec![leg(SUBSCRIPTION, 9_000, 1_000), leg("openai", 300, 200)],
@@ -1219,5 +1400,125 @@ mod tests {
             progress_event(&free_reason, 3).unwrap().payload("r")["status_reason"],
             ""
         );
+    }
+
+    fn metered_usage(input: u64, output: u64) -> RunUsage {
+        RunUsage {
+            provider_used: "openai".to_owned(),
+            input_tokens: input,
+            output_tokens: output,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_segment_tops_up_only_for_a_non_zdr_continuation_with_the_switch_on() {
+        assert!(should_top_up(true, true, false, false));
+        assert!(!should_top_up(false, true, false, false), "switch off");
+        assert!(
+            !should_top_up(true, false, false, false),
+            "an ordinary turn is settled by the ledger"
+        );
+        assert!(!should_top_up(true, true, true, false), "zero retention");
+        assert!(!should_top_up(true, true, false, true), "waived");
+    }
+
+    #[test]
+    fn the_top_up_switch_reads_only_the_literal_true() {
+        assert_eq!(SEGMENT_TOPUP_ENV, "MODEL_GATEWAY_GOAL_SEGMENT_TOPUP");
+        for off in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some("on"),
+            Some(" true "),
+        ] {
+            assert!(!mp_contracts::loop_fold::switch_from(off), "{off:?}");
+        }
+        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
+    }
+
+    #[test]
+    fn a_segments_usage_is_its_metered_tokens_and_priced_cost() {
+        let usage = metered_usage(400, 100);
+        let segment = SegmentUsage::of_segment(
+            Some(&usage),
+            Some(0.000_25),
+            CostBasis::Metered,
+            "openai",
+            "",
+        )
+        .expect("a segment with usage");
+        assert_eq!(
+            segment.tokens,
+            MeteredTokens {
+                input: 400,
+                output: 100
+            }
+        );
+        assert_eq!(segment.cost_usd_micros, Some(250));
+        assert!(segment.has_spend());
+        // An answer without usage is never debited from a tally.
+        assert!(
+            SegmentUsage::of_segment(None, Some(1.0), CostBasis::Metered, "openai", "").is_none()
+        );
+        // Unpriced stays unpriced; tokens still count.
+        let unpriced =
+            SegmentUsage::of_segment(Some(&usage), None, CostBasis::Metered, "openai", "").unwrap();
+        assert_eq!(unpriced.cost_usd_micros, None);
+        assert!(unpriced.has_spend());
+    }
+
+    #[test]
+    fn a_segment_that_spent_nothing_metered_makes_no_call() {
+        let usage = RunUsage {
+            legs: vec![leg(SUBSCRIPTION, 900, 100)],
+            ..Default::default()
+        };
+        let segment = SegmentUsage::of_segment(
+            Some(&usage),
+            Some(0.0),
+            CostBasis::Subscription,
+            "",
+            "conn-1",
+        )
+        .unwrap();
+        assert_eq!(segment.tokens, MeteredTokens::default());
+        assert!(!segment.has_spend());
+    }
+
+    #[tokio::test]
+    async fn the_top_up_request_carries_ids_and_counts_only() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let bearer =
+            crate::auth::VerifiedSessionBearer::for_test("fixture-token-aaaaaaaaaaaaaaaaaaaa");
+        let topup = GoalTopUp::new(ThreadGoalServiceClient::new(channel), &bearer, "org-1");
+        let usage = SegmentUsage {
+            tokens: MeteredTokens {
+                input: 7,
+                output: 3,
+            },
+            cost_usd_micros: None,
+            cost_basis: "metered",
+        };
+        let request = topup.request("run-1", "01JREQUEST", &usage);
+        assert_eq!(request.org_id, "org-1");
+        assert_eq!(request.run_id, "run-1");
+        assert_eq!(request.segment_key, "01JREQUEST");
+        assert_eq!(request.metered_input_tokens, 7);
+        assert_eq!(request.metered_output_tokens, 3);
+        assert_eq!(request.cost_usd_micros, -1, "unpriced is -1 on the wire");
+        assert_eq!(request.cost_basis, "metered");
+        // A segment with nothing to add never reaches the wire (the dead endpoint is never dialled).
+        let nothing = SegmentUsage {
+            tokens: MeteredTokens::default(),
+            cost_usd_micros: None,
+            cost_basis: "subscription",
+        };
+        assert!(topup
+            .top_up("run-1", "01JREQUEST", &nothing)
+            .await
+            .is_none());
     }
 }

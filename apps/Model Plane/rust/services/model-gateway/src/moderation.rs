@@ -407,9 +407,7 @@ impl ScreeningMode {
     #[must_use]
     pub fn configured() -> Self {
         static MODE: std::sync::OnceLock<ScreeningMode> = std::sync::OnceLock::new();
-        *MODE.get_or_init(|| {
-            Self::from_env_value(std::env::var("CONTENT_SAFETY_MODE_DEFAULT").ok().as_deref())
-        })
+        *MODE.get_or_init(|| Self::from_env_value(std::env::var(MODE_DEFAULT_ENV).ok().as_deref()))
     }
 
     /// Unset or unknown keeps `frame`, today's behaviour.
@@ -417,6 +415,18 @@ impl ScreeningMode {
     pub fn from_env_value(raw: Option<&str>) -> Self {
         raw.and_then(Self::from_wire).unwrap_or(Self::Frame)
     }
+}
+
+/// The environment switch of the screening mode default, read once by [`ScreeningMode::configured`] and listed in
+/// `switch_spellings::MODE_SWITCHES`.
+pub const MODE_DEFAULT_ENV: &str = "CONTENT_SAFETY_MODE_DEFAULT";
+
+/// Whether a set `CONTENT_SAFETY_MODE_DEFAULT` is a value [`ScreeningMode::from_env_value`] does not read: anything but
+/// `frame`, `tighten` or `enforce`, exact after trimming. Such a value reads as `frame`, so the startup report names it.
+/// A blank value reads as unset.
+#[must_use]
+pub fn unreadable_mode_default(value: &str) -> bool {
+    !value.trim().is_empty() && ScreeningMode::from_wire(value).is_none()
 }
 
 /// What an unavailable inline pass does to a clean result (WS26-S6). `Open` keeps

@@ -56,6 +56,11 @@ pub struct SseChunk {
     pub model_used: String,
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// The accepted mid-run messages the loop never took, by client message id. Named on a chat
+    /// stream's `done` frame only when `MODEL_GATEWAY_QUEUED_UNDELIVERED_IDS` is on (see
+    /// `stamp_undelivered`); left out otherwise, so every other frame is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub undelivered_client_message_ids: Option<Vec<String>>,
 }
 
 /// End every out-of-band registration a live stream holds.
@@ -82,6 +87,228 @@ fn finish_stream_registrations(
             %request_id,
             undelivered,
             "the run ended with queued messages the loop never took"
+        );
+    }
+}
+
+/// The switch that names, on a chat stream's `done` frame, the accepted mid-run messages the loop
+/// never took. Strict: only the literal `true` turns it on.
+pub(crate) const QUEUED_UNDELIVERED_IDS_VAR: &str = "MODEL_GATEWAY_QUEUED_UNDELIVERED_IDS";
+
+/// The gate of [`stamp_undelivered`], with the environment read injected so both arms can be tested in
+/// one process: the switch, and send receipts. The list names messages by the id each was queued under.
+/// Only a queue with receipts on is given the SPA's id; without them the owner mints its own, which the
+/// SPA could never match, so every such message would read as taken.
+fn undelivered_ids_enabled_with(get: &dyn Fn(&str) -> Option<String>, receipts_on: bool) -> bool {
+    receipts_on && mp_contracts::loop_fold::switch_from(get(QUEUED_UNDELIVERED_IDS_VAR).as_deref())
+}
+
+/// Whether the done frame names undelivered messages, read once per process.
+fn undelivered_ids_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        undelivered_ids_enabled_with(
+            &|key| std::env::var(key).ok(),
+            crate::queued_input::send_receipts_enabled(),
+        )
+    })
+}
+
+/// Close a stream's mid-run input as its answer is sent, and name on its `done` frame the accepted
+/// messages the loop never took. The SPA resends exactly those as ordinary turns and marks every other
+/// accepted message delivered, so a message the loop took is not sent twice when its `queued_input`
+/// frame was lost. With the switch off, or no queue registered under the id, the frame is left as it was.
+fn stamp_undelivered(
+    chunk: &mut SseChunk,
+    queued_inputs: &crate::queued_input::QueuedInputRegistry,
+    request_id: &str,
+) {
+    stamp_undelivered_if(undelivered_ids_enabled(), chunk, queued_inputs, request_id);
+}
+
+/// [`stamp_undelivered`] with its gate given, so both arms can be tested in one process.
+fn stamp_undelivered_if(
+    enabled: bool,
+    chunk: &mut SseChunk,
+    queued_inputs: &crate::queued_input::QueuedInputRegistry,
+    request_id: &str,
+) {
+    if enabled {
+        chunk.undelivered_client_message_ids = queued_inputs.close_and_undelivered(request_id);
+    }
+}
+
+#[cfg(test)]
+mod undelivered_done_tests {
+    use super::{stamp_undelivered_if, undelivered_ids_enabled_with, SseChunk};
+    use crate::normalize::RetrievalScope;
+    use crate::queued_input::{EnqueueOutcome, QueuedInputRegistry};
+
+    fn done() -> SseChunk {
+        SseChunk {
+            request_id: "req-1".to_owned(),
+            delta: String::new(),
+            done: true,
+            model_used: "verevon-balance".to_owned(),
+            input_tokens: 0,
+            output_tokens: 0,
+            undelivered_client_message_ids: None,
+        }
+    }
+
+    /// A stream whose loop took nothing: three accepted messages wait, one of them with no id.
+    fn stream_with_waiting_messages() -> QueuedInputRegistry {
+        let registry = QueuedInputRegistry::new();
+        registry.register(
+            "req-1",
+            "org-a",
+            "user-a",
+            "thread-1",
+            false,
+            RetrievalScope::Auto,
+        );
+        registry.enqueue_checked("req-1", "org-a", "user-a", "one", None, "msg-1");
+        registry.enqueue_checked("req-1", "org-a", "user-a", "two", None, "msg-2");
+        registry.enqueue_checked("req-1", "org-a", "user-a", "no id", None, "");
+        registry
+    }
+
+    /// The gate is strict and needs send receipts: the literal `true` alone is not enough.
+    #[test]
+    fn the_switch_needs_the_literal_true_and_send_receipts() {
+        let set = |value: &'static str| move |_: &str| Some(value.to_owned());
+        assert!(undelivered_ids_enabled_with(&set("true"), true));
+        for off in ["", "false", "1", "yes", "TRUE", " true", "true "] {
+            assert!(
+                !undelivered_ids_enabled_with(&set(off), true),
+                "{off:?} with receipts on"
+            );
+        }
+        assert!(
+            !undelivered_ids_enabled_with(&|_| None, true),
+            "unset reads as off"
+        );
+        assert!(
+            !undelivered_ids_enabled_with(&set("true"), false),
+            "without receipts the list could not match"
+        );
+    }
+
+    /// Off, the done frame is the frame it was before and the queue keeps accepting; on, the frame
+    /// names the accepted messages the loop never took, in order, and closes the queue.
+    #[test]
+    fn the_done_frame_names_the_undelivered_messages_only_with_the_switch_on() {
+        let off_registry = stream_with_waiting_messages();
+        let mut off = done();
+        stamp_undelivered_if(false, &mut off, &off_registry, "req-1");
+        let wire = serde_json::to_string(&off).expect("serialize");
+        assert!(!wire.contains("undelivered_client_message_ids"), "{wire}");
+        // Three messages wait, so the late enqueue would answer Full. Draining leaves the queue open
+        // and empty, so Queued can only mean the switch did not close it.
+        let _ = off_registry.drain("req-1");
+        assert!(
+            matches!(
+                off_registry.enqueue_checked("req-1", "org-a", "user-a", "late", None, "msg-late"),
+                EnqueueOutcome::Queued { .. }
+            ),
+            "switch off: nothing is closed"
+        );
+
+        let on_registry = stream_with_waiting_messages();
+        let mut on = done();
+        stamp_undelivered_if(true, &mut on, &on_registry, "req-1");
+        let wire = serde_json::to_string(&on).expect("serialize");
+        assert!(
+            wire.contains(r#""undelivered_client_message_ids":["msg-1","msg-2"]"#),
+            "the id-less message is not named: {wire}"
+        );
+        // The queue is still full, as it is after a real close, so this pins that closure is checked
+        // before Full: Full would leave the message waiting for a loop that has finished.
+        assert_eq!(
+            on_registry.enqueue_checked("req-1", "org-a", "user-a", "late", None, "msg-late"),
+            EnqueueOutcome::NoActiveStream,
+            "switch on: the queue is closed with the answer"
+        );
+    }
+
+    /// Every accepted message was taken: the field is present and empty, which the SPA reads as
+    /// "nothing to resend", not as "no answer".
+    #[test]
+    fn an_empty_list_is_named_as_an_empty_list() {
+        let registry = QueuedInputRegistry::new();
+        registry.register(
+            "req-1",
+            "org-a",
+            "user-a",
+            "thread-1",
+            false,
+            RetrievalScope::Auto,
+        );
+        let mut frame = done();
+        stamp_undelivered_if(true, &mut frame, &registry, "req-1");
+        let wire = serde_json::to_string(&frame).expect("serialize");
+        assert!(
+            wire.contains(r#""undelivered_client_message_ids":[]"#),
+            "{wire}"
+        );
+    }
+
+    /// A stream with no queue registered (a vision, image or ZDR answer, or a replay) has no list to
+    /// name, so its frame is unchanged even with the switch on.
+    #[test]
+    fn a_stream_with_no_queue_leaves_its_frame_unchanged() {
+        let mut frame = done();
+        stamp_undelivered_if(true, &mut frame, &QueuedInputRegistry::new(), "req-nope");
+        assert_eq!(frame.undelivered_client_message_ids, None);
+        let wire = serde_json::to_string(&frame).expect("serialize");
+        assert!(!wire.contains("undelivered_client_message_ids"), "{wire}");
+    }
+
+    /// Where the take-back closes. A queued message is only read by the tool loop, so a message typed
+    /// while the answer streams is never read by the run: the take-back stays open until the run's
+    /// answer is about to be stored, in both paths. Closing earlier (after the tool rounds) made every
+    /// take-back during the answer stream answer `already_delivered` and resend the message.
+    ///
+    /// The needles are assembled so that this test's own text never matches them.
+    #[test]
+    fn the_take_back_closes_just_before_the_answer_is_stored() {
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        let close_streaming = ["queued_inputs.close_retractions", "(&req_id);"].concat();
+        let close_fallback = ["state.queued_inputs.close_retractions", "(request_id);"].concat();
+        let save = ["session_flow::complete_direct_inference_run_with_message", "("].concat();
+        let answer_request = ["let mut grpc_req = Infer", "Request {"].concat();
+        let liveness = ["let run_live = crate::session_flow::heartbeat_direct_inference_run", "("].concat();
+        let work_summary = ["let work_summary = crate::space_sse::room_work_summary", "("].concat();
+
+        // The streaming path: one close, after the answer inference is built and its pre-save
+        // liveness check, before the work summary and the one save of the answer.
+        let streaming_closes: Vec<usize> = source.match_indices(&close_streaming).map(|(at, _)| at).collect();
+        assert_eq!(streaming_closes.len(), 1, "the streaming path closes the take-back exactly once");
+        let streaming_close = streaming_closes[0];
+        let answer_request_at = source.find(&answer_request).expect("the answer inference request");
+        let liveness_at = source.find(&liveness).expect("the pre-save liveness check");
+        let work_summary_at = source.find(&work_summary).expect("the streaming work summary");
+        let streaming_save = source.find(&save).expect("the streaming save of the answer");
+        assert!(
+            answer_request_at < liveness_at && liveness_at < streaming_close,
+            "the streaming close comes after the answer stream and its pre-save liveness check"
+        );
+        assert!(
+            streaming_close < work_summary_at && work_summary_at < streaming_save,
+            "the streaming close comes just before the work summary and the answer's save"
+        );
+
+        // The fallback path: one close, before its own save, which is the next save in the file.
+        let fallback_closes: Vec<usize> = source.match_indices(&close_fallback).map(|(at, _)| at).collect();
+        assert_eq!(fallback_closes.len(), 1, "the fallback path closes the take-back exactly once");
+        let fallback_close = fallback_closes[0];
+        let fallback_save = source[streaming_save + save.len()..]
+            .find(&save)
+            .map(|at| at + streaming_save + save.len())
+            .expect("the fallback save of the answer");
+        assert!(
+            streaming_save < fallback_close && fallback_close < fallback_save,
+            "the fallback close comes just before the fallback's save"
         );
     }
 }
@@ -1268,6 +1495,7 @@ fn replay_cached_stream(
             model_used: cached.model_used.clone(),
             input_tokens: 0,
             output_tokens: 0,
+            undelivered_client_message_ids: None,
         };
         let _ = tx
             .send(Ok(Event::default()
@@ -1282,6 +1510,7 @@ fn replay_cached_stream(
             model_used: cached.model_used,
             input_tokens: 0,
             output_tokens: 0,
+            undelivered_client_message_ids: None,
         };
         let _ = tx
             .send(Ok(Event::default()
@@ -1579,6 +1808,7 @@ mod agent_mode_turn_tests {
             permission_mode,
             plan_mode,
             granted,
+            None,
             "",
             None,
             &AgentRoute::default(),
@@ -2898,6 +3128,25 @@ fn research_partial(research: &crate::deep_research::DeepResearchOutcome) -> pro
     prost_types::Struct { fields }
 }
 
+/// The section tag of the standing profile block (`prompt.profile`) when `MODEL_GATEWAY_PROMPT_SECTION_NAMES`
+/// is on. It must equal the `user_profile` tag in session-core's `run_ledger_grpc.rs` SECTION_LABELS, which
+/// classifies the message by it in the request inspector.
+pub(crate) const PROFILE_SECTION_TAG: &str = "user_profile";
+
+/// The section tag of the memory block (`prompt.memory`) when `MODEL_GATEWAY_PROMPT_SECTION_NAMES` is on. It
+/// must equal the `memory` tag in session-core's `run_ledger_grpc.rs` SECTION_LABELS.
+pub(crate) const MEMORY_SECTION_TAG: &str = "memory";
+
+/// The `name` of a prompt block this file builds: its section tag when the section-name switch is on, else
+/// empty, which is the unnamed message the block has always been.
+fn block_section_name(section_names: bool, tag: &str) -> String {
+    if section_names {
+        tag.to_owned()
+    } else {
+        String::new()
+    }
+}
+
 pub async fn invoke_stream_sse(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -3274,6 +3523,24 @@ pub async fn invoke_stream_sse(
             );
         }
     };
+    // The org's hook rules (WS25-S3, F-f06-04) are read by a Do run's dispatch, so a Do turn makes them readable here,
+    // before any thread, grant or run is written: from the snapshot inside its bound, or read from capability-core with
+    // the caller's own bearer. With HOOKS_DURABLE on and the rules unknown the turn is refused, typed and retryable.
+    // With HOOKS_DO_RUNS off nothing is read, so nothing is required.
+    if features.iter().any(|feature| feature == "agentic") && do_runs_read_hook_rules() {
+        if let Err(code) = crate::runtime_registries::require_org_hooks(
+            &state,
+            &org_id,
+            capability_bearer
+                .as_ref()
+                .map(VerifiedCapabilityBearer::as_str),
+        )
+        .await
+        {
+            let (_, message) = crate::runtime_registries::ORG_HOOKS_UNAVAILABLE_ANSWER;
+            return error_stream(&request_id, code, message, true);
+        }
+    }
     // The org's web switches (Wave 3 EP-9 W2), read from the policy the admission above left warm. `None` when the
     // policy does not bind this turn, so its web access stays what the person chose.
     let org_web_off = crate::org_agent_policy::held_web_caps(
@@ -3870,6 +4137,10 @@ pub async fn invoke_stream_sse(
         .as_deref()
         .map(str::trim)
         .filter(|id| !id.is_empty() && agentic_requested && crate::thread_goal_routes::enabled());
+    // The metered-token cap a claimed goal turn leaves its Do run (F-f04-08): what the goal has left,
+    // clamped to the org's ceiling by `goal_turn_cap`. It lives to the Do run's dispatch, where the
+    // request's cap joins it. `None` for every turn that claims no goal.
+    let mut goal_run_tokens: Option<u64> = None;
     let mut goal_turn = match goal_turn_id {
         Some(goal_id) => match crate::thread_goal::GoalTurnLedger::claim(
             state.thread_goal_client.clone(),
@@ -3881,8 +4152,9 @@ pub async fn invoke_stream_sse(
         {
             Ok(ledger) => {
                 // D10: what the goal has left, clamped to the org's per-run ceiling and never above
-                // it. A Do run carries no token cap of its own yet (register D2-705), so the cap is
-                // stated here and the goal stops at its next claim.
+                // it. Its token half is stated on the Do run (`budget::run_token_cap`); the USD half is
+                // not sent, since execution-core cannot price a round, so the goal's cost budget is
+                // enforced at settle and at the next claim (D-f09-7).
                 let cap = crate::thread_goal::goal_turn_cap(
                     ledger.allowance(),
                     crate::sse_events::run_ceiling::RunCeiling::resolve(
@@ -3893,6 +4165,7 @@ pub async fn invoke_stream_sse(
                     ),
                 );
                 tracing::info!(request_id = %request_id, cap_tokens = ?cap.tokens, cap_usd = ?cap.usd, "goal turn claimed");
+                goal_run_tokens = cap.tokens;
                 Some(ledger)
             }
             Err(refusal) => {
@@ -4098,7 +4371,8 @@ pub async fn invoke_stream_sse(
                     if let Some(goal) = version_move.goal {
                         req.content = goal;
                     }
-                    Some((thread_id, turn))
+                    // The leaf the move left: a managed start that fails below puts the thread back on it (P2-sc-12-rel1).
+                    Some((thread_id, turn, version_move.previous_leaf_message_id))
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -4117,7 +4391,7 @@ pub async fn invoke_stream_sse(
     // so a later regenerate or edit of it replays on the same connection, and the subscription connection (DEC-V-R8),
     // so a side question on the thread is answered on it. Nothing is recorded for a ZDR turn.
     let started = crate::session_flow::with_user_turn_connections(&normalized.model_connection_id, &normalized.subscription_connection_id, effective_zdr, async { match version_thread.as_ref() {
-        Some((thread_id, turn)) => {
+        Some((thread_id, turn, previous_leaf_message_id)) => {
             crate::session_flow::with_user_context_refs(
                 context_refs.as_ref(),
                 crate::session_flow::prepare_version_run_authenticated(
@@ -4127,6 +4401,7 @@ pub async fn invoke_stream_sse(
                     &user_id,
                     &req.content,
                     turn,
+                    previous_leaf_message_id,
                     &managed_start_key,
                     &model_bearer,
                 ),
@@ -4387,6 +4662,15 @@ pub async fn invoke_stream_sse(
             None
         };
         timing.hand_off("agentic");
+        // The run token cap this Do run states (F-f04-08): the request's cap and the org's, the smaller of the
+        // two, then the goal turn's remaining allowance when a goal turn claimed one (`budget::run_token_cap`).
+        // `None` with MODEL_GATEWAY_DO_RUN_CAP off, so the run is sent as it was.
+        let max_run_tokens = crate::budget::run_token_cap(
+            do_run_cap_switch(),
+            normalized.max_tokens,
+            org_limits.max_tokens,
+            goal_run_tokens,
+        );
         return agentic_run_stream(
             state.clone(),
             session_run,
@@ -4468,6 +4752,8 @@ pub async fn invoke_stream_sse(
             run_tool_allowlist,
             // The turn's coordinator flag (`InvokeRequest.coordinator`); the dispatch decides whether it is sent.
             req.coordinator,
+            // The run token cap of this Do run (F-f04-08), stated above.
+            max_run_tokens,
         );
     }
 
@@ -4662,6 +4948,8 @@ pub async fn invoke_stream_sse(
     // memory is used (D8): `decide_profile` is the one rule for both paths.
     // Switch off, nothing is read or counted and the prompt is unchanged.
     let user_profile_prefix = crate::run_context::user_profile_prefix_enabled();
+    // The section-name switch (F-f08-15): the profile and memory blocks below are named by their tags only when it is on.
+    let section_names = crate::run_context::prompt_section_names_enabled();
     let memory_recall_status = if conversation_only || retrieval_scope == crate::normalize::RetrievalScope::WebOnly || crate::memory_prefetch::is_trivial_prompt(&req.content) {
         if user_profile_prefix {
             crate::run_context::record_user_profile_outcome("skipped_turn");
@@ -4704,7 +4992,7 @@ pub async fn invoke_stream_sse(
                 compaction_summary: String::new(),
                 role: "system".to_owned(),
                 content: block,
-                name: String::new(),
+                name: block_section_name(section_names, PROFILE_SECTION_TAG),
             });
         }
         if let Some(memory_block) = crate::memory_provenance::memory_context_block(&memory_entries)
@@ -4717,7 +5005,7 @@ pub async fn invoke_stream_sse(
                 compaction_summary: String::new(),
                 role: "system".to_owned(),
                 content: memory_block,
-                name: String::new(),
+                name: block_section_name(section_names, MEMORY_SECTION_TAG),
             });
         }
         recall_status
@@ -4910,7 +5198,7 @@ pub async fn invoke_stream_sse(
     // model reads, exactly the way `identity_context_message` primes the
     // grounding content that follows it. Absent only when every layer is
     // empty (ADR-0003, `apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md`).
-    prompt.authored_instructions = authored_instructions_message(&state, &req, persona_enabled);
+    prompt.authored_instructions = authored_instruction_messages(&state, &req, persona_enabled);
     // Skills: match this turn against the org's skill catalogue (disk-loaded +
     // learned) and inject the top matches as system context so a triggered skill
     // actually steers the model. This is the load-bearing Claude-Code skill
@@ -5094,8 +5382,9 @@ pub async fn invoke_stream_sse(
             || web_search_signal
             || deep_research_requested);
     // The recall tool reads the person's other conversations, so it is offered only when the switch is on,
-    // this turn reads its own sources in full, and the person's memory allows recall. The switch is read
-    // first, so a deployment that leaves it off makes no memory read.
+    // this turn reads its own sources in full, and the person's memory allows recall in this thread (F-f06-07: a
+    // thread set off is not offered the tool). The switch is read first, so a deployment that leaves it off makes
+    // no memory read.
     let recall_offered = features.iter().any(|f| f == "tools")
         && crate::recall_conversations::enabled()
         && crate::recall_conversations::turn_permits(
@@ -5108,6 +5397,7 @@ pub async fn invoke_stream_sse(
             &state,
             &org_id,
             &user_id,
+            &session_run.thread_id,
             model_bearer.as_str(),
         )
         .await
@@ -6918,6 +7208,7 @@ pub async fn invoke_stream_sse(
                         model_used: chunk.model_used.clone(),
                         input_tokens: 0,
                         output_tokens: 0,
+                        undelivered_client_message_ids: None,
                     };
                     let data = serde_json::to_string(&sse_chunk).unwrap_or_default();
                     // Buffer the delta for resumability before sending so a
@@ -6975,6 +7266,7 @@ pub async fn invoke_stream_sse(
                             model_used: chunk.model_used.clone(),
                             input_tokens: 0,
                             output_tokens: 0,
+                            undelivered_client_message_ids: None,
                         };
                         let data = serde_json::to_string(&sse_chunk).unwrap_or_default();
                         stream_buffers
@@ -7592,6 +7884,13 @@ pub async fn invoke_stream_sse(
                         .await;
                         break;
                     }
+                    // The run's answer is about to be stored: from here a message still waiting is named by
+                    // the done frame and resent, so it can no longer be taken back. A message typed while the
+                    // answer streamed was never read by the run, so a take-back until this point is honoured
+                    // (the cut-off is "until the run's answer is about to be stored"). Closed before the save
+                    // (a take-back after it would remove a message the stored answer seems to cover), and
+                    // whatever the undelivered-ids switch says. The fallback path closes at its own save.
+                    queued_inputs.close_retractions(&req_id);
                     // WS09-S3 durable `metadata.work` (no text); body and rules in `space_sse.rs`.
                     let work_summary = crate::space_sse::room_work_summary(
                         &stream_buffers,
@@ -7875,7 +8174,7 @@ pub async fn invoke_stream_sse(
                     if hold_artifact_answer {
                         let data = serde_json::to_string(&SseChunk { request_id: req_id.clone(),
                             delta: assistant_output.clone(), done: false, model_used: model_used.clone(),
-                            input_tokens: 0, output_tokens: 0 }).unwrap_or_default();
+                            input_tokens: 0, output_tokens: 0, undelivered_client_message_ids: None }).unwrap_or_default();
                         stream_buffers.append(&buffer_key, seq, "chunk", &data).await;
                         if client_connected {
                             let _ = tx.send(Ok(Event::default().id(seq.to_string()).event("chunk").data(data))).await;
@@ -8276,14 +8575,18 @@ pub async fn invoke_stream_sse(
                             },
                         )
                         .await;
-                    let done_chunk = SseChunk {
+                    let mut done_chunk = SseChunk {
                         request_id: req_id.clone(),
                         delta: String::new(),
                         done: true,
                         model_used,
                         input_tokens,
                         output_tokens,
+                        undelivered_client_message_ids: None,
                     };
+                    // The stream's mid-run input closes with its answer, and the done frame names what the
+                    // loop never took (see `stamp_undelivered`).
+                    stamp_undelivered(&mut done_chunk, &queued_inputs, &req_id);
                     let data = serde_json::to_string(&done_chunk).unwrap_or_default();
                     let _ = tx
                         .send(Ok(Event::default()
@@ -10143,6 +10446,7 @@ fn vision_stream(
                         model_used: model_used.clone(),
                         input_tokens: 0,
                         output_tokens: 0,
+                        undelivered_client_message_ids: None,
                     };
                     if tx
                         .send(Ok(Event::default()
@@ -10229,6 +10533,7 @@ fn vision_stream(
                     model_used,
                     input_tokens: 0,
                     output_tokens: 0,
+                    undelivered_client_message_ids: None,
                 };
                 let _ = tx
                     .send(Ok(Event::default()
@@ -10363,6 +10668,7 @@ fn image_gen_stream(
                         model_used: model_used.clone(),
                         input_tokens: 0,
                         output_tokens: 0,
+                        undelivered_client_message_ids: None,
                     };
                     let _ = tx
                         .send(Ok(Event::default()
@@ -10476,6 +10782,7 @@ fn image_gen_stream(
                     model_used,
                     input_tokens: 0,
                     output_tokens: 0,
+                    undelivered_client_message_ids: None,
                 };
                 let _ = tx
                     .send(Ok(Event::default()
@@ -10674,9 +10981,13 @@ fn temporal_awareness_message(
 /// answering as" framing) — only its firing condition (mention-gated) stays
 /// as-is; it is simply the last section here instead of the sole message.
 ///
-/// The text itself is composed by `run_context::compose_authored_instructions`,
-/// the one composer an Ask turn and an agent run share; this wraps it in the
-/// system message an Ask turn sends.
+/// The text itself is composed by `run_context::compose_authored_sections`,
+/// the one composer an Ask turn and an agent run share (and
+/// `compose_authored_instructions` is the join of its texts). With
+/// `MODEL_GATEWAY_PROMPT_SECTION_NAMES` off this wraps the joined text in the
+/// one unnamed system message an Ask turn has always sent; on, it sends one
+/// system message per section, in order, named by the section's tag, whose
+/// texts joined with a blank line are that same text (F-f08-16).
 ///
 /// `None` only when platform, org, Space, persona, and agent are ALL empty —
 /// preserving today's silent-no-message behavior for a deployment/org/Space
@@ -10693,20 +11004,46 @@ fn temporal_awareness_message(
 /// like every other layer here — only the per-thread *toggle* is
 /// ZDR-blocked (`update_thread_presentation` rejects ZDR callers outright,
 /// enforced in session-core, not here).
-pub(crate) fn authored_instructions_message(
+pub(crate) fn authored_instruction_messages(
     state: &AppState,
     req: &InvokeRequest,
     persona_enabled: bool,
-) -> Option<ChatMessage> {
+) -> Vec<ChatMessage> {
+    authored_instruction_messages_with(
+        state,
+        req,
+        persona_enabled,
+        crate::run_context::prompt_section_names_enabled(),
+    )
+}
+
+/// [`authored_instruction_messages`] with the section-name switch passed in, so the two
+/// shapes can be compared without the process environment. Empty only when every layer is
+/// empty; with the switch off, never more than one message.
+pub(crate) fn authored_instruction_messages_with(
+    state: &AppState,
+    req: &InvokeRequest,
+    persona_enabled: bool,
+    section_names: bool,
+) -> Vec<ChatMessage> {
     let layers = authored_layers(state, req);
-    crate::run_context::compose_authored_instructions(&layers, persona_enabled).map(|content| {
-        ChatMessage {
-            compaction_summary: String::new(),
-            role: "system".to_owned(),
-            content,
-            name: String::new(),
-        }
-    })
+    let system = |name: &str, content: String| ChatMessage {
+        compaction_summary: String::new(),
+        role: "system".to_owned(),
+        content,
+        name: name.to_owned(),
+    };
+    if section_names {
+        crate::run_context::compose_authored_sections(&layers, persona_enabled)
+            .into_iter()
+            .map(|section| system(section.tag, section.text))
+            .collect()
+    } else {
+        crate::run_context::compose_authored_instructions(&layers, persona_enabled)
+            .map(|content| system("", content))
+            .into_iter()
+            .collect()
+    }
 }
 
 /// The authored layers one request carries: the deployment's platform text and
@@ -10733,7 +11070,7 @@ pub(crate) fn authored_layers(
 /// Deliberately separate from `identity_context_message`: that message frames
 /// who the *user* is; this frames who is *answering*. Both can be present on
 /// the same turn (a mentioned agent still knows which org and user it's
-/// talking to). Composed into [`authored_instructions_message`] as the final
+/// talking to). Composed into [`authored_instruction_messages`] as the final
 /// layer; no longer called directly as the sole system-message source.
 fn agent_persona_message(req: &InvokeRequest) -> Option<ChatMessage> {
     let agent_name = req
@@ -10924,6 +11261,7 @@ async fn run_infer_fallback(
                     model_used: model_used.clone(),
                     input_tokens: 0,
                     output_tokens: 0,
+                    undelivered_client_message_ids: None,
                 };
                 let data = serde_json::to_string(&sse_chunk).unwrap_or_default();
                 // Buffer before sending so a reconnect never races ahead of
@@ -11041,6 +11379,9 @@ async fn run_infer_fallback(
                 end_resume_buffer(&buffers, &buffer_key, seq).await;
                 return;
             }
+            // No tool loop runs here, so nothing reads the queue any more: a waiting message is named
+            // by the done frame and resent, and can no longer be taken back (see the streaming path).
+            state.queued_inputs.close_retractions(request_id);
             // Scored before the persist for the same reason as the streaming
             // path: the durable turn must carry the number the stream
             // reported, or a thread reopened elsewhere shows a scored answer
@@ -11456,14 +11797,18 @@ async fn run_infer_fallback(
                 )
                 .await;
 
-            let done_chunk = SseChunk {
+            let mut done_chunk = SseChunk {
                 request_id: request_id.to_owned(),
                 delta: String::new(),
                 done: true,
                 model_used,
                 input_tokens,
                 output_tokens,
+                undelivered_client_message_ids: None,
             };
+            // The fallback answer is this stream's answer, so its done frame names what the loop never
+            // took too (see `stamp_undelivered`).
+            stamp_undelivered(&mut done_chunk, &state.queued_inputs, request_id);
             let data = serde_json::to_string(&done_chunk).unwrap_or_default();
             let _ = tx
                 .send(Ok(Event::default()
@@ -11845,6 +12190,7 @@ async fn resume_stream_for(
                     model_used: String::new(),
                     input_tokens: 0,
                     output_tokens: 0,
+                    undelivered_client_message_ids: None,
                 };
                 (
                     "chunk".to_owned(),
@@ -11866,6 +12212,7 @@ async fn resume_stream_for(
                 model_used: done.model_used,
                 input_tokens: done.input_tokens,
                 output_tokens: done.output_tokens,
+                undelivered_client_message_ids: None,
             };
             let data = serde_json::to_string(&chunk).unwrap_or_default();
             tx.send(Ok(Event::default()
@@ -13102,8 +13449,12 @@ fn zdr_turn_settings_with(
     if let Some(notice) = local_notice {
         sections.push(notice);
     }
-    if let Some(authored) = authored_instructions_message(state, req, true) {
-        sections.push(authored.content);
+    // One system string: a ZDR turn has no messages to name, and the joined text is what it sent.
+    if let Some(authored) = crate::run_context::compose_authored_instructions(
+        &authored_layers(state, req),
+        true,
+    ) {
+        sections.push(authored);
     }
     if let Some(directive) = req.verbosity.as_deref().and_then(crate::verbosity::directive) {
         sections.push(directive.to_owned());
@@ -13594,6 +13945,7 @@ fn zdr_answer_stream(
                 model_used: answer.model_used.clone(),
                 input_tokens: 0,
                 output_tokens: 0,
+                undelivered_client_message_ids: None,
             };
             let data = serde_json::to_string(&chunk).unwrap_or_default();
             if tx
@@ -13621,6 +13973,7 @@ fn zdr_answer_stream(
             model_used: answer.model_used,
             input_tokens: answer.input_tokens,
             output_tokens: answer.output_tokens,
+            undelivered_client_message_ids: None,
         };
         let _ = tx
             .send(Ok(Event::default()
@@ -13644,7 +13997,7 @@ fn zdr_answer_stream(
 ///     `ask` to fail safe fleet-wide, anything else → `auto` (default).
 pub(crate) fn posture_floor(claims: &crate::auth::Claims) -> crate::profile::ApprovalPosture {
     use crate::profile::ApprovalPosture;
-    let base_floor = match std::env::var("HARNESS_POSTURE_FLOOR")
+    let base_floor = match std::env::var(POSTURE_FLOOR_ENV)
         .ok()
         .as_deref()
         .map(str::trim)
@@ -13662,6 +14015,20 @@ pub(crate) fn posture_floor(claims: &crate::auth::Claims) -> crate::profile::App
         .filter(|s| !s.is_empty())
         .collect();
     crate::profile::floor_from_scopes(&claims.scopes, &autonomous, base_floor)
+}
+
+/// The environment switch of the base posture floor, read by [`posture_floor`] and listed in
+/// `switch_spellings::MODE_SWITCHES`.
+pub(crate) const POSTURE_FLOOR_ENV: &str = "HARNESS_POSTURE_FLOOR";
+
+/// Whether a set `HARNESS_POSTURE_FLOOR` is a value [`posture_floor`] does not read as `ask`: anything but `ask`, `auto`
+/// or blank, after trimming and folding case. Such a value keeps the `auto` floor, so the startup report names it. The
+/// floor itself is unchanged.
+pub(crate) fn unreadable_posture_floor(value: &str) -> bool {
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "" | "ask" | "auto"
+    )
 }
 
 /// Build the independently authenticated Execution Core request. Failure here
@@ -14360,7 +14727,8 @@ fn resolve_autonomy_rung(
             .map(|rung| rung as i32)
             .ok_or_else(|| tonic::Status::failed_precondition(PLAN_GRANT_UNAVAILABLE));
     }
-    Ok(dispatch_autonomy_rung(false, false, granted))
+    // A fresh run's grant is held to the cap by the caller (`spawn_run_dispatch`), not here.
+    Ok(dispatch_autonomy_rung(false, false, granted, None))
 }
 
 /// The approval posture an execute turn runs under (WS14 S2a, the posture ratchet). Pure.
@@ -14671,6 +15039,9 @@ fn spawn_run_dispatch(
     agent_tool_allowlist: Option<mp_contracts::model_plane::v1::AgentToolAllowlist>,
     // Coordinator mode (`coordinator_forwarded`): sent as `RunAgentRequest.coordinator`, `false` for every other dispatch.
     coordinator: bool,
+    // The run token cap (F-f04-08): the metered tokens the run may spend across its rounds, `budget::run_token_cap`.
+    // `None` with MODEL_GATEWAY_DO_RUN_CAP off, which sends the wire's 0, no cap.
+    max_run_tokens: Option<u64>,
 ) -> Result<tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>, tonic::Status> {
     let mut execution_client = state.execution_client.clone();
     // The graded authority execution-core enforces PER CALL.
@@ -14692,7 +15063,8 @@ fn spawn_run_dispatch(
     // the run paused with, and the executor refuses a request that states a wider
     // rung only after it has consumed the single-use approval. The thread's grant
     // may have widened since the pause, so it is not read for a resume
-    // (`dispatch_autonomy_rung`).
+    // (`dispatch_autonomy_rung`). The one exception is READ_ONLY under the org's
+    // read-only cap, which narrows the run and is never refused (P2-mg-05-rel1).
     //
     // An EXECUTE turn (`execute_granted`, WS14 S2a) is resolved through the same function and
     // fails closed: no live grant means `plan_grant_unavailable` and no `RunAgent` call at
@@ -14712,16 +15084,15 @@ fn spawn_run_dispatch(
     let granted = mp_contracts::model_plane::v1::AutonomyRung::try_from(rung)
         .ok()
         .filter(|rung| *rung != mp_contracts::model_plane::v1::AutonomyRung::Unspecified);
-    // The org's rung cap (WS25-S9) holds a fresh run to the narrower of its grant and the cap, and states the cap
-    // when it has no grant. Plan and resumed runs state no rung of their own (`dispatch_autonomy_rung`).
-    let granted = crate::org_agent_policy::clamp_rung(
-        granted,
-        crate::org_agent_policy::dispatch_rung_cap(
-            crate::org_agent_policy::policy_mode(),
-            crate::org_agent_policy::shared_cache(),
-            org_id,
-        ),
+    // The org's rung cap (WS25-S9), read once: it holds a fresh run to the narrower of its grant and the cap, and
+    // states the cap when it has no grant. The same cap reaches a resumed run, which states READ_ONLY under a
+    // read-only cap and nothing else of its own (P2-mg-05-rel1, `dispatch_autonomy_rung`). Plan runs state READ_ONLY.
+    let rung_cap = crate::org_agent_policy::dispatch_rung_cap(
+        crate::org_agent_policy::policy_mode(),
+        crate::org_agent_policy::shared_cache(),
+        org_id,
     );
+    let granted = crate::org_agent_policy::clamp_rung(granted, rung_cap);
     // The posture ratchet: an execute turn at the widest rung asks for a per-call approval.
     let ratcheted = execute_permission_mode(permission_mode, execute_granted, rung);
     if ratcheted != permission_mode {
@@ -14757,6 +15128,7 @@ fn spawn_run_dispatch(
         permission_mode,
         plan_mode,
         granted,
+        rung_cap,
         space_id,
         approved_plan_context,
         route,
@@ -14801,6 +15173,20 @@ fn spawn_run_dispatch(
     run_agent_req.max_questions = max_questions;
     // Coordinator mode, decided by the caller (`coordinator_forwarded`): sent only while its switch is on.
     run_agent_req.coordinator = coordinator;
+    // The run token cap, stated by the caller (F-f04-08): none, the wire's 0, unless MODEL_GATEWAY_DO_RUN_CAP is on and
+    // a cap is in force. Counts and the run id only in the log.
+    run_agent_req.max_run_tokens = max_run_tokens.unwrap_or(0);
+    if let Some(cap) = max_run_tokens {
+        tracing::info!(run_id = %run.run_id, max_run_tokens = cap, "RunAgent token cap stated");
+    }
+    // The org's `ext.skills` this run is held to, from the same read the Ask loop's skills use, so the two loops cannot
+    // disagree. Empty with SKILL_EXT_POLICY_ENFORCED off, so the request is the bytes it was. The word is a policy
+    // setting, never skill text, and it is set for a zero-retention or waived run and a continuation as well.
+    run_agent_req.ext_skills = crate::skills::run_ext_skills_token(
+        crate::skills::ext_policy_enforced(),
+        crate::org_agent_policy::shared_cache(),
+        org_id,
+    );
     // A wide-research run (EP-2 S8) delegates no wider than its org-clamped item cap: the narrower
     // of that cap and the server's own subagent budget, never wider than either.
     if let Some(wide) = wide_research {
@@ -14881,18 +15267,29 @@ impl AgentRoute {
 /// continuation states nothing: UNSPECIFIED means "not stated" to execution-core,
 /// which then runs the continuation under the rung the run paused with, so the
 /// thread's grant (which an approved plan may have widened since the pause) cannot
-/// make the executor refuse after the single-use consume. Any other run states the
-/// rung its thread was granted, or UNSPECIFIED when there is none.
+/// make the executor refuse after the single-use consume. The one rung a continuation
+/// does state is READ_ONLY, and only when its org is held to read-only (`rung_cap`,
+/// P2-mg-05-rel1): the org's cap may have tightened since the pause, and READ_ONLY is
+/// no wider than any authority a run can pause with, so execution-core narrows the run
+/// to it and never refuses it, and the run's sandbox egress is held at off. A wider cap
+/// is never stated on a resume, because a run paused read-only would refuse it. Any
+/// other run states the rung its thread was granted, already held to `rung_cap`, or
+/// UNSPECIFIED when there is none.
 fn dispatch_autonomy_rung(
     plan_mode: bool,
     resuming: bool,
     granted: Option<mp_contracts::model_plane::v1::AutonomyRung>,
+    rung_cap: Option<mp_contracts::model_plane::v1::AutonomyRung>,
 ) -> i32 {
     use mp_contracts::model_plane::v1::AutonomyRung;
     if plan_mode {
         AutonomyRung::ReadOnly as i32
     } else if resuming {
-        AutonomyRung::Unspecified as i32
+        if rung_cap == Some(AutonomyRung::ReadOnly) {
+            AutonomyRung::ReadOnly as i32
+        } else {
+            AutonomyRung::Unspecified as i32
+        }
     } else {
         granted.unwrap_or(AutonomyRung::Unspecified) as i32
     }
@@ -14914,6 +15311,9 @@ fn resolved_run_agent_request(
     permission_mode: &str,
     plan_mode: bool,
     granted: Option<mp_contracts::model_plane::v1::AutonomyRung>,
+    // The rung cap the org holds the run to (`dispatch_rung_cap`), read once by the dispatch; `None` with the
+    // policy off or no cap. Only a continuation reads it, and only for READ_ONLY (`dispatch_autonomy_rung`).
+    rung_cap: Option<mp_contracts::model_plane::v1::AutonomyRung>,
     space_id: &str,
     approved_plan_context: Option<&str>,
     route: &AgentRoute,
@@ -14924,7 +15324,7 @@ fn resolved_run_agent_request(
     connector_scope: Vec<String>,
     run_effort: i32,
 ) -> RunAgentRequest {
-    let autonomy_rung = dispatch_autonomy_rung(plan_mode, resume.is_some(), granted);
+    let autonomy_rung = dispatch_autonomy_rung(plan_mode, resume.is_some(), granted, rung_cap);
     // A continuation segment carries only what its own request sends, and it sends no level:
     // only a fresh run carries the turn's.
     let fresh = resume.is_none();
@@ -15076,6 +15476,12 @@ fn build_run_agent_request(
         agent_tool_allowlist: None,
         // Coordinator mode is set by the caller (`spawn_run_dispatch`), which decides it from the turn; none here.
         coordinator: false,
+        // The org's `ext.skills` word is set by the caller (`spawn_run_dispatch`), which reads the policy cache; empty
+        // (not enforced) here, so every other request is the bytes it was.
+        ext_skills: String::new(),
+        // The run token cap is stated by the caller (`spawn_run_dispatch`, F-f04-08) under MODEL_GATEWAY_DO_RUN_CAP;
+        // none here, so every other request is the bytes it was.
+        max_run_tokens: 0,
     }
 }
 
@@ -15107,6 +15513,21 @@ fn hooks_do_runs_mode() -> crate::runtime_registries::HooksDoRunsMode {
             std::env::var("HOOKS_DO_RUNS").ok().as_deref(),
         )
     })
+}
+
+/// Whether a Do run or a continuation reads the org's hook rules this process: only when `HOOKS_DO_RUNS` is on
+/// (shadow or enforce). With it off `do_run_org_policy` returns before any read, so nothing needs making readable
+/// (F-f06-04).
+fn do_runs_read_hook_rules() -> bool {
+    hooks_do_runs_mode() != crate::runtime_registries::HooksDoRunsMode::Off
+}
+
+/// The HTTP answer of a continuation whose org hook rules cannot be read (F-f06-04). It is the org policy's own
+/// unreadable answer, [`crate::org_agent_policy::POLICY_UNAVAILABLE_CODE`] at 503 and retryable. The continue route's
+/// closed HTTP vocabulary is pinned across the gateway, the BFF's relay list and the SPA (see
+/// [`CONTINUE_HTTP_REFUSALS`]), so `org_hooks_unavailable` cannot be added to it in this change.
+fn continue_hooks_unavailable_error() -> (StatusCode, Json<Value>) {
+    continue_policy_error(crate::org_agent_policy::POLICY_UNAVAILABLE_CODE)
 }
 
 /// How a Do run ended, as the gateway reads its status. Crate-visible so the goal ledger
@@ -15633,6 +16054,9 @@ fn agentic_run_stream(
     // Whether the turn asked for coordinator mode (`InvokeRequest.coordinator`). `false` for a continuation. The
     // dispatch sends it only as `coordinator_forwarded` allows.
     coordinator_requested: bool,
+    // The run token cap of this run (F-f04-08), stated by the caller: the invoke path from the request, the org
+    // and a goal turn's allowance; a continuation from the org alone. `None` with MODEL_GATEWAY_DO_RUN_CAP off.
+    max_run_tokens: Option<u64>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -15863,6 +16287,7 @@ fn agentic_run_stream(
             wide_research,
             agent_tool_allowlist,
             coordinator,
+            max_run_tokens,
         ) {
             Ok(dispatch) => dispatch,
             Err(error) => {
@@ -16490,6 +16915,48 @@ fn agentic_run_stream(
             }
         }
 
+        // F-f09-11: a /continue segment of a goal run debits its own usage to the goal. The run's first
+        // segment was settled by its goal turn ledger, which a continuation does not carry, so without
+        // this every approval-gated segment after it escapes the goal's budget. Session-core finds the
+        // goal by the run (a run in no goal is a quiet not-found) and debits once per `segment_key`, the
+        // continuation's request id. Off with MODEL_GATEWAY_GOAL_SEGMENT_TOPUP, and never for a
+        // zero-retention or waived run, which has no goal. Priced as the goal turn's settle prices.
+        if crate::thread_goal::should_top_up(
+            crate::thread_goal::segment_topup_enabled(),
+            continuing,
+            zdr,
+            retention_class.is_some(),
+        ) {
+            let cost_usd = match (response.usage.as_ref(), agent_usage.as_ref()) {
+                (Some(usage), Some(meter)) => frame_cost_usd(&meter.total(usage).0),
+                (Some(usage), None) => frame_cost_usd(
+                    &AgentRunUsage::start(&state.pricing, &model, &route)
+                        .await
+                        .total(usage)
+                        .0,
+                ),
+                (None, _) => None,
+            };
+            if let Some(segment) = crate::thread_goal::SegmentUsage::of_segment(
+                response.usage.as_ref(),
+                cost_usd,
+                crate::pricing::CostBasis::of_route(
+                    &route.provider_hint,
+                    &route.subscription_connection_id,
+                ),
+                &route.provider_hint,
+                &route.subscription_connection_id,
+            ) {
+                crate::thread_goal::GoalTopUp::new(
+                    state.thread_goal_client.clone(),
+                    &model_bearer,
+                    &org_id,
+                )
+                .top_up(&run.run_id, &request_id, &segment)
+                .await;
+            }
+        }
+
         // Compaction is LOSSY and otherwise invisible: an answer built on a
         // prompt whose earlier tool results were cleared can be worse for a
         // reason nothing else in the stream explains. execution-core reports it;
@@ -16775,6 +17242,7 @@ fn agentic_run_stream(
                 model_used: model.clone(),
                 input_tokens: 0,
                 output_tokens: 0,
+                undelivered_client_message_ids: None,
             };
             let data = serde_json::to_string(&chunk).unwrap_or_default();
             if tx
@@ -17029,6 +17497,33 @@ fn run_ceiling_enforce_switch() -> bool {
 /// can only tighten the org ceiling. The gate in `budget.rs` reads the same variable.
 fn cap_min_switch() -> bool {
     crate::budget::cap_min_enabled(&|key| std::env::var(key).ok())
+}
+
+/// The Do run token cap switch (F-f04-08) as this process's environment states it. It is read beside
+/// [`cap_min_switch`]: a dispatch states a token cap only while it is on.
+fn do_run_cap_switch() -> bool {
+    crate::budget::do_run_cap_enabled(&|key| std::env::var(key).ok())
+}
+
+/// The run token cap a continuation segment states (F-f04-08): the org's metered-token ceiling, read from
+/// Control Plane only while MODEL_GATEWAY_DO_RUN_CAP is on, so a continuation with the switch off makes no
+/// extra call. A continuation carries no request cap and no goal allowance, and the gateway keeps no record of
+/// the cap its run paused with. So the stated value is a ceiling, not the resumed run's own bound: execution-core
+/// keeps the authority the run paused with and narrows the stated cap by it, never widening it (F-f04-09,
+/// P2-mg-06-rel1). Execution-core does not enforce the stated cap yet, so no run is bounded by it today.
+async fn continuation_run_token_cap(state: &AppState, org_id: &str) -> Option<u64> {
+    if !do_run_cap_switch() {
+        return None;
+    }
+    let limits = crate::org_quota::fetch_org_limits(
+        &state.http_client,
+        &state.org_core_base_url,
+        org_id,
+        &state.org_core_service_id,
+        &state.org_core_service_token,
+    )
+    .await;
+    crate::budget::run_token_cap(true, None, limits.max_tokens, None)
 }
 
 /// The turn's usage as one meter: every call of the tool phase, the overhead calls beside the
@@ -18113,7 +18608,7 @@ fn publish_implicit_dissatisfaction(
 mod tests {
     use super::{
         agent_failure_message, agent_persona_message, agent_subscription_failure, approved_plan_is_for,
-        authored_instructions_message, build_stream_envelope, build_usage_envelope,
+        build_stream_envelope, build_usage_envelope,
         classify_agentic_run_outcome, dispatch_never_reached_execution_core,
         format_approved_plan_block, frame_cost_usd, is_confirmed_agent_dispatch_rejection,
         latest_proposed_plan, orchestration_event_to_lifecycle, orchestration_event_to_step_update,
@@ -18710,6 +19205,116 @@ mod tests {
         let capped = invoke_request(serde_json::json!({ "effort": "deep", "max_tokens": 2048 }));
         let stepped = super::zdr_turn_settings_with(&state, &capped, false, None).thinking;
         assert_eq!(stepped.budget_tokens, 1_024);
+    }
+
+    // F-f08-15: the standing profile and the memory block are named by their tags only while the switch is on,
+    // and a block this file builds is never named by anything else.
+    #[test]
+    fn the_profile_and_memory_blocks_are_named_only_while_the_switch_is_on() {
+        let named = |on, tag| super::block_section_name(on, tag);
+        assert_eq!(named(true, super::PROFILE_SECTION_TAG), "user_profile");
+        assert_eq!(named(true, super::MEMORY_SECTION_TAG), "memory");
+        assert_eq!(named(false, super::PROFILE_SECTION_TAG), "");
+        assert_eq!(named(false, super::MEMORY_SECTION_TAG), "");
+    }
+
+    /// The one-message form an Ask turn has always sent (the section switch off).
+    fn authored_instructions_message(
+        state: &AppState,
+        req: &InvokeRequest,
+        persona_enabled: bool,
+    ) -> Option<mp_contracts::model_plane::v1::ChatMessage> {
+        let mut messages =
+            super::authored_instruction_messages_with(state, req, persona_enabled, false);
+        assert!(messages.len() <= 1, "off sends at most one message");
+        messages.pop()
+    }
+
+    fn every_layer_request() -> InvokeRequest {
+        invoke_request(serde_json::json!({
+            "org_instructions": "Org rule.",
+            "space_instructions": "Space rule.",
+            "persona_instructions": "Always be terse.",
+            "agent_name": "Driftsassistent",
+            "agent_system_prompt": "Agent rule.",
+        }))
+    }
+
+    // F-f08-16: with the switch on an Ask turn sends one named system message per source, in
+    // the order of the hierarchy, and their texts are the one message the switch off sends.
+    #[tokio::test]
+    async fn named_sections_join_to_the_one_unnamed_message() {
+        let state = state_with_platform_instructions("Platform rule.");
+        let req = every_layer_request();
+        let off = super::authored_instruction_messages_with(&state, &req, true, false);
+        assert_eq!(off.len(), 1);
+        assert_eq!(off[0].role, "system");
+        assert_eq!(
+            off[0].name, "",
+            "the unnamed message is what was sent before"
+        );
+
+        let on = super::authored_instruction_messages_with(&state, &req, true, true);
+        let names: Vec<&str> = on.iter().map(|message| message.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "platform_instructions",
+                "org_instructions",
+                "space_instructions",
+                "persona",
+                "agent_role_instructions"
+            ]
+        );
+        assert!(on.iter().all(|message| message.role == "system"));
+        let joined = on
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert_eq!(joined, off[0].content, "not one byte of the text changes");
+        // Each source holds only its own text: the platform text never rides in the org message.
+        let by_name = |name: &str| {
+            on.iter()
+                .find(|message| message.name == name)
+                .expect("section")
+                .content
+                .as_str()
+        };
+        assert_eq!(by_name("platform_instructions"), "Platform rule.");
+        assert!(by_name("org_instructions").contains("Org rule."));
+        assert!(!by_name("org_instructions").contains("Platform rule."));
+        assert!(by_name("space_instructions").contains("Space rule."));
+        assert!(by_name("persona").contains("Always be terse."));
+        assert!(by_name("agent_role_instructions").contains("Agent rule."));
+    }
+
+    #[tokio::test]
+    async fn named_sections_leave_out_what_the_turn_does_not_carry() {
+        let state = state_with_platform_instructions("");
+        // Nothing authored: no message in either shape.
+        let bare = invoke_request(serde_json::json!({}));
+        assert!(super::authored_instruction_messages_with(&state, &bare, true, true).is_empty());
+        assert!(super::authored_instruction_messages_with(&state, &bare, true, false).is_empty());
+        // The per-thread persona toggle off drops the persona section, as it drops the text.
+        let req = invoke_request(serde_json::json!({
+            "org_instructions": "Org rule.",
+            "persona_instructions": "Always be terse.",
+        }));
+        let on = super::authored_instruction_messages_with(&state, &req, false, true);
+        let names: Vec<&str> = on.iter().map(|message| message.name.as_str()).collect();
+        assert_eq!(names, ["org_instructions"]);
+    }
+
+    // A ZDR turn has one system string and no names: it sends the joined text, whichever way
+    // the section switch stands.
+    #[tokio::test]
+    async fn a_zdr_turn_sends_the_joined_text_unchanged() {
+        let state = state_with_platform_instructions("Platform rule.");
+        let req = every_layer_request();
+        let off = super::authored_instruction_messages_with(&state, &req, true, false);
+        let settings = super::zdr_turn_settings_with(&state, &req, false, None);
+        assert_eq!(settings.system.as_deref(), Some(off[0].content.as_str()));
     }
 
     #[tokio::test]
@@ -23323,6 +23928,19 @@ async fn continue_skipped_site(
     )
     .await
     .map_err(continue_policy_error)?;
+    // The org's hook rules (F-f06-04) are read by the run this continuation starts, so they are made readable here,
+    // before the approval is read or spent. With HOOKS_DO_RUNS off nothing is read, so nothing is required.
+    if do_runs_read_hook_rules() {
+        crate::runtime_registries::require_org_hooks(
+            &state,
+            &claims.org_id,
+            capability_bearer
+                .as_deref()
+                .map(VerifiedCapabilityBearer::as_str),
+        )
+        .await
+        .map_err(|_| continue_hooks_unavailable_error())?;
+    }
 
     let detail = state
         .run_client
@@ -23408,6 +24026,8 @@ async fn continue_skipped_site(
         &req.claim_token,
         resume_mode_for(true, false, false),
     );
+    // The run token cap the continuation states (F-f04-08): the org's ceiling, read only while the switch is on.
+    let max_run_tokens = continuation_run_token_cap(&state, &claims.org_id).await;
     Ok(agentic_run_stream(
         state,
         run,
@@ -23453,6 +24073,7 @@ async fn continue_skipped_site(
         None,
         None,
         false,
+        max_run_tokens,
     ))
 }
 
@@ -23810,6 +24431,19 @@ async fn continue_question_form(
     )
     .await
     .map_err(continue_policy_error)?;
+    // The org's hook rules (F-f06-04) are read by the run this answer continues, so they are made readable here,
+    // before the question is read or answered. With HOOKS_DO_RUNS off nothing is read, so nothing is required.
+    if do_runs_read_hook_rules() {
+        crate::runtime_registries::require_org_hooks(
+            &state,
+            &claims.org_id,
+            capability_bearer
+                .as_deref()
+                .map(VerifiedCapabilityBearer::as_str),
+        )
+        .await
+        .map_err(|_| continue_hooks_unavailable_error())?;
+    }
 
     let detail = state
         .run_client
@@ -23897,6 +24531,8 @@ async fn continue_question_form(
         terminal_source: mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent,
     };
     let resume = question_resume(&question_id, answer_json, &claim_token);
+    // The run token cap the continuation states (F-f04-08): the org's ceiling, read only while the switch is on.
+    let max_run_tokens = continuation_run_token_cap(&state, &claims.org_id).await;
     Ok(agentic_run_stream(
         state,
         run,
@@ -23942,6 +24578,7 @@ async fn continue_question_form(
         None,
         None,
         false,
+        max_run_tokens,
     ))
 }
 
@@ -24055,6 +24692,20 @@ pub(crate) async fn continue_run(
     )
     .await
     .map_err(continue_policy_error)?;
+    // The org's hook rules (F-f06-04) are read by the run this continuation starts, the approval park resume included:
+    // both branches below launch the same run, so they are made readable here, before the run or the approval is read.
+    // Nothing is spent by a refusal. With HOOKS_DO_RUNS off nothing is read, so nothing is required.
+    if do_runs_read_hook_rules() {
+        crate::runtime_registries::require_org_hooks(
+            &state,
+            &claims.org_id,
+            capability_bearer
+                .as_deref()
+                .map(VerifiedCapabilityBearer::as_str),
+        )
+        .await
+        .map_err(|_| continue_hooks_unavailable_error())?;
+    }
 
     let detail = state
         .run_client
@@ -24176,6 +24827,8 @@ pub(crate) async fn continue_run(
         &req.claim_token,
     );
     let (org_id, user_id) = (claims.org_id.clone(), claims.user_id.clone());
+    // The run token cap the continuation states (F-f04-08): the org's ceiling, read only while the switch is on.
+    let max_run_tokens = continuation_run_token_cap(&state, &claims.org_id).await;
 
     // The ONE launch: it owns everything it uses, so it can run in a detached task. The
     // spend is computed INSIDE it, so it is claimed only when the closure runs: at once
@@ -24236,6 +24889,8 @@ pub(crate) async fn continue_run(
             None,
             // Nor coordinator mode: its tools are the snapshot the pause retained, so there is no offer to narrow.
             false,
+            // The org's ceiling is all the run token cap a continuation states (F-f04-08), read above.
+            max_run_tokens,
         )
     };
     if !resume_enabled {
@@ -24498,6 +25153,7 @@ mod continue_run_tests {
         goal: &str,
         resume: mp_contracts::model_plane::v1::AgentResume,
         granted: Option<mp_contracts::model_plane::v1::AutonomyRung>,
+        rung_cap: Option<mp_contracts::model_plane::v1::AutonomyRung>,
         budget: crate::run_budget::RunBudget,
     ) -> RunAgentRequest {
         resolved_run_agent_request(
@@ -24512,6 +25168,7 @@ mod continue_run_tests {
             CONTINUE_PERMISSION_MODE,
             false,
             granted,
+            rung_cap,
             "",
             None,
             &AgentRoute::default(),
@@ -24541,6 +25198,7 @@ mod continue_run_tests {
             0,
             "ask",
             false,
+            None,
             None,
             "",
             None,
@@ -24589,7 +25247,25 @@ mod continue_run_tests {
             "the run's goal",
             continue_resume("appr_1", "claim-1", "segment"),
             granted,
+            None,
             budget,
+        )
+    }
+
+    /// The request a real `/continue` builds for an org whose rung cap is `rung_cap`, while its thread holds a wide
+    /// grant. The grant is never stated on a resume, so only the cap can change the rung it states.
+    fn continue_request_under_cap(
+        rung_cap: Option<mp_contracts::model_plane::v1::AutonomyRung>,
+    ) -> RunAgentRequest {
+        continue_run_agent_request(
+            &continue_run_record(),
+            "org-1",
+            "user-1",
+            "the run's goal",
+            continue_resume("appr_1", "claim-1", "segment"),
+            Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite),
+            rung_cap,
+            crate::run_budget::RunBudget::default(),
         )
     }
 
@@ -24599,7 +25275,8 @@ mod continue_run_tests {
     /// after the single-use consume, which spends the click and strands the run. The
     /// grant can legitimately be equal to, wider than or narrower than the rung the
     /// run paused with (an approved plan can widen the thread's grant after the
-    /// pause), so the gateway cannot state it at all.
+    /// pause), so the gateway cannot state it at all. The one rung a continuation can state is READ_ONLY under an
+    /// org's read-only cap, which no grant changes (`a_real_continue_under_a_held_read_only_cap_states_read_only...`).
     #[test]
     fn a_real_continue_states_no_rung_whatever_the_threads_grant_is() {
         use mp_contracts::model_plane::v1::AutonomyRung as Rung;
@@ -24652,26 +25329,200 @@ mod continue_run_tests {
         use mp_contracts::model_plane::v1::AutonomyRung as Rung;
         let granted = Some(Rung::WorkspaceWrite);
         assert_eq!(
-            dispatch_autonomy_rung(false, false, granted),
+            dispatch_autonomy_rung(false, false, granted, None),
             Rung::WorkspaceWrite as i32,
             "a plain run states its thread's grant"
         );
-        assert_eq!(dispatch_autonomy_rung(false, false, None), Rung::Unspecified as i32);
         assert_eq!(
-            dispatch_autonomy_rung(true, false, granted),
+            dispatch_autonomy_rung(false, false, None, None),
+            Rung::Unspecified as i32
+        );
+        assert_eq!(
+            dispatch_autonomy_rung(true, false, granted, None),
             Rung::ReadOnly as i32,
             "plan mode is read-only, grant or not"
         );
         assert_eq!(
-            dispatch_autonomy_rung(false, true, granted),
+            dispatch_autonomy_rung(false, true, granted, None),
             Rung::Unspecified as i32,
             "a resume states nothing: the pause's authority applies"
         );
         assert_eq!(
-            dispatch_autonomy_rung(true, true, granted),
+            dispatch_autonomy_rung(true, true, granted, None),
             Rung::ReadOnly as i32,
             "a request may always NARROW: plan mode stays read-only"
         );
+    }
+
+    /// P2-mg-05-rel1: an org held to the read-only rung holds a resumed run to it, whatever the pause stated and
+    /// whatever the thread's grant is. READ_ONLY is no wider than any authority a run can pause with, so
+    /// execution-core narrows the run to it and never refuses it, and its sandbox egress is held at off (`run_ceiling`).
+    #[test]
+    fn a_resume_under_a_held_read_only_cap_states_read_only() {
+        use mp_contracts::model_plane::v1::AutonomyRung as Rung;
+        for granted in [
+            None,
+            Some(Rung::ReadOnly),
+            Some(Rung::WorkspaceWrite),
+            Some(Rung::DangerFullAccess),
+        ] {
+            assert_eq!(
+                dispatch_autonomy_rung(false, true, granted, Some(Rung::ReadOnly)),
+                Rung::ReadOnly as i32,
+                "grant {granted:?}: the read-only cap is stated on the resume"
+            );
+        }
+    }
+
+    /// A resume states no rung wider than READ_ONLY, and none at all without a cap. A wider stated rung is refused
+    /// after the single-use consume, so a wider cap, or no cap (the policy off, in shadow, or an org that sets none),
+    /// leaves the resume exactly as it was.
+    #[test]
+    fn a_resume_states_no_rung_under_a_wider_cap_or_without_one() {
+        use mp_contracts::model_plane::v1::AutonomyRung as Rung;
+        for cap in [
+            None,
+            Some(Rung::WorkspaceWrite),
+            Some(Rung::DangerFullAccess),
+        ] {
+            for granted in [None, Some(Rung::ReadOnly), Some(Rung::WorkspaceWrite)] {
+                assert_eq!(
+                    dispatch_autonomy_rung(false, true, granted, cap),
+                    Rung::Unspecified as i32,
+                    "cap {cap:?}, grant {granted:?}"
+                );
+            }
+        }
+    }
+
+    /// The policy switch decides whether the cap reaches a resume at all. Enforced and held, a read-only cap is stated
+    /// on the resume. Off, and in shadow (which applies nothing), the resume states what it always did.
+    #[test]
+    fn the_read_only_resume_follows_the_org_policy_switch() {
+        use crate::org_agent_policy::{dispatch_rung_cap, OrgPolicy, OrgPolicyCache, PolicyMode};
+        use mp_contracts::model_plane::v1::AutonomyRung as Rung;
+        let cache = OrgPolicyCache::new();
+        let settings = json!({"rung_cap": "read_only"});
+        let policy = OrgPolicy::from_settings(
+            1,
+            "digest-1",
+            settings.as_object().expect("a settings object"),
+        );
+        cache.store("org-1", policy, std::time::Instant::now());
+        for (mode, expected) in [
+            (PolicyMode::Off, Rung::Unspecified),
+            (PolicyMode::Shadow, Rung::Unspecified),
+            (PolicyMode::Enforce, Rung::ReadOnly),
+        ] {
+            let cap = dispatch_rung_cap(mode, &cache, "org-1");
+            assert_eq!(
+                dispatch_autonomy_rung(false, true, Some(Rung::WorkspaceWrite), cap),
+                expected as i32,
+                "{mode:?}"
+            );
+        }
+    }
+
+    /// The request a real `/continue` sends under a held read-only cap states READ_ONLY, and nothing else about it
+    /// changes: the pause's resume, no tools, no plan flag and the same placeholders as an uncapped continuation.
+    #[test]
+    fn a_real_continue_under_a_held_read_only_cap_states_read_only_and_nothing_else() {
+        use mp_contracts::model_plane::v1::AutonomyRung as Rung;
+        let held = continue_request_under_cap(Some(Rung::ReadOnly));
+        assert_eq!(held.autonomy_rung, Rung::ReadOnly as i32);
+        let unheld = continue_request_under_cap(None);
+        assert_eq!(unheld.autonomy_rung, Rung::Unspecified as i32);
+        assert_eq!(
+            continue_request_under_cap(Some(Rung::WorkspaceWrite)).autonomy_rung,
+            Rung::Unspecified as i32,
+            "a wider cap is never stated on a resume"
+        );
+        for req in [&held, &unheld] {
+            assert!(!req.plan_mode);
+            assert_eq!(req.mode, "ask");
+            assert!(req.tools.is_empty());
+            assert_eq!(req.max_rounds, 4);
+            assert_eq!(req.reasoning_effort, 0);
+            assert_eq!(
+                req.resume
+                    .as_ref()
+                    .map(|resume| resume.approval_id.as_str()),
+                Some("appr_1")
+            );
+        }
+    }
+
+    /// The dispatch reads the org's rung cap once. The same value holds a fresh run's grant and reaches the request a
+    /// continuation states its rung from (P2-mg-05-rel1), so the two cannot read different caps.
+    #[test]
+    fn the_dispatch_holds_a_resume_to_the_same_cap_that_holds_a_grant() {
+        let body = item_text("fn spawn_run_dispatch(", "\n}\n");
+        assert_eq!(body.matches("dispatch_rung_cap(").count(), 1, "{body}");
+        assert!(
+            body.contains("let granted = crate::org_agent_policy::clamp_rung(granted, rung_cap);"),
+            "{body}"
+        );
+        let built = body
+            .find("resolved_run_agent_request(")
+            .expect("the request is built");
+        let args: String = body[built..].chars().take(400).collect();
+        assert!(
+            args.contains("granted,\n        rung_cap,\n"),
+            "the request reads the same cap: {args}"
+        );
+    }
+
+    /// A resume states the run token cap as the org's ceiling alone (F-f04-08, P2-mg-06-rel1), and only while the
+    /// switch is on: the gateway holds neither the cap the run paused with nor a goal allowance for it, so the value
+    /// is a ceiling that execution-core narrows by the paused authority (F-f04-09), never a bound of its own. Every
+    /// resume site states it, so a run started uncapped is still capped on its resume. Switch off, the cap is read
+    /// after the switch and no org-core call is made.
+    #[test]
+    fn a_resume_states_the_org_ceiling_under_the_switch_and_no_other_run_cap() {
+        let cap = item_text("async fn continuation_run_token_cap(", "\n}\n");
+        let switch = cap
+            .find("do_run_cap_switch()")
+            .expect("the switch gates the cap");
+        let org = cap
+            .find("crate::org_quota::fetch_org_limits(")
+            .expect("the org ceiling is read");
+        assert!(
+            switch < org && cap[..org].contains("return None;"),
+            "switch off, no org-core call: {cap}"
+        );
+        let stated = "crate::budget::run_token_cap(true, None, limits.max_tokens, None)";
+        assert!(
+            cap.contains(stated),
+            "the org ceiling, no request cap and no goal allowance: {cap}"
+        );
+        for (site, body) in [
+            (
+                "continue_skipped_site",
+                item_text("async fn continue_skipped_site(", "\n}\n"),
+            ),
+            (
+                "continue_question_form",
+                item_text("async fn continue_question_form(", "\n}\n"),
+            ),
+            (
+                "continue_run",
+                item_text("pub(crate) async fn continue_run(", "\n}\n"),
+            ),
+        ] {
+            let states = "continuation_run_token_cap(&state, &claims.org_id).await";
+            assert_eq!(
+                body.matches(states).count(),
+                1,
+                "{site} states its cap: {body}"
+            );
+            let launch = body
+                .find("agentic_run_stream(")
+                .unwrap_or_else(|| panic!("{site} launches the run"));
+            assert!(
+                body[launch..].contains("max_run_tokens,"),
+                "{site} passes the stated cap to its launch: {body}"
+            );
+        }
     }
 
     /// The text of `agentic_run_stream`'s plan-context gate: the code from the binding of
@@ -26387,6 +27238,7 @@ mod continue_run_tests {
             None,
             None,
             false,
+            None,
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
@@ -27082,6 +27934,7 @@ mod continue_run_tests {
                     "the run's goal",
                     resume,
                     None,
+                    None,
                     crate::run_budget::RunBudget::default(),
                 )
                 .encode_to_vec()
@@ -27110,6 +27963,30 @@ mod continue_run_tests {
                 "no hint field (step, tool, fingerprint, brief) is filled, and no attestation exists"
             );
         }
+    }
+
+    /// F-f09-11: the dispatch tops a goal up from a continuation segment only through the decision
+    /// function (switch on, a continuation, not zero-retention, not waived), after the executor
+    /// answered and after the goal turn's own settle, keyed by the dispatch's request id.
+    #[test]
+    fn the_dispatch_debits_a_continuation_segment_through_the_top_up_gate() {
+        let code = stream_code();
+        let settle = position(&code, "ledger.settle(&settlement)");
+        let gate = position(&code, "crate::thread_goal::should_top_up(");
+        let tail = &code[gate..];
+        assert!(gate > settle, "the top-up follows the goal turn's own settle");
+        let gate_call = squash(arm_text(&code, "crate::thread_goal::should_top_up(", ") {"));
+        assert!(gate_call.contains("segment_topup_enabled()"), "{gate_call}");
+        assert!(gate_call.contains("continuing"), "{gate_call}");
+        assert!(gate_call.contains("zdr"), "{gate_call}");
+        assert!(gate_call.contains("retention_class.is_some()"), "{gate_call}");
+        let call = squash(arm_text(tail, "GoalTopUp::new(", ".await;"));
+        assert!(call.contains(".top_up(&run.run_id, &request_id, &segment)"), "{call}");
+        assert_eq!(
+            code.matches("GoalTopUp::new(").count(),
+            1,
+            "one top-up call site, the dispatch"
+        );
     }
 
     /// `continue_run` reaches the pre-consume only after every refusal check, through the
@@ -27899,6 +28776,7 @@ mod continue_run_tests {
             None,
             None,
             false,
+            None,
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
@@ -28623,6 +29501,82 @@ mod execute_turn_tests {
         assert!(ratcheted < built, "the posture is ratcheted before the request is built");
     }
 
+    /// F-f06-04: a Do turn makes the org's hook rules readable under the Do switch, before any thread, grant or
+    /// run is written. A turn that is not agentic reads none of them, so nothing is required of it.
+    #[test]
+    fn a_do_turn_makes_the_hook_rules_readable_before_any_thread_or_run_is_written() {
+        let invoke = code_of("pub async fn invoke_stream_sse(", "\n}\n");
+        let lines: Vec<&str> = invoke.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| line.contains("require_org_hooks("))
+            .expect("the Do turn makes the hook rules readable");
+        let guard = lines[at.saturating_sub(3)..at].join("\n");
+        assert!(
+            guard.contains("\"agentic\"") && guard.contains("do_runs_read_hook_rules()"),
+            "the requirement is the agentic turn under HOOKS_DO_RUNS: {guard}"
+        );
+        assert_eq!(invoke.matches("require_org_hooks(").count(), 1, "{invoke}");
+        let require = invoke.find("require_org_hooks(").expect("the call");
+        for write in [
+            "apply_version_move(",
+            "move_active_leaf(",
+            "prepare_managed_run_authenticated_with_receipt(",
+            "agentic_run_stream(",
+        ] {
+            let later = invoke
+                .find(write)
+                .unwrap_or_else(|| panic!("`{write}` is in invoke_stream_sse"));
+            assert!(
+                require < later,
+                "`{write}` runs after the hook rules are readable"
+            );
+        }
+    }
+
+    /// F-f06-04: every continuation that launches a run makes the org's hook rules readable after its admission and
+    /// before it reads the run or the approval, so a refusal spends nothing. The park resume is a branch of
+    /// `continue_run`, behind the same admission.
+    #[test]
+    fn every_continuation_makes_the_hook_rules_readable_before_it_reads_the_run() {
+        for header in [
+            "pub(crate) async fn continue_run(",
+            "async fn continue_skipped_site(",
+            "async fn continue_question_form(",
+        ] {
+            let body = code_of(header, "\n}\n");
+            let admitted = body
+                .find("admit_continuation(")
+                .unwrap_or_else(|| panic!("`{header}` reads the org's pause"));
+            let require = body
+                .find("require_org_hooks(")
+                .unwrap_or_else(|| panic!("`{header}` makes the hook rules readable"));
+            let read = body
+                .find(".get_run(")
+                .unwrap_or_else(|| panic!("`{header}` reads the run"));
+            assert!(
+                admitted < require && require < read,
+                "`{header}`: the admission, then the rules, then the run: {body}"
+            );
+            assert!(
+                body.contains("do_runs_read_hook_rules()"),
+                "`{header}`: nothing is required with HOOKS_DO_RUNS off"
+            );
+        }
+    }
+
+    /// F-f06-07: the recall offer asks Session Core about the thread this turn is in, so a thread set off is not
+    /// offered the tool. The call asks the same way, with the thread the turn passes to its tool loop.
+    #[test]
+    fn the_recall_offer_asks_about_this_turns_thread() {
+        let invoke = code_of("pub async fn invoke_stream_sse(", "\n}\n");
+        let offer = invoke
+            .find("recall_conversations::memory_refusal(")
+            .expect("the offer asks the memory gate");
+        let asked: String = invoke[offer..].chars().take(200).collect();
+        assert!(asked.contains("&session_run.thread_id"), "{asked}");
+    }
+
     /// The answer's progress frame comes just before the usage frame and states the turn's total, so
     /// the last progress frame of a turn and the frame that closes it agree.
     #[test]
@@ -28732,6 +29686,80 @@ mod execute_turn_tests {
         assert!(
             !invoke.contains("env::var"),
             "the handler reads no environment: the switch is the plan store's, read once"
+        );
+    }
+
+    /// F-f04-08: the run token cap reaches the dispatch on one path. The claim binds the goal's remaining token
+    /// allowance where it is read; the Do run states `budget::run_token_cap` of the request, the org and that
+    /// allowance, and only under the switch; the dispatch assigns the field it was given, before the request is
+    /// authenticated and sent.
+    #[test]
+    fn the_run_token_cap_reaches_the_dispatch_from_the_claim_and_the_request() {
+        let invoke = code_of("pub async fn invoke_stream_sse(", "\n}\n");
+        let claim = invoke
+            .find("GoalTurnLedger::claim(")
+            .expect("the goal turn is claimed");
+        let cap = invoke
+            .find("let cap = crate::thread_goal::goal_turn_cap(")
+            .expect("the goal's cap is read");
+        let bound = invoke
+            .find("goal_run_tokens = cap.tokens;")
+            .expect("the claim binds the token half");
+        assert!(
+            claim < cap && cap < bound,
+            "the claim, then the cap, then the binding: {invoke}"
+        );
+        assert_eq!(
+            invoke.matches("goal_run_tokens = cap.tokens;").count(),
+            1,
+            "{invoke}"
+        );
+
+        let states = invoke
+            .find("crate::budget::run_token_cap(")
+            .expect("the Do run states its cap");
+        assert_eq!(
+            invoke.matches("crate::budget::run_token_cap(").count(),
+            1,
+            "{invoke}"
+        );
+        let args: String = invoke[states..].chars().take(240).collect();
+        for input in [
+            "do_run_cap_switch(),",
+            "normalized.max_tokens,",
+            "org_limits.max_tokens,",
+            "goal_run_tokens,",
+        ] {
+            assert!(
+                args.contains(input),
+                "`{input}` is one of its inputs: {args}"
+            );
+        }
+        // The cap is stated before the run is dispatched; the dispatch takes it last.
+        let dispatched = invoke
+            .find("return agentic_run_stream(")
+            .expect("the Do run is dispatched");
+        assert!(
+            states < dispatched,
+            "the cap is stated before the run is dispatched"
+        );
+        let call = &invoke[dispatched..];
+        let end = call
+            .find("\n        );")
+            .expect("the end of the dispatch call");
+        assert!(call[..end].trim_end().ends_with("max_run_tokens,"), "{call}");
+
+        let dispatch = code_of("fn spawn_run_dispatch(", "\n}\n");
+        let assign = "run_agent_req.max_run_tokens = max_run_tokens.unwrap_or(0);";
+        assert_eq!(dispatch.matches(assign).count(), 1, "{dispatch}");
+        let assigned = dispatch.find(assign).expect("the field is assigned");
+        let authenticated = dispatch
+            .find("authenticated_run_agent_request(")
+            .expect("the request is authenticated");
+        let sent = dispatch.find(".run_agent(").expect("the request is sent");
+        assert!(
+            assigned < authenticated && authenticated < sent,
+            "assigned, then authenticated, then sent"
         );
     }
 
@@ -29193,6 +30221,44 @@ mod do_attachment_tests {
         );
     }
 
+    /// A ZDR follow-up is honored for its append context (`zdr_features` lists the field as honored, so the
+    /// turn is not refused for it), and its grounding reads the Space decision as a persistent turn does: it
+    /// retrieves with the decision while the switch is on, and unscoped as before while it is off.
+    #[test]
+    fn a_zdr_append_turn_retrieves_with_the_space_decision_only_while_the_switch_is_on() {
+        let zdr_turn: crate::http_routes::InvokeRequest = serde_json::from_value(serde_json::json!({
+            "content": "hei",
+            "model": "m",
+            "zdr": true,
+            "space_append_context": {
+                "space_id": "space-1", "space_decision_ref": "decision-1", "recipient_audience_ref": "audience-1",
+                "recipient_audience_revision": 1, "recipient_audience_hash": "hash-1",
+                "privacy_policy_ref": "privacy-1", "authority_revision": 1,
+                "resource_authorization_ref": "resource-1", "space_decision_token": "token",
+                "retrieval_decision_token": "append-retrieval-token",
+                "action_schema_hash": "schema", "payload_digest": "digest", "idempotency_key": "key",
+            },
+        }))
+        .expect("a valid ZDR invoke request");
+        assert!(
+            crate::zdr_features::refusal(&zdr_turn).is_none(),
+            "the append context is honored, not refused"
+        );
+        let decide = |append_enabled: bool| {
+            space_retrieval_decision(
+                zdr_turn.space_context.as_ref(),
+                zdr_turn.space_append_context.as_ref(),
+                append_enabled,
+            )
+        };
+        assert_eq!(decide(true), Some("append-retrieval-token"));
+        assert_eq!(
+            decide(false),
+            None,
+            "with the switch off a ZDR follow-up retrieves as before"
+        );
+    }
+
     #[test]
     fn a_forbidden_append_decision_is_passed_empty_so_retrieval_is_suppressed() {
         let append = space_decision("");
@@ -29331,6 +30397,46 @@ mod do_attachment_tests {
         let mut cleared = with;
         cleared.attachments.clear();
         assert_eq!(prost::Message::encode_to_vec(&cleared), prost::Message::encode_to_vec(&without));
+    }
+
+    /// P2-ec-01: the run request states the org's `ext.skills` only while SKILL_EXT_POLICY_ENFORCED is the literal
+    /// `true`. The test process leaves it unset, so the word is empty and the request is the bytes it was; the word
+    /// itself is pinned by `skills::ext_skills_tests::the_run_request_word_is_the_held_setting_and_empty_when_off`.
+    #[test]
+    fn the_run_request_states_no_ext_skills_while_the_switch_is_off() {
+        let run = crate::session_flow::SessionRun {
+            thread_id: "thread-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            already_started: false,
+            terminal_source: mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent,
+        };
+        assert!(
+            !crate::skills::ext_policy_enforced(),
+            "the test process must not set SKILL_EXT_POLICY_ENFORCED"
+        );
+        let request = build_run_agent_request(
+            &run,
+            "org-1",
+            "user-1",
+            "gpt-5.6-terra",
+            "do the thing",
+            &[],
+            false,
+            0,
+            "ask",
+            false,
+            0,
+            "",
+            None,
+            &AgentRoute::default(),
+            crate::run_budget::RunBudget::default(),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(request.ext_skills, "");
     }
 }
 

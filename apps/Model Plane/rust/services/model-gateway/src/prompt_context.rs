@@ -225,8 +225,10 @@ pub struct PromptContext {
     pub conversation_scope: Option<ChatMessage>,
     /// What this thread's artifacts are, at their current versions.
     pub artifact_inventory: Option<ChatMessage>,
-    /// Platform, org, Space and agent-persona instructions.
-    pub authored_instructions: Option<ChatMessage>,
+    /// Platform, org, Space, personal and agent-persona instructions: one unnamed
+    /// message, or with the section-name switch on one named message per source
+    /// (F-f08-16). Empty sends nothing.
+    pub authored_instructions: Vec<ChatMessage>,
     /// Who the model is talking to.
     pub identity: Option<ChatMessage>,
     /// The person's standing profile, as they wrote or accepted it (EP-8-S5).
@@ -531,9 +533,7 @@ mod tests {
         if let Some(identity) = &context.identity {
             messages.insert(0, identity.clone());
         }
-        if let Some(instructions) = &context.authored_instructions {
-            messages.insert(0, instructions.clone());
-        }
+        messages.splice(0..0, context.authored_instructions.iter().cloned());
         for block in [
             &context.skills,
             &context.verbosity,
@@ -563,7 +563,7 @@ mod tests {
         PromptContext {
             conversation_scope: Some(system("scope")),
             artifact_inventory: Some(system("inventory v3")),
-            authored_instructions: Some(system("instructions")),
+            authored_instructions: vec![system("instructions")],
             identity: Some(system("identity")),
             // Empty here, so every table below is the prompt before the slot
             // existed; the profile's own tests fill it.
@@ -591,6 +591,71 @@ mod tests {
             turn("assistant", "first answer"),
             turn("user", "current question"),
         ]
+    }
+
+    fn named(name: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            name: name.to_owned(),
+            ..system(content)
+        }
+    }
+
+    // F-f08-16: several authored-instruction messages (one per source) fill the same slot, in
+    // order, in the Context tier; one message is exactly what the slot always carried.
+    #[test]
+    fn several_authored_messages_keep_their_order_and_tier() {
+        let sections = vec![
+            named("platform_instructions", "platform"),
+            named("org_instructions", "org"),
+            named("persona", "persona"),
+        ];
+        let history = vec![turn("user", "question")];
+        let context = PromptContext {
+            authored_instructions: sections.clone(),
+            identity: Some(system("identity")),
+            history: history.clone(),
+            ..PromptContext::default()
+        };
+        let tiered = context
+            .clone()
+            .render_tiered(PromptOrder::StablePrefix)
+            .expect("tiered");
+        let names: Vec<&str> = tiered.messages.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "platform_instructions",
+                "org_instructions",
+                "persona",
+                "",
+                ""
+            ]
+        );
+        assert_eq!(
+            tiered.tiers,
+            [
+                PromptTier::Context,
+                PromptTier::Context,
+                PromptTier::Context,
+                PromptTier::Context,
+                PromptTier::Current
+            ]
+        );
+        assert_eq!(tiered.plan().context, 4);
+        // The legacy order puts them first, in order, ahead of the identity.
+        let legacy = context.render(PromptOrder::Legacy);
+        let legacy_names: Vec<&str> = legacy.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            legacy_names,
+            [
+                "platform_instructions",
+                "org_instructions",
+                "persona",
+                "",
+                ""
+            ]
+        );
+        assert_eq!(legacy[3].content, "identity");
     }
 
     #[test]

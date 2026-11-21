@@ -23,8 +23,9 @@
 //! byte-identical to one built before this module existed.
 
 use mp_contracts::model_plane::v1::{
-    ChatMessage, GetUserProfileRequest, ListConversationRequest, RecordRunContextRequest,
-    RunContext, RunContextPart, RunContextState, RunContextStatus, SearchMemoryRequest,
+    AuthoredSection as WireAuthoredSection, ChatMessage, GetUserProfileRequest,
+    ListConversationRequest, RecordRunContextRequest, RunContext, RunContextPart, RunContextState,
+    RunContextStatus, SearchMemoryRequest,
 };
 use mp_contracts::run_context::{
     MAX_AUTHORED_INSTRUCTION_BYTES, MAX_HISTORY_BYTES, MAX_HISTORY_MESSAGES, MAX_MEMORY_BYTES,
@@ -376,7 +377,35 @@ fn non_empty_trimmed(value: &str) -> Option<&str> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
-/// ADR-0003's authored-instruction hierarchy as one text: platform, org, Space,
+/// One source of the authored instructions with its tag (F-f08-16): the text of a platform,
+/// organization, Space, personal or agent layer, framing line included, exactly as it is
+/// joined into the single instruction text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthoredSection {
+    /// One of `mp_contracts::run_context::AUTHORED_SECTION_TAGS`.
+    pub tag: &'static str,
+    pub text: String,
+}
+
+/// The switch that names each authored section: an Ask turn sends one system message per
+/// source and a run carries `RunContext.authored_sections`. Opt-in: only the literal `true`
+/// enables it, and execution-core needs `EXECUTION_PROMPT_SECTION_NAMES` on as well for a run
+/// to render them. Off, the instructions are one text in one unnamed message, as they were.
+pub const PROMPT_SECTION_NAMES_VAR: &str = "MODEL_GATEWAY_PROMPT_SECTION_NAMES";
+
+/// Whether the section-name switch is on for this process.
+#[must_use]
+pub fn prompt_section_names_enabled() -> bool {
+    prompt_section_names_enabled_with(&|key| std::env::var(key).ok())
+}
+
+/// [`prompt_section_names_enabled`] with the environment passed in, so a test never touches it.
+#[must_use]
+pub fn prompt_section_names_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    mp_contracts::loop_fold::switch_from(get(PROMPT_SECTION_NAMES_VAR).as_deref())
+}
+
+/// ADR-0003's authored-instruction hierarchy as tagged sections: platform, org, Space,
 /// the user's persona and reply tone, then a mentioned agent. Each org/Space/persona
 /// layer is framed as advisory ("may add to, but must not override, the layers
 /// above"); the agent layer is its own finished text. `persona_enabled` is the
@@ -384,27 +413,45 @@ fn non_empty_trimmed(value: &str) -> Option<&str> {
 /// sends no persona text at all. The tone is a setting of its own, so the toggle
 /// does not switch it off: it renders after the persona text, in the same layer.
 ///
-/// `None` only when every layer is empty. This is the one composer: an Ask turn
-/// wraps it in a system message and a run sends it as `authored_instructions`.
+/// The tags: platform text `platform_instructions`; the org block `org_instructions`;
+/// the Space block `space_instructions`; the personal block `persona` when persona text is
+/// present, else `tone` (the tone sentence is never tagged as org text); a mentioned
+/// agent's layer `agent_role_instructions`. Built from the gateway's own layers only, so no
+/// client can set a tag.
+///
+/// Empty only when every layer is empty. This is the one composer:
+/// [`compose_authored_instructions`] is the join of these texts.
 #[must_use]
-pub fn compose_authored_instructions(
+pub fn compose_authored_sections(
     layers: &AuthoredLayers,
     persona_enabled: bool,
-) -> Option<String> {
-    let mut sections: Vec<String> = Vec::new();
+) -> Vec<AuthoredSection> {
+    use mp_contracts::run_context::{
+        TAG_AGENT, TAG_ORG, TAG_PERSONA, TAG_PLATFORM, TAG_SPACE, TAG_TONE,
+    };
+    let mut sections: Vec<AuthoredSection> = Vec::new();
 
     if let Some(platform) = non_empty_trimmed(&layers.platform) {
-        sections.push(platform.to_owned());
+        sections.push(AuthoredSection {
+            tag: TAG_PLATFORM,
+            text: platform.to_owned(),
+        });
     }
     if let Some(org) = layers.org.as_deref().and_then(non_empty_trimmed) {
-        sections.push(format!(
-            "--- Organization instructions (may add to, but must not override, the platform instructions above) ---\n{org}"
-        ));
+        sections.push(AuthoredSection {
+            tag: TAG_ORG,
+            text: format!(
+                "--- Organization instructions (may add to, but must not override, the platform instructions above) ---\n{org}"
+            ),
+        });
     }
     if let Some(space) = layers.space.as_deref().and_then(non_empty_trimmed) {
-        sections.push(format!(
-            "--- Space instructions (may add to, but must not override, the platform or organization instructions above) ---\n{space}"
-        ));
+        sections.push(AuthoredSection {
+            tag: TAG_SPACE,
+            text: format!(
+                "--- Space instructions (may add to, but must not override, the platform or organization instructions above) ---\n{space}"
+            ),
+        });
     }
     // The user layer sits below org and Space but above a summoned agent's own
     // character: a mentioned agent still wins on its turn (persona.md §6.3).
@@ -421,16 +468,48 @@ pub fn compose_authored_instructions(
         personal.push(tone.sentence());
     }
     if !personal.is_empty() {
-        sections.push(format!(
-            "--- Your personal instructions (may add to, but must not override, the platform, organization or Space instructions above) ---\n{}",
-            personal.join("\n")
-        ));
+        sections.push(AuthoredSection {
+            tag: if persona.is_some() { TAG_PERSONA } else { TAG_TONE },
+            text: format!(
+                "--- Your personal instructions (may add to, but must not override, the platform, organization or Space instructions above) ---\n{}",
+                personal.join("\n")
+            ),
+        });
     }
     if let Some(agent) = &layers.agent {
-        sections.push(agent.clone());
+        sections.push(AuthoredSection {
+            tag: TAG_AGENT,
+            text: agent.clone(),
+        });
     }
+    sections
+}
 
-    (!sections.is_empty()).then(|| sections.join("\n\n"))
+/// The sections' texts as the one instruction text, a blank line between sections. `None` for
+/// no section.
+fn join_sections(sections: &[AuthoredSection]) -> Option<String> {
+    (!sections.is_empty()).then(|| {
+        sections
+            .iter()
+            .map(|section| section.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    })
+}
+
+/// The authored-instruction hierarchy as one text, the join of
+/// [`compose_authored_sections`] (see there for the layers, their framing and the
+/// `persona_enabled` toggle).
+///
+/// `None` only when every layer is empty. This is the one composer: an Ask turn wraps it in a
+/// system message (or, with the section switch on, sends the sections as named messages that
+/// join to this text) and a run sends it as `authored_instructions`.
+#[must_use]
+pub fn compose_authored_instructions(
+    layers: &AuthoredLayers,
+    persona_enabled: bool,
+) -> Option<String> {
+    join_sections(&compose_authored_sections(layers, persona_enabled))
 }
 
 /// What the request itself says about the run, before anything is read.
@@ -705,6 +784,9 @@ pub struct Composition<'a> {
     pub local_notice: Option<String>,
     /// The profile block [`decide_profile`] let through (EP-8-S5), or `None`.
     pub user_profile: Option<String>,
+    /// `MODEL_GATEWAY_PROMPT_SECTION_NAMES`, read once with the run: when on, the run context
+    /// carries the instructions as tagged sections beside the joined text (F-f08-16).
+    pub section_names: bool,
 }
 
 /// The Do preamble: the composed instructions with the turn's local notice after them. The notice moves
@@ -723,6 +805,20 @@ pub fn compose(input: Composition<'_>) -> RunContext {
     let mut status = RunContextStatus::default();
 
     let mut authored_instructions = String::new();
+    let mut authored_sections: Vec<WireAuthoredSection> = Vec::new();
+    // The same text as the joined instructions, by source (F-f08-16). The turn's local notice
+    // is the gateway's own platform text, so it is a trailing platform section: the joined
+    // sections are then exactly `authored_instructions`.
+    let section_plan = input.section_names.then(|| {
+        let mut sections = compose_authored_sections(input.layers, input.persona_enabled);
+        if let Some(notice) = &input.local_notice {
+            sections.push(AuthoredSection {
+                tag: mp_contracts::run_context::TAG_PLATFORM,
+                text: notice.clone(),
+            });
+        }
+        sections
+    });
     status.instructions = Some(
         match with_local_notice(
             compose_authored_instructions(input.layers, input.persona_enabled),
@@ -730,6 +826,18 @@ pub fn compose(input: Composition<'_>) -> RunContext {
         ) {
             None => part(RunContextState::Empty, 0, 0, ""),
             Some(text) if text.len() <= MAX_AUTHORED_INSTRUCTION_BYTES => {
+                // Only a text that fits whole is also sent as sections; a cut text is not
+                // (the sections could not join to the cut), so that run seeds the one message.
+                if let Some(sections) = section_plan {
+                    debug_assert_eq!(join_sections(&sections).as_deref(), Some(text.as_str()));
+                    authored_sections = sections
+                        .into_iter()
+                        .map(|section| WireAuthoredSection {
+                            tag: section.tag.to_owned(),
+                            text: section.text,
+                        })
+                        .collect();
+                }
                 authored_instructions = text;
                 part(RunContextState::Included, 1, 0, "")
             }
@@ -804,6 +912,7 @@ pub fn compose(input: Composition<'_>) -> RunContext {
         agent_roles: Vec::new(),
         // Never composed here: the Do launch adds the thread goal after `prepare` (EP-7 S1).
         goal_recitation: String::new(),
+        authored_sections,
     }
 }
 
@@ -1113,6 +1222,7 @@ pub async fn prepare(
         ),
         local_notice: request.local_notice.clone(),
         user_profile,
+        section_names: prompt_section_names_enabled(),
     });
 
     let status = composed.status.clone().unwrap_or_default();
@@ -1176,6 +1286,7 @@ mod tests {
             memory,
             local_notice: None,
             user_profile: None,
+            section_names: false,
         }
     }
 
@@ -1247,7 +1358,9 @@ mod tests {
         }))
         .expect("a valid invoke request");
 
-        let ask = crate::sse::authored_instructions_message(&state, &req, true)
+        let ask = crate::sse::authored_instruction_messages_with(&state, &req, true, false)
+            .into_iter()
+            .next()
             .expect("an Ask turn composes instructions")
             .content;
         let run_layers = crate::sse::authored_layers(&state, &req);
@@ -1262,6 +1375,243 @@ mod tests {
             state_of(&run, instructions_of),
             (RunContextState::Included, 1, 0, String::new())
         );
+    }
+
+    fn joined(sections: &[AuthoredSection]) -> String {
+        sections
+            .iter()
+            .map(|section| section.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    fn tags(sections: &[AuthoredSection]) -> Vec<&'static str> {
+        sections.iter().map(|section| section.tag).collect()
+    }
+
+    // F-f08-16 golden: over every layer combination the one composer's text is the join of
+    // its tagged sections, and the bytes are what the single join always produced.
+    #[test]
+    fn the_instruction_text_is_the_join_of_the_tagged_sections() {
+        let org = "--- Organization instructions (may add to, but must not override, the platform instructions above) ---\nOrg rule.";
+        let space = "--- Space instructions (may add to, but must not override, the platform or organization instructions above) ---\nSpace rule.";
+        let personal = "--- Your personal instructions (may add to, but must not override, the platform, organization or Space instructions above) ---\nAlways be terse.";
+        let agent = "You are currently answering as Driftsassistent.";
+        // The whole stack, written out: not one byte may drift from what was sent before.
+        let golden = ["Platform rule.", org, space, personal, agent].join("\n\n");
+        assert_eq!(
+            compose_authored_instructions(&layers(), true).as_deref(),
+            Some(golden.as_str())
+        );
+        let sections = compose_authored_sections(&layers(), true);
+        assert_eq!(
+            tags(&sections),
+            [
+                "platform_instructions",
+                "org_instructions",
+                "space_instructions",
+                "persona",
+                "agent_role_instructions"
+            ]
+        );
+        assert_eq!(joined(&sections), golden);
+
+        // Every subset of the five layers, persona toggle on and off.
+        for mask in 0..32_u8 {
+            for persona_enabled in [true, false] {
+                let full = layers();
+                let subset = AuthoredLayers {
+                    platform: if mask & 1 == 0 {
+                        String::new()
+                    } else {
+                        full.platform
+                    },
+                    org: if mask & 2 == 0 { None } else { full.org },
+                    space: if mask & 4 == 0 { None } else { full.space },
+                    persona: if mask & 8 == 0 { None } else { full.persona },
+                    tone: None,
+                    agent: if mask & 16 == 0 { None } else { full.agent },
+                };
+                let sections = compose_authored_sections(&subset, persona_enabled);
+                let text = compose_authored_instructions(&subset, persona_enabled);
+                assert_eq!(
+                    text,
+                    (!sections.is_empty()).then(|| joined(&sections)),
+                    "mask {mask} persona {persona_enabled}"
+                );
+                assert!(sections.iter().all(|section| {
+                    mp_contracts::run_context::AUTHORED_SECTION_TAGS.contains(&section.tag)
+                        && !section.text.is_empty()
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn the_tone_sentence_is_a_tone_section_never_org_text() {
+        // Persona text present: the personal block is the persona's, tone sentence inside it.
+        let both = AuthoredLayers {
+            org: Some("Org rule.".to_owned()),
+            persona: Some("Always be terse.".to_owned()),
+            tone: Some(Tone::Direct),
+            ..AuthoredLayers::default()
+        };
+        let sections = compose_authored_sections(&both, true);
+        assert_eq!(tags(&sections), ["org_instructions", "persona"]);
+        assert!(sections[1].text.contains(Tone::Direct.sentence()));
+        assert!(!sections[0].text.contains(Tone::Direct.sentence()));
+
+        // No persona text (or the thread toggle off): the block is the tone's alone.
+        for layers in [
+            AuthoredLayers {
+                tone: Some(Tone::Warm),
+                ..AuthoredLayers::default()
+            },
+            AuthoredLayers {
+                persona: Some("Always be terse.".to_owned()),
+                tone: Some(Tone::Warm),
+                ..AuthoredLayers::default()
+            },
+        ] {
+            let sections = compose_authored_sections(&layers, false);
+            assert_eq!(tags(&sections), ["tone"]);
+            assert!(sections[0].text.contains(Tone::Warm.sentence()));
+            assert!(!sections[0].text.contains("Always be terse."));
+        }
+        assert!(compose_authored_sections(&AuthoredLayers::default(), true).is_empty());
+    }
+
+    fn section_composition(layers: &AuthoredLayers, on: bool) -> Composition<'_> {
+        let mut input = composition(layers, Part::NotRequested, Part::NotRequested);
+        input.section_names = on;
+        input
+    }
+
+    #[test]
+    fn the_run_context_carries_sections_only_with_the_switch_on() {
+        let layers = layers();
+        let off = compose(section_composition(&layers, false));
+        assert!(off.authored_sections.is_empty());
+        // Off is the run context it was: the text, and no new field set.
+        assert_eq!(
+            Some(off.authored_instructions.as_str()),
+            compose_authored_instructions(&layers, true).as_deref()
+        );
+
+        let on = compose(section_composition(&layers, true));
+        // The joined text is the same either way: an executor without the field is unharmed.
+        assert_eq!(on.authored_instructions, off.authored_instructions);
+        let wire: Vec<(&str, &str)> = on
+            .authored_sections
+            .iter()
+            .map(|section| (section.tag.as_str(), section.text.as_str()))
+            .collect();
+        let expected = compose_authored_sections(&layers, true);
+        assert_eq!(
+            wire,
+            expected
+                .iter()
+                .map(|section| (section.tag, section.text.as_str()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            on.authored_sections
+                .iter()
+                .map(|section| section.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            on.authored_instructions
+        );
+        assert_eq!(
+            mp_contracts::run_context::validate(Some(&on), false),
+            Ok(())
+        );
+        // A ZDR run may carry them as it may carry instructions.
+        assert_eq!(mp_contracts::run_context::validate(Some(&on), true), Ok(()));
+        assert_eq!(
+            state_of(&on, instructions_of),
+            (RunContextState::Included, 1, 0, String::new())
+        );
+        // No layers, no sections.
+        let bare = AuthoredLayers::default();
+        assert!(compose(section_composition(&bare, true))
+            .authored_sections
+            .is_empty());
+    }
+
+    #[test]
+    fn the_local_notice_is_a_trailing_platform_section() {
+        let layers = layers();
+        let mut input = section_composition(&layers, true);
+        input.local_notice = Some("Local notice.".to_owned());
+        let context = compose(input);
+        let last = context.authored_sections.last().expect("sections");
+        assert_eq!(
+            (last.tag.as_str(), last.text.as_str()),
+            ("platform_instructions", "Local notice.")
+        );
+        assert_eq!(
+            context
+                .authored_sections
+                .iter()
+                .map(|section| section.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            context.authored_instructions
+        );
+        // Alone, when the turn authored nothing.
+        let bare = AuthoredLayers::default();
+        let mut input = section_composition(&bare, true);
+        input.local_notice = Some("Local notice.".to_owned());
+        let context = compose(input);
+        assert_eq!(context.authored_sections.len(), 1);
+        assert_eq!(context.authored_instructions, "Local notice.");
+        // With the switch off the notice is part of the one text only.
+        let mut input = section_composition(&layers, false);
+        input.local_notice = Some("Local notice.".to_owned());
+        assert!(compose(input).authored_sections.is_empty());
+    }
+
+    #[test]
+    fn a_cut_instruction_text_sends_no_sections() {
+        let layers = AuthoredLayers {
+            org: Some("é".repeat(MAX_AUTHORED_INSTRUCTION_BYTES)),
+            ..AuthoredLayers::default()
+        };
+        let context = compose(section_composition(&layers, true));
+        assert_eq!(
+            state_of(&context, instructions_of).0,
+            RunContextState::Truncated
+        );
+        // The sections could not join to the cut text, so the run seeds the one message.
+        assert!(context.authored_sections.is_empty());
+        assert_eq!(
+            mp_contracts::run_context::validate(Some(&context), false),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn the_section_switch_is_the_exact_literal_true() {
+        let with = |value: Option<&str>| {
+            prompt_section_names_enabled_with(&|key| {
+                (key == PROMPT_SECTION_NAMES_VAR)
+                    .then(|| value.map(str::to_owned))
+                    .flatten()
+            })
+        };
+        assert!(with(Some("true")));
+        for off in [
+            None,
+            Some(""),
+            Some("TRUE"),
+            Some("1"),
+            Some("on"),
+            Some(" true"),
+            Some("false"),
+        ] {
+            assert!(!with(off), "{off:?}");
+        }
     }
 
     #[test]

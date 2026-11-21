@@ -51,6 +51,8 @@ pub const EXACT_SWITCHES: &[(&str, &str)] = &[
     (crate::browser_run::RECIPE_ENV, "true"),
     (crate::budget::CAP_MIN_ENV, "true"),
     (crate::budget::BUDGET_WINDOW_ENV, "true"),
+    (crate::budget::BUDGET_WINDOW_PER_CAP_ENV, "true"),
+    (crate::budget::DO_RUN_CAP_ENV, "true"),
     (crate::latency_levers::SPEED_TIER_ENV, "true"),
     (crate::normalize::BYO_GATEWAY_ENV, "true"),
     (crate::attachment_policy::SANDBOX_FILES_VAR, "true"),
@@ -97,6 +99,7 @@ pub const EXACT_SWITCHES: &[(&str, &str)] = &[
     (crate::goal_auto::ENABLED_ENV, "true"),
     (crate::goal_judge::GOAL_JUDGE_ENABLED_VAR, "true"),
     (crate::goal_unattended::ENABLED_ENV, "true"),
+    (crate::thread_goal::SEGMENT_TOPUP_ENV, "true"),
     (crate::council_routes::ENABLED_ENV, "true"),
     (crate::selection_guard::ENABLED_ENV, "true"),
     (crate::role_routing::ROLE_ROUTING_ENV, "true"),
@@ -134,6 +137,7 @@ pub const EXACT_SWITCHES: &[(&str, &str)] = &[
     (crate::sse::OWNER_LIST_SPACE_REFUSE_VAR, "true"),
     (crate::sse::SUBAGENT_ROLE_CATALOGUE_VAR, "true"),
     (crate::sse::AGENT_TOOL_ALLOWLIST_VAR, "true"),
+    (crate::sse::QUEUED_UNDELIVERED_IDS_VAR, "true"),
     (crate::quarry::attribution::ENABLED_ENV, "true"),
     (crate::review_proposal_rule::REVIEW_PROPOSAL_RULE_ENV, "on"),
     // Connectors, MCP, plugins, skills and deep research.
@@ -239,14 +243,6 @@ pub const DOCUMENTED_EXCEPTIONS: &[(&str, &str)] = &[
         "exact true, and any other spelling but an off word is refused at load, not read as off (relevance_calibration)",
     ),
     (
-        "MODEL_GATEWAY_AI_CHAT_METERING",
-        "exact service or all, no trimming or folding: any other value is off, and no startup report names it (http_routes AiChatMetering)",
-    ),
-    (
-        "CONTENT_SAFETY_MODE_DEFAULT",
-        "a mode word, exact after trimming: frame, tighten or enforce; any other value reads frame, and no startup report names it (moderation ScreeningMode)",
-    ),
-    (
         "ORG_AGENT_POLICY_MODE",
         "a mode, shadow or enforce: any other value enforces, fail closed (org_agent_policy PolicyMode)",
     ),
@@ -297,6 +293,7 @@ pub const SHARED_READER_SWITCHES: &[(&str, &str)] = &[
     (mp_contracts::loop_fold::LOOP_RESUME_ENV, "true"),
     (mp_contracts::loop_fold::LOOP_PARKING_ENV, "true"),
     (mp_contracts::loop_fold::CONTINUE_AFTER_APPROVAL_ENV, "true"),
+    (mp_contracts::loop_guard::RESULT_AWARE_ENV, "true"),
     (mp_contracts::skill_bundle::SKILL_FILE_ENV, "true"),
     (mp_contracts::custom_rest::ENABLED_ENV, "true"),
     (mp_contracts::shell_rule::RULE_PROPOSALS_ENV, "true"),
@@ -309,14 +306,55 @@ pub const SHARED_READER_SWITCHES: &[(&str, &str)] = &[
     (mp_contracts::space_attention::SUMMARY_ENV, "true"),
 ];
 
-/// The security-strengthening mode switches this service reads. `shadow` and `enforce` are read
-/// trimmed and case-folded, so a mis-cased word keeps its mode. Any other set value falls to the
-/// weaker reading (observe, or off) without an error, so [`warn_former_spellings`] reports each such
-/// value at startup. The readers are unit-tested where they are defined
-/// (`mp_contracts::loop_guard::LoopGuardMode::from_env_value` and `ApprovalStepUpGate::from_raw`).
-pub const MODE_SWITCHES: &[&str] = &[
-    crate::http_routes::APPROVAL_STEP_UP_ENV,
-    mp_contracts::loop_guard::ENV,
+/// One security-strengthening mode switch, as the startup report sees it: the name its reader reads, the rule that says
+/// a set value is one that reader does not take, and the words it does take, for the startup line. The rule is the
+/// reader's own function, so the report and the reader cannot drift apart.
+#[derive(Clone, Copy)]
+pub struct ModeSwitch {
+    /// The switch's environment name: the reader's own constant.
+    pub name: &'static str,
+    /// Whether a set value is one the reader does not take. An unset or blank value is never unreadable.
+    pub unreadable: fn(&str) -> bool,
+    /// The words the reader takes, as the startup line names them.
+    pub readable: &'static str,
+}
+
+/// The security-strengthening mode switches this service reads, each with its reader's rule for a value it does not
+/// take. `shadow` and `enforce` are read trimmed and case-folded by the loop guard and the step-up gate, so a mis-cased
+/// word keeps its mode. Any other set value falls to the weaker reading (observe, or off), or to the fallback of the
+/// reader, without an error, so [`warn_former_spellings`] reports each such value at startup. No reader changes. The
+/// rules are unit-tested where their readers are defined.
+pub const MODE_SWITCHES: &[ModeSwitch] = &[
+    ModeSwitch {
+        name: crate::http_routes::APPROVAL_STEP_UP_ENV,
+        unreadable: mp_contracts::loop_guard::unreadable_step_up_word,
+        readable: "off, shadow or enforce (any case, surrounding spaces allowed), or unset",
+    },
+    ModeSwitch {
+        name: mp_contracts::loop_guard::ENV,
+        unreadable: mp_contracts::loop_guard::unreadable_mode_word,
+        readable: "shadow or enforce (any case, surrounding spaces allowed), or unset",
+    },
+    ModeSwitch {
+        name: crate::sse::POSTURE_FLOOR_ENV,
+        unreadable: crate::sse::unreadable_posture_floor,
+        readable: "ask or auto (any case, surrounding spaces allowed), or unset",
+    },
+    ModeSwitch {
+        name: crate::moderation::MODE_DEFAULT_ENV,
+        unreadable: crate::moderation::unreadable_mode_default,
+        readable: "exactly frame, tighten or enforce (surrounding spaces allowed), or unset",
+    },
+    ModeSwitch {
+        name: crate::http_routes::AI_CHAT_METERING_ENV,
+        unreadable: crate::http_routes::unreadable_ai_chat_metering,
+        readable: "exactly service or all, or off, or unset",
+    },
+    ModeSwitch {
+        name: mp_contracts::site_policy::WEB_DOMAIN_POLICY_MODE_ENV,
+        unreadable: mp_contracts::site_policy::unreadable_web_domain_mode,
+        readable: "exactly off, shadow or enforce (surrounding spaces allowed), or unset",
+    },
 ];
 
 /// Every switch the report covers: [`EXACT_SWITCHES`], the two that `coordinator` names (it is the one
@@ -342,16 +380,13 @@ pub fn former_spellings(
         .collect()
 }
 
-/// The names of the [`MODE_SWITCHES`] whose value, as `lookup` returns it, is set to a value the
-/// mode does not read (see `mp_contracts::loop_guard::unreadable_mode_word`).
+/// The [`MODE_SWITCHES`] whose value, as `lookup` returns it, is set to a value its reader does not take (see
+/// [`ModeSwitch::unreadable`]), in table order.
 #[must_use]
-pub fn unreadable_modes(lookup: impl Fn(&str) -> Option<String>) -> Vec<&'static str> {
+pub fn unreadable_modes(lookup: impl Fn(&str) -> Option<String>) -> Vec<&'static ModeSwitch> {
     MODE_SWITCHES
         .iter()
-        .copied()
-        .filter(|&name| {
-            lookup(name).is_some_and(|value| mp_contracts::loop_guard::unreadable_mode_word(&value))
-        })
+        .filter(|switch| lookup(switch.name).is_some_and(|value| (switch.unreadable)(&value)))
         .collect()
 }
 
@@ -367,11 +402,12 @@ pub fn warn_former_spellings() {
              set it to exactly this value to turn it on"
         );
     }
-    for name in unreadable_modes(|name| std::env::var(name).ok()) {
+    for switch in unreadable_modes(|name| std::env::var(name).ok()) {
         warn!(
-            switch = name,
-            "mode switch is set to a value it does not read, so it keeps its weaker reading; \
-             set it to shadow or enforce (any case, surrounding spaces allowed), or unset it"
+            switch = switch.name,
+            readable = switch.readable,
+            "mode switch is set to a value its reader does not take, so the fallback reading applies; \
+             set it to one of the readable words, or unset it"
         );
     }
 }
@@ -488,7 +524,7 @@ mod tests {
 
     #[test]
     fn the_shared_reader_switches_are_reported_for_a_padded_value_and_not_for_the_exact_one() {
-        assert_eq!(SHARED_READER_SWITCHES.len(), 14);
+        assert_eq!(SHARED_READER_SWITCHES.len(), 15);
         for &(name, literal) in SHARED_READER_SWITCHES {
             assert_eq!(literal, "true", "{name}");
             assert_eq!(names(&[(name, " true ")]), vec![name], "{name}");
@@ -496,27 +532,167 @@ mod tests {
         }
     }
 
+    /// Per mode switch, the words its reader takes and values it does not, keyed by the reader's own constant.
+    const MODE_SAMPLES: &[(&str, &[&str], &[&str])] = &[
+        (
+            mp_contracts::loop_guard::ENV,
+            &["", "   ", "off", "shadow", "Shadow", " enforce ", "ENFORCE"],
+            &["enforced", "true", "1", "on", "OFF", "Off", "enforce-all"],
+        ),
+        (
+            crate::http_routes::APPROVAL_STEP_UP_ENV,
+            &[
+                "",
+                "   ",
+                "off",
+                "OFF",
+                "Off",
+                " off ",
+                "shadow",
+                "Shadow",
+                " enforce ",
+                "ENFORCE",
+            ],
+            &["enforced", "true", "1", "on", "enforce-all"],
+        ),
+        (
+            crate::sse::POSTURE_FLOOR_ENV,
+            &["", "   ", "ask", " ASK ", "auto", " Auto "],
+            &["asks", "ask-always", "always", "Enforce", "1", "on"],
+        ),
+        (
+            crate::moderation::MODE_DEFAULT_ENV,
+            &["", "   ", "frame", " tighten ", "enforce", "\tenforce\n"],
+            &["Enforce", "ENFORCE", "Frame", "shadow", "1", "frames"],
+        ),
+        (
+            crate::http_routes::AI_CHAT_METERING_ENV,
+            &["", "   ", "off", "service", "all"],
+            &["Service", "SERVICE", "ALL", " all ", "1", "on"],
+        ),
+        (
+            mp_contracts::site_policy::WEB_DOMAIN_POLICY_MODE_ENV,
+            &["", "   ", "off", " shadow ", "enforce"],
+            &["Enforce", "ENFORCE", "Shadow", "on", "1", "true"],
+        ),
+    ];
+
+    /// The mode switches the report names for `name` set to `value`.
+    fn flagged(name: &str, value: &str) -> Vec<&'static str> {
+        unreadable_modes(|set| (set == name).then(|| value.to_owned()))
+            .into_iter()
+            .map(|switch| switch.name)
+            .collect()
+    }
+
     #[test]
-    fn the_mode_switches_flag_only_a_value_the_mode_does_not_read() {
+    fn the_mode_switches_flag_only_a_value_their_reader_does_not_take() {
+        assert_eq!(MODE_SWITCHES.len(), MODE_SAMPLES.len());
+        for (name, readable, unreadable) in MODE_SAMPLES {
+            for word in *readable {
+                assert!(flagged(name, word).is_empty(), "{name} reads {word:?}");
+            }
+            for word in *unreadable {
+                assert_eq!(
+                    flagged(name, word),
+                    vec![*name],
+                    "{name} does not read {word:?}"
+                );
+            }
+            assert!(unreadable_modes(|_| None).is_empty(), "{name} unset");
+        }
+        // The loop guard keeps the word rule of `mp_contracts`, where `OFF` reads as shadow. The step-up
+        // gate has its own rule, checked with the other mode switches above.
         for word in ["enforced", "true", "1", "on", "OFF", "Off", "enforce-all"] {
             assert!(
                 mp_contracts::loop_guard::unreadable_mode_word(word),
                 "{word:?}"
             );
         }
-        for word in ["", "   ", "off", "shadow", "Shadow", " enforce ", "ENFORCE"] {
-            assert!(
-                !mp_contracts::loop_guard::unreadable_mode_word(word),
-                "{word:?}"
+    }
+
+    #[test]
+    fn the_posture_floor_flags_asks_and_ask_always_and_reads_ask_auto_and_blank() {
+        let name = crate::sse::POSTURE_FLOOR_ENV;
+        assert_eq!(name, "HARNESS_POSTURE_FLOOR");
+        // The floor folds case and reads only `ask` as Ask. `asks` and `ask-always` fall to the Auto floor, so the report names them.
+        for value in ["asks", "ask-always", "ask always", "always", "Enforce"] {
+            assert_eq!(flagged(name, value), vec![name], "{value:?}");
+        }
+        for value in ["ask", " ASK ", "auto", " Auto ", "", "   "] {
+            assert!(flagged(name, value).is_empty(), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn the_startup_mode_words_are_flagged_where_their_reader_does_not_take_them() {
+        // Content safety and the web domain switch read exactly their words, after trimming: a mis-cased word is not one.
+        for name in [
+            crate::moderation::MODE_DEFAULT_ENV,
+            mp_contracts::site_policy::WEB_DOMAIN_POLICY_MODE_ENV,
+        ] {
+            for value in ["Enforce", "ENFORCE"] {
+                assert_eq!(flagged(name, value), vec![name], "{name}={value:?}");
+            }
+        }
+        // The metering switch reads the exact word `service` or `all`, so a mis-cased `Service` is flagged.
+        for value in ["Service", "SERVICE"] {
+            assert_eq!(
+                flagged(crate::http_routes::AI_CHAT_METERING_ENV, value),
+                vec![crate::http_routes::AI_CHAT_METERING_ENV],
+                "{value:?}"
             );
         }
-        for &name in MODE_SWITCHES {
-            let flagged = unreadable_modes(|set| (set == name).then(|| "enforced".to_owned()));
-            assert_eq!(flagged, vec![name], "{name}");
-            let readable = unreadable_modes(|set| (set == name).then(|| "Enforce".to_owned()));
-            assert!(readable.is_empty(), "{name}");
-            let unset = unreadable_modes(|_| None);
-            assert!(unset.is_empty(), "{name} unset");
+        // The words each reader takes, a blank value and an unset switch are never flagged.
+        for (name, words) in [
+            (
+                crate::moderation::MODE_DEFAULT_ENV,
+                &["frame", "tighten", "enforce", " enforce ", ""][..],
+            ),
+            (
+                mp_contracts::site_policy::WEB_DOMAIN_POLICY_MODE_ENV,
+                &["off", "shadow", "enforce", ""][..],
+            ),
+            (
+                crate::http_routes::AI_CHAT_METERING_ENV,
+                &["service", "all", "off", ""][..],
+            ),
+        ] {
+            for value in words {
+                assert!(flagged(name, value).is_empty(), "{name}={value:?}");
+            }
+            assert!(unreadable_modes(|_| None).is_empty(), "{name} unset");
+        }
+    }
+
+    #[test]
+    fn the_new_mode_rows_are_listed_under_the_readers_own_names_and_not_as_exceptions() {
+        for (name, literal) in [
+            (crate::sse::POSTURE_FLOOR_ENV, "HARNESS_POSTURE_FLOOR"),
+            (
+                crate::moderation::MODE_DEFAULT_ENV,
+                "CONTENT_SAFETY_MODE_DEFAULT",
+            ),
+            (
+                crate::http_routes::AI_CHAT_METERING_ENV,
+                "MODEL_GATEWAY_AI_CHAT_METERING",
+            ),
+            (
+                mp_contracts::site_policy::WEB_DOMAIN_POLICY_MODE_ENV,
+                "WEB_DOMAIN_POLICY_MODE",
+            ),
+        ] {
+            assert_eq!(name, literal);
+            assert!(
+                MODE_SWITCHES.iter().any(|switch| switch.name == name),
+                "{name} is not listed"
+            );
+            assert!(
+                DOCUMENTED_EXCEPTIONS
+                    .iter()
+                    .all(|(listed, _)| *listed != name),
+                "{name} is also a documented exception"
+            );
         }
     }
 

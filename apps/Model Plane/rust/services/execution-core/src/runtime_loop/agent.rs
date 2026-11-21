@@ -41,7 +41,7 @@ use std::collections::BTreeSet;
 
 use mp_contracts::approval_cause::{self, CauseCode};
 use mp_contracts::loop_guard::{
-    call_signature, CallOutcome, CallRecord, LoopGuard, LoopGuardMode, Verdict,
+    call_signature, result_digest, CallOutcome, CallRecord, LoopGuard, LoopGuardMode, Verdict,
 };
 use mp_contracts::model_plane::v1::{
     self as pb, inference_core_client::InferenceCoreClient,
@@ -821,7 +821,7 @@ const OUTPUT_TRUNCATE: usize = 2000;
 /// GDPR data-classification of a tool's results, carried on the step audit
 /// detail. The five Norwegian read tools + the public web touch only public,
 /// non-personal data; `knowledge_search` reads the org's own private corpus.
-fn data_category(tool_name: &str) -> &'static str {
+pub(crate) fn data_category(tool_name: &str) -> &'static str {
     match tool_name {
         "knowledge_search" => "customer_private",
         // The document inventory lists the org's own private corpus (titles, sources), not public data.
@@ -862,6 +862,9 @@ fn unrecorded_effect_outcome(run_id: &str, tool: &str, reason: &str) -> StepOutc
         cause: None,
         screening_taint: false,
         pause_facts: approval_cause::CallFacts::default(),
+        pending_elicitation: None,
+        grounded: false,
+        data_category: None,
     }
 }
 
@@ -935,6 +938,23 @@ enum InputPauseResult {
         output: String,
         error: Option<String>,
     },
+}
+
+/// The one MCP call of a round whose server asked the run's owner a form that waits in the run
+/// for its answer (EP-4 S7), captured while the round's outcomes are processed so the round can
+/// finish recording every OTHER call's outcome before it pauses on this one. The form itself is
+/// the gateway's to hold: this keeps its id and the question's items, never an answer.
+struct ElicitationPause {
+    /// The call's position among the round's calls.
+    index: usize,
+    step_id: String,
+    /// The MCP tool's namespaced name (`mcp__<server>__<tool>`), recorded in the pause fold.
+    tool: String,
+    /// The digest of the exact call, recorded in the pause fold so a resume refuses a swapped call.
+    /// Empty only if it could not be computed, which cancels the form.
+    arguments_digest: String,
+    /// The form the gateway holds for the call.
+    pending: pb::McpElicitationPending,
 }
 
 /// The first (by array order) approval-needing call in a batch, captured so
@@ -1755,6 +1775,10 @@ async fn begin_question_continuation(
     };
     let target = super::resume::question_resume_target(&questions, &resume.question_id, run_id)
         .map_err(Refusal::status)?;
+    // A server's form is refused here, before any claim or spend: this resume would hand the owner's
+    // answer to the model as the call's result, and it must go only to the server that asked
+    // (W3-EP-4-S7-b builds that resume).
+    super::resume::question_resume_in_place_allowed(&target).map_err(Refusal::status)?;
 
     // 3. The claim of the fold the question paused. The claim token is this continuation's own.
     let pause_ref = mp_contracts::user_question::input_pause_ref(run_id, &target.step_id, &target.origin);
@@ -2542,6 +2566,17 @@ async fn merged_tool_defs_governed(
     untrusted.extend(append_untrusted_tool_defs_sorted(&mut tools, client_tools));
     // Nothing a caller or an MCP server added: the set so far is the base set.
     let nothing_appended = tools.len() == base_len;
+    // A retention-bound run (`zdr`, which a waived route folds into: see `offered_tools`) is never
+    // offered a reserved owner action, so its server-resolved view is not requested: no Control
+    // view token is minted for it and Capability Core is not asked. The floor is held here, not
+    // left to the services behind it. Control's zero-retention refusal reads only the Space's
+    // privacy evidence, which carries no run posture, and Capability Core refuses a view only when
+    // its own `zero_data_retention` is set, which Control always sends as false. Nothing is
+    // appended, so the set is the base set; a retention-bound run never parks, so that claim is
+    // never replayed.
+    if zdr {
+        return (tools, nothing_appended);
+    }
     let resolved = match capability_policy
         .resolve_server_tool_definitions(run_id, org_id)
         .await
@@ -2959,6 +2994,59 @@ async fn retry_wide_research_plan(
         .map_err(tonic::Status::failed_precondition)
 }
 
+/// The run's store for held results (WS25-S5), or none (F-f02-12). A run gets one only when the switch is on, the
+/// run keeps its content (neither zero-retention nor waived), and its capability policy would allow `result_query`.
+/// The policy is asked only once the switch and the run's posture admit a store, so a run that gets none makes no
+/// extra call, and a switch-off run is what it was before the switch existed.
+async fn result_store_for_run(
+    policy: &dyn crate::capability_policy::CapabilityPolicy,
+    req: &pb::RunAgentRequest,
+    waived: bool,
+    switch_on: bool,
+) -> Option<std::sync::Arc<super::result_handles::ResultHandles>> {
+    if !super::result_handles::handles_apply(switch_on, req.zdr, waived) {
+        return None;
+    }
+    if !result_query_usable(policy, req, req.zdr || waived).await {
+        return None;
+    }
+    super::result_handles::for_run(switch_on, req.zdr, waived, MAX_TOOL_CONTEXT_CHARS)
+}
+
+/// Whether the run's capability policy would allow `result_query` for this run (F-f02-12). The loop asks the same
+/// entry point for each built-in call, with the same stated retention posture, so this answers what the run's first
+/// `result_query` call would be given. Only an `allow` whose evidence verifies counts: an `ask` would pause a read
+/// for a person, and a refusal or an error leaves the read unavailable. The probe names no target, because
+/// `result_query` takes none. The log carries the decision and no ids or text.
+async fn result_query_usable(
+    policy: &dyn crate::capability_policy::CapabilityPolicy,
+    req: &pb::RunAgentRequest,
+    retention_bound: bool,
+) -> bool {
+    let answer = policy
+        .evaluate_tool_call_with_input(
+            super::result_handles::RESULT_QUERY_TOOL,
+            "",
+            &req.run_id,
+            &req.org_id,
+            &req.user_id,
+            retention_bound,
+        )
+        .await;
+    let usable = matches!(
+        &answer,
+        Ok(evaluation)
+            if evaluation.decision == crate::capability_policy::CapabilityDecision::Allow
+                && evaluation.evidence_verified
+    );
+    debug!(
+        usable,
+        decision = ?answer.as_ref().ok().map(|evaluation| evaluation.decision),
+        "run_agent: held results are offered only where result_query is allowed"
+    );
+    usable
+}
+
 /// [`run_agent_with_route`] with whether the offered tool set is derivable (WS03 S8-A): the
 /// body of the route-level driver. `derivable` is the offer's own claim; an approval
 /// continuation is never derivable whatever it says, because its tools are the snapshot's.
@@ -3007,6 +3095,14 @@ async fn run_agent_with_route_parkable(
     let _run_egress = (crate::egress_proxy::switch_tier()
         != mp_contracts::sandbox_report::NetworkTier::Off)
         .then(|| crate::egress_proxy::run_egress().register(&req.org_id, &req.run_id));
+    // The org's `ext.skills` this run is held to (P2-ec-01), read from its own request (the gateway sets it, no
+    // client can) and held for the run's life for the tool dispatch, which has no request in scope. Registered
+    // for every run, an unenforced one included, so a missing entry on a Do run always means "policy lost".
+    let _run_ext_skills = crate::skill_ext_policy::run_ext_skills().register(
+        &req.org_id,
+        &req.run_id,
+        &req.ext_skills,
+    );
 
     // A continuation (build plan WS03 S3, S7b): consume the granted approval exactly once,
     // then either restore the paused loop from its fold (the in-place resume) or start the
@@ -3101,11 +3197,18 @@ async fn run_agent_with_route_parkable(
     // Whether the run keeps no content (zero retention or a waived route), read before `route`
     // moves into the loop context: the lease release at the end of the run needs it.
     let persistence_free = req.zdr || route.is_waived();
-    // Run-scoped result handles (WS25-S5). A fresh run is offered `result_query` only when
-    // it holds results; a continuation keeps the tools its snapshot was offered. A scheduled
-    // run is offered its contract's tools and nothing the loop adds, so it holds no handles.
+    // Run-scoped result handles (WS25-S5). A fresh run is offered `result_query` only when it holds
+    // results, and only when its capability policy would allow that read (F-f02-12); a continuation
+    // keeps the tools its snapshot was offered. A scheduled run is offered its contract's tools and
+    // nothing the loop adds, so it holds no handles.
     let result_store = if resumed.is_none() && scheduled.is_none() {
-        super::result_handles::for_run(req.zdr, route.is_waived(), MAX_TOOL_CONTEXT_CHARS)
+        result_store_for_run(
+            capability_policy,
+            &req,
+            route.is_waived(),
+            super::result_handles::enabled(),
+        )
+        .await
     } else {
         None
     };
@@ -3615,6 +3718,10 @@ const MAX_INJECTED_SKILLS: usize = 3;
 /// false: not ZDR, not waived) the versions of the skills that were actually
 /// injected are pinned on `run_id` (EP-11 S3, [`crate::skill_pins`]). Off, or for a
 /// retention-bound run, nothing is recorded.
+///
+/// `ext` is the org's `ext.skills` the gateway stated on the run (P2-ec-01): the skills it does not
+/// permit are dropped before scoring, so they are never matched, injected or pinned. A run that
+/// states none ([`crate::skill_ext_policy::ExtSkills::NotEnforced`]) is read as it always was.
 async fn fetch_skill_context(
     session_channel: &Channel,
     bearer: Option<&str>,
@@ -3622,6 +3729,7 @@ async fn fetch_skill_context(
     goal: &str,
     run_id: &str,
     retention_bound: bool,
+    ext: crate::skill_ext_policy::ExtSkills,
 ) -> Vec<String> {
     let Some(bearer) = bearer else {
         return Vec::new();
@@ -3661,6 +3769,7 @@ async fn fetch_skill_context(
         .into_inner()
         .skills
         .into_iter()
+        .filter(|s| ext.permits(s))
         .filter(|s| !s.content.trim().is_empty())
         .map(|s| {
             let haystack =
@@ -4039,6 +4148,69 @@ fn seed_message(role: &str, content: String) -> pb::ChatMessage {
     }
 }
 
+/// One seeded message that names its source (an authored section's tag).
+fn named_seed_message(role: &str, name: &str, content: String) -> pb::ChatMessage {
+    pb::ChatMessage {
+        name: name.to_owned(),
+        ..seed_message(role, content)
+    }
+}
+
+/// The switch for the tagged authored sections (F-f08-16) and for the tagged profile and memory messages
+/// (F-f08-15). Off, a run seeds its authored instructions as one unnamed message whatever the request carries,
+/// and its profile and memory unnamed. The gateway's own `MODEL_GATEWAY_PROMPT_SECTION_NAMES` must be on as well
+/// for any section to arrive. Read once per process.
+const PROMPT_SECTION_NAMES_ENV: &str = "EXECUTION_PROMPT_SECTION_NAMES";
+
+/// The section tags of the profile and memory messages a run seeds when the switch is on. They must equal the
+/// `user_profile` and `memory` tags in session-core's `run_ledger_grpc.rs` SECTION_LABELS.
+const PROFILE_SECTION_TAG: &str = "user_profile";
+const MEMORY_SECTION_TAG: &str = "memory";
+
+fn prompt_section_names_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        mp_contracts::loop_fold::switch_from(
+            std::env::var(PROMPT_SECTION_NAMES_ENV).ok().as_deref(),
+        )
+    })
+}
+
+/// The section tag a block carries: its tag when the switch is on, else empty, the unnamed message it has
+/// always been.
+fn section_tag(section_names: bool, tag: &'static str) -> &'static str {
+    if section_names {
+        tag
+    } else {
+        ""
+    }
+}
+
+/// Whether a run context carries sections the seed will render: at least one with text.
+fn has_authored_sections(run_context: &pb::RunContext) -> bool {
+    run_context
+        .authored_sections
+        .iter()
+        .any(|section| !section.text.is_empty())
+}
+
+/// The run context as the seed reads it. With the switch off the sections are dropped, so the
+/// seed (and the tier plan) see exactly the request an executor that does not know the field
+/// would see: the one authored-instructions message. Borrowed unless something is dropped.
+fn gated_run_context(
+    run_context: &pb::RunContext,
+    section_names: bool,
+) -> std::borrow::Cow<'_, pb::RunContext> {
+    if section_names || run_context.authored_sections.is_empty() {
+        std::borrow::Cow::Borrowed(run_context)
+    } else {
+        std::borrow::Cow::Owned(pb::RunContext {
+            authored_sections: Vec::new(),
+            ..run_context.clone()
+        })
+    }
+}
+
 /// The order of a fresh loop's first messages, by prompt tier (`mp_contracts::prompt_tier`,
 /// Stable < Context < Conversation < Volatile < Current), so the bytes a provider can cache
 /// stay ahead of the bytes that change:
@@ -4061,6 +4233,26 @@ fn seed_order(
     skills: Option<String>,
     goal: &str,
 ) -> Vec<pb::ChatMessage> {
+    seed_order_with(
+        preamble,
+        run_context,
+        root,
+        skills,
+        goal,
+        prompt_section_names_enabled(),
+    )
+}
+
+/// [`seed_order`] with the section-name switch passed in, so a test never reads the process environment.
+/// With the switch on, the profile and the memory message carry their section tags; nothing else is named.
+fn seed_order_with(
+    preamble: String,
+    run_context: Option<&pb::RunContext>,
+    root: bool,
+    skills: Option<String>,
+    goal: &str,
+    section_names: bool,
+) -> Vec<pb::ChatMessage> {
     let mut messages = vec![seed_message("system", preamble)];
     let skills = skills.map(|text| seed_message("system", text));
     let Some(run_context) = run_context else {
@@ -4068,7 +4260,17 @@ fn seed_order(
         messages.push(seed_message("user", goal.to_owned()));
         return messages;
     };
-    if !run_context.authored_instructions.is_empty() {
+    if has_authored_sections(run_context) {
+        // F-f08-16: one named system message per source, in the gateway's order, ahead of
+        // everything else in the Context tier. The same text as the single message below.
+        messages.extend(
+            run_context
+                .authored_sections
+                .iter()
+                .filter(|section| !section.text.is_empty())
+                .map(|section| named_seed_message("system", &section.tag, section.text.clone())),
+        );
+    } else if !run_context.authored_instructions.is_empty() {
         messages.push(seed_message(
             "system",
             run_context.authored_instructions.clone(),
@@ -4078,7 +4280,11 @@ fn seed_order(
         // The person's standing profile (EP-8 S5): context about them, so the root loop only,
         // like the thread and the memory; Context tier, ahead of the conversation.
         if !run_context.user_profile.is_empty() {
-            messages.push(seed_message("system", run_context.user_profile.clone()));
+            messages.push(named_seed_message(
+                "system",
+                section_tag(section_names, PROFILE_SECTION_TAG),
+                run_context.user_profile.clone(),
+            ));
         }
         // The boundary already refuses any other role (`run_context::validate`); this is the
         // same rule held again where the history becomes messages, so that text the gateway
@@ -4091,7 +4297,11 @@ fn seed_order(
                 .map(|turn| seed_message(&turn.role, turn.content.clone())),
         );
         if !run_context.memory_block.is_empty() {
-            messages.push(seed_message("system", run_context.memory_block.clone()));
+            messages.push(named_seed_message(
+                "system",
+                section_tag(section_names, MEMORY_SECTION_TAG),
+                run_context.memory_block.clone(),
+            ));
         }
         // The thread goal (EP-7 S1): the owner's standing aim, recited as data under its own
         // header. Volatile, never cached: it changes whenever the owner edits the goal. A child
@@ -4208,6 +4418,34 @@ fn prompt_tier_plan(
     if messages.first()?.role != "system" {
         return None;
     }
+    // Tagged sections (F-f08-16): one Context message per section, counted only when the
+    // prompt really opens with them, name and text, in the gateway's order. Whether the
+    // switch let them through is read back from the messages, never assumed.
+    let sections: Vec<&pb::AuthoredSection> = run_context
+        .map(|run_context| {
+            run_context
+                .authored_sections
+                .iter()
+                .filter(|section| !section.text.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let named = !sections.is_empty()
+        && messages.len() > sections.len()
+        && sections
+            .iter()
+            .zip(&messages[1..])
+            .all(|(section, message)| {
+                message.role == "system"
+                    && message.name == section.tag
+                    && message.content == section.text
+            });
+    if named {
+        return Some(pb::PromptTierPlan {
+            stable_messages: 1,
+            context_messages: u32::try_from(sections.len()).unwrap_or(u32::MAX),
+        });
+    }
     let instructions = run_context
         .map(|run_context| run_context.authored_instructions.as_str())
         .filter(|text| !text.is_empty());
@@ -4255,6 +4493,9 @@ async fn seed_messages(ctx: &LoopContext<'_>, goal: &str) -> Vec<pb::ChatMessage
         goal,
         &ctx.req.run_id,
         ctx.req.zdr || ctx.route.is_waived(),
+        // The org's `ext.skills` the gateway stated on this run; a child shares its parent's request, so it
+        // reads the same word.
+        crate::skill_ext_policy::ExtSkills::from_token(&ctx.req.ext_skills),
     )
     .await;
     let skills = (!skill_blocks.is_empty()).then(|| {
@@ -4268,7 +4509,14 @@ async fn seed_messages(ctx: &LoopContext<'_>, goal: &str) -> Vec<pb::ChatMessage
     // never reaches the parent's context, only its conclusion does. What a child
     // does share is the authored instructions: they are the run's standing
     // rules, not its transcript.
-    let run_context = ctx.req.run_context.as_ref();
+    // With the section switch off the tagged sections are dropped here, so the seed is the one
+    // an executor without the field would build (F-f08-16).
+    let gated = ctx
+        .req
+        .run_context
+        .as_ref()
+        .map(|run_context| gated_run_context(run_context, prompt_section_names_enabled()));
+    let run_context = gated.as_deref();
     let root = ctx.depth == 0;
     if let Some(run_context) = run_context {
         // Sizes and counts only: the instructions, the turns and the memory are
@@ -4277,6 +4525,7 @@ async fn seed_messages(ctx: &LoopContext<'_>, goal: &str) -> Vec<pb::ChatMessage
             run_id = %ctx.req.run_id,
             depth = ctx.depth,
             instructions_bytes = run_context.authored_instructions.len(),
+            authored_sections = run_context.authored_sections.len(),
             history_messages = if root { run_context.history.len() } else { 0 },
             memory_bytes = if root { run_context.memory_block.len() } else { 0 },
             profile_bytes = if root { run_context.user_profile.len() } else { 0 },
@@ -4443,7 +4692,10 @@ async fn run_rounds(
     // It is per turn and in memory, outside the fold, so a restored or parked loop starts it afresh, and
     // a delegated child builds its own. With the switch off nothing is built.
     let guard_mode = loop_guard_mode();
-    let mut loop_guard = guard_mode.observes().then(LoopGuard::new);
+    let result_aware = loop_guard_result_aware();
+    let mut loop_guard = guard_mode
+        .observes()
+        .then(|| LoopGuard::new().with_result_awareness(result_aware));
     // WS11.S6: the first non-discovery tool class this loop chooses, counted once.
     let mut routing_first = RoutingFirstTool::new(&ctx.allowlist);
     // The deferred tools `tool_search` has revealed in this loop (W5-070). A revealed tool is offered
@@ -4602,6 +4854,9 @@ async fn run_rounds(
     // that delegates on every round cannot drive max_rounds² inference calls.
     // The question calls this loop has admitted (WS14 S4), counted across its rounds.
     let asks = std::sync::atomic::AtomicU32::new(0);
+    // The forms MCP servers put to the run's owner through this loop (EP-4 S7). A form becomes a
+    // question, so it shares the run's question cap with `ask_user`: the cap counts both.
+    let elicitations = std::sync::atomic::AtomicU32::new(0);
     while rounds_executed + delegated_rounds < max_rounds {
         // A run pinned to the ChatGPT subscription stops the moment ANY of its
         // loops had a round served by another route. This loop may be the
@@ -5893,6 +6148,13 @@ async fn run_rounds(
         let hand_back_notes =
             std::sync::Mutex::new(std::collections::HashMap::<String, String>::new());
         let hand_back_notes = &hand_back_notes;
+        // EP-4 S7 (audit P2-ec-03-rel1): the ledger reservation of each MCP form this round holds, by step
+        // id. A held call is not over, so the round closes its reservation only once it knows the form's
+        // fate: it stays open when the form is put to the owner (the resumed run closes it with the held
+        // call's real result), and it is closed as an unknown outcome when the form is cancelled.
+        let held_reservations =
+            std::sync::Mutex::new(std::collections::HashMap::<String, String>::new());
+        let held_reservations = &held_reservations;
         let release_prereserved = release_prereserved.as_deref();
         let outcomes_by_slot: Vec<Option<runtime_loop::StepOutcome>> = {
             let dispatches: Vec<Option<LoopSubagentDispatch<'_, '_>>> = slots
@@ -5924,6 +6186,19 @@ async fn run_rounds(
                 Vec::new()
             };
             let shadow_turns = &shadow_turns;
+            // EP-4 S7: whether this round's MCP calls may carry a server's form to the run's owner,
+            // decided once for the round from facts of the run. False for a zero-retention, waived,
+            // delegated or Space run, for a run that cannot pause in place (no fold writer, or the
+            // question switch off), for a run at its question cap, and with the switch off.
+            let elicitation_allowed =
+                crate::mcp_gateway::allow_elicitation(&crate::mcp_gateway::ElicitationRun {
+                    depth: ctx.depth,
+                    zdr: req.zdr,
+                    waived: ctx.route.is_waived(),
+                    parkable: ask_resume && folds.is_active(),
+                    space_scoped: !req.space_id.trim().is_empty(),
+                    questions_asked: questions_counted(&asks, &elicitations),
+                });
             // A connected-app read in this round counts as a flagged one for the egress calls of
             // the same round: those start before any result of the round is seen (WS23-S3).
             let read_in_round = slots.iter().any(|slot| {
@@ -6033,6 +6308,9 @@ async fn run_rounds(
                             cause: Some(CauseCode::TaintedEgress),
                             screening_taint: false,
                             pause_facts: approval_cause::CallFacts::default(),
+                            pending_elicitation: None,
+                            grounded: false,
+                            data_category: None,
                         });
                     }
                     // The run's egress ceiling for this call (EP-9 E3, D-E3), from what the run is
@@ -6092,6 +6370,9 @@ async fn run_rounds(
                             cause: None,
                             screening_taint: false,
                             pause_facts: approval_cause::CallFacts::default(),
+                            pending_elicitation: None,
+                            grounded: false,
+                            data_category: None,
                         });
                     }
                     // The release's pre-reserve could not be recorded (it failed, or its answer
@@ -6153,6 +6434,9 @@ async fn run_rounds(
                                     cause: None,
                                     screening_taint: false,
                                     pause_facts: approval_cause::CallFacts::default(),
+                                    pending_elicitation: None,
+                                    grounded: false,
+                                    data_category: None,
                                 });
                             }
                             // The action exists under another identity: whatever holds the
@@ -6335,6 +6619,8 @@ async fn run_rounds(
                                     ctx.space_retrieval,
                                     // The run's browser page dispatch (WS21-S5a); none for a child or ZDR.
                                     browser.as_ref(),
+                                    // EP-4 S7: whether an MCP call may carry its server's form.
+                                    elicitation_allowed,
                                 )
                             },
                             // The ledger's word first: a call that holds an effectful reservation
@@ -6342,7 +6628,9 @@ async fn run_rounds(
                             // the retry classifier says. The ledger classifies through the same
                             // gate, so the two agree; this holds if they ever stop.
                             |result| {
-                                !runtime_loop::effect::ledger_fences_retry(
+                                // A held form is never replayed: the server's call is waiting.
+                                result.pending_elicitation.is_none()
+                                    && !runtime_loop::effect::ledger_fences_retry(
                                     ledger_entry.as_ref(),
                                     is_release,
                                 ) && runtime_loop::retry::tool_call_is_retryable(
@@ -6379,24 +6667,36 @@ async fn run_rounds(
                     })
                     };
                     if let (Some(entry), Some(result)) = (&ledger_entry, &outcome) {
-                        let closing = runtime_loop::effect::final_outcome_for(&result.status);
-                        if let Err(reason) = runtime_loop::effect::finalize(
-                            ctx.session_channel,
-                            ctx.session_bearer,
-                            &req.run_id,
-                            &entry.action_id,
-                            closing,
-                        )
-                        .await
-                        {
-                            // The row stays `reserved`; the session-core sweep closes it
-                            // as `unknown_outcome`, which is honest and never a replay.
-                            warn!(
-                                run_id = %req.run_id,
-                                tool = %call.name,
-                                %reason,
-                                "run_agent: effect ledger finalize failed; the reservation stays open"
-                            );
+                        match runtime_loop::effect::final_outcome_for(&result.status) {
+                            Some(closing) => {
+                                if let Err(reason) = runtime_loop::effect::finalize(
+                                    ctx.session_channel,
+                                    ctx.session_bearer,
+                                    &req.run_id,
+                                    &entry.action_id,
+                                    closing,
+                                )
+                                .await
+                                {
+                                    // The row stays `reserved`; the session-core sweep closes it
+                                    // as `unknown_outcome`, which is honest and never a replay.
+                                    warn!(
+                                        run_id = %req.run_id,
+                                        tool = %call.name,
+                                        %reason,
+                                        "run_agent: effect ledger finalize failed; the reservation stays open"
+                                    );
+                                }
+                            }
+                            // A held form (EP-4 S7, audit P2-ec-03-rel1): the call is not over, so nothing
+                            // closes its reservation here. The round decides below: a form cancelled closes
+                            // it, a form put to the owner leaves it open for the resumed run.
+                            None => {
+                                held_reservations
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .insert(step_id.clone(), entry.action_id.clone());
+                            }
                         }
                     }
                     outcome
@@ -6415,6 +6715,9 @@ async fn run_rounds(
         // the continuation, and a second model loop beside it would write the same
         // run twice.
         if released_step_replayed.load(std::sync::atomic::Ordering::SeqCst) {
+            // The round ends here and no held form of it is put to its owner: each one's reservation is
+            // closed as unknown, as it was before a held form kept its reservation open.
+            close_held_form_reservations(ctx, held_reservations).await;
             return Err(tonic::Status::failed_precondition(
                 "continuation_already_consumed",
             ));
@@ -6429,6 +6732,10 @@ async fn run_rounds(
         // Where the waiting `ask_user` call's placeholder sits in `outcomes` (WS14 S5). It stands in
         // for the call until the round's pause is decided below, then is replaced or removed.
         let mut input_outcome_at: Option<usize> = None;
+        // The MCP form of this round that waits in the run (EP-4 S7), and where its call's placeholder
+        // sits in `outcomes`. It shares the round's one input pause with `ask_user`.
+        let mut elicit_pause: Option<ElicitationPause> = None;
+        let mut elicit_outcome_at: Option<usize> = None;
 
         for (index, (slot, outcome)) in slots.into_iter().zip(outcomes_by_slot).enumerate() {
             let (call, step_id, outcome) = match (slot, outcome) {
@@ -6449,6 +6756,53 @@ async fn run_rounds(
                 (CallSlot::ToDispatch { call, step_id }, Some(outcome)) => (call, step_id, outcome),
                 (CallSlot::ToDispatch { .. }, None) => {
                     unreachable!("every ToDispatch slot produced an outcome in phase 2")
+                }
+            };
+
+            // EP-4 S7: an MCP call that came back with a form its server asked, which the gateway
+            // holds. The round has ONE input pause: this form takes it unless something of the round
+            // already holds it (a second form, an `ask_user` question, or an approval pause raised
+            // before this call; one raised after it is checked once the loop is done). A form that
+            // cannot have it is cancelled at once, so the server is not left waiting, and the call
+            // reads that it could not be put to the owner.
+            let outcome = match outcome.pending_elicitation.clone() {
+                None => outcome,
+                Some(held) => {
+                    let free = ctx.depth == 0
+                        && elicit_pause.is_none()
+                        && input_pause.is_none()
+                        && pending_pause.is_none();
+                    if free {
+                        elicit_pause = Some(ElicitationPause {
+                            index,
+                            step_id: step_id.clone(),
+                            tool: call.name.clone(),
+                            arguments_digest: elicitation_arguments_digest(
+                                req,
+                                &step_id,
+                                &call.name,
+                                &call.arguments_json,
+                            ),
+                            pending: held,
+                        });
+                        // The call has no outcome until the round's pause is decided below.
+                        elicit_outcome_at = Some(outcomes.len());
+                        outcomes.push(ToolStepResult {
+                            name: call.name.clone(),
+                            output: String::new(),
+                            error: None,
+                            content_read: false,
+                        });
+                        continue;
+                    }
+                    warn!(
+                        run_id = %req.run_id,
+                        tool = %call.name,
+                        "run_agent: a second input pause in the round; the MCP form was cancelled"
+                    );
+                    cancel_held_form_of(ctx, &held.elicitation_id).await;
+                    close_held_form_reservation(ctx, held_reservations, &step_id).await;
+                    StepOutcome::failed(crate::mcp_gateway::FORM_NOT_PUT_NOW)
                 }
             };
 
@@ -6686,10 +7040,7 @@ async fn run_rounds(
             )
             .await;
 
-            if call.name == "knowledge_search"
-                && outcome.error.is_empty()
-                && knowledge_search_found_grounding(&outcome.output)
-            {
+            if knowledge_search_grounds(&call.name, &outcome) {
                 grounded = true;
             }
 
@@ -6712,6 +7063,16 @@ async fn run_rounds(
         // An approval pause wins the round (WS14 S5): the question did not wait, and the call reads
         // that, so it asks again after the run resumes. The approval path below runs unchanged.
         if pending_pause.is_some() {
+            // An MCP form that sat beside the approval pause (EP-4 S7) waits for no one: the round's
+            // one pause is the approval's. The held call is cancelled, and its call reads that.
+            if let Some(form) = elicit_pause.take() {
+                cancel_held_form_of(ctx, &form.pending.elicitation_id).await;
+                close_held_form_reservation(ctx, held_reservations, &form.step_id).await;
+                if let Some(outcome) = elicit_outcome_at.take().and_then(|at| outcomes.get_mut(at))
+                {
+                    outcome.error = Some(crate::mcp_gateway::FORM_NOT_PUT_NOW.to_owned());
+                }
+            }
             if let Some(at) = input_outcome_at.take() {
                 if let Some(outcome) = outcomes.get_mut(at) {
                     outcome.error = Some(format!(
@@ -6993,6 +7354,114 @@ async fn run_rounds(
             }
         }
 
+        // An MCP server's form that waits in the run (EP-4 S7): the run pauses on the call, with its
+        // fold saved first and the resume question created second, exactly as an `ask_user` pause is.
+        // The other calls of the round are recorded; only this call has no outcome. A form that
+        // cannot be put (no fold, no credential, a refused create) is cancelled and its call gets the
+        // tool error: the round goes on, and nothing is asked as the next turn, because a retry
+        // would run the server's work again.
+        if let (Some(form), Some(at)) = (elicit_pause.take(), elicit_outcome_at.take()) {
+            let ended = ctx.route.is_stopped() || ctx.refusal.latched().is_some();
+            let pause_fold = match fold_authority.as_ref() {
+                Some(authority) if folds.is_active() && !ended => {
+                    // Every outcome except the form's call's, which has none.
+                    let completed = runtime_loop::fold::fold_completed(
+                        &round_calls,
+                        Some(form.index),
+                        outcomes
+                            .iter()
+                            .enumerate()
+                            .filter(|(position, _)| *position != at)
+                            .map(|(_, o)| (o.output.as_str(), o.error.as_deref().unwrap_or(""))),
+                    );
+                    let fold = runtime_loop::fold::build_fold(
+                        &runtime_loop::fold::Snapshot {
+                            run_id: &req.run_id,
+                            segment_no: folds.segment(),
+                            rounds_executed,
+                            delegated_rounds,
+                            step_seq,
+                            children_started: children_started
+                                .load(std::sync::atomic::Ordering::Relaxed),
+                            grounded,
+                            compaction_triggered,
+                            // The round's own searches are in the open round, not yet in the set:
+                            // see `retrievals_at_round_start`.
+                            attempted_retrievals: retrievals_at_round_start
+                                .as_ref()
+                                .unwrap_or(&attempted_retrievals),
+                            messages: &messages,
+                            authority: authority.clone(),
+                            prompt_digest: &fold_prompt_digest,
+                            effect_ledger: ctx.effect_ledger,
+                            connector_taint: ctx.taint.is_marked(),
+                            connector_scope: connector_scope_of(req),
+                            // The answer resumes a run with no descriptor, so the fold keeps the
+                            // tool definitions the run was offered.
+                            offered_tools: Some(&ctx.tools),
+                        },
+                        Some(mp_contracts::loop_fold::RoundInFlight {
+                            assistant_content: response.content.clone(),
+                            calls: round_calls.clone(),
+                            completed,
+                        }),
+                        None,
+                    );
+                    folds.pause_fold(fold)
+                }
+                _ => None,
+            };
+            let paused = if ended {
+                // The run is over, so it leaves no question behind; the loop top ends it.
+                cancel_held_form_of(ctx, &form.pending.elicitation_id).await;
+                None
+            } else {
+                pause_for_elicitation(
+                    ctx,
+                    &form,
+                    rounds_executed.saturating_add(delegated_rounds),
+                    pause_fold,
+                )
+                .await
+            };
+            if let Some(mut paused) = paused {
+                // A form put to the owner is a question of the run: it counts against the cap.
+                elicitations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Built outside the loop, which alone holds the tally: a pause is an invocation
+                // that spent rounds, and the continuation starts its own tally.
+                paused.usage = Some(ctx.usage.snapshot());
+                return Ok(RoundsResult {
+                    compaction_triggered,
+                    outcome: RoundsOutcome::Paused(paused),
+                    rounds_executed,
+                    delegated_rounds,
+                    grounded,
+                });
+            }
+            // The form was cancelled: its call is a failed call, recorded as one. The held call's real
+            // result never comes, so its reservation closes as unknown (audit P2-ec-03-rel1).
+            close_held_form_reservation(ctx, held_reservations, &form.step_id).await;
+            let step = StepOutcome::failed(crate::mcp_gateway::FORM_NOT_ASKED);
+            let arguments = response
+                .tool_calls
+                .get(form.index)
+                .map_or("", |call| call.arguments_json.as_str());
+            record_tool_step(
+                ctx.session_channel,
+                &req.run_id,
+                &form.step_id,
+                &form.tool,
+                arguments,
+                &step,
+                zdr,
+                ctx.session_bearer,
+            )
+            .await;
+            if let Some(outcome) = outcomes.get_mut(at) {
+                outcome.error = Some(crate::mcp_gateway::FORM_NOT_ASKED.to_owned());
+            }
+        }
+
         // `ask_user` (WS14 S4): a question a call put to the owner ends the turn, and the turn answers
         // with the questions as prose. That prose is what an older client shows; the card comes from
         // the `user_question` event the gateway sends once the run completes. A call that failed asked
@@ -7032,6 +7501,7 @@ async fn run_rounds(
                 &response.tool_calls,
                 &outcomes,
                 paused_index,
+                result_aware,
             ));
             if verdict != Verdict::Continue {
                 info!(
@@ -8799,6 +9269,8 @@ fn record_delegation_memory(parent: &LoopContext<'_>, goal: &str, outcome: &str)
         memory_id: String::new(),
         user_id: parent.req.user_id.clone(),
         origin: "delegation".to_owned(),
+        // The parent run whose delegation this records (EP-8 S10). Only an AGENT_SELF save reads it.
+        run_id: parent.req.run_id.clone(),
     };
     let channel = parent.session_channel.clone();
     let run_id = parent.req.run_id.clone();
@@ -8860,7 +9332,7 @@ fn tool_step_id(prefix: &str, seq: u32, call: &pb::ToolCall) -> String {
 /// reports `status: "ok"` — i.e. the org's knowledge base actually returned
 /// relevant results, not `no_results`/`low_confidence`/`degraded`. Malformed
 /// output (never expected from the real tool) is treated as ungrounded.
-fn knowledge_search_found_grounding(output: &str) -> bool {
+pub(crate) fn knowledge_search_found_grounding(output: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(output)
         .ok()
         .and_then(|value| {
@@ -8870,6 +9342,15 @@ fn knowledge_search_found_grounding(output: &str) -> bool {
                 .map(str::to_owned)
         })
         .is_some_and(|status| status == "ok")
+}
+
+/// Whether a call's outcome grounds the answer (HONESTY_CONTRACT, F-f02-11): a `knowledge_search` that ran
+/// without error and reports `status: "ok"`. A parked result is grounded by the step, which read the text
+/// before it was held, because the loop sees only the handle envelope; an inline result is read from its output.
+fn knowledge_search_grounds(call_name: &str, outcome: &StepOutcome) -> bool {
+    call_name == "knowledge_search"
+        && outcome.error.is_empty()
+        && (outcome.grounded || knowledge_search_found_grounding(&outcome.output))
 }
 
 /// Canonical signature used only to suppress exact retrieval loops. Invalid or
@@ -10153,25 +10634,31 @@ does not exist:\n",
 /// The round's calls as the loop guard reads them: each call the model asked for, with how it ended.
 /// `outcomes` holds one entry per call except the one a pause holds back (`paused`), in call order,
 /// so the two are walked together. A suppressed duplicate reads as an error; the guard's rules count
-/// a call that gave no result the same way.
+/// a call that gave no result the same way. With `result_aware`, a call that ran carries the digest of
+/// its output, never the output itself; the digest lives in memory for this turn only.
 fn loop_guard_records(
     calls: &[pb::ToolCall],
     outcomes: &[ToolStepResult],
     paused: Option<usize>,
+    result_aware: bool,
 ) -> Vec<CallRecord> {
     calls
         .iter()
         .enumerate()
         .filter(|(index, _)| Some(*index) != paused)
         .zip(outcomes)
-        .map(|((_, call), outcome)| CallRecord {
-            tool: call.name.clone(),
-            signature: call_signature(&call.name, &call.arguments_json),
-            outcome: if outcome.error.is_some() {
-                CallOutcome::Err
-            } else {
-                CallOutcome::Ok
-            },
+        .map(|((_, call), outcome)| {
+            let failed = outcome.error.is_some();
+            CallRecord {
+                tool: call.name.clone(),
+                signature: call_signature(&call.name, &call.arguments_json),
+                outcome: if failed {
+                    CallOutcome::Err
+                } else {
+                    CallOutcome::Ok
+                },
+                result_digest: (result_aware && !failed).then(|| result_digest(&outcome.output)),
+            }
         })
         .collect()
 }
@@ -10215,6 +10702,19 @@ fn loop_guard_mode() -> LoopGuardMode {
     static MODE: std::sync::OnceLock<LoopGuardMode> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| {
         LoopGuardMode::from_env_value(std::env::var(LOOP_GUARD_ENV).ok().as_deref())
+    })
+}
+
+/// `LOOP_GUARD_RESULT_AWARE` (WS25-S2), read once per process with `LOOP_GUARD_MODE`. Only the literal `true`
+/// turns it on. With it off, a call is judged as it was before result digests existed.
+fn loop_guard_result_aware() -> bool {
+    static RESULT_AWARE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *RESULT_AWARE.get_or_init(|| {
+        mp_contracts::loop_guard::result_aware_from_env_value(
+            std::env::var(mp_contracts::loop_guard::RESULT_AWARE_ENV)
+                .ok()
+                .as_deref(),
+        )
     })
 }
 
@@ -10351,10 +10851,12 @@ async fn record_tool_step(
     // NAME so the audit details.tool is the name, not the opaque provider call id
     // that the step_id suffix uses (E5). Tool identifiers never contain spaces,
     // so the space-delimited prefix stays parseable.
-    let detail = format!(
-        "[data_category={} zdr={zdr} tool={tool_name}] ",
-        data_category(tool_name)
-    );
+    // The category is the one the step was held under when its outcome carries one (a read of a held
+    // result, F-f02-11), and the tool's own category otherwise.
+    let category = outcome
+        .data_category
+        .unwrap_or_else(|| data_category(tool_name));
+    let detail = format!("[data_category={category} zdr={zdr} tool={tool_name}] ");
     let (output, error) = if zdr {
         // ZDR persistence is classification/audit metadata only. The borrowed
         // `outcome` remains untouched and is still fed ephemerally to the next
@@ -10744,9 +11246,10 @@ mod shell_rule_proposals {
     #[test]
     fn shell_rule_names_program_and_subcommand_only() {
         let _switch = ShellRuleSwitch::set(true);
-        let command = "git commit -m 'Rettet særs viktig feil'";
+        // A read-only row (`git log`): its argument must not reach the rule.
+        let command = "git log --grep='Rettet særs viktig feil'";
         let cause = shell_cause(command, false, false);
-        assert_eq!(cause.action_key, "shell:git commit");
+        assert_eq!(cause.action_key, "shell:git log");
         assert!(!cause.action_key.contains("Rettet"));
         // The rule changes what an "Always" would name, never which scopes the pause offers or
         // which call the digest identifies.
@@ -10761,6 +11264,11 @@ mod shell_rule_proposals {
         for command in ["git status && git push", "git log | head", "rm -rf build", "FOO=1 ls"] {
             assert_eq!(shell_cause(command, false, false).action_key, "shell", "{command}");
         }
+        // A program row removed by F-f09-14 yields no rule.
+        assert_eq!(
+            shell_cause("git commit -m x", false, false).action_key,
+            "shell"
+        );
     }
 
     #[test]
@@ -11034,6 +11542,18 @@ async fn pause_for_approval(
 /// call was checked by `ask::parse` already, so that does not happen); an empty digest sends the
 /// question to the next turn.
 fn ask_arguments_digest(req: &pb::RunAgentRequest, step_id: &str, arguments_json: &str) -> String {
+    elicitation_arguments_digest(req, step_id, runtime_loop::ask::ASK_TOOL, arguments_json)
+}
+
+/// The digest of the exact call a pause waits on (the run, org, user, step, tool and arguments),
+/// recorded in the pause fold so a resume refuses a swapped call. Empty if the arguments are not
+/// JSON. It serves an `ask_user` pause and an MCP form's pause alike (EP-4 S7).
+fn elicitation_arguments_digest(
+    req: &pb::RunAgentRequest,
+    step_id: &str,
+    tool_name: &str,
+    arguments_json: &str,
+) -> String {
     let Ok(input) = serde_json::from_str::<JsonValue>(arguments_json) else {
         return String::new();
     };
@@ -11042,7 +11562,7 @@ fn ask_arguments_digest(req: &pb::RunAgentRequest, step_id: &str, arguments_json
         &req.org_id,
         &req.user_id,
         step_id,
-        runtime_loop::ask::ASK_TOOL,
+        tool_name,
         &input,
         "ask",
     );
@@ -11231,6 +11751,266 @@ async fn pause_for_input(
     );
 
     InputPauseResult::Paused(pb::RunAgentResponse {
+        status: "awaiting_input".to_owned(),
+        final_output: String::new(),
+        rounds_executed,
+        grounded: false,
+        // A pause is not a finish; the resumed run reports its own compaction state.
+        compaction_triggered: false,
+        // Not a failure, so no failure reason.
+        failure_code: String::new(),
+        retry_after_ms: None,
+        resets_at: String::new(),
+        park_reason: String::new(),
+        loop_stop_code: String::new(),
+        // The caller that holds the loop's tally sets it.
+        usage: None,
+        // The caller that holds the loop's round log sets it.
+        round_timing: Vec::new(),
+    })
+}
+
+/// The questions this loop has put to the owner: the `ask_user` calls it admitted plus the MCP forms
+/// it put (EP-4 S7). One tally, so a form and an `ask_user` question share the run's cap.
+fn questions_counted(
+    asks: &std::sync::atomic::AtomicU32,
+    elicitations: &std::sync::atomic::AtomicU32,
+) -> u32 {
+    asks.load(std::sync::atomic::Ordering::SeqCst)
+        .saturating_add(elicitations.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// Cancel the form the gateway holds under `elicitation_id` for this run's owner, so the server is
+/// told no answer will come and its call ends at once. Best effort: a gateway this service holds no
+/// credential for cannot be reached, and the gateway's own hold then expires the form.
+async fn cancel_held_form_of(ctx: &LoopContext<'_>, elicitation_id: &str) {
+    let req = ctx.req;
+    #[cfg(test)]
+    runtime_loop::note_cancelled_form(elicitation_id);
+    match crate::mcp_gateway::GovernedMcp::shared() {
+        Some(governed) => {
+            runtime_loop::cancel_held_form(governed, &req.org_id, &req.user_id, elicitation_id)
+                .await;
+        }
+        None => warn!(
+            run_id = %req.run_id,
+            elicitation_id,
+            "run_agent: an MCP form could not be cancelled, there is no gateway credential; the \
+             gateway's hold expires it"
+        ),
+    }
+}
+
+/// Close the ledger reservation of a held MCP form that the round will not put to its owner (audit
+/// P2-ec-03-rel1). The gateway has cancelled the held call, so its real result never comes and its
+/// outcome is unknown: that is recorded, never a replay. A call with no reservation (a read, or the
+/// ledger off) has nothing to close.
+async fn close_held_form_reservation(
+    ctx: &LoopContext<'_>,
+    held: &std::sync::Mutex<std::collections::HashMap<String, String>>,
+    step_id: &str,
+) {
+    let action_id = held
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(step_id);
+    if let Some(action_id) = action_id {
+        close_held_reservation_as_unknown(ctx, &action_id).await;
+    }
+}
+
+/// Close every reservation a round still holds open for its MCP forms, as unknown (audit
+/// P2-ec-03-rel1). The round ends without putting any of them to its owner.
+async fn close_held_form_reservations(
+    ctx: &LoopContext<'_>,
+    held: &std::sync::Mutex<std::collections::HashMap<String, String>>,
+) {
+    let action_ids: Vec<String> = held
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .drain()
+        .map(|(_, action_id)| action_id)
+        .collect();
+    for action_id in &action_ids {
+        close_held_reservation_as_unknown(ctx, action_id).await;
+    }
+}
+
+/// Record `unknown_outcome` for one reservation. A failed finalize leaves the row `reserved`, which
+/// the session-core sweep closes as unknown: honest, and never a replay.
+async fn close_held_reservation_as_unknown(ctx: &LoopContext<'_>, action_id: &str) {
+    if let Err(reason) = runtime_loop::effect::finalize(
+        ctx.session_channel,
+        ctx.session_bearer,
+        &ctx.req.run_id,
+        action_id,
+        "unknown_outcome",
+    )
+    .await
+    {
+        warn!(
+            run_id = %ctx.req.run_id,
+            %reason,
+            "run_agent: effect ledger finalize failed; the held form's reservation stays open"
+        );
+    }
+}
+
+/// Input pause on an MCP server's form (EP-4 S7): park the run on the MCP call the gateway holds so
+/// the owner's answer continues the same run. The order is [`pause_for_input`]'s: the fold is durable
+/// BEFORE the question exists, so a fast answer-and-continue can always claim it. The fold is saved
+/// under the elicitation pause reference (`{run}:{step}:elicit:1`), which is also the resume
+/// question's idempotency key, and records the id of the held form; only on a saved fold is the
+/// question created, with `resume` delivery and origin `mcp_elicitation`, through the execution
+/// service's own credential (session-core lets only that principal name a server as an origin).
+///
+/// Anything that stops the pause (no writer, a fold that was refused or not saved, no credential, a
+/// form with nothing to ask or no hold left, a refused create, a question that is not the resume row
+/// asked for) closes the fold if one was saved, cancels the held call, and returns `None`: the call
+/// gets a tool error and the round goes on. There is NO `next_turn` fallback: asking the question
+/// as the next turn would end the turn and a retry would run the server's work again.
+///
+/// Logs carry ids and closed tokens only, never the form.
+async fn pause_for_elicitation(
+    ctx: &LoopContext<'_>,
+    pause: &ElicitationPause,
+    rounds_executed: u32,
+    mut pause_fold: Option<runtime_loop::fold::PauseFold<'_, '_>>,
+) -> Option<pb::RunAgentResponse> {
+    let req = ctx.req;
+    let cancelled = |reason: &'static str| {
+        warn!(
+            run_id = %req.run_id,
+            elicitation_id = %pause.pending.elicitation_id,
+            reason,
+            "run_agent: an MCP form could not be put to the owner; the call was cancelled"
+        );
+        metrics::counter!("mcp_elicitation_not_asked_total", "reason" => reason).increment(1);
+    };
+    // The admission excludes these runs; the rule is checked again so nothing of a zero-retention or
+    // waived run is ever saved or asked.
+    if req.zdr || ctx.route.is_waived() || ctx.depth > 0 {
+        cancelled("retention");
+        cancel_held_form_of(ctx, &pause.pending.elicitation_id).await;
+        return None;
+    }
+    let Some(fold) = pause_fold.as_mut() else {
+        cancelled("no_fold_writer");
+        cancel_held_form_of(ctx, &pause.pending.elicitation_id).await;
+        return None;
+    };
+    if pause.arguments_digest.is_empty() {
+        cancelled("no_digest");
+        cancel_held_form_of(ctx, &pause.pending.elicitation_id).await;
+        return None;
+    }
+    // The question is built first: a hold that is already over, or a form with nothing to ask, saves
+    // nothing. Its idempotency key is the pause reference the fold is saved under.
+    let Some(request) = crate::mcp_gateway::elicitation_question(
+        &req.run_id,
+        &pause.step_id,
+        &req.org_id,
+        &pause.pending,
+        1,
+        chrono::Utc::now().timestamp(),
+    ) else {
+        cancelled("form_not_askable");
+        cancel_held_form_of(ctx, &pause.pending.elicitation_id).await;
+        return None;
+    };
+    let Ok(bearer) = ctx.terminal_tokens.question_origin_token(&req.org_id).await else {
+        cancelled("no_credential");
+        cancel_held_form_of(ctx, &pause.pending.elicitation_id).await;
+        return None;
+    };
+    let pause_ref = mp_contracts::user_question::input_pause_ref(
+        &req.run_id,
+        &pause.step_id,
+        mp_contracts::user_question::ORIGIN_MCP_ELICITATION,
+    );
+    debug_assert_eq!(request.idempotency_key, pause_ref);
+    match fold
+        .save_elicitation(
+            &pause_ref,
+            &pause.step_id,
+            &pause.tool,
+            &pause.arguments_digest,
+            &pause.pending.elicitation_id,
+        )
+        .await
+    {
+        runtime_loop::fold::PauseSaved::Saved { .. } => {}
+        // A tombstone is never resumable, and a fold that was not saved cannot be resumed: neither
+        // may sit behind a question that waits. A saved tombstone is closed like any pause fold.
+        runtime_loop::fold::PauseSaved::Tombstoned { .. } => {
+            fold.close_after_failed_pause().await;
+            cancelled("fold_tombstoned");
+            cancel_held_form_of(ctx, &pause.pending.elicitation_id).await;
+            return None;
+        }
+        runtime_loop::fold::PauseSaved::NotSaved => {
+            fold.close_after_failed_pause().await;
+            cancelled("fold_not_saved");
+            cancel_held_form_of(ctx, &pause.pending.elicitation_id).await;
+            return None;
+        }
+    }
+    // The fold is durable: now the question. A lost response is retried once under the same key; the
+    // store replays a create that committed, and the replayed row is checked like any other.
+    let mut retried = false;
+    let created: Result<pb::RunQuestion, &'static str> = loop {
+        match runtime_loop::create_elicitation_question(
+            ctx.session_channel,
+            &bearer,
+            request.clone(),
+        )
+        .await
+        {
+            Ok(question) if is_resume_question_of(&question, &req.run_id, &pause.step_id) => {
+                break Ok(question);
+            }
+            Ok(_) => break Err("question_not_resume"),
+            Err(status) if !retried && is_transport_failure(status.code()) => {
+                retried = true;
+                warn!(
+                    run_id = %req.run_id,
+                    code = ?status.code(),
+                    "run_agent: the MCP form's question was not created; trying once more under the same key"
+                );
+            }
+            Err(status) => {
+                warn!(
+                    run_id = %req.run_id,
+                    code = ?status.code(),
+                    "run_agent: the MCP form's question was refused or could not be created"
+                );
+                break Err("question_refused");
+            }
+        }
+    };
+    let question = match created {
+        Ok(question) => question,
+        Err(reason) => {
+            // No orphan paused row stays behind a question that will not wait.
+            fold.close_after_failed_pause().await;
+            cancelled(reason);
+            cancel_held_form_of(ctx, &pause.pending.elicitation_id).await;
+            return None;
+        }
+    };
+
+    let mut snapshot = ctx.state.get_or_create(&req.run_id);
+    snapshot.status = crate::state::RunStatus::AwaitingInput;
+    ctx.state.update(snapshot);
+
+    info!(
+        run_id = %req.run_id,
+        question_id = %question.id,
+        elicitation_id = %pause.pending.elicitation_id,
+        "run_agent: run paused for an MCP form"
+    );
+
+    Some(pb::RunAgentResponse {
         status: "awaiting_input".to_owned(),
         final_output: String::new(),
         rounds_executed,
@@ -13617,6 +14397,105 @@ mod tests {
             .all(|tool| tool.name != crate::runtime_loop::owner_reads::TOOL_NAME));
     }
 
+    /// A policy whose server view offers the shipped owner action whenever it is asked, and counts
+    /// the asks. A retention-bound run must never ask.
+    #[derive(Default)]
+    struct CountingTicketView {
+        asked: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingTicketView {
+        fn asks(&self) -> usize {
+            self.asked.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for CountingTicketView {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, Status> {
+            Ok(crate::capability_policy::CapabilityDecision::Allow)
+        }
+
+        async fn resolve_server_tool_definitions(
+            &self,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<Vec<pb::ToolDefinition>, Status> {
+            self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(vec![pb::ToolDefinition {
+                name: crate::ticket_tools::TOOL_NAME.to_owned(),
+                description: "Control-resolved ticket action".to_owned(),
+                parameters_json: crate::ticket_tools::TICKET_CREATE_MODEL_PARAMETERS_JSON
+                    .to_owned(),
+            }])
+        }
+    }
+
+    /// The owner-action view is not fetched for a retention-bound run, a ZDR request or a waived
+    /// route alike: no reserved action is offered, and nothing is asked of Control or Capability
+    /// Core on its behalf. An ordinary run is asked once and offered the action (P2-ec-06-rel1).
+    #[tokio::test]
+    async fn the_owner_action_view_is_never_fetched_for_a_retention_bound_run() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::mcp_gateway::McpDoTools;
+        let source = FakeGoverned::default();
+
+        // The merged offer for a retention-bound run asks for no view and offers no owner action.
+        let policy = CountingTicketView::default();
+        let tools = merged_tool_defs("run-1", "org-1", "user-1", &[], &policy, false, true).await;
+        assert!(tools
+            .iter()
+            .all(|tool| tool.name != crate::ticket_tools::TOOL_NAME));
+        assert_eq!(
+            policy.asks(),
+            0,
+            "a retention-bound offer asked for the view"
+        );
+
+        // The whole offer, reached by a ZDR request and by a waived route.
+        let mut zdr_request = offer_request("run-zdr-view");
+        zdr_request.zdr = true;
+        for (name, request, waived) in [
+            ("a ZDR request", zdr_request, false),
+            ("a waived route", offer_request("run-waived-view"), true),
+        ] {
+            let policy = CountingTicketView::default();
+            let offered = offered_tools(
+                &request,
+                waived,
+                false,
+                &policy,
+                governance(ToolClassGate::Off, McpDoTools::Off, 40, &source),
+            )
+            .await;
+            assert!(
+                offered
+                    .defs
+                    .iter()
+                    .all(|tool| tool.name != crate::ticket_tools::TOOL_NAME),
+                "{name}: a reserved owner action was offered"
+            );
+            assert_eq!(
+                policy.asks(),
+                0,
+                "{name}: the owner-action view was asked for"
+            );
+        }
+
+        // The control: an ordinary run is asked for the view once and offered the action.
+        let policy = CountingTicketView::default();
+        let tools = merged_tool_defs("run-1", "org-1", "user-1", &[], &policy, false, false).await;
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == crate::ticket_tools::TOOL_NAME));
+        assert_eq!(policy.asks(), 1);
+    }
+
     #[test]
     fn knowledge_search_found_grounding_requires_status_ok() {
         assert!(knowledge_search_found_grounding(
@@ -13632,6 +14511,33 @@ mod tests {
             r#"{"status":"degraded","result_count":0}"#
         ));
         assert!(!knowledge_search_found_grounding("not-json"));
+    }
+
+    /// The loop grounds a `knowledge_search` call from its outcome (F-f02-11): a parked result the step marked
+    /// grounded counts, an inline one counts by its output, and a call that errored grounds nothing.
+    #[test]
+    fn a_knowledge_search_call_grounds_only_when_it_ran_without_error() {
+        let envelope = r#"{"handle_id":"res_0000000000000001","source":"[source: knowledge_search]","size_chars":900,"summary":"x","note":"n"}"#;
+        let mut parked = StepOutcome::completed(envelope.to_owned());
+        parked.grounded = true;
+        assert!(knowledge_search_grounds("knowledge_search", &parked));
+        let mut errored = parked.clone();
+        errored.error = "the search failed".to_owned();
+        assert!(
+            !knowledge_search_grounds("knowledge_search", &errored),
+            "an errored call grounds nothing, even a parked result"
+        );
+        let unmarked = StepOutcome::completed(envelope.to_owned());
+        assert!(
+            !knowledge_search_grounds("knowledge_search", &unmarked),
+            "a handle envelope the step did not mark grounded carries no status to ground on"
+        );
+        let inline = StepOutcome::completed(r#"{"status":"ok","results":[]}"#.to_owned());
+        assert!(knowledge_search_grounds("knowledge_search", &inline));
+        assert!(
+            !knowledge_search_grounds("web_fetch", &parked),
+            "only a knowledge_search grounds the answer"
+        );
     }
 
     type InferStream = Pin<Box<dyn futures::Stream<Item = Result<pb::InferChunk, Status>> + Send>>;
@@ -14600,9 +15506,46 @@ mod tests {
         ) -> Result<String, SessionTerminalTokenError> {
             Ok("test-scheduled-step-service-token".to_owned())
         }
+
+        async fn question_origin_token(
+            &self,
+            _org_id: &str,
+        ) -> Result<String, SessionTerminalTokenError> {
+            Ok("test-question-origin-service-token".to_owned())
+        }
     }
 
     static STATIC_TERMINAL_TOKENS: StaticTerminalTokens = StaticTerminalTokens;
+
+    /// A deployment that holds the terminal credentials but not the narrow scope that names an MCP
+    /// server as a question's origin (EP-4 S7): the trait's own default refuses it.
+    struct NoQuestionOriginCredential;
+
+    #[tonic::async_trait]
+    impl ManagedRunTokenProvider for NoQuestionOriginCredential {
+        async fn terminalize_token(
+            &self,
+            org_id: &str,
+        ) -> Result<String, SessionTerminalTokenError> {
+            STATIC_TERMINAL_TOKENS.terminalize_token(org_id).await
+        }
+
+        async fn heartbeat_token(
+            &self,
+            org_id: &str,
+        ) -> Result<String, SessionTerminalTokenError> {
+            STATIC_TERMINAL_TOKENS.heartbeat_token(org_id).await
+        }
+
+        async fn scheduled_step_token(
+            &self,
+            org_id: &str,
+        ) -> Result<String, SessionTerminalTokenError> {
+            STATIC_TERMINAL_TOKENS.scheduled_step_token(org_id).await
+        }
+    }
+
+    static NO_QUESTION_ORIGIN_CREDENTIAL: NoQuestionOriginCredential = NoQuestionOriginCredential;
 
     /// A lazily-connecting client to an address nothing listens on. Every
     /// `run_agent`/`run_agent_with_tools` test below is non-Space (`space_id`
@@ -16669,6 +17612,9 @@ mod tests {
             agent_tool_allowlist: None,
             // An ordinary run, which is what every run before coordinator mode sent.
             coordinator: false,
+            ext_skills: String::new(),
+            // No run token cap, which is what every run before MODEL_GATEWAY_DO_RUN_CAP sent.
+            max_run_tokens: 0,
         }
     }
 
@@ -16825,12 +17771,72 @@ mod tests {
             "please book a shipment to Oslo",
             "run_test",
             false,
+            crate::skill_ext_policy::ExtSkills::NotEnforced,
         )
         .await;
 
         assert_eq!(blocks.len(), 1);
         assert!(blocks[0].contains("## Skill: Shipment booking"));
         assert!(blocks[0].contains("get_shipping_quotes before book_shipment"));
+    }
+
+    /// P2-ec-01: the org's `ext.skills`, stated on the run, narrows what a Do run injects.
+    #[tokio::test]
+    async fn fetch_skill_context_applies_the_orgs_ext_skills() {
+        use crate::skill_ext_policy::ExtSkills;
+
+        let skill_in = |name: &str, scope: &str| pb::AgentSkill {
+            scope: scope.to_owned(),
+            ..sample_agent_skill(name, &["deploy"], "Run the deploy checklist first.")
+        };
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        rec.lock().unwrap().agent_skills = vec![
+            skill_in("OrgRunbook", "org"),
+            skill_in("MyRunbook", "user"),
+            skill_in("RoomRunbook", "space"),
+        ];
+        let session_channel = spawn_session_channel(rec).await;
+        let injected = |ext: ExtSkills| {
+            let session_channel = session_channel.clone();
+            async move {
+                let mut names: Vec<String> = fetch_skill_context(
+                    &session_channel,
+                    Some("test-bearer"),
+                    "org_test",
+                    "please deploy the service",
+                    "run_test",
+                    false,
+                    ext,
+                )
+                .await
+                .into_iter()
+                .map(|block| block.lines().next().unwrap_or_default().to_owned())
+                .collect();
+                names.sort();
+                names
+            }
+        };
+
+        assert!(
+            injected(ExtSkills::None).await.is_empty(),
+            "none injects nothing"
+        );
+        assert_eq!(
+            injected(ExtSkills::ApprovedOnly).await,
+            ["## Skill: OrgRunbook"],
+            "approved_only injects the org's own skill only"
+        );
+        let all = [
+            "## Skill: MyRunbook",
+            "## Skill: OrgRunbook",
+            "## Skill: RoomRunbook",
+        ];
+        assert_eq!(injected(ExtSkills::Any).await, all);
+        assert_eq!(
+            injected(ExtSkills::NotEnforced).await,
+            all,
+            "an unenforced run is read as it always was"
+        );
     }
 
     #[tokio::test]
@@ -16850,6 +17856,7 @@ mod tests {
             "book a shipment",
             "run_test",
             false,
+            crate::skill_ext_policy::ExtSkills::NotEnforced,
         )
         .await;
 
@@ -16873,6 +17880,7 @@ mod tests {
             "what is 2+2",
             "run_test",
             false,
+            crate::skill_ext_policy::ExtSkills::NotEnforced,
         )
         .await;
 
@@ -16893,6 +17901,9 @@ mod tests {
             cause: None,
             screening_taint: false,
             pause_facts: approval_cause::CallFacts::default(),
+            pending_elicitation: None,
+            grounded: false,
+            data_category: None,
         };
         let degraded = StepOutcome {
             status: "failed".to_owned(),
@@ -16902,6 +17913,9 @@ mod tests {
             cause: None,
             screening_taint: false,
             pause_facts: approval_cause::CallFacts::default(),
+            pending_elicitation: None,
+            grounded: false,
+            data_category: None,
         };
 
         record_tool_step(
@@ -16963,6 +17977,9 @@ mod tests {
             cause: None,
             screening_taint: false,
             pause_facts: approval_cause::CallFacts::default(),
+            pending_elicitation: None,
+            grounded: false,
+            data_category: None,
         };
         let failed = StepOutcome {
             status: "failed".to_owned(),
@@ -16972,6 +17989,9 @@ mod tests {
             cause: None,
             screening_taint: false,
             pause_facts: approval_cause::CallFacts::default(),
+            pending_elicitation: None,
+            grounded: false,
+            data_category: None,
         };
 
         record_tool_step(
@@ -17031,6 +18051,9 @@ mod tests {
             cause: None,
             screening_taint: false,
             pause_facts: approval_cause::CallFacts::default(),
+            pending_elicitation: None,
+            grounded: false,
+            data_category: None,
         };
 
         record_tool_step(
@@ -17111,6 +18134,71 @@ mod tests {
         assert_eq!(data_category("web_fetch"), "public_non_personal");
     }
 
+    /// A read of a result the run holds is audited under the category it was parked with (F-f02-11): a
+    /// customer's result read back through `result_query` is not recorded as public. A step with no held
+    /// category keeps the read tool's own, as before.
+    #[tokio::test]
+    async fn a_read_of_a_held_result_is_audited_under_the_category_it_was_parked_under() {
+        const HELD_TEXT: &str = "a held part of the customer's document";
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let held = StepOutcome {
+            status: "completed".to_owned(),
+            output: HELD_TEXT.to_owned(),
+            error: String::new(),
+            compaction_triggered: false,
+            cause: None,
+            screening_taint: false,
+            pause_facts: approval_cause::CallFacts::default(),
+            pending_elicitation: None,
+            grounded: false,
+            data_category: Some("customer_private"),
+        };
+        let plain = StepOutcome {
+            data_category: None,
+            ..held.clone()
+        };
+
+        record_tool_step(
+            &session_channel,
+            "run-held",
+            "read-held",
+            "result_query",
+            "{}",
+            &held,
+            false,
+            Some("session-token"),
+        )
+        .await;
+        record_tool_step(
+            &session_channel,
+            "run-held",
+            "read-plain",
+            "result_query",
+            "{}",
+            &plain,
+            false,
+            Some("session-token"),
+        )
+        .await;
+
+        let r = rec.lock().unwrap();
+        assert!(
+            r.persisted_step_payloads[0]
+                .1
+                .contains("data_category=customer_private"),
+            "{}",
+            r.persisted_step_payloads[0].1
+        );
+        assert!(
+            r.persisted_step_payloads[1]
+                .1
+                .contains("data_category=public_non_personal"),
+            "{}",
+            r.persisted_step_payloads[1].1
+        );
+    }
+
     #[tokio::test]
     async fn non_zdr_tool_step_persistence_keeps_existing_content_behavior() {
         const TOOL_OUTPUT: &str = "ordinary persisted tool output";
@@ -17125,6 +18213,9 @@ mod tests {
             cause: None,
             screening_taint: false,
             pause_facts: approval_cause::CallFacts::default(),
+            pending_elicitation: None,
+            grounded: false,
+            data_category: None,
         };
         let failure = StepOutcome {
             status: "failed".to_owned(),
@@ -17134,6 +18225,9 @@ mod tests {
             cause: None,
             screening_taint: false,
             pause_facts: approval_cause::CallFacts::default(),
+            pending_elicitation: None,
+            grounded: false,
+            data_category: None,
         };
 
         record_tool_step(
@@ -17764,12 +18858,46 @@ mod tests {
                 content_read: false,
             },
         ];
-        let records = loop_guard_records(&calls, &outcomes, Some(2));
+        let records = loop_guard_records(&calls, &outcomes, Some(2), false);
         assert_eq!(records.len(), 2, "the call a pause holds back has no record");
         assert_eq!(records[0].tool, "yr_weather");
         assert_eq!(records[0].outcome, CallOutcome::Ok);
         assert_eq!(records[1].tool, "subagent.task");
         assert_eq!(records[1].outcome, CallOutcome::Err);
+    }
+
+    #[test]
+    fn loop_guard_records_digest_a_call_that_ran_only_when_result_aware() {
+        let calls = [failing_tool_call("wx-a"), failing_tool_call("wx-b")];
+        let outcomes = [
+            ToolStepResult {
+                name: "yr_weather".to_owned(),
+                output: "clear".to_owned(),
+                error: None,
+                content_read: false,
+            },
+            ToolStepResult {
+                name: "yr_weather".to_owned(),
+                output: String::new(),
+                error: Some("refused".to_owned()),
+                content_read: false,
+            },
+        ];
+        let off = loop_guard_records(&calls, &outcomes, None, false);
+        assert!(
+            off.iter().all(|record| record.result_digest.is_none()),
+            "with result awareness off no digest is computed"
+        );
+        let on = loop_guard_records(&calls, &outcomes, None, true);
+        assert_eq!(
+            on[0].result_digest,
+            Some(mp_contracts::loop_guard::result_digest("clear")),
+            "a call that ran carries the digest of its output"
+        );
+        assert_eq!(
+            on[1].result_digest, None,
+            "a failed call has no result to digest"
+        );
     }
 
     #[test]
@@ -23923,6 +25051,7 @@ mod tests {
             status: None,
             agent_roles: Vec::new(),
             goal_recitation: String::new(),
+            authored_sections: Vec::new(),
         }
     }
 
@@ -24046,6 +25175,278 @@ mod tests {
                 ("system", CONTEXT_INSTRUCTIONS),
                 ("user", "SUB-GOAL"),
             ]
+        );
+    }
+
+    #[test]
+    fn section_names_tag_the_profile_and_the_memory_and_nothing_else() {
+        let context = pb::RunContext {
+            user_profile: "PROFILE".to_owned(),
+            goal_recitation: "RECITATION".to_owned(),
+            ..full_run_context()
+        };
+        let skills = Some("SKILLS".to_owned());
+        let on = seed_order_with(
+            "PREAMBLE".to_owned(),
+            Some(&context),
+            true,
+            skills.clone(),
+            "GOAL",
+            true,
+        );
+        let off = seed_order_with(
+            "PREAMBLE".to_owned(),
+            Some(&context),
+            true,
+            skills.clone(),
+            "GOAL",
+            false,
+        );
+        // Switch on: the profile and the memory carry their tags; the preamble, the instructions, the turns,
+        // the recitation, the skills and the goal stay unnamed.
+        let names: Vec<&str> = on.iter().map(|message| message.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["", "", "user_profile", "", "", "memory", "", "", ""]
+        );
+        // The same roles and texts either way: the names are the only difference.
+        assert_eq!(roles_and_contents(&on), roles_and_contents(&off));
+        // Switch off: nothing is named, as before the switch existed.
+        assert!(off.iter().all(|message| message.name.is_empty()));
+        // A child loop has no profile and no memory to name.
+        let child = seed_order_with(
+            "PREAMBLE".to_owned(),
+            Some(&context),
+            false,
+            skills,
+            "SUB-GOAL",
+            true,
+        );
+        assert!(child.iter().all(|message| message.name.is_empty()));
+    }
+
+    const SECTION_PLATFORM: &str = "PLATFORM-TEXT";
+    const SECTION_ORG: &str = "--- Organization instructions ---\nORG-TEXT";
+    const SECTION_AGENT: &str = "You are currently answering as Driftsassistent.";
+
+    /// A run context as the gateway sends it with its section switch on: the sections, and
+    /// the same text joined into `authored_instructions`.
+    fn sectioned_run_context() -> pb::RunContext {
+        let sections = vec![
+            pb::AuthoredSection {
+                tag: "platform_instructions".to_owned(),
+                text: SECTION_PLATFORM.to_owned(),
+            },
+            pb::AuthoredSection {
+                tag: "org_instructions".to_owned(),
+                text: SECTION_ORG.to_owned(),
+            },
+            pb::AuthoredSection {
+                tag: "agent_role_instructions".to_owned(),
+                text: SECTION_AGENT.to_owned(),
+            },
+        ];
+        let joined = sections
+            .iter()
+            .map(|section| section.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        pb::RunContext {
+            authored_instructions: joined,
+            authored_sections: sections,
+            ..full_run_context()
+        }
+    }
+
+    fn names_of(messages: &[pb::ChatMessage]) -> Vec<&str> {
+        messages
+            .iter()
+            .map(|message| message.name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn authored_sections_seed_one_named_system_message_each() {
+        let context = sectioned_run_context();
+        let root = seed_order("PREAMBLE".to_owned(), Some(&context), true, None, "GOAL");
+        assert_eq!(
+            roles_and_contents(&root),
+            vec![
+                ("system", "PREAMBLE"),
+                ("system", SECTION_PLATFORM),
+                ("system", SECTION_ORG),
+                ("system", SECTION_AGENT),
+                ("user", CONTEXT_FIRST_TURN),
+                ("assistant", CONTEXT_FIRST_REPLY),
+                ("system", CONTEXT_MEMORY),
+                ("user", "GOAL"),
+            ]
+        );
+        assert_eq!(
+            names_of(&root),
+            vec![
+                "",
+                "platform_instructions",
+                "org_instructions",
+                "agent_role_instructions",
+                "",
+                "",
+                "",
+                ""
+            ]
+        );
+        // The sections say what the single message says: the same bytes, split by source.
+        let joined = root[1..4]
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert_eq!(joined, context.authored_instructions);
+
+        // A delegated child inherits the standing instructions, sectioned like its parent's.
+        let child = seed_order(
+            "PREAMBLE".to_owned(),
+            Some(&context),
+            false,
+            None,
+            "SUB-GOAL",
+        );
+        assert_eq!(
+            roles_and_contents(&child),
+            vec![
+                ("system", "PREAMBLE"),
+                ("system", SECTION_PLATFORM),
+                ("system", SECTION_ORG),
+                ("system", SECTION_AGENT),
+                ("user", "SUB-GOAL"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_without_sections_seeds_the_one_unnamed_message_as_before() {
+        // The old gateway: no sections on the wire. The seed is the one it always was.
+        let context = full_run_context();
+        let seeded = seed_order("PREAMBLE".to_owned(), Some(&context), true, None, "GOAL");
+        assert_eq!(
+            roles_and_contents(&seeded),
+            vec![
+                ("system", "PREAMBLE"),
+                ("system", CONTEXT_INSTRUCTIONS),
+                ("user", CONTEXT_FIRST_TURN),
+                ("assistant", CONTEXT_FIRST_REPLY),
+                ("system", CONTEXT_MEMORY),
+                ("user", "GOAL"),
+            ]
+        );
+        assert!(seeded.iter().all(|message| message.name.is_empty()));
+        // Sections with no text anywhere leave the instructions message to carry them.
+        let empty_sections = pb::RunContext {
+            authored_sections: vec![pb::AuthoredSection {
+                tag: "org_instructions".to_owned(),
+                text: String::new(),
+            }],
+            ..full_run_context()
+        };
+        assert_eq!(
+            roles_and_contents(&seed_order(
+                "PREAMBLE".to_owned(),
+                Some(&empty_sections),
+                true,
+                None,
+                "GOAL"
+            )),
+            roles_and_contents(&seeded)
+        );
+    }
+
+    #[test]
+    fn the_section_switch_decides_whether_sections_reach_the_seed() {
+        let context = sectioned_run_context();
+        // On: the sections ride through untouched, and nothing is copied.
+        assert!(matches!(
+            gated_run_context(&context, true),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        let on_context = gated_run_context(&context, true);
+        let on = seed_order(
+            "PREAMBLE".to_owned(),
+            Some(&*on_context),
+            true,
+            None,
+            "GOAL",
+        );
+        // Off: the seed is the one a request with no sections would give, byte for byte.
+        let off_context = gated_run_context(&context, false);
+        assert!(off_context.authored_sections.is_empty());
+        let off = seed_order(
+            "PREAMBLE".to_owned(),
+            Some(&*off_context),
+            true,
+            None,
+            "GOAL",
+        );
+        let without_field = pb::RunContext {
+            authored_sections: Vec::new(),
+            ..context.clone()
+        };
+        assert_eq!(
+            off,
+            seed_order(
+                "PREAMBLE".to_owned(),
+                Some(&without_field),
+                true,
+                None,
+                "GOAL"
+            )
+        );
+        assert!(off.iter().all(|message| message.name.is_empty()));
+        // The same instructions either way: the named messages joined are the one message.
+        assert_eq!(off[1].content, context.authored_instructions);
+        let named_joined = on[1..4]
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert_eq!(named_joined, off[1].content);
+        assert_eq!(on.len(), off.len() + 2);
+        // A context with no sections is never copied, whatever the switch says.
+        let plain = full_run_context();
+        assert!(matches!(
+            gated_run_context(&plain, false),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn the_round_names_every_section_as_a_context_message() {
+        let context = sectioned_run_context();
+        let on = seed_order("PREAMBLE".to_owned(), Some(&context), true, None, "GOAL");
+        assert_eq!(
+            prompt_tier_plan(Some(&context), &on)
+                .map(|plan| (plan.stable_messages, plan.context_messages)),
+            Some((1, 3))
+        );
+        // Switch off: the seed holds one message and the plan names one, not three.
+        let off_context = gated_run_context(&context, false);
+        let off = seed_order(
+            "PREAMBLE".to_owned(),
+            Some(&*off_context),
+            true,
+            None,
+            "GOAL",
+        );
+        assert_eq!(
+            prompt_tier_plan(Some(&context), &off)
+                .map(|plan| (plan.stable_messages, plan.context_messages)),
+            Some((1, 1))
+        );
+        // A prompt that does not open with the sections names none of them.
+        let plain = seed_order("PREAMBLE".to_owned(), None, true, None, "GOAL");
+        assert_eq!(
+            prompt_tier_plan(Some(&context), &plain)
+                .map(|plan| (plan.stable_messages, plan.context_messages)),
+            Some((1, 0))
         );
     }
 
@@ -24312,6 +25713,7 @@ mod tests {
             status: None,
             agent_roles: Vec::new(),
             goal_recitation: String::new(),
+            authored_sections: Vec::new(),
         };
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let session_channel = spawn_session_channel(rec.clone()).await;
@@ -36517,6 +37919,752 @@ mod tests {
                 asked.error
             );
         }
+
+        // --- EP-4 S7: an MCP server's form pauses the run as an input pause ---------------------
+
+        const FORM_TOOL: &str = "mcp__srv__echo";
+        const FORM_TOOL_2: &str = "mcp__srv__echo2";
+
+        fn mcp_tool(name: &str) -> pb::ToolDefinition {
+            pb::ToolDefinition {
+                name: name.to_owned(),
+                description: "A tool of an MCP server.".to_owned(),
+                parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+            }
+        }
+
+        fn mcp_call(id: &str, name: &str) -> pb::ToolCall {
+            pb::ToolCall {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                arguments_json: "{}".to_owned(),
+            }
+        }
+
+        /// The form a server asked, which the gateway holds for another `hold_secs` seconds.
+        fn held_form(elicitation_id: &str, hold_secs: i64) -> pb::McpElicitationPending {
+            pb::McpElicitationPending {
+                elicitation_id: elicitation_id.to_owned(),
+                server_id: "srv_01".to_owned(),
+                server_label: "Fixture".to_owned(),
+                message: "Which project?".to_owned(),
+                requested_schema_json: "{}".to_owned(),
+                items: vec![pb::QuestionItem {
+                    id: "project".to_owned(),
+                    kind: "text".to_owned(),
+                    prompt: "Project".to_owned(),
+                    ..Default::default()
+                }],
+                expires_at_unix: chrono::Utc::now().timestamp() + hold_secs,
+            }
+        }
+
+        /// One Do run whose first round makes `calls`, with every switch of the durable loop on, the
+        /// MCP form switch at `switch_on` and the resume-question switch at `ask_resume`. Each MCP
+        /// tool named in `calls` is offered. What the servers answer is scripted by the caller
+        /// through `runtime_loop::test_mcp`.
+        async fn drive_form(
+            ask_resume: Option<&str>,
+            switch_on: bool,
+            calls: Vec<pb::ToolCall>,
+            tokens: &dyn ManagedRunTokenProvider,
+            setup: impl FnOnce(&mut Recorder),
+        ) -> (Result<pb::RunAgentResponse, Status>, SharedRecorder) {
+            drive_form_with(ask_resume, switch_on, calls, tokens, setup, |_| {}).await
+        }
+
+        /// [`drive_form`] with a hook that changes the request before the run starts.
+        async fn drive_form_with(
+            ask_resume: Option<&str>,
+            switch_on: bool,
+            calls: Vec<pb::ToolCall>,
+            tokens: &dyn ManagedRunTokenProvider,
+            setup: impl FnOnce(&mut Recorder),
+            tweak: impl FnOnce(&mut pb::RunAgentRequest),
+        ) -> (Result<pb::RunAgentResponse, Status>, SharedRecorder) {
+            let _env_lock = ASK_RESUME_ENV_LOCK.lock().await;
+            let _env = AskResumeEnv::set(ask_resume);
+            let _ask = crate::runtime_loop::ask::test_switch::force(true);
+            let _forms = crate::mcp_gateway::test_switch::force(switch_on);
+            let _checkpoint = runtime_loop::fold::CheckpointSwitch::set(true);
+            let _ledger = runtime_loop::effect::LedgerSwitch::set(true);
+            let _continue = runtime_loop::resume::ContinueSwitch::set(true);
+            let _loop_resume = runtime_loop::resume::LoopResumeSwitch::set(true);
+            let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+            setup(&mut rec.lock().unwrap());
+            let mut tools = offered_tool_defs();
+            for call in &calls {
+                if call.name.starts_with("mcp__") {
+                    tools.push(mcp_tool(&call.name));
+                }
+            }
+            tools.push(pb::ToolDefinition {
+                name: "ask_user".to_owned(),
+                description: String::new(),
+                parameters_json: "{}".to_owned(),
+            });
+            let inference_channel = spawn_inference_channel(vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls,
+                },
+                Scripted::Answer("I will go on without the form.".to_owned()),
+            ])
+            .await;
+            let session_channel =
+                spawn_session_channel_with_approval_failure(rec.clone(), false).await;
+            let state = crate::state::StateStore::new();
+            let mut req = sample_request();
+            req.mode = "auto".to_owned();
+            req.max_questions = 3;
+            tweak(&mut req);
+            let resp = run_agent_with_tools(
+                &state,
+                session_channel,
+                inference_channel,
+                &plain_caller(),
+                req,
+                tools,
+                None,
+                Some("session-token".to_owned()),
+                "inference-token".to_owned(),
+                &ALLOW_CAPABILITY_POLICY,
+                tokens,
+                None,
+                None,
+                &test_sandbox_manager_client(),
+                "test-backend",
+                None,
+                &test_sandbox_tokens(),
+                None,
+            )
+            .await;
+            (resp, rec)
+        }
+
+        fn the_form_script(tool: &str, form: pb::McpElicitationPending) {
+            runtime_loop::test_mcp::push(tool, runtime_loop::test_mcp::Script::Form(form));
+        }
+
+        /// EP-4 S7: the question cap counts the forms a loop put as well as its `ask_user` calls. A
+        /// run with asks plus forms at the cap is not offered another form.
+        #[test]
+        fn the_question_cap_counts_asks_and_forms_together() {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            let cap =
+                u32::try_from(mp_contracts::user_question::MAX_QUESTIONS_PER_RUN).expect("small");
+            let allowed = |asks: u32, forms: u32| {
+                let run = crate::mcp_gateway::ElicitationRun {
+                    depth: 0,
+                    zdr: false,
+                    waived: false,
+                    parkable: true,
+                    space_scoped: false,
+                    questions_asked: questions_counted(
+                        &AtomicU32::new(asks),
+                        &AtomicU32::new(forms),
+                    ),
+                };
+                crate::mcp_gateway::allow_elicitation_when(true, &run)
+            };
+            assert!(allowed(cap - 1, 0));
+            assert!(
+                !allowed(cap - 1, 1),
+                "one form on top of cap-1 asks reaches the cap"
+            );
+            assert!(!allowed(0, cap));
+            assert!(!allowed(1, cap - 1));
+            assert!(allowed(1, cap - 2));
+            let asks = AtomicU32::new(2);
+            let forms = AtomicU32::new(0);
+            forms.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(questions_counted(&asks, &forms), 3);
+        }
+
+        /// The error a call of the round was recorded with, by tool name.
+        fn recorded_error(r: &Recorder, step_part: &str) -> String {
+            r.persisted_step_payloads
+                .iter()
+                .find(|(step, _, _)| step.contains(step_part))
+                .map(|(_, _, error)| error.clone())
+                .unwrap_or_default()
+        }
+
+        #[tokio::test]
+        async fn a_pending_form_pauses_the_run_as_an_input_pause_with_origin_mcp_elicitation() {
+            runtime_loop::test_mcp::clear();
+            the_form_script(FORM_TOOL, held_form("el_1", 600));
+            let (resp, rec) = drive_form(
+                Some("true"),
+                true,
+                vec![mcp_call("mcp-1", FORM_TOOL)],
+                &STATIC_TERMINAL_TOKENS,
+                |_| {},
+            )
+            .await;
+            let resp = resp.expect("the run pauses, it does not fail");
+            assert_eq!(resp.status, "awaiting_input", "{resp:?}");
+            assert!(
+                resp.final_output.is_empty(),
+                "nothing is answered while the run waits"
+            );
+
+            let r = rec.lock().unwrap();
+            assert_eq!(
+                r.run_questions.len(),
+                1,
+                "one question is stored: {:?}",
+                r.run_questions
+            );
+            let stored = &r.run_questions[0];
+            assert_eq!(
+                stored.delivery,
+                mp_contracts::user_question::DELIVERY_RESUME
+            );
+            assert_eq!(
+                stored.origin,
+                mp_contracts::user_question::ORIGIN_MCP_ELICITATION
+            );
+            assert_eq!(stored.origin_label, "Fixture");
+            assert_eq!(stored.items.len(), 1, "the server's own items");
+            let pause_ref = mp_contracts::user_question::input_pause_ref(
+                &stored.run_id,
+                &stored.step_id,
+                mp_contracts::user_question::ORIGIN_MCP_ELICITATION,
+            );
+            assert!(pause_ref.ends_with(":elicit:1"), "{pause_ref}");
+            assert_eq!(
+                stored.idempotency_key, pause_ref,
+                "the question is keyed by the pause ref"
+            );
+            assert!(
+                stored.expires_in_seconds <= 600,
+                "the question never outlives the gateway's hold: {}",
+                stored.expires_in_seconds
+            );
+            let save = r
+                .loop_saves
+                .iter()
+                .rev()
+                .find(|save| save.kind == "pause")
+                .expect("the input fold is saved");
+            assert_eq!(save.pause_ref, pause_ref);
+            let fold = save.fold();
+            let pending = fold
+                .pending
+                .as_ref()
+                .expect("the fold names what it waits on");
+            assert_eq!(pending.kind, mp_contracts::loop_fold::PauseKind::Input);
+            assert_eq!(pending.pause_ref, pause_ref);
+            assert_eq!(pending.step_id, stored.step_id);
+            assert_eq!(pending.call, FORM_TOOL, "the held call is the MCP tool");
+            assert!(
+                !pending.action_fingerprint.is_empty(),
+                "the exact call is digested"
+            );
+            assert_eq!(
+                mp_contracts::loop_fold::pending_elicitation_in(&fold).as_deref(),
+                Some("el_1"),
+                "the fold records the id of the held form and nothing else of it"
+            );
+            assert!(
+                mp_contracts::loop_fold::offered_tools_in(&fold).is_some(),
+                "an input fold keeps the offered tools a resume needs"
+            );
+            let round = fold.round_in_flight.as_ref().expect("the round is open");
+            assert!(
+                round.completed.iter().all(|entry| entry.call_id != "mcp-1"),
+                "the held call is the one call without an outcome"
+            );
+            assert!(
+                runtime_loop::test_mcp::cancelled().is_empty(),
+                "a form that waits is not cancelled"
+            );
+            assert!(
+                r.close_calls.is_empty(),
+                "the fold stays open for the resume"
+            );
+        }
+
+        /// P2-ec-03-rel1: a form that pauses the run leaves its call's ledger reservation OPEN. The held
+        /// call is not over: its real result comes back with the owner's answer, and the resumed run
+        /// closes the reservation with it. Closing it here as `unknown_outcome` would make that result
+        /// unrecordable (session-core refuses a finalize over a different outcome), so the call would
+        /// stay unknown for good.
+        #[tokio::test]
+        async fn a_held_form_leaves_its_reservation_open_for_the_resumed_run() {
+            runtime_loop::test_mcp::clear();
+            the_form_script(FORM_TOOL, held_form("el_1", 600));
+            let (resp, rec) = drive_form(
+                Some("true"),
+                true,
+                vec![mcp_call("mcp-1", FORM_TOOL)],
+                &STATIC_TERMINAL_TOKENS,
+                |_| {},
+            )
+            .await;
+            assert_eq!(resp.expect("the run pauses").status, "awaiting_input");
+            let r = rec.lock().unwrap();
+            assert!(
+                r.reservations
+                    .iter()
+                    .any(|request| request.tool == FORM_TOOL),
+                "the form's call was reserved before it ran"
+            );
+            assert!(
+                r.finalizations.is_empty(),
+                "a held call is not closed while the run waits: {:?}",
+                r.finalizations
+            );
+            assert!(
+                runtime_loop::test_mcp::cancelled().is_empty(),
+                "the form waits, it is not cancelled"
+            );
+        }
+
+        /// P2-ec-03-rel1: a form the round cannot put to its owner is cancelled at once, and the gateway
+        /// never returns its real result, so its reservation closes as an unknown outcome. The form the
+        /// round does put to its owner keeps its reservation open.
+        #[tokio::test]
+        async fn a_held_form_that_is_cancelled_closes_its_reservation_as_unknown() {
+            runtime_loop::test_mcp::clear();
+            the_form_script(FORM_TOOL, held_form("el_1", 600));
+            the_form_script(FORM_TOOL_2, held_form("el_2", 600));
+            let (resp, rec) = drive_form(
+                Some("true"),
+                true,
+                vec![mcp_call("mcp-1", FORM_TOOL), mcp_call("mcp-2", FORM_TOOL_2)],
+                &STATIC_TERMINAL_TOKENS,
+                |_| {},
+            )
+            .await;
+            assert_eq!(resp.expect("the run pauses").status, "awaiting_input");
+            assert_eq!(runtime_loop::test_mcp::cancelled(), ["el_2"]);
+            let r = rec.lock().unwrap();
+            let cancelled_action = r
+                .reservations
+                .iter()
+                .find(|request| request.tool == FORM_TOOL_2)
+                .map(|request| request.action_id.clone())
+                .expect("the cancelled form's call was reserved");
+            assert_eq!(
+                r.finalizations,
+                [(cancelled_action, "unknown_outcome".to_owned())],
+                "only the cancelled form is closed; the form that waits keeps its reservation open"
+            );
+        }
+
+        /// The held form and the owner's answer reach only a `run_questions` row: the fold carries the
+        /// id, and nothing of the form's message or schema.
+        #[tokio::test]
+        async fn the_fold_keeps_no_content_of_the_form() {
+            runtime_loop::test_mcp::clear();
+            the_form_script(FORM_TOOL, held_form("el_1", 600));
+            let (resp, rec) = drive_form(
+                Some("true"),
+                true,
+                vec![mcp_call("mcp-1", FORM_TOOL)],
+                &STATIC_TERMINAL_TOKENS,
+                |_| {},
+            )
+            .await;
+            assert_eq!(resp.expect("pauses").status, "awaiting_input");
+            let r = rec.lock().unwrap();
+            let save = r
+                .loop_saves
+                .iter()
+                .rev()
+                .find(|save| save.kind == "pause")
+                .expect("saved");
+            let text = String::from_utf8_lossy(&save.fold).into_owned();
+            for content in ["Which project?", "Fixture"] {
+                assert!(!text.contains(content), "the fold holds {content}");
+            }
+        }
+
+        /// A call whose server asks no form runs as it always did, with the switch on: nothing is
+        /// paused, saved or asked.
+        #[tokio::test]
+        async fn a_call_that_asks_no_form_is_untouched_by_the_switch() {
+            runtime_loop::test_mcp::clear();
+            runtime_loop::test_mcp::push(
+                FORM_TOOL,
+                runtime_loop::test_mcp::Script::Output("{\"ok\":true}".to_owned()),
+            );
+            let (resp, rec) = drive_form(
+                Some("true"),
+                true,
+                vec![mcp_call("mcp-1", FORM_TOOL)],
+                &STATIC_TERMINAL_TOKENS,
+                |_| {},
+            )
+            .await;
+            let resp = resp.expect("the run goes on");
+            assert_eq!(resp.status, "completed", "{resp:?}");
+            let r = rec.lock().unwrap();
+            assert!(r.run_questions.is_empty() && r.question_create_attempts.is_empty());
+            assert!(
+                r.loop_saves.iter().all(|save| save.kind != "pause"),
+                "no input fold"
+            );
+            assert!(runtime_loop::test_mcp::cancelled().is_empty());
+        }
+
+        #[tokio::test]
+        async fn with_the_switch_off_a_form_is_never_allowed_and_nothing_is_asked() {
+            runtime_loop::test_mcp::clear();
+            the_form_script(FORM_TOOL, held_form("el_1", 600));
+            let (resp, rec) = drive_form(
+                Some("true"),
+                false,
+                vec![mcp_call("mcp-1", FORM_TOOL)],
+                &STATIC_TERMINAL_TOKENS,
+                |_| {},
+            )
+            .await;
+            let resp = resp.expect("the run goes on");
+            assert_eq!(resp.status, "completed", "{resp:?}");
+            let r = rec.lock().unwrap();
+            assert!(r.run_questions.is_empty() && r.question_create_attempts.is_empty());
+            assert!(
+                r.loop_saves.iter().all(|save| save.kind != "pause"),
+                "no input fold"
+            );
+            assert!(
+                recorded_error(&r, "mcp-1").ends_with(crate::mcp_gateway::UNASKED_FORM),
+                "{}",
+                recorded_error(&r, "mcp-1")
+            );
+        }
+
+        #[tokio::test]
+        async fn a_run_that_cannot_pause_in_place_is_never_allowed_a_form() {
+            // Neither the resume-question switch nor, with it, a fold writer: the run cannot wait.
+            for ask_resume in [None, Some("1")] {
+                runtime_loop::test_mcp::clear();
+                the_form_script(FORM_TOOL, held_form("el_1", 600));
+                let (resp, rec) = drive_form(
+                    ask_resume,
+                    true,
+                    vec![mcp_call("mcp-1", FORM_TOOL)],
+                    &STATIC_TERMINAL_TOKENS,
+                    |_| {},
+                )
+                .await;
+                let resp = resp.expect("the run goes on");
+                assert_eq!(resp.status, "completed", "{ask_resume:?} {resp:?}");
+                let r = rec.lock().unwrap();
+                assert!(r.run_questions.is_empty(), "{ask_resume:?}");
+                assert!(
+                    recorded_error(&r, "mcp-1").ends_with(crate::mcp_gateway::UNASKED_FORM),
+                    "{}",
+                    recorded_error(&r, "mcp-1")
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn a_refused_create_cancels_the_held_call_and_gives_it_the_tool_error() {
+            runtime_loop::test_mcp::clear();
+            the_form_script(FORM_TOOL, held_form("el_1", 600));
+            let (resp, rec) = drive_form(
+                Some("true"),
+                true,
+                vec![mcp_call("mcp-1", FORM_TOOL)],
+                &STATIC_TERMINAL_TOKENS,
+                |rec| {
+                    rec.question_create_script
+                        .push_back(QuestionCreateScript::Fail(Status::failed_precondition(
+                            "question_delivery_unavailable",
+                        )));
+                },
+            )
+            .await;
+            let resp = resp.expect("the round goes on");
+            assert_eq!(resp.status, "completed", "{resp:?}");
+            let r = rec.lock().unwrap();
+            assert_eq!(
+                r.question_create_attempts.len(),
+                1,
+                "one resume attempt, and NO next_turn fallback: a retry would run the server's work again"
+            );
+            assert_eq!(
+                r.question_create_attempts[0].delivery,
+                mp_contracts::user_question::DELIVERY_RESUME
+            );
+            assert!(r.run_questions.is_empty());
+            assert!(!r.close_calls.is_empty(), "the saved input fold is closed");
+            assert_eq!(
+                runtime_loop::test_mcp::cancelled(),
+                ["el_1"],
+                "the held call is cancelled"
+            );
+            let form_action = r
+                .reservations
+                .iter()
+                .find(|request| request.tool == FORM_TOOL)
+                .map(|request| request.action_id.clone())
+                .expect("the form's call was reserved");
+            assert_eq!(
+                r.finalizations,
+                [(form_action, "unknown_outcome".to_owned())],
+                "a form that is not put to the owner closes its reservation as unknown"
+            );
+            assert!(
+                recorded_error(&r, "mcp-1").ends_with(crate::mcp_gateway::FORM_NOT_ASKED),
+                "{}",
+                recorded_error(&r, "mcp-1")
+            );
+        }
+
+        #[tokio::test]
+        async fn a_transport_error_on_the_create_is_tried_once_more_under_the_same_key() {
+            runtime_loop::test_mcp::clear();
+            the_form_script(FORM_TOOL, held_form("el_1", 600));
+            let (resp, rec) = drive_form(
+                Some("true"),
+                true,
+                vec![mcp_call("mcp-1", FORM_TOOL)],
+                &STATIC_TERMINAL_TOKENS,
+                |rec| {
+                    rec.question_create_script
+                        .push_back(QuestionCreateScript::Fail(Status::unavailable("lost")));
+                },
+            )
+            .await;
+            assert_eq!(resp.expect("pauses").status, "awaiting_input");
+            let r = rec.lock().unwrap();
+            let attempts = &r.question_create_attempts;
+            assert_eq!(attempts.len(), 2, "one retry");
+            assert_eq!(attempts[0].idempotency_key, attempts[1].idempotency_key);
+            assert!(runtime_loop::test_mcp::cancelled().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_fold_that_is_not_saved_cancels_the_form_before_any_question() {
+            runtime_loop::test_mcp::clear();
+            the_form_script(FORM_TOOL, held_form("el_1", 600));
+            let (resp, rec) = drive_form(
+                Some("true"),
+                true,
+                vec![mcp_call("mcp-1", FORM_TOOL)],
+                &STATIC_TERMINAL_TOKENS,
+                |rec| {
+                    rec.loop_save_failures.push(failing_save(
+                        "pause",
+                        8,
+                        Status::unavailable("store down"),
+                        false,
+                    ));
+                },
+            )
+            .await;
+            assert_eq!(resp.expect("the round goes on").status, "completed");
+            let r = rec.lock().unwrap();
+            assert!(
+                r.question_create_attempts.is_empty(),
+                "no question behind an unsaved fold"
+            );
+            assert_eq!(runtime_loop::test_mcp::cancelled(), ["el_1"]);
+            assert!(
+                recorded_error(&r, "mcp-1").ends_with(crate::mcp_gateway::FORM_NOT_ASKED),
+                "{}",
+                recorded_error(&r, "mcp-1")
+            );
+        }
+
+        #[tokio::test]
+        async fn a_form_with_no_hold_left_or_no_credential_is_cancelled_and_asks_nothing() {
+            // The gateway's hold already ran out: the form is not offered to the owner.
+            runtime_loop::test_mcp::clear();
+            the_form_script(FORM_TOOL, held_form("el_1", -5));
+            let (resp, rec) = drive_form(
+                Some("true"),
+                true,
+                vec![mcp_call("mcp-1", FORM_TOOL)],
+                &STATIC_TERMINAL_TOKENS,
+                |_| {},
+            )
+            .await;
+            assert_eq!(resp.expect("the round goes on").status, "completed");
+            {
+                let r = rec.lock().unwrap();
+                assert!(r.question_create_attempts.is_empty());
+                assert!(
+                    r.loop_saves.iter().all(|save| save.kind != "pause"),
+                    "nothing saved"
+                );
+                assert!(
+                    recorded_error(&r, "mcp-1").ends_with(crate::mcp_gateway::FORM_NOT_ASKED),
+                    "{}",
+                    recorded_error(&r, "mcp-1")
+                );
+            }
+            assert_eq!(runtime_loop::test_mcp::cancelled(), ["el_1"]);
+
+            // The deployment does not hold the narrow credential: nothing is saved or asked either.
+            runtime_loop::test_mcp::clear();
+            the_form_script(FORM_TOOL, held_form("el_2", 600));
+            let (resp, rec) = drive_form(
+                Some("true"),
+                true,
+                vec![mcp_call("mcp-1", FORM_TOOL)],
+                &NO_QUESTION_ORIGIN_CREDENTIAL,
+                |_| {},
+            )
+            .await;
+            assert_eq!(resp.expect("the round goes on").status, "completed");
+            let r = rec.lock().unwrap();
+            assert!(r.question_create_attempts.is_empty());
+            assert!(
+                r.loop_saves.iter().all(|save| save.kind != "pause"),
+                "nothing saved"
+            );
+            assert_eq!(runtime_loop::test_mcp::cancelled(), ["el_2"]);
+            assert!(
+                recorded_error(&r, "mcp-1").ends_with(crate::mcp_gateway::FORM_NOT_ASKED),
+                "{}",
+                recorded_error(&r, "mcp-1")
+            );
+        }
+
+        #[tokio::test]
+        async fn a_second_form_in_the_round_is_cancelled() {
+            runtime_loop::test_mcp::clear();
+            the_form_script(FORM_TOOL, held_form("el_1", 600));
+            the_form_script(FORM_TOOL_2, held_form("el_2", 600));
+            let (resp, rec) = drive_form(
+                Some("true"),
+                true,
+                vec![mcp_call("mcp-1", FORM_TOOL), mcp_call("mcp-2", FORM_TOOL_2)],
+                &STATIC_TERMINAL_TOKENS,
+                |_| {},
+            )
+            .await;
+            assert_eq!(resp.expect("the run pauses").status, "awaiting_input");
+            let r = rec.lock().unwrap();
+            assert_eq!(r.run_questions.len(), 1, "only the first form waits");
+            assert_eq!(runtime_loop::test_mcp::cancelled(), ["el_2"]);
+            let fold = r
+                .loop_saves
+                .iter()
+                .rev()
+                .find(|save| save.kind == "pause")
+                .expect("the input fold is saved")
+                .fold();
+            assert_eq!(
+                mp_contracts::loop_fold::pending_elicitation_in(&fold).as_deref(),
+                Some("el_1")
+            );
+            let round = fold.round_in_flight.as_ref().expect("the round is open");
+            let refused = round
+                .completed
+                .iter()
+                .find(|entry| entry.call_id == "mcp-2")
+                .expect("the second call has an outcome in the fold");
+            assert_eq!(refused.error, crate::mcp_gateway::FORM_NOT_PUT_NOW);
+            assert!(round.completed.iter().all(|entry| entry.call_id != "mcp-1"));
+        }
+
+        #[tokio::test]
+        async fn a_form_beside_an_ask_user_question_is_cancelled() {
+            runtime_loop::test_mcp::clear();
+            the_form_script(FORM_TOOL, held_form("el_1", 600));
+            let (resp, rec) = drive_form(
+                Some("true"),
+                true,
+                vec![
+                    ask_user_call("ask-1", "carrier"),
+                    mcp_call("mcp-1", FORM_TOOL),
+                ],
+                &STATIC_TERMINAL_TOKENS,
+                |_| {},
+            )
+            .await;
+            assert_eq!(resp.expect("the run pauses").status, "awaiting_input");
+            let r = rec.lock().unwrap();
+            assert_eq!(
+                r.run_questions.len(),
+                1,
+                "the round's one question is the model's"
+            );
+            assert_eq!(
+                r.run_questions[0].origin, "",
+                "a model question names no origin"
+            );
+            assert_eq!(runtime_loop::test_mcp::cancelled(), ["el_1"]);
+            let fold = r
+                .loop_saves
+                .iter()
+                .rev()
+                .find(|save| save.kind == "pause")
+                .expect("the input fold is saved")
+                .fold();
+            assert_eq!(mp_contracts::loop_fold::pending_elicitation_in(&fold), None);
+            let round = fold.round_in_flight.as_ref().expect("the round is open");
+            let refused = round
+                .completed
+                .iter()
+                .find(|entry| entry.call_id == "mcp-1")
+                .expect("the form's call has an outcome in the fold");
+            assert_eq!(refused.error, crate::mcp_gateway::FORM_NOT_PUT_NOW);
+        }
+
+        #[tokio::test]
+        async fn a_form_beside_an_approval_pause_is_cancelled_whichever_call_comes_first() {
+            // An org hook rule holds `mcp__srv__approve` for an approval, in any mode.
+            const HELD_TOOL: &str = "mcp__srv__approve";
+            for (name, calls) in [
+                (
+                    "approval first",
+                    vec![mcp_call("mcp-2", HELD_TOOL), mcp_call("mcp-1", FORM_TOOL)],
+                ),
+                (
+                    "form first",
+                    vec![mcp_call("mcp-1", FORM_TOOL), mcp_call("mcp-2", HELD_TOOL)],
+                ),
+            ] {
+                runtime_loop::test_mcp::clear();
+                the_form_script(FORM_TOOL, held_form("el_1", 600));
+                let (resp, rec) = drive_form_with(
+                    Some("true"),
+                    true,
+                    calls,
+                    &STATIC_TERMINAL_TOKENS,
+                    |_| {},
+                    |req| {
+                        req.org_policy = Some(pb::OrgPolicyContext {
+                            policy_revision: 1,
+                            hook_context: format!(
+                                r#"{{"rules":[{{"event":"pre_tool_use","tools":"{HELD_TOOL}","decision":"ask"}}]}}"#
+                            ),
+                            ..Default::default()
+                        });
+                    },
+                )
+                .await;
+                let resp = resp.expect("the run pauses for the approval");
+                assert_eq!(resp.status, "awaiting_approval", "{name}: {resp:?}");
+                let r = rec.lock().unwrap();
+                assert!(
+                    r.question_create_attempts.is_empty(),
+                    "{name}: no question is created while an approval waits"
+                );
+                assert_eq!(runtime_loop::test_mcp::cancelled(), ["el_1"], "{name}");
+                let form_action = r
+                    .reservations
+                    .iter()
+                    .find(|request| request.tool == FORM_TOOL)
+                    .map(|request| request.action_id.clone())
+                    .expect("the form's call was reserved");
+                assert!(
+                    r.finalizations
+                        .contains(&(form_action, "unknown_outcome".to_owned())),
+                    "{name}: the cancelled form closes as unknown: {:?}",
+                    r.finalizations
+                );
+            }
+        }
     }
 
     /// W2-WS14-S5-f2: two continues of one paused question with different claim tokens. The one whose
@@ -36603,6 +38751,39 @@ mod tests {
                 r.run_question_claims
             );
             assert!(r.run_question_spent_by.is_none());
+        }
+
+        /// EP-4 S7: a continuation naming a server's form is refused before any claim or spend. The
+        /// in-place resume would seed the owner's answer as the MCP call's result for the model; the
+        /// answer must go only to the server that asked, which is W3-EP-4-S7-b's resume.
+        #[tokio::test]
+        async fn a_continue_naming_an_mcp_form_claims_spends_and_seeds_nothing() {
+            let _checkpoint = runtime_loop::fold::CheckpointSwitch::set(true);
+            let _ledger = runtime_loop::effect::LedgerSwitch::set(true);
+            let _loop_resume = runtime_loop::resume::LoopResumeSwitch::set(true);
+            let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+            rec.lock().unwrap().run_question = Some(answered_resume_question(
+                mp_contracts::user_question::ORIGIN_MCP_ELICITATION,
+            ));
+            let channel = spawn_session_channel_with_approval_failure(rec.clone(), false).await;
+
+            let refused = continue_under(&rec, &channel, "claim-1").await;
+            assert_eq!(
+                refused.message(),
+                "question_resume_unavailable",
+                "{refused:?}"
+            );
+            let r = rec.lock().unwrap();
+            assert!(r.claim_calls.is_empty(), "no fold is claimed: {:?}", r.claim_calls);
+            assert!(
+                r.run_question_claims.is_empty() && r.run_question_spent_by.is_none(),
+                "the answer is not spent: {:?}",
+                r.run_question_claims
+            );
+            assert!(
+                r.consume_calls.is_empty() && r.loop_saves.is_empty(),
+                "nothing is consumed or saved, so nothing is seeded"
+            );
         }
 
         #[tokio::test]
@@ -37169,5 +39350,150 @@ mod coordinator_switch_literal_parse {
                 "{raw:?} must leave the switch off"
             );
         }
+    }
+}
+
+/// F-f02-12: a run is given a result store, and with it the handle tools, only where its capability policy would
+/// allow `result_query`. The probe is the loop's own entry point, and a switch-off run is never asked.
+#[cfg(test)]
+mod result_store_offer_tests {
+    use super::*;
+    use crate::capability_policy::{CapabilityDecision, CapabilityEvaluation, CapabilityPolicy};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Answer {
+        Allow,
+        AllowUnverified,
+        Deny,
+        Ask,
+        Refused,
+    }
+
+    /// A policy that gives one answer to every call, and records the calls it is asked.
+    struct Probe {
+        answer: Answer,
+        asked: AtomicUsize,
+        last: Mutex<Option<(String, String, bool)>>,
+    }
+
+    impl Probe {
+        fn new(answer: Answer) -> Self {
+            Self {
+                answer,
+                asked: AtomicUsize::new(0),
+                last: Mutex::new(None),
+            }
+        }
+    }
+
+    #[tonic::async_trait]
+    impl CapabilityPolicy for Probe {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<CapabilityDecision, tonic::Status> {
+            match self.answer {
+                Answer::Allow | Answer::AllowUnverified => Ok(CapabilityDecision::Allow),
+                Answer::Deny => Ok(CapabilityDecision::Deny),
+                Answer::Ask => Ok(CapabilityDecision::Ask),
+                Answer::Refused => Err(tonic::Status::unavailable("the policy is not answering")),
+            }
+        }
+
+        async fn evaluate_tool_call_with_input(
+            &self,
+            tool_name: &str,
+            tool_input: &str,
+            _run_id: &str,
+            _org_id: &str,
+            _user_id: &str,
+            retention_bound: bool,
+        ) -> Result<CapabilityEvaluation, tonic::Status> {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            *self.last.lock().unwrap() =
+                Some((tool_name.to_owned(), tool_input.to_owned(), retention_bound));
+            let decision = self.evaluate(tool_name, "", "").await?;
+            Ok(CapabilityEvaluation {
+                decision,
+                decision_id: String::new(),
+                capability_version: String::new(),
+                evidence_verified: self.answer != Answer::AllowUnverified,
+                policy_source: String::new(),
+                side_effect_class: String::new(),
+                approval_floor: String::new(),
+                capability_id: String::new(),
+                tool_digest: String::new(),
+                reason: String::new(),
+                ask_evidence_verified: false,
+            })
+        }
+    }
+
+    fn request(zdr: bool) -> pb::RunAgentRequest {
+        pb::RunAgentRequest {
+            run_id: "run-offer".to_owned(),
+            org_id: "org-offer".to_owned(),
+            user_id: "user-offer".to_owned(),
+            zdr,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_run_gets_a_store_only_where_result_query_is_allowed() {
+        for (answer, offered) in [
+            (Answer::Allow, true),
+            (Answer::AllowUnverified, false),
+            (Answer::Deny, false),
+            (Answer::Ask, false),
+            (Answer::Refused, false),
+        ] {
+            let probe = Probe::new(answer);
+            let store = result_store_for_run(&probe, &request(false), false, true).await;
+            assert_eq!(
+                store.is_some(),
+                offered,
+                "the answer for result_query decides the store"
+            );
+            assert_eq!(probe.asked.load(Ordering::SeqCst), 1, "one probe per run");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_switch_off_and_a_run_that_keeps_no_content_are_never_asked() {
+        let allowed = Probe::new(Answer::Allow);
+        assert!(
+            result_store_for_run(&allowed, &request(false), false, false)
+                .await
+                .is_none()
+        );
+        assert!(result_store_for_run(&allowed, &request(true), false, true)
+            .await
+            .is_none());
+        assert!(result_store_for_run(&allowed, &request(false), true, true)
+            .await
+            .is_none());
+        assert_eq!(
+            allowed.asked.load(Ordering::SeqCst),
+            0,
+            "no probe where no store can apply"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_probe_is_the_loops_own_call_with_its_retention_posture() {
+        let probe = Probe::new(Answer::Allow);
+        assert!(result_store_for_run(&probe, &request(false), false, true)
+            .await
+            .is_some());
+        let asked = probe.last.lock().unwrap().clone();
+        assert_eq!(
+            asked,
+            Some(("result_query".to_owned(), String::new(), false))
+        );
     }
 }

@@ -33,6 +33,11 @@ const MAX_IMAGE_BYTES_VAR: &str = "CHAT_ATTACHMENT_MAX_IMAGE_BYTES";
 const MAX_FILES_VAR: &str = "CHAT_ATTACHMENT_MAX_FILES";
 const MAX_FILE_BYTES_VAR: &str = "CHAT_ATTACHMENT_MAX_FILE_BYTES";
 const MAX_TOTAL_BYTES_VAR: &str = "CHAT_ATTACHMENT_MAX_TOTAL_BYTES";
+/// Operator allowlist of the hosts a hosted image (a `url` with no bytes) may name. Unset or empty
+/// keeps every hosted address as it was. Set, the address must be https, carry no userinfo and name
+/// a host on the list: a lower-case host name, or `*.` and a domain for any subdomain of it. The
+/// entries are comma-separated, and an entry that is not of that shape is dropped.
+pub const HOSTED_IMAGE_HOSTS_VAR: &str = "CHAT_ATTACHMENT_HOSTED_IMAGE_HOSTS";
 /// Request body limit of the chat stream route.
 pub const STREAM_BODY_LIMIT_VAR: &str = "CHAT_STREAM_BODY_LIMIT_BYTES";
 
@@ -137,7 +142,9 @@ impl AttachmentRoute {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The contract's numbers and switches as the environment sets them. Not `Copy`: it owns the
+/// hosted-image host list.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttachmentPolicy {
     enabled: bool,
     max_images: usize,
@@ -148,6 +155,8 @@ pub struct AttachmentPolicy {
     sandbox_files: bool,
     vision_as_parts: bool,
     do_attachments: bool,
+    /// The hosts a hosted image may name. `None` when the list is unset, which allows every hosted address.
+    hosted_image_hosts: Option<Vec<String>>,
 }
 
 impl Default for AttachmentPolicy {
@@ -184,6 +193,7 @@ impl AttachmentPolicy {
             do_attachments: mp_contracts::loop_fold::switch_from(
                 get(DO_ATTACHMENTS_VAR).as_deref(),
             ),
+            hosted_image_hosts: hosted_image_hosts_from(get(HOSTED_IMAGE_HOSTS_VAR).as_deref()),
         }
     }
 
@@ -245,7 +255,7 @@ impl AttachmentPolicy {
                 Kind::Image => self.max_image_bytes,
                 Kind::File => self.max_file_bytes,
             };
-            total = total.saturating_add(Self::measure(attachment, *kind, limit)?);
+            total = total.saturating_add(self.measure(attachment, *kind, limit)?);
         }
         if total > self.max_total_bytes {
             return Err(AttachmentRefusal::new(
@@ -315,10 +325,38 @@ impl AttachmentPolicy {
         }
     }
 
+    /// Whether a hosted image's address may reach the provider. Without the operator's list every
+    /// address may; with it, only an address [`url_on_list`] accepts.
+    fn hosted_url_allowed(&self, url: &str) -> bool {
+        match &self.hosted_image_hosts {
+            None => true,
+            Some(hosts) => url_on_list(url, hosts),
+        }
+    }
+
+    /// Whether an image address that a route forwards without a turn may reach the provider. The image
+    /// analysis and OCR routes send a hosted address on, and the provider fetches it, so it meets the same
+    /// list a hosted chat attachment meets in [`Self::validate`]. With the contract switched off, or no
+    /// operator list, every address passes as it did before the contract existed.
+    ///
+    /// # Errors
+    /// `EncodingInvalid` when the list is set and the address is not on it. The address is never echoed.
+    pub fn check_hosted_image_url(&self, url: &str) -> Result<(), AttachmentRefusal> {
+        if !self.enabled || self.hosted_url_allowed(url) {
+            return Ok(());
+        }
+        Err(AttachmentRefusal::new(
+            AttachmentCode::EncodingInvalid,
+            "The image address is not allowed.".to_owned(),
+        ))
+    }
+
     /// Validates the name and the encoding of one attachment and returns its
     /// decoded size, refusing it when that is over `limit`. A hosted image
-    /// (`url`, no bytes) has no size here.
+    /// (`url`, no bytes) has no size here; its address must pass the host list
+    /// when one is set.
     fn measure(
+        &self,
         attachment: &InvokeAttachment,
         kind: Kind,
         limit: usize,
@@ -342,18 +380,27 @@ impl AttachmentPolicy {
             .as_deref()
             .filter(|value| !value.is_empty());
         let Some(data) = data else {
-            let hosted = kind == Kind::Image
-                && attachment
-                    .url
-                    .as_deref()
-                    .is_some_and(|url| !url.trim().is_empty());
-            return if hosted {
-                Ok(0)
-            } else {
-                Err(AttachmentRefusal::new(
+            let url = attachment
+                .url
+                .as_deref()
+                .map(str::trim)
+                .filter(|url| !url.is_empty());
+            return match url {
+                Some(url) if kind == Kind::Image => {
+                    if self.hosted_url_allowed(url) {
+                        Ok(0)
+                    } else {
+                        // The address is never echoed: it can carry the person's data.
+                        Err(AttachmentRefusal::new(
+                            AttachmentCode::EncodingInvalid,
+                            format!("{label}: the image address is not allowed."),
+                        ))
+                    }
+                }
+                _ => Err(AttachmentRefusal::new(
                     AttachmentCode::EncodingInvalid,
                     format!("{label}: the attachment carries no data."),
-                ))
+                )),
             };
         };
         // The same tolerance the vision path has: a `data:` URL prefix is dropped.
@@ -442,6 +489,85 @@ fn check_name(raw: &str) -> Result<(), &'static str> {
         return Err("contains a control character");
     }
     Ok(())
+}
+
+/// The hosts [`HOSTED_IMAGE_HOSTS_VAR`] names, or `None` when it is unset or empty. Entries are
+/// comma-separated and surrounding blanks are ignored. An entry that is not a lower-case host name
+/// (or `*.` and one) is dropped, with one warning per process, and a list left empty allows no host.
+fn hosted_image_hosts_from(raw: Option<&str>) -> Option<Vec<String>> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let mut hosts = Vec::new();
+    let mut dropped = 0_usize;
+    let entries = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty());
+    for entry in entries {
+        if is_host_entry(entry) {
+            hosts.push(entry.to_owned());
+        } else {
+            dropped += 1;
+        }
+    }
+    if dropped > 0 {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                dropped,
+                "CHAT_ATTACHMENT_HOSTED_IMAGE_HOSTS: entries that are not lower-case host names were dropped"
+            );
+        });
+    }
+    Some(hosts)
+}
+
+/// A lower-case host name, or `*.` and one, of letters, digits, `.` and `-` only.
+fn is_host_entry(entry: &str) -> bool {
+    let name = entry.strip_prefix("*.").unwrap_or(entry);
+    !name.is_empty()
+        && name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+        })
+}
+
+/// Whether `raw` is an address the operator's list lets the provider fetch: https, no userinfo, and
+/// a host name (never an IP literal, never an empty label) that is an entry or sits below a `*.`
+/// entry. The address is parsed here and never fetched, and it is never put in a message or a log.
+fn url_on_list(raw: &str, hosts: &[String]) -> bool {
+    // The URL standard reads a backslash as a path separator, another parser as part of the authority:
+    // `https://cdn.example.org\@10.0.0.1/a.png` would name the listed host here and an internal one there.
+    // A blank, a control character and a non-ASCII byte are refused for the same reason, before the parse.
+    if raw
+        .bytes()
+        .any(|byte| byte <= b' ' || byte == b'\\' || byte >= 0x7f)
+    {
+        return false;
+    }
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return false;
+    };
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    if host.starts_with('[')
+        || host.parse::<std::net::IpAddr>().is_ok()
+        || host.split('.').any(str::is_empty)
+    {
+        return false;
+    }
+    hosts.iter().any(|entry| match entry.strip_prefix("*.") {
+        Some(domain) => host
+            .strip_suffix(domain)
+            .and_then(|rest| rest.strip_suffix('.'))
+            .is_some_and(|label| !label.is_empty()),
+        None => host == *entry,
+    })
 }
 
 /// `attachment_policy` of `/v1/models`: the numbers the server enforces, so the
@@ -887,5 +1013,237 @@ mod tests {
                 "attachment_encoding_invalid",
             ]
         );
+    }
+
+    /// A hosted image: a `url` and no bytes.
+    fn hosted(url: &str) -> InvokeAttachment {
+        InvokeAttachment {
+            kind: Some("image".to_owned()),
+            mime_type: Some("image/png".to_owned()),
+            url: Some(url.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    /// Whether a hosted image at `url` passes when the operator lists `hosts`.
+    fn hosted_passes(hosts: &str, url: &str) -> bool {
+        policy(&[(HOSTED_IMAGE_HOSTS_VAR, hosts)])
+            .validate(&[hosted(url)], AttachmentRoute::Platform)
+            .is_ok()
+    }
+
+    #[test]
+    fn a_listed_https_host_passes_and_the_other_hosted_forms_are_refused() {
+        let list = "cdn.example.org";
+        assert!(hosted_passes(list, "https://cdn.example.org/a.png"));
+        // The scheme and the host are case-insensitive, as they are in a URL.
+        assert!(hosted_passes(list, "HTTPS://CDN.Example.ORG/a.png"));
+        for url in [
+            "http://cdn.example.org/a.png",
+            "HTTP://cdn.example.org/a.png",
+            "https://user:secret@cdn.example.org/a.png",
+            "https://user@cdn.example.org/a.png",
+            "https://evil.example.net/a.png",
+            "https://cdn.example.org./a.png",
+            "https://cdn..example.org/a.png",
+            "not a url",
+        ] {
+            assert!(!hosted_passes(list, url), "{url}");
+        }
+    }
+
+    #[test]
+    fn a_look_alike_host_is_not_the_listed_one() {
+        let list = "example.org";
+        assert!(hosted_passes(list, "https://example.org/a.png"));
+        assert!(
+            !hosted_passes(list, "https://xn--exmple-cua.org/a.png"),
+            "a punycode look-alike"
+        );
+        assert!(
+            !hosted_passes(list, "https://ex\u{e4}mple.org/a.png"),
+            "an accented look-alike"
+        );
+    }
+
+    #[test]
+    fn an_uppercase_entry_is_not_a_lower_case_host_name_and_allows_nothing() {
+        assert_eq!(
+            hosted_image_hosts_from(Some("CDN.example.org")),
+            Some(Vec::new())
+        );
+        assert!(!hosted_passes(
+            "CDN.example.org",
+            "https://cdn.example.org/a.png"
+        ));
+    }
+
+    #[test]
+    fn an_ip_literal_is_refused_even_when_the_list_names_it() {
+        assert!(!hosted_passes("10.0.0.1", "https://10.0.0.1/a.png"));
+        assert!(!hosted_passes("10.0.0.1", "https://0x0a000001/a.png"));
+        assert!(!hosted_passes("cdn.example.org", "https://127.0.0.1/a.png"));
+        assert!(!hosted_passes("cdn.example.org", "https://[::1]/a.png"));
+    }
+
+    #[test]
+    fn a_wildcard_entry_matches_subdomains_on_a_label_boundary() {
+        let list = "*.example.com";
+        assert!(hosted_passes(list, "https://a.example.com/a.png"));
+        assert!(hosted_passes(list, "https://deep.a.example.com/a.png"));
+        for url in [
+            "https://example.com/a.png",
+            "https://evilexample.com/a.png",
+            "https://a.evilexample.com/a.png",
+            "https://example.com.evil.net/a.png",
+        ] {
+            assert!(!hosted_passes(list, url), "{url}");
+        }
+    }
+
+    #[test]
+    fn malformed_entries_are_dropped_and_an_emptied_list_allows_no_host() {
+        assert_eq!(
+            hosted_image_hosts_from(Some(" bad host, cdn.example.org ,,*.example.com, !x, *.")),
+            Some(vec![
+                "cdn.example.org".to_owned(),
+                "*.example.com".to_owned()
+            ])
+        );
+        assert!(hosted_passes(
+            "bad host,cdn.example.org",
+            "https://cdn.example.org/a.png"
+        ));
+        assert!(!hosted_passes("!!!", "https://cdn.example.org/a.png"));
+        assert!(!hosted_passes(" , ", "https://cdn.example.org/a.png"));
+    }
+
+    #[test]
+    fn an_unset_or_blank_list_changes_nothing() {
+        assert_eq!(hosted_image_hosts_from(None), None);
+        assert_eq!(hosted_image_hosts_from(Some("  ")), None);
+        assert_eq!(AttachmentPolicy::default().hosted_image_hosts, None);
+        for url in [
+            "http://anywhere.test/a.png",
+            "https://10.0.0.1/a.png",
+            "ftp://x.test/a.png",
+        ] {
+            assert!(hosted_passes("", url), "{url}");
+            assert!(AttachmentPolicy::default()
+                .validate(&[hosted(url)], AttachmentRoute::Platform)
+                .is_ok());
+        }
+    }
+
+    #[test]
+    fn the_list_judges_hosted_addresses_and_never_inline_bytes() {
+        assert!(policy(&[(HOSTED_IMAGE_HOSTS_VAR, "cdn.example.org")])
+            .validate(&[image(TINY)], AttachmentRoute::Platform)
+            .is_ok());
+    }
+
+    #[test]
+    fn a_refused_hosted_address_is_typed_and_never_echoed() {
+        let refusal = policy(&[(HOSTED_IMAGE_HOSTS_VAR, "cdn.example.org")])
+            .validate(
+                &[hosted("https://evil.example.net/secret-chart.png")],
+                AttachmentRoute::Platform,
+            )
+            .expect_err("refused");
+        assert_eq!(refusal.code, AttachmentCode::EncodingInvalid);
+        assert_eq!(
+            refusal.message,
+            "An attachment: the image address is not allowed."
+        );
+        assert!(
+            !refusal.message.contains("evil.example.net"),
+            "{}",
+            refusal.message
+        );
+        assert!(!refusal.message.contains("secret"), "{}", refusal.message);
+    }
+
+    /// The image routes send a hosted address on without a turn, so they meet the same list through
+    /// `check_hosted_image_url`.
+    fn image_route_passes(vars: &[(&str, &str)], url: &str) -> bool {
+        policy(vars).check_hosted_image_url(url).is_ok()
+    }
+
+    #[test]
+    fn the_image_routes_judge_a_hosted_address_by_the_same_list() {
+        let list = [(HOSTED_IMAGE_HOSTS_VAR, "cdn.example.org")];
+        assert!(image_route_passes(&list, "https://cdn.example.org/a.png"));
+        for url in [
+            "http://cdn.example.org/a.png",
+            "https://user:secret@cdn.example.org/a.png",
+            "https://10.0.0.1/a.png",
+            "https://127.0.0.1/a.png",
+            "https://[::1]/a.png",
+            "https://localhost/a.png",
+            "https://evil.example.net/a.png",
+            "https://cdn.example.org.evil.net/a.png",
+            "https://cdn.example.org\\@10.0.0.1/a.png",
+            "https://cdn.example.org/a b.png",
+            " https://cdn.example.org/a.png",
+            "not a url",
+        ] {
+            assert!(!image_route_passes(&list, url), "{url:?}");
+        }
+    }
+
+    #[test]
+    fn with_no_list_or_the_contract_off_the_image_routes_pass_every_address_as_before() {
+        let contract_off = [
+            (ENABLED_VAR, "0"),
+            (HOSTED_IMAGE_HOSTS_VAR, "cdn.example.org"),
+        ];
+        for url in [
+            "http://anywhere.test/a.png",
+            "https://10.0.0.1/a.png",
+            "https://user@x.test/a.png",
+            " https://x.test/a.png",
+            "ftp://x.test/a.png",
+        ] {
+            assert!(image_route_passes(&[], url), "{url:?}");
+            assert!(
+                image_route_passes(&contract_off, url),
+                "{url:?}: the contract is off"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_image_address_is_typed_and_never_echoed() {
+        let refusal = policy(&[(HOSTED_IMAGE_HOSTS_VAR, "cdn.example.org")])
+            .check_hosted_image_url("https://evil.example.net/secret-chart.png")
+            .expect_err("refused");
+        assert_eq!(refusal.code, AttachmentCode::EncodingInvalid);
+        assert_eq!(refusal.message, "The image address is not allowed.");
+        assert!(
+            !refusal.message.contains("evil.example.net"),
+            "{}",
+            refusal.message
+        );
+        assert!(!refusal.message.contains("secret"), "{}", refusal.message);
+    }
+
+    #[test]
+    fn a_backslash_blank_or_non_ascii_byte_is_refused_even_when_the_host_is_listed() {
+        // The URL standard reads the backslash as a path separator, so this names the listed host to
+        // this check and an internal host to a parser that keeps the backslash in the authority.
+        for url in [
+            "https://cdn.example.org\\@10.0.0.1/a.png",
+            "https://cdn.example.org/a\\b.png",
+            "https://cdn.example.org/a b.png",
+            "https://cdn.example.org/a\tb.png",
+            "https://cdn.example.org/a\u{7f}.png",
+            "https://cdn.example.org/\u{e5}.png",
+        ] {
+            assert!(!hosted_passes("cdn.example.org", url), "{url:?}");
+        }
+        assert!(hosted_passes(
+            "cdn.example.org",
+            "https://cdn.example.org/a.png"
+        ));
     }
 }

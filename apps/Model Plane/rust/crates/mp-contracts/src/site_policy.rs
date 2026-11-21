@@ -44,6 +44,15 @@ impl WebDomainPolicyMode {
     }
 }
 
+/// Whether a set `WEB_DOMAIN_POLICY_MODE` is a value [`WebDomainPolicyMode::from_env_value`] does not take as one of its
+/// words: anything but `off`, `shadow` or `enforce`, exact after trimming. Such a value still enforces (K3-26), so the
+/// reader is unchanged, and the startup report names it. A blank value reads as unset.
+#[must_use]
+pub fn unreadable_web_domain_mode(value: &str) -> bool {
+    let word = value.trim();
+    !(word.is_empty() || matches!(word, "off" | "shadow" | "enforce"))
+}
+
 /// The canonical form of one host, as `browser-domain-canonical.json` pins it: surrounding whitespace is trimmed,
 /// letters are folded to lower case, and then only ASCII letters, digits and hyphens may appear, in dot-separated
 /// labels. A host needs at least one dot, no label may be empty or start or end with a hyphen, a label may be at
@@ -293,6 +302,18 @@ mod tests {
             WebDomainPolicyMode::Enforce
         );
         assert_eq!(WebDomainPolicyMode::from_env_value(Some("on")), WebDomainPolicyMode::Enforce);
+    }
+
+    #[test]
+    fn the_switch_words_are_read_exactly_after_trimming_and_other_set_values_are_flagged() {
+        for word in ["", "   ", "off", " shadow ", "enforce"] {
+            assert!(!unreadable_web_domain_mode(word), "{word:?} is read");
+        }
+        for word in [
+            "Enforce", "ENFORCE", "Shadow", "on", "1", "true", "enforced",
+        ] {
+            assert!(unreadable_web_domain_mode(word), "{word:?} is not read");
+        }
     }
 
     #[test]

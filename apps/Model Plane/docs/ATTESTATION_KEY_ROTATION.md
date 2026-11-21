@@ -90,6 +90,27 @@ integration-corev2 trusts — no execution-core restart needed for either.
 8. Redeploy/restart integration-corev2 once more so the pruned registry
    takes effect (the old key stops being trusted).
 
+## Dev-only keys
+
+Two keys were printed in a transcript and are accepted as **dev-only** (the
+owner answers DEC-F02-3 and DEC-F04-10 in
+`docs/plans/model-plane-open-decisions.md`):
+
+- `MODEL_EXECUTION_SERVICE_API_KEY`, the service key that reaches
+  execution-core's ingestion key (`INGESTION_SERVICE_API_KEY`).
+- `EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY`, the attestation
+  signer, and the `EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID` it signs
+  under.
+
+No rotation is owed for either of them, and the rotation steps above do not
+apply to them. The rule that stands is that neither value is reused outside a
+dev environment. Production sets its own values: the production compose
+requires each of them in the `:?` form and gives none a default, so a
+production deployment fails at interpolation until its own values are set.
+The public half of the attestation key is registered under issuer
+`model-execution` in integration-corev2's
+`INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON`, as the steps above describe.
+
 ## What this does not yet cover
 
 - **conversation-core's key** uses the same registry and the same

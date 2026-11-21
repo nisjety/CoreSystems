@@ -88,6 +88,16 @@ fn loop_guard_mode() -> LoopGuardMode {
     })
 }
 
+/// `LOOP_GUARD_RESULT_AWARE`, read once per process with `LOOP_GUARD_MODE`. Only the literal `true` turns it on.
+fn loop_guard_result_aware() -> bool {
+    static RESULT_AWARE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *RESULT_AWARE.get_or_init(|| {
+        loop_guard::result_aware_from_env_value(
+            std::env::var(loop_guard::RESULT_AWARE_ENV).ok().as_deref(),
+        )
+    })
+}
+
 /// Default allowance for one artifact's private check: review passes,
 /// reviewer edits and repairs together.
 const DEFAULT_ARTIFACT_CHECK_SECS: u64 = 90;
@@ -580,11 +590,30 @@ pub(crate) fn extract_json_object(s: &str) -> Option<Value> {
 /// check. On, a file that failed the structural check is held back the first time its name fails in the turn, so
 /// the model can repair it and run it again. A second failure of that name is delivered with its check, so a file
 /// the model cannot fix still reaches the user, marked as failed.
+///
+/// A held file's events are kept in memory for the turn only. A later delivery of its name ends the hold, so the
+/// repaired file wins and nothing is sent twice. A turn that ends with a file still held delivers it then, marked
+/// failed ([`deliver_held_offices`], F-f05-24).
 #[derive(Debug, Default)]
 pub(crate) struct OfficeDelivery {
     enforce: bool,
-    held: BTreeSet<String>,
+    /// The names whose first structural failure this turn has seen. The hold is decided once per name.
+    struck: BTreeSet<String>,
+    /// The files held back and not yet repaired, by name.
+    held: BTreeMap<String, HeldFile>,
+    /// How many holds the turn has made, so a held file keeps its place in line.
+    holds_made: u64,
 }
+
+/// A held file: the artifact and attachment events it would have been delivered with, and its place in line.
+#[derive(Debug)]
+struct HeldFile {
+    order: u64,
+    events: Vec<ChatEvent>,
+}
+
+/// The most held files a turn keeps. A ninth drops the oldest, and only a content-free counter records it.
+const HELD_FILES_CAP: usize = 8;
 
 /// The switch that holds back failed Office files. Only the literal `true` enables it.
 pub(crate) const VERIFY_ENFORCE_ENV: &str = "CODE_INTERPRETER_VERIFY_ENFORCE";
@@ -595,14 +624,52 @@ impl OfficeDelivery {
     pub(crate) fn for_turn() -> Self {
         Self {
             enforce: enforce_from(std::env::var(VERIFY_ENFORCE_ENV).ok().as_deref()),
-            held: BTreeSet::new(),
+            ..Self::default()
         }
     }
 
     /// Whether the file is held back rather than delivered. Only the first failure of a name in the turn is held.
     fn holds_back(&mut self, name: &str, check: Option<&OfficeVerification>) -> bool {
         let failed = check.is_some_and(|report| report.level == VerificationLevel::Failed);
-        self.enforce && failed && self.held.insert(name.to_owned())
+        self.enforce && failed && self.struck.insert(name.to_owned())
+    }
+
+    /// Keeps a held file's events until the turn ends or its name is delivered. Beyond [`HELD_FILES_CAP`] the oldest
+    /// held file is dropped, and a content-free counter records it.
+    fn hold(&mut self, name: &str, events: Vec<ChatEvent>) {
+        self.holds_made = self.holds_made.saturating_add(1);
+        self.held.insert(
+            name.to_owned(),
+            HeldFile {
+                order: self.holds_made,
+                events,
+            },
+        );
+        while self.held.len() > HELD_FILES_CAP {
+            let Some(oldest) = self
+                .held
+                .iter()
+                .min_by_key(|(_, file)| file.order)
+                .map(|(name, _)| name.clone())
+            else {
+                break;
+            };
+            self.held.remove(&oldest);
+            metrics::counter!("mp_gateway_office_held_files_dropped_total").increment(1);
+        }
+    }
+
+    /// A delivery of `name`, a repair or a second failure, ends its hold: the held version is never sent.
+    fn release(&mut self, name: &str) {
+        self.held.remove(name);
+    }
+
+    /// The events of every file still held, in the order they were held. The holds are cleared, so a flush is final.
+    #[must_use]
+    pub(crate) fn flush_held(&mut self) -> Vec<ChatEvent> {
+        let mut files: Vec<HeldFile> = std::mem::take(&mut self.held).into_values().collect();
+        files.sort_by_key(|file| file.order);
+        files.into_iter().flat_map(|file| file.events).collect()
     }
 }
 
@@ -679,6 +746,10 @@ const DELIVERED_FILES_NOTE: &str = "\nThese files were delivered to the user as 
 /// the user has it.
 const WITHHELD_FILES_NOTE: &str = "\nThe files listed under files_withheld failed the structural Office check and were NOT delivered to the user: do not say the user has them, and regenerate each one with code_interpreter before you mention it again. A file listed under files_delivered was delivered as a downloadable artifact, which already appears as a download card below your message. Confirm what you produced in plain text, and NEVER write a markdown link, a bare URL, or a \"sandbox:/\" path for a file — no such link exists and it will not work.";
 
+/// The closing note of a turn that delivers a held Office file marked failed (F-f05-24). The model is told the file is
+/// attached as failed, so its answer says so and does not describe the file as ready.
+const HELD_OFFICE_CLOSING_NOTE: &str = "One or more Office files failed the structural check and are attached to this reply marked as failed, because no repaired version was produced in this turn: say so plainly, and do not describe them as ready or as verified in Office.";
+
 pub(crate) fn code_interpreter_events(
     outcome: &ToolOutcome,
     office: &mut OfficeDelivery,
@@ -730,11 +801,7 @@ pub(crate) fn code_interpreter_events(
             continue;
         }
         let check = office_report_for(&payload, &name);
-        if office.holds_back(&name, check.as_ref()) {
-            // Held back, not delivered: the model repairs the file and runs it again.
-            withheld.push(format!("{name} ({mime}, {bytes} bytes)"));
-            continue;
-        }
+        let held = office.holds_back(&name, check.as_ref());
         // A `data:` URI is the established way this gateway hands generated
         // bytes to the browser (the image-generation path does exactly this),
         // so a generated document needs no new storage or route.
@@ -742,22 +809,28 @@ pub(crate) fn code_interpreter_events(
         let artifact_id = format!("{}-file-{}", outcome.call_id, index + 1);
         let kind = crate::artifacts::kind_for_generated_file(&mime, &name);
         let preview = office_preview_for(&payload, &name);
-        events.push(crate::artifacts::artifact_event(
-            &artifact_id,
-            kind,
-            &name,
-            &data_uri,
-            1,
-        ));
-        events.push(crate::artifacts::attachment_event(
-            &artifact_id,
-            &name,
-            &mime,
-            &data_uri,
-            bytes,
-            check,
-            preview,
-        ));
+        let file_events = vec![
+            crate::artifacts::artifact_event(&artifact_id, kind, &name, &data_uri, 1),
+            crate::artifacts::attachment_event(
+                &artifact_id,
+                &name,
+                &mime,
+                &data_uri,
+                bytes,
+                check,
+                preview,
+            ),
+        ];
+        if held {
+            // Held back, not delivered: the model repairs the file and runs it again. Its events wait in the turn's
+            // office state, and the turn's end delivers them if no repaired version arrives (F-f05-24).
+            withheld.push(format!("{name} ({mime}, {bytes} bytes)"));
+            office.hold(&name, file_events);
+            continue;
+        }
+        // A delivery of this name, a pass or a second failure, ends any hold on an earlier version of it.
+        office.release(&name);
+        events.extend(file_events);
         listed.push(format!("{name} ({mime}, {bytes} bytes)"));
     }
 
@@ -3929,6 +4002,7 @@ async fn dispatch_tool_with_cost(
                 files_in.as_ref(),
                 attachments.run_attachments(),
                 skill_mounts,
+                capability_bearer,
             )
             .await
             {
@@ -3958,6 +4032,7 @@ async fn dispatch_tool_with_cost(
                     sandbox_bearer,
                     inference_bearer,
                     session_bearer,
+                    capability_bearer,
                     run_id,
                     org_id,
                     user_id,
@@ -9307,10 +9382,13 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     // for no choice. The caller decides it once for the turn (`sse::invoke_stream_sse`); the rounds carry it.
     speed_tier: &str,
 ) -> Result<ToolRounds, &'static str> {
+    // The Office files this turn has delivered or held back under the verifier's switch (WS19-S3). Owned here, so
+    // every exit of the tool loop meets the one place that delivers the files still held (F-f05-24).
+    let mut office_delivery = OfficeDelivery::for_turn();
     // Every Quarry read of the loop carries its request id and, off ZDR, its run id as advisory attribution
     // (E4.6, 062a). The loop is awaited on this task, not spawned, so the scope reaches each search and page
     // read it makes. The detached security publishes and semantic shadows it spawns make no Quarry call.
-    crate::quarry::attribution::scope(
+    let rounds = crate::quarry::attribution::scope(
         crate::quarry::attribution::Attribution {
             request_id: Some(request_id.to_owned()),
             parent_run: (!zdr).then(|| run_id.to_owned()),
@@ -9347,9 +9425,56 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             images,
             prompt_tiers,
             speed_tier,
+            &mut office_delivery,
         ),
     )
-    .await
+    .await;
+    deliver_held_offices(rounds, &mut office_delivery, sink).await
+}
+
+/// Ends the turn's held Office files (F-f05-24). A file held back in this turn and never repaired is delivered now,
+/// marked failed, through the tool phase's own forwarding: a live sink emits it, and a caller that buffers the events
+/// receives them in `events`. A turn that completes also gets the closing note, so its answer says the file failed.
+/// A cancelled client gets nothing, and its held files are dropped with the turn. Every exit of the tool loop, a
+/// normal end, the round limit, the loop guard's stop and an error that still answers, comes through here.
+async fn deliver_held_offices(
+    rounds: Result<ToolRounds, &'static str>,
+    office: &mut OfficeDelivery,
+    sink: Option<&crate::sse_events::RichEventSink>,
+) -> Result<ToolRounds, &'static str> {
+    let held = office.flush_held();
+    if held.is_empty() || matches!(rounds, Err("client_cancelled")) {
+        return rounds;
+    }
+    match (rounds, sink) {
+        (Ok(mut rounds), Some(sink)) => {
+            for event in held {
+                sink.emit(event).await;
+            }
+            rounds.messages.push(held_office_closing_note());
+            Ok(rounds)
+        }
+        (Ok(mut rounds), None) => {
+            rounds.events.extend(held);
+            rounds.messages.push(held_office_closing_note());
+            Ok(rounds)
+        }
+        (Err(reason), Some(sink)) => {
+            for event in held {
+                sink.emit(event).await;
+            }
+            Err(reason)
+        }
+        (Err(reason), None) => Err(reason),
+    }
+}
+
+fn held_office_closing_note() -> ChatMessage {
+    ChatMessage {
+        role: "system".to_owned(),
+        content: HELD_OFFICE_CLOSING_NOTE.to_owned(),
+        ..Default::default()
+    }
 }
 
 /// The loop of [`run_tool_rounds_for_model_with_attachments`], run inside its attribution scope. The parameters are the same.
@@ -9386,6 +9511,7 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
     images: &crate::vision::parts::ImageParts,
     prompt_tiers: Option<PromptTierPlan>,
     speed_tier: &str,
+    office_delivery: &mut OfficeDelivery,
 ) -> Result<ToolRounds, &'static str> {
     // Resolved ONCE for the whole turn rather than per call: the entitlement is a
     // property of the turn, and a value re-derived per round is a value that can
@@ -9532,7 +9658,10 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
     // The loop guard observes the model's rounds in this turn (WS25-S1). It is built only when
     // `LOOP_GUARD_MODE` observes, so with the switch off no guard runs at all.
     let guard_mode = loop_guard_mode();
-    let mut loop_guard = guard_mode.observes().then(LoopGuard::new);
+    let result_aware = loop_guard_result_aware();
+    let mut loop_guard = guard_mode
+        .observes()
+        .then(|| LoopGuard::new().with_result_awareness(result_aware));
     let mut loop_stop: Option<LoopStop> = None;
     // Artifact id → kind, for artifacts authored during THIS turn. An
     // `update_artifact` does not resupply the kind (changing it mid-history
@@ -9543,8 +9672,6 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
         String,
         crate::artifacts::ArtifactKind,
     > = std::collections::HashMap::new();
-    // The Office files this turn has delivered or held back under the verifier's switch (WS19-S3).
-    let mut office_delivery = OfficeDelivery::for_turn();
     // The question this turn is about, snapshotted BEFORE the loop starts
     // appending tool context: the last thing the user actually wrote. A
     // `web_search` is judged against the query the model composed (that is what
@@ -10486,7 +10613,7 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
                 artifact_id_of(&outcome).and_then(|id| state.artifact_versions.kind_of(thread_id, &id)
                     .or_else(|| authored_artifact_kinds.get(&id).copied()));
             let (artifact_events, rewritten) =
-                tool_artifact_events(&outcome, artifact_kind_hint, &mut office_delivery);
+                tool_artifact_events(&outcome, artifact_kind_hint, office_delivery);
             let checked_artifact_ids: Vec<&String> = artifact_events.iter().filter_map(|event| match event {
                     ChatEvent::Artifact { id, content, .. } if result_checks.iter().any(|check| check["artifactId"] == *id
                         && check["contentHash"] == crate::result_validation::content_hash(content)) => Some(id),
@@ -10768,6 +10895,10 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
                     } else {
                         CallOutcome::Ok
                     },
+                    // A call that ran is judged by a digest of its output, never the output itself, and only
+                    // when result awareness is on.
+                    result_digest: (result_aware && !*suppressed && outcome.error.is_none())
+                        .then(|| loop_guard::result_digest(&outcome.output)),
                 })
                 .collect();
             let verdict = guard.observe_round(&records);
@@ -15510,6 +15641,381 @@ mod tests {
         for off in [None, Some(""), Some("TRUE"), Some("1"), Some("yes"), Some("false")] {
             assert!(!enforce_from(off), "{off:?} must not switch enforcement on");
         }
+    }
+
+    /// A tool phase that produced nothing of its own, to see what the turn's end adds to it.
+    fn finished_rounds(events: Vec<ChatEvent>) -> ToolRounds {
+        ToolRounds {
+            result_checks: Vec::new(),
+            messages: Vec::new(),
+            events,
+            resolved_model: None,
+            last_round_tools: Vec::new(),
+            any_tool_succeeded: false,
+            tool_successes: 0,
+            tool_failures: 0,
+            document_tool_failures: 0,
+            web_citations: 0,
+            usage: Vec::new(),
+            loop_stop: None,
+        }
+    }
+
+    /// The name of each attachment in `events`, in order.
+    fn attached_names(events: &[ChatEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ChatEvent::Attachment { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// F-f05-24: a held file's events wait in the turn's state. Nothing is emitted for it when it is held.
+    #[test]
+    fn a_held_office_file_waits_in_the_turn_and_is_not_emitted() {
+        let mut office = OfficeDelivery {
+            enforce: true,
+            ..OfficeDelivery::default()
+        };
+        let broken = one_office_file("deck.docx", "failed", container_fault());
+        let (events, _) =
+            tool_artifact_events(&outcome_for("code_interpreter", broken), None, &mut office);
+        assert!(events.is_empty(), "the first failure is held: {events:?}");
+        assert_eq!(office.held.keys().collect::<Vec<_>>(), vec!["deck.docx"]);
+    }
+
+    /// F-f05-24: a repaired version is delivered once, its hold ends, and nothing of the held version is sent later.
+    #[test]
+    fn a_repaired_file_is_delivered_once_and_its_held_version_is_dropped() {
+        let mut office = OfficeDelivery {
+            enforce: true,
+            ..OfficeDelivery::default()
+        };
+        let broken = one_office_file("deck.docx", "failed", container_fault());
+        let repaired = one_office_file("deck.docx", "passed", serde_json::json!([]));
+        let _ = tool_artifact_events(&outcome_for("code_interpreter", broken), None, &mut office);
+        let (events, _) = tool_artifact_events(
+            &outcome_for("code_interpreter", repaired),
+            None,
+            &mut office,
+        );
+        assert_eq!(attached_names(&events), vec!["deck.docx"]);
+        match &events[1] {
+            ChatEvent::Attachment {
+                check: Some(report),
+                ..
+            } => assert_eq!(report.level, VerificationLevel::Passed),
+            other => panic!("expected the repaired file's attachment, got {other:?}"),
+        }
+        assert!(office.held.is_empty(), "the repair ends the hold");
+        assert!(
+            office.flush_held().is_empty(),
+            "the held version is never sent once the file is repaired"
+        );
+    }
+
+    /// F-f05-24: a second failure of a name is delivered with its check, and nothing is left held. A third failure of
+    /// the same name is delivered as well, as it always was: the hold is decided once per name.
+    #[test]
+    fn two_failures_of_a_name_deliver_the_second_and_leave_nothing_held() {
+        let mut office = OfficeDelivery {
+            enforce: true,
+            ..OfficeDelivery::default()
+        };
+        let broken = one_office_file("deck.docx", "failed", container_fault());
+        let _ = tool_artifact_events(
+            &outcome_for("code_interpreter", broken.clone()),
+            None,
+            &mut office,
+        );
+        let (second, _) = tool_artifact_events(
+            &outcome_for("code_interpreter", broken.clone()),
+            None,
+            &mut office,
+        );
+        assert_eq!(attached_names(&second), vec!["deck.docx"]);
+        assert!(office.held.is_empty());
+        assert!(office.flush_held().is_empty());
+        let (third, _) =
+            tool_artifact_events(&outcome_for("code_interpreter", broken), None, &mut office);
+        assert_eq!(attached_names(&third), vec!["deck.docx"]);
+        assert!(office.held.is_empty());
+    }
+
+    /// F-f05-24: past the cap the oldest held file gives way. The flush returns the rest in the order they were held,
+    /// which is not the order of their names.
+    #[test]
+    fn a_ninth_held_file_drops_the_oldest_and_the_flush_keeps_the_order_of_holding() {
+        let mut office = OfficeDelivery {
+            enforce: true,
+            ..OfficeDelivery::default()
+        };
+        let names = ["n4", "n2", "n9", "n1", "n7", "n3", "n8", "n5", "n6"];
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            for name in names {
+                let file = format!("{name}.docx");
+                let broken = one_office_file(&file, "failed", container_fault());
+                let (events, _) = tool_artifact_events(
+                    &outcome_for("code_interpreter", broken),
+                    None,
+                    &mut office,
+                );
+                assert!(events.is_empty(), "{file} is held: {events:?}");
+            }
+        });
+        assert!(
+            handle
+                .render()
+                .lines()
+                .any(|line| line == "mp_gateway_office_held_files_dropped_total 1"),
+            "the one dropped file is counted, and only its counter"
+        );
+        assert_eq!(office.held.len(), HELD_FILES_CAP);
+        assert!(
+            !office.held.contains_key("n4.docx"),
+            "the oldest held file gives way beyond the cap"
+        );
+        let expected: Vec<String> = ["n2", "n9", "n1", "n7", "n3", "n8", "n5", "n6"]
+            .iter()
+            .map(|name| format!("{name}.docx"))
+            .collect();
+        assert_eq!(attached_names(&office.flush_held()), expected);
+    }
+
+    /// F-f05-24: a turn that ends with a file still held delivers it marked failed, through the buffering caller's
+    /// events, and its answer is told so by the closing note. The normal end, the round limit and the loop guard's stop
+    /// all end the loop the same way, so they share this path.
+    #[tokio::test]
+    async fn a_turn_that_ends_with_a_held_file_delivers_it_marked_failed_with_the_closing_note() {
+        let mut office = OfficeDelivery {
+            enforce: true,
+            ..OfficeDelivery::default()
+        };
+        let broken = one_office_file("deck.docx", "failed", container_fault());
+        let _ = tool_artifact_events(&outcome_for("code_interpreter", broken), None, &mut office);
+        let rounds = deliver_held_offices(Ok(finished_rounds(Vec::new())), &mut office, None)
+            .await
+            .expect("the turn completes");
+        assert_eq!(attached_names(&rounds.events), vec!["deck.docx"]);
+        match rounds.events.last() {
+            Some(ChatEvent::Attachment {
+                check: Some(report),
+                ..
+            }) => assert_eq!(report.level, VerificationLevel::Failed),
+            other => panic!("expected the held attachment marked failed, got {other:?}"),
+        }
+        let note = rounds.messages.last().expect("the closing note");
+        assert_eq!(note.role, "system");
+        assert_eq!(note.content, HELD_OFFICE_CLOSING_NOTE);
+        assert!(office.held.is_empty(), "the flush clears the holds");
+    }
+
+    /// F-f05-24: the loop guard's stop and the round limit both end the tool loop with an `Ok`, as a normal end does, so a
+    /// held file is delivered marked failed on each of them, with the closing note. The round limit has no stop of its
+    /// own, which is the `None` case; the stop is the content-free account the guard made.
+    #[tokio::test]
+    async fn a_loop_guard_stop_and_the_round_limit_deliver_a_held_file_like_a_normal_end() {
+        let stop = mp_contracts::loop_guard::LoopStop {
+            reason: mp_contracts::loop_guard::StopReason::Repeat,
+            tool: "code_interpreter".to_owned(),
+            signature_hash: "fixture-signature".to_owned(),
+            count: 3,
+        };
+        for loop_stop in [Some(stop), None] {
+            let mut office = OfficeDelivery {
+                enforce: true,
+                ..OfficeDelivery::default()
+            };
+            let broken = one_office_file("deck.docx", "failed", container_fault());
+            let _ =
+                tool_artifact_events(&outcome_for("code_interpreter", broken), None, &mut office);
+            let rounds = ToolRounds {
+                loop_stop: loop_stop.clone(),
+                ..finished_rounds(Vec::new())
+            };
+            let rounds = deliver_held_offices(Ok(rounds), &mut office, None)
+                .await
+                .expect("the turn completes");
+            assert_eq!(attached_names(&rounds.events), vec!["deck.docx"]);
+            assert_eq!(
+                rounds.loop_stop, loop_stop,
+                "the stop is kept as the loop left it"
+            );
+            assert_eq!(
+                rounds
+                    .messages
+                    .last()
+                    .map(|message| message.content.as_str()),
+                Some(HELD_OFFICE_CLOSING_NOTE)
+            );
+            assert!(office.held.is_empty(), "the flush clears the holds");
+        }
+    }
+
+    /// F-f05-24: a turn with nothing held gets no closing note and no extra event.
+    #[tokio::test]
+    async fn a_turn_with_nothing_held_is_returned_unchanged() {
+        let mut office = OfficeDelivery {
+            enforce: true,
+            ..OfficeDelivery::default()
+        };
+        let passed = one_office_file("deck.docx", "passed", serde_json::json!([]));
+        let _ = tool_artifact_events(&outcome_for("code_interpreter", passed), None, &mut office);
+        let rounds = deliver_held_offices(Ok(finished_rounds(Vec::new())), &mut office, None)
+            .await
+            .expect("the turn completes");
+        assert!(rounds.events.is_empty());
+        assert!(rounds.messages.is_empty());
+    }
+
+    /// F-f05-24: with the switch off, which is the default, nothing is held or flushed, and the turn's end adds nothing.
+    #[tokio::test]
+    async fn with_the_switch_off_nothing_is_held_or_flushed() {
+        let mut office = OfficeDelivery::default();
+        let broken = one_office_file("deck.docx", "failed", container_fault());
+        let (events, _) =
+            tool_artifact_events(&outcome_for("code_interpreter", broken), None, &mut office);
+        assert_eq!(
+            attached_names(&events),
+            vec!["deck.docx"],
+            "delivered as it always was"
+        );
+        assert!(office.held.is_empty());
+        assert!(office.flush_held().is_empty());
+        let rounds = deliver_held_offices(Ok(finished_rounds(Vec::new())), &mut office, None)
+            .await
+            .expect("the turn completes");
+        assert!(rounds.events.is_empty());
+        assert!(rounds.messages.is_empty());
+    }
+
+    /// F-f05-24: a live turn streams its held file, marked failed, once, and leaves nothing for the caller to replay.
+    #[tokio::test]
+    async fn a_live_turn_streams_its_held_file_once_and_buffers_nothing() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let sink = crate::sse_events::RichEventSink::new(
+            tx,
+            vec!["artifacts".to_owned()],
+            "req-held".to_owned(),
+        );
+        let mut office = OfficeDelivery {
+            enforce: true,
+            ..OfficeDelivery::default()
+        };
+        let broken = one_office_file("deck.docx", "failed", container_fault());
+        let _ = tool_artifact_events(&outcome_for("code_interpreter", broken), None, &mut office);
+        let rounds =
+            deliver_held_offices(Ok(finished_rounds(Vec::new())), &mut office, Some(&sink))
+                .await
+                .expect("the turn completes");
+        assert!(
+            rounds.events.is_empty(),
+            "a live sink streams the file and buffers nothing"
+        );
+        assert_eq!(
+            rounds
+                .messages
+                .last()
+                .map(|message| message.content.as_str()),
+            Some(HELD_OFFICE_CLOSING_NOTE)
+        );
+        drop(sink);
+        let mut streamed = 0;
+        while rx.recv().await.is_some() {
+            streamed += 1;
+        }
+        assert_eq!(
+            streamed, 2,
+            "the artifact and its attachment reach the client once each"
+        );
+    }
+
+    /// F-f05-24: an error that still answers the user streams the held file before the answer, so the error does not
+    /// lose it.
+    #[tokio::test]
+    async fn an_error_that_still_answers_streams_the_held_file_first() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let sink = crate::sse_events::RichEventSink::new(
+            tx,
+            vec!["artifacts".to_owned()],
+            "req-error".to_owned(),
+        );
+        let mut office = OfficeDelivery {
+            enforce: true,
+            ..OfficeDelivery::default()
+        };
+        let broken = one_office_file("deck.docx", "failed", container_fault());
+        let _ = tool_artifact_events(&outcome_for("code_interpreter", broken), None, &mut office);
+        let outcome = deliver_held_offices(
+            Err(crate::result_validation::VALIDATION_FAILED),
+            &mut office,
+            Some(&sink),
+        )
+        .await;
+        assert_eq!(
+            outcome.err(),
+            Some(crate::result_validation::VALIDATION_FAILED)
+        );
+        drop(sink);
+        let mut streamed = 0;
+        while rx.recv().await.is_some() {
+            streamed += 1;
+        }
+        assert_eq!(
+            streamed, 2,
+            "the held file reaches the client before the error's answer"
+        );
+    }
+
+    /// F-f05-24: a cancelled client receives nothing for its held files, which are dropped with the turn.
+    #[tokio::test]
+    async fn a_cancelled_turn_drops_its_held_files() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let sink = crate::sse_events::RichEventSink::new(
+            tx,
+            vec!["artifacts".to_owned()],
+            "req-cancel".to_owned(),
+        );
+        let mut office = OfficeDelivery {
+            enforce: true,
+            ..OfficeDelivery::default()
+        };
+        let broken = one_office_file("deck.docx", "failed", container_fault());
+        let _ = tool_artifact_events(&outcome_for("code_interpreter", broken), None, &mut office);
+        let outcome = deliver_held_offices(Err("client_cancelled"), &mut office, Some(&sink)).await;
+        assert_eq!(outcome.err(), Some("client_cancelled"));
+        assert!(office.held.is_empty(), "the held files are dropped");
+        drop(sink);
+        assert!(
+            rx.recv().await.is_none(),
+            "a cancelled client receives nothing for a held file"
+        );
+    }
+
+    /// F-f05-24: with the switch off a live turn streams nothing extra at its end.
+    #[tokio::test]
+    async fn with_the_switch_off_a_live_turn_streams_nothing_extra() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let sink = crate::sse_events::RichEventSink::new(
+            tx,
+            vec!["artifacts".to_owned()],
+            "req-off".to_owned(),
+        );
+        let mut office = OfficeDelivery::default();
+        let rounds =
+            deliver_held_offices(Ok(finished_rounds(Vec::new())), &mut office, Some(&sink))
+                .await
+                .expect("the turn completes");
+        assert!(rounds.messages.is_empty());
+        drop(sink);
+        assert!(
+            rx.recv().await.is_none(),
+            "nothing is streamed at the turn's end"
+        );
     }
 
     #[test]

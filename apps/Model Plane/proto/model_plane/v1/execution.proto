@@ -84,6 +84,13 @@ message ExecuteScheduledStepRequest {
   // Ephemeral direct-hop Control decision. It must never be persisted in
   // Temporal history, Session metadata, events, checkpoints, or tool output.
   string control_decision_token = 13;
+  // The org's `ext.skills` policy word this scheduled step runs under (P2-ec-01-rel1): "" = not enforced, exactly as
+  // before the field existed; "none", "approved_only" or "any"; any other word is read as "none". capability-core states
+  // it from the org policy it reads at the fire, only while SKILL_EXT_POLICY_ENFORCED is the literal `true`, and
+  // orchestrator-core forwards it unchanged. It is not part of the Control decision. Only capability-core writes it and
+  // it drops any value a task template carries, so no caller chooses it. execution-core filters the run's skills by it,
+  // exactly as it does for RunAgentRequest.ext_skills, and acts only on a non-empty word.
+  string ext_skills = 14;
 }
 
 message ExecuteScheduledStepResponse {
@@ -318,8 +325,25 @@ message RunAgentRequest {
   // normal catalogue under their normal gates. Absent or false = an ordinary run, exactly as before the field existed.
   // The gateway sets it only while EXECUTION_COORDINATOR_MODE_ENABLED is the literal `true`, and never on a
   // zero-retention or waived turn or a continuation. Execution-core applies it only while the same switch is on.
-  // Field 27 is the next free number on this message.
+  // Field 28 is the next free number on this message.
   bool coordinator = 27;
+
+  // The org's `ext.skills` setting this run is held to (additive), as a policy word: "" = not enforced, exactly as
+  // before the field existed; "none", "approved_only" or "any"; any other word is read as "none". The gateway sets it
+  // from the policy the turn was admitted under, only while SKILL_EXT_POLICY_ENFORCED is the literal `true`, and from
+  // the same read the Ask loop's skills use, so the two loops cannot disagree. Execution-core never reads org-core and
+  // never trusts a client-supplied value: it filters the skills it injects and recovers by it, and acts only on a
+  // non-empty word. The word is a policy setting, never skill text.
+  string ext_skills = 28;
+
+  // The metered input and output tokens this run may spend across all its rounds (additive, F-f04-08). 0 = no cap:
+  // every run that predates the field, and every run while the gateway's MODEL_GATEWAY_DO_RUN_CAP is off. The gateway
+  // states the smaller of the request's cap and the org's ceiling (budget::min_cap), and a goal turn's remaining
+  // allowance when that is smaller, only while MODEL_GATEWAY_DO_RUN_CAP is the literal `true`. Execution-core ends the
+  // run at the next round boundary once the cap is spent, and only while its own EXECUTION_RUN_TOKEN_CAP is on; an
+  // executor that predates the field skips it as an unknown field. Cost is not sent: execution-core cannot price a
+  // round. Field 29 is the next free number on this message.
+  uint64 max_run_tokens = 29;
 }
 
 // WideResearchRequest is what a person asked a wide-research run to cover (Wave 3 EP-2 S8/S9). It only
@@ -447,6 +471,32 @@ message RunContext {
   // ZDR, waived or Space-scoped run. In flight only: never persisted. Fields 5
   // and 6 stay reserved for WS08 and WS20 (plan 4.3).
   string goal_recitation = 9;
+  // The authored instructions split by source (F-f08-16; owner: model-gateway
+  // composes and tags, execution-core renders). The same text as
+  // `authored_instructions`, cut into its sources in order, so a surface can
+  // tell the person which source said what. When this list is non-empty and
+  // EXECUTION_PROMPT_SECTION_NAMES is on, an executor builds one system
+  // message per section, in order, with the message `name` set to the tag, and
+  // ignores `authored_instructions`. The gateway still fills
+  // `authored_instructions` with the joined text ("\n\n" between sections), so
+  // an executor that does not know this field, or has the switch off, behaves
+  // exactly as before. Set only with MODEL_GATEWAY_PROMPT_SECTION_NAMES on.
+  // At most 8 sections, tags from the closed set, total text within the
+  // authored-instruction cap; built from the gateway's own layers, never from
+  // a client-supplied tag. A ZDR run may carry them as it may carry
+  // instructions. In flight only: never persisted, no content in any log.
+  repeated AuthoredSection authored_sections = 10;
+}
+
+// AuthoredSection - one source of a run's authored instructions (F-f08-16).
+message AuthoredSection {
+  // The source, from the closed set: "platform_instructions",
+  // "org_instructions", "space_instructions", "persona", "tone" or
+  // "agent_role_instructions". Only the platform text is hidden from the
+  // person; the others are shown as the text of their source.
+  string tag = 1;
+  // The finished section text, including its own framing line.
+  string text = 2;
 }
 
 // AgentRoleSpec - one published agent definition a delegated subagent may take
@@ -724,6 +774,18 @@ message ExecuteStepRequest {
   // model's arguments. Absent or empty selects nothing; a zero-retention step
   // ignores it.
   ConnectorScope connector_scope = 15;
+
+  // This step is an MCP-app call made outside the run loop (F-f10-21): an app drawn under a
+  // chat answer asks its host to call a tool on its own server. execution-core then accepts it
+  // only for an `mcp__` tool and only with `permission_mode = "ask"`; a call that would pause
+  // for approval answers FAILED_PRECONDITION `app_call_requires_chat` and creates no approval,
+  // no fold and no event; and the step writes no checkpoint, no step row and no run snapshot, so
+  // an app call can never advance, finish or fail the run it was drawn under. The tool's class
+  // and definition digest come from the capability-core registry binding resolved for this very
+  // call, never from execution-core's in-process view of the run. Written by model-gateway's
+  // app-call route only. False (the default) is the ordinary step, byte for byte. Field 16 is
+  // the next free number on this message.
+  bool side_call = 16;
 }
 
 // RunAttachmentKind — what a staged run input is.
