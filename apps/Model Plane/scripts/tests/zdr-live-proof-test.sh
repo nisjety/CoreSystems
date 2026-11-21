@@ -26,6 +26,8 @@ SECRET="stub-secret-value-never-printed"
 cat >"$TMP/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 args="$(echo "$*" | tr '\n' ' ')"
+# A psql call fed its SQL on stdin (exec -i): the SQL joins the logged line, so the patterns below match it.
+case "$args" in "exec -i "*) args="$args stdin: $(tr '\n' ' ')" ;; esac
 echo "$args" >>"$CALLS"
 case "$args" in
   "inspect --format {{.Image}}"*) echo "sha256:cccccccccccccccccccccccc" ;;
@@ -54,7 +56,9 @@ case "$args" in
       *information_schema*) echo "1" ;;
       *"zdr_waived"*) echo "${STUB_WAIVED:-0}" ;;
       *"'zdr' = 'true'"*) echo "${STUB_ZDR_ROWS:-0}" ;;
-      *"from threads"*) echo "${STUB_THREADS:-10}" ;;
+      *"from threads"*)
+        # Another org's threads are in the stack-wide count only (STUB_OTHER_THREADS), never in an org-bound read.
+        if [[ "$args" == *"where org_id"* ]]; then echo "${STUB_THREADS:-10}"; else echo "$(( ${STUB_THREADS:-10} + ${STUB_OTHER_THREADS:-0} ))"; fi ;;
       *"from messages"*) echo "40" ;;
       *"from runs"*) echo "20" ;;
       *"from feedback_ratings"*) echo "5" ;;
@@ -68,6 +72,7 @@ STUB
 chmod +x "$TMP/bin/docker" "$SCRIPT"
 
 export CALLS RUNNING SECRET_IN_ENV="$SECRET" PATH="$TMP/bin:$PATH" ZDR_WAVE_COMMIT="$WAVE"
+unset ZDR_PROOF_ORG_ID STUB_OTHER_THREADS
 failed=0
 fail() { echo "FAIL: $*" >&2; failed=1; }
 EVIDENCE="$TMP/evidence.txt"
@@ -120,6 +125,46 @@ fi
 if grep -q "$SECRET" "$CALLS"; then fail "the credential reached a docker command line"; fi
 if grep -q "$SECRET" "$TMP/out" "$EVIDENCE" "$STATE"; then fail "the credential reached the output, the evidence or the state file"; fi
 grep -q "ZDR live proof" "$EVIDENCE" || fail "the evidence file must receive the output"
+
+# Org scope: one org's counters do not move when another org's traffic lands, while the stack-wide
+# ones still do. The id reaches psql as the variable org, and the output names no id.
+ORG_TEST_ID="fixture-org-aaaaaaaa"
+ORG_STATE="$TMP/org-state.txt"
+ZDR_PROOF_ORG_ID="$ORG_TEST_ID" MODEL_DRAGONFLY_PASSWORD="$SECRET" proof --phase before --state "$ORG_STATE" ||
+  fail "org-scoped before must never fail"
+grep -qx "org_scope=on" "$TMP/out" || fail "the org scope must be named in the evidence"
+grep -qx "threads=10 scope=org" "$TMP/out" || fail "org counters must be labelled scope=org"
+grep -qx "feedback_ratings=5 scope=stack" "$TMP/out" || fail "feedback_ratings must be labelled scope=stack"
+grep -qF "where org_id = :'org'" "$CALLS" || fail "the threads read must bind the org"
+grep -qF "join threads t on t.id = m.thread_id where t.org_id = :'org'" "$CALLS" || fail "the messages read must reach the org through its thread"
+grep -qF "payload->>'org_id' = :'org'" "$CALLS" || fail "the outbox reads must bind the org"
+grep -qF -- "-v org=$ORG_TEST_ID" "$CALLS" || fail "the org must reach psql as the variable org"
+if grep -qF "$ORG_TEST_ID" "$TMP/out" "$EVIDENCE" "$ORG_STATE"; then
+  fail "the org id must not reach the output, the evidence or the state file"
+fi
+
+# Another org's threads move the stack-wide count only: the org-scoped after phase passes, and the
+# stack-wide after phase still fails on the same traffic.
+STUB_OTHER_THREADS=5 ZDR_PROOF_ORG_ID="$ORG_TEST_ID" MODEL_DRAGONFLY_PASSWORD="$SECRET" proof --phase after --state "$ORG_STATE" ||
+  { cat "$TMP/out" >&2; fail "another org's threads must not fail an org-scoped after phase"; }
+grep -q "failures=0" "$TMP/out" || fail "an org-scoped after phase with other traffic must report 0 failures"
+grep -qx "threads: before=10 after=10 delta=0 scope=org" "$TMP/out" || fail "the org delta must be labelled scope=org"
+STUB_OTHER_THREADS=5 MODEL_DRAGONFLY_PASSWORD="$SECRET" proof --phase after --state "$STATE" &&
+  fail "the stack-wide after phase must still fail on other traffic"
+grep -q "CHECK unchanged-threads FAIL" "$TMP/out" || fail "the stack-wide failure must name the counter"
+
+# Unset means the old output: no scope line and no org binding.
+proof --phase before --state "$TMP/unset-state.txt" || fail "unset org scope: before must never fail"
+if grep -qE "org_scope=on|scope=(org|stack)" "$TMP/out"; then fail "an unset org scope must not change the output"; fi
+if grep -qF ":'org'" "$CALLS"; then fail "an unset org scope must not bind an org"; fi
+
+# A value that is not an org id, and an empty one, is refused before anything is read or written.
+ZDR_PROOF_ORG_ID="x'; drop table threads; --" proof --phase before --state "$TMP/bad-state.txt" &&
+  fail "an org id with SQL characters must be refused"
+grep -q "is not an org id" "$TMP/out" || fail "the refusal must say why"
+if grep -q "drop table" "$TMP/out"; then fail "the refused value must not be printed"; fi
+ZDR_PROOF_ORG_ID= proof --phase before --state "$TMP/bad-state.txt" && fail "an empty org id must be refused, not read as stack-wide"
+[[ ! -e "$TMP/bad-state.txt" ]] || fail "a refused org id must write no state"
 
 [[ "$failed" == "0" ]] || exit 1
 echo "zdr-live-proof contract test: ok"

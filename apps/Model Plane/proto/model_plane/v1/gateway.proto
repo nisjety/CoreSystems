@@ -413,7 +413,8 @@ message FetchResponse {
   // Originally-requested URL.
   string url = 2;
 
-  // URL after redirect chain (Quarry follows up to 5 hops).
+  // URL after the redirect chain (Quarry follows up to 5 hops); empty means the final URL is
+  // unknown (the caller must treat it as the requested URL and never as a verified host).
   string final_url = 3;
 
   // HTTP status from the upstream.
@@ -504,7 +505,8 @@ message ExtractStructuredResponse {
   // Originally-requested URL.
   string url = 2;
 
-  // URL after redirect chain.
+  // URL after the redirect chain; empty means the final URL is unknown (the caller must treat it
+  // as the requested URL and never as a verified host).
   string final_url = 3;
 
   // Page title (carried through from the fetch step).

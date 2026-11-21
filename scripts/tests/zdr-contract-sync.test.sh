@@ -232,7 +232,7 @@ GOLDENS=(
   # model-gateway zdr_posture` (every non-GET route has a row) and the gateway
   # tests/space_routes_zdr_classes.rs (every /api/v1/spaces route has a row). The consumers vendor a
   # copy, with the pin, in the same slice as those lints (VENDORED and CONSUMERS rows then).
-  "apps/Model Plane/api/contracts/space-surface.v1.json|2c5921b02a546023997e9f651e677c6544cecb6845020ce46aa2d200c2c9d7cc"
+  "apps/Model Plane/api/contracts/space-surface.v1.json|5f322bb0a6c5d000a7a22ed14c2ded549f4a6f20d2624edd4f4d6ef40ee49a89"
 
   # WS02-S3: the Space event stream vocabulary (SSE events, cursor grammar, kind registry, closing codes,
   # refs allowlist, HTTP error map). AUTHORED by hand with the slice that serves it (session-core
@@ -397,8 +397,11 @@ VENDORED=(
   "apps/Ingestion Plane/integration-corev2/internal/api/testdata/zdr-posture-matrix.json|apps/Model Plane/api/contracts/zdr-posture-matrix.json"
   "apps/Ingestion Plane/integration-corev2/internal/api/testdata/zdr-posture-matrix.json.sha256|apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256"
 
-  # Not vendored yet: conversation-core (Z-03d) has no copy in the tree, so its CONSUMERS row stays pending
-  # until a copy and its pin land.
+  # ZDR-Z-03d: conversation-core's copy of the posture matrix and its pin (internal/clients/testdata). Its
+  # test (orgcore_client_posture_matrix_test.go) reads the copy through the pin; these rows also compare both
+  # with the canonical matrix, so a drifted copy fails this check too, not only that one test.
+  "apps/Application Plane/conversation-core/conversation-core-go/internal/clients/testdata/zdr-posture-matrix.json|apps/Model Plane/api/contracts/zdr-posture-matrix.json"
+  "apps/Application Plane/conversation-core/conversation-core-go/internal/clients/testdata/zdr-posture-matrix.json.sha256|apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256"
 
   # Z-05b: the SPA's copy of the refusal catalogue and its pin. zdr-refusals.ts renders every
   # code from it, and zdr-refusals.test.ts reads the copy inside the Frontend tree.
@@ -743,7 +746,7 @@ check_approval_zdr_cases() {
 # tree, flip one byte, and require the same checks to reject it; then require
 # them to accept the untouched copy.
 self_test() {
-  local row path pin matrix malformed
+  local row path pin matrix malformed conv conv_row
   SCRATCH="$(mktemp -d)"
   trap 'rm -rf "$SCRATCH"' EXIT
   for row in "${GOLDENS[@]}"; do
@@ -791,6 +794,30 @@ self_test() {
   fi
   if ! REQUIRE_CONTRACT= CONTRACT_SYNC_ROOT="$SCRATCH" bash "$SELF" >/dev/null 2>&1; then
     echo "self-test: the scratch copy does not pass again after the tamper checks, so the checks below would prove nothing" >&2
+    return 1
+  fi
+
+  # The conversation-core copy of the posture matrix (ZDR-Z-03d) and its pin are VENDORED: a drifted copy or
+  # pin must fail the whole check. Before their rows existed, nothing compared them with the canonical matrix.
+  conv="apps/Application Plane/conversation-core/conversation-core-go/internal/clients/testdata/zdr-posture-matrix.json"
+  if [[ ! -f "$SCRATCH/$conv" || ! -f "$SCRATCH/$conv.sha256" ]]; then
+    echo "self-test: the conversation-core copy of the posture matrix and its pin are not VENDORED, so their drift would go unnoticed" >&2
+    return 1
+  fi
+  printf ' ' >>"$SCRATCH/$conv"
+  if CONTRACT_SYNC_ROOT="$SCRATCH" bash "$SELF" >/dev/null 2>&1; then
+    echo "self-test: the checks accept a conversation-core copy of the posture matrix that differs from its golden" >&2
+    return 1
+  fi
+  cp "$ROOT/$conv" "$SCRATCH/$conv"
+  printf ' ' >>"$SCRATCH/$conv.sha256"
+  if CONTRACT_SYNC_ROOT="$SCRATCH" bash "$SELF" >/dev/null 2>&1; then
+    echo "self-test: the checks accept a conversation-core pin that differs from the canonical pin" >&2
+    return 1
+  fi
+  cp "$ROOT/$conv.sha256" "$SCRATCH/$conv.sha256"
+  if ! REQUIRE_CONTRACT= CONTRACT_SYNC_ROOT="$SCRATCH" bash "$SELF" >/dev/null 2>&1; then
+    echo "self-test: the scratch copy does not pass again after the conversation-core tamper checks" >&2
     return 1
   fi
 
@@ -871,6 +898,16 @@ self_test() {
     echo "self-test: a copy in another tree, or a copy of another golden, satisfies a consumer" >&2
     return 1
   fi
+  # The conversation-core consumer (ZDR-Z-03d) is satisfied by the VENDORED copy above, not merely pending:
+  # its real CONSUMERS row must pass under REQUIRE_CONTRACT against the real VENDORED rows.
+  conv_row=""
+  for row in "${CONSUMERS[@]}"; do
+    case "$row" in *"|conversation-core|"*) conv_row="$row" ;; esac
+  done
+  if [[ -z "$conv_row" ]] || ! (CONSUMERS=("$conv_row"); REQUIRE_CONTRACT=1; check_consumers) >/dev/null 2>&1; then
+    echo "self-test: the conversation-core consumer of the posture matrix is not satisfied by a VENDORED copy" >&2
+    return 1
+  fi
   # The same, through the whole script: a copy of it with one consumer nobody satisfies must
   # exit non-zero under REQUIRE_CONTRACT and zero without it.
   awk '{print} /^CONSUMERS=\($/ {print "  \"apps/none/golden.json|ghost|apps/ghost/|Z-00\""}' "$SELF" >"$SCRATCH/ghost-self.sh"
@@ -887,7 +924,7 @@ self_test() {
     echo "self-test: a pending consumer does not fail the whole check under REQUIRE_CONTRACT" >&2
     return 1
   fi
-  echo "self-test ok: an untouched copy passes, a tampered golden fails, a drifted vendored copy fails, a malformed ZDR golden fails, a disagreeing pin fails, a pending consumer fails under REQUIRE_CONTRACT"
+  echo "self-test ok: an untouched copy passes, a tampered golden fails, a drifted vendored copy fails, a malformed ZDR golden fails, a disagreeing pin fails, a pending consumer fails under REQUIRE_CONTRACT, a drifted conversation-core copy or pin fails"
 }
 
 if [[ "${1:-}" == "--self-test" ]]; then

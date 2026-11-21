@@ -122,6 +122,26 @@ STUB_PS="abc123" run --evidence-file "$ev" "$TMP/cand" "$TMP/roll" && fail "a ru
 grep -q "collide" "$TMP/out" || fail "the collision refusal must say why"
 grep -q "^artifact " "$CALLS" && fail "nothing may be verified before the collision guard"
 
+# --- quoted env values: refused before any rollback boot --------------------------------------
+# The check runs in a fresh shell, so the script's own fail() (which exits) is the one tested.
+quote_check() { bash -c 'source "$1"; reject_quoted_env_values "$2"' _ "$SRC" "$1" >"$TMP/quote.out" 2>&1; }
+printf '# FOO="a comment is not checked"\nexport CLEAN=bar\nPLAIN=value\nEMPTY=\n' >"$TMP/clean.env"
+quote_check "$TMP/clean.env" || { cat "$TMP/quote.out" >&2; fail "an env file without quoted values must pass"; }
+printf 'FOO="bar"\n' >"$TMP/quoted.env"
+quote_check "$TMP/quoted.env" && fail "a quoted env value must be refused"
+grep -q "quoted.env line 1: the value of FOO starts with a quote" "$TMP/quote.out" || fail "the refusal must name the file, the line and the key"
+grep -q "bar" "$TMP/quote.out" && fail "the refusal must not print the value"
+quote_check /dev/null || fail "/dev/null must be skipped"
+quote_check "$TMP/absent.env" || fail "a missing path must be skipped"
+# A quoted value in the rollback runtime file stops the rehearsal before any session-core boots.
+printf 'FOO="bar"\n' >"$TMP/quoted-runtime.env"
+rm -f "$ev"
+( export MODEL_PLANE_ROLLBACK_RUNTIME_ENV_FILE="$TMP/quoted-runtime.env"; run --no-build --evidence-file "$ev" "$TMP/cand" "$TMP/roll" ) &&
+  fail "a quoted value in the rollback runtime env file must be refused"
+grep -q "quoted-runtime.env line 1: the value of FOO starts with a quote" "$TMP/out" || fail "the wiring refusal must name the file, the line and the key"
+grep -q '^docker run .*-sc-' "$CALLS" && fail "no session-core may boot over a quoted env file"
+grep -q "bar" "$TMP/out" && fail "the rehearsal output must not print the value"
+
 # --- flow: one additive migration the rollback lacks -----------------------------------------
 rm -f "$ev"
 run --no-build --evidence-file "$ev" "$TMP/cand" "$TMP/roll" || { cat "$TMP/out" >&2; fail "the additive flow must pass"; }

@@ -34,6 +34,7 @@ Never paste a key, a runtime env value or a gates secret into a command line tha
 - S0, S2, S7, S8, S9, S10 and S11 are committed, and the tree you build from is clean: both builds run from a clean detached worktree (`git worktree add --detach <dir> <revision>`), never from the working checkout. `release-artifact.sh build` refuses a dirty `apps/Model Plane`.
 - `nats-provisioner` is in `SERVICES` and in the release overlay (S8). `release-artifact.sh dry-run <dir>` lists its build; if it does not, stop.
 - The six checks of `zdr-attestation-and-live-proof.md` pass 1 are recorded: the ZDR evidence digest goes into the gates file below.
+- Env file values must not be quoted (`KEY="value"`): `docker run --env-file` keeps the quotes and Compose strips them, so the rehearsal refuses a rollback runtime env file or an artifact's public policy file that has a quoted value, before the rollback boots.
 
 ## 1. Baseline R (the rollback), non-release mode
 
@@ -161,6 +162,19 @@ Both need `rg` (ripgrep) on `PATH`: the cross-plane preflight and the capability
 `--profile runtime` reads `ready` only on a clean tree, with both artifacts verified against the trusted key, a PASSED rehearsal no older than the threshold, a valid capability ledger and a valid thresholds file. `ready` for `runtime` is not promotion: `--profile full` additionally needs approved thresholds, a fully promoted capability ledger and clean dev-runtime and cross-plane preflights. It must still read `blocked` on a dev-keyed run; if it reads `ready` the key labelling above was skipped.
 
 A blocker may be waived only by an unexpired row in `RELEASE_GATE_WAIVERS.tsv` (owner, reason, evidence, at most 30 days). Blockers that say the evidence is wrong (`*_unverified`, `dirty_worktree`, `artifact_verify_key_missing`) cannot be waived.
+
+### Live acceptance metrics
+
+```bash
+bash "apps/Model Plane/scripts/acceptance-live-metrics.sh" --measure   # one line per row with a live source
+bash "apps/Model Plane/scripts/acceptance-live-metrics.sh" --check     # every row against its status and target
+```
+
+`--measure` reads the gateway error ratio and p95, session-core's terminal audit rows and delivery lag, the ZDR review-by days (the release tool's attestation report, for the path in `MODEL_PLANE_RUNTIME_PUBLIC_POLICY_FILE`; the file itself is never printed) and the age of the newest rehearsal file, which must say `result PASSED` on its first line. Endpoints come from `MP_GATEWAY_METRICS_URL` (default `http://127.0.0.1:8080/metrics`) and `MP_SESSION_METRICS_URL` (default `http://127.0.0.1:18081/metrics`, the host port of session-core's 8081). Both are read with a 5 s timeout and no credentials.
+
+`--check` prints `BLOCKED proposed <id>` for every proposed row, and never a pass for one. An approved row prints `PASS` or `FAIL` against its operator and target, or `UNREADABLE` when its source cannot be read. A source that cannot be read is never a pass. Exit 3 means blocked, not failed: today every row is proposed. Only the owners change a status or a target.
+
+The p95 is the largest per-route 0.95 quantile, because the gateway exports a summary (it configures no histogram buckets). The script interpolates buckets only if the gateway starts exporting them. Wiring this into `coresystem-conformance.sh` waits until the first row is approved.
 
 ## 7. Record
 

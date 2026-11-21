@@ -26,6 +26,9 @@ set -uo pipefail
 # Container names, the database and the wave commit come from the environment (dev stack defaults).
 # The cache key count needs MODEL_DRAGONFLY_PASSWORD in the environment; it is handed to redis-cli
 # through the environment of `docker exec`, never on a command line, and never printed.
+# ZDR_PROOF_ORG_ID (optional, environment only): a ZDR-TEST org id. When it is set, the threads,
+# messages, runs and outbox counters count that org only, so other traffic on a shared stack does not
+# fail the after phase; feedback_ratings and the cache keys stay stack-wide. The id is never printed.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REPO_ROOT="$(cd "$ROOT_DIR/../.." && pwd)"
@@ -56,6 +59,18 @@ fi
 if [[ "$PHASE" == "after" && ! -f "$STATE" ]]; then
   echo "zdr-live-proof: the state file $STATE does not exist: run --phase before first" >&2
   exit 2
+fi
+
+# Optional org scope. Unset: the stack-wide counters, exactly as before. Set: the counters of that org
+# only. The id comes from the environment, never a flag, so it stays out of shell history and the
+# tee'd evidence line, and it is never printed. Only letters, digits, '-' and '_' are accepted.
+ORG_SCOPE=0
+ORG_ARGS=()
+if [[ -n "${ZDR_PROOF_ORG_ID+x}" ]]; then
+  [[ "$ZDR_PROOF_ORG_ID" =~ ^[A-Za-z0-9_-]{1,128}$ ]] ||
+    { echo "zdr-live-proof: ZDR_PROOF_ORG_ID is set but is not an org id (letters, digits, '-' and '_'; the value is not printed)" >&2; exit 2; }
+  ORG_SCOPE=1
+  ORG_ARGS=(-v "org=$ZDR_PROOF_ORG_ID")
 fi
 
 command -v docker >/dev/null 2>&1 || { echo "zdr-live-proof: docker is not available" >&2; exit 2; }
@@ -93,9 +108,17 @@ check() {
   [[ "$result" == "PASS" ]] || failures=$((failures + 1))
 }
 
-psql_ro() { # <sql>
-  docker exec -e PGOPTIONS='-c default_transaction_read_only=on' "$MP_POSTGRES" \
-    psql -U "$MP_DB_USER" -d "$MP_DB" -At -F '|' -v ON_ERROR_STOP=1 -c "$1" 2>&1
+psql_ro() { # <sql> [extra psql arguments, such as -v org=...]
+  local sql="$1"
+  shift
+  if [[ $# -eq 0 ]]; then
+    docker exec -e PGOPTIONS='-c default_transaction_read_only=on' "$MP_POSTGRES" \
+      psql -U "$MP_DB_USER" -d "$MP_DB" -At -F '|' -v ON_ERROR_STOP=1 -c "$sql" 2>&1
+  else
+    # psql expands :'name' variables in a script, not in -c, so a query that binds one goes on stdin.
+    printf '%s;\n' "$sql" | docker exec -i -e PGOPTIONS='-c default_transaction_read_only=on' "$MP_POSTGRES" \
+      psql -U "$MP_DB_USER" -d "$MP_DB" -At -F '|' -v ON_ERROR_STOP=1 -X "$@" 2>&1
+  fi
 }
 
 block() { # <title> <command text shown in the evidence>
@@ -105,9 +128,9 @@ block() { # <title> <command text shown in the evidence>
 }
 
 # First field of a single-row result, or ERR when the read failed.
-scalar() { # <sql>
+scalar() { # <sql> [extra psql arguments]
   local out
-  if out="$(psql_ro "$1")"; then printf '%s' "${out%%|*}"; else printf 'ERR'; fi
+  if out="$(psql_ro "$@")"; then printf '%s' "${out%%|*}"; else printf 'ERR'; fi
 }
 
 container_of() { printf '%s-%s-1' "$MP_PREFIX" "$1"; }
@@ -121,10 +144,19 @@ echo "# Read at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 declare -A COUNTER
 read_counters() {
   local table
-  for table in threads messages runs feedback_ratings session_audit_outbox; do
-    COUNTER[$table]="$(scalar "select count(*) from $table")"
-  done
-  COUNTER[outbox_zdr_rows]="$(scalar "select count(*) from session_audit_outbox where payload->'details'->>'zdr' = 'true'")"
+  if [[ "$ORG_SCOPE" == "1" ]]; then
+    COUNTER[threads]="$(scalar "select count(*) from threads where org_id = :'org'" "${ORG_ARGS[@]}")"
+    COUNTER[messages]="$(scalar "select count(*) from messages m join threads t on t.id = m.thread_id where t.org_id = :'org'" "${ORG_ARGS[@]}")"
+    COUNTER[runs]="$(scalar "select count(*) from runs where org_id = :'org'" "${ORG_ARGS[@]}")"
+    COUNTER[feedback_ratings]="$(scalar "select count(*) from feedback_ratings")"
+    COUNTER[session_audit_outbox]="$(scalar "select count(*) from session_audit_outbox where payload->>'org_id' = :'org'" "${ORG_ARGS[@]}")"
+    COUNTER[outbox_zdr_rows]="$(scalar "select count(*) from session_audit_outbox where payload->'details'->>'zdr' = 'true' and payload->>'org_id' = :'org'" "${ORG_ARGS[@]}")"
+  else
+    for table in threads messages runs feedback_ratings session_audit_outbox; do
+      COUNTER[$table]="$(scalar "select count(*) from $table")"
+    done
+    COUNTER[outbox_zdr_rows]="$(scalar "select count(*) from session_audit_outbox where payload->'details'->>'zdr' = 'true'")"
+  fi
   if [[ -n "${MODEL_DRAGONFLY_PASSWORD:-}" ]]; then
     local keys
     if keys="$(REDISCLI_AUTH="$MODEL_DRAGONFLY_PASSWORD" docker exec -e REDISCLI_AUTH "$DRAGONFLY_CONTAINER" \
@@ -139,10 +171,21 @@ read_counters() {
 }
 COUNTER_NAMES=(threads messages runs feedback_ratings session_audit_outbox outbox_zdr_rows cache_keys)
 
+# " scope=org" or " scope=stack" after a counter line, printed only while ZDR_PROOF_ORG_ID is set.
+scope_tag() { # <counter>
+  [[ "$ORG_SCOPE" == "1" ]] || return 0
+  case "$1" in feedback_ratings | cache_keys) echo " scope=stack" ;; *) echo " scope=org" ;; esac
+}
+
 print_counters() {
-  block "COUNTERS" "select count(*) from threads, messages, runs, feedback_ratings, session_audit_outbox; count of ZDR rows in the outbox; redis-cli --scan --pattern '$CACHE_PATTERN' (count only, key names are not printed)"
+  if [[ "$ORG_SCOPE" == "1" ]]; then
+    block "COUNTERS" "select count(*) from threads, messages, runs and session_audit_outbox (with its ZDR rows) for the org bound as psql variable :'org' (ZDR_PROOF_ORG_ID, value not printed); feedback_ratings and redis-cli --scan --pattern '$CACHE_PATTERN' (count only, key names are not printed) stay stack-wide"
+    echo "org_scope=on"
+  else
+    block "COUNTERS" "select count(*) from threads, messages, runs, feedback_ratings, session_audit_outbox; count of ZDR rows in the outbox; redis-cli --scan --pattern '$CACHE_PATTERN' (count only, key names are not printed)"
+  fi
   local name
-  for name in "${COUNTER_NAMES[@]}"; do echo "$name=${COUNTER[$name]}"; done
+  for name in "${COUNTER_NAMES[@]}"; do echo "$name=${COUNTER[$name]}$(scope_tag "$name")"; done
   if [[ "${COUNTER[cache_keys]}" == "ERR" ]]; then
     echo "# cache_keys not read: MODEL_DRAGONFLY_PASSWORD unset or $DRAGONFLY_CONTAINER unreachable"
   fi
@@ -251,14 +294,14 @@ if [[ "$PHASE" == "after" ]]; then
     before="${BEFORE[$name]:-missing}"
     after="${COUNTER[$name]}"
     if [[ "$before" =~ ^[0-9]+$ && "$after" =~ ^[0-9]+$ ]]; then
-      echo "$name: before=$before after=$after delta=$((after - before))"
+      echo "$name: before=$before after=$after delta=$((after - before))$(scope_tag "$name")"
       if [[ "$after" == "$before" ]]; then
         check "unchanged-$name" PASS "$after"
       else
         check "unchanged-$name" FAIL "before=$before after=$after (other traffic on the stack also counts: run on a quiet stack)"
       fi
     else
-      echo "$name: before=$before after=$after delta=unreadable"
+      echo "$name: before=$before after=$after delta=unreadable$(scope_tag "$name")"
       check "unchanged-$name" FAIL "a counter was not read (before=$before after=$after)"
     fi
   done

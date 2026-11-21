@@ -16,12 +16,16 @@ on:
       - 'apps/Model Plane/proto/**'
       - 'scripts/gates/buf-lint-ratchet.py'
       - '.github/workflows/buf.yml'
+      - 'apps/Frontend Plane/verevon/src/lib/model-plane/gen/**'
+      - 'apps/Model Plane/scripts/tests/gateway-gencode-pin-test.mjs'
   pull_request:
     branches: [main, develop, fix/ui-premium-restore]
     paths:
       - 'apps/Model Plane/proto/**'
       - 'scripts/gates/buf-lint-ratchet.py'
       - '.github/workflows/buf.yml'
+      - 'apps/Frontend Plane/verevon/src/lib/model-plane/gen/**'
+      - 'apps/Model Plane/scripts/tests/gateway-gencode-pin-test.mjs'
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -43,6 +47,11 @@ jobs:
           python3 scripts/gates/buf-lint-ratchet.py --baseline "apps/Model Plane/proto/buf-lint-baseline.json" /tmp/buf-lint.json
       - name: buf breaking
         run: buf breaking "apps/Model Plane/proto" --against "apps/Model Plane/proto/baseline.binpb"
+
+      # The TypeScript gateway gencode must match gateway.proto and the plugin
+      # pins in buf.gen.yaml. Static checks only, no network.
+      - name: gateway gencode pins and field drift (TypeScript)
+        run: node --test "apps/Model Plane/scripts/tests/gateway-gencode-pin-test.mjs"
 
       # A gate that cannot fail reads as coverage. Prove on every run that
       # `buf breaking` really goes red on a breaking change (same pattern as

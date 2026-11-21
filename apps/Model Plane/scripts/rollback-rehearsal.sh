@@ -274,6 +274,27 @@ step() {
   fi
 }
 
+# docker run --env-file keeps a value's quotes, while Compose's dotenv parser strips them, so a boot
+# over a quoted value would test a different configuration than production. Refuses any file with
+# a quoted value. Prints the file name, the line number and the key only, never the value and never
+# another line. /dev/null and missing paths are skipped. Reads the files; writes nothing.
+reject_quoted_env_values() {
+  local file line line_no key hits=0 quote_re
+  quote_re="^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=[[:space:]]*[\"']"
+  for file in "$@"; do
+    [[ "$file" != "/dev/null" && -f "$file" && -r "$file" ]] || continue
+    line_no=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      line_no=$((line_no + 1))
+      [[ "$line" =~ $quote_re ]] || continue
+      key="${BASH_REMATCH[2]}"
+      echo "rollback-rehearsal: $(basename "$file") line $line_no: the value of $key starts with a quote; docker run --env-file keeps the quotes, Compose strips them. Remove the quotes." >&2
+      hits=$((hits + 1))
+    done <"$file"
+  done
+  [[ "$hits" == "0" ]] || fail "$hits env value(s) start with a quote; remove the quotes and rerun"
+}
+
 run_rehearsal() {
   local candidate="$1" rollback="$2" plan="$3" extra_count="$4" date_utc="$6" line
   local start_stack="$7" full_copy="$8" source_container="$9" seed_sql="${10}" wait_seconds="${11}"
@@ -374,6 +395,8 @@ run_rehearsal() {
   # 3. The rollback session-core. Only the ignore run carries the switch.
   local public_env="$rollback/runtime-public-policy.env"
   [[ -f "$public_env" ]] || public_env=/dev/null
+  # Every env file the rollback boots read, checked once before the first boot.
+  reject_quoted_env_values "$public_env" "$MODEL_PLANE_ROLLBACK_RUNTIME_ENV_FILE" "$db_env"
   boot_outcome() {
     local mode="$1" container="$2" args=() logs state elapsed=0
     [[ "$mode" != "ignore" ]] || args=(-e "$SWITCH=true")

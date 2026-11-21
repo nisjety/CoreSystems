@@ -591,7 +591,7 @@ CREATE INDEX IF NOT EXISTS run_trace_events_received_idx ON run_trace_events (re
 
 **API / contract changes.** `model_plane.v1.EventLog.QueryEvents` implemented (the first server); `GET /v1/runs/:run_id/trace` (model-gateway) and `GET /api/v1/runs/{run_id}/trace` (gateway). Response events use the S2 envelope; the cursor is opaque (`base64` of `{ "offset": ingest_seq }` by `mp-eventlog`, clients never parse it). Unknown event types must be tolerated by clients.
 
-**Feature flag and rollout.** `SESSION_CORE_TRACE_CONSUMER=0` stops the consumer (default `1` once S5 shadow mode has been observed healthy); `SESSION_CORE_TRACE_RETENTION_DAYS` (30). The read routes are additive. Rollback: stop the consumer (messages wait in the stream for 48 h), revert routes; the table can stay.
+**Feature flag and rollout.** `SESSION_CORE_TRACE_CONSUMER` takes only the exact literal `true` (`trace_nats::flag_enabled`, which delegates to `loop_fold::switch_from`); `1`, `on`, `0` and an unset value all leave the consumer off. It is turned on with `true` once S5 shadow mode has been observed healthy, and stopped by removing the value or setting anything but `true`; `SESSION_CORE_TRACE_RETENTION_DAYS` (30). The read routes are additive. Rollback: stop the consumer (messages wait in the stream for 48 h), revert routes; the table can stay.
 
 **Tests**
 - Pure (`SC/trace_nats.rs`): `validate_accepts_the_run_trace_golden`, `validate_rejects_an_absent_zdr_key`, `validate_rejects_zdr_true`, `validate_rejects_a_foreign_event_type`, `validate_rejects_a_foreign_producer`, `validate_rejects_producer_seq_zero`, `validate_rejects_an_oversized_payload`, `validate_rejects_a_dotted_run_id`.

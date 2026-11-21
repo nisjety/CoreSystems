@@ -28,12 +28,18 @@ plugins:
   # construct typed requests + decode typed responses without a separate
   # gRPC client. verevon uses Connect-RPC over HTTP for the actual wire
   # call (see lib/model-plane/reasoning.ts for the existing pattern).
-  - remote: buf.build/bufbuild/es
+  # Both TypeScript remotes are pinned to the versions named in the headers of
+  # the checked-in gencode. An unpinned remote resolves to whatever release is
+  # newest on the day of the run (protoc-gen-es v2.17.0 when these pins were
+  # set), so a regeneration would silently change the generator. Bump a pin
+  # only together with a regeneration of the gen files, then run
+  # apps/Model Plane/scripts/tests/gateway-gencode-pin-test.mjs.
+  - remote: buf.build/bufbuild/es:v2.16.0
     out: ../../Frontend Plane/verevon/src/lib/model-plane/gen
     opt:
       - target=ts
       - import_extension=js
-  - remote: buf.build/bufbuild/connect-es
+  - remote: buf.build/bufbuild/connect-es:v0.13.0
     out: ../../Frontend Plane/verevon/src/lib/model-plane/gen
     opt:
       - target=ts

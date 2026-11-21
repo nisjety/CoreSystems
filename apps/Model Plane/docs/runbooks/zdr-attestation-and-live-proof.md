@@ -82,6 +82,8 @@ bash "apps/Model Plane/scripts/tests/zdr-live-proof.sh" --phase after --state "$
 
 Every counter must be unchanged and the outbox must hold no ZDR row. A delta is a defect, not a flake: stop, keep the output, find the writer (thread, message, run, cache key, feedback row or audit envelope from a ZDR turn violates `docs/ZDR.md` section 2).
 
+On a shared stack, set `ZDR_PROOF_ORG_ID` to the ZDR-TEST org id in the shell for both the before and the after phase. It is read from the environment, not a flag, so the id stays out of the command history and the evidence, which records only `org_scope=on`. With it set, the threads, messages, runs and outbox counters count that org alone: another org's traffic does not fail the after phase, while a write by the ZDR-TEST org still does. `feedback_ratings` and the cache keys stay stack-wide and still need a quiet stack. Use the same value in both phases, because counters taken with and without the scope do not compare.
+
 ## 6. Put the org back and record
 
 ```bash
@@ -94,6 +96,10 @@ An org left on is an org whose chat is refused. Then:
 1. The evidence file `docs/compliance/evidence/live-reads-zdr-<date>.txt` holds the preflight, before, after and the delta; add the Playwright report path and the seed output (status lines only).
 2. `docs/ZDR.md` section 4 rows for Z-60 and `docs/decisions/ledger.md` (the own-connection ZDR entry's build state and trigger): record pass 1 as run on that date, with the evidence file. Pass 1 does not flip Z-60 to fully proven: the answer path is pass 2.
 3. Waiver minting is still off; say so in the evidence.
+
+## Skill revision attribution (after the capability-core rebuild)
+
+Every skill change is logged in `skill_revisions` with the actor that made it (migration 0064). Registry edits made before capability-core is rebuilt with the attribution settings are logged as `unattributed`, and so is any later writer that sets none. After that rebuild, run `bash "apps/Model Plane/scripts/verify-skill-revision-attribution.sh" --since <deploy time>`, where the deploy time is the UTC time the rebuilt capability-core went live (for example `--since 2026-11-20T09:00:00Z`). It prints the rows per actor_kind and one verdict, and exits 0 only when no revision since that time is unattributed. Exit 1 names the count and the earliest unattributed timestamp; exit 2 means the database could not be read, which is never a pass. Record the exit status with the release evidence and do not clear the gate on anything but 0. The read is one SELECT in a read-only transaction and prints counts and one timestamp only.
 
 ## Pass 2 (after a real attestation, task Z-40)
 
