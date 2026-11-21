@@ -58,6 +58,13 @@ function modelDataUseLine(
 }
 
 /**
+ * DEC-F08-03: the data-use line stays off until counsel approves its English and Norwegian copy (design gate WS01-S14). Only the
+ * literal `'true'` of `VITE_MODEL_DATA_USE_LABEL` shows it. Unset, or any other value, the picker renders as it did before the line.
+ * Display only: the catalogue states the facts, and the attestation and every zero-retention refusal are unchanged.
+ */
+const modelDataUseLabelEnabled = () => import.meta.env.VITE_MODEL_DATA_USE_LABEL === 'true'
+
+/**
  * One customer-gateway connection the picker may offer under "Your gateway" (W4-BYO-6): its opaque
  * Integration Core id, a display name, and the model ids it serves. Never carries a key. The parent reads
  * the list through `listCustomerGateways` in `model-connections-client.ts`.
@@ -345,7 +352,7 @@ export function AiModelPicker(props: {
                       onClick={() => chooseCatalogModel(model)}
                       class={{ 'dashboard-composer-model-menu__item--active': selected().model === model.id && selected().provider === model.provider }}
                     >
-                      <span><span><Zap class="size-3" /></span><span>{model.name}<Show when={modelReplacement(models() ?? [], model)}>{(replacement) => <span class="dashboard-composer-model-successor">{i18n.tr(`Erstattes av ${replacement().name}`, `Replaced by ${replacement().name}`)}</span>}</Show><Show when={formatContextWindow(model.contextWindowTokens)}>{(windowLabel) => <span class="dashboard-composer-model-context">{windowLabel()}</span>}</Show><Show when={model.price}>{(price) => <span class="dashboard-composer-model-price">{formatModelListPrice(price(), i18n.locale())}</span>}</Show><Show when={modelDataUseLine(model.dataUse, i18n.tr)}>{(line) => <span class="dashboard-composer-model-data-use">{line()}</span>}</Show></span></span>
+                      <span><span><Zap class="size-3" /></span><span>{model.name}<Show when={modelReplacement(models() ?? [], model)}>{(replacement) => <span class="dashboard-composer-model-successor">{i18n.tr(`Erstattes av ${replacement().name}`, `Replaced by ${replacement().name}`)}</span>}</Show><Show when={formatContextWindow(model.contextWindowTokens)}>{(windowLabel) => <span class="dashboard-composer-model-context">{windowLabel()}</span>}</Show><Show when={model.price}>{(price) => <span class="dashboard-composer-model-price">{formatModelListPrice(price(), i18n.locale())}</span>}</Show><Show when={modelDataUseLabelEnabled() ? modelDataUseLine(model.dataUse, i18n.tr) : undefined}>{(line) => <span class="dashboard-composer-model-data-use">{line()}</span>}</Show></span></span>
                       <span class="dashboard-composer-model-menu__right">
                         <Show when={model.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER}>
                           <span class="dashboard-composer-model-badge dashboard-composer-model-badge--cheap">{i18n.tr('Tilkoblet', 'Connected')}</span>

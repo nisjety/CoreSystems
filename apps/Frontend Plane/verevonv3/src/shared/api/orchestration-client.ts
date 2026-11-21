@@ -139,6 +139,9 @@ function canonicalApprovalStatus(raw: string | undefined): string | undefined {
   return upper
 }
 
+/** The levels a site-consent pause may state (WS21-S6); any other word is no claim. */
+const SITE_LEVELS: readonly ('read' | 'act')[] = ['read', 'act']
+
 /**
  * The cause object model-gateway projects on an approval. An absent or malformed cause is
  * `undefined` (the surfaces then say the generic waiting line); a stated one is read through the
@@ -162,6 +165,7 @@ export function normalizeApprovalCause(raw: unknown): ApprovalCause | undefined 
     assistKind: str(cause.assist_kind),
     assistOrigin: str(cause.assist_origin),
     host: str(cause.host),
+    maxLevel: SITE_LEVELS.find((level) => level === cause.max_level),
   }
 }
 

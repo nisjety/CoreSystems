@@ -515,7 +515,10 @@ message Approval {
   // before the cause existed and on one whose creator states none.
   ApprovalCause cause = 16;
 
-  // Tag 17 is reserved by the Model Plane chat build (decision record).
+  // The content-free record of how this approval was decided (F-f03-16, the decision record the
+  // chat build reserved tag 17 for). Unset on a pending approval, and on every approval while
+  // SESSION_CORE_APPROVAL_DECISION_RECORD is off. Closed words and opaque ids only.
+  ApprovalDecisionRecord decision = 17;
 
   // Stable key of the gated tool, from the creator's validated context (build
   // plan WS10 S1). Empty when the creator stated none.
@@ -579,6 +582,31 @@ enum ApprovalScope {
   APPROVAL_SCOPE_RUN = 3;
 }
 
+// How a decided approval was decided (F-f03-16). Written by session-core from the same stored
+// fields that its ApprovalStateChanged event reads, so the event and a read cannot disagree. Closed
+// words and opaque ids only: never a decision reason, a decider's identity or a grant id.
+message ApprovalDecisionRecord {
+  // Who recorded the decision. UNSPECIFIED for a decision that recorded no source (read as
+  // `unattributed`).
+  ApprovalDecisionSource source = 1;
+
+  // How far the decision reaches. UNSPECIFIED and ONCE both read as once.
+  ApprovalScope scope = 2;
+
+  // The standing rule the pause named, when one did. Empty otherwise.
+  string rule_id = 3;
+
+  // The standing grant the decision created. Empty: no column on the approval links it, and a
+  // grant names its approval, not the reverse.
+  string grant_id = 4;
+
+  // True only for a grant made with a fresh re-authentication (F-f03-13). Never true on a denial.
+  bool step_up_verified = 5;
+
+  // The closed cause code of the pause the decision answered. Empty when the creator stated none.
+  string cause_code = 6;
+}
+
 // Why an approval was asked for (build plan WS13 S1). The code is a closed
 // vocabulary (`mp-contracts` approval_cause, `api/contracts/approval-causes.json`);
 // an unknown code is stored as `unclassified_gate`. Never carries argument
@@ -627,7 +655,10 @@ message ApprovalCause {
   // WS13 S7's tool_digest on model-plane, merged with mp-w2w3 on 2026-11-03.
   string host_class = 11;
 
-  // Field 12 is held for WS21-S6's `max_level` (browser site consent).
+  // The highest level the org's site policy allows for `host` on a `browser_site_consent` pause
+  // (WS21-S6): `read` or `act`. Stated by the creator of that cause only, shown on the consent
+  // card, and never a host name. Empty for every other code.
+  string max_level = 12;
 
   // What a `browser_human_assist` pause hands to the person (EP-1): `user_takeover`
   // when the person took the browser, or the challenge the agent asks help with
@@ -1399,6 +1430,12 @@ message DecideApprovalRequest {
   // replaces the approved call with the edited one and grants it in one transaction. Refused while
   // APPROVAL_EDIT_ENABLED is off. Tag 9 in the design was taken by the Space member decide.
   ApprovalEdit edit = 13;
+
+  // F-f03-13: the caller re-authenticated, a fresh step-up claim (at most 120 s old) on the verified
+  // model token, for a GRANTED decision. Set only by the model-gateway HTTP edge, never from a client
+  // body and never on a denial. Provenance only: session-core records it and never reads a claim, so
+  // whether the grant may happen stays the gateway's step-up gate. Additive; generated bindings are FU-11.
+  bool step_up_verified = 14;
 }
 
 // EP-10 S4: the person's edit of a pending approval's call.

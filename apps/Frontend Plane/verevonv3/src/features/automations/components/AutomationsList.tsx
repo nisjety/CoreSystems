@@ -11,7 +11,12 @@ import {
   type CronSchedule,
 } from '@/shared/api/cron-client'
 import { listOrganizationMembers } from '@/shared/api/organization-client'
-import { cronExprToLabel, SCHEDULE_PRESETS } from '@/shared/api/schedule-from-chat'
+import {
+  cronExprToLabel,
+  renewalToolsOf,
+  SCHEDULE_PRESETS,
+  scheduleRenewInPlaceEnabled,
+} from '@/shared/api/schedule-from-chat'
 import { isZdrCode, zdrRefusalPresentation } from '@/shared/api/zdr-refusals'
 import { ResultFeedback } from '@/features/chat/components/ResultFeedback'
 import { ScheduleDialog } from '@/features/chat/components/ScheduleDialog'
@@ -384,6 +389,12 @@ export function AutomationsList(props: AutomationsListProps) {
   // Bumped after a Run now, so open results read again and show the new fire first.
   const [firesRevision, setFiresRevision] = createSignal(0)
   const [renewing, setRenewing] = createSignal<CronSchedule | null>(null)
+  // The schedule whose in-place renewal this server refused as not_supported. Its renewal then opens the create dialog.
+  const [renewalUnsupportedId, setRenewalUnsupportedId] = createSignal<string | null>(null)
+  const closeRenewal = (): void => {
+    setRenewing(null)
+    setRenewalUnsupportedId(null)
+  }
   const [copying, setCopying] = createSignal<CronSchedule | null>(null)
   const [retiming, setRetiming] = createSignal<RetimeDraft | null>(null)
 
@@ -811,13 +822,29 @@ export function AutomationsList(props: AutomationsListProps) {
 
       <Show when={renewing()}>
         {(target) => (
-          <ScheduleDialog
-            seedTitle={target().name}
-            seedGoal={goalOf(target())}
-            threadOriginHint="composer"
-            onClose={() => setRenewing(null)}
-            onCreated={() => void refetch()}
-          />
+          <Show
+            when={scheduleRenewInPlaceEnabled() && renewalUnsupportedId() !== target().id}
+            fallback={
+              <ScheduleDialog
+                seedTitle={target().name}
+                seedGoal={goalOf(target())}
+                threadOriginHint="composer"
+                onClose={closeRenewal}
+                onCreated={() => void refetch()}
+              />
+            }
+          >
+            {/* O-10: renewal is a PATCH of this schedule, so its id, history and counters stay. */}
+            <ScheduleDialog
+              seedTitle={target().name}
+              seedGoal={goalOf(target())}
+              threadOriginHint="composer"
+              renewal={{ cronId: target().id, tools: renewalToolsOf(target().task_template) }}
+              onClose={closeRenewal}
+              onRenewed={() => void refetch()}
+              onRenewalUnsupported={() => setRenewalUnsupportedId(target().id)}
+            />
+          </Show>
         )}
       </Show>
       <Show when={copying()}>

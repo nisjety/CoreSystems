@@ -74,7 +74,7 @@ type Handlers = {
   onConnected?: (event: { requestId?: string; threadId?: string }) => void
   onTitle?: (event: { title: string }) => void
   onMessage?: (event: { content: string }) => void
-  onDone?: (event: Record<string, never>) => void
+  onDone?: (event: { undeliveredClientMessageIds?: string[] }) => void
   onStopped?: (event: Record<string, never>) => void
   onError?: (event: { code: string; message: string; feature?: string }) => void
   onQueuedInput?: (event: { messages: string[]; ids?: string[] }) => void
@@ -1545,6 +1545,86 @@ describe('SpaceRoomComposer — owner mid-run steer (WS09-S2)', () => {
     stream.handlers().onDone?.({})
     flush()
     stream.finish()
+
+    await waitFor(() => expect(stripState('Bruk gul ledning')).toBe('delivered'))
+    expect(chatClient.streamChat).toHaveBeenCalledTimes(1)
+  })
+
+  // The done frame names the accepted messages the run never took (F-f01-09). One the run took is not sent again
+  // even when its delivery frame never arrived; one the frame names is sent again as an ordinary turn.
+  it('does not send a steered message again when the done frame says the run took it, though its delivery frame never came', async () => {
+    const stream = scriptedStream()
+    chatClient.queueInvocationInput.mockResolvedValue({ outcome: 'queued', pending: 1, persisted: true })
+    renderInThread(STEER_ON)
+    await ownTurnStreaming(stream)
+
+    typeAndSubmit('Bruk gul ledning')
+    await waitFor(() => expect(stripState('Bruk gul ledning')).toBe('pending'))
+
+    stream.handlers().onDone?.({ undeliveredClientMessageIds: [] })
+    flush()
+    stream.finish()
+
+    await waitFor(() => expect(stripState('Bruk gul ledning')).toBe('delivered'))
+    expect(chatClient.streamChat).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends a steered message again as an ordinary turn when the done frame names it as never taken', async () => {
+    const stream = scriptedStream()
+    chatClient.queueInvocationInput.mockResolvedValue({ outcome: 'queued', pending: 1, persisted: true })
+    renderInThread(STEER_ON)
+    await ownTurnStreaming(stream)
+
+    typeAndSubmit('Legg til kolonne')
+    await waitFor(() => expect(stripState('Legg til kolonne')).toBe('pending'))
+    const clientMessageId = chatClient.queueInvocationInput.mock.calls[0]?.[2]?.clientMessageId as string
+
+    stream.handlers().onDone?.({ undeliveredClientMessageIds: [clientMessageId] })
+    flush()
+    stream.finish()
+
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(2))
+    expect(chatClient.streamChat.mock.calls[1]?.[0]).toMatchObject({ content: 'Legg til kolonne', threadId: 't1' })
+  })
+
+  it('keeps the earlier rule when the done frame names no list, as with the gateway switch off', async () => {
+    const stream = scriptedStream()
+    chatClient.queueInvocationInput.mockResolvedValue({ outcome: 'queued', pending: 1, persisted: true })
+    renderInThread(STEER_ON)
+    await ownTurnStreaming(stream)
+
+    typeAndSubmit('Legg til kolonne')
+    await waitFor(() => expect(stripState('Legg til kolonne')).toBe('pending'))
+
+    stream.handlers().onDone?.({})
+    flush()
+    stream.finish()
+
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(2))
+  })
+
+  it('does not send a steered message again when its answer comes after the run ended and the done frame says the run took it', async () => {
+    const stream = scriptedStream()
+    let answer: (result: unknown) => void = () => {}
+    chatClient.queueInvocationInput.mockReturnValueOnce(new Promise((resolve) => {
+      answer = resolve
+    }))
+    renderInThread(STEER_ON)
+    await ownTurnStreaming(stream)
+
+    typeAndSubmit('Bruk gul ledning')
+    await waitFor(() => expect(chatClient.queueInvocationInput).toHaveBeenCalled())
+
+    stream.handlers().onDone?.({ undeliveredClientMessageIds: [] })
+    flush()
+    stream.finish()
+    // The turn's end is applied in the microtasks after the stream finishes; the gateway's answer comes after that.
+    for (let turn = 0; turn < 10; turn += 1) {
+      await Promise.resolve()
+      flush()
+    }
+
+    answer({ outcome: 'queued', pending: 1, persisted: true })
 
     await waitFor(() => expect(stripState('Bruk gul ledning')).toBe('delivered'))
     expect(chatClient.streamChat).toHaveBeenCalledTimes(1)

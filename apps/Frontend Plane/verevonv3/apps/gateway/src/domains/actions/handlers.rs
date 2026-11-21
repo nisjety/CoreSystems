@@ -24,6 +24,7 @@ use super::dispatchers::{
     dispatch_browser_select_tab, dispatch_browser_set_control_mode,
     dispatch_browser_suggest_action, dispatch_chat_approve_plan, dispatch_chat_cancel_invocation,
     dispatch_chat_clear_threads, dispatch_chat_delete_thread, dispatch_chat_queue_invocation_input,
+    dispatch_chat_queue_retract,
     dispatch_chat_save_thread_snapshot, dispatch_chat_submit_feedback,
     dispatch_chat_upload_document, dispatch_chat_extract_document,
     dispatch_finetune_cancel_job, dispatch_finetune_create_job, dispatch_finetune_deploy_job,
@@ -762,6 +763,10 @@ pub(super) async fn execute_action(
                 dispatch_chat_queue_invocation_input(&state, &user, &headers, &body.input)
             })
             .await
+        }
+        "chat.queue.retract" => {
+            boxed_dispatch(|| dispatch_chat_queue_retract(&state, &user, &headers, &body.input))
+                .await
         }
         "chat.clear_threads" => {
             boxed_dispatch(|| dispatch_chat_clear_threads(&state, &user, &headers, &body.input))

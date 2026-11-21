@@ -38,6 +38,16 @@
 //! `client_message_id` before it is queued, and that id is the queue's `op_id`: a repeat after a
 //! lost reply is queued once, and the loop takes each message with its id
 //! ([`QueuedInputRegistry::drain_receipted`]) so the delivery event can name what it carries.
+//!
+//! # Take-back (O-01, DEC-F01-03)
+//!
+//! With `MODEL_GATEWAY_QUEUE_RETRACT` on, a message the run has not taken yet can be withdrawn by the
+//! `client_message_id` it was sent under ([`QueuedInputRegistry::retract`]). The registry decides
+//! under the one lock that guards the queue, so a take-back and a delivery cannot both win. Only the
+//! replica that owns the stream can decide, and no text travels on the bus for it (the id is the
+//! whole message). The stored copy is marked withdrawn by session-core afterwards, which reverses
+//! the 2026-08-24 "persist before deliver" ledger entry for this one case: a message the run never
+//! read is not a message the transcript should keep.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -128,6 +138,24 @@ pub fn send_receipts_enabled() -> bool {
     send_receipts_enabled_from(std::env::var(SEND_RECEIPTS_ENV).ok().as_deref())
 }
 
+/// The switch for taking back a queued message (O-01, DEC-F01-03). Off, the retract route answers
+/// a typed 503 and the registry is never asked; on, a message the run has not taken yet can be
+/// withdrawn, and the transcript keeps a text-free "retracted" note in its place. Strict: only the
+/// literal `true` turns it on.
+pub const QUEUE_RETRACT_ENV: &str = "MODEL_GATEWAY_QUEUE_RETRACT";
+
+/// The strict parser of [`QUEUE_RETRACT_ENV`]: the exact literal `true`, and nothing else.
+#[must_use]
+pub fn queue_retract_enabled_from(value: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(value)
+}
+
+/// Whether taking back a queued message is on, read from the environment at each call.
+#[must_use]
+pub fn queue_retract_enabled() -> bool {
+    queue_retract_enabled_from(std::env::var(QUEUE_RETRACT_ENV).ok().as_deref())
+}
+
 /// Whether `id` can be a `client_message_id`: the shape session-core's `messages` CHECK allows.
 /// It rides the run-control bus as the message's `op_id`, in the body and never in a subject.
 #[must_use]
@@ -210,9 +238,36 @@ mod retrieval_scope_wire {
     }
 }
 
+/// What happened to a take-back of a queued message (O-01).
+///
+/// Three arms, each a different next move for the SPA: `Retracted` removes the entry from the strip
+/// (and the transcript keeps a "retracted" note), `AlreadyDelivered` says the run took the message
+/// first so it stays, and `NotFound` says this caller has no such message on a live stream.
+///
+/// Serialised on the run-control bus as the owner's answer to a retract request, so a take-back
+/// routed from another replica comes back as the same arm it would have here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetractOutcome {
+    /// The message was waiting and is gone from the queue, so the run will never read it. A repeat of
+    /// a take-back that already succeeded answers this too: the call is idempotent.
+    Retracted,
+    /// The run took the message (or the stream has closed and the done frame has named it for a
+    /// resend), so it can no longer be withdrawn.
+    AlreadyDelivered,
+    /// No live stream of this caller holds a message under that id. The same answer for a stream
+    /// that ended, one that never ran, somebody else's and an id that was never accepted, so a
+    /// request id is no oracle.
+    NotFound,
+}
+
 /// What waits for a run, and which attempts it has already accepted.
 #[derive(Default)]
 struct QueueState {
+    /// Ids of messages taken back, oldest first, bounded like [`MAX_SEEN_OPS`]. A repeat of a
+    /// take-back answers [`RetractOutcome::Retracted`] again; a repeat of the enqueue stays answered
+    /// by `seen_ops` and queues nothing, so a retracted message is never resurrected by a retry.
+    retracted: VecDeque<String>,
     /// `(text, op_id)`, oldest first. With send receipts on, the op id is the message's
     /// `client_message_id`, which is what lets the delivery event name the messages it carries.
     pending: VecDeque<(String, String)>,
@@ -220,6 +275,16 @@ struct QueueState {
     /// of one (the caller's reply was lost, so it asked again) is answered the same and queues
     /// nothing, so a retry can never deliver a message twice.
     seen_ops: VecDeque<(String, usize)>,
+    /// Set by [`QueuedInputRegistry::close_and_undelivered`] once the loop has finished. The list
+    /// that call returned is already on its way to the SPA, so nothing new may be accepted after it.
+    closed: bool,
+    /// Set by [`QueuedInputRegistry::close_retractions`] when the run's answer is about to be stored
+    /// (after the answer stream, not after the tool rounds: only the tool loop reads the queue, so a
+    /// message typed while the answer streams is still the person's to take back). From then on a
+    /// waiting message can no longer be taken back: it stays in `pending`, so the done frame names it
+    /// and the SPA sends it again as a new turn.
+    /// Independent of `closed`, which only the undelivered-ids switch sets.
+    retract_closed: bool,
 }
 
 /// One message the loop takes at a round boundary, with the id its sender gave it (empty when
@@ -372,6 +437,11 @@ impl QueuedInputRegistry {
                 return queued(*pending);
             }
         }
+        // Closed once the loop has finished: the done frame has already named what the loop never
+        // took, so a message accepted now would be in neither that list nor the loop.
+        if state.closed {
+            return EnqueueOutcome::NoActiveStream;
+        }
         if state.pending.len() >= MAX_QUEUED_MESSAGES {
             return EnqueueOutcome::Full {
                 pending: state.pending.len(),
@@ -430,6 +500,122 @@ impl QueuedInputRegistry {
             };
             state.pending.len()
         })
+    }
+
+    /// Close mid-run input for a stream whose loop has finished, and name what the loop never took.
+    ///
+    /// The list is the client message id of every accepted message still waiting, in the order they
+    /// were accepted, with the messages that carry no id left out: the SPA matches by id. The done
+    /// frame carries it (see `sse::stamp_undelivered`), so the SPA resends exactly those and marks
+    /// every other accepted message delivered. From here on an enqueue answers
+    /// [`EnqueueOutcome::NoActiveStream`], except a repeat of a message already accepted, which keeps
+    /// its first answer and so is not sent a second time.
+    ///
+    /// Nothing is taken off the queue: a second call names the same list, and [`finish`](Self::finish)
+    /// still counts what the loop never took. `None` when no stream of this id is registered.
+    pub fn close_and_undelivered(&self, request_id: &str) -> Option<Vec<String>> {
+        let entry = self.inner.get(request_id)?;
+        let mut state = match entry.queue.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.closed = true;
+        Some(
+            state
+                .pending
+                .iter()
+                .filter(|(_, client_message_id)| !client_message_id.is_empty())
+                .map(|(_, client_message_id)| client_message_id.clone())
+                .collect(),
+        )
+    }
+
+    /// Stop giving waiting messages back: the run's answer is about to be stored.
+    ///
+    /// Called just before the answer is persisted (after the answer stream and the pre-save liveness
+    /// check, in both the streaming and the fallback path), and whatever the undelivered-ids switch
+    /// says. It is deliberately not called when the tool rounds end: nothing reads the queue during the
+    /// answer stream, so a message typed then was never read by the run and is still the person's to
+    /// take back until the answer is about to be stored. Without the close at the save a take-back that lands between the stored answer and the done frame
+    /// would remove a message the stored answer appears to cover (a higher `sequence` follows the
+    /// stored copy), and the done frame would no longer name it: the message would be in neither
+    /// place. After this a waiting message answers [`RetractOutcome::AlreadyDelivered`] and stays in
+    /// the queue for [`close_and_undelivered`](Self::close_and_undelivered) to name. Nothing is taken
+    /// off the queue and a message already taken back stays taken back. Idempotent; `false` when no
+    /// stream of this id is registered.
+    pub fn close_retractions(&self, request_id: &str) -> bool {
+        let Some(entry) = self.inner.get(request_id) else {
+            return false;
+        };
+        let mut state = match entry.queue.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.retract_closed = true;
+        true
+    }
+
+    /// Take back the message the caller queued under `client_message_id`, if the run has not taken it.
+    ///
+    /// Decided under the same lock as [`enqueue_checked`](Self::enqueue_checked) and
+    /// [`drain_receipted`](Self::drain_receipted), so a take-back that races a delivery has exactly one
+    /// winner: whichever gets the lock first. A message still waiting is removed (the run will never
+    /// read it); one the loop already drained is [`RetractOutcome::AlreadyDelivered`]. Owner-bound
+    /// like every other call here: a mismatched org or user is indistinguishable from an inactive stream.
+    ///
+    /// After [`close_retractions`](Self::close_retractions) (the run's answer is about to be stored) or
+    /// [`close_and_undelivered`](Self::close_and_undelivered) a waiting message is going to be named
+    /// in the done frame, and the SPA sends it again as a new turn, so it can no longer be taken
+    /// back: that is `AlreadyDelivered` too (it is no longer this run's to withdraw).
+    #[must_use]
+    pub fn retract(
+        &self,
+        request_id: &str,
+        org_id: &str,
+        user_id: &str,
+        client_message_id: &str,
+    ) -> RetractOutcome {
+        let Some(entry) = self
+            .inner
+            .get(request_id)
+            .filter(|entry| entry.org_id == org_id && entry.user_id == user_id)
+        else {
+            return RetractOutcome::NotFound;
+        };
+        // A message with no id was never nameable, so it cannot be taken back.
+        if client_message_id.is_empty() {
+            return RetractOutcome::NotFound;
+        }
+        let mut state = match entry.queue.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(position) = state
+            .pending
+            .iter()
+            .position(|(_, op_id)| op_id == client_message_id)
+        {
+            if state.closed || state.retract_closed {
+                return RetractOutcome::AlreadyDelivered;
+            }
+            state.pending.remove(position);
+            if state.retracted.len() >= MAX_SEEN_OPS {
+                state.retracted.pop_front();
+            }
+            state.retracted.push_back(client_message_id.to_owned());
+            return RetractOutcome::Retracted;
+        }
+        if state.retracted.iter().any(|id| id == client_message_id) {
+            return RetractOutcome::Retracted;
+        }
+        if state
+            .seen_ops
+            .iter()
+            .any(|(seen, _)| seen == client_message_id)
+        {
+            return RetractOutcome::AlreadyDelivered;
+        }
+        RetractOutcome::NotFound
     }
 
     /// Number of streams currently accepting mid-run input.
@@ -496,6 +682,31 @@ pub fn bus_message(
     op_id.clone_into(&mut msg.op_id);
     msg.text = Some(text.to_owned());
     msg.claimed_thread_id = claimed_thread_id.map(str::to_owned);
+    Ok(msg)
+}
+
+/// The run-control message that asks the replica owning a stream to take back a queued message.
+///
+/// It carries ids only: the `client_message_id` rides as the op id, and no text of the message is
+/// ever put on the bus. Like [`bus_message`] it refuses a ZDR token and a waived one first, so a
+/// caller that skipped the handler's gate still cannot reach the bus.
+///
+/// # Errors
+/// The typed refusal for a ZDR or waived token (or any token the posture decision refuses).
+pub fn retract_bus_message(
+    claims: &Claims,
+    request_id: &str,
+    client_message_id: &str,
+) -> Result<RunControlMsg, Refusal> {
+    match decide_for(claims, &Route::plain(false)) {
+        Ok(TurnPosture::Persistent) => {}
+        Ok(TurnPosture::Zdr { .. }) => return Err(Refusal::DURABLE_MUTATION_FORBIDDEN),
+        Ok(TurnPosture::Waived { .. }) => return Err(Refusal::WAIVER_ROUTE_MISMATCH),
+        Err(refusal) => return Err(refusal),
+    }
+    let mut msg = RunControlMsg::new(RunControlOp::Retract, &claims.org_id, &claims.user_id);
+    request_id.clone_into(&mut msg.request_id);
+    client_message_id.clone_into(&mut msg.op_id);
     Ok(msg)
 }
 
@@ -938,6 +1149,80 @@ mod tests {
         assert_eq!(registry.finish("req-nope"), 0);
     }
 
+    /// The done frame names what the loop never took: the ids of the accepted messages still
+    /// waiting, in the order they were accepted, without the ones that carry no id. Naming them
+    /// takes nothing off the queue, and the second call names the same list.
+    #[test]
+    fn closing_names_what_the_loop_never_took_in_order() {
+        let registry = registry();
+        enqueue_checked_with_op(&registry, "one", "msg-1");
+        enqueue_checked_with_op(&registry, "two", "");
+        enqueue_checked_with_op(&registry, "three", "msg-3");
+        let named = Some(vec!["msg-1".to_owned(), "msg-3".to_owned()]);
+        assert_eq!(registry.close_and_undelivered("req-1"), named);
+        assert_eq!(
+            registry.close_and_undelivered("req-1"),
+            named,
+            "naming is idempotent"
+        );
+        assert_eq!(
+            registry.drain("req-1"),
+            vec!["one".to_owned(), "two".to_owned(), "three".to_owned()],
+            "naming the messages takes none of them off the queue"
+        );
+    }
+
+    /// Once closed, a new message is refused as an inactive stream is, and the refused message leaves
+    /// nothing behind. A repeat of a message already accepted keeps its first answer, so a retry is
+    /// not a second send.
+    #[test]
+    fn a_closed_stream_refuses_new_input_and_answers_a_repeat_as_before() {
+        let registry = registry();
+        let first = enqueue_checked_with_op(&registry, "one", "msg-1");
+        let _ = registry.close_and_undelivered("req-1");
+        assert_eq!(
+            enqueue(&registry, "req-1", "org-a", "user-a", "late"),
+            EnqueueOutcome::NoActiveStream
+        );
+        assert_eq!(enqueue_checked_with_op(&registry, "one", "msg-1"), first);
+        assert_eq!(registry.drain("req-1"), vec!["one".to_owned()]);
+    }
+
+    /// A message the loop took before the close is not named. When it took all of them the list is
+    /// empty, which is a real answer ("nothing was left behind"), not a missing one.
+    #[test]
+    fn a_taken_message_is_not_named_and_an_empty_list_is_a_real_answer() {
+        let registry = registry();
+        enqueue_checked_with_op(&registry, "one", "msg-1");
+        assert_eq!(registry.drain_receipted("req-1").len(), 1);
+        assert_eq!(registry.close_and_undelivered("req-1"), Some(Vec::new()));
+    }
+
+    #[test]
+    fn closing_a_stream_that_is_not_registered_names_nothing() {
+        let registry = registry();
+        assert_eq!(registry.close_and_undelivered("req-nope"), None);
+    }
+
+    /// Finishing after a close still counts what the loop never took, and then the stream is gone.
+    #[test]
+    fn finishing_after_a_close_still_counts_what_the_loop_never_took() {
+        let registry = registry();
+        enqueue_checked_with_op(&registry, "one", "msg-1");
+        let _ = registry.close_and_undelivered("req-1");
+        assert_eq!(registry.finish("req-1"), 1);
+        assert_eq!(registry.close_and_undelivered("req-1"), None);
+    }
+
+    /// `enqueue_checked` for the owner with the op id given, the shape the receipts path queues under.
+    fn enqueue_checked_with_op(
+        registry: &QueuedInputRegistry,
+        text: &str,
+        op_id: &str,
+    ) -> EnqueueOutcome {
+        registry.enqueue_checked("req-1", "org-a", "user-a", text, None, op_id)
+    }
+
     fn claims(zdr: bool, waiver: Option<serde_json::Value>) -> Claims {
         let mut payload = serde_json::json!({
             "sub": "user-a",
@@ -1038,6 +1323,324 @@ mod tests {
         );
         assert_eq!(bounds_refusal(&"x".repeat(MAX_QUEUED_CHARS)), None);
         assert_eq!(bounds_refusal(" hi "), None);
+    }
+
+    /// A waiting message is taken back by its id: the run never reads it, the others keep their order,
+    /// and a repeat of the take-back answers the same without touching anything else.
+    #[test]
+    fn a_waiting_message_is_retracted_by_its_id_and_the_rest_keep_their_order() {
+        let registry = registry();
+        enqueue_checked_with_op(&registry, "one", "msg-1");
+        enqueue_checked_with_op(&registry, "two", "msg-2");
+        enqueue_checked_with_op(&registry, "three", "msg-3");
+        assert_eq!(
+            registry.retract("req-1", "org-a", "user-a", "msg-2"),
+            RetractOutcome::Retracted
+        );
+        assert_eq!(
+            registry.retract("req-1", "org-a", "user-a", "msg-2"),
+            RetractOutcome::Retracted,
+            "a repeat of a take-back that succeeded is the same answer"
+        );
+        assert_eq!(
+            registry.drain_receipted("req-1"),
+            vec![
+                QueuedMessage {
+                    text: "one".into(),
+                    client_message_id: "msg-1".into()
+                },
+                QueuedMessage {
+                    text: "three".into(),
+                    client_message_id: "msg-3".into()
+                },
+            ]
+        );
+    }
+
+    /// A retried enqueue of a message that was taken back is answered as before and queues nothing, so
+    /// a lost reply cannot bring a withdrawn message back to the model.
+    #[test]
+    fn a_retracted_message_is_not_resurrected_by_a_repeat_of_its_enqueue() {
+        let registry = registry();
+        let first = enqueue_checked_with_op(&registry, "one", "msg-1");
+        assert_eq!(
+            registry.retract("req-1", "org-a", "user-a", "msg-1"),
+            RetractOutcome::Retracted
+        );
+        assert_eq!(enqueue_checked_with_op(&registry, "one", "msg-1"), first);
+        assert!(registry.drain("req-1").is_empty());
+    }
+
+    /// Once the loop has taken a message it is delivered and cannot be withdrawn; an id that was never
+    /// accepted is not found.
+    #[test]
+    fn a_delivered_message_cannot_be_retracted_and_an_unknown_one_is_not_found() {
+        let registry = registry();
+        enqueue_checked_with_op(&registry, "one", "msg-1");
+        assert_eq!(registry.drain_receipted("req-1").len(), 1);
+        assert_eq!(
+            registry.retract("req-1", "org-a", "user-a", "msg-1"),
+            RetractOutcome::AlreadyDelivered
+        );
+        assert_eq!(
+            registry.retract("req-1", "org-a", "user-a", "msg-9"),
+            RetractOutcome::NotFound
+        );
+        assert_eq!(
+            registry.retract("req-1", "org-a", "user-a", ""),
+            RetractOutcome::NotFound
+        );
+        assert_eq!(
+            registry.retract("req-nope", "org-a", "user-a", "msg-1"),
+            RetractOutcome::NotFound
+        );
+    }
+
+    /// Owner-bound like the enqueue: another tenant or user learns nothing, and the message stays queued.
+    #[test]
+    fn only_the_owner_of_the_stream_can_retract() {
+        let registry = registry();
+        enqueue_checked_with_op(&registry, "one", "msg-1");
+        for (org, user) in [("org-b", "user-a"), ("org-a", "user-b")] {
+            assert_eq!(
+                registry.retract("req-1", org, user, "msg-1"),
+                RetractOutcome::NotFound,
+                "{org}/{user}: a stranger's take-back is indistinguishable from a missing stream"
+            );
+        }
+        assert_eq!(registry.drain("req-1"), vec!["one".to_owned()]);
+    }
+
+    /// After the done frame has named a waiting message the SPA is sending it again as a new turn, so
+    /// it is no longer the run's to withdraw; a take-back that already succeeded stays answered.
+    #[test]
+    fn a_closed_stream_no_longer_gives_a_waiting_message_back() {
+        let registry = registry();
+        enqueue_checked_with_op(&registry, "one", "msg-1");
+        enqueue_checked_with_op(&registry, "two", "msg-2");
+        assert_eq!(
+            registry.retract("req-1", "org-a", "user-a", "msg-2"),
+            RetractOutcome::Retracted
+        );
+        assert_eq!(
+            registry.close_and_undelivered("req-1"),
+            Some(vec!["msg-1".to_owned()])
+        );
+        assert_eq!(
+            registry.retract("req-1", "org-a", "user-a", "msg-1"),
+            RetractOutcome::AlreadyDelivered
+        );
+        assert_eq!(
+            registry.retract("req-1", "org-a", "user-a", "msg-2"),
+            RetractOutcome::Retracted
+        );
+        assert_eq!(
+            registry.drain("req-1"),
+            vec!["one".to_owned()],
+            "the named message is still there to resend"
+        );
+    }
+
+    /// The close that comes just before the run's answer is stored ends take-backs, whatever the
+    /// undelivered-ids switch says (`closed` is never set with it off): a message still waiting is
+    /// then delivered as far as the caller is concerned, stays queued, and the done frame names it.
+    #[test]
+    fn a_take_back_after_the_loop_end_close_is_already_delivered_and_the_done_frame_still_names_it() {
+        let registry = registry();
+        enqueue_checked_with_op(&registry, "one", "msg-1");
+        enqueue_checked_with_op(&registry, "two", "msg-2");
+        assert_eq!(
+            registry.retract("req-1", "org-a", "user-a", "msg-2"),
+            RetractOutcome::Retracted,
+            "taken back before the loop ended"
+        );
+
+        assert!(registry.close_retractions("req-1"));
+        assert!(registry.close_retractions("req-1"), "idempotent");
+        assert_eq!(
+            registry.retract("req-1", "org-a", "user-a", "msg-1"),
+            RetractOutcome::AlreadyDelivered,
+            "the loop has its answer: the message is not the run's to give back"
+        );
+        assert_eq!(
+            registry.retract("req-1", "org-a", "user-a", "msg-2"),
+            RetractOutcome::Retracted,
+            "a take-back that already succeeded stays answered"
+        );
+        assert_eq!(
+            registry.close_and_undelivered("req-1"),
+            Some(vec!["msg-1".to_owned()]),
+            "the message the take-back refused is named for a resend"
+        );
+        assert!(!registry.close_retractions("req-nope"), "no such stream");
+    }
+
+    /// A message typed while the answer streams was never read by the run (only the tool loop drains
+    /// the queue), so a take-back after the last drain and before the close at the answer's save is
+    /// honoured: it is not `AlreadyDelivered`, and the done frame never names it for a resend.
+    #[test]
+    fn a_take_back_during_the_answer_stream_is_retracted_not_already_delivered() {
+        let registry = registry();
+        enqueue_checked_with_op(&registry, "early", "msg-1");
+        assert_eq!(
+            registry.drain_receipted("req-1").len(),
+            1,
+            "the tool loop read the first message at a round boundary"
+        );
+        // The tool rounds are over; the answer streams and the person sends, then takes back.
+        enqueue_checked_with_op(&registry, "during the answer", "msg-2");
+        assert_eq!(
+            registry.retract("req-1", "org-a", "user-a", "msg-2"),
+            RetractOutcome::Retracted,
+            "nothing read it: the take-back is honoured while the answer streams"
+        );
+        assert_eq!(
+            registry.retract("req-1", "org-a", "user-a", "msg-1"),
+            RetractOutcome::AlreadyDelivered,
+            "the message the loop did read stays delivered"
+        );
+        // The answer is about to be stored: the close, then the done frame.
+        assert!(registry.close_retractions("req-1"));
+        assert_eq!(
+            registry.close_and_undelivered("req-1"),
+            Some(Vec::new()),
+            "the retracted message is not named for a resend"
+        );
+    }
+
+    /// The close does not stop the stream taking new messages (that is the done frame's job), and a
+    /// message accepted after it cannot be taken back either.
+    #[test]
+    fn a_message_accepted_after_the_loop_end_close_cannot_be_taken_back_and_is_named() {
+        let registry = registry();
+        assert!(registry.close_retractions("req-1"));
+        enqueue_checked_with_op(&registry, "late", "msg-9");
+        assert_eq!(
+            registry.retract("req-1", "org-a", "user-a", "msg-9"),
+            RetractOutcome::AlreadyDelivered
+        );
+        assert_eq!(
+            registry.close_and_undelivered("req-1"),
+            Some(vec!["msg-9".to_owned()])
+        );
+    }
+
+    /// A take-back that races the loop's drain has exactly one winner: the message is either read by
+    /// the run or withdrawn, never both and never neither.
+    #[test]
+    fn a_take_back_racing_a_drain_has_exactly_one_winner() {
+        for round in 0..200 {
+            let registry = registry();
+            enqueue_checked_with_op(&registry, "racing words", "msg-1");
+            let drainer = {
+                let registry = registry.clone();
+                std::thread::spawn(move || registry.drain_receipted("req-1"))
+            };
+            let retractor = {
+                let registry = registry.clone();
+                std::thread::spawn(move || registry.retract("req-1", "org-a", "user-a", "msg-1"))
+            };
+            let delivered = drainer.join().expect("drainer");
+            let outcome = retractor.join().expect("retractor");
+            match outcome {
+                RetractOutcome::Retracted => assert!(
+                    delivered.is_empty(),
+                    "round {round}: a withdrawn message was also delivered"
+                ),
+                RetractOutcome::AlreadyDelivered => assert_eq!(
+                    delivered.len(),
+                    1,
+                    "round {round}: told it was delivered, but the run never took it"
+                ),
+                RetractOutcome::NotFound => {
+                    panic!("round {round}: the message was accepted, so it is known")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_retracted_ids_are_bounded() {
+        let registry = registry();
+        for n in 0..=MAX_SEEN_OPS {
+            enqueue_checked_with_op(&registry, "m", &format!("msg-{n}"));
+            assert_eq!(
+                registry.retract("req-1", "org-a", "user-a", &format!("msg-{n}")),
+                RetractOutcome::Retracted
+            );
+        }
+        // The oldest was forgotten as retracted, but its op is still remembered as accepted, so a
+        // late repeat of the take-back reads as "already taken": it is never delivered either way.
+        let retracted = {
+            let entry = registry.inner.get("req-1").expect("registered");
+            let state = entry.queue.lock().expect("lock");
+            state.retracted.len()
+        };
+        assert_eq!(retracted, MAX_SEEN_OPS);
+        assert!(registry.drain("req-1").is_empty());
+    }
+
+    #[test]
+    fn every_retract_outcome_survives_the_wire_encoding() {
+        for outcome in [
+            RetractOutcome::Retracted,
+            RetractOutcome::AlreadyDelivered,
+            RetractOutcome::NotFound,
+        ] {
+            let wire = serde_json::to_string(&outcome).expect("serialize");
+            assert_eq!(
+                serde_json::from_str::<RetractOutcome>(&wire).expect("parse"),
+                outcome,
+                "{wire}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_string(&RetractOutcome::AlreadyDelivered).unwrap(),
+            r#""already_delivered""#
+        );
+    }
+
+    #[test]
+    fn the_queue_retract_switch_is_strict_and_defaults_off() {
+        assert!(!queue_retract_enabled_from(None));
+        for off in [
+            "", "false", "1", "yes", "on", "tru", "truee", "TRUE", " true", "true ",
+        ] {
+            assert!(!queue_retract_enabled_from(Some(off)), "{off:?}");
+        }
+        assert!(queue_retract_enabled_from(Some("true")));
+    }
+
+    /// The take-back puts only ids on the bus, and never for a ZDR or waived token.
+    #[test]
+    fn the_retract_bus_message_carries_ids_only_and_is_never_built_for_zdr_or_waived_claims() {
+        let waiver = serde_json::json!({
+            "version": 1,
+            "provider": mp_contracts::agentic_subscription::PROVIDER_ID,
+            "connection": "conn-1",
+        });
+        assert_eq!(
+            retract_bus_message(&claims(true, None), "req-1", "msg-1"),
+            Err(Refusal::DURABLE_MUTATION_FORBIDDEN)
+        );
+        assert!(retract_bus_message(&claims(false, Some(waiver)), "req-1", "msg-1").is_err());
+        let msg = retract_bus_message(&claims(false, None), "req-1", "msg-1")
+            .expect("a persistent token may retract");
+        assert_eq!(msg.op, RunControlOp::Retract);
+        assert_eq!(
+            (
+                msg.org_id.as_str(),
+                msg.user_id.as_str(),
+                msg.request_id.as_str(),
+                msg.op_id.as_str()
+            ),
+            ("org-a", "user-a", "req-1", "msg-1")
+        );
+        assert!(
+            msg.text.is_none(),
+            "no text of the message travels on the bus"
+        );
+        assert!(msg.claimed_thread_id.is_none());
     }
 
     fn replica(hub: &crate::run_control::LoopbackHub) -> RunControl {

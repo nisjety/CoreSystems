@@ -127,6 +127,8 @@ export function messageToTurn(msg: ChatMessage): ChatTurn {
     // backfills the real time; loadThread fills any remainder from the stored
     // history entry before the turns reach the UI.
     createdAt: msg.createdAt || '',
+    // A message the person took back (O-01): a text-free note, flagged so it is shown as one and never replayed.
+    ...(msg.retracted ? { retracted: true } : {}),
     streaming: false,
     model: msg.model,
     ...serverConnectionFields(msg),
@@ -1256,6 +1258,8 @@ export function dedupeChatTurns(turns: ChatTurn[]): ChatTurn[] {
     const previous = next.at(-1)
     if (
       previous &&
+      !turn.retracted &&
+      !previous.retracted &&
       previous.role === turn.role &&
       previous.content === turn.content &&
       // Two timestamp-less turns (session-core sends none) are the case the
@@ -1897,14 +1901,28 @@ export function markQueuedInputsDelivered(
  * `resend`, to go out again as an ordinary turn under the same id, and marked `resent` in the
  * strip. A refused message, one already delivered, and one that never reached the gateway
  * (already waiting to go out) are left as they are.
+ *
+ * `undelivered` is the list the done frame names (`ChatDoneEvent.undeliveredClientMessageIds`). When it is
+ * given, the gateway has said which accepted messages it never took: an accepted message with an id is
+ * resent only if that id is on the list, and is marked `delivered` otherwise, because what was lost was its
+ * `queued_input` frame, not the message. An entry with no id keeps the rule above, and `undefined` (no list)
+ * is that rule for every entry.
  */
-export function settleQueuedInputsAtRunEnd(entries: readonly QueuedInput[]): {
+export function settleQueuedInputsAtRunEnd(
+  entries: readonly QueuedInput[],
+  undelivered?: readonly string[],
+): {
   entries: QueuedInput[]
   resend: QueuedInput[]
 } {
+  const undeliveredIds = undelivered ? new Set(undelivered) : undefined
   const resend: QueuedInput[] = []
   const settled = entries.map((entry): QueuedInput => {
-    if (entry.state !== 'pending' || !entry.accepted) return entry
+    // A take-back in flight decides this message's fate itself (O-01): it is neither resent nor marked delivered here.
+    if (entry.state !== 'pending' || !entry.accepted || entry.retracting) return entry
+    if (undeliveredIds && entry.clientMessageId && !undeliveredIds.has(entry.clientMessageId)) {
+      return { ...entry, state: 'delivered', note: undefined }
+    }
     resend.push(entry)
     return { ...entry, state: 'resent', accepted: false, note: undefined }
   })

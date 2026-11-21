@@ -26,6 +26,7 @@ use mp_contracts::model_plane::v1::{
     message_revision_service_server::MessageRevisionServiceServer,
     message_search_server::MessageSearchServer,
     message_tree_service_server::MessageTreeServiceServer,
+    message_withdrawal_service_server::MessageWithdrawalServiceServer,
     orchestration_core_service_server::OrchestrationCoreServiceServer,
     research_run_service_server::ResearchRunServiceServer,
     promote_on_use_service_server::{PromoteOnUseService, PromoteOnUseServiceServer},
@@ -214,7 +215,8 @@ fn thread_list_page_sql() -> String {
                            (t.starred_at IS NOT NULL) AS starred,
                            (t.last_assistant_at IS NOT NULL AND t.last_assistant_at > t.last_read_at) AS unread,
                            t.last_read_at,
-                           t.forked_from_thread_id
+                           t.forked_from_thread_id,
+                           t.memory_mode
                     FROM threads t
                     WHERE t.org_id = $1
                       AND ($6::BIGINT IS NULL
@@ -259,6 +261,7 @@ fn thread_list_page_sql() -> String {
                     page.unread,
                     page.last_read_at,
                     page.forked_from_thread_id,
+                    page.memory_mode,
                     jsonb_build_object('reply_count', reply_stats.reply_count,
                                        'last_author', reply_stats.last_author) AS reply_stats
                  FROM page
@@ -679,6 +682,9 @@ struct ConversationRow {
     /// The subscription connection the turn was written under (DEC-V-R8): an opaque id, NULL for every
     /// other turn and for rows written before the column existed.
     subscription_connection_id: Option<String>,
+    /// The turn was taken back before the run read it (O-01). Only read with `include_withdrawn_notes`,
+    /// where its `content` and `metadata` are already empty.
+    withdrawn: bool,
 }
 
 /// The sibling count of a turn, read where the tree is read: a thread that has never been
@@ -686,8 +692,8 @@ struct ConversationRow {
 /// The count includes inactive siblings on purpose: it is how many versions a turn has.
 const SIBLING_COUNT_SQL: &str = "CASE WHEN $6 OR t.active_leaf_message_id IS NOT NULL THEN \
     (CASE WHEN m.parent_message_id IS NULL \
-        THEN (SELECT COUNT(*) FROM messages AS s WHERE s.thread_id = m.thread_id AND s.parent_message_id IS NULL) \
-        ELSE (SELECT COUNT(*) FROM messages AS s WHERE s.thread_id = m.thread_id AND s.parent_message_id = m.parent_message_id) END) \
+        THEN (SELECT COUNT(*) FROM messages AS s WHERE s.thread_id = m.thread_id AND s.parent_message_id IS NULL AND s.withdrawn_at IS NULL) \
+        ELSE (SELECT COUNT(*) FROM messages AS s WHERE s.thread_id = m.thread_id AND s.parent_message_id = m.parent_message_id AND s.withdrawn_at IS NULL) END) \
     ELSE 0 END";
 
 fn session_message_from_row(row: ConversationRow, include_inactive: bool) -> pb::SessionMessage {
@@ -753,6 +759,7 @@ fn session_message_from_row(row: ConversationRow, include_inactive: bool) -> pb:
         model_connection_id: row.model_connection_id.unwrap_or_default(),
         // The opaque subscription connection id only, so a side question is answered on the same subscription.
         subscription_connection_id: row.subscription_connection_id.unwrap_or_default(),
+        withdrawn: row.withdrawn,
     }
 }
 
@@ -819,6 +826,34 @@ async fn conversation_page_rows(
     fetch: i64,
     include_inactive: bool,
 ) -> Result<Vec<ConversationRow>, Status> {
+    conversation_page_rows_noted(
+        pool,
+        org_id,
+        thread_id,
+        audience,
+        include_human_posts,
+        before_sequence,
+        fetch,
+        include_inactive,
+        false,
+    )
+    .await
+}
+
+/// [`conversation_page_rows`] for the thread view, which alone may also ask for the text-free note of
+/// each message the person took back (`include_notes`, O-01). Every other reader leaves withdrawn
+/// messages out entirely.
+async fn conversation_page_rows_noted(
+    pool: &PgPool,
+    org_id: &str,
+    thread_id: &str,
+    audience: AudienceWindow,
+    include_human_posts: bool,
+    before_sequence: Option<i64>,
+    fetch: i64,
+    include_inactive: bool,
+    include_notes: bool,
+) -> Result<Vec<ConversationRow>, Status> {
     conversation_rows_ordered(
         pool,
         org_id,
@@ -829,6 +864,7 @@ async fn conversation_page_rows(
         fetch,
         include_inactive,
         false,
+        include_notes,
     )
     .await
 }
@@ -845,6 +881,7 @@ async fn conversation_rows_ordered(
     fetch: i64,
     include_inactive: bool,
     ascending: bool,
+    include_notes: bool,
 ) -> Result<Vec<ConversationRow>, Status> {
     let direction = if ascending { "ASC" } else { "DESC" };
     let sql = format!(
@@ -857,7 +894,8 @@ async fn conversation_rows_ordered(
                 rv.actor_subject_id AS revised_by_subject_id,
                 COALESCE(rv.revision_no, 0) AS revision_no,
                 {fold_followed_up} AS agent_followed_up,
-                m.model_connection_id, m.subscription_connection_id
+                m.model_connection_id, m.subscription_connection_id,
+                (m.withdrawn_at IS NOT NULL) AS withdrawn
          FROM messages m
          JOIN threads t ON t.id = m.thread_id
          {fold_join}
@@ -869,7 +907,7 @@ async fn conversation_rows_ordered(
                 OR m.recipient_audience_revision IS NULL
                 OR m.recipient_audience_revision >= $8)
            AND ($4::BIGINT IS NULL OR m.sequence < $4)
-           AND ($6 OR m.on_active_path)
+           AND (CASE WHEN m.withdrawn_at IS NULL THEN ($6 OR m.on_active_path) ELSE $9 END)
            AND ($7 OR m.post_kind <> 'post')
          ORDER BY m.sequence {direction}
          LIMIT $5",
@@ -890,6 +928,7 @@ async fn conversation_rows_ordered(
         .bind(include_inactive)
         .bind(include_human_posts)
         .bind(audience.floor)
+        .bind(include_notes)
         .fetch_all(pool)
         .await
         .map_err(|error| {
@@ -914,6 +953,7 @@ async fn conversation_count_before(
     include_human_posts: bool,
     include_inactive: bool,
     before_sequence: i64,
+    include_notes: bool,
 ) -> Result<i64, Status> {
     sqlx::query_scalar(
         "SELECT count(*)
@@ -924,7 +964,7 @@ async fn conversation_count_before(
                 OR m.recipient_audience_revision IS NULL
                 OR m.recipient_audience_revision <= $3)
            AND m.sequence < $4
-           AND ($5 OR m.on_active_path)
+           AND (CASE WHEN m.withdrawn_at IS NULL THEN ($5 OR m.on_active_path) ELSE $8 END)
            AND ($6 OR m.post_kind <> 'post')
            AND ($7::BIGINT IS NULL
                 OR m.recipient_audience_revision IS NULL
@@ -937,6 +977,7 @@ async fn conversation_count_before(
     .bind(include_inactive)
     .bind(include_human_posts)
     .bind(audience.floor)
+    .bind(include_notes)
     .fetch_one(pool)
     .await
     .map_err(|error| {
@@ -974,7 +1015,7 @@ async fn conversation_page_response(
             .await?,
         )
     };
-    let rows = conversation_page_rows(
+    let rows = conversation_page_rows_noted(
         pool,
         &req.org_id,
         &req.thread_id,
@@ -983,6 +1024,7 @@ async fn conversation_page_response(
         before_sequence,
         limit + 1,
         req.include_inactive,
+        req.include_withdrawn_notes,
     )
     .await?;
     let page_size = usize::try_from(limit).unwrap_or(usize::MAX);
@@ -1014,6 +1056,7 @@ async fn conversation_page_response(
                 1,
                 req.include_inactive,
                 true,
+                req.include_withdrawn_notes,
             )
             .await?
             .into_iter()
@@ -1027,6 +1070,7 @@ async fn conversation_page_response(
                     req.include_human_posts,
                     req.include_inactive,
                     oldest_sequence,
+                    req.include_withdrawn_notes,
                 )
                 .await?;
                 // The count includes the first turn itself.
@@ -2609,17 +2653,26 @@ async fn record_scheduled_run_result_inner(
     pool: &PgPool,
     req: pb::RecordScheduledRunResultRequest,
 ) -> Result<Response<pb::RecordScheduledRunResultResponse>, Status> {
-    record_scheduled_run_result_with(pool, req, crate::thread_goals::thread_goals_enabled()).await
+    record_scheduled_run_result_with(
+        pool,
+        req,
+        crate::thread_goals::thread_goals_enabled(),
+        crate::scheduled_outcome_events::enabled(),
+    )
+    .await
 }
 
-/// [`record_scheduled_run_result_inner`] with the goal ledger switch passed in. With `goal_ledger`
-/// (`SESSION_CORE_THREAD_GOALS_ENABLED`) a fire of a goal-bound schedule also writes its
-/// unattended goal turn in the same transaction (EP-7 S6); off, nothing here reads a goal.
+/// [`record_scheduled_run_result_inner`] with the goal ledger and the outcome notice switches passed in. With
+/// `goal_ledger` (`SESSION_CORE_THREAD_GOALS_ENABLED`) a fire of a goal-bound schedule also writes its
+/// unattended goal turn in the same transaction (EP-7 S6); off, nothing here reads a goal. With `outcome_events`
+/// (`SESSION_CORE_SCHEDULED_OUTCOME_EVENTS_ENABLED`) the run's outcome notice is written in the same transaction
+/// (F-f05-05); off, no notice is written and no schedule is read for one.
 #[allow(clippy::result_large_err, clippy::too_many_lines)]
 async fn record_scheduled_run_result_with(
     pool: &PgPool,
     req: pb::RecordScheduledRunResultRequest,
     goal_ledger: bool,
+    outcome_events: bool,
 ) -> Result<Response<pb::RecordScheduledRunResultResponse>, Status> {
     let withheld_effects = validate_scheduled_run_result_request(&req)?;
 
@@ -2729,6 +2782,21 @@ async fn record_scheduled_run_result_with(
     } else {
         None
     };
+    // The run's revisions appended before its answer existed name the answer, as a direct
+    // completion's do (see `terminalization::complete_direct_run_with_message_inner`). With the
+    // switch off nothing is written here.
+    if let Some(answer) = message_id.as_deref() {
+        if crate::artifact_revisions::artifact_revisions_enabled() {
+            crate::artifact_revisions::backfill_revision_source(
+                &mut tx,
+                &req.org_id,
+                &thread_id,
+                &req.run_id,
+                answer,
+            )
+            .await?;
+        }
+    }
     let output_digest = if req.output.is_empty() {
         String::new()
     } else {
@@ -2772,6 +2840,24 @@ async fn record_scheduled_run_result_with(
     .execute(&mut *tx)
     .await
     .map_err(|error| Status::internal(error.to_string()))?;
+    // The run's outcome notice, in the same transaction as the receipt and the fire row it describes (F-f05-05).
+    // Only a persistent run is announced, and a notice that cannot be written never fails the result.
+    if outcome_events {
+        if let Some(outcome) = crate::scheduled_outcome_events::outcome_word(run_outcome) {
+            let finished = crate::scheduled_outcome_events::FinishedRun {
+                org_id: &req.org_id,
+                run_id: &req.run_id,
+                receipt_id: &receipt_id,
+                thread_id: &thread_id,
+                schedule_id: &schedule_id,
+                user_id: &owner,
+                retention_class: &retention_class,
+                outcome,
+                ts: chrono::Utc::now(),
+            };
+            crate::scheduled_outcome_events::record_outcome(&mut tx, &finished).await;
+        }
+    }
     if goal_ledger {
         record_unattended_goal_turn(
             &mut tx,
@@ -3274,7 +3360,7 @@ mod unattended_goal_tests {
         assert_eq!(bound.as_deref(), Some(seeded.goal_id.as_str()));
 
         let off = claimed_fire(&pool, &seeded, &mp_ids::new_ulid()).await;
-        record_scheduled_run_result_with(&pool, off, false)
+        record_scheduled_run_result_with(&pool, off, false, false)
             .await
             .expect("result with the switch off");
         let turns: i64 =
@@ -3286,10 +3372,10 @@ mod unattended_goal_tests {
         assert_eq!(turns, 0, "the switch off writes no goal turn");
 
         let request = claimed_fire(&pool, &seeded, &mp_ids::new_ulid()).await;
-        record_scheduled_run_result_with(&pool, request.clone(), true)
+        record_scheduled_run_result_with(&pool, request.clone(), true, false)
             .await
             .expect("first result");
-        record_scheduled_run_result_with(&pool, request.clone(), true)
+        record_scheduled_run_result_with(&pool, request.clone(), true, false)
             .await
             .expect("replayed result");
         let (outcome, unattended, counted, input, output, scheduled_thread): (
@@ -3339,7 +3425,7 @@ mod unattended_goal_tests {
 
         let clean_fire = mp_ids::new_ulid();
         let clean = claimed_fire(&pool, &seeded, &clean_fire).await;
-        let clean_result = record_scheduled_run_result_with(&pool, clean.clone(), true)
+        let clean_result = record_scheduled_run_result_with(&pool, clean.clone(), true, false)
             .await
             .expect("clean result")
             .into_inner();
@@ -3351,13 +3437,13 @@ mod unattended_goal_tests {
             withheld_effects: 2,
             ..review
         };
-        let first = record_scheduled_run_result_with(&pool, review.clone(), true)
+        let first = record_scheduled_run_result_with(&pool, review.clone(), true, false)
             .await
             .expect("review result")
             .into_inner();
         assert_eq!(first.status, "completed", "receipt keeps status");
         assert!(!first.message_id.is_empty(), "the answer is still appended");
-        let replay = record_scheduled_run_result_with(&pool, review.clone(), true)
+        let replay = record_scheduled_run_result_with(&pool, review.clone(), true, false)
             .await
             .expect("replayed review result")
             .into_inner();
@@ -3451,7 +3537,7 @@ mod unattended_goal_tests {
 
         // goal_max_runs = 1: the first fire pauses the schedule for good.
         let request = claimed_fire(&pool, &seeded, &mp_ids::new_ulid()).await;
-        record_scheduled_run_result_with(&pool, request, true)
+        record_scheduled_run_result_with(&pool, request, true, false)
             .await
             .expect("result");
         assert_eq!(
@@ -3934,6 +4020,12 @@ fn scheduled_run_origin(fire_key: &str) -> RunOrigin {
     }
 }
 
+/// The run metadata key holding the exact text of a scheduled run's stored-consent contract (F-f03-04).
+/// It sits beside `contract_digest`, which is the digest of this text, so the scheduled step can be served
+/// the contract byte-for-byte. The text is the owner's tool list and limits, never user content, and is
+/// never logged.
+pub(crate) const SCHEDULED_CONTRACT_TEXT_KEY: &str = "contract_text";
+
 /// Bind the non-secret schedule identity to the deterministic run row. This
 /// is separate from `StartRunRequest` so generic user runs cannot populate the
 /// schedule namespace. A retry may observe the exact same binding, but a
@@ -3992,11 +4084,24 @@ async fn persist_scheduled_run_bindings(
     if !req.contract_digest.is_empty() {
         let body: serde_json::Value = serde_json::from_str(&req.contract_json)
             .map_err(|_| Status::invalid_argument("scheduled-run contract body is invalid"))?;
+        // The text kept beside the digest must be the exact body the digest covers. scheduled_run_contract
+        // checks this before any bind; the check here keeps the stored text safe on its own, for a create
+        // and a rebind alike.
+        if format!("sha256:{:x}", Sha256::digest(req.contract_json.as_bytes()))
+            != req.contract_digest
+        {
+            return Err(Status::invalid_argument(
+                "scheduled-run contract bindings are invalid",
+            ));
+        }
         expected["contract_digest"] = serde_json::json!(req.contract_digest);
         expected["contract_expires_at"] = serde_json::json!(req.contract_expires_at);
         expected["contract"] = body;
+        // The exact text, kept beside its digest. It joins `exact` below only once the run holds it: a rebind
+        // of a run bound before the text was kept must still pass, and takes the text in place further down.
+        expected[SCHEDULED_CONTRACT_TEXT_KEY] = serde_json::json!(req.contract_json);
     }
-    let exact = [
+    let mut exact_keys = vec![
         "schedule_id",
         "fire_key",
         "space_id",
@@ -4007,9 +4112,14 @@ async fn persist_scheduled_run_bindings(
         "contract_digest",
         "contract_expires_at",
         "contract",
-    ]
-    .into_iter()
-    .all(|key| metadata.get(key) == expected.get(key));
+    ];
+    if metadata.get(SCHEDULED_CONTRACT_TEXT_KEY).is_some() {
+        // A run that already holds its text is rebound only with that exact text, so a second text is refused.
+        exact_keys.push(SCHEDULED_CONTRACT_TEXT_KEY);
+    }
+    let exact = exact_keys
+        .into_iter()
+        .all(|key| metadata.get(key) == expected.get(key));
     // A run bound before the origin stamp existed carries none. It may take the
     // stamp, but a run already stamped with any other origin is never rebound.
     let stamped = metadata.get(ORIGIN_METADATA_KEY).is_some();
@@ -4030,18 +4140,35 @@ async fn persist_scheduled_run_bindings(
         return Err(Status::permission_denied(
             "scheduled run id is bound to different immutable schedule metadata",
         ));
-    } else if !stamped {
-        sqlx::query(
-            "UPDATE runs SET metadata = metadata || jsonb_build_object($4::text, $2::text), updated_at = now()
-             WHERE id = $1 AND org_id = $3",
-        )
-        .bind(&req.run_id)
-        .bind(scheduled_run_origin(&req.fire_key).as_str())
-        .bind(&org_id)
-        .bind(ORIGIN_METADATA_KEY)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| Status::internal(error.to_string()))?;
+    } else {
+        if !stamped {
+            sqlx::query(
+                "UPDATE runs SET metadata = metadata || jsonb_build_object($4::text, $2::text), updated_at = now()
+                 WHERE id = $1 AND org_id = $3",
+            )
+            .bind(&req.run_id)
+            .bind(scheduled_run_origin(&req.fire_key).as_str())
+            .bind(&org_id)
+            .bind(ORIGIN_METADATA_KEY)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+        }
+        // A run bound before the text was kept takes it in place (F-f03-04). `exact` has just matched its
+        // stored digest to the request's, and the text was checked against that digest above.
+        if !req.contract_digest.is_empty() && metadata.get(SCHEDULED_CONTRACT_TEXT_KEY).is_none() {
+            sqlx::query(
+                "UPDATE runs SET metadata = metadata || jsonb_build_object($4::text, $2::text), updated_at = now()
+                 WHERE id = $1 AND org_id = $3",
+            )
+            .bind(&req.run_id)
+            .bind(&req.contract_json)
+            .bind(&org_id)
+            .bind(SCHEDULED_CONTRACT_TEXT_KEY)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+        }
     }
     tx.commit()
         .await
@@ -4662,7 +4789,8 @@ pub(crate) struct VerifiedReadClaims {
     pub(crate) issued_at: DateTime<Utc>,
     pub(crate) expires_at: DateTime<Utc>,
     pub(crate) zero_data_retention: bool,
-    /// WS04-S11: see [`VerifiedSpaceRead::history_floor`]; always `None` on non-read decisions.
+    /// WS04-S11: see [`VerifiedSpaceRead::history_floor`]. Read decisions and run-control decisions (R-sws-01)
+    /// carry it; a decision that signs no floor gives `None`.
     pub(crate) history_floor: Option<i64>,
 }
 
@@ -4951,14 +5079,19 @@ fn verify_run_control_space_decision_with_key(
         issued_at: claims.issued_at,
         expires_at: claims.expires_at,
         zero_data_retention: claims.zero_data_retention,
-        history_floor: None,
+        // R-sws-01: a stop reads the floor its decision signs, as a read does (the switch decides).
+        history_floor: crate::space::audience_window::history_floor_from_claim(
+            claims.history_floor_revision,
+            crate::space::audience_window::history_floor_enabled(),
+        ),
     })
 }
 
 /// Key lookup and verification of the Control `model.run.control` decision that authorizes a room
 /// manager's Stop of one run (WS09-S8). The decision is bound to the caller (subject), org, Space,
 /// `run_id`, the operation `cancel` and the request's idempotency key. Returns the audience
-/// ceiling, expiry and the zero-retention claim; the caller refuses a zero-retention decision.
+/// ceiling, expiry, the zero-retention claim and the history floor it signs (R-sws-01); the caller
+/// refuses a zero-retention decision.
 #[allow(clippy::result_large_err)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_run_control_space_decision(
@@ -5881,11 +6014,25 @@ async fn create_thread_inner_with_receipt(
     create_thread_inner_preverified_kind(pool, req, space_kind, receipt).await
 }
 
+/// The service-prepared thread with no receipt given: the form the tests call. The production preparations
+/// pass the receipt their caller gives, through [`create_thread_inner_preverified_with_receipt`].
+#[cfg_attr(not(test), allow(dead_code))]
 async fn create_thread_inner_preverified(
     pool: &PgPool,
     req: pb::CreateThreadRequest,
 ) -> Result<Response<pb::CreateThreadResponse>, Status> {
     create_thread_inner_preverified_kind(pool, req, None, None).await
+}
+
+/// [`create_thread_inner_preverified`] that stamps the receipt its caller gives (Z-17, thread half). The two
+/// service preparations (`prepare_scheduled_run_thread`, `prepare_user_owned_thread`) use it: before this they
+/// stamped nothing, so their threads read as persistent without a receipt.
+pub(crate) async fn create_thread_inner_preverified_with_receipt(
+    pool: &PgPool,
+    req: pb::CreateThreadRequest,
+    receipt: Option<&crate::retention_receipt::RunRetention>,
+) -> Result<Response<pb::CreateThreadResponse>, Status> {
+    create_thread_inner_preverified_kind(pool, req, None, receipt).await
 }
 
 /// WS17-S1: `space_kind` is the Space kind from the verified Control decision, already
@@ -9864,7 +10011,12 @@ impl SessionCore for SessionService {
         verify_scheduled_run_decision(&req)?;
 
         let owner = "service:orchestrator-core";
-        let created = create_thread_inner_preverified(
+        // Z-17 (thread half): the thread takes the receipt its service caller's claims give. A ZDR service is
+        // refused by `authorize_operation` above, so this is persistent; stamped only while
+        // SESSION_THREAD_RECEIPT_ENFORCE is on, as CreateThread stamps its caller's receipt.
+        let receipt = crate::retention_receipt::thread_receipt_enforce_enabled()
+            .then(|| crate::retention_receipt::RunRetention::from_caller(&caller));
+        let created = create_thread_inner_preverified_with_receipt(
             &self.pool,
             pb::CreateThreadRequest {
                 session_key: req.system_thread_key.clone(),
@@ -9883,6 +10035,7 @@ impl SessionCore for SessionService {
                 idempotency_key: req.idempotency_key.clone(),
                 ..Default::default()
             },
+            receipt.as_ref(),
         )
         .await?
         .into_inner();
@@ -9982,7 +10135,10 @@ impl SessionCore for SessionService {
         if origin == "mail_task" {
             verify_mail_task_thread_decision(&req)?;
         }
-        let created = create_thread_inner_preverified(
+        // Z-17 (thread half): the receipt the service caller's claims give, as for the scheduled-run thread above.
+        let receipt = crate::retention_receipt::thread_receipt_enforce_enabled()
+            .then(|| crate::retention_receipt::RunRetention::from_caller(&caller));
+        let created = create_thread_inner_preverified_with_receipt(
             &self.pool,
             pb::CreateThreadRequest {
                 session_key: req.session_key.clone(),
@@ -9991,6 +10147,7 @@ impl SessionCore for SessionService {
                 origin: origin.to_owned(),
                 ..Default::default()
             },
+            receipt.as_ref(),
         )
         .await?
         .into_inner();
@@ -11108,7 +11265,7 @@ impl SessionCore for SessionService {
             // The unpaged read is the newest page with no bound, put back in conversation order.
             // One query serves both reads, so the active-path filter and the tree columns cannot
             // drift apart between them.
-            let mut rows = conversation_page_rows(
+            let mut rows = conversation_page_rows_noted(
                 &self.pool,
                 &req.org_id,
                 &req.thread_id,
@@ -11117,6 +11274,7 @@ impl SessionCore for SessionService {
                 None,
                 i64::MAX,
                 req.include_inactive,
+                req.include_withdrawn_notes,
             )
             .await?;
             rows.reverse();
@@ -11211,6 +11369,8 @@ impl SessionCore for SessionService {
                 unread: bool,
                 last_read_at: DateTime<Utc>,
                 forked_from_thread_id: Option<String>,
+                // The thread's own memory mode (WS07-S6, migration 0067): `inherit` or `off`.
+                memory_mode: String,
                 // {reply_count, last_author}: one JSON column so the row stays a flat struct.
                 reply_stats: Option<serde_json::Value>,
             }
@@ -11247,6 +11407,8 @@ impl SessionCore for SessionService {
             };
             rows.truncate(page_size);
 
+            // A zero-retention caller has no memory mode to show (WS07-S6), so none is listed for it.
+            let zdr_caller = caller.zdr();
             let mut threads: Vec<pb::ThreadSummary> = rows
                 .into_iter()
                 .map(
@@ -11271,6 +11433,7 @@ impl SessionCore for SessionService {
                             unread,
                             last_read_at,
                             forked_from_thread_id,
+                            memory_mode,
                             reply_stats,
                         } = row;
                         let fallback_title = if session_key.trim().is_empty() {
@@ -11302,6 +11465,7 @@ impl SessionCore for SessionService {
                             unread,
                             last_read_at: Some(to_proto_timestamp(last_read_at)),
                             forked_from_thread_id: forked_from_thread_id.unwrap_or_default(),
+                            memory_mode: if zdr_caller { String::new() } else { memory_mode },
                             attention_state: pb::AttentionState::Unspecified as i32,
                             attention_since: None,
                             attention_unseen: false,
@@ -13311,6 +13475,7 @@ pub async fn serve(
         enabled: crate::message_search::message_search_enabled(),
     };
     let message_tree = crate::message_tree::MessageTreeGrpc { pool: pool.clone() };
+    let message_withdrawal = crate::message_withdrawal::MessageWithdrawalGrpc { pool: pool.clone() };
     let thread_fork = crate::thread_fork::ThreadForkGrpc { pool: pool.clone() };
     let thread_export = crate::thread_export::ThreadExportGrpc { pool: pool.clone() };
     let artifact_revision_pool = pool.clone();
@@ -13398,6 +13563,11 @@ pub async fn serve(
         ))
         .add_service(MessageTreeServiceServer::with_interceptor(
             message_tree,
+            auth.clone(),
+        ))
+        // O-01: the take-back of a stored mid-run message; the gateway's own switch gates the only caller.
+        .add_service(MessageWithdrawalServiceServer::with_interceptor(
+            message_withdrawal,
             auth.clone(),
         ))
         .add_service(ThreadForkServiceServer::with_interceptor(
@@ -14630,8 +14800,9 @@ mod tests {
         assistant_reply_slot_is_open, authorize_dataplane, claim_scheduled_step_inner,
         complete_step_inner, derive_idempotency_hash, finalize_tool_action_inner,
         normalize_thread_presentation_text, pb, persist_scheduled_run_bindings,
-        record_scheduled_run_result_inner, thread_revise_payload_digest,
-        record_scheduled_step_receipt_inner, reserve_tool_action_inner, resolve_dataplane_addr,
+        record_scheduled_run_result_inner, record_scheduled_run_result_with,
+        thread_revise_payload_digest, record_scheduled_step_receipt_inner,
+        reserve_tool_action_inner, resolve_dataplane_addr,
         resolve_residency, resolve_thread_origin,
         scheduled_run_execution_payload_digest,
         semantic_context_search_status, support_thread_id, thread_append_payload_digest,
@@ -15109,6 +15280,375 @@ mod tests {
         .expect("a retry of an already-stamped schedule binds again");
     }
 
+    /// A stored contract the contract-binding tests bind: one read tool and an expiry far ahead. Its digest is
+    /// the sha256 of these exact bytes, as `scheduled_run_contract` checks it.
+    const CONTRACT_BINDING_TEXT: &str = r#"{"expires_at":"2099-01-01T00:00:00Z","max_rounds":4,"max_tokens_per_round":512,"tools":[{"approved_at":"2026-10-24T10:00:00Z","capability":"cap.tool.web_search","class":"read","tool":"web_search"}],"v":1}"#;
+
+    /// The bind request for a scheduled run that carries a stored contract, for the same run and thread.
+    fn contract_bind_request(
+        run_id: &str,
+        thread_id: &str,
+        org_id: &str,
+        suffix: &str,
+    ) -> pb::StartScheduledRunRequest {
+        let mut req = scheduled_bind_request(run_id, thread_id, org_id, suffix);
+        req.contract_json = CONTRACT_BINDING_TEXT.to_owned();
+        req.contract_digest = format!(
+            "sha256:{:x}",
+            Sha256::digest(CONTRACT_BINDING_TEXT.as_bytes())
+        );
+        req.contract_expires_at = "2099-01-01T00:00:00Z".to_owned();
+        req
+    }
+
+    /// Real-Postgres proof for F-f03-04: a scheduled bind with a stored contract keeps the exact contract text
+    /// beside its digest, so the scheduled step can be served the contract byte-for-byte.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_scheduled_bind_keeps_the_exact_contract_text() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let suffix = mp_ids::new_ulid();
+        let (run_id, thread_id, org_id) =
+            seeded_unbound_scheduled_run(&pool, &suffix, serde_json::json!({})).await;
+        let req = contract_bind_request(&run_id, &thread_id, &org_id, &suffix);
+        persist_scheduled_run_bindings(&pool, &req)
+            .await
+            .expect("a scheduled run with a stored contract binds");
+        let (text, digest): (String, String) = sqlx::query_as(
+            "SELECT metadata->>'contract_text', metadata->>'contract_digest' FROM runs WHERE id = $1",
+        )
+        .bind(&run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read the bound contract");
+        assert_eq!(text, CONTRACT_BINDING_TEXT, "the exact text, byte for byte");
+        assert_eq!(digest, req.contract_digest);
+    }
+
+    /// Real-Postgres proof for F-f03-04: a run bound before the text was kept (the exact binding and contract,
+    /// without `contract_text` and without the origin stamp) takes both in place on a rebind, and keeps every
+    /// key it already had.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_pre_change_contract_run_takes_its_text_on_rebind() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let suffix = mp_ids::new_ulid();
+        let req = contract_bind_request(
+            &format!("scheduled-run-{suffix}"),
+            &format!("scheduled-thread-{suffix}"),
+            &format!("scheduled-org-{suffix}"),
+            &suffix,
+        );
+        let mut legacy = scheduled_binding_metadata(&suffix);
+        legacy["contract_digest"] = serde_json::json!(req.contract_digest);
+        legacy["contract_expires_at"] = serde_json::json!(req.contract_expires_at);
+        legacy["contract"] =
+            serde_json::from_str(CONTRACT_BINDING_TEXT).expect("the contract text is JSON");
+        let (run_id, thread_id, org_id) =
+            seeded_unbound_scheduled_run(&pool, &suffix, legacy).await;
+        let rebind = contract_bind_request(&run_id, &thread_id, &org_id, &suffix);
+        persist_scheduled_run_bindings(&pool, &rebind)
+            .await
+            .expect("a pre-change run with the exact binding takes the text");
+
+        let (text, origin, schedule_id, contract_digest): (String, String, String, String) =
+            sqlx::query_as(
+                "SELECT metadata->>'contract_text', metadata->>'origin',
+                        metadata->>'schedule_id', metadata->>'contract_digest'
+                 FROM runs WHERE id = $1",
+            )
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read the rebound metadata");
+        assert_eq!(text, CONTRACT_BINDING_TEXT, "the exact text, byte for byte");
+        assert_eq!(
+            origin, "schedule",
+            "the origin stamp is taken in the same rebind"
+        );
+        assert_eq!(
+            schedule_id,
+            format!("schedule-{suffix}"),
+            "every other key stays"
+        );
+        assert_eq!(contract_digest, req.contract_digest);
+    }
+
+    /// The scheduled-step read, called through the real RPC as `caller`.
+    async fn scheduled_step_context_as(
+        pool: &sqlx::PgPool,
+        caller: VerifiedIdentity,
+        run_id: &str,
+        thread_id: &str,
+        org_id: &str,
+    ) -> Result<pb::ScheduledStepContext, tonic::Status> {
+        use mp_contracts::model_plane::v1::run_service_server::RunService as _;
+        let mut request = tonic::Request::new(pb::GetScheduledStepContextRequest {
+            run_id: run_id.to_owned(),
+            thread_id: thread_id.to_owned(),
+            org_id: org_id.to_owned(),
+        });
+        request.extensions_mut().insert(caller);
+        crate::run_service_grpc::RunServiceImpl::new(pool.clone())
+            .get_scheduled_step_context(request)
+            .await
+            .map(|response| response.into_inner())
+    }
+
+    /// The caller Execution Core presents to the scheduled-step read: its service identity with the step scope.
+    fn execution_core_caller(org_id: &str) -> VerifiedIdentity {
+        VerifiedIdentity::service_for_test_as(
+            org_id,
+            crate::auth::SCHEDULED_STEP_SERVICE,
+            &[crate::auth::SCHEDULED_STEP_SCOPE],
+            false,
+        )
+    }
+
+    /// Real-Postgres proof for F-f03-04: the scheduled step reads its schedule's stored contract back as the exact
+    /// text its digest covers, with the expiry the digest was signed for, and the run's retention flags.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_contract_schedule_context_serves_text_whose_digest_matches() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let suffix = mp_ids::new_ulid();
+        let (run_id, thread_id, org_id) =
+            seeded_unbound_scheduled_run(&pool, &suffix, serde_json::json!({})).await;
+        let req = contract_bind_request(&run_id, &thread_id, &org_id, &suffix);
+        persist_scheduled_run_bindings(&pool, &req)
+            .await
+            .expect("a scheduled run with a stored contract binds");
+
+        let context = scheduled_step_context_as(
+            &pool,
+            execution_core_caller(&org_id),
+            &run_id,
+            &thread_id,
+            &org_id,
+        )
+        .await
+        .expect("the scheduled step reads its context");
+        assert_eq!(
+            context.contract_json, CONTRACT_BINDING_TEXT,
+            "the exact text, byte for byte"
+        );
+        assert_eq!(
+            mp_contracts::scheduled_contract::digest(&context.contract_json),
+            context.contract_digest,
+            "the served text hashes to the served digest"
+        );
+        assert_eq!(context.contract_digest, req.contract_digest);
+        assert_eq!(context.contract_expires_at, req.contract_expires_at);
+        assert!(
+            !context.zdr && !context.zdr_waived,
+            "a persistent run is read as persistent"
+        );
+    }
+
+    /// Real-Postgres proof for F-f03-04: a scheduled run bound before its text was kept has a digest and an expiry
+    /// but no stored text, so the scheduled step is served three empty fields and keeps the single-inference lane.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_run_bound_before_the_text_was_kept_serves_no_contract() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let suffix = mp_ids::new_ulid();
+        let mut legacy = scheduled_binding_metadata(&suffix);
+        legacy["contract_digest"] = serde_json::json!(format!(
+            "sha256:{:x}",
+            Sha256::digest(CONTRACT_BINDING_TEXT.as_bytes())
+        ));
+        legacy["contract_expires_at"] = serde_json::json!("2099-01-01T00:00:00Z");
+        legacy["contract"] =
+            serde_json::from_str(CONTRACT_BINDING_TEXT).expect("the contract text is JSON");
+        let (run_id, thread_id, org_id) =
+            seeded_unbound_scheduled_run(&pool, &suffix, legacy).await;
+
+        let context = scheduled_step_context_as(
+            &pool,
+            execution_core_caller(&org_id),
+            &run_id,
+            &thread_id,
+            &org_id,
+        )
+        .await
+        .expect("the scheduled step reads its context");
+        assert_eq!(context.contract_json, "", "no stored text, no contract");
+        assert_eq!(context.contract_digest, "");
+        assert_eq!(context.contract_expires_at, "");
+    }
+
+    /// Real-Postgres proof for F-f03-04: a run that already holds its contract text is rebound only with that exact
+    /// text. A second contract with its own digest is refused, a text paired with a digest it does not hash to is
+    /// refused, and the stored text stays the first one.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_second_contract_text_is_refused_on_rebind() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let suffix = mp_ids::new_ulid();
+        let (run_id, thread_id, org_id) =
+            seeded_unbound_scheduled_run(&pool, &suffix, serde_json::json!({})).await;
+        persist_scheduled_run_bindings(
+            &pool,
+            &contract_bind_request(&run_id, &thread_id, &org_id, &suffix),
+        )
+        .await
+        .expect("the first contract binds");
+
+        let other_text = CONTRACT_BINDING_TEXT.replacen("web_search", "fetch_doc", 1);
+        let mut second = contract_bind_request(&run_id, &thread_id, &org_id, &suffix);
+        second.contract_json = other_text.clone();
+        second.contract_digest = format!("sha256:{:x}", Sha256::digest(other_text.as_bytes()));
+        let refused = persist_scheduled_run_bindings(&pool, &second)
+            .await
+            .expect_err("a second contract is refused");
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+
+        let mut mismatched = contract_bind_request(&run_id, &thread_id, &org_id, &suffix);
+        mismatched.contract_json = other_text;
+        assert!(
+            persist_scheduled_run_bindings(&pool, &mismatched)
+                .await
+                .is_err(),
+            "a text that does not hash to its digest is never stored"
+        );
+
+        let stored: String =
+            sqlx::query_scalar("SELECT metadata->>'contract_text' FROM runs WHERE id = $1")
+                .bind(&run_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read the stored text");
+        assert_eq!(
+            stored, CONTRACT_BINDING_TEXT,
+            "the first text is the one kept"
+        );
+    }
+
+    /// Real-Postgres proof for F-f03-04: a stored text that no longer hashes to its digest is refused by the
+    /// scheduled-step read as data loss. The status carries the closed token only, never the text.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_tampered_stored_contract_text_answers_data_loss() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let suffix = mp_ids::new_ulid();
+        let (run_id, thread_id, org_id) =
+            seeded_unbound_scheduled_run(&pool, &suffix, serde_json::json!({})).await;
+        persist_scheduled_run_bindings(
+            &pool,
+            &contract_bind_request(&run_id, &thread_id, &org_id, &suffix),
+        )
+        .await
+        .expect("a scheduled run with a stored contract binds");
+        let tampered = CONTRACT_BINDING_TEXT.replacen("web_search", "shell_x", 1);
+        sqlx::query("UPDATE runs SET metadata = metadata || jsonb_build_object('contract_text', $2::text) WHERE id = $1")
+            .bind(&run_id)
+            .bind(&tampered)
+            .execute(&pool)
+            .await
+            .expect("tamper the stored text");
+
+        let status = scheduled_step_context_as(
+            &pool,
+            execution_core_caller(&org_id),
+            &run_id,
+            &thread_id,
+            &org_id,
+        )
+        .await
+        .expect_err("a stored text that no longer matches its digest is refused");
+        assert_eq!(status.code(), tonic::Code::DataLoss);
+        assert_eq!(status.message(), "scheduled_contract_corrupt");
+        assert!(
+            !status.message().contains("shell_x"),
+            "the status never carries the stored text"
+        );
+    }
+
+    /// The scheduled-step read stays with Execution Core. A person's credential is refused before any row is read.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn the_scheduled_step_context_stays_with_execution_core() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let suffix = mp_ids::new_ulid();
+        let (run_id, thread_id, org_id) =
+            seeded_unbound_scheduled_run(&pool, &suffix, serde_json::json!({})).await;
+        persist_scheduled_run_bindings(
+            &pool,
+            &contract_bind_request(&run_id, &thread_id, &org_id, &suffix),
+        )
+        .await
+        .expect("a scheduled run with a stored contract binds");
+
+        let person = VerifiedIdentity::user_for_test(&org_id, "person-1");
+        let status = scheduled_step_context_as(&pool, person, &run_id, &thread_id, &org_id)
+            .await
+            .expect_err("a person is refused the scheduled-step read");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    }
+
     /// Real-Postgres proof for WS20 S1: a scheduled answer is appended to its thread
     /// once, the receipt completes with a digest, a replay returns the same message,
     /// and a different terminal outcome cannot overwrite the first one.
@@ -15310,6 +15850,278 @@ mod tests {
         .await
         .expect("count answers");
         assert_eq!(answers, 0);
+    }
+
+    /// Names a scheduled fire's schedule as the schedule row carries it: its org and the subject its notice goes to.
+    async fn seed_schedule_subject(pool: &sqlx::PgPool, suffix: &str, subject: &str) {
+        sqlx::query("UPDATE cron_schedules SET org_id = $2, creator_subject_id = $3 WHERE id = $1")
+            .bind(format!("schedule-{suffix}"))
+            .bind(format!("scheduled-org-{suffix}"))
+            .bind(subject)
+            .execute(pool)
+            .await
+            .expect("name the schedule's subject");
+    }
+
+    /// The `SCHEDULED_RUN_OUTCOME` notices the outbox holds for one scheduled run, decoded as the drainer publishes them.
+    async fn outcome_notices(
+        pool: &sqlx::PgPool,
+        run_id: &str,
+    ) -> Vec<mp_events::envelope::Envelope> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT payload::text FROM session_audit_outbox
+             WHERE subject = $1 AND payload->>'event_type' = 'SCHEDULED_RUN_OUTCOME'
+             ORDER BY event_id",
+        )
+        .bind(mp_events::subjects::run_event_subject(run_id))
+        .fetch_all(pool)
+        .await
+        .expect("read the outbox");
+        rows.iter()
+            .map(|(text,)| {
+                mp_events::envelope::Envelope::from_json_bytes(text.as_bytes())
+                    .expect("a row decodes as an envelope")
+            })
+            .collect()
+    }
+
+    /// F-f05-05: a completed scheduled run writes one outcome notice in the transaction that settles its result, and a
+    /// replay of that result writes no second one. The notice names the schedule's subject, the thread and the closed word.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_completed_scheduled_run_writes_one_outcome_notice() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        let suffix = mp_ids::new_ulid();
+        let (run_id, thread_id, org_id, step_id, idempotency_key, receipt_id) =
+            seeded_claimed_scheduled_step(&pool, &suffix, "persistent").await;
+        seed_scheduled_fire(&pool, &suffix).await;
+        let subject = format!("subject-{suffix}");
+        seed_schedule_subject(&pool, &suffix, &subject).await;
+        let request = pb::RecordScheduledRunResultRequest {
+            run_id: run_id.clone(),
+            step_id,
+            org_id: org_id.clone(),
+            idempotency_key,
+            receipt_id,
+            status: "completed".to_owned(),
+            output: "the scheduled answer".to_owned(),
+            ..Default::default()
+        };
+
+        record_scheduled_run_result_with(&pool, request.clone(), false, true)
+            .await
+            .expect("first result");
+        record_scheduled_run_result_with(&pool, request, false, true)
+            .await
+            .expect("replayed result");
+
+        let notices = outcome_notices(&pool, &run_id).await;
+        assert_eq!(
+            notices.len(),
+            1,
+            "one notice however many times the result is recorded"
+        );
+        let notice = &notices[0];
+        assert!(notice.validate().is_ok(), "the notice must validate");
+        assert_eq!(notice.event_type, "SCHEDULED_RUN_OUTCOME");
+        assert_eq!(notice.org_id, org_id);
+        assert!(!notice.zdr, "a persistent run declares its posture");
+        assert_eq!(notice.payload["outcome"], "completed");
+        assert_eq!(notice.payload["subject_id"], subject.as_str());
+        assert_eq!(notice.payload["thread_id"], thread_id.as_str());
+        assert_eq!(notice.payload["run_id"], run_id.as_str());
+        assert_eq!(
+            notice.payload["schedule_id"],
+            format!("schedule-{suffix}").as_str()
+        );
+    }
+
+    /// F-f05-05: a step that completed with withheld effects is announced as `needs_review`, and a failed or unknown
+    /// step as `failed`, the closed words the notice carries.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_scheduled_outcome_notice_carries_the_run_outcome_word() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        for (status, withheld, unknown, error_code, word) in [
+            ("completed", 2_u32, false, "", "needs_review"),
+            ("failed", 0_u32, false, "provider_error", "failed"),
+            ("unknown_outcome", 0_u32, true, "inference_failed", "failed"),
+        ] {
+            let suffix = mp_ids::new_ulid();
+            let (run_id, _thread_id, org_id, step_id, idempotency_key, receipt_id) =
+                seeded_claimed_scheduled_step(&pool, &suffix, "persistent").await;
+            seed_scheduled_fire(&pool, &suffix).await;
+            seed_schedule_subject(&pool, &suffix, &format!("subject-{suffix}")).await;
+            record_scheduled_run_result_with(
+                &pool,
+                pb::RecordScheduledRunResultRequest {
+                    run_id: run_id.clone(),
+                    step_id,
+                    org_id,
+                    idempotency_key,
+                    receipt_id,
+                    status: status.to_owned(),
+                    output: if status == "completed" {
+                        "the scheduled answer".to_owned()
+                    } else {
+                        String::new()
+                    },
+                    error_code: error_code.to_owned(),
+                    unknown_outcome: unknown,
+                    withheld_effects: withheld,
+                    ..Default::default()
+                },
+                false,
+                true,
+            )
+            .await
+            .expect("record the terminal result");
+
+            let notices = outcome_notices(&pool, &run_id).await;
+            assert_eq!(notices.len(), 1, "{status} is announced once");
+            assert_eq!(notices[0].payload["outcome"], word, "{status}");
+        }
+    }
+
+    /// F-f05-05: a schedule that is gone, or that names no subject, writes no notice, and the result still completes its
+    /// receipt. With the switch off, a schedule that names a subject writes no notice either.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_scheduled_run_with_no_subject_or_switch_off_writes_no_notice() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        fn completed_result(
+            run_id: &str,
+            step_id: &str,
+            org_id: &str,
+            idempotency_key: &str,
+            receipt_id: &str,
+        ) -> pb::RecordScheduledRunResultRequest {
+            pb::RecordScheduledRunResultRequest {
+                run_id: run_id.to_owned(),
+                step_id: step_id.to_owned(),
+                org_id: org_id.to_owned(),
+                idempotency_key: idempotency_key.to_owned(),
+                receipt_id: receipt_id.to_owned(),
+                status: "completed".to_owned(),
+                output: "the scheduled answer".to_owned(),
+                ..Default::default()
+            }
+        }
+
+        // No schedule row at all.
+        let suffix = mp_ids::new_ulid();
+        let (run_id, _thread_id, org_id, step_id, idempotency_key, receipt_id) =
+            seeded_claimed_scheduled_step(&pool, &suffix, "persistent").await;
+        record_scheduled_run_result_with(
+            &pool,
+            completed_result(&run_id, &step_id, &org_id, &idempotency_key, &receipt_id),
+            false,
+            true,
+        )
+        .await
+        .expect("the result completes without its schedule");
+        assert!(outcome_notices(&pool, &run_id).await.is_empty());
+
+        // A schedule that names no subject.
+        let suffix = mp_ids::new_ulid();
+        let (run_id, _thread_id, org_id, step_id, idempotency_key, receipt_id) =
+            seeded_claimed_scheduled_step(&pool, &suffix, "persistent").await;
+        seed_scheduled_fire(&pool, &suffix).await;
+        record_scheduled_run_result_with(
+            &pool,
+            completed_result(&run_id, &step_id, &org_id, &idempotency_key, &receipt_id),
+            false,
+            true,
+        )
+        .await
+        .expect("the result completes without a subject");
+        assert!(outcome_notices(&pool, &run_id).await.is_empty());
+
+        // A subject, but the switch is off.
+        let suffix = mp_ids::new_ulid();
+        let (run_id, _thread_id, org_id, step_id, idempotency_key, receipt_id) =
+            seeded_claimed_scheduled_step(&pool, &suffix, "persistent").await;
+        seed_scheduled_fire(&pool, &suffix).await;
+        seed_schedule_subject(&pool, &suffix, &format!("subject-{suffix}")).await;
+        record_scheduled_run_result_with(
+            &pool,
+            completed_result(&run_id, &step_id, &org_id, &idempotency_key, &receipt_id),
+            false,
+            false,
+        )
+        .await
+        .expect("the result completes with the switch off");
+        assert!(outcome_notices(&pool, &run_id).await.is_empty());
+        let (receipt_status,): (String,) =
+            sqlx::query_as("SELECT status FROM scheduled_step_receipts WHERE receipt_id = $1")
+                .bind(&receipt_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read the receipt");
+        assert_eq!(receipt_status, "completed", "the result itself is recorded");
+    }
+
+    /// F-f05-05: a zero-retention run is refused before any notice is written.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_zero_retention_run_writes_no_outcome_notice() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        let suffix = mp_ids::new_ulid();
+        let (run_id, _thread_id, org_id, step_id, idempotency_key, receipt_id) =
+            seeded_claimed_scheduled_step(&pool, &suffix, "zdr").await;
+        seed_scheduled_fire(&pool, &suffix).await;
+        seed_schedule_subject(&pool, &suffix, &format!("subject-{suffix}")).await;
+
+        let refused = record_scheduled_run_result_with(
+            &pool,
+            pb::RecordScheduledRunResultRequest {
+                run_id: run_id.clone(),
+                step_id,
+                org_id,
+                idempotency_key,
+                receipt_id,
+                status: "completed".to_owned(),
+                ..Default::default()
+            },
+            false,
+            true,
+        )
+        .await
+        .expect_err("a zero-retention run is refused");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert!(outcome_notices(&pool, &run_id).await.is_empty());
     }
 
     /// Real-Postgres proof for the scheduled-step receipt contract. This keeps
@@ -26301,6 +27113,71 @@ mod thread_list_db_tests {
         .await;
         assert!(other.threads.is_empty());
     }
+
+    /// WS07-S6: a listing carries each thread's own memory mode, so the chat header can show it. A thread
+    /// the owner set off lists as `off`, its sibling as `inherit`, and a zero-retention caller is listed
+    /// no mode at all. Needs a disposable Postgres.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn a_thread_set_off_lists_as_off() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("memory-mode-list-test-{suffix}");
+        let user = "memory-mode-user";
+        let off_thread = format!("{suffix}-off");
+        let other_thread = format!("{suffix}-other");
+        seed_thread(&pool, &org, user, &off_thread, 2, false, false).await;
+        seed_thread(&pool, &org, user, &other_thread, 1, false, false).await;
+        let svc = service(pool.clone());
+
+        let mut request = Request::new(pb::UpdateThreadPresentationRequest {
+            org_id: org.clone(),
+            thread_id: off_thread.clone(),
+            memory_mode: Some("off".to_owned()),
+            ..Default::default()
+        });
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test(&org, user));
+        svc.update_thread_presentation(request)
+            .await
+            .expect("the owner sets the thread off");
+
+        let listed = list(&svc, &org, user, pb::ListThreadsRequest::default()).await;
+        let mode_of = |thread: &str| {
+            listed
+                .threads
+                .iter()
+                .find(|row| row.thread_id == thread)
+                .map(|row| row.memory_mode.clone())
+        };
+        assert_eq!(mode_of(off_thread.as_str()).as_deref(), Some("off"));
+        assert_eq!(mode_of(other_thread.as_str()).as_deref(), Some("inherit"));
+
+        let mut zdr = Request::new(pb::ListThreadsRequest {
+            org_id: org.clone(),
+            user_id: user.to_owned(),
+            ..Default::default()
+        });
+        zdr.extensions_mut()
+            .insert(VerifiedIdentity::user_for_test_with_zdr(&org, user, true));
+        let zdr_listed = svc
+            .list_threads(zdr)
+            .await
+            .expect("a zdr listing")
+            .into_inner();
+        assert!(
+            !zdr_listed.threads.is_empty(),
+            "the owner's threads are still listed"
+        );
+        assert!(
+            zdr_listed
+                .threads
+                .iter()
+                .all(|row| row.memory_mode.is_empty()),
+            "a zero-retention caller is listed no memory mode"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -26335,6 +27212,7 @@ mod conversation_page_tests {
             agent_followed_up: false,
             model_connection_id: model.map(str::to_owned),
             subscription_connection_id: subscription.map(str::to_owned),
+            withdrawn: false,
         };
         let on_subscription = session_message_from_row(turn(None, Some("conn_0f9c")), false);
         assert_eq!(on_subscription.subscription_connection_id, "conn_0f9c");
@@ -26385,6 +27263,7 @@ mod conversation_page_tests {
             agent_followed_up: false,
             model_connection_id: None,
             subscription_connection_id: None,
+            withdrawn: false,
         };
         let message = session_message_from_row(row, false);
         let created_at = message.created_at.expect("created_at is set on every row");
@@ -26538,6 +27417,64 @@ mod conversation_page_db_tests {
             .iter()
             .map(|message| message.content.as_str())
             .collect()
+    }
+
+    /// O-01: a message the person took back is left out of every read, whether or not the read asks for
+    /// inactive turns, and only the thread view (`include_withdrawn_notes`) reads one text-free note in
+    /// its place, in the same position. The row is stamped the way `WithdrawMessage` stamps it.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn a_withdrawn_message_is_left_out_of_every_read_but_the_thread_views_note_against_real_pg() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("withdrawn-read-{suffix}");
+        let thread = format!("withdrawn-read-thread-{suffix}");
+        let ids = seed_turns(&pool, &org, "owner", &thread, 3).await;
+        sqlx::query(
+            "UPDATE messages SET withdrawn_at = now(), content = '', metadata = '{}'::jsonb, on_active_path = FALSE
+             WHERE id = $1",
+        )
+        .bind(&ids[1])
+        .execute(&pool)
+        .await
+        .unwrap();
+        let svc = service(pool.clone());
+        let read_with = |limit: u32, include_inactive: bool, notes: bool| {
+            let (svc, org, thread) = (svc.clone(), org.clone(), thread.clone());
+            async move {
+                let mut request = Request::new(pb::ListConversationRequest {
+                    org_id: org.clone(),
+                    thread_id: thread,
+                    limit,
+                    include_inactive,
+                    include_withdrawn_notes: notes,
+                    ..Default::default()
+                });
+                request
+                    .extensions_mut()
+                    .insert(VerifiedIdentity::user_for_test(&org, "owner"));
+                svc.list_conversation(request).await.map(Response::into_inner).unwrap()
+            }
+        };
+
+        // Unpaged and paged, with and without the inactive branches: the withdrawn turn is in none.
+        for (limit, include_inactive) in [(0, false), (0, true), (10, false), (10, true)] {
+            let read = read_with(limit, include_inactive, false).await;
+            assert_eq!(contents(&read), ["turn 0", "turn 2"], "limit {limit}, inactive {include_inactive}");
+            assert!(read.messages.iter().all(|message| !message.withdrawn));
+        }
+
+        // The thread view alone reads the note: same place, no text, no evidence.
+        for limit in [0, 10] {
+            let read = read_with(limit, false, true).await;
+            assert_eq!(contents(&read), ["turn 0", "", "turn 2"], "limit {limit}");
+            let note = &read.messages[1];
+            assert!(note.withdrawn && note.metadata.is_none() && note.message_id == ids[1]);
+            assert_eq!(note.role, "user");
+            assert_eq!(read.messages.iter().filter(|message| message.withdrawn).count(), 1);
+        }
+
+        cleanup(&pool, &[thread.as_str()]).await;
     }
 
     async fn cleanup(pool: &PgPool, threads: &[&str]) {

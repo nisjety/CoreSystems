@@ -30,6 +30,7 @@ export const APPROVAL_CAUSE_CODES = [
   'auto_posture_provider_write',
   'browser_human_assist',
   'tainted_egress',
+  'browser_site_consent',
   'unclassified_gate',
 ] as const
 
@@ -59,6 +60,11 @@ export type ApprovalCause = {
   assistKind?: string
   assistOrigin?: string
   host?: string
+  /**
+   * A `browser_site_consent` pause only (WS21-S6): the highest level the org's site policy allows for
+   * `host`, `read` or `act`. Absent for every other cause, and for a level this build does not know.
+   */
+  maxLevel?: 'read' | 'act'
 }
 
 /** The walls the agent may ask the person for help with (EP-1 S2, D4). */
@@ -70,6 +76,21 @@ export type BrowserAssistKind = (typeof BROWSER_ASSIST_KINDS)[number]
 export function browserAssistKindOf(cause: ApprovalCause | undefined): BrowserAssistKind | undefined {
   if (cause?.code !== 'browser_human_assist' || cause.assistOrigin !== 'agent') return undefined
   return BROWSER_ASSIST_KINDS.find((kind) => kind === cause.assistKind)
+}
+
+/**
+ * The host and the highest level a `browser_site_consent` pause names (WS21-S6), or `undefined` when either is
+ * missing. A pause that names no level gets no consent card: the surface keeps the generic card rather than
+ * offer choices under a level the server did not state.
+ */
+export function browserSiteConsentOf(
+  cause: ApprovalCause | undefined,
+): { host: string; maxLevel: 'read' | 'act' } | undefined {
+  if (cause?.code !== 'browser_site_consent') return undefined
+  const host = cause.host?.trim()
+  const level = cause.maxLevel
+  if (!host || (level !== 'read' && level !== 'act')) return undefined
+  return { host, maxLevel: level }
 }
 
 /** A code from the wire as one of the closed set; anything else is `unclassified_gate`. */
@@ -210,6 +231,16 @@ export function browserAssistAttentionLine(i18n: ApprovalCopyI18n): string {
   return i18n.tr('Verevon trenger deg i nettleseren', 'Verevon needs you in the browser')
 }
 
+// WS21-S6: the highest level the site policy allows for the host, said once in each language. An
+// unknown or absent level says nothing rather than a level the server did not state.
+function siteLevelLine(maxLevel: 'read' | 'act' | undefined, i18n: ApprovalCopyI18n): string {
+  if (maxLevel === 'act') {
+    return i18n.tr('Den kan høyst lese siden og handle på den.', 'At most, it may read the site and act on it.')
+  }
+  if (maxLevel === 'read') return i18n.tr('Den kan høyst lese siden.', 'At most, it may read the site.')
+  return ''
+}
+
 // Total over the closed set: adding a code to `APPROVAL_CAUSE_CODES` without words here does not
 // compile, and the test pins the set to the contract file.
 const CAUSE_COPY: Record<CauseCode, (i18n: ApprovalCopyI18n, cause: ApprovalCause) => CauseCopy> = {
@@ -289,6 +320,24 @@ const CAUSE_COPY: Record<CauseCode, (i18n: ApprovalCopyI18n, cause: ApprovalCaus
         'Du styrer nettleseren. Trykk Gi tilbake når du er ferdig.',
         'You have control of the browser. Press Give back when you are done.',
       ),
+    }
+  },
+  // WS21-S6: the site policy asks the person before the agent opens a host. The host and the highest
+  // level the policy allows come from the approval's record, never from the page. Only once is offered.
+  browser_site_consent: (i18n, cause) => {
+    const host = cause.host?.trim() || undefined
+    const lead = host
+      ? i18n.tr(
+          `Organisasjonens regler spør deg før agenten åpner ${host}.`,
+          `The site policy asks you before the agent opens ${host}.`,
+        )
+      : i18n.tr(
+          'Organisasjonens regler spør deg før agenten åpner et nettsted.',
+          'The site policy asks you before the agent opens a site.',
+        )
+    return {
+      headline: i18n.tr('Agenten vil åpne et nettsted', 'The agent wants to open a site'),
+      reason: [lead, siteLevelLine(cause.maxLevel, i18n)].filter((line) => line !== '').join(' '),
     }
   },
   // WS23-S3: an egress call the run made after a connected-app read came back flagged. It is held

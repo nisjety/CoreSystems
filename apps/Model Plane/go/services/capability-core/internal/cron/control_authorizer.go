@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,13 +27,22 @@ const (
 	// controlCreateContractSchema is the create schema once a stored-consent
 	// contract is bound. The v1 schema stays byte-identical for contract-free creates.
 	controlCreateContractSchema = "sha256:space-cron-create-v2"
-	controlContractMaxClass     = "read"
-	controlFireAction           = "model.cron.fire"
-	controlFireAudience         = "model-plane-capability-core"
-	controlFireSchema           = "sha256:space-cron-fire-v1"
-	controlScheduledRunAction   = "model.schedule.run"
-	controlScheduledRunSchema   = "sha256:space-scheduled-run-v1"
+	// controlRenewalSchema is the schema of a renewal decision (O-10): the create authority bound
+	// to an existing schedule id by `renewal_of`. Distinct from both create schemas, so a create
+	// decision cannot be presented as a renewal and a renewal cannot be presented as a create.
+	controlRenewalSchema      = "sha256:space-cron-renew-v1"
+	controlContractMaxClass   = "read"
+	controlFireAction         = "model.cron.fire"
+	controlFireAudience       = "model-plane-capability-core"
+	controlFireSchema         = "sha256:space-cron-fire-v1"
+	controlScheduledRunAction = "model.schedule.run"
+	controlScheduledRunSchema = "sha256:space-scheduled-run-v1"
 )
+
+// ErrDecisionPayloadMismatch is returned when a Control create or renewal decision verified
+// but its payload digest does not bind the schedule, template or contract presented. The text is
+// the one a create has always carried; a renewal tells it apart from other refusals with errors.Is.
+var ErrDecisionPayloadMismatch = errors.New("Control schedule create decision payload does not bind this schedule")
 
 // ControlFireAuthorizer is Capability Core's narrow client for the Control
 // schedule-fire decision endpoint. It never accepts a caller-provided token:
@@ -189,11 +199,19 @@ type CreateIntent struct {
 	// When set, Control's payload digest must bind them or the decision is refused.
 	ContractDigest    string
 	ContractExpiresAt string
+	// RenewalOf is the id of the existing schedule whose approval is being renewed (O-10). It is
+	// empty for a create. When set it equals ScheduleID, a contract is required, and Control must
+	// have signed the renewal schema with this id bound into the payload digest.
+	RenewalOf string
 }
 
 // createSchemaFor is the action schema Control must have signed for this intent:
-// the contract-free v1 shape, or the v2 shape once a contract is bound.
+// the contract-free v1 shape, the v2 shape once a contract is bound, or the
+// renewal shape when the intent renews an existing schedule.
 func createSchemaFor(intent CreateIntent) string {
+	if intent.RenewalOf != "" {
+		return controlRenewalSchema
+	}
 	if intent.ContractDigest != "" {
 		return controlCreateContractSchema
 	}
@@ -234,7 +252,7 @@ func (v *ControlDecisionVerifier) VerifyScheduleCreate(token string, intent Crea
 		return ScheduleCreateBinding{}, fmt.Errorf("Control schedule create decision is not currently usable")
 	}
 	if decision.PayloadDigest != expectedCreatePayloadDigest(decision, intent) {
-		return ScheduleCreateBinding{}, fmt.Errorf("Control schedule create decision payload does not bind this schedule")
+		return ScheduleCreateBinding{}, ErrDecisionPayloadMismatch
 	}
 	return ScheduleCreateBinding{
 		SpaceRef: decision.SpaceRef, SubjectID: decision.SubjectID,
@@ -352,6 +370,14 @@ func validateCreateIntent(intent CreateIntent) error {
 	if intent.ContractDigest != "" && (!strings.HasPrefix(intent.ContractDigest, "sha256:") || len(intent.ContractDigest) != len("sha256:")+64) {
 		return fmt.Errorf("schedule create contract digest is invalid")
 	}
+	if intent.RenewalOf != "" {
+		if intent.RenewalOf != intent.ScheduleID {
+			return fmt.Errorf("schedule renewal must name the schedule it renews")
+		}
+		if intent.ContractDigest == "" {
+			return fmt.Errorf("schedule renewal requires a contract")
+		}
+	}
 	return nil
 }
 
@@ -468,6 +494,9 @@ func expectedCreatePayloadDigest(decision controlDecision, intent CreateIntent) 
 			struct{ name, value string }{"contract_expires_at", intent.ContractExpiresAt},
 			struct{ name, value string }{"contract_max_class", controlContractMaxClass},
 		)
+	}
+	if intent.RenewalOf != "" {
+		fields = append(fields, struct{ name, value string }{"renewal_of", intent.RenewalOf})
 	}
 	for _, field := range fields {
 		hash.Write([]byte(field.name))

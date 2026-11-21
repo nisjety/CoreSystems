@@ -111,7 +111,7 @@ describe('queue strip take-back controls', () => {
     const box = view.container.querySelector('textarea')!
     expect(box.value).toBe(entry.content)
     act(() => fireEvent.input(box, { target: { value: '  Sjekk faktura 43  ' } }))
-    act(() => fireEvent.click(buttonByText(view.container, 'Send på nytt')!))
+    act(() => fireEvent.click(buttonByText(view.container, 'Legg tilbake i boksen')!))
 
     expect(onEdit).toHaveBeenCalledTimes(1)
     expect(onEdit).toHaveBeenCalledWith(entry, 'Sjekk faktura 43')
@@ -126,7 +126,7 @@ describe('queue strip take-back controls', () => {
     act(() => fireEvent.click(buttonByLabel(view.container, 'Rediger')!))
     act(() => fireEvent.input(view.container.querySelector('textarea')!, { target: { value: '   ' } }))
 
-    expect(buttonByText(view.container, 'Send på nytt')!.disabled).toBe(true)
+    expect(buttonByText(view.container, 'Legg tilbake i boksen')!.disabled).toBe(true)
     expect(onEdit).not.toHaveBeenCalled()
   })
 
@@ -149,6 +149,7 @@ describe('queue strip take-back controls', () => {
     ['refused', { state: 'refused' }],
     ['not accepted by the gateway', { accepted: false }],
     ['without a client message id', { clientMessageId: undefined }],
+    ['being taken back already', { retracting: true }],
   ])('renders no controls for a message that is %s', (_case, overrides) => {
     vi.stubEnv('VITE_CHAT_QUEUE_RETRACT', 'true')
     const view = render(() => <QueuedInputStrip entries={[queued(overrides)]} onEdit={vi.fn()} onRetract={vi.fn()} />)

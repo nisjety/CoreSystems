@@ -293,7 +293,9 @@ service MessageTreeService {
   // rewind: the leaf becomes the target and nothing is deleted. Any other target is
   // a version switch: the leaf becomes the newest turn beneath it, so the chosen
   // branch shows its own continuation. With `exact` set, the leaf is the target
-  // itself (an undo of a rewind). Owner only, with `session:write`. Refused with
+  // itself (an undo of a rewind). With `to_root` set and no target, the leaf moves to the
+  // thread root instead, and no turn is active until the next append starts a new first
+  // turn (WS17 S9). Owner only, with `session:write`. Refused with
   // zdr_durable_mutation_forbidden for a zero-retention caller, and with
   // zdr_feature_not_supported (feature message_versions) for a waived caller or a
   // thread that holds a waived run. Refused for a Space thread and a thread with a
@@ -336,6 +338,23 @@ service MessageRevisionService {
   // to authorize a revision: its role and revision state, never its content or
   // author. Read class: authorized like ListConversation (a Space read decision).
   rpc ResolveMessageTarget(ResolveMessageTargetRequest) returns (ResolveMessageTargetResponse);
+}
+
+// MessageWithdrawalService: take back a mid-run message that was stored before the run took it
+// (build plan O-01, DEC-F01-03). A separate service, as MessageSearch and MessageTreeService are, so
+// that SessionCore and every mock of it stay source-compatible.
+service MessageWithdrawalService {
+  // Mark one of the caller's own not-yet-answered user messages as withdrawn, named by the
+  // client_message_id it was stored under. The row stays on the record with `withdrawn_at` set and its
+  // text and metadata cleared; every transcript, model-context, search, export and memory reader leaves
+  // it out, and the thread view (ListConversation with include_withdrawn_notes) answers one text-free
+  // `withdrawn` note in its place. Idempotent: withdrawing a withdrawn message answers
+  // `already_withdrawn`. Owner only, with `session:write`. Refused with
+  // zdr_durable_mutation_forbidden for a zero-retention caller and with zdr_feature_not_supported
+  // (feature message_withdrawal) for a waived caller or a thread that holds a waived run. NOT_FOUND when
+  // the thread holds no such message of the caller; FAILED_PRECONDITION `message_already_answered` once
+  // an assistant answer follows it.
+  rpc WithdrawMessage(WithdrawMessageRequest) returns (WithdrawMessageResponse);
 }
 
 // --- CreateThread ---
@@ -1332,6 +1351,12 @@ message ListConversationRequest {
   // `omitted_before` how many readable turns lie between the two. Only read
   // while SPACE_TIMELINE_CORE is on; otherwise the read is the plain page.
   bool include_first = 11;
+
+  // The thread view (O-01): also return one text-free note row, `withdrawn` set, for each message the
+  // caller took back (see MessageWithdrawalService). False is the default so every prompt, learning,
+  // Dreaming, export and wake reader leaves withdrawn messages out entirely; only the UI transcript
+  // route opts in.
+  bool include_withdrawn_notes = 12;
 }
 
 // One conversation turn. Named SessionMessage (not ThreadMessage, which the
@@ -1417,6 +1442,11 @@ message SessionMessage {
   // customer-gateway turn and for every row written before the column existed. The gateway's side-chat route
   // reads it off the thread to answer a side question on the same subscription connection.
   string subscription_connection_id = 21;
+
+  // True on the note that stands in the thread view for a message the caller took back (O-01). Such a
+  // row carries ids, the author, the role and the time only: empty `content`, no `metadata`, no
+  // mentions, and `on_active_path` false. Never set unless the read asked for include_withdrawn_notes.
+  bool withdrawn = 22;
 }
 
 message ListConversationResponse {
@@ -1532,6 +1562,27 @@ message ResolveMessageTargetResponse {
   string role = 1;
   // "" (never revised), "edited" or "deleted".
   string revision_state = 2;
+}
+
+// --- WithdrawMessage (O-01) ---
+
+message WithdrawMessageRequest {
+  // Required. The owning org; must equal the caller's org and the thread's org.
+  string org_id = 1;
+  // Required. The thread holding the message.
+  string thread_id = 2;
+  // Required. The client_message_id the message was stored under (a message sent without one cannot
+  // be taken back).
+  string client_message_id = 3;
+}
+
+message WithdrawMessageResponse {
+  // The durable id of the withdrawn message.
+  string message_id = 1;
+  // True when the message was already withdrawn, so this call changed nothing.
+  bool already_withdrawn = 2;
+  // When the message was withdrawn.
+  google.protobuf.Timestamp withdrawn_at = 3;
 }
 
 // --- ListThreads (durable cross-device chat history) ---
@@ -1698,6 +1749,12 @@ message ThreadSummary {
   // read of that thread before it happens; a listing without a thread_id filter leaves it false and
   // it must not be read as "holds none". A flag only, never a retention class or run id.
   bool holds_retention_run = 30;
+
+  // The thread's own memory mode (WS07-S6): "inherit" (it follows the user's memory state) or "off"
+  // (it neither recalls nor learns). Presentation state, like `persona_enabled`, written only by
+  // UpdateThreadPresentation. Empty for a zero-retention caller, which has no memory mode to show, and
+  // from a Session Core that predates the column.
+  string memory_mode = 31;
 }
 
 message ListThreadsResponse {
@@ -2406,6 +2463,11 @@ message SetActiveLeafRequest {
   // so the leaf returns to the turn the rewind left even when a later branch continues
   // from that turn. Unset, the target keeps the meaning above.
   bool exact = 5;
+  // Move the active leaf to the thread root instead (WS17 S9, an edit of the first turn):
+  // no turn is active afterwards, and the next appended turn starts a new first turn beside
+  // the old ones. Requires an empty target_message_id and an unset exact. The same guards as
+  // any move apply, including expected_leaf_message_id. Never renumber, reuse or remove a tag.
+  bool to_root = 6;
 }
 
 // Where the active leaf landed, and the active path up to it.

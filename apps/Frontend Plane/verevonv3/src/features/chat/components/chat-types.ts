@@ -398,6 +398,11 @@ export type ChatTurn = {
   role: 'user' | 'assistant'
   content: string
   createdAt: string
+  /**
+   * The person took this message back before the run read it (O-01). The turn is a text-free note: `content` is empty
+   * and it is never edited, regenerated or sent again. Only a thread read that asked for the notes carries one.
+   */
+  retracted?: boolean
   /** The server's message-tree position for this turn, on a versioned thread (WS17 S9). Absent everywhere else. */
   version?: import('@/shared/api/chat-client').ChatMessageVersion
   /**
@@ -714,6 +719,11 @@ export type QueuedInput = {
    * that was refused or never reached the gateway is not.
    */
   accepted?: boolean
+  /**
+   * A take-back of this message is in flight (O-01). Its fate is the gateway's to decide, so the run end
+   * leaves it alone (no resend, no delivered mark) until the answer says whether it was taken back.
+   */
+  retracting?: boolean
 }
 
 export type ChatState = {

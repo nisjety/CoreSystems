@@ -25,6 +25,7 @@ import {
   queueInvocationInput,
   rewindChatThread,
   resumeStream,
+  retractQueuedInput,
   saveChatThreadSnapshot,
   searchChatThreads,
   streamChat,
@@ -280,6 +281,37 @@ describe('chat-client stream-event coverage', () => {
     expect(onDone).toHaveBeenCalledWith(
       expect.objectContaining({ stopReason: 'stream_incomplete' }),
     )
+  })
+
+  describe('undelivered client message ids on done (F-f01-09)', () => {
+    async function doneFrame(payload: Record<string, unknown>) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          sseResponse([`event: done\ndata: ${JSON.stringify(payload)}\n\n`]),
+        ),
+      )
+      const onDone = vi.fn()
+      await streamChat({ content: 'hi' }, { onDone })
+      expect(onDone).toHaveBeenCalledTimes(1)
+      return onDone.mock.calls[0]![0] as { undeliveredClientMessageIds?: string[] }
+    }
+
+    it('reads the ids the gateway names, in the order it names them', async () => {
+      const done = await doneFrame({ undelivered_client_message_ids: ['msg-2', 'msg-1'] })
+      expect(done.undeliveredClientMessageIds).toEqual(['msg-2', 'msg-1'])
+    })
+
+    it('keeps an empty list, which says every accepted message was taken', async () => {
+      const done = await doneFrame({ undelivered_client_message_ids: [] })
+      expect(done.undeliveredClientMessageIds).toEqual([])
+    })
+
+    it('reads no list from a frame that names none, or whose list is not all strings', async () => {
+      expect((await doneFrame({})).undeliveredClientMessageIds).toBeUndefined()
+      expect((await doneFrame({ undelivered_client_message_ids: 'msg-1' })).undeliveredClientMessageIds).toBeUndefined()
+      expect((await doneFrame({ undelivered_client_message_ids: ['msg-1', 7] })).undeliveredClientMessageIds).toBeUndefined()
+    })
   })
 
   it('surfaces an unrecognised event instead of dropping it, but ignores STREAM_ envelopes', async () => {
@@ -781,6 +813,140 @@ describe('mid-run queued input', () => {
       // A blank key is no key.
       expect(buildChatWireBody({ content: 'hi', sessionKey: '   ', threadId: 'thr_7' }).session_key).toBe('thr_7')
     })
+  })
+})
+
+describe('taking back a mid-run message (O-01)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const jsonResponse = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  const answeredWith = (response: Response) => {
+    const calls: { url: string; method: string | undefined }[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: unknown, init?: RequestInit) => {
+        calls.push({ url: String(url), method: init?.method })
+        return Promise.resolve(response.clone())
+      }),
+    )
+    return calls
+  }
+
+  it('asks the owner by the run and the id the message was sent under, with a DELETE and no body', async () => {
+    const calls = answeredWith(jsonResponse(200, { retracted: true, withdrawn: true, message_id: 'm-1' }))
+    await expect(retractQueuedInput('req/1', 'msg-1')).resolves.toEqual({ outcome: 'retracted', withdrawn: true })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.method).toBe('DELETE')
+    expect(calls[0]!.url).toContain('/api/v1/chat/invocations/req%2F1/queue/msg-1')
+  })
+
+  it('reads a take-back that left no stored row to mark as retracted, without claiming a withdrawal', async () => {
+    answeredWith(jsonResponse(200, { retracted: true, withdrawn: false }))
+    await expect(retractQueuedInput('req-1', 'msg-1')).resolves.toEqual({ outcome: 'retracted', withdrawn: false })
+  })
+
+  it('maps the three outcomes the BFF reports as 200 by the gateway\'s own word', async () => {
+    answeredWith(jsonResponse(200, { retracted: false, error: 'already_delivered' }))
+    await expect(retractQueuedInput('req-1', 'msg-1')).resolves.toEqual({ outcome: 'already_delivered' })
+    answeredWith(jsonResponse(200, { retracted: false, error: 'not_found' }))
+    await expect(retractQueuedInput('req-1', 'msg-1')).resolves.toEqual({ outcome: 'not_found' })
+  })
+
+  it('maps the same outcomes when a BFF that does not normalize them answers 409 and 404', async () => {
+    answeredWith(jsonResponse(409, { error: { code: 'already_delivered', message: 'delivered' } }))
+    await expect(retractQueuedInput('req-1', 'msg-1')).resolves.toEqual({ outcome: 'already_delivered' })
+    answeredWith(jsonResponse(404, { error: { code: 'not_found', message: 'none' } }))
+    await expect(retractQueuedInput('req-1', 'msg-1')).resolves.toEqual({ outcome: 'not_found' })
+  })
+
+  it('keeps "this deployment does not take messages back" apart from "try again"', async () => {
+    answeredWith(jsonResponse(503, { error: { code: 'queue_retract_disabled', message: 'off' } }))
+    await expect(retractQueuedInput('req-1', 'msg-1')).resolves.toEqual({
+      outcome: 'refused',
+      reason: 'disabled',
+      message: 'off',
+    })
+    answeredWith(jsonResponse(503, { error: { code: 'run_control_unavailable', message: 'busy' } }))
+    await expect(retractQueuedInput('req-1', 'msg-1')).resolves.toEqual({
+      outcome: 'refused',
+      reason: 'unavailable',
+      message: 'busy',
+    })
+  })
+
+  it('claims nothing from a body that says neither, and words the fallback in the chosen language', async () => {
+    answeredWith(jsonResponse(200, { retracted: false }))
+    const result = await retractQueuedInput('req-1', 'msg-1')
+    expect(result.outcome).toBe('refused')
+    expect(result).toMatchObject({ message: 'Kunne ikke fjerne meldingen.' })
+    window.localStorage.setItem('verevon.locale', 'en')
+    try {
+      answeredWith(jsonResponse(200, { retracted: false }))
+      await expect(retractQueuedInput('req-1', 'msg-1')).resolves.toMatchObject({
+        outcome: 'refused',
+        message: 'Could not remove the message.',
+      })
+    } finally {
+      window.localStorage.removeItem('verevon.locale')
+    }
+  })
+
+  it('reads the gateway answer "taken back, but the stored copy stayed" as retracted, never as delivered', async () => {
+    answeredWith(jsonResponse(200, {
+      retracted: true,
+      withdrawn: false,
+      reason: 'message_already_answered',
+      thread_id: 't-1',
+    }))
+    await expect(retractQueuedInput('req-1', 'msg-1')).resolves.toEqual({ outcome: 'retracted', withdrawn: false })
+  })
+
+  it('reads a take-back whose stored copy could not be marked withdrawn as retryable, and only then (O-01, rel1)', async () => {
+    answeredWith(jsonResponse(200, {
+      retracted: true,
+      withdrawn: false,
+      error: 'withdrawal_not_recorded',
+      retryable: true,
+      request_id: 'req-1',
+      client_message_id: 'msg-1',
+    }))
+    await expect(retractQueuedInput('req-1', 'msg-1')).resolves.toEqual({
+      outcome: 'retracted',
+      withdrawn: false,
+      retryable: true,
+    })
+    answeredWith(jsonResponse(200, {
+      retracted: true,
+      withdrawn: false,
+      reason: 'message_already_answered',
+      thread_id: 't-1',
+    }))
+    const answered = await retractQueuedInput('req-1', 'msg-1')
+    expect(answered).toEqual({ outcome: 'retracted', withdrawn: false })
+    expect(answered).not.toHaveProperty('retryable')
+  })
+
+  it('reads a retracted note off the thread read by its flag, and only the literal true', async () => {
+    answeredWith(
+      jsonResponse(200, {
+        thread_id: 't-1',
+        messages: [
+          { message_id: 'm-1', role: 'user', content: 'hei' },
+          { message_id: 'm-2', role: 'user', content: '', retracted: true },
+          { message_id: 'm-3', role: 'user', content: 'x', retracted: 'true' },
+        ],
+      }),
+    )
+    const messages = await getThreadMessages('t-1')
+    expect(messages.map((message) => message.retracted)).toEqual([undefined, true, undefined])
+    expect(messages[1]!.content).toBe('')
   })
 })
 

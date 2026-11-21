@@ -12,6 +12,15 @@ const effectivePolicyItemSchema = z.object({
   revision: z.number().int().nonnegative().optional(),
   locked: z.boolean(),
   unavailable: z.boolean().default(false),
+  // A list a member may not read comes as its count alone (`redacted`); an admin reads its entries as text. The
+  // panel reads the same two shapes, so the two readers agree on what a list is.
+  redacted: z.boolean().optional(),
+  count: z.number().int().nonnegative().optional(),
+  // Each entry is non-blank text of at most 200 characters, counted in code points as the panel and server do.
+  values: z
+    .array(z.string().refine((entry) => entry.trim() !== '' && [...entry].length <= 200))
+    .max(200)
+    .optional(),
 })
 
 // requestJson has already unwrapped the route's `{ data }` envelope.

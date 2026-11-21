@@ -12,8 +12,11 @@ import {
   snapshot,
 } from 'solid-js'
 import {
+  answeringTurn,
   beginNewVersion,
   lastUserIndex,
+  precedingUserIndex,
+  precedingUserTurn,
   selectVersion,
   versionBadge,
   type ExchangeVersionState,
@@ -128,6 +131,7 @@ import {
   rejectPlan,
   listModels,
   queueInvocationInput,
+  retractQueuedInput,
   rewindChatThread,
   resumeStream,
   saveChatThreadSnapshot,
@@ -161,7 +165,7 @@ import type {
   WideResearchStart,
 } from '@/shared/api/chat-client'
 import { researchPlanTurnEnabled } from './ResearchPlanCard'
-import { translateApiError, useI18n } from '@/shared/i18n'
+import { LocalizedError, translateApiError, useI18n } from '@/shared/i18n'
 import type { VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import {
   ApiError,
@@ -179,7 +183,13 @@ import {
   listScheduleFires,
   type CronSchedule,
 } from '@/shared/api/cron-client'
-import { DEFAULT_SCHEDULE_TIMEZONE, DELEGABLE_SCHEDULE_TOOLS } from '@/shared/api/schedule-from-chat'
+import {
+  DEFAULT_SCHEDULE_TIMEZONE,
+  DELEGABLE_SCHEDULE_TOOLS,
+  loadDelegableScheduleTools,
+  scheduleDelegableToolsEnabled,
+  type ScheduleContractTool,
+} from '@/shared/api/schedule-from-chat'
 import {
   findArtifactById,
   foldSavedRevision,
@@ -334,10 +344,9 @@ function safeBranchBoundary(turns: readonly ChatTurn[], requestedIndex: number):
   if (!requestedTurn || requestedTurn.role !== 'assistant' || !isEffectfulChatTurn(requestedTurn.effectClass)) {
     return requestedIndex
   }
-  for (let candidate = requestedIndex - 1; candidate >= 0; candidate -= 1) {
-    if (turns[candidate]?.role === 'user') return candidate
-  }
-  return requestedIndex
+  // A retracted note between the question and its answer is not the question (O-01).
+  const question = precedingUserIndex(turns, requestedIndex)
+  return question >= 0 ? question : requestedIndex
 }
 
 /**
@@ -358,6 +367,12 @@ export function buildContinuationModelContent(userContent: string, partialAnswer
 const THREAD_PAGE_SIZE = 100
 /** WS09 S9. The newest messages read to find the saved answer of a trailing turn. */
 const SAVED_ANSWER_TAIL_SIZE = 4
+/**
+ * O-01, rel1. The waits before each new ask of a take-back whose stored copy could not be marked withdrawn (a
+ * retryable answer). The asks end after the last wait: an ask made once the run has ended finds no stream and cannot
+ * reach the stored copy.
+ */
+const RETRACT_RETRY_WAITS_MS: readonly number[] = [1_000, 2_000, 4_000, 8_000]
 
 /**
  * The numeric sequence behind an SSE `id:`. Model Gateway numbers every
@@ -572,6 +587,24 @@ export function useChatController() {
   const openChatSpaceRef = (): string | null => (
     state.threadId ? (scopedThreadRefs.get(state.threadId) ?? null) : projectSpaceRef()
   )
+  /**
+   * Whether each open thread's Space ref is known (R-spa-01): `settled` once it is, from a project's routing hint or from the
+   * answer of the ref load, and `failed` when that load itself failed. A thread missing from the map has an unknown routing
+   * hint, so a held send waits for it. A new chat has no thread, so it has no ref to wait for.
+   */
+  const [spaceRefLoads, setSpaceRefLoads] = createSignal<ReadonlyMap<string, 'settled' | 'failed'>>(new Map())
+  const setSpaceRefLoad = (threadId: string, load: 'settled' | 'failed' | null) => {
+    setSpaceRefLoads((prev) => {
+      const next = new Map(prev)
+      if (load) next.set(threadId, load)
+      else next.delete(threadId)
+      return next
+    })
+  }
+  /** True when the open thread's Space ref is known, or no thread is open. A held send is flushed only while this holds. */
+  const spaceRefSettled = (): boolean => !state.threadId || spaceRefLoads().has(state.threadId)
+  /** True when the open thread's ref load failed, so whether it is a Space is unknown and its held sends are refused. */
+  const spaceRefFailed = (): boolean => !!state.threadId && spaceRefLoads().get(state.threadId) === 'failed'
   /**
    * Whether the server keeps a message tree for conversations (WS17 S9). The switch is server-wide, so it is
    * learnt from a `connected` frame or a transcript whose turns carry a version, and never unlearnt. While it
@@ -1242,9 +1275,7 @@ export function useChatController() {
     if (assistantIndex == null) return turns
     const assistant = turns[assistantIndex]
     if (!assistant || assistant.role !== 'assistant') return turns
-    const precedingUser = [...turns.slice(0, assistantIndex)]
-      .reverse()
-      .find((turn) => turn.role === 'user')
+    const precedingUser = precedingUserTurn(turns, assistantIndex)
     if (!precedingUser) return turns
 
     const normalizeGoal = (value: string) => value.trim().replace(/\s+/g, ' ').toLocaleLowerCase()
@@ -1517,6 +1548,9 @@ export function useChatController() {
       ? (scopedThreadRefs.get(threadId) ?? projectThreadRef(threadId))
       : undefined
     if (knownProjectRef) scopedThreadRefs.set(threadId, knownProjectRef)
+    // R-spa-01: while this load is in flight the thread's Space ref is not settled, so a held send waits (see the flush below).
+    // The load settles it when it ends, success or failure.
+    setSpaceRefLoad(threadId, null)
     // Switching threads must tear down the previously-selected thread's
     // in-flight stream/resume and reset the shared view machine. Left running,
     // that stream's terminal handlers keep mutating the store after
@@ -1562,7 +1596,12 @@ export function useChatController() {
         : null,
     )
     if (knownProjectRef) {
-      await loadProjectThread(threadId, knownProjectRef, seq)
+      // The project's ref is known from its routing hint, so the load settles it when it ends (R-spa-01).
+      try {
+        await loadProjectThread(threadId, knownProjectRef, seq)
+      } finally {
+        if (seq === threadLoadSequence) setSpaceRefLoad(threadId, 'settled')
+      }
       return
     }
     // WS09 S6. With VITE_CHAT_PARALLEL_THREAD_LOAD=true the reads go out together.
@@ -1585,7 +1624,13 @@ export function useChatController() {
     // cached: the BFF obtains a new Control decision for the actual content.
     // By id, not a search of the listing: a thread past the first page keeps its
     // routing hint too.
-    const session = await getChatThread(threadId).catch(() => null)
+    // A lookup that fails leaves the Space unknown, so the held sends of this thread are refused once the load ends (R-spa-01). A
+    // server that does not list the thread answers null, which is a known thread with no Space ref.
+    const lookup = await getChatThread(threadId).then(
+      (found) => ({ session: found, failed: false }),
+      () => ({ session: null, failed: true }),
+    )
+    const session = lookup.session
     const scoped = session?.spaceRef?.trim()
     if (scoped) scopedThreadRefs.set(threadId, scoped)
     // A paged open skips the transcript the same way (WS09 S9): the newest page
@@ -1739,6 +1784,9 @@ export function useChatController() {
       hydrateRunQuestions(threadId, fallbackTurns, seq)
       hydrateProposedPlan(threadId, fallbackTurns, seq)
       maybeResumeStream(threadId, fallbackTurns)
+    } finally {
+      // The turns have landed and the thread's Space ref answered: held sends may flush now, and a failed lookup refuses them (R-spa-01).
+      if (seq === threadLoadSequence) setSpaceRefLoad(threadId, lookup.failed ? 'failed' : 'settled')
     }
   }
 
@@ -2094,7 +2142,7 @@ export function useChatController() {
       const outcome = await awaitDurableOutcome(threadId, assistantId, runId, watch.signal, owned)
       if (outcome.kind !== 'adopted' || state.threadId !== threadId) return
       const index = state.turns.findIndex((candidate) => candidate.id === assistantId)
-      const question = state.turns.slice(0, index).reverse().find((candidate) => candidate.role === 'user')
+      const question = precedingUserTurn(state.turns, index)
       upsertTaskStep(createTurnStep(
         assistantId,
         createPreview(question?.content ?? '', 58),
@@ -2159,7 +2207,7 @@ export function useChatController() {
     const resumeGeneration = streamGeneration
     const isActiveThread = () => state.threadId === threadId && streamGeneration === resumeGeneration
     const turnIndex = state.turns.findIndex((candidate) => candidate.id === assistantId)
-    const precedingUser = turnIndex > 0 ? state.turns[turnIndex - 1] : undefined
+    const precedingUser = turnIndex > 0 ? precedingUserTurn(state.turns, turnIndex) : undefined
     const turnTitle = createPreview(
       precedingUser?.role === 'user' ? precedingUser.content : turn.content,
       58,
@@ -2445,6 +2493,9 @@ export function useChatController() {
     setPendingQuestion(null)
     setQuestionError(null)
     setPendingResearchPlan(null)
+    // A fresh chat forgets the project picked for the previous one (WS18-S4). A deliberate handoff that starts a new chat is a plain
+    // chat of its own, so a project picked on mount does not carry into it (R-spa-05).
+    setProjectSpaceRef(null)
     // Each fresh chat starts with Temporary Chat off — a user re-enables it
     // deliberately per conversation rather than it silently staying on.
     setTemporaryChat(false)
@@ -2610,6 +2661,28 @@ export function useChatController() {
             return null
           })
           if (!launchFiles) return
+          // DEC-V-R8 (R-spa-05): the launch's route is checked against the chat it lands in before anything is sent. The check runs
+          // after the await above, which is when the reset of a handoff has taken effect: its chat has no project picked. A refused
+          // launch sends nothing; its words go back to the box and the notice says why. P2-spa-03 rel1: a launch the chat's Space ref
+          // is not known to allow is refused as well, route or no route, while that ref is loading or after its load failed (spaceRefUnsettledSendCopy).
+          const launchRoute = {
+            provider: pending.provider,
+            subscriptionConnectionId: pending.subscriptionConnectionId,
+            modelConnectionId: pending.modelConnectionId,
+          }
+          const launchRefusal = spaceRouteRefusalCopy(launchRoute) ?? spaceRefUnsettledSendCopy()
+          if (launchRefusal) {
+            // A zero-retention launch keeps its choice when its words go back to the box: the toggle is on before the words are set, so
+            // the draft is not stored and the next send carries zdr. ZDR is a floor; a refused launch never downgrades it.
+            if (pending.zdr) setTemporaryChat(true)
+            setInput((current) => (current.trim() === '' ? pending.text : `${pending.text}\n\n${current}`))
+            // The files of a refused launch do not come back with its words, so the notice says so.
+            const filesNotice = (pending.attachments ?? []).length > 0
+              ? ` ${i18n.tr('Vedleggene ble ikke lagt tilbake. Legg dem til på nytt.', 'The files were not put back. Add them again.')}`
+              : ''
+            showFeedbackNotice(`${i18n.tr(launchRefusal.no, launchRefusal.en)}${filesNotice}`)
+            return
+          }
           const [attachments, inlined] = launchFiles
           triggerLaunchMotion()
           const sending = sendContent(pending.text, pending.model, {
@@ -2916,9 +2989,23 @@ export function useChatController() {
    * "Keep working while away" on the goal bar (EP-7 S6). Until the goal's schedules are known, `scheduled` reads true,
    * so no start is offered over a schedule the page has not seen.
    */
+  // The consent list of "Keep working while away" (EP-7 S6). With VITE_SCHEDULE_DELEGABLE_TOOLS_ENABLED on, the org's
+  // delegable read tools are asked for once, on the first read: the away form reads them only once it is open. The
+  // per-tab answer in schedule-from-chat keeps it to one request. Off, the list is DELEGABLE_SCHEDULE_TOOLS, exactly
+  // as before.
+  const [scheduleTools, setScheduleTools] = createSignal<readonly ScheduleContractTool[]>(DELEGABLE_SCHEDULE_TOOLS)
+  let scheduleToolsRequested = false
+  const goalAwayTools = (): readonly ScheduleContractTool[] => {
+    if (!scheduleDelegableToolsEnabled()) return DELEGABLE_SCHEDULE_TOOLS
+    if (!scheduleToolsRequested) {
+      scheduleToolsRequested = true
+      void loadDelegableScheduleTools(goalAwayOrg()).then(setScheduleTools)
+    }
+    return scheduleTools()
+  }
   const goalAway: GoalAwayView = {
     available: () => goalAwayOffered(threadGoal()),
-    tools: () => DELEGABLE_SCHEDULE_TOOLS,
+    tools: goalAwayTools,
     scheduled: () => {
       const goal = threadGoal()
       const read = goalAwayRead()
@@ -3258,7 +3345,7 @@ export function useChatController() {
       if (turn.role === 'assistant' && turn.runId === runId) assistantIndex = index
     })
     const assistantId = assistantIndex >= 0 ? state.turns[assistantIndex]?.id : undefined
-    const precedingUser = assistantIndex > 0 ? state.turns[assistantIndex - 1] : undefined
+    const precedingUser = assistantIndex > 0 ? precedingUserTurn(state.turns, assistantIndex) : undefined
     const turnTitle = createPreview(precedingUser?.role === 'user' ? precedingUser.content : '', 58)
     const generation = streamGeneration
     const isActive = () => state.threadId === threadId && streamGeneration === generation
@@ -3858,15 +3945,30 @@ export function useChatController() {
   const queuedSendContext = new Map<string, { modelOverride: string | undefined; options: SendOptions }>()
 
   /**
+   * The ids the last run end named as never taken (the done frame's list), or undefined when it named none. A take-back
+   * answered after the run ended settles the entry under the same list (see `retractQueuedMessage`).
+   */
+  let lastRunEndUndelivered: readonly string[] | undefined
+  /** How many times a run's end has settled the strip, so a take-back answered after one can tell the run ended meanwhile. */
+  let runEndsSettled = 0
+
+  /**
    * The run ended on its own. A message the gateway accepted that the run never took (it ended
    * between two tool-round boundaries) goes out again as an ordinary turn under the SAME id, so
    * the transcript holds it once (the gateway stored it when it accepted it, and the resend finds
    * that row) and the agent answers it. The strip says "resent" instead of leaving it waiting.
+   *
+   * `undelivered` is the list the done frame names, when it names one: the messages the gateway
+   * never took. Without it the rule is the one above; with it, an accepted message the gateway took
+   * is marked delivered rather than sent again (see `settleQueuedInputsAtRunEnd`).
    */
-  const resendUntakenQueuedInputs = () => {
-    const { entries, resend } = settleQueuedInputsAtRunEnd(state.queuedInputs)
-    if (resend.length === 0) return
+  const resendUntakenQueuedInputs = (undelivered?: readonly string[], held: readonly QueuedInput[] = state.queuedInputs) => {
+    lastRunEndUndelivered = undelivered
+    runEndsSettled += 1
+    const { entries, resend } = settleQueuedInputsAtRunEnd(held, undelivered)
+    if (resend.length === 0 && undelivered === undefined) return
     setState((s) => { s.queuedInputs = entries })
+    if (resend.length === 0) return
     setDeferredSends((pending) => [
       ...pending,
       ...resend.map((entry) => {
@@ -3937,6 +4039,155 @@ export function useChatController() {
       return
     }
     noteQueuedInput(id, 'refused', result.message)
+  }
+
+  /**
+   * The text-free note a withdrawn message leaves where its stored copy sits: in front of the streaming answer, and only
+   * while that run is the one streaming. The first answer to a take-back and a background ask both leave it this way.
+   */
+  const insertRetractedNote = (s: ChatState, requestId: string, clientMessageId: string) => {
+    const noteId = `retracted-${clientMessageId}`
+    if (s.requestId !== requestId || s.turns.some((turn) => turn.id === noteId)) return
+    const last = s.turns.length - 1
+    if (last < 0 || s.turns[last]?.role !== 'assistant' || s.turns[last]?.streaming !== true) return
+    s.turns.splice(last, 0, {
+      id: noteId,
+      role: 'user',
+      content: '',
+      createdAt: new Date().toISOString(),
+      streaming: false,
+      tools: [],
+      attachments: [],
+      retracted: true,
+    })
+  }
+
+  /**
+   * Asks the same take-back again while the stored copy is not marked withdrawn (O-01, rel1): the gateway runs the
+   * withdrawal again on a repeat, so a retryable answer is worth another ask after a short wait. The entry stays in the
+   * strip as taking back until then, so the run end leaves it alone. A withdrawn answer removes it and shows the note.
+   * Any other answer, or the last ask, gives up: the entry is marked refused with a note, so nothing is left silent.
+   */
+  const withdrawStoredCopyInBackground = (
+    requestId: string,
+    entryId: string,
+    clientMessageId: string,
+    attempt = 0,
+  ): void => {
+    setTimeout(() => {
+      void retractQueuedInput(requestId, clientMessageId).then((result) => {
+        if (result.outcome === 'retracted' && result.withdrawn) {
+          setState((s) => {
+            s.queuedInputs = s.queuedInputs.filter((queued) => queued.id !== entryId)
+            insertRetractedNote(s, requestId, clientMessageId)
+          })
+          return
+        }
+        if (result.outcome === 'retracted' && result.retryable === true && attempt + 1 < RETRACT_RETRY_WAITS_MS.length) {
+          withdrawStoredCopyInBackground(requestId, entryId, clientMessageId, attempt + 1)
+          return
+        }
+        noteQueuedInput(
+          entryId,
+          'refused',
+          i18n.tr(
+            'Fjernet fra kjøringen, men ikke fra samtalen – meldingen kan fortsatt stå der.',
+            'Taken back from the run, but not from the conversation – it may still be there.',
+          ),
+          { retracting: false },
+        )
+      })
+    }, RETRACT_RETRY_WAITS_MS[attempt])
+  }
+
+  /**
+   * Take back a mid-run message while the gateway still holds it (O-01, DEC-F01-03). Only the entry the strip
+   * offers it for (pending, accepted by the gateway, named by the id it was sent under) is asked about, and
+   * the gateway decides: the queue settles a take-back against a delivery under one lock, so the answer is
+   * one of three.
+   *
+   * - Taken back: the run never reads it. The entry leaves the strip, and its send context goes with it, before
+   *   the run end can resend it. The thread keeps a text-free "retracted" note where it was stored.
+   * - Already delivered, or not found: the run took it, or ended. The entry stays; if the run has ended while
+   *   the question was in flight, the run end is settled now (a message the done frame named is resent, as it
+   *   would have been) because `settleQueuedInputsAtRunEnd` leaves an entry whose take-back is in flight alone.
+   * - Taken back, but its stored copy could not be marked withdrawn (a retryable answer): the entry stays in the strip as
+   *   taking back while the same take-back is asked again in the background. It then leaves with the note, or is marked
+   *   refused with a note when those asks give up.
+   * - Refused: nothing was decided; the entry stays and says it can be tried again.
+   *
+   * Resolves true only when the message was taken back.
+   */
+  const retractQueuedMessage = async (entry: QueuedInput): Promise<boolean> => {
+    const requestId = state.requestId
+    const current = state.queuedInputs.find((queued) => queued.id === entry.id)
+    if (
+      !requestId
+      || !current
+      || current.state !== 'pending'
+      || !current.accepted
+      || !current.clientMessageId
+      || current.retracting
+    ) {
+      return false
+    }
+    noteQueuedInput(current.id, 'pending', undefined, { retracting: true })
+    const endsBefore = runEndsSettled
+    const result = await retractQueuedInput(requestId, current.clientMessageId)
+    if (result.outcome === 'retracted') {
+      queuedSendContext.delete(current.id)
+      const clientMessageId = current.clientMessageId
+      if (result.retryable) {
+        // The queue gave the message back, so the run will never read it, but its stored copy is still live: ask again in
+        // the background, and keep the entry in the strip as taking back until that settles (the run end leaves it alone).
+        withdrawStoredCopyInBackground(requestId, current.id, clientMessageId)
+        return true
+      }
+      setState((s) => {
+        s.queuedInputs = s.queuedInputs.filter((queued) => queued.id !== current.id)
+        // The stored copy is now a text-free note where the message was saved (before the run's answer), so show it
+        // here at once rather than only after the thread is read again. Only when the store marked the row withdrawn,
+        // and only while the answer is still streaming (the note sits in front of it).
+        if (result.withdrawn) insertRetractedNote(s, requestId, clientMessageId)
+      })
+      return true
+    }
+    if (result.outcome === 'refused') {
+      noteQueuedInput(
+        current.id,
+        'pending',
+        result.reason === 'disabled'
+          ? undefined
+          : i18n.tr('Kunne ikke fjerne meldingen – prøv igjen.', 'Could not remove the message – try again.'),
+        { retracting: false },
+      )
+      return false
+    }
+    // The run took the message, or it is no longer this run's to withdraw. Neither is claimed here: the delivery frame
+    // or the done frame settles it, and a run that ended meanwhile is settled now.
+    const released = i18n.tr('Kan ikke trekkes tilbake lenger.', 'It can no longer be taken back.')
+    noteQueuedInput(current.id, 'pending', released, { retracting: false })
+    // Only a run that ended on its own (the done frame) settles its strip: a stop, an error or a dropped connection
+    // never resends a message the person may have meant to stop with the run. The strip is read as this answer leaves it,
+    // since the write above is not applied until the batch is.
+    if (runEndsSettled !== endsBefore) {
+      resendUntakenQueuedInputs(
+        lastRunEndUndelivered,
+        state.queuedInputs.map((queued) =>
+          queued.id === current.id ? { ...queued, state: 'pending', note: released, retracting: false } : queued),
+      )
+    }
+    return false
+  }
+
+  /**
+   * "Rediger" on a queued message: take it back, then put its text (as edited) back into the composer. Never
+   * queues it again on its own: when the take-back does not succeed the text stays where it was, and the person
+   * decides what to send.
+   */
+  const editQueuedMessage = async (entry: QueuedInput, text: string): Promise<void> => {
+    if (!(await retractQueuedMessage(entry))) return
+    setInput((current) => (current.trim() === '' ? text : `${text}\n\n${current}`))
   }
 
   const sendContent = async (
@@ -4057,6 +4308,8 @@ export function useChatController() {
       // The provisional thread belongs to its project from the first send, so the
       // project stays on screen until the durable id replaces this one.
       if (requestedSpaceRef) scopedThreadRefs.set(activeThreadId, requestedSpaceRef)
+      // The new chat's routing hint is the project it was started in, or none: known from the first send (R-spa-01).
+      setSpaceRefLoad(activeThreadId, 'settled')
       chatDraft.carry(null, activeThreadId)
       setState((s) => { s.threadId = activeThreadId })
       startingThreadIds.add(activeThreadId)
@@ -4252,6 +4505,8 @@ export function useChatController() {
         if (chatProjectsEnabled()) rememberProjectThread(serverThreadId, requestedSpaceRef)
       }
       chatDraft.carry(priorThreadId, serverThreadId)
+      // The durable thread takes the routing hint the send was made with (R-spa-01).
+      setSpaceRefLoad(serverThreadId, 'settled')
       setState((s) => { s.threadId = serverThreadId })
       if (!isTemporaryThread(serverThreadId)) setActiveChatThreadId(serverThreadId)
       writeThreadSnapshot(serverThreadId, state.turns, { preview: content, updatedAt: submittedAt })
@@ -4546,7 +4801,7 @@ export function useChatController() {
             if (!researchPlanTurnEnabled() || isTemporaryThread(state.threadId ?? activeThreadId)) return
             setPendingResearchPlan({ plan, question: content, model })
           },
-          onDone: ({ requestId, modelUsed, outputTokens, stopReason }) => {
+          onDone: ({ requestId, modelUsed, outputTokens, stopReason, undeliveredClientMessageIds }) => {
             settleDraft?.('accepted')
             settled = true
             terminalSeen = true
@@ -4575,7 +4830,7 @@ export function useChatController() {
             markOpenSteps('done', 'Completed.', assistantId)
             // The run is over: what it was handed is settled, and what it never took goes out
             // again as an ordinary turn.
-            if (projection.accepts()) resendUntakenQueuedInputs()
+            if (projection.accepts()) resendUntakenQueuedInputs(undeliveredClientMessageIds)
             updateLocalRunHint(activeThreadId, 'completed', state.turns.find((turn) => turn.id === assistantId)?.runId)
             // Mark read at stream end, not per delta, and only while the owner is still on this thread.
             if (projection.accepts()) {
@@ -4849,6 +5104,20 @@ export function useChatController() {
   // send the page makes carries one; a send without it is unchanged.
   const handleComposerSubmit = async (payload: DashboardComposerSubmitPayload, deckTemplate?: string) => {
     if (isForeignOriginThread(state.threadId)) return
+    // DEC-V-R8, defence in depth (R-spa-05): the composer withholds a Space route before it submits, and this checks the route again
+    // for a send that goes out now. A chat whose Space ref has not settled (still loading, or its load failed) is not known to be no
+    // Space, so a route a Space may not take is refused there as well, and so is a plain send, which goes out without the chat's
+    // spaceRef (P2-spa-03 rel1). A refusal throws, so the composer keeps the draft and says why. A send made while a run streams is
+    // held instead, and it is judged when it would go out (the held-send flush below).
+    if (!isStreaming()) {
+      const route = {
+        provider: payload.provider,
+        subscriptionConnectionId: payload.subscriptionConnectionId,
+        modelConnectionId: payload.modelConnectionId,
+      }
+      const routeRefusal = spaceRouteRefusalCopy(route) ?? spaceRefUnsettledSendCopy()
+      if (routeRefusal) throw new LocalizedError(routeRefusal)
+    }
     // Before the launch motion and before any model-bound step: a refusal throws, the composer keeps the draft.
     const browserRegions = assertComposerRegionsSendable(payload)
     const browserTabRefs = await resolveComposerTabMentions(payload)
@@ -5041,13 +5310,49 @@ export function useChatController() {
   // machine is free, anything a run ended too early to receive goes out as an
   // ordinary turn. Placed after `sendContent` so the effect's first run cannot
   // read it before it is assigned.
+  // R-spa-01: a held send also waits until the open thread's Space ref is known. A thread switch sets the thread and the status
+  // idle before its ref lookup answers, and a send judged in that gap could go out on a route the Space may not take. When that
+  // lookup failed, whether the thread is a Space is unknown, so every held send goes back to the box instead.
+  const spaceRefLoadFailedCopy = {
+    no: 'Kunne ikke sjekke om samtalen er et delt Space. Meldingen er lagt tilbake i boksen.',
+    en: 'Could not check whether this conversation is a shared Space. The message is back in the box.',
+  }
+  // P2-spa-03 rel1: a launch, or a composer send, judged while the open chat's ref is still loading is refused with this copy, the same
+  // way; the message is back in the box, so it can be sent again once the chat has loaded.
+  const spaceRefLoadingCopy = {
+    no: 'Samtalen lastes fortsatt. Meldingen er lagt tilbake i boksen.',
+    en: 'The conversation is still loading. The message is back in the box.',
+  }
   createEffect(
     () => ({
       status: state.status,
       deferred: deferredSends(),
+      settled: spaceRefSettled(),
+      failed: spaceRefFailed(),
     }),
-    ({ status, deferred }) => {
-      if (status === 'streaming' || deferred.length === 0) return
+    ({ status, deferred, settled, failed }) => {
+      if (status === 'streaming' || deferred.length === 0 || !settled) return
+      if (failed) {
+        setDeferredSends([])
+        untrack(() => {
+          const message = i18n.tr(spaceRefLoadFailedCopy.no, spaceRefLoadFailedCopy.en)
+          // Each held send takes the oldest strip entry still waiting under its words, and each entry is taken once.
+          const claimed = new Set<string>()
+          for (const held of deferred) {
+            const waiting = state.queuedInputs.find((entry) => !claimed.has(entry.id)
+              && entry.content === held.content && (entry.state === 'pending' || entry.state === 'resent'))
+            if (!waiting) continue
+            claimed.add(waiting.id)
+            noteQueuedInput(waiting.id, 'refused', message)
+          }
+          // All of them go back at once, in the order they were typed, ahead of whatever the box already holds.
+          setInput((current) => [...deferred.map((held) => held.content), current]
+            .filter((part) => part.trim() !== '')
+            .join('\n\n'))
+          showFeedbackNotice(message)
+        })
+        return
+      }
       // Cleared BEFORE sending: `sendContent` flips the status, which re-runs
       // this effect, and a queue still holding the same text would send it
       // twice. The send itself is an event-style operation, so keep its
@@ -5667,6 +5972,30 @@ export function useChatController() {
   }
 
   /**
+   * The copy, in both languages, of a route a Space thread may not take (DEC-V-R8), or null when the route may go out. With the BYO
+   * gateway switch on, a Space thread never takes the member's ChatGPT subscription or their own gateway. Off, or outside a Space,
+   * nothing is withheld.
+   */
+  const spaceRouteRefusalCopy = (
+    route: Readonly<{ provider?: string; subscriptionConnectionId?: string; modelConnectionId?: string }>,
+  ): { no: string; en: string } | null => {
+    const onSpace = Boolean(openChatSpaceRef())
+    if (subscriptionRouteWithheldOnSpace(onSpace) && (route.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER || route.subscriptionConnectionId)) {
+      return {
+        no: 'Abonnementsmodeller kan ikke brukes i et delt Space. Velg en annen modell.',
+        en: 'ChatGPT subscription models cannot be used in a shared Space. Choose another model.',
+      }
+    }
+    if (onSpace && byoGatewaySwitchOn() && route.modelConnectionId) {
+      return {
+        no: 'Din egen gateway kan ikke brukes i et delt Space. Velg en annen modell.',
+        en: 'Your own gateway cannot be used in a shared Space. Choose another model.',
+      }
+    }
+    return null
+  }
+
+  /**
    * The notice for a route a Space thread may not send again (DEC-V-R8). With the BYO gateway switch on, a Space thread never
    * takes the member's ChatGPT subscription or their own gateway, and a turn written under one of them is not sent on it again:
    * a regenerate, continue, edit or re-run that would replay it is refused with the composer's words, before anything is
@@ -5675,19 +6004,22 @@ export function useChatController() {
   const spaceRouteRefusal = (
     route: Readonly<{ provider?: string; subscriptionConnectionId?: string; modelConnectionId?: string }>,
   ): string | null => {
-    const onSpace = Boolean(openChatSpaceRef())
-    if (subscriptionRouteWithheldOnSpace(onSpace) && (route.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER || route.subscriptionConnectionId)) {
-      return i18n.tr(
-        'Abonnementsmodeller kan ikke brukes i et delt Space. Velg en annen modell.',
-        'ChatGPT subscription models cannot be used in a shared Space. Choose another model.',
-      )
-    }
-    if (onSpace && byoGatewaySwitchOn() && route.modelConnectionId) {
-      return i18n.tr(
-        'Din egen gateway kan ikke brukes i et delt Space. Velg en annen modell.',
-        'Your own gateway cannot be used in a shared Space. Choose another model.',
-      )
-    }
+    const copy = spaceRouteRefusalCopy(route)
+    return copy ? i18n.tr(copy.no, copy.en) : null
+  }
+
+  /**
+   * The copy of a send the open chat's Space ref has not settled (P2-spa-03 rel1), for a launch or a send that goes out now, with or
+   * without a route. While the BYO gateway switch is on, a send is refused until the open thread's ref is known: a ref load that failed
+   * leaves it unknown until the chat is opened again, and a load still in flight has not answered, so the send cannot tell whether the
+   * chat is a Space. A plain send names no route a Space withholds, but it goes out without the chat's spaceRef, so it waits for the ref
+   * as a route does. It is refused, not held, and its words go back to the box like the other refused sends. Null when the switch is
+   * off, or once the ref is known (`spaceRouteRefusalCopy` judges a known Space).
+   */
+  const spaceRefUnsettledSendCopy = (): { no: string; en: string } | null => {
+    if (!byoGatewaySwitchOn()) return null
+    if (spaceRefFailed()) return spaceRefLoadFailedCopy
+    if (!spaceRefSettled()) return spaceRefLoadingCopy
     return null
   }
 
@@ -5714,8 +6046,13 @@ export function useChatController() {
     const answer = page?.messages.at(-1)
     if (answer?.role !== 'assistant') return
     serverMessageIds.set(answerId, answer.id)
-    const question = page?.messages.at(-2)
-    if (questionId && question?.role === 'user') serverMessageIds.set(questionId, question.id)
+    // A message the person took back is stored between the question and its answer as a text-free note (O-01):
+    // the question is the nearest message before the answer that is not one.
+    const messages = page?.messages ?? []
+    let questionAt = messages.length - 2
+    while (questionAt > 0 && messages[questionAt]?.retracted) questionAt -= 1
+    const question = messages[questionAt]
+    if (questionId && question?.role === 'user' && !question.retracted) serverMessageIds.set(questionId, question.id)
   }
 
   /** A versioned regenerate or edit names a turn the server has saved; a stopped or unsaved turn has no id to name. */
@@ -5732,7 +6069,8 @@ export function useChatController() {
     const anchorIndex = lastUserIndex(state.turns)
     const lastUser = anchorIndex < 0 ? undefined : state.turns[anchorIndex]
     if (!lastUser) return undefined
-    return { anchorIndex, lastUser, outgoingAssistant: state.turns[anchorIndex + 1] }
+    // The turn that answered it: a retracted note stored between them is not the answer (O-01).
+    return { anchorIndex, lastUser, outgoingAssistant: answeringTurn(state.turns, anchorIndex) }
   }
 
   /**
@@ -6004,7 +6342,7 @@ export function useChatController() {
     const assistantIndex = state.turns.findIndex((turn) => turn.id === turnId)
     const assistant = state.turns[assistantIndex]
     if (!assistant || assistant.role !== 'assistant' || !isEffectfulChatTurn(assistant.effectClass)) return
-    const user = [...state.turns.slice(0, assistantIndex)].reverse().find((turn) => turn.role === 'user')
+    const user = precedingUserTurn(state.turns, assistantIndex)
     if (!user) return
     const route = {
       provider: user.provider ?? assistant.provider,
@@ -6053,7 +6391,7 @@ export function useChatController() {
     const assistantIndex = state.turns.findIndex((turn) => turn.id === turnId)
     const assistant = state.turns[assistantIndex]
     if (!assistant) return null
-    const user = [...state.turns.slice(0, assistantIndex)].reverse().find((turn) => turn.role === 'user')
+    const user = precedingUserTurn(state.turns, assistantIndex)
     return user?.content ?? null
   }
 
@@ -6063,7 +6401,7 @@ export function useChatController() {
     const original = state.turns[index]
     const next = text.trim()
     if (!original || original.role !== 'user' || !next) return
-    const outgoingAssistant = state.turns[index + 1]
+    const outgoingAssistant = answeringTurn(state.turns, index)
     if (isEffectfulChatTurn(outgoingAssistant?.effectClass)) {
       showFeedbackNotice('Denne turen har dokumentert effekt og kan ikke redigeres på stedet. Start en ny tur eller bruk kvitteringen i Trace.')
       return
@@ -6163,6 +6501,7 @@ export function useChatController() {
     const nextThreadId = createId('thread')
     const branchTurns = turns.slice(0, index + 1).map((turn) => ({ ...turn, id: createId(turn.role) }))
     setState((s) => { s.turns = branchTurns })
+    setSpaceRefLoad(nextThreadId, 'settled')
     setState((s) => { s.threadId = nextThreadId })
     setState((s) => { s.status = 'idle' })
     setState((s) => { s.requestId = null })
@@ -6515,6 +6854,9 @@ export function useChatController() {
     isForeignOriginThread: () => isForeignOriginThread(state.threadId),
     input,
     setInput,
+    // O-01: take a mid-run message back while the gateway still holds it, and the edit that puts its text back in the composer.
+    retractQueuedMessage,
+    editQueuedMessage,
     setMessageListRef,
     // WS09 S9. The page's "load earlier" control.
     hasEarlierTurns,

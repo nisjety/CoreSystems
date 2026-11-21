@@ -654,4 +654,73 @@ describe('space send pipeline (P-SPA2)', () => {
       expect((streamChat.mock.calls[1]?.[0] as Record<string, unknown>).clientMessageId).toBe(firstId)
     })
   })
+
+  /**
+   * The done frame names the accepted mid-run messages the run never took (F-f01-09). The pipeline carries that
+   * list to the room, which settles its strip against it. A turn whose done frame names none carries no list.
+   */
+  describe('the mid-run list a done frame names (F-f01-09)', () => {
+    it('carries the ids the done frame names as never taken, for the room to settle against', async () => {
+      const { pipeline } = pipelineWith()
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onConnected?.({ requestId: 'req_1', threadId: 'thr_1' } as never)
+        handlers.onDone?.({ undeliveredClientMessageIds: ['msg-2'] } as never)
+      })
+      await pipeline.send(input())
+      flush()
+      expect(pipeline.undeliveredClientMessageIds()).toEqual(['msg-2'])
+    })
+
+    it('carries an empty list when the done frame names one: the run took every accepted message', async () => {
+      const { pipeline } = pipelineWith()
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onDone?.({ undeliveredClientMessageIds: [] } as never)
+      })
+      await pipeline.send(input())
+      flush()
+      expect(pipeline.undeliveredClientMessageIds()).toEqual([])
+    })
+
+    it('carries no list when the done frame names none, as with the gateway switch off', async () => {
+      const { pipeline } = pipelineWith()
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onDone?.({} as never)
+      })
+      await pipeline.send(input())
+      flush()
+      expect(pipeline.undeliveredClientMessageIds()).toBeUndefined()
+    })
+
+    it('forgets the last turn\'s list when the next send starts, and carries none for a turn that ends in an error', async () => {
+      const { pipeline } = pipelineWith()
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onDone?.({ undeliveredClientMessageIds: ['msg-2'] } as never)
+      })
+      await pipeline.send(input())
+      flush()
+      expect(pipeline.undeliveredClientMessageIds()).toEqual(['msg-2'])
+
+      let seenAtStart: readonly string[] | undefined = ['not read']
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        seenAtStart = pipeline.undeliveredClientMessageIds()
+        handlers.onError?.({ code: 'request_failed', message: 'x' } as never)
+      })
+      await pipeline.send(input())
+      flush()
+      expect(seenAtStart).toBeUndefined()
+      expect(pipeline.undeliveredClientMessageIds()).toBeUndefined()
+      expect(pipeline.exchange()).toMatchObject({ status: 'error' })
+    })
+
+    it('tolerates a done event that arrives with no payload at all', async () => {
+      const { pipeline } = pipelineWith()
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onDone?.(undefined as never)
+      })
+      await pipeline.send(input())
+      flush()
+      expect(pipeline.undeliveredClientMessageIds()).toBeUndefined()
+      expect(pipeline.exchange()).toMatchObject({ status: 'done' })
+    })
+  })
 })

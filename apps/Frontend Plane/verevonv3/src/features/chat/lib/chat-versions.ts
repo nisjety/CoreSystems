@@ -43,9 +43,38 @@ export type VersionBadge = {
 
 export function lastUserIndex(turns: readonly ChatTurn[]): number {
   for (let i = turns.length - 1; i >= 0; i -= 1) {
-    if (turns[i]?.role === 'user') return i
+    // A retracted message is a text-free note, never the turn a regenerate or a retry replays (O-01).
+    if (turns[i]?.role === 'user' && !turns[i]?.retracted) return i
   }
   return -1
+}
+
+/**
+ * The nearest real question before `index`. A retracted message is stored between a question and the answer
+ * the run gave it, so "the turn before" is not always the question (O-01). -1 when there is none.
+ */
+export function precedingUserIndex(turns: readonly ChatTurn[], index: number): number {
+  for (let i = Math.min(index, turns.length) - 1; i >= 0; i -= 1) {
+    if (turns[i]?.role === 'user' && !turns[i]?.retracted) return i
+  }
+  return -1
+}
+
+/** [`precedingUserIndex`], as the turn itself. */
+export function precedingUserTurn(turns: readonly ChatTurn[], index: number): ChatTurn | undefined {
+  const found = precedingUserIndex(turns, index)
+  return found < 0 ? undefined : turns[found]
+}
+
+/**
+ * The turn that answers the question at `index`: the first turn after it that is not a retracted note (O-01).
+ * Never a retracted note, so a check on "what answered this question" does not read the note's empty record.
+ */
+export function answeringTurn(turns: readonly ChatTurn[], index: number): ChatTurn | undefined {
+  for (let i = index + 1; i < turns.length; i += 1) {
+    if (!turns[i]?.retracted) return turns[i]
+  }
+  return undefined
 }
 
 /** Deep-copy a tail so a sibling can never alias live store objects. */

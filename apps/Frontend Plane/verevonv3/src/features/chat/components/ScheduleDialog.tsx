@@ -1,14 +1,19 @@
 import { CalendarClock, X } from '@/shared/icons'
 import { createMemo, createSignal, For, Show } from 'solid-js'
 
+import { ApiError } from '@/shared/api/api-error'
 import {
   createScheduleFromChat,
   DEFAULT_SCHEDULE_TIMEZONE,
   DELEGABLE_SCHEDULE_TOOLS,
+  loadDelegableScheduleTools,
+  renewScheduleApproval,
   SCHEDULE_CONTRACT_DEFAULT_DAYS,
   SCHEDULE_CONTRACT_MAX_DAYS,
   SCHEDULE_PRESETS,
   scheduleContractExpiry,
+  scheduleDelegableToolsEnabled,
+  type ScheduleContractTool,
   type ScheduleFromChatInput,
 } from '@/shared/api/schedule-from-chat'
 import { translateApiError, useI18n } from '@/shared/i18n'
@@ -54,6 +59,17 @@ export interface ScheduleDialogProps {
   readonly seedScheduleExpr?: string
   readonly threadOriginHint: 'composer' | 'message-action'
   readonly onCreated?: (id: string) => void
+  /**
+   * Renewal mode (O-10): the dialog renews the approval of the existing schedule `cronId` in place and
+   * creates nothing. Only the approved tools and the approval's length can change, so the name, task,
+   * recurrence and timezone are not shown. `tools` are the tools the lapsed approval named.
+   */
+  readonly renewal?: { readonly cronId: string; readonly tools: readonly ScheduleContractTool[] }
+  readonly onRenewed?: (id: string) => void
+  /** The server has no in-place renewal (a typed not_supported). The caller then opens the create dialog instead. */
+  readonly onRenewalUnsupported?: () => void
+  /** A temporary or zero-retention chat: scheduling is refused there, so no tool list is asked for and no consent card shows. */
+  readonly zeroRetention?: boolean
 }
 
 function firstPresetId(): string {
@@ -85,7 +101,22 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
   const [customExpr, setCustomExpr] = createSignal(customExprFor(props.seedScheduleExpr))
   const [timezoneAdvanced, setTimezoneAdvanced] = createSignal(false)
   const [timezone, setTimezone] = createSignal(DEFAULT_SCHEDULE_TIMEZONE)
-  const [contractToolNames, setContractToolNames] = createSignal<string[]>([])
+  // The tools a new schedule may approve. With VITE_SCHEDULE_DELEGABLE_TOOLS_ENABLED on, the org's delegable list is
+  // asked for when the dialog opens (it is mounted only while open), once per tab and org, and the card shows a short
+  // loading line until it answers. A renewal offers the tools its lapsed approval named. A chat that keeps no data
+  // loads nothing. Off, the list is DELEGABLE_SCHEDULE_TOOLS.
+  const loadsDelegableTools = !props.renewal && !props.zeroRetention && scheduleDelegableToolsEnabled()
+  const [delegableTools, setDelegableTools] = createSignal<readonly ScheduleContractTool[] | null>(
+    loadsDelegableTools ? null : DELEGABLE_SCHEDULE_TOOLS,
+  )
+  if (loadsDelegableTools) void loadDelegableScheduleTools(orgId()).then(setDelegableTools)
+  const offeredTools = createMemo<readonly ScheduleContractTool[]>(() =>
+    props.renewal ? props.renewal.tools : (delegableTools() ?? []),
+  )
+  const toolsLoading = () => !props.renewal && delegableTools() === null
+  // A renewal starts with the lapsed approval's tools selected; a new schedule starts with none.
+  const initialToolNames = (): string[] => (props.renewal ? props.renewal.tools.map((tool) => tool.tool) : [])
+  const [contractToolNames, setContractToolNames] = createSignal<string[]>(initialToolNames())
   const [contractDays, setContractDays] = createSignal(SCHEDULE_CONTRACT_DEFAULT_DAYS)
   const [submitting, setSubmitting] = createSignal(false)
   const [errorMessage, setErrorMessage] = createSignal<string | undefined>(undefined)
@@ -103,7 +134,7 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
     setCustomExpr(customExprFor(props.seedScheduleExpr))
     setTimezoneAdvanced(false)
     setTimezone(DEFAULT_SCHEDULE_TIMEZONE)
-    setContractToolNames([])
+    setContractToolNames(initialToolNames())
     setContractDays(SCHEDULE_CONTRACT_DEFAULT_DAYS)
     setErrorMessage(undefined)
   }
@@ -114,7 +145,45 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
     props.onClose()
   }
 
+  async function submitRenewal(): Promise<void> {
+    const id = orgId()
+    const renewal = props.renewal
+    if (!renewal || !id || submitting()) return
+    const approvedTools = offeredTools().filter((tool) => contractToolNames().includes(tool.tool))
+    if (approvedTools.length === 0) {
+      setErrorMessage(i18n.tr('Velg minst ett verktøy å godkjenne.', 'Choose at least one tool to approve.'))
+      return
+    }
+    setSubmitting(true)
+    setErrorMessage(undefined)
+    try {
+      await renewScheduleApproval({
+        orgId: id,
+        cronId: renewal.cronId,
+        contract: { tools: approvedTools, expiresAt: scheduleContractExpiry(contractDays()) },
+      })
+      reset()
+      props.onRenewed?.(renewal.cronId)
+      props.onClose()
+    } catch (err) {
+      // No in-place renewal on this server: the caller opens the create dialog, which is what a schedule did before.
+      if (err instanceof ApiError && err.code === 'not_supported' && props.onRenewalUnsupported) {
+        props.onRenewalUnsupported()
+        return
+      }
+      setErrorMessage(
+        translateApiError(err, i18n.tr, {
+          no: 'Kunne ikke fornye godkjenningen.',
+          en: 'Could not renew the approval.',
+        }),
+      )
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   async function submit(): Promise<void> {
+    if (props.renewal) return submitRenewal()
     const id = orgId()
     const trimmedName = name().trim()
     const trimmedExpr = scheduleExpr()
@@ -131,7 +200,7 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
     setSubmitting(true)
     setErrorMessage(undefined)
     try {
-      const approvedTools = DELEGABLE_SCHEDULE_TOOLS.filter((tool) => contractToolNames().includes(tool.tool))
+      const approvedTools = offeredTools().filter((tool) => contractToolNames().includes(tool.tool))
       const input: ScheduleFromChatInput = {
         orgId: id,
         name: trimmedName,
@@ -176,120 +245,139 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
       >
         <header>
           <h3 id="schedule-dialog-title">
-            <CalendarClock size={16} aria-hidden="true" /> {i18n.tr('Planlegg denne forespørselen', 'Schedule this request')}
+            <CalendarClock size={16} aria-hidden="true" />{' '}
+            {props.renewal
+              ? i18n.tr('Forny godkjenning', 'Renew approval')
+              : i18n.tr('Planlegg denne forespørselen', 'Schedule this request')}
           </h3>
           <button type="button" onClick={close} aria-label={i18n.tr('Lukk', 'Close')}>
             <X size={16} />
           </button>
         </header>
 
-        <label class="verevon-schedule-dialog__field">
-          <span>{i18n.tr('Navn', 'Name')}</span>
-          <input
-            value={name()}
-            maxlength={120}
-            placeholder={i18n.tr('f.eks. Daglig oppsummering', 'e.g. Daily summary')}
-            onInput={(event) => setName(event.currentTarget.value)}
-            disabled={submitting()}
-          />
-        </label>
-
-        <Show when={props.goalEditable || !props.seedGoal.trim()}>
+        <Show when={!props.renewal}>
           <label class="verevon-schedule-dialog__field">
-            <span>{i18n.tr('Oppgave', 'Task')}</span>
-            <textarea
-              value={goal()}
-              maxlength={4000}
-              rows={3}
-              placeholder={i18n.tr('Beskriv hva Verevon skal undersøke eller oppsummere ved hver kjøring.', 'Describe what Verevon should investigate or summarize on each run.')}
-              onInput={(event) => setGoal(event.currentTarget.value)}
+            <span>{i18n.tr('Navn', 'Name')}</span>
+            <input
+              value={name()}
+              maxlength={120}
+              placeholder={i18n.tr('f.eks. Daglig oppsummering', 'e.g. Daily summary')}
+              onInput={(event) => setName(event.currentTarget.value)}
               disabled={submitting()}
             />
           </label>
-        </Show>
 
-        <label class="verevon-schedule-dialog__field">
-          <span>{i18n.tr('Gjentakelse', 'Recurrence')}</span>
-          <select
-            value={presetId()}
-            onChange={(event) => setPresetId(event.currentTarget.value)}
-            disabled={submitting()}
-          >
-            <For each={SCHEDULE_PRESETS}>
-              {(preset) => <option value={preset.id}>{i18n.tr(preset.labelNo, preset.labelEn)}</option>}
-            </For>
-          </select>
-        </label>
-
-        <Show when={isCustom()}>
-          <label class="verevon-schedule-dialog__field">
-            <span>{i18n.tr('Cron-uttrykk', 'Cron expression')}</span>
-            <input
-              value={customExpr()}
-              placeholder={i18n.tr('min time dag måned ukedag — f.eks. 0 9 * * 1', 'min hour day month weekday — e.g. 0 9 * * 1')}
-              onInput={(event) => setCustomExpr(event.currentTarget.value)}
-              disabled={submitting()}
-            />
-            <small>{i18n.tr('5 felt. Eksempel: «0 9 * * 1» = hver mandag kl. 09:00.', '5 fields. Example: "0 9 * * 1" = every Monday at 09:00.')}</small>
-          </label>
-        </Show>
-
-        <div class="verevon-schedule-dialog__field">
-          <span>{i18n.tr('Tidssone', 'Timezone')}</span>
-          <Show
-            when={timezoneAdvanced()}
-            fallback={
-              <div class="verevon-schedule-dialog__timezone-fixed">
-                <span>{timezone()}</span>
-                <button type="button" onClick={() => setTimezoneAdvanced(true)} disabled={submitting()}>
-                  {i18n.tr('Endre', 'Change')}
-                </button>
-              </div>
-            }
-          >
-            <input
-              value={timezone()}
-              placeholder={i18n.tr('Europe/Oslo', 'Europe/Oslo')}
-              onInput={(event) => setTimezone(event.currentTarget.value)}
-              disabled={submitting()}
-            />
+          <Show when={props.goalEditable || !props.seedGoal.trim()}>
+            <label class="verevon-schedule-dialog__field">
+              <span>{i18n.tr('Oppgave', 'Task')}</span>
+              <textarea
+                value={goal()}
+                maxlength={4000}
+                rows={3}
+                placeholder={i18n.tr('Beskriv hva Verevon skal undersøke eller oppsummere ved hver kjøring.', 'Describe what Verevon should investigate or summarize on each run.')}
+                onInput={(event) => setGoal(event.currentTarget.value)}
+                disabled={submitting()}
+              />
+            </label>
           </Show>
-        </div>
 
-        <div class="verevon-schedule-dialog__field">
-          <span>{i18n.tr('Hva kjøringen kan gjøre', 'What the run may do')}</span>
-          <div class="verevon-schedule-dialog__policy" role="radiogroup" aria-label={i18n.tr('Hva kjøringen kan gjøre', 'What the run may do')}>
-            <label class="verevon-schedule-dialog__policy-option">
-              <input type="radio" name="schedule-policy" checked />
-              {i18n.tr('Kun utkast (standard)', 'Draft only (default)')}
+          <label class="verevon-schedule-dialog__field">
+            <span>{i18n.tr('Gjentakelse', 'Recurrence')}</span>
+            <select
+              value={presetId()}
+              onChange={(event) => setPresetId(event.currentTarget.value)}
+              disabled={submitting()}
+            >
+              <For each={SCHEDULE_PRESETS}>
+                {(preset) => <option value={preset.id}>{i18n.tr(preset.labelNo, preset.labelEn)}</option>}
+              </For>
+            </select>
+          </label>
+
+          <Show when={isCustom()}>
+            <label class="verevon-schedule-dialog__field">
+              <span>{i18n.tr('Cron-uttrykk', 'Cron expression')}</span>
+              <input
+                value={customExpr()}
+                placeholder={i18n.tr('min time dag måned ukedag — f.eks. 0 9 * * 1', 'min hour day month weekday — e.g. 0 9 * * 1')}
+                onInput={(event) => setCustomExpr(event.currentTarget.value)}
+                disabled={submitting()}
+              />
+              <small>{i18n.tr('5 felt. Eksempel: «0 9 * * 1» = hver mandag kl. 09:00.', '5 fields. Example: "0 9 * * 1" = every Monday at 09:00.')}</small>
             </label>
-            <label class="verevon-schedule-dialog__policy-option verevon-schedule-dialog__policy-option--disabled">
-              <input type="radio" name="schedule-policy" disabled />
-              {i18n.tr('Tillat handlinger, med godkjenning', 'Allow actions, with approval')}
-              <small>
-                {i18n.tr(
-                  'Kommer senere — planlagte kjøringer kan ikke stoppe opp og vente på godkjenning ennå.',
-                  'Coming later — scheduled runs cannot yet pause and wait for approval.',
-                )}
-              </small>
-            </label>
+          </Show>
+
+          <div class="verevon-schedule-dialog__field">
+            <span>{i18n.tr('Tidssone', 'Timezone')}</span>
+            <Show
+              when={timezoneAdvanced()}
+              fallback={
+                <div class="verevon-schedule-dialog__timezone-fixed">
+                  <span>{timezone()}</span>
+                  <button type="button" onClick={() => setTimezoneAdvanced(true)} disabled={submitting()}>
+                    {i18n.tr('Endre', 'Change')}
+                  </button>
+                </div>
+              }
+            >
+              <input
+                value={timezone()}
+                placeholder={i18n.tr('Europe/Oslo', 'Europe/Oslo')}
+                onInput={(event) => setTimezone(event.currentTarget.value)}
+                disabled={submitting()}
+              />
+            </Show>
           </div>
-        </div>
+
+          <div class="verevon-schedule-dialog__field">
+            <span>{i18n.tr('Hva kjøringen kan gjøre', 'What the run may do')}</span>
+            <div class="verevon-schedule-dialog__policy" role="radiogroup" aria-label={i18n.tr('Hva kjøringen kan gjøre', 'What the run may do')}>
+              <label class="verevon-schedule-dialog__policy-option">
+                <input type="radio" name="schedule-policy" checked />
+                {i18n.tr('Kun utkast (standard)', 'Draft only (default)')}
+              </label>
+              <label class="verevon-schedule-dialog__policy-option verevon-schedule-dialog__policy-option--disabled">
+                <input type="radio" name="schedule-policy" disabled />
+                {i18n.tr('Tillat handlinger, med godkjenning', 'Allow actions, with approval')}
+                <small>
+                  {i18n.tr(
+                    'Kommer senere — planlagte kjøringer kan ikke stoppe opp og vente på godkjenning ennå.',
+                    'Coming later — scheduled runs cannot yet pause and wait for approval.',
+                  )}
+                </small>
+              </label>
+            </div>
+          </div>
+        </Show>
 
         <Show
-          when={DELEGABLE_SCHEDULE_TOOLS.length > 0}
+          when={offeredTools().length > 0}
           fallback={
+            <Show
+              when={!toolsLoading()}
+              fallback={
+                <p class="verevon-schedule-dialog__note" data-testid="schedule-consent-loading">
+                  {i18n.tr('Laster verktøyene som kan godkjennes …', 'Loading the tools that can be approved …')}
+                </p>
+              }
+            >
             <p class="verevon-schedule-dialog__note" data-testid="schedule-consent-empty">
-              {i18n.tr(
-                'Ingen verktøy kan godkjennes for kjøring uten deg ennå, så planen forblir kun utkast.',
-                'No tool can yet be approved for a run without you, so this schedule stays draft only.',
-              )}
+              {props.renewal
+                ? i18n.tr(
+                    'Den utløpte godkjenningen navnga ingen verktøy som kan godkjennes på nytt.',
+                    'The lapsed approval named no tool that can be approved again.',
+                  )
+                : i18n.tr(
+                    'Ingen verktøy kan godkjennes for kjøring uten deg ennå, så planen forblir kun utkast.',
+                    'No tool can yet be approved for a run without you, so this schedule stays draft only.',
+                  )}
             </p>
+            </Show>
           }
         >
           <fieldset class="verevon-schedule-dialog__field" data-testid="schedule-consent-card" disabled={submitting()}>
             <legend>{i18n.tr('Godkjenning for planlagte kjøringer', 'Approval for scheduled runs')}</legend>
-            <For each={DELEGABLE_SCHEDULE_TOOLS}>
+            <For each={offeredTools()}>
               {(tool) => (
                 <label class="verevon-schedule-dialog__policy-option">
                   <input
@@ -322,9 +410,11 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
           </fieldset>
         </Show>
 
-        <p class="verevon-schedule-dialog__note">
-          {i18n.tr('Kjører i din personlige arbeidsflate.', 'Runs in your personal workspace.')}
-        </p>
+        <Show when={!props.renewal}>
+          <p class="verevon-schedule-dialog__note">
+            {i18n.tr('Kjører i din personlige arbeidsflate.', 'Runs in your personal workspace.')}
+          </p>
+        </Show>
 
         <Show when={errorMessage()}>
           {(message) => <p class="verevon-schedule-dialog__error" role="alert">{message()}</p>}
@@ -340,10 +430,20 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
           <button
             type="button"
             class="verevon-schedule-dialog__submit"
-            disabled={!name().trim() || !goal().trim() || !scheduleExpr() || submitting()}
+            disabled={
+              props.renewal
+                ? offeredTools().length === 0 || submitting()
+                : !name().trim() || !goal().trim() || !scheduleExpr() || submitting()
+            }
             onClick={() => void submit()}
           >
-            {submitting() ? i18n.tr('Oppretter …', 'Creating…') : i18n.tr('Opprett plan', 'Create schedule')}
+            {props.renewal
+              ? submitting()
+                ? i18n.tr('Fornyer …', 'Renewing…')
+                : i18n.tr('Forny godkjenning', 'Renew approval')
+              : submitting()
+                ? i18n.tr('Oppretter …', 'Creating…')
+                : i18n.tr('Opprett plan', 'Create schedule')}
           </button>
         </footer>
       </section>

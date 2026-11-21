@@ -103,6 +103,8 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
                 .delete(delete_plugin_kill),
         )
         .route("/api/v1/cron", get(list_cron).post(create_cron))
+        // F-f02-15: the delegable read tools a schedule consent card may offer. Registered before `{cron_id}`.
+        .route("/api/v1/cron/delegable-tools", get(list_delegable_tools))
         .route(
             "/api/v1/cron/{cron_id}",
             post(update_cron).delete(delete_cron),
@@ -125,7 +127,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
     };
     // EP-11 S1: the answer the Skills page reads to show a member's own skills. Routed only while
     // SKILL_MEMBER_AUTHORING is on; off, the path answers as it did before (a GET there is a 405).
-    let router = if skill_member_authoring_enabled() {
+    let router = if state.space_features.skill_member_authoring {
         router.route("/api/v1/skills/authoring", get(skill_authoring))
     } else {
         router
@@ -277,12 +279,6 @@ async fn list_skill_versions(
     .await
 }
 
-/// Whether the `SKILL_MEMBER_AUTHORING` switch (EP-11 S1) lets a member author private skills. Read
-/// strictly: only the literal `true` enables it. Read per request, like `schedule_contract_enabled`.
-fn skill_member_authoring_enabled() -> bool {
-    std::env::var("SKILL_MEMBER_AUTHORING").is_ok_and(|value| value == "true")
-}
-
 /// The fields a private skill is created with. Anything else a member sends in a create is dropped.
 const PRIVATE_SKILL_FIELDS: [&str; 7] = [
     "name",
@@ -389,7 +385,7 @@ async fn create_skill(
     let forwarded = if can_author_skills(&state, &user).await {
         body
     } else {
-        match member_private_skill_body(&body, skill_member_authoring_enabled()) {
+        match member_private_skill_body(&body, state.space_features.skill_member_authoring) {
             Some(own) => own,
             None => {
                 return (
@@ -433,7 +429,7 @@ async fn update_skill(
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let admin = can_author_skills(&state, &user).await;
-    if !admin && !skill_member_authoring_enabled() {
+    if !admin && !state.space_features.skill_member_authoring {
         return (
             StatusCode::FORBIDDEN,
             Json(error(
@@ -483,7 +479,7 @@ async fn delete_skill(
     Path(skill_id): Path<String>,
 ) -> impl IntoResponse {
     let admin = can_author_skills(&state, &user).await;
-    if !admin && !skill_member_authoring_enabled() {
+    if !admin && !state.space_features.skill_member_authoring {
         return (
             StatusCode::FORBIDDEN,
             Json(error(
@@ -536,7 +532,7 @@ async fn proxy_skill_draft_call(
     method: Method,
 ) -> axum::response::Response {
     let admin = can_author_skills(state, user).await;
-    if !admin && !skill_member_authoring_enabled() {
+    if !admin && !state.space_features.skill_member_authoring {
         return (
             StatusCode::FORBIDDEN,
             Json(error(
@@ -644,7 +640,8 @@ async fn import_skill(
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let admin = can_author_skills(&state, &user).await;
-    let Some(forwarded) = skill_import_body(&body, admin, skill_member_authoring_enabled()) else {
+    let member_switch = state.space_features.skill_member_authoring;
+    let Some(forwarded) = skill_import_body(&body, admin, member_switch) else {
         return (
             StatusCode::FORBIDDEN,
             Json(error(
@@ -1001,6 +998,83 @@ async fn list_cron(
     .await
 }
 
+/// The read tools a schedule may be approved to use unattended (F-f02-15), as capability-core states the org's
+/// delegable list. The BFF takes org and user from the verified session and forwards neither from the browser;
+/// capability-core decides which tools are delegable. A failure answers the typed error envelope.
+async fn list_delegable_tools(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let token = shared::model_token(&state, &user, &headers).await;
+    let capability = match shared::required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
+    };
+    let url = format!("{}/v1/cron/delegable-tools", state.model_gateway_url);
+    let (status, Json(payload)) = shared::proxy_model_json_with_capability(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await;
+    if !status.is_success() {
+        let body = if payload.get("error").is_some() {
+            payload
+        } else {
+            error(
+                "delegable_tools_unavailable",
+                "The schedule tools could not be read.",
+            )
+        };
+        return (status, Json(body)).into_response();
+    }
+    (
+        StatusCode::OK,
+        Json(json!({ "data": delegable_tool_rows(&payload) })),
+    )
+        .into_response()
+}
+
+/// The rows a consent card may offer (F-f02-15): a `{tool, capability}` pair of non-empty strings, each tool once,
+/// at most 64. Any other row is dropped, and no field beyond the two is copied, so nothing else an upstream row
+/// carries reaches the browser. The rows come from `data`, or from a bare list.
+fn delegable_tool_rows(payload: &Value) -> Vec<Value> {
+    const MAX_DELEGABLE_TOOL_ROWS: usize = 64;
+    let rows: &[Value] = payload
+        .get("data")
+        .and_then(Value::as_array)
+        .or_else(|| payload.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut seen = std::collections::HashSet::new();
+    let mut kept = Vec::new();
+    for row in rows {
+        if kept.len() == MAX_DELEGABLE_TOOL_ROWS {
+            break;
+        }
+        let tool = row
+            .get("tool")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        let capability = row
+            .get("capability")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        if tool.is_empty() || capability.is_empty() || !seen.insert(tool.to_owned()) {
+            continue;
+        }
+        kept.push(json!({ "tool": tool, "capability": capability }));
+    }
+    kept
+}
+
 /// The recent fires of one schedule, for "See results". Creator-scoped like
 /// update and delete: an org admin/owner, or the schedule's own creator. The
 /// fires themselves are read from capability-core for the verified org.
@@ -1325,14 +1399,6 @@ async fn relay_event_trigger_capability(
     .into_response()
 }
 
-/// SCHEDULE_CONTRACT_ENABLED (DEC-16). Read strictly: only the literal `true`
-/// lets a create carry a stored-consent contract to Control, so anything else
-/// leaves schedules draft-only.
-// Read per request, not from AppState: the state is not owned by this change.
-fn schedule_contract_enabled() -> bool {
-    std::env::var("SCHEDULE_CONTRACT_ENABLED").is_ok_and(|value| value == "true")
-}
-
 /// Create a cron schedule (`name`, `schedule_expr`, `timezone`, `task_template`,
 /// `enabled`). Proxied to model-gateway `/v1/cron` → capability-core, which
 /// validates the cron expression and seeds next_fire_at.
@@ -1405,7 +1471,7 @@ async fn create_cron(
         &mut body,
         &schedule_id,
         &idempotency_key,
-        schedule_contract_enabled(),
+        state.space_features.schedule_contract_enabled,
     )
     .await
     {
@@ -1480,7 +1546,7 @@ async fn update_cron(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(cron_id): Path<String>,
-    Json(body): Json<Value>,
+    Json(mut body): Json<Value>,
 ) -> impl IntoResponse {
     let token = shared::model_token(&state, &user, &headers).await;
     let capability = match shared::required_capability_token(&state, &user, &headers).await {
@@ -1499,6 +1565,33 @@ async fn update_cron(
     {
         return response.into_response();
     }
+    // O-10: a PATCH that carries a new `approval_contract` renews the schedule's approval in place.
+    // With SCHEDULE_CONTRACT_ENABLED off there is no renewal to offer: the PATCH is refused with the
+    // typed not_supported before anything is forwarded, and the browser falls back to creating a schedule.
+    if body.get("approval_contract").is_some() {
+        if !state.space_features.schedule_contract_enabled {
+            return (
+                StatusCode::NOT_IMPLEMENTED,
+                Json(error(
+                    "not_supported",
+                    "Renewing a schedule's approval is not enabled on this server.",
+                )),
+            )
+                .into_response();
+        }
+        if let Err(response) = inject_schedule_renewal(
+            &state,
+            &user,
+            &cron_id,
+            token.as_deref(),
+            &capability,
+            &mut body,
+        )
+        .await
+        {
+            return response.into_response();
+        }
+    }
     let url = format!(
         "{}/v1/cron/{}",
         state.model_gateway_url,
@@ -1515,6 +1608,66 @@ async fn update_cron(
     )
     .await
     .into_response()
+}
+
+/// Reads the schedule being renewed and swaps a Control renewal decision into `body` (O-10). The
+/// schedule row is capability-core's own, fetched with the caller's tokens, so the template Control
+/// binds is the one that will be stored; only the schedule's creator gets past this step.
+async fn inject_schedule_renewal(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    cron_id: &str,
+    token: Option<&str>,
+    capability: &str,
+    body: &mut Value,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let Some(org_id) = user
+        .active_org_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership is required to renew a schedule.",
+            )),
+        ));
+    };
+    let url = format!(
+        "{}/v1/cron/{}",
+        state.model_gateway_url,
+        urlencoding::encode(cron_id)
+    );
+    let (status, Json(schedule)) = shared::proxy_model_json_with_capability(
+        state,
+        Method::GET,
+        &url,
+        None,
+        token,
+        Some(capability),
+        user,
+    )
+    .await;
+    if !status.is_success() {
+        return Err((status, Json(schedule)));
+    }
+    let counter = CRON_CREATE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let idempotency_key = format!("space-cron-renew:{cron_id}:{nanos}-{counter}");
+    crate::domains::spaces::inject_schedule_renewal_context(
+        state,
+        user,
+        org_id,
+        &schedule,
+        cron_id,
+        body,
+        &idempotency_key,
+    )
+    .await
 }
 
 /// Delete a cron schedule. Admin-gated for anyone else's schedule; relaxed
@@ -2271,8 +2424,9 @@ mod tests {
     use super::{
         apply_agent_draft_preview, apply_preview_persona, builder_session_authority,
         can_author_own_schedule, can_run_schedule_now, cron_create_names_explicit_space,
-        draft_from_request, member_private_skill_body, parse_builder_definition, skill_import_body,
-        version_to_api, BuilderDefinition, SKILL_IMPORT_BODY_LIMIT_BYTES,
+        delegable_tool_rows, draft_from_request, member_private_skill_body,
+        parse_builder_definition, skill_import_body, version_to_api, BuilderDefinition,
+        SKILL_IMPORT_BODY_LIMIT_BYTES,
     };
     use crate::middleware::AuthenticatedUser;
     use axum::{body::Body, http::Request};
@@ -2461,6 +2615,99 @@ mod tests {
             .all(|request| request.url.path() != "/v1/cron/cron_1/fires"));
     }
 
+    // list_delegable_tools (F-f02-15) — the session decides the org, only the two fields of a row reach the
+    // browser, and an upstream failure answers the typed envelope.
+    #[test]
+    fn delegable_rows_keep_each_tool_once_and_only_its_two_fields() {
+        let payload = json!({"data": [
+            {"tool": " web_search ", "capability": "web", "class": "read", "secret": "upstream-only"},
+            {"tool": "web_search", "capability": "web"},
+            {"tool": "", "capability": "web"},
+            {"tool": "fs_read"},
+            {"tool": 7, "capability": "web"},
+        ]});
+        assert_eq!(
+            delegable_tool_rows(&payload),
+            vec![json!({"tool": "web_search", "capability": "web"})]
+        );
+        let many: Vec<Value> = (0..100)
+            .map(|n| json!({"tool": format!("tool_{n}"), "capability": "read"}))
+            .collect();
+        assert_eq!(delegable_tool_rows(&json!({"data": many})).len(), 64);
+        let bare = json!([{"tool": "web_search", "capability": "web"}]);
+        assert_eq!(delegable_tool_rows(&bare).len(), 1);
+        assert!(delegable_tool_rows(&json!({"error": {"code": "x"}})).is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_delegable_tools_forwards_the_session_scope_and_only_two_fields() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (auth, user_core, model) = fires_test_servers("user-1").await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/cron/delegable-tools"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
+                {"tool": "web_search", "capability": "web", "upstream_secret": "must-not-leak"}
+            ]})))
+            .mount(&model)
+            .await;
+        let state = fires_test_state(&auth, &user_core, &model);
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/cron/delegable-tools")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .header("x-verevon-org-id", "org-forged")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(
+            body,
+            json!({"data": [{"tool": "web_search", "capability": "web"}]})
+        );
+        let model_requests = model.received_requests().await.unwrap();
+        let listed = model_requests
+            .iter()
+            .find(|request| request.url.path() == "/v1/cron/delegable-tools")
+            .expect("the list reaches model-gateway");
+        assert!(listed.headers.get("x-verevon-org-id").is_none());
+    }
+
+    #[tokio::test]
+    async fn list_delegable_tools_answers_the_typed_envelope_when_the_upstream_fails() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (auth, user_core, model) = fires_test_servers("user-1").await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/cron/delegable-tools"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&model)
+            .await;
+        let state = fires_test_state(&auth, &user_core, &model);
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/cron/delegable-tools")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["error"]["code"], "delegable_tools_unavailable");
+    }
+
     // run_cron_now (EP-6 S2) — the creator only, never an admin on someone
     // else's schedule; only the request id travels on.
 
@@ -2549,6 +2796,150 @@ mod tests {
         assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
         assert_eq!(body["error"]["code"], "run_now_not_creator");
         assert!(run_requests(&model.received_requests().await.unwrap()).is_empty());
+    }
+
+    // O-10: a PATCH that carries a new approval_contract renews the schedule in place. The BFF reads
+    // the schedule, asks Control for a renewal decision and forwards the contract with that decision.
+
+    /// Answers the Control decision call with a renewal decision that echoes the request's own key.
+    struct RenewalDecision;
+
+    impl wiremock::Respond for RenewalDecision {
+        fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+            let body: Value = serde_json::from_slice(&request.body).unwrap_or_default();
+            ResponseTemplate::new(200).set_body_json(json!({"data": {
+                "token": "schedule-renew-token",
+                "decision": {
+                    "space_ref": "personal-1", "subject_id": "user-1",
+                    "service_audience": "model-plane-capability-core", "action_id": "model.cron.create",
+                    "action_schema_hash": "sha256:space-cron-renew-v1",
+                    "idempotency_key": body["idempotency_key"]
+                }
+            }}))
+        }
+    }
+
+    const RENEWED_CONTRACT: &str = r#"{"expires_at":"2026-12-20T10:00:00Z","max_rounds":6,"max_tokens_per_round":2048,"tools":[{"approved_at":"2026-11-20T10:00:00Z","capability":"cap.tool.web_search","class":"read","tool":"web_search"}],"v":1}"#;
+
+    async fn renew_through_router(
+        contracts_enabled: bool,
+    ) -> (axum::http::StatusCode, Value, MockServer, MockServer) {
+        let (auth, user_core, model) = fires_test_servers("user-1").await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/cron/cron_1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "cron_1", "creator_subject_id": "user-1", "space_ref": "personal-1",
+                "task_template": {"kind": "cron", "description": "summarise", "approval_contract": "{}"}
+            })))
+            .with_priority(1)
+            .mount(&model)
+            .await;
+        Mock::given(wm_method("PATCH"))
+            .and(wm_path("/v1/cron/cron_1"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"id": "cron_1", "renewed": true})),
+            )
+            .mount(&model)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/schedule-create-decision"))
+            .respond_with(RenewalDecision)
+            .mount(&user_core)
+            .await;
+        let mut state = fires_test_state(&auth, &user_core, &model);
+        state.space_features.schedule_contract_enabled = contracts_enabled;
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/cron/cron_1")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "approval_contract": RENEWED_CONTRACT, "enabled": true,
+                            "space_schedule_renew_decision": "forged", "idempotency_key": "forged"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or_default();
+        (status, body, user_core, model)
+    }
+
+    #[tokio::test]
+    async fn update_cron_renews_in_place_with_a_control_decision_in_place_of_the_browsers() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, _body, user_core, model) = renew_through_router(true).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        let patches: Vec<_> = model
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.method.as_str() == "PATCH")
+            .collect();
+        assert_eq!(
+            patches.len(),
+            1,
+            "the renewal is one PATCH of the existing schedule"
+        );
+        let forwarded: Value = serde_json::from_slice(&patches[0].body).unwrap();
+        assert_eq!(forwarded["approval_contract"], RENEWED_CONTRACT);
+        assert_eq!(forwarded["enabled"], true);
+        assert_eq!(
+            forwarded["space_schedule_renew_decision"],
+            "schedule-renew-token"
+        );
+        assert!(forwarded["idempotency_key"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("space-cron-renew:cron_1:"));
+        // No second schedule is created and Control was asked exactly once, for a renewal.
+        assert!(model
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.method.as_str() != "POST"));
+        let control: Vec<_> = user_core
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.url.path().ends_with("/schedule-create-decision"))
+            .collect();
+        assert_eq!(control.len(), 1);
+        let asked: Value = serde_json::from_slice(&control[0].body).unwrap();
+        assert_eq!(asked["renewal_of"], "cron_1");
+        assert_eq!(asked["schedule_id"], "cron_1");
+    }
+
+    #[tokio::test]
+    async fn update_cron_refuses_a_renewal_as_not_supported_while_contracts_are_off() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, user_core, model) = renew_through_router(false).await;
+        assert_eq!(status, axum::http::StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(body["error"]["code"], "not_supported");
+        // Nothing is forwarded upstream and Control is never asked, so no browser-supplied decision travels.
+        assert!(model
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.method.as_str() != "PATCH"));
+        assert!(user_core
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| !request.url.path().ends_with("/schedule-create-decision")));
     }
 
     // EP-6 S8 — the agent builder gate, the draft shape, and the preview persona.
@@ -2936,11 +3327,8 @@ mod tests {
         switch: Option<&str>,
     ) -> (axum::http::StatusCode, Value) {
         let (auth, user_core, model) = servers;
-        let state = fires_test_state(auth, user_core, model);
-        match switch {
-            Some(value) => std::env::set_var("SKILL_MEMBER_AUTHORING", value),
-            None => std::env::remove_var("SKILL_MEMBER_AUTHORING"),
-        }
+        let mut state = fires_test_state(auth, user_core, model);
+        state.space_features.skill_member_authoring = switch == Some("true");
         let builder = Request::builder()
             .method(method)
             .uri(uri)
@@ -2953,7 +3341,6 @@ mod tests {
         }
         .unwrap();
         let response = crate::build_router(state).oneshot(request).await.unwrap();
-        std::env::remove_var("SKILL_MEMBER_AUTHORING");
         let status = response.status();
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))

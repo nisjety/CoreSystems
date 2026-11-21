@@ -15,6 +15,7 @@ import {
   browserAssistKindOf,
   browserAssistNoTakeOverLine,
   browserRiskLabel,
+  browserSiteConsentOf,
   causeCodeOf,
   type ApprovalCause,
   type ApprovalCopyI18n,
@@ -166,6 +167,63 @@ describe('a help request the agent raised on a wall (EP-1 S2)', () => {
     for (const line of [browserAssistAttentionLine(en), browserAssistAttentionLine(no)]) {
       expect(line).not.toMatch(/example\.com|\.[a-z]{2,}\b/)
     }
+  })
+})
+
+describe('a site the site policy asks the person about (WS21-S6)', () => {
+  const consent = (extra: Partial<ApprovalCause> = {}) => ({ cause: cause('browser_site_consent', extra) })
+
+  it('names the host and the highest level the policy allows, in both languages', () => {
+    const read = consent({ host: 'shop.example.com', maxLevel: 'read' })
+    expect(approvalHeadline(read, en)).toBe('The agent wants to open a site')
+    expect(approvalHeadline(read, no)).toBe('Agenten vil åpne et nettsted')
+    expect(approvalReason(read, en)).toBe(
+      'The site policy asks you before the agent opens shop.example.com. At most, it may read the site.',
+    )
+    expect(approvalReason(read, no)).toBe(
+      'Organisasjonens regler spør deg før agenten åpner shop.example.com. Den kan høyst lese siden.',
+    )
+    const act = consent({ host: 'shop.example.com', maxLevel: 'act' })
+    expect(approvalReason(act, en)).toBe(
+      'The site policy asks you before the agent opens shop.example.com. At most, it may read the site and act on it.',
+    )
+    expect(approvalReason(act, no)).toBe(
+      'Organisasjonens regler spør deg før agenten åpner shop.example.com. Den kan høyst lese siden og handle på den.',
+    )
+  })
+
+  it('states no level it was not given, and reads a blank host as none', () => {
+    expect(approvalReason(consent(), en)).toBe('The site policy asks you before the agent opens a site.')
+    expect(approvalReason(consent({ host: '  ' }), no)).toBe(
+      'Organisasjonens regler spør deg før agenten åpner et nettsted.',
+    )
+    expect(approvalReason(consent({ host: 'shop.example.com' }), en)).not.toMatch(/At most/)
+  })
+
+  it('never shows a wire token in either language', () => {
+    for (const extra of [{}, { host: 'shop.example.com', maxLevel: 'act' as const }]) {
+      for (const read of [approvalHeadline, approvalReason] as const) {
+        for (const i18n of [no, en]) expect(read(consent(extra), i18n)).not.toMatch(/browser_site_consent|max_level|_/)
+      }
+    }
+  })
+
+  it('hands the consent card its host and level only when the pause names both', () => {
+    expect(browserSiteConsentOf(cause('browser_site_consent', { host: ' shop.example.com ', maxLevel: 'act' }))).toEqual({
+      host: 'shop.example.com',
+      maxLevel: 'act',
+    })
+    expect(browserSiteConsentOf(cause('browser_site_consent', { host: 'shop.example.com', maxLevel: 'read' }))).toEqual({
+      host: 'shop.example.com',
+      maxLevel: 'read',
+    })
+    // No host, a blank host, or no level stated: no card, so the pause keeps the generic copy.
+    for (const extra of [{}, { host: '  ', maxLevel: 'read' as const }, { host: 'shop.example.com' }, { maxLevel: 'act' as const }]) {
+      expect(browserSiteConsentOf(cause('browser_site_consent', extra)), JSON.stringify(extra)).toBeUndefined()
+    }
+    // Only this cause is a consent pause, even with a host and a level on it; and no cause at all is none.
+    expect(browserSiteConsentOf(cause('browser_human_assist', { host: 'shop.example.com', maxLevel: 'read' }))).toBeUndefined()
+    expect(browserSiteConsentOf(undefined)).toBeUndefined()
   })
 })
 

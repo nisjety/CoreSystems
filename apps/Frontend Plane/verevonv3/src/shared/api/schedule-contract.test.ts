@@ -1,16 +1,20 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { createCronSchedule } from './cron-client'
+import { createCronSchedule, renewCronScheduleApproval } from './cron-client'
 import {
   buildScheduleContractText,
   createScheduleFromChat,
+  renewalToolsOf,
+  renewScheduleApproval,
   scheduleContractExpiry,
+  scheduleRenewInPlaceEnabled,
   type ScheduleFromChatInput,
 } from './schedule-from-chat'
 
 vi.mock('./cron-client', () => ({
   createCronSchedule: vi.fn(async () => ({ id: 'cron-1' })),
   listCronSchedules: vi.fn(),
+  renewCronScheduleApproval: vi.fn(async () => ({})),
 }))
 
 const base: ScheduleFromChatInput = {
@@ -86,5 +90,66 @@ describe('createScheduleFromChat contract', () => {
     const text = sentTemplate().approval_contract
     expect(typeof text).toBe('string')
     expect(JSON.parse(text as string)).toMatchObject({ v: 1, expires_at: '2026-11-23T10:00:00Z' })
+  })
+})
+
+describe('renewScheduleApproval', () => {
+  beforeEach(() => {
+    vi.mocked(createCronSchedule).mockClear()
+    vi.mocked(renewCronScheduleApproval).mockClear()
+  })
+
+  it('renews the named schedule with the contract text and never creates a schedule', async () => {
+    await renewScheduleApproval({
+      orgId: 'org-1',
+      cronId: 'cron-9',
+      contract: { tools: [readTool], expiresAt: '2026-12-20T10:00:00Z' },
+    })
+
+    expect(createCronSchedule).not.toHaveBeenCalled()
+    expect(renewCronScheduleApproval).toHaveBeenCalledTimes(1)
+    const [orgId, cronId, text] = vi.mocked(renewCronScheduleApproval).mock.calls[0] as [string, string, string]
+    expect(orgId).toBe('org-1')
+    expect(cronId).toBe('cron-9')
+    const contract = JSON.parse(text) as { v: number; expires_at: string; tools: { tool: string; class: string; approved_at: string }[] }
+    expect(contract.v).toBe(1)
+    expect(contract.expires_at).toBe('2026-12-20T10:00:00Z')
+    expect(contract.tools.map((tool) => [tool.tool, tool.class])).toEqual([['web_search', 'read']])
+    expect(contract.tools[0]?.approved_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/)
+  })
+})
+
+describe('renewalToolsOf', () => {
+  it('reads the tools the lapsed approval named, once each', () => {
+    const text = buildScheduleContractText(
+      { tools: [readTool, { tool: 'web_fetch', capability: 'cap.tool.web_fetch' }], expiresAt: '2026-01-01T00:00:00Z' },
+      '2025-12-01T10:00:00Z',
+    )
+
+    expect(renewalToolsOf({ approval_contract: text })).toEqual([
+      readTool,
+      { tool: 'web_fetch', capability: 'cap.tool.web_fetch' },
+    ])
+  })
+
+  it('gives nothing to approve for a draft, a malformed contract or a non-object template', () => {
+    expect(renewalToolsOf({ kind: 'cron' })).toEqual([])
+    expect(renewalToolsOf({ approval_contract: 'not json' })).toEqual([])
+    expect(renewalToolsOf({ approval_contract: '{"tools":"web_search"}' })).toEqual([])
+    expect(renewalToolsOf({ approval_contract: '{"tools":[{"tool":1,"capability":"x"},{"tool":"a"}]}' })).toEqual([])
+    expect(renewalToolsOf(null)).toEqual([])
+    expect(renewalToolsOf('x')).toEqual([])
+  })
+})
+
+describe('scheduleRenewInPlaceEnabled', () => {
+  afterEach(() => vi.unstubAllEnvs())
+
+  it('is on only for the literal true', () => {
+    expect(scheduleRenewInPlaceEnabled()).toBe(false)
+    vi.stubEnv('VITE_SCHEDULE_DELEGABLE_TOOLS_ENABLED', '1')
+    expect(scheduleRenewInPlaceEnabled()).toBe(false)
+    vi.stubEnv('VITE_SCHEDULE_DELEGABLE_TOOLS_ENABLED', 'true')
+    expect(scheduleRenewInPlaceEnabled()).toBe(true)
   })
 })

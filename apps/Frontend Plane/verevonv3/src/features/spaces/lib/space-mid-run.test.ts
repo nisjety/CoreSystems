@@ -16,7 +16,7 @@ const TARGET: SpaceSteerTarget = { requestId: 'req-1', threadId: 'thr-1', spaceR
 
 // Solid 2 batches signal writes until a flush, and a read outside a reactive scope sees the last
 // committed value. Every step below is followed by `flush()` before the strip is read.
-function setup(options: { ended?: boolean } = {}) {
+function setup(options: { ended?: boolean; undelivered?: (requestId: string) => readonly string[] | undefined } = {}) {
   const queue = vi.fn<SpaceQueueCall>()
   const state = { ended: options.ended ?? false, minted: 0 }
   const midRun = createRoot(() =>
@@ -28,6 +28,7 @@ function setup(options: { ended?: boolean } = {}) {
         return `cm-${state.minted}`
       },
       settled: () => state.ended,
+      undelivered: options.undelivered,
     }),
   )
   return {
@@ -113,6 +114,32 @@ describe('createSpaceMidRun: a steered message (WS09-S2)', () => {
     expect(midRun.entries()[0]?.state).toBe('resent')
     expect(midRun.settle()).toEqual([{ content: 'Bruk gul ledning', clientMessageId: 'cm-1' }])
     expect(midRun.settle()).toEqual([])
+  })
+
+  // The answer came after the run had ended. The run's done frame says whether the loop took the message (F-f01-09).
+  it('is delivered, and not sent again, when the run ended before the answer and its done frame does not name it', async () => {
+    const { queue, midRun, end } = setup({ undelivered: () => [] })
+    queue.mockResolvedValueOnce({ outcome: 'queued', pending: 1, persisted: true })
+    end()
+
+    const outcome = await midRun.steer('Bruk gul ledning', TARGET)
+    flush()
+
+    expect(outcome).toBe('queued')
+    expect(midRun.entries()[0]?.state).toBe('delivered')
+    expect(midRun.settle()).toEqual([])
+  })
+
+  it('is held for a resend when the run ended before the answer and its done frame names it as never taken', async () => {
+    const { queue, midRun, end } = setup({ undelivered: () => ['cm-1'] })
+    queue.mockResolvedValueOnce({ outcome: 'queued', pending: 1, persisted: true })
+    end()
+
+    const outcome = await midRun.steer('Bruk gul ledning', TARGET)
+    flush()
+
+    expect(outcome).toBe('resend')
+    expect(midRun.settle()).toEqual([{ content: 'Bruk gul ledning', clientMessageId: 'cm-1' }])
   })
 
   it('is held for a resend under the id the gateway stored it with, when the run ended before taking it', async () => {
@@ -251,6 +278,47 @@ describe('createSpaceMidRun: settling the turn (WS09-S2)', () => {
     midRun.startTurn(false)
     flush()
     expect(midRun.entries()).toEqual([])
+  })
+
+  /**
+   * The done frame names the accepted messages the run never took (F-f01-09). One it does not name was taken,
+   * even when its `queued_input` frame never arrived, so it is not answered a second time.
+   */
+  it('sends again only the accepted message the done frame names, and marks one the run took delivered', async () => {
+    const { queue, midRun } = setup()
+    queue
+      .mockResolvedValueOnce({ outcome: 'queued', pending: 1, persisted: true })
+      .mockResolvedValueOnce({ outcome: 'queued', pending: 2, persisted: true })
+    await midRun.steer('Første', TARGET)
+    await midRun.steer('Andre', TARGET)
+    flush()
+
+    expect(midRun.settle(['cm-2'])).toEqual([{ content: 'Andre', clientMessageId: 'cm-2' }])
+    flush()
+    expect(midRun.entries().map((entry) => entry.state)).toEqual(['delivered', 'resent'])
+    expect(midRun.settle(['cm-2'])).toEqual([])
+  })
+
+  it('sends none again when the done frame names an empty list: the run took every accepted message', async () => {
+    const { queue, midRun } = setup()
+    queue.mockResolvedValueOnce({ outcome: 'queued', pending: 1, persisted: true })
+    await midRun.steer('Tatt', TARGET)
+    flush()
+
+    expect(midRun.settle([])).toEqual([])
+    flush()
+    expect(midRun.entries().map((entry) => entry.state)).toEqual(['delivered'])
+  })
+
+  it('keeps the earlier rule when no list is named, as with the gateway switch off', async () => {
+    const { queue, midRun } = setup()
+    queue.mockResolvedValueOnce({ outcome: 'queued', pending: 1, persisted: true })
+    await midRun.steer('Tatt', TARGET)
+    flush()
+
+    expect(midRun.settle(undefined)).toEqual([{ content: 'Tatt', clientMessageId: 'cm-1' }])
+    flush()
+    expect(midRun.entries().map((entry) => entry.state)).toEqual(['resent'])
   })
 })
 

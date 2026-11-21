@@ -42,7 +42,7 @@ use tracing::{info, warn};
 
 use crate::cancel_registry::CancelRegistry;
 use crate::gateway_metrics::{self, RunControlOutcome};
-use crate::queued_input::{EnqueueOutcome, QueuedInputRegistry};
+use crate::queued_input::{EnqueueOutcome, QueuedInputRegistry, RetractOutcome};
 
 /// The switch that turns the bus on. Default off; only `true` enables it.
 pub const BUS_ENV: &str = "MODEL_GATEWAY_RUN_CONTROL_BUS";
@@ -120,6 +120,8 @@ pub enum RunControlOp {
     Cancel,
     Queue,
     Probe,
+    /// Take back a queued message by its id (O-01). Carries ids only, never the text.
+    Retract,
 }
 
 impl RunControlOp {
@@ -130,6 +132,7 @@ impl RunControlOp {
             Self::Cancel => "cancel",
             Self::Queue => "queue",
             Self::Probe => "probe",
+            Self::Retract => "retract",
         }
     }
 }
@@ -855,6 +858,11 @@ fn stream_owner(
             );
             queue_reply(&outcome)
         }
+        // The owner decides under the registry's own lock, so a take-back and a delivery cannot both
+        // win; the message is named by its id (the op id) and no text is read from the request.
+        RunControlOp::Retract if msg.request_id == request_id => {
+            retract_reply(queued_inputs.retract(&request_id, &msg.org_id, &msg.user_id, &msg.op_id))
+        }
         RunControlOp::Probe
             if msg.request_id == request_id
                 && cancels.is_live_for(&request_id, &msg.org_id, &msg.user_id) =>
@@ -882,6 +890,33 @@ fn queue_reply(outcome: &EnqueueOutcome) -> RunControlReply {
             ..RunControlReply::found()
         },
     }
+}
+
+/// The reply to a retract request. `found` is false only when this caller has no live message under
+/// that id here, which the caller turns into the same "not found" a missing stream gives.
+fn retract_reply(outcome: RetractOutcome) -> RunControlReply {
+    match outcome {
+        RetractOutcome::NotFound => RunControlReply::not_found(),
+        outcome => RunControlReply {
+            outcome: serde_json::to_string(&outcome).ok(),
+            ..RunControlReply::found()
+        },
+    }
+}
+
+/// Where a take-back of a queued message was decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetractRoute {
+    /// This replica owns the stream and decided it.
+    Local(RetractOutcome),
+    /// Another replica owns the stream and decided it.
+    Peer(RetractOutcome),
+    /// No live message of this caller under that id anywhere: the same answer for an ended stream,
+    /// one that never ran, somebody else's and an id that was never accepted.
+    NotFound,
+    /// The bus could not tell. The message may or may not have been withdrawn, so the caller says so
+    /// (a retryable 503) and changes nothing in the transcript.
+    Unavailable,
 }
 
 impl RunControl {
@@ -1053,6 +1088,61 @@ impl RunControl {
                 | RunControlError::BadReply
                 | RunControlError::Unavailable(_),
             ) => QueueRoute::Unavailable,
+        }
+    }
+
+    /// Take back the message `msg.op_id` of this caller's stream `msg.request_id` (built by
+    /// [`crate::queued_input::retract_bus_message`], which is the ZDR and waived gate): here when this
+    /// replica owns the stream, otherwise ask the replica that does. The owner answers; nothing but
+    /// ids travels on the bus.
+    ///
+    /// A request that timed out is repeated once: a take-back is idempotent on the owner (a repeat of
+    /// one that already succeeded answers `Retracted`), so the repeat can neither withdraw twice nor
+    /// turn a lost reply into a wrong answer.
+    pub async fn retract_input(
+        &self,
+        queued_inputs: &QueuedInputRegistry,
+        msg: &RunControlMsg,
+    ) -> RetractRoute {
+        let owns_stream = queued_inputs
+            .stream_for(&msg.request_id, &msg.org_id, &msg.user_id)
+            .is_some();
+        if owns_stream {
+            self.count_local(RunControlOp::Retract);
+            return match queued_inputs.retract(
+                &msg.request_id,
+                &msg.org_id,
+                &msg.user_id,
+                &msg.op_id,
+            ) {
+                RetractOutcome::NotFound => RetractRoute::NotFound,
+                outcome => RetractRoute::Local(outcome),
+            };
+        }
+        let Ok(subject) = RunControlSubject::request(&msg.request_id, RunControlOp::Retract) else {
+            return RetractRoute::NotFound;
+        };
+        let mut result = self.request(&subject, msg).await;
+        if result == Err(RunControlError::Timeout) {
+            result = self.request(&subject, msg).await;
+        }
+        match result {
+            Ok(reply) if !reply.found => RetractRoute::NotFound,
+            Ok(reply) => reply
+                .outcome
+                .and_then(|outcome| serde_json::from_str(&outcome).ok())
+                .map_or(RetractRoute::Unavailable, RetractRoute::Peer),
+            Err(
+                RunControlError::NoOwner
+                | RunControlError::Disabled
+                | RunControlError::InvalidSubject,
+            ) => RetractRoute::NotFound,
+            Err(
+                RunControlError::Timeout
+                | RunControlError::BadReply
+                | RunControlError::PayloadTooLarge
+                | RunControlError::Unavailable(_),
+            ) => RetractRoute::Unavailable,
         }
     }
 
@@ -1552,7 +1642,12 @@ mod tests {
         assert!(control.attach(&cancels, &queued_inputs, "req-1", "run-1").await);
 
         // A message whose ids are not the stream's it was delivered for is not honoured, for any op.
-        for op in [RunControlOp::Cancel, RunControlOp::Queue, RunControlOp::Probe] {
+        for op in [
+            RunControlOp::Cancel,
+            RunControlOp::Queue,
+            RunControlOp::Probe,
+            RunControlOp::Retract,
+        ] {
             let mut msg = RunControlMsg::new(op, "org-a", "user-a");
             msg.request_id = "req-2".into();
             msg.run_id = "run-2".into();
@@ -1632,6 +1727,114 @@ mod tests {
         stranger.user_id = "user-b".into();
         assert_eq!(peer.queue_input(&peer_queue, &stranger).await, QueueRoute::NoOwner);
         assert!(owner_queue.drain("req-1").is_empty());
+    }
+
+    /// O-01: a take-back that lands on the other replica is decided by the owner, by id alone. The
+    /// answer comes back as the arm the owner decided, a stranger is told what a missing stream is told,
+    /// and nothing of the message's text is on the request.
+    #[tokio::test]
+    async fn a_take_back_reaches_the_owner_and_comes_back_as_its_outcome() {
+        let hub = LoopbackHub::new();
+        let (owner, peer) = (rc(&hub), rc(&hub));
+        let (owner_cancels, owner_queue) = (CancelRegistry::new(), QueuedInputRegistry::new());
+        let peer_queue = QueuedInputRegistry::new();
+        let _flag = owner_cancels.register_run("req-1", "org-a", "user-a", "run-1");
+        owner_queue.register(
+            "req-1",
+            "org-a",
+            "user-a",
+            "thread-1",
+            false,
+            RetrievalScope::Auto,
+        );
+        assert!(
+            owner
+                .attach(&owner_cancels, &owner_queue, "req-1", "run-1")
+                .await
+        );
+        owner_queue.enqueue_checked("req-1", "org-a", "user-a", "use EUR", None, "msg-1");
+        owner_queue.enqueue_checked("req-1", "org-a", "user-a", "and NOK", None, "msg-2");
+
+        let retract = |user: &str, id: &str| {
+            let mut msg = RunControlMsg::new(RunControlOp::Retract, "org-a", user);
+            msg.request_id = "req-1".into();
+            msg.op_id = id.into();
+            msg
+        };
+        assert!(
+            retract("user-a", "msg-1").text.is_none(),
+            "no text travels for a take-back"
+        );
+
+        // A stranger is told what a missing stream is told, and the message stays queued.
+        assert_eq!(
+            peer.retract_input(&peer_queue, &retract("user-b", "msg-1"))
+                .await,
+            RetractRoute::NotFound
+        );
+        assert_eq!(
+            peer.retract_input(&peer_queue, &retract("user-a", "msg-9"))
+                .await,
+            RetractRoute::NotFound,
+            "an id the owner never accepted is not found"
+        );
+        // The owner decides: withdrawn once, and the same answer for a repeat.
+        for _ in 0..2 {
+            assert_eq!(
+                peer.retract_input(&peer_queue, &retract("user-a", "msg-1"))
+                    .await,
+                RetractRoute::Peer(RetractOutcome::Retracted)
+            );
+        }
+        // The loop takes the other one first: the take-back is told it was delivered.
+        assert_eq!(owner_queue.drain("req-1"), ["and NOK"]);
+        assert_eq!(
+            peer.retract_input(&peer_queue, &retract("user-a", "msg-2"))
+                .await,
+            RetractRoute::Peer(RetractOutcome::AlreadyDelivered)
+        );
+        // On the owner the local registry answers and the bus is not asked.
+        assert_eq!(
+            owner
+                .retract_input(&owner_queue, &retract("user-a", "msg-1"))
+                .await,
+            RetractRoute::Local(RetractOutcome::Retracted)
+        );
+        assert_eq!(
+            owner
+                .retract_input(&owner_queue, &retract("user-a", "msg-9"))
+                .await,
+            RetractRoute::NotFound
+        );
+
+        // The owner finishes: nobody owns the stream, so there is nothing to take back from.
+        owner_cancels.finish("req-1");
+        assert_eq!(
+            peer.retract_input(&peer_queue, &retract("user-a", "msg-1"))
+                .await,
+            RetractRoute::NotFound
+        );
+        // An owner that does not answer is not "not found": the message may still be waiting.
+        let _flag = owner_cancels.register_run("req-1", "org-a", "user-a", "run-1");
+        assert!(
+            owner
+                .attach(&owner_cancels, &owner_queue, "req-1", "run-1")
+                .await
+        );
+        hub.mute(true);
+        assert_eq!(
+            peer.retract_input(&peer_queue, &retract("user-a", "msg-1"))
+                .await,
+            RetractRoute::Unavailable
+        );
+        hub.mute(false);
+        // With the bus off an unknown stream is simply not found.
+        assert_eq!(
+            RunControl::off()
+                .retract_input(&peer_queue, &retract("user-a", "msg-1"))
+                .await,
+            RetractRoute::NotFound
+        );
     }
 
     #[tokio::test(start_paused = true)]

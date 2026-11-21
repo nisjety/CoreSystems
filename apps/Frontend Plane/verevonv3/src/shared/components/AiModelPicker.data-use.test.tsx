@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ModelInfo } from '@/shared/api/chat-client'
 
 // A catalogue record states its data use under the model's name, one statement at a time. A
@@ -29,10 +29,16 @@ async function openMenu(models: ModelInfo[]): Promise<void> {
 
 afterEach(() => {
   cleanup()
+  vi.unstubAllEnvs()
   window.localStorage.clear()
 })
 
 describe('AiModelPicker data-use line', () => {
+  // The line is behind VITE_MODEL_DATA_USE_LABEL until counsel approves its copy (DEC-F08-03): these cases run with the switch on.
+  beforeEach(() => {
+    vi.stubEnv('VITE_MODEL_DATA_USE_LABEL', 'true')
+  })
+
   it('shows the attested statement under the model that carries it, and no line under the rest', async () => {
     await openMenu([chat('claude-sonnet-5-5', { zdrAttested: true }), chat('gpt-mini')])
 
@@ -56,5 +62,21 @@ describe('AiModelPicker data-use line', () => {
 
     expect(await screen.findByText('silent')).toBeTruthy()
     expect(screen.queryByText(/Null datalagring|Brukes|Lagres|Ingen lagring/)).toBeNull()
+  })
+})
+
+describe('AiModelPicker data-use line while the switch is off', () => {
+  // Only the literal 'true' turns the line on. Unset, '1' and 'TRUE' leave the picker as it was before the line (DEC-F08-03).
+  it.each([
+    ['unset', undefined],
+    ['1', '1'],
+    ['TRUE', 'TRUE'],
+  ])('shows no data-use text, not even for an attested model, when the switch is %s', async (_label, value) => {
+    vi.stubEnv('VITE_MODEL_DATA_USE_LABEL', value)
+    await openMenu([chat('claude-sonnet-5-5', { zdrAttested: true })])
+
+    expect(await screen.findByText('claude-sonnet-5-5')).toBeTruthy()
+    expect(screen.queryByText('Null datalagring, bekreftet')).toBeNull()
+    expect(document.querySelector('.dashboard-composer-model-data-use')).toBeNull()
   })
 })

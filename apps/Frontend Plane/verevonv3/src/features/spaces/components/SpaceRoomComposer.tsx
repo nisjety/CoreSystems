@@ -356,6 +356,9 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   const midRun = createSpaceMidRun({
     tr: i18n.tr,
     settled: () => !turnInFlight,
+    // A steer answered after its run ended: that run's done list says whether the loop took the message. Only the
+    // run the pipeline still holds the list of; another run's list says nothing about this message.
+    undelivered: (requestId) => (requestId === pipeline.liveRequestId() ? pipeline.undeliveredClientMessageIds() : undefined),
   })
   // Messages the run never took, to go out as ordinary turns one at a time.
   let resendQueue: SpaceMidRunResend[] = []
@@ -365,7 +368,9 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   // took, one message per turn; any other ending sends nothing again, and the strip says so.
   function endOfTurn(): void {
     if (pipeline.exchange()?.status === 'done') {
-      resendQueue = [...resendQueue, ...midRun.settle()]
+      // The done frame names the messages the run never took (F-f01-09). When it names a list, a steered message
+      // the list does not name was taken; without one, the earlier rule holds.
+      resendQueue = [...resendQueue, ...midRun.settle(pipeline.undeliveredClientMessageIds())]
       sendNextResend()
       return
     }

@@ -343,6 +343,7 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'chat.execute_approved_plan': exempt('irreversible_destructive', 'destructive'),
   'chat.cancel_invocation': exempt('no_owner_executor', 'context_write'),
   'chat.queue_invocation_input': exempt('no_owner_executor', 'context_write'),
+  'chat.queue.retract': exempt('no_owner_executor', 'context_write'),
   'chat.run.continue': exempt('irreversible_destructive', 'destructive'),
   'chat.answer_question': exempt('no_owner_executor', 'context_write'),
   'approvals.decide': exempt('irreversible_destructive', 'destructive'),

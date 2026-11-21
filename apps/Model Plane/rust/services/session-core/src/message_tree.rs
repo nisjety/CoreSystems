@@ -144,7 +144,7 @@ pub(crate) async fn current_leaf(
         Some(leaf_id) => sqlx::query_scalar(
             "SELECT EXISTS (
                  SELECT 1 FROM messages
-                 WHERE thread_id = $1 AND parent_message_id IS NULL
+                 WHERE thread_id = $1 AND parent_message_id IS NULL AND withdrawn_at IS NULL
                    AND sequence > (SELECT sequence FROM messages WHERE id = $2)
              )",
         )
@@ -175,7 +175,7 @@ pub(crate) async fn record_append(
          SET parent_message_id = $2::TEXT,
              sibling_ordinal = (
                  SELECT COUNT(*)::INTEGER + 1 FROM messages AS s
-                 WHERE s.thread_id = $1 AND s.id <> $3
+                 WHERE s.thread_id = $1 AND s.id <> $3 AND s.withdrawn_at IS NULL
                    AND s.parent_message_id IS NOT DISTINCT FROM $2::TEXT
              )
          WHERE id = $3",
@@ -219,7 +219,7 @@ async fn link_chain(tx: &mut Transaction<'_, Postgres>, thread_id: &str) -> Resu
         "WITH ranked AS (
              SELECT id, ROW_NUMBER() OVER (PARTITION BY parent_message_id ORDER BY sequence) AS ordinal
              FROM messages
-             WHERE thread_id = $1
+             WHERE thread_id = $1 AND withdrawn_at IS NULL
          )
          UPDATE messages AS m
          SET sibling_ordinal = ranked.ordinal
@@ -267,7 +267,7 @@ async fn load_turns(
     let rows: Vec<(String, Option<String>, i64, bool)> = sqlx::query_as(
         "SELECT id, parent_message_id, sequence, on_active_path
          FROM messages
-         WHERE thread_id = $1
+         WHERE thread_id = $1 AND withdrawn_at IS NULL
          ORDER BY sequence",
     )
     .bind(thread_id)
@@ -343,11 +343,7 @@ impl MessageTreeGrpc {
         authorize_operation(&caller, "session:write")?;
         refuse_waived_versions(&caller)?;
         let req = request.into_inner();
-        if req.org_id.is_empty() || req.thread_id.is_empty() || req.target_message_id.is_empty() {
-            return Err(Status::invalid_argument(
-                "org_id, thread_id and target_message_id are required",
-            ));
-        }
+        check_move_shape(&req)?;
         caller.authorize_org(&req.org_id)?;
         if !message_versions_enabled() {
             return Err(Status::unavailable("message_versions_disabled"));
@@ -358,6 +354,30 @@ impl MessageTreeGrpc {
         tx.commit().await.map_err(internal)?;
         Ok(Response::new(response))
     }
+}
+
+/// The shape a move must have, checked before the org, the switch and any read. A move to a turn names the turn. A move
+/// to the root (WS17 S9) names no turn and takes no exact flag: it moves the leaf past every turn, not onto one.
+fn check_move_shape(req: &pb::SetActiveLeafRequest) -> Result<(), Status> {
+    if req.to_root {
+        if req.org_id.is_empty() || req.thread_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "org_id and thread_id are required",
+            ));
+        }
+        if !req.target_message_id.is_empty() || req.exact {
+            return Err(Status::invalid_argument(
+                "to_root takes no target_message_id and no exact flag",
+            ));
+        }
+        return Ok(());
+    }
+    if req.org_id.is_empty() || req.thread_id.is_empty() || req.target_message_id.is_empty() {
+        return Err(Status::invalid_argument(
+            "org_id, thread_id and target_message_id are required",
+        ));
+    }
+    Ok(())
 }
 
 /// A waived caller keeps no message versions (DEC-32): a waived run counts as zero-retention for
@@ -409,6 +429,9 @@ async fn set_active_leaf_in_tx(
     if leaf.as_deref().unwrap_or_default() != req.expected_leaf_message_id.as_str() {
         return Err(Status::aborted("active_leaf_stale"));
     }
+    if req.to_root {
+        return move_to_root(tx, &req.thread_id).await;
+    }
     let tree = Tree::new(load_turns(tx, &req.thread_id).await?);
     let landed = if req.exact {
         tree.exact_leaf(&req.target_message_id)
@@ -440,6 +463,31 @@ async fn set_active_leaf_in_tx(
     Ok(pb::SetActiveLeafResponse {
         active_leaf_message_id: new_leaf,
         active_path: path,
+    })
+}
+
+/// The move to the thread root (WS17 S9, an edit of the first turn): every turn leaves the active path and the thread
+/// holds no leaf, so the next appended turn starts a new first turn beside the old ones. Nothing is deleted. Called
+/// under the thread lock, after every guard of a move has passed.
+async fn move_to_root(
+    tx: &mut Transaction<'_, Postgres>,
+    thread_id: &str,
+) -> Result<pb::SetActiveLeafResponse, Status> {
+    sqlx::query(
+        "UPDATE messages SET on_active_path = FALSE WHERE thread_id = $1 AND on_active_path",
+    )
+    .bind(thread_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(internal)?;
+    sqlx::query("UPDATE threads SET active_leaf_message_id = NULL WHERE id = $1")
+        .bind(thread_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(internal)?;
+    Ok(pb::SetActiveLeafResponse {
+        active_leaf_message_id: String::new(),
+        active_path: Vec::new(),
     })
 }
 
@@ -621,7 +669,33 @@ mod tests {
         assert!(down.contains("DROP COLUMN IF EXISTS on_active_path"));
     }
 
-    /// The source with its `#[cfg(test)]` items removed, so the scan sees only request-path code.
+    /// The production files of `src/space/`, read at test time. The test-only modules (`*_tests.rs` and
+    /// `test_support.rs`) are not request-path code, so they are left out.
+    fn space_production_sources() -> Vec<(String, String)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("space");
+        let mut out: Vec<(String, String)> = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("the space module directory is readable") {
+            let path = entry.expect("a directory entry").path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let is_test_only = name.ends_with("_tests.rs") || name == "test_support.rs";
+            let is_rust = path.extension().and_then(|ext| ext.to_str()) == Some("rs");
+            if is_rust && !is_test_only {
+                let text = std::fs::read_to_string(&path).expect("a space source file is readable");
+                out.push((format!("space/{name}"), text));
+            }
+        }
+        out.sort();
+        assert!(out.len() > 10, "the space module lists its production files");
+        out
+    }
+
+    /// The source with its `#[cfg(test)]` items removed, so the scan sees only request-path code. The braces
+    /// that close an item are counted outside string and character literals and comments, so a test that holds
+    /// a `"}"` does not end its module early.
     fn production_text(source: &str) -> String {
         let mut out = String::with_capacity(source.len());
         let mut lines = source.lines();
@@ -630,18 +704,17 @@ mod tests {
                 // The attribute gates the item that follows: skip it, brace for brace.
                 let mut depth = 0_i32;
                 let mut opened = false;
+                let mut lex = Lex::Code;
                 for item_line in lines.by_ref() {
-                    for character in item_line.chars() {
-                        match character {
-                            '{' => {
-                                depth += 1;
-                                opened = true;
-                            }
-                            '}' => depth -= 1,
-                            _ => {}
-                        }
-                    }
+                    let (next, saw_open, delta) = brace_delta(item_line, lex);
+                    lex = next;
+                    opened |= saw_open;
+                    depth += delta;
                     if opened && depth == 0 {
+                        break;
+                    }
+                    if !opened && item_line.trim_end().ends_with(';') {
+                        // An attribute on a braceless item (`mod x;`, `use y;`) gates that line alone.
                         break;
                     }
                 }
@@ -651,6 +724,111 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    /// Where the Rust lexer stands at the start or end of a line: in code, or inside a literal or a comment
+    /// that may run on to the next line.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Lex {
+        Code,
+        Str,
+        RawStr(usize),
+        Block(usize),
+    }
+
+    /// The braces one line opens or closes in code, from the lexer state it starts in. Braces inside a string
+    /// or character literal or a comment do not count. Returns the state the line ends in, whether the line
+    /// opens a brace in code, and the net brace count.
+    fn brace_delta(line: &str, start: Lex) -> (Lex, bool, i32) {
+        let chars: Vec<char> = line.chars().collect();
+        let at = |index: usize| chars.get(index).copied();
+        let (mut lex, mut opened, mut delta, mut i) = (start, false, 0_i32, 0_usize);
+        while i < chars.len() {
+            let c = chars[i];
+            match lex {
+                Lex::Code => {
+                    if c == '/' && at(i + 1) == Some('/') {
+                        break;
+                    }
+                    if c == '/' && at(i + 1) == Some('*') {
+                        lex = Lex::Block(1);
+                        i += 2;
+                        continue;
+                    }
+                    let after_ident = i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_');
+                    if c == 'r' && !after_ident {
+                        let mut j = i + 1;
+                        while at(j) == Some('#') {
+                            j += 1;
+                        }
+                        if at(j) == Some('"') {
+                            lex = Lex::RawStr(j - i - 1);
+                            i = j + 1;
+                            continue;
+                        }
+                    }
+                    match c {
+                        '"' => lex = Lex::Str,
+                        '\'' if at(i + 1) == Some('\\') => {
+                            // An escaped character literal: skip past its escape, then to the closing quote.
+                            let mut j = i + 3;
+                            while j < chars.len() && chars[j] != '\'' {
+                                j += 1;
+                            }
+                            i = j + 1;
+                            continue;
+                        }
+                        '\'' if at(i + 2) == Some('\'') => {
+                            i += 3;
+                            continue;
+                        }
+                        '{' => {
+                            opened = true;
+                            delta += 1;
+                        }
+                        '}' => delta -= 1,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                Lex::Str => {
+                    if c == '\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if c == '"' {
+                        lex = Lex::Code;
+                    }
+                    i += 1;
+                }
+                Lex::RawStr(hashes) => {
+                    if c == '"' && (1..=hashes).all(|k| at(i + k) == Some('#')) {
+                        lex = Lex::Code;
+                        i += 1 + hashes;
+                        continue;
+                    }
+                    i += 1;
+                }
+                Lex::Block(depth) => {
+                    if c == '*' && at(i + 1) == Some('/') {
+                        lex = if depth == 1 {
+                            Lex::Code
+                        } else {
+                            Lex::Block(depth - 1)
+                        };
+                        i += 2;
+                        continue;
+                    }
+                    if c == '/' && at(i + 1) == Some('*') {
+                        lex = Lex::Block(depth + 1);
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                }
+            }
+        }
+        (lex, opened, delta)
     }
 
     #[test]
@@ -677,12 +855,44 @@ mod tests {
             "SELECT EXISTS(SELECT 1 FROM messages WHERE thread_id = $1 AND client_message_id = $2)",
             "JOIN messages m ON m.id = substr(sl.link, 9)",
         ];
-        let sources = [
-            ("grpc.rs", include_str!("grpc.rs")),
-            ("dreaming.rs", include_str!("dreaming.rs")),
-            ("message_search.rs", include_str!("message_search.rs")),
+        // The reads in `space/` that see every branch on purpose. Each entry names its file, a fragment
+        // of the statement and the reason. An entry that matches no statement fails the test, so a read
+        // that is removed leaves no entry behind.
+        const ALL_BRANCH_READS: [(&str, &str, &str); 4] = [
+            (
+                "space/revisions.rs",
+                "FROM messages WHERE id = $1 AND thread_id = $2 FOR UPDATE",
+                "the revision writer locks its target on whichever branch holds it and refuses a target outside \
+                 the decision's reach; a reader reaches a message only through ResolveMessageTarget, which filters \
+                 the active path. A revision may still name a turn off the path (an owner decision)",
+            ),
+            (
+                "space/revisions.rs",
+                "FROM messages fa WHERE fa.thread_id = m.thread_id",
+                "the follow-up flag of the conversation read: whether an assistant answer came after a deleted \
+                 user turn, on any branch. Kept as it was, because a change alters what a deleted turn shows \
+                 (an owner decision)",
+            ),
+            (
+                "space/thread_activity.rs",
+                "EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = t.id)",
+                "the summary backfill and its pending probe: a thread with a turn on any branch still owes \
+                 its summary row; no content is read",
+            ),
+            (
+                "space/mentions.rs",
+                "SELECT role, post_kind, author_subject_id, content FROM messages",
+                "the wake trigger's identity check by message id (role, post kind, author and content \
+                 digest); nothing is returned to a reader",
+            ),
         ];
-        for (name, source) in sources {
+        let mut sources: Vec<(String, String)> = vec![
+            ("grpc.rs".to_owned(), include_str!("grpc.rs").to_owned()),
+            ("dreaming.rs".to_owned(), include_str!("dreaming.rs").to_owned()),
+            ("message_search.rs".to_owned(), include_str!("message_search.rs").to_owned()),
+        ];
+        sources.extend(space_production_sources());
+        for (name, source) in &sources {
             let text = production_text(source);
             let reads = text
                 .match_indices("FROM messages")
@@ -693,12 +903,24 @@ mod tests {
                 let literal = &text[start..end];
                 let filtered = literal.contains("on_active_path");
                 let writer_side = WRITER_SIDE.iter().any(|known| literal.contains(known));
+                let all_branches = ALL_BRANCH_READS.iter().any(|(file, fragment, _)| {
+                    *file == name.as_str() && literal.contains(*fragment)
+                });
                 assert!(
-                    filtered || writer_side,
+                    filtered || writer_side || all_branches,
                     "{name}: a read of messages without the active-path filter: {}",
                     literal.trim().lines().next().unwrap_or_default()
                 );
             }
+        }
+        for (file, fragment, _) in ALL_BRANCH_READS {
+            let kept = sources.iter().any(|(name, source)| {
+                name.as_str() == file && production_text(source).contains(fragment)
+            });
+            assert!(
+                kept,
+                "{file}: no statement reads {fragment:?} any more, so its allow-list entry is stale"
+            );
         }
     }
 
@@ -763,13 +985,45 @@ mod tests {
         expected: &str,
         exact: bool,
     ) -> Result<pb::SetActiveLeafResponse, Status> {
-        let mut request = Request::new(pb::SetActiveLeafRequest {
-            org_id: ORG.to_owned(),
-            thread_id: thread.to_owned(),
-            target_message_id: target.to_owned(),
-            expected_leaf_message_id: expected.to_owned(),
-            exact,
-        });
+        send_move(
+            pool,
+            pb::SetActiveLeafRequest {
+                org_id: ORG.to_owned(),
+                thread_id: thread.to_owned(),
+                target_message_id: target.to_owned(),
+                expected_leaf_message_id: expected.to_owned(),
+                exact,
+                to_root: false,
+            },
+        )
+        .await
+    }
+
+    /// The move to the thread root, as an edit of the first turn makes it (WS17 S9).
+    async fn move_to_root(
+        pool: &PgPool,
+        thread: &str,
+        expected: &str,
+    ) -> Result<pb::SetActiveLeafResponse, Status> {
+        send_move(
+            pool,
+            pb::SetActiveLeafRequest {
+                org_id: ORG.to_owned(),
+                thread_id: thread.to_owned(),
+                target_message_id: String::new(),
+                expected_leaf_message_id: expected.to_owned(),
+                exact: false,
+                to_root: true,
+            },
+        )
+        .await
+    }
+
+    async fn send_move(
+        pool: &PgPool,
+        request: pb::SetActiveLeafRequest,
+    ) -> Result<pb::SetActiveLeafResponse, Status> {
+        let mut request = Request::new(request);
         request
             .extensions_mut()
             .insert(VerifiedIdentity::user_for_test(ORG, USER));
@@ -984,5 +1238,190 @@ mod tests {
         );
         let plain = VerifiedIdentity::user_for_test("org-1", "user-1");
         assert!(refuse_waived_versions(&plain).is_ok());
+    }
+
+    #[test]
+    fn a_move_to_the_root_names_no_turn_and_no_exact_flag() {
+        let root = pb::SetActiveLeafRequest {
+            org_id: ORG.to_owned(),
+            thread_id: "thread-1".to_owned(),
+            to_root: true,
+            ..Default::default()
+        };
+        assert!(check_move_shape(&root).is_ok());
+        let with_target = pb::SetActiveLeafRequest {
+            target_message_id: "turn-1".to_owned(),
+            ..root.clone()
+        };
+        let refused = check_move_shape(&with_target).expect_err("a target is refused");
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+        let exact = pb::SetActiveLeafRequest {
+            exact: true,
+            ..root.clone()
+        };
+        let refused = check_move_shape(&exact).expect_err("an exact flag is refused");
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+        // A move to a turn still names its turn, and its refusal keeps the message it had.
+        let unnamed = pb::SetActiveLeafRequest {
+            to_root: false,
+            ..root.clone()
+        };
+        let refused = check_move_shape(&unnamed).expect_err("a move names its turn");
+        assert_eq!(
+            refused.message(),
+            "org_id, thread_id and target_message_id are required"
+        );
+        let named = pb::SetActiveLeafRequest {
+            target_message_id: "turn-1".to_owned(),
+            to_root: false,
+            ..root
+        };
+        assert!(check_move_shape(&named).is_ok());
+    }
+
+    /// The shape is checked before the org, the switch and any read, so a pool that never connects is enough: the
+    /// refusal comes back without a database.
+    #[tokio::test]
+    async fn a_move_to_the_root_with_a_target_is_refused_before_any_read() {
+        let pool = PgPool::connect_lazy("postgres://unused@localhost/unused").expect("a lazy pool");
+        let mut request = Request::new(pb::SetActiveLeafRequest {
+            org_id: ORG.to_owned(),
+            thread_id: "thread-1".to_owned(),
+            target_message_id: "turn-1".to_owned(),
+            to_root: true,
+            ..Default::default()
+        });
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test(ORG, USER));
+        let status = MessageTreeGrpc { pool }
+            .set_active_leaf(request)
+            .await
+            .expect_err("a move to the root names no turn");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    /// WS17 S9: an edit of the first turn moves the leaf to the root. The next appended turn is a new first turn,
+    /// beside the old one, and it is that turn's sibling 2.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn an_edit_of_the_first_turn_moves_to_the_root_and_the_new_first_turn_is_its_sibling() {
+        let pool = connect().await;
+        std::env::set_var(ENABLED_ENV, "true");
+        let thread = mp_ids::new_ulid();
+        seed_thread(&pool, &thread).await;
+        let first = append(&pool, &thread, "user", "question").await;
+        let answer = append(&pool, &thread, "assistant", "answer").await;
+        let moved = move_to_root(&pool, &thread, &answer).await.unwrap();
+        assert_eq!(moved.active_leaf_message_id, "");
+        assert!(moved.active_path.is_empty());
+        assert_eq!(leaf(&pool, &thread).await, None);
+        assert!(
+            shape(&pool, &thread).await.iter().all(|row| !row.2),
+            "no turn is active after the move"
+        );
+        // The edit appends with no parent, so it is a new first turn beside the old one.
+        let edited = append(&pool, &thread, "user", "edited question").await;
+        assert_eq!(leaf(&pool, &thread).await.as_deref(), Some(edited.as_str()));
+        let after = shape(&pool, &thread).await;
+        assert_eq!(
+            after[0],
+            (first.clone(), None, false),
+            "the old first turn is kept"
+        );
+        assert_eq!(after[1], (answer.clone(), Some(first.clone()), false));
+        assert_eq!(after[2], (edited.clone(), None, true));
+        let roots: Vec<(String, i32)> = sqlx::query_as(
+            "SELECT id, sibling_ordinal FROM messages
+             WHERE thread_id = $1 AND parent_message_id IS NULL ORDER BY sequence",
+        )
+        .bind(&thread)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            roots,
+            vec![(first, 1), (edited, 2)],
+            "the edit is the second first turn"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_move_to_the_root_with_a_stale_leaf_aborts_and_changes_nothing() {
+        let pool = connect().await;
+        std::env::set_var(ENABLED_ENV, "true");
+        let thread = mp_ids::new_ulid();
+        seed_thread(&pool, &thread).await;
+        let first = append(&pool, &thread, "user", "question").await;
+        let answer = append(&pool, &thread, "assistant", "answer").await;
+        let before = shape(&pool, &thread).await;
+        let error = move_to_root(&pool, &thread, &first).await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Aborted);
+        assert_eq!(error.message(), "active_leaf_stale");
+        assert_eq!(shape(&pool, &thread).await, before);
+        assert_eq!(leaf(&pool, &thread).await.as_deref(), Some(answer.as_str()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_move_to_the_root_is_refused_while_a_run_is_active() {
+        let pool = connect().await;
+        std::env::set_var(ENABLED_ENV, "true");
+        let thread = mp_ids::new_ulid();
+        seed_thread(&pool, &thread).await;
+        let _question = append(&pool, &thread, "user", "question").await;
+        let answer = append(&pool, &thread, "assistant", "answer").await;
+        sqlx::query(
+            "INSERT INTO runs (id, thread_id, goal, org_id, user_id, status)
+             VALUES ($1, $2, 'g', $3, $4, 'running')",
+        )
+        .bind(mp_ids::new_ulid())
+        .bind(&thread)
+        .bind(ORG)
+        .bind(USER)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let before = shape(&pool, &thread).await;
+        let error = move_to_root(&pool, &thread, &answer).await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(error.message(), "active_run_blocks_switch");
+        assert_eq!(
+            shape(&pool, &thread).await,
+            before,
+            "a refused move changes no row"
+        );
+        assert_eq!(leaf(&pool, &thread).await.as_deref(), Some(answer.as_str()));
+    }
+
+    /// P2-sc-12-rel1: the gateway puts a thread back on its branch when the managed start after an edit of the first turn
+    /// fails. After the move to the root and the edit's append, an exact move back to the old leaf, compared with the
+    /// edit that is now the leaf, restores the old path and leaves the edit on the record beside it.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_restore_after_a_failed_start_puts_the_old_branch_back_and_keeps_the_edit() {
+        let pool = connect().await;
+        std::env::set_var(ENABLED_ENV, "true");
+        let thread = mp_ids::new_ulid();
+        seed_thread(&pool, &thread).await;
+        let first = append(&pool, &thread, "user", "question").await;
+        let answer = append(&pool, &thread, "assistant", "answer").await;
+        move_to_root(&pool, &thread, &answer).await.unwrap();
+        let edited = append(&pool, &thread, "user", "edited question").await;
+        let restored = move_leaf_as(&pool, &thread, &answer, &edited, true)
+            .await
+            .unwrap();
+        assert_eq!(restored.active_leaf_message_id, answer);
+        assert_eq!(restored.active_path, vec![first.clone(), answer.clone()]);
+        assert_eq!(leaf(&pool, &thread).await.as_deref(), Some(answer.as_str()));
+        let after = shape(&pool, &thread).await;
+        assert_eq!(after[0], (first.clone(), None, true));
+        assert_eq!(after[1], (answer.clone(), Some(first.clone()), true));
+        assert_eq!(
+            after[2],
+            (edited.clone(), None, false),
+            "the edit stays on the record, off the path"
+        );
     }
 }

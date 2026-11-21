@@ -188,7 +188,9 @@ describe('mid-run input is never dropped', () => {
         'which is the bug with extra steps',
     ).toBe(true)
     const trays = await source('src/features/chat/components/ComposerTrays.tsx')
-    expect(trays).toContain('<QueuedInputStrip entries={tray().entries} />')
+    // The strip takes the take-back handlers the page passes (O-01); it still reads `tray().entries` and nothing else.
+    expect(trays).toContain('<QueuedInputStrip')
+    expect(trays).toContain('entries={tray().entries}')
   })
 
   it('promotes a pending message to delivered when the agent is handed it', async () => {

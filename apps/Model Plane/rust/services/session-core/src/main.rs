@@ -41,6 +41,7 @@ mod memory_grpc;
 mod write_policy;
 mod message_search;
 mod message_tree;
+mod message_withdrawal;
 mod nats;
 mod nats_connection;
 mod orchestration_grpc;
@@ -57,6 +58,7 @@ mod run_ledger_grpc;
 mod run_origin_stamp;
 mod run_phase;
 mod run_service_grpc;
+mod scheduled_outcome_events;
 mod service_token;
 mod skill_versions;
 mod space;
@@ -234,6 +236,8 @@ async fn main() -> Result<()> {
             async move { dreaming::run(pool, letta).await }
         },
     ));
+    // Refuses to boot fail-closed without org-core credentials, when ORG_POLICY_STARTUP_GUARD is true (WS07-S4).
+    org_policy::startup_check(|name| std::env::var(name).ok())?;
     let org_policy_pool = pool.clone();
     let org_policy_handle = tokio::spawn(supervise_background(
         "session-core org agent policy poller",

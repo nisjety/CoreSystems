@@ -88,6 +88,7 @@ WITH candidates AS (
     {fold_join}
     WHERE m.role IN ('user', 'assistant')
       AND m.on_active_path
+      AND m.withdrawn_at IS NULL
       AND (m.copied_from_message_id IS NULL OR NULLIF($7, '') IS NOT NULL)
       AND (NOT $9::BOOLEAN OR m.post_kind = 'turn')
       AND to_tsvector('simple', left(m.content, 65536)) @@ to_tsquery('simple', $3)

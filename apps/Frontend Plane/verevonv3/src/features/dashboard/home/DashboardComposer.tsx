@@ -4995,6 +4995,7 @@ export function DashboardComposer(props: {
 						seedTitle={scheduleSeed().title}
 						seedGoal={scheduleSeed().goal}
 						threadOriginHint={scheduleSeed().origin}
+						zeroRetention={temporaryChat()}
 					/>
 				</Portal>
 			</Show>

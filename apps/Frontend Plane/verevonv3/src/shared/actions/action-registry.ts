@@ -2145,6 +2145,17 @@ const chatQueueInvocationInput = z.object({
     .optional(),
 })
 
+// Take back a message sent mid-run while the gateway still holds it (O-01, DEC-F01-03). Named by the run it was sent
+// into and the id it was sent under (the send receipt of `chat.queue_invocation_input`): both are required, so a
+// message without an id cannot be taken back. Strict, so a client cannot name a thread, an org or a user: the owner
+// reads the thread from the run's own registration.
+const chatQueueRetractInput = z
+  .object({
+    requestId: z.string().min(1),
+    clientMessageId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/),
+  })
+  .strict()
+
 // The person's answer to a question a run put to them (build plan WS14 S3), or a skip. A
 // question is its own store with its own owner-only answer, never an approval: an answer is
 // information and carries no authority, so the entry is low risk and shares nothing with the
@@ -2390,6 +2401,8 @@ const chatSaveThreadSnapshotInput = z.object({
   title: z.string().trim().optional(),
   pinned: z.boolean().optional(),
   preview: z.string().trim().optional(),
+  // The thread's own memory mode (WS07-S6). Absent leaves it as it is; only the two closed values pass.
+  memoryMode: z.enum(['inherit', 'off']).optional(),
 })
 
 // The export's answer is the file itself, which the browser saves: the contract names its media
@@ -5546,6 +5559,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: false,
     inputSchema: chatQueueInvocationInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.queue.retract',
+    label: 'Retract queued message',
+    description: 'Take back a message the person sent while a run was working, if the run has not read it yet, by the clientMessageId it was sent under. The owning queue decides under the one lock that guards delivery, so a take-back and a delivery cannot both win: the answer is retracted (the run never reads it, its stored copy is withdrawn and the thread keeps a text-free "retracted" note), already_delivered (the run took it first; it stays) or not_found (no live message of this caller under that id, which is also what a run that ended answers). A repeat of a take-back that succeeded answers retracted again. Refused typed under zero data retention and for a waived credential, since such a run has no queue, and 503 queue_retract_disabled while the deployment does not take messages back. Never model-executable: taking a message back is the sender, never a model.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: chatQueueRetractInput,
     outputSchema: envelopeStatusOutput,
   },
   {

@@ -174,6 +174,46 @@ describe('the run ends', () => {
     expect(queuedInputsForNewTurn(entries, true).map((item) => item.id)).toEqual(['q2'])
     expect(queuedInputsForNewTurn(entries, false)).toEqual([])
   })
+
+  /**
+   * The gateway names the accepted messages it never took (F-f01-09). Only those are sent again; one
+   * it took whose `queued_input` frame was lost is marked delivered, so it is not answered twice.
+   */
+  it('sends again an accepted message only when the gateway names it as never taken', () => {
+    const taken = entry({ id: 'q1', clientMessageId: 'msg-1', accepted: true })
+    const leftover = entry({ id: 'q2', clientMessageId: 'msg-2', accepted: true })
+    const { entries, resend } = settleQueuedInputsAtRunEnd([taken, leftover], ['msg-2'])
+
+    expect(resend).toEqual([leftover])
+    expect(entries.map((item) => item.state)).toEqual(['delivered', 'resent'])
+    // Settled once: the next run's end, naming the same id, sends nothing again.
+    expect(settleQueuedInputsAtRunEnd(entries, ['msg-2']).resend).toEqual([])
+  })
+
+  it('marks every accepted message delivered, and sends none again, when the gateway names none left', () => {
+    const accepted = [
+      entry({ id: 'q1', clientMessageId: 'msg-1', accepted: true }),
+      entry({ id: 'q2', clientMessageId: 'msg-2', accepted: true }),
+    ]
+    const { entries, resend } = settleQueuedInputsAtRunEnd(accepted, [])
+    expect(resend).toEqual([])
+    expect(entries.map((item) => item.state)).toEqual(['delivered', 'delivered'])
+  })
+
+  it('keeps the old rule for an accepted message with no id, and for every entry when no list is named', () => {
+    const noId = entry({ id: 'q1', accepted: true })
+    const named = entry({ id: 'q2', clientMessageId: 'msg-2', accepted: true })
+    expect(settleQueuedInputsAtRunEnd([noId, named], []).resend).toEqual([noId])
+
+    const legacy = settleQueuedInputsAtRunEnd([noId, named])
+    expect(legacy.resend).toEqual([noId, named])
+    expect(legacy.entries.map((item) => item.state)).toEqual(['resent', 'resent'])
+  })
+
+  it('leaves alone a message the gateway has not confirmed yet, whatever the list says', () => {
+    const waiting = entry({ id: 'q1', clientMessageId: 'msg-1' })
+    expect(settleQueuedInputsAtRunEnd([waiting], ['msg-1'])).toEqual({ entries: [waiting], resend: [] })
+  })
 })
 
 /** The wiring has no seam inside the hook; each property is pinned where it lives. */
@@ -210,10 +250,12 @@ describe('the controller wires receipts through the send path', () => {
     const text = await controller()
     const doneStart = text.indexOf("markOpenSteps('done', 'Completed.', assistantId)\n            // The run is over")
     expect(doneStart, 'the live stream no longer settles its mid-run messages at done').toBeGreaterThan(-1)
-    expect(text.slice(doneStart, doneStart + 400)).toContain('resendUntakenQueuedInputs()')
-    // One call site: a stop, an error and a dropped connection never resend a message the user
-    // may have meant to stop with the run.
-    expect(text.match(/resendUntakenQueuedInputs\(\)/g)).toHaveLength(1)
+    expect(text.slice(doneStart, doneStart + 400)).toContain('resendUntakenQueuedInputs(undeliveredClientMessageIds)')
+    // Two call sites: the done frame, and a take-back answered after the run ended on its own (O-01), which
+    // settles only a run whose done frame came while it was asked. A stop, an error and a dropped connection never
+    // resend a message the user may have meant to stop with the run.
+    expect(text.match(/resendUntakenQueuedInputs\(/g)).toHaveLength(2)
+    expect(text).toContain('if (runEndsSettled !== endsBefore) {')
   })
 
   it('keeps the "resent" entries through the resending turn', async () => {
@@ -259,6 +301,19 @@ const send = (controller: ReturnType<typeof useChatController>, text: string) =>
 
 async function finishStream(stream: CapturedStream, requestId: string) {
   stream.handlers.onDone?.({ requestId, modelUsed: 'verevon-balance', outputTokens: 4, stopReason: 'stop' })
+  stream.resolve()
+  await tick()
+}
+
+/** The run ends with the gateway's list of the accepted messages it never took (F-f01-09). */
+async function finishStreamWithUndelivered(stream: CapturedStream, requestId: string, undeliveredClientMessageIds: string[]) {
+  stream.handlers.onDone?.({
+    requestId,
+    modelUsed: 'verevon-balance',
+    outputTokens: 4,
+    stopReason: 'stop',
+    undeliveredClientMessageIds,
+  })
   stream.resolve()
   await tick()
 }
@@ -369,6 +424,46 @@ describe('the controller names every send and settles the mid-run tray', () => {
       await finishStream(streams[0]!, 'req-1')
       expect(streams).toHaveLength(1)
       expect(states(controller)).toEqual(['refused'])
+    })
+  })
+
+  /**
+   * The delivery frame was lost, so the strip never heard of the delivery. The run's end names what
+   * the gateway never took, and says nothing else was left behind: the message it took is not sent again.
+   */
+  it('does not send again a message the gateway took, when its delivery frame never arrives', async () => {
+    mockQueueInvocationInput.mockResolvedValueOnce({ outcome: 'queued', pending: 1, persisted: true })
+    await withController(async (controller) => {
+      await runningTurn(controller)
+      await send(controller, 'Og hvem eier planen?')
+      await tick()
+      expect(states(controller)).toEqual(['pending'])
+
+      await finishStreamWithUndelivered(streams[0]!, 'req-1', [])
+      expect(streams, 'a message the gateway took is never sent again').toHaveLength(1)
+      expect(states(controller)).toEqual(['delivered'])
+    })
+  })
+
+  it('sends again, under its own id, only the message the gateway names as never taken', async () => {
+    mockQueueInvocationInput
+      .mockResolvedValueOnce({ outcome: 'queued', pending: 1, persisted: true })
+      .mockResolvedValueOnce({ outcome: 'queued', pending: 2, persisted: true })
+    await withController(async (controller) => {
+      await runningTurn(controller)
+      await send(controller, 'Første mellom')
+      await tick()
+      await send(controller, 'Andre mellom')
+      await tick()
+      const leftoverId = mockQueueInvocationInput.mock.calls[1]![2]!.clientMessageId
+
+      await finishStreamWithUndelivered(streams[0]!, 'req-1', [leftoverId!])
+
+      // Only the named message goes out again; the one the gateway took is not in the resending turn.
+      expect(streams).toHaveLength(2)
+      expect(streams[1]!.request.content).toContain('Andre mellom')
+      expect(streams[1]!.request.clientMessageId).toBe(leftoverId)
+      expect(states(controller), 'the resending turn keeps only the entries that say resent').toEqual(['resent'])
     })
   })
 })

@@ -24,10 +24,12 @@ import { translateApiError } from '@/shared/i18n/errors'
  * A steered message is in one of four states, over the three outcomes of `queueInvocationInput`:
  *
  * - `pending`   accepted by the gateway (`queued`), not yet handed to the agent;
- * - `delivered` the agent has it (a `queued_input` frame named it), whichever arrived first;
- * - `resent`    the run ended before taking it (`run_ended`, or an accepted message the run never
- *               read). It goes out again as an ordinary turn under the SAME client message id, which
- *               makes the transcript hold it once. That happens only after a clean finish;
+ * - `delivered` the agent has it (a `queued_input` frame named it, or the turn's done frame does not name
+ *               it as never taken), whichever arrived first;
+ * - `resent`    the run ended before taking it (`run_ended`, or an accepted message the run never read: the
+ *               done frame's list says which, when it names one). It goes out again as an ordinary turn under
+ *               the SAME client message id, which makes the transcript hold it once. That happens only after a
+ *               clean finish;
  * - `refused`   not accepted, or accepted but never read by a turn that stopped or failed. The note
  *               says why. Never silent.
  *
@@ -128,8 +130,13 @@ export interface SpaceMidRun {
   /**
    * The turn finished cleanly. Messages the run never took are marked `resent` and returned, in the
    * order they were sent; the caller sends them one at a time, as ordinary turns.
+   *
+   * `undelivered` is the list the turn's done frame names, when it names one (see
+   * `settleQueuedInputsAtRunEnd`): an accepted message with an id the list does not name was taken, so it is
+   * marked `delivered` and not returned, even when its `queued_input` frame never arrived. Without a list every
+   * accepted message the run did not confirm is returned, as before.
    */
-  readonly settle: () => readonly SpaceMidRunResend[]
+  readonly settle: (undelivered?: readonly string[]) => readonly SpaceMidRunResend[]
   /**
    * The turn ended without a clean finish (stopped or failed): nothing is sent again. Every message the
    * run never took, and each of `unsent` (found by `settle` but not sent yet), is marked `refused`.
@@ -185,6 +192,11 @@ export function createSpaceMidRun(options: {
   readonly settled?: () => boolean
   readonly tr: (no: string, en: string) => string
   readonly queue?: SpaceQueueCall
+  /**
+   * The messages the done frame of the run named as never taken, read once the run has ended (see `steer`).
+   * `undefined` when no list is known for that run, and the message then keeps the earlier rule.
+   */
+  readonly undelivered?: (requestId: string) => readonly string[] | undefined
 }): SpaceMidRun {
   const queue: SpaceQueueCall = options.queue ?? queueInvocationInput
   const mint = options.mint ?? (() => `msg-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`)
@@ -238,6 +250,8 @@ export function createSpaceMidRun(options: {
     const result = await ask(requestId, content, target, clientMessageId)
     // Read the turn's state after the answer: it may have ended while the call was in the air.
     const ended = options.settled?.() === true
+    // Once the run has ended, the list its done frame names (when it names one) says whether the loop took it.
+    const named = ended ? options.undelivered?.(requestId) : undefined
 
     if (result.outcome === 'queued') {
       // A `queued_input` frame can name the message before this answer arrives. A delivered message
@@ -248,6 +262,11 @@ export function createSpaceMidRun(options: {
         if (entry.id !== id) return entry
         if (entry.state !== 'pending') return { ...entry, accepted: true }
         if (ended) {
+          // Accepted before the run's done frame, which does not name it: the loop took it, and only its
+          // `queued_input` frame was lost. It is delivered, not answered a second time (F-f01-09).
+          if (named !== undefined && !named.includes(clientMessageId)) {
+            return { ...entry, state: 'delivered', accepted: true, note: undefined }
+          }
           decision.resend = true
           return { ...entry, state: 'resent', accepted: false, note: undefined }
         }
@@ -289,10 +308,10 @@ export function createSpaceMidRun(options: {
     steer,
     markDelivered: (messages, ids = []) =>
       setEntries((current) => markQueuedInputsDelivered(current, messages, ids)),
-    settle: () => {
+    settle: (undelivered) => {
       const settledNow = { resend: [] as QueuedInput[] }
       setEntries((current) => {
-        const settled = settleQueuedInputsAtRunEnd(current)
+        const settled = settleQueuedInputsAtRunEnd(current, undelivered)
         settledNow.resend = settled.resend
         return settled.entries
       })

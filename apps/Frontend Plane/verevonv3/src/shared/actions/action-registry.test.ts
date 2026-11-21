@@ -1825,7 +1825,8 @@ describe('action registry', () => {
     // (browser.list_origin_consents, browser.revoke_origin_consent, browser_attach.stop, browser_tab.control,
     // browser_context.resolve_tab_mentions, browser_region.attach, browser_evidence.save_recipe and
     // chat.research_run.cancel): 374 + 8 = 382.
-    expect(ids).toHaveLength(382)
+    // +1 after O-01 registered chat.queue.retract, the take-back of a queued mid-run message: 383.
+    expect(ids).toHaveLength(383)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

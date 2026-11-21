@@ -33,6 +33,73 @@ describe('effective policy client', () => {
     ])
   })
 
+  it('keeps a withheld count and an admin list as the server sends them', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(
+          JSON.stringify({
+            data: {
+              items: [
+                { key: 'model_access.allow', value: null, origin: 'org', locked: true, redacted: true, count: 2 },
+                {
+                  key: 'browser_sites.rules',
+                  value: null,
+                  origin: 'org',
+                  locked: true,
+                  values: ['example.com (read)'],
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      ),
+    )
+
+    const items = await getEffectivePolicy('thread_1')
+
+    expect(items[0]).toMatchObject({ key: 'model_access.allow', value: null, redacted: true, count: 2 })
+    expect(items[1]).toMatchObject({ key: 'browser_sites.rules', values: ['example.com (read)'] })
+  })
+
+  it('refuses a list that holds anything but text', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(
+          JSON.stringify({
+            data: {
+              items: [{ key: 'model_access.allow', value: null, origin: 'org', locked: false, values: ['ok', 3] }],
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      ),
+    )
+
+    await expect(getEffectivePolicy('thread_1')).rejects.toThrow()
+  })
+
+  it('bounds an entry in characters, as the panel and the server do, not in UTF-16 units', async () => {
+    const answer = (entry: string) =>
+      vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(
+          JSON.stringify({
+            data: {
+              items: [{ key: 'browser_sites.rules', value: null, origin: 'org', locked: false, values: [entry] }],
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      )
+    // 200 code points are 400 UTF-16 units: the bound is the characters a person reads.
+    vi.stubGlobal('fetch', answer('😀'.repeat(200)))
+    await expect(getEffectivePolicy('thread_1')).resolves.toMatchObject([{ key: 'browser_sites.rules' }])
+    vi.stubGlobal('fetch', answer('😀'.repeat(201)))
+    await expect(getEffectivePolicy('thread_1')).rejects.toThrow()
+  })
+
   it('refuses an origin the view does not name, rather than showing it', async () => {
     vi.stubGlobal(
       'fetch',

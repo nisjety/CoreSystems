@@ -298,6 +298,12 @@ export interface SpaceSendPipeline {
   readonly liveRequestId: () => string | undefined
   /** The thread the turn in flight (or the last one) is in, once known. */
   readonly liveThreadId: () => string | undefined
+  /**
+   * The mid-run messages the turn's done frame named as never taken (`undelivered_client_message_ids`,
+   * F-f01-09), by client message id. `undefined` when the frame named no list (the gateway's switch is off,
+   * or no done frame came), so the room keeps its earlier rule; an empty list means the run took every one.
+   */
+  readonly undeliveredClientMessageIds: () => readonly string[] | undefined
   readonly send: (input: SpaceSendInput) => Promise<void>
   readonly stop: () => Promise<void>
   /**
@@ -320,6 +326,9 @@ export function createSpaceSendPipeline(options: SpaceSendPipelineOptions): Spac
   // new post gets is minted server-side, so it is only known once the stream
   // announces it.
   let liveThreadId: string | undefined
+  // The mid-run messages the done frame named as never taken (F-f01-09). The room settles its strip against
+  // them at the turn's end. Reset with each send, so a turn never carries the list of the one before it.
+  let undeliveredClientMessageIds: readonly string[] | undefined
   // The last send as it left the box, with its name, for `retry`.
   let lastSend: SpaceSendInput | undefined
   const idempotencyOn = () => (options.sendIdempotency ?? spaceSendIdempotencyEnabled)()
@@ -337,6 +346,7 @@ export function createSpaceSendPipeline(options: SpaceSendPipelineOptions): Spac
     abortController = controller
     liveRequestId = undefined
     liveThreadId = replyThreadId
+    undeliveredClientMessageIds = undefined
     const openedNewThread = !replyThreadId
     beginOwnStream({ spaceRef: host.spaceRef, threadId: replyThreadId })
 
@@ -409,9 +419,11 @@ export function createSpaceSendPipeline(options: SpaceSendPipelineOptions): Spac
           assistantContent: (restart ? '' : current.assistantContent) + delta,
         })
       },
-      onDone: () => {
+      onDone: (done) => {
         terminal = true
         noteSendTransportOk()
+        // The messages this run never took, as the done frame names them (F-f01-09). A frame may name none.
+        undeliveredClientMessageIds = done?.undeliveredClientMessageIds
         // A stop that already landed must not be overwritten by a trailing
         // `done`: the server emits `stopped` and may still close the
         // stream normally afterwards.
@@ -557,5 +569,14 @@ export function createSpaceSendPipeline(options: SpaceSendPipelineOptions): Spac
     await send(again)
   }
 
-  return { exchange, submitting, liveRequestId: () => liveRequestId, liveThreadId: () => liveThreadId, send, stop, retry }
+  return {
+    exchange,
+    submitting,
+    liveRequestId: () => liveRequestId,
+    liveThreadId: () => liveThreadId,
+    undeliveredClientMessageIds: () => undeliveredClientMessageIds,
+    send,
+    stop,
+    retry,
+  }
 }

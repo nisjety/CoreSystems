@@ -59,6 +59,11 @@
       "scope_options": ["once"]
     },
     {
+      "code": "browser_site_consent",
+      "raised_by": "execution-core browser gate: the site policy asks the member before the agent opens a host",
+      "scope_options": ["once"]
+    },
+    {
       "code": "unclassified_gate",
       "raised_by": "ExecuteStep, pause_for_approval, and every code outside this list; a request that states no cause stores none",
       "scope_options": ["once"]

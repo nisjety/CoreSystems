@@ -78,6 +78,11 @@ async fn invoke_chat_json(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
+    // WS18-S4: a project start takes the same body as the stream, so it is refused here with the project switch off,
+    // before the retention decision, any bearer or any upstream call. Every other turn passes exactly as before.
+    if !state.space_features.chat_projects && super::streams::is_project_start(&body) {
+        return super::streams::chat_projects_disabled();
+    }
     // ZDR-Z-19b: the turn's retention is decided FIRST, from the raw body, so one answer serves every
     // bearer below (model-gateway refuses delegated bearers that differ in `zdr` or `zdr_waiver`).
     // A refusal is answered as the JSON envelope and nothing is sent upstream.
@@ -376,6 +381,67 @@ pub(crate) async fn queue_invocation_input(
         .await,
     )
     .into_response()
+}
+
+/// Take back a message the user typed mid-stream, while Model Gateway still holds it (O-01).
+///
+/// The browser names the run and the id the message was sent under, and supplies nothing else: no thread, no
+/// org, no user. Model Gateway reads the thread from the run's own registration, the owner's queue decides
+/// whether the run has read the message, and the stored copy is withdrawn there. The delegated session
+/// bearer rides along as on the queue route, because the withdrawal is a Session Core write made as the caller.
+pub(crate) async fn retract_queued_input(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path((request_id, client_message_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let token = shared::model_token(&state, &user, &headers).await;
+    let url = format!(
+        "{}/v1/invoke/{}/queue/{}",
+        state.model_gateway_url,
+        urlencoding::encode(&request_id),
+        urlencoding::encode(&client_message_id),
+    );
+    let session_token = shared::session_token(&state, &user, &headers).await;
+    normalize_retract_response(
+        shared::proxy_model_json_with_session(
+            &state,
+            Method::DELETE,
+            &url,
+            None,
+            token.as_deref(),
+            session_token.as_deref(),
+            &user,
+        )
+        .await,
+    )
+    .into_response()
+}
+
+/// The two ordinary answers of a take-back that did not take anything back (the run read the message first, or
+/// it holds no such message any more) are lifecycle races, not failed requests: Model Gateway answers them
+/// 409 and 404 with a typed `error`, and at the browser-facing boundary they are retained as that body under
+/// 200, so DevTools does not report a handled race as a failed HTTP request (as `normalize_queue_response`
+/// does for a run that ended). The typed `error` and `retracted: false` are required, so an unrelated upstream
+/// 404 or 409 keeps its status.
+fn normalize_retract_response(response: (StatusCode, Json<Value>)) -> (StatusCode, Json<Value>) {
+    let (status, body) = response;
+    let declined = body.0.get("retracted").and_then(Value::as_bool) == Some(false);
+    let race = match (status, body.0.get("error").and_then(Value::as_str)) {
+        (StatusCode::CONFLICT, Some("already_delivered")) => declined,
+        (StatusCode::NOT_FOUND, Some("not_found")) => declined,
+        _ => false,
+    };
+    // An answer that says the take-back stands (`retracted: true`) but carries a failure status: the queue gave the
+    // message back and only the stored copy could not be marked withdrawn (a retryable 503, or a refusal from the
+    // store). The run never reads it, so the browser must read it as taken back (never as a refusal that leaves the
+    // message to be resent at the run's end, against the take-back). Kept as that body under 200.
+    let taken_back = !status.is_success() && body.0.get("retracted").and_then(Value::as_bool) == Some(true);
+    if race || taken_back {
+        (StatusCode::OK, body)
+    } else {
+        (status, body)
+    }
 }
 
 /// A run ending between the browser's keystroke and the enqueue request is an
@@ -753,20 +819,73 @@ async fn proxy_thread_workspace(
     if thread_id.is_empty() {
         return bad_request("thread_id is required.");
     }
-    let Ok(sandbox) = shared::required_sandbox_token(state, user, headers).await else {
+    let Ok((status, body)) = thread_workspace_call(state, user, headers, thread_id, method).await
+    else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "sandbox credential is unavailable" })),
         )
             .into_response();
     };
+    (status, body).into_response()
+}
+
+/// Erase one thread's workspace before its durable delete (F-f06-03), and say only whether that happened.
+///
+/// model-gateway erases the workspace only while Session Core still knows the thread (F-f06-01), so a thread delete
+/// calls this first. The person's own `aud=sandbox-manager` credential goes to model-gateway exactly as the reset
+/// route sends it, and nowhere else: the BFF decides no ownership. `true` only for a 2xx from model-gateway. Nothing
+/// is minted and nothing is sent while the switch (`SANDBOX_THREAD_WORKSPACE_ENABLED`) is off, or for a request that
+/// keeps no content: such a person has no workspace and is minted no sandbox credential. The answer's body is never
+/// returned, so no caller can relay it.
+pub(super) async fn erase_thread_workspace(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    thread_id: &str,
+) -> bool {
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() || !workspace_erase_applies(state, user, headers).await {
+        return false;
+    }
+    matches!(
+        thread_workspace_call(state, user, headers, thread_id, Method::DELETE).await,
+        Ok((status, _)) if status.is_success()
+    )
+}
+
+/// Whether the thread workspaces of this request are erased at all: the switch is on, and the request does not keep
+/// zero retention, by its own header or body or because its organisation is under it. The switch is read first, so a
+/// switched-off gateway makes no org-core call.
+pub(super) async fn workspace_erase_applies(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> bool {
+    shared::sandbox_thread_workspace_enabled(state)
+        && !(crate::zdr::request_zdr(headers, None)
+            || crate::zdr::org_zdr_enabled(state, user).await)
+}
+
+/// One call to model-gateway's workspace route for this thread, with the person's model credential and the sandbox
+/// credential minted for this request. `Err` is the one refusal before any call: no sandbox credential.
+async fn thread_workspace_call(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    thread_id: &str,
+    method: Method,
+) -> Result<(StatusCode, Json<Value>), ()> {
+    let sandbox = shared::required_sandbox_token(state, user, headers)
+        .await
+        .map_err(|_| ())?;
     let token = shared::model_token(state, user, headers).await;
     let url = format!(
         "{}/v1/threads/{}/workspace",
         state.model_gateway_url,
         urlencoding::encode(thread_id),
     );
-    let (status, Json(body)) = shared::proxy_model_json_with_sandbox(
+    Ok(shared::proxy_model_json_with_sandbox(
         state,
         method,
         &url,
@@ -775,8 +894,7 @@ async fn proxy_thread_workspace(
         Some(&sandbox),
         user,
     )
-    .await;
-    (status, Json(body)).into_response()
+    .await)
 }
 
 /// Itemized context window for a thread — the context inspector's read.
@@ -1087,6 +1205,59 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["queued"], false);
         assert_eq!(body["resend_as_new_turn"], true);
+    }
+
+    #[test]
+    fn a_take_back_that_lost_a_race_is_a_successful_browser_protocol_response() {
+        for (status, error) in [
+            (StatusCode::CONFLICT, "already_delivered"),
+            (StatusCode::NOT_FOUND, "not_found"),
+        ] {
+            let (out, Json(body)) = normalize_retract_response((
+                status,
+                Json(json!({"retracted": false, "error": error, "client_message_id": "msg-1"})),
+            ));
+            assert_eq!(out, StatusCode::OK, "{error}");
+            assert_eq!(body["retracted"], false);
+            assert_eq!(body["error"], error, "the gateway's word is kept");
+        }
+    }
+
+    #[test]
+    fn a_take_back_that_stands_but_could_not_be_recorded_is_read_as_taken_back() {
+        // The queue gave the message back, whatever status the store's refusal carried: the browser reads it as taken
+        // back (withdrawn false), never as a refusal that leaves the message to be resent at the run's end.
+        for (status, body) in [
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({"retracted": true, "withdrawn": false, "error": "withdrawal_not_recorded", "retryable": true}),
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                json!({"retracted": true, "withdrawn": false, "error": {"code": "thread_forbidden"}}),
+            ),
+            (StatusCode::NOT_FOUND, json!({"retracted": true, "error": "not_found"})),
+        ] {
+            let (out, Json(kept)) = normalize_retract_response((status, Json(body.clone())));
+            assert_eq!(out, StatusCode::OK, "{body}");
+            assert_eq!(kept, body, "the body is kept whole");
+        }
+    }
+
+    #[test]
+    fn a_take_back_keeps_every_other_status_and_an_untyped_404_or_409() {
+        // A success, a refusal that does not claim the take-back and an unrelated upstream 404/409 are untouched.
+        for (status, body) in [
+            (StatusCode::OK, json!({"retracted": true, "withdrawn": true})),
+            (StatusCode::SERVICE_UNAVAILABLE, json!({"error": {"code": "queue_retract_disabled"}})),
+            (StatusCode::PRECONDITION_FAILED, json!({"error": {"code": "zdr_durable_mutation_forbidden"}})),
+            (StatusCode::NOT_FOUND, json!({"error": {"code": "thread_not_found"}})),
+            (StatusCode::CONFLICT, json!({"error": "already_delivered"})),
+        ] {
+            let (out, Json(kept)) = normalize_retract_response((status, Json(body.clone())));
+            assert_eq!(out, status, "{body}");
+            assert_eq!(kept, body);
+        }
     }
 
     #[test]

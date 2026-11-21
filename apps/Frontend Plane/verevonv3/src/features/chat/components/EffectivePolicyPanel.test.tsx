@@ -79,11 +79,11 @@ describe('EffectivePolicyPanel', () => {
     vi.stubEnv('VITE_POLICY_EFFECTIVE_VIEW_ENABLED', 'true')
     requestJson.mockResolvedValue({
       items: [
-        { key: 'approval_posture', value: 'ask_first', origin: 'platform' },
+        { key: 'approval.posture', value: 'ask_first', origin: 'platform' },
         { key: 'zdr', value: true, origin: 'org', revision: 4 },
-        { key: 'routing', value: 'auto', origin: 'space' },
-        { key: 'budget', value: 500, origin: 'user' },
-        { key: 'web_access', value: 'read_only', origin: 'request' },
+        { key: 'web.mode', value: 'live', origin: 'space' },
+        { key: 'budget.max_rounds', value: 500, origin: 'user' },
+        { key: 'mode_cap', value: 'read_only', origin: 'request' },
       ],
     })
     render(() => <EffectivePolicyPanel scope={{ kind: 'thread', threadId: 'thr_1' }} />)
@@ -103,7 +103,7 @@ describe('EffectivePolicyPanel', () => {
   it('never names a layer the server did not send', async () => {
     vi.stubEnv('VITE_POLICY_EFFECTIVE_VIEW_ENABLED', 'true')
     requestJson.mockResolvedValue({
-      items: [{ key: 'routing', value: 'auto', origin: 'mystery' }, { key: 'budget', value: 10 }],
+      items: [{ key: 'web.mode', value: 'live', origin: 'mystery' }, { key: 'budget.max_rounds', value: 10 }],
     })
     render(() => <EffectivePolicyPanel scope={{ kind: 'thread', threadId: 'thr_1' }} />)
     await openPanel()
@@ -126,7 +126,7 @@ describe('EffectivePolicyPanel', () => {
   it('shows an unavailable setting without its value or its origin', async () => {
     vi.stubEnv('VITE_POLICY_EFFECTIVE_VIEW_ENABLED', 'true')
     requestJson.mockResolvedValue({
-      items: [{ key: 'web_access', unavailable: true, value: 'read_only', origin: 'org' }],
+      items: [{ key: 'mode_cap', unavailable: true, value: 'read_only', origin: 'org' }],
     })
     render(() => <EffectivePolicyPanel scope={{ kind: 'thread', threadId: 'thr_1' }} />)
     await openPanel()
@@ -139,7 +139,7 @@ describe('EffectivePolicyPanel', () => {
   it('shows a member an admin-only detail as a count, and keeps the origin', async () => {
     vi.stubEnv('VITE_POLICY_EFFECTIVE_VIEW_ENABLED', 'true')
     requestJson.mockResolvedValue({
-      items: [{ key: 'browser_site_mode', value: null, origin: 'org', redacted: true, count: 12 }],
+      items: [{ key: 'browser_sites.rules', value: null, origin: 'org', redacted: true, count: 12 }],
     })
     render(() => <EffectivePolicyPanel scope={{ kind: 'thread', threadId: 'thr_1' }} />)
     await openPanel()
@@ -218,20 +218,146 @@ describe('EffectivePolicyPanel', () => {
       { key: 'zdr', value: true, origin: 'org', locked: false, redacted: false, unavailable: false },
     ])
 
-    expect(parseEffectivePolicy({ items: [{ key: 'routing', value: { mode: 'auto' }, origin: 'org' }] })).toEqual([
-      { key: 'routing', value: null, origin: null, locked: false, redacted: false, unavailable: true },
+    expect(
+      parseEffectivePolicy({ items: [{ key: 'model_access.max_effort', value: { mode: 'auto' }, origin: 'org' }] }),
+    ).toEqual([
+      { key: 'model_access.max_effort', value: null, origin: null, locked: false, redacted: false, unavailable: true },
     ])
   })
 
   it('reads a revision and a count only when they are whole numbers', () => {
     expect(
-      parseEffectivePolicy({ items: [{ key: 'budget', value: 1, revision: 1.5, count: -2, origin: 'org' }] }),
-    ).toEqual([{ key: 'budget', value: 1, origin: 'org', locked: false, redacted: false, unavailable: false }])
+      parseEffectivePolicy({
+        items: [{ key: 'budget.max_rounds', value: 1, revision: 1.5, count: -2, origin: 'org' }],
+      }),
+    ).toEqual([
+      { key: 'budget.max_rounds', value: 1, origin: 'org', locked: false, redacted: false, unavailable: false },
+    ])
   })
 
   it('throws on a response without an items list', () => {
     expect(() => parseEffectivePolicy({ items: 'nope' })).toThrow()
     expect(() => parseEffectivePolicy(null)).toThrow()
+  })
+
+  it('reads an admin list as its entries and a withheld list as its count, and no list in any other shape', () => {
+    expect(
+      parseEffectivePolicy({
+        items: [
+          { key: 'model_access.allow', value: null, origin: 'org', values: ['model-a', 'model-b'] },
+          { key: 'model_access.deny', value: null, origin: 'org', redacted: true, count: 1 },
+        ],
+      }),
+    ).toEqual([
+      {
+        key: 'model_access.allow',
+        value: null,
+        origin: 'org',
+        locked: false,
+        redacted: false,
+        values: ['model-a', 'model-b'],
+        unavailable: false,
+      },
+      {
+        key: 'model_access.deny',
+        value: null,
+        origin: 'org',
+        locked: false,
+        redacted: true,
+        count: 1,
+        unavailable: false,
+      },
+    ])
+
+    // A list that is not text, blank, or over the bounds makes its row unavailable rather than a list.
+    const tooLong = Array.from({ length: 201 }, (_, n) => `model-${n}`)
+    for (const values of [['model-a', 3], [' '], ['x'.repeat(201)], tooLong, 'model-a']) {
+      expect(parseEffectivePolicy({ items: [{ key: 'model_access.allow', values, origin: 'org' }] })).toEqual([
+        { key: 'model_access.allow', value: null, origin: null, locked: false, redacted: false, unavailable: true },
+      ])
+    }
+
+    // A withheld row carries neither a value nor a list.
+    for (const extra of [{ value: 'model-a' }, { values: ['model-a'] }]) {
+      const [row] = parseEffectivePolicy({
+        items: [{ key: 'model_access.allow', origin: 'org', redacted: true, count: 1, ...extra }],
+      })
+      expect(row?.unavailable).toBe(true)
+      expect(row?.values).toBeUndefined()
+    }
+  })
+
+  it('shows a member the count of a list and an admin the list itself, and "Not set" for an empty one', async () => {
+    vi.stubEnv('VITE_POLICY_EFFECTIVE_VIEW_ENABLED', 'true')
+    requestJson.mockResolvedValue({
+      items: [
+        { key: 'model_access.allow', value: null, origin: 'org', redacted: true, count: 2 },
+        {
+          key: 'browser_sites.rules',
+          value: null,
+          origin: 'org',
+          values: ['example.com (read)', 'shop.example.com (act)'],
+        },
+        { key: 'model_access.deny', value: null, origin: 'platform', values: [] },
+      ],
+    })
+    render(() => <EffectivePolicyPanel scope={{ kind: 'thread', threadId: 'thr_1' }} />)
+    await openPanel()
+
+    expect(await screen.findByText('2 entries, visible to admins only')).toBeTruthy()
+    expect(screen.getByText('example.com (read), shop.example.com (act)')).toBeTruthy()
+    expect(screen.getByText('Not set')).toBeTruthy()
+  })
+
+  it('labels a dotted key from the copy and humanises a key the copy does not name', async () => {
+    vi.stubEnv('VITE_POLICY_EFFECTIVE_VIEW_ENABLED', 'true')
+    requestJson.mockResolvedValue({
+      items: [
+        { key: 'approval.posture', value: 'auto', origin: 'platform' },
+        { key: 'routing.fallback_model', value: 'auto', origin: 'org' },
+      ],
+    })
+    render(() => <EffectivePolicyPanel scope={{ kind: 'thread', threadId: 'thr_1' }} />)
+    await openPanel()
+
+    expect(await screen.findByText('Approval posture')).toBeTruthy()
+    expect(screen.getByText('Routing fallback model')).toBeTruthy()
+    expect(screen.queryByText('routing.fallback_model')).toBeNull()
+  })
+
+  it('names every key the servers send, in both locales', () => {
+    // The keys model-gateway's view lists, the reserved and enforced settings it lists at their default, the BFF's
+    // model-access and browser-site items, and the stand-ins an unanswered owner leaves in place.
+    const sent = [
+      'approval.posture',
+      'budget.max_rounds',
+      'budget.max_subagents',
+      'mode_cap',
+      'rung_cap',
+      'web.mode',
+      'web.paid_providers',
+      'research.max_fan_out_items',
+      'ext.skills',
+      'ext.plugins',
+      'user_hooks',
+      'reference_uploads',
+      'mcp_apps.network_origins',
+      'zdr',
+      'model_access.allow_mode',
+      'model_access.min_privacy_tier',
+      'model_access.max_effort',
+      'model_access.allow',
+      'model_access.deny',
+      'browser_sites.mode',
+      'browser_sites.rules',
+      'model_plane',
+      'model_access',
+      'browser_sites',
+    ]
+    for (const key of sent) {
+      expect(Object.hasOwn(en.effectivePolicy.keys, key), `en ${key}`).toBe(true)
+      expect(Object.hasOwn(no.effectivePolicy.keys, key), `no ${key}`).toBe(true)
+    }
   })
 
   it('keeps one column at phone width and lets long values wrap', () => {

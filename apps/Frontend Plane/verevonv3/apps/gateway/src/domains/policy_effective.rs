@@ -31,7 +31,6 @@ use serde_json::{json, Value};
 use crate::{
     config::AppState,
     contracts::ActionActor,
-    domains::browser_sites,
     domains::chat::shared::{
         model_token, proxy_model_json_with_capability, required_capability_token,
     },
@@ -67,7 +66,8 @@ fn switch_enabled(value: Option<&str>) -> bool {
     value == Some("true")
 }
 
-/// One value of the view, as the owners and this route shape it. `value` is `null` only when `unavailable` is set.
+/// One value of the view, as the owners and this route shape it. `value` is `null` only when `unavailable` is set, and
+/// also for a list (EP-9 T3): a member reads a list as `redacted` with its `count`, and an admin reads it as `values`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Item {
     key: String,
@@ -78,7 +78,22 @@ struct Item {
     locked: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     unavailable: bool,
+    /// The value is withheld from this viewer: a member reads how many entries a list holds, never the entries.
+    #[serde(default, skip_serializing_if = "is_false")]
+    redacted: bool,
+    /// How many entries a withheld list holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    count: Option<u64>,
+    /// The entries of a list this viewer may read (an admin's), one string each.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    values: Option<Vec<String>>,
 }
+
+/// The most entries a list shows, and the most characters one entry shows. The panel reads no more than these.
+const MAX_LIST_ENTRIES: usize = 200;
+const MAX_ENTRY_CHARS: usize = 200;
+/// The most characters of a browser-site rule the admin reads as text, when the rule is not a host and a level.
+const MAX_RULE_TEXT_CHARS: usize = 120;
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -93,6 +108,9 @@ impl Item {
             revision,
             locked,
             unavailable: false,
+            redacted: false,
+            count: None,
+            values: None,
         }
     }
 
@@ -104,6 +122,9 @@ impl Item {
             revision: None,
             locked: false,
             unavailable: true,
+            redacted: false,
+            count: None,
+            values: None,
         }
     }
 }
@@ -138,7 +159,7 @@ async fn get_effective_policy(
     let admin = has_authorized_org_role(&user, &["owner", "admin"]);
     let model_access_on = state.model_entitlement_admin_enabled;
     // Org-core reads the browser-site policy for an owner or admin alone, so a member is not asked for it.
-    let browser_sites_on = admin && browser_sites::enabled_from_env();
+    let browser_sites_on = admin && state.space_features.browser_sites_enabled;
 
     let (model_plane, model_access, browser, zdr) = tokio::join!(
         within_budget(model_plane_items(&state, &user, &headers, &thread_id)),
@@ -360,16 +381,6 @@ fn model_access_from(body: &Value, admin: bool) -> Vec<Item> {
     let allow_set = set && !allow.is_empty();
     let deny_set = set && !deny.is_empty();
     let listed = allow_mode == "listed";
-    let allow_shown = if admin {
-        Value::Array(allow.clone())
-    } else {
-        json!(allow.len())
-    };
-    let deny_shown = if admin {
-        Value::Array(deny.clone())
-    } else {
-        json!(deny.len())
-    };
     vec![
         org_or_platform(
             "model_access.allow_mode",
@@ -392,14 +403,22 @@ fn model_access_from(body: &Value, admin: bool) -> Vec<Item> {
             revision,
             effort_set,
         ),
-        org_or_platform(
+        list_item(
             "model_access.allow",
-            allow_shown,
+            &allow,
+            admin,
             allow_set,
             revision,
             allow_set && listed,
         ),
-        org_or_platform("model_access.deny", deny_shown, deny_set, revision, deny_set),
+        list_item(
+            "model_access.deny",
+            &deny,
+            admin,
+            deny_set,
+            revision,
+            deny_set,
+        ),
     ]
 }
 
@@ -435,6 +454,63 @@ fn org_or_platform(
     }
 }
 
+/// An owner's list as this viewer may read it (EP-9 T3). An admin reads the entries, one string each. A member reads how
+/// many there are and never an entry, so no admin list reaches a member: the entries are not even built for one.
+fn list_item(
+    key: &str,
+    list: &[Value],
+    admin: bool,
+    set: bool,
+    revision: i64,
+    restricts: bool,
+) -> Item {
+    let mut item = org_or_platform(key, Value::Null, set, revision, restricts);
+    if admin {
+        item.values = Some(entries_text(list));
+    } else {
+        item.redacted = true;
+        item.count = Some(u64::try_from(list.len()).unwrap_or(u64::MAX));
+    }
+    item
+}
+
+/// The entries of a model list as text, one string each, at most [`MAX_LIST_ENTRIES`] of them.
+fn entries_text(list: &[Value]) -> Vec<String> {
+    list.iter()
+        .take(MAX_LIST_ENTRIES)
+        .map(|entry| {
+            let text = entry
+                .as_str()
+                .map_or_else(|| entry.to_string(), str::to_owned);
+            truncate_chars(&text, MAX_ENTRY_CHARS)
+        })
+        .collect()
+}
+
+/// The browser-site rules as an admin reads them, one line each: `<host> (<rule>)` for a rule that names a host and a
+/// level, otherwise the rule's JSON text cut to [`MAX_RULE_TEXT_CHARS`]. At most [`MAX_LIST_ENTRIES`] lines.
+fn rules_text(rules: &[Value]) -> Vec<String> {
+    rules
+        .iter()
+        .take(MAX_LIST_ENTRIES)
+        .map(|rule| {
+            match (
+                rule.get("host").and_then(Value::as_str),
+                rule.get("rule").and_then(Value::as_str),
+            ) {
+                (Some(host), Some(level)) => {
+                    truncate_chars(&format!("{host} ({level})"), MAX_ENTRY_CHARS)
+                }
+                _ => truncate_chars(&rule.to_string(), MAX_RULE_TEXT_CHARS),
+            }
+        })
+        .collect()
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
+}
+
 /// The organization's browser-site mode and rules, from org-core's policy read. Only an owner or admin may read it
 /// there, so this runs for an admin alone.
 async fn browser_site_items(
@@ -467,6 +543,15 @@ fn browser_site_items_from(body: &Value) -> Vec<Item> {
         .cloned()
         .unwrap_or_default();
     let rules_set = set && !rules.is_empty();
+    // Read for an admin alone, so the rules are listed as their lines; a member never has these items.
+    let mut rules_item = org_or_platform(
+        "browser_sites.rules",
+        Value::Null,
+        rules_set,
+        revision,
+        rules_set,
+    );
+    rules_item.values = Some(rules_text(&rules));
     vec![
         org_or_platform(
             "browser_sites.mode",
@@ -475,13 +560,7 @@ fn browser_site_items_from(body: &Value) -> Vec<Item> {
             revision,
             set && mode == "allowlist",
         ),
-        org_or_platform(
-            "browser_sites.rules",
-            Value::Array(rules),
-            rules_set,
-            revision,
-            rules_set,
-        ),
+        rules_item,
     ]
 }
 
@@ -603,16 +682,85 @@ mod tests {
         let admin = for_viewer(model_access_from(&body, true), true);
 
         let allow_member = find(&member, "model_access.allow");
-        assert_eq!(allow_member.value, json!(2));
+        assert_eq!(allow_member.value, Value::Null);
+        assert!(allow_member.redacted);
+        assert_eq!(allow_member.count, Some(2));
+        assert_eq!(allow_member.values, None);
         assert_eq!(allow_member.revision, None);
-        assert_eq!(find(&admin, "model_access.allow").value, json!(["model-a", "model-b"]));
-        assert_eq!(find(&admin, "model_access.allow").revision, Some(7));
+        let allow_admin = find(&admin, "model_access.allow");
+        assert_eq!(allow_admin.value, Value::Null);
+        assert!(!allow_admin.redacted);
+        assert_eq!(allow_admin.count, None);
+        assert_eq!(
+            allow_admin.values,
+            Some(vec!["model-a".to_owned(), "model-b".to_owned()])
+        );
+        assert_eq!(allow_admin.revision, Some(7));
+        // No entry of the admin list reaches a member, under any key.
+        let member_json = serde_json::to_string(&member).expect("the items serialize");
+        assert!(
+            !member_json.contains("model-a") && !member_json.contains("model-b"),
+            "{member_json}"
+        );
 
         let privacy = find(&member, "model_access.min_privacy_tier");
         assert_eq!(privacy.value, json!("eu_resident"));
         assert_eq!(privacy.origin.as_deref(), Some("org"));
         assert!(privacy.locked);
         assert_eq!(find(&member, "model_access.max_effort").value, json!("unlimited"));
+    }
+
+    #[test]
+    fn an_admin_list_is_capped_and_a_long_entry_is_cut_while_a_member_reads_the_full_count() {
+        let mut entries: Vec<String> = (0..MAX_LIST_ENTRIES + 5)
+            .map(|n| format!("model-{n}"))
+            .collect();
+        entries[0] = "x".repeat(MAX_ENTRY_CHARS + 10);
+        let body = json!({
+            "state": "org",
+            "revision": 1,
+            "policy": {"allow_mode": "listed", "allow": entries},
+        });
+
+        let admin = model_access_from(&body, true);
+        let values = find(&admin, "model_access.allow")
+            .values
+            .clone()
+            .expect("an admin reads the entries");
+        assert_eq!(values.len(), MAX_LIST_ENTRIES);
+        assert_eq!(values[0].chars().count(), MAX_ENTRY_CHARS);
+        assert_eq!(values[1], "model-1");
+
+        let member = model_access_from(&body, false);
+        assert_eq!(find(&member, "model_access.allow").count, Some(205));
+    }
+
+    #[test]
+    fn an_admin_reads_each_browser_site_rule_as_one_line_and_a_long_rule_is_cut() {
+        let items = browser_site_items_from(&json!({
+            "revision": 3,
+            "mode": "allowlist",
+            "rules": [
+                {"host": "example.com", "rule": "read"},
+                {"host": "shop.example.com", "rule": "act"},
+                {"rule": "read"},
+                "not-an-object",
+            ],
+        }));
+        let rules = find(&items, "browser_sites.rules");
+        assert_eq!(rules.value, Value::Null);
+        assert!(!rules.redacted);
+        assert_eq!(
+            rules.values,
+            Some(vec![
+                "example.com (read)".to_owned(),
+                "shop.example.com (act)".to_owned(),
+                "{\"rule\":\"read\"}".to_owned(),
+                "\"not-an-object\"".to_owned(),
+            ])
+        );
+        let long = rules_text(&[json!({"note": "y".repeat(300)})]);
+        assert_eq!(long[0].chars().count(), MAX_RULE_TEXT_CHARS);
     }
 
     #[test]

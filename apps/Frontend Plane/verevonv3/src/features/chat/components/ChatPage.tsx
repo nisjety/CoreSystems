@@ -40,6 +40,7 @@ import {
   type ChatTurnTiming,
   type DeckTemplate,
 } from '@/shared/api/chat-client'
+import { answeringTurn } from '@/features/chat/lib/chat-versions'
 import { serverVersionBadge } from '@/features/chat/lib/chat-versions-server'
 import { getLearningAllowed } from '@/shared/api/memory-client'
 import { importUpload } from '@/shared/api/knowledge-client'
@@ -229,6 +230,8 @@ export default function ChatPage() {
     questionError,
     answerPendingQuestion,
     skipPendingQuestion,
+    retractQueuedMessage,
+    editQueuedMessage,
     pendingResearchPlan,
     startResearchPlan,
     cancelResearchPlan,
@@ -875,7 +878,7 @@ export default function ChatPage() {
     docked: dockedNodesFor(dockedTrays(), turn.id),
     settledFold: settledFolds()?.get(turn.id),
     version: index === turns.length - 1 ? finalExchangeVersion() : null,
-    editLocked: turn.role === 'user' && isEffectfulChatTurn(turns[index + 1]?.effectClass),
+    editLocked: turn.role === 'user' && isEffectfulChatTurn(answeringTurn(turns, index)?.effectClass),
   })))
 
   // WS09 S10, behind `VITE_CHAT_VIRTUALIZE` (see transcript-window.ts). The window
@@ -1879,6 +1882,8 @@ export default function ChatPage() {
                 questionError={questionError()}
                 onAnswerQuestion={(answer) => void answerPendingQuestion(answer)}
                 onSkipQuestion={() => void skipPendingQuestion()}
+                onEditQueuedInput={(entry, text) => void editQueuedMessage(entry, text)}
+                onRetractQueuedInput={(entry) => void retractQueuedMessage(entry)}
                 researchPlan={pendingResearchPlan()}
                 onStartResearchPlan={(edit) => void startResearchPlan(edit)}
                 onCancelResearchPlan={cancelResearchPlan}
@@ -1980,6 +1985,7 @@ export default function ChatPage() {
             seedTitle={scheduleDialogSeed().title}
             seedGoal={scheduleDialogSeed().goal}
             threadOriginHint="message-action"
+            zeroRetention={temporaryChat() || isActiveThreadTemporary()}
           />
         </Portal>
       </Show>

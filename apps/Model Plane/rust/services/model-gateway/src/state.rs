@@ -23,6 +23,7 @@ use mp_contracts::model_plane::v1::{
     message_search_client::MessageSearchClient,
     memory_service_client::MemoryServiceClient,
     message_tree_service_client::MessageTreeServiceClient,
+    message_withdrawal_service_client::MessageWithdrawalServiceClient,
     thread_export_service_client::ThreadExportServiceClient,
     thread_share_service_client::ThreadShareServiceClient,
     thread_fork_service_client::ThreadForkServiceClient,
@@ -172,6 +173,8 @@ pub struct AppState {
     pub artifact_editing_enabled: bool,
     /// Session Core's MessageTree service on the session_client endpoint (WS17-S8).
     pub message_tree_client: MessageTreeServiceClient<Channel>,
+    /// Session Core's MessageWithdrawalService on the session_client endpoint (O-01, take back a queued message).
+    pub message_withdrawal_client: MessageWithdrawalServiceClient<Channel>,
     /// Session Core's ThreadFork service on the session_client endpoint (WS17-S6).
     pub thread_fork_client: ThreadForkServiceClient<Channel>,
     /// Session Core's ThreadGoalService on the session_client endpoint (EP-7 S1).
@@ -562,6 +565,7 @@ impl AppState {
             artifact_revisions_mode: crate::artifact_revisions::ArtifactRevisionsMode::Off,
             artifact_editing_enabled: false,
             message_tree_client: MessageTreeServiceClient::new(session_channel.clone()),
+            message_withdrawal_client: MessageWithdrawalServiceClient::new(session_channel.clone()),
             thread_fork_client: ThreadForkServiceClient::new(session_channel.clone()),
             thread_goal_client: ThreadGoalServiceClient::new(session_channel.clone()),
             research_run_client: ResearchRunServiceClient::new(session_channel.clone()),
@@ -778,6 +782,11 @@ impl AppState {
         // Editing over a shadow or absent revision table would save text no turn reads: refuse the boot.
         let artifact_editing_enabled = crate::artifact_edit_routes::editing_from_env(artifact_revisions_mode)?;
         let message_tree_client = MessageTreeServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let message_withdrawal_client = MessageWithdrawalServiceClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
@@ -1082,6 +1091,7 @@ impl AppState {
             state.artifact_revisions_mode = artifact_revisions_mode;
             state.artifact_editing_enabled = artifact_editing_enabled;
             state.message_tree_client = message_tree_client;
+            state.message_withdrawal_client = message_withdrawal_client;
             state.thread_fork_client = thread_fork_client;
             state.thread_goal_client = thread_goal_client;
             state.research_run_client = research_run_client;
@@ -1163,6 +1173,7 @@ impl AppState {
             state.artifact_revisions_mode = artifact_revisions_mode;
             state.artifact_editing_enabled = artifact_editing_enabled;
             state.message_tree_client = message_tree_client;
+            state.message_withdrawal_client = message_withdrawal_client;
             state.thread_fork_client = thread_fork_client;
             state.thread_goal_client = thread_goal_client;
             state.research_run_client = research_run_client;

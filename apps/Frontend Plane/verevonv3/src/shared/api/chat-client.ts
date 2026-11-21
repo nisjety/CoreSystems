@@ -25,7 +25,7 @@ import {
 import { createSelectedAgentToolSpecs } from '@/shared/actions/agent-tools'
 import { parseChatHistoryAction, threadExportInput, threadImportInput, threadSideChatAction } from '@/shared/actions/chat-history'
 import { isSupportChatThread } from '@/shared/chat/support-chat-thread'
-import { isLocale, localeIntl, localeStorageKey, type Locale } from '@/shared/i18n/locales'
+import { defaultLocale, isLocale, localeIntl, localeStorageKey, pickLocaleText, type Locale } from '@/shared/i18n/locales'
 import { isAgUiEventName, toVerevonUiEvent, type VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import {
   applyServerRetention,
@@ -533,6 +533,13 @@ export type ChatDoneEvent = {
    * the answer may be truncated. See model_plane.v1.InferChunk.stop_reason.
    */
   stopReason?: string
+  /**
+   * The accepted mid-run messages the gateway never took, by client message id, as the run ended
+   * (`undelivered_client_message_ids`). Named only when the gateway has `MODEL_GATEWAY_QUEUED_UNDELIVERED_IDS`
+   * on and send receipts on. `undefined` means the gateway named none, and the strip keeps its earlier rule;
+   * an empty list means every accepted message was taken.
+   */
+  undeliveredClientMessageIds?: string[]
 }
 /**
  * The run was stopped before finishing. Distinct from `onDone` on purpose: a
@@ -1540,6 +1547,11 @@ export type ChatMessage = {
    * thread (WS17 S9). Absent when the server keeps no version tree for the thread.
    */
   version?: ChatMessageVersion
+  /**
+   * The person took this message back before the run read it (O-01), from the wire's `retracted`. The row is a text-free
+   * note (`content` is empty). Absent on every other message, and always absent while the gateway's take-back is off.
+   */
+  retracted?: boolean
 }
 
 /** A turn's place in the server's message tree (WS17 S9): its parent, its place among the turns sharing it, and those turns. */
@@ -1592,6 +1604,11 @@ export type ChatThreadSession = {
    * for a temporary/ZDR chat, which cannot durably persist this toggle.
    */
   personaEnabled: boolean
+  /**
+   * The thread's own memory mode (WS07-S6): `inherit` or `off`. Absent when the server states none (the switch is
+   * off, or the caller is zero retention). Set through `saveChatThreadSnapshot`.
+   */
+  memoryMode?: 'inherit' | 'off'
   /** Newest run projection from Session Core, when the thread has one. */
   latestRunId?: string
   latestRunStatus?: string
@@ -1677,6 +1694,10 @@ export type SaveChatThreadSnapshotRequest = {
    * "omission = leave unchanged" contract as `pinned` above.
    */
   personaEnabled?: boolean
+  /**
+   * OMIT to leave the thread's memory mode untouched (WS07-S6). Only `inherit` or `off` is sent.
+   */
+  memoryMode?: 'inherit' | 'off'
 }
 
 export type ModelModality = 'chat' | 'image' | 'video' | 'audio' | 'embedding' | 'other'
@@ -1902,6 +1923,15 @@ function strOrJson(value: unknown): string | undefined {
 
 function num(value: unknown): number | undefined {
   return typeof value === 'number' ? value : undefined
+}
+
+/**
+ * The `undelivered_client_message_ids` of a done frame, when it is an array of strings. Anything else is no
+ * list at all (`undefined`), which is not the same as an empty list: see `ChatDoneEvent`.
+ */
+function undeliveredIds(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  return value.every((item): item is string => typeof item === 'string') ? value : undefined
 }
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {
@@ -2855,6 +2885,7 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         modelUsed: str(payload.model_used) ?? str(payload.modelUsed),
         outputTokens: num(payload.output_tokens) ?? num(payload.outputTokens),
         stopReason: str(payload.stop_reason) ?? str(payload.stopReason),
+        undeliveredClientMessageIds: undeliveredIds(payload.undelivered_client_message_ids),
       })
       break
     case 'stopped':
@@ -3702,6 +3733,79 @@ export async function queueInvocationInput(
     // under the same id stores it once.
     if (error.status === 503) {
       return { outcome: 'refused', reason: 'unavailable', message: error.message }
+    }
+    return { outcome: 'refused', reason: 'other', message: error.message }
+  }
+}
+
+/**
+ * What happened to the take-back of a message sent while a run was streaming (O-01, DEC-F01-03).
+ *
+ * Three answers the UI acts on differently, plus a refusal. `retracted`: the run had not read the message and
+ * now never will, so the strip drops it and the transcript keeps a text-free note. `already_delivered`: the run
+ * took it first (or the run's end has handed it over to a resend), so it stays where it is. `not_found`: the
+ * gateway holds no such message of this caller, which is what a run that ended gives. `refused` names what
+ * could not be decided, and nothing is claimed either way (`unavailable` is retryable; `disabled` says this
+ * deployment does not take messages back). `retracted` with `retryable` (and `withdrawn` false) is a take-back the
+ * queue has decided whose stored copy could not be marked withdrawn: asking the same take-back again marks it.
+ */
+export type QueuedInputRetractResult =
+  | { outcome: 'retracted'; withdrawn: boolean; retryable?: true }
+  | { outcome: 'already_delivered' }
+  | { outcome: 'not_found' }
+  | { outcome: 'refused'; reason: 'unavailable' | 'disabled' | 'other'; message: string }
+
+/** The fallback text of a take-back that decided nothing, in the language the person chose (the app default otherwise). */
+function retractRefusedText(): string {
+  return pickLocaleText(storedUiLocale() ?? defaultLocale, 'Kunne ikke fjerne meldingen.', 'Could not remove the message.')
+}
+
+/**
+ * Take back the mid-run message sent under `clientMessageId`, while the gateway still holds it.
+ *
+ * The gateway's queue decides under the one lock that guards delivery, so a take-back and a delivery cannot both
+ * win. Idempotent: a repeat of a take-back that succeeded answers `retracted` again. The BFF forwards the
+ * caller's own credentials and supplies no authority; the Model Plane names the thread from the run's own
+ * registration, never from here.
+ */
+export async function retractQueuedInput(
+  requestId: string,
+  clientMessageId: string,
+): Promise<QueuedInputRetractResult> {
+  try {
+    const raw = await requestJson<Record<string, unknown>>(
+      `/api/v1/chat/invocations/${encodeURIComponent(requestId)}/queue/${encodeURIComponent(clientMessageId)}`,
+      { method: 'DELETE' },
+    )
+    if (raw.retracted === true) {
+      const withdrawn = raw.withdrawn !== false
+      // The queue gave the message back, but the stored copy could not be marked withdrawn (the BFF keeps the gateway's
+      // retryable 503 as this 200 body). Asking the same take-back again re-marks it, so the caller may retry.
+      if (!withdrawn && raw.retryable === true) return { outcome: 'retracted', withdrawn, retryable: true }
+      return { outcome: 'retracted', withdrawn }
+    }
+    // The BFF answers the two ordinary races as 200 (like a run that ended under a queue request), keeping the
+    // gateway's word in `error`.
+    if (raw.error === 'already_delivered') return { outcome: 'already_delivered' }
+    if (raw.error === 'not_found') return { outcome: 'not_found' }
+    return { outcome: 'refused', reason: 'other', message: retractRefusedText() }
+  } catch (error) {
+    if (!(error instanceof ApiError)) {
+      return {
+        outcome: 'refused',
+        reason: 'other',
+        message: error instanceof Error ? error.message : retractRefusedText(),
+      }
+    }
+    // Also accepted as statuses, for a BFF that does not normalize them.
+    if (error.status === 404) return { outcome: 'not_found' }
+    if (error.status === 409) return { outcome: 'already_delivered' }
+    if (error.status === 503) {
+      return {
+        outcome: 'refused',
+        reason: error.code === 'queue_retract_disabled' ? 'disabled' : 'unavailable',
+        message: error.message,
+      }
     }
     return { outcome: 'refused', reason: 'other', message: error.message }
   }
@@ -4838,6 +4942,8 @@ export type ComposerCapabilities = {
   deepResearchKnowledge: boolean
   /** The composer's "Bred forskning" entry (EP-2 S8): the gateway's switch, off for a ZDR caller. */
   wideResearch: boolean
+  /** Project chats (WS18-S4): the BFF's own GATEWAY_CHAT_PROJECTS_ENABLED, added to the gateway's answer. Off reads false. */
+  chatProjects: boolean
 }
 
 export const NO_COMPOSER_CAPABILITIES: ComposerCapabilities = {
@@ -4849,6 +4955,7 @@ export const NO_COMPOSER_CAPABILITIES: ComposerCapabilities = {
   artifactPromote: false,
   deepResearchKnowledge: false,
   wideResearch: false,
+  chatProjects: false,
 }
 
 /**
@@ -4872,6 +4979,7 @@ export async function getComposerCapabilities(): Promise<ComposerCapabilities> {
     artifactPromote: record?.artifact_promote === true,
     deepResearchKnowledge: record?.deep_research_knowledge === true,
     wideResearch: record?.wide_research === true,
+    chatProjects: record?.chat_projects === true,
   }
 }
 
@@ -5212,6 +5320,8 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
       confidence: num(item.confidence),
       verification: normalizeVerification(item.verification),
       ...messageVersionField(item.version),
+      // Read by name and only a literal `true`: a take-back note, never a flag guessed from empty text.
+      ...(item.retracted === true ? { retracted: true } : {}),
     }))
 }
 
@@ -5324,6 +5434,8 @@ function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
     // a snapshot response that omits it) reads as enabled, the mirror image
     // of `pinned` defaulting to false — see this field's own doc comment.
     personaEnabled: item.personaEnabled !== false,
+    // Relayed only as one of its two closed values. Absent is "the server states none", never a default.
+    ...(item.memoryMode === 'inherit' || item.memoryMode === 'off' ? { memoryMode: item.memoryMode } : {}),
     ...(latestRunId ? { latestRunId } : {}),
     ...(latestRunStatus ? { latestRunStatus } : {}),
     ...(latestRunUpdatedAt ? { latestRunUpdatedAt } : {}),

@@ -2807,6 +2807,23 @@
       "reason": "Refuses a ZDR or waived token before it runs (zdr_posture.rs DURABLE_MUTATIONS)."
     },
     {
+      "id": "mg:DELETE:/v1/invoke/:request_id/queue/:client_message_id",
+      "kind": "route",
+      "plane": "model",
+      "service": "model-gateway",
+      "method": "DELETE",
+      "path": "/v1/invoke/:request_id/queue/:client_message_id",
+      "handler": "http_routes.rs::invoke_retract_queued_input",
+      "decision_type": "token_posture",
+      "min_role": "authenticated",
+      "zdr_class": "refuse",
+      "basis": "guard:require_non_zdr_durable_mutation",
+      "idempotency": "unspecified",
+      "flag": null,
+      "payload_allow_list": [],
+      "reason": "Refuses a ZDR or waived token before it runs (zdr_posture.rs DURABLE_MUTATIONS); a ZDR or waived turn has no queue to take a message back from."
+    },
+    {
       "id": "mg:POST:/v1/invoke/stream",
       "kind": "route",
       "plane": "model",
@@ -4284,6 +4301,40 @@
       "flag": "MODEL_GATEWAY_BROWSER_KEY_GRANTS",
       "payload_allow_list": [],
       "reason": "Releases one of the calling key's grants: deletes are allowed under every posture (zdr_posture.rs DURABLE_MUTATIONS comment)."
+    },
+    {
+      "id": "mg:POST:/v1/web/domain-check",
+      "kind": "route",
+      "plane": "model",
+      "service": "model-gateway",
+      "method": "POST",
+      "path": "/v1/web/domain-check",
+      "handler": "web_domain_routes.rs::domain_check",
+      "decision_type": "token_posture",
+      "min_role": "authenticated",
+      "zdr_class": "n/a",
+      "basis": "guard:zdr_or_refuse",
+      "idempotency": "n/a",
+      "flag": "WEB_DOMAIN_POLICY_MODE",
+      "payload_allow_list": [],
+      "reason": "Answers allow or deny per host (at most 32 distinct) from the caller's own organisation's web domain rules, for the BFF's web search and crawl (O-23): it carries hosts and verdicts only, never page content, so a zero-retention caller is served; a waived token is refused as a route mismatch."
+    },
+    {
+      "id": "mg:POST:/v1/web/domain-rules",
+      "kind": "route",
+      "plane": "model",
+      "service": "model-gateway",
+      "method": "POST",
+      "path": "/v1/web/domain-rules",
+      "handler": "web_domain_routes.rs::domain_rules",
+      "decision_type": "token_posture",
+      "min_role": "authenticated",
+      "zdr_class": "n/a",
+      "basis": "guard:zdr_or_refuse",
+      "idempotency": "n/a",
+      "flag": "WEB_DOMAIN_POLICY_MODE",
+      "payload_allow_list": [],
+      "reason": "Answers the caller's own organisation's allow and deny host lists for a crawl to carry (O-23): hosts only, no page content, so a zero-retention caller is served; a waived token is refused as a route mismatch; rules that cannot be read are a typed 503 under enforce."
     }
   ]
 }

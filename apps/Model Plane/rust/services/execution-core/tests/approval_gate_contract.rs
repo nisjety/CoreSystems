@@ -32,7 +32,8 @@ const GOLDEN: &str = include_str!("../../../../api/contracts/approval-causes.jso
 /// The codes no production site raises yet. Each is in the golden; the test insists that it stays
 /// unraised until the slice that owns it wires it, so the reservation cannot outlive its reason.
 // `CapabilityPolicyAsk` left this list when main's Space gate (WS10 S3, `space_gate.rs`) began raising it.
-const RESERVED: &[&str] = &[];
+// `BrowserSiteConsent` is reserved for the site-policy producer (D2-934, WS21-S5b), not yet in the tree.
+const RESERVED: &[&str] = &["BrowserSiteConsent"];
 
 /// Main's creators that state no cause, and why: (file under `src`, enclosing function). The
 /// quarantine hold (WS10 S8) is an `UntrustedContent` review of held tool output, not a tool call
@@ -94,6 +95,7 @@ fn variant_and_token(code: CauseCode) -> (&'static str, &'static str) {
         }
         CauseCode::BrowserHumanAssist => ("BrowserHumanAssist", "browser_human_assist"),
         CauseCode::TaintedEgress => ("TaintedEgress", "tainted_egress"),
+        CauseCode::BrowserSiteConsent => ("BrowserSiteConsent", "browser_site_consent"),
         CauseCode::UnclassifiedGate => ("UnclassifiedGate", "unclassified_gate"),
     }
 }

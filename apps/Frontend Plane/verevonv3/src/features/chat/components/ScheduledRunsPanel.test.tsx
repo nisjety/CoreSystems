@@ -23,14 +23,18 @@ vi.mock('@/shared/api/cron-client', async (importOriginal) => {
     ...actual,
     listCronSchedules: vi.fn(),
     updateCronSchedule: vi.fn(),
+    renewCronScheduleApproval: vi.fn(),
+    createCronSchedule: vi.fn(),
     deleteCronSchedule: vi.fn(),
     listScheduleFires: vi.fn(),
   }
 })
 
 import {
+  createCronSchedule,
   listCronSchedules,
   listScheduleFires,
+  renewCronScheduleApproval,
   updateCronSchedule,
   deleteCronSchedule,
   type CronSchedule,
@@ -41,6 +45,8 @@ const mockedList = vi.mocked(listCronSchedules)
 const mockedFires = vi.mocked(listScheduleFires)
 const mockedUpdate = vi.mocked(updateCronSchedule)
 const mockedDelete = vi.mocked(deleteCronSchedule)
+const mockedRenew = vi.mocked(renewCronScheduleApproval)
+const mockedCreate = vi.mocked(createCronSchedule)
 
 function schedule(overrides: Partial<CronSchedule>): CronSchedule {
   return {
@@ -229,6 +235,23 @@ describe('ScheduledRunsPanel', () => {
 
     expect(await screen.findByText('Forny godkjenning')).toBeTruthy()
     expect(screen.getByText('Pause')).toBeTruthy()
+  })
+
+  it('renews an expired approval in place: one PATCH of this schedule, and no new schedule', async () => {
+    vi.stubEnv('VITE_SCHEDULE_DELEGABLE_TOOLS_ENABLED', 'true')
+    mockedList.mockResolvedValue({
+      schedules: [schedule({ id: 'cron_1', enabled: false, task_template: approvalTemplate('2026-01-01T00:00:00Z') })],
+    })
+    mockedRenew.mockResolvedValue({ id: 'cron_1' })
+
+    render(() => <ScheduledRunsPanel />)
+    fireEvent.click(await screen.findByText('Forny godkjenning'))
+    fireEvent.click(await screen.findByRole('button', { name: 'Forny godkjenning' }))
+
+    await waitFor(() => expect(mockedRenew).toHaveBeenCalledTimes(1))
+    expect(mockedRenew.mock.calls[0]?.[1]).toBe('cron_1')
+    expect(mockedCreate).not.toHaveBeenCalled()
+    expect(mockedUpdate).not.toHaveBeenCalled()
   })
 
   it('opens the consent card seeded with the schedule when renewing', async () => {

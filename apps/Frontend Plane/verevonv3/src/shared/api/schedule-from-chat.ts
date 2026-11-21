@@ -1,4 +1,12 @@
-import { createCronSchedule, listCronSchedules, type CronSchedule } from './cron-client'
+import {
+  createCronSchedule,
+  listCronSchedules,
+  listDelegableScheduleTools,
+  renewCronScheduleApproval,
+  type CronSchedule,
+} from './cron-client'
+
+export { listDelegableScheduleTools }
 
 /**
  * Thin wrapper over `cron-client.ts` for the chat-facing "Planlegg dette" /
@@ -45,10 +53,41 @@ export const SCHEDULE_CONTRACT_DEFAULT_DAYS = 30
 export const SCHEDULE_CONTRACT_MAX_DAYS = 90
 
 /**
- * The read tools the consent card offers. Empty until the registry-backed list
- * endpoint lands, so the card states that the plan stays draft only.
+ * The read tools the consent card offers while VITE_SCHEDULE_DELEGABLE_TOOLS_ENABLED is off. Empty, so the card
+ * states that the plan stays draft only. With the switch on, the dialog offers the org's list instead.
  */
 export const DELEGABLE_SCHEDULE_TOOLS: readonly ScheduleContractTool[] = []
+
+/**
+ * VITE_SCHEDULE_DELEGABLE_TOOLS_ENABLED (F-f05-20). On, the consent card loads the org's delegable read tools when it
+ * opens, and "Renew approval" renews the schedule in place (F-f05-20b). Off, the card offers DELEGABLE_SCHEDULE_TOOLS
+ * (empty, so draft only), no request is made, and renewal keeps creating a new schedule, exactly as before. Read at
+ * call time, so a test can set it.
+ */
+export function scheduleDelegableToolsEnabled(): boolean {
+  return import.meta.env.VITE_SCHEDULE_DELEGABLE_TOOLS_ENABLED === 'true'
+}
+
+/** The per-tab answers, one per org. Module memory only: the list is org-specific registry state, never storage. */
+const delegableToolsByOrg = new Map<string, Promise<readonly ScheduleContractTool[]>>()
+
+/**
+ * The org's delegable read tools for the consent card, asked of the BFF once per tab and org: a second open reuses the
+ * answer, and two opens that overlap share one request. An empty answer (a failure, a 404 while the switch is off, or
+ * no delegable tool yet) is not kept, so the next open asks again. No org, no request.
+ */
+export function loadDelegableScheduleTools(orgId: string): Promise<readonly ScheduleContractTool[]> {
+  const key = orgId.trim()
+  if (!key) return Promise.resolve([])
+  const known = delegableToolsByOrg.get(key)
+  if (known) return known
+  const pending = listDelegableScheduleTools().then((tools) => {
+    if (tools.length === 0) delegableToolsByOrg.delete(key)
+    return tools
+  })
+  delegableToolsByOrg.set(key, pending)
+  return pending
+}
 
 /** The canonical expiry for a contract that runs `days` from `now`. */
 export function scheduleContractExpiry(days: number, now: Date = new Date()): string {
@@ -73,6 +112,53 @@ export function buildScheduleContractText(input: ScheduleContractInput, approved
     max_rounds: 6,
     max_tokens_per_round: 2048,
   })
+}
+
+/**
+ * VITE_SCHEDULE_DELEGABLE_TOOLS_ENABLED. On, "Renew approval" opens the dialog in renewal mode and
+ * renews the existing schedule in place (O-10). Off, the renew action keeps creating a new schedule,
+ * exactly as before. Read at call time, so a test can set it.
+ */
+export function scheduleRenewInPlaceEnabled(): boolean {
+  return scheduleDelegableToolsEnabled()
+}
+
+/**
+ * The tools a lapsed approval named, read from the schedule's stored `approval_contract` text. The
+ * renewal dialog offers exactly these for approval again, pre-selected. Capability-core re-checks every
+ * one against the registry at renewal, so a tool that is no longer read-only is refused there, not
+ * trusted here. Anything unreadable gives an empty list, and the dialog then offers nothing to approve.
+ */
+export function renewalToolsOf(taskTemplate: unknown): ScheduleContractTool[] {
+  const text = (taskTemplate as { approval_contract?: unknown } | null | undefined)?.approval_contract
+  if (typeof text !== 'string') return []
+  try {
+    const parsed = JSON.parse(text) as { tools?: unknown }
+    if (!Array.isArray(parsed.tools)) return []
+    const seen = new Set<string>()
+    const tools: ScheduleContractTool[] = []
+    for (const entry of parsed.tools as { tool?: unknown; capability?: unknown }[]) {
+      if (typeof entry?.tool !== 'string' || typeof entry.capability !== 'string' || seen.has(entry.tool)) continue
+      seen.add(entry.tool)
+      tools.push({ tool: entry.tool, capability: entry.capability })
+    }
+    return tools
+  } catch {
+    return []
+  }
+}
+
+export interface RenewScheduleApprovalInput {
+  orgId: string
+  /** The existing schedule. Its id, history and counters stay; only the approval changes. */
+  cronId: string
+  contract: ScheduleContractInput
+}
+
+/** Renew one schedule's approval in place. Never creates a schedule. */
+export function renewScheduleApproval(input: RenewScheduleApprovalInput): Promise<unknown> {
+  const approvedAt = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
+  return renewCronScheduleApproval(input.orgId, input.cronId, buildScheduleContractText(input.contract, approvedAt))
 }
 
 export function createScheduleFromChat(input: ScheduleFromChatInput): Promise<{ id: string }> {

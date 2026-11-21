@@ -9,7 +9,7 @@ pub(crate) mod shared;
 pub(crate) mod research_runs;
 mod search;
 mod snapshots;
-mod streams;
+pub(crate) mod streams;
 pub(crate) mod support;
 mod transcripts;
 #[cfg(test)]
@@ -188,6 +188,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/chat/invocations/{request_id}/queue",
             post(json_handlers::queue_invocation_input),
+        )
+        // O-01: take a queued mid-run message back, by the id it was sent under, while the gateway still holds it.
+        .route(
+            "/api/v1/chat/invocations/{request_id}/queue/{client_message_id}",
+            delete(json_handlers::retract_queued_input),
         )
         .route(
             "/api/v1/chat/threads/{thread_id}/messages",

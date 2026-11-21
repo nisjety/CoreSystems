@@ -62,13 +62,17 @@ pub enum CauseCode {
     /// An egress call (a web fetch or a provider action) held for a person after a connected-app
     /// read came back flagged by screening (WS23-S3). Only `once` is offered.
     TaintedEgress,
+    /// The site policy asks the member before the agent opens a host (WS21-S6). The cause states the
+    /// host and the highest level the policy allows it ([`SITE_LEVELS`]). Only `once` is offered: a
+    /// remembered choice is an org-core preference, never an approval scope.
+    BrowserSiteConsent,
     /// A gate that did not say why, or a code this reader does not know.
     UnclassifiedGate,
 }
 
 impl CauseCode {
     /// Every code, in the order the golden lists them.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::OwnerEffectReserved,
         Self::ConsentToDisclose,
         Self::RiskyEffectUnderAsk,
@@ -80,6 +84,7 @@ impl CauseCode {
         Self::AutoPostureProviderWrite,
         Self::BrowserHumanAssist,
         Self::TaintedEgress,
+        Self::BrowserSiteConsent,
         Self::UnclassifiedGate,
     ];
 
@@ -98,6 +103,7 @@ impl CauseCode {
             Self::AutoPostureProviderWrite => "auto_posture_provider_write",
             Self::BrowserHumanAssist => "browser_human_assist",
             Self::TaintedEgress => "tainted_egress",
+            Self::BrowserSiteConsent => "browser_site_consent",
             Self::UnclassifiedGate => "unclassified_gate",
         }
     }
@@ -433,7 +439,7 @@ pub fn normalized(mut cause: ApprovalCause) -> (ApprovalCause, bool) {
     if !is_sha256_hex(&cause.tool_digest) {
         cause.tool_digest.clear();
     }
-    keep_browser_assist_facts(&mut cause, code);
+    keep_browser_facts(&mut cause, code);
     keep_capability_id(&mut cause);
     cause.scope_options = eligible_scopes(&cause);
     (cause, known)
@@ -461,6 +467,9 @@ pub const ASSIST_KINDS: [&str; 5] =
 pub const ASSIST_ORIGIN_PERSON: &str = "person";
 /// `assist_origin` of a pause the agent raised to ask for help.
 pub const ASSIST_ORIGIN_AGENT: &str = "agent";
+/// Every `max_level` a `browser_site_consent` pause may state: the highest level the org's site
+/// policy allows for its host, `read` (look at the page) or `act` (also act on it) (WS21-S6).
+pub const SITE_LEVELS: [&str; 2] = ["read", "act"];
 
 /// The cause of a pause on a browser call the person holds or was asked to help with (EP-1): the
 /// call's cause under `browser_human_assist`, with the closed kind and origin and the session's
@@ -483,25 +492,111 @@ pub fn for_browser_assist(
     normalized(cause).0
 }
 
-/// The browser-assist facts a cause may keep: only a `browser_human_assist` cause states them, only
-/// closed words for the kind and origin, and a bounded host. Any other cause keeps none, so a
-/// creator cannot attach a host to a pause whose card does not show one.
-fn keep_browser_assist_facts(cause: &mut ApprovalCause, code: CauseCode) {
-    if code != CauseCode::BrowserHumanAssist {
-        cause.assist_kind.clear();
-        cause.assist_origin.clear();
-        cause.host.clear();
-        return;
+/// The cause of a pause the site policy raises before the agent opens a host (WS21-S6): the call's
+/// cause under `browser_site_consent`, with the host and the highest level the policy allows for it.
+/// A level outside [`SITE_LEVELS`] is dropped, never stored.
+#[must_use]
+pub fn for_browser_site_consent(
+    run_id: &str,
+    tool_name: &str,
+    tool_input: &str,
+    host: &str,
+    max_level: &str,
+) -> ApprovalCause {
+    let cause = ApprovalCause {
+        host: host.to_owned(),
+        max_level: max_level.to_owned(),
+        ..for_call(CauseCode::BrowserSiteConsent, run_id, tool_name, tool_input)
+    };
+    normalized(cause).0
+}
+
+/// The browser facts a cause may keep. A `browser_human_assist` cause states the closed kind and origin
+/// and a bounded host; a `browser_site_consent` cause states a bounded host and a closed level. Any
+/// other cause keeps none of them, so a creator cannot attach a host to a pause whose card does not show
+/// one, nor a level to a pause the site policy did not raise.
+fn keep_browser_facts(cause: &mut ApprovalCause, code: CauseCode) {
+    match code {
+        CauseCode::BrowserHumanAssist => {
+            if !ASSIST_KINDS.contains(&cause.assist_kind.as_str()) {
+                cause.assist_kind.clear();
+            }
+            if ![ASSIST_ORIGIN_PERSON, ASSIST_ORIGIN_AGENT].contains(&cause.assist_origin.as_str())
+            {
+                cause.assist_origin.clear();
+            }
+            cause.max_level.clear();
+            bound_host(&mut cause.host);
+        }
+        CauseCode::BrowserSiteConsent => {
+            cause.assist_kind.clear();
+            cause.assist_origin.clear();
+            if !SITE_LEVELS.contains(&cause.max_level.as_str()) {
+                cause.max_level.clear();
+            }
+            bound_host(&mut cause.host);
+        }
+        _ => {
+            cause.assist_kind.clear();
+            cause.assist_origin.clear();
+            cause.host.clear();
+            cause.max_level.clear();
+        }
     }
-    if !ASSIST_KINDS.contains(&cause.assist_kind.as_str()) {
-        cause.assist_kind.clear();
+}
+
+/// Bounds a host to [`MAX_FIELD_CHARS`] characters.
+fn bound_host(host: &mut String) {
+    if host.chars().count() > MAX_FIELD_CHARS {
+        *host = host.chars().take(MAX_FIELD_CHARS).collect();
     }
-    if ![ASSIST_ORIGIN_PERSON, ASSIST_ORIGIN_AGENT].contains(&cause.assist_origin.as_str()) {
-        cause.assist_origin.clear();
+}
+
+/// The codes whose grant needs a fresh password check, whatever the call (WS13 S5, D2-451). The v1 set
+/// is closed at three rows: an owner effect, a provider write under ask (`provider_write`), and a
+/// high-risk capability call whose declared class is `destructive`. `auto_posture_provider_write` is
+/// deliberately not a row (see the test below). A code added later is not stepped up until this
+/// function says so, and no other reader derives the bit: session-core stamps it once, through
+/// [`with_step_up`].
+#[must_use]
+pub fn step_up_set(code: CauseCode, effect_class: &str) -> bool {
+    match code {
+        CauseCode::OwnerEffectReserved | CauseCode::ProviderWrite => true,
+        CauseCode::CapabilityHighRisk => {
+            SideEffectClass::from_wire(effect_class) == SideEffectClass::Destructive
+        }
+        _ => false,
     }
-    if cause.host.chars().count() > MAX_FIELD_CHARS {
-        cause.host = cause.host.chars().take(MAX_FIELD_CHARS).collect();
+}
+
+/// The environment switch that stamps the step-up bit on a stored cause (WS13 S5). Default off; session-core
+/// reads it when an approval is created. Only the literal `true`. Model-gateway's `APPROVAL_STEP_UP_ENFORCED`
+/// decides what the bit does, so the rollout is shadow first, then this switch, then enforce.
+pub const STEP_UP_CAUSE_ENV: &str = "SESSION_CORE_APPROVAL_STEP_UP_CAUSE";
+
+/// Parse the step-up cause switch: the exact literal `true`, with no trimming and no case folding, and
+/// nothing else. An unset or malformed value leaves the bit as the creator stated it.
+#[must_use]
+pub fn step_up_cause_from(value: Option<&str>) -> bool {
+    switch_from(value)
+}
+
+/// Whether the step-up cause switch is on in this process.
+#[must_use]
+pub fn step_up_cause_enabled() -> bool {
+    step_up_cause_from(std::env::var(STEP_UP_CAUSE_ENV).ok().as_deref())
+}
+
+/// Raises the step-up bit of a cause the v1 set names, when `enabled` (WS13 S5). It only raises: a bit the
+/// creator stated survives, and with `enabled` off the cause comes back exactly as given, so a process with
+/// the switch off stores what the creator sent.
+#[must_use]
+pub fn with_step_up(mut cause: ApprovalCause, enabled: bool) -> ApprovalCause {
+    if enabled {
+        cause.step_up_required |=
+            step_up_set(CauseCode::from_wire(&cause.code), &cause.effect_class);
     }
+    cause
 }
 
 /// The stored shape, `approvals.metadata.cause`. Empty strings and an unset
@@ -522,6 +617,7 @@ pub fn to_metadata(cause: &ApprovalCause) -> Value {
         ("assist_kind", &cause.assist_kind),
         ("assist_origin", &cause.assist_origin),
         ("host", &cause.host),
+        ("max_level", &cause.max_level),
     ] {
         if !value.is_empty() {
             map.insert(key.to_owned(), Value::String(value.clone()));
@@ -576,6 +672,7 @@ pub fn from_metadata(metadata: &Value) -> Option<ApprovalCause> {
         assist_kind: text("assist_kind"),
         assist_origin: text("assist_origin"),
         host: text("host"),
+        max_level: text("max_level"),
     };
     Some(normalized(cause).0)
 }
@@ -1226,6 +1323,120 @@ mod tests {
     }
 
     #[test]
+    fn the_v1_step_up_set_is_exactly_its_rows_across_every_code() {
+        let stepped_up = [CauseCode::OwnerEffectReserved, CauseCode::ProviderWrite];
+        for code in CauseCode::ALL {
+            for class in [
+                "",
+                "read",
+                "external_write",
+                "destructive",
+                "owner_effect",
+                "Destructive",
+            ] {
+                let expected = stepped_up.contains(&code)
+                    || (code == CauseCode::CapabilityHighRisk && class == "destructive");
+                assert_eq!(step_up_set(code, class), expected, "{code:?} {class:?}");
+            }
+        }
+        assert!(
+            !step_up_set(CauseCode::BrowserActionRisk, "destructive"),
+            "a browser action is outside the v1 set, whatever its class"
+        );
+        assert!(
+            !step_up_set(CauseCode::AutoPostureProviderWrite, "external_write"),
+            "the chat posture's own write is outside the v1 set, so it stays three rows"
+        );
+    }
+
+    #[test]
+    fn the_step_up_cause_switch_is_strict() {
+        assert!(step_up_cause_from(Some("true")));
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("yes"),
+            Some("on"),
+            Some("false"),
+            Some(" TRUE "),
+            Some("TRUE"),
+            Some(" true"),
+            Some("True"),
+        ] {
+            assert!(!step_up_cause_from(value), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn the_step_up_bit_is_only_raised_and_only_for_the_set() {
+        let owner = for_call_with_class(
+            CauseCode::OwnerEffectReserved,
+            "run_1",
+            "tickets.create",
+            "{}",
+            "owner_effect",
+        );
+        assert!(
+            !with_step_up(owner.clone(), false).step_up_required,
+            "off leaves the bit as the creator stated it"
+        );
+        assert!(with_step_up(owner, true).step_up_required);
+
+        let stated = ApprovalCause {
+            step_up_required: true,
+            ..for_code(CauseCode::RiskyEffectUnderAsk)
+        };
+        assert!(
+            with_step_up(stated, true).step_up_required,
+            "a creator's own bit is never cleared, even for a cause the set does not name"
+        );
+
+        let read = for_call_with_class(
+            CauseCode::CapabilityHighRisk,
+            "run_1",
+            "knowledge_search",
+            "{}",
+            "read",
+        );
+        assert!(!with_step_up(read, true).step_up_required);
+        let destructive = for_call_with_class(
+            CauseCode::CapabilityHighRisk,
+            "run_1",
+            "delete_records",
+            "{}",
+            "destructive",
+        );
+        assert!(with_step_up(destructive, true).step_up_required);
+    }
+
+    #[test]
+    fn the_step_up_bit_survives_the_stored_shape_and_an_unset_bit_is_not_stored() {
+        let stepped = with_step_up(
+            for_call_with_class(
+                CauseCode::ProviderWrite,
+                "run_1",
+                "execute_provider_action",
+                r#"{"operation":"message.send"}"#,
+                "external_write",
+            ),
+            true,
+        );
+        let metadata = json!({ "cause": to_metadata(&stepped) });
+        assert_eq!(metadata["cause"]["step_up_required"], true);
+        assert_eq!(from_metadata(&metadata), Some(stepped));
+
+        let plain = for_call_with_class(
+            CauseCode::RiskyEffectUnderAsk,
+            "run_1",
+            "knowledge_search",
+            "{}",
+            "read",
+        );
+        assert!(to_metadata(&plain).get("step_up_required").is_none());
+    }
+
+    #[test]
     fn a_browser_assist_cause_is_once_and_keeps_its_closed_facts_through_the_stored_shape() {
         let cause = for_browser_assist(
             "run_1",
@@ -1280,5 +1491,93 @@ mod tests {
             (cause.assist_kind.as_str(), cause.assist_origin.as_str(), cause.host.as_str()),
             ("", "", "")
         );
+    }
+
+    #[test]
+    fn a_browser_site_consent_cause_keeps_its_host_and_closed_level_through_the_stored_shape() {
+        let cause = for_browser_site_consent("run_1", "browser.open", "{}", "example.com", "act");
+        assert_eq!(cause.code, "browser_site_consent");
+        assert_eq!(scopes(&cause), ["once"]);
+        assert_eq!(
+            (
+                cause.host.as_str(),
+                cause.max_level.as_str(),
+                cause.assist_kind.as_str()
+            ),
+            ("example.com", "act", "")
+        );
+        let metadata = json!({ "cause": to_metadata(&cause) });
+        assert_eq!(metadata["cause"]["max_level"], "act");
+        assert_eq!(from_metadata(&metadata), Some(cause));
+    }
+
+    #[test]
+    fn a_site_level_outside_the_closed_set_is_dropped_and_the_host_is_bounded() {
+        for level in ["write", "ACT", " read", "read ", ""] {
+            let cause =
+                for_browser_site_consent("run_1", "browser.open", "{}", "example.com", level);
+            assert_eq!(cause.max_level, "", "{level:?}");
+        }
+        for level in SITE_LEVELS {
+            let cause =
+                for_browser_site_consent("run_1", "browser.open", "{}", "example.com", level);
+            assert_eq!(cause.max_level, level);
+        }
+        let long = for_browser_site_consent(
+            "run_1",
+            "browser.open",
+            "{}",
+            &"h".repeat(MAX_FIELD_CHARS + 10),
+            "read",
+        );
+        assert_eq!(long.host.chars().count(), MAX_FIELD_CHARS);
+    }
+
+    #[test]
+    fn only_a_browser_site_consent_cause_may_state_a_site_level() {
+        let stated = ApprovalCause {
+            host: "example.com".to_owned(),
+            max_level: "act".to_owned(),
+            ..ApprovalCause::default()
+        };
+        let (help, _) = normalized(ApprovalCause {
+            code: CauseCode::BrowserHumanAssist.as_str().to_owned(),
+            assist_kind: ASSIST_KIND_USER_TAKEOVER.to_owned(),
+            assist_origin: ASSIST_ORIGIN_PERSON.to_owned(),
+            ..stated.clone()
+        });
+        assert_eq!(help.max_level, "", "a help request states no site level");
+        assert_eq!(help.host, "example.com");
+        let (gate, _) = normalized(ApprovalCause {
+            code: CauseCode::RiskyEffectUnderAsk.as_str().to_owned(),
+            ..stated.clone()
+        });
+        assert_eq!((gate.max_level.as_str(), gate.host.as_str()), ("", ""));
+        let (consent, _) = normalized(ApprovalCause {
+            code: CauseCode::BrowserSiteConsent.as_str().to_owned(),
+            assist_kind: ASSIST_KIND_USER_TAKEOVER.to_owned(),
+            assist_origin: ASSIST_ORIGIN_PERSON.to_owned(),
+            ..stated
+        });
+        assert_eq!(consent.max_level, "act");
+        assert_eq!(
+            (consent.assist_kind.as_str(), consent.assist_origin.as_str()),
+            ("", ""),
+            "a site consent states no assist fact"
+        );
+    }
+
+    #[test]
+    fn a_browser_site_consent_cause_is_once_whatever_its_class() {
+        for class in ["read", "sandbox_compute", "external_write", ""] {
+            let cause = for_call_with_class(
+                CauseCode::BrowserSiteConsent,
+                "run_1",
+                "browser.open",
+                "{}",
+                class,
+            );
+            assert_eq!(scopes(&cause), ["once"], "{class}");
+        }
     }
 }

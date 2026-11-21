@@ -932,6 +932,8 @@ pub(crate) mod tests {
         const DURABLE_MUTATIONS: &[(&str, &str)] = &[
             ("http_routes.rs", "create_memory"),
             ("http_routes.rs", "invoke_queue_input"),
+            // O-01: taking back a queued message withdraws a stored one.
+            ("http_routes.rs", "invoke_retract_queued_input"),
             ("http_routes.rs", "plan_approval"),
             ("http_routes.rs", "create_document"),
             ("http_routes.rs", "proxy_to_capability_core"),

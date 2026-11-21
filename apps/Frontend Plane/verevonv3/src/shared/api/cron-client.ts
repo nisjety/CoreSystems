@@ -130,16 +130,37 @@ export function createCronSchedule(
   })
 }
 
-/** Update a schedule's enabled flag, description, or expression. */
+/**
+ * Update a schedule's enabled flag, description, or expression. `approval_contract` renews the
+ * schedule's approval in place (O-10): the BFF swaps in the Control renewal decision, so the browser
+ * sends only the new contract text and never a decision or idempotency key of its own.
+ */
 export function updateCronSchedule(
   orgId: string,
   cronId: string,
-  body: { enabled?: boolean; description?: string; schedule_expr?: string },
+  body: { enabled?: boolean; description?: string; schedule_expr?: string; approval_contract?: string },
 ): Promise<unknown> {
   return requestJson<unknown>(`/api/v1/cron/${encodeURIComponent(cronId)}`, {
     method: 'POST',
     body: JSON.stringify(body),
     headers: { 'x-verevon-org-id': orgId },
+  })
+}
+
+/**
+ * Renew a schedule's approval in place: one PATCH of the existing schedule, which keeps its id, history
+ * and counters. `enabled: true` resumes a schedule the lapse had paused. A bare re-enable of a lapsed
+ * approval stays refused with 409, so this is the only way back.
+ */
+export function renewCronScheduleApproval(
+  orgId: string,
+  cronId: string,
+  approvalContract: string,
+  options: { resume?: boolean } = {},
+): Promise<unknown> {
+  return updateCronSchedule(orgId, cronId, {
+    approval_contract: approvalContract,
+    ...(options.resume === false ? {} : { enabled: true }),
   })
 }
 
@@ -167,6 +188,54 @@ export interface CronScheduleFire {
   withheld_effects: number
   /** The fire's key: the schedule slot's time, or manual:<request id> for a Run now (EP-6-S3). */
   fire_key?: string
+}
+
+/**
+ * One read tool the org has made delegable for an unattended schedule. Capability-core decides which tools are
+ * delegable; a consent card only ever carries these two fields back.
+ */
+export interface DelegableScheduleTool {
+  readonly tool: string
+  readonly capability: string
+}
+
+/** The most rows the consent card takes from the org's delegable list (F-f02-15). */
+export const DELEGABLE_SCHEDULE_TOOLS_MAX = 64
+
+/** The row list of a delegable-tools answer: a bare list, or one under `tools`. Anything else is malformed. */
+function delegableRowsOf(answer: unknown): unknown[] | null {
+  if (Array.isArray(answer)) return answer
+  if (answer !== null && typeof answer === 'object' && Array.isArray((answer as { tools?: unknown }).tools)) {
+    return (answer as { tools: unknown[] }).tools
+  }
+  return null
+}
+
+/**
+ * The read tools the org has made delegable, from the BFF (`GET /api/v1/cron/delegable-tools`). The BFF takes the
+ * org from the session, and capability-core decides which tools are delegable. This only checks each row's shape
+ * (non-empty strings, one entry per tool, at most 64) and never filters or adds to the list. Any failure answers an
+ * empty list, a 404 while the switch is off, a network error or a malformed answer alike, so the card says the plan
+ * stays draft only. No tool name is logged.
+ */
+export async function listDelegableScheduleTools(): Promise<readonly DelegableScheduleTool[]> {
+  try {
+    const rows = delegableRowsOf(await requestJson<unknown>('/api/v1/cron/delegable-tools'))
+    if (!rows) return []
+    const seen = new Set<string>()
+    const tools: DelegableScheduleTool[] = []
+    for (const row of rows as ({ tool?: unknown; capability?: unknown } | null)[]) {
+      if (tools.length >= DELEGABLE_SCHEDULE_TOOLS_MAX) break
+      const tool = typeof row?.tool === 'string' ? row.tool.trim() : ''
+      const capability = typeof row?.capability === 'string' ? row.capability.trim() : ''
+      if (!tool || !capability || seen.has(tool)) continue
+      seen.add(tool)
+      tools.push({ tool, capability })
+    }
+    return tools
+  } catch {
+    return []
+  }
 }
 
 /** The most recent fires of one schedule, newest first. */

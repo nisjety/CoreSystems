@@ -212,7 +212,9 @@ import {
   browserAssistActionLabel,
   browserAssistKindOf,
   browserAssistNoTakeOverLine,
+  browserSiteConsentOf,
 } from '@/shared/approvals/approval-copy'
+import { rememberMyBrowserSiteChoice } from '@/shared/api/browser-sites-client'
 import type { ChatRunBrowserControl } from '@/features/chat/lib/chat-run-watch'
 import { BrowserApprovalDecisionCard } from '@/features/browser/approval/BrowserApprovalDecisionCard'
 import {
@@ -370,10 +372,26 @@ export function MessageBlock(props: {
   // role through a memo so the conditional branch is established in a tracked
   // scope before `<Show>` receives its plain boolean value.
   const isAssistant = createMemo(() => props.message.role === 'assistant')
+  const retracted = createMemo(() => props.message.retracted === true)
   return (
-    <Show when={isAssistant()} fallback={<UserMessage {...props} />}>
-      <AssistantMessage {...props} />
+    <Show when={!retracted()} fallback={<RetractedMessageNote />}>
+      <Show when={isAssistant()} fallback={<UserMessage {...props} />}>
+        <AssistantMessage {...props} />
+      </Show>
     </Show>
+  )
+}
+
+/**
+ * Where the person took a mid-run message back before the run read it (O-01): a note with no text, because the
+ * message's text is gone from the record. It is not a turn: nothing on it can be edited, copied or sent again.
+ */
+function RetractedMessageNote() {
+  const i18n = useI18n()
+  return (
+    <p class="verevon-chat-retracted" role="note">
+      {i18n.tr('Melding trukket tilbake', 'Message retracted')}
+    </p>
   )
 }
 
@@ -2831,6 +2849,90 @@ export function BrowserSiteConsentCard(props: {
 }
 
 /**
+ * WS21-S6: the consent card of one `browser_site_consent` approval, mounted from the approval's own record (its
+ * host and the highest level the site policy allows), with the approval's words above it. "Remember" saves the
+ * member's own choice for the host first, and the pause is decided only once that save has landed: a refused
+ * save keeps the pause pending and says so. "Allow for this run" and "Do not allow" decide it directly.
+ */
+export function BrowserSiteConsentApproval(props: {
+  approval: Approval
+  host: string
+  maxLevel: 'read' | 'act'
+  onAllow: () => void
+  onDeny: () => void
+}) {
+  const i18n = useI18n()
+  const [busy, setBusy] = createSignal(false)
+  const [problem, setProblem] = createSignal<string | null>(null)
+  const saveFailure = (error: unknown) => {
+    const fallback = i18n.tr('Valget kunne ikke lagres. Prøv igjen.', 'The choice could not be saved. Try again.')
+    return translateApiError(error, i18n.tr, { no: fallback, en: fallback })
+  }
+
+  const remember = async (level: 'read' | 'act') => {
+    const orgId = getSession().activeOrg?.id ?? ''
+    setBusy(true)
+    setProblem(null)
+    try {
+      if (!orgId) throw new Error('no active organisation')
+      await rememberMyBrowserSiteChoice(orgId, props.host, level)
+    } catch (error) {
+      setBusy(false)
+      setProblem(saveFailure(error))
+      return
+    }
+    setBusy(false)
+    props.onAllow()
+  }
+
+  const choose = (choice: BrowserSiteConsentChoice) => {
+    if (busy()) return
+    if (choice === 'deny') {
+      props.onDeny()
+      return
+    }
+    if (choice === 'allow_this_run') {
+      props.onAllow()
+      return
+    }
+    void remember(choice === 'remember_act' ? 'act' : 'read')
+  }
+
+  return (
+    <div class="verevon-chat-approval" role="group" aria-label={approvalHeadline(props.approval, i18n)}>
+      <div class="verevon-chat-approval__head">
+        <span class="verevon-chat-approval__badge">{i18n.tr('Godkjenning', 'Approval')}</span>
+        <span class="verevon-chat-approval__kind">{approvalHeadline(props.approval, i18n)}</span>
+      </div>
+      <Show when={approvalReason(props.approval, i18n)}>
+        {(reason) => <p class="verevon-chat-approval__detail">{reason()}</p>}
+      </Show>
+      {/* A consent pause comes only from a run with the agent browser, and under zero data retention that browser is
+          refused before any consent is asked (WS21-S5a), so no zero-retention turn reaches this card. */}
+      <BrowserSiteConsentCard host={props.host} maxLevel={props.maxLevel} zdr={false} onDecide={choose} />
+      <Show when={problem()}>
+        {(message) => (
+          <p class="verevon-chat-approval__error" role="alert">
+            {message()}
+          </p>
+        )}
+      </Show>
+    </div>
+  )
+}
+
+/**
+ * The consent card a `browser_site_consent` pause mounts (WS21-S6), or `undefined` for every other pause. Off
+ * unless the build sets `VITE_BROWSER_SITES` to the literal `true`, so with the switch off each pause keeps the
+ * generic card it had. A pause that needs a password confirmation keeps the generic card too, since only that card
+ * carries the confirmation form.
+ */
+function siteConsentOf(approval: Approval): { host: string; maxLevel: 'read' | 'act' } | undefined {
+  if (import.meta.env.VITE_BROWSER_SITES !== 'true' || approval.cause?.stepUpRequired) return undefined
+  return browserSiteConsentOf(approval.cause)
+}
+
+/**
  * EP-1 S2: the agent asks the person to clear a wall on the page (a sign-in, a human check, a
  * consent choice, a firewall). The words and the host come from the approval's cause, the record
  * the server keeps, never from text on the page. Take over flips the browser to the person through
@@ -3062,14 +3164,29 @@ export function ApprovalRequests(props: {
       <For each={props.approvals}>
         {(approval) => (
           <Show
-            when={!browserAssistKindOf(approval.cause)}
+            when={!browserAssistKindOf(approval.cause) && !siteConsentOf(approval)}
             fallback={
-              <BrowserHumanAssistCard
-                approval={approval}
-                control={props.browserControl}
-                onTakeOver={props.onBrowserTakeOver}
-                onSkip={() => props.onDecide(approval.id, 'reject')}
-              />
+              <Show
+                when={siteConsentOf(approval)}
+                fallback={
+                  <BrowserHumanAssistCard
+                    approval={approval}
+                    control={props.browserControl}
+                    onTakeOver={props.onBrowserTakeOver}
+                    onSkip={() => props.onDecide(approval.id, 'reject')}
+                  />
+                }
+              >
+                {(consent) => (
+                  <BrowserSiteConsentApproval
+                    approval={approval}
+                    host={consent().host}
+                    maxLevel={consent().maxLevel}
+                    onAllow={() => approve(approval)}
+                    onDeny={() => props.onDecide(approval.id, 'reject')}
+                  />
+                )}
+              </Show>
             }
           >
           <Show
@@ -3467,7 +3584,7 @@ const chatQueueRetract = () => import.meta.env.VITE_CHAT_QUEUE_RETRACT === 'true
  * answers a take-back by the client message id that send was made under.
  */
 const canTakeBack = (entry: QueuedInput) =>
-  entry.state === 'pending' && entry.accepted === true && Boolean(entry.clientMessageId)
+  entry.state === 'pending' && entry.accepted === true && Boolean(entry.clientMessageId) && !entry.retracting
 
 /**
  * Edit and Remove for one queued message. Each control appears only with its handler: the
@@ -3518,7 +3635,7 @@ function QueuedInputControls(props: {
           />
           <div>
             <button type="button" onClick={() => setEditing(false)}>{i18n.tr('Avbryt', 'Cancel')}</button>
-            <button type="button" disabled={!draft().trim()} onClick={submitEdit}>{i18n.tr('Send på nytt', 'Send again')}</button>
+            <button type="button" disabled={!draft().trim()} onClick={submitEdit}>{i18n.tr('Legg tilbake i boksen', 'Put back in the box')}</button>
           </div>
         </div>
       )}
@@ -3559,6 +3676,7 @@ export function QueuedInputStrip(props: {
     // The run ended without taking it, so it went out again as an ordinary turn (same id: the
     // transcript holds it once).
     if (entry.state === 'resent') return i18n.tr('sendt på nytt som ny melding', 'resent as a new message')
+    if (entry.retracting) return i18n.tr('trekker tilbake …', 'taking back …')
     return 'venter'
   }
   return (

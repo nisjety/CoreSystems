@@ -163,6 +163,18 @@ pub(crate) async fn resolve_thread_space_ref(
     }
 }
 
+/// The thread a turn continues: the snake `thread_id`, trimmed and non-empty, and nothing else. The injector reads it this
+/// way and so does the project-start gate of the chat turns (WS18-S4). A camelCase `threadId` is read by nothing
+/// downstream (the body normalisation does not map it, the injector reads only `thread_id`, and model-gateway has no
+/// alias for it), so it names no thread.
+pub(crate) fn existing_thread_id_of(object: &Map<String, Value>) -> Option<&str> {
+    object
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|thread_id| !thread_id.is_empty())
+}
+
 /// Turns an untrusted personal-Space selection into a Control-issued thread
 /// creation/append context. The browser may choose only `space_ref`; all
 /// authority fields are removed before Control is called and are reconstructed
@@ -239,12 +251,7 @@ pub(crate) async fn inject_personal_thread_context_for_wake(
             )),
         ));
     }
-    let existing_thread_id = object
-        .get("thread_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|thread_id| !thread_id.is_empty())
-        .map(str::to_owned);
+    let existing_thread_id = existing_thread_id_of(object).map(str::to_owned);
 
     let actor = ActionActor {
         user_id: user.user_id.clone(),
@@ -881,6 +888,176 @@ pub(crate) async fn inject_personal_schedule_create_context(
     );
     object.insert(
         "space_schedule_create_decision".to_owned(),
+        Value::String(token.to_owned()),
+    );
+    object.insert(
+        "idempotency_key".to_owned(),
+        Value::String(idempotency_key.to_owned()),
+    );
+    Ok(())
+}
+
+/// Turns a renewing cron PATCH body into one that carries a Control renewal decision (O-10). The
+/// browser sends only the new `approval_contract` text (and, optionally, `enabled` and
+/// `schedule_expr`). This step reads the schedule's own template and Space from `schedule` (the
+/// capability-core row, fetched by the caller), swaps the contract into that template, hashes the
+/// result the way Go does, and asks Control for a renewal decision bound to the schedule id, that
+/// template digest and the contract digest and expiry. A caller-supplied decision, idempotency key
+/// or authority field is dropped first. Only the schedule's own creator can renew: Control signs
+/// for the authenticated user, and capability-core repeats the creator check.
+pub(crate) async fn inject_schedule_renewal_context(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    schedule: &Value,
+    schedule_id: &str,
+    input: &mut Value,
+    idempotency_key: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    fn bad_request(code: &'static str, message: impl Into<String>) -> (StatusCode, Json<Value>) {
+        (StatusCode::BAD_REQUEST, Json(error(code, message)))
+    }
+    let object = input
+        .as_object_mut()
+        .ok_or_else(|| bad_request("invalid_cron_request", "Cron request must be an object."))?;
+    for field in FORGED_SPACE_AUTHORITY_FIELDS {
+        object.remove(*field);
+    }
+    object.remove("space_schedule_renew_decision");
+    object.remove("space_schedule_create_decision");
+    object.remove("idempotency_key");
+    if org_id.trim().is_empty()
+        || schedule_id.trim().is_empty()
+        || idempotency_key.trim().is_empty()
+    {
+        return Err(bad_request(
+            "invalid_cron_request",
+            "A bounded schedule identity and active organization are required.",
+        ));
+    }
+    let text = object
+        .get("approval_contract")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            bad_request(
+                "invalid_task_template",
+                "The schedule contract must be JSON text.",
+            )
+        })?;
+    // The digest and expiry Control signs come from the same text capability-core hashes.
+    let mut probe = json!({ "approval_contract": text });
+    let (contract_digest, contract_expires_at) = split_schedule_contract(&mut probe, true)?
+        .ok_or_else(|| {
+            bad_request(
+                "invalid_task_template",
+                "The schedule contract must name an expiry.",
+            )
+        })?;
+    if schedule.get("creator_subject_id").and_then(Value::as_str) != Some(user.user_id.as_str()) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "forbidden",
+                "Only the schedule's creator can renew its approval.",
+            )),
+        ));
+    }
+    let space_ref = schedule
+        .get("space_ref")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            (
+                StatusCode::CONFLICT,
+                Json(error(
+                    "schedule_space_missing",
+                    "The schedule is not bound to a Space.",
+                )),
+            )
+        })?;
+    let mut template = schedule.get("task_template").cloned().ok_or_else(|| {
+        (
+            StatusCode::CONFLICT,
+            Json(error(
+                "no_approval_to_renew",
+                "The schedule has no approval to renew.",
+            )),
+        )
+    })?;
+    match template.as_object_mut() {
+        Some(fields) if fields.contains_key("approval_contract") => {
+            fields.insert("approval_contract".to_owned(), Value::String(text));
+        }
+        _ => {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(error(
+                    "no_approval_to_renew",
+                    "The schedule has no approval to renew.",
+                )),
+            ));
+        }
+    }
+    schedule_template::check_digest_stable(&template)
+        .map_err(|reason| bad_request("invalid_task_template", reason))?;
+    let template_digest = schedule_template::template_digest(&template)
+        .map_err(|_| bad_request("invalid_cron_request", "Task template cannot be encoded."))?;
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let url = format!(
+        "{}/api/v1/internal/spaces/schedule-create-decision",
+        state.user_core_url
+    );
+    let (status, Json(response)) = proxy_json(
+        state,
+        Method::POST,
+        &url,
+        Some(json!({
+            "space_ref": space_ref,
+            "schedule_id": schedule_id,
+            "template_digest": template_digest,
+            "idempotency_key": idempotency_key,
+            "contract_digest": contract_digest,
+            "contract_expires_at": contract_expires_at,
+            "renewal_of": schedule_id,
+        })),
+        Some(org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    if !status.is_success() {
+        return Err(typed_response(state, status, response, denial::OP_SCHEDULE));
+    }
+    let data = crate::envelope::unwrap_data(&response);
+    let decision = data
+        .get("decision")
+        .and_then(Value::as_object)
+        .ok_or_else(invalid_decision)?;
+    let token = data
+        .get("token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(invalid_decision)?;
+    if required_decision_string(decision, "space_ref")? != space_ref
+        || required_decision_string(decision, "subject_id")? != user.user_id
+        || required_decision_string(decision, "service_audience")? != "model-plane-capability-core"
+        || required_decision_string(decision, "action_id")? != "model.cron.create"
+        || required_decision_string(decision, "action_schema_hash")? != "sha256:space-cron-renew-v1"
+        || required_decision_string(decision, "idempotency_key")? != idempotency_key
+    {
+        return Err(invalid_decision());
+    }
+    object.insert(
+        "space_schedule_renew_decision".to_owned(),
         Value::String(token.to_owned()),
     );
     object.insert(
@@ -6096,7 +6273,7 @@ mod tests {
     use super::{
         forward_owner_grant_mutation, inject_authored_instructions,
         inject_mentioned_space_agent_persona, inject_persona_instructions,
-        inject_personal_schedule_create_context,
+        inject_personal_schedule_create_context, inject_schedule_renewal_context,
         inject_personal_thread_context, personal_import_ingress_decision, space_actions,
         thread_items_match_space, OwnerGrantMutationRequest, UpdateSpaceInstructionsRequest,
     };
@@ -6108,6 +6285,7 @@ mod tests {
     };
     use http_body_util::BodyExt;
     use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
     use tower::ServiceExt;
     use wiremock::matchers::{
         body_partial_json as wm_body_partial_json, method as wm_method, path as wm_path,
@@ -6422,6 +6600,154 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .starts_with("sha256:"));
+    }
+
+    const RENEWAL_CONTRACT: &str = r#"{"expires_at":"2026-12-20T10:00:00Z","max_rounds":6,"max_tokens_per_round":2048,"tools":[{"approved_at":"2026-11-20T10:00:00Z","capability":"cap.tool.web_search","class":"read","tool":"web_search"}],"v":1}"#;
+
+    fn renewal_schedule() -> Value {
+        json!({
+            "id": "cron-1", "creator_subject_id": "user-1", "space_ref": "personal-1",
+            "task_template": {
+                "kind": "cron", "description": "summarise the week",
+                "approval_contract": "{\"expires_at\":\"2026-11-01T10:00:00Z\"}"
+            }
+        })
+    }
+
+    async fn renewal_control(action_schema_hash: &str) -> MockServer {
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/schedule-create-decision"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"token": "schedule-renew-token", "decision": {
+                    "space_ref": "personal-1", "subject_id": "user-1",
+                    "service_audience": "model-plane-capability-core", "action_id": "model.cron.create",
+                    "action_schema_hash": action_schema_hash, "idempotency_key": "renew-1"
+                }}
+            })))
+            .mount(&user_core)
+            .await;
+        user_core
+    }
+
+    #[tokio::test]
+    async fn schedule_renewal_asks_control_for_a_decision_bound_to_the_renewed_template() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let user_core = renewal_control("sha256:space-cron-renew-v1").await;
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = user_core.uri();
+        let mut outbound = json!({
+            "approval_contract": RENEWAL_CONTRACT, "enabled": true,
+            "space_schedule_renew_decision": "forged", "idempotency_key": "forged",
+            "contract_digest": "sha256:forged"
+        });
+
+        inject_schedule_renewal_context(
+            &state,
+            &authenticated_user(),
+            "org-1",
+            &renewal_schedule(),
+            "cron-1",
+            &mut outbound,
+            "renew-1",
+        )
+        .await
+        .expect("Control renewal authority should be injected");
+
+        assert_eq!(outbound["space_schedule_renew_decision"], "schedule-renew-token");
+        assert_eq!(outbound["idempotency_key"], "renew-1");
+        assert_eq!(outbound["approval_contract"], RENEWAL_CONTRACT);
+        assert_eq!(outbound["enabled"], true);
+        assert!(outbound.get("contract_digest").is_none());
+
+        let received = user_core.received_requests().await.expect("Control request");
+        assert_eq!(received.len(), 1);
+        let body: Value = serde_json::from_slice(&received[0].body).expect("request JSON");
+        assert_eq!(body["space_ref"], "personal-1");
+        assert_eq!(body["schedule_id"], "cron-1");
+        assert_eq!(body["renewal_of"], "cron-1");
+        assert_eq!(body["idempotency_key"], "renew-1");
+        assert_eq!(body["contract_expires_at"], "2026-12-20T10:00:00Z");
+        let expected_contract_digest = format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(RENEWAL_CONTRACT.as_bytes()))
+        );
+        assert_eq!(body["contract_digest"], expected_contract_digest);
+        // The template Control commits to is the stored one with the new contract swapped in.
+        let mut renewed = renewal_schedule()["task_template"].clone();
+        renewed["approval_contract"] = json!(RENEWAL_CONTRACT);
+        assert_eq!(
+            body["template_digest"],
+            super::schedule_template::template_digest(&renewed).expect("digest")
+        );
+    }
+
+    #[tokio::test]
+    async fn schedule_renewal_refuses_anyone_but_the_creator_before_asking_control() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let user_core = renewal_control("sha256:space-cron-renew-v1").await;
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = user_core.uri();
+        let mut schedule = renewal_schedule();
+        schedule["creator_subject_id"] = json!("someone-else");
+        let mut outbound = json!({"approval_contract": RENEWAL_CONTRACT});
+
+        let (status, _) = inject_schedule_renewal_context(
+            &state,
+            &authenticated_user(),
+            "org-1",
+            &schedule,
+            "cron-1",
+            &mut outbound,
+            "renew-1",
+        )
+        .await
+        .expect_err("another member's schedule must not be renewed");
+
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert!(outbound.get("space_schedule_renew_decision").is_none());
+        assert!(user_core.received_requests().await.expect("requests").is_empty());
+    }
+
+    #[tokio::test]
+    async fn schedule_renewal_needs_an_existing_approval_and_a_renewal_schema() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let user_core = renewal_control("sha256:space-cron-renew-v1").await;
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = user_core.uri();
+        let mut draft = renewal_schedule();
+        draft["task_template"] = json!({"kind": "cron", "description": "draft"});
+        let mut outbound = json!({"approval_contract": RENEWAL_CONTRACT});
+        let (status, _) = inject_schedule_renewal_context(
+            &state,
+            &authenticated_user(),
+            "org-1",
+            &draft,
+            "cron-1",
+            &mut outbound,
+            "renew-1",
+        )
+        .await
+        .expect_err("a draft schedule has no approval to renew");
+        assert_eq!(status, axum::http::StatusCode::CONFLICT);
+        assert!(user_core.received_requests().await.expect("requests").is_empty());
+
+        // A Control answer under the create schema is never accepted as a renewal decision.
+        let replayed = renewal_control("sha256:space-cron-create-v2").await;
+        state.user_core_url = replayed.uri();
+        let mut outbound = json!({"approval_contract": RENEWAL_CONTRACT});
+        inject_schedule_renewal_context(
+            &state,
+            &authenticated_user(),
+            "org-1",
+            &renewal_schedule(),
+            "cron-1",
+            &mut outbound,
+            "renew-1",
+        )
+        .await
+        .expect_err("a create-schema decision must not renew");
+        assert!(outbound.get("space_schedule_renew_decision").is_none());
     }
 
     /// Runs the real create-context step against a mock Control and returns

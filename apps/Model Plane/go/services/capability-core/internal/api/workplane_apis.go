@@ -1141,7 +1141,8 @@ type CronHandler struct {
 	// an approval_contract is refused, so a schedule without a contract stays draft-only.
 	scheduleContract bool
 	// contractGuards is CRON_CONTRACT_GUARDS_ENABLED. On, a bare re-enable of a
-	// schedule whose approval has lapsed is refused (WS20-S8).
+	// schedule whose approval has lapsed is refused (WS20-S8), and, with scheduleContract
+	// on too, a PATCH that carries a contract and a Control decision renews it (O-10).
 	contractGuards bool
 	// runNow is CRON_RUN_NOW_ENABLED (EP-6-S2). Off, or without the fire authorizer and
 	// its transaction pool, POST /api/v1/cron/{id}/run does not exist.
@@ -1578,9 +1579,28 @@ func (h *CronHandler) patch(w http.ResponseWriter, r *http.Request, id string) {
 	var update struct {
 		Enabled      *bool   `json:"enabled"`
 		ScheduleExpr *string `json:"schedule_expr"`
+		// ApprovalContract, the renewal decision and its idempotency key renew the schedule's
+		// approval in place (O-10). With SCHEDULE_CONTRACT_ENABLED and CRON_CONTRACT_GUARDS_ENABLED
+		// both on they renew it; otherwise they are refused as not_supported (see below).
+		ApprovalContract *string `json:"approval_contract"`
+		RenewalDecision  string  `json:"space_schedule_renew_decision"`
+		IdempotencyKey   string  `json:"idempotency_key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if update.ApprovalContract != nil || update.RenewalDecision != "" {
+		// Without both switches this server has no renewal to offer. The typed refusal tells the
+		// browser to fall back to creating a schedule, and nothing is read or written.
+		if !h.renewalEnabled() {
+			writeTypedError(w, http.StatusNotImplemented, "not_supported", "renewing a schedule's approval is not enabled on this server")
+			return
+		}
+		h.renewScheduleContract(w, r, id, cronRenewalBody{
+			Enabled: update.Enabled, ScheduleExpr: update.ScheduleExpr, ApprovalContract: update.ApprovalContract,
+			Decision: update.RenewalDecision, IdempotencyKey: update.IdempotencyKey,
+		})
 		return
 	}
 	if update.Enabled == nil && update.ScheduleExpr == nil {
@@ -1593,8 +1613,8 @@ func (h *CronHandler) patch(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	now := time.Now().UTC()
 	if h.contractGuards && update.Enabled != nil && *update.Enabled {
-		// A bare re-enable never revives an approval that has lapsed. Renewal is a new
-		// create decision, so the schedule must be created again (WS20-S8).
+		// A bare re-enable never revives an approval that has lapsed. Renewal is a PATCH that
+		// carries the new contract and a Control renewal decision (O-10, cron_contract_renew.go).
 		var template []byte
 		err := h.pool.QueryRow(r.Context(), `SELECT task_template FROM cron_schedules WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL`, id, verifiedOrganizationID(r)).Scan(&template)
 		if errors.Is(err, pgx.ErrNoRows) {

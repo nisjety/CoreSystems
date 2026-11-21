@@ -15,7 +15,11 @@ const (
 	scheduleCreateSchema   = "sha256:space-cron-create-v1"
 	// scheduleCreateContractSchema is the schema once a stored-consent contract is bound (DEC-16).
 	scheduleCreateContractSchema = "sha256:space-cron-create-v2"
-	scheduleContractMaxClass     = "read"
+	// scheduleRenewalSchema is the schema of a renewal decision (O-10): the same Control authority
+	// as a create, bound to an existing schedule id by `renewal_of`. A distinct schema keeps a create
+	// decision from being replayed as a renewal and a renewal from being replayed as a create.
+	scheduleRenewalSchema    = "sha256:space-cron-renew-v1"
+	scheduleContractMaxClass = "read"
 	// scheduleContractMaxDays is the longest contract the Control decision will sign.
 	scheduleContractMaxDays = 90
 	scheduleContractTime    = "2006-01-02T15:04:05Z"
@@ -38,10 +42,16 @@ type ScheduleCreateRequest struct {
 	ContractDigest    string
 	ContractExpiresAt string
 	ContractsEnabled  bool
+	// RenewalOf is the id of the existing schedule whose approval this decision renews (O-10).
+	// Empty for a create. A renewal always carries a contract, and its ScheduleID is RenewalOf.
+	RenewalOf string
 }
 
 // scheduleCreateSchemaFor is the action schema Control signs for a request.
 func scheduleCreateSchemaFor(request ScheduleCreateRequest) string {
+	if request.RenewalOf != "" {
+		return scheduleRenewalSchema
+	}
 	if request.ContractDigest != "" {
 		return scheduleCreateContractSchema
 	}
@@ -87,6 +97,15 @@ func (r ScheduleCreateRequest) Validate() error {
 	if !strings.HasPrefix(r.TemplateDigest, "sha256:") || len(r.TemplateDigest) != len("sha256:")+64 {
 		return fmt.Errorf("schedule create template digest is invalid")
 	}
+	if r.RenewalOf != "" {
+		// A renewal replaces a contract, so it names one, and it renews exactly the schedule it signs for.
+		if r.RenewalOf != r.ScheduleID {
+			return fmt.Errorf("schedule renewal must name the schedule it renews")
+		}
+		if r.ContractDigest == "" || r.ContractExpiresAt == "" {
+			return fmt.Errorf("schedule renewal requires a contract")
+		}
+	}
 	return nil
 }
 
@@ -107,6 +126,9 @@ func scheduleCreatePayloadDigest(evidence PersonalThreadDecisionEvidence, reques
 			struct{ name, value string }{"contract_expires_at", request.ContractExpiresAt},
 			struct{ name, value string }{"contract_max_class", scheduleContractMaxClass},
 		)
+	}
+	if request.RenewalOf != "" {
+		fields = append(fields, struct{ name, value string }{"renewal_of", request.RenewalOf})
 	}
 	for _, field := range fields {
 		hash.Write([]byte(field.name))

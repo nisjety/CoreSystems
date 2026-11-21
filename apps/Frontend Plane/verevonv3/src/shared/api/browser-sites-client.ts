@@ -43,3 +43,18 @@ export function setMyBrowserSiteChoice(
     signal,
   })
 }
+
+/**
+ * Records the caller's choice for one host against the policy revision the caller reads just before the write
+ * (WS21-S6). The consent card saves a remembered choice this way, with the host from the approval record. A
+ * revision that moved meanwhile is refused with 409 and nothing is saved.
+ */
+export async function rememberMyBrowserSiteChoice(
+  orgId: string,
+  host: string,
+  level: 'read' | 'act',
+  signal?: AbortSignal,
+): Promise<BrowserSiteChoice> {
+  const current = await requestJson<{ revision: number }>(`${browserSitesPath(orgId)}/me`, { signal })
+  return setMyBrowserSiteChoice(orgId, host.trim().toLowerCase(), current.revision, level, undefined, signal)
+}

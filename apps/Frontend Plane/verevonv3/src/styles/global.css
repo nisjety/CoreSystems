@@ -47653,6 +47653,14 @@ so it
   font-style: italic;
 }
 
+/* The note a retracted mid-run message leaves in the thread (O-01): no text, quiet, one line. */
+.verevon-chat-retracted {
+  margin: 4px 0;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--verevon-text-muted);
+}
+
 /* Chat — the thread goal (EP-7 S1; its S4 and S6 blocks render inside the same bar).
    The bar docks above the composer and is one line in the common case; criteria, usage, the
    auto-continue and away blocks wrap beneath it. Every status and stop reason is a word first and

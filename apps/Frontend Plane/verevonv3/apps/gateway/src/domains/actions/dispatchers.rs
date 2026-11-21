@@ -35,11 +35,12 @@ use crate::domains::chat::research_runs::cancel_research_run;
 use crate::domains::chat::documents::upload_chat_document;
 use crate::domains::chat::history::{
     clear_threads as clear_chat_threads, delete_thread as delete_chat_thread,
-    save_thread as save_chat_thread, SaveThreadRequest,
+    forwardable_memory_mode, save_thread as save_chat_thread, SaveThreadRequest,
 };
 use crate::domains::chat::json_handlers::{
     cancel_invocation as cancel_chat_invocation,
-    queue_invocation_input as queue_chat_invocation_input, submit_feedback as submit_chat_feedback,
+    queue_invocation_input as queue_chat_invocation_input,
+    retract_queued_input as retract_chat_queued_input, submit_feedback as submit_chat_feedback,
 };
 use crate::domains::inbox::{create_ai_text_proposal, require_support_ai_review};
 use crate::domains::ingestions::jobs::control_job as control_ingestion_job;
@@ -249,7 +250,17 @@ pub(super) async fn dispatch_recrawl(
     let token = quarry_token(state, user, &cookie).await;
 
     let url = format!("{}/v1/crawl", state.quarry_edge_url);
-    let crawl_body = json!({ "source_id": source_id, "org_id": org_id });
+    let mut crawl_body = json!({ "source_id": source_id, "org_id": org_id });
+
+    // O-23: a re-crawl follows links too, so the org's web domain rules ride on it. It names no seed URL here (Quarry
+    // reads the stored source), so only the rules are attached. Off (`WEB_DOMAIN_POLICY_BFF`, the default), the body
+    // is what it was.
+    if let Some(refusal) =
+        crate::domains::web_domain_policy::attach_crawl_rules(state, user, headers, &mut crawl_body)
+            .await
+    {
+        return refusal.into_response();
+    }
 
     let (status, Json(resp)) = proxy_bearer_json(
         state,
@@ -474,6 +485,16 @@ pub(super) async fn dispatch_crawl_site(
                 approval_policy.threshold_pages,
             );
         }
+    }
+
+    // O-23: the org's web domain rules judge the seed host, and ride on the request for Quarry to apply to every link
+    // it follows. A seed on a refused host, or rules that cannot be read, stop the crawl before it starts. Off (the
+    // default, `WEB_DOMAIN_POLICY_BFF`), the body is exactly what it was.
+    let mut crawl_body = crawl_body;
+    if let Some(refusal) =
+        crate::domains::web_domain_policy::guard_crawl(state, user, headers, &mut crawl_body).await
+    {
+        return refusal.into_response();
     }
 
     let (status, Json(resp)) = proxy_bearer_json(
@@ -5576,6 +5597,33 @@ pub(super) async fn dispatch_chat_queue_invocation_input(
     owner_json_response_to_envelope("chat.queue_invocation_input", user, status, payload)
 }
 
+/// `chat.queue.retract`: take a queued mid-run message back by the run it was sent into and the id it was sent
+/// under. Both are required; nothing else is read from the input, so a caller cannot name a thread.
+pub(super) async fn dispatch_chat_queue_retract(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let request_id = ticket_string(input, "requestId");
+    let client_message_id = ticket_string(input, "clientMessageId");
+    if request_id.is_empty() || client_message_id.is_empty() {
+        return ticket_bad_request(
+            "chat.queue.retract requires non-empty 'requestId' and 'clientMessageId'",
+        );
+    }
+    let response = retract_chat_queued_input(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor((request_id.to_owned(), client_message_id.to_owned())),
+    )
+    .await
+    .into_response();
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("chat.queue.retract", user, status, payload)
+}
+
 pub(super) async fn dispatch_chat_clear_threads(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -5613,17 +5661,10 @@ pub(super) async fn dispatch_chat_delete_thread(
     owner_json_response_to_envelope("chat.delete_thread", user, status, payload)
 }
 
-pub(super) async fn dispatch_chat_save_thread_snapshot(
-    state: &AppState,
-    user: &AuthenticatedUser,
-    headers: &HeaderMap,
-    input: &Value,
-) -> Response {
-    let thread_id = ticket_string(input, "threadId");
-    if thread_id.is_empty() {
-        return ticket_bad_request("chat.save_thread_snapshot requires a non-empty 'threadId'");
-    }
-    let body = SaveThreadRequest {
+/// The save request an action input names. A memory mode is kept only as one of its two closed values (WS07-S6),
+/// so any other value is dropped here and never forwarded.
+fn save_thread_request_from_input(input: &Value) -> SaveThreadRequest {
+    SaveThreadRequest {
         title: input
             .get("title")
             .and_then(Value::as_str)
@@ -5634,7 +5675,25 @@ pub(super) async fn dispatch_chat_save_thread_snapshot(
             .and_then(Value::as_str)
             .map(str::to_owned),
         persona_enabled: input.get("personaEnabled").and_then(Value::as_bool),
-    };
+        memory_mode: input
+            .get("memoryMode")
+            .and_then(Value::as_str)
+            .and_then(forwardable_memory_mode)
+            .map(str::to_owned),
+    }
+}
+
+pub(super) async fn dispatch_chat_save_thread_snapshot(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let thread_id = ticket_string(input, "threadId");
+    if thread_id.is_empty() {
+        return ticket_bad_request("chat.save_thread_snapshot requires a non-empty 'threadId'");
+    }
+    let body = save_thread_request_from_input(input);
     let response = save_chat_thread(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
@@ -7610,6 +7669,149 @@ mod tests {
 
     use super::*;
 
+    /// WS07-S6: the action forwards a memory mode only when it is `inherit` or `off`; anything else is dropped.
+    #[test]
+    fn save_thread_snapshot_forwards_a_memory_mode_only_when_it_is_closed() {
+        let request = |input: Value| save_thread_request_from_input(&input);
+        assert_eq!(
+            request(json!({"threadId": "t", "memoryMode": "off"}))
+                .memory_mode
+                .as_deref(),
+            Some("off")
+        );
+        assert_eq!(
+            request(json!({"threadId": "t", "memoryMode": "inherit"}))
+                .memory_mode
+                .as_deref(),
+            Some("inherit")
+        );
+        for input in [
+            json!({"threadId": "t", "memoryMode": "bogus"}),
+            json!({"threadId": "t", "memoryMode": "OFF"}),
+            json!({"threadId": "t", "memoryMode": true}),
+            json!({"threadId": "t"}),
+        ] {
+            assert!(request(input.clone()).memory_mode.is_none(), "{input}");
+        }
+        // The other presentation fields keep their own reading.
+        let other = request(json!({"threadId": "t", "pinned": true, "personaEnabled": false}));
+        assert_eq!(other.pinned, Some(true));
+        assert_eq!(other.persona_enabled, Some(false));
+    }
+
+    /// R-spa-16: every upstream the revoke path reaches, on one mock server: the caller's room role
+    /// (user-core), the binding mutation and the roster declaration (Application's Convex). `roster` is
+    /// Control's answer to the roster declaration; only `applied` confirms it.
+    async fn mount_revoke_agent_upstream(roster: &str) -> wiremock::MockServer {
+        use wiremock::{
+            matchers::{body_partial_json, method as wm_method, path as wm_path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": "manager"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .and(body_partial_json(
+                json!({"path": "spaceAgents:setSpaceAgentBindingStateForGateway"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": {"bindingRef": "sab_1", "subjectId": "agent-a1", "status": "revoked", "changed": true}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/action"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"value": {"status": roster}})),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// R-spa-16: the state the revoke handler reads, with every upstream pointed at `server`.
+    fn revoke_agent_state(server: &wiremock::MockServer) -> crate::config::AppState {
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = server.uri();
+        state.application_convex_url = server.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state
+    }
+
+    /// R-spa-16: a room member's authenticated session, as the router attaches it to a request.
+    fn revoke_agent_user() -> crate::middleware::AuthenticatedUser {
+        crate::middleware::AuthenticatedUser {
+            user_id: "revoke-user".to_owned(),
+            user_email: "revoke@example.com".to_owned(),
+            user_name: "Revoke".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    /// R-spa-16: drive `spaces.revoke_agent` through its dispatcher for one room binding, with Control's
+    /// roster answer given. Returns the action's status and body.
+    async fn revoke_agent_action(roster: &str) -> (StatusCode, Value) {
+        let server = mount_revoke_agent_upstream(roster).await;
+        let state = revoke_agent_state(&server);
+        let user = revoke_agent_user();
+        let headers = HeaderMap::new();
+        let input = json!({"spaceRef": "space-room", "bindingRef": "sab_1"});
+        let response = dispatch_space_revoke_agent(&state, &user, &headers, &input).await;
+        response_to_status_and_json(response).await
+    }
+
+    /// R-spa-16 (V3d-bff-2): a revocation Control confirms answers through the action with its result data
+    /// carrying `agent_memory_erase`. The memory feature is off in this harness (the test default), so no
+    /// erase is attempted and the outcome is `not_applicable`; the action must not drop it.
+    #[tokio::test]
+    async fn revoke_agent_success_result_carries_the_agent_memory_erase_outcome() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body) = revoke_agent_action("applied").await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["actionId"], "spaces.revoke_agent", "{body}");
+        assert_eq!(body["data"]["result"]["status"], "revoked", "{body}");
+        assert_eq!(
+            body["data"]["result"]["agent_memory_erase"], "not_applicable",
+            "{body}"
+        );
+    }
+
+    /// R-spa-16 (V3d-bff-2): when Control does not confirm the roster, the revoke answers 502 and the action
+    /// passes that error through as the raw envelope (not re-wrapped as a result), with
+    /// `error.details.agent_memory_erase` intact.
+    #[tokio::test]
+    async fn revoke_agent_unconfirmed_roster_passes_the_error_through_with_its_erase_outcome() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body) = revoke_agent_action("pending").await;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_eq!(
+            body["error"]["code"], "agent_revocation_unconfirmed",
+            "{body}"
+        );
+        assert_eq!(
+            body["error"]["details"],
+            json!({ "agent_memory_erase": "not_applicable" }),
+            "{body}"
+        );
+        assert!(body.get("data").is_none(), "{body}");
+    }
+
     #[test]
     fn a_tab_action_takes_human_or_agent_as_its_actor_and_nothing_else() {
         let actor = |input: Value| ticket_tab_actor(&input, "browser_tab.select");
@@ -9082,5 +9284,242 @@ mod ownership_share_tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"]["code"], "role_not_supported");
         assert!(body.get("data").is_none());
+    }
+}
+
+/// O-23: the `knowledge.crawl_site` action carries the org's web domain rules to Quarry and refuses a denied seed.
+#[cfg(test)]
+mod crawl_domain_rules_tests {
+    use super::*;
+    use axum::http::StatusCode;
+    use http_body_util::BodyExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path, path_regex};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    struct DomainCheck;
+
+    impl Respond for DomainCheck {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let body: Value = serde_json::from_slice(&request.body).unwrap_or_default();
+            let mut verdicts = serde_json::Map::new();
+            for host in body["hosts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                let verdict = if host == "blocked.example" {
+                    "deny"
+                } else {
+                    "allow"
+                };
+                verdicts.insert(host.to_owned(), json!(verdict));
+            }
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "mode": "enforce", "verdicts": verdicts }))
+        }
+    }
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-crawl".to_owned(),
+            user_email: "user@crawl.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-crawl".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-crawl".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    struct Upstreams {
+        state: AppState,
+        model: MockServer,
+        quarry: MockServer,
+        _auth: MockServer,
+    }
+
+    async fn upstreams(switch: bool, rules_status: u16) -> Upstreams {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(path_regex(r"^/api/[a-z-]+/token$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "token": "t" })))
+            .mount(&auth)
+            .await;
+        let model = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/web/domain-check"))
+            .respond_with(DomainCheck)
+            .mount(&model)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/web/domain-rules"))
+            .respond_with(ResponseTemplate::new(rules_status).set_body_json(json!({
+                "mode": "enforce",
+                "rules": { "mode": "allowlist", "deny": ["blocked.example"], "allow": ["good.example"], "revision": 2 }
+            })))
+            .mount(&model)
+            .await;
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/crawl"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(json!({ "id": "job-1" })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.model_gateway_url = model.uri();
+        state.quarry_edge_url = quarry.uri();
+        state.space_features.web_domain_policy_bff = switch;
+        Upstreams {
+            state,
+            model,
+            quarry,
+            _auth: auth,
+        }
+    }
+
+    async fn crawl(world: &Upstreams, url: &str) -> (StatusCode, Value) {
+        let response = dispatch_crawl_site(
+            &world.state,
+            &user(),
+            &HeaderMap::new(),
+            &json!({ "url": url, "maxPages": 5 }),
+        )
+        .await;
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    async fn crawl_requests(world: &Upstreams) -> Vec<Value> {
+        world
+            .quarry
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| request.url.path() == "/v1/crawl")
+            .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_crawl_request_carries_the_orgs_rules_for_quarry_to_apply_to_every_link() {
+        let world = upstreams(true, 200).await;
+        let (status, _) = crawl(&world, "https://good.example/").await;
+        assert_eq!(status, StatusCode::OK);
+        let sent = crawl_requests(&world).await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0]["domain_rules"],
+            json!({ "mode": "allowlist", "deny": ["blocked.example"], "allow": ["good.example"] })
+        );
+        assert_eq!(
+            sent[0]["max_pages"], 5,
+            "the rest of the body is what it was"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_seed_host_is_refused_and_quarry_is_never_called() {
+        let world = upstreams(true, 200).await;
+        let (status, body) = crawl(&world, "https://blocked.example/start").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "org_site_blocked");
+        assert!(crawl_requests(&world).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rules_that_cannot_be_read_stop_the_crawl_before_it_starts() {
+        let world = upstreams(true, 503).await;
+        let (status, body) = crawl(&world, "https://good.example/").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "org_site_check_unavailable");
+        assert!(
+            crawl_requests(&world).await.is_empty(),
+            "a crawl that cannot read the rules does not start"
+        );
+    }
+
+    async fn recrawl(world: &Upstreams) -> (StatusCode, Value) {
+        let response = dispatch_recrawl(
+            &world.state,
+            &user(),
+            &HeaderMap::new(),
+            &json!({ "sourceId": "src-1" }),
+        )
+        .await;
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_recrawl_carries_the_orgs_rules_and_stops_when_they_cannot_be_read() {
+        let world = upstreams(true, 200).await;
+        let (status, _) = recrawl(&world).await;
+        assert_eq!(status, StatusCode::OK);
+        let sent = crawl_requests(&world).await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["source_id"], "src-1");
+        assert_eq!(
+            sent[0]["domain_rules"],
+            json!({ "mode": "allowlist", "deny": ["blocked.example"], "allow": ["good.example"] })
+        );
+
+        let unreadable = upstreams(true, 503).await;
+        let (status, body) = recrawl(&unreadable).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "org_site_check_unavailable");
+        assert!(crawl_requests(&unreadable).await.is_empty());
+
+        let off = upstreams(false, 200).await;
+        let (status, _) = recrawl(&off).await;
+        assert_eq!(status, StatusCode::OK);
+        let sent = crawl_requests(&off).await;
+        assert!(sent[0].get("domain_rules").is_none(), "off is what it was");
+        assert!(off
+            .model
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn with_the_switch_off_the_crawl_is_what_it_was_and_model_gateway_is_never_asked() {
+        let world = upstreams(false, 200).await;
+        let (status, _) = crawl(&world, "https://blocked.example/start").await;
+        assert_eq!(status, StatusCode::OK);
+        let sent = crawl_requests(&world).await;
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].get("domain_rules").is_none());
+        assert!(world
+            .model
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
     }
 }

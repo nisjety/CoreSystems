@@ -41,6 +41,8 @@ export type EffectivePolicyItem = {
   redacted: boolean
   /** For a withheld list: how many entries it holds. */
   count?: number
+  /** For a list this caller may read (an admin's): its entries, one text each. */
+  values?: string[]
   /** The owner did not answer for this setting, so neither its value nor its origin is shown. */
   unavailable: boolean
 }
@@ -84,24 +86,51 @@ function isPolicyScalar(value: unknown): value is Exclude<PolicyValue, null> {
   )
 }
 
+/** The most entries a list shows, and the most characters one entry shows: the bounds the server keeps. */
+const MAX_LIST_ENTRIES = 200
+const MAX_ENTRY_CHARS = 200
+
+/**
+ * The entries of a list as sent: undefined when there is no list, the entries when every one is non-empty text
+ * within the bounds, and null when the list is anything else, which makes the row unavailable.
+ */
+function parseValues(raw: unknown): string[] | undefined | null {
+  if (raw === undefined) return undefined
+  if (!Array.isArray(raw) || raw.length > MAX_LIST_ENTRIES) return null
+  const entries: string[] = []
+  for (const entry of raw) {
+    if (typeof entry !== 'string' || entry.trim() === '' || [...entry].length > MAX_ENTRY_CHARS) return null
+    entries.push(entry)
+  }
+  return entries
+}
+
 /**
  * One setting as sent, or null when it has no key. A value this panel cannot show makes the row unavailable
- * rather than being rendered as something else.
+ * rather than being rendered as something else. A withheld row carries no value and no list: any value or list
+ * on it makes the row unavailable, so a withheld detail is never shown in any form.
  */
 function parseItem(raw: unknown): EffectivePolicyItem | null {
   if (!isRecord(raw) || typeof raw.key !== 'string' || raw.key.trim() === '') return null
   const sent = raw.value === undefined ? null : raw.value
-  const unavailable = raw.unavailable === true || (sent !== null && !isPolicyScalar(sent))
+  const redacted = raw.redacted === true
+  const values = parseValues(raw.values)
+  const unavailable =
+    raw.unavailable === true ||
+    (sent !== null && !isPolicyScalar(sent)) ||
+    values === null ||
+    (redacted && (sent !== null || values !== undefined))
   const item: EffectivePolicyItem = {
     key: raw.key,
     value: !unavailable && isPolicyScalar(sent) ? sent : null,
     origin: !unavailable && isPolicyOrigin(raw.origin) ? raw.origin : null,
     locked: raw.locked === true,
-    redacted: raw.redacted === true,
+    redacted,
     unavailable,
   }
   if (typeof raw.revision === 'number' && Number.isInteger(raw.revision)) item.revision = raw.revision
   if (typeof raw.count === 'number' && Number.isInteger(raw.count) && raw.count >= 0) item.count = raw.count
+  if (!unavailable && values) item.values = values
   return item
 }
 
@@ -136,13 +165,20 @@ async function loadEffectivePolicy(query: string): Promise<PolicyLoad> {
   }
 }
 
+/** A label for a key the copy does not name: the key read as words, its first letter capitalised. */
+function humanizeKey(key: string): string {
+  const words = key.replace(/[._]+/g, ' ').trim()
+  return words === '' ? key : words.charAt(0).toUpperCase() + words.slice(1)
+}
+
 function keyLabel(text: PolicyCopy, key: string): string {
-  return Object.hasOwn(text.keys, key) ? (text.keys[key] ?? key) : key
+  return Object.hasOwn(text.keys, key) ? (text.keys[key] ?? humanizeKey(key)) : humanizeKey(key)
 }
 
 function valueText(item: EffectivePolicyItem, text: PolicyCopy): string {
   if (item.unavailable) return text.unavailable
   if (item.redacted) return item.count === undefined ? text.redacted : text.redactedCount(item.count)
+  if (item.values !== undefined) return item.values.length === 0 ? text.notSet : item.values.join(', ')
   if (item.value === null) return text.notSet
   if (typeof item.value === 'boolean') return item.value ? text.on : text.off
   return String(item.value)

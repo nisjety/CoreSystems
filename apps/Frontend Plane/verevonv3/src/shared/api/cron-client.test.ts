@@ -9,7 +9,14 @@ vi.mock('./http', async (importOriginal) => {
 })
 
 import { requestJson } from './http'
-import { listCronSchedules, listScheduleFires, runScheduleNow } from './cron-client'
+import { ApiError } from './api-error'
+import {
+  listCronSchedules,
+  listDelegableScheduleTools,
+  listScheduleFires,
+  renewCronScheduleApproval,
+  runScheduleNow,
+} from './cron-client'
 
 const mockedRequest = vi.mocked(requestJson)
 
@@ -85,5 +92,73 @@ describe('listScheduleFires', () => {
     expect(mockedRequest).toHaveBeenCalledWith('/api/v1/cron/cron%201/fires?limit=5', {
       headers: { 'x-verevon-org-id': 'org-1' },
     })
+  })
+})
+
+describe('renewCronScheduleApproval', () => {
+  it('renews the existing schedule in place: one update of that id with the contract text and resume', async () => {
+    mockedRequest.mockResolvedValue({ id: 'cron 1' })
+    await renewCronScheduleApproval('org-1', 'cron 1', '{"v":1}')
+    expect(mockedRequest).toHaveBeenCalledTimes(1)
+    expect(mockedRequest).toHaveBeenCalledWith('/api/v1/cron/cron%201', {
+      method: 'POST',
+      body: JSON.stringify({ approval_contract: '{"v":1}', enabled: true }),
+      headers: { 'x-verevon-org-id': 'org-1' },
+    })
+  })
+
+  it('can leave the schedule paused when asked not to resume it', async () => {
+    mockedRequest.mockResolvedValue({ id: 'cron_1' })
+    await renewCronScheduleApproval('org-1', 'cron_1', '{"v":1}', { resume: false })
+    expect(mockedRequest).toHaveBeenCalledWith('/api/v1/cron/cron_1', {
+      method: 'POST',
+      body: JSON.stringify({ approval_contract: '{"v":1}' }),
+      headers: { 'x-verevon-org-id': 'org-1' },
+    })
+  })
+})
+
+describe('listDelegableScheduleTools', () => {
+  it('asks the delegable route with no org header, since the BFF takes the org from the session', async () => {
+    mockedRequest.mockResolvedValue([])
+    await listDelegableScheduleTools()
+    expect(mockedRequest).toHaveBeenCalledWith('/api/v1/cron/delegable-tools')
+  })
+
+  it('keeps each well-formed tool once, trimmed, with only its two fields', async () => {
+    mockedRequest.mockResolvedValue([
+      { tool: ' web_search ', capability: 'web', class: 'read' },
+      { tool: 'web_search', capability: 'web' },
+      { tool: 'fs_read' },
+      { tool: 'calendar_read', capability: ' calendar ' },
+    ])
+    await expect(listDelegableScheduleTools()).resolves.toEqual([
+      { tool: 'web_search', capability: 'web' },
+      { tool: 'calendar_read', capability: 'calendar' },
+    ])
+  })
+
+  it('also reads the rows under a tools key', async () => {
+    mockedRequest.mockResolvedValue({ tools: [{ tool: 'web_search', capability: 'web' }] })
+    await expect(listDelegableScheduleTools()).resolves.toEqual([{ tool: 'web_search', capability: 'web' }])
+  })
+
+  it('answers an empty list for a 404 while the switch is off', async () => {
+    mockedRequest.mockRejectedValue(new ApiError('not found', 404, null))
+    await expect(listDelegableScheduleTools()).resolves.toEqual([])
+  })
+
+  it('answers an empty list for a network error', async () => {
+    mockedRequest.mockRejectedValue(new TypeError('Failed to fetch'))
+    await expect(listDelegableScheduleTools()).resolves.toEqual([])
+  })
+
+  it('answers an empty list for a malformed answer', async () => {
+    mockedRequest.mockResolvedValue({ tool: 'web_search', capability: 'web' })
+    await expect(listDelegableScheduleTools()).resolves.toEqual([])
+    mockedRequest.mockResolvedValue(null)
+    await expect(listDelegableScheduleTools()).resolves.toEqual([])
+    mockedRequest.mockResolvedValue({ tools: 'web_search' })
+    await expect(listDelegableScheduleTools()).resolves.toEqual([])
   })
 })

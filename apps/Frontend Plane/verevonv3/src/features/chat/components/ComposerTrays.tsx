@@ -13,6 +13,7 @@ import { QuestionCard } from '@/shared/chat-nodes/QuestionCard'
 import { X } from '@/shared/icons'
 import { useI18n } from '@/shared/i18n'
 import type { DockedTray, DockedTrayKind } from '../lib/composer-trays'
+import type { QueuedInput } from './chat-types'
 import type { GoalAutoContinueView } from '../lib/goal-pump'
 import { ApprovalRequests, PlanApprovalControl, QueuedInputStrip } from './ChatMessages'
 import { DeckTemplatePicker } from './DeckTemplatePicker'
@@ -59,6 +60,13 @@ export function ComposerTrays(props: {
   questionError?: string | null
   onAnswerQuestion?: (answer: ChatQuestionAnswer) => void
   onSkipQuestion?: () => void
+  /**
+   * Take back, or edit, a message sent mid-run while the gateway still holds it (O-01). Passed to the strip, which
+   * shows the controls only with `VITE_CHAT_QUEUE_RETRACT=true` and only for a message the gateway accepted and
+   * has not delivered. Absent where the page does not offer a take-back.
+   */
+  onEditQueuedInput?: (entry: QueuedInput, text: string) => void
+  onRetractQueuedInput?: (entry: QueuedInput) => void
   /** A deep-research plan waiting for Start (EP-2 S5). It waits behind an approval and a question, ahead of a plan. */
   researchPlan?: ChatResearchPlanEvent
   onStartResearchPlan?: (edit: ResearchPlanEdit) => void
@@ -295,7 +303,15 @@ export function ComposerTrays(props: {
             />
           )}
         </Match>
-        <Match when={queue()}>{(tray) => <QueuedInputStrip entries={tray().entries} />}</Match>
+        <Match when={queue()}>
+          {(tray) => (
+            <QueuedInputStrip
+              entries={tray().entries}
+              onEdit={props.onEditQueuedInput}
+              onRetract={props.onRetractQueuedInput}
+            />
+          )}
+        </Match>
         <Match when={wideResearchOpen()}>
           <WideResearchStart
             model={props.wideResearchModel}

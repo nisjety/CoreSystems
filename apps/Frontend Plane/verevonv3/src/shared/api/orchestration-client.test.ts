@@ -18,6 +18,7 @@ import {
   getApprovalPreview,
   listApprovals,
   listRunQuestions,
+  normalizeApprovalCause,
   normalizePlan,
   normalizeRunQuestion,
   planStepEditToWire,
@@ -169,6 +170,28 @@ describe('listApprovals', () => {
       undefined,
       undefined,
     ])
+  })
+})
+
+describe('normalizeApprovalCause (WS21-S6)', () => {
+  const consent = { code: 'browser_site_consent', host: 'shop.example.com', scope_options: ['once'] }
+
+  it('reads the host and keeps the site level only when it is read or act', () => {
+    expect(normalizeApprovalCause({ ...consent, max_level: 'read' })).toEqual({
+      code: 'browser_site_consent',
+      host: 'shop.example.com',
+      scopeOptions: ['once'],
+      stepUpRequired: false,
+      maxLevel: 'read',
+    })
+    expect(normalizeApprovalCause({ ...consent, max_level: 'act' })?.maxLevel).toBe('act')
+    for (const level of ['write', 'READ', ' act', '', null, 3, ['read']]) {
+      expect(normalizeApprovalCause({ ...consent, max_level: level })?.maxLevel, JSON.stringify(level)).toBeUndefined()
+    }
+  })
+
+  it('states no level for a cause that projects none', () => {
+    expect(normalizeApprovalCause({ code: 'browser_site_consent', scope_options: ['once'] })?.maxLevel).toBeUndefined()
   })
 })
 

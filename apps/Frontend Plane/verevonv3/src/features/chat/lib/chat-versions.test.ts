@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type { ChatTurn } from '../components/chat-types'
 import {
+  answeringTurn,
   beginNewVersion,
   lastUserIndex,
+  precedingUserIndex,
+  precedingUserTurn,
   selectVersion,
   versionBadge,
   type ExchangeVersionState,
@@ -31,6 +34,33 @@ describe('lastUserIndex', () => {
   it('is -1 with no user turn', () => {
     expect(lastUserIndex([a('a1')])).toBe(-1)
     expect(lastUserIndex([])).toBe(-1)
+  })
+})
+
+describe('a retracted note between a question and its answer (O-01)', () => {
+  const note = (id: string) => turn({ id, retracted: true })
+
+  it('is not the question the answer followed, and not the answer the question got', () => {
+    const turns = [u('u1'), a('a1'), u('u2'), note('n1'), a('a2')]
+    expect(precedingUserIndex(turns, 4)).toBe(2)
+    expect(precedingUserTurn(turns, 4)?.content).toBe('q-u2')
+    expect(answeringTurn(turns, 2)?.id).toBe('a2')
+    expect(answeringTurn(turns, 0)?.id).toBe('a1')
+  })
+
+  it('reads two notes in a row the same way, and finds nothing where there is nothing', () => {
+    const turns = [u('u1'), note('n1'), note('n2'), a('a1')]
+    expect(precedingUserIndex(turns, 3)).toBe(0)
+    expect(answeringTurn(turns, 0)?.id).toBe('a1')
+    expect(answeringTurn([u('u1'), note('n1')], 0)).toBeUndefined()
+    expect(precedingUserIndex([note('n1'), a('a1')], 1)).toBe(-1)
+    expect(precedingUserTurn([], 0)).toBeUndefined()
+  })
+
+  it('keeps every turn without a note exactly as the old index arithmetic read it', () => {
+    const turns = [u('u1'), a('a1'), u('u2'), a('a2')]
+    expect(precedingUserIndex(turns, 3)).toBe(2)
+    expect(answeringTurn(turns, 2)).toBe(turns[3])
   })
 })
 
