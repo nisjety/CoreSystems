@@ -138,9 +138,10 @@ test('an agent without a published version keeps the legacy persona and stays wr
   assert.doesNotThrow(() =>
     assertLegacyWriteAllowed(legacy, { systemPrompt: 'New words', tools: ['legacy_tool'] }),
   );
+  assert.doesNotThrow(() => assertLegacyWriteAllowed(legacy, { name: 'Renamed', model: 'claude-haiku-5-5' }));
 });
 
-test('a versioned agent serves its published version and refuses direct prompt and tool writes', () => {
+test('a versioned agent serves its published version and refuses direct name, model, prompt and tool writes', () => {
   const versioned = { name: 'Legacy name', systemPrompt: 'stale', orgId: ORG_A, publishedVersion: 2 };
   const row = versionRow({});
   assert.deepEqual(definitionPersona(versioned, row), {
@@ -156,7 +157,15 @@ test('a versioned agent serves its published version and refuses direct prompt a
     /agent_versioned_field_refused/,
   );
   assert.throws(() => assertLegacyWriteAllowed(versioned, { tools: [] }), /agent_versioned_field_refused/);
-  assert.doesNotThrow(() => assertLegacyWriteAllowed(versioned, { name: 'Renamed' }));
+  // publish mirrors the version's name and model onto the row, so a direct write would disagree with it.
+  assert.throws(() => assertLegacyWriteAllowed(versioned, { name: 'Renamed' }), /agent_versioned_field_refused/);
+  assert.throws(
+    () => assertLegacyWriteAllowed(versioned, { model: 'claude-haiku-5-5' }),
+    /agent_versioned_field_refused/,
+  );
+  // The other legacy fields keep their write path once the agent is versioned.
+  assert.doesNotThrow(() => assertLegacyWriteAllowed(versioned, { description: 'Support desk' }));
+  assert.doesNotThrow(() => assertLegacyWriteAllowed(versioned, { greeting: 'Hello' }));
 });
 
 test('a pointer whose version cannot be read serves no persona, never the legacy prompt', () => {

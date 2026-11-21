@@ -269,3 +269,76 @@ for (const { lifecycle, reason } of REFUSALS) {
     assert.equal(eventOf(handle.tables, 'space_a').deliveryState, 'closed', 'the refused event is never claimed again');
   });
 }
+
+// R-app-03: a refused request's receipt names why it was refused, from the closed vocabulary. Only a
+// rejected request carries a reason. Every other state has none, and so does a refusal Control gave itself.
+function membership() {
+  return fake.memberTables({}, { orgId: ORG, authId: 'user_a' });
+}
+
+function receiptForGateway(handle, spaceRef) {
+  return spaces.getPersonalSpaceDeletionReceiptForGateway._handler(handle.ctx, {
+    externalAuthId: 'user_a',
+    externalOrgId: ORG,
+    serviceKey: fake.SERVICE_KEY,
+    requestId: requestIdOf(spaceRef),
+  });
+}
+
+function receiptForViewer(handle, spaceRef) {
+  const ctx = { ...handle.ctx, auth: { getUserIdentity: async () => ({ 'properties.externalAuthId': 'user_a' }) } };
+  return spaces.getPersonalSpaceDeletionReceipt._handler(ctx, { externalOrgId: ORG, requestId: requestIdOf(spaceRef) });
+}
+
+for (const { lifecycle, reason } of REFUSALS) {
+  test(`the receipt of a request refused for a ${lifecycle ?? 'missing'} Space names the refusal ${reason}, to the gateway and to the viewer`, async (t) => {
+    t.mock.method(console, 'warn', () => {});
+    fake.withServiceKey(t);
+    const handle = harness(tablesOf(deletion('space_a', { lifecycle }), membership()));
+    await claimAuthorization(handle);
+    assert.deepEqual(await acknowledge(handle, 'space_a', 'authorized'), { state: 'rejected' });
+
+    const gateway = await receiptForGateway(handle, 'space_a');
+    assert.equal(gateway.request.state, 'rejected');
+    assert.equal(gateway.purgeStatus, 'pending');
+    assert.equal(gateway.rejectionReason, reason);
+
+    const viewer = await receiptForViewer(handle, 'space_a');
+    assert.equal(viewer.request.state, 'rejected');
+    assert.equal(viewer.rejectionReason, reason);
+  });
+}
+
+test('a receipt carries no rejection reason while the request is pending, authorized, blocked, or refused by Control', async (t) => {
+  fake.withServiceKey(t);
+  const cases = [
+    { name: 'pending', answer: null, state: 'pending_authorization' },
+    { name: 'authorized', answer: 'authorized', state: 'authorized' },
+    { name: 'blocked_legal_hold', answer: 'blocked_legal_hold', state: 'blocked_legal_hold' },
+    { name: 'refused by Control', answer: 'rejected', state: 'rejected' },
+  ];
+  for (const { name, answer, state } of cases) {
+    const handle = harness(tablesOf(deletion('space_a', { lifecycle: 'active' }), membership()));
+    if (answer !== null) {
+      await claimAuthorization(handle);
+      assert.deepEqual(await acknowledge(handle, 'space_a', answer), { state: answer }, name);
+    }
+    const gateway = await receiptForGateway(handle, 'space_a');
+    const viewer = await receiptForViewer(handle, 'space_a');
+    assert.equal(gateway.request.state, state, name);
+    assert.equal(gateway.rejectionReason, undefined, name);
+    assert.equal(viewer.rejectionReason, undefined, name);
+    assert.doesNotMatch(JSON.stringify(gateway), /rejectionReason/, name);
+  }
+});
+
+test('a rejected request whose event carries text outside the closed vocabulary shows no reason', async (t) => {
+  fake.withServiceKey(t);
+  const tables = tablesOf(deletion('space_a', { lifecycle: 'active' }), membership());
+  tables.spaceDeletionRequests[0].state = 'rejected';
+  tables.spaceDeletionAuthorizationEvents[0].lastDeliveryError = 'Control: user_a is under a hold';
+  const gateway = await receiptForGateway(harness(tables), 'space_a');
+  assert.equal(gateway.request.state, 'rejected');
+  assert.equal(gateway.rejectionReason, undefined);
+  assert.doesNotMatch(JSON.stringify(gateway), /hold/);
+});

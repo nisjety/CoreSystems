@@ -117,10 +117,41 @@ from the deployed service.
 Support automation remains disabled because current workflows do not supply
 authoritative organization/user mapping.
 
-Web Push is not ready to switch on. The queued delivery worker never sends a push,
-subscriptions outlive a purged organisation until Control publishes a purge event,
-and whether Chrome shows a notice for each push while a window is visible is not
-verified.
+Web Push is not ready to switch on. The queued delivery worker now sends the same
+wake-up as the synchronous path, and a purged organisation's subscriptions are erased
+only when `NOTIFICATION_ORG_ERASURE_ENABLED=true` and Control provisions the
+`notification-core-org-erasure` durable. Whether Chrome shows a notice for each push
+while a window is visible is not verified.
+
+In `novu` mode, organization erasure erases the provider side before the local rows. For each
+membership of the erased organization it deletes that membership's Novu messages and then
+its Novu subscriber. The subscriber's workflow preferences go with the subscriber, because
+the SDK has no separate preference delete. That removal is assumed from Novu's subscriber
+delete and must be confirmed on a live tenant before it is relied on. Only after every
+provider step succeeds are the local rows purged, since the memberships name the provider
+subscribers. A failed step retries the whole message with the local rows still in place.
+The local purge then runs in one transaction over every organization-keyed table, Web Push
+subscriptions included, children before parents, and it hard-deletes sealed endpoints and keys. A
+user's identity that another organization still uses is detached rather than deleted.
+`notification_delivery_callback_replays` nonces carry no organization and expire on their own, so
+the purge leaves them.
+
+In `disabled` mode there are no provider records, so the erasure purges the local rows alone and
+logs one content-free line that says the provider side is off. An organization that was synced to
+Novu during an earlier `novu` period and is then erased in `disabled` mode keeps its Novu
+subscribers and messages. That case is not erased yet.
+
+The same subject carries the per-user erasure: `subject_type` `user` for a hard delete and `user_anonymize` for an
+anonymize, published once for each organization the user actively belongs to and for the organization that requested it. The same switch turns it on, and the same consumer
+handles it. In `novu` mode the user's provider-side subscribers and messages are erased first, one membership at a time,
+in every organization the user belongs to. Then one transaction removes the user's rows in every organization: the
+requests and their attempts, feed items, preferences, memberships, the subscriber identity, and the Web Push
+subscriptions with their sealed endpoints. Rows with no organization that name the user as recipient go too. Organization
+channel policy and the callback replay nonces name no user, so they stay. The purge is keyed by the user, not by the
+organization on the event, because the Auth erasure behind it is global; a replayed child removes nothing. A user synced
+to Novu during an earlier `novu` period and then erased in `disabled` mode keeps its Novu subscribers and messages, as an
+organization does. The per-user purge is covered by unit tests and a Postgres proof that is opt-in; it is not yet proven
+on a live Novu tenant.
 
 Measured race-suite coverage is 81.4% for delegation, 59.1% for notification,
 32.6% for HTTP, and 41.0% for database. This does not meet the 80% critical-module

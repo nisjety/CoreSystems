@@ -244,6 +244,68 @@ ORDER BY organization_id`, strings.TrimSpace(userID), MembershipStatusActive)
 	return memberships, nil
 }
 
+// ListMembershipsForOrganization returns every membership of one organization, active and removed, ordered by user. The
+// provider-side erasure reads it before the local purge removes these rows.
+func (r *PGRepository) ListMembershipsForOrganization(ctx context.Context, organizationID string) ([]Membership, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("subscriber repository not configured")
+	}
+	rows, err := r.pool.Query(ctx, `
+SELECT organization_id, user_id, provider_subscriber_id, role, status, authority_revision,
+	COALESCE(source_event_id, ''), occurred_at, updated_at
+FROM notification_subscriber_memberships
+WHERE organization_id = $1
+ORDER BY user_id`, strings.TrimSpace(organizationID))
+	if err != nil {
+		return nil, fmt.Errorf("list organization memberships: %w", err)
+	}
+	defer rows.Close()
+
+	memberships := make([]Membership, 0)
+	for rows.Next() {
+		membership, scanErr := scanMembership(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		memberships = append(memberships, *membership)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate organization memberships: %w", err)
+	}
+	return memberships, nil
+}
+
+// ListMembershipsForUser returns every membership of one user across every organization, active and removed, ordered by
+// organization. The per-user provider-side erasure reads it before the local purge removes these rows.
+func (r *PGRepository) ListMembershipsForUser(ctx context.Context, userID string) ([]Membership, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("subscriber repository not configured")
+	}
+	rows, err := r.pool.Query(ctx, `
+SELECT organization_id, user_id, provider_subscriber_id, role, status, authority_revision,
+	COALESCE(source_event_id, ''), occurred_at, updated_at
+FROM notification_subscriber_memberships
+WHERE user_id = $1
+ORDER BY organization_id`, strings.TrimSpace(userID))
+	if err != nil {
+		return nil, fmt.Errorf("list user memberships: %w", err)
+	}
+	defer rows.Close()
+
+	memberships := make([]Membership, 0)
+	for rows.Next() {
+		membership, scanErr := scanMembership(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		memberships = append(memberships, *membership)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate user memberships: %w", err)
+	}
+	return memberships, nil
+}
+
 func scanSubscriber(row pgx.Row) (*Subscriber, error) {
 	var s Subscriber
 	if err := row.Scan(

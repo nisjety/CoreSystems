@@ -73,4 +73,23 @@ crons.interval(
   {},
 );
 
+// R-app-01: re-drive a Space deletion authorization whose claim died before its acknowledgement, so the deletion does not wait
+// for another request. Off unless SPACE_DELETION_AUTH_SWEEP is the literal true, which the sweep reads at call time.
+crons.interval(
+  "space deletion authorization sweep",
+  { minutes: 5 },
+  internal.spaceDeletionAuthorization.sweepAuthorizationEvents,
+  {},
+);
+
+// P2-app-02-rel1: re-drives a Space delivery claim (an owner deletion delivery, a Space registration or a recipient-audience
+// registration) whose worker died before its acknowledgement, so the claim does not wait for another request. Off unless
+// SPACE_DELIVERY_LEASE_SWEEP is the literal true, which the sweep reads at call time.
+crons.interval(
+  "space delivery lease sweep",
+  { minutes: 5 },
+  internal.spaces.sweepExpiredDeliveryLeases,
+  {},
+);
+
 export default crons;

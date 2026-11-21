@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
+import { internalAction, internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { assertServiceKey, requireGatewayMember, requireViewerMembership } from "./authz";
 import {
@@ -881,7 +881,8 @@ export const requestPersonalSpaceDeletionForGateway = mutation({
 
 // An honest owner-only receipt surface. This reports authorization and owner
 // completion separately; it cannot turn a still-pending delete into a success
-// merely because the requester retried or a worker timed out.
+// merely because the requester retried or a worker timed out. `rejectionReason` is
+// the typed reason a refused request was refused, and is undefined in every other state.
 export const getPersonalSpaceDeletionReceipt = query({
   args: { externalOrgId: v.string(), requestId: v.string() },
   handler: async (ctx, args) => {
@@ -900,6 +901,7 @@ export const getPersonalSpaceDeletionReceipt = query({
         ownerPlane: receipt.ownerPlane as SpaceDeletionOwner,
         status: receipt.status as SpaceDeletionOwnerStatus,
       }))),
+      rejectionReason: await deletionRejectionReason(ctx, request),
     };
   },
 });
@@ -922,7 +924,7 @@ export const getPersonalSpaceDeletionReceiptForGateway = query({
     if (!members.some((candidate: any) => candidate.syncStatus !== "deleted")) throw new Error("Unauthorized");
     const receipts = await ctx.db.query("spaceDeletionOwnerReceipts")
       .withIndex("by_request", (q: any) => q.eq("requestId", request.requestId)).collect();
-    return { request, receipts, purgeStatus: aggregateDeletionReceipts(receipts.map((receipt: any) => ({ ownerPlane: receipt.ownerPlane as SpaceDeletionOwner, status: receipt.status as SpaceDeletionOwnerStatus }))) };
+    return { request, receipts, purgeStatus: aggregateDeletionReceipts(receipts.map((receipt: any) => ({ ownerPlane: receipt.ownerPlane as SpaceDeletionOwner, status: receipt.status as SpaceDeletionOwnerStatus }))), rejectionReason: await deletionRejectionReason(ctx, request) };
   },
 });
 
@@ -1093,25 +1095,84 @@ export const replaceRecipientAudience = internalMutation({
   },
 });
 
+// A claim reads a bounded window of the outbox, never the whole table: the first CLAIM_SCAN_LIMIT
+// due rows of each claimable state, through `by_delivery_state_and_next_attempt`, per window, and at
+// most CLAIM_SCAN_WINDOWS windows. A due row whose Space or audience snapshot is missing is closed
+// with a typed reason and the scan goes on, so a stale head never blocks the claims behind it. An
+// expired lease sorts before every live one in the claimed state, because a live claim has the later
+// claim time, so a window never hides an expired lease. Once the window bound is reached the claim
+// schedules its worker again, so the rows past the bound are still reached without a new event.
+const CLAIM_SCAN_LIMIT = 20;
+const CLAIM_SCAN_WINDOWS = 4;
+const CLOSED_DELIVERY_SPACE_MISSING = "space_missing";
+const CLOSED_DELIVERY_AUDIENCE_SNAPSHOT_MISSING = "audience_snapshot_missing";
+
+// The rows of one outbox that a claim may select, earliest first. A window reads, per claimable state,
+// the due rows and the rows with no `nextAttemptAt`, and it reads the rows with no `deliveryState`. The
+// last two kinds are legacy rows the schema still allows, and the old full scan selected them: a missing
+// state reads as `pending` and a missing `nextAttemptAt` as `createdAt` (see `deliveryFor`). The index
+// matches a missing value through `undefined`, so every kind is read through
+// `by_delivery_state_and_next_attempt`, under the same window bound. A row that two reads both return is
+// kept once.
+async function claimableDueRows(
+  ctx: any,
+  table: "spaceLifecycleEvents" | "spaceRecipientAudienceEvents",
+  now: number,
+): Promise<any[]> {
+  if (!Number.isSafeInteger(now) || now <= 0) throw new Error("Space delivery claim time is invalid");
+  const rows = new Map<string, any>();
+  const readWindow = async (range: (q: any) => any) => {
+    const batch = await ctx.db.query(table)
+      .withIndex("by_delivery_state_and_next_attempt", range)
+      .take(CLAIM_SCAN_LIMIT);
+    for (const row of batch) rows.set(row._id, row);
+  };
+  for (const deliveryState of CLAIMABLE_DELIVERY_STATES) {
+    await readWindow((q: any) => q.eq("deliveryState", deliveryState).lte("nextAttemptAt", now));
+    await readWindow((q: any) => q.eq("deliveryState", deliveryState).eq("nextAttemptAt", undefined));
+  }
+  await readWindow((q: any) => q.eq("deliveryState", undefined));
+  return [...rows.values()]
+    .filter((candidate: any) => canClaimSpaceLifecycleDelivery(deliveryFor(candidate), now))
+    .sort((left: any, right: any) =>
+      (left.nextAttemptAt ?? left.createdAt) - (right.nextAttemptAt ?? right.createdAt) || left.createdAt - right.createdAt,
+    );
+}
+
+// Logs the ids and the reason code of a closed row, never its content.
+function warnStaleDeliveryRow(scope: "registration" | "audience", row: any, reason: string): void {
+  console.warn("[Space delivery] closed a due row whose Space or audience snapshot is missing", {
+    reason, scope, eventId: row.eventId, spaceRef: row.spaceRef, audienceRef: row.audienceRef ?? null,
+  });
+}
+
 export const claimNextRecipientAudienceRegistration = internalMutation({
   args: { workerId: v.string(), now: v.number() },
   handler: async (ctx, args) => {
     assertDeliveryWorker(args.workerId);
-    const events = await ctx.db.query("spaceRecipientAudienceEvents").collect();
-    const candidate = events
-      .filter((event: any) => canClaimSpaceLifecycleDelivery(deliveryFor(event), args.now))
-      .sort((left: any, right: any) =>
-        (left.nextAttemptAt ?? left.createdAt) - (right.nextAttemptAt ?? right.createdAt) || left.createdAt - right.createdAt,
-      )[0];
-    if (!candidate) return null;
-    const audience = await ctx.db
-      .query("spaceRecipientAudiences")
-      .withIndex("by_audience_ref", (q: any) => q.eq("audienceRef", candidate.audienceRef))
-      .first();
-    if (!audience) throw new Error("recipient audience delivery has no audience snapshot");
-    const delivery = claimSpaceLifecycleDelivery(deliveryFor(candidate), args.workerId, args.now, 30_000);
-    await ctx.db.patch(candidate._id, patchForDelivery(delivery));
-    return { audience, eventId: candidate.eventId, workerId: args.workerId };
+    for (let scan = 0; scan < CLAIM_SCAN_WINDOWS; scan += 1) {
+      const due = await claimableDueRows(ctx, "spaceRecipientAudienceEvents", args.now);
+      if (due.length === 0) return null;
+      for (const candidate of due) {
+        const audience = await ctx.db
+          .query("spaceRecipientAudiences")
+          .withIndex("by_audience_ref", (q: any) => q.eq("audienceRef", candidate.audienceRef))
+          .first();
+        if (!audience) {
+          warnStaleDeliveryRow("audience", candidate, CLOSED_DELIVERY_AUDIENCE_SNAPSHOT_MISSING);
+          await ctx.db.patch(candidate._id, closedDeliveryPatch(CLOSED_DELIVERY_AUDIENCE_SNAPSHOT_MISSING));
+          continue;
+        }
+        const delivery = claimSpaceLifecycleDelivery(deliveryFor(candidate), args.workerId, args.now, 30_000);
+        await ctx.db.patch(candidate._id, patchForDelivery(delivery));
+        return { audience, eventId: candidate.eventId, workerId: args.workerId };
+      }
+    }
+    // Every window was closed in full and the bound is reached: one more run reaches the rows past it.
+    await ctx.scheduler.runAfter(0, internal.spaceAudienceRegistration.deliverOne, {
+      workerId: `space-audience-registration:scan:${crypto.randomUUID()}`,
+    });
+    return null;
   },
 });
 
@@ -1252,6 +1313,27 @@ export const claimNextDeletionAuthorization = internalMutation({
   },
 });
 
+// The authorization events whose claim lease has run out, for the authorization sweep. A worker that died between its claim
+// and its acknowledgement leaves its event claimed. The claim is selectable again once its lease expires, but only a later
+// run selects it, so the sweep finds it here. Reads only the claimed rows of the state index, and returns at most `limit`
+// event ids, the longest-expired lease first.
+export const expiredDeletionAuthorizationLeases = internalQuery({
+  args: { now: v.number(), limit: v.number() },
+  handler: async (ctx, args): Promise<string[]> => {
+    if (!Number.isSafeInteger(args.now) || args.now <= 0) throw new Error("deletion delivery claim time is invalid");
+    if (!Number.isSafeInteger(args.limit) || args.limit <= 0) throw new Error("deletion sweep limit is invalid");
+    const claimed: any[] = await ctx.db.query("spaceDeletionAuthorizationEvents")
+      .withIndex("by_delivery_state_and_next_attempt", (q: any) =>
+        q.eq("deliveryState", "claimed").lte("nextAttemptAt", args.now))
+      .collect();
+    return claimed
+      .filter((event: any) => event.leaseExpiresAt !== undefined && event.leaseExpiresAt <= args.now)
+      .sort((left: any, right: any) => left.leaseExpiresAt - right.leaseExpiresAt)
+      .slice(0, args.limit)
+      .map((event: any) => event.eventId as string);
+  },
+});
+
 export const releaseDeletionAuthorizationClaim = internalMutation({
   args: { eventId: v.string(), workerId: v.string(), now: v.number(), error: v.string() },
   handler: async (ctx, args) => {
@@ -1358,13 +1440,16 @@ export const acknowledgeDeletionAuthorizationClaim = internalMutation({
     // the fence so no current or future recipient snapshot can be served for a
     // deleting Space. Keep the Space/tombstone and deletion-request evidence;
     // those are the minimum durable reconciliation record, not user content.
-    const audiences = (await ctx.db.query("spaceRecipientAudiences").collect())
-      .filter((candidate: any) => candidate.spaceRef === request.spaceRef);
-    const audienceEvents = await ctx.db.query("spaceRecipientAudienceEvents").collect();
+    // Both recipient tables are read through their by-space index: the fence reads this Space's
+    // rows (every revision, active or superseded) and never a whole table.
+    const audiences = await ctx.db.query("spaceRecipientAudiences")
+      .withIndex("by_space_and_revision", (q: any) => q.eq("spaceRef", request.spaceRef))
+      .collect();
+    const audienceEvents = await ctx.db.query("spaceRecipientAudienceEvents")
+      .withIndex("by_space_and_revision", (q: any) => q.eq("spaceRef", request.spaceRef))
+      .collect();
     for (const audience of audiences) await ctx.db.delete(audience._id);
-    for (const audienceEvent of audienceEvents.filter((candidate: any) => candidate.spaceRef === request.spaceRef)) {
-      await ctx.db.delete(audienceEvent._id);
-    }
+    for (const audienceEvent of audienceEvents) await ctx.db.delete(audienceEvent._id);
     // WS11-S6: attention items, follows, preferences, reminders, agent activity,
     // read markers and presence for the Space; pages itself in the background.
     await ctx.scheduler.runAfter(0, internal.spaceAttentionIngest.purgeSpace, {
@@ -1406,6 +1491,25 @@ const CLOSED_DELIVERY_NOT_LIVE = "deletion_not_live";
 const CLOSED_DELIVERY_ANSWERED_BY_COORDINATOR = "receipt_answered_by_coordinator";
 // An authorized request whose Space an earlier authorized request is already deleting.
 const CLOSED_DELIVERY_DELETION_IN_PROGRESS = "deletion_in_progress";
+
+// The closed vocabulary of a refused deletion request's reason: a receipt carries one of these
+// codes or none, never free text from the event.
+const DELETION_REJECTION_REASONS = [
+  CLOSED_DELIVERY_DELETION_IN_PROGRESS,
+  CLOSED_DELIVERY_DELETION_COMPLETED,
+  CLOSED_DELIVERY_NOT_LIVE,
+] as const;
+
+// The reason a request was refused, read from its authorization event. The event id is derived
+// from the request id, so this is one indexed lookup. Only a rejected request has a reason here:
+// a refusal Control itself gave has none, and every other state answers undefined.
+async function deletionRejectionReason(ctx: any, request: any): Promise<string | undefined> {
+  if (request.state !== "rejected") return undefined;
+  const event = await ctx.db.query("spaceDeletionAuthorizationEvents")
+    .withIndex("by_event_id", (q: any) => q.eq("eventId", deletionAuthorizationEventId(request.requestId)))
+    .first();
+  return DELETION_REJECTION_REASONS.find((code) => code === event?.lastDeliveryError);
+}
 
 // A live lease means a worker is still inside its owner call. Closing that row would
 // turn the worker's acknowledgement into an error, so the row is left to that worker.
@@ -1747,45 +1851,183 @@ export const rearmParkedDeletionOwnerDelivery = internalMutation({
 });
 
 const PARKED_DELIVERY_STATES = ["failed_permanent", "blocked_legal_hold"] as const;
-const PARKED_LIST_DEFAULT = 50;
+const PARKED_LIST_DEFAULT = 200;
 const PARKED_LIST_MAX = 200;
 
+// A page cursor names the last row a page returned: `<_creationTime>|<_id>`. Rows sort by creation time, then by id, so a
+// cursor names one position in that order and the next page starts just after it: no row is skipped or repeated.
+function encodeParkedCursor(event: { _creationTime: number; _id: string }): string {
+  return `${event._creationTime}|${event._id}`;
+}
+
+function decodeParkedCursor(cursor: string): { time: number; id: string } {
+  const at = cursor.indexOf("|");
+  const time = at > 0 ? Number(cursor.slice(0, at)) : Number.NaN;
+  const id = at > 0 ? cursor.slice(at + 1) : "";
+  if (!Number.isFinite(time) || id === "") throw new Error("parked deletion list cursor is invalid");
+  return { time, id };
+}
+
+function compareParkedRows(left: { _creationTime: number; _id: string }, right: { _creationTime: number; _id: string }): number {
+  if (left._creationTime !== right._creationTime) return left._creationTime - right._creationTime;
+  if (left._id === right._id) return 0;
+  return left._id < right._id ? -1 : 1;
+}
+
 /**
- * Operator view of parked owner deliveries, for the trusted coordinator ingress only:
- * every row an adapted owner parked as `failed_permanent` or `blocked_legal_hold`. Each
- * row returns its ids, owner, state, reason code and attempt count. No upstream text,
- * receipt detail or Space content is returned. `limit` caps each owner and state on its
- * own, so one owner's backlog cannot hide another owner's parked rows; the read is bounded
- * at six indexed lists of at most `limit` rows each.
+ * Operator view of parked owner deliveries, for the trusted coordinator ingress only: every
+ * row an adapted owner parked as `failed_permanent` or `blocked_legal_hold`, in creation order.
+ * Each row returns its ids, owner, state, reason code and attempt count. No upstream text,
+ * receipt detail or Space content is returned. A page holds at most `limit` rows (default and
+ * maximum 200). `nextCursor` names the last row of the page, and is null on the last page; pass
+ * it back as `cursor` for the next page. The parked rows are read through the owner and state
+ * index, never the whole table. That index orders by next attempt, so the rows are sorted by
+ * creation time here.
  */
 export const listParkedDeletionOwnerDeliveries = internalQuery({
-  args: { limit: v.optional(v.number()) },
+  args: { cursor: v.optional(v.string()), limit: v.optional(v.number()) },
   handler: async (ctx, args) => {
     const requested = args.limit ?? PARKED_LIST_DEFAULT;
     if (!Number.isSafeInteger(requested) || requested < 1) throw new Error("parked deletion list limit is invalid");
     const limit = Math.min(requested, PARKED_LIST_MAX);
-    const rows: Array<{
-      eventId: string; requestId: string; ownerPlane: string; deliveryState: string;
-      reason: string | null; deliveryAttempts: number;
-    }> = [];
+    const after = args.cursor === undefined ? null : decodeParkedCursor(args.cursor);
+    const parked: any[] = [];
     for (const owner of ADAPTED_DELETION_OWNERS) {
       for (const deliveryState of PARKED_DELIVERY_STATES) {
         const found = await ctx.db.query("spaceDeletionOwnerDeliveryEvents")
           .withIndex("by_owner_and_delivery", (q: any) => q.eq("ownerPlane", owner).eq("deliveryState", deliveryState))
-          .take(limit);
-        for (const event of found) {
-          rows.push({
-            eventId: event.eventId,
-            requestId: event.requestId,
-            ownerPlane: owner,
-            deliveryState,
-            reason: event.lastDeliveryError ?? null,
-            deliveryAttempts: event.deliveryAttempts ?? 0,
-          });
-        }
+          .collect();
+        for (const event of found) parked.push(event);
       }
     }
-    return rows;
+    parked.sort(compareParkedRows);
+    const later = parked
+      .filter((event: any) => after === null
+        || (event._creationTime === after.time ? event._id > after.id : event._creationTime > after.time))
+      .slice(0, limit + 1);
+    const page = later.slice(0, limit);
+    return {
+      rows: page.map((event: any) => ({
+        eventId: event.eventId,
+        requestId: event.requestId,
+        ownerPlane: event.ownerPlane,
+        deliveryState: event.deliveryState,
+        reason: event.lastDeliveryError ?? null,
+        deliveryAttempts: event.deliveryAttempts ?? 0,
+      })),
+      nextCursor: later.length > limit ? encodeParkedCursor(page[page.length - 1]) : null,
+    };
+  },
+});
+
+// SPACE_DELIVERY_LEASE_SWEEP is read at call time as the literal "true" only. On, the sweep below re-drives every delivery
+// claim whose lease has run out. Off, the sweep reads and schedules nothing, and a claim waits for another run's claim, as before.
+function deliveryLeaseSweepEnabled(): boolean {
+  return process.env.SPACE_DELIVERY_LEASE_SWEEP === "true";
+}
+
+// The most expired claims one sweep re-drives per outbox. The cron runs every five minutes, so a larger backlog drains over several runs.
+const DELIVERY_LEASE_SWEEP_LIMIT = 20;
+
+function assertLeaseSweepArgs(now: number, limit: number): void {
+  if (!Number.isSafeInteger(now) || now <= 0) throw new Error("delivery lease sweep time is invalid");
+  if (!Number.isSafeInteger(limit) || limit <= 0) throw new Error("delivery lease sweep limit is invalid");
+}
+
+// The event ids of the claimed rows whose lease has run out at `now`, longest-expired first, at most `limit`. A live lease is
+// left to its worker. A claim sets `nextAttemptAt` to its claim time and its lease ends later than that, so the claimed rows
+// due by `now` contain every expired claim.
+function expiredLeaseEventIds(claimed: any[], now: number, limit: number): string[] {
+  return claimed
+    .filter((row: any) => row.leaseExpiresAt !== undefined && row.leaseExpiresAt <= now)
+    .sort((left: any, right: any) => left.leaseExpiresAt - right.leaseExpiresAt)
+    .slice(0, limit)
+    .map((row: any) => row.eventId as string);
+}
+
+// One owner's claimed deletion deliveries whose lease has run out. The sweep re-drives each through that owner's adapter.
+export const expiredOwnerDeliveryLeases = internalQuery({
+  args: { owner: v.union(v.literal("model"), v.literal("data"), v.literal("ingestion")), now: v.number(), limit: v.number() },
+  handler: async (ctx, args): Promise<string[]> => {
+    assertLeaseSweepArgs(args.now, args.limit);
+    const claimed: any[] = await ctx.db.query("spaceDeletionOwnerDeliveryEvents")
+      .withIndex("by_owner_and_delivery", (q: any) =>
+        q.eq("ownerPlane", args.owner).eq("deliveryState", "claimed").lte("nextAttemptAt", args.now))
+      .collect();
+    return expiredLeaseEventIds(claimed, args.now, args.limit);
+  },
+});
+
+// Space registration claims whose lease has run out. The sweep re-drives each through the registration worker.
+export const expiredRegistrationLeases = internalQuery({
+  args: { now: v.number(), limit: v.number() },
+  handler: async (ctx, args): Promise<string[]> => {
+    assertLeaseSweepArgs(args.now, args.limit);
+    const claimed: any[] = await ctx.db.query("spaceLifecycleEvents")
+      .withIndex("by_delivery_state_and_next_attempt", (q: any) =>
+        q.eq("deliveryState", "claimed").lte("nextAttemptAt", args.now))
+      .collect();
+    return expiredLeaseEventIds(claimed, args.now, args.limit);
+  },
+});
+
+// Recipient-audience registration claims whose lease has run out. The sweep re-drives each through its worker.
+export const expiredRecipientAudienceLeases = internalQuery({
+  args: { now: v.number(), limit: v.number() },
+  handler: async (ctx, args): Promise<string[]> => {
+    assertLeaseSweepArgs(args.now, args.limit);
+    const claimed: any[] = await ctx.db.query("spaceRecipientAudienceEvents")
+      .withIndex("by_delivery_state_and_next_attempt", (q: any) =>
+        q.eq("deliveryState", "claimed").lte("nextAttemptAt", args.now))
+      .collect();
+    return expiredLeaseEventIds(claimed, args.now, args.limit);
+  },
+});
+
+// Re-drives every delivery claim whose lease has run out: an owner deletion delivery (Model, Data, Ingestion), a Space
+// registration and a recipient-audience registration. A worker that dies between its claim and its acknowledgement (a crash,
+// a deploy restart) leaves its row claimed. Only a later run's claim takes such a row over, so with no new traffic a Space
+// deletion's owner receipts or a registration could stall. The sweep schedules one run of the outbox's worker per expired
+// row. Each run claims the earliest due row through the normal selection, which never takes a live lease; an expired claim
+// is due from its claim time, so the runs reach the expired rows in due order. It runs on the cron in crons.ts.
+export const sweepExpiredDeliveryLeases = internalAction({
+  args: {},
+  handler: async (ctx): Promise<{ status: "disabled" | "swept"; scheduled: number }> => {
+    if (!deliveryLeaseSweepEnabled()) return { status: "disabled", scheduled: 0 };
+    const now = Date.now();
+    let scheduled = 0;
+    for (const owner of ADAPTED_DELETION_OWNERS) {
+      const eventIds: string[] = await ctx.runQuery(internal.spaces.expiredOwnerDeliveryLeases, {
+        owner, now, limit: DELIVERY_LEASE_SWEEP_LIMIT,
+      });
+      for (const eventId of eventIds) {
+        await ctx.scheduler.runAfter(0, ownerDeliverOne(owner), {
+          workerId: `${OWNER_DELIVERY_WORKER[owner]}:${eventId}:${crypto.randomUUID()}`,
+        });
+      }
+      scheduled += eventIds.length;
+    }
+    const registrations: string[] = await ctx.runQuery(internal.spaces.expiredRegistrationLeases, {
+      now, limit: DELIVERY_LEASE_SWEEP_LIMIT,
+    });
+    for (const eventId of registrations) {
+      await ctx.scheduler.runAfter(0, internal.spaceRegistration.deliverOne, {
+        workerId: `space-registration:${eventId}:${crypto.randomUUID()}`,
+      });
+    }
+    const audiences: string[] = await ctx.runQuery(internal.spaces.expiredRecipientAudienceLeases, {
+      now, limit: DELIVERY_LEASE_SWEEP_LIMIT,
+    });
+    for (const eventId of audiences) {
+      await ctx.scheduler.runAfter(0, internal.spaceAudienceRegistration.deliverOne, {
+        workerId: `space-audience-registration:${eventId}:${crypto.randomUUID()}`,
+      });
+    }
+    scheduled += registrations.length + audiences.length;
+    if (scheduled > 0) {
+      console.warn("[Space delivery] lease sweep re-drove claims whose lease had expired", { scheduled });
+    }
+    return { status: "swept", scheduled };
   },
 });
 
@@ -2016,35 +2258,41 @@ export const claimNextRegistration = internalMutation({
     if (!Number.isSafeInteger(args.now) || args.now <= 0) {
       throw new Error("Space delivery claim time is invalid");
     }
-    const events = await ctx.db.query("spaceLifecycleEvents").collect();
-    const candidate = events
-      .filter((event: any) => canClaimSpaceLifecycleDelivery(deliveryFor(event), args.now))
-      .sort((left: any, right: any) =>
-        (left.nextAttemptAt ?? left.createdAt) - (right.nextAttemptAt ?? right.createdAt) ||
-        left.createdAt - right.createdAt,
-      )[0];
-    if (!candidate) return null;
-
-    const space = await getSpaceByRef(ctx, candidate.spaceRef);
-    if (!space) throw new Error("Space lifecycle event has no canonical Space");
-    const delivery = claimSpaceLifecycleDelivery(deliveryFor(candidate), args.workerId, args.now, 30_000);
-    await ctx.db.patch(candidate._id, patchForDelivery(delivery));
-    return {
-      event: {
-        eventId: candidate.eventId,
-        externalOrgId: candidate.externalOrgId,
-        lifecycle: candidate.lifecycle,
-        revision: candidate.revision,
-        spaceRef: candidate.spaceRef,
-      },
-      space: {
-        kind: space.kind,
-        ownerPrincipalId: space.ownerExternalAuthId ?? space.createdByExternalAuthId,
-        // WS12-S2: DM kinds only; undefined (and so omitted) for every other kind.
-        participantExternalAuthIds: space.participantExternalAuthIds,
-        participantHash: space.participantHash,
-      },
-    };
+    for (let scan = 0; scan < CLAIM_SCAN_WINDOWS; scan += 1) {
+      const due = await claimableDueRows(ctx, "spaceLifecycleEvents", args.now);
+      if (due.length === 0) return null;
+      for (const candidate of due) {
+        const space = await getSpaceByRef(ctx, candidate.spaceRef);
+        if (!space) {
+          warnStaleDeliveryRow("registration", candidate, CLOSED_DELIVERY_SPACE_MISSING);
+          await ctx.db.patch(candidate._id, closedDeliveryPatch(CLOSED_DELIVERY_SPACE_MISSING));
+          continue;
+        }
+        const delivery = claimSpaceLifecycleDelivery(deliveryFor(candidate), args.workerId, args.now, 30_000);
+        await ctx.db.patch(candidate._id, patchForDelivery(delivery));
+        return {
+          event: {
+            eventId: candidate.eventId,
+            externalOrgId: candidate.externalOrgId,
+            lifecycle: candidate.lifecycle,
+            revision: candidate.revision,
+            spaceRef: candidate.spaceRef,
+          },
+          space: {
+            kind: space.kind,
+            ownerPrincipalId: space.ownerExternalAuthId ?? space.createdByExternalAuthId,
+            // WS12-S2: DM kinds only; undefined (and so omitted) for every other kind.
+            participantExternalAuthIds: space.participantExternalAuthIds,
+            participantHash: space.participantHash,
+          },
+        };
+      }
+    }
+    // Every window was closed in full and the bound is reached: one more run reaches the rows past it.
+    await ctx.scheduler.runAfter(0, internal.spaceRegistration.deliverOne, {
+      workerId: `space-registration:scan:${crypto.randomUUID()}`,
+    });
+    return null;
   },
 });
 
@@ -2066,6 +2314,14 @@ export const releaseRegistrationClaim = internalMutation({
   },
 });
 
+// A deleting lifecycle ack that cannot move its control receipt still commits: a throw would roll the ack back, and the claim
+// would be re-claimed at the head of the line. The warning carries ids and the reason code only, never the content of a row.
+function warnDeletingAckWithoutReceipt(event: any, reason: string): void {
+  console.warn("[Space deletion] acknowledged a deleting lifecycle event without moving its control receipt", {
+    reason, eventId: event.eventId, spaceRef: event.spaceRef,
+  });
+}
+
 export const acknowledgeRegistrationClaim = internalMutation({
   args: { controlResourceRef: v.string(), eventId: v.string(), workerId: v.string(), now: v.number() },
   handler: async (ctx, args) => {
@@ -2075,12 +2331,19 @@ export const acknowledgeRegistrationClaim = internalMutation({
       .withIndex("by_event_id", (q: any) => q.eq("eventId", args.eventId))
       .first();
     if (!event) throw new Error("Space lifecycle event not found");
-    const delivery = acknowledgeSpaceLifecycleDelivery(deliveryFor(event), args.workerId, args.now);
-    await ctx.db.patch(event._id, {
-      ...patchForDelivery(delivery),
-      deliveredAt: args.now,
-      lastDeliveryError: undefined,
-    });
+    // A redelivered ack finds its claim already acknowledged. The row is then left as it is, and the receipt step below
+    // is idempotent. Any other state keeps the claim's worker check.
+    const redelivered = event.deliveryState === "acknowledged";
+    const delivery = redelivered
+      ? deliveryFor(event)
+      : acknowledgeSpaceLifecycleDelivery(deliveryFor(event), args.workerId, args.now);
+    if (!redelivered) {
+      await ctx.db.patch(event._id, {
+        ...patchForDelivery(delivery),
+        deliveredAt: args.now,
+        lastDeliveryError: undefined,
+      });
+    }
 
     const space = await getSpaceByRef(ctx, event.spaceRef);
     if (!space) throw new Error("Space lifecycle event has no canonical Space");
@@ -2089,24 +2352,30 @@ export const acknowledgeRegistrationClaim = internalMutation({
     // an authorization decision: only the specific lifecycle delivery that
     // received Control's success response may advance this owner receipt.
     if (event.lifecycle === "deleting") {
-      const requests = await ctx.db.query("spaceDeletionRequests").collect();
-      const request = requests.find((candidate: any) =>
-        candidate.spaceRef === event.spaceRef
-        && candidate.externalOrgId === event.externalOrgId
-        && candidate.state === "authorized",
-      );
-      if (!request) throw new Error("Control deleting lifecycle has no authorized deletion request");
-      const receipt = await ctx.db.query("spaceDeletionOwnerReceipts")
-        .withIndex("by_request_and_owner", (q: any) => q.eq("requestId", request.requestId).eq("ownerPlane", "control"))
-        .first();
-      if (!receipt) throw new Error("Control deletion owner receipt is missing");
-      assertReceiptTransition(receipt.status as SpaceDeletionOwnerStatus, "succeeded");
-      await ctx.db.patch(receipt._id, {
-        status: "succeeded",
-        receiptRef: `control:${event.spaceRef}:lifecycle:${event.revision}`,
-        detail: "Control Space projections purged with accepted deleting lifecycle revision",
-        updatedAt: args.now,
-      });
+      // The authorized requests of this Space, through the index; the one for this organization is the request.
+      const requests = await ctx.db.query("spaceDeletionRequests")
+        .withIndex("by_space_and_state", (q: any) => q.eq("spaceRef", event.spaceRef).eq("state", "authorized"))
+        .collect();
+      const request = requests.find((candidate: any) => candidate.externalOrgId === event.externalOrgId);
+      if (!request) {
+        warnDeletingAckWithoutReceipt(event, "control_deleting_without_authorized_request");
+      } else {
+        const receipt = await ctx.db.query("spaceDeletionOwnerReceipts")
+          .withIndex("by_request_and_owner", (q: any) => q.eq("requestId", request.requestId).eq("ownerPlane", "control"))
+          .first();
+        if (!receipt) {
+          warnDeletingAckWithoutReceipt(event, "control_deletion_receipt_missing");
+        } else if (receipt.status !== "succeeded") {
+          // A redelivered ack finds the receipt already succeeded: no transition is checked and nothing is written.
+          assertReceiptTransition(receipt.status as SpaceDeletionOwnerStatus, "succeeded");
+          await ctx.db.patch(receipt._id, {
+            status: "succeeded",
+            receiptRef: `control:${event.spaceRef}:lifecycle:${event.revision}`,
+            detail: "Control Space projections purged with accepted deleting lifecycle revision",
+            updatedAt: args.now,
+          });
+        }
+      }
     }
     // Only Control's accepted receipt for the original registration can make a
     // pending Space active. Later lifecycle events are acknowledgements of the

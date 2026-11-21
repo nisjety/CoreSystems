@@ -644,16 +644,44 @@ func (s *Service) dispatchAndFinalize(
 	return buildAcceptedResponse(submittedRequest), nil
 }
 
-// notifyPush hands a submitted native notification to the Web Push hook. Only the waiting states push, only with the
-// push channel on, and never for a zero-retention request. The hook returns at once; its sends run in the background.
+// notifyPush hands a submitted native notification to the Web Push hook. The rules live in pushDispatcher, which the
+// queued DeliveryWorker shares, so both delivery paths push the same notices under the same guards.
 func (s *Service) notifyPush(ctx context.Context, request *StoredRequest) {
-	if s.pushNotifier == nil || !s.nativeDelivery || !IsNativeType(request.Type) || request.RetentionMode == RetentionModeZDR {
+	s.push().dispatch(ctx, request)
+}
+
+// push returns the Web Push dispatcher this service pushes with: its own notifier, preference gate and native switch.
+func (s *Service) push() *pushDispatcher {
+	return &pushDispatcher{
+		notifier:       s.pushNotifier,
+		preferenceGate: s.preferenceGate,
+		nativeDelivery: s.nativeDelivery,
+	}
+}
+
+// PushDispatcher returns the Web Push dispatcher of this service. It carries the same notifier and gate instances as
+// the synchronous path, so WithDeliveryWorkerPush(service.PushDispatcher()) pushes exactly what Accept pushes.
+func (s *Service) PushDispatcher() *pushDispatcher {
+	return s.push()
+}
+
+// pushDispatcher hands a submitted native notification to the Web Push hook. Only the waiting states push, only with
+// the push channel on, and never for a zero-retention request. The hook returns at once; its sends run in the
+// background. A nil dispatcher pushes nothing.
+type pushDispatcher struct {
+	notifier       PushNotifier
+	preferenceGate PreferenceGate
+	nativeDelivery bool
+}
+
+func (d *pushDispatcher) dispatch(ctx context.Context, request *StoredRequest) {
+	if d == nil || d.notifier == nil || !d.nativeDelivery || request == nil || !IsNativeType(request.Type) || request.RetentionMode == RetentionModeZDR {
 		return
 	}
 	if request.Type == scheduledRunOutcomeType && !isWaitingOutcome(request.Payload) {
 		return
 	}
-	gate, ok := s.preferenceGate.(ChannelPreferenceGate)
+	gate, ok := d.preferenceGate.(ChannelPreferenceGate)
 	if !ok {
 		return
 	}
@@ -671,7 +699,7 @@ func (s *Service) notifyPush(ctx context.Context, request *StoredRequest) {
 		Type:           request.Type,
 		ThreadID:       payloadString(request.Payload, "thread_id"),
 	}
-	s.pushNotifier.NotifyPush(ctx, notice)
+	d.notifier.NotifyPush(ctx, notice)
 }
 
 // extractDisplayFields pulls common display fields out of the payload by

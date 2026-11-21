@@ -261,7 +261,8 @@ test('the parked-delivery list names each parked row by ids, owner, state and re
     ],
   });
 
-  const rows = await spaces.listParkedDeletionOwnerDeliveries._handler(handle.ctx, {});
+  const { rows, nextCursor } = await spaces.listParkedDeletionOwnerDeliveries._handler(handle.ctx, {});
+  assert.equal(nextCursor, null, 'three parked rows fit one page');
   const byEvent = [...rows].sort((left, right) => left.eventId.localeCompare(right.eventId));
   assert.deepEqual(byEvent, [
     { eventId: eventIdOf('r1', 'model'), requestId: 'r1', ownerPlane: 'model', deliveryState: 'failed_permanent', reason: 'permanent_refusal_http_403', deliveryAttempts: 1 },
@@ -273,29 +274,105 @@ test('the parked-delivery list names each parked row by ids, owner, state and re
   }
 });
 
-test('the parked-delivery list caps each owner and state at its limit, so one owner backlog never hides another owner rows', async () => {
+test('a page holds at most its limit, and the cursor walks every parked row behind it in creation order', async () => {
   const handle = harness({
     spaceDeletionOwnerDeliveryEvents: [
-      deliveryRow({ requestId: 'r1', owner: 'model', deliveryState: 'failed_permanent', lastDeliveryError: 'permanent_refusal_http_403' }),
-      deliveryRow({ requestId: 'r2', owner: 'model', deliveryState: 'failed_permanent', lastDeliveryError: 'delivery_retry_bound_reached', attempts: 12 }),
-      deliveryRow({ requestId: 'r3', owner: 'model', deliveryState: 'failed_permanent', lastDeliveryError: 'permanent_refusal_http_403' }),
-      deliveryRow({ requestId: 'r4', owner: 'data', deliveryState: 'failed_permanent', lastDeliveryError: 'permanent_refusal_http_401' }),
-      deliveryRow({ requestId: 'r5', owner: 'ingestion', deliveryState: 'blocked_legal_hold', lastDeliveryError: 'erasure_blocked_legal_hold' }),
+      { ...deliveryRow({ requestId: 'r1', owner: 'model', deliveryState: 'failed_permanent', lastDeliveryError: 'permanent_refusal_http_403' }), _creationTime: 1 },
+      { ...deliveryRow({ requestId: 'r2', owner: 'data', deliveryState: 'failed_permanent', lastDeliveryError: 'permanent_refusal_http_401' }), _creationTime: 2 },
+      { ...deliveryRow({ requestId: 'r3', owner: 'ingestion', deliveryState: 'blocked_legal_hold', lastDeliveryError: 'erasure_blocked_legal_hold' }), _creationTime: 3 },
+      { ...deliveryRow({ requestId: 'r4', owner: 'model', deliveryState: 'pending' }), _creationTime: 4 },
+      { ...deliveryRow({ requestId: 'r5', owner: 'model', deliveryState: 'failed_permanent', lastDeliveryError: 'delivery_retry_bound_reached', attempts: 12 }), _creationTime: 5 },
+      { ...deliveryRow({ requestId: 'r6', owner: 'data', deliveryState: 'blocked_legal_hold', lastDeliveryError: 'erasure_blocked_legal_hold' }), _creationTime: 6 },
     ],
   });
 
-  const capped = await spaces.listParkedDeletionOwnerDeliveries._handler(handle.ctx, { limit: 2 });
-  const countOf = (rows, owner) => rows.filter((row) => row.ownerPlane === owner).length;
-  assert.equal(countOf(capped, 'model'), 2, 'model is capped at the limit');
-  assert.equal(countOf(capped, 'data'), 1, 'data is listed though model has more rows');
-  assert.equal(countOf(capped, 'ingestion'), 1, 'the ingestion hold is listed though model has more rows');
+  const pages = [];
+  let cursor;
+  for (;;) {
+    const page = await spaces.listParkedDeletionOwnerDeliveries._handler(handle.ctx, { cursor, limit: 2 });
+    pages.push(page);
+    if (page.nextCursor === null) break;
+    cursor = page.nextCursor;
+  }
+  assert.deepEqual(pages.map((page) => page.rows.map((row) => row.requestId)), [['r1', 'r2'], ['r3', 'r5'], ['r6']]);
+  assert.equal(pages[0].nextCursor, '2|row_r2_data', 'the cursor is the creation time and id of the page\'s last row');
+});
 
-  const all = await spaces.listParkedDeletionOwnerDeliveries._handler(handle.ctx, {});
-  assert.equal(all.length, 5);
+test('250 parked rows come back in two pages, in creation order, with no gap and no duplicate', async () => {
+  const owners = ['model', 'data', 'ingestion'];
+  const states = ['failed_permanent', 'blocked_legal_hold'];
+  const seeded = [];
+  for (let index = 0; index < 250; index += 1) {
+    // The creation times are a permutation, so the rows are not already in creation order when the list reads them.
+    seeded.push({
+      ...deliveryRow({ requestId: `r${index}`, owner: owners[index % 3], deliveryState: states[index % 2], lastDeliveryError: 'permanent_refusal_http_403' }),
+      _creationTime: 1_000 + ((index * 37) % 250),
+    });
+  }
+  for (let index = 0; index < 40; index += 1) {
+    seeded.push({ ...deliveryRow({ requestId: `p${index}`, owner: owners[index % 3], deliveryState: 'pending' }), _creationTime: 1_000 + index });
+  }
+  const handle = harness({ spaceDeletionOwnerDeliveryEvents: seeded });
+  const expected = seeded
+    .filter((row) => row.deliveryState !== 'pending')
+    .sort((left, right) => left._creationTime - right._creationTime)
+    .map((row) => row.eventId);
+  assert.equal(expected.length, 250);
+
+  const first = await spaces.listParkedDeletionOwnerDeliveries._handler(handle.ctx, {});
+  assert.equal(first.rows.length, 200, 'the default page is 200 rows');
+  assert.notEqual(first.nextCursor, null);
+  const second = await spaces.listParkedDeletionOwnerDeliveries._handler(handle.ctx, { cursor: first.nextCursor });
+  assert.equal(second.rows.length, 50);
+  assert.equal(second.nextCursor, null, 'the last page has no cursor');
+
+  const listed = [...first.rows, ...second.rows].map((row) => row.eventId);
+  assert.equal(new Set(listed).size, 250, 'no row is repeated');
+  assert.deepEqual(listed, expected, 'every parked row, in creation order, with no gap');
+});
+
+test('rows that share a creation time are ordered by id, and a cursor splits them without a gap or a repeat', async () => {
+  const handle = harness({
+    spaceDeletionOwnerDeliveryEvents: [
+      { ...deliveryRow({ requestId: 'b', owner: 'model', deliveryState: 'failed_permanent', lastDeliveryError: 'permanent_refusal_http_403' }), _creationTime: 10 },
+      { ...deliveryRow({ requestId: 'a', owner: 'data', deliveryState: 'blocked_legal_hold', lastDeliveryError: 'erasure_blocked_legal_hold' }), _creationTime: 10 },
+      { ...deliveryRow({ requestId: 'c', owner: 'ingestion', deliveryState: 'failed_permanent', lastDeliveryError: 'permanent_refusal_http_403' }), _creationTime: 9 },
+    ],
+  });
+
+  const pages = [];
+  let cursor;
+  for (;;) {
+    const page = await spaces.listParkedDeletionOwnerDeliveries._handler(handle.ctx, { cursor, limit: 1 });
+    pages.push(page);
+    if (page.nextCursor === null) break;
+    cursor = page.nextCursor;
+  }
+  assert.deepEqual(pages.map((page) => page.rows[0].requestId), ['c', 'a', 'b']);
+  assert.equal(pages[1].nextCursor, '10|row_a_data');
+});
+
+test('a malformed cursor and a bad limit are refused, and a cursor past every row lists nothing', async () => {
+  const handle = harness({
+    spaceDeletionOwnerDeliveryEvents: [
+      deliveryRow({ requestId: 'r1', owner: 'model', deliveryState: 'failed_permanent', lastDeliveryError: 'permanent_refusal_http_403' }),
+    ],
+  });
+
+  for (const cursor of ['', 'nonsense', '|row_r1_model', '10|', 'NaN|row_r1_model', 'Infinity|row_r1_model']) {
+    await fake.rejectsWith(
+      spaces.listParkedDeletionOwnerDeliveries._handler(handle.ctx, { cursor }),
+      'parked deletion list cursor is invalid',
+    );
+  }
   for (const limit of [0, -1, 1.5, Number.NaN]) {
     await fake.rejectsWith(
       spaces.listParkedDeletionOwnerDeliveries._handler(handle.ctx, { limit }),
       'parked deletion list limit is invalid',
     );
   }
+  assert.deepEqual(
+    await spaces.listParkedDeletionOwnerDeliveries._handler(handle.ctx, { cursor: '999999|zzz' }),
+    { rows: [], nextCursor: null },
+  );
 });

@@ -134,7 +134,20 @@ set_convex_env "SPACE_DM_OPEN" "${SPACE_DM_OPEN:-0}"
 # one emoji and a time). Off unless a compose file turns it on; read by the function at
 # call time, so set 0 and `docker restart convex-gateway` to stop new reactions (existing
 # rows stay and reads return nothing). A rollout control only, never an authorization input.
-set_convex_env "SPACE_REACTIONS" "${SPACE_REACTIONS:-0}"
+set_convex_env "SPACE_REACTIONS" "${SPACE_REACTIONS:-false}"
+# BEGIN space-reactions-former-spelling
+# SPACE_REACTIONS is read as the exact literal true, in Convex and in the gateway. A former spelling (1, on, yes or enabled,
+# or true in another case or padded with spaces) reads off now, so say so once here. The value itself is never logged.
+reactions_raw="${SPACE_REACTIONS-}"
+reactions_key="$(printf '%s' "$reactions_raw" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+if [ "$reactions_raw" != "true" ]; then
+  case "$reactions_key" in
+    1|on|yes|enabled|true)
+      echo "[Convex] WARNING: SPACE_REACTIONS is set to a former spelling and reads off now; only the exact literal true turns it on."
+      ;;
+  esac
+fi
+# END space-reactions-former-spelling
 # WS11-S6 flag SPACE_ATTENTION_INGEST: spaceAttentionIngest:ingestSpaceEvent (Space
 # attention items, follows and agent activity from the MODEL_PLANE_SPACE_EVENTS
 # durable). Off unless a compose file turns it on; read by the function at call
@@ -150,14 +163,27 @@ set_convex_env "SPACE_ATTENTION_INGEST" "${SPACE_ATTENTION_INGEST:-0}"
 set_convex_env "SPACE_ATTENTION_OUT_OF_APP" "${SPACE_ATTENTION_OUT_OF_APP:-0}"
 set_convex_env "NOTIFICATION_CORE_URL" "${NOTIFICATION_CORE_URL:-}"
 set_convex_env "NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN" "${NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN:-}"
-# Space deletion re-drive flag SPACE_DELETION_HOLD_RELEASE: spaces:redriveModelDeletionAfterLegalHoldRelease
-# and the trusted receipt path may leave a legal-hold block. Off unless a compose file turns it on; read at
-# call time, so set 0 and `docker restart convex-gateway` to stop. With it off a hold stays terminal.
-set_convex_env "SPACE_DELETION_HOLD_RELEASE" "${SPACE_DELETION_HOLD_RELEASE:-0}"
-# Space deletion flag SPACE_DELETION_PERMANENT_REFUSAL_PARK: on, a permanent owner refusal (400, 401, 403, 412)
-# parks that owner's delivery as failed_permanent, which nothing re-arms yet. Off unless a compose file turns it
-# on; read at call time, so set 0 and `docker restart convex-gateway` to stop. With it off such a refusal retries.
-set_convex_env "SPACE_DELETION_PERMANENT_REFUSAL_PARK" "${SPACE_DELETION_PERMANENT_REFUSAL_PARK:-0}"
+# Space deletion re-drive flag SPACE_DELETION_HOLD_RELEASE: the re-drive covers Model, Data and Ingestion owners, re-asking
+# each one after its legal hold is lifted, and the trusted receipt path may leave a legal-hold block. Off unless a compose
+# file turns it on; only the literal true turns it on. Read at call time, so set false and `docker restart convex-gateway`
+# to stop. With it off a hold stays terminal.
+set_convex_env "SPACE_DELETION_HOLD_RELEASE" "${SPACE_DELETION_HOLD_RELEASE:-false}"
+# Space deletion flag SPACE_DELETION_PERMANENT_REFUSAL_PARK: on, a permanent owner refusal (400, 401, 403, 412) parks
+# that owner's delivery as failed_permanent. The re-drive covers Model, Data and Ingestion owners; failed_permanent rows
+# are listed by listParkedDeletionOwnerDeliveries and re-armed by rearmParkedDeletionOwnerDelivery. Off unless a compose
+# file turns it on; only the literal true turns it on. Read at call time, so set false and `docker restart convex-gateway`
+# to stop. With it off such a refusal retries.
+set_convex_env "SPACE_DELETION_PERMANENT_REFUSAL_PARK" "${SPACE_DELETION_PERMANENT_REFUSAL_PARK:-false}"
+# Space deletion flag SPACE_DELETION_AUTH_SWEEP: on, spaceDeletionAuthorization:sweepAuthorizationEvents re-drives an
+# authorization whose claim died before its acknowledgement, and a claim that throws after it is taken is released for
+# retry. Off unless a compose file turns it on; read at call time, so set false and `docker restart convex-gateway` to
+# stop. With it off such a claim waits for another request's run, as before.
+set_convex_env "SPACE_DELETION_AUTH_SWEEP" "${SPACE_DELETION_AUTH_SWEEP:-false}"
+# Space delivery flag SPACE_DELIVERY_LEASE_SWEEP: on, spaces:sweepExpiredDeliveryLeases re-drives a Space deletion owner
+# delivery, Space registration or recipient-audience registration whose worker died before its acknowledgement. Off unless
+# a compose file turns it on; read at call time, so set false and `docker restart convex-gateway` to stop. With it off such a
+# claim waits for another run's claim, as before.
+set_convex_env "SPACE_DELIVERY_LEASE_SWEEP" "${SPACE_DELIVERY_LEASE_SWEEP:-false}"
 
 # ─────────────────────────────────────────────────────────────────────────
 # Force-deploy functions before starting dev mode.

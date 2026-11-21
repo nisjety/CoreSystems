@@ -19,6 +19,7 @@ type DeliveryWorker struct {
 	recipientResolver RecipientResolver
 	now               TimeSource
 	lease             time.Duration
+	push              *pushDispatcher
 }
 
 type DeliveryWorkerOption func(*DeliveryWorker)
@@ -36,6 +37,15 @@ func WithDeliveryWorkerLease(lease time.Duration) DeliveryWorkerOption {
 		if lease > 0 {
 			worker.lease = lease
 		}
+	}
+}
+
+// WithDeliveryWorkerPush hands each notice the worker submits to the Web Push hook, as the synchronous path does. Build
+// the dispatcher from the service that accepted the notices (Service.PushDispatcher), so both paths share one notifier
+// and one gate. A nil dispatcher pushes nothing.
+func WithDeliveryWorkerPush(dispatcher *pushDispatcher) DeliveryWorkerOption {
+	return func(worker *DeliveryWorker) {
+		worker.push = dispatcher
 	}
 }
 
@@ -146,5 +156,8 @@ func (worker *DeliveryWorker) RunOnce(ctx context.Context, workerID string) (boo
 	if _, err := worker.queue.MarkDeliverySubmitted(ctx, attempt.ID, workerID, providerRequestID, now); err != nil {
 		return true, fmt.Errorf("mark delivery sent_unconfirmed: %w", err)
 	}
+	// The notice is submitted now, so it may wake the recipient as the synchronous path does. A crash between the mark
+	// and this call loses one wake-up. The feed projection is durable and still runs, so no notice is lost.
+	worker.push.dispatch(ctx, request)
 	return true, nil
 }

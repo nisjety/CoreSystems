@@ -536,16 +536,24 @@ export function projectAgentVersion(row: AgentVersionRow, organizationId: unknow
 }
 
 /**
- * Once an agent serves a published version, its `systemPrompt` and `tools` change only
- * through draft and publish. A direct write would leave the row disagreeing with the
- * version the gateway serves. The other legacy fields keep their existing write path.
+ * Once an agent serves a published version, `name`, `model`, `systemPrompt` and `tools` change
+ * only through draft and publish. A direct write would leave the row disagreeing with the
+ * version the gateway serves: publish mirrors the version's name and model onto the row, and
+ * systemPrompt and tools are served from the version itself. The other fields (description,
+ * useCase, status, temperature, tone, greeting, knowledgeSources, profile) keep their write
+ * path. An unversioned agent keeps every write.
  */
 export function assertLegacyWriteAllowed(
   agent: { publishedVersion?: number },
-  patch: { systemPrompt?: unknown; tools?: unknown },
+  patch: { systemPrompt?: unknown; tools?: unknown; name?: unknown; model?: unknown },
 ) {
   if (agent.publishedVersion === undefined) return;
-  if (patch.systemPrompt !== undefined || patch.tools !== undefined) {
+  if (
+    patch.name !== undefined ||
+    patch.model !== undefined ||
+    patch.systemPrompt !== undefined ||
+    patch.tools !== undefined
+  ) {
     throw new Error("agent_versioned_field_refused");
   }
 }

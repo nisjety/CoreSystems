@@ -33,13 +33,14 @@ export const spaceAudienceTables = {
 
   // Transactional outbox for Application -> Control audience registration.
   // The event carries no participant IDs; the worker rereads the immutable
-  // audience revision only after leasing this row.
+  // audience revision only after leasing this row. `closed` is terminal: a row
+  // whose audience snapshot is missing is closed with its reason in lastDeliveryError.
   spaceRecipientAudienceEvents: defineTable({
     audienceRef: v.string(),
     deliveryAttempts: v.optional(v.number()),
     deliveryState: v.optional(v.union(
       v.literal("pending"), v.literal("claimed"), v.literal("acknowledged"),
-      v.literal("failed"), v.literal("rejected"),
+      v.literal("failed"), v.literal("rejected"), v.literal("closed"),
     )),
     eventId: v.string(),
     externalOrgId: v.string(),
@@ -53,5 +54,7 @@ export const spaceAudienceTables = {
     deliveredAt: v.optional(v.number()),
   })
     .index("by_event_id", ["eventId"])
+    // The deletion fence purges one Space's outbox rows through this index, never the whole table.
+    .index("by_space_and_revision", ["spaceRef", "revision"])
     .index("by_delivery_state_and_next_attempt", ["deliveryState", "nextAttemptAt"]),
 };

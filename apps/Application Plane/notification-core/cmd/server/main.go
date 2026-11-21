@@ -243,6 +243,8 @@ func main() {
 			dispatcher,
 			recipientResolver,
 			notification.WithDeliveryWorkerLease(cfg.DeliveryWorkerLease),
+			// A queued notice wakes its recipient exactly as a synchronous one does: the same notifier and gate.
+			notification.WithDeliveryWorkerPush(notificationService.PushDispatcher()),
 		)
 		go runDeliveryWorker(consumerCtx, deliveryWorker, workerID, cfg.DeliveryWorkerPollInterval)
 		feedProjectionWorker := notification.NewFeedProjectionWorker(
@@ -309,6 +311,25 @@ func main() {
 		orgDeletionSubscriber := consumers.NewOrgDeletionSubscriber(sharedNatsClient.JS, notificationService)
 		startOrgDeletionSubscriberWithRetry(consumerCtx, orgDeletionSubscriber)
 		defer orgDeletionSubscriber.Stop()
+	}
+	// The organization-erasure subscriber erases every notification-core record of an organization when org-core
+	// announces its erasure, both on hard delete and at the 30-day purge. It also erases every record of one user, in every
+	// organization, when user-core announces that user's erasure (subject_type user or user_anonymize). It is off unless
+	// NOTIFICATION_ORG_ERASURE_ENABLED is the literal true, and it rides the shared broker, where the erasure subject
+	// lives. The repository purges cover every organization-keyed and every user-keyed table, each in one transaction,
+	// Web Push subscriptions included, and they need no subscription key, so they run with web push off too. In novu mode
+	// the provider-side erasure runs first and gates the local purge: the membership rows that name each Novu subscriber
+	// are local, and the local purge removes them. In disabled mode there is no provider record, so the local purge runs alone.
+	if cfg.OrgErasureEnabled {
+		if sharedNatsClient == nil {
+			log.Printf("notification-core: org-erasure subscriber disabled: the shared broker is not configured")
+		} else {
+			providerEraser := subscribers.NewProviderEraser(subRepo, runtime)
+			orgErasureSubscriber := consumers.NewOrgErasureSubscriberForMode(sharedNatsClient.JS, cfg.DeliveryMode, providerEraser, repository).
+				WithUserErasure(cfg.DeliveryMode, providerEraser, repository)
+			startOrgErasureSubscriberWithRetry(consumerCtx, orgErasureSubscriber)
+			defer orgErasureSubscriber.Stop()
+		}
 	}
 	defer consumerCancel()
 
@@ -417,6 +438,39 @@ func startOrgDeletionSubscriberWithRetry(ctx context.Context, sub *consumers.Org
 					continue
 				}
 				log.Printf("notification-core: org-deletion subscriber started successfully after retry")
+				return
+			}
+		}
+	}()
+}
+
+// orgErasureSubscriberRetryInterval is how often startOrgErasureSubscriberWithRetry re-attempts binding the erasure
+// subscriber after an initial failure.
+const orgErasureSubscriberRetryInterval = 30 * time.Second
+
+// startOrgErasureSubscriberWithRetry binds the erasure subscriber once and, if the bind fails, retries it in the
+// background, as startOrgDeletionSubscriberWithRetry does. The Control Plane provisions the durable on the shared
+// broker, so a bind that fails before that is a logged retry, not a crash of the whole process.
+func startOrgErasureSubscriberWithRetry(ctx context.Context, sub *consumers.OrgErasureSubscriber) {
+	err := sub.Start(ctx)
+	if err == nil {
+		return
+	}
+	log.Printf("notification-core: org-erasure subscriber failed to start, will retry every %s in the background: %v", orgErasureSubscriberRetryInterval, err)
+
+	go func() {
+		ticker := time.NewTicker(orgErasureSubscriberRetryInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := sub.Start(ctx); err != nil {
+					log.Printf("notification-core: org-erasure subscriber retry failed: %v", err)
+					continue
+				}
+				log.Printf("notification-core: org-erasure subscriber started successfully after retry")
 				return
 			}
 		}

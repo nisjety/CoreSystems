@@ -254,13 +254,16 @@ export const spaceTables = {
     revision: v.number(),
     // Delivery is an at-least-once outbox. The Control endpoint deduplicates
     // stable event IDs; a claim lease prevents concurrent workers from
-    // delivering the same row in the ordinary case.
+    // delivering the same row in the ordinary case. `closed` is terminal: a row
+    // whose Space is missing is closed with its reason in lastDeliveryError and
+    // no claim selects it.
     deliveryState: v.optional(v.union(
       v.literal("pending"),
       v.literal("claimed"),
       v.literal("acknowledged"),
       v.literal("failed"),
       v.literal("rejected"),
+      v.literal("closed"),
     )),
     deliveryAttempts: v.optional(v.number()),
     leaseOwner: v.optional(v.string()),

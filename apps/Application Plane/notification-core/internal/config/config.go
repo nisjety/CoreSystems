@@ -56,6 +56,14 @@ type Config struct {
 	SharedNATSURL      string
 	SharedNATSUser     string
 	SharedNATSPassword string
+	// OrgErasureEnabled turns on the GDPR erasure consumer. When org-core announces the GDPR erasure of an organization,
+	// every notification-core record of that organization is erased. When user-core announces the erasure of one user
+	// (subject_type user or user_anonymize), every notification-core record of that user is erased in every organization.
+	// In novu mode the provider-side subscribers and messages are erased first, before any local row is purged. In disabled
+	// mode there is no provider record to erase, so only the local rows are erased. It is off by default and read as the
+	// literal "true". It needs the shared broker and the Control Plane durable notification-core-org-erasure provisioned
+	// before it can bind.
+	OrgErasureEnabled bool
 }
 
 func Load() (*Config, error) {
@@ -84,6 +92,7 @@ func Load() (*Config, error) {
 		SharedNATSURL:              strings.TrimSpace(getEnv("NOTIFICATION_GDPR_SHARED_NATS_URL", "")),
 		SharedNATSUser:             strings.TrimSpace(getEnv("NOTIFICATION_GDPR_SHARED_NATS_USER", "")),
 		SharedNATSPassword:         strings.TrimSpace(getEnv("NOTIFICATION_GDPR_SHARED_NATS_PASSWORD", "")),
+		OrgErasureEnabled:          os.Getenv("NOTIFICATION_ORG_ERASURE_ENABLED") == "true",
 		DelegationKeys: map[string]string{
 			"verevon-gateway": strings.TrimSpace(getEnv("NOTIFICATION_GATEWAY_SERVICE_TOKEN", "")),
 			"support-worker":  strings.TrimSpace(getEnv("NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN", "")),
@@ -124,7 +133,6 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("NOTIFICATION_DELIVERY_WORKER_ENABLED requires NOTIFICATION_DELIVERY_CALLBACK_SECRET")
 		}
 	}
-
 	if cfg.WebPushEnabled {
 		if err := validateWebPushConfig(cfg); err != nil {
 			return nil, err

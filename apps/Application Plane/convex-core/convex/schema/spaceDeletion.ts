@@ -28,7 +28,8 @@ export const spaceDeletionTables = {
     updatedAt: v.number(),
   })
     .index("by_request_id", ["requestId"])
-    .index("by_space_and_idempotency", ["spaceRef", "idempotencyKey"]),
+    .index("by_space_and_idempotency", ["spaceRef", "idempotencyKey"])
+    .index("by_space_and_state", ["spaceRef", "state"]),
 
   // Leased, at-least-once delivery of immutable deletion intent to Control.
   // The receipt is authorization only; owner-plane purge receipts belong to a

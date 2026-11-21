@@ -646,3 +646,84 @@ func marshalPayload(payload map[string]any) ([]byte, error) {
 	}
 	return encoded, nil
 }
+
+// catalogueOrganizationID is the org_id of the org-wide default channel policy and of the workflow registrations. It is
+// catalogue rather than any organization's data, so no erasure may touch it.
+const catalogueOrganizationID = "_default"
+
+var errOrganizationErasureRefused = errors.New("organization erasure needs a real organization id")
+
+// organizationPurgeExempt names the tables the migrations create that an organization erasure does not touch, with the
+// reason each is exempt. notification_delivery_callback_replays holds the nonces of signed provider callbacks. A nonce
+// names no organization and no notification, so no organization can be attributed to it, and each row lives only until
+// its expiry.
+var organizationPurgeExempt = map[string]string{
+	"notification_delivery_callback_replays": "nonces carry no organization and expire on their own",
+}
+
+// organizationPurgeSteps lists every statement that removes one organization's rows, children before parents. Each takes
+// the organization id as its only parameter. Together with organizationPurgeExempt it names every table the migrations
+// create, and a unit test pins that.
+var organizationPurgeSteps = []struct {
+	table     string
+	statement string
+}{
+	{"notification_feed_projection_attempts", `DELETE FROM notification_feed_projection_attempts WHERE notification_id IN (SELECT id FROM notification_requests WHERE organization_id = $1)`},
+	{"notification_delivery_attempts", `DELETE FROM notification_delivery_attempts WHERE notification_id IN (SELECT id FROM notification_requests WHERE organization_id = $1)`},
+	{"notification_requests", `DELETE FROM notification_requests WHERE organization_id = $1`},
+	{"notification_feed_items", `DELETE FROM notification_feed_items WHERE organization_id = $1`},
+	{"notification_preferences", `DELETE FROM notification_preferences WHERE organization_id = $1`},
+	{"notification_channel_configs", `DELETE FROM notification_channel_configs WHERE org_id = $1`},
+	// Hard delete, not revoke: a sealed endpoint and its keys must not survive the erasure, revoked or not.
+	{"notification_web_push_subscriptions", `DELETE FROM notification_web_push_subscriptions WHERE organization_id = $1`},
+	// notification_subscribers is keyed by user, not by organization, and org_id is a best-effort cache of one organization
+	// (migration 002). A row is one user's identity across every organization the user belongs to. It is deleted only when
+	// the erased organization is its last home: the row is attached to the erased organization, by its cache or by a
+	// membership of it, and no other organization holds any membership for the user. Otherwise it is kept, and only its
+	// cache and role for the erased organization are cleared by the next step.
+	{"notification_subscribers", `DELETE FROM notification_subscribers s
+WHERE (s.org_id = $1 OR EXISTS (SELECT 1 FROM notification_subscriber_memberships dm WHERE dm.user_id = s.user_id AND dm.organization_id = $1))
+  AND NOT EXISTS (SELECT 1 FROM notification_subscriber_memberships m WHERE m.user_id = s.user_id AND m.organization_id <> $1)`},
+	{"notification_subscribers_detached", `UPDATE notification_subscribers SET org_id = NULL, role = '', updated_at = NOW() WHERE org_id = $1`},
+	// Last among the tenant rows: the subscriber steps above read these memberships to find the identities to keep or erase.
+	{"notification_subscriber_memberships", `DELETE FROM notification_subscriber_memberships WHERE organization_id = $1`},
+}
+
+// PurgeOrganization hard-deletes every row this store keeps for one organization, Web Push subscriptions included, in one
+// transaction, and returns the rows removed per table. A user's identity that another organization still uses is detached
+// from this one, not deleted. Catalogue rows and rows with no organization are left alone, and a replayed erasure deletes
+// zero.
+func (r *PGRepository) PurgeOrganization(ctx context.Context, organizationID string) (map[string]int64, error) {
+	organizationID = strings.TrimSpace(organizationID)
+	if organizationID == "" || organizationID == catalogueOrganizationID {
+		return nil, errOrganizationErasureRefused
+	}
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("notification repository is not configured")
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin organization purge: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	removed := make(map[string]int64, len(organizationPurgeSteps))
+	for _, step := range organizationPurgeSteps {
+		tag, err := tx.Exec(ctx, step.statement, organizationID)
+		if err != nil {
+			return nil, fmt.Errorf("purge %s: %w", step.table, err)
+		}
+		removed[step.table] = tag.RowsAffected()
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit organization purge: %w", err)
+	}
+	committed = true
+	return removed, nil
+}
