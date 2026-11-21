@@ -30,9 +30,15 @@ pub(crate) const ACTION_SCHEMA_HASH: &str = "sha256:space-scheduled-step-v1";
 // A step decision that carries a stored-consent contract binds the contract
 // digest and expiry, so it uses its own schema hash; v1 stays byte-identical.
 pub(crate) const ACTION_SCHEMA_HASH_CONTRACT: &str = "sha256:space-scheduled-step-v2";
-// Default off. When on, a step decision without a stored-consent contract is
-// refused; only the literal "true" enables it, as the other switches do.
+// Default off. When on, a step is refused unless the Control decision names exactly the contract
+// the run holds (`check_run_contract`); only the literal "true" enables it, as the other switches
+// do. A run that holds no contract, with a decision that names none, is not refused.
 const CONTRACT_REQUIRED_ENV: &str = "EXECUTION_CORE_SCHEDULED_CONTRACT_REQUIRED";
+/// The closed token a step is refused with when its run holds a contract the Control decision does not name.
+pub(crate) const REFUSAL_CONTRACT_REQUIRED: &str = "scheduled_contract_required";
+/// The closed token a step is refused with when the Control decision names a contract its run does not hold, or
+/// names one for a run that holds none.
+pub(crate) const REFUSAL_CONTRACT_MISMATCH: &str = "scheduled_contract_mismatch";
 pub(crate) const REQUIRED_PERMISSION: &str = "schedule:step";
 const MAX_TOKEN_BYTES: usize = 16_384;
 const MAX_FUTURE_ISSUED_SKEW: Duration = Duration::from_secs(60);
@@ -62,6 +68,13 @@ const GO_STANDARD_NO_PAD: GeneralPurpose = GeneralPurpose::new(
 pub(crate) struct ScheduledStepDecisionVerifier {
     key_id: String,
     key: VerifyingKey,
+}
+
+/// What a verified step decision binds: the digest of the contract Control signed over, when the decision names one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedStep {
+    /// The contract digest, shape-checked by `check_contract`. `None` for a decision issued without a contract.
+    pub contract_digest: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -159,22 +172,14 @@ impl ScheduledStepDecisionVerifier {
         }
     }
 
+    /// Verify the Control decision for this step and report the contract it binds. Whether the decision must name
+    /// the contract the run holds is decided against the run, once the run is loaded (`check_run_contract`).
     #[allow(clippy::result_large_err)]
     pub(crate) fn verify(
         &self,
         request: &ExecuteScheduledStepRequest,
         now: DateTime<Utc>,
-    ) -> Result<(), Status> {
-        self.verify_with_contract_policy(request, now, contract_required())
-    }
-
-    #[allow(clippy::result_large_err)]
-    fn verify_with_contract_policy(
-        &self,
-        request: &ExecuteScheduledStepRequest,
-        now: DateTime<Utc>,
-        contract_required: bool,
-    ) -> Result<(), Status> {
+    ) -> Result<VerifiedStep, Status> {
         let token = request.control_decision_token.trim();
         if token.is_empty() || token.len() > MAX_TOKEN_BYTES {
             return Err(Status::permission_denied(
@@ -232,9 +237,6 @@ impl ScheduledStepDecisionVerifier {
             && claims.recipient_audience_revision > 0
             && claims.entitlement_revision > 0;
         check_contract(&claims, now)?;
-        if contract_required && claims.contract_digest.is_none() {
-            return Err(Status::failed_precondition("scheduled_contract_required"));
-        }
         let expected_schema = if claims.contract_digest.is_some() {
             ACTION_SCHEMA_HASH_CONTRACT
         } else {
@@ -262,12 +264,40 @@ impl ScheduledStepDecisionVerifier {
                 "Control decision does not authorize this scheduled step",
             ));
         }
-        Ok(())
+        Ok(VerifiedStep {
+            contract_digest: claims.contract_digest,
+        })
     }
 }
 
-fn contract_required() -> bool {
+/// Whether a step must name the contract its run holds: the literal `true`, read on every step.
+pub(crate) fn contract_required() -> bool {
     std::env::var(CONTRACT_REQUIRED_ENV).ok().as_deref() == Some("true")
+}
+
+/// Binds a verified step decision to the contract its run holds (F-f02-17). With the switch on, the decision must
+/// name exactly the contract the run holds: a run that holds one needs a decision with the same digest, and a run
+/// that holds none takes only a decision that names none. With the switch off nothing is compared, as before. The
+/// refusals are closed tokens, and neither the contract nor its digest appears in them. The decision's digest is
+/// Control's and the run's is Session Core's; neither is read from the request body.
+#[allow(clippy::result_large_err)]
+pub(crate) fn check_run_contract(
+    decision_digest: Option<&str>,
+    run_holds_contract: bool,
+    run_digest: &str,
+    required: bool,
+) -> Result<(), Status> {
+    if !required {
+        return Ok(());
+    }
+    match (run_holds_contract, decision_digest) {
+        (true, None) => Err(Status::failed_precondition(REFUSAL_CONTRACT_REQUIRED)),
+        (true, Some(digest)) if digest == run_digest => Ok(()),
+        (true, Some(_)) | (false, Some(_)) => {
+            Err(Status::failed_precondition(REFUSAL_CONTRACT_MISMATCH))
+        }
+        (false, None) => Ok(()),
+    }
 }
 
 fn first_env(names: &[&str]) -> Option<String> {
@@ -392,6 +422,7 @@ mod tests {
             policy_digest: format!("sha256:{}", "b".repeat(64)),
             idempotency_key: "fire_1:step:0".to_owned(),
             control_decision_token: String::new(),
+            ext_skills: String::new(),
         }
     }
 
@@ -499,21 +530,20 @@ mod tests {
         assert_eq!(status.message(), "scheduled_contract_invalid");
     }
 
+    /// The decision reports the contract digest it signed over, or none. A decision without a contract verifies
+    /// whatever the switch says: whether the run must hold it is decided against the run (`check_run_contract`).
     #[test]
-    fn contract_required_switch_refuses_a_decision_without_a_contract() {
+    fn a_decision_reports_the_contract_digest_it_names_or_none() {
         let now = Utc::now();
         let signing = SigningKey::from_bytes(&[11; 32]);
         let verifier =
             ScheduledStepDecisionVerifier::for_test("control-key", signing.verifying_key());
         let mut req = request();
         req.control_decision_token = token(&signing, "control-key", &req, now);
-        verifier
-            .verify_with_contract_policy(&req, now, false)
-            .expect("legacy decision verifies while the switch is off");
-        let status = verifier
-            .verify_with_contract_policy(&req, now, true)
-            .expect_err("legacy decision refused while the switch is on");
-        assert_eq!(status.message(), "scheduled_contract_required");
+        let legacy = verifier
+            .verify(&req, now)
+            .expect("a decision without a contract verifies");
+        assert_eq!(legacy.contract_digest, None);
 
         let digest = format!("sha256:{}", "d".repeat(64));
         req.control_decision_token = token_with_contract(
@@ -523,9 +553,65 @@ mod tests {
             now,
             Some((&digest, now + chrono::Duration::hours(1))),
         );
-        verifier
-            .verify_with_contract_policy(&req, now, true)
-            .expect("contract-bound decision verifies while the switch is on");
+        let bound = verifier
+            .verify(&req, now)
+            .expect("a contract-bound decision verifies");
+        assert_eq!(bound.contract_digest.as_deref(), Some(digest.as_str()));
+    }
+
+    fn digest_of(letter: char) -> String {
+        format!("sha256:{}", letter.to_string().repeat(64))
+    }
+
+    fn refusal_of(result: Result<(), Status>) -> String {
+        result.expect_err("refused").message().to_owned()
+    }
+
+    /// F-f02-17: with the switch on, a run that holds a contract takes only the decision that names it, and a run
+    /// that holds none takes only a decision that names none.
+    #[test]
+    fn with_the_switch_on_the_decision_must_name_exactly_the_contract_the_run_holds() {
+        let held = digest_of('d');
+        let other = digest_of('e');
+        assert_eq!(REFUSAL_CONTRACT_REQUIRED, "scheduled_contract_required");
+        assert_eq!(REFUSAL_CONTRACT_MISMATCH, "scheduled_contract_mismatch");
+        // Case (a): a run holding a contract refuses a decision that names none.
+        assert_eq!(
+            refusal_of(check_run_contract(None, true, held.as_str(), true)),
+            REFUSAL_CONTRACT_REQUIRED
+        );
+        // Case (b): a decision over another contract is refused, whatever the run holds.
+        assert_eq!(
+            refusal_of(check_run_contract(
+                Some(other.as_str()),
+                true,
+                held.as_str(),
+                true
+            )),
+            REFUSAL_CONTRACT_MISMATCH
+        );
+        // Case (c): a decision that names a contract for a run that holds none is refused.
+        assert_eq!(
+            refusal_of(check_run_contract(Some(held.as_str()), false, "", true)),
+            REFUSAL_CONTRACT_MISMATCH
+        );
+        // The named contract passes, and a legacy decision for a run with no contract passes unchanged.
+        check_run_contract(Some(held.as_str()), true, held.as_str(), true)
+            .expect("the named contract passes");
+        check_run_contract(None, false, "", true).expect("a legacy step for a legacy run passes");
+    }
+
+    /// F-f02-17: with the switch off nothing is compared, so every decision keeps its behaviour from before.
+    #[test]
+    fn with_the_switch_off_nothing_is_compared() {
+        let held = digest_of('d');
+        let other = digest_of('e');
+        check_run_contract(None, true, held.as_str(), false)
+            .expect("switch off: a run with a contract needs no named contract");
+        check_run_contract(Some(other.as_str()), true, held.as_str(), false)
+            .expect("switch off: a decision over another contract is not compared");
+        check_run_contract(Some(held.as_str()), false, "", false)
+            .expect("switch off: a decision that names a contract for a legacy run is not refused");
     }
 
     #[test]

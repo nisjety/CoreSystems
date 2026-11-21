@@ -94,6 +94,7 @@ moves a request between batches, never within-file order. Mark a batch done by e
 | 6 | T8 (M3.2) | WS20-S2 and WS20-S6 `browser:view` row (model-gateway block on `quarry`) | open |
 | 7 | none (filed after batch 6) | W3-EP-9-W3-a: `org:browser-site:read:any` on audience `org-core` for `execution-core` and `model-gateway` (compose credentials) | open |
 | 8 | none (filed after batch 6) | P0-D2-481: `session:memory-controls:read` on audience `session-core` for `orchestrator-core` | open |
+| 9 | none (filed after batch 8) | F-f04-12 (audit phase 2, DEC-F04-3): principal `execution-core-screening` (new), audience `inference-core`, scopes `inference:invoke`, retention `tenant` (the classifier call of a Do screening verdict, run organization only), `consumerEnv` `EXECUTION_CORE_SCREENING_SERVICE_API_KEY`, no NATS ACL; flag `EXECUTION_SCREEN_INFERENCE_CREDENTIAL` default off; compose credential line on `execution-core` | open |
 
 The WS-level scope names above come from each workstream's file-level table; the authoritative text for a request
 is its own slice row. When a slice builds, it adds its request to this table in the same PR (append a row cell,

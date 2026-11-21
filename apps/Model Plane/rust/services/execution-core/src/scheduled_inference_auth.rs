@@ -18,9 +18,39 @@ use tokio::sync::Mutex;
 const AUDIENCE: &str = "inference-core";
 const SCOPE: &str = "inference:invoke";
 const REASON: &str = "execution-core scheduled-step inference";
+const SCREENING_REASON: &str = "execution-core content screening";
 const REFRESH_SKEW: Duration = Duration::from_secs(30);
 const MAX_TTL_SECONDS: u64 = 3_600;
 const MAX_RESPONSE_BYTES: usize = 65_536;
+
+/// Which principal a minter presents: the service id and key variables it reads, the id it falls back to,
+/// and the reason Auth Core records for each credential it issues. Each lane has its own principal, so a
+/// credential minted on one lane is never presented as the other.
+struct MintLane {
+    service_id_env: &'static str,
+    default_service_id: &'static str,
+    credential_env: &'static str,
+    reason: &'static str,
+}
+
+const SCHEDULED_LANE: MintLane = MintLane {
+    service_id_env: "EXECUTION_CORE_SERVICE_ID",
+    default_service_id: "execution-core",
+    credential_env: "EXECUTION_CORE_SERVICE_API_KEY",
+    reason: REASON,
+};
+
+/// The content-screening lane (F-f04-12): the narrow `execution-core-screening` principal, which holds
+/// `inference:invoke` on `inference-core` alone and nothing else.
+const SCREENING_LANE: MintLane = MintLane {
+    service_id_env: "EXECUTION_CORE_SCREENING_SERVICE_ID",
+    default_service_id: "execution-core-screening",
+    credential_env: "EXECUTION_CORE_SCREENING_SERVICE_API_KEY",
+    reason: SCREENING_REASON,
+};
+
+/// The minter the content-screening lane uses, the same minting with the screening principal.
+pub(crate) type ScreeningInferenceTokenProvider = ScheduledInferenceTokenProvider;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ScheduledInferenceTokenError {
@@ -39,6 +69,7 @@ pub(crate) struct ScheduledInferenceTokenProvider {
     auth_core_url: String,
     service_id: String,
     credential: String,
+    reason: &'static str,
     http: reqwest::Client,
     cache: Arc<Mutex<HashMap<String, CachedToken>>>,
     mint_lock: Arc<Mutex<()>>,
@@ -70,24 +101,37 @@ struct TokenResponse {
 
 impl ScheduledInferenceTokenProvider {
     pub(crate) fn from_env() -> Result<Self, ScheduledInferenceTokenError> {
+        Self::from_lane(&SCHEDULED_LANE)
+    }
+
+    /// The content-screening lane's minter, built from `EXECUTION_CORE_SCREENING_SERVICE_ID` (default
+    /// `execution-core-screening`) and `EXECUTION_CORE_SCREENING_SERVICE_API_KEY`. Its key is never the
+    /// execution service's own.
+    pub(crate) fn from_screening_env() -> Result<Self, ScheduledInferenceTokenError> {
+        Self::from_lane(&SCREENING_LANE)
+    }
+
+    fn from_lane(lane: &MintLane) -> Result<Self, ScheduledInferenceTokenError> {
         let auth_core_url = required_env("AUTH_CORE_URL")?;
-        let service_id = std::env::var("EXECUTION_CORE_SERVICE_ID")
+        let service_id = std::env::var(lane.service_id_env)
             .ok()
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "execution-core".to_owned());
-        let credential = required_env("EXECUTION_CORE_SERVICE_API_KEY")?;
-        Self::new(&auth_core_url, service_id, credential)
+            .unwrap_or_else(|| lane.default_service_id.to_owned());
+        let credential = required_env(lane.credential_env)?;
+        Self::new(&auth_core_url, service_id, credential, lane.reason)
     }
 
     fn new(
         auth_core_url: &str,
         service_id: String,
         credential: String,
+        reason: &'static str,
     ) -> Result<Self, ScheduledInferenceTokenError> {
         Ok(Self {
             auth_core_url: auth_core_url.trim_end_matches('/').to_owned(),
             service_id,
             credential,
+            reason,
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(5))
@@ -103,8 +147,20 @@ impl ScheduledInferenceTokenProvider {
             auth_core_url,
             "execution-core".to_owned(),
             "dev-secret".to_owned(),
+            REASON,
         )
         .expect("scheduled inference token provider")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_screening_for_test(auth_core_url: &str) -> Self {
+        Self::new(
+            auth_core_url,
+            "execution-core-screening".to_owned(),
+            "dev-screening-secret".to_owned(),
+            SCREENING_REASON,
+        )
+        .expect("screening inference token provider")
     }
 
     pub(crate) async fn token(&self, org_id: &str) -> Result<String, ScheduledInferenceTokenError> {
@@ -148,7 +204,7 @@ impl ScheduledInferenceTokenProvider {
             .json(&serde_json::json!({
                 "orgId": org_id,
                 "scopes": [SCOPE],
-                "reason": REASON,
+                "reason": self.reason,
             }))
             .send()
             .await?;
@@ -197,7 +253,7 @@ fn required_env(name: &'static str) -> Result<String, ScheduledInferenceTokenErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{body_json, method, path};
+    use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
@@ -241,5 +297,61 @@ mod tests {
             .await
             .expect_err("wrong audience must fail closed");
         assert!(error.to_string().contains("invalid"));
+    }
+
+    /// The screening lane presents its own principal, its own reason and the one scope, and mints
+    /// for the run's organization only: a second organization gets its own credential.
+    #[tokio::test]
+    async fn screening_lane_mints_its_own_principal_for_the_run_org_only() {
+        let server = MockServer::start().await;
+        for (org, token) in [
+            ("org-a", "screening-token-a"),
+            ("org-b", "screening-token-b"),
+        ] {
+            Mock::given(method("POST"))
+                .and(path("/api/inference-core/internal-token"))
+                .and(header("x-service-id", "execution-core-screening"))
+                .and(body_json(serde_json::json!({
+                    "orgId": org,
+                    "scopes": ["inference:invoke"],
+                    "reason": SCREENING_REASON,
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "token": token,
+                    "expiresInSeconds": 300,
+                    "audience": "inference-core",
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+
+        let provider = ScheduledInferenceTokenProvider::new_screening_for_test(&server.uri());
+        assert_eq!(provider.token("org-a").await.unwrap(), "screening-token-a");
+        assert_eq!(provider.token("org-a").await.unwrap(), "screening-token-a");
+        assert_eq!(provider.token("org-b").await.unwrap(), "screening-token-b");
+    }
+
+    /// The screening lane's own default id, and a key variable that is not the execution service's.
+    #[test]
+    fn screening_lane_reads_its_own_variables_and_defaults_to_its_own_principal() {
+        assert_eq!(
+            SCREENING_LANE.service_id_env,
+            "EXECUTION_CORE_SCREENING_SERVICE_ID"
+        );
+        assert_eq!(
+            SCREENING_LANE.default_service_id,
+            "execution-core-screening"
+        );
+        assert_eq!(
+            SCREENING_LANE.credential_env,
+            "EXECUTION_CORE_SCREENING_SERVICE_API_KEY"
+        );
+        assert_eq!(SCREENING_LANE.reason, SCREENING_REASON);
+        assert_ne!(SCREENING_LANE.credential_env, SCHEDULED_LANE.credential_env);
+        assert_ne!(
+            SCREENING_LANE.default_service_id,
+            SCHEDULED_LANE.default_service_id
+        );
     }
 }

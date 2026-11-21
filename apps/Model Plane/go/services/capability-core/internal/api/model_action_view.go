@@ -222,6 +222,11 @@ func (h *CapabilitiesHandler) resolveModelActionView(w http.ResponseWriter, requ
 		return
 	}
 	data := modelActionViewData{RunID: view.authority.RunID, Actions: []modelActionToolDefinition{}}
+	// A row this view cannot offer is skipped, not a reason to end the list: an unavailable row
+	// costs the Model that one action and no other. The reason is the first such row's, and it is
+	// named only when no row is offered at all, so a view with an offered row carries no reason.
+	var firstReason string
+	hasReason := false
 	for _, row := range admitted {
 		capability, err := h.availabilityStore.GetForOrg(request.Context(), row.CapabilityID, orgID)
 		if err != nil || capability == nil || capability.ID != row.CapabilityID || (capability.OrgID != orgID && capability.OrgID != "global") {
@@ -241,14 +246,16 @@ func (h *CapabilitiesHandler) resolveModelActionView(w http.ResponseWriter, requ
 			HealthCheckedAt:   capability.HealthCheckedAt,
 		})
 		if availability.State != models.AvailabilityAvailable && availability.State != models.AvailabilityApprovalRequired {
-			data.ReasonCode = availability.ReasonCode
-			writeJSON(w, modelActionViewResponse{Data: data})
-			return
+			if !hasReason {
+				firstReason, hasReason = availability.ReasonCode, true
+			}
+			continue
 		}
 		if availability.ExecutionMode != models.ExecutionAgentic {
-			data.ReasonCode = "execution_mode_unavailable"
-			writeJSON(w, modelActionViewResponse{Data: data})
-			return
+			if !hasReason {
+				firstReason, hasReason = "execution_mode_unavailable", true
+			}
+			continue
 		}
 		data.Actions = append(data.Actions, modelActionToolDefinition{
 			Name:             row.ToolName,
@@ -257,6 +264,9 @@ func (h *CapabilitiesHandler) resolveModelActionView(w http.ResponseWriter, requ
 			ActionSchemaHash: row.ActionSchemaHash,
 			RequiresApproval: row.RequiresApproval,
 		})
+	}
+	if len(data.Actions) == 0 {
+		data.ReasonCode = firstReason
 	}
 	writeJSON(w, modelActionViewResponse{Data: data})
 }

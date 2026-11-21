@@ -1282,6 +1282,7 @@ mod execute_step_space_withhold_path {
             None,
             retrieval,
             space_id,
+            false,
         )
         .await
     }

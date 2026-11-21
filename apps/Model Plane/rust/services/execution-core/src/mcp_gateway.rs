@@ -41,6 +41,8 @@ use tonic::{Request, Status};
 
 use crate::capability_policy::ServiceTokenProvider;
 use crate::permission::ToolClassView;
+use crate::provenance::screening_client;
+use crate::scheduled_inference_auth::ScreeningInferenceTokenProvider;
 
 /// In-network model-gateway gRPC address (shared `model-plane-network`).
 const DEFAULT_ADDR: &str = "http://model-gateway:9090";
@@ -48,11 +50,21 @@ const DEFAULT_ADDR: &str = "http://model-gateway:9090";
 /// In-network capability-core gRPC address, as `execution-core`'s policy client uses.
 const DEFAULT_CAPABILITY_ADDR: &str = "http://capability-core:9097";
 
+/// How long a screening call waits for its classifier credential. The verdict has a deadline of its
+/// own, so the credential gets a short budget, and the call goes without it past that.
+const CLASSIFIER_MINT_BUDGET: Duration = Duration::from_secs(1);
+
 /// Lazily-connected client to the gateway's MCP surface.
 #[derive(Clone)]
 pub struct McpGatewayClient {
     channel: Channel,
+    /// The channel a form's answer goes over (EP-4 S7, D3-440): an answer lets the held call run
+    /// on to its result, which a slow server returns after the proxy channel's 8 s deadline.
+    answer_channel: Channel,
 }
+
+/// The deadline of the channel an answer to a held form goes over (D3-440).
+pub const ANSWER_DEADLINE: Duration = Duration::from_secs(60);
 
 impl McpGatewayClient {
     /// Build a lazily-connected client. Reads `MODEL_GATEWAY_ADDR` (or
@@ -64,12 +76,18 @@ impl McpGatewayClient {
         let addr = std::env::var("MODEL_GATEWAY_ADDR")
             .or_else(|_| std::env::var("MODEL_GATEWAY_GRPC_URL"))
             .unwrap_or_else(|_| DEFAULT_ADDR.to_owned());
-        let channel = tonic::transport::Endpoint::from_shared(addr)
+        let endpoint = tonic::transport::Endpoint::from_shared(addr)
             .ok()?
-            .connect_timeout(std::time::Duration::from_secs(2))
+            .connect_timeout(std::time::Duration::from_secs(2));
+        let channel = endpoint
+            .clone()
             .timeout(std::time::Duration::from_secs(8))
             .connect_lazy();
-        Some(Self { channel })
+        let answer_channel = endpoint.timeout(ANSWER_DEADLINE).connect_lazy();
+        Some(Self {
+            channel,
+            answer_channel,
+        })
     }
 
     /// Agent-facing MCP tool defs for `(org_id, user_id)`, namespaced
@@ -226,10 +244,54 @@ pub struct ElicitationRun {
     pub questions_asked: u32,
 }
 
+/// What the call of a form that cannot be put to the owner now reads: another input pause holds
+/// the round, so the form was cancelled (EP-4 S7). The server's call did not complete.
+pub const FORM_NOT_PUT_NOW: &str =
+    "the MCP server's form could not be put to the owner now; the call was cancelled";
+
+/// What the call reads when its server's form could not be put to the owner at all (no fold, no
+/// credential, a form with nothing to ask or no hold left, a refused create): the form was
+/// cancelled and the call did not complete (EP-4 S7). It is never asked as the next turn, because a
+/// retry would run the server's work again.
+pub const FORM_NOT_ASKED: &str =
+    "the MCP server asked a question that could not be put to the owner; the call was cancelled";
+
 /// Whether this run's MCP calls may allow the server to ask its owner a question.
 #[must_use]
 pub fn allow_elicitation(run: &ElicitationRun) -> bool {
+    #[cfg(test)]
+    if let Some(forced) = test_switch::forced() {
+        return allow_elicitation_when(forced, run);
+    }
     allow_elicitation_when(elicitation_enabled(), run)
+}
+
+/// A test's override of the switch, which the process reads once. Thread-local: `#[tokio::test]`
+/// runs its future on the test's own thread, so it cannot leak into a parallel test.
+#[cfg(test)]
+pub(crate) mod test_switch {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FORCED: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    pub(crate) fn forced() -> Option<bool> {
+        FORCED.with(Cell::get)
+    }
+
+    /// Hold the switch at `on` until the guard drops.
+    pub(crate) struct Guard(Option<bool>);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            FORCED.with(|forced| forced.set(self.0));
+        }
+    }
+
+    pub(crate) fn force(on: bool) -> Guard {
+        Guard(FORCED.with(|forced| forced.replace(Some(on))))
+    }
 }
 
 /// [`allow_elicitation`] with the switch given, so the rule is testable without the environment.
@@ -600,6 +662,10 @@ pub fn plan_offer(
 pub struct SignedToolClass {
     pub class: String,
     pub floor: String,
+    /// The pinned definition digest of the registry binding this process resolved for the
+    /// call, empty when the policy states none. Read only by an MCP-app side call
+    /// (`ExecuteStepRequest.side_call`), which has no run view to take it from.
+    pub digest: String,
 }
 
 /// The typed refusal prefix of a call whose class changed under the run, so a log
@@ -612,7 +678,31 @@ impl SignedToolClass {
         Self {
             class: class.to_owned(),
             floor: floor.to_owned(),
+            digest: String::new(),
         }
+    }
+
+    /// The same class and floor with the registry binding's pinned definition digest.
+    #[must_use]
+    pub fn with_digest(mut self, digest: &str) -> Self {
+        digest.clone_into(&mut self.digest);
+        self
+    }
+
+    /// The view an MCP-app side call is judged and dispatched on: the registry binding this
+    /// call's own policy decision carried, never execution-core's in-process snapshot of a run.
+    /// `None` when the decision names no class or no digest, so the caller fails closed.
+    #[must_use]
+    pub fn binding_view(&self, tool_name: &str) -> Option<ToolClassView> {
+        if self.class.trim().is_empty() || self.digest.is_empty() {
+            return None;
+        }
+        Some(ToolClassView::from_registry(
+            tool_name,
+            &self.class,
+            &self.floor,
+            &self.digest,
+        ))
     }
 
     /// Whether the decision's class or floor is anything other than what `view`
@@ -918,6 +1008,27 @@ pub struct GovernedMcp {
     gateway: McpGatewayClient,
     registry: Channel,
     credentials: Credentials,
+    /// The content-screening principal's minter. Present only while `EXECUTION_SCREEN_INFERENCE_CREDENTIAL`
+    /// is the literal `true` and this service holds that principal's key; a screening call carries its
+    /// classifier credential through it, and never for a zero-retention or waived run.
+    classifier_tokens: Option<ScreeningInferenceTokenProvider>,
+}
+
+/// The content-screening lane's minter, or `None` while the credential switch is off or the principal's
+/// key is not configured. Without it a screening call carries no classifier credential at all.
+fn classifier_tokens_from_env() -> Option<ScreeningInferenceTokenProvider> {
+    if !screening_client::credential_enabled() {
+        return None;
+    }
+    match ScreeningInferenceTokenProvider::from_screening_env() {
+        Ok(provider) => Some(provider),
+        Err(_) => {
+            tracing::warn!(
+                "content screening credential is not configured; screening keeps the zero classifier budget"
+            );
+            None
+        }
+    }
 }
 
 impl GovernedMcp {
@@ -955,6 +1066,7 @@ impl GovernedMcp {
                 gateway: Box::new(GatewayTokens::from_env()?),
                 capability: Box::new(ServiceTokenProvider::from_env().ok()?),
             },
+            classifier_tokens: classifier_tokens_from_env(),
         })
     }
 
@@ -1112,7 +1224,9 @@ impl GovernedMcp {
             .map_err(|status| format!("mcp gateway credential: {}", status.message()))?;
         insert_bearer(&mut request, "authorization", &bearer)
             .map_err(|status| status.message().to_owned())?;
-        let response = McpElicitationServiceClient::new(self.gateway.channel.clone())
+        // Its own channel and a longer deadline than the proxy's: the answer lets the held call
+        // run on, and a slow server's result must not be lost to the 8 s proxy timeout.
+        let response = McpElicitationServiceClient::new(self.gateway.answer_channel.clone())
             .answer_mcp_elicitation(request)
             .await
             .map_err(|e| format!("mcp elicitation transport: {e}"))?
@@ -1124,12 +1238,64 @@ impl GovernedMcp {
     /// bearer rides along when this service can mint one, so the gateway reads the org's injection
     /// policy. Without it the gateway keeps its own default mode and screening stays on.
     ///
+    /// A call for a run that keeps its content also carries the content-screening principal's
+    /// classifier credential, when it is configured (see [`Self::classifier_bearer`]). A gateway that
+    /// refuses that credential is asked again without it, so the deterministic verdict is not lost to
+    /// the classifier's credential.
+    ///
     /// # Errors
     ///
     /// A status when no gateway credential could be obtained or the gateway refused the call.
     pub async fn screen_content(
         &self,
         request: pb::ScreenContentRequest,
+    ) -> Result<pb::ScreenContentResponse, Status> {
+        let Some(classifier) = self.classifier_bearer(&request).await else {
+            return self.send_screen_content(request, None).await;
+        };
+        let retry = request.clone();
+        match self
+            .send_screen_content(request, Some(classifier.as_str()))
+            .await
+        {
+            Err(status)
+                if matches!(
+                    status.code(),
+                    tonic::Code::PermissionDenied | tonic::Code::Unauthenticated
+                ) =>
+            {
+                tracing::warn!(
+                    code = ?status.code(),
+                    "gateway refused the screening classifier credential; asking without it"
+                );
+                self.send_screen_content(retry, None).await
+            }
+            answer => answer,
+        }
+    }
+
+    /// The classifier credential a screening call carries, minted for the run's organization. It is
+    /// never minted for a zero-retention or waived run: the caller sets `request.zdr` to zdr OR waived,
+    /// and that flag alone decides. A mint that fails or outlasts its budget yields none, so the call
+    /// goes without it and the gateway keeps its zero classifier budget.
+    async fn classifier_bearer(&self, request: &pb::ScreenContentRequest) -> Option<String> {
+        if request.zdr {
+            return None;
+        }
+        let tokens = self.classifier_tokens.as_ref()?;
+        match tokio::time::timeout(CLASSIFIER_MINT_BUDGET, tokens.token(&request.org_id)).await {
+            Ok(Ok(token)) => Some(token),
+            Ok(Err(_)) | Err(_) => {
+                tracing::warn!("screening classifier credential unavailable; asking without it");
+                None
+            }
+        }
+    }
+
+    async fn send_screen_content(
+        &self,
+        request: pb::ScreenContentRequest,
+        classifier: Option<&str>,
     ) -> Result<pb::ScreenContentResponse, Status> {
         let org_id = request.org_id.clone();
         let mut request = Request::new(request);
@@ -1140,6 +1306,9 @@ impl GovernedMcp {
         )?;
         if let Ok(bearer) = self.capability_bearer(&org_id).await {
             insert_bearer(&mut request, "x-capability-authorization", &bearer)?;
+        }
+        if let Some(bearer) = classifier {
+            insert_bearer(&mut request, "x-inference-authorization", bearer)?;
         }
         ModelGatewayClient::new(self.gateway.channel.clone())
             .screen_content(request)
@@ -1622,9 +1791,150 @@ mod tests {
                 gateway,
                 registry,
                 credentials: Credentials::Static,
+                classifier_tokens: None,
             },
             seen,
         )
+    }
+
+    /// A governed client whose classifier credential is minted by `auth_core_url`. The decision tests
+    /// below never dial its gateway or registry channels.
+    fn governed_with_classifier(auth_core_url: &str) -> GovernedMcp {
+        GovernedMcp {
+            gateway: McpGatewayClient::from_env().expect("lazy gateway channel"),
+            registry: tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+            credentials: Credentials::Static,
+            classifier_tokens: Some(ScreeningInferenceTokenProvider::new_screening_for_test(
+                auth_core_url,
+            )),
+        }
+    }
+
+    fn screen_request(zdr: bool) -> pb::ScreenContentRequest {
+        pb::ScreenContentRequest {
+            request_id: String::new(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            tool_name: "web_fetch".to_owned(),
+            content: "page text".to_owned(),
+            zdr,
+        }
+    }
+
+    fn token_reply(token: &str) -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "token": token,
+            "expiresInSeconds": 300,
+            "audience": "inference-core",
+        }))
+    }
+
+    /// A zero-retention or waived run never mints the classifier credential, so its call can never
+    /// carry one: Auth Core is not asked at all.
+    #[tokio::test]
+    async fn a_zdr_or_waived_screening_call_never_gets_the_classifier_credential() {
+        let auth = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(token_reply("must-not-be-minted"))
+            .mount(&auth)
+            .await;
+        let governed = governed_with_classifier(&auth.uri());
+        assert_eq!(
+            governed.classifier_bearer(&screen_request(true)).await,
+            None
+        );
+        assert!(auth
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
+    }
+
+    /// A persistent run's call carries the classifier credential minted for its own organization, and
+    /// the credential is reused from the cache for the next call of that organization.
+    #[tokio::test]
+    async fn a_persistent_screening_call_carries_the_run_orgs_classifier_credential() {
+        let auth = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/api/inference-core/internal-token",
+            ))
+            .and(wiremock::matchers::header(
+                "x-service-id",
+                "execution-core-screening",
+            ))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "orgId": "org-1",
+                "scopes": ["inference:invoke"],
+            })))
+            .respond_with(token_reply("screening-token"))
+            .expect(1)
+            .mount(&auth)
+            .await;
+        let governed = governed_with_classifier(&auth.uri());
+        assert_eq!(
+            governed
+                .classifier_bearer(&screen_request(false))
+                .await
+                .as_deref(),
+            Some("screening-token")
+        );
+        assert_eq!(
+            governed
+                .classifier_bearer(&screen_request(false))
+                .await
+                .as_deref(),
+            Some("screening-token")
+        );
+    }
+
+    /// A refused or failed mint sends the call without a classifier credential, never an error.
+    #[tokio::test]
+    async fn a_failed_mint_sends_the_call_without_the_classifier_credential() {
+        let auth = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(403))
+            .mount(&auth)
+            .await;
+        let governed = governed_with_classifier(&auth.uri());
+        assert_eq!(
+            governed.classifier_bearer(&screen_request(false)).await,
+            None
+        );
+    }
+
+    /// A slow Auth Core cannot use up the verdict's own deadline: past the mint budget the call goes
+    /// without the credential.
+    #[tokio::test]
+    async fn a_slow_mint_is_abandoned_within_its_budget() {
+        let auth = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(token_reply("too-late").set_delay(Duration::from_secs(3)))
+            .mount(&auth)
+            .await;
+        let governed = governed_with_classifier(&auth.uri());
+        let started = Instant::now();
+        assert_eq!(
+            governed.classifier_bearer(&screen_request(false)).await,
+            None
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// With the credential switch off there is no minter, so no call carries a classifier credential.
+    #[tokio::test]
+    async fn without_the_credential_switch_no_call_carries_a_classifier_credential() {
+        let mut governed = governed_with_classifier("http://127.0.0.1:1");
+        governed.classifier_tokens = None;
+        assert_eq!(
+            governed.classifier_bearer(&screen_request(false)).await,
+            None
+        );
     }
 
     #[tokio::test]
@@ -1921,6 +2231,75 @@ mod tests {
         assert!(allow_elicitation_when(true, &below));
         let at = ElicitationRun { questions_asked: cap, ..root_run() };
         assert!(!allow_elicitation_when(true, &at), "a run at its question cap asks no more");
+    }
+
+    /// EP-4 S7: the production `allow_elicitation` reads the process switch, which is off by
+    /// default; a test may hold it, and only for its own thread.
+    #[test]
+    fn the_admission_reads_the_switch_and_a_test_may_hold_it_for_its_own_thread() {
+        // The process environment of a unit test does not carry the literal `true`.
+        assert!(!allow_elicitation(&root_run()), "off by default");
+        {
+            let _on = test_switch::force(true);
+            assert!(allow_elicitation(&root_run()));
+            let _off = test_switch::force(false);
+            assert!(!allow_elicitation(&root_run()));
+        }
+        assert!(
+            !allow_elicitation(&root_run()),
+            "the hold ends with its guard"
+        );
+        std::thread::spawn(|| {
+            let _on = test_switch::force(true);
+        })
+        .join()
+        .expect("thread");
+        assert_eq!(
+            test_switch::forced(),
+            None,
+            "another thread's hold is not this one's"
+        );
+    }
+
+    /// The pause reference of a form is the question's key, so the fold the pause saves and the
+    /// question the pause creates name each other (D3-440 keeps the question inside the hold).
+    #[test]
+    fn a_forms_question_is_keyed_by_its_pause_reference_and_never_outlives_the_hold() {
+        let form = pending("Fixture", 1_100);
+        let request =
+            elicitation_question("run_1", "step_1", "org_1", &form, 1, 1_000).expect("asked");
+        assert_eq!(
+            request.idempotency_key,
+            user_question::input_pause_ref(
+                "run_1",
+                "step_1",
+                user_question::ORIGIN_MCP_ELICITATION
+            )
+        );
+        assert!(
+            i64::from(request.expires_in_seconds) <= form.expires_at_unix - 1_000,
+            "a lapsed hold is never offered"
+        );
+    }
+
+    /// The answer goes over a channel with its own, longer deadline than the proxy's 8 s, so a slow
+    /// server's result after the owner answered is not lost (D3-440).
+    #[test]
+    fn an_answer_has_a_longer_deadline_than_the_proxy() {
+        assert_eq!(ANSWER_DEADLINE, Duration::from_secs(60));
+        assert!(ANSWER_DEADLINE > Duration::from_secs(8));
+    }
+
+    #[test]
+    fn the_words_a_cancelled_forms_call_reads_are_closed() {
+        assert_eq!(
+            FORM_NOT_PUT_NOW,
+            "the MCP server's form could not be put to the owner now; the call was cancelled"
+        );
+        assert_eq!(
+            FORM_NOT_ASKED,
+            "the MCP server asked a question that could not be put to the owner; the call was cancelled"
+        );
     }
 
     #[test]

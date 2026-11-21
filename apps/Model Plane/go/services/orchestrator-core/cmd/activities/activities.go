@@ -154,6 +154,7 @@ func (a *Activities) ExecuteScheduledStepActivity(
 		PolicyDigest:         intent.PolicyDigest,
 		IdempotencyKey:       intent.IdempotencyKey,
 		ControlDecisionToken: decisionToken,
+		ExtSkills:            intent.ExtSkills,
 	})
 	if err != nil {
 		return StepResult{}, err

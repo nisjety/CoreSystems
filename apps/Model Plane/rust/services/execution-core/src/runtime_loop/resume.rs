@@ -1903,6 +1903,22 @@ pub(crate) fn question_resume_target(
     })
 }
 
+/// Whether the in-place question resume may take `target` (EP-4 S7). A server's form
+/// (`mcp_elicitation`) is refused [`Refusal::QuestionResumeUnavailable`] until the resume that
+/// answers the held MCP call exists (W3-EP-4-S7-b): the in-place resume seeds the owner's answer as
+/// the paused call's result FOR THE MODEL, which would never reach the server that asked. The check
+/// runs before any claim, spend or seed, so the answer is left unspent. Pure.
+///
+/// # Errors
+///
+/// [`Refusal::QuestionResumeUnavailable`] for a server's form.
+pub(crate) fn question_resume_in_place_allowed(target: &QuestionTarget) -> Result<(), Refusal> {
+    if target.origin == mp_contracts::user_question::ORIGIN_MCP_ELICITATION {
+        return Err(Refusal::QuestionResumeUnavailable);
+    }
+    Ok(())
+}
+
 /// What a question continuation does once its stage is known (see [`question_stage_decision`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StageDecision {
@@ -3942,6 +3958,28 @@ mod tests {
         assert_eq!(target("q_missing"), Err(Refusal::QuestionNotFound));
         assert_eq!(target(""), Err(Refusal::QuestionNotFound), "an empty id names nothing");
         assert_eq!(question_resume_target(&[], "q_answered", RUN), Err(Refusal::QuestionNotFound));
+    }
+
+    /// EP-4 S7: the in-place resume takes a model question and refuses a server's form, whatever the
+    /// form's state, until W3-EP-4-S7-b answers the held call.
+    #[test]
+    fn question_resume_in_place_refuses_a_server_form_only() {
+        let target = |origin: &str| QuestionTarget {
+            origin: origin.to_owned(),
+            ..input_target()
+        };
+        assert_eq!(question_resume_in_place_allowed(&target("model")), Ok(()));
+        assert_eq!(
+            question_resume_in_place_allowed(&target("")),
+            Ok(()),
+            "an empty origin is a model question"
+        );
+        assert_eq!(
+            question_resume_in_place_allowed(&target(
+                mp_contracts::user_question::ORIGIN_MCP_ELICITATION
+            )),
+            Err(Refusal::QuestionResumeUnavailable)
+        );
     }
 
     #[test]

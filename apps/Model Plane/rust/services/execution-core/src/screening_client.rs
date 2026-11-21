@@ -9,6 +9,10 @@
 //! A verdict only tightens the local one. A refused, slow or mismatched answer keeps the local
 //! verdict, and a ZDR run never asks. Asking is off unless `CONTENT_SAFETY_SCREEN_RPC` is the
 //! literal `true`.
+//!
+//! The gateway's classifier may also run for the ask, under the content-screening principal's own
+//! credential, and only when `EXECUTION_SCREEN_INFERENCE_CREDENTIAL` is the literal `true`. A ZDR or
+//! waived run never gets that credential, so its ask keeps the gateway's zero classifier budget.
 
 use std::time::Duration;
 
@@ -19,6 +23,11 @@ use super::{Provenance, ScreeningPosture, TrustClass};
 
 /// The switch that turns the Do-mode verdict on.
 pub const SWITCH_ENV: &str = "CONTENT_SAFETY_SCREEN_RPC";
+
+/// The switch that lets a Do verdict call carry the classifier credential of the content-screening
+/// principal (F-f04-12). Off, the call carries no classifier credential, so the gateway keeps its zero
+/// classifier budget, as before.
+pub const CREDENTIAL_SWITCH_ENV: &str = "EXECUTION_SCREEN_INFERENCE_CREDENTIAL";
 
 /// How long a Do step waits for the verdict before it keeps the local one.
 const SCREEN_DEADLINE: Duration = Duration::from_secs(3);
@@ -37,6 +46,14 @@ pub fn parse_switch(raw: Option<&str>) -> bool {
 pub fn enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| parse_switch(std::env::var(SWITCH_ENV).ok().as_deref()))
+}
+
+/// Whether a Do verdict call may carry the classifier credential. Read once; only the exact literal
+/// `true` enables it.
+#[must_use]
+pub fn credential_enabled() -> bool {
+    static CREDENTIAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CREDENTIAL.get_or_init(|| parse_switch(std::env::var(CREDENTIAL_SWITCH_ENV).ok().as_deref()))
 }
 
 /// The gateway a Do step asks. Present when the switch is on and this service holds the
@@ -85,6 +102,10 @@ pub struct Screened {
 ///
 /// The gateway is asked only about external results the local scan covered, and never on a ZDR
 /// run. Every other case, and every failure of the ask, keeps `local`.
+///
+/// A waived run (`waived`) is still asked for the deterministic verdict, as before, but it is told
+/// it is zero-retention: the request carries `zdr` OR `waived`, so the gateway runs no classifier
+/// for it, and [`crate::mcp_gateway::GovernedMcp::screen_content`] attaches no classifier credential.
 #[allow(clippy::too_many_arguments)]
 pub async fn screen_result(
     transport: Option<&dyn ScreenTransport>,
@@ -95,6 +116,7 @@ pub async fn screen_result(
     user_id: &str,
     run_id: &str,
     zdr: bool,
+    waived: bool,
 ) -> Screened {
     let Some(transport) = transport else {
         return unchanged(output, local);
@@ -113,7 +135,7 @@ pub async fn screen_result(
         run_id: run_id.to_owned(),
         tool_name: tool_name.to_owned(),
         content: output.clone(),
-        zdr,
+        zdr: zdr || waived,
     };
     let verdict = match tokio::time::timeout(SCREEN_DEADLINE, transport.screen(request)).await {
         Ok(Ok(verdict)) => verdict,
@@ -227,6 +249,7 @@ mod tests {
     struct FakeGateway {
         reply: Option<pb::ScreenContentResponse>,
         calls: AtomicUsize,
+        zdr_seen: std::sync::Mutex<Vec<bool>>,
     }
 
     impl FakeGateway {
@@ -234,6 +257,7 @@ mod tests {
             Self {
                 reply: Some(reply),
                 calls: AtomicUsize::new(0),
+                zdr_seen: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -241,11 +265,17 @@ mod tests {
             Self {
                 reply: None,
                 calls: AtomicUsize::new(0),
+                zdr_seen: std::sync::Mutex::new(Vec::new()),
             }
         }
 
         fn calls(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
+        }
+
+        /// The `zdr` flag of each request the gateway was asked, in order.
+        fn zdr_seen(&self) -> Vec<bool> {
+            self.zdr_seen.lock().expect("fake gateway lock").clone()
         }
     }
 
@@ -253,8 +283,12 @@ mod tests {
     impl ScreenTransport for FakeGateway {
         async fn screen(
             &self,
-            _request: pb::ScreenContentRequest,
+            request: pb::ScreenContentRequest,
         ) -> Result<pb::ScreenContentResponse, Status> {
+            self.zdr_seen
+                .lock()
+                .expect("fake gateway lock")
+                .push(request.zdr);
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.reply
                 .clone()
@@ -289,6 +323,7 @@ mod tests {
             "user_1",
             "run_1",
             false,
+            false,
         )
         .await;
         assert_eq!(gateway.calls(), 1);
@@ -310,6 +345,7 @@ mod tests {
             "org_1",
             "user_1",
             "run_1",
+            false,
             false,
         )
         .await;
@@ -340,6 +376,7 @@ mod tests {
             "user_1",
             "run_1",
             true,
+            false,
         )
         .await;
         assert_eq!(gateway.calls(), 0);
@@ -360,6 +397,7 @@ mod tests {
             "user_1",
             "run_1",
             false,
+            false,
         )
         .await;
         assert!(screened.taint);
@@ -379,6 +417,7 @@ mod tests {
             "org_1",
             "user_1",
             "run_1",
+            false,
             false,
         )
         .await;
@@ -401,6 +440,7 @@ mod tests {
             "user_1",
             "run_1",
             false,
+            false,
         )
         .await;
         assert_eq!(clean.calls(), 1);
@@ -417,6 +457,7 @@ mod tests {
             "org_1",
             "user_1",
             "run_1",
+            false,
             false,
         )
         .await;
@@ -436,6 +477,7 @@ mod tests {
             "org_1",
             "user_1",
             "run_1",
+            false,
             false,
         )
         .await;
@@ -458,6 +500,7 @@ mod tests {
             "user_1",
             "run_1",
             false,
+            false,
         )
         .await;
         // Past the size bound the local scan did not cover the payload, so the gateway would only
@@ -473,6 +516,7 @@ mod tests {
             "org_1",
             "user_1",
             "run_1",
+            false,
             false,
         )
         .await;
@@ -490,6 +534,7 @@ mod tests {
             "org_1",
             "user_1",
             "run_1",
+            false,
             false,
         )
         .await;
@@ -514,6 +559,60 @@ mod tests {
         ] {
             assert!(!parse_switch(raw), "{raw:?}");
         }
+    }
+
+    /// A waived run keeps the deterministic verdict, as it always had, but is asked as zero-retention:
+    /// the request carries `zdr` OR `waived`, so the gateway runs no classifier for it.
+    #[tokio::test]
+    async fn a_waived_run_is_asked_as_zero_retention_and_keeps_its_verdict() {
+        let local = assess("web_fetch", QUIET);
+        let gateway = FakeGateway::answering(verdict(QUIET, "flagged", true));
+        let screened = screen_result(
+            Some(&gateway),
+            "web_fetch",
+            QUIET.to_owned(),
+            local,
+            "org_1",
+            "user_1",
+            "run_1",
+            false,
+            true,
+        )
+        .await;
+        assert_eq!(gateway.calls(), 1);
+        assert_eq!(gateway.zdr_seen(), vec![true]);
+        assert_eq!(screened.provenance.posture, ScreeningPosture::Flagged);
+        assert!(screened
+            .output
+            .starts_with("[withheld: web_fetch result (external-web)"));
+    }
+
+    /// A persistent run is asked exactly as before: no zero-retention flag on the request.
+    #[tokio::test]
+    async fn a_persistent_run_is_asked_without_the_zero_retention_flag() {
+        let gateway = FakeGateway::answering(verdict(QUIET, "clean", false));
+        screen_result(
+            Some(&gateway),
+            "web_fetch",
+            QUIET.to_owned(),
+            assess("web_fetch", QUIET),
+            "org_1",
+            "user_1",
+            "run_1",
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(gateway.zdr_seen(), vec![false]);
+    }
+
+    #[test]
+    fn the_credential_switch_has_its_own_name() {
+        assert_eq!(
+            CREDENTIAL_SWITCH_ENV,
+            "EXECUTION_SCREEN_INFERENCE_CREDENTIAL"
+        );
+        assert_ne!(CREDENTIAL_SWITCH_ENV, SWITCH_ENV);
     }
 
     #[test]

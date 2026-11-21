@@ -444,6 +444,14 @@ struct ModelActionViewTool {
     parameters_json: String,
     action_schema_hash: String,
     requires_approval: bool,
+    // Optional. When a view names one, it must hold the value the pin owns; an omitted field is not
+    // checked. Capability Core does not send these yet.
+    #[serde(default)]
+    class: Option<String>,
+    #[serde(default)]
+    authority: Option<String>,
+    #[serde(default)]
+    loop_tool_name: Option<String>,
 }
 
 impl ServerResolvedModelActionViewClient {
@@ -540,34 +548,212 @@ impl ServerResolvedModelActionViewClient {
         }
         let response = serde_json::from_slice::<ModelActionViewEnvelope>(&body)
             .map_err(|_| Status::permission_denied("model action view response is invalid"))?;
-        if response.data.run_id != run_id || response.data.actions.len() > 1 {
+        let admission_table = crate::runtime_loop::owner_reads::admission_table();
+        if response.data.run_id != run_id
+            || response.data.actions.len()
+                > crate::owner_actions::offered_pins(admission_table).len()
+        {
             return Err(Status::permission_denied(
                 "model action view response is not run-bound",
             ));
         }
-        response
-            .data
-            .actions
-            .into_iter()
-            .map(|tool| {
-                if tool.name != crate::ticket_tools::TOOL_NAME
-                    || tool.description.trim().is_empty()
-                    || tool.parameters_json
-                        != crate::ticket_tools::TICKET_CREATE_MODEL_PARAMETERS_JSON
-                    || tool.action_schema_hash != crate::ticket_tools::TICKET_CREATE_SCHEMA_SHA256
-                    || !tool.requires_approval
-                {
-                    return Err(Status::permission_denied(
-                        "model action view returned an invalid tool definition",
-                    ));
-                }
-                Ok(mp_contracts::model_plane::v1::ToolDefinition {
-                    name: tool.name,
-                    description: tool.description,
-                    parameters_json: tool.parameters_json,
-                })
+        server_resolved_definitions(response.data.actions, admission_table)
+    }
+}
+
+/// The definitions a verified Control view offers, each held to the pin it names. Every action must
+/// match a pin this build offers in this admission mode, by its exact name, description, parameters
+/// and schema hash, and its approval must be the pin's. It must not repeat a name, and any closed
+/// field it names (class, authority, loop tool name) must hold the pin's value. One mismatch refuses
+/// the whole view.
+fn server_resolved_definitions(
+    tools: Vec<ModelActionViewTool>,
+    admission_table: bool,
+) -> Result<Vec<mp_contracts::model_plane::v1::ToolDefinition>, Status> {
+    let offered = crate::owner_actions::offered_pins(admission_table);
+    let refused =
+        || Status::permission_denied("model action view returned an invalid tool definition");
+    let mut definitions: Vec<mp_contracts::model_plane::v1::ToolDefinition> =
+        Vec::with_capacity(tools.len());
+    for tool in tools {
+        let ModelActionViewTool {
+            name,
+            description,
+            parameters_json,
+            action_schema_hash,
+            requires_approval,
+            class,
+            authority,
+            loop_tool_name,
+        } = tool;
+        let definition = mp_contracts::model_plane::v1::ToolDefinition {
+            name,
+            description,
+            parameters_json,
+        };
+        crate::owner_actions::definition_matches_pin(&definition, &action_schema_hash)
+            .filter(|action| offered.iter().any(|pin| pin.name == action.name()))
+            .filter(|action| requires_approval == action.requires_durable_approval())
+            .filter(|action| class.as_deref().is_none_or(|value| value == action.class()))
+            .filter(|action| {
+                authority
+                    .as_deref()
+                    .is_none_or(|value| value == action.authority())
             })
-            .collect()
+            .filter(|action| {
+                loop_tool_name
+                    .as_deref()
+                    .is_none_or(|value| value == action.name())
+            })
+            .ok_or_else(refused)?;
+        if definitions
+            .iter()
+            .any(|existing| existing.name == definition.name)
+        {
+            return Err(refused());
+        }
+        definitions.push(definition);
+    }
+    tracing::debug!(
+        count = definitions.len(),
+        tools = ?definitions.iter().map(|definition| definition.name.as_str()).collect::<Vec<_>>(),
+        "server-resolved owner actions offered"
+    );
+    Ok(definitions)
+}
+
+#[cfg(test)]
+mod model_action_view_resolution_tests {
+    use super::*;
+
+    fn tool(
+        name: &str,
+        description: &str,
+        parameters_json: &str,
+        action_schema_hash: &str,
+        requires_approval: bool,
+    ) -> ModelActionViewTool {
+        ModelActionViewTool {
+            name: name.to_owned(),
+            description: description.to_owned(),
+            parameters_json: parameters_json.to_owned(),
+            action_schema_hash: action_schema_hash.to_owned(),
+            requires_approval,
+            class: None,
+            authority: None,
+            loop_tool_name: None,
+        }
+    }
+
+    fn shipped_ticket() -> ModelActionViewTool {
+        tool(
+            crate::ticket_tools::TOOL_NAME,
+            "Create one governed ticket.",
+            crate::ticket_tools::TICKET_CREATE_MODEL_PARAMETERS_JSON,
+            crate::ticket_tools::TICKET_CREATE_SCHEMA_SHA256,
+            true,
+        )
+    }
+
+    #[test]
+    fn the_pinned_ticket_view_is_offered_in_both_admission_modes() {
+        for admission_table in [false, true] {
+            let offered = server_resolved_definitions(vec![shipped_ticket()], admission_table)
+                .expect("the shipped definition is admitted");
+            assert_eq!(offered.len(), 1);
+            assert_eq!(offered[0].name, crate::ticket_tools::TOOL_NAME);
+            assert_eq!(
+                offered[0].parameters_json,
+                crate::ticket_tools::TICKET_CREATE_MODEL_PARAMETERS_JSON
+            );
+        }
+    }
+
+    #[test]
+    fn a_repeated_name_refuses_the_whole_view() {
+        for admission_table in [false, true] {
+            assert!(server_resolved_definitions(
+                vec![shipped_ticket(), shipped_ticket()],
+                admission_table
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn a_drifted_definition_refuses_the_whole_view() {
+        let mut wrong_hash = shipped_ticket();
+        wrong_hash.action_schema_hash = format!("sha256:{}", "0".repeat(64));
+        let mut wrong_parameters = shipped_ticket();
+        wrong_parameters.parameters_json = r#"{"type":"object"}"#.to_owned();
+        let mut blank_description = shipped_ticket();
+        blank_description.description = "   ".to_owned();
+        let mut no_approval = shipped_ticket();
+        no_approval.requires_approval = false;
+        let unpinned = tool(
+            "tickets.create.alias",
+            "alias",
+            crate::ticket_tools::TICKET_CREATE_MODEL_PARAMETERS_JSON,
+            crate::ticket_tools::TICKET_CREATE_SCHEMA_SHA256,
+            true,
+        );
+        for bad in [
+            wrong_hash,
+            wrong_parameters,
+            blank_description,
+            no_approval,
+            unpinned,
+        ] {
+            assert!(server_resolved_definitions(vec![bad], true).is_err());
+        }
+    }
+
+    #[test]
+    fn a_closed_field_is_checked_only_when_the_view_names_it() {
+        // Omitted: not checked, so the shipped view is admitted as it always was.
+        assert!(server_resolved_definitions(vec![shipped_ticket()], true).is_ok());
+
+        let pinned_class = ModelActionViewTool {
+            class: Some("write_approval".to_owned()),
+            ..shipped_ticket()
+        };
+        let pinned_authority = ModelActionViewTool {
+            authority: Some("owner_contract".to_owned()),
+            ..shipped_ticket()
+        };
+        let pinned_loop_name = ModelActionViewTool {
+            loop_tool_name: Some(crate::ticket_tools::TOOL_NAME.to_owned()),
+            ..shipped_ticket()
+        };
+        for good in [pinned_class, pinned_authority, pinned_loop_name] {
+            assert!(server_resolved_definitions(vec![good], true).is_ok());
+        }
+
+        let other_class = ModelActionViewTool {
+            class: Some("read".to_owned()),
+            ..shipped_ticket()
+        };
+        let other_authority = ModelActionViewTool {
+            authority: Some("control_run_decision".to_owned()),
+            ..shipped_ticket()
+        };
+        let other_loop_name = ModelActionViewTool {
+            loop_tool_name: Some("web_fetch".to_owned()),
+            ..shipped_ticket()
+        };
+        for bad in [other_class, other_authority, other_loop_name] {
+            assert!(server_resolved_definitions(vec![bad], true).is_err());
+        }
+    }
+
+    #[test]
+    fn the_view_wire_format_still_refuses_an_unknown_field() {
+        let unknown = r#"{"name":"tickets.create","description":"d","parameters_json":"{}","action_schema_hash":"sha256:0","requires_approval":true,"surprise":1}"#;
+        assert!(serde_json::from_str::<ModelActionViewTool>(unknown).is_err());
+        let optional = r#"{"name":"tickets.create","description":"d","parameters_json":"{}","action_schema_hash":"sha256:0","requires_approval":true,"class":"write_approval"}"#;
+        let parsed = serde_json::from_str::<ModelActionViewTool>(optional)
+            .expect("the optional closed field parses");
+        assert_eq!(parsed.class.as_deref(), Some("write_approval"));
     }
 }
 

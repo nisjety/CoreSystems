@@ -55,6 +55,9 @@ type ScheduledRunInput struct {
 	// digest-verified template. Set only while ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED is on;
 	// empty, the fire is not judged and its history is what it was before the field existed.
 	GoalID string `json:"goal_id,omitempty"`
+	// ExtSkills is the org's `ext.skills` policy word for this fire (P2-ec-01-rel1), stated by capability-core only
+	// while its switch is on. Empty is "not enforced", and the field then stays out of the workflow input.
+	ExtSkills string `json:"ext_skills,omitempty"`
 }
 
 // GoalJudgeTurnInput is the input of JudgeGoalTurnActivity (EP-7 S6). The type lives in the

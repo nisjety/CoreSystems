@@ -91,6 +91,12 @@ type scheduledRunSession interface {
 	PrepareScheduledRunThread(context.Context, *mpv1.PrepareScheduledRunThreadRequest, ...grpc.CallOption) (*mpv1.PrepareScheduledRunThreadResponse, error)
 }
 
+// OrgExtSkillsReader reads the org's `ext.skills` policy word, as the org agent policy states it
+// (P2-ec-01-rel1). The org agent policy handler satisfies it.
+type OrgExtSkillsReader interface {
+	ExtSkillsWord(ctx context.Context, orgID string) (string, error)
+}
+
 // WorkflowDispatcher turns a claimed task into one durable Temporal run.
 //
 // Why this and not a NATS consumer of mp.v1.capability.task.dispatched: the
@@ -115,12 +121,35 @@ type WorkflowDispatcher struct {
 	defaultWorkflowType string
 	fireAuthorizer      ScheduleFireAuthorizer
 	scheduledRunSession scheduledRunSession
+	orgExtSkills        OrgExtSkillsReader
+	extSkillsEnforced   bool
 }
 
 // SetScheduledRunSession enables the scoped cron preparation path. Cron tasks
 // fail closed when it is absent; ordinary tasks are unchanged.
 func (d *WorkflowDispatcher) SetScheduledRunSession(client scheduledRunSession) {
 	d.scheduledRunSession = client
+}
+
+// SetOrgExtSkills states the org's `ext.skills` word on every scheduled run this dispatcher starts
+// (P2-ec-01-rel1), but only while enforced is true: SKILL_EXT_POLICY_ENFORCED, the literal "true" the
+// gateway reads too. Off, no word is read or stated and the run reads as it did before the field existed.
+func (d *WorkflowDispatcher) SetOrgExtSkills(reader OrgExtSkillsReader, enforced bool) {
+	d.orgExtSkills = reader
+	d.extSkillsEnforced = enforced
+}
+
+// scheduledExtSkillsWord is the org's ext.skills word a scheduled run is started under. Off, it is "" and
+// nothing is read. On, a policy that cannot be read is an error, never a guess: a scheduled run that cannot
+// be held to its org's policy does not start.
+func (d *WorkflowDispatcher) scheduledExtSkillsWord(ctx context.Context, orgID string) (string, error) {
+	if !d.extSkillsEnforced {
+		return "", nil
+	}
+	if d.orgExtSkills == nil {
+		return "", errors.New("the org ext.skills policy reader is not configured")
+	}
+	return d.orgExtSkills.ExtSkillsWord(ctx, orgID)
 }
 
 // NewWorkflowDispatcher builds the dispatcher. pub may be nil (reconcile events
@@ -199,6 +228,8 @@ type preparedScheduledRun struct {
 	templateDigest string
 	templateJSON   string
 	idempotencyKey string
+	// extSkills is the org's ext.skills word the run is started under (P2-ec-01-rel1); "" while not stated.
+	extSkills string
 }
 
 // Dispatch starts the durable run for one claimed task.
@@ -370,6 +401,12 @@ func (d *WorkflowDispatcher) reauthorizeScheduleFire(ctx context.Context, task T
 		return nil, fmt.Errorf("taskexec: cron task %s scheduled-run authorization failed: %w", task.ID, err)
 	}
 	decision := prep.Decision
+	// Read after Control authorized the fire and before the thread is prepared, so a policy that cannot be
+	// read refuses the fire before anything is written (P2-ec-01-rel1).
+	extSkills, err := d.scheduledExtSkillsWord(ctx, intent.OrgID)
+	if err != nil {
+		return nil, fmt.Errorf("taskexec: cron task %s org ext.skills policy is unreadable: %w", task.ID, err)
+	}
 	response, err := d.scheduledRunSession.PrepareScheduledRunThread(ctx, &mpv1.PrepareScheduledRunThreadRequest{
 		OrgId: intent.OrgID, HumanSubjectId: intent.SubjectID, SpaceId: intent.SpaceRef,
 		ScheduleId: intent.ScheduleID, FireKey: intent.FireKey, RunId: task.ID, SystemThreadKey: prep.SystemThreadKey,
@@ -395,6 +432,7 @@ func (d *WorkflowDispatcher) reauthorizeScheduleFire(ctx context.Context, task T
 		templateDigest: intent.TemplateDigest,
 		templateJSON:   string(canonicalTemplate),
 		idempotencyKey: intent.IdempotencyKey,
+		extSkills:      extSkills,
 	}, nil
 }
 
@@ -473,6 +511,15 @@ func attachScheduledRunInput(req *mpv1.StartWorkflowRequest, prepared preparedSc
 	// fields, making the non-secret facts below the complete scheduled-run
 	// binding. Orchestrator uses them only to request a fresh direct-hop
 	// execution decision immediately before Session Core starts the run.
+	// The org's skill policy word is stated by the dispatcher alone (P2-ec-01-rel1). With no word stated, a template
+	// that carries one is refused, as the workflow registry always refused an input field it does not know. With a
+	// word stated, the template's copy is replaced below, so a template can never choose the word.
+	if _, carried := req.Input.Fields["ext_skills"]; carried {
+		if prepared.extSkills == "" {
+			return errors.New("taskexec: scheduled workflow input may not carry ext_skills")
+		}
+		delete(req.Input.Fields, "ext_skills")
+	}
 	for _, field := range []string{
 		"schedule_fire_intent", "control_decision_token", "decision", "token",
 		"payload_digest", "authority_revision", "recipient_audience_hash",
@@ -488,6 +535,11 @@ func attachScheduledRunInput(req *mpv1.StartWorkflowRequest, prepared preparedSc
 	req.Input.Fields["template_digest"] = structpb.NewStringValue(templateDigest)
 	req.Input.Fields["task_template_json"] = structpb.NewStringValue(templateJSON)
 	req.Input.Fields["idempotency_key"] = structpb.NewStringValue(idempotencyKey)
+	// The org's ext.skills word is stated here and nowhere else (P2-ec-01-rel1). Absent while the switch is off,
+	// so the workflow input is what it was.
+	if prepared.extSkills != "" {
+		req.Input.Fields["ext_skills"] = structpb.NewStringValue(prepared.extSkills)
+	}
 	return nil
 }
 

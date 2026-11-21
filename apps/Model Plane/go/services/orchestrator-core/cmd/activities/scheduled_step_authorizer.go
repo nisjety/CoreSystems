@@ -47,6 +47,11 @@ type ScheduledStepExecutionIntent struct {
 	// Set only for a step under a stored-consent contract (WS20 S5).
 	ContractDigest    string
 	ContractExpiresAt string
+	// The org's `ext.skills` policy word the step runs under (P2-ec-01-rel1), stated by capability-core. It travels to
+	// execution-core on the request only: it is not in the Control decision's body or payload digest, and it is empty
+	// while capability-core's switch is off. It is omitted from the step's Temporal input while empty, so a switch-off
+	// step's input is byte for byte what it was.
+	ExtSkills string `json:",omitempty"`
 }
 
 func (i ScheduledStepExecutionIntent) hasContract() bool {

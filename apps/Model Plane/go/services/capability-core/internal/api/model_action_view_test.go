@@ -266,6 +266,89 @@ func TestModelActionViewStillRefusesZeroDataRetention(t *testing.T) {
 	}
 }
 
+// capabilityRowsStore answers GetForOrg from rows keyed by capability id, so one view can name two
+// capabilities that are in different states.
+type capabilityRowsStore struct {
+	fakeAvailabilityStore
+	rows map[string]*registry.CapabilityRow
+}
+
+func (s *capabilityRowsStore) GetForOrg(_ context.Context, capabilityID, organizationID string) (*registry.CapabilityRow, error) {
+	s.gotOrgID = organizationID
+	return s.rows[capabilityID], nil
+}
+
+// An unavailable row no longer ends the list: the available row is offered whichever order the
+// admission table lists them in, and a view that offers a row carries no reason code. With nothing
+// offered, the reason is the first unavailable row's in action-id order.
+func TestModelActionViewOffersAvailableRowsPastAnUnavailableOne(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	checkedAt := now
+
+	listing := *ticketsCreateAdmission()
+	listing.ActionID = "documents.list"
+	listing.ToolName = "documents.list"
+	listing.CapabilityID = "cap.tool.documents.list"
+	listing.ActionSchemaHash = "sha256:" + strings.Repeat("b", 64)
+
+	// The ticket capability is attested and available, or not attested at all; the listing
+	// capability is disabled by registry policy.
+	available := attestedTicketsStore(checkedAt).row
+	unattested := &registry.CapabilityRow{ID: ticketsCreateCapabilityID, OrgID: "global", Version: "1", Enabled: true, RiskLevel: models.RiskHigh}
+	disabled := &registry.CapabilityRow{ID: listing.CapabilityID, OrgID: "global", Version: "1", Enabled: false, RiskLevel: models.RiskHigh}
+
+	ticket := ticketsCreateAdmission()
+	tests := []struct {
+		name        string
+		order       []*registry.AgentActionAdmission
+		ticketRow   *registry.CapabilityRow
+		wantActions []string
+		wantReason  string
+	}{
+		{name: "available row first", order: []*registry.AgentActionAdmission{ticket, &listing}, ticketRow: available, wantActions: []string{ticketsCreateToolName}},
+		{name: "unavailable row first", order: []*registry.AgentActionAdmission{&listing, ticket}, ticketRow: available, wantActions: []string{ticketsCreateToolName}},
+		{name: "unattested row before a disabled one", order: []*registry.AgentActionAdmission{ticket, &listing}, ticketRow: unattested, wantReason: "health_not_attested"},
+		{name: "disabled row before an unattested one", order: []*registry.AgentActionAdmission{&listing, ticket}, ticketRow: unattested, wantReason: "capability_disabled"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			verifier, err := NewControlModelActionViewVerifier("control-key", base64.RawURLEncoding.EncodeToString(public))
+			if err != nil {
+				t.Fatal(err)
+			}
+			verifier.WithAgentActionAdmissions(&fakeAgentActionAdmissions{rows: test.order}, true)
+			store := &capabilityRowsStore{rows: map[string]*registry.CapabilityRow{
+				ticketsCreateCapabilityID: test.ticketRow,
+				listing.CapabilityID:      disabled,
+			}}
+			handler := (&CapabilitiesHandler{availabilityStore: store}).WithModelActionViewVerifier(verifier)
+			token := signControlModelActionViewV2(t, private, "control-key", validControlModelActionViewV2(now, map[string]string{
+				ticketsCreateToolName: ticketsCreateActionSchemaHash,
+				listing.ActionID:      listing.ActionSchemaHash,
+			}))
+			recorder := modelActionViewRecorder(t, handler, "run-1", token)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+			}
+			var view modelActionViewResponse
+			if err := json.NewDecoder(recorder.Body).Decode(&view); err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			for _, action := range view.Data.Actions {
+				names = append(names, action.Name)
+			}
+			if !slices.Equal(names, test.wantActions) || view.Data.ReasonCode != test.wantReason {
+				t.Fatalf("offered %v reason %q, want %v reason %q", names, view.Data.ReasonCode, test.wantActions, test.wantReason)
+			}
+		})
+	}
+}
+
 // The migration seeds the tickets.create row. The constants and the seeded row must describe the
 // same action, or the table would offer a different definition than the one Execution Core pins.
 func TestAgentActionAdmissionSeedCarriesTheTicketsCreateContract(t *testing.T) {

@@ -258,12 +258,7 @@ impl SandboxManagerClient {
         if lease_id.trim().is_empty() || label.trim().is_empty() {
             return Err(Status::invalid_argument("lease_id and label are required"));
         }
-        let message = SnapshotRequest {
-            lease_id: lease_id.to_owned(),
-            label: label.to_owned(),
-            backend_id: backend_id.to_owned(),
-            changed_files,
-        };
+        let message = snapshot_request(lease_id, label, backend_id, changed_files);
         let wire = Self::authorize(bearer, message)?;
         let outcome = tokio::time::timeout(RPC_TIMEOUT, self.client().snapshot_sandbox(wire))
             .await
@@ -360,6 +355,10 @@ impl SandboxManagerClient {
     /// Reads a thread's workspace through its own lease (WS22-S2). The thread RPCs accept
     /// the lease's owner, so this takes the user-bound sandbox bearer, never a service token.
     ///
+    /// `zdr` is the run's persistence-free flag (zero retention or a waiver). It is sent as the
+    /// request's own flag, and sandbox-manager refuses the call when it is set, whatever lease the
+    /// call names (F-f02-05). A caller never sends `true` for a run it may read the thread for.
+    ///
     /// # Errors
     /// `invalid_argument` when `lease_id` is blank; `deadline_exceeded` past
     /// [`RPC_TIMEOUT`]; otherwise sandbox-manager's own status.
@@ -368,6 +367,7 @@ impl SandboxManagerClient {
         bearer: &str,
         lease_id: &str,
         backend_id: &str,
+        zdr: bool,
     ) -> Result<GetThreadWorkspaceResponse, Status> {
         if lease_id.trim().is_empty() {
             return Err(Status::invalid_argument("lease_id is required"));
@@ -375,6 +375,7 @@ impl SandboxManagerClient {
         let message = GetThreadWorkspaceRequest {
             lease_id: lease_id.to_owned(),
             backend_id: backend_id.to_owned(),
+            zdr,
         };
         let wire = Self::authorize(bearer, message)?;
         let outcome = tokio::time::timeout(RPC_TIMEOUT, self.client().get_thread_workspace(wire))
@@ -387,6 +388,10 @@ impl SandboxManagerClient {
     /// on its base hash (WS22-S2). A conflicting path comes back in the response and is never
     /// overwritten.
     ///
+    /// `zdr` is the run's persistence-free flag, sent as the request's own flag: sandbox-manager
+    /// refuses a write that carries it, so nothing a zero-retention or waived run would keep is
+    /// ever committed (F-f02-05).
+    ///
     /// # Errors
     /// `invalid_argument` when `lease_id` is blank; `deadline_exceeded` past
     /// [`RPC_TIMEOUT`]; otherwise sandbox-manager's own status.
@@ -395,6 +400,7 @@ impl SandboxManagerClient {
         bearer: &str,
         lease_id: &str,
         backend_id: &str,
+        zdr: bool,
         changes: Vec<WorkspaceChangedFile>,
         deleted: Vec<ThreadDeletedPath>,
     ) -> Result<ApplyThreadWorkspaceChangesResponse, Status> {
@@ -406,6 +412,7 @@ impl SandboxManagerClient {
             backend_id: backend_id.to_owned(),
             changes,
             deleted,
+            zdr,
         };
         let wire = Self::authorize(bearer, message)?;
         let outcome = tokio::time::timeout(
@@ -777,6 +784,25 @@ impl SandboxManagerClient {
     }
 }
 
+/// The `SnapshotSandbox` request for one run's overlay. `deleted_paths` (the F-f05-16 tombstone list)
+/// stays empty: no caller records a deletion until F-f05-17 does. The request is then exactly the
+/// four fields it carried before the proto grew that list, and sandbox-manager honours a list only
+/// for a Space-scoped lease while `SANDBOX_MANAGER_OVERLAY_TOMBSTONES_ENABLED` is on.
+fn snapshot_request(
+    lease_id: &str,
+    label: &str,
+    backend_id: &str,
+    changed_files: Vec<WorkspaceChangedFile>,
+) -> SnapshotRequest {
+    SnapshotRequest {
+        lease_id: lease_id.to_owned(),
+        label: label.to_owned(),
+        backend_id: backend_id.to_owned(),
+        changed_files,
+        deleted_paths: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -922,14 +948,46 @@ mod tests {
     async fn thread_workspace_calls_refuse_a_blank_lease_before_the_wire() {
         let client = test_client();
         let read = client
-            .get_thread_workspace("bearer", " ", "backend-1")
+            .get_thread_workspace("bearer", " ", "backend-1", false)
             .await
             .expect_err("a blank lease is refused before any RPC");
         assert_eq!(read.code(), tonic::Code::InvalidArgument);
         let applied = client
-            .apply_thread_workspace_changes("bearer", "", "backend-1", Vec::new(), Vec::new())
+            .apply_thread_workspace_changes(
+                "bearer",
+                "",
+                "backend-1",
+                false,
+                Vec::new(),
+                Vec::new(),
+            )
             .await
             .expect_err("a blank lease is refused before any RPC");
         assert_eq!(applied.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn a_snapshot_sends_no_tombstones_until_a_caller_records_a_deletion() {
+        use prost::Message;
+
+        let changed = WorkspaceChangedFile {
+            path: "notes/a.txt".to_owned(),
+            content_hash: "sha256:aa".to_owned(),
+            size_bytes: 3,
+            base_hash: String::new(),
+        };
+        let request = snapshot_request("lease-1", "label", "backend-1", vec![changed]);
+        assert_eq!(request.changed_files.len(), 1);
+        assert!(
+            request.deleted_paths.is_empty(),
+            "a snapshot with no recorded deletion must carry no tombstones"
+        );
+        // An empty `deleted_paths` adds no bytes: with nothing changed, the request encodes to
+        // the three identity fields exactly as before F-f05-16 (switch-off wire behaviour).
+        let bare = snapshot_request("lease-1", "label", "backend-1", Vec::new());
+        assert_eq!(
+            bare.encode_to_vec(),
+            b"\x0a\x07lease-1\x12\x05label\x1a\x09backend-1".to_vec()
+        );
     }
 }

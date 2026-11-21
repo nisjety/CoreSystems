@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AcquireLeaseRequest, AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse, AppendProcessOutputRequest, AppendProcessOutputResponse, ApplyThreadWorkspaceChangesRequest, ApplyThreadWorkspaceChangesResponse, DeleteThreadWorkspaceRequest, DeleteThreadWorkspaceResponse, GetLeaseStatusRequest, GetLeaseStatusResponse, GetProcessRequest, GetProcessResponse, GetThreadWorkspaceRequest, GetThreadWorkspaceResponse, GetWorkspaceManifestRequest, GetWorkspaceManifestResponse, ListProcessesRequest, ListProcessesResponse, PromoteWorkspaceRequest, PromoteWorkspaceResponse, ReadProcessOutputRequest, ReadProcessOutputResponse, ReconcileProcessesRequest, ReconcileProcessesResponse, RegisterProcessRequest, RegisterProcessResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest, SandboxHealthResponse, SnapshotRequest, SnapshotResponse, UpdateProcessStateRequest, UpdateProcessStateResponse } from "./sandboxes_pbjs";
+import { AcquireLeaseRequest, AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse, AppendProcessOutputRequest, AppendProcessOutputResponse, ApplyThreadWorkspaceChangesRequest, ApplyThreadWorkspaceChangesResponse, DeleteThreadWorkspaceRequest, DeleteThreadWorkspaceResponse, EraseThreadWorkspaceForRetentionRequest, EraseThreadWorkspaceForRetentionResponse, GetLeaseStatusRequest, GetLeaseStatusResponse, GetProcessRequest, GetProcessResponse, GetThreadWorkspaceRequest, GetThreadWorkspaceResponse, GetWorkspaceManifestRequest, GetWorkspaceManifestResponse, ListProcessesRequest, ListProcessesResponse, PromoteWorkspaceRequest, PromoteWorkspaceResponse, ReadProcessOutputRequest, ReadProcessOutputResponse, ReconcileProcessesRequest, ReconcileProcessesResponse, RegisterProcessRequest, RegisterProcessResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest, SandboxHealthResponse, SnapshotRequest, SnapshotResponse, UpdateProcessStateRequest, UpdateProcessStateResponse } from "./sandboxes_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -226,6 +226,22 @@ export const SandboxManager = {
       name: "DeleteThreadWorkspace",
       I: DeleteThreadWorkspaceRequest,
       O: DeleteThreadWorkspaceResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Erase a deleted thread's rows and object-store prefix for the retention sweeper
+     * (F-f10-08, owner D-f10-7). Service-only: the caller must be a service principal
+     * holding sandbox:thread-workspace:erase:any, and a user is refused. org_id must be
+     * the verified organization, and owner_id only selects rows that must also match the
+     * org and the thread; a thread another owner shares is never erased. Gated by
+     * SANDBOX_MANAGER_SERVICE_THREAD_ERASE.
+     *
+     * @generated from rpc model_plane.v1.SandboxManager.EraseThreadWorkspaceForRetention
+     */
+    eraseThreadWorkspaceForRetention: {
+      name: "EraseThreadWorkspaceForRetention",
+      I: EraseThreadWorkspaceForRetentionRequest,
+      O: EraseThreadWorkspaceForRetentionResponse,
       kind: MethodKind.Unary,
     },
     /**

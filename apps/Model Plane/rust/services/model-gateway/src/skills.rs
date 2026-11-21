@@ -595,6 +595,17 @@ impl ExtSkills {
             _ => Self::None,
         }
     }
+
+    /// The policy word this setting travels as on `RunAgentRequest.ext_skills`, the inverse of
+    /// [`ExtSkills::from_token`].
+    #[must_use]
+    pub const fn as_token(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ApprovedOnly => "approved_only",
+            Self::Any => "any",
+        }
+    }
 }
 
 /// The `ext.skills` a turn of this org is held to. `None` when the switch is off, so nothing
@@ -616,6 +627,19 @@ pub fn held_ext_skills(
             .policy(org_id)
             .map_or(ExtSkills::None, |policy| ExtSkills::from_token(&policy.ext_skills)),
     )
+}
+
+/// The word a Do run's `RunAgentRequest.ext_skills` carries: [`held_ext_skills`] as its token, and
+/// the empty word (not enforced) when the switch is off. It is read the way the Ask loop's skills
+/// are, so the two loops cannot disagree; the word is a policy setting, never skill text.
+#[must_use]
+pub fn run_ext_skills_token(
+    enforced: bool,
+    cache: &crate::org_agent_policy::OrgPolicyCache,
+    org_id: &str,
+) -> String {
+    held_ext_skills(enforced, cache, org_id)
+        .map_or_else(String::new, |ext| ext.as_token().to_owned())
 }
 
 /// Whether `ext` lets this skill reach a turn. The tier is read from the provenance the cache
@@ -2117,6 +2141,25 @@ mod ext_skills_tests {
             ..Default::default()
         };
         assert!(ext_skills_permits(ExtSkills::None, &builtin));
+    }
+
+    #[test]
+    fn the_run_request_word_is_the_held_setting_and_empty_when_off() {
+        assert_eq!(run_ext_skills_token(false, &cache_with("o", Some("none")), "o"), "");
+        assert_eq!(run_ext_skills_token(true, &cache_with("o", Some("none")), "o"), "none");
+        assert_eq!(
+            run_ext_skills_token(true, &cache_with("o", Some("approved_only")), "o"),
+            "approved_only"
+        );
+        assert_eq!(run_ext_skills_token(true, &cache_with("o", Some("any")), "o"), "any");
+        // An org whose policy cannot be seen is held to none, never left unenforced.
+        assert_eq!(
+            run_ext_skills_token(true, &OrgPolicyCache::new(), "o"),
+            "none"
+        );
+        for ext in [ExtSkills::None, ExtSkills::ApprovedOnly, ExtSkills::Any] {
+            assert_eq!(ExtSkills::from_token(ext.as_token()), ext);
+        }
     }
 
     #[test]

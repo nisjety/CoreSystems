@@ -124,17 +124,21 @@ pub(crate) fn action_id_for(step_id: &str) -> String {
     }
 }
 
-/// The outcome the ledger records for a step that ended with `status`.
+/// The outcome the ledger records for a step that ended with `status`, or `None` while the step
+/// is still open: its reservation then stays open.
 ///
 /// A call the gate stopped before its body ran did not run. A call that finished
-/// reports its own result. Anything else, a timeout above all, is an outcome nobody
+/// reports its own result. A call held for its owner (`awaiting_input`, an MCP form) has not
+/// finished: its real result comes back with the owner's answer, so nothing is recorded for it
+/// yet (audit P2-ec-03-rel1). Anything else, a timeout above all, is an outcome nobody
 /// observed: the honest record is that it is unknown.
-pub(crate) fn final_outcome_for(status: &str) -> &'static str {
+pub(crate) fn final_outcome_for(status: &str) -> Option<&'static str> {
     match status {
-        "completed" => "completed",
-        "failed" => "failed",
-        "awaiting_approval" | "permission_denied" => "not_run",
-        _ => "unknown_outcome",
+        "completed" => Some("completed"),
+        "failed" => Some("failed"),
+        "awaiting_approval" | "permission_denied" => Some("not_run"),
+        "awaiting_input" => None,
+        _ => Some("unknown_outcome"),
     }
 }
 
@@ -689,14 +693,22 @@ mod tests {
 
     #[test]
     fn a_step_status_maps_to_the_honest_ledger_outcome() {
-        assert_eq!(final_outcome_for("completed"), "completed");
-        assert_eq!(final_outcome_for("failed"), "failed");
+        assert_eq!(final_outcome_for("completed"), Some("completed"));
+        assert_eq!(final_outcome_for("failed"), Some("failed"));
         // Stopped by a gate before its body ran: it did not run.
-        assert_eq!(final_outcome_for("awaiting_approval"), "not_run");
-        assert_eq!(final_outcome_for("permission_denied"), "not_run");
+        assert_eq!(final_outcome_for("awaiting_approval"), Some("not_run"));
+        assert_eq!(final_outcome_for("permission_denied"), Some("not_run"));
+        // Held for its owner: the call is not over, so its reservation stays open. It must not
+        // be closed as unknown here, or the held call's real result could never be recorded
+        // (audit P2-ec-03-rel1).
+        assert_eq!(final_outcome_for("awaiting_input"), None);
         // Nobody saw how these ended, so the record says so.
         for status in ["timed_out", "resource_exhausted", "anything_else", ""] {
-            assert_eq!(final_outcome_for(status), "unknown_outcome", "{status:?}");
+            assert_eq!(
+                final_outcome_for(status),
+                Some("unknown_outcome"),
+                "{status:?}"
+            );
         }
     }
 
@@ -710,8 +722,10 @@ mod tests {
             "timed_out",
             "unknown",
         ] {
-            assert!(mp_contracts::effect_ledger::is_final_outcome(final_outcome_for(status)));
+            let outcome = final_outcome_for(status).expect("a closed status records an outcome");
+            assert!(mp_contracts::effect_ledger::is_final_outcome(outcome));
         }
+        assert_eq!(final_outcome_for("awaiting_input"), None);
     }
 
     fn state(id: &str, status: &str, class: &str, digest: &str) -> pb::ToolActionState {

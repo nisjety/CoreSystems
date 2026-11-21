@@ -140,8 +140,9 @@ pub(crate) fn offered_defs(
 
 /// The run request the scheduled lane drives. It is always plan mode at the read-only rung,
 /// carries no caller tools and no subagents, carries the run's own zero-retention flag (a waived
-/// run is refused before it reaches here, so no waiver travels), and is bounded by the contract's
-/// rounds and the lane's ceiling. The subject is the owner the schedule acts for.
+/// run is refused before it reaches here, so no waiver travels), carries the org's `ext.skills`
+/// word the step states (P2-ec-01-rel1), and is bounded by the contract's rounds and the lane's
+/// ceiling. The subject is the owner the schedule acts for.
 pub(crate) fn run_request(
     step: &pb::ExecuteScheduledStepRequest,
     goal: &str,
@@ -163,6 +164,9 @@ pub(crate) fn run_request(
         autonomy_rung: pb::AutonomyRung::ReadOnly as i32,
         space_id: step.space_id.clone(),
         max_subagents: 0,
+        // The org's `ext.skills` word the step states. Empty when the step states none, which is
+        // "not enforced", exactly as a run without the field.
+        ext_skills: step.ext_skills.clone(),
         ..Default::default()
     }
 }
@@ -364,6 +368,52 @@ mod tests {
         contract.max_rounds = MAX_ROUNDS;
         let request = run_request(&step(), "goal", &contract, false);
         assert_eq!(request.max_rounds, MAX_ROUNDS);
+    }
+
+    /// P2-ec-01-rel1: the scheduled Do lane states the org's `ext.skills` word on the run it drives,
+    /// so the skills that run injects and recovers are filtered as a gateway Do run's are. A step
+    /// that states no word is "not enforced" and the run reads as it always did.
+    #[test]
+    fn run_request_states_the_orgs_ext_skills_word_from_the_step() {
+        use crate::skill_ext_policy::ExtSkills;
+
+        let contract = ScheduledContract::parse(CONTRACT).unwrap();
+        let skill = |name: &str, scope: &str| pb::AgentSkill {
+            id: format!("sk-{name}"),
+            name: name.to_owned(),
+            content: format!("how to {name}"),
+            enabled: true,
+            scope: scope.to_owned(),
+            ..Default::default()
+        };
+        let rows = || {
+            vec![
+                skill("org-row", "org"),
+                skill("user-row", "user"),
+                skill("space-row", "space"),
+            ]
+        };
+        let names = |skills: Vec<pb::AgentSkill>| -> Vec<String> {
+            skills.into_iter().map(|skill| skill.name).collect()
+        };
+
+        let mut approved = step();
+        approved.ext_skills = "approved_only".to_owned();
+        let request = run_request(&approved, "goal", &contract, false);
+        assert_eq!(request.ext_skills, "approved_only");
+        assert_eq!(
+            names(ExtSkills::from_token(&request.ext_skills).filter(rows())),
+            ["org-row"],
+            "only the org tier reaches a scheduled run the org narrows to approved_only"
+        );
+
+        let unstated = run_request(&step(), "goal", &contract, false);
+        assert_eq!(unstated.ext_skills, "");
+        assert_eq!(
+            names(ExtSkills::from_token(&unstated.ext_skills).filter(rows())).len(),
+            3,
+            "a step that states no word is not enforced"
+        );
     }
 
     #[test]

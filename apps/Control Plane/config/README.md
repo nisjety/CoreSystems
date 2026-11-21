@@ -397,6 +397,22 @@ identity and no waiver; session-core refuses it on any thread that holds a ZDR o
 waived run, so those threads are never judged. Nothing presents it until
 `MODEL_GATEWAY_GOAL_JUDGE_ENABLED` and `SESSION_CORE_THREAD_GOALS_ENABLED` are on.
 
+### Content-screening principal (dark)
+
+`execution-core-screening` is the credential execution-core's Do screening presents when
+the gateway's classifier runs on a tool result (F-f04-12, DEC-F04-3). It is its own principal
+so that execution-core's service credential is never reused for the classifier call, and it
+holds the one scope on the one audience. Its retention is `tenant`, as for the other
+background classifier lanes: the call is made for the run's organization only, and a
+zero-retention or waived run never presents it.
+
+| principal | audience | scopes | retention | key published to |
+| --- | --- | --- | --- | --- |
+| `execution-core-screening` | `inference-core` | `inference:invoke` | `tenant` | `EXECUTION_CORE_SCREENING_SERVICE_API_KEY` (execution-core) |
+
+Nothing presents it until `EXECUTION_SCREEN_INFERENCE_CREDENTIAL` is the literal `true` (and
+`CONTENT_SAFETY_SCREEN_RPC` is on).
+
 ### Organization binding (`tenancy`): the production principal model
 
 Auth Core's production loader refuses `allowAnyOrg: true` (a leaked workload

@@ -16,6 +16,10 @@ const SESSION_CORE_AUDIENCE: &str = "session-core";
 const TERMINALIZE_SCOPE: &str = "session:terminalize";
 const HEARTBEAT_SCOPE: &str = "session:heartbeat";
 const SCHEDULED_STEP_SCOPE: &str = "session:scheduled-step";
+/// The narrow scope with which execution-core names an MCP server as the origin of a run question
+/// (EP-4 S7, W3-EP-4-S7-a0). Auth Core refuses a scope outside the principal's allowlist, so until
+/// that scope is granted the mint fails and a form is cancelled instead of asked.
+const QUESTION_SERVICE_ORIGIN_SCOPE: &str = "orchestration:question:service-origin";
 const REFRESH_SKEW: Duration = Duration::from_secs(30);
 const MAX_TOKEN_TTL_SECONDS: u64 = 3600;
 const MAX_CACHE_ENTRIES: usize = 10_000;
@@ -39,6 +43,7 @@ enum TerminalScope {
     Terminalize,
     Heartbeat,
     ScheduledStep,
+    QuestionServiceOrigin,
 }
 
 impl TerminalScope {
@@ -47,6 +52,7 @@ impl TerminalScope {
             Self::Terminalize => TERMINALIZE_SCOPE,
             Self::Heartbeat => HEARTBEAT_SCOPE,
             Self::ScheduledStep => SCHEDULED_STEP_SCOPE,
+            Self::QuestionServiceOrigin => QUESTION_SERVICE_ORIGIN_SCOPE,
         }
     }
 
@@ -55,6 +61,7 @@ impl TerminalScope {
             Self::Terminalize => "managed-run terminalization",
             Self::Heartbeat => "managed-run heartbeat",
             Self::ScheduledStep => "scheduled-step claim and receipt",
+            Self::QuestionServiceOrigin => "MCP form question origin",
         }
     }
 }
@@ -97,6 +104,18 @@ pub(crate) trait ManagedRunTokenProvider: Send + Sync {
 
     async fn scheduled_step_token(&self, org_id: &str)
         -> Result<String, SessionTerminalTokenError>;
+
+    /// The credential with which a run's MCP server is named as the origin of a question (EP-4 S7).
+    /// A provider that does not hold it refuses, so a form is cancelled instead of asked.
+    async fn question_origin_token(
+        &self,
+        org_id: &str,
+    ) -> Result<String, SessionTerminalTokenError> {
+        let _ = org_id;
+        Err(SessionTerminalTokenError::Configuration(
+            "the MCP question origin credential",
+        ))
+    }
 }
 
 impl fmt::Debug for SessionTerminalTokenProvider {
@@ -176,6 +195,14 @@ impl SessionTerminalTokenProvider {
         org_id: &str,
     ) -> Result<String, SessionTerminalTokenError> {
         self.token(org_id, TerminalScope::ScheduledStep).await
+    }
+
+    pub(crate) async fn question_origin_token(
+        &self,
+        org_id: &str,
+    ) -> Result<String, SessionTerminalTokenError> {
+        self.token(org_id, TerminalScope::QuestionServiceOrigin)
+            .await
     }
 
     async fn token(
@@ -310,6 +337,13 @@ impl ManagedRunTokenProvider for SessionTerminalTokenProvider {
     ) -> Result<String, SessionTerminalTokenError> {
         SessionTerminalTokenProvider::scheduled_step_token(self, org_id).await
     }
+
+    async fn question_origin_token(
+        &self,
+        org_id: &str,
+    ) -> Result<String, SessionTerminalTokenError> {
+        SessionTerminalTokenProvider::question_origin_token(self, org_id).await
+    }
 }
 
 fn cache_key(org_id: &str, scope: TerminalScope) -> Result<CacheKey, SessionTerminalTokenError> {
@@ -408,6 +442,51 @@ mod tests {
             provider.scheduled_step_token("org-a").await.unwrap(),
             "scheduled-step-token"
         );
+    }
+
+    /// EP-4 S7: the credential that names an MCP server as a question's origin carries that one
+    /// narrow scope and no other, and a refusal by Auth Core is an error, never a wider token.
+    #[tokio::test]
+    async fn the_question_origin_credential_is_the_one_narrow_scope() {
+        let auth = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/session-core/internal-token"))
+            .and(header("x-service-id", "execution-core"))
+            .and(body_json(serde_json::json!({
+                "orgId": "org-a",
+                "scopes": ["orchestration:question:service-origin"],
+                "reason": "execution-core MCP form question origin"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "question-origin-token",
+                "expiresInSeconds": 300,
+                "audience": "session-core"
+            })))
+            .expect(1)
+            .mount(&auth)
+            .await;
+        let provider = SessionTerminalTokenProvider::new_for_test(
+            auth.uri(),
+            "execution-core",
+            "execution-secret",
+        );
+        assert_eq!(
+            provider.question_origin_token("org-a").await.unwrap(),
+            "question-origin-token"
+        );
+
+        let refusing = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/session-core/internal-token"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&refusing)
+            .await;
+        let provider = SessionTerminalTokenProvider::new_for_test(
+            refusing.uri(),
+            "execution-core",
+            "execution-secret",
+        );
+        assert!(provider.question_origin_token("org-a").await.is_err());
     }
 
     #[tokio::test]

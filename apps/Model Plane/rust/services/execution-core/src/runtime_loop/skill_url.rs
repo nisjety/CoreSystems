@@ -43,6 +43,7 @@ use mp_contracts::model_plane::v1::{self as pb, session_core_client::SessionCore
 use tonic::transport::Channel;
 
 use super::skill_budget::{self, fit_skill_blocks};
+use crate::skill_ext_policy::ExtSkills;
 
 /// Deployment switch. Only the literal `true` turns site-skill matching on.
 const SKILL_URL_MATCH_ENV: &str = "EXECUTION_CORE_SKILL_URL_MATCH";
@@ -337,12 +338,19 @@ async fn fetch_url_skills(
 
 /// The blocks to add after an observation of `page_url`: the matching skills this run has not
 /// been given yet, marked as given. Empty when none match.
-fn take_new_blocks(key: &RunKey, page_url: &str) -> Vec<String> {
+fn take_new_blocks(key: &RunKey, page_url: &str, ext: ExtSkills) -> Vec<String> {
     let mut map = cache().lock().unwrap_or_else(PoisonError::into_inner);
     let Some(entry) = map.get_mut(key) else {
         return Vec::new();
     };
-    let fresh: Vec<&pb::AgentSkill> = select_for_url(&entry.skills, page_url)
+    // The org's `ext.skills` is applied on every take, not at the fetch, so a cached list can never outlive it.
+    let permitted: Vec<pb::AgentSkill> = entry
+        .skills
+        .iter()
+        .filter(|skill| ext.permits(skill))
+        .cloned()
+        .collect();
+    let fresh: Vec<&pb::AgentSkill> = select_for_url(&permitted, page_url)
         .into_iter()
         .filter(|skill| !entry.injected.contains(&(skill.id.clone(), skill.version)))
         .collect();
@@ -368,6 +376,7 @@ pub(crate) async fn blocks_for_page(
     run_id: &str,
     page_url: &str,
     zdr: bool,
+    do_managed: bool,
     session_channel: Option<&Channel>,
     session_bearer: Option<&str>,
 ) -> Vec<String> {
@@ -375,6 +384,12 @@ pub(crate) async fn blocks_for_page(
     if zdr || org_id.trim().is_empty() || run_id.trim().is_empty() {
         return Vec::new();
     }
+    // The org's `ext.skills` the run started under (P2-ec-01). A Do-managed run whose entry is gone gives no
+    // guidance: this path is advisory, so failing closed here is simply silence.
+    let Ok(ext) = crate::skill_ext_policy::run_ext_skills().for_run(org_id, run_id, do_managed)
+    else {
+        return Vec::new();
+    };
     let key: RunKey = (org_id.to_owned(), run_id.to_owned());
     if !is_fresh(&key) {
         let (Some(channel), Some(bearer)) = (
@@ -388,7 +403,7 @@ pub(crate) async fn blocks_for_page(
         };
         store(key.clone(), skills);
     }
-    take_new_blocks(&key, page_url)
+    take_new_blocks(&key, page_url, ext)
 }
 
 /// `rendered` with the site-skill guidance for `page_url` after it, or `rendered` unchanged.
@@ -399,6 +414,7 @@ pub(crate) async fn annotate_observation(
     run_id: &str,
     page_url: &str,
     zdr: bool,
+    do_managed: bool,
     session_channel: Option<&Channel>,
     session_bearer: Option<&str>,
 ) -> String {
@@ -407,6 +423,7 @@ pub(crate) async fn annotate_observation(
         run_id,
         page_url,
         zdr,
+        do_managed,
         session_channel,
         session_bearer,
     )
@@ -415,4 +432,82 @@ pub(crate) async fn annotate_observation(
         return rendered;
     }
     annotate(&rendered, &blocks)
+}
+
+#[cfg(test)]
+mod ext_skills_tests {
+    use super::*;
+
+    fn site_skill(name: &str, scope: &str) -> pb::AgentSkill {
+        pb::AgentSkill {
+            id: format!("sk-{name}"),
+            name: name.to_owned(),
+            content: format!("guidance of {name}"),
+            enabled: true,
+            scope: scope.to_owned(),
+            url_patterns: vec!["example.com".to_owned()],
+            ..Default::default()
+        }
+    }
+
+    /// The blocks a run's observation of example.com carries under the policy word the run started under
+    /// (`None` = the run has no entry), with a fresh cache so no channel is read.
+    async fn blocks(run: &str, word: Option<&str>, do_managed: bool) -> Vec<String> {
+        let key: RunKey = ("org-ext".to_owned(), run.to_owned());
+        store(
+            key,
+            vec![
+                site_skill("OrgSite", "org"),
+                site_skill("MySite", "user"),
+                site_skill("RoomSite", "space"),
+            ],
+        );
+        let _guard = word
+            .map(|word| crate::skill_ext_policy::run_ext_skills().register("org-ext", run, word));
+        blocks_for_page(
+            "org-ext",
+            run,
+            "https://example.com/a",
+            false,
+            do_managed,
+            None,
+            None,
+        )
+        .await
+    }
+
+    fn has(blocks: &[String], name: &str) -> bool {
+        blocks.iter().any(|block| block.contains(name))
+    }
+
+    #[tokio::test]
+    async fn site_guidance_follows_the_orgs_ext_skills() {
+        let none = blocks("run-site-none", Some("none"), true).await;
+        assert!(none.is_empty(), "none gives no site guidance: {none:?}");
+
+        let approved = blocks("run-site-approved", Some("approved_only"), true).await;
+        assert!(has(&approved, "OrgSite"));
+        assert!(
+            !has(&approved, "MySite") && !has(&approved, "RoomSite"),
+            "{approved:?}"
+        );
+
+        // `any` and the unenforced empty word narrow nothing: all three rows are candidates, and only the page's
+        // own cap (`MAX_URL_SKILLS`) keeps the guidance to two blocks, a person's and a Space's rows included.
+        for word in ["any", ""] {
+            let all = blocks(&format!("run-site-{word}"), Some(word), true).await;
+            assert_eq!(all.len(), MAX_URL_SKILLS, "{word:?}: {all:?}");
+            assert!(
+                has(&all, "MySite") || has(&all, "RoomSite"),
+                "{word:?} lets a non-org row through: {all:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_do_run_with_no_policy_entry_gets_no_site_guidance() {
+        assert!(blocks("run-site-lost", None, true).await.is_empty());
+        // A call that is no Do run reads as it always did.
+        assert!(!blocks("run-site-single-step", None, false).await.is_empty());
+    }
 }

@@ -109,6 +109,7 @@ func scheduledStepIntent(in ScheduledRunInput, i int) activities.ScheduledStepEx
 		IdempotencyKey:    fmt.Sprintf("%s:step:%d", in.IdempotencyKey, i),
 		ContractDigest:    in.ContractDigest,
 		ContractExpiresAt: in.ContractExpiresAt,
+		ExtSkills:         in.ExtSkills,
 	}
 }
 

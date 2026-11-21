@@ -34,7 +34,10 @@ use mp_contracts::page_reader;
 use mp_contracts::result_query::{
     apply_text_query, describe_text, HandleQuery, TextRange, MAX_TEXT_READ_CHARS,
 };
+use mp_contracts::tool_class::SideEffectClass;
 use serde_json::{json, Value};
+
+use crate::capability_policy::ToolClassGate;
 
 /// Environment switch for run-scoped handles in execution-core. Off keeps
 /// today's inline truncation.
@@ -71,10 +74,17 @@ pub fn parse_enabled(raw: Option<&str>) -> bool {
 
 /// The store for one run, or `None` when handles do not apply to it: the switch
 /// is off, or the run is zero-retention or waived. `None` means every result of
-/// the run stays inline, which is today's behaviour.
+/// the run stays inline, which is today's behaviour. The caller reads the switch
+/// (`enabled`) and asks the run's capability policy before it asks for a store
+/// (F-f02-12).
 #[must_use]
-pub fn for_run(zdr: bool, waived: bool, park_over_chars: usize) -> Option<Arc<ResultHandles>> {
-    handles_apply(enabled(), zdr, waived).then(|| Arc::new(ResultHandles::new(park_over_chars)))
+pub fn for_run(
+    switch_on: bool,
+    zdr: bool,
+    waived: bool,
+    park_over_chars: usize,
+) -> Option<Arc<ResultHandles>> {
+    handles_apply(switch_on, zdr, waived).then(|| Arc::new(ResultHandles::new(park_over_chars)))
 }
 
 /// Whether a run gets a store, given the switch and the run's posture. Zero-retention
@@ -87,14 +97,42 @@ pub fn handles_apply(enabled: bool, zdr: bool, waived: bool) -> bool {
 /// Whether a tool's output may be parked. Only read-class results are: a
 /// write's output is the record of what it did, and the tools below either
 /// already have a bounded output of their own or are the read-back itself.
+///
+/// `declared` is the class the run's registry answer gave the tool, where the
+/// tool class gate enforces it (see [`declared_park_class`]). A declared read
+/// parks whatever its name, and any other declared class stays inline, an MCP
+/// tool included. Without an answer the name classifier decides, and a name it
+/// calls risky never parks, so a missing answer cannot loosen it (F-f02-12).
 #[must_use]
-pub fn is_parkable_tool(tool_name: &str) -> bool {
-    tool_name != RESULT_QUERY_TOOL
+pub fn is_parkable_tool(tool_name: &str, declared: Option<SideEffectClass>) -> bool {
+    let structural = tool_name != RESULT_QUERY_TOOL
         && tool_name != crate::subagent::research_fan_out::RESEARCH_TOOL_NAME
         && !crate::subagent::is_subagent_tool(tool_name)
-        && !crate::process_tools::is_process_tool(tool_name)
-        && !crate::permission::is_risky_call(tool_name, "")
-        && !crate::permission::is_restricted_context_write(tool_name)
+        && !crate::process_tools::is_process_tool(tool_name);
+    if !structural || crate::permission::is_restricted_context_write(tool_name) {
+        return false;
+    }
+    match declared {
+        Some(class) => class == SideEffectClass::Read,
+        None => !crate::permission::is_risky_call(tool_name, ""),
+    }
+}
+
+/// The class a result's parking follows (F-f02-12): the class the run's registry
+/// answer declared for the tool, read only where the tool class gate enforces the
+/// declared class. Every other gate state, and a tool the registry did not answer
+/// for, keep the name classifier, so this is `None` for them.
+#[must_use]
+pub fn declared_park_class(
+    gate: ToolClassGate,
+    org_id: &str,
+    run_id: &str,
+    tool_name: &str,
+) -> Option<SideEffectClass> {
+    if gate != ToolClassGate::Enforce {
+        return None;
+    }
+    crate::permission::run_view(org_id, run_id, tool_name).map(|view| view.class())
 }
 
 /// The offered definition of `result_query`.
@@ -131,6 +169,9 @@ struct Held {
     body: String,
     /// Whether this is a fetched page the reader may read by section and by search.
     page: bool,
+    /// The GDPR category of the tool that produced the result, as it was classified when the result was
+    /// parked. A read of the result is audited under this category, not under the read tool's own (F-f02-11).
+    category: &'static str,
 }
 
 impl Held {
@@ -193,8 +234,9 @@ impl ResultHandles {
         run_id: &str,
         label: &str,
         body: &str,
+        category: &'static str,
     ) -> Result<String, ParkRefused> {
-        self.hold(org_id, run_id, label, body, false)
+        self.hold(org_id, run_id, label, body, false, category)
     }
 
     /// Hold a fetched page for the reader (EP-2-S10). The rules are [`Self::park`]'s; the page is also
@@ -208,8 +250,9 @@ impl ResultHandles {
         run_id: &str,
         label: &str,
         body: &str,
+        category: &'static str,
     ) -> Result<String, ParkRefused> {
-        self.hold(org_id, run_id, label, body, true)
+        self.hold(org_id, run_id, label, body, true, category)
     }
 
     fn hold(
@@ -219,6 +262,7 @@ impl ResultHandles {
         label: &str,
         body: &str,
         page: bool,
+        category: &'static str,
     ) -> Result<String, ParkRefused> {
         if body.chars().count() <= self.park_over_chars {
             return Err(ParkRefused::BelowThreshold);
@@ -255,9 +299,28 @@ impl ResultHandles {
                 label: label.to_owned(),
                 body: body.to_owned(),
                 page,
+                category,
             },
         );
         Ok(handle_id)
+    }
+
+    /// The category a held result was parked under, for the audit of a read of it (F-f02-11). `None` when
+    /// this run does not hold the handle, or it has expired.
+    #[must_use]
+    pub fn category_of(&self, org_id: &str, run_id: &str, handle_id: &str) -> Option<&'static str> {
+        let now = Instant::now();
+        let state = self.lock();
+        let key = Key {
+            org_id: org_id.to_owned(),
+            run_id: run_id.to_owned(),
+            handle_id: handle_id.to_owned(),
+        };
+        state
+            .entries
+            .get(&key)
+            .filter(|held| now.duration_since(held.stored_at) < self.ttl)
+            .map(|held| held.category)
     }
 
     /// Read a window of a held result. The label is returned with every read.
@@ -466,7 +529,7 @@ pub fn inline_text<'a>(tool_name: &str, output: &'a str) -> Cow<'a, str> {
 
 /// Hold a read-class result for the model and return what the model reads in its place, or `None` when
 /// it stays inline. A page the reader holds is parked as a page; any other result is parked as WS25-S5
-/// parks it.
+/// parks it. `category` is the result's GDPR category, which a later read of the handle is audited under.
 #[must_use]
 pub fn hold_for_model(
     store: &ResultHandles,
@@ -475,8 +538,17 @@ pub fn hold_for_model(
     tool_name: &str,
     label: &str,
     body: &str,
+    category: &'static str,
 ) -> Option<String> {
-    hold_as(reader_applies(tool_name), store, org_id, run_id, label, body)
+    hold_as(
+        reader_applies(tool_name),
+        store,
+        org_id,
+        run_id,
+        label,
+        body,
+        category,
+    )
 }
 
 fn hold_as(
@@ -486,12 +558,15 @@ fn hold_as(
     run_id: &str,
     label: &str,
     body: &str,
+    category: &'static str,
 ) -> Option<String> {
     if page {
-        let page_ref = store.park_page(org_id, run_id, label, body).ok()?;
+        let page_ref = store
+            .park_page(org_id, run_id, label, body, category)
+            .ok()?;
         return Some(page_envelope(&page_ref, label, body));
     }
-    let handle_id = store.park(org_id, run_id, label, body).ok()?;
+    let handle_id = store.park(org_id, run_id, label, body, category).ok()?;
     Some(handle_envelope(&handle_id, label, body))
 }
 
@@ -651,10 +726,7 @@ pub fn execute_result_query(
 ) -> Result<String, String> {
     let input: Value = serde_json::from_str(tool_input)
         .map_err(|error| format!("invalid {RESULT_QUERY_TOOL} input: {error}"))?;
-    let handle_id = input
-        .get("handle_id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
+    let handle_id = result_query_handle_id(&input)
         .ok_or_else(|| format!("{RESULT_QUERY_TOOL} requires a 'handle_id'"))?;
     let range = match input.get("range") {
         None | Some(Value::Null) => None,
@@ -686,6 +758,47 @@ pub fn execute_result_query(
         .map(|value| value.to_string())
 }
 
+/// The handle a `result_query` input names, when it names a non-empty one.
+fn result_query_handle_id(input: &Value) -> Option<&str> {
+    input
+        .get("handle_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+}
+
+/// The category a read of a held result is audited under (F-f02-11): the category its handle was parked
+/// under, so a read of a customer's result is recorded as customer data and not as public. `None` when the
+/// call names no handle this run holds, or the handle has expired, and the audit then keeps the read tool's
+/// own category. Only a successful read is audited this way, and the content never enters the audit.
+#[must_use]
+pub fn held_category_of_read(
+    handles: Option<&ResultHandles>,
+    org_id: &str,
+    run_id: &str,
+    tool_name: &str,
+    tool_input: &str,
+) -> Option<&'static str> {
+    let handle_id = held_handle_of_read(tool_name, tool_input)?;
+    handles?.category_of(org_id, run_id, &handle_id)
+}
+
+/// The handle a read names, read the way that read reads it: `handle_id` for `result_query`, and the page
+/// `ref` for a reader call. `None` for any other tool.
+fn held_handle_of_read(tool_name: &str, tool_input: &str) -> Option<String> {
+    let input: Value = serde_json::from_str(tool_input).ok()?;
+    let handle = if tool_name == RESULT_QUERY_TOOL {
+        result_query_handle_id(&input)?
+    } else if matches!(
+        tool_name,
+        crate::web_tools::READ_PAGE_TOOL | crate::web_tools::FIND_IN_PAGE_TOOL
+    ) {
+        page_ref_of(&input, tool_name).ok()?
+    } else {
+        return None;
+    };
+    Some(handle.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -709,7 +822,9 @@ mod tests {
     fn an_oversized_result_is_parked_and_read_back_in_three_slices() {
         let store = ResultHandles::new(100);
         let text = body(250);
-        let handle = store.park("org", "run", LABEL, &text).expect("parked");
+        let handle = store
+            .park("org", "run", LABEL, &text, "public_non_personal")
+            .expect("parked");
         let mut rebuilt = String::new();
         for offset in [0, 100, 200] {
             let slice = store
@@ -725,7 +840,7 @@ mod tests {
     fn every_slice_repeats_the_label_the_result_was_recorded_under() {
         let store = ResultHandles::new(10);
         let handle = store
-            .park("org", "run", LABEL, &body(40))
+            .park("org", "run", LABEL, &body(40), "public_non_personal")
             .expect("parked");
         for offset in [0, 20] {
             let slice = store
@@ -739,7 +854,7 @@ mod tests {
     fn a_result_within_the_cap_is_not_parked() {
         let store = ResultHandles::new(100);
         assert_eq!(
-            store.park("org", "run", LABEL, &body(100)),
+            store.park("org", "run", LABEL, &body(100), "public_non_personal"),
             Err(ParkRefused::BelowThreshold)
         );
     }
@@ -748,7 +863,7 @@ mod tests {
     fn a_result_over_one_handle_stays_inline() {
         let store = ResultHandles::with_limits(10, 50, MAX_RUN_BYTES, HANDLE_TTL);
         assert_eq!(
-            store.park("org", "run", "", &body(60)),
+            store.park("org", "run", "", &body(60), "public_non_personal"),
             Err(ParkRefused::TooLarge)
         );
     }
@@ -756,9 +871,11 @@ mod tests {
     #[test]
     fn a_run_past_its_total_falls_back_inline_for_the_next_result() {
         let store = ResultHandles::with_limits(10, MAX_HANDLE_BYTES, 100, HANDLE_TTL);
-        store.park("org", "run", "", &body(60)).expect("first fits");
+        store
+            .park("org", "run", "", &body(60), "public_non_personal")
+            .expect("first fits");
         assert_eq!(
-            store.park("org", "run", "", &body(60)),
+            store.park("org", "run", "", &body(60), "public_non_personal"),
             Err(ParkRefused::RunFull)
         );
     }
@@ -766,7 +883,9 @@ mod tests {
     #[test]
     fn a_handle_is_unreadable_from_another_run_or_another_org() {
         let store = ResultHandles::new(10);
-        let handle = store.park("org", "run_a", LABEL, &body(40)).expect("parked");
+        let handle = store
+            .park("org", "run_a", LABEL, &body(40), "public_non_personal")
+            .expect("parked");
         let query = window(0, 10);
         assert!(store.read("org", "run_b", &handle, &query).is_err());
         assert!(store.read("other-org", "run_a", &handle, &query).is_err());
@@ -776,8 +895,12 @@ mod tests {
     #[test]
     fn releasing_a_run_drops_its_results_and_leaves_others() {
         let store = ResultHandles::new(10);
-        let mine = store.park("org", "run_a", "", &body(40)).expect("parked");
-        let theirs = store.park("org", "run_b", "", &body(40)).expect("parked");
+        let mine = store
+            .park("org", "run_a", "", &body(40), "public_non_personal")
+            .expect("parked");
+        let theirs = store
+            .park("org", "run_b", "", &body(40), "public_non_personal")
+            .expect("parked");
         store.release_run("org", "run_a");
         assert!(store.read("org", "run_a", &mine, &window(0, 5)).is_err());
         assert!(store.read("org", "run_b", &theirs, &window(0, 5)).is_ok());
@@ -786,7 +909,9 @@ mod tests {
     #[test]
     fn an_expired_handle_does_not_resolve() {
         let store = ResultHandles::with_limits(10, MAX_HANDLE_BYTES, MAX_RUN_BYTES, Duration::ZERO);
-        let handle = store.park("org", "run", "", &body(40)).expect("parked");
+        let handle = store
+            .park("org", "run", "", &body(40), "public_non_personal")
+            .expect("parked");
         assert!(store.read("org", "run", &handle, &window(0, 5)).is_err());
     }
 
@@ -824,10 +949,116 @@ mod tests {
 
     #[test]
     fn result_query_is_never_parked_and_a_web_read_is() {
-        assert!(!is_parkable_tool(RESULT_QUERY_TOOL));
-        assert!(!is_parkable_tool("shell"));
-        assert!(!is_parkable_tool("execute_provider_action"));
-        assert!(is_parkable_tool("web_fetch"));
+        assert!(!is_parkable_tool(RESULT_QUERY_TOOL, None));
+        assert!(!is_parkable_tool(
+            RESULT_QUERY_TOOL,
+            Some(SideEffectClass::Read)
+        ));
+        assert!(!is_parkable_tool("shell", None));
+        assert!(!is_parkable_tool("execute_provider_action", None));
+        assert!(is_parkable_tool("web_fetch", None));
+    }
+
+    /// F-f02-12: no MCP result parked, because the name classifier calls every `mcp__` name risky. A read the
+    /// registry declared parks now; a write, a sandboxed compute or an unknown class does not, and a missing
+    /// answer keeps the name classifier's refusal.
+    #[test]
+    fn a_read_declared_mcp_tool_parks_and_a_write_or_unknown_one_does_not() {
+        assert!(
+            !is_parkable_tool("mcp__srv__lookup", None),
+            "no answer: the name classifier refuses it"
+        );
+        assert!(is_parkable_tool(
+            "mcp__srv__lookup",
+            Some(SideEffectClass::Read)
+        ));
+        for class in [
+            SideEffectClass::SandboxCompute,
+            SideEffectClass::ContextWrite,
+            SideEffectClass::ExternalWrite,
+            SideEffectClass::Destructive,
+            SideEffectClass::OwnerEffect,
+            SideEffectClass::Unclassified,
+        ] {
+            assert!(
+                !is_parkable_tool("mcp__srv__lookup", Some(class)),
+                "{class:?} must stay inline"
+            );
+        }
+        assert!(!is_parkable_tool(
+            "mcp__srv__lookup",
+            Some(SideEffectClass::from_wire("bogus"))
+        ));
+    }
+
+    /// The declared class decides a built-in too, a restricted-context write never parks even when declared
+    /// read, and the name classifier still refuses a write by name when there is no answer.
+    #[test]
+    fn a_declared_class_decides_a_built_in_and_a_restricted_write_never_parks() {
+        assert!(!is_parkable_tool(
+            "save_memory",
+            Some(SideEffectClass::Read)
+        ));
+        assert!(!is_parkable_tool("tickets.create", None));
+        assert!(!is_parkable_tool(
+            "shell",
+            Some(SideEffectClass::Destructive)
+        ));
+    }
+
+    /// F-f02-12: a missing view never loosens. The gate decides whether a declared class is read at all: enforce
+    /// reads it, and off and shadow keep the name classifier.
+    #[test]
+    fn a_declared_class_is_read_only_where_the_gate_enforces_it() {
+        use crate::permission::{record_run_views, ToolClassView};
+        let (org, run, tool) = ("org-park-gate", "run-park-gate", "mcp__park__lookup");
+        let enforce = || declared_park_class(ToolClassGate::Enforce, org, run, tool);
+        assert_eq!(enforce(), None, "no view was recorded for this run");
+        assert!(!is_parkable_tool(tool, enforce()));
+        record_run_views(
+            org,
+            run,
+            [(
+                tool.to_owned(),
+                ToolClassView::from_registry(tool, "read", "none", "d"),
+            )],
+        );
+        assert_eq!(enforce(), Some(SideEffectClass::Read));
+        assert!(is_parkable_tool(tool, enforce()));
+        assert_eq!(
+            declared_park_class(ToolClassGate::Shadow, org, run, tool),
+            None
+        );
+        assert_eq!(
+            declared_park_class(ToolClassGate::Off, org, run, tool),
+            None
+        );
+        assert!(!is_parkable_tool(
+            tool,
+            declared_park_class(ToolClassGate::Shadow, org, run, tool)
+        ));
+        // A tool the registry answered for with a write stays inline under enforce, whatever its name says.
+        let pay = "mcp__park__pay";
+        record_run_views(
+            org,
+            run,
+            [(
+                pay.to_owned(),
+                ToolClassView::from_registry(pay, "external_write", "none", "d"),
+            )],
+        );
+        assert!(!is_parkable_tool(
+            pay,
+            declared_park_class(ToolClassGate::Enforce, org, run, pay)
+        ));
+    }
+
+    #[test]
+    fn a_store_is_made_only_for_a_switched_on_run_that_keeps_content() {
+        assert!(for_run(true, false, false, 10).is_some());
+        assert!(for_run(false, false, false, 10).is_none());
+        assert!(for_run(true, true, false, 10).is_none());
+        assert!(for_run(true, false, true, 10).is_none());
     }
 
     #[test]
@@ -872,7 +1103,9 @@ mod tests {
     fn a_held_page_reads_back_by_outline_section_and_search() {
         let store = ResultHandles::new(10);
         let text = page();
-        let page_ref = store.park_page("org", "run", LABEL, &text).expect("parked");
+        let page_ref = store
+            .park_page("org", "run", LABEL, &text, "public_non_personal")
+            .expect("parked");
         let envelope: Value =
             serde_json::from_str(&page_envelope(&page_ref, LABEL, &text)).expect("json");
         assert_eq!(envelope["ref"], json!(page_ref));
@@ -900,12 +1133,16 @@ mod tests {
     fn a_reader_refuses_a_result_that_is_not_a_page_and_an_unknown_section() {
         let store = ResultHandles::new(10);
         let text = page();
-        let other = store.park("org", "run", LABEL, &text).expect("parked");
+        let other = store
+            .park("org", "run", LABEL, &text, "public_non_personal")
+            .expect("parked");
         let refused = store
             .read_page("org", "run", &other, "", 0)
             .expect_err("not a page");
         assert!(refused.contains("not a fetched page"), "{refused}");
-        let page_ref = store.park_page("org", "run", LABEL, &text).expect("parked");
+        let page_ref = store
+            .park_page("org", "run", LABEL, &text, "public_non_personal")
+            .expect("parked");
         let unknown = store
             .read_page("org", "run", &page_ref, "s9", 0)
             .expect_err("no such section");
@@ -917,7 +1154,7 @@ mod tests {
         let store = ResultHandles::new(10);
         let text = page();
         let page_ref = store
-            .park_page("org", "run_a", LABEL, &text)
+            .park_page("org", "run_a", LABEL, &text, "public_non_personal")
             .expect("parked");
         assert!(store.read_page("org", "run_b", &page_ref, "", 0).is_err());
         assert!(store
@@ -926,7 +1163,9 @@ mod tests {
         assert!(store.read_page("org", "run_a", &page_ref, "", 0).is_ok());
         let expired =
             ResultHandles::with_limits(10, MAX_HANDLE_BYTES, MAX_RUN_BYTES, Duration::ZERO);
-        let gone = expired.park_page("org", "run", LABEL, &text).expect("parked");
+        let gone = expired
+            .park_page("org", "run", LABEL, &text, "public_non_personal")
+            .expect("parked");
         assert!(expired.read_page("org", "run", &gone, "", 0).is_err());
     }
 
@@ -934,7 +1173,7 @@ mod tests {
     fn find_in_page_says_so_when_no_passage_shares_a_word_with_the_query() {
         let store = ResultHandles::new(10);
         let page_ref = store
-            .park_page("org", "run", LABEL, &page())
+            .park_page("org", "run", LABEL, &page(), "public_non_personal")
             .expect("parked");
         let none: Value = serde_json::from_str(
             &store
@@ -972,12 +1211,32 @@ mod tests {
     #[test]
     fn a_page_is_held_for_reading_only_above_the_threshold_and_only_as_a_page() {
         let large = ResultHandles::new(10_000);
-        assert!(large.park_page("org", "run", LABEL, &page()).is_err());
+        assert!(large
+            .park_page("org", "run", LABEL, &page(), "public_non_personal")
+            .is_err());
         let small = ResultHandles::new(10);
-        let held = hold_as(true, &small, "org", "run", LABEL, &page()).expect("held");
+        let held = hold_as(
+            true,
+            &small,
+            "org",
+            "run",
+            LABEL,
+            &page(),
+            "public_non_personal",
+        )
+        .expect("held");
         let reader: Value = serde_json::from_str(&held).expect("json");
         assert!(reader["outline"].is_array());
-        let plain_text = hold_as(false, &small, "org", "run", LABEL, &page()).expect("held");
+        let plain_text = hold_as(
+            false,
+            &small,
+            "org",
+            "run",
+            LABEL,
+            &page(),
+            "public_non_personal",
+        )
+        .expect("held");
         let plain: Value = serde_json::from_str(&plain_text).expect("json");
         let handle = plain["handle_id"].as_str().expect("handle").to_owned();
         assert!(small.read_page("org", "run", &handle, "", 0).is_err());
@@ -993,5 +1252,95 @@ mod tests {
         assert!(no_query.contains("'query'"), "{no_query}");
         let malformed = read_page_call("not json", "org", "run", &store).expect_err("malformed");
         assert!(malformed.starts_with("invalid read_page input"), "{malformed}");
+    }
+
+    #[test]
+    fn a_parked_result_keeps_the_category_it_was_parked_under() {
+        let store = ResultHandles::new(10);
+        let handle = store
+            .park("org", "run_a", LABEL, &body(40), "customer_private")
+            .expect("parked");
+        assert_eq!(
+            store.category_of("org", "run_a", &handle),
+            Some("customer_private")
+        );
+        assert_eq!(store.category_of("org", "run_b", &handle), None);
+        assert_eq!(store.category_of("other-org", "run_a", &handle), None);
+        assert_eq!(store.category_of("org", "run_a", "res_missing"), None);
+        let expired =
+            ResultHandles::with_limits(10, MAX_HANDLE_BYTES, MAX_RUN_BYTES, Duration::ZERO);
+        let gone = expired
+            .park("org", "run", LABEL, &body(40), "customer_private")
+            .expect("parked");
+        assert_eq!(expired.category_of("org", "run", &gone), None);
+    }
+
+    #[test]
+    fn a_read_back_result_is_audited_under_the_category_it_was_parked_under() {
+        let store = ResultHandles::new(10);
+        let handle = store
+            .park("org", "run", LABEL, &body(40), "customer_private")
+            .expect("parked");
+        let input = json!({"handle_id": handle, "range": {"offset": 0, "length": 5}}).to_string();
+        assert!(execute_result_query(&input, "org", "run", Some(&store)).is_ok());
+        assert_eq!(
+            held_category_of_read(Some(&store), "org", "run", RESULT_QUERY_TOOL, &input),
+            Some("customer_private")
+        );
+        // Another run, another org, no store, an unreadable input and no handle keep the read tool's own category.
+        assert_eq!(
+            held_category_of_read(Some(&store), "org", "run_b", RESULT_QUERY_TOOL, &input),
+            None
+        );
+        assert_eq!(
+            held_category_of_read(Some(&store), "other-org", "run", RESULT_QUERY_TOOL, &input),
+            None
+        );
+        assert_eq!(
+            held_category_of_read(None, "org", "run", RESULT_QUERY_TOOL, &input),
+            None
+        );
+        assert_eq!(
+            held_category_of_read(Some(&store), "org", "run", RESULT_QUERY_TOOL, "not json"),
+            None
+        );
+        assert_eq!(
+            held_category_of_read(Some(&store), "org", "run", RESULT_QUERY_TOOL, "{}"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_page_read_is_audited_under_the_category_its_page_was_parked_under() {
+        let store = ResultHandles::new(10);
+        let page_ref = store
+            .park_page("org", "run", LABEL, &page(), "personal")
+            .expect("parked");
+        let input = json!({ "ref": page_ref }).to_string();
+        assert_eq!(
+            held_category_of_read(
+                Some(&store),
+                "org",
+                "run",
+                crate::web_tools::READ_PAGE_TOOL,
+                &input
+            ),
+            Some("personal")
+        );
+        assert_eq!(
+            held_category_of_read(
+                Some(&store),
+                "org",
+                "run",
+                crate::web_tools::FIND_IN_PAGE_TOOL,
+                &input
+            ),
+            Some("personal")
+        );
+        // Only a reader call or result_query is read this way: any other tool keeps its own category.
+        assert_eq!(
+            held_category_of_read(Some(&store), "org", "run", "web_fetch", &input),
+            None
+        );
     }
 }

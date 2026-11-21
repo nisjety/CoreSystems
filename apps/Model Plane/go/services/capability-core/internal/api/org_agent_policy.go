@@ -439,6 +439,42 @@ func (h *OrgAgentPolicyHandler) load(ctx context.Context, orgID string) (orgAgen
 	return row, nil
 }
 
+// ExtSkillsWord is the `ext.skills` word the org's policy states, which a scheduled run carries on its
+// ExecuteScheduledStepRequest (P2-ec-01-rel1). It reads the key the way the gateway reads it
+// (mp-contracts token_of): the schema default when the document omits the key, and the schema's
+// fail-closed word for a value this build cannot read, so an unreadable value can only narrow the org.
+// A failed read is returned as an error, never guessed at.
+func (h *OrgAgentPolicyHandler) ExtSkillsWord(ctx context.Context, orgID string) (string, error) {
+	row, err := h.load(ctx, orgID)
+	if err != nil {
+		return "", err
+	}
+	var def orgAgentSetting
+	found := false
+	for _, candidate := range orgAgentPolicySettings {
+		if candidate.key == "ext.skills" {
+			def, found = candidate, true
+		}
+	}
+	if !found {
+		// The key is in the schema, so this is unreachable; if it were not, the empty word would read as not
+		// enforced, so the org is narrowed to its first-party skills instead.
+		return "none", nil
+	}
+	value, stored := row.Settings["ext.skills"]
+	if !stored {
+		value = orgAgentDefaultValue(def, def.def)
+	}
+	mode := ""
+	if object, isObject := value.(map[string]any); isObject {
+		mode, _ = object["mode"].(string)
+	}
+	if !slices.Contains(def.order, mode) {
+		return def.failClose, nil
+	}
+	return mode, nil
+}
+
 // get is GET /api/v1/org-agent-policy: any member of the org reads the document in force.
 func (h *OrgAgentPolicyHandler) get(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := mcpVerifiedOrganization(r, false)

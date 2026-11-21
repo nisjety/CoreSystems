@@ -760,7 +760,13 @@ type SnapshotRequest struct {
 	// upsert as this lease's own workspace_files overlay. Empty for every
 	// non-Space snapshot (existing behavior, unchanged) and for a
 	// Space-scoped snapshot that hydrated nothing new.
-	ChangedFiles  []*WorkspaceChangedFile `protobuf:"bytes,4,rep,name=changed_files,json=changedFiles,proto3" json:"changed_files,omitempty"`
+	ChangedFiles []*WorkspaceChangedFile `protobuf:"bytes,4,rep,name=changed_files,json=changedFiles,proto3" json:"changed_files,omitempty"`
+	// Paths this run removed since it hydrated its workspace, recorded as
+	// tombstones on this lease's own overlay (F-f05-16). Honoured only for a
+	// Space-scoped lease and only while SANDBOX_MANAGER_OVERLAY_TOMBSTONES_ENABLED
+	// is on; otherwise ignored. PromoteWorkspace deletes the Space row only when
+	// it still holds the base_hash the run saw.
+	DeletedPaths  []*WorkspaceDeletedPath `protobuf:"bytes,5,rep,name=deleted_paths,json=deletedPaths,proto3" json:"deleted_paths,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -819,6 +825,13 @@ func (x *SnapshotRequest) GetBackendId() string {
 func (x *SnapshotRequest) GetChangedFiles() []*WorkspaceChangedFile {
 	if x != nil {
 		return x.ChangedFiles
+	}
+	return nil
+}
+
+func (x *SnapshotRequest) GetDeletedPaths() []*WorkspaceDeletedPath {
+	if x != nil {
+		return x.DeletedPaths
 	}
 	return nil
 }
@@ -1206,6 +1219,64 @@ func (x *WorkspaceChangedFile) GetBaseHash() string {
 	return ""
 }
 
+// A path a run removed, with the Space hash it saw when it hydrated.
+type WorkspaceDeletedPath struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Path relative to the workspace root.
+	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	// The Space-level hash this path had when this run's hydrate observed it.
+	// PromoteWorkspace deletes the Space row only while it still holds this
+	// hash. Empty means the path did not exist when the run hydrated (the run
+	// created and then removed it), so only the run's own overlay row is dropped.
+	BaseHash      string `protobuf:"bytes,2,opt,name=base_hash,json=baseHash,proto3" json:"base_hash,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkspaceDeletedPath) Reset() {
+	*x = WorkspaceDeletedPath{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkspaceDeletedPath) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkspaceDeletedPath) ProtoMessage() {}
+
+func (x *WorkspaceDeletedPath) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkspaceDeletedPath.ProtoReflect.Descriptor instead.
+func (*WorkspaceDeletedPath) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *WorkspaceDeletedPath) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *WorkspaceDeletedPath) GetBaseHash() string {
+	if x != nil {
+		return x.BaseHash
+	}
+	return ""
+}
+
 type PromoteWorkspaceRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Lease whose own workspace_files overlay to merge into its Space.
@@ -1218,7 +1289,7 @@ type PromoteWorkspaceRequest struct {
 
 func (x *PromoteWorkspaceRequest) Reset() {
 	*x = PromoteWorkspaceRequest{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[12]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1230,7 +1301,7 @@ func (x *PromoteWorkspaceRequest) String() string {
 func (*PromoteWorkspaceRequest) ProtoMessage() {}
 
 func (x *PromoteWorkspaceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[12]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1243,7 +1314,7 @@ func (x *PromoteWorkspaceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PromoteWorkspaceRequest.ProtoReflect.Descriptor instead.
 func (*PromoteWorkspaceRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{12}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *PromoteWorkspaceRequest) GetLeaseId() string {
@@ -1276,7 +1347,7 @@ type PromoteWorkspaceResponse struct {
 
 func (x *PromoteWorkspaceResponse) Reset() {
 	*x = PromoteWorkspaceResponse{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[13]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1288,7 +1359,7 @@ func (x *PromoteWorkspaceResponse) String() string {
 func (*PromoteWorkspaceResponse) ProtoMessage() {}
 
 func (x *PromoteWorkspaceResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[13]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1301,7 +1372,7 @@ func (x *PromoteWorkspaceResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PromoteWorkspaceResponse.ProtoReflect.Descriptor instead.
 func (*PromoteWorkspaceResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{13}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *PromoteWorkspaceResponse) GetConflictingPaths() []string {
@@ -1319,7 +1390,7 @@ type SandboxHealthRequest struct {
 
 func (x *SandboxHealthRequest) Reset() {
 	*x = SandboxHealthRequest{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[14]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1331,7 +1402,7 @@ func (x *SandboxHealthRequest) String() string {
 func (*SandboxHealthRequest) ProtoMessage() {}
 
 func (x *SandboxHealthRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[14]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1344,7 +1415,7 @@ func (x *SandboxHealthRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SandboxHealthRequest.ProtoReflect.Descriptor instead.
 func (*SandboxHealthRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{14}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{15}
 }
 
 type SandboxHealthResponse struct {
@@ -1357,7 +1428,7 @@ type SandboxHealthResponse struct {
 
 func (x *SandboxHealthResponse) Reset() {
 	*x = SandboxHealthResponse{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[15]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1369,7 +1440,7 @@ func (x *SandboxHealthResponse) String() string {
 func (*SandboxHealthResponse) ProtoMessage() {}
 
 func (x *SandboxHealthResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[15]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1382,7 +1453,7 @@ func (x *SandboxHealthResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SandboxHealthResponse.ProtoReflect.Descriptor instead.
 func (*SandboxHealthResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{15}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *SandboxHealthResponse) GetStatus() string {
@@ -1409,7 +1480,7 @@ type RedactedCommand struct {
 
 func (x *RedactedCommand) Reset() {
 	*x = RedactedCommand{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[16]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1421,7 +1492,7 @@ func (x *RedactedCommand) String() string {
 func (*RedactedCommand) ProtoMessage() {}
 
 func (x *RedactedCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[16]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1434,7 +1505,7 @@ func (x *RedactedCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RedactedCommand.ProtoReflect.Descriptor instead.
 func (*RedactedCommand) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{16}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *RedactedCommand) GetProgram() string {
@@ -1542,7 +1613,7 @@ type Process struct {
 
 func (x *Process) Reset() {
 	*x = Process{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[17]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1554,7 +1625,7 @@ func (x *Process) String() string {
 func (*Process) ProtoMessage() {}
 
 func (x *Process) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[17]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1567,7 +1638,7 @@ func (x *Process) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Process.ProtoReflect.Descriptor instead.
 func (*Process) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{17}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Process) GetProcessId() string {
@@ -1803,7 +1874,7 @@ type ProcessOutputChunk struct {
 
 func (x *ProcessOutputChunk) Reset() {
 	*x = ProcessOutputChunk{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[18]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1815,7 +1886,7 @@ func (x *ProcessOutputChunk) String() string {
 func (*ProcessOutputChunk) ProtoMessage() {}
 
 func (x *ProcessOutputChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[18]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1828,7 +1899,7 @@ func (x *ProcessOutputChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProcessOutputChunk.ProtoReflect.Descriptor instead.
 func (*ProcessOutputChunk) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{18}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ProcessOutputChunk) GetSeq() int64 {
@@ -1898,7 +1969,7 @@ type RegisterProcessRequest struct {
 
 func (x *RegisterProcessRequest) Reset() {
 	*x = RegisterProcessRequest{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[19]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1910,7 +1981,7 @@ func (x *RegisterProcessRequest) String() string {
 func (*RegisterProcessRequest) ProtoMessage() {}
 
 func (x *RegisterProcessRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[19]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1923,7 +1994,7 @@ func (x *RegisterProcessRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterProcessRequest.ProtoReflect.Descriptor instead.
 func (*RegisterProcessRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{19}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *RegisterProcessRequest) GetProcessId() string {
@@ -2007,7 +2078,7 @@ type RegisterProcessResponse struct {
 
 func (x *RegisterProcessResponse) Reset() {
 	*x = RegisterProcessResponse{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[20]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2019,7 +2090,7 @@ func (x *RegisterProcessResponse) String() string {
 func (*RegisterProcessResponse) ProtoMessage() {}
 
 func (x *RegisterProcessResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[20]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2032,7 +2103,7 @@ func (x *RegisterProcessResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterProcessResponse.ProtoReflect.Descriptor instead.
 func (*RegisterProcessResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{20}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *RegisterProcessResponse) GetProcess() *Process {
@@ -2051,7 +2122,7 @@ type ProcessStarted struct {
 
 func (x *ProcessStarted) Reset() {
 	*x = ProcessStarted{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[21]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2063,7 +2134,7 @@ func (x *ProcessStarted) String() string {
 func (*ProcessStarted) ProtoMessage() {}
 
 func (x *ProcessStarted) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[21]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2076,7 +2147,7 @@ func (x *ProcessStarted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProcessStarted.ProtoReflect.Descriptor instead.
 func (*ProcessStarted) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{21}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{22}
 }
 
 // A caller asked the process to stop. Recorded here; the host is what actually
@@ -2091,7 +2162,7 @@ type ProcessSignalRequested struct {
 
 func (x *ProcessSignalRequested) Reset() {
 	*x = ProcessSignalRequested{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[22]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2103,7 +2174,7 @@ func (x *ProcessSignalRequested) String() string {
 func (*ProcessSignalRequested) ProtoMessage() {}
 
 func (x *ProcessSignalRequested) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[22]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2116,7 +2187,7 @@ func (x *ProcessSignalRequested) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProcessSignalRequested.ProtoReflect.Descriptor instead.
 func (*ProcessSignalRequested) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{22}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *ProcessSignalRequested) GetSignal() ProcessSignal {
@@ -2143,7 +2214,7 @@ type ProcessExited struct {
 
 func (x *ProcessExited) Reset() {
 	*x = ProcessExited{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[23]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2155,7 +2226,7 @@ func (x *ProcessExited) String() string {
 func (*ProcessExited) ProtoMessage() {}
 
 func (x *ProcessExited) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[23]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2168,7 +2239,7 @@ func (x *ProcessExited) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProcessExited.ProtoReflect.Descriptor instead.
 func (*ProcessExited) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{23}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *ProcessExited) GetState() ProcessState {
@@ -2222,7 +2293,7 @@ type UpdateProcessStateRequest struct {
 
 func (x *UpdateProcessStateRequest) Reset() {
 	*x = UpdateProcessStateRequest{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[24]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2234,7 +2305,7 @@ func (x *UpdateProcessStateRequest) String() string {
 func (*UpdateProcessStateRequest) ProtoMessage() {}
 
 func (x *UpdateProcessStateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[24]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2247,7 +2318,7 @@ func (x *UpdateProcessStateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateProcessStateRequest.ProtoReflect.Descriptor instead.
 func (*UpdateProcessStateRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{24}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *UpdateProcessStateRequest) GetProcessId() string {
@@ -2339,7 +2410,7 @@ type UpdateProcessStateResponse struct {
 
 func (x *UpdateProcessStateResponse) Reset() {
 	*x = UpdateProcessStateResponse{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[25]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2351,7 +2422,7 @@ func (x *UpdateProcessStateResponse) String() string {
 func (*UpdateProcessStateResponse) ProtoMessage() {}
 
 func (x *UpdateProcessStateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[25]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2364,7 +2435,7 @@ func (x *UpdateProcessStateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateProcessStateResponse.ProtoReflect.Descriptor instead.
 func (*UpdateProcessStateResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{25}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{26}
 }
 
 // Append output and refresh the heartbeat.
@@ -2387,7 +2458,7 @@ type AppendProcessOutputRequest struct {
 
 func (x *AppendProcessOutputRequest) Reset() {
 	*x = AppendProcessOutputRequest{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[26]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2399,7 +2470,7 @@ func (x *AppendProcessOutputRequest) String() string {
 func (*AppendProcessOutputRequest) ProtoMessage() {}
 
 func (x *AppendProcessOutputRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[26]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2412,7 +2483,7 @@ func (x *AppendProcessOutputRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppendProcessOutputRequest.ProtoReflect.Descriptor instead.
 func (*AppendProcessOutputRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{26}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *AppendProcessOutputRequest) GetProcessId() string {
@@ -2467,7 +2538,7 @@ type AppendProcessOutputResponse struct {
 
 func (x *AppendProcessOutputResponse) Reset() {
 	*x = AppendProcessOutputResponse{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[27]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2479,7 +2550,7 @@ func (x *AppendProcessOutputResponse) String() string {
 func (*AppendProcessOutputResponse) ProtoMessage() {}
 
 func (x *AppendProcessOutputResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[27]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2492,7 +2563,7 @@ func (x *AppendProcessOutputResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppendProcessOutputResponse.ProtoReflect.Descriptor instead.
 func (*AppendProcessOutputResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{27}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *AppendProcessOutputResponse) GetNextSeq() int64 {
@@ -2537,7 +2608,7 @@ type ReconcileProcessesRequest struct {
 
 func (x *ReconcileProcessesRequest) Reset() {
 	*x = ReconcileProcessesRequest{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[28]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2549,7 +2620,7 @@ func (x *ReconcileProcessesRequest) String() string {
 func (*ReconcileProcessesRequest) ProtoMessage() {}
 
 func (x *ReconcileProcessesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[28]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2562,7 +2633,7 @@ func (x *ReconcileProcessesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReconcileProcessesRequest.ProtoReflect.Descriptor instead.
 func (*ReconcileProcessesRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{28}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *ReconcileProcessesRequest) GetBackendId() string {
@@ -2590,7 +2661,7 @@ type ReconcileProcessesResponse struct {
 
 func (x *ReconcileProcessesResponse) Reset() {
 	*x = ReconcileProcessesResponse{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[29]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2602,7 +2673,7 @@ func (x *ReconcileProcessesResponse) String() string {
 func (*ReconcileProcessesResponse) ProtoMessage() {}
 
 func (x *ReconcileProcessesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[29]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2615,7 +2686,7 @@ func (x *ReconcileProcessesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReconcileProcessesResponse.ProtoReflect.Descriptor instead.
 func (*ReconcileProcessesResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{29}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *ReconcileProcessesResponse) GetLostCount() int64 {
@@ -2636,7 +2707,7 @@ type GetProcessRequest struct {
 
 func (x *GetProcessRequest) Reset() {
 	*x = GetProcessRequest{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[30]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2648,7 +2719,7 @@ func (x *GetProcessRequest) String() string {
 func (*GetProcessRequest) ProtoMessage() {}
 
 func (x *GetProcessRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[30]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2661,7 +2732,7 @@ func (x *GetProcessRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetProcessRequest.ProtoReflect.Descriptor instead.
 func (*GetProcessRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{30}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *GetProcessRequest) GetProcessId() string {
@@ -2682,7 +2753,7 @@ type GetProcessResponse struct {
 
 func (x *GetProcessResponse) Reset() {
 	*x = GetProcessResponse{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[31]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2694,7 +2765,7 @@ func (x *GetProcessResponse) String() string {
 func (*GetProcessResponse) ProtoMessage() {}
 
 func (x *GetProcessResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[31]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2707,7 +2778,7 @@ func (x *GetProcessResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetProcessResponse.ProtoReflect.Descriptor instead.
 func (*GetProcessResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{31}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *GetProcessResponse) GetProcess() *Process {
@@ -2744,7 +2815,7 @@ type ListProcessesRequest struct {
 
 func (x *ListProcessesRequest) Reset() {
 	*x = ListProcessesRequest{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[32]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2756,7 +2827,7 @@ func (x *ListProcessesRequest) String() string {
 func (*ListProcessesRequest) ProtoMessage() {}
 
 func (x *ListProcessesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[32]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2769,7 +2840,7 @@ func (x *ListProcessesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListProcessesRequest.ProtoReflect.Descriptor instead.
 func (*ListProcessesRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{32}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *ListProcessesRequest) GetSpaceId() string {
@@ -2827,7 +2898,7 @@ type ListProcessesResponse struct {
 
 func (x *ListProcessesResponse) Reset() {
 	*x = ListProcessesResponse{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[33]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2839,7 +2910,7 @@ func (x *ListProcessesResponse) String() string {
 func (*ListProcessesResponse) ProtoMessage() {}
 
 func (x *ListProcessesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[33]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2852,7 +2923,7 @@ func (x *ListProcessesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListProcessesResponse.ProtoReflect.Descriptor instead.
 func (*ListProcessesResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{33}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *ListProcessesResponse) GetProcesses() []*Process {
@@ -2900,7 +2971,7 @@ type ReadProcessOutputRequest struct {
 
 func (x *ReadProcessOutputRequest) Reset() {
 	*x = ReadProcessOutputRequest{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[34]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2912,7 +2983,7 @@ func (x *ReadProcessOutputRequest) String() string {
 func (*ReadProcessOutputRequest) ProtoMessage() {}
 
 func (x *ReadProcessOutputRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[34]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2925,7 +2996,7 @@ func (x *ReadProcessOutputRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadProcessOutputRequest.ProtoReflect.Descriptor instead.
 func (*ReadProcessOutputRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{34}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *ReadProcessOutputRequest) GetProcessId() string {
@@ -3006,7 +3077,7 @@ type ReadProcessOutputResponse struct {
 
 func (x *ReadProcessOutputResponse) Reset() {
 	*x = ReadProcessOutputResponse{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[35]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3018,7 +3089,7 @@ func (x *ReadProcessOutputResponse) String() string {
 func (*ReadProcessOutputResponse) ProtoMessage() {}
 
 func (x *ReadProcessOutputResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[35]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3031,7 +3102,7 @@ func (x *ReadProcessOutputResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadProcessOutputResponse.ProtoReflect.Descriptor instead.
 func (*ReadProcessOutputResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{35}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ReadProcessOutputResponse) GetChunks() []*ProcessOutputChunk {
@@ -3105,7 +3176,7 @@ type ThreadWorkspaceEntry struct {
 
 func (x *ThreadWorkspaceEntry) Reset() {
 	*x = ThreadWorkspaceEntry{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[36]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3117,7 +3188,7 @@ func (x *ThreadWorkspaceEntry) String() string {
 func (*ThreadWorkspaceEntry) ProtoMessage() {}
 
 func (x *ThreadWorkspaceEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[36]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3130,7 +3201,7 @@ func (x *ThreadWorkspaceEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ThreadWorkspaceEntry.ProtoReflect.Descriptor instead.
 func (*ThreadWorkspaceEntry) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{36}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ThreadWorkspaceEntry) GetPath() string {
@@ -3160,14 +3231,17 @@ type GetThreadWorkspaceRequest struct {
 	// Thread lease whose workspace to read.
 	LeaseId string `protobuf:"bytes,1,opt,name=lease_id,json=leaseId,proto3" json:"lease_id,omitempty"`
 	// Caller's asserted backend id; must match the lease's pinned backend.
-	BackendId     string `protobuf:"bytes,2,opt,name=backend_id,json=backendId,proto3" json:"backend_id,omitempty"`
+	BackendId string `protobuf:"bytes,2,opt,name=backend_id,json=backendId,proto3" json:"backend_id,omitempty"`
+	// True when the caller's run keeps no content (zero retention or a waiver, DEC-32). sandbox-manager
+	// refuses the call; the flag can only raise the floor, a false value never lowers it.
+	Zdr           bool `protobuf:"varint,3,opt,name=zdr,proto3" json:"zdr,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GetThreadWorkspaceRequest) Reset() {
 	*x = GetThreadWorkspaceRequest{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[37]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3179,7 +3253,7 @@ func (x *GetThreadWorkspaceRequest) String() string {
 func (*GetThreadWorkspaceRequest) ProtoMessage() {}
 
 func (x *GetThreadWorkspaceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[37]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3192,7 +3266,7 @@ func (x *GetThreadWorkspaceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetThreadWorkspaceRequest.ProtoReflect.Descriptor instead.
 func (*GetThreadWorkspaceRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{37}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *GetThreadWorkspaceRequest) GetLeaseId() string {
@@ -3209,6 +3283,13 @@ func (x *GetThreadWorkspaceRequest) GetBackendId() string {
 	return ""
 }
 
+func (x *GetThreadWorkspaceRequest) GetZdr() bool {
+	if x != nil {
+		return x.Zdr
+	}
+	return false
+}
+
 // The thread's files at one revision.
 type GetThreadWorkspaceResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -3222,7 +3303,7 @@ type GetThreadWorkspaceResponse struct {
 
 func (x *GetThreadWorkspaceResponse) Reset() {
 	*x = GetThreadWorkspaceResponse{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[38]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3234,7 +3315,7 @@ func (x *GetThreadWorkspaceResponse) String() string {
 func (*GetThreadWorkspaceResponse) ProtoMessage() {}
 
 func (x *GetThreadWorkspaceResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[38]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3247,7 +3328,7 @@ func (x *GetThreadWorkspaceResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetThreadWorkspaceResponse.ProtoReflect.Descriptor instead.
 func (*GetThreadWorkspaceResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{38}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *GetThreadWorkspaceResponse) GetEntries() []*ThreadWorkspaceEntry {
@@ -3278,7 +3359,7 @@ type ThreadDeletedPath struct {
 
 func (x *ThreadDeletedPath) Reset() {
 	*x = ThreadDeletedPath{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[39]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3290,7 +3371,7 @@ func (x *ThreadDeletedPath) String() string {
 func (*ThreadDeletedPath) ProtoMessage() {}
 
 func (x *ThreadDeletedPath) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[39]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3303,7 +3384,7 @@ func (x *ThreadDeletedPath) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ThreadDeletedPath.ProtoReflect.Descriptor instead.
 func (*ThreadDeletedPath) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{39}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *ThreadDeletedPath) GetPath() string {
@@ -3330,14 +3411,17 @@ type ApplyThreadWorkspaceChangesRequest struct {
 	// Files created or rewritten. Each base_hash is what the caller last saw.
 	Changes []*WorkspaceChangedFile `protobuf:"bytes,3,rep,name=changes,proto3" json:"changes,omitempty"`
 	// Files removed.
-	Deleted       []*ThreadDeletedPath `protobuf:"bytes,4,rep,name=deleted,proto3" json:"deleted,omitempty"`
+	Deleted []*ThreadDeletedPath `protobuf:"bytes,4,rep,name=deleted,proto3" json:"deleted,omitempty"`
+	// True when the caller's run keeps no content (zero retention or a waiver, DEC-32). sandbox-manager
+	// refuses the call; the flag can only raise the floor, a false value never lowers it.
+	Zdr           bool `protobuf:"varint,5,opt,name=zdr,proto3" json:"zdr,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ApplyThreadWorkspaceChangesRequest) Reset() {
 	*x = ApplyThreadWorkspaceChangesRequest{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[40]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3349,7 +3433,7 @@ func (x *ApplyThreadWorkspaceChangesRequest) String() string {
 func (*ApplyThreadWorkspaceChangesRequest) ProtoMessage() {}
 
 func (x *ApplyThreadWorkspaceChangesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[40]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3362,7 +3446,7 @@ func (x *ApplyThreadWorkspaceChangesRequest) ProtoReflect() protoreflect.Message
 
 // Deprecated: Use ApplyThreadWorkspaceChangesRequest.ProtoReflect.Descriptor instead.
 func (*ApplyThreadWorkspaceChangesRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{40}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *ApplyThreadWorkspaceChangesRequest) GetLeaseId() string {
@@ -3393,6 +3477,13 @@ func (x *ApplyThreadWorkspaceChangesRequest) GetDeleted() []*ThreadDeletedPath {
 	return nil
 }
 
+func (x *ApplyThreadWorkspaceChangesRequest) GetZdr() bool {
+	if x != nil {
+		return x.Zdr
+	}
+	return false
+}
+
 // The outcome of one batch.
 type ApplyThreadWorkspaceChangesResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -3411,7 +3502,7 @@ type ApplyThreadWorkspaceChangesResponse struct {
 
 func (x *ApplyThreadWorkspaceChangesResponse) Reset() {
 	*x = ApplyThreadWorkspaceChangesResponse{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[41]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3423,7 +3514,7 @@ func (x *ApplyThreadWorkspaceChangesResponse) String() string {
 func (*ApplyThreadWorkspaceChangesResponse) ProtoMessage() {}
 
 func (x *ApplyThreadWorkspaceChangesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[41]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3436,7 +3527,7 @@ func (x *ApplyThreadWorkspaceChangesResponse) ProtoReflect() protoreflect.Messag
 
 // Deprecated: Use ApplyThreadWorkspaceChangesResponse.ProtoReflect.Descriptor instead.
 func (*ApplyThreadWorkspaceChangesResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{41}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *ApplyThreadWorkspaceChangesResponse) GetConflictingPaths() []string {
@@ -3480,7 +3571,7 @@ type DeleteThreadWorkspaceRequest struct {
 
 func (x *DeleteThreadWorkspaceRequest) Reset() {
 	*x = DeleteThreadWorkspaceRequest{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[42]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3492,7 +3583,7 @@ func (x *DeleteThreadWorkspaceRequest) String() string {
 func (*DeleteThreadWorkspaceRequest) ProtoMessage() {}
 
 func (x *DeleteThreadWorkspaceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[42]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3505,7 +3596,7 @@ func (x *DeleteThreadWorkspaceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteThreadWorkspaceRequest.ProtoReflect.Descriptor instead.
 func (*DeleteThreadWorkspaceRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{42}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *DeleteThreadWorkspaceRequest) GetThreadId() string {
@@ -3535,7 +3626,7 @@ type DeleteThreadWorkspaceResponse struct {
 
 func (x *DeleteThreadWorkspaceResponse) Reset() {
 	*x = DeleteThreadWorkspaceResponse{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[43]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3547,7 +3638,7 @@ func (x *DeleteThreadWorkspaceResponse) String() string {
 func (*DeleteThreadWorkspaceResponse) ProtoMessage() {}
 
 func (x *DeleteThreadWorkspaceResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[43]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3560,7 +3651,7 @@ func (x *DeleteThreadWorkspaceResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteThreadWorkspaceResponse.ProtoReflect.Descriptor instead.
 func (*DeleteThreadWorkspaceResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{43}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *DeleteThreadWorkspaceResponse) GetFilesDeleted() int64 {
@@ -3577,6 +3668,117 @@ func (x *DeleteThreadWorkspaceResponse) GetObjectPrefix() string {
 	return ""
 }
 
+// Erase one deleted thread's workspace for the retention sweeper (F-f10-08).
+type EraseThreadWorkspaceForRetentionRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Organization that owns the thread. Must equal the verified organization.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// Thread whose workspace to erase. A plain id: no wildcard, no path.
+	ThreadId string `protobuf:"bytes,2,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	// Owner the thread's rows are keyed by, read by the sweeper from the thread row
+	// before the delete. Not an authority claim.
+	OwnerId       string `protobuf:"bytes,3,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EraseThreadWorkspaceForRetentionRequest) Reset() {
+	*x = EraseThreadWorkspaceForRetentionRequest{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[45]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EraseThreadWorkspaceForRetentionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EraseThreadWorkspaceForRetentionRequest) ProtoMessage() {}
+
+func (x *EraseThreadWorkspaceForRetentionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[45]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EraseThreadWorkspaceForRetentionRequest.ProtoReflect.Descriptor instead.
+func (*EraseThreadWorkspaceForRetentionRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{45}
+}
+
+func (x *EraseThreadWorkspaceForRetentionRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *EraseThreadWorkspaceForRetentionRequest) GetThreadId() string {
+	if x != nil {
+		return x.ThreadId
+	}
+	return ""
+}
+
+func (x *EraseThreadWorkspaceForRetentionRequest) GetOwnerId() string {
+	if x != nil {
+		return x.OwnerId
+	}
+	return ""
+}
+
+// What the retention erase removed.
+type EraseThreadWorkspaceForRetentionResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Rows removed.
+	FilesDeleted  int64 `protobuf:"varint,1,opt,name=files_deleted,json=filesDeleted,proto3" json:"files_deleted,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EraseThreadWorkspaceForRetentionResponse) Reset() {
+	*x = EraseThreadWorkspaceForRetentionResponse{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[46]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EraseThreadWorkspaceForRetentionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EraseThreadWorkspaceForRetentionResponse) ProtoMessage() {}
+
+func (x *EraseThreadWorkspaceForRetentionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[46]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EraseThreadWorkspaceForRetentionResponse.ProtoReflect.Descriptor instead.
+func (*EraseThreadWorkspaceForRetentionResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{46}
+}
+
+func (x *EraseThreadWorkspaceForRetentionResponse) GetFilesDeleted() int64 {
+	if x != nil {
+		return x.FilesDeleted
+	}
+	return 0
+}
+
 // Read one lease's lifecycle.
 type GetLeaseStatusRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -3590,7 +3792,7 @@ type GetLeaseStatusRequest struct {
 
 func (x *GetLeaseStatusRequest) Reset() {
 	*x = GetLeaseStatusRequest{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[44]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3602,7 +3804,7 @@ func (x *GetLeaseStatusRequest) String() string {
 func (*GetLeaseStatusRequest) ProtoMessage() {}
 
 func (x *GetLeaseStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[44]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3615,7 +3817,7 @@ func (x *GetLeaseStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetLeaseStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetLeaseStatusRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{44}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *GetLeaseStatusRequest) GetLeaseId() string {
@@ -3659,7 +3861,7 @@ type GetLeaseStatusResponse struct {
 
 func (x *GetLeaseStatusResponse) Reset() {
 	*x = GetLeaseStatusResponse{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[45]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3671,7 +3873,7 @@ func (x *GetLeaseStatusResponse) String() string {
 func (*GetLeaseStatusResponse) ProtoMessage() {}
 
 func (x *GetLeaseStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[45]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3684,7 +3886,7 @@ func (x *GetLeaseStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetLeaseStatusResponse.ProtoReflect.Descriptor instead.
 func (*GetLeaseStatusResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{45}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *GetLeaseStatusResponse) GetLeaseId() string {
@@ -3781,13 +3983,14 @@ const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
 	"\n" +
 	"backend_id\x18\x02 \x01(\tR\tbackendId\"2\n" +
 	"\x14ReleaseLeaseResponse\x12\x1a\n" +
-	"\breleased\x18\x01 \x01(\bR\breleased\"\xac\x01\n" +
+	"\breleased\x18\x01 \x01(\bR\breleased\"\xf7\x01\n" +
 	"\x0fSnapshotRequest\x12\x19\n" +
 	"\blease_id\x18\x01 \x01(\tR\aleaseId\x12\x14\n" +
 	"\x05label\x18\x02 \x01(\tR\x05label\x12\x1d\n" +
 	"\n" +
 	"backend_id\x18\x03 \x01(\tR\tbackendId\x12I\n" +
-	"\rchanged_files\x18\x04 \x03(\v2$.model_plane.v1.WorkspaceChangedFileR\fchangedFiles\"R\n" +
+	"\rchanged_files\x18\x04 \x03(\v2$.model_plane.v1.WorkspaceChangedFileR\fchangedFiles\x12I\n" +
+	"\rdeleted_paths\x18\x05 \x03(\v2$.model_plane.v1.WorkspaceDeletedPathR\fdeletedPaths\"R\n" +
 	"\x10SnapshotResponse\x12\x1f\n" +
 	"\vsnapshot_id\x18\x01 \x01(\tR\n" +
 	"snapshotId\x12\x1d\n" +
@@ -3813,7 +4016,10 @@ const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
 	"\fcontent_hash\x18\x02 \x01(\tR\vcontentHash\x12\x1d\n" +
 	"\n" +
 	"size_bytes\x18\x03 \x01(\x03R\tsizeBytes\x12\x1b\n" +
-	"\tbase_hash\x18\x04 \x01(\tR\bbaseHash\"S\n" +
+	"\tbase_hash\x18\x04 \x01(\tR\bbaseHash\"G\n" +
+	"\x14WorkspaceDeletedPath\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1b\n" +
+	"\tbase_hash\x18\x02 \x01(\tR\bbaseHash\"S\n" +
 	"\x17PromoteWorkspaceRequest\x12\x19\n" +
 	"\blease_id\x18\x01 \x01(\tR\aleaseId\x12\x1d\n" +
 	"\n" +
@@ -3986,23 +4192,25 @@ const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12!\n" +
 	"\fcontent_hash\x18\x02 \x01(\tR\vcontentHash\x12\x1d\n" +
 	"\n" +
-	"size_bytes\x18\x03 \x01(\x03R\tsizeBytes\"U\n" +
+	"size_bytes\x18\x03 \x01(\x03R\tsizeBytes\"g\n" +
 	"\x19GetThreadWorkspaceRequest\x12\x19\n" +
 	"\blease_id\x18\x01 \x01(\tR\aleaseId\x12\x1d\n" +
 	"\n" +
-	"backend_id\x18\x02 \x01(\tR\tbackendId\"x\n" +
+	"backend_id\x18\x02 \x01(\tR\tbackendId\x12\x10\n" +
+	"\x03zdr\x18\x03 \x01(\bR\x03zdr\"x\n" +
 	"\x1aGetThreadWorkspaceResponse\x12>\n" +
 	"\aentries\x18\x01 \x03(\v2$.model_plane.v1.ThreadWorkspaceEntryR\aentries\x12\x1a\n" +
 	"\brevision\x18\x02 \x01(\x03R\brevision\"D\n" +
 	"\x11ThreadDeletedPath\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1b\n" +
-	"\tbase_hash\x18\x02 \x01(\tR\bbaseHash\"\xdb\x01\n" +
+	"\tbase_hash\x18\x02 \x01(\tR\bbaseHash\"\xed\x01\n" +
 	"\"ApplyThreadWorkspaceChangesRequest\x12\x19\n" +
 	"\blease_id\x18\x01 \x01(\tR\aleaseId\x12\x1d\n" +
 	"\n" +
 	"backend_id\x18\x02 \x01(\tR\tbackendId\x12>\n" +
 	"\achanges\x18\x03 \x03(\v2$.model_plane.v1.WorkspaceChangedFileR\achanges\x12;\n" +
-	"\adeleted\x18\x04 \x03(\v2!.model_plane.v1.ThreadDeletedPathR\adeleted\"\xae\x01\n" +
+	"\adeleted\x18\x04 \x03(\v2!.model_plane.v1.ThreadDeletedPathR\adeleted\x12\x10\n" +
+	"\x03zdr\x18\x05 \x01(\bR\x03zdr\"\xae\x01\n" +
 	"#ApplyThreadWorkspaceChangesResponse\x12+\n" +
 	"\x11conflicting_paths\x18\x01 \x03(\tR\x10conflictingPaths\x12\x1a\n" +
 	"\brevision\x18\x02 \x01(\x03R\brevision\x12\x1d\n" +
@@ -4015,7 +4223,13 @@ const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
 	"\x06org_id\x18\x02 \x01(\tR\x05orgId\"i\n" +
 	"\x1dDeleteThreadWorkspaceResponse\x12#\n" +
 	"\rfiles_deleted\x18\x01 \x01(\x03R\ffilesDeleted\x12#\n" +
-	"\robject_prefix\x18\x02 \x01(\tR\fobjectPrefix\"Q\n" +
+	"\robject_prefix\x18\x02 \x01(\tR\fobjectPrefix\"x\n" +
+	"'EraseThreadWorkspaceForRetentionRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1b\n" +
+	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x19\n" +
+	"\bowner_id\x18\x03 \x01(\tR\aownerId\"O\n" +
+	"(EraseThreadWorkspaceForRetentionResponse\x12#\n" +
+	"\rfiles_deleted\x18\x01 \x01(\x03R\ffilesDeleted\"Q\n" +
 	"\x15GetLeaseStatusRequest\x12\x19\n" +
 	"\blease_id\x18\x01 \x01(\tR\aleaseId\x12\x1d\n" +
 	"\n" +
@@ -4074,7 +4288,7 @@ const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
 	"$SANDBOX_FAILURE_CAUSE_QUOTA_EXCEEDED\x10\x06\x12,\n" +
 	"(SANDBOX_FAILURE_CAUSE_WORKSPACE_CONFLICT\x10\a\x12!\n" +
 	"\x1dSANDBOX_FAILURE_CAUSE_EXPIRED\x10\b\x12'\n" +
-	"#SANDBOX_FAILURE_CAUSE_POLICY_DENIED\x10\t2\xc3\x0e\n" +
+	"#SANDBOX_FAILURE_CAUSE_POLICY_DENIED\x10\t2\xdb\x0f\n" +
 	"\x0eSandboxManager\x12Y\n" +
 	"\fAcquireLease\x12#.model_plane.v1.AcquireLeaseRequest\x1a$.model_plane.v1.AcquireLeaseResponse\x12Y\n" +
 	"\fReleaseLease\x12#.model_plane.v1.ReleaseLeaseRequest\x1a$.model_plane.v1.ReleaseLeaseResponse\x12T\n" +
@@ -4093,7 +4307,8 @@ const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
 	"\x06Health\x12$.model_plane.v1.SandboxHealthRequest\x1a%.model_plane.v1.SandboxHealthResponse\x12k\n" +
 	"\x12GetThreadWorkspace\x12).model_plane.v1.GetThreadWorkspaceRequest\x1a*.model_plane.v1.GetThreadWorkspaceResponse\x12\x86\x01\n" +
 	"\x1bApplyThreadWorkspaceChanges\x122.model_plane.v1.ApplyThreadWorkspaceChangesRequest\x1a3.model_plane.v1.ApplyThreadWorkspaceChangesResponse\x12t\n" +
-	"\x15DeleteThreadWorkspace\x12,.model_plane.v1.DeleteThreadWorkspaceRequest\x1a-.model_plane.v1.DeleteThreadWorkspaceResponse\x12_\n" +
+	"\x15DeleteThreadWorkspace\x12,.model_plane.v1.DeleteThreadWorkspaceRequest\x1a-.model_plane.v1.DeleteThreadWorkspaceResponse\x12\x95\x01\n" +
+	" EraseThreadWorkspaceForRetention\x127.model_plane.v1.EraseThreadWorkspaceForRetentionRequest\x1a8.model_plane.v1.EraseThreadWorkspaceForRetentionResponse\x12_\n" +
 	"\x0eGetLeaseStatus\x12%.model_plane.v1.GetLeaseStatusRequest\x1a&.model_plane.v1.GetLeaseStatusResponseB\xb6\x01\n" +
 	"\x12com.model_plane.v1B\x0eSandboxesProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
@@ -4110,144 +4325,150 @@ func file_model_plane_v1_sandboxes_proto_rawDescGZIP() []byte {
 }
 
 var file_model_plane_v1_sandboxes_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
-var file_model_plane_v1_sandboxes_proto_msgTypes = make([]protoimpl.MessageInfo, 46)
+var file_model_plane_v1_sandboxes_proto_msgTypes = make([]protoimpl.MessageInfo, 49)
 var file_model_plane_v1_sandboxes_proto_goTypes = []any{
-	(SandboxLifecycleState)(0),                  // 0: model_plane.v1.SandboxLifecycleState
-	(SandboxEgressTier)(0),                      // 1: model_plane.v1.SandboxEgressTier
-	(ProcessState)(0),                           // 2: model_plane.v1.ProcessState
-	(ProcessSignal)(0),                          // 3: model_plane.v1.ProcessSignal
-	(ProcessStream)(0),                          // 4: model_plane.v1.ProcessStream
-	(SandboxFailureCause)(0),                    // 5: model_plane.v1.SandboxFailureCause
-	(*AcquireLeaseRequest)(nil),                 // 6: model_plane.v1.AcquireLeaseRequest
-	(*AcquireLeaseResponse)(nil),                // 7: model_plane.v1.AcquireLeaseResponse
-	(*ReleaseLeaseRequest)(nil),                 // 8: model_plane.v1.ReleaseLeaseRequest
-	(*ReleaseLeaseResponse)(nil),                // 9: model_plane.v1.ReleaseLeaseResponse
-	(*SnapshotRequest)(nil),                     // 10: model_plane.v1.SnapshotRequest
-	(*SnapshotResponse)(nil),                    // 11: model_plane.v1.SnapshotResponse
-	(*ActivateLeaseRequest)(nil),                // 12: model_plane.v1.ActivateLeaseRequest
-	(*ActivateLeaseResponse)(nil),               // 13: model_plane.v1.ActivateLeaseResponse
-	(*GetWorkspaceManifestRequest)(nil),         // 14: model_plane.v1.GetWorkspaceManifestRequest
-	(*WorkspaceManifestEntry)(nil),              // 15: model_plane.v1.WorkspaceManifestEntry
-	(*GetWorkspaceManifestResponse)(nil),        // 16: model_plane.v1.GetWorkspaceManifestResponse
-	(*WorkspaceChangedFile)(nil),                // 17: model_plane.v1.WorkspaceChangedFile
-	(*PromoteWorkspaceRequest)(nil),             // 18: model_plane.v1.PromoteWorkspaceRequest
-	(*PromoteWorkspaceResponse)(nil),            // 19: model_plane.v1.PromoteWorkspaceResponse
-	(*SandboxHealthRequest)(nil),                // 20: model_plane.v1.SandboxHealthRequest
-	(*SandboxHealthResponse)(nil),               // 21: model_plane.v1.SandboxHealthResponse
-	(*RedactedCommand)(nil),                     // 22: model_plane.v1.RedactedCommand
-	(*Process)(nil),                             // 23: model_plane.v1.Process
-	(*ProcessOutputChunk)(nil),                  // 24: model_plane.v1.ProcessOutputChunk
-	(*RegisterProcessRequest)(nil),              // 25: model_plane.v1.RegisterProcessRequest
-	(*RegisterProcessResponse)(nil),             // 26: model_plane.v1.RegisterProcessResponse
-	(*ProcessStarted)(nil),                      // 27: model_plane.v1.ProcessStarted
-	(*ProcessSignalRequested)(nil),              // 28: model_plane.v1.ProcessSignalRequested
-	(*ProcessExited)(nil),                       // 29: model_plane.v1.ProcessExited
-	(*UpdateProcessStateRequest)(nil),           // 30: model_plane.v1.UpdateProcessStateRequest
-	(*UpdateProcessStateResponse)(nil),          // 31: model_plane.v1.UpdateProcessStateResponse
-	(*AppendProcessOutputRequest)(nil),          // 32: model_plane.v1.AppendProcessOutputRequest
-	(*AppendProcessOutputResponse)(nil),         // 33: model_plane.v1.AppendProcessOutputResponse
-	(*ReconcileProcessesRequest)(nil),           // 34: model_plane.v1.ReconcileProcessesRequest
-	(*ReconcileProcessesResponse)(nil),          // 35: model_plane.v1.ReconcileProcessesResponse
-	(*GetProcessRequest)(nil),                   // 36: model_plane.v1.GetProcessRequest
-	(*GetProcessResponse)(nil),                  // 37: model_plane.v1.GetProcessResponse
-	(*ListProcessesRequest)(nil),                // 38: model_plane.v1.ListProcessesRequest
-	(*ListProcessesResponse)(nil),               // 39: model_plane.v1.ListProcessesResponse
-	(*ReadProcessOutputRequest)(nil),            // 40: model_plane.v1.ReadProcessOutputRequest
-	(*ReadProcessOutputResponse)(nil),           // 41: model_plane.v1.ReadProcessOutputResponse
-	(*ThreadWorkspaceEntry)(nil),                // 42: model_plane.v1.ThreadWorkspaceEntry
-	(*GetThreadWorkspaceRequest)(nil),           // 43: model_plane.v1.GetThreadWorkspaceRequest
-	(*GetThreadWorkspaceResponse)(nil),          // 44: model_plane.v1.GetThreadWorkspaceResponse
-	(*ThreadDeletedPath)(nil),                   // 45: model_plane.v1.ThreadDeletedPath
-	(*ApplyThreadWorkspaceChangesRequest)(nil),  // 46: model_plane.v1.ApplyThreadWorkspaceChangesRequest
-	(*ApplyThreadWorkspaceChangesResponse)(nil), // 47: model_plane.v1.ApplyThreadWorkspaceChangesResponse
-	(*DeleteThreadWorkspaceRequest)(nil),        // 48: model_plane.v1.DeleteThreadWorkspaceRequest
-	(*DeleteThreadWorkspaceResponse)(nil),       // 49: model_plane.v1.DeleteThreadWorkspaceResponse
-	(*GetLeaseStatusRequest)(nil),               // 50: model_plane.v1.GetLeaseStatusRequest
-	(*GetLeaseStatusResponse)(nil),              // 51: model_plane.v1.GetLeaseStatusResponse
-	(*durationpb.Duration)(nil),                 // 52: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil),               // 53: google.protobuf.Timestamp
+	(SandboxLifecycleState)(0),                       // 0: model_plane.v1.SandboxLifecycleState
+	(SandboxEgressTier)(0),                           // 1: model_plane.v1.SandboxEgressTier
+	(ProcessState)(0),                                // 2: model_plane.v1.ProcessState
+	(ProcessSignal)(0),                               // 3: model_plane.v1.ProcessSignal
+	(ProcessStream)(0),                               // 4: model_plane.v1.ProcessStream
+	(SandboxFailureCause)(0),                         // 5: model_plane.v1.SandboxFailureCause
+	(*AcquireLeaseRequest)(nil),                      // 6: model_plane.v1.AcquireLeaseRequest
+	(*AcquireLeaseResponse)(nil),                     // 7: model_plane.v1.AcquireLeaseResponse
+	(*ReleaseLeaseRequest)(nil),                      // 8: model_plane.v1.ReleaseLeaseRequest
+	(*ReleaseLeaseResponse)(nil),                     // 9: model_plane.v1.ReleaseLeaseResponse
+	(*SnapshotRequest)(nil),                          // 10: model_plane.v1.SnapshotRequest
+	(*SnapshotResponse)(nil),                         // 11: model_plane.v1.SnapshotResponse
+	(*ActivateLeaseRequest)(nil),                     // 12: model_plane.v1.ActivateLeaseRequest
+	(*ActivateLeaseResponse)(nil),                    // 13: model_plane.v1.ActivateLeaseResponse
+	(*GetWorkspaceManifestRequest)(nil),              // 14: model_plane.v1.GetWorkspaceManifestRequest
+	(*WorkspaceManifestEntry)(nil),                   // 15: model_plane.v1.WorkspaceManifestEntry
+	(*GetWorkspaceManifestResponse)(nil),             // 16: model_plane.v1.GetWorkspaceManifestResponse
+	(*WorkspaceChangedFile)(nil),                     // 17: model_plane.v1.WorkspaceChangedFile
+	(*WorkspaceDeletedPath)(nil),                     // 18: model_plane.v1.WorkspaceDeletedPath
+	(*PromoteWorkspaceRequest)(nil),                  // 19: model_plane.v1.PromoteWorkspaceRequest
+	(*PromoteWorkspaceResponse)(nil),                 // 20: model_plane.v1.PromoteWorkspaceResponse
+	(*SandboxHealthRequest)(nil),                     // 21: model_plane.v1.SandboxHealthRequest
+	(*SandboxHealthResponse)(nil),                    // 22: model_plane.v1.SandboxHealthResponse
+	(*RedactedCommand)(nil),                          // 23: model_plane.v1.RedactedCommand
+	(*Process)(nil),                                  // 24: model_plane.v1.Process
+	(*ProcessOutputChunk)(nil),                       // 25: model_plane.v1.ProcessOutputChunk
+	(*RegisterProcessRequest)(nil),                   // 26: model_plane.v1.RegisterProcessRequest
+	(*RegisterProcessResponse)(nil),                  // 27: model_plane.v1.RegisterProcessResponse
+	(*ProcessStarted)(nil),                           // 28: model_plane.v1.ProcessStarted
+	(*ProcessSignalRequested)(nil),                   // 29: model_plane.v1.ProcessSignalRequested
+	(*ProcessExited)(nil),                            // 30: model_plane.v1.ProcessExited
+	(*UpdateProcessStateRequest)(nil),                // 31: model_plane.v1.UpdateProcessStateRequest
+	(*UpdateProcessStateResponse)(nil),               // 32: model_plane.v1.UpdateProcessStateResponse
+	(*AppendProcessOutputRequest)(nil),               // 33: model_plane.v1.AppendProcessOutputRequest
+	(*AppendProcessOutputResponse)(nil),              // 34: model_plane.v1.AppendProcessOutputResponse
+	(*ReconcileProcessesRequest)(nil),                // 35: model_plane.v1.ReconcileProcessesRequest
+	(*ReconcileProcessesResponse)(nil),               // 36: model_plane.v1.ReconcileProcessesResponse
+	(*GetProcessRequest)(nil),                        // 37: model_plane.v1.GetProcessRequest
+	(*GetProcessResponse)(nil),                       // 38: model_plane.v1.GetProcessResponse
+	(*ListProcessesRequest)(nil),                     // 39: model_plane.v1.ListProcessesRequest
+	(*ListProcessesResponse)(nil),                    // 40: model_plane.v1.ListProcessesResponse
+	(*ReadProcessOutputRequest)(nil),                 // 41: model_plane.v1.ReadProcessOutputRequest
+	(*ReadProcessOutputResponse)(nil),                // 42: model_plane.v1.ReadProcessOutputResponse
+	(*ThreadWorkspaceEntry)(nil),                     // 43: model_plane.v1.ThreadWorkspaceEntry
+	(*GetThreadWorkspaceRequest)(nil),                // 44: model_plane.v1.GetThreadWorkspaceRequest
+	(*GetThreadWorkspaceResponse)(nil),               // 45: model_plane.v1.GetThreadWorkspaceResponse
+	(*ThreadDeletedPath)(nil),                        // 46: model_plane.v1.ThreadDeletedPath
+	(*ApplyThreadWorkspaceChangesRequest)(nil),       // 47: model_plane.v1.ApplyThreadWorkspaceChangesRequest
+	(*ApplyThreadWorkspaceChangesResponse)(nil),      // 48: model_plane.v1.ApplyThreadWorkspaceChangesResponse
+	(*DeleteThreadWorkspaceRequest)(nil),             // 49: model_plane.v1.DeleteThreadWorkspaceRequest
+	(*DeleteThreadWorkspaceResponse)(nil),            // 50: model_plane.v1.DeleteThreadWorkspaceResponse
+	(*EraseThreadWorkspaceForRetentionRequest)(nil),  // 51: model_plane.v1.EraseThreadWorkspaceForRetentionRequest
+	(*EraseThreadWorkspaceForRetentionResponse)(nil), // 52: model_plane.v1.EraseThreadWorkspaceForRetentionResponse
+	(*GetLeaseStatusRequest)(nil),                    // 53: model_plane.v1.GetLeaseStatusRequest
+	(*GetLeaseStatusResponse)(nil),                   // 54: model_plane.v1.GetLeaseStatusResponse
+	(*durationpb.Duration)(nil),                      // 55: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil),                    // 56: google.protobuf.Timestamp
 }
 var file_model_plane_v1_sandboxes_proto_depIdxs = []int32{
-	52, // 0: model_plane.v1.AcquireLeaseRequest.ttl:type_name -> google.protobuf.Duration
-	53, // 1: model_plane.v1.AcquireLeaseResponse.expires_at:type_name -> google.protobuf.Timestamp
+	55, // 0: model_plane.v1.AcquireLeaseRequest.ttl:type_name -> google.protobuf.Duration
+	56, // 1: model_plane.v1.AcquireLeaseResponse.expires_at:type_name -> google.protobuf.Timestamp
 	0,  // 2: model_plane.v1.AcquireLeaseResponse.state:type_name -> model_plane.v1.SandboxLifecycleState
 	1,  // 3: model_plane.v1.AcquireLeaseResponse.egress_tier:type_name -> model_plane.v1.SandboxEgressTier
 	17, // 4: model_plane.v1.SnapshotRequest.changed_files:type_name -> model_plane.v1.WorkspaceChangedFile
-	0,  // 5: model_plane.v1.ActivateLeaseResponse.state:type_name -> model_plane.v1.SandboxLifecycleState
-	15, // 6: model_plane.v1.GetWorkspaceManifestResponse.entries:type_name -> model_plane.v1.WorkspaceManifestEntry
-	22, // 7: model_plane.v1.Process.command:type_name -> model_plane.v1.RedactedCommand
-	2,  // 8: model_plane.v1.Process.state:type_name -> model_plane.v1.ProcessState
-	3,  // 9: model_plane.v1.Process.signal_requested:type_name -> model_plane.v1.ProcessSignal
-	53, // 10: model_plane.v1.Process.term_requested_at:type_name -> google.protobuf.Timestamp
-	53, // 11: model_plane.v1.Process.expires_at:type_name -> google.protobuf.Timestamp
-	53, // 12: model_plane.v1.Process.started_at:type_name -> google.protobuf.Timestamp
-	53, // 13: model_plane.v1.Process.ended_at:type_name -> google.protobuf.Timestamp
-	53, // 14: model_plane.v1.Process.last_heartbeat_at:type_name -> google.protobuf.Timestamp
-	53, // 15: model_plane.v1.Process.created_at:type_name -> google.protobuf.Timestamp
-	53, // 16: model_plane.v1.Process.updated_at:type_name -> google.protobuf.Timestamp
-	4,  // 17: model_plane.v1.ProcessOutputChunk.stream:type_name -> model_plane.v1.ProcessStream
-	53, // 18: model_plane.v1.ProcessOutputChunk.captured_at:type_name -> google.protobuf.Timestamp
-	22, // 19: model_plane.v1.RegisterProcessRequest.command:type_name -> model_plane.v1.RedactedCommand
-	23, // 20: model_plane.v1.RegisterProcessResponse.process:type_name -> model_plane.v1.Process
-	3,  // 21: model_plane.v1.ProcessSignalRequested.signal:type_name -> model_plane.v1.ProcessSignal
-	2,  // 22: model_plane.v1.ProcessExited.state:type_name -> model_plane.v1.ProcessState
-	27, // 23: model_plane.v1.UpdateProcessStateRequest.started:type_name -> model_plane.v1.ProcessStarted
-	28, // 24: model_plane.v1.UpdateProcessStateRequest.signal:type_name -> model_plane.v1.ProcessSignalRequested
-	29, // 25: model_plane.v1.UpdateProcessStateRequest.exited:type_name -> model_plane.v1.ProcessExited
-	24, // 26: model_plane.v1.AppendProcessOutputRequest.chunks:type_name -> model_plane.v1.ProcessOutputChunk
-	23, // 27: model_plane.v1.GetProcessResponse.process:type_name -> model_plane.v1.Process
-	23, // 28: model_plane.v1.ListProcessesResponse.processes:type_name -> model_plane.v1.Process
-	24, // 29: model_plane.v1.ReadProcessOutputResponse.chunks:type_name -> model_plane.v1.ProcessOutputChunk
-	2,  // 30: model_plane.v1.ReadProcessOutputResponse.state:type_name -> model_plane.v1.ProcessState
-	42, // 31: model_plane.v1.GetThreadWorkspaceResponse.entries:type_name -> model_plane.v1.ThreadWorkspaceEntry
-	17, // 32: model_plane.v1.ApplyThreadWorkspaceChangesRequest.changes:type_name -> model_plane.v1.WorkspaceChangedFile
-	45, // 33: model_plane.v1.ApplyThreadWorkspaceChangesRequest.deleted:type_name -> model_plane.v1.ThreadDeletedPath
-	0,  // 34: model_plane.v1.GetLeaseStatusResponse.state:type_name -> model_plane.v1.SandboxLifecycleState
-	5,  // 35: model_plane.v1.GetLeaseStatusResponse.failure_cause:type_name -> model_plane.v1.SandboxFailureCause
-	53, // 36: model_plane.v1.GetLeaseStatusResponse.last_activity_at:type_name -> google.protobuf.Timestamp
-	53, // 37: model_plane.v1.GetLeaseStatusResponse.heartbeat_at:type_name -> google.protobuf.Timestamp
-	53, // 38: model_plane.v1.GetLeaseStatusResponse.expires_at:type_name -> google.protobuf.Timestamp
-	6,  // 39: model_plane.v1.SandboxManager.AcquireLease:input_type -> model_plane.v1.AcquireLeaseRequest
-	8,  // 40: model_plane.v1.SandboxManager.ReleaseLease:input_type -> model_plane.v1.ReleaseLeaseRequest
-	10, // 41: model_plane.v1.SandboxManager.SnapshotSandbox:input_type -> model_plane.v1.SnapshotRequest
-	12, // 42: model_plane.v1.SandboxManager.ActivateLease:input_type -> model_plane.v1.ActivateLeaseRequest
-	14, // 43: model_plane.v1.SandboxManager.GetWorkspaceManifest:input_type -> model_plane.v1.GetWorkspaceManifestRequest
-	18, // 44: model_plane.v1.SandboxManager.PromoteWorkspace:input_type -> model_plane.v1.PromoteWorkspaceRequest
-	25, // 45: model_plane.v1.SandboxManager.RegisterProcess:input_type -> model_plane.v1.RegisterProcessRequest
-	30, // 46: model_plane.v1.SandboxManager.UpdateProcessState:input_type -> model_plane.v1.UpdateProcessStateRequest
-	32, // 47: model_plane.v1.SandboxManager.AppendProcessOutput:input_type -> model_plane.v1.AppendProcessOutputRequest
-	34, // 48: model_plane.v1.SandboxManager.ReconcileProcesses:input_type -> model_plane.v1.ReconcileProcessesRequest
-	36, // 49: model_plane.v1.SandboxManager.GetProcess:input_type -> model_plane.v1.GetProcessRequest
-	38, // 50: model_plane.v1.SandboxManager.ListProcesses:input_type -> model_plane.v1.ListProcessesRequest
-	40, // 51: model_plane.v1.SandboxManager.ReadProcessOutput:input_type -> model_plane.v1.ReadProcessOutputRequest
-	20, // 52: model_plane.v1.SandboxManager.Health:input_type -> model_plane.v1.SandboxHealthRequest
-	43, // 53: model_plane.v1.SandboxManager.GetThreadWorkspace:input_type -> model_plane.v1.GetThreadWorkspaceRequest
-	46, // 54: model_plane.v1.SandboxManager.ApplyThreadWorkspaceChanges:input_type -> model_plane.v1.ApplyThreadWorkspaceChangesRequest
-	48, // 55: model_plane.v1.SandboxManager.DeleteThreadWorkspace:input_type -> model_plane.v1.DeleteThreadWorkspaceRequest
-	50, // 56: model_plane.v1.SandboxManager.GetLeaseStatus:input_type -> model_plane.v1.GetLeaseStatusRequest
-	7,  // 57: model_plane.v1.SandboxManager.AcquireLease:output_type -> model_plane.v1.AcquireLeaseResponse
-	9,  // 58: model_plane.v1.SandboxManager.ReleaseLease:output_type -> model_plane.v1.ReleaseLeaseResponse
-	11, // 59: model_plane.v1.SandboxManager.SnapshotSandbox:output_type -> model_plane.v1.SnapshotResponse
-	13, // 60: model_plane.v1.SandboxManager.ActivateLease:output_type -> model_plane.v1.ActivateLeaseResponse
-	16, // 61: model_plane.v1.SandboxManager.GetWorkspaceManifest:output_type -> model_plane.v1.GetWorkspaceManifestResponse
-	19, // 62: model_plane.v1.SandboxManager.PromoteWorkspace:output_type -> model_plane.v1.PromoteWorkspaceResponse
-	26, // 63: model_plane.v1.SandboxManager.RegisterProcess:output_type -> model_plane.v1.RegisterProcessResponse
-	31, // 64: model_plane.v1.SandboxManager.UpdateProcessState:output_type -> model_plane.v1.UpdateProcessStateResponse
-	33, // 65: model_plane.v1.SandboxManager.AppendProcessOutput:output_type -> model_plane.v1.AppendProcessOutputResponse
-	35, // 66: model_plane.v1.SandboxManager.ReconcileProcesses:output_type -> model_plane.v1.ReconcileProcessesResponse
-	37, // 67: model_plane.v1.SandboxManager.GetProcess:output_type -> model_plane.v1.GetProcessResponse
-	39, // 68: model_plane.v1.SandboxManager.ListProcesses:output_type -> model_plane.v1.ListProcessesResponse
-	41, // 69: model_plane.v1.SandboxManager.ReadProcessOutput:output_type -> model_plane.v1.ReadProcessOutputResponse
-	21, // 70: model_plane.v1.SandboxManager.Health:output_type -> model_plane.v1.SandboxHealthResponse
-	44, // 71: model_plane.v1.SandboxManager.GetThreadWorkspace:output_type -> model_plane.v1.GetThreadWorkspaceResponse
-	47, // 72: model_plane.v1.SandboxManager.ApplyThreadWorkspaceChanges:output_type -> model_plane.v1.ApplyThreadWorkspaceChangesResponse
-	49, // 73: model_plane.v1.SandboxManager.DeleteThreadWorkspace:output_type -> model_plane.v1.DeleteThreadWorkspaceResponse
-	51, // 74: model_plane.v1.SandboxManager.GetLeaseStatus:output_type -> model_plane.v1.GetLeaseStatusResponse
-	57, // [57:75] is the sub-list for method output_type
-	39, // [39:57] is the sub-list for method input_type
-	39, // [39:39] is the sub-list for extension type_name
-	39, // [39:39] is the sub-list for extension extendee
-	0,  // [0:39] is the sub-list for field type_name
+	18, // 5: model_plane.v1.SnapshotRequest.deleted_paths:type_name -> model_plane.v1.WorkspaceDeletedPath
+	0,  // 6: model_plane.v1.ActivateLeaseResponse.state:type_name -> model_plane.v1.SandboxLifecycleState
+	15, // 7: model_plane.v1.GetWorkspaceManifestResponse.entries:type_name -> model_plane.v1.WorkspaceManifestEntry
+	23, // 8: model_plane.v1.Process.command:type_name -> model_plane.v1.RedactedCommand
+	2,  // 9: model_plane.v1.Process.state:type_name -> model_plane.v1.ProcessState
+	3,  // 10: model_plane.v1.Process.signal_requested:type_name -> model_plane.v1.ProcessSignal
+	56, // 11: model_plane.v1.Process.term_requested_at:type_name -> google.protobuf.Timestamp
+	56, // 12: model_plane.v1.Process.expires_at:type_name -> google.protobuf.Timestamp
+	56, // 13: model_plane.v1.Process.started_at:type_name -> google.protobuf.Timestamp
+	56, // 14: model_plane.v1.Process.ended_at:type_name -> google.protobuf.Timestamp
+	56, // 15: model_plane.v1.Process.last_heartbeat_at:type_name -> google.protobuf.Timestamp
+	56, // 16: model_plane.v1.Process.created_at:type_name -> google.protobuf.Timestamp
+	56, // 17: model_plane.v1.Process.updated_at:type_name -> google.protobuf.Timestamp
+	4,  // 18: model_plane.v1.ProcessOutputChunk.stream:type_name -> model_plane.v1.ProcessStream
+	56, // 19: model_plane.v1.ProcessOutputChunk.captured_at:type_name -> google.protobuf.Timestamp
+	23, // 20: model_plane.v1.RegisterProcessRequest.command:type_name -> model_plane.v1.RedactedCommand
+	24, // 21: model_plane.v1.RegisterProcessResponse.process:type_name -> model_plane.v1.Process
+	3,  // 22: model_plane.v1.ProcessSignalRequested.signal:type_name -> model_plane.v1.ProcessSignal
+	2,  // 23: model_plane.v1.ProcessExited.state:type_name -> model_plane.v1.ProcessState
+	28, // 24: model_plane.v1.UpdateProcessStateRequest.started:type_name -> model_plane.v1.ProcessStarted
+	29, // 25: model_plane.v1.UpdateProcessStateRequest.signal:type_name -> model_plane.v1.ProcessSignalRequested
+	30, // 26: model_plane.v1.UpdateProcessStateRequest.exited:type_name -> model_plane.v1.ProcessExited
+	25, // 27: model_plane.v1.AppendProcessOutputRequest.chunks:type_name -> model_plane.v1.ProcessOutputChunk
+	24, // 28: model_plane.v1.GetProcessResponse.process:type_name -> model_plane.v1.Process
+	24, // 29: model_plane.v1.ListProcessesResponse.processes:type_name -> model_plane.v1.Process
+	25, // 30: model_plane.v1.ReadProcessOutputResponse.chunks:type_name -> model_plane.v1.ProcessOutputChunk
+	2,  // 31: model_plane.v1.ReadProcessOutputResponse.state:type_name -> model_plane.v1.ProcessState
+	43, // 32: model_plane.v1.GetThreadWorkspaceResponse.entries:type_name -> model_plane.v1.ThreadWorkspaceEntry
+	17, // 33: model_plane.v1.ApplyThreadWorkspaceChangesRequest.changes:type_name -> model_plane.v1.WorkspaceChangedFile
+	46, // 34: model_plane.v1.ApplyThreadWorkspaceChangesRequest.deleted:type_name -> model_plane.v1.ThreadDeletedPath
+	0,  // 35: model_plane.v1.GetLeaseStatusResponse.state:type_name -> model_plane.v1.SandboxLifecycleState
+	5,  // 36: model_plane.v1.GetLeaseStatusResponse.failure_cause:type_name -> model_plane.v1.SandboxFailureCause
+	56, // 37: model_plane.v1.GetLeaseStatusResponse.last_activity_at:type_name -> google.protobuf.Timestamp
+	56, // 38: model_plane.v1.GetLeaseStatusResponse.heartbeat_at:type_name -> google.protobuf.Timestamp
+	56, // 39: model_plane.v1.GetLeaseStatusResponse.expires_at:type_name -> google.protobuf.Timestamp
+	6,  // 40: model_plane.v1.SandboxManager.AcquireLease:input_type -> model_plane.v1.AcquireLeaseRequest
+	8,  // 41: model_plane.v1.SandboxManager.ReleaseLease:input_type -> model_plane.v1.ReleaseLeaseRequest
+	10, // 42: model_plane.v1.SandboxManager.SnapshotSandbox:input_type -> model_plane.v1.SnapshotRequest
+	12, // 43: model_plane.v1.SandboxManager.ActivateLease:input_type -> model_plane.v1.ActivateLeaseRequest
+	14, // 44: model_plane.v1.SandboxManager.GetWorkspaceManifest:input_type -> model_plane.v1.GetWorkspaceManifestRequest
+	19, // 45: model_plane.v1.SandboxManager.PromoteWorkspace:input_type -> model_plane.v1.PromoteWorkspaceRequest
+	26, // 46: model_plane.v1.SandboxManager.RegisterProcess:input_type -> model_plane.v1.RegisterProcessRequest
+	31, // 47: model_plane.v1.SandboxManager.UpdateProcessState:input_type -> model_plane.v1.UpdateProcessStateRequest
+	33, // 48: model_plane.v1.SandboxManager.AppendProcessOutput:input_type -> model_plane.v1.AppendProcessOutputRequest
+	35, // 49: model_plane.v1.SandboxManager.ReconcileProcesses:input_type -> model_plane.v1.ReconcileProcessesRequest
+	37, // 50: model_plane.v1.SandboxManager.GetProcess:input_type -> model_plane.v1.GetProcessRequest
+	39, // 51: model_plane.v1.SandboxManager.ListProcesses:input_type -> model_plane.v1.ListProcessesRequest
+	41, // 52: model_plane.v1.SandboxManager.ReadProcessOutput:input_type -> model_plane.v1.ReadProcessOutputRequest
+	21, // 53: model_plane.v1.SandboxManager.Health:input_type -> model_plane.v1.SandboxHealthRequest
+	44, // 54: model_plane.v1.SandboxManager.GetThreadWorkspace:input_type -> model_plane.v1.GetThreadWorkspaceRequest
+	47, // 55: model_plane.v1.SandboxManager.ApplyThreadWorkspaceChanges:input_type -> model_plane.v1.ApplyThreadWorkspaceChangesRequest
+	49, // 56: model_plane.v1.SandboxManager.DeleteThreadWorkspace:input_type -> model_plane.v1.DeleteThreadWorkspaceRequest
+	51, // 57: model_plane.v1.SandboxManager.EraseThreadWorkspaceForRetention:input_type -> model_plane.v1.EraseThreadWorkspaceForRetentionRequest
+	53, // 58: model_plane.v1.SandboxManager.GetLeaseStatus:input_type -> model_plane.v1.GetLeaseStatusRequest
+	7,  // 59: model_plane.v1.SandboxManager.AcquireLease:output_type -> model_plane.v1.AcquireLeaseResponse
+	9,  // 60: model_plane.v1.SandboxManager.ReleaseLease:output_type -> model_plane.v1.ReleaseLeaseResponse
+	11, // 61: model_plane.v1.SandboxManager.SnapshotSandbox:output_type -> model_plane.v1.SnapshotResponse
+	13, // 62: model_plane.v1.SandboxManager.ActivateLease:output_type -> model_plane.v1.ActivateLeaseResponse
+	16, // 63: model_plane.v1.SandboxManager.GetWorkspaceManifest:output_type -> model_plane.v1.GetWorkspaceManifestResponse
+	20, // 64: model_plane.v1.SandboxManager.PromoteWorkspace:output_type -> model_plane.v1.PromoteWorkspaceResponse
+	27, // 65: model_plane.v1.SandboxManager.RegisterProcess:output_type -> model_plane.v1.RegisterProcessResponse
+	32, // 66: model_plane.v1.SandboxManager.UpdateProcessState:output_type -> model_plane.v1.UpdateProcessStateResponse
+	34, // 67: model_plane.v1.SandboxManager.AppendProcessOutput:output_type -> model_plane.v1.AppendProcessOutputResponse
+	36, // 68: model_plane.v1.SandboxManager.ReconcileProcesses:output_type -> model_plane.v1.ReconcileProcessesResponse
+	38, // 69: model_plane.v1.SandboxManager.GetProcess:output_type -> model_plane.v1.GetProcessResponse
+	40, // 70: model_plane.v1.SandboxManager.ListProcesses:output_type -> model_plane.v1.ListProcessesResponse
+	42, // 71: model_plane.v1.SandboxManager.ReadProcessOutput:output_type -> model_plane.v1.ReadProcessOutputResponse
+	22, // 72: model_plane.v1.SandboxManager.Health:output_type -> model_plane.v1.SandboxHealthResponse
+	45, // 73: model_plane.v1.SandboxManager.GetThreadWorkspace:output_type -> model_plane.v1.GetThreadWorkspaceResponse
+	48, // 74: model_plane.v1.SandboxManager.ApplyThreadWorkspaceChanges:output_type -> model_plane.v1.ApplyThreadWorkspaceChangesResponse
+	50, // 75: model_plane.v1.SandboxManager.DeleteThreadWorkspace:output_type -> model_plane.v1.DeleteThreadWorkspaceResponse
+	52, // 76: model_plane.v1.SandboxManager.EraseThreadWorkspaceForRetention:output_type -> model_plane.v1.EraseThreadWorkspaceForRetentionResponse
+	54, // 77: model_plane.v1.SandboxManager.GetLeaseStatus:output_type -> model_plane.v1.GetLeaseStatusResponse
+	59, // [59:78] is the sub-list for method output_type
+	40, // [40:59] is the sub-list for method input_type
+	40, // [40:40] is the sub-list for extension type_name
+	40, // [40:40] is the sub-list for extension extendee
+	0,  // [0:40] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_sandboxes_proto_init() }
@@ -4255,21 +4476,21 @@ func file_model_plane_v1_sandboxes_proto_init() {
 	if File_model_plane_v1_sandboxes_proto != nil {
 		return
 	}
-	file_model_plane_v1_sandboxes_proto_msgTypes[17].OneofWrappers = []any{}
-	file_model_plane_v1_sandboxes_proto_msgTypes[23].OneofWrappers = []any{}
-	file_model_plane_v1_sandboxes_proto_msgTypes[24].OneofWrappers = []any{
+	file_model_plane_v1_sandboxes_proto_msgTypes[18].OneofWrappers = []any{}
+	file_model_plane_v1_sandboxes_proto_msgTypes[24].OneofWrappers = []any{}
+	file_model_plane_v1_sandboxes_proto_msgTypes[25].OneofWrappers = []any{
 		(*UpdateProcessStateRequest_Started)(nil),
 		(*UpdateProcessStateRequest_Signal)(nil),
 		(*UpdateProcessStateRequest_Exited)(nil),
 	}
-	file_model_plane_v1_sandboxes_proto_msgTypes[35].OneofWrappers = []any{}
+	file_model_plane_v1_sandboxes_proto_msgTypes[36].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_sandboxes_proto_rawDesc), len(file_model_plane_v1_sandboxes_proto_rawDesc)),
 			NumEnums:      6,
-			NumMessages:   46,
+			NumMessages:   49,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

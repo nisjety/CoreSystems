@@ -1544,6 +1544,26 @@ impl PauseFold<'_, '_> {
         self.save_pending(pending, pause_ref).await
     }
 
+    /// Save the fold for an input pause on an MCP server's form (EP-4 S7): [`Self::save_input`]
+    /// for the pause named by `pause_ref` (the `{run}:{step}:elicit:1` reference), with the id of
+    /// the form the gateway holds recorded under [`lf::EXT_PENDING_ELICITATION`], so the resume
+    /// can answer that held call and no other. `call` is the MCP tool's name and `fingerprint` the
+    /// digest of the exact call. The id is the only thing of the form the fold keeps.
+    pub(crate) async fn save_elicitation(
+        &mut self,
+        pause_ref: &str,
+        step_id: &str,
+        call: &str,
+        fingerprint: &str,
+        elicitation_id: &str,
+    ) -> PauseSaved {
+        self.fold.extensions.insert(
+            lf::EXT_PENDING_ELICITATION.to_owned(),
+            serde_json::Value::String(elicitation_id.to_owned()),
+        );
+        self.save_input(pause_ref, step_id, call, fingerprint).await
+    }
+
     /// The part of a pause save every kind shares: set `pending`, save the fold under
     /// `pause_ref`, and on a content refusal save a tombstone under the same reference.
     async fn save_pending(&mut self, pending: PendingPause, pause_ref: &str) -> PauseSaved {

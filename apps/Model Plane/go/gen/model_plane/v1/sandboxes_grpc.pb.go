@@ -19,24 +19,25 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	SandboxManager_AcquireLease_FullMethodName                = "/model_plane.v1.SandboxManager/AcquireLease"
-	SandboxManager_ReleaseLease_FullMethodName                = "/model_plane.v1.SandboxManager/ReleaseLease"
-	SandboxManager_SnapshotSandbox_FullMethodName             = "/model_plane.v1.SandboxManager/SnapshotSandbox"
-	SandboxManager_ActivateLease_FullMethodName               = "/model_plane.v1.SandboxManager/ActivateLease"
-	SandboxManager_GetWorkspaceManifest_FullMethodName        = "/model_plane.v1.SandboxManager/GetWorkspaceManifest"
-	SandboxManager_PromoteWorkspace_FullMethodName            = "/model_plane.v1.SandboxManager/PromoteWorkspace"
-	SandboxManager_RegisterProcess_FullMethodName             = "/model_plane.v1.SandboxManager/RegisterProcess"
-	SandboxManager_UpdateProcessState_FullMethodName          = "/model_plane.v1.SandboxManager/UpdateProcessState"
-	SandboxManager_AppendProcessOutput_FullMethodName         = "/model_plane.v1.SandboxManager/AppendProcessOutput"
-	SandboxManager_ReconcileProcesses_FullMethodName          = "/model_plane.v1.SandboxManager/ReconcileProcesses"
-	SandboxManager_GetProcess_FullMethodName                  = "/model_plane.v1.SandboxManager/GetProcess"
-	SandboxManager_ListProcesses_FullMethodName               = "/model_plane.v1.SandboxManager/ListProcesses"
-	SandboxManager_ReadProcessOutput_FullMethodName           = "/model_plane.v1.SandboxManager/ReadProcessOutput"
-	SandboxManager_Health_FullMethodName                      = "/model_plane.v1.SandboxManager/Health"
-	SandboxManager_GetThreadWorkspace_FullMethodName          = "/model_plane.v1.SandboxManager/GetThreadWorkspace"
-	SandboxManager_ApplyThreadWorkspaceChanges_FullMethodName = "/model_plane.v1.SandboxManager/ApplyThreadWorkspaceChanges"
-	SandboxManager_DeleteThreadWorkspace_FullMethodName       = "/model_plane.v1.SandboxManager/DeleteThreadWorkspace"
-	SandboxManager_GetLeaseStatus_FullMethodName              = "/model_plane.v1.SandboxManager/GetLeaseStatus"
+	SandboxManager_AcquireLease_FullMethodName                     = "/model_plane.v1.SandboxManager/AcquireLease"
+	SandboxManager_ReleaseLease_FullMethodName                     = "/model_plane.v1.SandboxManager/ReleaseLease"
+	SandboxManager_SnapshotSandbox_FullMethodName                  = "/model_plane.v1.SandboxManager/SnapshotSandbox"
+	SandboxManager_ActivateLease_FullMethodName                    = "/model_plane.v1.SandboxManager/ActivateLease"
+	SandboxManager_GetWorkspaceManifest_FullMethodName             = "/model_plane.v1.SandboxManager/GetWorkspaceManifest"
+	SandboxManager_PromoteWorkspace_FullMethodName                 = "/model_plane.v1.SandboxManager/PromoteWorkspace"
+	SandboxManager_RegisterProcess_FullMethodName                  = "/model_plane.v1.SandboxManager/RegisterProcess"
+	SandboxManager_UpdateProcessState_FullMethodName               = "/model_plane.v1.SandboxManager/UpdateProcessState"
+	SandboxManager_AppendProcessOutput_FullMethodName              = "/model_plane.v1.SandboxManager/AppendProcessOutput"
+	SandboxManager_ReconcileProcesses_FullMethodName               = "/model_plane.v1.SandboxManager/ReconcileProcesses"
+	SandboxManager_GetProcess_FullMethodName                       = "/model_plane.v1.SandboxManager/GetProcess"
+	SandboxManager_ListProcesses_FullMethodName                    = "/model_plane.v1.SandboxManager/ListProcesses"
+	SandboxManager_ReadProcessOutput_FullMethodName                = "/model_plane.v1.SandboxManager/ReadProcessOutput"
+	SandboxManager_Health_FullMethodName                           = "/model_plane.v1.SandboxManager/Health"
+	SandboxManager_GetThreadWorkspace_FullMethodName               = "/model_plane.v1.SandboxManager/GetThreadWorkspace"
+	SandboxManager_ApplyThreadWorkspaceChanges_FullMethodName      = "/model_plane.v1.SandboxManager/ApplyThreadWorkspaceChanges"
+	SandboxManager_DeleteThreadWorkspace_FullMethodName            = "/model_plane.v1.SandboxManager/DeleteThreadWorkspace"
+	SandboxManager_EraseThreadWorkspaceForRetention_FullMethodName = "/model_plane.v1.SandboxManager/EraseThreadWorkspaceForRetention"
+	SandboxManager_GetLeaseStatus_FullMethodName                   = "/model_plane.v1.SandboxManager/GetLeaseStatus"
 )
 
 // SandboxManagerClient is the client API for SandboxManager service.
@@ -106,6 +107,13 @@ type SandboxManagerClient interface {
 	// Erase a thread's rows and its object-store prefix (WS22-S5). Owner-bound: the
 	// caller's own sandbox bearer; service principals are refused.
 	DeleteThreadWorkspace(ctx context.Context, in *DeleteThreadWorkspaceRequest, opts ...grpc.CallOption) (*DeleteThreadWorkspaceResponse, error)
+	// Erase a deleted thread's rows and object-store prefix for the retention sweeper
+	// (F-f10-08, owner D-f10-7). Service-only: the caller must be a service principal
+	// holding sandbox:thread-workspace:erase:any, and a user is refused. org_id must be
+	// the verified organization, and owner_id only selects rows that must also match the
+	// org and the thread; a thread another owner shares is never erased. Gated by
+	// SANDBOX_MANAGER_SERVICE_THREAD_ERASE.
+	EraseThreadWorkspaceForRetention(ctx context.Context, in *EraseThreadWorkspaceForRetentionRequest, opts ...grpc.CallOption) (*EraseThreadWorkspaceForRetentionResponse, error)
 	// Read a lease's lifecycle: its state, the failure cause the latest thread-workspace apply recorded,
 	// when it was last used, and the counts its thread workspace holds (WS22-S6). Descriptive, like
 	// GetProcess: a released or expired lease still answers, so a client can say why its files are not kept.
@@ -290,6 +298,16 @@ func (c *sandboxManagerClient) DeleteThreadWorkspace(ctx context.Context, in *De
 	return out, nil
 }
 
+func (c *sandboxManagerClient) EraseThreadWorkspaceForRetention(ctx context.Context, in *EraseThreadWorkspaceForRetentionRequest, opts ...grpc.CallOption) (*EraseThreadWorkspaceForRetentionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EraseThreadWorkspaceForRetentionResponse)
+	err := c.cc.Invoke(ctx, SandboxManager_EraseThreadWorkspaceForRetention_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sandboxManagerClient) GetLeaseStatus(ctx context.Context, in *GetLeaseStatusRequest, opts ...grpc.CallOption) (*GetLeaseStatusResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetLeaseStatusResponse)
@@ -367,6 +385,13 @@ type SandboxManagerServer interface {
 	// Erase a thread's rows and its object-store prefix (WS22-S5). Owner-bound: the
 	// caller's own sandbox bearer; service principals are refused.
 	DeleteThreadWorkspace(context.Context, *DeleteThreadWorkspaceRequest) (*DeleteThreadWorkspaceResponse, error)
+	// Erase a deleted thread's rows and object-store prefix for the retention sweeper
+	// (F-f10-08, owner D-f10-7). Service-only: the caller must be a service principal
+	// holding sandbox:thread-workspace:erase:any, and a user is refused. org_id must be
+	// the verified organization, and owner_id only selects rows that must also match the
+	// org and the thread; a thread another owner shares is never erased. Gated by
+	// SANDBOX_MANAGER_SERVICE_THREAD_ERASE.
+	EraseThreadWorkspaceForRetention(context.Context, *EraseThreadWorkspaceForRetentionRequest) (*EraseThreadWorkspaceForRetentionResponse, error)
 	// Read a lease's lifecycle: its state, the failure cause the latest thread-workspace apply recorded,
 	// when it was last used, and the counts its thread workspace holds (WS22-S6). Descriptive, like
 	// GetProcess: a released or expired lease still answers, so a client can say why its files are not kept.
@@ -431,6 +456,9 @@ func (UnimplementedSandboxManagerServer) ApplyThreadWorkspaceChanges(context.Con
 }
 func (UnimplementedSandboxManagerServer) DeleteThreadWorkspace(context.Context, *DeleteThreadWorkspaceRequest) (*DeleteThreadWorkspaceResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteThreadWorkspace not implemented")
+}
+func (UnimplementedSandboxManagerServer) EraseThreadWorkspaceForRetention(context.Context, *EraseThreadWorkspaceForRetentionRequest) (*EraseThreadWorkspaceForRetentionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method EraseThreadWorkspaceForRetention not implemented")
 }
 func (UnimplementedSandboxManagerServer) GetLeaseStatus(context.Context, *GetLeaseStatusRequest) (*GetLeaseStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetLeaseStatus not implemented")
@@ -762,6 +790,24 @@ func _SandboxManager_DeleteThreadWorkspace_Handler(srv interface{}, ctx context.
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxManager_EraseThreadWorkspaceForRetention_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EraseThreadWorkspaceForRetentionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxManagerServer).EraseThreadWorkspaceForRetention(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxManager_EraseThreadWorkspaceForRetention_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxManagerServer).EraseThreadWorkspaceForRetention(ctx, req.(*EraseThreadWorkspaceForRetentionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SandboxManager_GetLeaseStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetLeaseStatusRequest)
 	if err := dec(in); err != nil {
@@ -854,6 +900,10 @@ var SandboxManager_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteThreadWorkspace",
 			Handler:    _SandboxManager_DeleteThreadWorkspace_Handler,
+		},
+		{
+			MethodName: "EraseThreadWorkspaceForRetention",
+			Handler:    _SandboxManager_EraseThreadWorkspaceForRetention_Handler,
 		},
 		{
 			MethodName: "GetLeaseStatus",

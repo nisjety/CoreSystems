@@ -246,6 +246,9 @@ type scheduledRunRequest struct {
 	FireKey          string `json:"fire_key"`
 	TemplateDigest   string `json:"template_digest"`
 	IdempotencyKey   string `json:"idempotency_key"`
+	// ExtSkills is the org's `ext.skills` word capability-core states for this fire (P2-ec-01-rel1). Absent while its
+	// switch is off. Capability-core is the only writer: it drops any value a task template carries.
+	ExtSkills string `json:"ext_skills,omitempty"`
 }
 
 func buildScheduledRunInput(raw json.RawMessage, t Tenancy) (any, error) {
@@ -278,6 +281,10 @@ func buildScheduledRunInput(raw json.RawMessage, t Tenancy) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("orchestration: scheduled run contract is not bound to its execution input: %w", err)
 	}
+	extSkills, err := scheduledExtSkillsWord(req.ExtSkills)
+	if err != nil {
+		return nil, err
+	}
 	// Off, the goal is never read, so the workflow input stays byte-identical.
 	goalID := ""
 	if goalJudgeActivityEnabled() {
@@ -303,7 +310,19 @@ func buildScheduledRunInput(raw json.RawMessage, t Tenancy) (any, error) {
 		ContractExpiresAt: contract.ExpiresAt,
 		Retention:         t.Retention(),
 		GoalID:            goalID,
+		ExtSkills:         extSkills,
 	}, nil
+}
+
+// scheduledExtSkillsWord checks the org's `ext.skills` word capability-core states on a scheduled run (P2-ec-01-rel1).
+// Empty is "not enforced" and stays out of the workflow input. The three policy words pass unchanged for execution-core
+// to apply. Any other word is refused, so a malformed word never reaches execution-core dressed as a policy.
+func scheduledExtSkillsWord(word string) (string, error) {
+	switch word {
+	case "", "none", "approved_only", "any":
+		return word, nil
+	}
+	return "", errors.New("orchestration: scheduled run ext_skills is not an ext.skills policy word")
 }
 
 // goalJudgeActivityEnabled is ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED (EP-7 S6), read at each

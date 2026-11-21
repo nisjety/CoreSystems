@@ -1894,7 +1894,7 @@ Rules: add-only; never renumber a wire field (`execution.proto:139-142`); none o
 | gateway.proto Hook priority, revision, created_by | WS25 S8 | **8, 9, 10** |
 | gateway.proto ScreenContent RPC + messages (file end) | WS26 S7 | new messages |
 | memory.proto IndexMemoryRequest.origin; SearchMemoryResponse.skip_reason, ListMemoryResponse.hidden_reason; Get/SetMemoryControls, ResetMemory | WS26 S4; WS07 S1/S2 | **7; 4, 4; new** |
-| sandboxes.proto AcquireLeaseRequest.zdr; Get/Apply/DeleteThreadWorkspace; SandboxFailureCause, GetLeaseStatus | WS22 S1, S5, S6 | **8; new** |
+| sandboxes.proto AcquireLeaseRequest.zdr; GetThreadWorkspaceRequest.zdr; ApplyThreadWorkspaceChangesRequest.zdr (F-f02-05); Get/Apply/DeleteThreadWorkspace; SandboxFailureCause, GetLeaseStatus | WS22 S1, S5, S6 | **8; 3; 5; new** |
 | browser.proto AcquireGrantRequest space_id, read_only, ttl_seconds; AcquireGrantResponse read_only, denied_domains; ValidateGrantResponse read_only | WS21 S4 | **10-12; 10, 11; 10**. [RECONCILE] QRY session's Grant v2 note owns these tags (DEC-20, 2.6 row 15); take its numbers if they differ |
 
 SSE ChatEvent variants (taxonomy gate, not proto): WS15 S1 `retry_scheduled`, `compaction`, `context_change` (`run_parked` at S7); WS14 S4 `user_question`; WS27 S3 `usage_progress`; additive keys on `usage` (WS02 S1) and `queued_input.ids` (WS04). Arrival order WS02, WS04, WS13/WS14, WS15, WS27.
