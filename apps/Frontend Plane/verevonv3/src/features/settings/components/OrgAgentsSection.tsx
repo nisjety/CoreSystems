@@ -11,6 +11,7 @@ import {
 import { ApiError } from '@/shared/api/http'
 import { getAgentInstallations } from '@/shared/api/spaces-client'
 import { translateApiError, useI18n } from '@/shared/i18n'
+import { SpaceAgentAccessDialog } from '@/features/spaces/components/SpaceAgentAccessDialog'
 import { SpaceConfirmButton } from '@/features/spaces/components/SpaceConfirmButton'
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
 import { getSession } from '@/shared/session/session-store'
@@ -27,6 +28,21 @@ import { hasWorkspaceAdminAccess } from '@/shared/session/access'
 type Tr = (no: string, en: string) => string
 
 type AgentAction = 'suspend' | 'reactivate' | 'retire'
+
+/** The prefix of an agent definition's subject id: `agent-<definition id>` (the access dialog takes the definition id). */
+const AGENT_SUBJECT_PREFIX = 'agent-'
+
+/**
+ * D19/D22as: the definition id whose access an org admin may edit here: an ownerless, org-visible agent that is not
+ * retired and is a definition subject. Presentation only; the dialog's read says again whether this admin may edit,
+ * and Control decides the write.
+ */
+export function orgAgentEditRef(agent: OrgAgentView): string | null {
+  if (agent.owner_user_id || agent.visibility !== 'org' || agent.lifecycle === 'retired') return null
+  if (!agent.agent_subject_id.startsWith(AGENT_SUBJECT_PREFIX)) return null
+  const ref = agent.agent_subject_id.slice(AGENT_SUBJECT_PREFIX.length)
+  return ref ? ref : null
+}
 
 export function OrgAgentsSection() {
   const i18n = useI18n()
@@ -58,6 +74,7 @@ export function OrgAgentsSection() {
     return byId
   })
   const [busyId, setBusyId] = createSignal<string | null>(null)
+  const [editingRef, setEditingRef] = createSignal<string | undefined>(undefined)
   const [notice, setNotice] = createSignal<string | null>(null)
   const [actionError, setActionError] = createSignal<string | null>(null)
 
@@ -167,6 +184,13 @@ export function OrgAgentsSection() {
                       <code>{agent.agent_subject_id}</code>
                     </span>
                     <span>{lifecycleLabel(agent.lifecycle)}</span>
+                    <Show when={orgAgentEditRef(agent)}>
+                      {(ref) => (
+                        <SettingsButton type="button" disabled={busyId() !== null} onClick={() => setEditingRef(ref())}>
+                          {tr('Rediger tilgang', 'Edit access')}
+                        </SettingsButton>
+                      )}
+                    </Show>
                     <Show when={agent.lifecycle === 'active'}>
                       <SettingsButton
                         type="button"
@@ -203,6 +227,15 @@ export function OrgAgentsSection() {
             </ul>
           </Show>
         </Show>
+        <SpaceAgentAccessDialog
+          agentRef={editingRef()}
+          open={() => editingRef() !== undefined}
+          onClose={() => setEditingRef(undefined)}
+          onSaved={() => {
+            setEditingRef(undefined)
+            void refetch()
+          }}
+        />
       </section>
     </Show>
   )

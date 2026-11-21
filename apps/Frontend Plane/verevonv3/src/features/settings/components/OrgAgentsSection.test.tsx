@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
 import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { OrgAgentsSection } from '@/features/settings/components/OrgAgentsSection'
+import { OrgAgentsSection, orgAgentEditRef } from '@/features/settings/components/OrgAgentsSection'
 import { clearSession, markSessionOnboardingComplete, setSessionUser } from '@/shared/session/session-store'
 
 // W3-DEC-ORGAGENT (D19): the org-admin section lists the org-visible agents and suspends, reactivates or retires one.
@@ -248,3 +248,25 @@ describe('OrgAgentsSection changes (W3-DEC-ORGAGENT)', () => {
     expect(await screen.findByText('Ingen endring. Agenten har allerede denne tilstanden.')).toBeTruthy()
   })
 })
+
+// D19/D22as: an org admin edits the access of an ownerless org agent from this section.
+describe('Edit access for an ownerless org agent (D22as)', () => {
+  const ORG_AGENT = { ...ACTIVE, agent_subject_id: 'agent-def1' }
+
+  it('offers Edit access only for an ownerless, org-visible definition that is not retired', () => {
+    expect(orgAgentEditRef(ORG_AGENT)).toBe('def1')
+    expect(orgAgentEditRef({ ...ORG_AGENT, owner_user_id: 'user_9' })).toBeNull()
+    expect(orgAgentEditRef({ ...ORG_AGENT, visibility: 'owner' })).toBeNull()
+    expect(orgAgentEditRef({ ...ORG_AGENT, lifecycle: 'retired' })).toBeNull()
+    expect(orgAgentEditRef({ ...ORG_AGENT, agent_subject_id: 'agt_1' })).toBeNull()
+  })
+
+  it('opens the access dialog on that agent', async () => {
+    signIn('admin')
+    const fetchMock = stubOrgAgents([ORG_AGENT])
+    render(() => <OrgAgentsSection />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Rediger tilgang' }))
+    await waitFor(() => expect(callsTo(fetchMock, 'GET', '/api/v1/agents/def1/access')).toHaveLength(1))
+  })
+})
+

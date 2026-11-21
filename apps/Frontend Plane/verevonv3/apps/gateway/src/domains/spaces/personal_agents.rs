@@ -45,6 +45,32 @@ const PERSONAL_AGENTS_SURFACE: &str = "personal_agents";
 const AGENT_ACCESS_FORBIDDEN: &str = "agent_access_forbidden";
 /// Control's typed 422 on an organization-agent registration: the subject id or the visibility and add policy pair is not valid.
 const AGENT_POLICY_INVALID: &str = "agent_policy_invalid";
+/// Control's cap on one agent's access list (`maxAgentAccessEntries`).
+const MAX_AGENT_ACCESS_ENTRIES: usize = 200;
+
+/// D19/D22as, presentation only: whether an org owner or admin may edit this agent's access although
+/// they are neither its owner nor a listed manager. It mirrors Control's `AgentAccessEditAuthority`
+/// (ownerless, org-visible, canonical org owner or admin); Control decides again on every write.
+fn org_admin_editable(user: &AuthenticatedUser, view: &Value) -> bool {
+    str_field(view, "owner_user_id").trim().is_empty()
+        && str_field(view, "visibility") == "org"
+        && crate::middleware::has_authorized_org_role(user, &["owner", "admin"])
+}
+
+/// D24 mirrored into the display projection: an owner-to-org flip keeps the actor on the access list as a
+/// manager unless they listed themselves, exactly as Control's `UpdateAgentAccess` stores it. Control's
+/// answer carries no list, so without this the projection (and the next editor's read) would silently drop
+/// them, and a save from that read would really remove them.
+fn entries_as_stored(prior: &Value, to_visibility: &str, actor_id: &str, mut entries: Vec<Value>) -> Vec<Value> {
+    let clears_owner = !str_field(prior, "owner_user_id").trim().is_empty()
+        && str_field(prior, "visibility") == "owner"
+        && to_visibility == "org";
+    let listed = entries.iter().any(|entry| str_field(entry, "principal_id") == actor_id);
+    if clears_owner && !listed && entries.len() < MAX_AGENT_ACCESS_ENTRIES && !actor_id.trim().is_empty() {
+        entries.push(json!({ "principal_id": actor_id, "role": "manager" }));
+    }
+    entries
+}
 
 /// The WS17-S5 routes, merged by `module_routes()` in `spaces/mod.rs`.
 pub(super) fn routes() -> Router<AppState> {
@@ -596,7 +622,14 @@ pub(crate) async fn get_agent_access_core(
         "add_policy": field(&data, "add_policy"),
         "revision": field(&data, "revision"),
         "owner_subject_id": field(&data, "owner_user_id"),
-        "owner_label": field(&definition, "ownerLabel"),
+        // D22as: an owner-to-org flip clears Control's owner; Convex keeps its creator, so its label is
+        // shown only while Control still names an owner.
+        "owner_label": if str_field(&data, "owner_user_id").trim().is_empty() {
+            Value::Null
+        } else {
+            field(&definition, "ownerLabel")
+        },
+        "org_admin_editable": org_admin_editable(user, &data),
         "entries": entries,
     }))
 }
@@ -634,6 +667,26 @@ pub(crate) async fn put_agent_access_core(
     let add_policy = str_field(body, "add_policy").trim().to_owned();
 
     let subject = subject_of(agent_id);
+    // The state the edit starts from, so the projection can store the list as Control will (D24).
+    let prior_url = format!(
+        "{}/api/v1/internal/agents/subjects/{}",
+        state.user_core_url,
+        urlencoding::encode(&subject)
+    );
+    let (prior_status, Json(prior)) = proxy_json(
+        state,
+        Method::GET,
+        &prior_url,
+        None,
+        Some(org_id.as_str()),
+        Some(&actor_for(user)),
+        None,
+    )
+    .await;
+    if !prior_status.is_success() {
+        return (prior_status, Json(prior));
+    }
+    let prior = prior.get("data").cloned().unwrap_or(Value::Null);
     let url = format!(
         "{}/api/v1/internal/agents/subjects/{}/access",
         state.user_core_url,
@@ -658,6 +711,7 @@ pub(crate) async fn put_agent_access_core(
         return (status, Json(view));
     }
     let data = view.get("data").cloned().unwrap_or(Value::Null);
+    let entries = entries_as_stored(&prior, &visibility, &user.user_id, entries);
 
     let Ok(_) = convex_gateway_call(
         state,
@@ -1547,6 +1601,13 @@ mod tests {
         }});
         answer(
             &f.user_core,
+            "GET",
+            "/api/v1/internal/agents/subjects/agent-agent-1",
+            control(json!({"agent_subject_id": "agent-agent-1", "visibility": "org", "add_policy": "anyone", "revision": 7})),
+        )
+        .await;
+        answer(
+            &f.user_core,
             "PUT",
             "/api/v1/internal/agents/subjects/agent-agent-1/access",
             ResponseTemplate::new(409).set_body_json(conflict.clone()),
@@ -1605,5 +1666,102 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let written = convex_args(&f.convex, "users:setPrimaryAgentForGateway").await;
         assert_eq!(written[0]["agentSubjectId"], "agent-agent-8");
+    }
+
+
+    // ---- D22as / D19 / D24: org-admin edit of an ownerless org agent, and the owner-to-org flip -----------
+
+    fn admin() -> AuthenticatedUser {
+        let mut admin = user();
+        admin.auth_role = Some("admin".to_owned());
+        admin.authorized_membership = Some(AuthorizedMembership {
+            organization_id: ORG.to_owned(),
+            role: "admin".to_owned(),
+        });
+        admin
+    }
+
+    #[test]
+    fn org_admin_editable_mirrors_controls_ownerless_org_visible_admin_rule() {
+        let ownerless = json!({"visibility": "org", "role": ""});
+        assert!(org_admin_editable(&admin(), &ownerless));
+        assert!(!org_admin_editable(&user(), &ownerless), "a plain member is not an org admin");
+        assert!(!org_admin_editable(&admin(), &json!({"visibility": "org", "owner_user_id": "user-9"})), "an owned agent");
+        assert!(!org_admin_editable(&admin(), &json!({"visibility": "owner"})), "a personal agent");
+    }
+
+    #[test]
+    fn an_owner_to_org_flip_stores_the_actor_as_a_manager_unless_listed_and_nothing_else_does() {
+        let owned = json!({"owner_user_id": "user-1", "visibility": "owner"});
+        let other = json!({"principal_id": "user-2", "role": "collaborator"});
+        assert_eq!(
+            entries_as_stored(&owned, "org", "user-1", vec![other.clone()]),
+            vec![other.clone(), json!({"principal_id": "user-1", "role": "manager"})]
+        );
+        let listed = json!({"principal_id": "user-1", "role": "collaborator"});
+        assert_eq!(entries_as_stored(&owned, "org", "user-1", vec![listed.clone()]), vec![listed]);
+        assert_eq!(entries_as_stored(&owned, "owner", "user-1", vec![]), Vec::<Value>::new(), "no flip");
+        let ownerless = json!({"visibility": "org"});
+        assert_eq!(entries_as_stored(&ownerless, "org", "user-1", vec![]), Vec::<Value>::new(), "an admin edit adds no one");
+        let full: Vec<Value> = (0..MAX_AGENT_ACCESS_ENTRIES)
+            .map(|index| json!({"principal_id": format!("p-{index}"), "role": "collaborator"}))
+            .collect();
+        assert_eq!(entries_as_stored(&owned, "org", "user-1", full.clone()).len(), full.len(), "the cap holds");
+    }
+
+    #[tokio::test]
+    async fn an_owner_to_org_flip_writes_the_former_owner_into_the_projection_and_the_answer() {
+        let f = fixture().await;
+        answer(
+            &f.user_core,
+            "GET",
+            "/api/v1/internal/agents/subjects/agent-agent-1",
+            control(json!({"agent_subject_id": "agent-agent-1", "owner_user_id": "user-1", "visibility": "owner", "revision": 3})),
+        )
+        .await;
+        answer(
+            &f.user_core,
+            "PUT",
+            "/api/v1/internal/agents/subjects/agent-agent-1/access",
+            control(json!({"agent_subject_id": "agent-agent-1", "visibility": "org", "add_policy": "anyone", "revision": 4, "role": "manager"})),
+        )
+        .await;
+        convex(&f, "spaceAgents:setAgentVisibilityProjectionForGateway", convex_value(json!({}))).await;
+        let (status, Json(body)) = put_agent_access_core(
+            &f.state,
+            &user(),
+            "agent-1",
+            &json!({"visibility": "org", "add_policy": "anyone", "entries": [], "expected_revision": 3}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let manager = json!([{"principal_id": "user-1", "role": "manager"}]);
+        assert_eq!(body["data"]["entries"], manager);
+        let projected = convex_args(&f.convex, "spaceAgents:setAgentVisibilityProjectionForGateway").await;
+        assert_eq!(projected[0]["accessEntries"], json!([{"principalId": "user-1", "role": "manager"}]));
+    }
+
+    #[tokio::test]
+    async fn an_ownerless_agent_shows_no_owner_label_and_says_an_org_admin_may_edit_it() {
+        let f = fixture().await;
+        answer(
+            &f.user_core,
+            "GET",
+            "/api/v1/internal/agents/subjects/agent-agent-1",
+            control(json!({"agent_subject_id": "agent-agent-1", "visibility": "org", "add_policy": "anyone", "revision": 4, "role": ""})),
+        )
+        .await;
+        convex(
+            &f,
+            "spaceAgents:agentDefinitionForGateway",
+            convex_value(json!({"agentRef": "agent-1", "ownerLabel": "Former Owner", "accessEntries": []})),
+        )
+        .await;
+        let (status, Json(body)) = get_agent_access_core(&f.state, &admin(), "agent-1").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["data"]["owner_label"].is_null(), "the cleared owner is not shown as the owner");
+        assert_eq!(body["data"]["org_admin_editable"], true);
+        let (_, Json(member_view)) = get_agent_access_core(&f.state, &user(), "agent-1").await;
+        assert_eq!(member_view["data"]["org_admin_editable"], false);
     }
 }

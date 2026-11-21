@@ -79,6 +79,11 @@ export type PersonalAgentAccess = {
   /** Null when no owner is named (a save reply does not carry it; the read does). */
   readonly ownerSubjectId: string | null
   readonly entries: readonly PersonalAgentEntry[]
+  /**
+   * D19/D22as: an org owner or admin may edit this ownerless, org-visible agent although they are not on its list.
+   * Presentation only (the read says so; a save reply does not); Control decides on every write.
+   */
+  readonly orgAdminEditable: boolean
 }
 
 export type PersonalAgentAccessSave = {
@@ -180,6 +185,7 @@ function accessOf(value: unknown): PersonalAgentAccess {
     revision: revisionOf(row.revision),
     ownerSubjectId: typeof row.owner_subject_id === 'string' && row.owner_subject_id ? row.owner_subject_id : null,
     entries: listOf(row.entries, entryOf),
+    orgAdminEditable: row.org_admin_editable === true,
   }
 }
 

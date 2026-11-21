@@ -31,6 +31,7 @@ function accessOf(over: Partial<PersonalAgentAccess> = {}): PersonalAgentAccess 
     revision: 7,
     ownerSubjectId: 'sub-kari',
     entries: [{ principalId: 'sub-kari', role: 'manager' }],
+    orgAdminEditable: false,
     ...over,
   }
 }
@@ -224,6 +225,15 @@ describe('SpaceAgentAccessDialog (WS17-S5)', () => {
       await screen.findByText('sub-kari')
       expect(screen.queryByRole('searchbox')).toBeNull()
       expect(access.searchDirectory).not.toHaveBeenCalled()
+    })
+
+    it('is offered to an org admin on an ownerless org agent they are not listed on (D22as)', async () => {
+      access.getPersonalAgentAccess.mockResolvedValue(
+        accessOf({ role: 'collaborator', ownerSubjectId: null, visibility: 'org', orgAdminEditable: true }),
+      )
+      renderDialog()
+      await screen.findByText('sub-kari')
+      expect(screen.queryByRole('searchbox')).not.toBeNull()
     })
   })
 })

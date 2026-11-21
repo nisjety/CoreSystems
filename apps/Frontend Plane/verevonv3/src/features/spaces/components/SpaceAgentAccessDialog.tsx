@@ -70,7 +70,9 @@ export function SpaceAgentAccessDialog(props: SpaceAgentAccessDialogProps) {
   const [conflict, setConflict] = createSignal(false)
   const [saved, setSaved] = createSignal(false)
 
-  const editable = () => access()?.role === 'owner' || access()?.role === 'manager'
+  // D19/D22as: an org owner or admin edits an ownerless org agent too (the gateway's read says when).
+  const editable = () =>
+    access()?.role === 'owner' || access()?.role === 'manager' || access()?.orgAdminEditable === true
   const dirty = createMemo(() => {
     const current = access()
     return (
