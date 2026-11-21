@@ -117,6 +117,67 @@ fn the_user_erasure_summary_counts_the_standing_authority() {
     );
 }
 
+/// F-f01-16: a person's erasure removes their own user-scope skills with their versions and revisions, in the
+/// order the org purge uses (versions under the erasure setting, then the skills, then the revisions that
+/// hold their text), after the promote counters and before the audit row, and its audit detail carries the
+/// three counts. Checked on the source text, so no database is needed.
+#[test]
+fn a_person_erasure_removes_the_persons_own_skills_in_the_purge_order() {
+    let source = include_str!("gdpr.rs");
+    let helper = squash(body_of(source, "async fn erase_user_skills_in_tx("));
+    let at = |needle: &str| {
+        helper
+            .find(needle)
+            .unwrap_or_else(|| panic!("the skill erasure states {needle}"))
+    };
+    let on = at("set_config('mp.version_erasure', 'on', true)");
+    let versions = at(
+        "DELETE FROM agent_skill_versions WHERE org_id = $1 AND scope = 'user' AND owner_user_id = $2",
+    );
+    let off = at("set_config('mp.version_erasure', '', true)");
+    let skills =
+        at("DELETE FROM agent_skills WHERE org_id = $1 AND scope = 'user' AND owner_user_id = $2");
+    let revisions = at("DELETE FROM skill_revisions WHERE org_id = $1 AND owner_user_id = $2");
+    assert!(
+        on < versions && versions < off && off < skills && skills < revisions,
+        "the versions go under the setting, then the skills, then the revisions that hold their text"
+    );
+    assert_eq!(
+        helper.matches("mp.version_erasure").count(),
+        2,
+        "the setting is on for the one version delete and put back at once"
+    );
+    assert!(
+        !helper.contains("DELETE FROM agent_skills WHERE org_id = $1 AND scope = 'org'")
+            && !helper.contains("DELETE FROM agent_skills WHERE org_id = $1 AND owner_user_id"),
+        "an org-scope skill is never named by the person's erasure"
+    );
+
+    let body = squash(body_of(source, "pub async fn erase_user_personal_data_for("));
+    let promote = body
+        .find("DELETE FROM promote_use_counts WHERE org_id = $1 AND user_id = $2")
+        .expect("the promote-on-use counter delete");
+    let call = body
+        .find("erase_user_skills_in_tx(&mut tx, org_id, user_id)")
+        .expect("the skill erasure");
+    let audit = body
+        .find("INSERT INTO memory_control_events")
+        .expect("the audit row");
+    assert!(
+        promote < call && call < audit,
+        "the skills go after the promote counters and before the audit row"
+    );
+    for detail in [
+        "'agent_skills', $10::bigint, 'skill_revisions', $11::bigint",
+        "'agent_skills', $8::bigint, 'skill_revisions', $9::bigint",
+    ] {
+        assert!(
+            body.contains(detail),
+            "the audit detail counts the skills: {detail}"
+        );
+    }
+}
+
 // ---- DB --------------------------------------------------------------------------------------
 
 async fn personal_thread(pool: &Pool, org: &str, thread: &str, owner: &str) {
@@ -464,4 +525,157 @@ async fn a_person_erasure_removes_their_grants_and_proposals_and_no_one_elses() 
             .await
             .ok();
     }
+}
+
+/// The rows of `table` in `org` whose owner is `owner`.
+async fn owned_rows(pool: &Pool, table: &str, org: &str, owner: &str) -> i64 {
+    sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM {table} WHERE org_id = $1 AND owner_user_id = $2"
+    ))
+    .bind(org)
+    .bind(owner)
+    .fetch_one(pool)
+    .await
+    .expect("count the owned rows")
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+async fn a_person_erasure_removes_their_own_skills_their_versions_and_their_revisions() {
+    use crate::space::test_support;
+    let Some(pool) = test_support::connect().await else {
+        return;
+    };
+    let nonce = mp_ids::new_ulid();
+    let org = format!("f01-16-org-{nonce}");
+    let (mine, theirs, shared) = (
+        format!("f01-16-mine-{nonce}"),
+        format!("f01-16-theirs-{nonce}"),
+        format!("f01-16-shared-{nonce}"),
+    );
+    for (id, name, scope, owner) in [
+        (&mine, "mine", "user", "erased-user"),
+        (&theirs, "theirs", "user", "other-user"),
+        (&shared, "shared", "org", ""),
+    ] {
+        sqlx::query(
+            "INSERT INTO agent_skills (id, org_id, name, content, scope, owner_user_id, created_at, updated_at) \
+             VALUES ($1, $2, $3, 'the skill text', $4, $5, now(), now())",
+        )
+        .bind(id)
+        .bind(&org)
+        .bind(name)
+        .bind(scope)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .expect("seed skill");
+    }
+    // An edit writes a further version and revision of the person's text.
+    sqlx::query("UPDATE agent_skills SET content = 'the edited skill text' WHERE id = $1")
+        .bind(&mine)
+        .execute(&pool)
+        .await
+        .expect("edit the personal skill");
+
+    // Counted from the rows themselves, so the assertions hold whatever the triggers wrote.
+    let before_versions = owned_rows(&pool, "agent_skill_versions", &org, "erased-user").await;
+    let before_revisions = owned_rows(&pool, "skill_revisions", &org, "erased-user").await;
+    assert!(before_versions >= 1 && before_revisions >= 1, "the person's text is versioned and revised");
+
+    let summary = erase_user_personal_data_for(
+        &pool,
+        &org,
+        "erased-user",
+        UserErasureKind::Erase,
+        &CheckedThreads::none(),
+        None,
+    )
+    .await
+    .expect("erasure");
+    assert_eq!(
+        summary.agent_skills, 1,
+        "the person's one personal skill row"
+    );
+    assert_eq!(
+        summary.skill_revisions, before_revisions as u64,
+        "every revision of their text"
+    );
+    assert_eq!(
+        summary.agent_skill_versions, before_versions as u64,
+        "every version of their text"
+    );
+    assert_eq!(
+        owned_rows(&pool, "agent_skills", &org, "erased-user").await,
+        0
+    );
+    assert_eq!(
+        owned_rows(&pool, "skill_revisions", &org, "erased-user").await,
+        0,
+        "the deleted revision that holds the text goes too"
+    );
+    assert_eq!(
+        owned_rows(&pool, "agent_skill_versions", &org, "erased-user").await,
+        0
+    );
+
+    // Another member's skill and the org skill survive, with their own history.
+    assert_eq!(
+        owned_rows(&pool, "agent_skills", &org, "other-user").await,
+        1
+    );
+    assert!(owned_rows(&pool, "skill_revisions", &org, "other-user").await >= 1);
+    let (shared_rows,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM agent_skills WHERE org_id = $1 AND id = $2")
+            .bind(&org)
+            .bind(&shared)
+            .fetch_one(&pool)
+            .await
+            .expect("count the org skill");
+    assert_eq!(shared_rows, 1, "the org skill is not the person's to erase");
+
+    // The audit row counts the three removals and holds no text.
+    let details: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT detail FROM memory_control_events WHERE org_id = $1 AND user_id = $2 AND event = 'erased'",
+    )
+    .bind(&org)
+    .bind("erased-user")
+    .fetch_all(&pool)
+    .await
+    .expect("the audit rows");
+    assert!(
+        details.iter().any(|detail| {
+            detail["agent_skills"] == 1
+                && detail["skill_revisions"] == before_revisions
+                && detail["agent_skill_versions"] == before_versions
+        }),
+        "the audit row counts the skill removals"
+    );
+    assert!(
+        details
+            .iter()
+            .all(|detail| !detail.to_string().contains("skill text")),
+        "the audit row holds no skill text"
+    );
+
+    // Redelivery finds nothing left to remove.
+    let again = erase_user_personal_data_for(
+        &pool,
+        &org,
+        "erased-user",
+        UserErasureKind::Erase,
+        &CheckedThreads::none(),
+        None,
+    )
+    .await
+    .expect("redelivered erasure");
+    assert_eq!(
+        (
+            again.agent_skills,
+            again.skill_revisions,
+            again.agent_skill_versions
+        ),
+        (0, 0, 0),
+        "a second run deletes nothing"
+    );
 }

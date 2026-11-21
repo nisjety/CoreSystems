@@ -264,6 +264,7 @@ async fn decide_with(
         grant_ttl_secs: 3600,
         rule_proposed: false,
         authz_audit: false,
+        step_up_verified: false,
     };
     decide_approval_recorded(
         pool,

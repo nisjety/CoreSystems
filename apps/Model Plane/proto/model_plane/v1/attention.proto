@@ -22,6 +22,9 @@ service AttentionService {
 
   // The per-person attention stream (WS16 S5): a snapshot, then the changes, resyncs and heartbeats.
   rpc StreamAttention(StreamAttentionRequest) returns (stream StreamAttentionResponse);
+
+  // Whether one waiting item still waits on its owner. For service callers holding session:read; content-free.
+  rpc ConfirmAttentionWaiting(ConfirmAttentionWaitingRequest) returns (ConfirmAttentionWaitingResponse);
 }
 
 // The attention state of a thread. The set is closed: a new state needs a new number here and a
@@ -62,6 +65,9 @@ enum AttentionReason {
   // its token budget or turn cap or was judged blocked. Derived only while the thread has no other
   // pending row and the thread goals switch is on, so a flag-off response never carries it.
   ATTENTION_REASON_GOAL = 5;
+  // A run a crash parked waits for its owner to continue it (O-02). Named only once the park has waited the
+  // notice time, and only while the crash-park notice is on; the state is NEEDS_INPUT.
+  ATTENTION_REASON_PARKED = 6;
 }
 
 // One thread that needs attention or is working. Identifiers and the closed state only: no title,
@@ -179,3 +185,29 @@ message AttentionResync {}
 
 // A keep-alive frame (WS16 S5).
 message AttentionHeartbeat {}
+
+// Asks whether one waiting item still waits on its owner (F-f05-03). A service asks before it announces
+// the item, so an item decided since the announcement is not announced again.
+message ConfirmAttentionWaitingRequest {
+  // The organization the item belongs to. Must match the verified caller.
+  string org_id = 1;
+  // The owner the item belongs to. The row must belong to this owner, so a service names the person it
+  // acts for and gets no answer about another person's item.
+  string user_id = 2;
+  // The thread the item belongs to.
+  string thread_id = 3;
+  // The run the item belongs to: the run that raised the row, or for a goal the run of its last settled turn.
+  string run_id = 4;
+  // The row that waits: the approval, the proposed plan or the approval that names it, the run question or the goal.
+  string source_id = 5;
+  // The state the item was announced in. Only a state that raises an item can be waiting; any other is not waiting.
+  AttentionState state = 6;
+}
+
+// Whether the item still waits on its owner (F-f05-03).
+message ConfirmAttentionWaitingResponse {
+  // False while the attention switch is off. Waiting is then false too.
+  bool enabled = 1;
+  // Whether the row still waits in the state the request names. Carries no content.
+  bool waiting = 2;
+}

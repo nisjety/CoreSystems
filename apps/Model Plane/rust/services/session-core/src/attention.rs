@@ -168,6 +168,9 @@ pub(crate) struct Pending {
     pub(crate) questions: Vec<DateTime<Utc>>,
     /// The thread's latest goal (EP-7 S5). `None` while the goals switch is off.
     pub(crate) goal: Option<GoalFact>,
+    /// When the thread's latest run was crash-parked, once the park has waited the notice time (O-02). `None`
+    /// while the notice is off, and for a run that is not a due crash park.
+    pub(crate) crash_park: Option<DateTime<Utc>>,
 }
 
 /// The thread's latest goal: its closed status and when that status was last written.
@@ -228,6 +231,14 @@ pub(crate) fn derive(facts: &ThreadFacts<'_>, pending: &Pending) -> Derived {
         reason: AttentionReason::Input,
         since: Some(at),
     });
+    // A crash-parked run that has waited its notice time waits on its owner to continue it (O-02). It
+    // reads as the notice names it, so the list and the event agree. The run's own WORKING state loses
+    // to it, because the run is not working: its loop is gone and only the owner can continue it.
+    let parked = pending.crash_park.map(|since| Derived {
+        state: AttentionState::NeedsInput,
+        reason: AttentionReason::Parked,
+        since: Some(since),
+    });
     let run = run_state(facts.latest_run_status).map(|state| Derived {
         state,
         reason: AttentionReason::Unspecified,
@@ -236,10 +247,11 @@ pub(crate) fn derive(facts: &ThreadFacts<'_>, pending: &Pending) -> Derived {
     // A stopped goal speaks for the thread only while no other row waits on the owner (EP-7 S5) and
     // no run is working, since a working run means someone already acted. It then stands in for the
     // latest run: a met goal only over a completed run (a later failed run stays FAILED), a goal
-    // stopped by a cap or a blocked verdict over any finished run.
+    // stopped by a cap or a blocked verdict over any finished run. A due crash park is a row that waits.
     let has_live_pending = approvals.clone().next().is_some()
         || !pending.proposed_plans.is_empty()
-        || !pending.questions.is_empty();
+        || !pending.questions.is_empty()
+        || pending.crash_park.is_some();
     let goal = pending
         .goal
         .as_ref()
@@ -267,6 +279,7 @@ pub(crate) fn derive(facts: &ThreadFacts<'_>, pending: &Pending) -> Derived {
         approvals
             .chain(plans)
             .chain(questions)
+            .chain(parked)
             .chain(goal)
             .chain(run)
             .chain(archived)
@@ -347,7 +360,57 @@ async fn fetch_pending(
             pending.entry(thread_id).or_default().goal = Some(goal);
         }
     }
+    // A thread whose latest run is a due crash park is read here while the notice is on (O-02). Off, nothing is read.
+    if crate::loop_checkpoint::crash_park_notice_active() {
+        let notice = crate::loop_checkpoint::crash_park_notice_seconds();
+        let ttl = crate::loop_checkpoint::park_ttl_seconds();
+        for (thread_id, since) in fetch_crash_parks(pool, org_id, thread_ids, notice, ttl).await? {
+            pending.entry(thread_id).or_default().crash_park = Some(since);
+        }
+    }
     Ok(pending)
+}
+
+/// Reads, in one query, the due crash park of each thread's latest run (O-02), with the instant the park began. The
+/// predicate is the one the notice reads ([`crate::loop_checkpoint::DUE_CRASH_PARK_PREDICATE`]), and the thread's origin
+/// is one the notice covers (the same list the attention list covers), so the list names a thread exactly when the park
+/// is one the notice announces. The notice's own stamp is left out: once a park is announced, the list keeps naming it
+/// until the park ends. The latest run is the one the listing names: the newest by `updated_at`, then `created_at` and
+/// `id`. Park state, times and origins only; no fold content is read.
+async fn fetch_crash_parks(
+    pool: &PgPool,
+    org_id: &str,
+    thread_ids: &[String],
+    notice_seconds: i64,
+    ttl_seconds: i64,
+) -> Result<Vec<(String, DateTime<Utc>)>, Status> {
+    let origins: Vec<String> = LISTED_ORIGINS
+        .iter()
+        .map(|origin| (*origin).to_owned())
+        .collect();
+    let sql = format!(
+        "SELECT latest.thread_id, c.updated_at
+           FROM (SELECT DISTINCT ON (thread_id) id, thread_id
+                   FROM runs
+                  WHERE org_id = $4 AND thread_id = ANY($5)
+                  ORDER BY thread_id, updated_at DESC, created_at DESC, id DESC) AS latest
+           JOIN run_loop_checkpoints AS c ON c.run_id = latest.id
+           JOIN runs AS r ON r.id = c.run_id
+           JOIN threads AS t ON t.id = r.thread_id
+          WHERE {} AND t.origin = ANY($6)",
+        crate::loop_checkpoint::DUE_CRASH_PARK_PREDICATE
+    );
+    let rows: Vec<(String, DateTime<Utc>)> = sqlx::query_as(&sql)
+        .bind(mp_contracts::loop_fold::ParkReason::CrashInterrupted.as_str())
+        .bind(notice_seconds as f64)
+        .bind(ttl_seconds as f64)
+        .bind(org_id)
+        .bind(thread_ids.to_vec())
+        .bind(origins)
+        .fetch_all(pool)
+        .await
+        .map_err(read_error)?;
+    Ok(rows)
 }
 
 /// Reads the latest goal of each thread in one query (EP-7 S5): its status and when that status was
@@ -835,6 +898,79 @@ mod tests {
     }
 
     #[test]
+    fn a_crash_park_reason_takes_the_number_the_contract_names() {
+        assert_eq!(AttentionReason::Parked as i32, 6);
+        assert_eq!(AttentionReason::try_from(6), Ok(AttentionReason::Parked));
+    }
+
+    /// A due crash park (O-02): the latest run is still `running`, but its loop is gone and the owner waits to
+    /// continue it. The thread reads NEEDS_INPUT with the PARKED reason, dated to the park.
+    fn parked(seconds: i64) -> Pending {
+        Pending {
+            crash_park: Some(at(seconds)),
+            ..Pending::default()
+        }
+    }
+
+    #[test]
+    fn a_due_crash_park_waits_on_its_owner_whatever_the_run_status_says() {
+        let derived = derive(&running_facts("running"), &parked(70));
+        assert_eq!(derived.state, AttentionState::NeedsInput);
+        assert_eq!(derived.reason, AttentionReason::Parked);
+        assert_eq!(derived.since, Some(at(70)));
+        assert_eq!(
+            derive(&running_facts("queued"), &parked(70)).state,
+            AttentionState::NeedsInput
+        );
+    }
+
+    #[test]
+    fn a_waiting_approval_outranks_a_due_crash_park() {
+        let pending = Pending {
+            approvals: vec![approval("tool_call", "running", None, 50)],
+            crash_park: Some(at(70)),
+            ..Pending::default()
+        };
+        let derived = derive(&running_facts("running"), &pending);
+        assert_eq!(derived.state, AttentionState::NeedsApproval);
+        assert_eq!(derived.reason, AttentionReason::Approval);
+    }
+
+    #[test]
+    fn a_stopped_goal_does_not_speak_while_a_due_crash_park_waits() {
+        let pending = Pending {
+            goal: Some(GoalFact {
+                status: "budget_reached".to_owned(),
+                since: at(60),
+            }),
+            crash_park: Some(at(70)),
+            ..Pending::default()
+        };
+        let derived = derive(&running_facts("running"), &pending);
+        assert_eq!(derived.reason, AttentionReason::Parked);
+    }
+
+    #[test]
+    fn without_a_due_crash_park_the_working_run_is_unchanged() {
+        assert_eq!(
+            derive(&running_facts("running"), &Pending::default()).state,
+            AttentionState::Working
+        );
+    }
+
+    #[test]
+    fn the_list_reads_the_same_predicate_the_notice_reads() {
+        // The list and the notice name the same parks by construction: both splice in the one predicate, and both
+        // take the query's placeholders from the same positions. A second copy of the predicate would drift.
+        let source = include_str!("attention.rs").replace("\r\n", "\n");
+        let production = &source[..source
+            .find("\n#[cfg(test)]\nmod tests {")
+            .expect("tests marker")];
+        assert!(production.contains("crate::loop_checkpoint::DUE_CRASH_PARK_PREDICATE"));
+        assert!(!production.contains("c.park_notice_sent_at"));
+    }
+
+    #[test]
     fn attention_goal_met_is_completed_goal() {
         let derived = derive(&running_facts("completed"), &goal("met", 110));
         assert_eq!(derived.state, AttentionState::Completed);
@@ -953,7 +1089,7 @@ mod tests {
 #[cfg(test)]
 mod db_tests {
     use super::*;
-    use crate::loop_checkpoint::test_support::scratch_pool;
+    use crate::loop_checkpoint::test_support::{fold_for, plant_round_fold, scratch_pool};
     use mp_ids::new_ulid;
 
     async fn seed_thread(pool: &PgPool, org: &str, user: &str, thread: &str) {
@@ -1008,6 +1144,7 @@ mod db_tests {
         .expect("seed approval");
     }
 
+    // memory_mode keeps its default here: attention fields never carry a thread's memory mode.
     fn listing_row(thread: &str, latest_run_status: &str) -> pb::ThreadSummary {
         pb::ThreadSummary {
             thread_id: thread.to_owned(),
@@ -1180,5 +1317,83 @@ mod db_tests {
             .expect("item");
         assert!(item.unseen);
         assert_eq!(item.state, AttentionState::Completed as i32);
+    }
+
+    /// A crash park as the recovery worker leaves one, `age_seconds` old: a round fold of `run` turned into a park.
+    async fn plant_crash_park(pool: &PgPool, run: &str, age_seconds: f64) {
+        plant_round_fold(pool, run, &fold_for(run), "auth-1").await;
+        sqlx::query(
+            "UPDATE run_loop_checkpoints
+                SET kind = 'park', state = 'parked', pause_ref = $2, park_reason = 'crash_interrupted',
+                    park_until = now() + interval '1 hour', updated_at = now() - make_interval(secs => $3)
+              WHERE run_id = $1",
+        )
+        .bind(run)
+        .bind(format!("park-{run}"))
+        .bind(age_seconds)
+        .execute(pool)
+        .await
+        .expect("plant a crash park");
+    }
+
+    /// The list reads a crash park only where the notice announces it (O-02): a thread whose origin the list covers,
+    /// and whose latest run is the parked one. A Support thread's park, and a park a newer run has overtaken, are not named.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_crash_park_is_read_only_where_the_notice_announces_it() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let suffix = new_ulid();
+        let (org, user) = (format!("attn-{suffix}"), "attn-user");
+        // Named: a chat thread whose latest run is due.
+        let (chat_thread, chat_run) = (format!("thr_chat_{suffix}"), format!("run_chat_{suffix}"));
+        seed_thread(&pool, &org, user, &chat_thread).await;
+        seed_run(&pool, &org, user, &chat_thread, &chat_run, "running").await;
+        plant_crash_park(&pool, &chat_run, 5.0 * 3600.0).await;
+        // Not named: a support thread, which answers to its own surface.
+        let (support_thread, support_run) =
+            (format!("thr_sup_{suffix}"), format!("run_sup_{suffix}"));
+        seed_thread(&pool, &org, user, &support_thread).await;
+        sqlx::query("UPDATE threads SET origin = 'support' WHERE id = $1")
+            .bind(&support_thread)
+            .execute(&pool)
+            .await
+            .expect("move the thread to support");
+        seed_run(&pool, &org, user, &support_thread, &support_run, "running").await;
+        plant_crash_park(&pool, &support_run, 5.0 * 3600.0).await;
+        // Not named: a due park that a newer run of its thread has overtaken.
+        let (overtaken_thread, overtaken_run) =
+            (format!("thr_old_{suffix}"), format!("run_old_{suffix}"));
+        seed_thread(&pool, &org, user, &overtaken_thread).await;
+        seed_run(
+            &pool,
+            &org,
+            user,
+            &overtaken_thread,
+            &overtaken_run,
+            "running",
+        )
+        .await;
+        plant_crash_park(&pool, &overtaken_run, 5.0 * 3600.0).await;
+        let newer_run = format!("run_new_{suffix}");
+        seed_run(&pool, &org, user, &overtaken_thread, &newer_run, "running").await;
+        sqlx::query("UPDATE runs SET updated_at = now() + interval '1 second' WHERE id = $1")
+            .bind(&newer_run)
+            .execute(&pool)
+            .await
+            .expect("the newer run is the thread's latest");
+
+        let named = fetch_crash_parks(
+            &pool,
+            &org,
+            &[chat_thread.clone(), support_thread, overtaken_thread],
+            14_400,
+            86_400,
+        )
+        .await
+        .expect("the list's crash-park read");
+        let threads: Vec<&str> = named.iter().map(|(thread, _)| thread.as_str()).collect();
+        assert_eq!(threads, [chat_thread.as_str()]);
     }
 }

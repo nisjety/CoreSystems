@@ -45,6 +45,7 @@ use tracing::info;
 
 use crate::auth::{authorize_operation, identity, VerifiedIdentity};
 use crate::grpc::{record_metrics, THREAD_TITLE_MAX_CHARS};
+use crate::retention_receipt::{thread_receipt_enforce_enabled, RunRetention};
 use crate::run_phase::ERROR_CODE_TRAILER;
 use crate::thread_export::ERROR_REASON_TRAILER;
 use crate::thread_import_foreign::{self, ForeignSource};
@@ -306,6 +307,10 @@ pub(crate) async fn import_thread(
     req: pb::ImportThreadRequest,
 ) -> Result<pb::ImportThreadResponse, Status> {
     refuse_retention_exempt(caller)?;
+    // Z-17 (thread half): the imported thread is persistent. A zero-retention and a waived caller were
+    // refused just above, so the persistent receipt is the caller's own. Stamped only while
+    // SESSION_THREAD_RECEIPT_ENFORCE is on; off, the columns stay NULL, which reads as persistent.
+    let receipt = thread_receipt_enforce_enabled().then(RunRetention::persistent);
     let owner = caller
         .user_id()
         .ok_or_else(|| Status::permission_denied("an import is made by the thread's owner"))?;
@@ -315,7 +320,16 @@ pub(crate) async fn import_thread(
     let now = Utc::now();
     let mut tx = pool.begin().await.map_err(internal)?;
     let source_org_match = source_in_org(&mut tx, &plan.source_thread_id, caller.org_id()).await?;
-    insert_import_thread(&mut tx, &thread_id, caller.org_id(), owner, &plan.title, now).await?;
+    insert_import_thread(
+        &mut tx,
+        &thread_id,
+        caller.org_id(),
+        owner,
+        &plan.title,
+        now,
+        receipt.as_ref(),
+    )
+    .await?;
     let imported = insert_turns(&mut tx, &thread_id, &plan, source_org_match).await?;
     insert_imported_event(
         &mut tx,
@@ -563,11 +577,13 @@ async fn insert_import_thread(
     owner: &str,
     title: &str,
     now: DateTime<Utc>,
+    receipt: Option<&RunRetention>,
 ) -> Result<(), Status> {
     sqlx::query(
         "INSERT INTO threads
-         (id, session_key, org_id, user_id, created_at, origin, memory_mode, presentation_title)
-         VALUES ($1, $2, $3, $4, $5, 'chat', 'off', $6)",
+         (id, session_key, org_id, user_id, created_at, origin, memory_mode, presentation_title,
+          retention_class, waiver_ack_id, waiver_connection_id)
+         VALUES ($1, $2, $3, $4, $5, 'chat', 'off', $6, $7, $8, $9)",
     )
     .bind(thread_id)
     .bind(format!("import:{thread_id}"))
@@ -575,6 +591,9 @@ async fn insert_import_thread(
     .bind(owner)
     .bind(now)
     .bind(title)
+    .bind(receipt.map(|receipt| receipt.class.as_str()))
+    .bind(receipt.and_then(RunRetention::ack_id))
+    .bind(receipt.and_then(RunRetention::connection_id))
     .execute(&mut **tx)
     .await
     .map_err(internal)?;
@@ -1008,6 +1027,134 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+    }
+
+    async fn append_answer(pool: &PgPool, thread: &str) -> String {
+        let mut tx = pool.begin().await.unwrap();
+        let request = pb::AppendMessageRequest {
+            thread_id: thread.to_owned(),
+            role: "assistant".to_owned(),
+            content: "answer".to_owned(),
+            ..Default::default()
+        };
+        let appended = crate::grpc::append_message_in_tx(&mut tx, &request, OWNER)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        appended.message_id
+    }
+
+    async fn receipt_columns(
+        pool: &PgPool,
+        thread: &str,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        sqlx::query_as(
+            "SELECT retention_class, waiver_ack_id, waiver_connection_id FROM threads WHERE id = $1",
+        )
+        .bind(thread)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// C-24a (ZDR-Z-17, thread half): a fork, an import and a service-prepared thread each store the receipt
+    /// the switch gives them. With the switch on, a zero-retention caller's append to any of them is refused by
+    /// `require_thread_posture`, the persistent owner's is allowed and a waived caller's is a posture mismatch.
+    /// With the switch off the columns stay NULL. The switch is set for this test only, and a guard clears it
+    /// even when an assertion fails.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_fork_an_import_and_a_prepared_thread_carry_the_receipt_and_refuse_a_zdr_append() {
+        use crate::retention_receipt::{require_thread_posture, THREAD_RECEIPT_ENFORCE_ENV};
+
+        /// Clears the switch when it leaves scope, so a failing assertion cannot leave it on.
+        struct SwitchOn;
+        impl Drop for SwitchOn {
+            fn drop(&mut self) {
+                std::env::remove_var(THREAD_RECEIPT_ENFORCE_ENV);
+            }
+        }
+
+        let pool = connect().await;
+        let owner = VerifiedIdentity::user_for_test(ORG, OWNER);
+        let source = new_ulid();
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)",
+        )
+        .bind(&source)
+        .bind(ORG)
+        .bind(OWNER)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let answer = append_answer(&pool, &source).await;
+        let fork_request = pb::ForkThreadRequest {
+            org_id: ORG.to_owned(),
+            thread_id: source.clone(),
+            from_message_id: answer,
+            title: String::new(),
+        };
+        let file = export_file(vec![message("user", "hei"), message("assistant", "hallo")]);
+        let service = VerifiedIdentity::service_for_test(ORG, &["session:write"], false);
+
+        std::env::set_var(THREAD_RECEIPT_ENFORCE_ENV, "true");
+        let switch = SwitchOn;
+        let forked = crate::thread_fork::copy_thread(&pool, &owner, fork_request.clone())
+            .await
+            .unwrap();
+        let imported = import_thread(&pool, &owner, import_request(&file))
+            .await
+            .unwrap();
+        let prepared = crate::grpc::create_thread_inner_preverified_with_receipt(
+            &pool,
+            pb::CreateThreadRequest {
+                session_key: format!("prepared-{}", new_ulid()),
+                org_id: ORG.to_owned(),
+                user_id: OWNER.to_owned(),
+                ..Default::default()
+            },
+            Some(&RunRetention::from_caller(&service)),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        let zdr = VerifiedIdentity::user_for_test_with_zdr(ORG, OWNER, true);
+        let waived = VerifiedIdentity::user_for_test_with_waiver(ORG, OWNER, "conn-1", "ack-1");
+        for thread in [&forked.new_thread_id, &imported.thread_id, &prepared.thread_id] {
+            assert_eq!(
+                receipt_columns(&pool, thread).await,
+                (Some("persistent".to_owned()), None, None),
+                "the switch on stamps persistent: {thread}"
+            );
+            let refused = require_thread_posture(&pool, &zdr, thread)
+                .await
+                .expect_err("a zero-retention append is refused");
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+            require_thread_posture(&pool, &owner, thread)
+                .await
+                .expect("the persistent owner may append");
+            let mismatch = require_thread_posture(&pool, &waived, thread)
+                .await
+                .expect_err("a waived append is a posture mismatch");
+            assert_eq!(mismatch.code(), tonic::Code::PermissionDenied);
+        }
+
+        // The switch off: the same entry points leave the receipt columns NULL.
+        drop(switch);
+        let unstamped_fork = crate::thread_fork::copy_thread(&pool, &owner, fork_request)
+            .await
+            .unwrap();
+        let unstamped_import = import_thread(&pool, &owner, import_request(&file))
+            .await
+            .unwrap();
+        for thread in [&unstamped_fork.new_thread_id, &unstamped_import.thread_id] {
+            assert_eq!(
+                receipt_columns(&pool, thread).await,
+                (None, None, None),
+                "the switch off leaves the receipt columns NULL: {thread}"
+            );
+        }
     }
 
     #[tokio::test]

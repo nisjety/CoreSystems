@@ -14,7 +14,8 @@ use mp_contracts::model_plane::v1::{
     attention_service_server::{AttentionService, AttentionServiceServer},
     stream_attention_response::Frame as StreamFrame,
     AttentionCounts, AttentionHeartbeat, AttentionItem, AttentionReason, AttentionSnapshot,
-    AttentionState, AttentionThreadChanged, ListAttentionRequest, ListAttentionResponse,
+    AttentionState, AttentionThreadChanged, ConfirmAttentionWaitingRequest,
+    ConfirmAttentionWaitingResponse, ListAttentionRequest, ListAttentionResponse,
     MarkThreadSeenRequest, MarkThreadSeenResponse, StreamAttentionRequest, StreamAttentionResponse,
 };
 use serde_json::{json, Value};
@@ -89,6 +90,16 @@ impl AttentionService for AttentionDouble {
         let frames: Vec<Result<StreamAttentionResponse, Status>> =
             self.stream_frames.iter().cloned().map(Ok).collect();
         Ok(Response::new(futures::stream::iter(frames)))
+    }
+
+    /// The gateway never asks Session Core whether an item waits, so the double refuses the call.
+    async fn confirm_attention_waiting(
+        &self,
+        _request: TonicRequest<ConfirmAttentionWaitingRequest>,
+    ) -> Result<Response<ConfirmAttentionWaitingResponse>, Status> {
+        Err(Status::unimplemented(
+            "confirm_attention_waiting is not served by this double",
+        ))
     }
 }
 

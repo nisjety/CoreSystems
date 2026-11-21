@@ -1449,6 +1449,14 @@ pub struct UserErasureSummary {
     pub approval_scope_grants: u64,
     /// The person's approval rule proposals (`approval_rule_proposals`) deleted (D-WS13-7).
     pub approval_rule_proposals: u64,
+    /// The person's own user-scope skill rows (`agent_skills`, `scope = 'user'`) deleted with their text
+    /// (F-f01-16). Org-scope skills are never matched.
+    pub agent_skills: u64,
+    /// The revisions that hold the person's skill text, including the `deleted` revision a skill delete
+    /// writes (`skill_revisions`, F-f01-16).
+    pub skill_revisions: u64,
+    /// The immutable versions of the person's own user-scope skills (`agent_skill_versions`, F-f01-16).
+    pub agent_skill_versions: u64,
     /// Semantic-tier outcome for the copies of those rows, and of any copy the listing found that no
     /// durable row still holds.
     pub semantic_memory: crate::memory_erasure::SemanticErasure,
@@ -1611,6 +1619,71 @@ pub async fn erase_user_personal_data(
     erase_user_personal_data_for(pool, org_id, user_id, UserErasureKind::Erase, &checked, letta).await
 }
 
+/// The counts of one person's skill erasure (F-f01-16).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct UserSkillErasure {
+    agent_skills: u64,
+    skill_revisions: u64,
+    agent_skill_versions: u64,
+}
+
+/// Erases one person's own skills inside the erasing transaction (F-f01-16): their user-scope skill rows,
+/// the immutable versions of those skills and the revisions that hold their text. The statements run in the
+/// order the org purge runs them. The versions go first, with `mp.version_erasure` on for that one statement
+/// (the immutability trigger refuses any other version delete), then the skills, then the revisions: deleting
+/// a skill writes a `deleted` revision that holds its text (`agent_skills_revision_trg`), and that revision
+/// must go too. Only the person's own rows are matched. An org-scope skill's owner is empty, and the rows are
+/// bound to the person's user scope and owner, so no org row is named. The setting is put back at once.
+/// Counts only; nothing is logged.
+///
+/// # Errors
+///
+/// Returns an error if any statement fails; the caller's transaction is then rolled back.
+async fn erase_user_skills_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    user_id: &str,
+) -> anyhow::Result<UserSkillErasure> {
+    // An empty owner is the owner of every org skill, so an empty person names no skill of their own.
+    if user_id.trim().is_empty() {
+        return Ok(UserSkillErasure::default());
+    }
+    sqlx::query("SELECT set_config('mp.version_erasure', 'on', true)")
+        .execute(&mut **tx)
+        .await?;
+    let agent_skill_versions = sqlx::query(
+        "DELETE FROM agent_skill_versions WHERE org_id = $1 AND scope = 'user' AND owner_user_id = $2",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    sqlx::query("SELECT set_config('mp.version_erasure', '', true)")
+        .execute(&mut **tx)
+        .await?;
+    let agent_skills = sqlx::query(
+        "DELETE FROM agent_skills WHERE org_id = $1 AND scope = 'user' AND owner_user_id = $2",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    let skill_revisions =
+        sqlx::query("DELETE FROM skill_revisions WHERE org_id = $1 AND owner_user_id = $2")
+            .bind(org_id)
+            .bind(user_id)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected();
+    Ok(UserSkillErasure {
+        agent_skills,
+        skill_revisions,
+        agent_skill_versions,
+    })
+}
+
 /// [`erase_user_personal_data`] for either per-user event kind. `user_anonymize` removes the same two
 /// stores (the standing profile and the person's own personal memory) as `user`. Each call writes one
 /// content-free `memory_control_events` row in the erasing transaction: the kind, the number of
@@ -1706,6 +1779,9 @@ pub async fn erase_user_personal_data_for(
             .execute(&mut *tx)
             .await?
             .rows_affected();
+    // Personal skills (F-f01-16): the person's own user-scope skills, their versions and the revisions that
+    // hold their text, in this transaction. Both erasure kinds remove them, and the hold gate ran above.
+    let skills = erase_user_skills_in_tx(&mut tx, org_id, user_id).await?;
     // The audit record of this erasure: counts only, never the erased text or an id list. Written in
     // the erasing transaction, so a rolled-back erasure leaves no row claiming it happened.
     if thread_memory_erasure_enabled() {
@@ -1714,7 +1790,9 @@ pub async fn erase_user_personal_data_for(
             "INSERT INTO memory_control_events (id, org_id, user_id, event, actor, detail) \
              VALUES ($1, $2, $3, 'erased', $4, jsonb_build_object( \
                'kind', $5::text, 'user_profiles', $6::bigint, 'personal_memory', $7::bigint, \
-               'thread_memory', $8::bigint, 'thread_memory_narrowed', $9::bigint))",
+               'thread_memory', $8::bigint, 'thread_memory_narrowed', $9::bigint, \
+               'agent_skills', $10::bigint, 'skill_revisions', $11::bigint, \
+               'agent_skill_versions', $12::bigint))",
         )
         .bind(mp_ids::new_ulid())
         .bind(org_id)
@@ -1725,13 +1803,18 @@ pub async fn erase_user_personal_data_for(
         .bind(i64::try_from(erased.len()).unwrap_or(i64::MAX))
         .bind(i64::try_from(thread_memory.deleted.len()).unwrap_or(i64::MAX))
         .bind(i64::try_from(thread_memory.narrowed).unwrap_or(i64::MAX))
+        .bind(i64::try_from(skills.agent_skills).unwrap_or(i64::MAX))
+        .bind(i64::try_from(skills.skill_revisions).unwrap_or(i64::MAX))
+        .bind(i64::try_from(skills.agent_skill_versions).unwrap_or(i64::MAX))
         .execute(&mut *tx)
         .await?;
     } else {
         sqlx::query(
             "INSERT INTO memory_control_events (id, org_id, user_id, event, actor, detail) \
              VALUES ($1, $2, $3, 'erased', $4, jsonb_build_object( \
-               'kind', $5::text, 'user_profiles', $6::bigint, 'personal_memory', $7::bigint))",
+               'kind', $5::text, 'user_profiles', $6::bigint, 'personal_memory', $7::bigint, \
+               'agent_skills', $8::bigint, 'skill_revisions', $9::bigint, \
+               'agent_skill_versions', $10::bigint))",
         )
         .bind(mp_ids::new_ulid())
         .bind(org_id)
@@ -1740,6 +1823,9 @@ pub async fn erase_user_personal_data_for(
         .bind(kind.as_str())
         .bind(i64::try_from(user_profiles).unwrap_or(i64::MAX))
         .bind(i64::try_from(erased.len()).unwrap_or(i64::MAX))
+        .bind(i64::try_from(skills.agent_skills).unwrap_or(i64::MAX))
+        .bind(i64::try_from(skills.skill_revisions).unwrap_or(i64::MAX))
+        .bind(i64::try_from(skills.agent_skill_versions).unwrap_or(i64::MAX))
         .execute(&mut *tx)
         .await?;
     }
@@ -1832,6 +1918,9 @@ pub async fn erase_user_personal_data_for(
         thread_memory_narrowed,
         approval_scope_grants,
         approval_rule_proposals,
+        agent_skills: skills.agent_skills,
+        skill_revisions: skills.skill_revisions,
+        agent_skill_versions: skills.agent_skill_versions,
         semantic_memory: semantic,
         listing_degradation,
     };

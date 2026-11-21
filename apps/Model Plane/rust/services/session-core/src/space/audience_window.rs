@@ -100,6 +100,18 @@ pub(crate) fn floor_gate_message_sql(message: &str, ceiling: &str, floor: &str) 
     )
 }
 
+/// The thread-level floor gate of a Space run read (R-sws-01): the thread `thread` (an alias of a `threads`
+/// row) holds a message the reader may see from the floor on, as [`floor_gate_message_sql`] states it. A
+/// caller appends it only while a floor applies, so a statement with no floor keeps its text. The active
+/// path is stated in the EXISTS as well (V3e-sws-1-rel1): the same predicate the gate already carries under
+/// a floor, written where the `message_tree` guard can read it.
+pub(crate) fn floor_gate_thread_sql(thread: &str, ceiling: &str, floor: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM messages em WHERE em.thread_id = {thread}.id AND em.on_active_path AND {gate})",
+        gate = floor_gate_message_sql("em", ceiling, floor),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +196,31 @@ mod tests {
             placeholders
                 .iter()
                 .all(|token| *token == "$3::BIGINT" || *token == "$6::BIGINT"),
+            "only the ceiling and the floor are bound: {placeholders:?}"
+        );
+    }
+
+    /// R-sws-01: the thread gate is an EXISTS over the thread's own messages that states the message
+    /// predicate, and it binds only the two bounds it is given.
+    #[test]
+    fn the_floor_gate_thread_predicate_states_an_exists_over_the_thread_messages() {
+        let sql = floor_gate_thread_sql("t", "$7", "$8");
+        assert!(
+            sql.starts_with("EXISTS (SELECT 1 FROM messages em WHERE em.thread_id = t.id AND em.on_active_path AND ($8::BIGINT IS NULL OR"),
+            "the thread gate reads the thread's own messages, no-floor branch first: {sql}"
+        );
+        assert!(
+            sql.contains(&floor_gate_message_sql("em", "$7", "$8")),
+            "the thread gate states the message predicate: {sql}"
+        );
+        let placeholders: Vec<&str> = sql
+            .split(|c: char| c == '(' || c == ')' || c.is_whitespace())
+            .filter(|token| token.starts_with('$'))
+            .collect();
+        assert!(
+            placeholders
+                .iter()
+                .all(|token| *token == "$7::BIGINT" || *token == "$8::BIGINT"),
             "only the ceiling and the floor are bound: {placeholders:?}"
         );
     }

@@ -611,24 +611,6 @@ pub async fn update_todo_status(pool: &Pool, id: &str, status: &str) -> Result<(
     Ok(())
 }
 
-/// List todos for a plan in ordinal order.
-///
-/// # Errors
-///
-/// Returns an error if the query fails.
-pub async fn list_todos_by_plan(
-    pool: &Pool,
-    plan_id: &str,
-) -> Result<Vec<(String, i64, String, String)>> {
-    let rows = sqlx::query_as(
-        "SELECT id, ordinal, status, content FROM todos WHERE plan_id = $1 ORDER BY ordinal ASC",
-    )
-    .bind(plan_id)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows)
-}
-
 /// Kill switch for reciting a plan's todos into the prompt. Only the literal `true`
 /// enables it, as with every session-core switch; off is the default.
 pub const TODO_RECITATION_ENV: &str = "SESSION_CORE_TODO_RECITATION_ENABLED";
@@ -649,27 +631,78 @@ fn todo_recitation_from(value: Option<&str>) -> bool {
     value == Some("true")
 }
 
+/// The most todos one recited block names. A plan with more is cut to this many, in ordinal order.
+const MAX_RECITED_TODOS: usize = 40;
+
+/// The most characters of one todo's text the block carries. A longer text is cut on a character
+/// boundary and ends with an ellipsis, all within this count.
+const MAX_RECITED_TODO_CHARS: usize = 240;
+
+/// The most characters the whole block holds, the closing line included, so a plan of long todos
+/// cannot flood the Volatile prompt tier.
+const MAX_RECITED_BLOCK_CHARS: usize = 6000;
+
+/// The closing line when todos were left out. It states no count: the read fetches one row past
+/// [`MAX_RECITED_TODOS`] and no count query runs, so the number left out is not known.
+const TODO_RECITATION_OMITTED: &str = "(more todos not shown)";
+
 /// The block that recites `todos` for the Volatile prompt tier: the header, then one line per
-/// todo in the order given (`list_todos_by_plan` returns ordinal order). A todo is collapsed
-/// onto one line, so its text cannot open a line of the block. `None` when there is nothing
-/// to recite.
+/// todo in the order given (`list_todos_for_owner` returns ordinal order). A todo is collapsed
+/// onto one line, so its text cannot open a line of the block, and its text is cut to
+/// [`MAX_RECITED_TODO_CHARS`]. At most [`MAX_RECITED_TODOS`] lines are written and the block
+/// stops before [`MAX_RECITED_BLOCK_CHARS`]; when any todo is left out, [`TODO_RECITATION_OMITTED`]
+/// closes it. `None` when there is nothing to recite.
 #[must_use]
 pub fn render_todo_recitation(todos: &[(String, i64, String, String)]) -> Option<String> {
     if todos.is_empty() {
         return None;
     }
-    let lines: Vec<String> = todos
-        .iter()
-        .map(|(_, ordinal, status, content)| {
-            format!("{ordinal}. [{}] {}", one_line(status), one_line(content))
-        })
-        .collect();
-    Some(format!("{TODO_RECITATION_HEADER}\n{}", lines.join("\n")))
+    let mut block = TODO_RECITATION_HEADER.to_owned();
+    let mut used = block.chars().count();
+    let mut written = 0;
+    for (_, ordinal, status, content) in todos.iter().take(MAX_RECITED_TODOS) {
+        let line = format!(
+            "{ordinal}. [{}] {}",
+            clip_chars(&one_line(status), MAX_RECITED_TODO_CHARS),
+            clip_chars(&one_line(content), MAX_RECITED_TODO_CHARS),
+        );
+        // The line is kept only if the closing line still fits after it, when a todo follows.
+        let follows = written + 1 < todos.len();
+        let closing = if follows {
+            TODO_RECITATION_OMITTED.chars().count() + 1
+        } else {
+            0
+        };
+        let grown = used + line.chars().count() + 1;
+        if grown + closing > MAX_RECITED_BLOCK_CHARS {
+            break;
+        }
+        block.push('\n');
+        block.push_str(&line);
+        used = grown;
+        written += 1;
+    }
+    if written < todos.len() {
+        block.push('\n');
+        block.push_str(TODO_RECITATION_OMITTED);
+    }
+    Some(block)
 }
 
 /// `text` with every run of whitespace, line breaks included, replaced by a single space.
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `text` cut to at most `max` characters. A longer text keeps its first `max - 1` characters and
+/// an ellipsis, so the result never exceeds `max`.
+fn clip_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let mut clipped: String = text.chars().take(max.saturating_sub(1)).collect();
+    clipped.push('…');
+    clipped
 }
 
 /// The block reciting the todos of `plan_id` to the user who owns the plan, or `None` when the
@@ -688,8 +721,34 @@ pub async fn recite_plan_todos(
     recite_plan_todos_with(todo_recitation_enabled(), pool, org_id, user_id, plan_id).await
 }
 
+/// The todos of `plan_id` in ordinal order, only when the plan belongs to `org_id` and `user_id`.
+/// The owner predicate is part of this query, so another person's plan, or the same person's plan
+/// in another organisation, yields no rows. One row past [`MAX_RECITED_TODOS`] is fetched: that is
+/// enough to know that some todos are left out, with no count query.
+async fn list_todos_for_owner(
+    pool: &Pool,
+    org_id: &str,
+    user_id: &str,
+    plan_id: &str,
+) -> Result<Vec<(String, i64, String, String)>> {
+    let limit = i64::try_from(MAX_RECITED_TODOS + 1).unwrap_or(i64::MAX);
+    let rows = sqlx::query_as(
+        "SELECT t.id, t.ordinal, t.status, t.content \
+         FROM todos t JOIN plans p ON p.id = t.plan_id \
+         WHERE t.plan_id = $1 AND p.org_id = $2 AND p.user_id = $3 \
+         ORDER BY t.ordinal ASC LIMIT $4",
+    )
+    .bind(plan_id)
+    .bind(org_id)
+    .bind(user_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 /// [`recite_plan_todos`] with the switch given, so the off path is testable without the
-/// environment.
+/// environment. With the switch off it returns before any query.
 async fn recite_plan_todos_with(
     enabled: bool,
     pool: &Pool,
@@ -700,14 +759,7 @@ async fn recite_plan_todos_with(
     if !enabled {
         return Ok(None);
     }
-    // `list_todos_by_plan` filters by plan alone, so the owner check must come before it.
-    let Some(plan) = get_plan(pool, plan_id).await? else {
-        return Ok(None);
-    };
-    if plan.org_id != org_id || plan.user_id != user_id {
-        return Ok(None);
-    }
-    let todos = list_todos_by_plan(pool, plan_id).await?;
+    let todos = list_todos_for_owner(pool, org_id, user_id, plan_id).await?;
     Ok(render_todo_recitation(&todos))
 }
 
@@ -770,6 +822,57 @@ mod todo_recitation_tests {
             "the header and one todo line: {block:?}"
         );
         assert!(block.ends_with("1. [pending] first second third"));
+    }
+
+    #[test]
+    fn todo_recitation_names_at_most_forty_todos_then_a_closing_line() {
+        let todos: Vec<(String, i64, String, String)> = (1..=100)
+            .map(|n: i64| todo(n, "pending", &format!("Todo number {n}")))
+            .collect();
+        let block = render_todo_recitation(&todos).expect("a block");
+        let lines: Vec<&str> = block.lines().collect();
+        assert_eq!(
+            lines.len(),
+            MAX_RECITED_TODOS + 2,
+            "the header, forty todos and the closing line"
+        );
+        assert_eq!(lines[MAX_RECITED_TODOS], "40. [pending] Todo number 40");
+        assert_eq!(lines[MAX_RECITED_TODOS + 1], TODO_RECITATION_OMITTED);
+        assert!(block.chars().count() <= MAX_RECITED_BLOCK_CHARS);
+    }
+
+    #[test]
+    fn todo_recitation_cuts_a_long_todo_on_a_character_boundary_with_an_ellipsis() {
+        let long = "é".repeat(1000);
+        let block = render_todo_recitation(&[todo(1, "pending", &long)]).expect("a block");
+        let line = block.lines().nth(1).expect("the todo line");
+        assert!(
+            line.ends_with('…'),
+            "the cut text ends with an ellipsis: {line}"
+        );
+        assert_eq!(
+            line.chars().count(),
+            "1. [pending] ".chars().count() + MAX_RECITED_TODO_CHARS
+        );
+        assert_eq!(block.lines().count(), 2, "one todo and no closing line");
+    }
+
+    #[test]
+    fn todo_recitation_stops_at_the_block_bound_when_the_todos_are_long() {
+        let text = "x".repeat(MAX_RECITED_TODO_CHARS);
+        let todos: Vec<(String, i64, String, String)> =
+            (1..=40).map(|n: i64| todo(n, "pending", &text)).collect();
+        let block = render_todo_recitation(&todos).expect("a block");
+        assert!(
+            block.chars().count() <= MAX_RECITED_BLOCK_CHARS,
+            "{} characters",
+            block.chars().count()
+        );
+        assert!(
+            block.lines().count() < MAX_RECITED_TODOS + 2,
+            "the bound, not the count, ends the block"
+        );
+        assert_eq!(block.lines().last(), Some(TODO_RECITATION_OMITTED));
     }
 
     #[tokio::test]
@@ -863,6 +966,70 @@ mod todo_recitation_tests {
             .await
             .expect("a stranger's recitation");
         assert_eq!(stranger, None);
+
+        let other_org = recite_plan_todos_with(true, &pool, "tr-other-org", user, &plan_id)
+            .await
+            .expect("the same person's recitation in another organisation");
+        assert_eq!(
+            other_org, None,
+            "the owner predicate includes the organisation"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_long_plan_recites_at_most_forty_todos_and_says_more_follow() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let sfx = mp_ids::new_ulid();
+        let (thread_id, plan_id) = (format!("tr-long-t-{sfx}"), format!("tr-long-p-{sfx}"));
+        let (org, user) = (format!("tr-long-org-{sfx}"), "u1");
+        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,$3)")
+            .bind(&thread_id)
+            .bind(&org)
+            .bind(user)
+            .execute(&pool)
+            .await
+            .expect("seed thread");
+        create_plan(
+            &pool,
+            &plan_id,
+            &thread_id,
+            None,
+            "goal",
+            &org,
+            user,
+            &serde_json::json!({}),
+        )
+        .await
+        .expect("seed plan");
+        for n in 1..=45 {
+            append_todo(
+                &pool,
+                &format!("todo_long_{n}_{sfx}"),
+                &plan_id,
+                Some(&thread_id),
+                &format!("Step {n}"),
+                "normal",
+                &serde_json::json!({}),
+            )
+            .await
+            .expect("seed todo");
+        }
+
+        let block = recite_plan_todos_with(true, &pool, &org, user, &plan_id)
+            .await
+            .expect("the owner's recitation")
+            .expect("a block");
+        let lines: Vec<&str> = block.lines().collect();
+        assert_eq!(
+            lines.len(),
+            MAX_RECITED_TODOS + 2,
+            "the header, forty todos and the closing line"
+        );
+        assert!(lines[MAX_RECITED_TODOS].starts_with("40. [pending] Step 40"));
+        assert_eq!(lines[MAX_RECITED_TODOS + 1], TODO_RECITATION_OMITTED);
     }
 }
 
@@ -1014,6 +1181,10 @@ pub struct DecisionRecord<'a> {
     /// decision, the scope and the host class). Read by the caller from
     /// `SESSION_CORE_AUTHZ_DECISION_AUDIT`, default off.
     pub authz_audit: bool,
+    /// F-f03-13: the caller re-authenticated for this decision, a fresh step-up claim on the verified
+    /// token. Stated by the model-gateway edge for a grant only; the caller sets it false otherwise, and
+    /// session-core never reads a claim itself. Provenance only.
+    pub step_up_verified: bool,
 }
 
 /// The record of a caller that states no source: `unattributed`, one call only, not audited.
@@ -1024,6 +1195,7 @@ const UNATTRIBUTED_DECISION: DecisionRecord<'static> = DecisionRecord {
     grant_ttl_secs: mp_contracts::approval_cause::THREAD_GRANT_TTL_DEFAULT_SECS,
     rule_proposed: false,
     authz_audit: false,
+    step_up_verified: false,
 };
 
 pub async fn decide_approval(
@@ -1055,7 +1227,7 @@ fn decision_json(record: &DecisionRecord<'_>) -> JsonValue {
     let mut decision = serde_json::json!({
         "source": record.source,
         "scope": record.scope,
-        "step_up_verified": false,
+        "step_up_verified": record.step_up_verified,
     });
     if record.rule_proposed {
         decision["rule_proposed"] = JsonValue::Bool(true);
@@ -1387,7 +1559,7 @@ async fn decide_approval_inner(
                 rule_id: &cause_text(&metadata, "rule_id"),
                 scope: record.scope,
                 decision_source: record.source,
-                step_up_verified: false,
+                step_up_verified: record.step_up_verified,
                 occurred_at: Utc::now(),
             },
         );
@@ -4419,6 +4591,7 @@ mod tests {
             grant_ttl_secs: 3600,
             rule_proposed: false,
             authz_audit: false,
+            step_up_verified: false,
         };
         assert_eq!(
             decision_json(&plain),
@@ -4429,6 +4602,30 @@ mod tests {
             ..plain
         };
         assert_eq!(decision_json(&proposed)["rule_proposed"], true);
+    }
+
+    /// F-f03-13: the decision stores the step-up the caller stated, and no other decision says it.
+    #[test]
+    fn a_decision_records_step_up_only_as_the_caller_stated_it() {
+        let verified = DecisionRecord {
+            source: "user",
+            scope: "once",
+            audit: false,
+            grant_ttl_secs: 3600,
+            rule_proposed: false,
+            authz_audit: false,
+            step_up_verified: true,
+        };
+        assert_eq!(decision_json(&verified)["step_up_verified"], true);
+        let unverified = DecisionRecord {
+            step_up_verified: false,
+            ..verified
+        };
+        assert_eq!(decision_json(&unverified)["step_up_verified"], false);
+        assert_eq!(
+            decision_json(&UNATTRIBUTED_DECISION)["step_up_verified"],
+            false
+        );
     }
 
     #[test]
@@ -4887,6 +5084,7 @@ mod approval_decision_db_tests {
             grant_ttl_secs: 3600,
             rule_proposed: false,
             authz_audit: false,
+            step_up_verified: false,
         };
         let write = decide_approval_recorded(
             &pool,
@@ -4950,6 +5148,7 @@ mod approval_decision_db_tests {
             grant_ttl_secs: 3600,
             rule_proposed: false,
             authz_audit: true,
+            step_up_verified: false,
         };
         for attempt in 0..2 {
             let write = decide_approval_recorded(
@@ -5008,6 +5207,7 @@ mod approval_decision_db_tests {
             grant_ttl_secs: 3600,
             rule_proposed: false,
             authz_audit: false,
+            step_up_verified: false,
         };
         decide_approval_recorded(&pool, &id, &org, Some(user.as_str()), "denied", &user, "no", &off)
             .await
@@ -5028,6 +5228,7 @@ mod approval_decision_db_tests {
             grant_ttl_secs: 3600,
             rule_proposed: false,
             authz_audit: true,
+            step_up_verified: false,
         };
         decide_approval_recorded(&pool, &id, &org, Some(user.as_str()), "granted", &user, "ok", &on)
             .await
@@ -5095,6 +5296,7 @@ mod approval_decision_db_tests {
             grant_ttl_secs: 3600,
             rule_proposed: false,
             authz_audit: false,
+            step_up_verified: false,
         };
         for attempt in 0..2 {
             let write = decide_approval_recorded(
@@ -5128,6 +5330,7 @@ mod approval_decision_db_tests {
             grant_ttl_secs: 3600,
             rule_proposed: false,
             authz_audit: false,
+            step_up_verified: false,
         };
         decide_approval_recorded(
             &pool,
@@ -7210,6 +7413,7 @@ mod approval_scope_grant_db_tests {
             grant_ttl_secs: 3600,
             rule_proposed: false,
             authz_audit: false,
+            step_up_verified: false,
         };
         decide_approval_recorded(
             pool,
@@ -7650,6 +7854,7 @@ mod approval_scope_grant_db_tests {
             grant_ttl_secs: 3600,
             rule_proposed: true,
             authz_audit: false,
+            step_up_verified: false,
         };
         decide_approval_recorded(
             &pool,
@@ -7707,6 +7912,7 @@ mod approval_scope_grant_db_tests {
             grant_ttl_secs: 3600,
             rule_proposed: true,
             authz_audit: false,
+            step_up_verified: false,
         };
         let refused = decide_approval_recorded(
             &pool,
@@ -8251,6 +8457,7 @@ mod approval_edit_db_tests {
         grant_ttl_secs: mp_contracts::approval_cause::THREAD_GRANT_TTL_DEFAULT_SECS,
         rule_proposed: false,
         authz_audit: false,
+        step_up_verified: false,
     };
 
     fn subject_patch(subject: &str) -> MailSendPatch {

@@ -207,6 +207,18 @@ pub(crate) fn mode_from(raw: Option<&str>) -> Mode {
     }
 }
 
+/// Whether a set value is one the startup report names (`switch_spellings`): anything `mode_from`
+/// reads as dry run without being one of its words. `enforce` and `dry_run` read as themselves, and
+/// blank or `off` in any case once trimmed reads as off. Every other value is named, so a padded or
+/// cased `enforce` (which reads as dry run) shows in the logs instead of passing unnoticed.
+pub(crate) fn is_unreadable_mode(raw: &str) -> bool {
+    if matches!(raw, "enforce" | "dry_run") {
+        return false;
+    }
+    let word = raw.trim();
+    !(word.is_empty() || word.eq_ignore_ascii_case("off"))
+}
+
 pub(crate) fn mode() -> Mode {
     mode_from(std::env::var(SWITCH_ENV).ok().as_deref())
 }
@@ -1123,6 +1135,38 @@ mod tests {
             "Enforce", "ENFORCE", "enforced", "true", "1", "on", "dry-run", "false", "offer",
         ] {
             assert_eq!(mode_from(Some(raw)), Mode::DryRun, "{raw}");
+        }
+    }
+
+    /// The startup report names exactly the values the switch reads as dry run by accident: a padded
+    /// or cased `enforce` is the case that matters, since it is the one that looks like a delete
+    /// switch and does not turn one on. The words and the off values are never named.
+    #[test]
+    fn retention_sweep_startup_report_names_only_the_values_that_read_as_dry_run_by_accident() {
+        for word in [
+            "enforce",
+            "dry_run",
+            "off",
+            "OFF",
+            " off ",
+            "",
+            "   ",
+            "\toff\r\n",
+        ] {
+            assert!(!is_unreadable_mode(word), "{word:?} is one of its words");
+        }
+        for junk in [
+            " enforce ",
+            "enforce\r\n",
+            "Enforce",
+            "ENFORCE",
+            "enforced",
+            "true",
+            "maybe",
+            "dry-run",
+        ] {
+            assert!(is_unreadable_mode(junk), "{junk:?} reads as dry run");
+            assert_eq!(mode_from(Some(junk)), Mode::DryRun, "{junk:?}");
         }
     }
 

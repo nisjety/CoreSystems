@@ -19,7 +19,9 @@
 //! 3. The caller holds no row in `space_membership_revocations` for this Space.
 //! 4. The run is a ROOT run of a thread of THIS Space and org, inside the decision's audience
 //!    ceiling. A run anywhere else, or beyond the ceiling, is `NotFound`: there is no oracle for a
-//!    run id the caller may not see.
+//!    run id the caller may not see. Under a `since_join` history floor (R-sws-01) it is also stamped
+//!    at or after the floor, and its thread holds a message the caller may see from the floor on,
+//!    the rule ListRuns applies, so a late joiner cannot stop a run it may not list.
 //! 5. The run's retention class is `persistent`; a zero-retention or waived run is refused with the
 //!    typed refusal.
 //!
@@ -37,6 +39,7 @@ use tonic::Status;
 
 use crate::auth::{authorize_operation, VerifiedIdentity};
 use crate::run_service_grpc::{cancel_run_terminalize, ActingAs};
+use crate::space::audience_window::floor_gate_thread_sql;
 
 /// Longest id accepted on the request.
 const MAX_ID_BYTES: usize = 128;
@@ -73,6 +76,27 @@ struct StopRow {
     owner_org_id: String,
     owner_user_id: String,
     retention_class: String,
+}
+
+/// The statement of the stop read (R-sws-01). Parameters: $1 run id, $2 org, $3 Space, $4 the audience ceiling
+/// and, only under a `since_join` floor, $5 the floor. A floored read adds the run-stamp floor and the thread gate
+/// that ListRuns' Space branch applies; with no floor the text is the one it always was.
+fn stop_row_sql(floored: bool) -> String {
+    let mut sql = String::from(
+        "SELECT r.org_id AS owner_org_id, r.user_id AS owner_user_id, \
+                r.retention_class AS retention_class \
+         FROM runs r JOIN threads t ON t.id = r.thread_id \
+         WHERE r.id = $1 AND r.org_id = $2 AND t.org_id = $2 AND t.space_id = $3 \
+           AND r.parent_run_id IS NULL \
+           AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $4)",
+    );
+    if floored {
+        sql.push_str(
+            " AND (r.recipient_audience_revision IS NULL OR r.recipient_audience_revision >= $5::BIGINT) AND ",
+        );
+        sql.push_str(&floor_gate_thread_sql("t", "$4", "$5"));
+    }
+    sql
 }
 
 /// Stop one room run under a verified Control run-control decision.
@@ -135,22 +159,23 @@ pub(crate) async fn cancel_run_as_room_manager(
         ));
     }
 
-    let row: StopRow = sqlx::query_as(
-        "SELECT r.org_id AS owner_org_id, r.user_id AS owner_user_id, \
-                r.retention_class AS retention_class \
-         FROM runs r JOIN threads t ON t.id = r.thread_id \
-         WHERE r.id = $1 AND r.org_id = $2 AND t.org_id = $2 AND t.space_id = $3 \
-           AND r.parent_run_id IS NULL \
-           AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $4)",
-    )
-    .bind(run_id)
-    .bind(caller.org_id())
-    .bind(space_id)
-    .bind(decision.recipient_audience_revision)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| Status::internal(error.to_string()))?
-    .ok_or_else(|| Status::not_found("run not found"))?;
+    // R-sws-01: under a `since_join` floor (the decision signs one and the switch is the literal true) the run
+    // must be stamped from the floor on, and its thread must hold a message the caller may see from it on.
+    let floor = decision.history_floor;
+    let sql = stop_row_sql(floor.is_some());
+    let mut stop = sqlx::query_as::<_, StopRow>(&sql)
+        .bind(run_id)
+        .bind(caller.org_id())
+        .bind(space_id)
+        .bind(decision.recipient_audience_revision);
+    if let Some(floor) = floor {
+        stop = stop.bind(floor);
+    }
+    let row: StopRow = stop
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?
+        .ok_or_else(|| Status::not_found("run not found"))?;
 
     if row.retention_class != "persistent" {
         return Err(zdr_refusal());
@@ -174,4 +199,196 @@ pub(crate) async fn cancel_run_as_room_manager(
         owner_org_id: row.owner_org_id,
         owner_user_id: row.owner_user_id,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::space::test_support::{
+        clean_space, connect, seed_space_message_at_revision, seed_space_run, seed_space_thread,
+    };
+    use mp_ids::new_ulid;
+    use tonic::Code;
+
+    const MEMBER: &str = "member-1";
+
+    /// R-sws-01: with no floor the stop read keeps the text it always had, and a floored read adds the run-stamp
+    /// floor and the thread gate, on $5, and nothing else. Checked on the statement text, so no database is needed.
+    #[test]
+    fn the_stop_read_keeps_its_text_without_a_floor_and_adds_the_run_and_thread_floor_under_one() {
+        let legacy = concat!(
+            "SELECT r.org_id AS owner_org_id, r.user_id AS owner_user_id, ",
+            "r.retention_class AS retention_class ",
+            "FROM runs r JOIN threads t ON t.id = r.thread_id ",
+            "WHERE r.id = $1 AND r.org_id = $2 AND t.org_id = $2 AND t.space_id = $3 ",
+            "AND r.parent_run_id IS NULL ",
+            "AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $4)",
+        );
+        assert_eq!(
+            stop_row_sql(false),
+            legacy,
+            "no floor: the text is unchanged"
+        );
+        assert_eq!(
+            stop_row_sql(true),
+            format!(
+                "{legacy} AND (r.recipient_audience_revision IS NULL OR r.recipient_audience_revision >= $5::BIGINT) AND {}",
+                floor_gate_thread_sql("t", "$4", "$5")
+            ),
+            "a floor adds the run-stamp floor and the thread gate and nothing else"
+        );
+    }
+
+    /// One room-manager stop of `run` by the member, under a run-control decision that signs the floor 3, with
+    /// the switch on or off.
+    async fn stop_as(
+        pool: &PgPool,
+        org: &str,
+        space: &str,
+        run: &str,
+        key: &str,
+        switch_on: bool,
+    ) -> Result<pb::CancelRunAsRoomManagerResponse, Status> {
+        use crate::grpc::space_w1_tests::{live_run_control_token, HistoryFloorEnv, DECISION_REF};
+        let _switch = HistoryFloorEnv::set(switch_on.then_some("true"));
+        let req = pb::CancelRunAsRoomManagerRequest {
+            run_id: run.to_owned(),
+            space_id: space.to_owned(),
+            idempotency_key: key.to_owned(),
+            reason: String::new(),
+            space_control_decision_token: live_run_control_token(
+                org,
+                MEMBER,
+                space,
+                run,
+                key,
+                5,
+                Some(3),
+            ),
+            space_control_decision_ref: DECISION_REF.to_owned(),
+        };
+        cancel_run_as_room_manager(pool, &VerifiedIdentity::user_for_test(org, MEMBER), &req).await
+    }
+
+    /// R-sws-01 against Postgres: under a `since_join` floor a late joiner cannot stop a run stamped before the join,
+    /// nor one on a thread with nothing from the floor on, and can stop the run stamped from the join on, on a
+    /// listed thread. With the switch off the same signed floor is ignored and the earlier run stops as before.
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn a_late_joiner_cannot_stop_a_run_from_before_the_join_nor_one_on_an_unlisted_thread() {
+        use crate::grpc::space_w1_tests::StreamKeysEnv;
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let _keys = StreamKeysEnv::publish();
+        let suffix = new_ulid();
+        let org = format!("stop-floor-{suffix}");
+        let space = format!("space-stop-floor-{suffix}");
+        let listed = format!("{suffix}-listed");
+        let unlisted = format!("{suffix}-unlisted");
+        seed_space_thread(&pool, &org, &space, &listed, "owner-1").await;
+        seed_space_thread(&pool, &org, &space, &unlisted, "owner-1").await;
+        // The listed thread holds a turn before the join (revision 1) and one from revision 4 on; the unlisted
+        // thread holds only the earlier turn.
+        seed_space_message_at_revision(
+            &pool,
+            &space,
+            &listed,
+            &format!("{suffix}-l1"),
+            "before the join",
+            1,
+        )
+        .await;
+        seed_space_message_at_revision(
+            &pool,
+            &space,
+            &listed,
+            &format!("{suffix}-l2"),
+            "after the join",
+            4,
+        )
+        .await;
+        seed_space_message_at_revision(
+            &pool,
+            &space,
+            &unlisted,
+            &format!("{suffix}-u1"),
+            "before the join",
+            1,
+        )
+        .await;
+        let early = format!("{suffix}-run-early");
+        let late = format!("{suffix}-run-late");
+        let quiet = format!("{suffix}-run-quiet");
+        let off = format!("{suffix}-run-off");
+        // `early` is stamped before the join on the listed thread; `late` from the join on, on it; `quiet` from the
+        // join on, on the unlisted thread; `off` before the join on the listed thread, for the switch-off case.
+        for (run, thread, stamp) in [
+            (&early, &listed, 2_i64),
+            (&late, &listed, 4),
+            (&quiet, &unlisted, 4),
+            (&off, &listed, 2),
+        ] {
+            seed_space_run(&pool, &org, &space, thread, run, "running", "persistent").await;
+            sqlx::query("UPDATE runs SET recipient_audience_revision = $1 WHERE id = $2")
+                .bind(stamp)
+                .bind(run)
+                .execute(&pool)
+                .await
+                .expect("stamp the run");
+        }
+
+        let refused = stop_as(
+            &pool,
+            &org,
+            &space,
+            &early,
+            &format!("{suffix}-key-early"),
+            true,
+        )
+        .await
+        .expect_err("a run stamped before the join is not stopped");
+        assert_eq!(
+            refused.code(),
+            Code::NotFound,
+            "the run stamp floor refuses it"
+        );
+        let refused = stop_as(
+            &pool,
+            &org,
+            &space,
+            &quiet,
+            &format!("{suffix}-key-quiet"),
+            true,
+        )
+        .await
+        .expect_err("a run on an unlisted thread is not stopped");
+        assert_eq!(refused.code(), Code::NotFound, "the thread gate refuses it");
+        let stopped = stop_as(
+            &pool,
+            &org,
+            &space,
+            &late,
+            &format!("{suffix}-key-late"),
+            true,
+        )
+        .await
+        .expect("a run from the join on, on a listed thread, is stopped");
+        assert!(stopped.cancelled, "the stop is recorded");
+        let stopped = stop_as(
+            &pool,
+            &org,
+            &space,
+            &off,
+            &format!("{suffix}-key-off"),
+            false,
+        )
+        .await
+        .expect("with the switch off the signed floor is ignored");
+        assert!(
+            stopped.cancelled,
+            "the earlier run stops as before the floor"
+        );
+        clean_space(&pool, &org, &space).await;
+    }
 }

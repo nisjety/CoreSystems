@@ -98,21 +98,58 @@ type attentionPayload struct {
 	GoalStatus string `json:"goal_status,omitempty"`
 }
 
-// attentionKindOf resolves the notification an attention item sends and the
-// state word its coalescing and idempotency keys use. A goal item resolves only
-// when its status stops the goal and agrees with the state session-core derived
-// for it; its key word is the goal reason, so a goal stop never folds into a
-// question on the same thread.
+// parkedAttentionReason is the reason session-core names on a RUN_ATTENTION for a
+// run a crash parked, once the park has waited its notice time (O-02). Such a run
+// waits on its owner to continue it, and it is announced only as NEEDS_INPUT.
+const parkedAttentionReason = "ATTENTION_REASON_PARKED"
+
+// parkedKind is the notification a crash-parked run sends: fixed copy and a deep
+// link, never run content. It is typed with the needs_input notification type that
+// notify-core already registers, so no new registration is needed for it.
+var parkedKind = attentionKind{
+	notifyType: "modelplane.needs_input",
+	kind:       "parked",
+	title:      "Run waiting for you",
+	body:       "A run in one of your chats is waiting for you to continue it.",
+}
+
+// pendingRowReasons are the reasons that name a pending row, or no reason at all.
+// For these the state alone says what waits, as it always has.
+var pendingRowReasons = map[string]bool{
+	"":                             true,
+	"ATTENTION_REASON_UNSPECIFIED": true,
+	"ATTENTION_REASON_APPROVAL":    true,
+	"ATTENTION_REASON_PLAN":        true,
+	"ATTENTION_REASON_INPUT":       true,
+}
+
+// attentionKindOf resolves the notification an attention item sends and the state
+// word its coalescing and idempotency keys use. The reason picks the template: a
+// pending row takes its state's notification; a goal item resolves only when its
+// status stops the goal and agrees with the state session-core derived for it; a
+// crash-parked run resolves only as NEEDS_INPUT. A goal and a parked run key on
+// their reason, so neither folds into a question on the same thread. A reason this
+// build does not name resolves to nothing, so an unknown reason is never notified.
 func attentionKindOf(payload attentionPayload) (attentionKind, string, bool) {
-	if strings.TrimSpace(payload.Reason) != goalAttentionReason {
+	reason := strings.TrimSpace(payload.Reason)
+	switch {
+	case pendingRowReasons[reason]:
 		kind, ok := attentionKinds[payload.State]
 		return kind, payload.State, ok
-	}
-	state, ok := goalStopStates[strings.TrimSpace(payload.GoalStatus)]
-	if !ok || state != payload.State {
+	case reason == goalAttentionReason:
+		state, ok := goalStopStates[strings.TrimSpace(payload.GoalStatus)]
+		if !ok || state != payload.State {
+			return attentionKind{}, "", false
+		}
+		return goalStoppedKind, goalAttentionReason, true
+	case reason == parkedAttentionReason:
+		if payload.State != "ATTENTION_STATE_NEEDS_INPUT" {
+			return attentionKind{}, "", false
+		}
+		return parkedKind, parkedAttentionReason, true
+	default:
 		return attentionKind{}, "", false
 	}
-	return goalStoppedKind, goalAttentionReason, true
 }
 
 // NotifierOption configures a Notifier.

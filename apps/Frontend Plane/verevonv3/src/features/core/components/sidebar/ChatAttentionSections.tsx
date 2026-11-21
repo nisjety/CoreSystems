@@ -12,6 +12,8 @@ export type AttentionSectionRows = {
   unseen: ChatThreadHistoryItem[]
   /** The waiting threads whose reason is a stopped goal (EP-7 S5); their row reads "Goal stopped". */
   goalStopped: ReadonlySet<string>
+  /** The waiting threads whose run a crash parked (O-02); their row reads "Waiting for you to continue". */
+  parked?: ReadonlySet<string>
 }
 
 /**
@@ -26,7 +28,8 @@ export type AttentionRowRenderer = (item: ChatThreadHistoryItem, onMove?: () => 
  */
 export function attentionSectionRows(attention: AttentionSnapshot | null, sessions: ChatThreadHistoryItem[]): AttentionSectionRows {
   const goalStopped = new Set<string>()
-  const rows: AttentionSectionRows = { waiting: [], working: [], unseen: [], goalStopped }
+  const parked = new Set<string>()
+  const rows: AttentionSectionRows = { waiting: [], working: [], unseen: [], goalStopped, parked }
   if (!attention?.enabled) return rows
   const entries = new Map(attention.items.map((item) => [item.threadId, item]))
   const waiting: Array<{ session: ChatThreadHistoryItem; since: number }> = []
@@ -37,6 +40,7 @@ export function attentionSectionRows(attention: AttentionSnapshot | null, sessio
     if (section === 'waiting') {
       waiting.push({ session, since: Date.parse(entry.since ?? '') || Number.POSITIVE_INFINITY })
       if (entry.reason === 'goal') goalStopped.add(session.threadId)
+      if (entry.reason === 'parked') parked.add(session.threadId)
     } else if (section) {
       rows[section].push(session)
     }
@@ -73,6 +77,7 @@ export function ChatAttentionSections(props: {
             renderRow={props.renderRow}
             onMove={props.onMove}
             goalStopped={props.sections.goalStopped}
+            parked={props.sections.parked}
           />
         </Show>
         <Show when={props.sections.working.length > 0}>
@@ -93,15 +98,24 @@ function AttentionGroup(props: {
   onMove?: (item: ChatThreadHistoryItem) => void
   /** The threads in this group that wait on a stopped goal (EP-7 S5); none outside Waiting. */
   goalStopped?: ReadonlySet<string>
+  /** The threads in this group whose run a crash parked (O-02); none outside Waiting. */
+  parked?: ReadonlySet<string>
 }) {
   return (
     <div class="chat-attention__group">
       <span class="verevon-sidebar-group-title">{props.label}</span>
       <For each={props.items}>
-        {(item) => props.renderRow(item, moveAction(props.onMove, item), props.goalStopped?.has(item.threadId) ? 'goal' : undefined)}
+        {(item) => props.renderRow(item, moveAction(props.onMove, item), waitingReason(item.threadId, props.goalStopped, props.parked))}
       </For>
     </div>
   )
+}
+
+/** The reason a row reads with in Waiting: a stopped goal, or a parked run (O-02). Any other row has none. */
+function waitingReason(threadId: string, goalStopped?: ReadonlySet<string>, parked?: ReadonlySet<string>): AttentionReason | undefined {
+  if (goalStopped?.has(threadId)) return 'goal'
+  if (parked?.has(threadId)) return 'parked'
+  return undefined
 }
 
 function moveAction(onMove: ((item: ChatThreadHistoryItem) => void) | undefined, item: ChatThreadHistoryItem): () => void {

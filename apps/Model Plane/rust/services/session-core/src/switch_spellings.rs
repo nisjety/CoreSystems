@@ -80,6 +80,10 @@ pub const MODE_SWITCHES: &[(&str, fn(&str) -> bool)] = &[
         mp_contracts::retention::SPACE_ZDR_ENV,
         mp_contracts::retention::space_zdr_mode_is_unreadable,
     ),
+    (
+        crate::retention_sweeper::SWITCH_ENV,
+        crate::retention_sweeper::is_unreadable_mode,
+    ),
 ];
 
 /// The names of the [`MODE_SWITCHES`] whose value, as `lookup` returns it, is set to a value its
@@ -221,6 +225,19 @@ mod tests {
     #[test]
     fn an_unset_mode_switch_is_not_named() {
         assert!(unreadable_modes(|_| None).is_empty());
+    }
+
+    /// `SESSION_RETENTION_SWEEP` is named the way the other mode switches are: a padded or cased
+    /// `enforce` reads as dry run and is reported, while its words and the off values are not.
+    #[test]
+    fn the_retention_sweep_switch_names_a_padded_or_cased_enforce() {
+        let name = crate::retention_sweeper::SWITCH_ENV;
+        for word in ["", "   ", "off", " OFF ", "dry_run", "enforce"] {
+            assert!(flagged(name, word).is_empty(), "{name}={word:?}");
+        }
+        for junk in [" enforce ", "Enforce", "enforce\r\n", "ENFORCE", "true"] {
+            assert_eq!(flagged(name, junk), vec![name], "{name}={junk:?}");
+        }
     }
 
     /// The startup report writes one warning per unreadable mode switch, naming the switch, and

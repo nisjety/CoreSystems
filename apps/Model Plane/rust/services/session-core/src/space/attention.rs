@@ -149,6 +149,7 @@ fn thread_floor_predicate(floor: &str) -> String {
     format!(
         "({floor}::BIGINT IS NULL OR EXISTS (SELECT 1 FROM messages em
                  WHERE em.thread_id = t.id
+                   AND em.on_active_path
                    AND {gate}))",
         gate = floor_gate_message_sql("em", "$3", floor),
     )

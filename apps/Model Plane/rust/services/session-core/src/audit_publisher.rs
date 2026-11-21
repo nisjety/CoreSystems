@@ -64,6 +64,16 @@ pub const EVENT_APPROVAL_REQUESTED: &str = "approval_requested";
 pub const SUBJECT_MODEL_APPROVAL_REQUESTED: &str =
     "verevon.audit.v2.model.session-core.approval_requested";
 
+/// Audit event name of a manager's delete of one Space memory row (EP-8 S7). Content-free: the Space,
+/// the row id, the row's scope and the Control decision reference. Never the row's text, topic, key,
+/// source links or any reason. Written by the manager's delete behind
+/// `SESSION_CORE_SPACE_MEMORY_DELETE_AUDIT` (default off).
+pub const EVENT_SPACE_MEMORY_DELETED: &str = "space_memory_deleted";
+
+/// NATS subject of a Space memory delete, in the same flat family.
+pub const SUBJECT_MODEL_SPACE_MEMORY_DELETED: &str =
+    "verevon.audit.v2.model.session-core.space_memory_deleted";
+
 /// Subject family carrying Session Core's flat audit-core bodies.
 const AUDIT_SUBJECT_PREFIX: &str = "verevon.audit.v2.model.session-core.";
 
@@ -626,6 +636,62 @@ pub(crate) const APPROVAL_NOTIFY_ENV: &str = "SESSION_CORE_APPROVAL_NOTIFY";
 #[must_use]
 pub fn approval_notify_enabled() -> bool {
     flag_on(std::env::var(APPROVAL_NOTIFY_ENV).ok().as_deref())
+}
+
+/// What a manager's delete of one Space memory row tells the audit trail (EP-8 S7). Ids and closed
+/// words only: the row's text, topic, key, source links and any reason stay out of the row. The
+/// scope is read from the deleted row, so a caller passes an empty one.
+#[derive(Debug, Clone, Copy)]
+pub struct SpaceMemoryDeleteAudit<'a> {
+    pub org_id: &'a str,
+    /// The verified Space manager who removed the row.
+    pub actor_user_id: &'a str,
+    pub space_id: &'a str,
+    pub memory_id: &'a str,
+    /// The row's own scope, `space` or `agent`.
+    pub scope: &'a str,
+    /// The Control `model.space.memory.manage` decision the delete ran under.
+    pub decision_ref: &'a str,
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// The audit event id of one row's delete. A replay of the same delete names the same id, so the
+/// row is written once.
+#[must_use]
+pub fn space_memory_deleted_event_id(memory_id: &str) -> String {
+    format!("{EVENT_SPACE_MEMORY_DELETED}:{memory_id}")
+}
+
+/// Build the FLAT audit body of one Space memory delete (see [`build_approval_decision_body`] for
+/// the shape audit-core decodes). The subject is the Space and the resource is the row.
+#[must_use]
+pub fn build_space_memory_deleted_body(audit: &SpaceMemoryDeleteAudit<'_>) -> serde_json::Value {
+    serde_json::json!({
+        "event_id": space_memory_deleted_event_id(audit.memory_id),
+        "occurred_at": audit.occurred_at.to_rfc3339(),
+        "org_id": audit.org_id,
+        "user_id": audit.actor_user_id,
+        "plane": "model",
+        "producer": "session-core",
+        "event": EVENT_SPACE_MEMORY_DELETED,
+        "subject": audit.space_id,
+        "resource_id": audit.memory_id,
+        "outcome": "deleted",
+        "details": {
+            "scope": audit.scope,
+            "decision_ref": audit.decision_ref,
+        },
+    })
+}
+
+/// The switch of a manager's Space memory delete audit (EP-8 S7). Only the exact literal `true`.
+pub(crate) const SPACE_MEMORY_DELETE_AUDIT_ENV: &str = "SESSION_CORE_SPACE_MEMORY_DELETE_AUDIT";
+
+/// Whether a manager's Space memory delete writes its audit row: only the exact literal `true`
+/// (default off).
+#[must_use]
+pub fn space_memory_delete_audit_enabled() -> bool {
+    flag_on(std::env::var(SPACE_MEMORY_DELETE_AUDIT_ENV).ok().as_deref())
 }
 
 /// The strict reading of an audit switch: only the exact literal `true`, with no trimming and no
@@ -1231,6 +1297,110 @@ mod tests {
         let event_id = zdr["event_id"].as_str().expect("id").to_owned();
         assert!(check_outbox_authority(OutboxRoute::Audit, &event_id, &zdr).is_ok());
         assert_eq!(event_id, approval_requested_event_id("appr-1"));
+    }
+
+    #[test]
+    fn a_space_memory_delete_body_carries_ids_and_closed_codes_only() {
+        let at = chrono::DateTime::parse_from_rfc3339("2026-11-20T09:00:00Z")
+            .expect("fixed instant")
+            .with_timezone(&chrono::Utc);
+        let audit = SpaceMemoryDeleteAudit {
+            org_id: "org_fixture",
+            actor_user_id: "user_manager",
+            space_id: "space_fixture",
+            memory_id: "mem_fixture",
+            scope: "space",
+            decision_ref: "decision_fixture",
+            occurred_at: at,
+        };
+        let body = build_space_memory_deleted_body(&audit);
+
+        let mut keys: Vec<&str> = body
+            .as_object()
+            .expect("the body is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "details",
+                "event",
+                "event_id",
+                "occurred_at",
+                "org_id",
+                "outcome",
+                "plane",
+                "producer",
+                "resource_id",
+                "subject",
+                "user_id",
+            ]
+        );
+        let mut detail_keys: Vec<&str> = body["details"]
+            .as_object()
+            .expect("details is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        detail_keys.sort_unstable();
+        assert_eq!(detail_keys, ["decision_ref", "scope"]);
+
+        assert_eq!(body["event"], "space_memory_deleted");
+        assert_eq!(body["event_id"], "space_memory_deleted:mem_fixture");
+        assert_eq!(body["subject"], "space_fixture");
+        assert_eq!(body["resource_id"], "mem_fixture");
+        assert_eq!(body["user_id"], "user_manager");
+        assert_eq!(body["outcome"], "deleted");
+        assert_eq!(body["details"]["scope"], "space");
+        assert_eq!(body["details"]["decision_ref"], "decision_fixture");
+        // A replay of the same delete names the same event id, so its row is written once.
+        assert_eq!(
+            build_space_memory_deleted_body(&audit)["event_id"],
+            body["event_id"]
+        );
+    }
+
+    #[test]
+    fn a_space_memory_delete_routes_as_one_audit_subject_the_authority_check_accepts() {
+        let body = build_space_memory_deleted_body(&SpaceMemoryDeleteAudit {
+            org_id: "org_fixture",
+            actor_user_id: "user_manager",
+            space_id: "space_fixture",
+            memory_id: "mem_fixture",
+            scope: "agent",
+            decision_ref: "decision_fixture",
+            occurred_at: chrono::Utc::now(),
+        });
+        assert_eq!(
+            SUBJECT_MODEL_SPACE_MEMORY_DELETED,
+            "verevon.audit.v2.model.session-core.space_memory_deleted"
+        );
+        assert_eq!(
+            classify_outbox_subject(SUBJECT_MODEL_SPACE_MEMORY_DELETED),
+            Some(OutboxRoute::Audit)
+        );
+        assert_eq!(
+            audit_subject_for_event(EVENT_SPACE_MEMORY_DELETED).as_deref(),
+            Some(SUBJECT_MODEL_SPACE_MEMORY_DELETED),
+            "the wire subject is the one the body's own event names"
+        );
+        let event_id = body["event_id"].as_str().expect("an event id").to_owned();
+        assert!(check_outbox_authority(OutboxRoute::Audit, &event_id, &body).is_ok());
+    }
+
+    #[test]
+    fn the_space_memory_delete_switch_is_named_and_reads_only_the_exact_literal_true() {
+        assert_eq!(
+            SPACE_MEMORY_DELETE_AUDIT_ENV,
+            "SESSION_CORE_SPACE_MEMORY_DELETE_AUDIT"
+        );
+        assert!(!flag_on(None));
+        for off in ["", "1", "on", "yes", "TRUE", " true "] {
+            assert!(!flag_on(Some(off)), "{off:?} must leave the switch off");
+        }
+        assert!(flag_on(Some("true")));
     }
 
     #[test]

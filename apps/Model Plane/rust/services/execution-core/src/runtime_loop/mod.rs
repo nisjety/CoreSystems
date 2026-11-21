@@ -66,6 +66,28 @@ const CODE_INTERPRETER_TOOL: &str = "code_interpreter";
 /// (`/v1/agent/*`). Async, like `shell` — dispatched off the async path below.
 const BROWSER_AGENT_TOOL: &str = "browser_agent";
 
+/// Whether a step may carry `side_call`: an `mcp__` tool, with the literal `ask` posture. The gRPC
+/// boundary refuses anything else as `invalid_argument` before it gets here.
+pub(crate) fn side_call_admissible(tool_name: &str, permission_mode: &str) -> bool {
+    tool_name.starts_with(MCP_TOOL_PREFIX) && permission_mode == "ask"
+}
+
+/// The permission answer for an MCP-app side call, from the registry binding its own policy
+/// decision carried (class, floor and digest), as `evaluate_call_with_class` reads a declared
+/// class. A decision that states no class or no digest cannot clear the call, so it pauses,
+/// which the side-call lane answers `app_call_requires_chat`.
+fn side_call_permission(
+    mode: PermissionMode,
+    tool_name: &str,
+    tool_input: &str,
+    signed: &crate::mcp_gateway::SignedToolClass,
+) -> PermissionDecision {
+    match signed.binding_view(tool_name) {
+        Some(view) => permission::evaluate_call_with_class(mode, &view, tool_input),
+        None => PermissionDecision::AwaitApproval,
+    }
+}
+
 /// Apply the signed browser class as an additional ceiling, without changing
 /// the legacy decision for any other tool. The class never loosens that answer.
 fn browser_scoped_permission(
@@ -199,7 +221,7 @@ const CUSTOM_REST_WRITE_TOOL: &str = mp_contracts::custom_rest::WRITE_TOOL_NAME;
 /// `mcp__` call has already passed the purpose-lock by the time it lands here.
 const MCP_TOOL_PREFIX: &str = "mcp__";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StepOutcome {
     pub status: String,
     pub output: String,
@@ -216,9 +238,32 @@ pub struct StepOutcome {
     /// rule lifts, the capability id. Set only with `awaiting_approval` at the capability gate;
     /// empty everywhere else, which leaves the cause `once` only.
     pub pause_facts: approval_cause::CallFacts,
+    /// The form an MCP server asked and the gateway holds (EP-4 S7). Set only with
+    /// `awaiting_input`, on a call that was allowed to carry one; `None` everywhere else. The
+    /// output is empty: the call has not finished, and nothing of the form is kept here but what
+    /// the loop needs to put it to the run's owner.
+    pub pending_elicitation: Option<pb::McpElicitationPending>,
+    /// Set only on a parked `knowledge_search` result whose unparked text reports `status: "ok"` (F-f02-11).
+    /// Once a result is parked the loop sees only the handle envelope, which carries no status, so the loop
+    /// reads this flag for it. `false` everywhere else, where the loop reads the output as it always has.
+    pub grounded: bool,
+    /// The GDPR category the step is audited under when it must differ from the tool name's own category:
+    /// set only by a successful read of a result this run holds, under the category it was parked with
+    /// (F-f02-11). `None` everywhere else.
+    pub data_category: Option<&'static str>,
 }
 
 impl StepOutcome {
+    /// An MCP call that came back with a form its server asked (EP-4 S7): the step waits for the
+    /// run's owner, with no output.
+    fn awaiting_elicitation(pending: pb::McpElicitationPending) -> Self {
+        Self {
+            status: "awaiting_input".to_owned(),
+            pending_elicitation: Some(pending),
+            ..Self::completed(String::new())
+        }
+    }
+
     fn completed(output: String) -> Self {
         Self {
             status: "completed".to_owned(),
@@ -228,6 +273,9 @@ impl StepOutcome {
             cause: None,
             screening_taint: false,
             pause_facts: approval_cause::CallFacts::default(),
+            pending_elicitation: None,
+            grounded: false,
+            data_category: None,
         }
     }
 
@@ -240,6 +288,9 @@ impl StepOutcome {
             cause: None,
             screening_taint: false,
             pause_facts: approval_cause::CallFacts::default(),
+            pending_elicitation: None,
+            grounded: false,
+            data_category: None,
         }
     }
 
@@ -252,6 +303,9 @@ impl StepOutcome {
             cause: Some(cause),
             screening_taint: false,
             pause_facts: approval_cause::CallFacts::default(),
+            pending_elicitation: None,
+            grounded: false,
+            data_category: None,
         }
     }
 
@@ -272,6 +326,9 @@ impl StepOutcome {
             cause: None,
             screening_taint: false,
             pause_facts: approval_cause::CallFacts::default(),
+            pending_elicitation: None,
+            grounded: false,
+            data_category: None,
         }
     }
 
@@ -284,6 +341,9 @@ impl StepOutcome {
             cause: None,
             screening_taint: false,
             pause_facts: approval_cause::CallFacts::default(),
+            pending_elicitation: None,
+            grounded: false,
+            data_category: None,
         }
     }
 
@@ -296,6 +356,9 @@ impl StepOutcome {
             cause: None,
             screening_taint: false,
             pause_facts: approval_cause::CallFacts::default(),
+            pending_elicitation: None,
+            grounded: false,
+            data_category: None,
         }
     }
 
@@ -308,6 +371,9 @@ impl StepOutcome {
             cause: None,
             screening_taint: false,
             pause_facts: approval_cause::CallFacts::default(),
+            pending_elicitation: None,
+            grounded: false,
+            data_category: None,
         }
     }
 
@@ -320,6 +386,9 @@ impl StepOutcome {
             cause: None,
             screening_taint: false,
             pause_facts: approval_cause::CallFacts::default(),
+            pending_elicitation: None,
+            grounded: false,
+            data_category: None,
         }
     }
 
@@ -332,6 +401,9 @@ impl StepOutcome {
             cause: None,
             screening_taint: false,
             pause_facts: approval_cause::CallFacts::default(),
+            pending_elicitation: None,
+            grounded: false,
+            data_category: None,
         }
     }
 }
@@ -352,6 +424,7 @@ async fn browser_execution_to_step_outcome(
     user_id: &str,
     run_id: &str,
     zdr: bool,
+    waived: bool,
 ) -> StepOutcome {
     match execution {
         tool_bridge::BrowserAgentExecution::Completed { output } => {
@@ -365,6 +438,7 @@ async fn browser_execution_to_step_outcome(
                 user_id,
                 run_id,
                 zdr,
+                waived,
             )
             .await;
             crate::provenance::audit(
@@ -677,6 +751,10 @@ pub async fn execute_step(
         None,
         // The compatibility entry point has no request, so it names no Space.
         "",
+        // ... and is never an MCP-app side call.
+        false,
+        // ... and has no run that could wait for the answer to a server's form.
+        false,
     )
     .await
 }
@@ -725,6 +803,9 @@ pub(crate) async fn execute_step_with_browser_grant(
     // `ExecuteStepRequest.space_id`: the Space the step is scoped to, empty outside one. Read by
     // the owner document listing, which refuses a Space-scoped step (D2-769).
     request_space_id: &str,
+    // `ExecuteStepRequest.side_call`, after the gRPC boundary admitted it (an `mcp__` tool under
+    // `ask`): an MCP-app call outside the run loop. See `execute_step_inner`.
+    side_call: bool,
 ) -> StepOutcome {
     execute_step_inner(
         tool_name,
@@ -759,6 +840,9 @@ pub(crate) async fn execute_step_with_browser_grant(
         space_retrieval,
         None,
         request_space_id,
+        side_call,
+        // The single-step RPC has no run that could wait for the answer to a server's form.
+        false,
     )
     .await
 }
@@ -836,6 +920,8 @@ pub(crate) async fn execute_step_with_subagent(
         // directly with its run's own Space retrieval, so this one authorises none.
         crate::knowledge_tools::SpaceRetrieval::Organisation,
         None,
+        // ... and none of its MCP calls may carry a server's form.
+        false,
     )
     .await
 }
@@ -892,6 +978,9 @@ pub(crate) async fn execute_step_with_result_handles(
     // The run's browser page dispatch (WS21-S5a). Only the agent loop of a run holding a verified
     // browser sign-in passes one; every other caller passes none.
     browser: Option<&browser_session::BrowserDispatch<'_>>,
+    // Whether this call's MCP server may ask the run's owner a form (EP-4 S7): true only for an agent
+    // loop whose run `mcp_gateway::allow_elicitation` admitted. Every other caller passes false.
+    allow_elicitation: bool,
 ) -> StepOutcome {
     execute_step_inner(
         tool_name,
@@ -925,6 +1014,8 @@ pub(crate) async fn execute_step_with_result_handles(
         browser,
         // The agent loop refuses the listing on its own `space_id` before it dispatches.
         "",
+        false,
+        allow_elicitation,
     )
     .await
 }
@@ -1046,7 +1137,16 @@ async fn execute_step_inner(
     // other caller. A step can be Space-scoped without a sandbox context (no sandbox bearer is
     // demanded for `knowledge_list_documents`), so the owner listing reads it too (D2-769).
     request_space_id: &str,
+    // `ExecuteStepRequest.side_call`: an MCP-app call made outside the run loop. Only the single-step
+    // RPC sets it, after it checked the name and the posture; this is the same check again.
+    side_call: bool,
+    // Whether this call's MCP server may ask the run's owner a form (EP-4 S7); see
+    // `execute_step_with_result_handles`. Read by the MCP arm only, and never for a side call.
+    allow_elicitation: bool,
 ) -> StepOutcome {
+    if side_call && !side_call_admissible(tool_name, permission_mode) {
+        return StepOutcome::failed("side_call_invalid: only an mcp__ tool under permission_mode ask");
+    }
     let released = release.is_some_and(|r| r.covers(step_id, tool_name, tool_input));
     // A Do run's `browser.act` (WS21-S5b): served only while the act switch is on and the run holds its
     // page dispatch, which is never the case under zero retention. Every other call keeps its path.
@@ -1206,7 +1306,8 @@ async fn execute_step_inner(
             signed_class = crate::mcp_gateway::SignedToolClass::new(
                 &evaluation.side_effect_class,
                 &evaluation.approval_floor,
-            );
+            )
+            .with_digest(&evaluation.tool_digest);
             pause_facts = approval_cause::CallFacts {
                 effect_class: evaluation.side_effect_class.clone(),
                 tool_digest: evaluation.tool_digest.clone(),
@@ -1229,7 +1330,14 @@ async fn execute_step_inner(
             signed_class = crate::mcp_gateway::SignedToolClass::new(
                 &evaluation.side_effect_class,
                 &evaluation.approval_floor,
-            );
+            )
+            .with_digest(&evaluation.tool_digest);
+            // An MCP-app side call never waits for a person and is never offered a standing
+            // grant: any ask is the typed `awaiting_approval` outcome, which the gRPC boundary
+            // answers `app_call_requires_chat` without creating an approval.
+            if side_call {
+                return StepOutcome::awaiting_approval(CauseCode::CapabilityHighRisk);
+            }
             // An ask whose evidence did not verify states nothing: an unverified class never
             // widens a scope.
             if evaluation.ask_evidence_verified {
@@ -1400,8 +1508,16 @@ async fn execute_step_inner(
     // Under `TOOL_CLASS_GATE` the run's declared class and approval floor decide
     // instead of the name (`permission::RunGate`); with the gate off this is
     // `evaluate_call` exactly.
-    let legacy_permission =
-        permission::RunGate::for_run(org_id, run_id).evaluate_call(mode, tool_name, tool_input);
+    //
+    // An MCP-app side call (`ExecuteStepRequest.side_call`) is judged on the registry binding its
+    // own policy decision carried and never on the run's in-process views, which an execution-core
+    // restart, an eviction or another replica leaves empty: no binding states the strictest
+    // answer, which pauses and so answers `app_call_requires_chat`.
+    let legacy_permission = if side_call {
+        side_call_permission(mode, tool_name, tool_input, &signed_class)
+    } else {
+        permission::RunGate::for_run(org_id, run_id).evaluate_call(mode, tool_name, tool_input)
+    };
     let permission_decision = browser_scoped_permission(
         crate::capability_policy::browser_agent_policy_enforced(),
         tool_name, tool_input, mode, legacy_permission, &signed_class,
@@ -1421,6 +1537,11 @@ async fn execute_step_inner(
             permission_pause_cause(permission::RunGate::for_run(org_id, run_id), tool_name)
         }
     });
+    // A side call that would pause never reaches a standing grant (which a release would spend)
+    // or the Space fold: the pause is the answer.
+    if let (true, Some(cause)) = (side_call, permission_pause) {
+        return StepOutcome::awaiting_approval(cause);
+    }
     if gate_enforced {
         // On an enforced Space step the permission ask joins the fold below (WS10 S3). A browser
         // act never does: no standing rule there may pass it, so it pauses here.
@@ -1542,6 +1663,7 @@ async fn execute_step_inner(
             user_id,
             run_id,
             zdr,
+            waived,
         )
         .await;
     }
@@ -1552,13 +1674,17 @@ async fn execute_step_inner(
     // The long-page reader (EP-2-S10) answers read_page and find_in_page from the pages this run holds, as result_query answers from its own store. Off, the names fall through as before.
     if let Some(read) = result_handles::execute_reader_tool(tool_name, tool_input, org_id, run_id, result_store) {
         return match read {
-            Ok(output) => StepOutcome::completed(output),
+            Ok(output) => {
+                held_read_outcome(output, result_store, org_id, run_id, tool_name, tool_input)
+            }
             Err(error) => StepOutcome::failed(&error),
         };
     }
     if tool_name == result_handles::RESULT_QUERY_TOOL && result_store.is_some() {
         return match result_handles::execute_result_query(tool_input, org_id, run_id, result_store) {
-            Ok(output) => StepOutcome::completed(output),
+            Ok(output) => {
+                held_read_outcome(output, result_store, org_id, run_id, tool_name, tool_input)
+            }
             Err(error) => StepOutcome::failed(&error),
         };
     }
@@ -1743,6 +1869,7 @@ async fn execute_step_inner(
             org_id,
             user_id,
             thread_id,
+            run_id,
             zdr,
             session_channel.as_ref(),
             session_bearer,
@@ -1754,6 +1881,9 @@ async fn execute_step_inner(
             org_id,
             run_id,
             zdr || waived,
+            // Only an agent loop carries a delegation dispatch: that is a Do-managed run, which holds the org's
+            // `ext.skills` and fails closed without it (P2-ec-01).
+            subagent_dispatch.is_some(),
             session_channel.as_ref(),
             session_bearer,
         )
@@ -1878,7 +2008,7 @@ async fn execute_step_inner(
         // not a fallback to a generic HTTP executor.
         crate::ticket_tools::execute_if_configured(tool_input, run_id, org_id, step_id).await
     } else if tool_name.starts_with(MCP_TOOL_PREFIX) {
-        execute_mcp(
+        match execute_mcp(
             tool_name,
             tool_input,
             org_id,
@@ -1886,8 +2016,21 @@ async fn execute_step_inner(
             run_id,
             zdr || waived,
             &signed_class,
+            side_call,
+            // EP-4 S7: a form is allowed only for a call of an agent loop that admitted one, and
+            // never for an MCP-app side call, which has no run that could wait for the answer.
+            allow_elicitation && !side_call,
         )
         .await
+        {
+            McpExecution::Done(done) => done,
+            // The server asked the run's owner a form and the gateway holds the call. Nothing ran
+            // to its end, so there is no output to screen or label: the loop that dispatched it
+            // pauses the run on the form, or cancels it.
+            McpExecution::Awaiting(pending) => {
+                return StepOutcome::awaiting_elicitation(pending);
+            }
+        }
     } else if subagent::is_subagent_tool(tool_name) {
         execute_subagent(tool_name, tool_input, subagent_dispatch).await
     } else {
@@ -1981,6 +2124,7 @@ async fn execute_step_inner(
         user_id,
         run_id,
         zdr,
+        waived,
     )
     .await;
     crate::provenance::audit(tool_name, org_id, run_id, zdr, &screened.provenance);
@@ -2023,18 +2167,41 @@ async fn execute_step_inner(
     // An oversized read-class result is held by the run and the model gets its handle
     // (WS25-S5). The label is the render prefix alone, so the held body is exactly the
     // tool's output, and every read repeats the same verdict.
+    // The result is held under the category its tool is classified under, and every later read of it is
+    // audited under that category (F-f02-11). Which results park follows the tool's declared class where the
+    // gate enforces it, and the name classifier otherwise (F-f02-12).
     let parked = result_store
-        .filter(|_| result_handles::is_parkable_tool(tool_name))
+        .filter(|_| {
+            let declared = result_handles::declared_park_class(
+                permission::tool_class_gate(),
+                org_id,
+                run_id,
+                tool_name,
+            );
+            result_handles::is_parkable_tool(tool_name, declared)
+        })
         .and_then(|store| {
             let prefix = crate::provenance::render("", &screened.provenance);
             let label = prefix.strip_suffix('\n').unwrap_or(&prefix);
-            result_handles::hold_for_model(store, org_id, run_id, tool_name, label, &screened.output)
+            result_handles::hold_for_model(
+                store,
+                org_id,
+                run_id,
+                tool_name,
+                label,
+                &screened.output,
+                agent::data_category(tool_name),
+            )
         });
-    let mut outcome = StepOutcome::completed(with_edit_note(
-        parked.unwrap_or(rendered),
+    // Grounding of a parked result is read from its unparked text here, because the loop sees only the
+    // handle envelope (F-f02-11). An inline result keeps the loop's own check, as it was.
+    let mut outcome = screened_outcome(
         tool_name,
+        parked,
+        rendered,
+        &screened.output,
         release.filter(|_| released),
-    ));
+    );
     outcome.compaction_triggered = compaction_triggered;
     outcome.screening_taint = ((tool_name == READ_PROVIDER_ACTION_TOOL
         || tool_name == CUSTOM_REST_READ_TOOL)
@@ -2050,11 +2217,55 @@ async fn execute_step_inner(
             run_id,
             &page_url,
             zdr,
+            subagent_dispatch.is_some(),
             session_channel.as_ref(),
             session_bearer,
         )
         .await;
     }
+    outcome
+}
+
+/// The outcome of a successful read of a result this run holds (F-f02-11). The step is audited under the
+/// category the result was parked with, so a read of a customer's result is not recorded as public.
+fn held_read_outcome(
+    output: String,
+    handles: Option<&result_handles::ResultHandles>,
+    org_id: &str,
+    run_id: &str,
+    tool_name: &str,
+    tool_input: &str,
+) -> StepOutcome {
+    let mut outcome = StepOutcome::completed(output);
+    outcome.data_category =
+        result_handles::held_category_of_read(handles, org_id, run_id, tool_name, tool_input);
+    outcome
+}
+
+/// Whether a parked result is grounded (F-f02-11): a `knowledge_search` whose unparked text reports
+/// `status: "ok"`. The parked envelope carries no status, so the loop cannot read it from the handle.
+fn parked_knowledge_grounding(tool_name: &str, unparked_output: &str) -> bool {
+    tool_name == KNOWLEDGE_SEARCH_TOOL && agent::knowledge_search_found_grounding(unparked_output)
+}
+
+/// The outcome of a screened result once the store has had its say (F-f02-11): the handle envelope when the
+/// result was parked, else the rendered text, under the edit note a provider write carries. A parked result is
+/// grounded from `unparked_output`, the text the store was given, because the loop sees only the envelope. An
+/// inline result is not grounded here, and the loop reads its output as it always has.
+fn screened_outcome(
+    tool_name: &str,
+    parked: Option<String>,
+    rendered: String,
+    unparked_output: &str,
+    release: Option<&resume::ApprovedRelease>,
+) -> StepOutcome {
+    let grounded = parked.is_some() && parked_knowledge_grounding(tool_name, unparked_output);
+    let mut outcome = StepOutcome::completed(with_edit_note(
+        parked.unwrap_or(rendered),
+        tool_name,
+        release,
+    ));
+    outcome.grounded = grounded;
     outcome
 }
 
@@ -2745,11 +2956,21 @@ async fn execute_web_search(
 /// content to a third-party server, so it is refused here, before any credential is
 /// minted or any network call made, even though the step gate refuses it first.
 ///
-/// With `MCP_DO_TOOLS` off the call is the plain, unbound proxy it always was. With
+/// With `MCP_DO_TOOLS` off an ordinary call is the plain, unbound proxy it always was. With
 /// it on the call needs the run's registry binding: the tool's class must be one the
 /// mode allows and must still be the class the call's signed policy decision carries
 /// (`signed`), and the digest the registry pinned goes to the gateway, which refuses the
 /// call if the definition it would run has changed since.
+///
+/// An MCP-app side call is never run on the plain proxy while the mode is off (P2-ec-02-rel1):
+/// that proxy pins no digest and checks no class or mode, and a side call has no run view to
+/// check them against. It is refused instead, before any credential is minted or any network
+/// call made.
+///
+/// With `allow_elicitation` (EP-4 S7) the governed call may come back as a form its server asked
+/// and the gateway holds ([`McpExecution::Awaiting`]); without it a form that comes anyway is
+/// cancelled. The plain proxy never allows one.
+#[allow(clippy::too_many_arguments)]
 async fn execute_mcp(
     tool_name: &str,
     tool_input: &str,
@@ -2758,18 +2979,144 @@ async fn execute_mcp(
     run_id: &str,
     retention_waived: bool,
     signed: &crate::mcp_gateway::SignedToolClass,
-) -> tool_bridge::ToolExecution {
+    side_call: bool,
+    allow_elicitation: bool,
+) -> McpExecution {
+    // A test scripts what its server answers: an output, or a form, which only a call that
+    // allowed one receives (as the gateway sets one only when the request allowed it).
+    #[cfg(test)]
+    if !retention_waived {
+        if let Some(scripted) = test_mcp::take(tool_name) {
+            return match scripted {
+                test_mcp::Script::Form(pending) if allow_elicitation && !side_call => {
+                    McpExecution::Awaiting(pending)
+                }
+                test_mcp::Script::Form(_) => {
+                    McpExecution::Done(tool_error(crate::mcp_gateway::UNASKED_FORM.to_owned()))
+                }
+                test_mcp::Script::Output(output) => {
+                    McpExecution::Done(tool_bridge::ToolExecution {
+                        output,
+                        error: None,
+                    })
+                }
+            };
+        }
+    }
+    execute_mcp_in_mode(
+        crate::mcp_gateway::McpDoTools::from_env(),
+        tool_name,
+        tool_input,
+        org_id,
+        user_id,
+        run_id,
+        retention_waived,
+        signed,
+        side_call,
+        allow_elicitation,
+    )
+    .await
+}
+
+/// What an MCP call came to (EP-4 S7): a finished execution (an output or a tool error), or the
+/// form its server asked, which the gateway holds until the run's owner answers or the hold ends.
+/// Only a call that allowed a form can come back as [`Self::Awaiting`].
+#[derive(Debug)]
+enum McpExecution {
+    Done(tool_bridge::ToolExecution),
+    Awaiting(pb::McpElicitationPending),
+}
+
+/// What a test's MCP server answers, and the forms a test's loop cancelled (EP-4 S7). Thread-local:
+/// `#[tokio::test]` runs the loop on the test's own thread, so one test's script never reaches
+/// another's.
+#[cfg(test)]
+pub(crate) mod test_mcp {
+    use super::pb;
+    use std::cell::RefCell;
+    use std::collections::{HashMap, VecDeque};
+
+    pub(crate) enum Script {
+        Output(String),
+        Form(pb::McpElicitationPending),
+    }
+
+    thread_local! {
+        static SCRIPTS: RefCell<HashMap<String, VecDeque<Script>>> = RefCell::new(HashMap::new());
+        static CANCELLED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Queue `script` as the next answer of `tool`.
+    pub(crate) fn push(tool: &str, script: Script) {
+        SCRIPTS.with(|all| {
+            all.borrow_mut()
+                .entry(tool.to_owned())
+                .or_default()
+                .push_back(script)
+        });
+    }
+
+    pub(crate) fn take(tool: &str) -> Option<Script> {
+        SCRIPTS.with(|all| all.borrow_mut().get_mut(tool).and_then(VecDeque::pop_front))
+    }
+
+    pub(crate) fn clear() {
+        SCRIPTS.with(|all| all.borrow_mut().clear());
+        CANCELLED.with(|ids| ids.borrow_mut().clear());
+    }
+
+    pub(crate) fn note_cancelled(elicitation_id: &str) {
+        CANCELLED.with(|ids| ids.borrow_mut().push(elicitation_id.to_owned()));
+    }
+
+    /// The ids of the forms the loop cancelled since the last [`clear`], in order.
+    pub(crate) fn cancelled() -> Vec<String> {
+        CANCELLED.with(|ids| ids.borrow().clone())
+    }
+}
+
+/// Record, for a test, that the loop cancelled the held form `elicitation_id`.
+#[cfg(test)]
+pub(crate) fn note_cancelled_form(elicitation_id: &str) {
+    test_mcp::note_cancelled(elicitation_id);
+}
+
+#[cfg(test)]
+impl McpExecution {
+    /// The finished execution of a call that allowed no form.
+    fn into_done(self) -> tool_bridge::ToolExecution {
+        match self {
+            Self::Done(done) => done,
+            Self::Awaiting(_) => panic!("a call that allowed no form came back awaiting one"),
+        }
+    }
+}
+
+/// [`execute_mcp`] with the `MCP_DO_TOOLS` mode named, so a test can name it without touching
+/// the process environment.
+#[allow(clippy::too_many_arguments)]
+async fn execute_mcp_in_mode(
+    mode: crate::mcp_gateway::McpDoTools,
+    tool_name: &str,
+    tool_input: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    retention_waived: bool,
+    signed: &crate::mcp_gateway::SignedToolClass,
+    side_call: bool,
+    allow_elicitation: bool,
+) -> McpExecution {
     if retention_waived {
-        return tool_error(
+        return McpExecution::Done(tool_error(
             mp_contracts::zdr_refusal::Refusal::feature_not_supported("mcp_execution").message(),
-        );
+        ));
     }
     let Some((server_id, remote_tool)) = crate::mcp_gateway::parse_mcp_tool_name(tool_name) else {
-        return tool_error(format!(
+        return McpExecution::Done(tool_error(format!(
             "malformed MCP tool '{tool_name}' (expected mcp__<server>__<tool>)"
-        ));
+        )));
     };
-    let mode = crate::mcp_gateway::McpDoTools::from_env();
     if mode != crate::mcp_gateway::McpDoTools::Off {
         return execute_governed_mcp(
             mode,
@@ -2780,22 +3127,41 @@ async fn execute_mcp(
             run_id,
             (server_id, remote_tool),
             signed,
+            side_call,
+            allow_elicitation,
         )
         .await;
     }
-    let Some(client) = crate::mcp_gateway::McpGatewayClient::from_env() else {
-        return tool_error("MCP gateway not configured (MODEL_GATEWAY_ADDR)".to_owned());
-    };
-    match client
-        .proxy_tool(org_id, user_id, server_id, remote_tool, tool_input)
-        .await
-    {
-        Ok(output) => tool_bridge::ToolExecution {
-            output,
-            error: None,
-        },
-        Err(e) => tool_error(e),
+    // P2-ec-02-rel1: with the mode off there is no governed lane, and the plain proxy below
+    // would run a side call with no digest pin and no class or mode check. It is refused before
+    // any credential is minted or network call made. An ordinary call keeps the plain proxy.
+    if side_call {
+        metrics::counter!("mcp_app_call_refused_total", "reason" => "do_tools_off").increment(1);
+        tracing::warn!(
+            tool = %tool_name,
+            "MCP app call refused: MCP_DO_TOOLS is off, so the call has no pinned lane"
+        );
+        return McpExecution::Done(tool_error(format!(
+            "MCP tool '{tool_name}' is not run for an app call on this deployment; it was not run"
+        )));
     }
+    let Some(client) = crate::mcp_gateway::McpGatewayClient::from_env() else {
+        return McpExecution::Done(tool_error(
+            "MCP gateway not configured (MODEL_GATEWAY_ADDR)".to_owned(),
+        ));
+    };
+    McpExecution::Done(
+        match client
+            .proxy_tool(org_id, user_id, server_id, remote_tool, tool_input)
+            .await
+        {
+            Ok(output) => tool_bridge::ToolExecution {
+                output,
+                error: None,
+            },
+            Err(e) => tool_error(e),
+        },
+    )
 }
 
 /// The governed half of [`execute_mcp`]: the call runs only if the run holds the
@@ -2819,13 +3185,23 @@ async fn execute_governed_mcp(
     run_id: &str,
     (server_id, remote_tool): (&str, &str),
     signed: &crate::mcp_gateway::SignedToolClass,
-) -> tool_bridge::ToolExecution {
-    let Some(view) = permission::run_view(org_id, run_id, tool_name)
-        .filter(|view| !view.digest().is_empty())
-    else {
-        return tool_error(format!(
+    // An MCP-app side call has no run view to read: it takes the class, floor and digest of the
+    // registry binding its own policy decision carried (`signed`). No binding states no digest and
+    // is refused as not bound, exactly as a run with no view is.
+    side_call: bool,
+    // EP-4 S7: whether this call's server may ask the run's owner a form. Only an agent loop whose
+    // run `mcp_gateway::allow_elicitation` admitted sets it, and never for a side call.
+    allow_elicitation: bool,
+) -> McpExecution {
+    let view = if side_call {
+        signed.binding_view(tool_name)
+    } else {
+        permission::run_view(org_id, run_id, tool_name)
+    };
+    let Some(view) = view.filter(|view| !view.digest().is_empty()) else {
+        return McpExecution::Done(tool_error(format!(
             "MCP tool '{tool_name}' is not bound for this run; it was not run"
-        ));
+        )));
     };
     if signed.differs_from(tool_name, &view) {
         metrics::counter!("mcp_tool_class_changed_total").increment(1);
@@ -2835,7 +3211,7 @@ async fn execute_governed_mcp(
             decided_class = %signed.class,
             "MCP tool class changed since the offer; the call was refused"
         );
-        return tool_error(format!(
+        return McpExecution::Done(tool_error(format!(
             "{}: MCP tool '{tool_name}' is no longer the class this run was offered it as \
              (offered '{}', now '{}'); it was not run",
             crate::mcp_gateway::CLASS_CHANGED,
@@ -2845,19 +3221,22 @@ async fn execute_governed_mcp(
             } else {
                 signed.class.as_str()
             },
-        ));
+        )));
     }
     if !mode.allows(view.class()) {
-        return tool_error(format!(
+        return McpExecution::Done(tool_error(format!(
             "MCP tool '{tool_name}' is a '{}' tool, which this deployment does not run in Do runs",
             view.class().as_str()
-        ));
+        )));
     }
     let Some(governed) = crate::mcp_gateway::GovernedMcp::shared() else {
-        return tool_error("MCP gateway credential is not configured; the tool was not run".to_owned());
+        return McpExecution::Done(tool_error(
+            "MCP gateway credential is not configured; the tool was not run".to_owned(),
+        ));
     };
-    // EP-4 S7: a server's form needs a run that can pause for its owner's answer (WS14-S5's
-    // executor input pause), which no run has yet, so no call allows one: the wire stays as it was.
+    // EP-4 S7: a server's form is allowed only to a call of a run that can pause for its owner's
+    // answer (`mcp_gateway::allow_elicitation`, decided by the agent loop); everywhere else the wire
+    // is what it was, and a form that comes anyway is cancelled below.
     match governed
         .proxy(
             org_id,
@@ -2866,18 +3245,51 @@ async fn execute_governed_mcp(
             remote_tool,
             tool_input,
             view.digest(),
-            false,
+            allow_elicitation && !side_call,
         )
         .await
     {
-        Ok(crate::mcp_gateway::McpProxyOutcome::Output(output)) => tool_bridge::ToolExecution {
-            output,
-            error: None,
-        },
-        Ok(crate::mcp_gateway::McpProxyOutcome::Elicitation(pending)) => {
-            cancel_unasked_form(governed, org_id, user_id, &pending).await
+        Ok(crate::mcp_gateway::McpProxyOutcome::Output(output)) => {
+            McpExecution::Done(tool_bridge::ToolExecution {
+                output,
+                error: None,
+            })
         }
-        Err(e) => tool_error(e),
+        Ok(crate::mcp_gateway::McpProxyOutcome::Elicitation(pending))
+            if allow_elicitation && !side_call =>
+        {
+            McpExecution::Awaiting(pending)
+        }
+        Ok(crate::mcp_gateway::McpProxyOutcome::Elicitation(pending)) => {
+            McpExecution::Done(cancel_unasked_form(governed, org_id, user_id, &pending).await)
+        }
+        Err(e) => McpExecution::Done(tool_error(e)),
+    }
+}
+
+/// Cancel a form the gateway holds: the server is told no answer will come, so its call ends at
+/// once instead of waiting for the hold to lapse. Best effort; a cancel that does not land leaves
+/// the gateway's own hold to expire it. Logs ids and a length only: the server's message and
+/// schema never reach a log.
+pub(crate) async fn cancel_held_form(
+    governed: &crate::mcp_gateway::GovernedMcp,
+    org_id: &str,
+    user_id: &str,
+    elicitation_id: &str,
+) {
+    let cancel = crate::mcp_gateway::ElicitationReply {
+        action: crate::mcp_gateway::ELICITATION_CANCEL,
+        answers: Vec::new(),
+    };
+    if let Err(error) = governed
+        .answer_elicitation(org_id, user_id, elicitation_id, cancel)
+        .await
+    {
+        tracing::warn!(
+            elicitation_id = %elicitation_id,
+            error_len = error.len(),
+            "an MCP form could not be cancelled; the gateway's hold expires it"
+        );
     }
 }
 
@@ -2891,21 +3303,7 @@ async fn cancel_unasked_form(
     pending: &pb::McpElicitationPending,
 ) -> tool_bridge::ToolExecution {
     metrics::counter!("mcp_elicitation_unasked_total").increment(1);
-    let cancel = crate::mcp_gateway::ElicitationReply {
-        action: crate::mcp_gateway::ELICITATION_CANCEL,
-        answers: Vec::new(),
-    };
-    if let Err(error) = governed
-        .answer_elicitation(org_id, user_id, &pending.elicitation_id, cancel)
-        .await
-    {
-        // Ids and lengths only: the server's message and schema never reach a log.
-        tracing::warn!(
-            elicitation_id = %pending.elicitation_id,
-            error_len = error.len(),
-            "an unasked MCP form could not be cancelled; the gateway's hold expires it"
-        );
-    }
+    cancel_held_form(governed, org_id, user_id, &pending.elicitation_id).await;
     tool_error(crate::mcp_gateway::UNASKED_FORM.to_owned())
 }
 
@@ -3920,6 +4318,13 @@ async fn resolve_write_approval(
         // Record that decision durably (idempotent — a re-run finds it granted),
         // then forward the real id.
         if !granted {
+            // A step-up cause is never granted by the posture (DEC-F03-3): it stays pending for the person,
+            // whose own decision the gateway checks for a fresh password (WS13 S5).
+            if let Some(refusal) =
+                auto_posture_step_up_refusal(&approval.id, approval.cause.as_ref())
+            {
+                return Err(refusal);
+            }
             let decided_by = if user_id.trim().is_empty() {
                 org_id.to_owned()
             } else {
@@ -3979,6 +4384,20 @@ fn auto_posture_decision_request(
     }
 }
 
+/// The refusal the chat posture gives a provider write whose approval is a step-up cause (WS13 S5,
+/// DEC-F03-3), or `None` when the posture may record its own grant. The approval stays pending, so the
+/// person's own decision, checked by the gateway for a fresh password, is the only grant it can get.
+fn auto_posture_step_up_refusal(
+    approval_id: &str,
+    cause: Option<&pb::ApprovalCause>,
+) -> Option<String> {
+    cause.is_some_and(|cause| cause.step_up_required).then(|| {
+        format!(
+            "provider write blocked: approval {approval_id} needs your confirmation with a fresh password check"
+        )
+    })
+}
+
 #[cfg(test)]
 mod auto_posture_decision_tests {
     use super::*;
@@ -3993,6 +4412,21 @@ mod auto_posture_decision_tests {
         assert_eq!(request.decided_by, "user-1");
         assert_eq!(request.decision, pb::ApprovalState::Granted as i32);
         assert_eq!(request.org_id, "org-1");
+    }
+
+    #[test]
+    fn the_chat_posture_never_grants_a_step_up_cause() {
+        let stepped = pb::ApprovalCause {
+            step_up_required: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            auto_posture_step_up_refusal("appr-1", Some(&stepped)).as_deref(),
+            Some("provider write blocked: approval appr-1 needs your confirmation with a fresh password check")
+        );
+        let plain = pb::ApprovalCause::default();
+        assert_eq!(auto_posture_step_up_refusal("appr-1", Some(&plain)), None);
+        assert_eq!(auto_posture_step_up_refusal("appr-1", None), None);
     }
 }
 
@@ -4044,6 +4478,8 @@ mod connector_tool_tests {
                     crate::knowledge_tools::SpaceRetrieval::Organisation,
                     None,
                     "",
+                    false,
+                    false,
                 )
                 .await;
                 assert_eq!(out.status, "failed", "{tool} zdr={zdr} waived={waived}");
@@ -4139,7 +4575,7 @@ mod connector_tool_tests {
             EXECUTE_PROVIDER_ACTION_TOOL, input, "ask", "", "org-1", "user-1", "run-1", "step-1", "",
             None, None, None, false, false, 0, None, None, None, &NoPolicy, None, None, None, None,
             None, None, true, &selected, crate::knowledge_tools::SpaceRetrieval::Organisation, None,
-            "",
+            "", false, false,
         )
         .await;
         assert_eq!(out.status, "failed");
@@ -4204,6 +4640,7 @@ mod memory_tool_tests {
             "org-1",
             "user-1",
             "thread-1",
+            "run-1",
             true,
             None,
             Some("bearer"),
@@ -4233,8 +4670,10 @@ mod memory_tool_tests {
 
     #[tokio::test]
     async fn memory_tools_validate_input_before_any_precondition_noise() {
-        let out =
-            execute_save_memory("not json", "org-1", "user-1", "t-1", false, None, None).await;
+        let out = execute_save_memory(
+            "not json", "org-1", "user-1", "t-1", "run-1", false, None, None,
+        )
+        .await;
         assert!(out
             .error
             .expect("must refuse")
@@ -4244,6 +4683,7 @@ mod memory_tool_tests {
             "org-1",
             "user-1",
             "t-1",
+            "run-1",
             false,
             None,
             None,
@@ -4253,6 +4693,28 @@ mod memory_tool_tests {
             .error
             .expect("must refuse")
             .contains("must not be empty"));
+    }
+
+    #[test]
+    fn save_memory_names_the_loop_run_and_never_the_models_input() {
+        // The run id is the loop's own (EP-8 S10): session-core attributes a bound agent's note by it. SaveInput
+        // has no field for it, so the model's tool input cannot name a run.
+        let source = include_str!("mod.rs");
+        // Joined at compile time, so this file never holds the needle as one literal: a search for the
+        // definition (here, and in compaction_parity_contract) cannot match this test instead.
+        let start = source
+            .find(concat!("\n", "async fn ", "execute_save_memory("))
+            .expect("the save");
+        let body =
+            &source[start..start + source[start..].find("\n}\n").expect("its closing brace")];
+        assert!(
+            body.contains("run_id: run_id.to_owned(),"),
+            "the request carries the loop's run"
+        );
+        assert!(
+            !body.contains("input.run_id"),
+            "the model's input never names the run"
+        );
     }
 
     #[tokio::test]
@@ -4351,6 +4813,104 @@ mod memory_tool_tests {
     }
 }
 
+#[cfg(test)]
+mod reattach_ext_skills_tests {
+    use super::*;
+
+    /// A Do-managed run whose policy entry is gone reads nothing and answers the typed error, before any
+    /// credential or session read is asked for (P2-ec-01).
+    #[tokio::test]
+    async fn reattach_with_a_missing_policy_entry_refuses_on_a_do_run() {
+        let out = execute_reattach_skill(
+            r#"{"name":"Deploy runbook"}"#,
+            "org-reattach",
+            "run-reattach-lost",
+            false,
+            true,
+            None,
+            Some("bearer"),
+        )
+        .await;
+        assert_eq!(
+            out.error.as_deref(),
+            Some(crate::skill_ext_policy::UNAVAILABLE)
+        );
+        assert!(out.output.is_empty());
+    }
+
+    /// A registered run is past the policy gate: it fails later, on the missing session channel, so the entry
+    /// (an empty word included) is what lets it through. A single step that is no Do run needs no entry.
+    #[tokio::test]
+    async fn reattach_with_an_entry_or_off_a_do_run_is_not_refused_by_the_policy() {
+        let input = r#"{"name":"Deploy runbook"}"#;
+        let _guard = crate::skill_ext_policy::run_ext_skills().register(
+            "org-reattach",
+            "run-reattach-held",
+            "",
+        );
+        for (run, do_managed) in [("run-reattach-held", true), ("run-reattach-step", false)] {
+            let out = execute_reattach_skill(
+                input,
+                "org-reattach",
+                run,
+                false,
+                do_managed,
+                None,
+                Some("bearer"),
+            )
+            .await;
+            let error = out.error.unwrap_or_default();
+            assert!(
+                error.contains("requires a verified session credential"),
+                "{run}: {error}"
+            );
+        }
+    }
+
+    /// What a non-permitted skill becomes to recovery: an unknown name, so its text is never returned.
+    #[test]
+    fn a_skill_the_org_does_not_permit_is_not_recovered() {
+        use crate::skill_ext_policy::ExtSkills;
+        use mp_contracts::skill_recovery::{recover_skill, RecoveredSkill};
+
+        let row = |name: &str, scope: &str| pb::AgentSkill {
+            id: format!("sk-{name}"),
+            name: name.to_owned(),
+            content: format!("private text of {name}"),
+            enabled: true,
+            scope: scope.to_owned(),
+            ..Default::default()
+        };
+        let rows = || {
+            vec![
+                row("Org runbook", "org"),
+                row("My runbook", "user"),
+                row("Room runbook", "space"),
+            ]
+        };
+        let found = |ext: ExtSkills, name: &str| {
+            matches!(
+                recover_skill(&ext.filter(rows()), name),
+                RecoveredSkill::Found { .. }
+            )
+        };
+        for name in ["Org runbook", "My runbook", "Room runbook"] {
+            assert!(found(ExtSkills::Any, name), "any recovers {name}");
+            assert!(
+                found(ExtSkills::NotEnforced, name),
+                "an unenforced run recovers {name}"
+            );
+            assert!(
+                !found(ExtSkills::None, name),
+                "none recovers nothing: {name}"
+            );
+        }
+        assert!(found(ExtSkills::ApprovedOnly, "Org runbook"));
+        assert!(!found(ExtSkills::ApprovedOnly, "My runbook"));
+        assert!(!found(ExtSkills::ApprovedOnly, "Room runbook"));
+    }
+}
+
 fn tool_error(message: String) -> tool_bridge::ToolExecution {
     tool_bridge::ToolExecution {
         output: String::new(),
@@ -4369,6 +4929,7 @@ async fn execute_reattach_skill(
     org_id: &str,
     run_id: &str,
     retention_bound: bool,
+    do_managed: bool,
     session_channel: Option<&tonic::transport::Channel>,
     session_bearer: Option<&str>,
 ) -> tool_bridge::ToolExecution {
@@ -4390,6 +4951,12 @@ async fn execute_reattach_skill(
             "{REATTACH_SKILL_TOOL} requires the skill's 'name' as shown in its block"
         ));
     }
+    // The org's `ext.skills` the run started under (P2-ec-01). A Do-managed run whose entry is gone (a restart,
+    // another replica) cannot know it, so it reads nothing rather than widening.
+    let ext = match crate::skill_ext_policy::run_ext_skills().for_run(org_id, run_id, do_managed) {
+        Ok(ext) => ext,
+        Err(code) => return tool_error(code.to_owned()),
+    };
     let (Some(channel), Some(bearer)) = (session_channel, session_bearer) else {
         return tool_error(format!(
             "{REATTACH_SKILL_TOOL} requires a verified session credential"
@@ -4425,6 +4992,9 @@ async fn execute_reattach_skill(
             .into_iter()
             // A learned proposal its owner has not accepted is not usable (WS07-S7).
             .filter(|skill| skill.review_state.is_empty() || skill.review_state == "accepted")
+            // What the org's `ext.skills` does not permit is not recovered either: it reads as an unknown
+            // name, and the pin lookup below never sees it.
+            .filter(|skill| ext.permits(skill))
             .collect(),
         Err(error) => {
             tracing::warn!(code = ?error.code(), %org_id, "reattach_skill: skill read failed");
@@ -4549,11 +5119,13 @@ fn memory_tool_preflight<'a>(
 /// governed loop, where the purpose-lock, permission gate, and per-step audit
 /// record already apply. session-core owns org/user/thread scoping and mints
 /// the memory id.
+#[allow(clippy::too_many_arguments)]
 async fn execute_save_memory(
     tool_input: &str,
     org_id: &str,
     user_id: &str,
     thread_id: &str,
+    run_id: &str,
     zdr: bool,
     session_channel: Option<&Channel>,
     session_bearer: Option<&str>,
@@ -4596,6 +5168,9 @@ async fn execute_save_memory(
         user_id: user_id.to_owned(),
         // The model's own tool call. The content policy gives it no org-wide scope.
         origin: "model_tool".to_owned(),
+        // The run whose tool call this is (EP-8 S10). session-core attributes a bound agent's note by it; the
+        // model's input has no field for it.
+        run_id: run_id.to_owned(),
     };
     let request = match authenticated_session_request(request, &bearer) {
         Ok(r) => r,
@@ -4796,6 +5371,27 @@ async fn create_run_question_with(
         origin_label: String::new(),
     };
     let request = authenticated_session_request(request, bearer).map_err(tonic::Status::internal)?;
+    let response = OrchestrationCoreServiceClient::new(channel.clone())
+        .create_run_question(request)
+        .await?;
+    Ok(response.into_inner().question.unwrap_or_default())
+}
+
+/// Put an MCP server's form to the run's owner as a `resume` question (EP-4 S7): `request` is built
+/// by `mcp_gateway::elicitation_question`, which names the origin, the server's label and the
+/// `{run}:{step}:elicit:<n>` key. `bearer` is the execution service's own credential, never the
+/// run's: session-core lets only that principal name a server as the origin of a question.
+///
+/// # Errors
+/// The status the credential check or session-core's `CreateRunQuestion` reports.
+#[allow(clippy::result_large_err)]
+pub(crate) async fn create_elicitation_question(
+    channel: &Channel,
+    bearer: &str,
+    request: pb::CreateRunQuestionRequest,
+) -> Result<pb::RunQuestion, tonic::Status> {
+    let request =
+        authenticated_session_request(request, bearer).map_err(tonic::Status::internal)?;
     let response = OrchestrationCoreServiceClient::new(channel.clone())
         .create_run_question(request)
         .await?;
@@ -5275,6 +5871,7 @@ mod tests {
             None,
             crate::knowledge_tools::SpaceRetrieval::Organisation,
             "",
+            false,
         )
         .await
     }
@@ -5398,6 +5995,7 @@ mod tests {
             None,
             crate::knowledge_tools::SpaceRetrieval::Organisation,
             "",
+            false,
         )
         .await;
         assert_eq!(out.status, "awaiting_approval");
@@ -6084,6 +6682,7 @@ mod tests {
                 "user_test",
                 "run_test",
                 false,
+                false,
             )
             .await;
             assert_eq!(outcome.status, expected_status, "outcome: {outcome:?}");
@@ -6106,6 +6705,7 @@ mod tests {
             "org_test",
             "user_test",
             "run_test",
+            false,
             false,
         )
         .await;
@@ -6342,7 +6942,19 @@ mod tests {
     #[tokio::test]
     async fn a_retention_waived_mcp_call_is_refused_before_any_credential_or_network_call() {
         let signed = crate::mcp_gateway::SignedToolClass::new("read", "none");
-        let out = execute_mcp("mcp__srv__echo", "{}", "org_x", "user_x", "run_x", true, &signed).await;
+        let out = execute_mcp(
+            "mcp__srv__echo",
+            "{}",
+            "org_x",
+            "user_x",
+            "run_x",
+            true,
+            &signed,
+            false,
+            true,
+        )
+        .await
+        .into_done();
         assert!(out.output.is_empty());
         assert_eq!(
             out.error.as_deref(),
@@ -6353,8 +6965,19 @@ mod tests {
             )
         );
         // Even a name that is not an MCP tool's shape gets the retention refusal first.
-        let malformed =
-            execute_mcp("mcp__nonsense", "{}", "org_x", "user_x", "run_x", true, &signed).await;
+        let malformed = execute_mcp(
+            "mcp__nonsense",
+            "{}",
+            "org_x",
+            "user_x",
+            "run_x",
+            true,
+            &signed,
+            false,
+            true,
+        )
+        .await
+        .into_done();
         assert_eq!(malformed.error, out.error);
     }
 
@@ -6375,8 +6998,11 @@ mod tests {
                 run,
                 parts,
                 &SignedToolClass::new(decided, "none"),
+                false,
+                false,
             )
             .await
+            .into_done()
             .error
             .unwrap_or_default()
         };
@@ -6421,8 +7047,11 @@ mod tests {
             "run-write",
             parts,
             &SignedToolClass::new("external_write", "none"),
+            false,
+            false,
         )
-        .await;
+        .await
+        .into_done();
         assert!(other.error.unwrap_or_default().contains("not bound"));
     }
 
@@ -6444,8 +7073,11 @@ mod tests {
                 run,
                 ("srv", "echo"),
                 &signed,
+                false,
+                false,
             )
             .await
+            .into_done()
             .error
             .unwrap_or_default()
         };
@@ -6471,6 +7103,329 @@ mod tests {
         // The decision that agrees with the view goes on as far as the credential.
         let agreed = call(SignedToolClass::new("read", "none"), "run-stale-view").await;
         assert!(agreed.contains("credential"), "{agreed}");
+    }
+
+    // -- F-f10-21: the MCP-app side-call lane ------------------------------
+
+    const SIDE_DIGEST: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+    /// A policy answering `decision` for an MCP tool with the class, floor and digest that the
+    /// gRPC policy reads from its own registry binding for the call.
+    struct BoundTool {
+        decision: crate::capability_policy::CapabilityDecision,
+        class: &'static str,
+        floor: &'static str,
+        digest: &'static str,
+    }
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for BoundTool {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, tonic::Status> {
+            Ok(self.decision)
+        }
+
+        async fn evaluate_tool_call(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+            _user_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityEvaluation, tonic::Status> {
+            Ok(crate::capability_policy::CapabilityEvaluation {
+                decision: self.decision,
+                decision_id: "pdec_side".to_owned(),
+                capability_version: "1.0.0".to_owned(),
+                evidence_verified: true,
+                policy_source: "approval_floor".to_owned(),
+                side_effect_class: self.class.to_owned(),
+                approval_floor: self.floor.to_owned(),
+                capability_id: "cap.mcp_tool.abc".to_owned(),
+                tool_digest: self.digest.to_owned(),
+                reason: String::new(),
+                ask_evidence_verified: true,
+            })
+        }
+    }
+
+    /// One MCP step through the single-step path, with `side_call` as named. The run holds no
+    /// view in the process's run-view store: the run is one no offer ever recorded.
+    async fn mcp_step(
+        side_call: bool,
+        tool_name: &str,
+        permission_mode: &str,
+        policy: &dyn crate::capability_policy::CapabilityPolicy,
+    ) -> StepOutcome {
+        execute_step_with_browser_grant(
+            tool_name,
+            "{}",
+            permission_mode,
+            "",
+            "org-side",
+            "user-side",
+            "run-side-never-offered",
+            "app-step",
+            "",
+            None,
+            None,
+            None,
+            false,
+            false,
+            0,
+            None,
+            None,
+            None,
+            policy,
+            None,
+            None,
+            None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
+            "",
+            side_call,
+        )
+        .await
+    }
+
+    /// With the tool class gate off (the unit-test process), an ordinary `ask` step for an `mcp__`
+    /// name pauses, and the single-step RPC then raises a durable approval for it. The side call
+    /// answers the same pause as the outcome the RPC refuses as `app_call_requires_chat`, and the
+    /// RPC raises nothing for it.
+    #[tokio::test]
+    async fn a_side_call_pause_is_the_outcome_the_rpc_refuses_without_an_approval() {
+        use crate::capability_policy::CapabilityDecision;
+        // An ask-class tool, and an unclassified one the gate off cannot place.
+        let asks = [
+            BoundTool {
+                decision: CapabilityDecision::Ask,
+                class: "external_write",
+                floor: "ask",
+                digest: SIDE_DIGEST,
+            },
+            BoundTool {
+                decision: CapabilityDecision::Allow,
+                class: "",
+                floor: "",
+                digest: "",
+            },
+            BoundTool {
+                decision: CapabilityDecision::Allow,
+                class: "external_write",
+                floor: "none",
+                digest: SIDE_DIGEST,
+            },
+        ];
+        for policy in &asks {
+            let ordinary = mcp_step(false, "mcp__srv__echo", "ask", policy).await;
+            assert_eq!(ordinary.status, "awaiting_approval", "the ordinary step pauses");
+            let side = mcp_step(true, "mcp__srv__echo", "ask", policy).await;
+            assert_eq!(side.status, "awaiting_approval", "{side:?}");
+            let refusal = crate::grpc::side_call_response("app-step".to_owned(), side)
+                .expect_err("a pause is a refusal, not a response");
+            assert_eq!(refusal.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(refusal.message(), "app_call_requires_chat");
+        }
+    }
+
+    /// A read tool the registry binding says needs no approval is not paused by the permission
+    /// gate, though the run holds no view of it (an execution-core restart, an eviction, another
+    /// replica) and though the legacy name posture would pause every `mcp__` call under `ask`.
+    #[tokio::test]
+    async fn a_side_call_is_judged_on_its_own_binding_and_not_on_the_run_views() {
+        use crate::capability_policy::CapabilityDecision;
+        let read = BoundTool {
+            decision: CapabilityDecision::Allow,
+            class: "read",
+            floor: "none",
+            digest: SIDE_DIGEST,
+        };
+        assert!(permission::run_view("org-side", "run-side-never-offered", "mcp__srv__echo").is_none());
+        let ordinary = mcp_step(false, "mcp__srv__echo", "ask", &read).await;
+        assert_eq!(ordinary.status, "awaiting_approval", "the legacy posture pauses an mcp__ call");
+        let side = mcp_step(true, "mcp__srv__echo", "ask", &read).await;
+        assert_ne!(side.status, "awaiting_approval", "{side:?}");
+        // The tool class gate and the registry floor still bind it: a floor above none pauses.
+        let floored = BoundTool { floor: "ask", ..read };
+        assert_eq!(
+            mcp_step(true, "mcp__srv__echo", "ask", &floored).await.status,
+            "awaiting_approval"
+        );
+    }
+
+    /// A side call whose binding resolved runs when the run's view store was cleared, and the
+    /// binding's digest, not the view's, is what the gateway is asked to pin. One whose decision
+    /// carries no binding is refused as not bound, as a run with no view always was.
+    #[tokio::test]
+    async fn a_side_call_dispatches_on_its_binding_after_the_run_views_are_gone() {
+        use crate::mcp_gateway::{McpDoTools, SignedToolClass};
+        let call = |signed: SignedToolClass, side_call: bool| async move {
+            execute_governed_mcp(
+                McpDoTools::Read,
+                "mcp__srv__echo",
+                "{}",
+                "org-side",
+                "user",
+                "run-side-cleared",
+                ("srv", "echo"),
+                &signed,
+                side_call,
+                false,
+            )
+            .await
+            .into_done()
+            .error
+            .unwrap_or_default()
+        };
+        assert!(permission::run_view("org-side", "run-side-cleared", "mcp__srv__echo").is_none());
+
+        // The ordinary call has nothing to read and is not bound, as before.
+        let ordinary = call(SignedToolClass::new("read", "none").with_digest(SIDE_DIGEST), false).await;
+        assert!(ordinary.contains("not bound"), "{ordinary}");
+
+        // The side call passes the binding check and goes on as far as the credential, which a unit
+        // test lacks: it was neither refused as not bound nor as a changed class.
+        let bound = call(SignedToolClass::new("read", "none").with_digest(SIDE_DIGEST), true).await;
+        assert!(bound.contains("credential"), "{bound}");
+
+        // No digest, or no class, in the binding: not bound, and nothing is dispatched.
+        for signed in [
+            SignedToolClass::new("read", "none"),
+            SignedToolClass::new("", "").with_digest(SIDE_DIGEST),
+            SignedToolClass::default(),
+        ] {
+            let refused = call(signed, true).await;
+            assert!(refused.contains("not bound"), "{refused}");
+        }
+
+        // A class the mode does not run is refused with the mode's own words, never dispatched.
+        let write = {
+            execute_governed_mcp(
+                McpDoTools::Read,
+                "mcp__srv__echo",
+                "{}",
+                "org-side",
+                "user",
+                "run-side-cleared",
+                ("srv", "echo"),
+                &SignedToolClass::new("external_write", "none").with_digest(SIDE_DIGEST),
+                true,
+                false,
+            )
+            .await
+            .into_done()
+            .error
+            .unwrap_or_default()
+        };
+        assert!(write.contains("does not run in Do runs"), "{write}");
+    }
+
+    /// P2-ec-02-rel1: with `MCP_DO_TOOLS` off a side call has no governed lane, so it is refused
+    /// before the plain proxy, which pins no digest and checks no class or mode. The refusal is the
+    /// off mode's alone: the same bound call under `read` goes on to the governed lane and asks for
+    /// its credential, which a unit test does not have, so it never reaches the network here.
+    #[tokio::test]
+    async fn a_side_call_is_refused_while_mcp_do_tools_is_off_before_any_proxy() {
+        use crate::mcp_gateway::{McpDoTools, SignedToolClass};
+        let bound = SignedToolClass::new("read", "none").with_digest(SIDE_DIGEST);
+        let off = execute_mcp_in_mode(
+            McpDoTools::Off,
+            "mcp__srv__echo",
+            "{}",
+            "org-side",
+            "user",
+            "run-side-off",
+            false,
+            &bound,
+            true,
+            false,
+        )
+        .await
+        .into_done();
+        assert!(off.output.is_empty(), "{off:?}");
+        let refused = off.error.unwrap_or_default();
+        assert!(refused.contains("is not run for an app call"), "{refused}");
+        assert!(
+            !refused.contains("credential") && !refused.contains("transport"),
+            "{refused}"
+        );
+
+        let governed = execute_mcp_in_mode(
+            McpDoTools::Read,
+            "mcp__srv__echo",
+            "{}",
+            "org-side",
+            "user",
+            "run-side-off",
+            false,
+            &bound,
+            true,
+            false,
+        )
+        .await
+        .into_done()
+        .error
+        .unwrap_or_default();
+        assert!(governed.contains("credential"), "{governed}");
+        assert!(
+            !governed.contains("is not run for an app call"),
+            "{governed}"
+        );
+    }
+
+    /// `side_call` is for an `mcp__` tool under the literal `ask` posture and nothing else; the step
+    /// itself refuses any other shape, as the RPC does before it.
+    #[tokio::test]
+    async fn a_side_call_on_another_tool_or_another_posture_is_refused() {
+        use crate::capability_policy::CapabilityDecision;
+        assert!(side_call_admissible("mcp__srv__echo", "ask"));
+        for (tool, mode) in [
+            ("knowledge_search", "ask"),
+            ("code_interpreter", "ask"),
+            ("MCP__srv__echo", "ask"),
+            (" mcp__srv__echo", "ask"),
+            ("mcp__srv__echo", "auto"),
+            ("mcp__srv__echo", "deny"),
+            ("mcp__srv__echo", ""),
+            ("mcp__srv__echo", "ASK"),
+        ] {
+            assert!(!side_call_admissible(tool, mode), "{tool} {mode}");
+        }
+        let policy = BoundTool {
+            decision: CapabilityDecision::Allow,
+            class: "read",
+            floor: "none",
+            digest: SIDE_DIGEST,
+        };
+        for (tool, mode) in [("knowledge_search", "ask"), ("mcp__srv__echo", "auto")] {
+            let out = mcp_step(true, tool, mode, &policy).await;
+            assert_eq!(out.status, "failed", "{tool} {mode}");
+            assert!(out.error.starts_with("side_call_invalid"), "{}", out.error);
+        }
+    }
+
+    /// An org hook rule that asks for an MCP tool pauses a side call, and the pause is the outcome
+    /// the RPC refuses: a side call is never offered a standing grant, so nothing releases it.
+    #[tokio::test]
+    async fn a_hook_ask_pauses_a_side_call() {
+        use crate::capability_policy::CapabilityDecision;
+        let read = BoundTool {
+            decision: CapabilityDecision::Allow,
+            class: "read",
+            floor: "none",
+            digest: SIDE_DIGEST,
+        };
+        let hook = r#"{"rules":[{"event":"pre_tool_use","tools":"mcp__*","decision":"ask","reason":"review MCP"}]}"#;
+        let out = execute_step_with_browser_grant(
+            "mcp__srv__echo", "{}", "ask", hook, "org-side", "user-side", "run-side-never-offered",
+            "app-step", "", None, None, None, false, false, 0, None, None, None, &read, None, None,
+            None, crate::knowledge_tools::SpaceRetrieval::Organisation, "", true,
+        )
+        .await;
+        assert_eq!(out.status, "awaiting_approval", "{out:?}");
+        assert_eq!(out.cause, Some(CauseCode::HookAsk));
     }
 
     // -- WS06-S9 postponed tests -------------------------------------------
@@ -6997,6 +7952,7 @@ mod owner_listing_tests {
             None,
             space_retrieval,
             request_space_id,
+            false,
         )
         .await
     }
@@ -7329,5 +8285,335 @@ mod pause_facts_defaults {
         assert_eq!(with.pause_facts, facts);
         assert_eq!(with.status, plain.status);
         assert_eq!(with.cause, plain.cause);
+    }
+}
+
+#[cfg(test)]
+mod held_result_tests {
+    use super::{
+        execute_step_with_result_handles, held_read_outcome, parked_knowledge_grounding,
+        result_handles, screened_outcome, StepOutcome, KNOWLEDGE_SEARCH_TOOL,
+    };
+    use crate::capability_policy::CapabilityDecision;
+    use serde_json::{json, Value};
+
+    /// A parked `knowledge_search` is grounded when its unparked text reports `status: "ok"` (F-f02-11).
+    /// The handle envelope carries no status, so this unparked read is the only one a parked result gets.
+    #[test]
+    fn a_parked_knowledge_result_is_grounded_only_by_its_unparked_status_ok() {
+        assert!(parked_knowledge_grounding(
+            KNOWLEDGE_SEARCH_TOOL,
+            r#"{"status":"ok","results":[]}"#
+        ));
+        for status in ["no_results", "low_confidence", "degraded"] {
+            let text = format!(r#"{{"status":"{status}"}}"#);
+            assert!(
+                !parked_knowledge_grounding(KNOWLEDGE_SEARCH_TOOL, &text),
+                "{status} is not grounded"
+            );
+        }
+        assert!(!parked_knowledge_grounding(
+            KNOWLEDGE_SEARCH_TOOL,
+            "not json"
+        ));
+        assert!(!parked_knowledge_grounding(
+            "web_fetch",
+            r#"{"status":"ok"}"#
+        ));
+    }
+
+    /// A read of a held result carries the category the result was parked under, and a read of anything
+    /// else keeps the read tool's own category (F-f02-11).
+    #[test]
+    fn a_read_of_a_held_result_carries_the_category_it_was_parked_under() {
+        let store = result_handles::ResultHandles::new(10);
+        let handle = store
+            .park("org", "run", "label", &"x".repeat(40), "customer_private")
+            .expect("parked");
+        let input = serde_json::json!({ "handle_id": handle }).to_string();
+        let read = held_read_outcome(
+            "a window".to_owned(),
+            Some(&store),
+            "org",
+            "run",
+            result_handles::RESULT_QUERY_TOOL,
+            &input,
+        );
+        assert_eq!(read.status, "completed");
+        assert_eq!(read.data_category, Some("customer_private"));
+        assert!(!read.grounded, "a read is never grounded by itself");
+        let other_run = held_read_outcome(
+            "a window".to_owned(),
+            Some(&store),
+            "org",
+            "other-run",
+            result_handles::RESULT_QUERY_TOOL,
+            &input,
+        );
+        assert_eq!(other_run.data_category, None);
+    }
+
+    /// Allows every call, as the run's capability gate does for a call a standing policy admits. Every other
+    /// gate of the step is the production one.
+    struct AllowEverything;
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for AllowEverything {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<CapabilityDecision, tonic::Status> {
+            Ok(CapabilityDecision::Allow)
+        }
+    }
+
+    /// Turns the long-page reader on for this test's process, and off again when it drops. The reader is read
+    /// from its environment switch, as the other env-gated tests in this crate read theirs.
+    struct ReaderOn;
+
+    impl ReaderOn {
+        fn set() -> Self {
+            std::env::set_var(crate::web_tools::WEB_READER_ENV, "true");
+            Self
+        }
+    }
+
+    impl Drop for ReaderOn {
+        fn drop(&mut self) {
+            std::env::remove_var(crate::web_tools::WEB_READER_ENV);
+        }
+    }
+
+    const LABEL: &str = "[source: web_fetch]\nNOTE: external content";
+
+    /// A page of the reader's shape: a preamble, then two sections, one of which carries the query's words.
+    fn page() -> String {
+        "Intro words.\n# Costs\nThe levy rose in 2024.\n# Lice\nSea lice treatment with warm water cut the lice count in every pen.\n".to_owned()
+    }
+
+    /// A knowledge search's body: its `status` and one result of `text_chars` characters.
+    fn search_body(status: &str, text_chars: usize) -> String {
+        json!({ "status": status, "results": [{ "text": "x".repeat(text_chars) }] }).to_string()
+    }
+
+    /// One dispatch of a read, run the way the agent loop runs it: `auto` mode, the allowing policy, and the
+    /// run's own held results.
+    async fn read_step(
+        tool_name: &str,
+        tool_input: &str,
+        run_id: &str,
+        store: &result_handles::ResultHandles,
+    ) -> StepOutcome {
+        execute_step_with_result_handles(
+            tool_name,
+            tool_input,
+            "auto",
+            "",
+            "org",
+            "user",
+            run_id,
+            "step",
+            "",
+            None,
+            None,
+            None,
+            false,
+            false,
+            0,
+            None,
+            None,
+            None,
+            &AllowEverything,
+            None,
+            None,
+            None,
+            None,
+            Some(store),
+            true,
+            &[],
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
+            None,
+            false,
+        )
+        .await
+    }
+
+    /// A read of a held result is audited under the category it was parked under, through the dispatch the
+    /// loop runs (F-f02-11). A read the run does not hold carries no category.
+    #[tokio::test]
+    async fn a_result_query_read_is_audited_under_the_category_it_was_parked_under() {
+        let store = result_handles::ResultHandles::new(10);
+        let handle = store
+            .park("org", "run", LABEL, &"x".repeat(40), "customer_private")
+            .expect("parked");
+        let input = json!({ "handle_id": handle }).to_string();
+        let read = read_step(result_handles::RESULT_QUERY_TOOL, &input, "run", &store).await;
+        assert_eq!(read.status, "completed", "{}", read.error);
+        assert_eq!(read.data_category, Some("customer_private"));
+        let foreign = read_step(
+            result_handles::RESULT_QUERY_TOOL,
+            &input,
+            "other-run",
+            &store,
+        )
+        .await;
+        assert_eq!(foreign.status, "failed");
+        assert_eq!(foreign.data_category, None);
+        let unknown = read_step(
+            result_handles::RESULT_QUERY_TOOL,
+            r#"{"handle_id":"res_0000000000000099"}"#,
+            "run",
+            &store,
+        )
+        .await;
+        assert_eq!(unknown.status, "failed");
+        assert_eq!(unknown.data_category, None);
+    }
+
+    /// A read of a held page is audited under the category its page was parked under, for both reader calls,
+    /// through the dispatch the loop runs (F-f02-11). A page another run holds carries no category.
+    #[tokio::test]
+    async fn a_page_read_is_audited_under_the_category_its_page_was_parked_under() {
+        let _reader = ReaderOn::set();
+        let store = result_handles::ResultHandles::new(10);
+        let page_ref = store
+            .park_page("org", "run", LABEL, &page(), "personal")
+            .expect("parked");
+        let section = read_step(
+            crate::web_tools::READ_PAGE_TOOL,
+            &json!({ "ref": page_ref }).to_string(),
+            "run",
+            &store,
+        )
+        .await;
+        assert_eq!(section.status, "completed", "{}", section.error);
+        assert_eq!(section.data_category, Some("personal"));
+        let found = read_step(
+            crate::web_tools::FIND_IN_PAGE_TOOL,
+            &json!({ "ref": page_ref, "query": "lice" }).to_string(),
+            "run",
+            &store,
+        )
+        .await;
+        assert_eq!(found.status, "completed", "{}", found.error);
+        assert_eq!(found.data_category, Some("personal"));
+        let foreign = read_step(
+            crate::web_tools::READ_PAGE_TOOL,
+            &json!({ "ref": page_ref }).to_string(),
+            "other-run",
+            &store,
+        )
+        .await;
+        assert_eq!(foreign.status, "failed");
+        assert_eq!(foreign.data_category, None);
+    }
+
+    /// A parked `knowledge_search` is grounded from the text it parked, and an inline one is not grounded here
+    /// (F-f02-11). A `web_fetch` is never grounded, whatever its text says.
+    #[test]
+    fn a_parked_knowledge_search_is_grounded_from_its_unparked_text() {
+        let label = "[source: knowledge_search]";
+        let found = search_body("ok", 300);
+        let parked_store = result_handles::ResultHandles::new(100);
+        let envelope = result_handles::hold_for_model(
+            &parked_store,
+            "org",
+            "run",
+            KNOWLEDGE_SEARCH_TOOL,
+            label,
+            &found,
+            "customer_private",
+        )
+        .expect("over the threshold, so the result is parked");
+        let envelope_value: Value = serde_json::from_str(&envelope).expect("the envelope is JSON");
+        assert!(
+            envelope_value.get("status").is_none(),
+            "the envelope the loop reads carries no status"
+        );
+        let parked = screened_outcome(
+            KNOWLEDGE_SEARCH_TOOL,
+            Some(envelope.clone()),
+            format!("{label}\n{found}"),
+            &found,
+            None,
+        );
+        assert!(
+            parked.grounded,
+            "a parked ok search is grounded from its unparked text"
+        );
+        assert_eq!(
+            parked.output, envelope,
+            "the model reads the handle envelope"
+        );
+
+        let empty = search_body("no_results", 300);
+        let held = result_handles::hold_for_model(
+            &parked_store,
+            "org",
+            "run",
+            KNOWLEDGE_SEARCH_TOOL,
+            label,
+            &empty,
+            "customer_private",
+        );
+        let not_found = screened_outcome(
+            KNOWLEDGE_SEARCH_TOOL,
+            held,
+            format!("{label}\n{empty}"),
+            &empty,
+            None,
+        );
+        assert!(
+            !not_found.grounded,
+            "a parked search that found nothing is not grounded"
+        );
+
+        let inline_store = result_handles::ResultHandles::new(1_000);
+        let small = search_body("ok", 0);
+        let inline_held = result_handles::hold_for_model(
+            &inline_store,
+            "org",
+            "run",
+            KNOWLEDGE_SEARCH_TOOL,
+            label,
+            &small,
+            "customer_private",
+        );
+        assert!(
+            inline_held.is_none(),
+            "within the threshold the result stays inline"
+        );
+        let inline = screened_outcome(
+            KNOWLEDGE_SEARCH_TOOL,
+            inline_held,
+            small.clone(),
+            &small,
+            None,
+        );
+        assert!(
+            !inline.grounded,
+            "an inline result is grounded by the loop's own check, not here"
+        );
+        assert_eq!(inline.output, small);
+
+        let page_text = "x".repeat(300);
+        let web_handle = parked_store
+            .park("org", "run", LABEL, &page_text, "public_non_personal")
+            .expect("parked");
+        let web_envelope = result_handles::handle_envelope(&web_handle, LABEL, &page_text);
+        let web = screened_outcome(
+            "web_fetch",
+            Some(web_envelope.clone()),
+            page_text.clone(),
+            &found,
+            None,
+        );
+        assert!(
+            !web.grounded,
+            "only a knowledge_search is grounded, whatever its text says"
+        );
+        assert_eq!(web.output, web_envelope);
     }
 }

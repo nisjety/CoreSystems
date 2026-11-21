@@ -375,6 +375,52 @@ fn decision_fields(approval: &store::ApprovalRow) -> DecisionFields {
     }
 }
 
+/// The step-up a decision records (F-f03-13). The gateway sets the request's field only for a grant with
+/// a fresh claim. Session-core copies it only when the decision it records is a grant, so a denial or a
+/// timeout never carries it, whatever the request says. Provenance only: nothing here authorises a grant.
+fn recorded_step_up_verified(new_status: &str, requested: bool) -> bool {
+    new_status == "granted" && requested
+}
+
+/// The switch that makes an approval read back its content-free decision record (F-f03-16). Off by
+/// default: only the literal `true` enables it, and with it off every approval reads exactly as before.
+const APPROVAL_DECISION_RECORD_ENV: &str = "SESSION_CORE_APPROVAL_DECISION_RECORD";
+
+fn approval_decision_record_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(
+        std::env::var(APPROVAL_DECISION_RECORD_ENV).ok().as_deref(),
+    )
+}
+
+/// The decision record a decided approval reads back (F-f03-16). It is built from the same
+/// [`decision_fields`] the `ApprovalStateChanged` event carries, so the event and a read cannot disagree.
+/// `None` for a pending approval, and for every approval while the switch is off. The grant id is never
+/// set: no column on the approval links the scope grant it created, and a grant names its approval, not
+/// the reverse.
+fn approval_decision_record(
+    approval: &store::ApprovalRow,
+    enabled: bool,
+) -> Option<proto::ApprovalDecisionRecord> {
+    let decided = matches!(
+        proto::ApprovalState::try_from(approval_state_from_str(&approval.status)),
+        Ok(proto::ApprovalState::Granted
+            | proto::ApprovalState::Denied
+            | proto::ApprovalState::TimedOut)
+    );
+    if !enabled || !decided {
+        return None;
+    }
+    let fields = decision_fields(approval);
+    Some(proto::ApprovalDecisionRecord {
+        source: fields.decision_source,
+        scope: fields.scope,
+        rule_id: fields.rule_id,
+        grant_id: String::new(),
+        step_up_verified: fields.step_up_verified,
+        cause_code: fields.cause_code,
+    })
+}
+
 /// Whether an audited decision enqueues its `approval_decided` audit row (build plan WS13 S3).
 /// Default off: only the literal `true` enables it.
 fn approval_audit_events_enabled() -> bool {
@@ -1651,6 +1697,12 @@ fn plan_from_row(row: &store::PlanRow, steps: Vec<proto::PlanStep>) -> proto::Pl
 }
 
 pub(crate) fn approval_from_row(row: &store::ApprovalRow) -> proto::Approval {
+    approval_from_row_with(row, approval_decision_record_enabled())
+}
+
+/// [`approval_from_row`] with the decision-record switch given, so each reading is testable without the
+/// process environment.
+fn approval_from_row_with(row: &store::ApprovalRow, decision_record: bool) -> proto::Approval {
     proto::Approval {
         id: row.id.clone(),
         run_id: row.run_id.clone(),
@@ -1679,6 +1731,8 @@ pub(crate) fn approval_from_row(row: &store::ApprovalRow) -> proto::Approval {
         grant_ref: String::new(),
         turn_origin: String::new(),
         revision: store::approval_revision(&row.metadata).0,
+        // F-f03-16: a decided approval's content-free record, behind SESSION_CORE_APPROVAL_DECISION_RECORD.
+        decision: approval_decision_record(row, decision_record),
     }
 }
 
@@ -1692,9 +1746,10 @@ pub(crate) fn approval_from_row(row: &store::ApprovalRow) -> proto::Approval {
 /// zero-retention credential stores none, so nothing of an approval's cause outlives a
 /// ZDR caller; an approval with no stated cause is stored exactly as before. `durable_forbidden` is
 /// true for a ZDR caller or a waived one with the waiver refusal on (D2-1149, DEC-32).
-fn new_approval_metadata(
+fn new_approval_metadata_with(
     req: &proto::CreateApprovalRequest,
     durable_forbidden: bool,
+    step_up_cause: bool,
 ) -> (JsonValue, Option<&'static str>) {
     let mut metadata_map = serde_json::Map::new();
     if !req.reason.is_empty() {
@@ -1706,6 +1761,8 @@ fn new_approval_metadata(
     let mut stored_code = None;
     if let Some(cause) = req.cause.clone().filter(|_| !durable_forbidden) {
         let (cause, known) = approval_cause::normalized(cause);
+        // The one chokepoint for the step-up bit (WS13 S5, D2-451): every pause's cause is stored here.
+        let cause = approval_cause::with_step_up(cause, step_up_cause);
         if !known {
             warn!(
                 run_id = %req.run_id,
@@ -1728,6 +1785,19 @@ fn new_approval_metadata(
         }
     }
     (JsonValue::Object(metadata_map), stored_code)
+}
+
+/// The `metadata` a new approval row is created with, with the step-up cause switch read from this process
+/// (WS13 S5). See [`new_approval_metadata_with`] for the rest.
+fn new_approval_metadata(
+    req: &proto::CreateApprovalRequest,
+    durable_forbidden: bool,
+) -> (JsonValue, Option<&'static str>) {
+    new_approval_metadata_with(
+        req,
+        durable_forbidden,
+        approval_cause::step_up_cause_enabled(),
+    )
 }
 
 /// The evidence dimensions the vision's proof model names that this plane
@@ -5099,6 +5169,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 grant_ttl_secs: approval_cause::thread_grant_ttl_secs(),
                 rule_proposed: req.rule_proposed,
                 authz_audit: crate::audit_publisher::authz_decision_audit_enabled(),
+                step_up_verified: recorded_step_up_verified(new_status, req.step_up_verified),
             };
             let decision_write = match (member_space.as_deref(), edit.as_ref()) {
                 (None, Some((patch, base_fingerprint))) => {
@@ -6716,6 +6787,51 @@ mod tests {
         assert_eq!(cause.code, "risky_effect_under_ask");
         assert_eq!(cause.call_digest, "d".repeat(64));
         assert_eq!(cause.scope_options, vec!["once".to_owned()]);
+    }
+
+    #[test]
+    fn the_step_up_bit_is_stored_for_the_v1_set_only_and_only_with_the_switch() {
+        let stepped = |code: &str, class: &str| {
+            let mut req = create_with_cause(code);
+            req.cause.as_mut().expect("cause").effect_class = class.to_owned();
+            req
+        };
+        let bit = |metadata: &JsonValue| metadata["cause"]["step_up_required"].as_bool();
+        for (code, class) in [
+            ("owner_effect_reserved", ""),
+            ("provider_write", "external_write"),
+            ("capability_high_risk", "destructive"),
+        ] {
+            let (on, _) = new_approval_metadata_with(&stepped(code, class), false, true);
+            assert_eq!(bit(&on), Some(true), "{code} {class} is a step-up cause");
+            let (off, _) = new_approval_metadata_with(&stepped(code, class), false, false);
+            assert_eq!(bit(&off), None, "off stores no bit for {code}");
+        }
+        for (code, class) in [
+            ("capability_high_risk", "read"),
+            ("risky_effect_under_ask", "destructive"),
+            ("browser_action_risk", "destructive"),
+            ("auto_posture_provider_write", "external_write"),
+        ] {
+            let (on, _) = new_approval_metadata_with(&stepped(code, class), false, true);
+            assert_eq!(bit(&on), None, "{code} {class} is outside the v1 set");
+        }
+        // Zero retention stores no cause, so no bit either, with the switch on.
+        let (zdr, code) =
+            new_approval_metadata_with(&stepped("provider_write", "external_write"), true, true);
+        assert_eq!(code, None);
+        assert!(zdr.get("cause").is_none(), "{zdr}");
+        // A creator's own bit is kept with the switch off, and reads back as stated.
+        let mut stated = create_with_cause("risky_effect_under_ask");
+        stated.cause.as_mut().expect("cause").step_up_required = true;
+        let (kept, _) = new_approval_metadata_with(&stated, false, false);
+        assert_eq!(bit(&kept), Some(true));
+        let mut row = test_approval("appr_step_up");
+        row.metadata = kept;
+        let cause = approval_from_row(&row)
+            .cause
+            .expect("the stored cause comes back");
+        assert!(cause.step_up_required);
     }
 
     #[test]
@@ -11005,6 +11121,113 @@ mod approval_edit_tests {
         let (revision, fields) = store::approval_revision(&serde_json::json!({}));
         assert_eq!(revision, 0);
         assert!(fields.is_empty());
+    }
+
+    /// F-f03-13: a grant records the step-up the gateway verified. A denial or a timeout never does,
+    /// whatever the request carries.
+    #[test]
+    fn a_step_up_is_recorded_for_a_grant_and_never_for_a_denial() {
+        assert!(recorded_step_up_verified("granted", true));
+        assert!(!recorded_step_up_verified("granted", false));
+        assert!(!recorded_step_up_verified("denied", true));
+        assert!(!recorded_step_up_verified("timed_out", true));
+    }
+
+    fn decision_row(status: &str, metadata: serde_json::Value) -> store::ApprovalRow {
+        store::ApprovalRow {
+            id: "appr_record".to_owned(),
+            run_id: "run_1".to_owned(),
+            plan_id: None,
+            kind: "tool_call".to_owned(),
+            status: status.to_owned(),
+            requested_by: "user-1".to_owned(),
+            decided_by: "user-1".to_owned(),
+            decision_reason: "looks right".to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            idempotency_key: String::new(),
+            metadata,
+            requested_at: Utc::now(),
+            decided_at: Some(Utc::now()),
+            expires_at: None,
+            continuation_mode: String::new(),
+            consumed_at: None,
+        }
+    }
+
+    /// F-f03-16: a decided approval reads back its content-free record through the list and get path,
+    /// from the same stored fields the state event reads.
+    #[test]
+    fn a_decided_approval_reads_back_its_content_free_record() {
+        let row = decision_row(
+            "granted",
+            serde_json::json!({
+                "cause": { "code": "provider_write", "rule_id": "rule_1" },
+                "decision": { "source": "user", "scope": "thread", "step_up_verified": true },
+            }),
+        );
+        let record = approval_from_row_with(&row, true)
+            .decision
+            .expect("a decided approval carries its record");
+        assert_eq!(record.source, proto::ApprovalDecisionSource::User as i32);
+        assert_eq!(record.scope, proto::ApprovalScope::Thread as i32);
+        assert_eq!(record.rule_id, "rule_1");
+        assert_eq!(record.cause_code, "provider_write");
+        assert!(record.step_up_verified);
+        assert_eq!(record.grant_id, "", "no column links the scope grant");
+        let fields = decision_fields(&row);
+        assert_eq!(record.source, fields.decision_source);
+        assert_eq!(record.scope, fields.scope);
+        assert_eq!(record.step_up_verified, fields.step_up_verified);
+    }
+
+    #[test]
+    fn a_denied_or_timed_out_approval_carries_its_record_too() {
+        for status in ["denied", "timed_out"] {
+            let row = decision_row(
+                status,
+                serde_json::json!({ "decision": { "source": "timeout", "scope": "once" } }),
+            );
+            let record = approval_decision_record(&row, true).expect("a decided approval");
+            assert_eq!(record.source, proto::ApprovalDecisionSource::Timeout as i32);
+            assert_eq!(record.scope, proto::ApprovalScope::Once as i32);
+        }
+    }
+
+    #[test]
+    fn a_pending_approval_carries_no_record() {
+        let row = decision_row(
+            "requested",
+            serde_json::json!({ "decision": { "source": "user", "scope": "run" } }),
+        );
+        assert!(approval_decision_record(&row, true).is_none());
+        assert!(approval_from_row_with(&row, true).decision.is_none());
+    }
+
+    #[test]
+    fn an_approval_decided_before_the_record_existed_reads_the_defaults() {
+        let row = decision_row("granted", serde_json::json!({}));
+        let record = approval_decision_record(&row, true).expect("a decided approval");
+        assert_eq!(
+            record.source,
+            proto::ApprovalDecisionSource::Unspecified as i32,
+            "a row with no recorded source reads as unattributed"
+        );
+        assert_eq!(record.scope, proto::ApprovalScope::Once as i32);
+        assert_eq!(record.rule_id, "");
+        assert_eq!(record.cause_code, "");
+        assert!(!record.step_up_verified);
+    }
+
+    /// F-f03-16: with the switch off a decided approval carries no record, so it reads exactly as before.
+    #[test]
+    fn with_the_switch_off_no_approval_carries_a_record() {
+        let row = decision_row(
+            "granted",
+            serde_json::json!({ "decision": { "source": "user", "scope": "run", "step_up_verified": true } }),
+        );
+        assert!(approval_decision_record(&row, false).is_none());
+        assert!(approval_from_row_with(&row, false).decision.is_none());
     }
 }
 

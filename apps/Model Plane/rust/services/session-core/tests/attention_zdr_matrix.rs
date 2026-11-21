@@ -11,6 +11,7 @@ const MATRIX: &str = include_str!("../../../../api/contracts/zdr-posture-matrix.
 const ATTENTION_SOURCE: &str = include_str!("../src/attention.rs");
 const EVENTS_SOURCE: &str = include_str!("../src/attention_events.rs");
 const GRPC_SOURCE: &str = include_str!("../src/attention_grpc.rs");
+const CHECKPOINT_SOURCE: &str = include_str!("../src/loop_checkpoint.rs");
 
 #[test]
 fn the_crate_gate_permits_only_the_persistent_class() {
@@ -99,6 +100,25 @@ fn the_announcement_sweep_covers_the_origins_the_list_covers() {
     assert!(
         EVENTS_SOURCE.contains(origins),
         "the announcement sweep covers the same origins as the list"
+    );
+}
+
+#[test]
+fn the_crash_park_notice_and_the_list_read_the_same_origins() {
+    // The crash-park notice (O-02) binds the sweep's origin list, and the list's crash-park read filters on the same
+    // origins, so a park is named exactly where the notice announces it. A binary crate's test cannot call the queries,
+    // so this pins their text.
+    assert!(
+        CHECKPOINT_SOURCE.contains("AND t.origin = ANY($5)"),
+        "the notice filters on the listed origins"
+    );
+    assert!(
+        CHECKPOINT_SOURCE.contains("crate::attention_events::LISTED_ORIGINS"),
+        "the notice binds the sweep's origin list"
+    );
+    assert!(
+        ATTENTION_SOURCE.contains("t.origin = ANY($6)"),
+        "the list's crash-park read filters on the listed origins"
     );
 }
 

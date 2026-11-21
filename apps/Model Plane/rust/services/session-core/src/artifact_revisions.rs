@@ -70,7 +70,43 @@ const DISABLED: &str = "artifact_revisions_disabled";
 
 /// Read where it is used, as the fork switch is: the RPC holds no switch of its own.
 pub(crate) fn artifact_revisions_enabled() -> bool {
+    // A test forces the answer for its own thread, so it does not race the tests that set the
+    // process environment. Compiled out of the binary.
+    #[cfg(test)]
+    if let Some(forced) = test_switch::forced() {
+        return forced;
+    }
     mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
+}
+
+/// A per-thread override of [`artifact_revisions_enabled`] for tests. It holds only for a test that
+/// runs its calls on its own thread (a `#[tokio::test]` is single-threaded), and restores the
+/// earlier value when the guard drops.
+#[cfg(test)]
+pub(crate) mod test_switch {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FORCED: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    pub(crate) fn forced() -> Option<bool> {
+        FORCED.with(Cell::get)
+    }
+
+    pub(crate) struct Forced(Option<bool>);
+
+    impl Forced {
+        pub(crate) fn set(on: bool) -> Self {
+            Self(FORCED.with(|cell| cell.replace(Some(on))))
+        }
+    }
+
+    impl Drop for Forced {
+        fn drop(&mut self) {
+            FORCED.with(|cell| cell.set(self.0));
+        }
+    }
 }
 
 /// The revision RPCs. They hold the pool and nothing else; the rules are in this module.
@@ -520,6 +556,37 @@ async fn source_message(
     .fetch_optional(&mut **tx)
     .await
     .map_err(internal)
+}
+
+/// Names the answer message of a run on the model revisions the run appended before that answer
+/// was saved. The gateway appends each model revision at the commit lock, before the assistant
+/// message exists, so `source_message_id` is stored NULL until the completion that saves the answer
+/// calls this inside its own transaction (a rolled-back completion leaves no attribution behind).
+///
+/// Only a NULL source is set, and only `source_message_id` moves: content, version and
+/// `content_sha256` are the revision history and stay as they were. A second call changes nothing,
+/// and a row that already names a message keeps it. The rows are scoped to the run, its thread and
+/// its org. NULL means the turn saved no answer: a run that completed without one keeps NULL, and
+/// so does a run that never completed. Returns the number of revisions it named.
+pub(crate) async fn backfill_revision_source(
+    tx: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    thread_id: &str,
+    run_id: &str,
+    message_id: &str,
+) -> Result<u64, Status> {
+    let named = sqlx::query(
+        "UPDATE artifact_revisions SET source_message_id = $1
+         WHERE run_id = $2 AND thread_id = $3 AND org_id = $4 AND source_message_id IS NULL",
+    )
+    .bind(message_id)
+    .bind(run_id)
+    .bind(thread_id)
+    .bind(org_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(internal)?;
+    Ok(named.rows_affected())
 }
 
 /// Whether the thread holds a run whose content was waived from retention (DEC-32). The same
@@ -1257,5 +1324,258 @@ mod tests {
             .unwrap_err();
         assert_eq!(refused.code(), tonic::Code::Unavailable);
         assert_eq!(refused.message(), DISABLED);
+    }
+
+    /// A revision as the gateway appends it, before its run's answer exists: the run named, no
+    /// source message.
+    async fn seed_run_revision(
+        pool: &PgPool,
+        org: &str,
+        thread: &str,
+        run: &str,
+        artifact: &str,
+        version: i32,
+    ) -> String {
+        let id = new_ulid();
+        sqlx::query(
+            "INSERT INTO artifact_revisions
+             (id, org_id, thread_id, artifact_id, version, kind, title, content, editor_kind,
+              editor_subject_id, run_id, content_sha256)
+             VALUES ($1, $2, $3, $4, $5, 'document', 'Report', $6, 'model', $7, $8, repeat('0', 64))",
+        )
+        .bind(&id)
+        .bind(org)
+        .bind(thread)
+        .bind(artifact)
+        .bind(version)
+        .bind(format!("text {version}"))
+        .bind(OWNER)
+        .bind(run)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// An assistant message of the thread, standing for a run's saved answer.
+    async fn seed_answer(pool: &PgPool, thread: &str) -> String {
+        let id = new_ulid();
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content)
+             VALUES ($1, $2, 'assistant', 'Her er rapporten.')",
+        )
+        .bind(&id)
+        .bind(thread)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// The source message a revision names, or `None` while it names none.
+    async fn source_of(pool: &PgPool, revision: &str) -> Option<String> {
+        let source: Option<String> =
+            sqlx::query_scalar("SELECT source_message_id FROM artifact_revisions WHERE id = $1")
+                .bind(revision)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        source
+    }
+
+    /// Everything the back-fill must not touch: a revision's content, version and digest.
+    async fn history_of(pool: &PgPool, revision: &str) -> (String, i32, String) {
+        sqlx::query_as(
+            "SELECT content, version, content_sha256 FROM artifact_revisions WHERE id = $1",
+        )
+        .bind(revision)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn backfill_names_the_answer_once_and_moves_only_the_attribution() {
+        let pool = connect().await;
+        let thread = seed_thread(&pool).await;
+        let run = format!("run-{}", new_ulid());
+        let first = seed_run_revision(&pool, ORG, &thread, &run, "report", 1).await;
+        let second = seed_run_revision(&pool, ORG, &thread, &run, "report", 2).await;
+        let answer = seed_answer(&pool, &thread).await;
+        let history = history_of(&pool, &first).await;
+
+        let mut tx = pool.begin().await.unwrap();
+        assert_eq!(
+            backfill_revision_source(&mut tx, ORG, &thread, &run, &answer)
+                .await
+                .unwrap(),
+            2
+        );
+        tx.commit().await.unwrap();
+        assert_eq!(
+            source_of(&pool, &first).await.as_deref(),
+            Some(answer.as_str())
+        );
+        assert_eq!(
+            source_of(&pool, &second).await.as_deref(),
+            Some(answer.as_str())
+        );
+        assert_eq!(
+            history_of(&pool, &first).await,
+            history,
+            "only the attribution moved"
+        );
+
+        // A repeat names nothing, and a later answer never overwrites a source already set.
+        let later = seed_answer(&pool, &thread).await;
+        let mut tx = pool.begin().await.unwrap();
+        assert_eq!(
+            backfill_revision_source(&mut tx, ORG, &thread, &run, &answer)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            backfill_revision_source(&mut tx, ORG, &thread, &run, &later)
+                .await
+                .unwrap(),
+            0
+        );
+        tx.commit().await.unwrap();
+        assert_eq!(
+            source_of(&pool, &first).await.as_deref(),
+            Some(answer.as_str())
+        );
+        assert_eq!(
+            source_of(&pool, &second).await.as_deref(),
+            Some(answer.as_str())
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn backfill_is_scoped_to_its_run_thread_and_org() {
+        let pool = connect().await;
+        let thread = seed_thread(&pool).await;
+        let other_thread = seed_thread(&pool).await;
+        let run = format!("run-{}", new_ulid());
+        let other_run = format!("run-{}", new_ulid());
+        let mine = seed_run_revision(&pool, ORG, &thread, &run, "report", 1).await;
+        let other_run_here = seed_run_revision(&pool, ORG, &thread, &other_run, "report", 2).await;
+        let same_run_elsewhere =
+            seed_run_revision(&pool, ORG, &other_thread, &run, "notes", 1).await;
+        let same_run_other_org =
+            seed_run_revision(&pool, "org-other", &thread, &run, "deck", 1).await;
+        let answer = seed_answer(&pool, &thread).await;
+
+        let mut tx = pool.begin().await.unwrap();
+        assert_eq!(
+            backfill_revision_source(&mut tx, ORG, &thread, &run, &answer)
+                .await
+                .unwrap(),
+            1,
+            "only this run's revision, in this thread and this org"
+        );
+        tx.commit().await.unwrap();
+        assert_eq!(
+            source_of(&pool, &mine).await.as_deref(),
+            Some(answer.as_str())
+        );
+        assert_eq!(source_of(&pool, &other_run_here).await, None);
+        assert_eq!(source_of(&pool, &same_run_elsewhere).await, None);
+        assert_eq!(source_of(&pool, &same_run_other_org).await, None);
+    }
+
+    fn completion(
+        run: &str,
+        thread: &str,
+        content: &str,
+        key: &str,
+    ) -> pb::CompleteDirectRunWithMessageRequest {
+        pb::CompleteDirectRunWithMessageRequest {
+            run_id: run.to_owned(),
+            thread_id: thread.to_owned(),
+            content: content.to_owned(),
+            idempotency_key: key.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    async fn start_run(
+        pool: &PgPool,
+        thread: &str,
+        start_key: &str,
+    ) -> crate::terminalization::ManagedRunStart {
+        crate::terminalization::start_managed_run_with_retention_inner(
+            pool,
+            pb::StartManagedRunRequest {
+                wake: None,
+                thread_id: thread.to_owned(),
+                parent_run_id: String::new(),
+                agent_id: "general-v1".to_owned(),
+                goal: "report goal".to_owned(),
+                mode: "execute".to_owned(),
+                org_id: ORG.to_owned(),
+                user_id: OWNER.to_owned(),
+                start_key: start_key.to_owned(),
+                terminal_source: pb::ManagedRunSource::GatewayDirect as i32,
+                agent_version_pin: None,
+            },
+            crate::retention_receipt::RunRetention::persistent(),
+        )
+        .await
+        .expect("the run starts")
+    }
+
+    /// The completion that saves a run's answer names that answer on the revisions the run appended
+    /// before it existed, in the completion's own transaction. A run that completes with no answer
+    /// names nothing, so its revision keeps NULL.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_direct_completion_names_its_answer_on_the_run_revisions() {
+        let pool = connect().await;
+        let _switch = test_switch::Forced::set(true);
+        let thread = seed_thread(&pool).await;
+
+        let started = start_run(&pool, &thread, "answer-start-1").await;
+        let revision = seed_run_revision(&pool, ORG, &thread, &started.run_id, "report", 1).await;
+        assert_eq!(
+            source_of(&pool, &revision).await,
+            None,
+            "appended before the answer"
+        );
+        crate::terminalization::complete_direct_run_with_message_inner(
+            &pool,
+            completion(&started.run_id, &thread, "Her er rapporten.", "answer-1"),
+        )
+        .await
+        .expect("the run completes with its answer");
+        let answer: String = sqlx::query_scalar(
+            "SELECT id FROM messages WHERE thread_id = $1 AND role = 'assistant'
+             ORDER BY sequence DESC LIMIT 1",
+        )
+        .bind(&thread)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            source_of(&pool, &revision).await.as_deref(),
+            Some(answer.as_str())
+        );
+
+        let silent = start_run(&pool, &thread, "answer-start-2").await;
+        let unanswered = seed_run_revision(&pool, ORG, &thread, &silent.run_id, "notes", 1).await;
+        crate::terminalization::complete_direct_run_with_message_inner(
+            &pool,
+            completion(&silent.run_id, &thread, "", "answer-2"),
+        )
+        .await
+        .expect("the run completes without an answer");
+        assert_eq!(
+            source_of(&pool, &unanswered).await,
+            None,
+            "no answer, no source"
+        );
     }
 }

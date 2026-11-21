@@ -1377,6 +1377,10 @@ async fn thread_has_waived_run(pool: &PgPool, thread_id: &str) -> Result<bool, s
     Ok(waived)
 }
 
+/// The next batch of messages to mine, oldest first: the user and assistant turns on the active
+/// path that are not consolidated yet. A scheduled run's answer is left out by its own message
+/// provenance (`metadata.source_scope = 'scheduled_run'`, stamped by `append_scheduled_result_in_tx`),
+/// not by its thread: a scheduled thread lives in a personal Space, and a personal Space does learn.
 async fn load_pending_messages(
     pool: &PgPool,
     limit: i64,
@@ -1389,6 +1393,8 @@ async fn load_pending_messages(
     // The agent-run exclusion below is the set `memory_control::thread_containment` names for
     // the gate; a source-scan test there pins the two to each other. A thread in a Space is
     // read and then skipped by the Space plan's `contained` flag (WS17-S1), which records why.
+    // An API key owns no memory (EP-12 D2), so a key-owned thread is never read here, and its
+    // turns are never shown as the window's context either (`load_preceding_context`).
     let rows = sqlx::query_as::<_, (String, String, String, String, String, String, bool, bool, bool)>(
         &format!("SELECT m.id, m.thread_id, m.role, {fold_content}, t.org_id, t.user_id, t.source_scope = 'conversation', \
                 {contained} AND $6, {tainted} \
@@ -1397,8 +1403,10 @@ async fn load_pending_messages(
          {fold_join} \
          WHERE m.role IN ('user', 'assistant') \
            AND m.on_active_path \
+           AND COALESCE(m.metadata->>'source_scope','') <> 'scheduled_run' \
            AND m.copied_from_message_id IS NULL \
            AND NOT (t.origin = 'agent_run' OR (t.origin = 'space' AND t.space_id IS NULL)) \
+           AND NOT starts_with(t.user_id, $8) \
            AND m.post_kind <> 'post' \
            AND {not_deleted} \
            AND (m.author_subject_id IS NULL OR m.author_subject_id = t.user_id) \
@@ -1432,6 +1440,7 @@ async fn load_pending_messages(
     .bind(gate.max_stale_secs)
     .bind(crate::space::memory_scope::containment_on())
     .bind(crate::external_content::skip_enabled())
+    .bind(crate::auth::API_KEY_OWNER_PREFIX)
     .fetch_all(pool)
     .await?;
 
@@ -1458,6 +1467,9 @@ async fn load_pending_messages(
 /// Ordered DESC then reversed so the LIMIT keeps the messages nearest the
 /// pending window; ordering ASC with a LIMIT would return the thread's opening
 /// turns instead, which is the least useful context available.
+///
+/// A scheduled run's answer is left out by its message provenance, as it is from
+/// the pending window: the context the extractor reads must not hold the answer.
 async fn load_preceding_context(
     pool: &PgPool,
     thread_id: &str,
@@ -1480,11 +1492,13 @@ async fn load_preceding_context(
          {fold_join} \
          WHERE m.thread_id = $1 \
            AND m.on_active_path \
+           AND COALESCE(m.metadata->>'source_scope','') <> 'scheduled_run' \
            AND {not_deleted} \
            AND m.role IN ('user', 'assistant') \
            AND m.post_kind <> 'post' \
            AND (m.author_subject_id IS NULL OR m.author_subject_id = t.user_id) \
            AND NOT {tainted} \
+           AND NOT starts_with(t.user_id, $10) \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND m.created_at <= c.extract_after) \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND c.memory_state <> 'on' AND $4) \
            AND (NOT $4 OR t.memory_resumed_at IS NULL OR m.created_at > t.memory_resumed_at) \
@@ -1508,6 +1522,7 @@ async fn load_preceding_context(
     .bind(gate.max_stale_secs)
     .bind(crate::space::memory_scope::containment_on())
     .bind(crate::external_content::skip_enabled())
+    .bind(crate::auth::API_KEY_OWNER_PREFIX)
     .fetch_all(pool)
     .await?;
     rows.reverse();
@@ -2656,6 +2671,44 @@ pub(crate) async fn list_space_memory(
         .collect())
 }
 
+/// The one Space memory delete: one row, in one Space of one org. The plain and the audited delete
+/// both run it, so they remove the same rows. `RETURNING` gives the row's own scope (`space` or
+/// `agent`) for the audit row.
+const DELETE_SPACE_MEMORY_SQL: &str = "DELETE FROM agent_memory \
+     WHERE org_id = $1 AND id = $3 \
+       AND ((scope = 'space' AND scope_id = $2) \
+         OR (scope = 'agent' AND split_part(scope_id, ':', 1) = $2)) \
+     RETURNING id, scope";
+
+/// The outbox insert of one audit row. A row whose event id is already queued is left as it is.
+const INSERT_SPACE_MEMORY_AUDIT_SQL: &str =
+    "INSERT INTO session_audit_outbox (event_id, subject, payload) \
+     VALUES ($1, $2, $3) ON CONFLICT (event_id) DO NOTHING";
+
+/// Writes one Space memory delete's audit row inside the caller's transaction, so the row commits or rolls back
+/// with the delete it records. The event id is the deleted row's id, so a replay of the same delete writes nothing.
+/// The caller owns the transaction and maps the error. Shared by a manager's single-row delete and by the
+/// revocation's erasure of each of a binding's notes (`space_memory::erase_agent_memory`).
+///
+/// # Errors
+///
+/// Returns the sqlx error when the outbox refuses the row, for example an id too long for its event id.
+pub(crate) async fn write_space_memory_delete_audit(
+    tx: &mut Transaction<'_, Postgres>,
+    row: &crate::audit_publisher::SpaceMemoryDeleteAudit<'_>,
+) -> Result<(), sqlx::Error> {
+    let body = crate::audit_publisher::build_space_memory_deleted_body(row);
+    sqlx::query(INSERT_SPACE_MEMORY_AUDIT_SQL)
+        .bind(crate::audit_publisher::space_memory_deleted_event_id(
+            row.memory_id,
+        ))
+        .bind(crate::audit_publisher::SUBJECT_MODEL_SPACE_MEMORY_DELETED)
+        .bind(&body)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 /// Deletes one row of one Space's memory (EP-8 S7). The Space and org are in the `WHERE` clause,
 /// so a guessed id of another Space, of a person's memory or of another org deletes nothing.
 /// A Space's memory is its `space` rows and the `agent` rows of its bound agents (EP-6 P3, the
@@ -2668,19 +2721,89 @@ pub(crate) async fn delete_space_memory(
     space_id: &str,
     memory_id: &str,
 ) -> Result<bool, sqlx::Error> {
-    let deleted: Option<String> = sqlx::query_scalar(
-        "DELETE FROM agent_memory \
-         WHERE org_id = $1 AND id = $3 \
-           AND ((scope = 'space' AND scope_id = $2) \
-             OR (scope = 'agent' AND split_part(scope_id, ':', 1) = $2)) \
-         RETURNING id",
-    )
-    .bind(org_id)
-    .bind(space_id)
-    .bind(memory_id)
-    .fetch_optional(pool)
-    .await?;
+    let deleted: Option<(String, String)> = sqlx::query_as(DELETE_SPACE_MEMORY_SQL)
+        .bind(org_id)
+        .bind(space_id)
+        .bind(memory_id)
+        .fetch_optional(pool)
+        .await?;
     Ok(deleted.is_some())
+}
+
+/// Why a manager's delete of one Space memory row did not complete.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SpaceMemoryDeleteError {
+    /// The delete, or the transaction around it, failed.
+    #[error(transparent)]
+    Store(#[from] sqlx::Error),
+    /// The row's audit event could not be written while its switch is on. The delete was rolled
+    /// back, so the row is still there.
+    #[error("the audit row for the Space memory delete could not be written")]
+    AuditUnavailable(#[source] sqlx::Error),
+}
+
+/// A manager's delete of one Space memory row (EP-8 S7), with its audit trail.
+///
+/// With `SESSION_CORE_SPACE_MEMORY_DELETE_AUDIT` on, the row's audit event is written in the
+/// transaction that deletes the row, and a failed write rolls the delete back: no row is removed
+/// without its record. With the switch off it is [`delete_space_memory`] as before. `audit.scope`
+/// is read from the deleted row, so a caller passes an empty scope.
+///
+/// # Errors
+///
+/// [`SpaceMemoryDeleteError::Store`] when the delete fails, and
+/// [`SpaceMemoryDeleteError::AuditUnavailable`] when the audit row cannot be written.
+pub(crate) async fn delete_space_memory_audited(
+    pool: &PgPool,
+    org_id: &str,
+    space_id: &str,
+    memory_id: &str,
+    audit: &crate::audit_publisher::SpaceMemoryDeleteAudit<'_>,
+) -> Result<bool, SpaceMemoryDeleteError> {
+    delete_space_memory_audited_with(
+        crate::audit_publisher::space_memory_delete_audit_enabled(),
+        pool,
+        org_id,
+        space_id,
+        memory_id,
+        audit,
+    )
+    .await
+}
+
+/// [`delete_space_memory_audited`] with the switch given, so both paths are testable without the
+/// environment.
+async fn delete_space_memory_audited_with(
+    audit_on: bool,
+    pool: &PgPool,
+    org_id: &str,
+    space_id: &str,
+    memory_id: &str,
+    audit: &crate::audit_publisher::SpaceMemoryDeleteAudit<'_>,
+) -> Result<bool, SpaceMemoryDeleteError> {
+    if !audit_on {
+        return Ok(delete_space_memory(pool, org_id, space_id, memory_id).await?);
+    }
+    let mut tx = pool.begin().await?;
+    let deleted: Option<(String, String)> = sqlx::query_as(DELETE_SPACE_MEMORY_SQL)
+        .bind(org_id)
+        .bind(space_id)
+        .bind(memory_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some((_, scope)) = deleted else {
+        return Ok(false);
+    };
+    let row = crate::audit_publisher::SpaceMemoryDeleteAudit {
+        memory_id,
+        scope: scope.as_str(),
+        ..*audit
+    };
+    write_space_memory_delete_audit(&mut tx, &row)
+        .await
+        .map_err(SpaceMemoryDeleteError::AuditUnavailable)?;
+    tx.commit().await?;
+    Ok(true)
 }
 
 fn memory_topic(scope: &str, kind: &str) -> &'static str {
@@ -2746,6 +2869,61 @@ mod tests {
 
         let migration = include_str!("../migrations/0011_identity_scoping.sql");
         assert!(migration.contains("ON agent_memory (org_id, scope, owner, key)"));
+    }
+
+    /// A scheduled run's answer is not memory. Its thread is a personal Space, which does learn, so
+    /// both Dreaming reads that can reach a message leave the answer out by its own provenance. The
+    /// needle is built from parts so this test's source does not match it, and each read's body is
+    /// searched on its own, so the exclusion cannot move from one read to the other.
+    #[test]
+    fn dreaming_reads_leave_out_a_scheduled_run_answer_by_its_message_provenance() {
+        let source = include_str!("dreaming.rs");
+        let exclusion = [
+            "AND COALESCE(m.metadata->>'source_scope','')",
+            " <> 'scheduled_run'",
+        ]
+        .concat();
+        for reader in [
+            "async fn load_pending_messages(",
+            "async fn load_preceding_context(",
+        ] {
+            let start = source.find(reader).expect("the Dreaming read exists");
+            let end = start
+                + source[start..]
+                    .find("\n}\n")
+                    .expect("the Dreaming read's body closes");
+            assert!(
+                source[start..end].contains(&exclusion),
+                "{reader} must leave out a scheduled run's answer by its message provenance"
+            );
+        }
+    }
+
+    /// EP-12 D2, checked on the source where no database is: both Dreaming readers that select a
+    /// thread's messages leave out a key-owned thread, by binding the one owner prefix. The DB tier
+    /// (`dreaming_never_reads_a_key_owned_thread`) proves the rows.
+    #[test]
+    fn dreaming_reads_leave_out_a_key_owned_thread_in_both_readers() {
+        let source = include_str!("dreaming.rs");
+        // The placeholder number differs per reader, so the needle stops before it.
+        let exclusion = "AND NOT starts_with(t.user_id, $";
+        let bind = ".bind(crate::auth::API_KEY_OWNER_PREFIX)";
+        for reader in [
+            "async fn load_pending_messages(",
+            "async fn load_preceding_context(",
+        ] {
+            let start = source.find(reader).expect("the Dreaming read exists");
+            let end = start
+                + source[start..]
+                    .find("\n}\n")
+                    .expect("the Dreaming read's body closes");
+            let body = &source[start..end];
+            assert!(
+                body.contains(exclusion),
+                "{reader} must leave out a key-owned thread"
+            );
+            assert!(body.contains(bind), "{reader} must bind the owner prefix");
+        }
     }
 
     #[test]
@@ -3522,6 +3700,83 @@ mod tests {
         );
     }
 
+    /// EP-12 D2: an API key has no memory, so Dreaming never reads a key-owned thread. Its messages
+    /// are not pending, are never ledgered, and are not shown to the extractor as context; a
+    /// person's thread is read as before. Needs a disposable Postgres.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn dreaming_never_reads_a_key_owned_thread() {
+        let pool = disposable_pool().await;
+        let org = format!("key-owned-{}", new_ulid());
+        let key_thread = seed_thread(&pool, &org, "apikey:key-1").await;
+        let person_thread = seed_thread(&pool, &org, "user-a").await;
+        let (key_said, person_said, key_later) = (new_ulid(), new_ulid(), new_ulid());
+        for (id, thread) in [(&key_said, &key_thread), (&person_said, &person_thread)] {
+            sqlx::query("INSERT INTO messages (id, thread_id, role, content) VALUES ($1, $2, 'user', 'Jeg heter Ima.')")
+                .bind(id)
+                .bind(thread)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content, created_at)
+             VALUES ($1, $2, 'assistant', 'Hei Ima.', now() + interval '1 second')",
+        )
+        .bind(&key_later)
+        .bind(&key_thread)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let pending: Vec<String> = load_pending_messages(&pool, 100_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.thread_id == key_thread || message.thread_id == person_thread)
+            .map(|message| message.message_id)
+            .collect();
+        assert_eq!(
+            pending,
+            vec![person_said],
+            "only a person's thread is mined"
+        );
+        // The pass itself then runs over the same messages: the key-owned ones are still not
+        // ledgered, a person's message is, and nothing is remembered under the key owner.
+        dream_once(&pool, None, None, None, 100_000).await.unwrap();
+        let ledgered: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM dream_runs WHERE thread_id = $1")
+                .bind(&key_thread)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(ledgered, 0, "a key-owned message is not ledgered either");
+        let mined: i64 = sqlx::query_scalar("SELECT count(*) FROM dream_runs WHERE thread_id = $1")
+            .bind(&person_thread)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(
+            mined >= 1,
+            "the pass ran over a person's thread and ledgered it"
+        );
+        let remembered: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM agent_memory WHERE org_id = $1 AND owner = 'apikey:key-1'",
+        )
+        .bind(&org)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(remembered, 0, "nothing is remembered under the key owner");
+        let context = load_preceding_context(&pool, &key_thread, Some(key_later.as_str()))
+            .await
+            .unwrap();
+        assert!(
+            context.is_empty(),
+            "and none of it is shown to the extractor as context"
+        );
+    }
+
     /// D1-570: Dreaming neither reads nor is shown what a thread said while it was off, once the
     /// thread is back on, and what was said after the resume is still read. Needs a disposable
     /// Postgres.
@@ -4197,6 +4452,171 @@ mod space_recall_tests {
         let recalled = recall(&seeded, AUDIENCE).await;
         assert!(recalled.waived);
         assert!(recalled.rows.is_empty(), "D11: a waived thread recalls no Space memory");
+        cleanup(&seeded).await;
+    }
+
+    fn space_delete_audit<'a>(
+        seeded: &'a Seeded,
+        memory_id: &'a str,
+    ) -> crate::audit_publisher::SpaceMemoryDeleteAudit<'a> {
+        crate::audit_publisher::SpaceMemoryDeleteAudit {
+            org_id: &seeded.org,
+            actor_user_id: OWNER,
+            space_id: &seeded.space,
+            memory_id,
+            scope: "",
+            decision_ref: "decision-1",
+            occurred_at: Utc::now(),
+        }
+    }
+
+    async fn audited_delete(
+        audit_on: bool,
+        seeded: &Seeded,
+        memory_id: &str,
+    ) -> Result<bool, SpaceMemoryDeleteError> {
+        let audit = space_delete_audit(seeded, memory_id);
+        delete_space_memory_audited_with(
+            audit_on,
+            &seeded.pool,
+            &seeded.org,
+            &seeded.space,
+            memory_id,
+            &audit,
+        )
+        .await
+    }
+
+    async fn only_row_id(seeded: &Seeded, space: &str) -> String {
+        sqlx::query_scalar("SELECT id FROM agent_memory WHERE org_id = $1 AND scope_id = $2")
+            .bind(&seeded.org)
+            .bind(space)
+            .fetch_one(&seeded.pool)
+            .await
+            .expect("the seeded row")
+    }
+
+    async fn outbox_rows(seeded: &Seeded, event_id: &str) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM session_audit_outbox WHERE event_id = $1")
+            .bind(event_id)
+            .fetch_one(&seeded.pool)
+            .await
+            .expect("count the audit rows")
+    }
+
+    async fn drop_outbox(seeded: &Seeded, event_id: &str) {
+        sqlx::query("DELETE FROM session_audit_outbox WHERE event_id = $1")
+            .bind(event_id)
+            .execute(&seeded.pool)
+            .await
+            .ok();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn a_manager_delete_writes_one_audit_row_and_a_replay_writes_none() {
+        let Some(seeded) = seed().await else { return };
+        let space = seeded.space.clone();
+        insert(
+            &seeded,
+            "space",
+            Some(&space),
+            "",
+            Some(AUDIENCE),
+            "room fact",
+        )
+        .await;
+        let memory_id = only_row_id(&seeded, &space).await;
+        let event_id = crate::audit_publisher::space_memory_deleted_event_id(&memory_id);
+
+        assert!(audited_delete(true, &seeded, &memory_id)
+            .await
+            .expect("the manager's delete"));
+        assert_eq!(
+            outbox_rows(&seeded, &event_id).await,
+            1,
+            "one audit row, written with the delete"
+        );
+        assert!(
+            !audited_delete(true, &seeded, &memory_id)
+                .await
+                .expect("the replay"),
+            "the row is gone"
+        );
+        assert_eq!(
+            outbox_rows(&seeded, &event_id).await,
+            1,
+            "a replay of the same delete writes no second row"
+        );
+        drop_outbox(&seeded, &event_id).await;
+        cleanup(&seeded).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn with_the_switch_off_a_manager_delete_writes_no_audit_row() {
+        let Some(seeded) = seed().await else { return };
+        let space = seeded.space.clone();
+        insert(
+            &seeded,
+            "space",
+            Some(&space),
+            "",
+            Some(AUDIENCE),
+            "room fact",
+        )
+        .await;
+        let memory_id = only_row_id(&seeded, &space).await;
+        let event_id = crate::audit_publisher::space_memory_deleted_event_id(&memory_id);
+
+        assert!(audited_delete(false, &seeded, &memory_id)
+            .await
+            .expect("the delete"));
+        assert_eq!(
+            outbox_rows(&seeded, &event_id).await,
+            0,
+            "off is today's delete: no audit row"
+        );
+        cleanup(&seeded).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn a_delete_whose_audit_row_cannot_be_written_is_rolled_back() {
+        let Some(seeded) = seed().await else { return };
+        let space = seeded.space.clone();
+        // An id this long makes the audit row's event id longer than the outbox allows (128
+        // characters), so its insert fails and the delete must not stand.
+        let memory_id = format!("long-{}", "m".repeat(120));
+        sqlx::query(
+            "INSERT INTO agent_memory (id, org_id, scope, scope_id, key, content, kind, confidence, owner, \
+             source_links, review_state, audience_hash, audience_revision, source_label) \
+             VALUES ($1, $2, 'space', $3, $4, 'room fact', 'fact', 0.9, '', $5, 'accepted', $6, 1, 'room_statement')",
+        )
+        .bind(&memory_id)
+        .bind(&seeded.org)
+        .bind(&space)
+        .bind(format!("k-{}", new_ulid()))
+        .bind(vec![format!("thread:{}", seeded.thread)])
+        .bind(AUDIENCE)
+        .execute(&seeded.pool)
+        .await
+        .expect("seed a row with a long id");
+
+        let refused = audited_delete(true, &seeded, &memory_id).await;
+        assert!(
+            matches!(refused, Err(SpaceMemoryDeleteError::AuditUnavailable(_))),
+            "{refused:?}"
+        );
+        let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM agent_memory WHERE id = $1")
+            .bind(&memory_id)
+            .fetch_one(&seeded.pool)
+            .await
+            .expect("count the row");
+        assert_eq!(
+            remaining, 1,
+            "fail closed: no row is deleted without its audit row"
+        );
         cleanup(&seeded).await;
     }
 }

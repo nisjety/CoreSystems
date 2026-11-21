@@ -678,6 +678,144 @@ async fn wake_requires_own_post_with_bound_digest() {
     world.finish().await;
 }
 
+/// A revision row of a stored post, as `revise_message` writes one. The fold reads the latest row the
+/// ceiling admits, and the wake's trigger check reads the text through that fold.
+async fn record_revision(
+    world: &World,
+    thread: &str,
+    message_id: &str,
+    revision_no: i32,
+    action: &str,
+    content: Option<&str>,
+) {
+    sqlx::query(
+        "INSERT INTO message_revisions
+         (revision_id, org_id, thread_id, message_id, revision_no, action, actor_subject_id, actor_class,
+          content, content_digest, prev_content_digest, original_retention, idempotency_hash, space_id,
+          recipient_audience_revision, authority_revision, resource_authorization_ref)
+         VALUES ($1, $2, $3, $4, $5, $6, 'owner-1', 'author', $7, 'sha256:revision', 'sha256:previous',
+                 'retain', $8, $9, 1, 1, 'resource-1')",
+    )
+    .bind(new_ulid())
+    .bind(&world.org)
+    .bind(thread)
+    .bind(message_id)
+    .bind(revision_no)
+    .bind(action)
+    .bind(content)
+    .bind(format!("idem-{}", new_ulid()))
+    .bind(&world.space)
+    .execute(&world.pool)
+    .await
+    .expect("the revision is recorded");
+}
+
+#[tokio::test]
+#[ignore = "needs DB harness"]
+async fn an_untouched_wake_trigger_passes_the_revision_fold() {
+    let _flags = WakeFlags::set(true, true);
+    let Some(world) = World::new("fold-plain").await else {
+        return;
+    };
+    let thread = world.thread("owner-1").await;
+    let text = "@X weigh in";
+    let posted = world
+        .post(&thread, "owner-1", text, vec![agent("agent-x")])
+        .await
+        .expect("the post");
+    mentions::check_wake_facts(
+        &world.pool,
+        &world.org,
+        &thread,
+        "owner-1",
+        &world.verified(&posted.message_id, text, "agent-x"),
+    )
+    .await
+    .expect("a post no revision touched admits the digest it was bound with");
+    world.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "needs DB harness"]
+async fn an_edited_wake_trigger_mismatches_the_digest_bound_before_the_edit() {
+    let _flags = WakeFlags::set(true, true);
+    let Some(world) = World::new("fold-edit").await else {
+        return;
+    };
+    let thread = world.thread("owner-1").await;
+    let text = "@X weigh in";
+    let posted = world
+        .post(&thread, "owner-1", text, vec![agent("agent-x")])
+        .await
+        .expect("the post");
+    // The decision bound the text as it was posted; the author edits the post afterwards.
+    let edited = "@X weigh in, please";
+    record_revision(
+        &world,
+        &thread,
+        &posted.message_id,
+        1,
+        "edited",
+        Some(edited),
+    )
+    .await;
+    let status = mentions::check_wake_facts(
+        &world.pool,
+        &world.org,
+        &thread,
+        "owner-1",
+        &world.verified(&posted.message_id, text, "agent-x"),
+    )
+    .await
+    .expect_err("the effective text is the edit, so the bound digest fails closed");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        error_code(&status).as_deref(),
+        Some("wake_trigger_mismatch")
+    );
+    mentions::check_wake_facts(
+        &world.pool,
+        &world.org,
+        &thread,
+        "owner-1",
+        &world.verified(&posted.message_id, edited, "agent-x"),
+    )
+    .await
+    .expect("a decision bound to the edit's own text admits it");
+    world.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "needs DB harness"]
+async fn a_deleted_wake_trigger_mismatches() {
+    let _flags = WakeFlags::set(true, true);
+    let Some(world) = World::new("fold-del").await else {
+        return;
+    };
+    let thread = world.thread("owner-1").await;
+    let text = "@X weigh in";
+    let posted = world
+        .post(&thread, "owner-1", text, vec![agent("agent-x")])
+        .await
+        .expect("the post");
+    record_revision(&world, &thread, &posted.message_id, 1, "deleted", None).await;
+    let status = mentions::check_wake_facts(
+        &world.pool,
+        &world.org,
+        &thread,
+        "owner-1",
+        &world.verified(&posted.message_id, text, "agent-x"),
+    )
+    .await
+    .expect_err("a deleted post is not a candidate, so it cannot wake an agent");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        error_code(&status).as_deref(),
+        Some("wake_trigger_mismatch")
+    );
+    world.finish().await;
+}
+
 #[tokio::test]
 #[ignore = "needs DB harness"]
 async fn wake_with_member_post_is_refused() {

@@ -20,6 +20,7 @@ import {
   Undo2,
   X,
 } from '@/shared/icons'
+import { isLocalRetentionAllowed } from '@/features/chat/lib/chat-retention'
 import type { JSX } from '@solidjs/web'
 import { Dynamic } from '@solidjs/web'
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from 'solid-js'
@@ -39,6 +40,10 @@ import {
   renameChatThreadLocally,
   replaceChatThreadHistory,
   selectChatThread,
+  chatThreadMemoryControlVisible,
+  chatThreadMemoryModeEnabled,
+  setChatThreadMemoryModeLocally,
+  toggleThreadMemoryMode,
   togglePersonaEnabledChatThread,
   togglePinnedChatThread,
   upsertChatThreadHistory,
@@ -567,6 +572,21 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
     })
   }
 
+  /**
+   * Memory on this thread (WS07-S6), beside the persona toggle and with the same shape: the server write is the
+   * load-bearing call, the local flip is optimistic, and a refused write puts the stored mode back with the notice.
+   */
+  const toggleMemory = (threadId: string) => {
+    // The stored mode, not the signal: the rollback below must return to what was stored before this write.
+    const current = readChatThreadHistory().find((item) => item.threadId === threadId)?.memoryMode
+    const next = toggleThreadMemoryMode(current)
+    setSessions(setChatThreadMemoryModeLocally(threadId, next))
+    void saveChatThreadSnapshot(threadId, { memoryMode: next }).catch(() => {
+      setSessions(setChatThreadMemoryModeLocally(threadId, current ?? 'inherit'))
+      setError(i18n.tr('Kunne ikke endre minne for samtalen.', 'Could not change memory for the conversation.'))
+    })
+  }
+
   const startRename = (item: ChatThreadHistoryItem) => {
     setOpenMenuThreadId(null)
     setRenameDraft(item.title)
@@ -836,6 +856,14 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
                 </small>
               )}
             </Show>
+            <Show when={chatParkedChip(waitingReason, i18n)}>
+              {(chip) => (
+                <small class="core-chat-session__status" data-tone={chip().tone} role="status">
+                  <i aria-hidden="true" />
+                  {chip().label}
+                </small>
+              )}
+            </Show>
           </div>
           <em>{formatChatUpdatedAt(item.updatedAt, i18n)}</em>
         </button>
@@ -857,6 +885,7 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
           onRenameStart={() => startRename(item)}
           onMoveToProject={onMoveToProject}
           onTogglePersona={() => togglePersona(item.threadId)}
+          onToggleMemory={() => toggleMemory(item.threadId)}
           onArchive={() => void archiveThread(item.threadId)}
           onDelete={() => void deleteThread(item.threadId)}
         />
@@ -971,6 +1000,7 @@ function ChatSessionMenu(props: {
   onRenameStart: () => void
   onMoveToProject?: () => void
   onTogglePersona: () => void
+  onToggleMemory: () => void
   onArchive: () => void
   onDelete: () => void
 }) {
@@ -1073,6 +1103,23 @@ function ChatSessionMenu(props: {
                 : i18n.tr('Slå av persona for denne samtalen', 'Turn persona off for this thread')}
             </button>
           </li>
+          <Show when={chatThreadMemoryControlVisible(props.item, { enabled: chatThreadMemoryModeEnabled(), localRetentionAllowed: isLocalRetentionAllowed() })}>
+            <li role="presentation">
+              <button
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={props.item.memoryMode === 'off' ? 'false' : 'true'}
+                class="core-chat-session__menu-item"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  close(false)
+                  props.onToggleMemory()
+                }}
+              >
+                {i18n.tr('Minne på denne samtalen', 'Memory on this thread')}
+              </button>
+            </li>
+          </Show>
           <li role="presentation">
             <button
               type="button"
@@ -1122,6 +1169,16 @@ const CHAT_GOAL_STATUS_COPY: Record<ThreadGoalStatus, { no: string; en: string }
   budget_reached: { no: 'Budsjett brukt opp', en: 'Budget reached' },
   turns_reached: { no: 'Ingen runder igjen', en: 'Out of turns' },
   blocked: { no: 'Stoppet', en: 'Blocked' },
+}
+
+/** The chip on a thread row whose run a crash parked (O-02), once its notice is due: the run waits for its owner to
+ * continue it. Nothing else reads as parked, and a thread that is not in Waiting for it shows no chip. */
+function chatParkedChip(
+  waitingReason: AttentionReason | undefined,
+  i18n: ReturnType<typeof useI18n>,
+): ChatGoalChip | undefined {
+  if (waitingReason !== 'parked') return undefined
+  return { label: i18n.tr('Venter på deg for å fortsette', 'Waiting for you to continue'), tone: 'attention' }
 }
 
 /** The goal chip on a thread row (EP-7 S5). A thread the rail placed in Waiting for a stopped goal

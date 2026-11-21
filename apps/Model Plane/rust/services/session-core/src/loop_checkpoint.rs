@@ -1064,6 +1064,150 @@ pub(crate) async fn push_crash_park(
     Ok(pushed.rows_affected())
 }
 
+/// The switch of the crash-park notice (O-02). Off by default; only the exact literal `true` turns it on. It needs crash
+/// parking and the attention events on as well, and [`crash_park_notice_active`] says so.
+pub(crate) const CRASH_PARK_NOTICE_ENV: &str = "SESSION_CORE_CRASH_PARK_NOTICE_ENABLED";
+/// The notice time in seconds (O-02), read through [`crash_park_notice_seconds`].
+const CRASH_PARK_NOTICE_SECONDS_ENV: &str = "SESSION_CORE_CRASH_PARK_NOTICE_SECONDS";
+/// Four hours: how long a crash park waits before the person is told it waits for them.
+const CRASH_PARK_NOTICE_DEFAULT_SECONDS: i64 = 14_400;
+/// The shortest notice time the variable can name.
+const CRASH_PARK_NOTICE_MIN_SECONDS: i64 = 600;
+/// The most notices one pass writes. A backlog after an outage drains over several passes.
+const CRASH_PARK_NOTICE_BATCH: i64 = 100;
+
+/// The crash parks a notice is due for (O-02), as the notice and the attention list both read them. Placeholders:
+/// `$1` the park reason, `$2` the notice time in seconds, `$3` the park TTL in seconds. A park is due once it has waited
+/// the notice time and has not run out. Only a persistent run is named: a zero-retention or waived run never keeps a
+/// fold, and its ZDR flag is checked too. The two readers splice this one text in, so the list names a thread exactly
+/// when the notice is due for its run.
+pub(crate) const DUE_CRASH_PARK_PREDICATE: &str = "c.kind = 'park' AND c.state = 'parked' AND c.park_reason = $1 AND c.updated_at <= now() - make_interval(secs => $2) AND c.updated_at > now() - make_interval(secs => $3) AND r.retention_class = 'persistent' AND NOT COALESCE((SELECT o.zdr FROM managed_run_terminalization_outbox AS o WHERE o.run_id = c.run_id), false)";
+
+/// Whether the crash-park notice is switched on: only the exact literal `true`, through the parser the durable-loop
+/// switches share.
+pub(crate) fn crash_park_notice_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(CRASH_PARK_NOTICE_ENV).ok().as_deref())
+}
+
+/// Whether the notice goes out at all: crash parking is on, the attention events that carry the notice are on, and the
+/// notice switch is the literal `true`. The attention list names a park as NEEDS_INPUT only while this holds, so the
+/// list and the notice agree.
+pub(crate) fn crash_park_notice_active() -> bool {
+    crate::terminalization::crash_park_active()
+        && crate::attention_events::enabled()
+        && crash_park_notice_enabled()
+}
+
+/// The notice time in seconds from the variable's value: four hours when it is unset or is not a whole number of
+/// seconds, clamped to ten minutes up to the park TTL. The clamp keeps the notice before the park runs out.
+pub(crate) fn crash_park_notice_seconds_from(value: Option<&str>, ttl_seconds: i64) -> i64 {
+    let seconds = value
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .unwrap_or(CRASH_PARK_NOTICE_DEFAULT_SECONDS);
+    seconds.clamp(CRASH_PARK_NOTICE_MIN_SECONDS.min(ttl_seconds), ttl_seconds)
+}
+
+/// The notice time in seconds, read at each pass.
+pub(crate) fn crash_park_notice_seconds() -> i64 {
+    crash_park_notice_seconds_from(
+        std::env::var(CRASH_PARK_NOTICE_SECONDS_ENV).ok().as_deref(),
+        park_ttl_seconds(),
+    )
+}
+
+/// The recovery tick's crash-park notice (O-02): writes one `RUN_ATTENTION` row for each due crash park, and stamps the
+/// park in the same transaction, so the person is told once. It writes nothing while its switches are off. Returns the
+/// number of notices written.
+pub(crate) async fn notify_waiting_crash_parks(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    if !crash_park_notice_active() {
+        return Ok(0);
+    }
+    notify_due_crash_parks(
+        pool,
+        crash_park_notice_seconds(),
+        park_ttl_seconds(),
+        Utc::now(),
+    )
+    .await
+}
+
+/// The crash parks the notice writes for, read in one query (O-02). Placeholders: `$1` to `$3` as
+/// [`DUE_CRASH_PARK_PREDICATE`] names them, `$4` the batch and `$5` the origins the attention list covers.
+///
+/// Two scopes narrow the due predicate to the parks the attention list names, so the list and the notice name the
+/// same thing. The thread's origin must be one the list covers: a Space, support or system thread answers to its own
+/// surface, and a scheduled run lives in a Space thread. The park's run must be its thread's latest run, the one the
+/// list reads, so a park that a newer run has overtaken is never announced. The third condition, not stamped yet, is
+/// what keeps the notice to once per park.
+fn due_crash_park_notice_sql() -> String {
+    format!(
+        "SELECT c.run_id, c.org_id, c.user_id, r.thread_id, COALESCE(c.pause_ref, c.run_id) AS source_id
+           FROM run_loop_checkpoints AS c
+           JOIN runs AS r ON r.id = c.run_id
+           JOIN threads AS t ON t.id = r.thread_id
+          WHERE {DUE_CRASH_PARK_PREDICATE} AND c.park_notice_sent_at IS NULL
+            AND t.origin = ANY($5)
+            AND NOT EXISTS (
+                SELECT 1 FROM runs AS newer
+                 WHERE newer.thread_id = r.thread_id
+                   AND (newer.updated_at, newer.created_at, newer.id) > (r.updated_at, r.created_at, r.id)
+            )
+          ORDER BY c.updated_at, c.run_id
+          LIMIT $4
+            FOR UPDATE OF c SKIP LOCKED"
+    )
+}
+
+/// Writes the notices due at the given notice time and park TTL. The parks are locked with `SKIP LOCKED`, so two replicas
+/// never take the same park, and the notice's event id names the run, so a park is written once even if a lock is lost.
+/// Returns the number of rows written.
+pub(crate) async fn notify_due_crash_parks(
+    pool: &PgPool,
+    notice_seconds: i64,
+    ttl_seconds: i64,
+    now: DateTime<Utc>,
+) -> Result<u64, sqlx::Error> {
+    let origins: Vec<String> = crate::attention_events::LISTED_ORIGINS
+        .iter()
+        .map(|origin| (*origin).to_owned())
+        .collect();
+    let sql = due_crash_park_notice_sql();
+    let mut tx = pool.begin().await?;
+    let due: Vec<(String, String, String, String, String)> = sqlx::query_as(&sql)
+        .bind(mp_contracts::loop_fold::ParkReason::CrashInterrupted.as_str())
+        .bind(notice_seconds as f64)
+        .bind(ttl_seconds as f64)
+        .bind(CRASH_PARK_NOTICE_BATCH)
+        .bind(origins)
+        .fetch_all(&mut *tx)
+        .await?;
+    let mut written = 0_u64;
+    for (run_id, org_id, user_id, thread_id, source_id) in due {
+        let notice = crate::attention_events::CrashParkNotice {
+            org_id,
+            user_id,
+            thread_id,
+            run_id,
+            source_id,
+        };
+        if crate::attention_events::write_crash_park_notice(&mut tx, &notice, now).await? {
+            written += 1;
+        }
+        sqlx::query(
+            "UPDATE run_loop_checkpoints SET park_notice_sent_at = now()
+              WHERE run_id = $1 AND park_notice_sent_at IS NULL",
+        )
+        .bind(&notice.run_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    if written > 0 {
+        metrics::counter!("mp_session_crash_park_notices_total").increment(written);
+    }
+    Ok(written)
+}
+
 /// Close a run's fold once its loop has finished. The ciphertext is dropped at
 /// once; the row remains so a late writer is refused rather than resurrecting it.
 pub(crate) async fn close(
@@ -1563,6 +1707,95 @@ mod tests {
         if std::env::var_os(PARK_TTL_ENV).is_none() {
             assert_eq!(park_ttl_seconds(), 86_400, "the process default");
         }
+    }
+
+    #[test]
+    fn the_crash_park_notice_waits_four_hours_and_stays_inside_the_park_ttl() {
+        // Unset, not a whole number of seconds, or too large to read as one: four hours, as park_ttl_from reads them.
+        for unset in [
+            None,
+            Some(""),
+            Some("soon"),
+            Some("1.5"),
+            Some("99999999999999999999"),
+        ] {
+            assert_eq!(
+                crash_park_notice_seconds_from(unset, 86_400),
+                14_400,
+                "{unset:?}"
+            );
+        }
+        for (value, want) in [
+            ("1", 600),
+            ("599", 600),
+            ("600", 600),
+            (" 3600 ", 3_600),
+            ("86400", 86_400),
+            ("86401", 86_400),
+        ] {
+            assert_eq!(
+                crash_park_notice_seconds_from(Some(value), 86_400),
+                want,
+                "{value:?}"
+            );
+        }
+        // A park TTL under the notice's own floor is the ceiling too, so the clamp never inverts.
+        assert_eq!(crash_park_notice_seconds_from(Some("9999"), 60), 60);
+        assert_eq!(crash_park_notice_seconds_from(None, 60), 60);
+    }
+
+    #[test]
+    fn the_notice_switch_reads_only_the_exact_literal() {
+        // The parser the durable-loop switches share: `true` and nothing else.
+        for (value, on) in [
+            (Some("true"), true),
+            (Some("TRUE"), false),
+            (Some(" true"), false),
+            (Some("1"), false),
+            (None, false),
+        ] {
+            assert_eq!(mp_contracts::loop_fold::switch_from(value), on, "{value:?}");
+        }
+        assert_eq!(
+            CRASH_PARK_NOTICE_ENV,
+            "SESSION_CORE_CRASH_PARK_NOTICE_ENABLED"
+        );
+    }
+
+    /// Collapses runs of whitespace, so a query is compared by its tokens and not by how its lines are laid out.
+    fn squeezed_sql(sql: &str) -> String {
+        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn the_notice_names_only_the_listed_origins_and_the_threads_latest_run() {
+        // The notice is read through a database, so this pins its text. The origin filter binds the attention list's
+        // origins, and a park is announced only while its run is the newest run of its thread, the run the list reads.
+        let sql = squeezed_sql(&due_crash_park_notice_sql());
+        assert!(
+            sql.contains(DUE_CRASH_PARK_PREDICATE),
+            "the notice reads the shared predicate"
+        );
+        assert!(
+            sql.contains("JOIN threads AS t ON t.id = r.thread_id"),
+            "{sql}"
+        );
+        assert!(sql.contains("AND t.origin = ANY($5)"), "{sql}");
+        assert!(
+            sql.contains(
+                "NOT EXISTS ( SELECT 1 FROM runs AS newer WHERE newer.thread_id = r.thread_id"
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("(newer.updated_at, newer.created_at, newer.id) > (r.updated_at, r.created_at, r.id)"),
+            "{sql}"
+        );
+        assert!(sql.contains("AND c.park_notice_sent_at IS NULL"), "{sql}");
+        assert!(
+            sql.contains("LIMIT $4 FOR UPDATE OF c SKIP LOCKED"),
+            "{sql}"
+        );
     }
 
     /// A park fold of `run_id` as the executor writes one, parsed, after `edit` changed its JSON.
@@ -2552,8 +2785,8 @@ fn after() { WRITE }
     /// against a scratch Postgres (the database name must say it is a test database).
     mod db {
         use super::super::test_support::{
-            cipher, fold_for, fold_rows, fold_state, park_fold_for, scratch_pool, seed_fold,
-            seed_run,
+            cipher, fold_for, fold_rows, fold_state, park_fold_for, plant_round_fold,
+            scratch_pool, seed_fold, seed_run,
         };
         use super::*;
 
@@ -3897,6 +4130,292 @@ fn after() { WRITE }
                 .await
                 .expect("the run's own reference stands under the park rules");
             assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("parked"));
+        }
+
+        /// Plant a crash park the way the recovery worker leaves one, `age_seconds` old: a round fold turned into a park
+        /// (`kind` `park`, `state` `parked`, reason `crash_interrupted`) whose `updated_at` is that far in the past.
+        async fn plant_crash_park(pool: &PgPool, run_id: &str, age_seconds: f64) {
+            plant_round_fold(pool, run_id, &fold_for(run_id), "auth-1").await;
+            sqlx::query(
+                "UPDATE run_loop_checkpoints
+                    SET kind = 'park', state = 'parked', pause_ref = $2, park_reason = 'crash_interrupted',
+                        park_until = now() + interval '1 hour', updated_at = now() - make_interval(secs => $3)
+                  WHERE run_id = $1",
+            )
+            .bind(run_id)
+            .bind(format!("park-{run_id}"))
+            .bind(age_seconds)
+            .execute(pool)
+            .await
+            .expect("plant a crash park");
+        }
+
+        /// How many notices the outbox holds for a run, and whether the park carries its notice mark.
+        async fn notice_state(pool: &PgPool, run_id: &str) -> (i64, bool) {
+            let rows: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM session_audit_outbox WHERE event_id = $1")
+                    .bind(crate::attention_events::crash_park_notice_event_id(run_id))
+                    .fetch_one(pool)
+                    .await
+                    .expect("count notices");
+            let stamped: Option<bool> = sqlx::query_scalar(
+                "SELECT park_notice_sent_at IS NOT NULL FROM run_loop_checkpoints WHERE run_id = $1",
+            )
+            .bind(run_id)
+            .fetch_optional(pool)
+            .await
+            .expect("read the notice mark");
+            (rows, stamped.unwrap_or(false))
+        }
+
+        /// The notice time and the park TTL the tests run under: four hours and one day.
+        const NOTICE_SECONDS: i64 = 14_400;
+        const TTL_SECONDS: i64 = 86_400;
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn a_due_crash_park_is_announced_once_and_stamped() {
+            let Some(pool) = scratch_pool().await else {
+                return;
+            };
+            let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+            plant_crash_park(&pool, &run_id, 5.0 * 3600.0).await;
+
+            notify_due_crash_parks(&pool, NOTICE_SECONDS, TTL_SECONDS, Utc::now())
+                .await
+                .expect("the notice pass");
+            assert_eq!(
+                notice_state(&pool, &run_id).await,
+                (1, true),
+                "one notice, and the park is stamped"
+            );
+
+            // The payload names ids and the closed tokens only, and it is a persistent run's notice.
+            let payload: serde_json::Value =
+                sqlx::query_scalar("SELECT payload FROM session_audit_outbox WHERE event_id = $1")
+                    .bind(crate::attention_events::crash_park_notice_event_id(&run_id))
+                    .fetch_one(&pool)
+                    .await
+                    .expect("read the notice");
+            assert_eq!(payload["payload"]["state"], "ATTENTION_STATE_NEEDS_INPUT");
+            assert_eq!(payload["payload"]["reason"], "ATTENTION_REASON_PARKED");
+            assert_eq!(payload["payload"]["run_id"], run_id.as_str());
+            assert_eq!(payload["zdr"], false);
+
+            // A later pass finds the park stamped, and writes nothing more for it.
+            notify_due_crash_parks(&pool, NOTICE_SECONDS, TTL_SECONDS, Utc::now())
+                .await
+                .expect("the second pass");
+            assert_eq!(
+                notice_state(&pool, &run_id).await,
+                (1, true),
+                "still one notice"
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn a_park_that_is_young_claimed_resumed_or_expired_is_not_announced() {
+            let Some(pool) = scratch_pool().await else {
+                return;
+            };
+            // Young: an hour old, before the notice time.
+            let (young, _, _) = seed_run(&pool, "persistent").await;
+            plant_crash_park(&pool, &young, 3600.0).await;
+            // Claimed: a continuation holds the park.
+            let (claimed, _, _) = seed_run(&pool, "persistent").await;
+            plant_crash_park(&pool, &claimed, 5.0 * 3600.0).await;
+            sqlx::query("UPDATE run_loop_checkpoints SET state = 'resuming' WHERE run_id = $1")
+                .bind(&claimed)
+                .execute(&pool)
+                .await
+                .expect("claim the park");
+            // Resumed: the run is no longer a park.
+            let (resumed, _, _) = seed_run(&pool, "persistent").await;
+            plant_crash_park(&pool, &resumed, 5.0 * 3600.0).await;
+            sqlx::query(
+                "UPDATE run_loop_checkpoints SET kind = 'round', state = 'active' WHERE run_id = $1",
+            )
+            .bind(&resumed)
+            .execute(&pool)
+            .await
+            .expect("resume the run");
+            // Expired: older than the park TTL, so the worker ends the run instead.
+            let (expired, _, _) = seed_run(&pool, "persistent").await;
+            plant_crash_park(&pool, &expired, 2.0 * 86_400.0).await;
+
+            notify_due_crash_parks(&pool, NOTICE_SECONDS, TTL_SECONDS, Utc::now())
+                .await
+                .expect("the notice pass");
+            for run in [&young, &claimed, &resumed, &expired] {
+                assert_eq!(
+                    notice_state(&pool, run).await,
+                    (0, false),
+                    "{run} is not announced"
+                );
+            }
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn a_zero_retention_or_waived_run_is_never_announced() {
+            let Some(pool) = scratch_pool().await else {
+                return;
+            };
+            for retention in ["zdr", "zdr_waived"] {
+                let (run_id, _org, _user) = seed_run(&pool, retention).await;
+                plant_crash_park(&pool, &run_id, 5.0 * 3600.0).await;
+                notify_due_crash_parks(&pool, NOTICE_SECONDS, TTL_SECONDS, Utc::now())
+                    .await
+                    .expect("the notice pass");
+                assert_eq!(
+                    notice_state(&pool, &run_id).await,
+                    (0, false),
+                    "a {retention} run is not announced"
+                );
+            }
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn two_replicas_announce_a_crash_park_once() {
+            let Some(pool) = scratch_pool().await else {
+                return;
+            };
+            let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+            plant_crash_park(&pool, &run_id, 5.0 * 3600.0).await;
+
+            let (first, second) = tokio::join!(
+                notify_due_crash_parks(&pool, NOTICE_SECONDS, TTL_SECONDS, Utc::now()),
+                notify_due_crash_parks(&pool, NOTICE_SECONDS, TTL_SECONDS, Utc::now()),
+            );
+            first.expect("replica one");
+            second.expect("replica two");
+            assert_eq!(
+                notice_state(&pool, &run_id).await,
+                (1, true),
+                "one row between two replicas"
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn with_the_notice_switched_off_nothing_is_announced() {
+            let Some(pool) = scratch_pool().await else {
+                return;
+            };
+            if crash_park_notice_active() {
+                eprintln!("skipping: the crash-park notice is on in this environment");
+                return;
+            }
+            let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+            plant_crash_park(&pool, &run_id, 5.0 * 3600.0).await;
+            assert_eq!(
+                notify_waiting_crash_parks(&pool)
+                    .await
+                    .expect("the recovery tick's pass"),
+                0,
+                "a switched-off notice writes nothing"
+            );
+            assert_eq!(notice_state(&pool, &run_id).await, (0, false));
+        }
+
+        /// Moves a run's thread to another origin the attention list does not cover (`system`, `support`, ...).
+        async fn put_thread_on_origin(pool: &PgPool, run_id: &str, origin: &str) {
+            sqlx::query(
+                "UPDATE threads SET origin = $2 WHERE id = (SELECT thread_id FROM runs WHERE id = $1)",
+            )
+            .bind(run_id)
+            .bind(origin)
+            .execute(pool)
+            .await
+            .expect("move the thread to its origin");
+        }
+
+        /// Makes a run a scheduled run's, as `start_scheduled_run` leaves it: its thread lives in a Space (origin `space`,
+        /// with the Space context the threads table requires) and the system principal owns the thread and the run. Call
+        /// it before the run's fold is planted, since the fold takes its owner from the run.
+        async fn put_scheduled_run_in_space(pool: &PgPool, run_id: &str, space_ref: &str) {
+            sqlx::query(
+                "UPDATE threads
+                    SET origin = 'space', space_id = $2, user_id = 'service:orchestrator-core',
+                        space_decision_ref = 'decision-1', recipient_audience_ref = 'audience-1',
+                        privacy_policy_ref = 'policy-1', resource_authorization_ref = 'resource-1',
+                        authority_revision = 1, recipient_audience_revision = 1,
+                        recipient_audience_hash = 'audience-hash-1'
+                  WHERE id = (SELECT thread_id FROM runs WHERE id = $1)",
+            )
+            .bind(run_id)
+            .bind(space_ref)
+            .execute(pool)
+            .await
+            .expect("move the thread into a Space");
+            sqlx::query("UPDATE runs SET user_id = 'service:orchestrator-core' WHERE id = $1")
+                .bind(run_id)
+                .execute(pool)
+                .await
+                .expect("the system principal owns the run");
+        }
+
+        /// Starts a newer run in the thread of `run_id`, so the thread's latest run is the newer one from now on.
+        async fn start_newer_run(pool: &PgPool, run_id: &str) {
+            sqlx::query(
+                "INSERT INTO runs (id, thread_id, goal, org_id, user_id, retention_class, updated_at)
+                 SELECT $2, thread_id, 'g', org_id, user_id, 'persistent', now() + interval '1 second'
+                   FROM runs WHERE id = $1",
+            )
+            .bind(run_id)
+            .bind(format!("{run_id}-newer"))
+            .execute(pool)
+            .await
+            .expect("start a newer run");
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn a_crash_park_the_list_does_not_name_is_not_announced() {
+            let Some(pool) = scratch_pool().await else {
+                return;
+            };
+            // Announced: a due park on a chat thread, and one on an agent-run thread, each on its thread's latest run.
+            let (chat, _, _) = seed_run(&pool, "persistent").await;
+            plant_crash_park(&pool, &chat, 5.0 * 3600.0).await;
+            let (agent_run, _, _) = seed_run(&pool, "persistent").await;
+            put_thread_on_origin(&pool, &agent_run, "agent_run").await;
+            plant_crash_park(&pool, &agent_run, 5.0 * 3600.0).await;
+            // Not announced: a scheduled run's park, in a Space and owned by the system principal.
+            let (scheduled, _, _) = seed_run(&pool, "persistent").await;
+            put_scheduled_run_in_space(&pool, &scheduled, "space-1").await;
+            plant_crash_park(&pool, &scheduled, 5.0 * 3600.0).await;
+            // Not announced: a system thread's park.
+            let (system, _, _) = seed_run(&pool, "persistent").await;
+            put_thread_on_origin(&pool, &system, "system").await;
+            plant_crash_park(&pool, &system, 5.0 * 3600.0).await;
+            // Not announced: a park that a newer run of its thread has overtaken. The list reads the latest run only.
+            let (overtaken, _, _) = seed_run(&pool, "persistent").await;
+            plant_crash_park(&pool, &overtaken, 5.0 * 3600.0).await;
+            start_newer_run(&pool, &overtaken).await;
+
+            notify_due_crash_parks(&pool, NOTICE_SECONDS, TTL_SECONDS, Utc::now())
+                .await
+                .expect("the notice pass");
+            assert_eq!(
+                notice_state(&pool, &chat).await,
+                (1, true),
+                "a chat park is announced"
+            );
+            assert_eq!(
+                notice_state(&pool, &agent_run).await,
+                (1, true),
+                "an agent-run park is announced"
+            );
+            for run in [&scheduled, &system, &overtaken] {
+                assert_eq!(
+                    notice_state(&pool, run).await,
+                    (0, false),
+                    "{run} is neither announced nor stamped"
+                );
+            }
         }
     }
 }

@@ -28,7 +28,7 @@ use crate::http_health::Readiness;
 use crate::runtime_loop;
 use crate::sandbox_manager_client::SandboxManagerClient;
 use crate::scheduled_inference_auth::ScheduledInferenceTokenProvider;
-use crate::scheduled_step_decision::ScheduledStepDecisionVerifier;
+use crate::scheduled_step_decision::{self, ScheduledStepDecisionVerifier};
 use crate::session_terminal_auth::{ManagedRunTokenProvider, SessionTerminalTokenProvider};
 use crate::state::{RunSnapshot, RunStatus, StateStore};
 use crate::workspace_cas::CasClient;
@@ -261,6 +261,10 @@ impl ExecutionService {
     async fn execute_scheduled_step_runtime(
         &self,
         req: pb::ExecuteScheduledStepRequest,
+        // The contract digest the verified Control decision names, if it names one (F-f02-17).
+        decision_contract_digest: Option<&str>,
+        // Whether the decision must name the contract the run holds: the switch, read by the caller (F-f02-17).
+        contract_required: bool,
     ) -> Result<Response<pb::ExecuteScheduledStepResponse>, Status> {
         let inference_tokens = self.scheduled_inference_tokens.as_ref().ok_or_else(|| {
             Status::failed_precondition(
@@ -411,6 +415,29 @@ impl ExecutionService {
                 unknown_outcome: false,
                 ..Default::default()
             }));
+        }
+        // The Control decision must name exactly the contract the run holds, once the switch asks for it
+        // (F-f02-17). The refusal is decided on the loaded run, before any model call, and it closes the claim
+        // with a failed receipt that carries the closed token: nothing is left claimed, and no contract text
+        // reaches the receipt or the message.
+        if let Err(refusal) = scheduled_step_decision::check_run_contract(
+            decision_contract_digest,
+            !run.contract_json.is_empty(),
+            &run.contract_digest,
+            contract_required,
+        ) {
+            let token = refusal.message().to_owned();
+            self.record_scheduled_step_receipt(
+                &req,
+                &session_bearer,
+                &claim.receipt_id,
+                "failed",
+                "",
+                &token,
+                false,
+            )
+            .await?;
+            return Err(refusal);
         }
 
         // A step whose schedule stored a consent contract takes the bounded agent lane when
@@ -1326,6 +1353,48 @@ fn validate_direct_permission_mode(permission_mode: &str) -> Result<(), Status> 
     }
 }
 
+/// The typed word of an MCP-app side call that was refused for a shape it may not have
+/// (`ExecuteStepRequest.side_call` on a tool that is not `mcp__`, or a posture that is not `ask`).
+const SIDE_CALL_INVALID: &str = "side_call_invalid";
+
+/// `ExecuteStepRequest.side_call` is for an `mcp__` tool under the literal `ask` posture and
+/// nothing else; any other shape is `INVALID_ARGUMENT`. A request that is not a side call is not
+/// judged here.
+fn validate_side_call(
+    side_call: bool,
+    tool_name: &str,
+    permission_mode: &str,
+) -> Result<(), Status> {
+    if side_call && !crate::runtime_loop::side_call_admissible(tool_name, permission_mode) {
+        return Err(Status::invalid_argument(SIDE_CALL_INVALID));
+    }
+    Ok(())
+}
+
+/// The typed word of an MCP-app side call that would have paused for a person. model-gateway maps
+/// it to its own `app_call_requires_chat` answer.
+const APP_CALL_REQUIRES_CHAT: &str = "app_call_requires_chat";
+
+/// The answer of an MCP-app side call (`ExecuteStepRequest.side_call`), from the outcome the step
+/// reached. A pause is the refusal `FAILED_PRECONDITION app_call_requires_chat`: the caller creates
+/// no approval, no fold and no event for it. Every other outcome is returned as the step's own
+/// answer, scrubbed as an ordinary step's is. Nothing here touches session-core or the run's state.
+pub(crate) fn side_call_response(
+    step_id: String,
+    outcome: runtime_loop::StepOutcome,
+) -> Result<pb::ExecuteStepResponse, Status> {
+    if outcome.status == "awaiting_approval" {
+        return Err(Status::failed_precondition(APP_CALL_REQUIRES_CHAT));
+    }
+    Ok(pb::ExecuteStepResponse {
+        step_id,
+        status: outcome.status,
+        output: crate::scrub::scrub_string(&outcome.output),
+        error: crate::scrub::scrub_string(&outcome.error),
+        compaction_triggered: outcome.compaction_triggered,
+    })
+}
+
 /// Judge the inference route a `RunAgent` request names before any of the run's
 /// work starts.
 ///
@@ -1575,6 +1644,10 @@ impl ExecutionCore for ExecutionService {
         caller.authorize(&req.org_id, Some(&req.user_id))?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;
+        // An MCP-app side call is admitted only after the caller and the run owner were: an
+        // `mcp__` tool under the literal `ask` posture, nothing else (F-f10-21).
+        let side_call = req.side_call;
+        validate_side_call(side_call, &req.tool_name, &req.permission_mode)?;
         reject_direct_owner_action(
             crate::permission::RunGate::for_run(&req.org_id, &req.run_id),
             &req.tool_name,
@@ -1641,7 +1714,8 @@ impl ExecutionCore for ExecutionService {
         let run_id = req.run_id.clone();
         let step_id = req.step_id.clone();
 
-        let prior = self.state.get_or_create(&run_id);
+        // A side call never reads, creates or advances the run's snapshot.
+        let prior = (!side_call).then(|| self.state.get_or_create(&run_id));
 
         // Surface browser-agent progress (B4) on the run-event stream. The sink
         // publishes BrowserActionDispatched/BrowserObservationReceived events to
@@ -1713,7 +1787,8 @@ impl ExecutionCore for ExecutionService {
             "",
             Some(self.session_channel.clone()),
             Some(&browser_sink),
-            Some(&self.state),
+            // A side call is handed no run state: it holds no lease, workspace or snapshot.
+            (!side_call).then_some(&self.state),
             req.zdr,
             // The caller's own waiver (Z-18): a waived caller's retrieval is
             // filtered, whichever step it runs. A step names no model route, so
@@ -1731,8 +1806,18 @@ impl ExecutionCore for ExecutionService {
             // The step's own Space, so the owner document listing refuses a Space-scoped step even
             // when no sandbox context is built for it (D2-769, `OWNER_LIST_SPACE_REFUSE`).
             &req.space_id,
+            side_call,
         )
         .await;
+
+        // An MCP-app side call ends here: a pause is the typed refusal (no approval, no fold, no
+        // event), and nothing below runs, so no checkpoint, step row or run snapshot is written.
+        if side_call {
+            return side_call_response(step_id, outcome).map(Response::new);
+        }
+        let Some(prior) = prior else {
+            return Err(Status::internal("run snapshot missing for a non-side step"));
+        };
 
         // HITL enforcement: a pause is durable only after session-core accepts
         // the Approval. On persistence failure, fail the RPC before checkpoint
@@ -2148,8 +2233,13 @@ impl ExecutionCore for ExecutionService {
                     "scheduled-step Control decision verifier is not configured",
                 )
             })?;
-        verifier.verify(&req, chrono::Utc::now())?;
-        self.execute_scheduled_step_runtime(req).await
+        let verified = verifier.verify(&req, chrono::Utc::now())?;
+        self.execute_scheduled_step_runtime(
+            req,
+            verified.contract_digest.as_deref(),
+            scheduled_step_decision::contract_required(),
+        )
+        .await
     }
 }
 
@@ -2712,6 +2802,7 @@ mod auth_tests {
             policy_digest: valid_digest,
             idempotency_key: "idem_01".to_owned(),
             control_decision_token: "scheduled-step-decision".to_owned(),
+            ext_skills: String::new(),
         };
         validate_scheduled_step_bindings(&valid).expect("canonical bindings are accepted");
 
@@ -3318,6 +3409,88 @@ mod run_context_boundary_tests {
 }
 
 #[cfg(test)]
+mod side_call_tests {
+    use super::*;
+
+    fn outcome(status: &str, output: &str, error: &str) -> runtime_loop::StepOutcome {
+        runtime_loop::StepOutcome {
+            status: status.to_owned(),
+            output: output.to_owned(),
+            error: error.to_owned(),
+            compaction_triggered: false,
+            cause: None,
+            screening_taint: false,
+            pause_facts: Default::default(),
+            pending_elicitation: None,
+            grounded: false,
+            data_category: None,
+        }
+    }
+
+    #[test]
+    fn a_side_call_is_admitted_only_for_an_mcp_tool_under_ask() {
+        assert!(validate_side_call(true, "mcp__srv__echo", "ask").is_ok());
+        // Not a side call: nothing is judged, whatever the tool and posture.
+        for (tool, mode) in [("shell", "auto"), ("mcp__srv__echo", "auto"), ("", "")] {
+            assert!(validate_side_call(false, tool, mode).is_ok(), "{tool} {mode}");
+        }
+        for (tool, mode) in [
+            ("knowledge_search", "ask"),
+            ("code_interpreter", "ask"),
+            ("execute_provider_action", "ask"),
+            ("mcp_srv_echo", "ask"),
+            ("mcp__srv__echo", "auto"),
+            ("mcp__srv__echo", "deny"),
+            ("mcp__srv__echo", ""),
+            ("mcp__srv__echo", "Ask"),
+        ] {
+            let refused = validate_side_call(true, tool, mode).expect_err("must be refused");
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument, "{tool} {mode}");
+            assert_eq!(refused.message(), "side_call_invalid");
+        }
+    }
+
+    #[test]
+    fn a_paused_side_call_is_a_typed_refusal_and_never_a_response() {
+        let refused = side_call_response("app-1".to_owned(), outcome("awaiting_approval", "", ""))
+            .expect_err("a pause is a refusal");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(refused.message(), "app_call_requires_chat");
+    }
+
+    #[test]
+    fn a_finished_or_failed_side_call_is_answered_scrubbed_and_nothing_else() {
+        let done = side_call_response("app-2".to_owned(), outcome("completed", "42", ""))
+            .expect("completed is a response");
+        assert_eq!(done.step_id, "app-2");
+        assert_eq!(done.status, "completed");
+        assert_eq!(done.output, "42");
+        let failed = side_call_response("app-3".to_owned(), outcome("failed", "", "boom"))
+            .expect("failed is a response");
+        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.error, "boom");
+    }
+
+    /// A finished run's snapshot is exactly what it was after a failed side call: the lane is handed
+    /// no run state, takes no snapshot of its own and writes nothing, so nothing can move it.
+    #[test]
+    fn a_failed_side_call_leaves_a_finished_runs_snapshot_untouched() {
+        let state = StateStore::new();
+        let mut finished = state.get_or_create("run-finished");
+        finished.status = RunStatus::Completed;
+        finished.step_index = 7;
+        state.update(finished.clone());
+        let before = format!("{:?}", state.snapshot("run-finished"));
+
+        let _ = side_call_response("app-4".to_owned(), outcome("failed", "", "tool_call_failed"));
+        let _ = side_call_response("app-5".to_owned(), outcome("awaiting_approval", "", ""));
+
+        assert_eq!(format!("{:?}", state.snapshot("run-finished")), before);
+        assert_eq!(state.snapshot("run-finished"), Some(finished));
+    }
+}
+
+#[cfg(test)]
 mod step_attachment_tests {
     use super::*;
     use mp_contracts::attachments::sha256_hex;
@@ -3607,6 +3780,10 @@ mod scheduled_agent_lane_tests {
         inference_calls: usize,
         results: Vec<pb::RecordScheduledRunResultRequest>,
         receipts: Vec<pb::RecordScheduledStepReceiptRequest>,
+        /// Every managed-run heartbeat the loop sent, a refused one included, in call order.
+        heartbeats: Vec<pb::HeartbeatManagedRunRequest>,
+        /// How many heartbeats had been sent when the loop first asked the model; `None` if it never did.
+        heartbeats_before_first_inference: Option<usize>,
     }
 
     type Shared = Arc<Mutex<Seen>>;
@@ -3665,6 +3842,8 @@ mod scheduled_agent_lane_tests {
     struct Lane {
         seen: Shared,
         context: pb::ScheduledStepContext,
+        /// Whether the managed-run lifecycle refuses the loop's heartbeat.
+        heartbeat_refused: bool,
     }
 
     impl Lane {
@@ -3678,7 +3857,12 @@ mod scheduled_agent_lane_tests {
         {
             let path = request.uri().path().to_owned();
             if path.starts_with("/model_plane.v1.InferenceCore/") {
-                self.seen.lock().unwrap().inference_calls += 1;
+                let mut seen = self.seen.lock().unwrap();
+                if seen.inference_calls == 0 {
+                    let sent = seen.heartbeats.len();
+                    seen.heartbeats_before_first_inference = Some(sent);
+                }
+                seen.inference_calls += 1;
                 return unimplemented_response();
             }
             self.seen.lock().unwrap().session_paths.push(path.clone());
@@ -3728,6 +3912,33 @@ mod scheduled_agent_lane_tests {
                         },
                     )
                 }
+                // The loop's managed-run heartbeat: once before its first round and once before each round
+                // (F-f03-04). It must carry the heartbeat credential the lane gives the run. It is recorded
+                // whether it is accepted or refused, so a test can see where the loop stopped.
+                "/model_plane.v1.ManagedRunLifecycle/HeartbeatManagedRun" => {
+                    let presented = request
+                        .headers()
+                        .get(http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    let refused = self.heartbeat_refused;
+                    let seen = Arc::clone(&self.seen);
+                    unary(request, move |heartbeat: pb::HeartbeatManagedRunRequest| {
+                        seen.lock().unwrap().heartbeats.push(heartbeat);
+                        if presented.as_deref() != Some("Bearer test-heartbeat-token") {
+                            return Err(Status::unauthenticated(
+                                "managed heartbeat requires its heartbeat credential",
+                            ));
+                        }
+                        if refused {
+                            return Err(Status::unavailable("managed heartbeat refused"));
+                        }
+                        Ok(pb::HeartbeatManagedRunResponse {
+                            renewed_until: None,
+                            already_terminal: false,
+                        })
+                    })
+                }
                 _ => unimplemented_response(),
             }
         }
@@ -3764,6 +3975,10 @@ mod scheduled_agent_lane_tests {
 
     named_fake!(FakeSessionCore, "model_plane.v1.SessionCore");
     named_fake!(FakeRunService, "model_plane.v1.RunService");
+    named_fake!(
+        FakeManagedRunLifecycle,
+        "model_plane.v1.ManagedRunLifecycle"
+    );
     named_fake!(FakeInferenceCore, "model_plane.v1.InferenceCore");
 
     struct CountingPolicy(Arc<AtomicUsize>);
@@ -3844,6 +4059,38 @@ mod scheduled_agent_lane_tests {
     }
 
     async fn harness(zdr: bool, zdr_waived: bool) -> Harness {
+        harness_with_context(pb::ScheduledStepContext {
+            run_id: "run-1".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            goal: "summarise the week".to_owned(),
+            status: "running".to_owned(),
+            // Any stored contract routes the step to the agent lane; the retention check comes
+            // before the contract is read, so it need not verify.
+            contract_json: "{}".to_owned(),
+            contract_digest: "sha256:none".to_owned(),
+            contract_expires_at: "2099-01-01T00:00:00Z".to_owned(),
+            zdr,
+            zdr_waived,
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// The fake session and inference services answer for `context`, the step's run as Session Core serves it.
+    async fn harness_with_context(context: pb::ScheduledStepContext) -> Harness {
+        harness_with_heartbeat(context, false).await
+    }
+
+    /// As [`harness_with_context`], with the managed-run heartbeat refused when `heartbeat_refused` is set. Without
+    /// the refusal the fake accepts a heartbeat that presents the heartbeat credential. Session Core refuses a
+    /// heartbeat for a run with no managed obligation (`terminalization::lock_managed_obligation`), and
+    /// `StartScheduledRun` opens none for a scheduled run, so this acceptance is a test double, not a claim about
+    /// the production answer for a scheduled run.
+    async fn harness_with_heartbeat(
+        context: pb::ScheduledStepContext,
+        heartbeat_refused: bool,
+    ) -> Harness {
         use wiremock::{
             matchers::{method, path},
             Mock, MockServer, ResponseTemplate,
@@ -3851,21 +4098,8 @@ mod scheduled_agent_lane_tests {
         let seen: Shared = Arc::default();
         let lane = Lane {
             seen: Arc::clone(&seen),
-            context: pb::ScheduledStepContext {
-                run_id: "run-1".to_owned(),
-                thread_id: "thread-1".to_owned(),
-                org_id: "org-1".to_owned(),
-                goal: "summarise the week".to_owned(),
-                status: "running".to_owned(),
-                // Any stored contract routes the step to the agent lane; the retention check comes
-                // before the contract is read, so it need not verify.
-                contract_json: "{}".to_owned(),
-                contract_digest: "sha256:none".to_owned(),
-                contract_expires_at: "2099-01-01T00:00:00Z".to_owned(),
-                zdr,
-                zdr_waived,
-                ..Default::default()
-            },
+            context,
+            heartbeat_refused,
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -3875,6 +4109,7 @@ mod scheduled_agent_lane_tests {
             Server::builder()
                 .add_service(FakeSessionCore(lane.clone()))
                 .add_service(FakeRunService(lane.clone()))
+                .add_service(FakeManagedRunLifecycle(lane.clone()))
                 .add_service(FakeInferenceCore(lane))
                 .serve_with_incoming(TcpListenerStream::new(listener)),
         );
@@ -3951,7 +4186,7 @@ mod scheduled_agent_lane_tests {
         let harness = harness(zdr, zdr_waived).await;
         let response = harness
             .service
-            .execute_scheduled_step_runtime(step())
+            .execute_scheduled_step_runtime(step(), None, false)
             .await
             .expect("the lane answers with a recorded outcome")
             .into_inner();
@@ -4063,5 +4298,243 @@ mod scheduled_agent_lane_tests {
             runtime_loop::scheduled_agent::REFUSAL_INVALID
         );
         assert_eq!(harness.seen.lock().unwrap().inference_calls, 0);
+    }
+
+    /// The stored contract the F-f03-04 tests serve: one read-only web search, unexpired in 2099.
+    const VERIFYING_CONTRACT: &str = r#"{"expires_at":"2099-01-01T00:00:00Z","max_rounds":4,"max_tokens_per_round":512,"tools":[{"approved_at":"2026-10-24T10:00:00Z","capability":"cap.tool.web_search","class":"read","tool":"web_search"}],"v":1}"#;
+
+    /// F-f03-04: the stored contract Session Core serves whole, its text hashing to its digest, passes the
+    /// lane's admission. A persistent, unexpired step with the switch on therefore reaches the agent loop, and
+    /// neither contract refusal is recorded. The loop renews the run's managed deadline as the execution agent
+    /// before its first model call, and then asks the model.
+    #[tokio::test]
+    async fn a_served_contract_that_verifies_is_admitted_by_the_lane() {
+        switch_on();
+        let harness = harness_with_context(contract_run(VERIFYING_CONTRACT)).await;
+        let response = harness
+            .service
+            .execute_scheduled_step_runtime(step(), None, false)
+            .await
+            .expect("the lane answers with a recorded outcome")
+            .into_inner();
+        assert_ne!(
+            response.error,
+            runtime_loop::scheduled_agent::REFUSAL_INVALID
+        );
+        assert_ne!(
+            response.error,
+            runtime_loop::scheduled_agent::REFUSAL_EXPIRED
+        );
+        let seen = harness.seen.lock().unwrap();
+        assert!(
+            seen.inference_calls > 0,
+            "a contract that verifies reaches the agent loop, which asks the model"
+        );
+        assert!(
+            matches!(seen.heartbeats_before_first_inference, Some(sent) if sent >= 1),
+            "the loop renews its managed deadline before its first model call"
+        );
+        let [heartbeat, ..] = seen.heartbeats.as_slice() else {
+            panic!("the loop sent no managed heartbeat");
+        };
+        assert_eq!(heartbeat.run_id, "run-1");
+        assert_eq!(
+            heartbeat.source,
+            pb::ManagedRunSource::ExecutionAgent as i32
+        );
+    }
+
+    /// F-f03-04: the loop's managed heartbeat is the gate before its first model call. When the managed-run
+    /// lifecycle refuses it, the loop stops there: no model call and no capability decision. The step is closed
+    /// once, as the lane's unknown-outcome class for a loop-level unavailable, and is never retried.
+    #[tokio::test]
+    async fn a_refused_managed_heartbeat_stops_the_scheduled_step_before_any_model_call() {
+        switch_on();
+        let harness = harness_with_heartbeat(contract_run(VERIFYING_CONTRACT), true).await;
+        let response = harness
+            .service
+            .execute_scheduled_step_runtime(step(), None, false)
+            .await
+            .expect("the lane answers with a recorded outcome")
+            .into_inner();
+        assert_eq!(response.error, "inference_outcome_unknown");
+        assert!(response.unknown_outcome);
+        let seen = harness.seen.lock().unwrap();
+        assert_eq!(
+            seen.heartbeats.len(),
+            1,
+            "the loop sends one heartbeat, and the refusal ends it"
+        );
+        assert_eq!(
+            seen.inference_calls, 0,
+            "no model call after a refused heartbeat"
+        );
+        assert_eq!(seen.heartbeats_before_first_inference, None);
+        assert_eq!(
+            harness.evaluations.load(Ordering::SeqCst),
+            0,
+            "no tool reached a capability decision"
+        );
+        let [result] = seen.results.as_slice() else {
+            panic!("exactly one result row, got {}", seen.results.len());
+        };
+        assert_eq!(result.status, "unknown_outcome");
+        assert_eq!(result.error_code, "inference_outcome_unknown");
+        assert!(result.unknown_outcome);
+        assert!(result.output.is_empty());
+    }
+
+    /// A run that holds no contract, as Session Core serves the run of a schedule made without one.
+    fn legacy_run() -> pb::ScheduledStepContext {
+        pb::ScheduledStepContext {
+            run_id: "run-1".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            goal: "summarise the week".to_owned(),
+            status: "running".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// A run holding `text` as its stored contract, under the digest of its exact text.
+    fn contract_run(text: &str) -> pb::ScheduledStepContext {
+        pb::ScheduledStepContext {
+            contract_json: text.to_owned(),
+            contract_digest: mp_contracts::scheduled_contract::digest(text),
+            contract_expires_at: "2099-01-01T00:00:00Z".to_owned(),
+            ..legacy_run()
+        }
+    }
+
+    /// F-f02-17: a refused step closed its claim with a failed receipt that carries `token`, and reached nothing
+    /// after the claim: no model call, no result row and no capability decision.
+    fn assert_refused_after_claim(harness: &Harness, token: &str) {
+        let seen = harness.seen.lock().unwrap();
+        assert_eq!(seen.inference_calls, 0, "no model call for a refused step");
+        assert_eq!(
+            harness.evaluations.load(Ordering::SeqCst),
+            0,
+            "no tool reached a capability decision"
+        );
+        assert_eq!(
+            seen.session_paths,
+            [
+                "/model_plane.v1.SessionCore/ClaimScheduledStep",
+                "/model_plane.v1.RunService/GetScheduledStepContext",
+                "/model_plane.v1.SessionCore/RecordScheduledStepReceipt",
+            ],
+            "the claim, the run context and the receipt that closes the claim, and nothing else"
+        );
+        let [receipt] = seen.receipts.as_slice() else {
+            panic!("exactly one receipt, got {}", seen.receipts.len());
+        };
+        assert_eq!(receipt.status, "failed");
+        assert_eq!(receipt.error_code, token);
+        assert!(!receipt.unknown_outcome);
+        assert!(
+            seen.results.is_empty(),
+            "a refused step writes no result row"
+        );
+    }
+
+    /// F-f02-17: a decision over another contract never reaches the model, and the step is refused with its token.
+    #[tokio::test]
+    async fn a_decision_over_another_contract_never_reaches_the_model() {
+        let harness = harness_with_context(contract_run(r#"{"v":1}"#)).await;
+        let other = format!("sha256:{}", "e".repeat(64));
+        let refused = harness
+            .service
+            .execute_scheduled_step_runtime(step(), Some(other.as_str()), true)
+            .await
+            .expect_err("a decision over another contract is refused");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            refused.message(),
+            scheduled_step_decision::REFUSAL_CONTRACT_MISMATCH
+        );
+        assert_refused_after_claim(&harness, scheduled_step_decision::REFUSAL_CONTRACT_MISMATCH);
+    }
+
+    /// F-f02-17: a run that holds a contract takes no decision that names none.
+    #[tokio::test]
+    async fn a_run_holding_a_contract_takes_no_decision_that_names_none() {
+        let harness = harness_with_context(contract_run(r#"{"v":1}"#)).await;
+        let refused = harness
+            .service
+            .execute_scheduled_step_runtime(step(), None, true)
+            .await
+            .expect_err("a decision naming no contract is refused");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            refused.message(),
+            scheduled_step_decision::REFUSAL_CONTRACT_REQUIRED
+        );
+        assert_refused_after_claim(&harness, scheduled_step_decision::REFUSAL_CONTRACT_REQUIRED);
+    }
+
+    /// F-f02-17: a decision that names a contract is refused for a run that holds none.
+    #[tokio::test]
+    async fn a_decision_naming_a_contract_is_refused_for_a_run_that_holds_none() {
+        let harness = harness_with_context(legacy_run()).await;
+        let named = format!("sha256:{}", "d".repeat(64));
+        let refused = harness
+            .service
+            .execute_scheduled_step_runtime(step(), Some(named.as_str()), true)
+            .await
+            .expect_err("a decision naming a contract is refused for a run without one");
+        assert_eq!(
+            refused.message(),
+            scheduled_step_decision::REFUSAL_CONTRACT_MISMATCH
+        );
+        assert_refused_after_claim(&harness, scheduled_step_decision::REFUSAL_CONTRACT_MISMATCH);
+    }
+
+    /// F-f02-17: a legacy step for a legacy run passes the binding with the switch on and reaches the model as it
+    /// did before. The fake inference answers Unimplemented, so the step ends `inference_failed` after the call.
+    #[tokio::test]
+    async fn a_legacy_step_for_a_legacy_run_passes_the_binding_with_the_switch_on() {
+        let harness = harness_with_context(legacy_run()).await;
+        let response = harness
+            .service
+            .execute_scheduled_step_runtime(step(), None, true)
+            .await
+            .expect("a legacy step is not refused by the binding")
+            .into_inner();
+        assert_eq!(response.error, "inference_failed");
+        assert_eq!(
+            harness.seen.lock().unwrap().inference_calls,
+            1,
+            "the legacy step reaches the model"
+        );
+    }
+
+    /// F-f02-17: with the switch off the decision is not bound to the run, so a decision over another contract is
+    /// not refused by the binding. The digest below does not match the text, so if the agent lane runs it refuses
+    /// the step at admission, before any work.
+    #[tokio::test]
+    async fn the_switch_off_does_not_bind_the_decision_to_the_run() {
+        let mut context = contract_run(r#"{"v":1}"#);
+        context.contract_digest = "sha256:none".to_owned();
+        let harness = harness_with_context(context).await;
+        let other = format!("sha256:{}", "e".repeat(64));
+        let refused_by_binding = match harness
+            .service
+            .execute_scheduled_step_runtime(step(), Some(other.as_str()), false)
+            .await
+        {
+            Ok(response) => {
+                let error = response.into_inner().error;
+                error == scheduled_step_decision::REFUSAL_CONTRACT_REQUIRED
+                    || error == scheduled_step_decision::REFUSAL_CONTRACT_MISMATCH
+            }
+            Err(status) => {
+                status.message() == scheduled_step_decision::REFUSAL_CONTRACT_REQUIRED
+                    || status.message() == scheduled_step_decision::REFUSAL_CONTRACT_MISMATCH
+            }
+        };
+        assert!(
+            !refused_by_binding,
+            "with the switch off the run's contract is not compared with the decision"
+        );
     }
 }

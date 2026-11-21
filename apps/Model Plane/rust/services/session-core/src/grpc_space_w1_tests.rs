@@ -150,6 +150,73 @@ pub(crate) fn live_stream_token(
     )
 }
 
+/// A read decision (`model.thread.read`, audience `model-plane`) valid now, for `org`, `user` and `space` at
+/// `ceiling`, signing `floor` when it is `Some` (WS04-S11). For the Space DB tests.
+pub(crate) fn live_thread_read_token(
+    org: &str,
+    user: &str,
+    space: &str,
+    ceiling: i64,
+    floor: Option<i64>,
+) -> String {
+    mint(
+        CONTROL_SPACE_DECISION_AUDIENCE,
+        &["thread:read"],
+        false,
+        |claims| {
+            claims["org_id"] = json!(org);
+            claims["subject_id"] = json!(user);
+            claims["space_ref"] = json!(space);
+            claims["recipient_audience_revision"] = json!(ceiling);
+            claims["issued_at"] = json!(Utc::now().to_rfc3339());
+            claims["expires_at"] = json!((Utc::now() + chrono::Duration::minutes(2)).to_rfc3339());
+            if let Some(floor) = floor {
+                claims["history_floor_revision"] = json!(floor);
+            }
+        },
+        false,
+    )
+}
+
+/// A run-control decision (`model.run.control`, the one permission `run:cancel`, operation `cancel`) valid
+/// now, bound to `run_id` and `idempotency_key`, for `org`, `user` and `space` at `ceiling`, signing `floor`
+/// when it is `Some`. Its digest is Control's own, so Session Core's verifier accepts it. For the Space DB tests.
+pub(crate) fn live_run_control_token(
+    org: &str,
+    user: &str,
+    space: &str,
+    run_id: &str,
+    idempotency_key: &str,
+    ceiling: i64,
+    floor: Option<i64>,
+) -> String {
+    let mut claims = read_claims(
+        CONTROL_SPACE_DECISION_AUDIENCE,
+        &[RUN_CONTROL_PERMISSION],
+        false,
+    );
+    claims["action_id"] = json!(CONTROL_RUN_CONTROL_ACTION);
+    claims["action_schema_hash"] = json!(CONTROL_RUN_CONTROL_SCHEMA);
+    claims["idempotency_key"] = json!(idempotency_key);
+    claims["org_id"] = json!(org);
+    claims["subject_id"] = json!(user);
+    claims["space_ref"] = json!(space);
+    claims["recipient_audience_revision"] = json!(ceiling);
+    claims["issued_at"] = json!(Utc::now().to_rfc3339());
+    claims["expires_at"] = json!((Utc::now() + chrono::Duration::minutes(2)).to_rfc3339());
+    if let Some(floor) = floor {
+        claims["history_floor_revision"] = json!(floor);
+    }
+    let parsed: ControlSpaceDecisionClaims =
+        serde_json::from_value(claims.clone()).expect("claims fixture");
+    claims["payload_digest"] = json!(run_control_payload_digest(
+        &parsed,
+        run_id,
+        RUN_CONTROL_OPERATION_CANCEL
+    ));
+    sign(&signing_key(), &claims)
+}
+
 fn stream_token() -> String {
     mint(
         CONTROL_SPACE_STREAM_AUDIENCE,
@@ -833,12 +900,13 @@ async fn zdr_refusal_record_run_output_is_durable_mutation_forbidden() {
 /// Serialises the tests that set `SESSION_CORE_SPACE_HISTORY_FLOOR`; clears the variable on drop.
 static HISTORY_FLOOR_ENV_LOCK: Mutex<()> = Mutex::new(());
 
-struct HistoryFloorEnv {
+/// Holds the history-floor switch at `value` for one test (pub(crate) for the Space DB tests); clears it on drop.
+pub(crate) struct HistoryFloorEnv {
     _guard: std::sync::MutexGuard<'static, ()>,
 }
 
 impl HistoryFloorEnv {
-    fn set(value: Option<&str>) -> Self {
+    pub(crate) fn set(value: Option<&str>) -> Self {
         let guard = HISTORY_FLOOR_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);

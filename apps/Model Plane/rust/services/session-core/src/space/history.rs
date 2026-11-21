@@ -226,14 +226,16 @@ const WAIVED_FLOOR_PARAM: &str = "$11";
 /// placeholder `floor` (`NULL` = none; WS04-S11).
 ///
 /// `m.space_id = $2` with the role list is the index's partial predicate; the Space equality is
-/// stated on the thread and the message, the ceiling on both. A message stamped before the floor
-/// is not a hit, and an unstamped one is, as in the conversation read. A message that has any
+/// stated on the thread and the message, the ceiling on both. A turn on an inactive branch (rewound
+/// or regenerated away, `on_active_path = false`) is not a hit, as in every history reader. A message
+/// stamped before the floor is not a hit, and an unstamped one is, as in the conversation read. A message that has any
 /// revision row is excluded (retain-mode originals of an edited or deleted message stay in
 /// `messages.content`, so they must never be found). Threads that hold a `zdr_waived` run are
 /// added by the page query and reported by [`WAIVED_EXISTS_SQL`].
 fn base_predicates(floor: &str) -> String {
     format!(
         "m.space_id = $2 AND m.space_id IS NOT NULL AND m.role IN ('user', 'assistant')
+      AND m.on_active_path
       AND {FTS_EXPR} @@ to_tsquery('simple', $5)
       AND t.org_id = $1 AND t.space_id = $2 AND t.archived_at IS NULL
       AND (CASE WHEN $4::BIGINT IS NULL
@@ -258,7 +260,8 @@ const WAIVED_RUN_SQL: &str =
 
 /// The page. Extra parameters: $11/$12 keyset position, $13 offset (relevance), $14 rows to
 /// read, $15/$16 snippet markers, $17 the history floor. `ts_headline` runs on the page only,
-/// after the limit.
+/// after the limit. `m.on_active_path` is stated in this text as well as in [`base_predicates`]:
+/// the guard in `message_tree.rs` reads statement text, not the composed SQL.
 fn search_sql(relevance: bool) -> String {
     let (score, order) = if relevance {
         (
@@ -277,6 +280,7 @@ fn search_sql(relevance: bool) -> String {
     FROM messages m
     JOIN threads t ON t.id = m.thread_id
     WHERE {base}
+      AND m.on_active_path
       AND NOT {WAIVED_RUN_SQL}
       AND ($11::TIMESTAMPTZ IS NULL OR (m.created_at, m.id) < ($11::TIMESTAMPTZ, $12::TEXT))
     ORDER BY {order}
@@ -303,14 +307,15 @@ fn waived_exists_sql() -> String {
     format!(
         "SELECT EXISTS (
     SELECT 1 FROM messages m JOIN threads t ON t.id = m.thread_id
-    WHERE {base} AND {WAIVED_RUN_SQL}
+    WHERE {base} AND m.on_active_path AND {WAIVED_RUN_SQL}
 )"
     )
 }
 
 /// Message address: the thread of one message under the same Space, org, ceiling, floor and owner
 /// predicates. A deleted message is not addressable; an edited one is; a message before the
-/// history floor is not addressable either (WS04-S11). Parameters: $1 org, $2 Space, $3 user,
+/// history floor is not addressable either (WS04-S11), and neither is a turn on an inactive branch
+/// (`m.on_active_path`, V3e-sws-1-rel1). Parameters: $1 org, $2 Space, $3 user,
 /// $4 ceiling (`NULL` = owner-only), $5 message id, $6 history floor (`NULL` = none).
 const RESOLVE_SQL: &str = "
 SELECT m.thread_id
@@ -319,6 +324,7 @@ JOIN threads t ON t.id = m.thread_id
 WHERE m.id = $5
   AND m.space_id = $2
   AND m.role IN ('user', 'assistant')
+  AND m.on_active_path
   AND t.org_id = $1
   AND t.space_id = $2
   AND (CASE WHEN $4::BIGINT IS NULL
@@ -718,6 +724,27 @@ mod tests {
         assert!(RESOLVE_SQL.contains("m.recipient_audience_revision >= $6::BIGINT"));
     }
 
+    /// V3e-sws-1-rel1: every history statement that reads `messages` states the active-path filter, the
+    /// shared predicates by way of `base_predicates` and each statement by its own text. No database.
+    #[test]
+    fn every_history_statement_reads_only_the_active_path() {
+        assert!(base_predicates(PAGE_FLOOR_PARAM).contains("AND m.on_active_path"));
+        for (name, sql) in [
+            ("the recent page", search_sql(false)),
+            ("the relevance page", search_sql(true)),
+            ("the waived-run probe", waived_exists_sql()),
+        ] {
+            assert!(
+                sql.contains("AND m.on_active_path"),
+                "{name} states the active-path filter: {sql}"
+            );
+        }
+        assert!(
+            RESOLVE_SQL.contains("AND m.on_active_path"),
+            "the message address states the active-path filter"
+        );
+    }
+
     /// The message ids one Space search returns, bound exactly as `search()` binds them.
     async fn search_ids(
         pool: &PgPool,
@@ -868,6 +895,50 @@ mod tests {
             resolve_thread(&pool, &org, &space, Some(5), zero, &before).await,
             Some(thread.clone()),
             "a zero claim addresses the earlier message"
+        );
+
+        clean_space(&pool, &org, &space).await;
+    }
+
+    /// V3e-sws-1-rel1 against Postgres: a turn rewound or regenerated away (`on_active_path = false`) is
+    /// neither a search hit nor a message address, and the turn still on the path is both.
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn space_history_search_and_resolve_skip_a_turn_off_the_active_path() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let suffix = new_ulid();
+        let org = format!("history-path-{suffix}");
+        let space = format!("space-history-path-{suffix}");
+        let thread = format!("{suffix}-thread");
+        seed_space_thread(&pool, &org, &space, &thread, "owner-a").await;
+        let on_path = format!("{suffix}-on");
+        let off_path = format!("{suffix}-off");
+        seed_space_message_at_revision(&pool, &space, &thread, &on_path, "budget on the path", 1)
+            .await;
+        seed_space_message_at_revision(&pool, &space, &thread, &off_path, "budget off the path", 1)
+            .await;
+        sqlx::query("UPDATE messages SET on_active_path = FALSE WHERE id = $1")
+            .bind(&off_path)
+            .execute(&pool)
+            .await
+            .expect("the turn leaves the active path");
+
+        assert_eq!(
+            search_ids(&pool, &org, &space, Some(5), None, "budget").await,
+            vec![on_path.clone()],
+            "a turn off the active path is not a hit"
+        );
+        assert_eq!(
+            resolve_thread(&pool, &org, &space, Some(5), None, &off_path).await,
+            None,
+            "a turn off the active path is not addressable"
+        );
+        assert_eq!(
+            resolve_thread(&pool, &org, &space, Some(5), None, &on_path).await,
+            Some(thread.clone()),
+            "the turn on the path is addressable"
         );
 
         clean_space(&pool, &org, &space).await;

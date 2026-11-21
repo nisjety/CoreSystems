@@ -555,23 +555,30 @@ fn existing_start_matches(
         && existing.mode == request.mode
 }
 
+/// The metadata thread of a ZDR managed start. It holds no content, and it takes the run's own receipt
+/// (`receipt`, the zero-retention class of a ZDR start) so that no persistent caller's append can land in
+/// a zero-retention run's thread (Z-17, thread half). `None` while `SESSION_THREAD_RECEIPT_ENFORCE` is off.
 async fn insert_zdr_thread(
     transaction: &mut Transaction<'_, Postgres>,
     org_id: &str,
     user_id: &str,
     now: DateTime<Utc>,
+    receipt: Option<&RunRetention>,
 ) -> Result<String, Status> {
     let thread_id = new_ulid();
     let session_key = format!("zdr-{}", new_ulid());
     sqlx::query(
-        "INSERT INTO threads (id, session_key, org_id, user_id, created_at)
-         VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO threads (id, session_key, org_id, user_id, created_at, retention_class, waiver_ack_id, waiver_connection_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(&thread_id)
     .bind(&session_key)
     .bind(org_id)
     .bind(user_id)
     .bind(now)
+    .bind(receipt.map(|receipt| receipt.class.as_str()))
+    .bind(receipt.and_then(RunRetention::ack_id))
+    .bind(receipt.and_then(RunRetention::connection_id))
     .execute(&mut **transaction)
     .await
     .map_err(database_error)?;
@@ -917,7 +924,18 @@ pub(crate) async fn start_managed_run_with_wake_inner(
         retention.inherit_from(Some(&parent))?
     };
     let thread_id = if persisted.create_metadata_thread {
-        insert_zdr_thread(&mut transaction, &request.org_id, &request.user_id, now).await?
+        // Z-17 (thread half): the metadata thread takes the run's receipt, stamped only while
+        // SESSION_THREAD_RECEIPT_ENFORCE is on.
+        let thread_receipt =
+            retention_receipt::thread_receipt_enforce_enabled().then(|| retention.clone());
+        insert_zdr_thread(
+            &mut transaction,
+            &request.org_id,
+            &request.user_id,
+            now,
+            thread_receipt.as_ref(),
+        )
+        .await?
     } else {
         persisted.thread_id.clone()
     };
@@ -1797,8 +1815,8 @@ pub(crate) async fn complete_direct_run_with_message_inner(
 
     // An empty answer completes the run without a message, as the two-call
     // path did (the Gateway skipped the append and still recorded Completed).
-    let (message_sequence, memory) = if request.content.trim().is_empty() {
-        (0, None)
+    let (message_sequence, answer_message_id, memory) = if request.content.trim().is_empty() {
+        (0, String::new(), None)
     } else {
         let appended = crate::grpc::append_message_in_tx(
             &mut transaction,
@@ -1813,7 +1831,7 @@ pub(crate) async fn complete_direct_run_with_message_inner(
             "",
         )
         .await?;
-        (appended.sequence, appended.memory)
+        (appended.sequence, appended.message_id, appended.memory)
     };
     let receipt = apply_managed_terminal_outcome(
         &mut transaction,
@@ -1843,6 +1861,24 @@ pub(crate) async fn complete_direct_run_with_message_inner(
         return Err(Status::internal(
             "direct completion receipt was not persisted",
         ));
+    }
+    // The model revisions this run appended before its answer existed name the answer now, in this
+    // transaction, so a rolled-back completion leaves no attribution behind. A run that saved no
+    // answer (message_sequence 0) names nothing, and its revisions keep NULL.
+    if message_sequence > 0 && crate::artifact_revisions::artifact_revisions_enabled() {
+        let org_id: String = sqlx::query_scalar("SELECT org_id FROM threads WHERE id = $1")
+            .bind(&request.thread_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(database_error)?;
+        crate::artifact_revisions::backfill_revision_source(
+            &mut transaction,
+            &org_id,
+            &request.thread_id,
+            &request.run_id,
+            &answer_message_id,
+        )
+        .await?;
     }
     transaction.commit().await.map_err(database_error)?;
     Ok(CommittedDirectCompletion {
@@ -2452,6 +2488,12 @@ pub(crate) async fn run_recovery_worker(pool: PgPool) -> anyhow::Result<()> {
             Err(error) => {
                 tracing::warn!(%error, "managed terminalization recovery deferred");
             }
+        }
+        // The crash-park notice (O-02) rides the same tick. It writes nothing while its switches are off.
+        match crate::loop_checkpoint::notify_waiting_crash_parks(&pool).await {
+            Ok(0) => {}
+            Ok(notified) => tracing::info!(notified, "crash-park notices written"),
+            Err(error) => tracing::warn!(%error, "crash-park notice deferred"),
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }

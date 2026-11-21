@@ -34,9 +34,11 @@ use mp_ids::new_ulid;
 use crate::auth::{
     authorize_operation, authorize_owner_row, authorize_run_action_authority_service,
     authorize_scheduled_step_authority_service, authorize_scheduled_step_service,
-    authorize_thread_owner_row, identity, OwnerIntent, VerifiedIdentity,
+    authorize_thread_owner_resolve, authorize_thread_owner_row, identity, OwnerIntent,
+    VerifiedIdentity,
 };
 use crate::orchestration_grpc::json_to_struct;
+use crate::space::audience_window::floor_gate_thread_sql;
 
 /// `space_membership_revoked` is true when the row has a non-null
 /// `space_id` AND that (space_id, user_id) pair has a row in
@@ -263,6 +265,33 @@ fn scheduled_metadata_string(metadata: &serde_json::Value, key: &str) -> Option<
         .map(ToOwned::to_owned)
 }
 
+/// The stored-consent contract a scheduled step is served (F-f03-04): the exact text, its digest and its
+/// expiry. A run with no stored text (a schedule without a contract, or a run bound before the text was kept)
+/// serves none of the three, and the step keeps the single-inference lane. A stored text is served whole only:
+/// it needs its digest and expiry, and it must hash to that digest. Anything else is stored data that no longer
+/// matches what was bound, so the read is refused as `scheduled_contract_corrupt`. That token is the whole
+/// message; neither the text nor any part of it reaches a status or a log.
+fn served_scheduled_contract(
+    text: Option<String>,
+    digest: Option<String>,
+    expires_at: Option<String>,
+) -> Result<Option<(String, String, String)>, Status> {
+    let Some(text) = text else {
+        return Ok(None);
+    };
+    let corrupt = || Status::data_loss("scheduled_contract_corrupt");
+    let (Some(digest), Some(expires_at)) = (digest, expires_at) else {
+        return Err(corrupt());
+    };
+    if text.is_empty()
+        || expires_at.is_empty()
+        || mp_contracts::scheduled_contract::digest(&text) != digest
+    {
+        return Err(corrupt());
+    }
+    Ok(Some((text, digest, expires_at)))
+}
+
 fn project_scheduled_step_authority(
     row: ScheduledStepAuthorityRow,
     req: &pb::ResolveScheduledStepAuthorityRequest,
@@ -299,6 +328,17 @@ fn project_scheduled_step_authority(
         return None;
     }
 
+    // The Control-signed contract digest and expiry travel with the step, never its text (F-f03-04). A run with
+    // neither has no contract. A run with only one of them does not hold a whole binding, so it is not resolved.
+    let (contract_digest, contract_expires_at) = match (
+        scheduled_metadata_string(&row.metadata, "contract_digest"),
+        scheduled_metadata_string(&row.metadata, "contract_expires_at"),
+    ) {
+        (None, None) => (String::new(), String::new()),
+        (Some(digest), Some(expires_at)) if valid_sha256_digest(&digest) => (digest, expires_at),
+        _ => return None,
+    };
+
     Some(pb::ResolveScheduledStepAuthorityResponse {
         resolved: true,
         run_id: row.run_id,
@@ -314,9 +354,8 @@ fn project_scheduled_step_authority(
         step_index: req.step_index,
         idempotency_key,
         run_status: row.run_status,
-        // The contract fields (WS20-S5) are not read from the run's metadata yet: empty means
-        // "no contract" to every consumer, which is today's behaviour.
-        ..Default::default()
+        contract_digest,
+        contract_expires_at,
     })
 }
 
@@ -420,6 +459,29 @@ const RUN_SELECT: &str = concat!("SELECT
      FROM runs r
      LEFT JOIN run_loop_checkpoints lc ON lc.run_id = r.id");
 
+/// The thread scope of ListRuns' Space branch: the `JOIN threads` and its `WHERE`, with the org, Space, ceiling
+/// and floor on `$5` to `$8`. `gated` is whether a `since_join` history floor applies (R-sws-01): the run's
+/// thread must then also hold a message the reader may see from the floor on, the gate the attach read applies
+/// (V3e-sws-2-rel1). Without a floor the text is the one the branch always had, byte for byte; the gate binds
+/// nothing new, since `$7` and `$8` are already bound.
+fn space_list_scope_sql(gated: bool) -> String {
+    let mut scope = String::from(
+        " JOIN threads t ON t.id = r.thread_id
+                     WHERE t.org_id = $5 AND t.space_id = $6
+                       AND (t.recipient_audience_revision IS NULL
+                            OR t.recipient_audience_revision <= $7)
+                       AND ($8::BIGINT IS NULL
+                            OR r.recipient_audience_revision IS NULL
+                            OR r.recipient_audience_revision >= $8)
+                       AND ($1 = '' OR r.thread_id = $1)",
+    );
+    if gated {
+        scope.push_str(" AND ");
+        scope.push_str(&floor_gate_thread_sql("t", "$7", "$8"));
+    }
+    scope
+}
+
 /// Whether a durable loop fold is in a state a continuation can claim: paused for
 /// an approval, parked, or `resuming` under a lease that has lapsed. It mirrors
 /// the claim gate in `loop_checkpoint::claim` and deliberately ignores the pause
@@ -484,6 +546,12 @@ fn row_to_detail(row: RunRow, store_enabled: bool, viewer: &VerifiedIdentity) ->
         String::new()
     };
 
+    // The stored contract text is an internal copy the scheduled step reads back (F-f03-04). It stays out of
+    // the run's metadata, so every run reads exactly as it did before the copy was kept.
+    let mut metadata = row.metadata;
+    if let Some(map) = metadata.as_object_mut() {
+        map.remove(crate::grpc::SCHEDULED_CONTRACT_TEXT_KEY);
+    }
     pb::RunDetail {
         run_id: row.id,
         thread_id: row.thread_id,
@@ -507,7 +575,7 @@ fn row_to_detail(row: RunRow, store_enabled: bool, viewer: &VerifiedIdentity) ->
             seconds: row.updated_at,
             nanos: 0,
         }),
-        metadata: json_to_struct(&row.metadata),
+        metadata: json_to_struct(&metadata),
         resumable,
         park_reason,
         owner_subject_id: String::new(),
@@ -758,8 +826,20 @@ impl RunService for RunServiceImpl {
             ));
         }
         caller.authorize_org(&req.org_id)?;
-        let row: Option<(String, String, String, String, String, String)> = sqlx::query_as(
-            "SELECT r.id, r.thread_id, r.org_id, r.goal, r.status, r.retention_class
+        let row: Option<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT r.id, r.thread_id, r.org_id, r.goal, r.status, r.retention_class,
+                    r.metadata->>'contract_text', r.metadata->>'contract_digest',
+                    r.metadata->>'contract_expires_at'
              FROM runs r
              JOIN threads t ON t.id = r.thread_id
              WHERE r.id = $1 AND r.thread_id = $2 AND r.org_id = $3
@@ -773,9 +853,25 @@ impl RunService for RunServiceImpl {
         .fetch_optional(&self.pool)
         .await
         .map_err(|error| Status::internal(error.to_string()))?;
-        let Some((run_id, thread_id, org_id, goal, status, retention_class)) = row else {
+        let Some((
+            run_id,
+            thread_id,
+            org_id,
+            goal,
+            status,
+            retention_class,
+            contract_text,
+            contract_digest,
+            contract_expires_at,
+        )) = row
+        else {
             return Err(Status::not_found("scheduled run context not found"));
         };
+        // A run with no stored text serves three empty fields, which keeps the step on the single-inference
+        // lane. A stored text is served whole, or the read is refused as data loss (served_scheduled_contract).
+        let (contract_json, contract_digest, contract_expires_at) =
+            served_scheduled_contract(contract_text, contract_digest, contract_expires_at)?
+                .unwrap_or_default();
         Ok(Response::new(pb::ScheduledStepContext {
             run_id,
             thread_id,
@@ -785,9 +881,9 @@ impl RunService for RunServiceImpl {
             // The run's real retention, so the lane can refuse a zero-retention or waived run.
             zdr: retention_class == "zdr",
             zdr_waived: retention_class == "zdr_waived",
-            // The contract body, digest and expiry (WS20-S5) are not served yet: empty means
-            // "no contract".
-            ..Default::default()
+            contract_json,
+            contract_digest,
+            contract_expires_at,
         }))
     }
 
@@ -970,21 +1066,14 @@ impl RunService for RunServiceImpl {
             // The Space branch joins `threads` rather than filtering runs by a
             // column of their own: a run has no audience snapshot, so the only
             // honest way to decide whether this reader may see it is to ask
-            // whether they may see the thread it belongs to.
+            // whether they may see the thread it belongs to. Under a `since_join`
+            // floor (R-sws-01) the thread must also hold a message from the floor
+            // on, and the run must be stamped from it: see `space_list_scope_sql`.
             let audience = crate::space::audience_window::audience_window(space_read);
             let audience_ceiling = audience.ceiling;
             let mut query = String::from(RUN_SELECT);
             if audience_ceiling.is_some() {
-                query.push_str(
-                    " JOIN threads t ON t.id = r.thread_id
-                     WHERE t.org_id = $5 AND t.space_id = $6
-                       AND (t.recipient_audience_revision IS NULL
-                            OR t.recipient_audience_revision <= $7)
-                       AND ($8::BIGINT IS NULL
-                            OR r.recipient_audience_revision IS NULL
-                            OR r.recipient_audience_revision >= $8)
-                       AND ($1 = '' OR r.thread_id = $1)",
-                );
+                query.push_str(&space_list_scope_sql(audience.floor.is_some()));
             } else {
                 query.push_str(" WHERE r.thread_id = $1");
             }
@@ -1137,7 +1226,7 @@ impl RunService for RunServiceImpl {
         let started = Instant::now();
         let result: Result<Response<pb::ResolveThreadOwnerResponse>, Status> = async {
             let caller = identity(&request)?;
-            authorize_operation(&caller, "session:read")?;
+            authorize_thread_owner_resolve(&caller)?;
             let req = request.into_inner();
             if req.thread_id.trim().is_empty()
                 || req.org_id.trim().is_empty()
@@ -1462,6 +1551,217 @@ mod tests {
         // A run with no fold is not resumable and names no park reason.
         assert!(!detail.resumable);
         assert_eq!(detail.park_reason, "");
+    }
+
+    /// The stored contract the served-contract tests use: one read tool, four rounds and an expiry far ahead.
+    const SERVED_CONTRACT: &str = r#"{"expires_at":"2099-01-01T00:00:00Z","max_rounds":4,"max_tokens_per_round":512,"tools":[{"approved_at":"2026-10-24T10:00:00Z","capability":"cap.tool.web_search","class":"read","tool":"web_search"}],"v":1}"#;
+
+    #[test]
+    fn a_stored_contract_is_served_whole_and_its_text_passes_the_checks_admit_makes() {
+        let digest = mp_contracts::scheduled_contract::digest(SERVED_CONTRACT);
+        let served = served_scheduled_contract(
+            Some(SERVED_CONTRACT.to_owned()),
+            Some(digest.clone()),
+            Some("2099-01-01T00:00:00Z".to_owned()),
+        )
+        .expect("a stored contract whose text matches its digest is served")
+        .expect("a stored text is served");
+        assert_eq!(served.0, SERVED_CONTRACT, "the exact text, byte for byte");
+        assert_eq!(served.1, digest);
+        assert_eq!(served.2, "2099-01-01T00:00:00Z");
+        // execution-core's admit() checks the digest over the exact text, the contract's own shape, and that
+        // the expiry the step names is the contract's expiry. admit() lives in execution-core, which session-core
+        // cannot call, so the same three checks run here on the shared mp-contracts functions it uses.
+        assert_eq!(
+            mp_contracts::scheduled_contract::digest(&served.0),
+            served.1
+        );
+        let contract = mp_contracts::scheduled_contract::ScheduledContract::parse(&served.0)
+            .expect("the served text is a contract this build admits");
+        assert_eq!(contract.expires_at, served.2);
+    }
+
+    #[test]
+    fn a_run_without_a_stored_text_serves_no_contract() {
+        // A schedule without a contract, and a run bound before the text was kept (a digest and an expiry, but no
+        // text), both serve no contract, so the step keeps the single-inference lane.
+        let expires = Some("2099-01-01T00:00:00Z".to_owned());
+        let digest = Some(mp_contracts::scheduled_contract::digest(SERVED_CONTRACT));
+        assert!(matches!(
+            served_scheduled_contract(None, None, None),
+            Ok(None)
+        ));
+        assert!(matches!(
+            served_scheduled_contract(None, digest, expires),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn a_stored_contract_that_no_longer_matches_its_bindings_is_refused_as_data_loss() {
+        let expires = Some("2099-01-01T00:00:00Z".to_owned());
+        let digest = Some(mp_contracts::scheduled_contract::digest(SERVED_CONTRACT));
+        let edited = SERVED_CONTRACT.replacen("web_search", "shell_x", 1);
+        let cases: [(&str, Option<String>, Option<String>, Option<String>); 5] = [
+            (
+                "an edited text",
+                Some(edited),
+                digest.clone(),
+                expires.clone(),
+            ),
+            (
+                "a text with no digest",
+                Some(SERVED_CONTRACT.to_owned()),
+                None,
+                expires.clone(),
+            ),
+            (
+                "a text with no expiry",
+                Some(SERVED_CONTRACT.to_owned()),
+                digest.clone(),
+                None,
+            ),
+            (
+                "a text under a digest that is not its hash",
+                Some(SERVED_CONTRACT.to_owned()),
+                Some("sha256:none".to_owned()),
+                expires.clone(),
+            ),
+            (
+                "an empty text",
+                Some(String::new()),
+                Some(mp_contracts::scheduled_contract::digest("")),
+                expires,
+            ),
+        ];
+        for (case, text, digest, expires) in cases {
+            let status = served_scheduled_contract(text, digest, expires).expect_err(case);
+            assert_eq!(status.code(), tonic::Code::DataLoss, "{case}");
+            assert_eq!(status.message(), "scheduled_contract_corrupt", "{case}");
+            // The status names the token only: no part of the stored text is in it.
+            assert!(
+                !status.message().contains("web_search") && !status.message().contains("shell_x"),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn scheduled_step_authority_carries_the_contract_digest_and_expiry_but_never_the_text() {
+        let digest = mp_contracts::scheduled_contract::digest(SERVED_CONTRACT);
+        let mut row = scheduled_step_row();
+        row.metadata["contract_digest"] = serde_json::json!(digest);
+        row.metadata["contract_expires_at"] = serde_json::json!("2099-01-01T00:00:00Z");
+        row.metadata["contract_text"] = serde_json::json!(SERVED_CONTRACT);
+        let response = project_scheduled_step_authority(row, &scheduled_step_request())
+            .expect("a scheduled step with a whole contract binding resolves");
+        assert_eq!(response.contract_digest, digest);
+        assert_eq!(response.contract_expires_at, "2099-01-01T00:00:00Z");
+        // The response has no field for the text, and its encoded bytes do not carry the text either.
+        let wire = prost::Message::encode_to_vec(&response);
+        assert!(!wire
+            .windows(SERVED_CONTRACT.len())
+            .any(|window| window == SERVED_CONTRACT.as_bytes()));
+    }
+
+    #[test]
+    fn scheduled_step_authority_without_a_contract_leaves_the_contract_fields_empty() {
+        let response =
+            project_scheduled_step_authority(scheduled_step_row(), &scheduled_step_request())
+                .expect("exact prepared metadata must resolve");
+        assert_eq!(response.contract_digest, "");
+        assert_eq!(response.contract_expires_at, "");
+    }
+
+    #[test]
+    fn scheduled_step_authority_with_half_a_contract_binding_is_not_resolved() {
+        let digest = mp_contracts::scheduled_contract::digest(SERVED_CONTRACT);
+        let mut only_digest = scheduled_step_row();
+        only_digest.metadata["contract_digest"] = serde_json::json!(digest);
+        assert!(project_scheduled_step_authority(only_digest, &scheduled_step_request()).is_none());
+
+        let mut only_expiry = scheduled_step_row();
+        only_expiry.metadata["contract_expires_at"] = serde_json::json!("2099-01-01T00:00:00Z");
+        assert!(project_scheduled_step_authority(only_expiry, &scheduled_step_request()).is_none());
+
+        let mut malformed = scheduled_step_row();
+        malformed.metadata["contract_digest"] = serde_json::json!("sha256:none");
+        malformed.metadata["contract_expires_at"] = serde_json::json!("2099-01-01T00:00:00Z");
+        assert!(project_scheduled_step_authority(malformed, &scheduled_step_request()).is_none());
+    }
+
+    #[test]
+    fn the_contract_text_never_reaches_a_log_line() {
+        // The text is served to the scheduled step only. A production log line that names the text or the
+        // fields that carry it would copy the owner's stored consent into logs.
+        let source = include_str!("run_service_grpc.rs").replace("\r\n", "\n");
+        let marker = "\n#[cfg(test)]\nmod tests {";
+        let production = &source[..source.find(marker).expect("tests marker")];
+        let log_macros = [
+            "tracing::",
+            "info!(",
+            "warn!(",
+            "error!(",
+            "debug!(",
+            "trace!(",
+        ];
+        for line in production.lines() {
+            if log_macros
+                .iter()
+                .any(|macro_name| line.contains(macro_name))
+            {
+                for field in [
+                    "contract_text",
+                    "contract_json",
+                    "contract_digest",
+                    "SERVED_CONTRACT",
+                ] {
+                    assert!(
+                        !line.contains(field),
+                        "a log line names the stored contract: {line}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn row_to_detail_leaves_the_stored_contract_text_out_of_the_run_metadata() {
+        let row = RunRow {
+            id: "run_03".to_owned(),
+            thread_id: "thr_03".to_owned(),
+            parent_run_id: None,
+            agent_id: "general-v1".to_owned(),
+            status: "queued".to_owned(),
+            mode: "ask".to_owned(),
+            goal: "g".to_owned(),
+            final_output: None,
+            error: None,
+            metadata: serde_json::json!({
+                "source": "scheduled_run",
+                "contract_digest": "sha256:none",
+                "contract_text": SERVED_CONTRACT,
+            }),
+            created_at: 1,
+            updated_at: 2,
+            steps_completed: 0,
+            checkpoint_index: 0,
+            retention_class: "persistent".to_owned(),
+            owner_user_id: "owner_1".to_owned(),
+            fold_state: None,
+            fold_kind: None,
+            fold_claim_expired: None,
+            fold_park_reason: None,
+            fold_pause_consumed: None,
+        };
+        let detail = row_to_detail(row, false, &owner_viewer());
+        let metadata = detail.metadata.expect("a run with metadata projects it");
+        assert!(metadata.fields.contains_key("source"));
+        assert!(metadata.fields.contains_key("contract_digest"));
+        assert!(
+            !metadata.fields.contains_key("contract_text"),
+            "the internal text never reaches a run read"
+        );
     }
 
     fn fold_row(
@@ -2854,6 +3154,118 @@ mod tests {
         assert_eq!(lookup.calls.load(Ordering::SeqCst), 1);
     }
 
+    /// sandbox-manager's principal holding only its narrow thread-ownership scope, as Auth Core mints it.
+    fn sandbox_manager_for_test(org_id: &str) -> VerifiedIdentity {
+        VerifiedIdentity::service_for_test_as(
+            org_id,
+            crate::auth::THREAD_OWNER_RESOLVE_SERVICE,
+            &[crate::auth::THREAD_OWNER_RESOLVE_SCOPE],
+            false,
+        )
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_sandbox_manager_resolves_with_its_own_scope() {
+        // sandbox-manager holds only the narrow scope, and asks about any user in its org.
+        let (service, lookup) = service_with_thread_owner_result(Ok(true));
+        let response = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-1", "org-a", "user-z"),
+                sandbox_manager_for_test("org-a"),
+            ))
+            .await
+            .expect("sandbox-manager's own scope resolves thread ownership")
+            .into_inner();
+        assert!(response.authorized);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_sandbox_manager_stays_bound_to_its_org() {
+        let (service, lookup) = service_with_thread_owner_result(Ok(true));
+        let error = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-1", "org-b", "user-z"),
+                sandbox_manager_for_test("org-a"),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_sandbox_manager_zdr_token_is_refused_before_db() {
+        let (service, lookup) = service_with_thread_owner_result(Ok(true));
+        let error = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-1", "org-a", "user-z"),
+                VerifiedIdentity::service_for_test_as(
+                    "org-a",
+                    crate::auth::THREAD_OWNER_RESOLVE_SERVICE,
+                    &[crate::auth::THREAD_OWNER_RESOLVE_SCOPE],
+                    true,
+                ),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_sandbox_manager_without_its_scope_is_refused_before_db() {
+        let (service, lookup) = service_with_thread_owner_result(Ok(true));
+        let error = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-1", "org-a", "user-z"),
+                VerifiedIdentity::service_for_test_as(
+                    "org-a",
+                    crate::auth::THREAD_OWNER_RESOLVE_SERVICE,
+                    &[],
+                    false,
+                ),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_narrow_scope_is_refused_for_any_other_service_before_db() {
+        let (service, lookup) = service_with_thread_owner_result(Ok(true));
+        let error = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-1", "org-a", "user-z"),
+                VerifiedIdentity::service_for_test_as(
+                    "org-a",
+                    "service:execution-core",
+                    &[crate::auth::THREAD_OWNER_RESOLVE_SCOPE],
+                    false,
+                ),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_sandbox_manager_scope_opens_no_other_run_read() {
+        // The narrow scope reaches this one RPC and no other: a run listing gates on session:read before it
+        // reads a row, so it still refuses sandbox-manager, and no database is touched.
+        let (service, _lookup) = service_with_thread_owner_result(Ok(true));
+        let error = service
+            .list_runs(identity_request(
+                pb::ListRunsRequest::default(),
+                sandbox_manager_for_test("org-a"),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+    }
+
     #[tokio::test]
     async fn resolve_thread_owner_rejects_empty_fields() {
         let (service, lookup) = service_with_thread_owner_result(Ok(true));
@@ -3268,5 +3680,139 @@ mod tests {
                 .execute(&pool)
                 .await;
         }
+    }
+
+    /// R-sws-01: with no floor the Space branch's thread scope is the text it always was. Under a floor it gains
+    /// the thread gate, which reads the placeholders the scope already binds ($7 the ceiling, $8 the floor), so the
+    /// statement binds the same parameters either way. Checked on the statement text, so no database is needed.
+    #[test]
+    fn list_runs_space_scope_keeps_its_text_without_a_floor_and_gates_the_thread_under_one() {
+        let legacy = " JOIN threads t ON t.id = r.thread_id\n                     WHERE t.org_id = $5 AND t.space_id = $6\n                       AND (t.recipient_audience_revision IS NULL\n                            OR t.recipient_audience_revision <= $7)\n                       AND ($8::BIGINT IS NULL\n                            OR r.recipient_audience_revision IS NULL\n                            OR r.recipient_audience_revision >= $8)\n                       AND ($1 = '' OR r.thread_id = $1)";
+        assert_eq!(
+            space_list_scope_sql(false),
+            legacy,
+            "no floor: the scope's text is unchanged"
+        );
+        assert_eq!(
+            space_list_scope_sql(true),
+            format!("{legacy} AND {}", floor_gate_thread_sql("t", "$7", "$8")),
+            "a floor appends the thread gate and nothing else"
+        );
+    }
+
+    /// The run ids a Space reader lists under a read decision signing `floor`, with the switch on or off.
+    async fn space_runs_listed_to(
+        service: &RunServiceImpl,
+        org: &str,
+        space: &str,
+        floor: Option<i64>,
+        switch_on: bool,
+    ) -> Vec<String> {
+        use crate::grpc::space_w1_tests::{live_thread_read_token, HistoryFloorEnv, DECISION_REF};
+        let _switch = HistoryFloorEnv::set(switch_on.then_some("true"));
+        let listed = service
+            .list_runs(identity_request(
+                pb::ListRunsRequest {
+                    space_id: space.to_owned(),
+                    space_read_decision_token: live_thread_read_token(
+                        org, "member-1", space, 5, floor,
+                    ),
+                    space_read_decision_ref: DECISION_REF.to_owned(),
+                    limit: 50,
+                    ..Default::default()
+                },
+                VerifiedIdentity::user_for_test(org, "member-1"),
+            ))
+            .await
+            .expect("a Space reader lists the runs of the Space")
+            .into_inner();
+        let mut ids: Vec<String> = listed.runs.into_iter().map(|run| run.run_id).collect();
+        ids.sort();
+        ids
+    }
+
+    /// R-sws-01 against Postgres: under a `since_join` floor a late joiner lists no run stamped before the join and
+    /// no run on a thread with nothing from the floor on, and lists the run stamped from the floor on, on a listed
+    /// thread. With the switch off the same signed floor is ignored and every run of the Space is listed.
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn a_late_joiner_lists_no_run_from_before_the_join_nor_one_on_an_unlisted_thread() {
+        use crate::grpc::space_w1_tests::StreamKeysEnv;
+        use crate::space::test_support::{
+            clean_space, connect, seed_space_message_at_revision, seed_space_run, seed_space_thread,
+        };
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let _keys = StreamKeysEnv::publish();
+        let suffix = new_ulid();
+        let org = format!("runs-floor-{suffix}");
+        let space = format!("space-runs-floor-{suffix}");
+        let listed = format!("{suffix}-listed");
+        let unlisted = format!("{suffix}-unlisted");
+        seed_space_thread(&pool, &org, &space, &listed, "owner-1").await;
+        seed_space_thread(&pool, &org, &space, &unlisted, "owner-1").await;
+        // The listed thread holds a turn before the join (revision 1) and one from revision 4 on; the unlisted
+        // thread holds only the earlier turn.
+        seed_space_message_at_revision(
+            &pool,
+            &space,
+            &listed,
+            &format!("{suffix}-l1"),
+            "before the join",
+            1,
+        )
+        .await;
+        seed_space_message_at_revision(
+            &pool,
+            &space,
+            &listed,
+            &format!("{suffix}-l2"),
+            "after the join",
+            4,
+        )
+        .await;
+        seed_space_message_at_revision(
+            &pool,
+            &space,
+            &unlisted,
+            &format!("{suffix}-u1"),
+            "before the join",
+            1,
+        )
+        .await;
+        let early = format!("{suffix}-run-early");
+        let late = format!("{suffix}-run-late");
+        let quiet = format!("{suffix}-run-quiet");
+        // `early` is stamped before the join on the listed thread; `late` is stamped from the join on, on it; and
+        // `quiet` is stamped from the join on, on the unlisted thread.
+        for (run, thread, stamp) in [
+            (&early, &listed, 2_i64),
+            (&late, &listed, 4),
+            (&quiet, &unlisted, 4),
+        ] {
+            seed_space_run(&pool, &org, &space, thread, run, "completed", "persistent").await;
+            sqlx::query("UPDATE runs SET recipient_audience_revision = $1 WHERE id = $2")
+                .bind(stamp)
+                .bind(run)
+                .execute(&pool)
+                .await
+                .expect("stamp the run");
+        }
+
+        let service = RunServiceImpl::new(pool.clone());
+        let mut every = vec![early.clone(), late.clone(), quiet.clone()];
+        every.sort();
+        assert_eq!(
+            space_runs_listed_to(&service, &org, &space, Some(3), true).await,
+            vec![late.clone()],
+            "under the floor only the run from the join on, on a listed thread, is listed"
+        );
+        assert_eq!(
+            space_runs_listed_to(&service, &org, &space, Some(3), false).await,
+            every,
+            "the switch off ignores the signed floor and every run of the Space is listed"
+        );
+        clean_space(&pool, &org, &space).await;
     }
 }

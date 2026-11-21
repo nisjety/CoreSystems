@@ -2094,6 +2094,31 @@ components:
           description: Where the approved action stands, derived from the delivery rows. Null until the approval is granted.
           allOf:
             - $ref: "#/components/schemas/ApprovalContinuation"
+        decision:
+          nullable: true
+          description: How a decided approval was decided. Null while it is pending, and on every approval while the decision record is off. Closed words and the rule id only, never the grant id, who decided or the reason.
+          allOf:
+            - $ref: "#/components/schemas/ApprovalDecision"
+
+    ApprovalDecision:
+      type: object
+      description: The content-free record of how an approval was decided. Closed words and the rule id only.
+      properties:
+        source:
+          type: string
+          enum: [user, posture_auto, standing_grant, timeout, system, unattributed]
+          description: Who recorded the decision. unattributed when the decision recorded no source.
+        scope:
+          type: string
+          enum: [once, thread, run]
+          description: How far the decision reaches.
+        rule_id:
+          type: string
+          nullable: true
+          description: Standing rule the pause named, when one did.
+        step_up_verified:
+          type: boolean
+          description: True only for a grant made with a fresh re-authentication.
 
     ApprovalContinuation:
       type: object

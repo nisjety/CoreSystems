@@ -36,6 +36,24 @@ describe('attention client', () => {
     })
   })
 
+  it('keeps a crash-parked reason (O-02) and drops a reason outside the closed set', async () => {
+    requestJsonMock.mockResolvedValue({
+      enabled: true,
+      items: [
+        { threadId: 'thread-4', state: 'needs_input', reason: 'parked', unseen: false, runId: 'run-4' },
+        { threadId: 'thread-5', state: 'needs_input', reason: 'paused-elsewhere', unseen: false },
+      ],
+      counts: { needsYou: 2, working: 0, unseen: 0 },
+    })
+
+    const snapshot = await getAttention()
+
+    expect(snapshot.items).toEqual([
+      { threadId: 'thread-4', state: 'needs_input', reason: 'parked', unseen: false, runId: 'run-4' },
+      { threadId: 'thread-5', state: 'needs_input', unseen: false },
+    ])
+  })
+
   it('drops a state outside the closed set and an item with no thread, and keeps the rest of the item', async () => {
     requestJsonMock.mockResolvedValue({
       enabled: true,

@@ -451,6 +451,22 @@ pub(crate) fn known_turn_origin(origin: &str) -> bool {
     sm::run_origin_for_turn_origin(origin).is_some()
 }
 
+/// The stored facts of a wake's trigger post, read through the revision fold (WS12-S4), so the text
+/// the digest is checked against is the post's effective text, and a deleted post is not a candidate
+/// at all. Control's digest binds the text as it stood at the decision: an edit made after the
+/// decision fails the digest check in [`check_wake_facts`], which fails closed.
+fn trigger_facts_sql() -> String {
+    format!(
+        "SELECT m.role, m.post_kind, m.author_subject_id, {content} AS content
+         FROM messages m
+         {join}
+         WHERE m.id = $1 AND m.thread_id = $2 AND {not_deleted}",
+        content = crate::space::revisions::FOLD_CONTENT_SQL,
+        join = crate::space::revisions::fold_join_sql("NULL::BIGINT"),
+        not_deleted = crate::space::revisions::FOLD_NOT_DELETED_SQL,
+    )
+}
+
 /// Checks the stored facts of a verified wake: the thread is the caller's own and lives in the
 /// decision's Space; the trigger is the caller's own `post` and its text hashes to the bound
 /// digest; the agent is an `expected` mention on it. The run slot guard runs in the start
@@ -482,15 +498,13 @@ pub(crate) async fn check_wake_facts(
             "Control wake decision targets another Space",
         ));
     }
-    let trigger: Option<(String, String, Option<String>, String)> = sqlx::query_as(
-        "SELECT role, post_kind, author_subject_id, content FROM messages
-         WHERE id = $1 AND thread_id = $2",
-    )
-    .bind(&wake.trigger_message_id)
-    .bind(thread_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| Status::internal(e.to_string()))?;
+    let trigger: Option<(String, String, Option<String>, String)> =
+        sqlx::query_as(&trigger_facts_sql())
+            .bind(&wake.trigger_message_id)
+            .bind(thread_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
     let Some((role, post_kind, author, content)) = trigger else {
         return Err(trigger_mismatch("wake trigger is not a message of this thread"));
     };
@@ -942,5 +956,33 @@ mod tests {
             edit(&mut wake);
             assert_ne!(reference, digest(&wake, "org-1", "user-1", "thread-1"), "field edit {index}");
         }
+    }
+
+    /// WS12-S4 on the wake's stored-fact check: the trigger's text is read through the revision fold,
+    /// and a deleted post is not a candidate. Checked on the statement text; the DB tier in
+    /// `grpc_space_mentions_tests` proves the rows (no database needed here).
+    #[test]
+    fn the_wake_trigger_is_read_through_the_revision_fold() {
+        let sql = trigger_facts_sql();
+        let fold = crate::space::revisions::fold_join_sql("NULL::BIGINT");
+        assert!(sql.contains(fold.as_str()), "the fold join");
+        let content = format!("{} AS content", crate::space::revisions::FOLD_CONTENT_SQL);
+        assert!(
+            sql.contains(content.as_str()),
+            "the effective text is the digest's input"
+        );
+        assert!(
+            sql.contains(crate::space::revisions::FOLD_NOT_DELETED_SQL),
+            "a deleted post"
+        );
+        let fold_at = sql.find("LEFT JOIN LATERAL").expect("the fold join");
+        let deleted_at = sql
+            .find(crate::space::revisions::FOLD_NOT_DELETED_SQL)
+            .expect("the deleted-post filter");
+        assert!(fold_at < deleted_at, "the filter reads the joined revision");
+        assert!(
+            sql.contains("WHERE m.id = $1 AND m.thread_id = $2"),
+            "the same two binds"
+        );
     }
 }

@@ -172,7 +172,8 @@ impl MessageRevisionGrpc {
 /// of one message of a Space thread the read decision reaches. Parameters: $1 message, $2 thread, $3
 /// org, $4 Space, $5 ceiling, $6 history floor (`NULL` = none). A message stamped before the floor is
 /// not found, as it is not in the floored history read, so the reader learns neither its role nor its
-/// revision state. A deleted message stays addressable: its state is the answer.
+/// revision state. A message on an inactive branch (rewound or regenerated away) is not found either
+/// (`m.on_active_path`, V3e-sws-1-rel1). A deleted message stays addressable: its state is the answer.
 fn resolve_target_sql() -> String {
     format!(
         "SELECT m.role, {state} AS revision_state
@@ -180,6 +181,7 @@ fn resolve_target_sql() -> String {
          JOIN threads t ON t.id = m.thread_id
          {join}
          WHERE m.id = $1 AND m.thread_id = $2 AND t.org_id = $3 AND t.space_id = $4
+           AND m.on_active_path
            AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $5)
            AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $5)
            AND ($6::BIGINT IS NULL OR m.recipient_audience_revision IS NULL
@@ -808,6 +810,13 @@ mod tests {
         assert!(sql.contains("COALESCE(rv.action, '') AS revision_state"));
     }
 
+    /// V3e-sws-1-rel1: the message address states the active-path filter in its own text, so a turn rewound
+    /// or regenerated away is not addressable under any floor.
+    #[test]
+    fn the_message_address_reads_only_the_active_path() {
+        assert!(resolve_target_sql().contains("AND m.on_active_path"));
+    }
+
     /// V3e-sws-2 against Postgres: a message stamped before a `since_join` floor is not found by the
     /// message address, and one from the floor on is found with its role and revision state. The switch
     /// off (no floor) finds both.
@@ -874,6 +883,48 @@ mod tests {
             Some(("user".to_owned(), String::new())),
             "the switch off addresses the earlier message too"
         );
+
+        clean_space(&pool, &org, &space).await;
+    }
+
+    /// V3e-sws-1-rel1 against Postgres: a message on an inactive branch (`on_active_path = false`) is not
+    /// found by the message address, with or without a history floor.
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn the_message_address_finds_no_turn_off_the_active_path() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let suffix = new_ulid();
+        let org = format!("resolve-path-{suffix}");
+        let space = format!("space-resolve-path-{suffix}");
+        let thread = format!("{suffix}-thread");
+        let rewound = format!("{suffix}-rewound");
+        seed_space_thread(&pool, &org, &space, &thread, "owner-a").await;
+        seed_space_message_at_revision(&pool, &space, &thread, &rewound, "a rewound turn", 1).await;
+        sqlx::query("UPDATE messages SET on_active_path = FALSE WHERE id = $1")
+            .bind(&rewound)
+            .execute(&pool)
+            .await
+            .expect("the turn leaves the active path");
+
+        let sql = resolve_target_sql();
+        for floor in [None, Some(1_i64)] {
+            let found: Option<(String, String)> = sqlx::query_as(&sql)
+                .bind(&rewound)
+                .bind(&thread)
+                .bind(&org)
+                .bind(&space)
+                .bind(5_i64)
+                .bind(floor)
+                .fetch_optional(&pool)
+                .await
+                .expect("the message address");
+            assert_eq!(
+                found, None,
+                "a turn off the active path is not addressable (floor {floor:?})"
+            );
+        }
 
         clean_space(&pool, &org, &space).await;
     }

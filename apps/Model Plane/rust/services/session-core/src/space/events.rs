@@ -389,6 +389,35 @@ pub(crate) fn gate(row: &GateRow<'_>, ctx: &GateContext<'_>) -> GateOutcome {
     }
 }
 
+/// Whether the history floor alone stubs this row (R-sws-06): a Space row of a persistent or waived run,
+/// stamped at or below the decision's ceiling and before its floor, that nothing else stubs. The ceiling
+/// and the retention checks are part of the answer and never skipped: a row above the ceiling closes the
+/// stream before any floor is judged, and a zero-retention or foreign-scope row keeps its stub.
+pub(crate) fn stubbed_by_floor_alone(row: &GateRow<'_>, ctx: &GateContext<'_>) -> bool {
+    let (Some(revision), Some(floor)) = (row.audience_revision, ctx.decision_floor) else {
+        return false;
+    };
+    row.scope == "space"
+        && matches!(row.retention_class, "persistent" | "zdr_waived")
+        && revision <= ctx.decision_ceiling
+        && revision < floor
+        && gate(row, ctx) == GateOutcome::Stub
+}
+
+/// Whether a thread-listing probe may lift this row's floor stub (R-sws-06). Only the three thread events
+/// are judged by the listing: each carries the thread's own INSERT-time revision, so a pre-join thread the
+/// floored timeline still lists would arrive stubbed. Every other kind keeps its stub.
+pub(crate) fn thread_listing_may_lift(
+    kind: &str,
+    row: &GateRow<'_>,
+    ctx: &GateContext<'_>,
+) -> bool {
+    matches!(
+        kind,
+        "thread.created" | "thread.updated" | "thread.archived"
+    ) && stubbed_by_floor_alone(row, ctx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,6 +518,77 @@ mod tests {
             gate(&space(Some(1), "persistent"), &c),
             GateOutcome::Deliver,
             "switch off"
+        );
+    }
+
+    /// R-sws-06: the listing probe may lift only a thread event that the history floor alone stubs. A message,
+    /// a row at or after the floor, a row above the ceiling, a zero-retention, foreign-scope or unstamped row, a
+    /// closed stream and a switch-off decision (no floor) keep their answer.
+    #[test]
+    fn a_thread_event_the_floor_alone_stubs_is_the_only_one_a_listing_may_lift() {
+        let mut c = ctx();
+        c.decision_floor = Some(3);
+        let space = |rev, ret| row("space", rev, ret);
+        for kind in ["thread.created", "thread.updated", "thread.archived"] {
+            assert!(
+                thread_listing_may_lift(kind, &space(Some(2), "persistent"), &c),
+                "{kind} before the floor"
+            );
+            assert!(
+                thread_listing_may_lift(kind, &space(Some(1), "zdr_waived"), &c),
+                "{kind} waived run"
+            );
+            assert!(
+                !thread_listing_may_lift(kind, &space(Some(3), "persistent"), &c),
+                "{kind} at the floor"
+            );
+            assert!(
+                !thread_listing_may_lift(kind, &space(Some(6), "persistent"), &c),
+                "{kind} above the ceiling"
+            );
+            assert!(
+                !thread_listing_may_lift(kind, &space(Some(2), "zdr"), &c),
+                "{kind} zero retention"
+            );
+            assert!(
+                !thread_listing_may_lift(kind, &space(None, "persistent"), &c),
+                "{kind} unstamped"
+            );
+            assert!(
+                !thread_listing_may_lift(kind, &row("reaction", Some(2), "persistent"), &c),
+                "{kind} foreign scope"
+            );
+        }
+        for kind in [
+            "message.appended",
+            "thread.deleted",
+            "run.state_changed",
+            "redacted",
+        ] {
+            assert!(
+                !thread_listing_may_lift(kind, &space(Some(2), "persistent"), &c),
+                "{kind} is not a thread listing event"
+            );
+        }
+        let foreign = GateRow {
+            org_id: "org-2",
+            ..row("space", Some(2), "persistent")
+        };
+        assert!(
+            !thread_listing_may_lift("thread.updated", &foreign, &c),
+            "another org closes the stream"
+        );
+        let mut late = ctx();
+        late.decision_floor = Some(3);
+        late.now = at(61);
+        assert!(
+            !thread_listing_may_lift("thread.updated", &space(Some(2), "persistent"), &late),
+            "an expired lease closes the stream"
+        );
+        c.decision_floor = None;
+        assert!(
+            !thread_listing_may_lift("thread.updated", &space(Some(2), "persistent"), &c),
+            "switch off: no floor, nothing is lifted"
         );
     }
 

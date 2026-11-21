@@ -9,8 +9,10 @@
 //! produced what it says.
 //!
 //! Refused: a Space thread (its audience is not the owner's to copy), a thread that holds a waived
-//! run (DEC-32: waived content is not copied into a new durable store), a point off the active
-//! path, and a path longer than [`MAX_FORK_TURNS`]. A zero-retention credential is refused by the
+//! run (DEC-32: waived content is not copied into a new durable store), a thread whose own receipt
+//! names zero retention or a waiver (Z-17, thread half, while `SESSION_THREAD_RECEIPT_ENFORCE` is
+//! on: its messages are that content with or without a run), a point off the active path, and a
+//! path longer than [`MAX_FORK_TURNS`]. A zero-retention credential is refused by the
 //! `session:write` gate, and a service credential is refused because a fork is the owner's own
 //! act. The copy is one transaction under the source's row lock, so an append cannot land between
 //! the read and the copy. The switch is [`ENABLED_ENV`], default off; while it is off the RPC
@@ -27,6 +29,7 @@ use tracing::info;
 
 use crate::auth::{authorize_operation, identity, VerifiedIdentity};
 use crate::grpc::record_metrics;
+use crate::retention_receipt::{thread_receipt_enforce_enabled, RunRetention};
 
 /// The environment switch for forking. Default off, read by the strict parser the other switches
 /// share, so only the literal `true` turns it on.
@@ -94,15 +97,21 @@ struct Fork<'a> {
     source: SourceThread,
     title: &'a str,
     now: DateTime<Utc>,
+    /// The new thread's retention receipt (Z-17), `None` while the switch is off.
+    receipt: Option<RunRetention>,
 }
 
 /// Copy the active path of one owned thread into a new thread. The switch and the session scope
-/// are the RPC's to check, so the copy itself can be tested without either.
+/// are the RPC's to check, so the copy itself can be tested without either. The new thread takes the
+/// caller's retention receipt, as `CreateThread` stamps one: a fork is the owner's own act, so the thread
+/// carries the owner's posture (Z-17, thread half). Stamped only while `SESSION_THREAD_RECEIPT_ENFORCE`
+/// is on; off, the columns stay NULL, which reads as persistent.
 pub(crate) async fn copy_thread(
     pool: &PgPool,
     caller: &VerifiedIdentity,
     req: pb::ForkThreadRequest,
 ) -> Result<pb::ForkThreadResponse, Status> {
+    let receipt = thread_receipt_enforce_enabled().then(|| RunRetention::from_caller(caller));
     let org_id = req.org_id.trim();
     let thread_id = req.thread_id.trim();
     let from_message_id = req.from_message_id.trim();
@@ -153,6 +162,7 @@ pub(crate) async fn copy_thread(
         source,
         title: req.title.trim(),
         now: Utc::now(),
+        receipt,
     };
     insert_fork_thread(&mut tx, &fork).await?;
     let copied = copy_turns(&mut tx, &fork.new_thread_id, thread_id, new_ids, source_ids).await?;
@@ -192,13 +202,27 @@ async fn lock_source(
     })
 }
 
-/// Whether the thread holds a run whose content was waived from retention (DEC-32).
+/// Whether the thread may not be copied. It holds a run whose content was waived from retention
+/// (DEC-32), or, while `SESSION_THREAD_RECEIPT_ENFORCE` is on, its own receipt names zero retention
+/// or a waiver (Z-17, thread half). Such a thread holds messages whether or not a run came from them,
+/// so the run half alone would let its owner's persistent credential copy them into a persistent
+/// thread. With the switch off no receipt is stamped or read, and the answer is the run half alone.
 async fn thread_is_waived(
     tx: &mut Transaction<'_, Postgres>,
     thread_id: &str,
 ) -> Result<bool, Status> {
-    sqlx::query_scalar(
+    let waived_run: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM runs WHERE thread_id = $1 AND retention_class = 'zdr_waived')",
+    )
+    .bind(thread_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(internal)?;
+    if waived_run || !thread_receipt_enforce_enabled() {
+        return Ok(waived_run);
+    }
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM threads WHERE id = $1 AND retention_class IN ('zdr', 'zdr_waived'))",
     )
     .bind(thread_id)
     .fetch_one(&mut **tx)
@@ -269,8 +293,9 @@ async fn insert_fork_thread(
     sqlx::query(
         "INSERT INTO threads
          (id, session_key, org_id, user_id, created_at, origin, source_scope, persona_enabled, memory_mode,
-          presentation_title, forked_from_thread_id, forked_from_message_id)
-         VALUES ($1, $2, $3, $4, $5, 'chat', $6, $7, $8, NULLIF($9, ''), $10, $11)",
+          presentation_title, forked_from_thread_id, forked_from_message_id,
+          retention_class, waiver_ack_id, waiver_connection_id)
+         VALUES ($1, $2, $3, $4, $5, 'chat', $6, $7, $8, NULLIF($9, ''), $10, $11, $12, $13, $14)",
     )
     .bind(&fork.new_thread_id)
     .bind(format!("fork:{}", fork.new_thread_id))
@@ -283,6 +308,9 @@ async fn insert_fork_thread(
     .bind(fork.title)
     .bind(fork.source_thread_id)
     .bind(fork.from_message_id)
+    .bind(fork.receipt.as_ref().map(|receipt| receipt.class.as_str()))
+    .bind(fork.receipt.as_ref().and_then(RunRetention::ack_id))
+    .bind(fork.receipt.as_ref().and_then(RunRetention::connection_id))
     .execute(&mut **tx)
     .await
     .map_err(internal)?;
@@ -465,6 +493,27 @@ mod tests {
         }
     }
 
+    /// A thread created with `receipt` the way `CreateThread` stamps it, and one answer on it. It holds
+    /// no run, so only the thread's own receipt can refuse a fork of it.
+    async fn stamped_thread(pool: &PgPool, receipt: &RunRetention) -> (String, String) {
+        let thread = crate::grpc::create_thread_inner_preverified_with_receipt(
+            pool,
+            pb::CreateThreadRequest {
+                session_key: format!("stamped-{}", new_ulid()),
+                org_id: ORG.to_owned(),
+                user_id: OWNER.to_owned(),
+                ..Default::default()
+            },
+            Some(receipt),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .thread_id;
+        let answer = append(pool, &thread, "assistant", "answer").await;
+        (thread, answer)
+    }
+
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
     async fn fork_copies_active_path_up_to_message() {
@@ -631,6 +680,55 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(zdr.code(), tonic::Code::FailedPrecondition);
+    }
+
+    /// Z-17, thread half: a thread stamped with a zero-retention or waived receipt at `CreateThread` is not
+    /// forkable while `SESSION_THREAD_RECEIPT_ENFORCE` is on, though it holds no waived run. A persistent
+    /// thread still forks. With the switch off the receipt is not read, so the waived thread forks as it
+    /// did before. The switch is set for this test only, and a guard clears it even when an assertion fails.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn fork_refuses_a_thread_stamped_zdr_or_waived_while_the_receipt_is_enforced() {
+        use crate::retention_receipt::THREAD_RECEIPT_ENFORCE_ENV;
+
+        /// Clears the switch when it leaves scope, so a failing assertion cannot leave it on.
+        struct SwitchOn;
+        impl Drop for SwitchOn {
+            fn drop(&mut self) {
+                std::env::remove_var(THREAD_RECEIPT_ENFORCE_ENV);
+            }
+        }
+
+        let pool = connect().await;
+        let owner = VerifiedIdentity::user_for_test(ORG, OWNER);
+        let waived = RunRetention::waived("ack-fork", "conn-fork");
+
+        std::env::set_var(THREAD_RECEIPT_ENFORCE_ENV, "true");
+        let switch = SwitchOn;
+        let (zdr_thread, zdr_answer) = stamped_thread(&pool, &RunRetention::zdr()).await;
+        let (waived_thread, waived_answer) = stamped_thread(&pool, &waived).await;
+        let (persistent_thread, persistent_answer) =
+            stamped_thread(&pool, &RunRetention::persistent()).await;
+
+        for (thread, answer) in [(&zdr_thread, &zdr_answer), (&waived_thread, &waived_answer)] {
+            let refused = copy_thread(&pool, &owner, fork_request(thread, answer))
+                .await
+                .unwrap_err();
+            assert_eq!(refused.message(), "fork_source_not_forkable", "{thread}");
+        }
+        copy_thread(
+            &pool,
+            &owner,
+            fork_request(&persistent_thread, &persistent_answer),
+        )
+        .await
+        .expect("a persistent thread still forks while the receipt is enforced");
+
+        // The switch off: the receipt is neither stamped nor read, so the same waived thread forks as before.
+        drop(switch);
+        copy_thread(&pool, &owner, fork_request(&waived_thread, &waived_answer))
+            .await
+            .expect("with the switch off the thread receipt is not read");
     }
 
     #[tokio::test]

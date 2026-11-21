@@ -8,11 +8,15 @@
 
 use super::*;
 use crate::auth::VerifiedIdentity;
-use crate::grpc::space_w1_tests::{live_stream_token, StreamKeysEnv, DECISION_REF};
+use crate::grpc::space_w1_tests::{
+    live_stream_token, HistoryFloorEnv, StreamKeysEnv, DECISION_REF,
+};
 use crate::space::test_support::{
-    clean_space, connect, seed_space_message, seed_space_thread, set_event_log,
+    clean_space, connect, seed_space_message, seed_space_message_at_revision, seed_space_thread,
+    set_event_log,
 };
 use futures::StreamExt as _;
+use serde_json::json;
 
 const NEEDS_DB: &str = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)";
 const MEMBER: &str = "member-1";
@@ -277,6 +281,128 @@ async fn stream_thread_deleted_replay_reads_redacted() {
             "event:thread.deleted:3"
         ]
     );
+    drop(stream);
+    clean_space(&pool, &org, &space).await;
+}
+
+/// Opens a `since_join` reader's stream at `ceiling` from the start of the log: the decision signs `floor`,
+/// and the switch is the literal true while it verifies.
+async fn open_since_join(
+    pool: &PgPool,
+    org: &str,
+    space: &str,
+    ceiling: i64,
+    floor: i64,
+) -> Frames {
+    let _switch = HistoryFloorEnv::set(Some("true"));
+    let service = SpaceEventsGrpc::new(pool.clone(), SpaceWakes::new());
+    let mut request = Request::new(pb::StreamSpaceEventsRequest {
+        org_id: org.to_owned(),
+        user_id: MEMBER.to_owned(),
+        space_id: space.to_owned(),
+        decision_ref: DECISION_REF.to_owned(),
+        decision_token: live_stream_token(org, MEMBER, space, ceiling, false, |claims| {
+            claims["history_floor_revision"] = json!(floor);
+        }),
+        resume: true,
+        generation: 1,
+        after_seq: 0,
+    });
+    request
+        .extensions_mut()
+        .insert(VerifiedIdentity::user_for_test(org, MEMBER));
+    service
+        .stream_space_events(request)
+        .await
+        .expect("the stream opens")
+        .into_inner()
+}
+
+/// R-sws-06 against Postgres: a `since_join` reader gets a thread event (`thread.created`, `thread.updated`) of a
+/// pre-join thread that the floored timeline lists to it, and a stub for the one it does not list. Both threads'
+/// own revisions are stamped before the floor, so only the listing decides. Message bodies never reach the wire.
+#[tokio::test]
+#[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+async fn since_join_reader_gets_a_listed_pre_join_threads_events_and_stubs_the_rest() {
+    let Some(pool) = connect().await else { return };
+    set_event_log(&pool, true).await;
+    let (org, space) = ids("listing");
+    let _keys = StreamKeysEnv::publish();
+    let listed = format!("listed-{space}");
+    let unlisted = format!("unlisted-{space}");
+    // Seq 1 and 2: both threads are created at revision 1, before the join at 3.
+    seed_space_thread(&pool, &org, &space, &listed, "owner-1").await;
+    seed_space_thread(&pool, &org, &space, &unlisted, "owner-1").await;
+    // Seq 3 to 5: the listed thread has a turn before the join and one from revision 4 on; the unlisted
+    // thread has only a turn before the join.
+    seed_space_message_at_revision(
+        &pool,
+        &space,
+        &listed,
+        &format!("early-{space}"),
+        "before the join",
+        1,
+    )
+    .await;
+    seed_space_message_at_revision(
+        &pool,
+        &space,
+        &listed,
+        &format!("late-{space}"),
+        "after the join",
+        4,
+    )
+    .await;
+    seed_space_message_at_revision(
+        &pool,
+        &space,
+        &unlisted,
+        &format!("only-{space}"),
+        "before the join",
+        1,
+    )
+    .await;
+    // Seq 6 and 7: each thread is renamed, and its event is stamped with the thread's own revision 1.
+    for thread in [&listed, &unlisted] {
+        sqlx::query("UPDATE threads SET presentation_title = 'renamed' WHERE id = $1")
+            .bind(thread)
+            .execute(&pool)
+            .await
+            .expect("rename the thread");
+    }
+
+    let mut stream = open_since_join(&pool, &org, &space, 5, 3).await;
+    let connected = next_non_heartbeat(&mut stream).await;
+    assert!(
+        matches!(connected.frame, Some(Frame::Connected(_))),
+        "connected first, {NEEDS_DB}"
+    );
+    let mut words = Vec::new();
+    let mut renamed = None;
+    for _ in 0..7 {
+        let frame = next_non_heartbeat(&mut stream).await;
+        words.push(word(&frame));
+        if let Some(Frame::Event(record)) = &frame.frame {
+            if record.kind == "thread.updated" && record.thread_id == listed {
+                renamed = Some(record.clone());
+            }
+        }
+    }
+    assert_eq!(
+        words,
+        [
+            "event:thread.created:1",
+            "event:hidden:2",
+            "event:hidden:3",
+            "event:message.appended:4",
+            "event:hidden:5",
+            "event:thread.updated:6",
+            "event:hidden:7",
+        ],
+        "the listed thread's events arrive, the unlisted thread's stay stubs"
+    );
+    let renamed = renamed.expect("the listed thread's rename is delivered");
+    assert_eq!(renamed.fields, ["title"]);
     drop(stream);
     clean_space(&pool, &org, &space).await;
 }

@@ -11,8 +11,9 @@ use mp_contracts::model_plane::v1::{
     attention_service_server::AttentionService, session_core_server::SessionCore,
     stream_attention_response::Frame as StreamFrame, AttentionCounts, AttentionHeartbeat,
     AttentionItem, AttentionResync, AttentionSnapshot, AttentionState, AttentionThreadChanged,
-    ListAttentionRequest, ListAttentionResponse, MarkThreadSeenRequest, MarkThreadSeenResponse,
-    StreamAttentionRequest, StreamAttentionResponse, UpdateThreadPresentationRequest,
+    ConfirmAttentionWaitingRequest, ConfirmAttentionWaitingResponse, ListAttentionRequest,
+    ListAttentionResponse, MarkThreadSeenRequest, MarkThreadSeenResponse, StreamAttentionRequest,
+    StreamAttentionResponse, UpdateThreadPresentationRequest,
 };
 use mp_contracts::zdr_refusal::Refusal;
 use sqlx::PgPool;
@@ -22,8 +23,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::attention;
+use crate::attention_events::{self, ConfirmQuery};
 use crate::attention_hub::{self, Body, Change, Keyed, Listing, Sequencer, StreamPermit, STREAMS};
-use crate::auth::{authorize_operation, identity};
+use crate::auth::{authorize_operation, identity, VerifiedIdentity};
 use crate::grpc::{record_metrics, SessionService};
 use crate::retention_receipt::RunRetention;
 
@@ -165,12 +167,110 @@ impl AttentionService for SessionService {
         record_metrics("stream_attention", started, result.is_ok());
         result
     }
+
+    /// Whether one waiting item still waits on its owner (F-f05-03). A service asks it before it announces the
+    /// item. Only the two answers leave: the RPC writes nothing and names no content.
+    async fn confirm_attention_waiting(
+        &self,
+        request: Request<ConfirmAttentionWaitingRequest>,
+    ) -> Result<Response<ConfirmAttentionWaitingResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<ConfirmAttentionWaitingResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:read")?;
+            let req = request.into_inner();
+            let state = confirm_admission(&caller, &req)?;
+            if !attention::enabled() {
+                metrics::counter!("mp_session_attention_confirm_total", "outcome" => "disabled")
+                    .increment(1);
+                return Ok(Response::new(switched_off()));
+            }
+            let query = ConfirmQuery {
+                org_id: caller.org_id(),
+                user_id: &req.user_id,
+                thread_id: &req.thread_id,
+                run_id: &req.run_id,
+                source_id: &req.source_id,
+                state,
+            };
+            let waiting = attention_events::still_waiting(&self.pool, &query)
+                .await
+                .map_err(|_| {
+                    // The read error names no row and no text. An answer is never guessed, so the caller retries.
+                    tracing::warn!(
+                        run_id = %req.run_id,
+                        thread_id = %req.thread_id,
+                        "attention waiting confirmation failed"
+                    );
+                    Status::internal("attention waiting confirmation failed")
+                })?;
+            let outcome = if waiting { "waiting" } else { "not_waiting" };
+            metrics::counter!("mp_session_attention_confirm_total", "outcome" => outcome)
+                .increment(1);
+            Ok(Response::new(ConfirmAttentionWaitingResponse {
+                enabled: true,
+                waiting,
+            }))
+        }
+        .await;
+        record_metrics("confirm_attention_waiting", started, result.is_ok());
+        result
+    }
 }
 
 impl Keyed for AttentionItem {
     fn key(&self) -> &str {
         &self.thread_id
     }
+}
+
+/// The answer of a confirm while the attention switch is off: no item is known to wait.
+fn switched_off() -> ConfirmAttentionWaitingResponse {
+    ConfirmAttentionWaitingResponse {
+        enabled: false,
+        waiting: false,
+    }
+}
+
+/// The admission of a confirm (F-f05-03): the request names every identifier and a state that can be announced,
+/// the org is the caller's, and the caller is a service. A person reads their own items through `ListAttention`,
+/// so a user is refused here whatever their org. Returns the state the item was announced in. Pure, so each
+/// refusal is tested without a database.
+#[allow(clippy::result_large_err)]
+fn confirm_admission(
+    caller: &VerifiedIdentity,
+    req: &ConfirmAttentionWaitingRequest,
+) -> Result<AttentionState, Status> {
+    let state = match AttentionState::try_from(req.state) {
+        Ok(AttentionState::Unspecified) => {
+            return Err(Status::invalid_argument("state is required"));
+        }
+        Ok(state) => state,
+        Err(_) => {
+            return Err(Status::invalid_argument(
+                "state is not a known attention state",
+            ));
+        }
+    };
+    let named = [
+        &req.org_id,
+        &req.user_id,
+        &req.thread_id,
+        &req.run_id,
+        &req.source_id,
+    ];
+    if named.iter().any(|value| value.trim().is_empty()) {
+        return Err(Status::invalid_argument(
+            "org_id, user_id, thread_id, run_id and source_id are required",
+        ));
+    }
+    caller.authorize_org(&req.org_id)?;
+    if !caller.is_service() {
+        return Err(Status::permission_denied(
+            "only a service may confirm an attention item",
+        ));
+    }
+    Ok(state)
 }
 
 /// Whether the attention stream is served on this replica.
@@ -329,5 +429,90 @@ mod tests {
         };
         assert_eq!(snapshot.items[0].thread_id, "thread-2");
         assert_eq!(snapshot.counts, Some(counts));
+    }
+
+    fn confirm_request() -> ConfirmAttentionWaitingRequest {
+        ConfirmAttentionWaitingRequest {
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            source_id: "apr-1".to_owned(),
+            state: AttentionState::NeedsApproval as i32,
+        }
+    }
+
+    #[test]
+    fn a_service_with_session_read_confirms_an_item_of_its_own_org() {
+        let caller = VerifiedIdentity::service_for_test("org-1", &["session:read"], false);
+        assert_eq!(
+            confirm_admission(&caller, &confirm_request()).ok(),
+            Some(AttentionState::NeedsApproval)
+        );
+    }
+
+    #[test]
+    fn a_user_is_refused_because_only_a_service_may_confirm() {
+        let caller = VerifiedIdentity::user_for_test("org-1", "user-1");
+        let status = confirm_admission(&caller, &confirm_request())
+            .expect_err("a person reads through ListAttention");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[test]
+    fn another_org_is_refused_even_for_a_service() {
+        let caller = VerifiedIdentity::service_for_test("org-2", &["session:read"], false);
+        let status = confirm_admission(&caller, &confirm_request())
+            .expect_err("the org must be the caller's");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[test]
+    fn every_identifier_is_required_and_a_blank_one_is_invalid() {
+        let caller = VerifiedIdentity::service_for_test("org-1", &["session:read"], false);
+        let blank: [fn(&mut ConfirmAttentionWaitingRequest); 5] = [
+            |req: &mut ConfirmAttentionWaitingRequest| req.org_id = " ".to_owned(),
+            |req: &mut ConfirmAttentionWaitingRequest| req.user_id = String::new(),
+            |req: &mut ConfirmAttentionWaitingRequest| req.thread_id = String::new(),
+            |req: &mut ConfirmAttentionWaitingRequest| req.run_id = String::new(),
+            |req: &mut ConfirmAttentionWaitingRequest| req.source_id = "\t".to_owned(),
+        ];
+        for clear in blank {
+            let mut req = confirm_request();
+            clear(&mut req);
+            let status = confirm_admission(&caller, &req).expect_err("a blank id is refused");
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        }
+    }
+
+    #[test]
+    fn the_state_must_be_one_the_contract_names() {
+        let caller = VerifiedIdentity::service_for_test("org-1", &["session:read"], false);
+        let mut req = confirm_request();
+        req.state = AttentionState::Unspecified as i32;
+        let status = confirm_admission(&caller, &req).expect_err("a state is required");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        req.state = 99;
+        let status = confirm_admission(&caller, &req).expect_err("an unknown state is refused");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        for state in [
+            AttentionState::NeedsInput,
+            AttentionState::PlanReady,
+            AttentionState::Completed,
+        ] {
+            req.state = state as i32;
+            assert!(confirm_admission(&caller, &req).is_ok(), "{state:?}");
+        }
+    }
+
+    #[test]
+    fn the_switched_off_answer_says_enabled_false_and_waiting_false() {
+        assert_eq!(
+            switched_off(),
+            ConfirmAttentionWaitingResponse {
+                enabled: false,
+                waiting: false,
+            }
+        );
     }
 }

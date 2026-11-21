@@ -208,6 +208,34 @@ message SettleGoalTurnRequest {
   string usage_source = 11;
 }
 
+// F-f09-11. Debit the metered usage of one later segment of a goal turn's run: a run that paused
+// (approval, question, park) is settled with its first segment's usage, and each /continue segment
+// after it spends more. Called with the owner's session bearer, never by a service. The run must
+// belong to a goal's already settled turn (`not_found` `thread_goal_turn_not_found` for a run in no
+// goal, `failed_precondition` `thread_goal_turn_unsettled` before the first settle). Idempotent per
+// (goal, turn, segment_key): a segment already debited answers the goal as it stands. It adds the
+// tokens and the cost to the goal, never a turn, and applies the same stop rules as a settle. Off
+// unless SESSION_CORE_THREAD_GOALS_ENABLED is the literal `true`. Ids and counts only.
+message TopUpGoalTurnRequest {
+  // The org the run belongs to; must match the caller's org.
+  string org_id = 1;
+  // The run whose continuation segment spent the usage; it names the goal and the turn.
+  string run_id = 2;
+  // Opaque id of the continuation dispatch (the request id), at most 128 characters. Never
+  // content: it only makes the debit idempotent.
+  string segment_key = 3;
+  // Input tokens of the segment's metered calls (a subscription call counts none).
+  uint64 metered_input_tokens = 4;
+  // Output tokens of the segment's metered calls.
+  uint64 metered_output_tokens = 5;
+  // The segment's spend in micro-USD, or any negative value when it could not be priced (adds
+  // no cost). Bounded as SettleGoalTurnRequest.cost_usd_micros is.
+  int64 cost_usd_micros = 6;
+  // A closed token naming how the spend was priced ("metered", "subscription"); empty when
+  // unknown.
+  string cost_basis = 7;
+}
+
 // EP-7 S3. Record the completion judge's verdict on a settled goal turn. Called only by the
 // goal-judge principal (service:model-gateway-goal-judge) holding session:goal-verdict:write; a
 // person or any other caller is refused. A thread that holds a zero-retention or waived run is
@@ -335,6 +363,11 @@ service ThreadGoalService {
   // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
   // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
   rpc SettleGoalTurn(SettleGoalTurnRequest) returns (ThreadGoalResponse);
+  // F-f09-11. Debit one continuation segment's usage on a settled turn, idempotent per segment.
+  // Response type is shared by several goal RPCs; renaming it would break generated code.
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  rpc TopUpGoalTurn(TopUpGoalTurnRequest) returns (ThreadGoalResponse);
   // EP-7 S3. Record the completion judge's verdict on a settled turn (goal-judge principal only,
   // session:goal-verdict:write; refuses a thread holding a zero-retention or waived run).
   // Response type is shared by several goal RPCs; renaming it would break generated code.

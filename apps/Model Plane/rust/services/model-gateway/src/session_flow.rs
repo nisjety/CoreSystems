@@ -1055,6 +1055,9 @@ pub(crate) async fn prepare_idempotent_browser_run(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VersionMove {
     pub goal: Option<String>,
+    /// The leaf the thread held before the move. A managed start that fails after the move puts the thread back on it
+    /// (see `restore_version_move`).
+    pub previous_leaf_message_id: String,
 }
 
 /// The typed refusal of a branch move the thread cannot make: a turn that is not on the active path, is of
@@ -1076,6 +1079,9 @@ pub struct VersionPlan {
     pub subscription_connection_id: String,
     parent_message_id: String,
     expected_leaf_message_id: String,
+    /// True for an edit of the thread's first turn (WS17 S9): the move is to the thread root, which names no turn, and
+    /// the edit starts a new first turn beside the old ones. Never true for a regenerate.
+    pub root_edit: bool,
 }
 
 /// Reads the thread for a regenerate or an edit (WS17 S9) and answers what the move would do,
@@ -1095,6 +1101,18 @@ pub async fn plan_version_move(
     turn: &crate::normalize::VersionTurn,
     bearer: &VerifiedSessionBearer,
 ) -> Result<VersionPlan, tonic::Status> {
+    let turns = read_version_turns(state, org_id, thread_id, bearer).await?;
+    plan_from_turns(&turns, turn)
+}
+
+/// The thread's turns with the branches the leaf is not on, read once for a regenerate, an edit or a restore (see
+/// [`plan_version_move`] and [`restore_version_move`]).
+async fn read_version_turns(
+    state: &AppState,
+    org_id: &str,
+    thread_id: &str,
+    bearer: &VerifiedSessionBearer,
+) -> Result<Vec<mp_contracts::model_plane::v1::SessionMessage>, tonic::Status> {
     use mp_contracts::model_plane::v1::ListConversationRequest;
 
     let mut session_client = state.session_client.clone();
@@ -1118,7 +1136,7 @@ pub async fn plan_version_move(
         .await?
         .into_inner()
         .messages;
-    plan_from_turns(&turns, turn)
+    Ok(turns)
 }
 
 /// The move a regenerate or an edit makes, read from the thread's turns as Session Core returns them with the inactive
@@ -1146,6 +1164,25 @@ pub(crate) fn plan_from_turns(
     if message.role != role || !message.on_active_path {
         return Err(refused());
     }
+    let expected_leaf_message_id = active_leaf_of(turns);
+    // The thread's first turn is the first turn on the active path, and it holds no parent. Once a move to the root has
+    // happened, the first turn is not at index 0 any more, so the position on the path decides it, not the index. An
+    // edit of that turn moves the leaf to the thread root (WS17 S9): the edit then starts a new first turn beside the old
+    // ones. A regenerate of it has no question to answer, so it stays refused.
+    let first_on_path = turns.iter().position(|candidate| candidate.on_active_path) == Some(index);
+    if message.parent_message_id.is_empty() && first_on_path {
+        if matches!(turn, VersionTurn::Regenerate { .. }) {
+            return Err(refused());
+        }
+        return Ok(VersionPlan {
+            goal: None,
+            model_connection_id: message.model_connection_id.trim().to_owned(),
+            subscription_connection_id: message.subscription_connection_id.trim().to_owned(),
+            parent_message_id: String::new(),
+            expected_leaf_message_id,
+            root_edit: true,
+        });
+    }
     let parent_index = if message.parent_message_id.is_empty() {
         index.checked_sub(1)
     } else {
@@ -1171,20 +1208,64 @@ pub(crate) fn plan_from_turns(
         VersionTurn::Regenerate { .. } => parent.subscription_connection_id.trim().to_owned(),
         VersionTurn::Edit { .. } => message.subscription_connection_id.trim().to_owned(),
     };
-    let expected_leaf_message_id = turns
-        .iter()
-        .rev()
-        .find(|candidate| candidate.on_active_path)
-        .map(|candidate| candidate.message_id.clone())
-        .unwrap_or_default();
-
     Ok(VersionPlan {
         goal,
         model_connection_id,
         subscription_connection_id,
         parent_message_id: parent.message_id.clone(),
         expected_leaf_message_id,
+        root_edit: false,
     })
+}
+
+/// The `SetActiveLeaf` request a plan makes (WS17 S9): a version switch to the turn the edit or the regenerate
+/// continues, or, for an edit of the thread's first turn, the move to the root, which names no turn.
+pub(crate) fn set_active_leaf_request(
+    org_id: &str,
+    thread_id: &str,
+    plan: &VersionPlan,
+) -> mp_contracts::model_plane::v1::SetActiveLeafRequest {
+    mp_contracts::model_plane::v1::SetActiveLeafRequest {
+        org_id: org_id.to_owned(),
+        thread_id: thread_id.to_owned(),
+        target_message_id: if plan.root_edit {
+            String::new()
+        } else {
+            plan.parent_message_id.clone()
+        },
+        expected_leaf_message_id: plan.expected_leaf_message_id.clone(),
+        exact: false,
+        to_root: plan.root_edit,
+    }
+}
+
+/// The leaf a thread holds as its active path shows it: the newest turn on the path, or empty when no turn is on it
+/// (a move to the root holds none). A move and its restore both compare against the leaf read this way.
+fn active_leaf_of(turns: &[mp_contracts::model_plane::v1::SessionMessage]) -> String {
+    turns
+        .iter()
+        .rev()
+        .find(|candidate| candidate.on_active_path)
+        .map(|candidate| candidate.message_id.clone())
+        .unwrap_or_default()
+}
+
+/// The `SetActiveLeaf` request that puts a thread back on the leaf its version move left (P2-sc-12-rel1): an exact move
+/// to `previous_leaf_message_id`, compared with the leaf the thread holds now. See [`restore_version_move`].
+pub(crate) fn restore_leaf_request(
+    org_id: &str,
+    thread_id: &str,
+    previous_leaf_message_id: &str,
+    current_leaf_message_id: &str,
+) -> mp_contracts::model_plane::v1::SetActiveLeafRequest {
+    mp_contracts::model_plane::v1::SetActiveLeafRequest {
+        org_id: org_id.to_owned(),
+        thread_id: thread_id.to_owned(),
+        target_message_id: previous_leaf_message_id.to_owned(),
+        expected_leaf_message_id: current_leaf_message_id.to_owned(),
+        exact: true,
+        to_root: false,
+    }
 }
 
 /// Moves the active branch as a [`VersionPlan`] read it (WS17 S9), before the run that answers the
@@ -1200,24 +1281,17 @@ pub async fn apply_version_move(
     plan: &VersionPlan,
     bearer: &VerifiedSessionBearer,
 ) -> Result<VersionMove, tonic::Status> {
-    use mp_contracts::model_plane::v1::SetActiveLeafRequest;
-
     state
         .message_tree_client
         .clone()
         .set_active_leaf(crate::sse::authenticated_session_request(
-            SetActiveLeafRequest {
-                org_id: org_id.to_owned(),
-                thread_id: thread_id.to_owned(),
-                target_message_id: plan.parent_message_id.clone(),
-                expected_leaf_message_id: plan.expected_leaf_message_id.clone(),
-                exact: false,
-            },
+            set_active_leaf_request(org_id, thread_id, plan),
             bearer,
         )?)
         .await?;
     Ok(VersionMove {
         goal: plan.goal.clone(),
+        previous_leaf_message_id: plan.expected_leaf_message_id.clone(),
     })
 }
 
@@ -1239,10 +1313,12 @@ pub async fn move_active_leaf(
 
 /// The managed run of a regenerate or an edit whose branch has moved (see [`move_active_leaf`]). A regenerate
 /// appends no user turn, since its question is already the leaf. An edit appends its text beside the edited
-/// turn, as an ordinary send does. The rest is the ordinary managed start.
+/// turn, as an ordinary send does. The rest is the ordinary managed start. A start that fails has already moved the
+/// branch, so the thread goes back to `previous_leaf_message_id`, the leaf the move left (see `restore_version_move`).
 ///
 /// # Errors
 /// As [`prepare_managed_run_authenticated`].
+#[allow(clippy::too_many_arguments)]
 pub async fn prepare_version_run_authenticated(
     state: &AppState,
     thread_id: &str,
@@ -1250,10 +1326,11 @@ pub async fn prepare_version_run_authenticated(
     user_id: &str,
     goal: &str,
     turn: &crate::normalize::VersionTurn,
+    previous_leaf_message_id: &str,
     start_key: &str,
     bearer: &VerifiedSessionBearer,
 ) -> Result<SessionRun> {
-    prepare_managed_run_with_bearer(
+    let started = prepare_managed_run_with_bearer(
         state,
         Some(thread_id),
         None,
@@ -1275,7 +1352,67 @@ pub async fn prepare_version_run_authenticated(
         None,
         None,
     )
-    .await
+    .await;
+    if started.is_err() {
+        restore_version_move(state, org_id, thread_id, previous_leaf_message_id, bearer).await;
+    }
+    started
+}
+
+/// Puts a thread back on the branch its version move left, after the managed start that followed the move failed
+/// (P2-sc-12-rel1). The move commits before the run starts, so a start that is refused (quota, admission, a provider)
+/// would otherwise leave the thread on the turn the move chose. For an edit of the first turn that is no active turn at
+/// all, and the transcript reads empty until the next send. The restore is an exact move back to the leaf the move
+/// expected, compared with the leaf the thread holds now: the edit itself when it was appended before the start failed,
+/// which then stays on the record beside the old branch. Session Core refuses the move while a run is active on the
+/// thread, so it never moves a branch under a live run. A restore that fails is logged and changes nothing else: the
+/// start's own error is the one the caller returns.
+async fn restore_version_move(
+    state: &AppState,
+    org_id: &str,
+    thread_id: &str,
+    previous_leaf_message_id: &str,
+    bearer: &VerifiedSessionBearer,
+) {
+    if previous_leaf_message_id.is_empty() {
+        return;
+    }
+    if let Err(error) =
+        move_back_to_leaf(state, org_id, thread_id, previous_leaf_message_id, bearer).await
+    {
+        tracing::warn!(
+            grpc_code = ?error.code(),
+            thread_id = %thread_id,
+            "session-core could not put the thread back on its branch after a failed managed start"
+        );
+    }
+}
+
+/// The restore's two calls: the thread is read as a move reads it, then the exact move back is made against the
+/// newest active turn that read found (see [`restore_version_move`]).
+async fn move_back_to_leaf(
+    state: &AppState,
+    org_id: &str,
+    thread_id: &str,
+    previous_leaf_message_id: &str,
+    bearer: &VerifiedSessionBearer,
+) -> Result<(), tonic::Status> {
+    let turns = read_version_turns(state, org_id, thread_id, bearer).await?;
+    let request = crate::sse::authenticated_session_request(
+        restore_leaf_request(
+            org_id,
+            thread_id,
+            previous_leaf_message_id,
+            &active_leaf_of(&turns),
+        ),
+        bearer,
+    )?;
+    state
+        .message_tree_client
+        .clone()
+        .set_active_leaf(request)
+        .await?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3925,5 +4062,179 @@ mod tests {
             crate::session_flow::TurnQuality::default(),
         );
         assert!(only_deck.is_none(), "a waived turn with only a deck stores no artifacts key");
+    }
+
+    /// A turn as a regenerate or an edit reads it: its role, the turn it continues (empty for a root, or for a turn
+    /// written before the tree), and whether the active path holds it.
+    fn move_turn(
+        id: &str,
+        role: &str,
+        parent: &str,
+        on_active_path: bool,
+    ) -> mp_contracts::model_plane::v1::SessionMessage {
+        mp_contracts::model_plane::v1::SessionMessage {
+            message_id: id.to_owned(),
+            role: role.to_owned(),
+            content: format!("{role} {id}"),
+            parent_message_id: parent.to_owned(),
+            on_active_path,
+            ..Default::default()
+        }
+    }
+
+    fn edit_of(message_id: &str) -> crate::normalize::VersionTurn {
+        crate::normalize::VersionTurn::Edit {
+            message_id: message_id.to_owned(),
+        }
+    }
+
+    /// WS17 S9 (F-f04-22): an edit of the thread's first turn asks for the move to the root, which names no turn. The
+    /// edit appends with no parent, so it becomes a new first turn; the move passes the leaf the edit last saw.
+    #[test]
+    fn an_edit_of_the_first_turn_asks_for_the_move_to_the_root() {
+        let thread = vec![
+            move_turn("q-1", "user", "", true),
+            move_turn("a-1", "assistant", "q-1", true),
+            move_turn("q-2", "user", "a-1", true),
+            move_turn("a-2", "assistant", "q-2", true),
+        ];
+        let plan = super::plan_from_turns(&thread, &edit_of("q-1"))
+            .expect("the first turn of a thread can be edited");
+        assert!(plan.root_edit);
+        assert_eq!(plan.goal, None);
+        let request = super::set_active_leaf_request("org-1", "thread-1", &plan);
+        assert!(request.to_root);
+        assert!(
+            request.target_message_id.is_empty(),
+            "the move names no turn"
+        );
+        assert!(!request.exact);
+        assert_eq!(request.expected_leaf_message_id, "a-2");
+        assert_eq!(request.org_id, "org-1");
+        assert_eq!(request.thread_id, "thread-1");
+    }
+
+    /// After a move to the root, the new first turn is the first on the active path, so editing it is a root edit as
+    /// well. Its parent is not the turn before it in sequence, which is an old turn on the inactive branch.
+    #[test]
+    fn an_edit_of_the_new_first_turn_is_a_root_edit_and_not_a_legacy_parent() {
+        let thread = vec![
+            move_turn("q-1", "user", "", false),
+            move_turn("a-1", "assistant", "q-1", false),
+            move_turn("q-3", "user", "", true),
+            move_turn("a-3", "assistant", "q-3", true),
+        ];
+        let plan = super::plan_from_turns(&thread, &edit_of("q-3"))
+            .expect("the new first turn can be edited");
+        assert!(plan.root_edit);
+        assert_eq!(plan.expected_leaf_message_id, "a-3");
+    }
+
+    /// A thread written before the tree links no turn: each turn continues the one before it in sequence. An edit of a
+    /// later turn keeps that turn as its parent, and the move stays a version switch to it. Only the first turn is a
+    /// root.
+    #[test]
+    fn an_edit_of_a_later_legacy_turn_keeps_the_turn_before_it_as_its_parent() {
+        let thread = vec![
+            move_turn("q-1", "user", "", true),
+            move_turn("a-1", "assistant", "", true),
+            move_turn("q-2", "user", "", true),
+        ];
+        let later = super::plan_from_turns(&thread, &edit_of("q-2"))
+            .expect("a later legacy turn can be edited");
+        assert!(!later.root_edit);
+        assert_eq!(later.parent_message_id, "a-1");
+        let request = super::set_active_leaf_request("org-1", "thread-1", &later);
+        assert!(!request.to_root);
+        assert_eq!(request.target_message_id, "a-1");
+        let first = super::plan_from_turns(&thread, &edit_of("q-1"))
+            .expect("the first legacy turn can be edited");
+        assert!(first.root_edit);
+    }
+
+    /// A regenerate has a question to answer, and the first turn of a thread has none: a root answer stays refused.
+    /// So does an edit of a turn off the active path.
+    #[test]
+    fn a_regenerate_of_a_root_and_an_edit_off_the_path_stay_refused() {
+        let root_answer = vec![
+            move_turn("a-0", "assistant", "", true),
+            move_turn("q-1", "user", "a-0", true),
+        ];
+        let regenerate = crate::normalize::VersionTurn::Regenerate {
+            message_id: "a-0".to_owned(),
+        };
+        let refused = super::plan_from_turns(&root_answer, &regenerate)
+            .expect_err("a root answer has no question to answer again");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(refused.message(), "history_branch_refused");
+        let off_path = vec![
+            move_turn("q-1", "user", "", false),
+            move_turn("q-3", "user", "", true),
+        ];
+        let refused = super::plan_from_turns(&off_path, &edit_of("q-1"))
+            .expect_err("an inactive turn is not edited here");
+        assert_eq!(refused.message(), "history_branch_refused");
+    }
+
+    /// P2-sc-12-rel1: a start that fails after an edit of the first turn puts the thread back on the leaf the move
+    /// expected. The move leaves no turn active, so the leaf it is compared with is read after the edit is appended,
+    /// and the restore is an exact move to the old leaf.
+    #[test]
+    fn a_failed_start_after_a_root_edit_moves_back_exactly_to_the_leaf_the_move_expected() {
+        let before = vec![
+            move_turn("q-1", "user", "", true),
+            move_turn("a-1", "assistant", "q-1", true),
+        ];
+        let plan = super::plan_from_turns(&before, &edit_of("q-1"))
+            .expect("the first turn of a thread can be edited");
+        assert!(plan.root_edit);
+        assert_eq!(plan.expected_leaf_message_id, "a-1");
+        let moved_to_root = vec![
+            move_turn("q-1", "user", "", false),
+            move_turn("a-1", "assistant", "q-1", false),
+        ];
+        assert_eq!(
+            super::active_leaf_of(&moved_to_root),
+            "",
+            "no turn is active after the move to the root"
+        );
+        let mut appended = moved_to_root.clone();
+        appended.push(move_turn("q-2", "user", "", true));
+        assert_eq!(
+            super::active_leaf_of(&appended),
+            "q-2",
+            "the edit is the leaf once appended"
+        );
+        let restore = super::restore_leaf_request(
+            "org-1",
+            "thread-1",
+            &plan.expected_leaf_message_id,
+            &super::active_leaf_of(&appended),
+        );
+        assert_eq!(restore.org_id, "org-1");
+        assert_eq!(restore.thread_id, "thread-1");
+        assert_eq!(
+            restore.target_message_id, "a-1",
+            "the thread goes back to the leaf the move expected"
+        );
+        assert_eq!(
+            restore.expected_leaf_message_id, "q-2",
+            "compared with the leaf the thread holds now"
+        );
+        assert!(restore.exact);
+        assert!(!restore.to_root);
+    }
+
+    /// A thread with no active turn reads an empty leaf, and the leaf of a thread that has one is its newest active turn,
+    /// whatever branch the inactive turns sit on.
+    #[test]
+    fn the_leaf_a_thread_holds_is_its_newest_active_turn_or_none() {
+        assert_eq!(super::active_leaf_of(&[]), "");
+        let thread = vec![
+            move_turn("q-1", "user", "", true),
+            move_turn("a-1", "assistant", "q-1", false),
+            move_turn("q-2", "user", "q-1", true),
+        ];
+        assert_eq!(super::active_leaf_of(&thread), "q-2");
     }
 }

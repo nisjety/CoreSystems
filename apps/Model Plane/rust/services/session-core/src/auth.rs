@@ -82,10 +82,12 @@ pub(crate) fn skill_org_admin_check_enabled(raw: Option<&str>) -> bool {
     mp_contracts::loop_fold::switch_from(raw)
 }
 
-/// `sub` of an `api_key` principal is this prefix plus its `key_id`. The shape rules below are
-/// model-gateway's and inference-core's `is_well_formed_api_key`, so one token reads the same in
-/// every Model Plane service.
-const API_KEY_SUBJECT_PREFIX: &str = "apikey:";
+/// `sub` of an `api_key` principal is this prefix plus its `key_id`, and the `user_id` of every row
+/// an API key owns is that same string (EP-12 D2). The shape rules below are model-gateway's and
+/// inference-core's `is_well_formed_api_key`, so one token reads the same in every Model Plane
+/// service. This is the one definition: a reader that selects an API key's rows binds this value
+/// rather than a copy of the literal.
+pub(crate) const API_KEY_OWNER_PREFIX: &str = "apikey:";
 const MAX_API_KEY_ID_LEN: usize = 128;
 const MAX_ACTING_USER_ID_LEN: usize = 256;
 
@@ -93,7 +95,7 @@ const MAX_ACTING_USER_ID_LEN: usize = 256;
 /// Core actor ids are base62, so a person's id never carries the `:` this prefix does.
 #[must_use]
 pub(crate) fn is_api_key_owner(user_id: &str) -> bool {
-    user_id.starts_with(API_KEY_SUBJECT_PREFIX)
+    user_id.starts_with(API_KEY_OWNER_PREFIX)
 }
 
 /// The one scope Auth Core's API-key exchange grants for `aud=session-core` (EP-12 D3). A key
@@ -292,7 +294,7 @@ impl VerifiedIdentity {
     #[must_use]
     pub fn api_key_id(&self) -> Option<&str> {
         if self.is_api_key() {
-            self.principal_id.strip_prefix(API_KEY_SUBJECT_PREFIX)
+            self.principal_id.strip_prefix(API_KEY_OWNER_PREFIX)
         } else {
             None
         }
@@ -455,7 +457,7 @@ impl VerifiedIdentity {
     ) -> Self {
         Self {
             org_id: Arc::from(org_id),
-            principal_id: Arc::from(format!("{API_KEY_SUBJECT_PREFIX}{key_id}")),
+            principal_id: Arc::from(format!("{API_KEY_OWNER_PREFIX}{key_id}")),
             user_id: None,
             scopes: Arc::from([API_KEY_SCOPE.to_owned()]),
             kind: PrincipalKind::ApiKey,
@@ -604,6 +606,48 @@ pub fn authorize_scheduled_step_authority_service(caller: &VerifiedIdentity) -> 
         ));
     }
     caller.require_service_scope(SCHEDULED_STEP_AUTHORITY_SCOPE)
+}
+
+/// Scope of sandbox-manager's thread-ownership read (O-13). Before it serves, writes or erases a thread
+/// workspace, sandbox-manager asks Session Core whether the verified user owns the thread. The answer is
+/// one boolean, so the scope is a read; only [`authorize_thread_owner_resolve`] accepts it, and no other
+/// RPC does, because every other gate asks for its own scope.
+pub const THREAD_OWNER_RESOLVE_SCOPE: &str = "session:thread-owner:resolve";
+
+/// The one service identity that may hold [`THREAD_OWNER_RESOLVE_SCOPE`]: sandbox-manager's own principal.
+/// Auth Core signs a service token's `sub` and `service_id` as `service:<serviceId>`, and sandbox-manager's
+/// registry row is keyed `sandbox-manager`.
+pub const THREAD_OWNER_RESOLVE_SERVICE: &str = "service:sandbox-manager";
+
+/// Verify sandbox-manager's narrow ownership read: the exact service identity holding the exact scope, and
+/// not a zero-retention credential. A ZDR credential is refused the way the other narrow service authorities
+/// of this module refuse one, so a retention posture that reached this scope fails closed.
+#[allow(clippy::result_large_err)]
+pub fn authorize_thread_owner_resolve_service(caller: &VerifiedIdentity) -> Result<(), Status> {
+    if caller.zdr() {
+        return Err(
+            mp_contracts::zdr_refusal::Refusal::feature_not_supported("sandbox_workspace")
+                .grpc_status(tonic::Code::FailedPrecondition),
+        );
+    }
+    if !caller.is_service() || caller.principal_id() != THREAD_OWNER_RESOLVE_SERVICE {
+        return Err(Status::permission_denied(
+            "only sandbox-manager may resolve thread ownership with this scope",
+        ));
+    }
+    caller.require_service_scope(THREAD_OWNER_RESOLVE_SCOPE)
+}
+
+/// Who may call `ResolveThreadOwner`: sandbox-manager's narrow principal on its own scope, or any caller that
+/// `authorize_operation` admits for `session:read`, as before: a person (the handler then checks the person's
+/// own id) or a service holding `session:read` (capability-core's memory and learning gates). Every other
+/// service is refused, whatever scope it holds.
+#[allow(clippy::result_large_err)]
+pub fn authorize_thread_owner_resolve(caller: &VerifiedIdentity) -> Result<(), Status> {
+    if caller.is_service() && caller.principal_id() == THREAD_OWNER_RESOLVE_SERVICE {
+        return authorize_thread_owner_resolve_service(caller);
+    }
+    authorize_operation(caller, "session:read")
 }
 
 /// The closed set of principals allowed to own a run with no human behind it.
@@ -849,13 +893,13 @@ fn is_well_formed_api_key(claims: &Claims) -> bool {
     };
     (1..=MAX_API_KEY_ID_LEN).contains(&key_id.len())
         && key_id.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
-        && claims.sub.strip_prefix(API_KEY_SUBJECT_PREFIX) == Some(key_id)
+        && claims.sub.strip_prefix(API_KEY_OWNER_PREFIX) == Some(key_id)
         && claims.user_id.is_empty()
         && claims.service_id.is_empty()
         && !owner.is_empty()
         && owner.len() <= MAX_ACTING_USER_ID_LEN
         && owner == owner.trim()
-        && !owner.starts_with(API_KEY_SUBJECT_PREFIX)
+        && !owner.starts_with(API_KEY_OWNER_PREFIX)
 }
 
 /// The wire shape of the `zdr_waiver` claim. Extra fields Auth Core may add
@@ -1911,6 +1955,110 @@ mod tests {
                 .expect_err("ZDR credential must not perform durable erasure")
                 .code(),
             Code::FailedPrecondition,
+        );
+    }
+
+    #[test]
+    fn thread_owner_resolve_requires_the_exact_sandbox_manager_identity_scope_and_non_zdr() {
+        let authorized = VerifiedIdentity::service_for_test_as(
+            "org-1",
+            THREAD_OWNER_RESOLVE_SERVICE,
+            &[THREAD_OWNER_RESOLVE_SCOPE],
+            false,
+        );
+        authorize_thread_owner_resolve(&authorized)
+            .expect("the exact sandbox-manager principal may resolve thread ownership");
+
+        for (principal, scopes, zdr, expected) in [
+            (
+                THREAD_OWNER_RESOLVE_SERVICE,
+                Vec::<&str>::new(),
+                false,
+                Code::PermissionDenied,
+            ),
+            // The exact identity holding a broad read instead of the narrow scope.
+            (
+                THREAD_OWNER_RESOLVE_SERVICE,
+                vec!["session:read"],
+                false,
+                Code::PermissionDenied,
+            ),
+            (
+                "service:sandbox-manager-copy",
+                vec![THREAD_OWNER_RESOLVE_SCOPE],
+                false,
+                Code::PermissionDenied,
+            ),
+            (
+                "service:session-core",
+                vec![THREAD_OWNER_RESOLVE_SCOPE],
+                false,
+                Code::PermissionDenied,
+            ),
+            (
+                THREAD_OWNER_RESOLVE_SERVICE,
+                vec![THREAD_OWNER_RESOLVE_SCOPE],
+                true,
+                Code::FailedPrecondition,
+            ),
+        ] {
+            let caller = VerifiedIdentity::service_for_test_as("org-1", principal, &scopes, zdr);
+            assert_eq!(
+                authorize_thread_owner_resolve(&caller)
+                    .expect_err("only the exact non-ZDR sandbox-manager principal may resolve")
+                    .code(),
+                expected,
+                "principal {principal} with scopes {scopes:?} and zdr {zdr}",
+            );
+        }
+    }
+
+    #[test]
+    fn thread_owner_resolve_keeps_session_read_callers_only() {
+        // The callers that resolve today, unchanged: a person (the handler checks the person's own id)
+        // and a service holding session:read.
+        authorize_thread_owner_resolve(&VerifiedIdentity::user_for_test("org-1", "user-1"))
+            .expect("a person passes this gate");
+        authorize_thread_owner_resolve(&VerifiedIdentity::service_for_test_as(
+            "org-1",
+            "service:capability-core",
+            &["session:read"],
+            false,
+        ))
+        .expect("capability-core's session:read keeps resolving thread ownership");
+
+        // The narrow scope is worth nothing outside its one identity.
+        let look_alike = VerifiedIdentity::service_for_test_as(
+            "org-1",
+            "service:capability-core",
+            &[THREAD_OWNER_RESOLVE_SCOPE],
+            false,
+        );
+        assert_eq!(
+            authorize_thread_owner_resolve(&look_alike)
+                .expect_err("another service holding the narrow scope")
+                .code(),
+            Code::PermissionDenied,
+        );
+
+        // And the sandbox-manager identity, holding only the narrow scope, passes no other session gate.
+        let sandbox = VerifiedIdentity::service_for_test_as(
+            "org-1",
+            THREAD_OWNER_RESOLVE_SERVICE,
+            &[THREAD_OWNER_RESOLVE_SCOPE],
+            false,
+        );
+        assert_eq!(
+            authorize_operation(&sandbox, "session:read")
+                .expect_err("a broad session read")
+                .code(),
+            Code::PermissionDenied,
+        );
+        assert_eq!(
+            authorize_operation(&sandbox, "session:write")
+                .expect_err("a session write")
+                .code(),
+            Code::PermissionDenied,
         );
     }
 

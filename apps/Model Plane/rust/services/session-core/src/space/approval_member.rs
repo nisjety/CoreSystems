@@ -439,7 +439,7 @@ const ROOM_APPROVAL_COLUMNS: &str = "a.id, a.run_id, a.plan_id, a.kind, a.status
 fn room_approvals_sql() -> String {
     let thread_gate = format!(
         "($8::BIGINT IS NULL OR EXISTS (SELECT 1 FROM messages em
-            WHERE em.thread_id = t.id AND {gate}))",
+            WHERE em.thread_id = t.id AND em.on_active_path AND {gate}))",
         gate = floor_gate_message_sql("em", "$3", "$8"),
     );
     format!(

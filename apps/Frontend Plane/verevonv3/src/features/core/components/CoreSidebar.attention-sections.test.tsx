@@ -135,6 +135,22 @@ describe('ChatSidebarPanel attention rail', () => {
     ])
   })
 
+  it('reads a crash-parked run in Waiting as waiting for the person to continue it (O-02)', async () => {
+    attentionClient.getAttention.mockResolvedValue(snapshot([
+      { threadId: 'thread-old-approval', state: 'needs_input', reason: 'parked', since: '2026-10-30T08:00:00.000Z', unseen: false },
+    ]))
+
+    renderChatSidebar()
+    const rail = await waitFor(() => {
+      const section = document.querySelector('.chat-attention')
+      expect(section).not.toBeNull()
+      return section as HTMLElement
+    })
+
+    expect(rail.textContent).toContain('Venter på deg')
+    expect(rail.textContent).toContain('Venter på deg for å fortsette')
+  })
+
   it('renders no section when nothing needs attention, and the list still shows every chat', async () => {
     attentionClient.getAttention.mockResolvedValue(snapshot([]))
 

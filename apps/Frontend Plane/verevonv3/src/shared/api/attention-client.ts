@@ -1,8 +1,8 @@
 import { isAttentionState, type AttentionState } from '@/shared/attention/attention-state'
 import { requestJson } from './http'
 
-/** Why a waiting thread waits, when the server names it. */
-export type AttentionReason = 'approval' | 'plan' | 'input' | 'goal'
+/** Why a waiting thread waits, when the server names it. `parked` is a run a crash parked, once its notice is due (O-02). */
+export type AttentionReason = 'approval' | 'plan' | 'input' | 'goal' | 'parked'
 
 /** One thread the attention listing names. Identifiers and the closed state only. */
 export type AttentionItem = {
@@ -26,7 +26,7 @@ export type AttentionSnapshot = {
   capabilities: { stream: boolean; push: boolean }
 }
 
-const REASONS: readonly AttentionReason[] = ['approval', 'plan', 'input', 'goal']
+const REASONS: readonly AttentionReason[] = ['approval', 'plan', 'input', 'goal', 'parked']
 
 /** Fired on the window when the server's attention state may have moved, so the open rail reads it again. */
 export const ATTENTION_CHANGED_EVENT = 'verevon:attention-changed'

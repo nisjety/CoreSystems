@@ -14,7 +14,10 @@
 //!    `closing{zdr_poll_only}`, and no log row is ever read;
 //! 4. every row and every heartbeat goes through the pure [`gate`]: lease expiry, membership
 //!    revocation (the `space_membership_revocations` table, behind a 2 s cache), the decision's
-//!    audience-revision ceiling, an unknown scope or kind (stubbed `hidden`).
+//!    audience-revision ceiling, an unknown scope or kind (stubbed `hidden`). Under a `since_join`
+//!    floor a thread event (`thread.created`, `thread.updated`, `thread.archived`) that only the floor
+//!    stubs is delivered when the floored timeline lists its thread to the reader (R-sws-06); the
+//!    listing is asked once per thread per batch and reads a boolean only.
 //!
 //! Nothing in this module is an authorization input by itself; the verified decision is, and the
 //! lease bounds how long one decision keeps a stream open.
@@ -43,8 +46,10 @@ use tracing::warn;
 use crate::auth::{authorize_operation, identity};
 use crate::grpc::verify_space_stream_decision;
 use crate::space::events::{
-    gate, run_state, CloseCode, GateContext, GateOutcome, GateRow, SpaceWakes, Wake,
+    gate, run_state, thread_listing_may_lift, CloseCode, GateContext, GateOutcome, GateRow,
+    SpaceWakes, Wake,
 };
+use crate::space::timeline::thread_listed_sql;
 
 const STREAM_POOL_ENV: &str = "SPACE_STREAM_DB_POOL";
 const MAX_STREAMS_ENV: &str = "SPACE_STREAM_MAX_STREAMS";
@@ -413,6 +418,27 @@ async fn fetch_rows(
         .collect()
 }
 
+/// Whether the floored timeline lists `thread_id` to this reader (R-sws-06): the probe of
+/// [`thread_listed_sql`] under the decision's ceiling and floor. The answer is one boolean; no content.
+async fn thread_listed(
+    pool: &PgPool,
+    org_id: &str,
+    space_id: &str,
+    ceiling: i64,
+    floor: i64,
+    thread_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let sql = thread_listed_sql();
+    sqlx::query_scalar::<_, bool>(&sql)
+        .bind(org_id)
+        .bind(space_id)
+        .bind(ceiling)
+        .bind(floor)
+        .bind(thread_id)
+        .fetch_one(pool)
+        .await
+}
+
 /// A short closed word: lower-case letters, digits and underscore.
 fn closed_word(value: &str) -> Option<String> {
     (!value.is_empty()
@@ -653,6 +679,8 @@ impl StreamState {
                 Err(_) => return Some(self.fail_unavailable().await),
             };
             let full = rows.len() as i64 >= BATCH;
+            // R-sws-06: each thread's listing is asked once per batch, however many of its events are in it.
+            let mut listed: HashMap<String, bool> = HashMap::new();
             for row in &rows {
                 // A hole or a generation change means this cursor can no longer be trusted:
                 // the client resnapshots instead of guessing.
@@ -662,15 +690,28 @@ impl StreamState {
                 if row.seq != self.after + 1 {
                     return Some(self.cursor_too_old("retention").await);
                 }
-                let verdict = gate(
-                    &GateRow {
-                        org_id: &self.org_id,
-                        scope: &row.scope,
-                        audience_revision: row.audience_revision,
-                        retention_class: &row.retention_class,
-                    },
-                    &self.gate_context(revoked_at),
-                );
+                let gate_row = GateRow {
+                    org_id: &self.org_id,
+                    scope: &row.scope,
+                    audience_revision: row.audience_revision,
+                    retention_class: &row.retention_class,
+                };
+                let ctx = self.gate_context(revoked_at);
+                let verdict = match gate(&gate_row, &ctx) {
+                    // R-sws-06: a thread event that only the floor stubs is delivered when the floored timeline
+                    // lists its thread to this reader. Nothing else is lifted: the ceiling and retention ran first.
+                    GateOutcome::Stub if thread_listing_may_lift(&row.kind, &gate_row, &ctx) => {
+                        match self
+                            .thread_listed_for(row.thread_id.as_deref(), &mut listed)
+                            .await
+                        {
+                            Ok(true) => GateOutcome::Deliver,
+                            Ok(false) => GateOutcome::Stub,
+                            Err(_) => return Some(self.fail_unavailable().await),
+                        }
+                    }
+                    other => other,
+                };
                 let record = match verdict {
                     GateOutcome::Close(code) => return Some(self.close(code).await),
                     GateOutcome::Stub => hidden_stub(row),
@@ -740,6 +781,32 @@ impl StreamState {
             .send(Err(Status::unavailable("space event log is unavailable")))
             .await;
         "db_unavailable"
+    }
+
+    /// R-sws-06: whether the floored timeline lists `thread_id` to this reader, asked once per batch through
+    /// `listed`. `false` without a thread id or without a floor, so a stub stays a stub.
+    async fn thread_listed_for(
+        &self,
+        thread_id: Option<&str>,
+        listed: &mut HashMap<String, bool>,
+    ) -> Result<bool, sqlx::Error> {
+        let (Some(thread_id), Some(floor)) = (thread_id, self.floor) else {
+            return Ok(false);
+        };
+        if let Some(known) = listed.get(thread_id) {
+            return Ok(*known);
+        }
+        let answer = thread_listed(
+            &self.shared.pool,
+            &self.org_id,
+            &self.space_id,
+            self.ceiling,
+            floor,
+            thread_id,
+        )
+        .await?;
+        listed.insert(thread_id.to_owned(), answer);
+        Ok(answer)
     }
 
     /// `revoked_at` of this subject's revocation row for the Space, behind a 2 s cache shared

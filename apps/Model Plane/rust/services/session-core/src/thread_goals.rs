@@ -76,6 +76,12 @@ pub(crate) const TURNS_REACHED: &str = "thread_goal_turns_reached";
 pub(crate) const TURN_MISMATCH: &str = "thread_goal_turn_mismatch";
 /// The verdict refusal (EP-7 S3): a turn is judged only once it has settled.
 pub(crate) const TURN_NOT_SETTLED: &str = "thread_goal_turn_not_settled";
+/// The top-up refusals (F-f09-11): a run that belongs to no goal turn (quiet, the caller ignores it),
+/// and a turn that has not settled yet (a segment is debited only after the first one was).
+pub(crate) const TURN_NOT_FOUND: &str = "thread_goal_turn_not_found";
+pub(crate) const TURN_UNSETTLED: &str = "thread_goal_turn_unsettled";
+/// The longest segment key a top-up keeps (the table's CHECK).
+const MAX_SEGMENT_KEY_CHARS: usize = 128;
 
 /// The statuses of a goal that is still open: at most one per thread (the partial unique index).
 const OPEN_STATUSES: [&str; 2] = ["active", "paused"];
@@ -273,6 +279,27 @@ impl ThreadGoalService for ThreadGoalGrpc {
         }
         .await;
         record_metrics("settle_goal_turn", started, result.is_ok());
+        result
+    }
+
+    async fn top_up_goal_turn(
+        &self,
+        request: Request<pb::TopUpGoalTurnRequest>,
+    ) -> Result<Response<pb::ThreadGoalResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
+            refuse_retention_exempt(&caller)?;
+            if !thread_goals_enabled() {
+                return Err(Status::unavailable(DISABLED));
+            }
+            top_up_goal_turn(&self.pool, &caller, request.into_inner())
+                .await
+                .map(Response::new)
+        }
+        .await;
+        record_metrics("top_up_goal_turn", started, result.is_ok());
         result
     }
 
@@ -1224,6 +1251,132 @@ pub(crate) async fn settle_goal_turn(
     .await
     .map_err(internal)?;
     // A goal paused while its turn ran still stops on a spent cap: what was spent is spent.
+    if OPEN_STATUSES.contains(&row.status.as_str()) {
+        if let Some((stop, reason)) = stop_state(&row) {
+            if let Some(closed) = close_goal(&mut tx, &row.id, stop, reason).await? {
+                row = closed;
+            }
+        }
+    }
+    tx.commit().await.map_err(internal)?;
+    Ok(found(row))
+}
+
+/// The segment key of a top-up: an opaque id of the continuation dispatch, 1 to 128 characters of
+/// letters, digits and `_ - . :` (a request id), so it can never carry content.
+fn check_segment_key(raw: &str) -> Result<&str, Status> {
+    let key = raw.trim();
+    if key.is_empty()
+        || key.chars().count() > MAX_SEGMENT_KEY_CHARS
+        || !key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
+    {
+        return Err(invalid(
+            "segment_key is not an opaque id of 1 to 128 characters",
+        ));
+    }
+    Ok(key)
+}
+
+/// The turn a top-up finds by its run.
+#[derive(Debug, sqlx::FromRow)]
+struct TopUpTurnRow {
+    goal_id: String,
+    turn_no: i32,
+}
+
+/// Debit the metered usage of one later segment of a goal turn's run (F-f09-11): a run that paused
+/// is settled with its first segment's usage, and each /continue segment after it spends more.
+/// Adds the tokens and the cost to the goal exactly as a settle does, never a turn, and applies the
+/// same stop rules, so a segment that crosses a cap closes the goal. Idempotent per
+/// `(goal, turn, segment_key)`: the ledger row and the counters are written in one transaction, and a
+/// segment already there answers the goal as it stands. A run in no goal answers a quiet `not_found`
+/// ([`TURN_NOT_FOUND`]); a turn that has not settled yet is refused ([`TURN_UNSETTLED`]), so no segment
+/// is debited before the first one. Ids and counts only; the settle's idempotency is untouched.
+pub(crate) async fn top_up_goal_turn(
+    pool: &PgPool,
+    caller: &VerifiedIdentity,
+    req: pb::TopUpGoalTurnRequest,
+) -> Result<pb::ThreadGoalResponse, Status> {
+    refuse_service_writer(caller)?;
+    let org_id = req.org_id.trim();
+    let run_id = req.run_id.trim();
+    if org_id.is_empty() || run_id.is_empty() {
+        return Err(Status::invalid_argument("org_id and run_id are required"));
+    }
+    let segment_key = check_segment_key(&req.segment_key)?;
+    // Validated as a settle validates it; a top-up stores no basis.
+    check_cost_basis(&req.cost_basis)?;
+    let input = bounded_tokens(req.metered_input_tokens);
+    let output = bounded_tokens(req.metered_output_tokens);
+    // -1 (any negative) is "could not be priced": adds nothing.
+    let cost = (req.cost_usd_micros >= 0)
+        .then(|| req.cost_usd_micros.min(bounded_tokens(MAX_TURN_TOKENS)));
+    caller.authorize_org(org_id)?;
+
+    let mut tx = pool.begin().await.map_err(internal)?;
+    // The run names its goal and turn; the org filter keeps another org's run unfound.
+    let located: TopUpTurnRow = sqlx::query_as(
+        "SELECT goal_id, turn_no FROM thread_goal_turns
+         WHERE run_id = $1 AND org_id = $2
+         ORDER BY claimed_at DESC LIMIT 1",
+    )
+    .bind(run_id)
+    .bind(org_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(internal)?
+    .ok_or_else(|| Status::not_found(TURN_NOT_FOUND))?;
+    let goal = lock_owned_goal(&mut tx, caller, org_id, &located.goal_id).await?;
+    // Read after the goal lock, so a settle in flight has committed or not started: a turn is
+    // debited only once it has settled.
+    let outcome: Option<String> = sqlx::query_scalar(
+        "SELECT outcome FROM thread_goal_turns WHERE goal_id = $1 AND turn_no = $2",
+    )
+    .bind(&goal.id)
+    .bind(located.turn_no)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(internal)?
+    .ok_or_else(|| Status::not_found(TURN_NOT_FOUND))?;
+    if outcome.is_none() {
+        return Err(Status::failed_precondition(TURN_UNSETTLED));
+    }
+    let inserted = sqlx::query(
+        "INSERT INTO thread_goal_turn_topups (goal_id, turn_no, segment_key, org_id)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(&goal.id)
+    .bind(located.turn_no)
+    .bind(segment_key)
+    .bind(org_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(internal)?
+    .rows_affected();
+    if inserted == 0 {
+        // The segment was debited already: a retry changes nothing.
+        tx.commit().await.map_err(internal)?;
+        return Ok(found(goal));
+    }
+    let tokens = input.saturating_add(output);
+    let mut row: GoalRow = sqlx::query_as(&format!(
+        "UPDATE thread_goals
+         SET tokens_used = tokens_used + $2,
+             cost_used_usd_micros = cost_used_usd_micros + COALESCE($3, 0),
+             updated_at = now()
+         WHERE id = $1
+         RETURNING {GOAL_COLUMNS}"
+    ))
+    .bind(&goal.id)
+    .bind(tokens)
+    .bind(cost)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(internal)?;
+    // A goal paused or still open stops on a spent cap: what was spent is spent.
     if OPEN_STATUSES.contains(&row.status.as_str()) {
         if let Some((stop, reason)) = stop_state(&row) {
             if let Some(closed) = close_goal(&mut tx, &row.id, stop, reason).await? {
@@ -2325,6 +2478,226 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(refused.message(), NOT_ACTIVE);
+    }
+
+    fn top_up(
+        run_id: &str,
+        segment_key: &str,
+        tokens: u64,
+        cost_usd_micros: i64,
+    ) -> pb::TopUpGoalTurnRequest {
+        pb::TopUpGoalTurnRequest {
+            org_id: ORG.to_owned(),
+            run_id: run_id.to_owned(),
+            segment_key: segment_key.to_owned(),
+            metered_input_tokens: tokens,
+            metered_output_tokens: 0,
+            cost_usd_micros,
+            cost_basis: "metered".to_owned(),
+        }
+    }
+
+    /// A goal whose first turn is bound to a fresh run and settled with 10 tokens, so a top-up may
+    /// follow. The run id is unique, as a top-up finds its turn by it.
+    async fn goal_with_settled_run(
+        pool: &PgPool,
+        token_budget: u64,
+        max_turns: u32,
+    ) -> (pb::ThreadGoal, String) {
+        let goal = goal_with(pool, token_budget, max_turns).await;
+        let run_id = format!("run-topup-{}", new_ulid());
+        claim_goal_turn(pool, &owner(), claim(&goal)).await.unwrap();
+        bind(pool, &goal, 1, &run_id).await;
+        let mut parked = settle(&goal, 1, &run_id, 10);
+        parked.outcome = "awaiting_approval".to_owned();
+        settle_goal_turn(pool, &owner(), parked).await.unwrap();
+        (goal, run_id)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_top_up_adds_once_per_segment_key_and_never_a_turn() {
+        let pool = connect().await;
+        let (goal, run_id) = goal_with_settled_run(&pool, 0, 10).await;
+        let first = top_up_goal_turn(&pool, &owner(), top_up(&run_id, "seg-1", 500, 40))
+            .await
+            .unwrap()
+            .goal
+            .unwrap();
+        assert_eq!(first.tokens_used, 510);
+        assert_eq!(first.cost_used_usd_micros, 40);
+        assert_eq!(first.turns_used, 1, "a top-up is never a turn");
+        // The same segment again: a no-op.
+        let again = top_up_goal_turn(&pool, &owner(), top_up(&run_id, "seg-1", 500, 40))
+            .await
+            .unwrap()
+            .goal
+            .unwrap();
+        assert_eq!(again.tokens_used, 510);
+        assert_eq!(again.cost_used_usd_micros, 40);
+        // Another segment of the same run adds again; an unpriced one adds tokens and no cost.
+        let second = top_up_goal_turn(&pool, &owner(), top_up(&run_id, "seg-2", 7, -1))
+            .await
+            .unwrap()
+            .goal
+            .unwrap();
+        assert_eq!(second.tokens_used, 517);
+        assert_eq!(second.cost_used_usd_micros, 40);
+        assert_eq!(second.turns_used, 1);
+        let kept: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM thread_goal_turn_topups WHERE goal_id = $1 AND turn_no = 1",
+        )
+        .bind(&goal.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(kept, 2);
+        // The settle stays idempotent and untouched by the top-ups.
+        let settle_again = settle_goal_turn(&pool, &owner(), settle(&goal, 1, &run_id, 10))
+            .await
+            .unwrap()
+            .goal
+            .unwrap();
+        assert_eq!(settle_again.tokens_used, 517);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_top_up_before_the_first_settle_is_refused() {
+        let pool = connect().await;
+        let goal = goal_with(&pool, 0, 10).await;
+        let run_id = format!("run-topup-{}", new_ulid());
+        claim_goal_turn(&pool, &owner(), claim(&goal))
+            .await
+            .unwrap();
+        bind(&pool, &goal, 1, &run_id).await;
+        let refused = top_up_goal_turn(&pool, &owner(), top_up(&run_id, "seg-1", 500, 0))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(refused.message(), TURN_UNSETTLED);
+        let stored: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM thread_goal_turn_topups WHERE goal_id = $1")
+                .bind(&goal.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, 0, "nothing is written for an unsettled turn");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_top_up_of_another_orgs_run_or_a_non_goal_run_is_not_found() {
+        let pool = connect().await;
+        let (_goal, run_id) = goal_with_settled_run(&pool, 0, 10).await;
+        // Another org's caller naming this run: not found, and nothing is revealed.
+        let stranger = VerifiedIdentity::user_for_test("org-someone-else", "user-stranger");
+        let mut foreign = top_up(&run_id, "seg-1", 500, 0);
+        foreign.org_id = "org-someone-else".to_owned();
+        let refused = top_up_goal_turn(&pool, &stranger, foreign)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::NotFound);
+        assert_eq!(refused.message(), TURN_NOT_FOUND);
+        // The caller's own org naming it with another org's identity is refused as an org mismatch.
+        let mismatch = top_up_goal_turn(&pool, &stranger, top_up(&run_id, "seg-1", 500, 0))
+            .await
+            .unwrap_err();
+        assert_ne!(mismatch.code(), tonic::Code::Ok);
+        // A run that belongs to no goal.
+        let none = top_up_goal_turn(&pool, &owner(), top_up("run-in-no-goal", "seg-1", 500, 0))
+            .await
+            .unwrap_err();
+        assert_eq!(none.code(), tonic::Code::NotFound);
+        assert_eq!(none.message(), TURN_NOT_FOUND);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_top_up_that_crosses_a_cap_closes_the_goal() {
+        let pool = connect().await;
+        let (goal, run_id) = goal_with_settled_run(&pool, 1_000, 10).await;
+        let under = top_up_goal_turn(&pool, &owner(), top_up(&run_id, "seg-1", 500, 0))
+            .await
+            .unwrap()
+            .goal
+            .unwrap();
+        assert_eq!(under.status, "active");
+        let crossed = top_up_goal_turn(&pool, &owner(), top_up(&run_id, "seg-2", 600, 0))
+            .await
+            .unwrap()
+            .goal
+            .unwrap();
+        assert_eq!(crossed.tokens_used, 1_110);
+        assert_eq!(crossed.status, "budget_reached");
+        assert_eq!(crossed.status_reason, "token_budget");
+        assert_eq!(crossed.revision, goal.revision + 1);
+        assert_eq!(crossed.turns_used, 1);
+        // The goal is closed: no new turn is claimed, and a later segment is still counted.
+        let refused = claim_goal_turn(&pool, &owner(), claim(&goal))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.message(), NOT_ACTIVE);
+        let late = top_up_goal_turn(&pool, &owner(), top_up(&run_id, "seg-3", 5, 0))
+            .await
+            .unwrap()
+            .goal
+            .unwrap();
+        assert_eq!(late.tokens_used, 1_115);
+        assert_eq!(late.status, "budget_reached");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_goals_top_ups_go_with_the_goal() {
+        let pool = connect().await;
+        let (goal, run_id) = goal_with_settled_run(&pool, 0, 10).await;
+        top_up_goal_turn(&pool, &owner(), top_up(&run_id, "seg-1", 5, 0))
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM thread_goals WHERE id = $1")
+            .bind(&goal.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM thread_goal_turn_topups WHERE goal_id = $1")
+                .bind(&goal.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(left, 0, "the ledger is erased with the goal (cascade)");
+    }
+
+    #[test]
+    fn a_segment_key_is_an_opaque_bounded_id() {
+        assert_eq!(
+            check_segment_key("  01JABCDEF-seg_1.a:b ").unwrap(),
+            "01JABCDEF-seg_1.a:b"
+        );
+        assert!(check_segment_key("").is_err());
+        assert!(check_segment_key("   ").is_err());
+        assert!(check_segment_key(&"a".repeat(128)).is_ok());
+        assert!(check_segment_key(&"a".repeat(129)).is_err());
+        // Content-looking text is refused: spaces and punctuation outside the id alphabet.
+        assert!(check_segment_key("a segment of text").is_err());
+        assert!(check_segment_key("seg;drop").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_service_caller_never_writes_a_top_up_and_no_row_is_read_first() {
+        // A lazy pool never connects: the refusal comes before any database use.
+        let pool = PgPool::connect_lazy("postgres://127.0.0.1:1/none").unwrap();
+        let service = VerifiedIdentity::service_for_test(ORG, &["session:write"], false);
+        let refused = top_up_goal_turn(&pool, &service, top_up("run-1", "seg-1", 1, 0))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+        // A bad key is refused before any database use too.
+        let bad = top_up_goal_turn(&pool, &owner(), top_up("run-1", "not a key", 1, 0))
+            .await
+            .unwrap_err();
+        assert_eq!(bad.code(), tonic::Code::InvalidArgument);
     }
 
     #[tokio::test]

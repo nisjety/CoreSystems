@@ -110,7 +110,31 @@ fn eligible_sql() -> String {
       AND ($4::BIGINT IS NULL OR EXISTS (
             SELECT 1 FROM messages em
              WHERE em.thread_id = t.id
+               AND em.on_active_path
                AND {gate}))",
+        gate = floor_gate_message_sql("em", "$3", "$4"),
+    )
+}
+
+/// The listing probe of one thread (R-sws-06): whether the floored timeline lists it to this reader. It is
+/// [`eligible_sql`] for one thread id, with the same org and Space, the same ceiling on the thread and its
+/// activity, and the same floor gate on a message. It leaves out the `archived_at` clause on purpose: an
+/// archive event is the change the probe judges, so a thread the reader could list before its archive still
+/// delivers that event. `$1` org, `$2` Space, `$3` audience ceiling, `$4` history floor (`NULL` = none), `$5`
+/// thread id. The answer is one boolean; no content is read.
+pub(crate) fn thread_listed_sql() -> String {
+    format!(
+        "SELECT EXISTS (
+            SELECT 1 FROM threads t
+             WHERE t.id = $5 AND t.org_id = $1 AND t.space_id = $2
+               AND t.last_message_seq IS NOT NULL
+               AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $3)
+               AND COALESCE(t.activity_max_audience_revision, t.recipient_audience_revision, 0) <= $3
+               AND ($4::BIGINT IS NULL OR EXISTS (
+                     SELECT 1 FROM messages em
+                      WHERE em.thread_id = t.id
+                        AND em.on_active_path
+                        AND {gate})))",
         gate = floor_gate_message_sql("em", "$3", "$4"),
     )
 }
@@ -118,7 +142,8 @@ fn eligible_sql() -> String {
 /// The page query: `extra` narrows the eligible set, `order` is the inner (indexed) order, `limit`
 /// an integer literal, `outer_order` the order of the answer. Lateral joins run on page rows only.
 /// Under a floor the turn count, the last author and the recent authors count and name only the turns
-/// from the floor on (V3e-sws-2); with no floor they are the stored summary, as before.
+/// from the floor on, and only those on the active path (V3e-sws-2, V3e-sws-1-rel1); with no floor they
+/// are the stored summary, as before.
 fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str) -> String {
     format!(
         "WITH page AS (
@@ -138,6 +163,7 @@ fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str) -> String {
                 CASE WHEN $4::BIGINT IS NULL THEN page.turn_count
                      ELSE (SELECT count(*)::INTEGER FROM messages tm
                             WHERE tm.thread_id = page.id AND tm.role IN ('user', 'assistant')
+                              AND tm.on_active_path
                               AND (tm.recipient_audience_revision IS NULL
                                    OR tm.recipient_audience_revision >= $4::BIGINT))
                 END AS turn_count,
@@ -145,6 +171,7 @@ fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str) -> String {
                 CASE WHEN $4::BIGINT IS NULL THEN page.last_author_subject_id
                      ELSE (SELECT tm.author_subject_id FROM messages tm
                             WHERE tm.thread_id = page.id AND tm.role = 'user'
+                              AND tm.on_active_path
                               AND tm.author_subject_id IS NOT NULL
                               AND (tm.recipient_audience_revision IS NULL
                                    OR tm.recipient_audience_revision >= $4::BIGINT)
@@ -159,6 +186,7 @@ fn page_sql(extra: &str, order: &str, limit: i64, outer_order: &str) -> String {
                                                AND tm.author_subject_id IS NOT NULL
                                                AND (tm.recipient_audience_revision IS NULL
                                                     OR tm.recipient_audience_revision >= $4::BIGINT)
+                                               AND tm.on_active_path
                                              GROUP BY tm.author_subject_id
                                              ORDER BY max(tm.sequence) DESC
                                              LIMIT 5) ra), ARRAY[]::TEXT[])
@@ -518,6 +546,54 @@ mod tests {
             "page.last_message_seq DESC",
         );
         assert!(window.contains("$5") && window.contains("$6"));
+    }
+
+    /// V3e-sws-1-rel1: under a floor the turn count, the last author and the recent authors read only the
+    /// turns on the active path, each subquery stating it, as the three message laterals already do. The
+    /// eligible gate's EXISTS states it in its own text as well. Checked on the statement text.
+    #[test]
+    fn the_floored_thread_columns_and_the_eligible_gate_read_only_the_active_path() {
+        let page = page_sql(
+            "",
+            "t.last_message_seq DESC",
+            10,
+            "page.last_message_seq DESC",
+        );
+        assert_eq!(
+            page.matches("tm.on_active_path").count(),
+            3,
+            "turn count, last author and recent authors each state it: {page}"
+        );
+        assert!(eligible_sql().contains("AND em.on_active_path\n"));
+        assert!(thread_listed_sql().contains("AND em.on_active_path\n"));
+    }
+
+    /// R-sws-06: the stream's listing probe states the timeline's own predicates for one thread: the org and
+    /// the Space, the thread's ceiling and its activity ceiling, and the floor gate on a message, bound on `$3`
+    /// and `$4`, with the thread id on `$5`. It leaves out the archived clause on purpose. Checked on the
+    /// statement text, so no database is needed.
+    #[test]
+    fn the_thread_listing_probe_states_the_timeline_predicates_for_one_thread() {
+        let sql = thread_listed_sql();
+        for part in [
+            "t.id = $5",
+            "t.org_id = $1",
+            "t.space_id = $2",
+            "t.recipient_audience_revision <= $3",
+            "COALESCE(t.activity_max_audience_revision, t.recipient_audience_revision, 0) <= $3",
+            "$4::BIGINT IS NULL OR EXISTS",
+            "em.on_active_path",
+            "em.recipient_audience_revision <= $3::BIGINT",
+            "em.recipient_audience_revision >= $4::BIGINT",
+            "floor_gate_rev.action = 'deleted'",
+        ] {
+            assert!(sql.contains(part), "the probe states {part}: {sql}");
+        }
+        assert!(
+            !sql.contains("archived_at"),
+            "an archive event is judged, not the archive state: {sql}"
+        );
+        assert!(!sql.contains("$6"), "five placeholders only: {sql}");
     }
 
     /// WS04-S11 against Postgres: under a `since_join` floor, a thread with no message from the floor

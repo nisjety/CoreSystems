@@ -33,6 +33,7 @@
 //! The Space's owner or admin lists one agent's notes through [`list_agent_memory`] (EP-6 P3), under
 //! the Space's memory decision; a ZDR or waived caller is refused `named_agent` there.
 
+use crate::auth::VerifiedIdentity;
 use crate::dreaming::DreamMemoryCandidate;
 use crate::write_policy;
 use chrono::{DateTime, Utc};
@@ -605,10 +606,44 @@ fn agent_enabled_from(space_enabled: bool, raw: Option<&str>) -> bool {
     space_enabled && enabled_from(raw)
 }
 
+/// The run-bound switch (EP-8 S10, F-f08-11). Default off; only the literal `true` turns it on, and only
+/// with agent memory on. It decides which run an agent's own save belongs to, never whether a note is kept.
+pub(crate) const AGENT_RUN_BOUND_ENV: &str = "SESSION_CORE_AGENT_MEMORY_RUN_BOUND";
+
+/// Whether an agent's own save must name the run that issued it. Read once per save, next to [`agent_enabled`].
+pub(crate) fn agent_run_bound() -> bool {
+    agent_run_bound_from(
+        agent_enabled(),
+        std::env::var(AGENT_RUN_BOUND_ENV).ok().as_deref(),
+    )
+}
+
+fn agent_run_bound_from(agent_on: bool, raw: Option<&str>) -> bool {
+    agent_on && enabled_from(raw)
+}
+
 /// Whether an `IndexMemory` topic asks for the agent's own memory. Read only with the switch on,
 /// so with it off `AGENT_SELF` stays an ordinary thread note (`dreaming::scope_for_topic`).
 pub(crate) fn is_agent_self_topic(topic: &str) -> bool {
     topic.trim().eq_ignore_ascii_case("AGENT_SELF")
+}
+
+/// The narrow scope an agent's own note is written under (P2-sc-08-rel1). It is not `memory:write`, which reaches
+/// every thread of the org. Auth Core grants it to Execution Core's principal alone, as the narrow scopes in `auth.rs`
+/// are granted.
+pub(crate) const AGENT_NOTE_WRITE_SCOPE: &str = "session:agent-memory:write";
+/// The one principal that writes an agent's own note: Execution Core, which runs the woken agent's `save_memory`.
+pub(crate) const AGENT_NOTE_WRITER_SERVICE: &str = "service:execution-core";
+
+/// Whether this caller may write an agent's own note (P2-sc-08-rel1). The claimed origin is the caller's word and
+/// cannot prove the turn: a person's bearer that names a live wake run and claims `model_tool` looks exactly like
+/// the loop's save. So only the loop's principal, holding its own scope, writes one. Execution Core forwards the
+/// thread owner's bearer on its tool calls today, so every agent save is refused here until it writes under this
+/// identity.
+pub(crate) fn is_agent_note_writer(caller: &VerifiedIdentity) -> bool {
+    caller.is_service()
+        && caller.principal_id() == AGENT_NOTE_WRITER_SERVICE
+        && caller.has_scope(AGENT_NOTE_WRITE_SCOPE)
 }
 
 /// `scope_id` of an agent row: one (Space, agent) binding (D12 option a). A Space id holding `:`
@@ -734,34 +769,63 @@ fn agent_facts_from_row(row: AgentFactsRow) -> AgentTurnFacts {
     }
 }
 
-/// The agent's save (`IndexMemory`, topic `AGENT_SELF`, origin `model_tool`), stamped with the
-/// thread's current audience. The agent is the one live wake run of the thread; none, or two at
-/// once, cannot say whose turn this is, and nothing is written. The caller has already refused a
-/// ZDR or waived credential and run the content policy for scope `agent`. Returns the row id, or
-/// why nothing was written.
-pub(crate) async fn index_agent_memory(
-    pool: &PgPool,
-    org_id: &str,
-    owner_user_id: &str,
-    thread_id: &str,
-    content: &str,
-) -> Result<Result<String, Skip>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let live: Vec<AgentFactsRow> = sqlx::query_as(&format!(
+/// The live wake runs of a thread, joined to the thread and its owner. With `run_bound` on (F-f08-11) the
+/// query names the one run the save belongs to (`$4`). Off, it is the scan it always was: at most two rows,
+/// and one live wake is the only turn that can be inferred.
+fn live_wake_runs_sql(run_bound: bool) -> String {
+    let run_clause = if run_bound { " AND r.id = $4" } else { "" };
+    format!(
         "SELECT t.space_id, r.agent_subject_id, r.id, t.space_decision_ref, \
                 t.recipient_audience_hash, t.recipient_audience_revision, \
                 EXISTS (SELECT 1 FROM runs wr WHERE wr.thread_id = t.id AND wr.retention_class = 'zdr_waived') \
          FROM threads t \
          JOIN runs r ON r.thread_id = t.id AND r.agent_subject_id IS NOT NULL AND {RUN_LIVE_SQL} \
-         WHERE t.id = $1 AND t.org_id = $2 AND t.user_id = $3 \
+         WHERE t.id = $1 AND t.org_id = $2 AND t.user_id = $3{run_clause} \
          ORDER BY r.created_at DESC \
          LIMIT 2"
-    ))
-    .bind(thread_id)
-    .bind(org_id)
-    .bind(owner_user_id)
-    .fetch_all(&mut *tx)
-    .await?;
+    )
+}
+
+/// The run-bound refusal (F-f08-11), decided before any statement. With the switch on, a save that names no
+/// run has no agent it can belong to, so nothing is written and nothing is inferred from the thread's runs.
+fn run_bound_refusal(run_bound: bool, run_id: &str) -> Option<Skip> {
+    (run_bound && run_id.trim().is_empty()).then_some(Skip::NotAgentTurn)
+}
+
+/// The agent's save (`IndexMemory`, topic `AGENT_SELF`, origin `model_tool`), stamped with the thread's
+/// current audience. The agent is decided from server state, never from the request:
+/// * with `run_bound` off, the agent is the one live wake run of the thread; none, or two at once, cannot
+///   say whose turn this is, and nothing is written;
+/// * with `run_bound` on (`SESSION_CORE_AGENT_MEMORY_RUN_BOUND`), the save names the run that issued it, and
+///   only that run writes, when it is a live wake run of an agent on this thread. An empty `run_id` writes
+///   nothing.
+///
+/// The caller has already refused a ZDR or waived credential and run the content policy for scope `agent`.
+/// Returns the row id, or why nothing was written.
+pub(crate) async fn index_agent_memory(
+    pool: &PgPool,
+    org_id: &str,
+    owner_user_id: &str,
+    thread_id: &str,
+    run_id: &str,
+    run_bound: bool,
+    content: &str,
+) -> Result<Result<String, Skip>, sqlx::Error> {
+    let run_id = run_id.trim();
+    if let Some(skip) = run_bound_refusal(run_bound, run_id) {
+        record_agent_skip("write", skip);
+        return Ok(Err(skip));
+    }
+    let mut tx = pool.begin().await?;
+    let sql = live_wake_runs_sql(run_bound);
+    let mut query = sqlx::query_as::<_, AgentFactsRow>(&sql)
+        .bind(thread_id)
+        .bind(org_id)
+        .bind(owner_user_id);
+    if run_bound {
+        query = query.bind(run_id);
+    }
+    let live: Vec<AgentFactsRow> = query.fetch_all(&mut *tx).await?;
     let facts = match <[AgentFactsRow; 1]>::try_from(live) {
         Ok([only]) => agent_facts_from_row(only),
         Err(_) => AgentTurnFacts::default(),
@@ -894,35 +958,53 @@ pub(crate) async fn recall_agent_memory(
 /// cites. A refusal deletes nothing and keeps its typed code. With the switch off nothing is asked and the
 /// delete is the one statement it always was.
 ///
+/// With `SESSION_CORE_SPACE_MEMORY_DELETE_AUDIT` on, each erased note writes the same content-free
+/// `space_memory_deleted` row a manager's single-row delete writes (F-f08-08), in the transaction that deletes
+/// it, so a failed write rolls the whole revocation back. `actor` names who erased and under which Control
+/// decision. Its `memory_id` and `scope` are set per erased note, and its `org_id` and `space_id` are replaced
+/// by the ones this call names.
+///
 /// # Errors
 ///
 /// Returns [`crate::gdpr::ErasureHoldError`] (inside the `anyhow::Error`) when a hold covers the organization
-/// or one of the cited threads, or cannot be ruled out. Returns an error if a statement or the commit fails;
-/// nothing is deleted then.
+/// or one of the cited threads, or cannot be ruled out. Returns an error if a statement or the commit fails,
+/// or [`crate::dreaming::SpaceMemoryDeleteError::AuditUnavailable`] if an audit row cannot be written; nothing
+/// is deleted then.
 pub(crate) async fn erase_agent_memory(
     pool: &PgPool,
     org_id: &str,
     space_id: &str,
     agent_subject_id: &str,
+    actor: &crate::audit_publisher::SpaceMemoryDeleteAudit<'_>,
 ) -> anyhow::Result<u64> {
+    let audit = crate::audit_publisher::space_memory_delete_audit_enabled().then(|| {
+        crate::audit_publisher::SpaceMemoryDeleteAudit {
+            org_id,
+            space_id,
+            ..*actor
+        }
+    });
     erase_agent_memory_gated(
         pool,
         org_id,
         space_id,
         agent_subject_id,
         crate::gdpr::erasure_hold_gate(),
+        audit.as_ref(),
     )
     .await
 }
 
-/// [`erase_agent_memory`] with the hold gate named by the caller, so a test can answer with its own org-core.
-/// Production always passes the process gate.
+/// [`erase_agent_memory`] with the hold gate and the audit named by the caller, so a test can answer with its own
+/// org-core and write or skip the audit rows directly. Production always passes the process gate and the audit
+/// switch's answer.
 async fn erase_agent_memory_gated(
     pool: &PgPool,
     org_id: &str,
     space_id: &str,
     agent_subject_id: &str,
     gate: &crate::gdpr::ErasureHoldGate,
+    audit: Option<&crate::audit_publisher::SpaceMemoryDeleteAudit<'_>>,
 ) -> anyhow::Result<u64> {
     let Some(scope_id) = agent_scope_id(space_id, agent_subject_id) else {
         return Ok(0);
@@ -930,7 +1012,9 @@ async fn erase_agent_memory_gated(
     // EP-9 C4: the organization's hold is asked before the transaction opens and before any note is locked or
     // deleted, so a held organization is refused with nothing touched. Switched off, nothing is asked.
     gate.ensure_not_held(org_id, &[]).await?;
-    let erased = if matches!(gate, crate::gdpr::ErasureHoldGate::Off) {
+    // The one statement runs only with both switches off. With the audit on, the notes go through the checked
+    // transaction, which writes each note's audit row before the commit.
+    let erased = if matches!(gate, crate::gdpr::ErasureHoldGate::Off) && audit.is_none() {
         sqlx::query(
             "DELETE FROM agent_memory WHERE org_id = $1 AND scope = 'agent' AND scope_id = $2",
         )
@@ -940,7 +1024,7 @@ async fn erase_agent_memory_gated(
         .await?
         .rows_affected()
     } else {
-        erase_binding_rows_checked(pool, gate, org_id, &scope_id).await?
+        erase_binding_rows_checked(pool, gate, org_id, &scope_id, audit).await?
     };
     if erased > 0 {
         metrics::counter!("mp_session_space_memory_erased_total", "op" => "binding_revocation")
@@ -953,12 +1037,15 @@ async fn erase_agent_memory_gated(
 /// threads they cite are read from those locked rows and asked (the GDPR-order-rel2 rule), and only then are the
 /// locked notes deleted, so the rows checked are the rows removed. A refusal or a failed statement drops the
 /// transaction and nothing is deleted. A note written after the lock is not part of this revocation, so a held
-/// thread's content is never deleted unchecked.
+/// thread's content is never deleted unchecked. With `audit` given, each locked note's audit row is written in this
+/// transaction after its delete and before the commit, so a failed write drops the transaction and no note goes
+/// without its record.
 async fn erase_binding_rows_checked(
     pool: &PgPool,
     gate: &crate::gdpr::ErasureHoldGate,
     org_id: &str,
     scope_id: &str,
+    audit: Option<&crate::audit_publisher::SpaceMemoryDeleteAudit<'_>>,
 ) -> anyhow::Result<u64> {
     let mut tx = pool.begin().await?;
     let rows: Vec<(String, Vec<String>)> = sqlx::query_as(
@@ -988,6 +1075,20 @@ async fn erase_binding_rows_checked(
     .execute(&mut *tx)
     .await?
     .rows_affected();
+    if let Some(audit) = audit {
+        // The delete removed exactly the rows locked above, so each note gets its own row, in this transaction.
+        for id in &ids {
+            let row = crate::audit_publisher::SpaceMemoryDeleteAudit {
+                memory_id: id.as_str(),
+                scope: AGENT_SCOPE,
+                ..*audit
+            };
+            crate::dreaming::write_space_memory_delete_audit(&mut tx, &row)
+                .await
+                .map_err(crate::dreaming::SpaceMemoryDeleteError::AuditUnavailable)
+                .map_err(anyhow::Error::from)?;
+        }
+    }
     tx.commit().await?;
     Ok(erased)
 }
@@ -1318,6 +1419,140 @@ mod tests {
     }
 
     #[test]
+    fn run_bound_switch_needs_agent_memory_and_the_literal_true() {
+        assert!(agent_run_bound_from(true, Some("true")));
+        assert!(
+            !agent_run_bound_from(false, Some("true")),
+            "no agent memory, nothing to bind"
+        );
+        for off in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some("on"),
+            Some("false"),
+            Some(" true "),
+        ] {
+            assert!(
+                !agent_run_bound_from(true, off),
+                "{off:?} must leave the run binding off"
+            );
+        }
+    }
+
+    #[test]
+    fn run_bound_refuses_only_a_save_that_names_no_run() {
+        assert_eq!(run_bound_refusal(true, ""), Some(Skip::NotAgentTurn));
+        assert_eq!(run_bound_refusal(true, "   "), Some(Skip::NotAgentTurn));
+        assert_eq!(run_bound_refusal(true, "run-1"), None);
+        assert_eq!(
+            run_bound_refusal(false, ""),
+            None,
+            "switch off: today's inference, not a refusal"
+        );
+        assert_eq!(
+            Skip::NotAgentTurn.agent_refusal(),
+            "agent_memory_not_written:not_agent_turn"
+        );
+    }
+
+    #[test]
+    fn live_run_query_is_unchanged_with_the_run_bound_switch_off() {
+        // Byte for byte the query `index_agent_memory` ran before the run binding existed.
+        assert_eq!(
+            live_wake_runs_sql(false),
+            "SELECT t.space_id, r.agent_subject_id, r.id, t.space_decision_ref, t.recipient_audience_hash, \
+             t.recipient_audience_revision, EXISTS (SELECT 1 FROM runs wr WHERE wr.thread_id = t.id AND \
+             wr.retention_class = 'zdr_waived') FROM threads t JOIN runs r ON r.thread_id = t.id AND \
+             r.agent_subject_id IS NOT NULL AND r.status NOT IN ('completed', 'failed', 'cancelled') WHERE \
+             t.id = $1 AND t.org_id = $2 AND t.user_id = $3 ORDER BY r.created_at DESC LIMIT 2"
+        );
+        let bound = live_wake_runs_sql(true);
+        assert!(
+            bound.contains(
+                "WHERE t.id = $1 AND t.org_id = $2 AND t.user_id = $3 AND r.id = $4 ORDER BY"
+            ),
+            "{bound}"
+        );
+    }
+
+    #[test]
+    fn the_agent_save_names_its_run_from_the_request_and_reads_the_switch_at_the_call() {
+        let index = include_str!("memory_grpc.rs");
+        let call = index
+            .find("crate::space_memory::index_agent_memory(")
+            .expect("the agent save");
+        // The call's arguments run up to its `.await`; both the run and the switch must be among them.
+        let end = index[call..].find(".await").expect("the call is awaited");
+        let window = &index[call..call + end];
+        assert!(
+            window.contains("req.run_id.trim(),"),
+            "the run comes from the request"
+        );
+        assert!(
+            window.contains("crate::space_memory::agent_run_bound(),"),
+            "the switch is read at the call"
+        );
+    }
+
+    #[test]
+    fn validation_migration_validates_only_the_constraints_no_row_breaks() {
+        let up = include_str!("../migrations/0135_validate_agent_memory_scope_constraints.sql");
+        let source = include_str!("../migrations/0103_agent_memory_scope_key.sql");
+        let revert = include_str!(
+            "../migrations/revert/0135_validate_agent_memory_scope_constraints.down.sql"
+        );
+        let squeeze = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let (up_flat, source_flat, revert_flat) = (squeeze(up), squeeze(source), squeeze(revert));
+        let predicates = [
+            ("agent_memory_scope_chk", "scope IN ('run', 'thread', 'session', 'workspace', 'user', 'org', 'global', 'space', 'agent')"),
+            ("agent_memory_scope_id_chk", "(scope IN ('space', 'agent')) = (scope_id IS NOT NULL AND scope_id <> '')"),
+            ("agent_memory_space_audience_chk", "scope <> 'space' OR (audience_hash IS NOT NULL AND audience_hash <> '' AND audience_revision IS NOT NULL)"),
+            ("agent_memory_source_label_chk", "source_label IS NULL OR source_label IN ('room_statement', 'member_save', 'agent_memory')"),
+        ];
+        for (constraint, predicate) in predicates {
+            assert!(
+                source_flat.contains(predicate),
+                "0103 declares {constraint} with this predicate"
+            );
+            assert!(
+                up_flat.contains(&format!("({predicate}) IS FALSE")),
+                "{constraint} counts only FALSE rows"
+            );
+            assert!(
+                up_flat.contains(&format!("conname = '{constraint}'")),
+                "{constraint} is looked up by name"
+            );
+            assert!(up_flat.contains(&format!(
+                "ALTER TABLE agent_memory VALIDATE CONSTRAINT {constraint};"
+            )));
+            assert!(revert_flat.contains(&format!(
+                "ADD CONSTRAINT {constraint} CHECK ( {predicate} ) NOT VALID"
+            )));
+        }
+        assert_eq!(
+            up.matches(") IS FALSE").count(),
+            8,
+            "each block checks for a violating row, and counts it for the notice"
+        );
+        assert_eq!(
+            up.matches("NOT convalidated").count(),
+            4,
+            "a validated constraint is skipped"
+        );
+        assert_eq!(
+            up.matches("VALIDATE CONSTRAINT").count(),
+            4,
+            "one validation per constraint"
+        );
+        assert!(
+            !up.contains("DELETE FROM") && !up.contains("UPDATE agent_memory"),
+            "no row is read out, deleted or rewritten"
+        );
+    }
+
+    #[test]
     fn agent_self_topic_is_a_thread_note_with_the_switch_off() {
         assert_eq!(
             crate::dreaming::scope_for_topic(&crate::dreaming::normalize_topic("AGENT_SELF")),
@@ -1330,6 +1565,70 @@ mod tests {
             assert!(!is_agent_self_topic(other), "{other}");
         }
         assert!(write_policy::check("Kari foretrekker tabeller.", AGENT_SCOPE, write_policy::Origin::ModelTool).is_ok());
+    }
+
+    #[test]
+    fn only_the_loop_on_its_own_scope_is_an_agent_note_writer() {
+        // P2-sc-08-rel1: the claimed origin cannot prove the turn, so the writer is the identity.
+        let the_loop = VerifiedIdentity::service_for_test_as(
+            "org-1",
+            "service:execution-core",
+            &[AGENT_NOTE_WRITE_SCOPE],
+            false,
+        );
+        assert!(is_agent_note_writer(&the_loop));
+        // A person's bearer, or an api key, is not the agent's turn, whatever origin it claims.
+        assert!(!is_agent_note_writer(&VerifiedIdentity::user_for_test(
+            "org-1", "owner-1"
+        )));
+        assert!(!is_agent_note_writer(&VerifiedIdentity::api_key_for_test(
+            "org-1", "key-1", "owner-1", false
+        )));
+        // The loop's principal without its scope, and another service holding the scope, are refused.
+        assert!(!is_agent_note_writer(
+            &VerifiedIdentity::service_for_test_as(
+                "org-1",
+                "service:execution-core",
+                &["memory:write"],
+                false
+            )
+        ));
+        assert!(!is_agent_note_writer(
+            &VerifiedIdentity::service_for_test_as(
+                "org-1",
+                "service:orchestrator-core",
+                &[AGENT_NOTE_WRITE_SCOPE],
+                false
+            )
+        ));
+        assert!(!is_agent_note_writer(
+            &VerifiedIdentity::service_for_test_as(
+                "org-1",
+                "service:execution-core-2",
+                &[AGENT_NOTE_WRITE_SCOPE],
+                false
+            )
+        ));
+    }
+
+    #[test]
+    fn the_agent_note_writer_is_asked_before_the_agent_note_is_written() {
+        // The writer check sits in the agent branch of `index_memory`, ahead of the one write it guards.
+        let index = include_str!("memory_grpc.rs");
+        let save = &index[index.find("async fn index_memory(").expect("the save")
+            ..index.find("async fn list_memory(").expect("the list")];
+        let asked = save
+            .find("is_agent_note_writer(&caller)")
+            .expect("the writer is asked");
+        assert!(
+            asked
+                < save
+                    .find("crate::space_memory::index_agent_memory(")
+                    .expect("the agent write")
+        );
+        assert!(
+            save.contains("memory_write_scope(crate::space_memory::agent_enabled(), &req.topic)")
+        );
     }
 
     #[test]
@@ -1479,7 +1778,7 @@ mod tests {
         );
         let checked_path = pos(
             gated,
-            "erase_binding_rows_checked(pool, gate, org_id, &scope_id)",
+            "erase_binding_rows_checked(pool, gate, org_id, &scope_id, audit)",
         );
         assert!(
             organization < switch && switch < off_delete && switch < checked_path,
@@ -1504,6 +1803,40 @@ mod tests {
         );
     }
 
+    /// F-f08-08 (rel1): the revocation writes the audit row a manager's single-row delete writes, one per erased
+    /// note, in the transaction that deletes it, behind the audit switch the revocation reads once. Each row is
+    /// written after its note's delete and before the commit. With the audit off the one statement runs as before.
+    #[test]
+    fn revocation_erasure_writes_each_notes_audit_row_before_its_commit() {
+        let source = production_source(include_str!("space_memory.rs"));
+        let wrapper = production_fn(source, "pub(crate) async fn erase_agent_memory(");
+        let gated = production_fn(source, "async fn erase_agent_memory_gated(");
+        let checked = production_fn(source, "async fn erase_binding_rows_checked(");
+        assert!(
+            wrapper.contains("crate::audit_publisher::space_memory_delete_audit_enabled()"),
+            "the revocation reads the manager's delete audit switch, not a switch of its own"
+        );
+        assert!(
+            gated.contains("matches!(gate, crate::gdpr::ErasureHoldGate::Off) && audit.is_none()"),
+            "the one statement runs only with both switches off"
+        );
+        let pos = |text: &str, needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("expected {needle:?} in the revocation erasure"))
+        };
+        let delete = pos(checked, "AND id = ANY($3)");
+        let audit_row = pos(checked, "write_space_memory_delete_audit(&mut tx, &row)");
+        let commit = pos(checked, "tx.commit().await?;");
+        assert!(
+            delete < audit_row && audit_row < commit,
+            "each note's audit row is written after its delete and before the commit"
+        );
+        assert!(
+            checked.contains("memory_id: id.as_str(),") && checked.contains("scope: AGENT_SCOPE,"),
+            "the row names the erased note and the agent scope, and nothing else is set per row"
+        );
+    }
+
     /// A held organization refuses the revocation before any statement: the pool is never connected.
     #[tokio::test]
     async fn a_held_organization_refuses_the_revocation_before_any_statement() {
@@ -1515,6 +1848,7 @@ mod tests {
             "space-1",
             "agent-1",
             &hold_gate(&server.uri()),
+            None,
         )
         .await
         .expect_err("a held organization refuses the revocation");
@@ -1532,10 +1866,16 @@ mod tests {
             crate::gdpr::ERASURE_HOLD_CHECK_ENV => Some("true".to_owned()),
             _ => None,
         });
-        let refusal =
-            erase_agent_memory_gated(&unconnected_pool(), "org-1", "space-1", "agent-1", &gate)
-                .await
-                .expect_err("an unanswerable check refuses the revocation");
+        let refusal = erase_agent_memory_gated(
+            &unconnected_pool(),
+            "org-1",
+            "space-1",
+            "agent-1",
+            &gate,
+            None,
+        )
+        .await
+        .expect_err("an unanswerable check refuses the revocation");
         assert!(matches!(
             refusal.downcast_ref::<crate::gdpr::ErasureHoldError>(),
             Some(crate::gdpr::ErasureHoldError::Unavailable(_))
@@ -1789,8 +2129,32 @@ mod tests {
             .expect("finish run");
     }
 
+    /// A save with the run-bound switch off: the one live wake run of the thread is the agent.
     async fn save(seeded: &Seeded, thread: &str, content: &str) -> Result<String, Skip> {
-        index_agent_memory(&seeded.pool, &seeded.org, OWNER, thread, content).await.unwrap()
+        index_agent_memory(&seeded.pool, &seeded.org, OWNER, thread, "", false, content)
+            .await
+            .unwrap()
+    }
+
+    /// A save that names the run that issued it, with the run-bound switch as given.
+    async fn save_for(
+        seeded: &Seeded,
+        thread: &str,
+        run: &str,
+        run_bound: bool,
+        content: &str,
+    ) -> Result<String, Skip> {
+        index_agent_memory(
+            &seeded.pool,
+            &seeded.org,
+            OWNER,
+            thread,
+            run,
+            run_bound,
+            content,
+        )
+        .await
+        .unwrap()
     }
 
     async fn recall(seeded: &Seeded, thread: &str, run: &str) -> Vec<(String, String)> {
@@ -1879,12 +2243,20 @@ mod tests {
         let second = seed_wake_run(&seeded, &seeded.space, &seeded.thread, "agent-2").await;
         save(&seeded, &seeded.thread, "Agent two note.").await.expect("agent-2 note");
 
-        assert_eq!(erase_agent_memory(&seeded.pool, &seeded.org, &seeded.space, "agent-1").await.unwrap(), 1);
+        let actor = erase_actor(&seeded);
+        assert_eq!(
+            erase_agent_memory(&seeded.pool, &seeded.org, &seeded.space, "agent-1", &actor)
+                .await
+                .unwrap(),
+            1
+        );
         assert!(recall(&seeded, &seeded.thread, &first).await.is_empty());
         assert_eq!(recall(&seeded, &seeded.thread, &second).await.len(), 1, "another binding keeps its notes");
         assert_eq!(count(&seeded, "SELECT COUNT(*) FROM agent_memory WHERE org_id = $1 AND scope = 'space'").await, 1);
         assert_eq!(
-            erase_agent_memory(&seeded.pool, &seeded.org, &seeded.space, "agent-1").await.unwrap(),
+            erase_agent_memory(&seeded.pool, &seeded.org, &seeded.space, "agent-1", &actor)
+                .await
+                .unwrap(),
             0,
             "a redelivered revocation is a no-op"
         );
@@ -1911,10 +2283,16 @@ mod tests {
         finish_run(&seeded, &run).await;
 
         mount_hold_answer(&server, &seeded.org, true, Vec::new()).await;
-        let refusal =
-            erase_agent_memory_gated(&seeded.pool, &seeded.org, &seeded.space, "agent-1", &gate)
-                .await
-                .expect_err("a held organization refuses the revocation");
+        let refusal = erase_agent_memory_gated(
+            &seeded.pool,
+            &seeded.org,
+            &seeded.space,
+            "agent-1",
+            &gate,
+            None,
+        )
+        .await
+        .expect_err("a held organization refuses the revocation");
         assert_eq!(
             refusal.downcast_ref::<crate::gdpr::ErasureHoldError>(),
             Some(&crate::gdpr::ErasureHoldError::OrgHeld)
@@ -1926,10 +2304,16 @@ mod tests {
         );
 
         mount_hold_answer(&server, &seeded.org, false, vec![seeded.thread.clone()]).await;
-        let refusal =
-            erase_agent_memory_gated(&seeded.pool, &seeded.org, &seeded.space, "agent-1", &gate)
-                .await
-                .expect_err("a held thread that the note cites refuses the revocation");
+        let refusal = erase_agent_memory_gated(
+            &seeded.pool,
+            &seeded.org,
+            &seeded.space,
+            "agent-1",
+            &gate,
+            None,
+        )
+        .await
+        .expect_err("a held thread that the note cites refuses the revocation");
         assert_eq!(
             refusal.downcast_ref::<crate::gdpr::ErasureHoldError>(),
             Some(&crate::gdpr::ErasureHoldError::ThreadsHeld(1))
@@ -1942,19 +2326,406 @@ mod tests {
 
         mount_hold_answer(&server, &seeded.org, false, Vec::new()).await;
         assert_eq!(
-            erase_agent_memory_gated(&seeded.pool, &seeded.org, &seeded.space, "agent-1", &gate)
-                .await
-                .expect("released: the revocation completes"),
+            erase_agent_memory_gated(
+                &seeded.pool,
+                &seeded.org,
+                &seeded.space,
+                "agent-1",
+                &gate,
+                None
+            )
+            .await
+            .expect("released: the revocation completes"),
             1
         );
         assert_eq!(count(&seeded, BINDING_NOTES).await, 0);
         assert_eq!(
-            erase_agent_memory_gated(&seeded.pool, &seeded.org, &seeded.space, "agent-1", &gate)
-                .await
-                .expect("a redelivered revocation"),
+            erase_agent_memory_gated(
+                &seeded.pool,
+                &seeded.org,
+                &seeded.space,
+                "agent-1",
+                &gate,
+                None
+            )
+            .await
+            .expect("a redelivered revocation"),
             0,
             "a redelivered revocation finds nothing left"
         );
+        cleanup(&seeded).await;
+    }
+
+    /// The actor a revocation names: the manager and the Control decision, as a manager's single-row delete names them.
+    fn erase_actor(seeded: &Seeded) -> crate::audit_publisher::SpaceMemoryDeleteAudit<'_> {
+        crate::audit_publisher::SpaceMemoryDeleteAudit {
+            org_id: &seeded.org,
+            actor_user_id: OWNER,
+            space_id: &seeded.space,
+            memory_id: "",
+            scope: "",
+            decision_ref: "decision-1",
+            occurred_at: chrono::Utc::now(),
+        }
+    }
+
+    /// How many audit rows the outbox holds for one note's delete.
+    async fn audit_rows_of(seeded: &Seeded, memory_id: &str) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM session_audit_outbox WHERE event_id = $1")
+            .bind(crate::audit_publisher::space_memory_deleted_event_id(
+                memory_id,
+            ))
+            .fetch_one(&seeded.pool)
+            .await
+            .expect("count the audit rows")
+    }
+
+    /// F-f08-08 (rel1): with the audit on, the revocation writes one content-free audit row per erased note, in its
+    /// transaction. The other binding's note keeps its row and writes none; a redelivered revocation writes no second.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn revoked_binding_writes_one_audit_row_per_erased_note() {
+        let Some(seeded) = seed(REMEMBER).await else {
+            return;
+        };
+        let first = seed_wake_run(&seeded, &seeded.space, &seeded.thread, "agent-1").await;
+        let erased_note = save(&seeded, &seeded.thread, NOTE)
+            .await
+            .expect("agent-1 note");
+        finish_run(&seeded, &first).await;
+        let _second = seed_wake_run(&seeded, &seeded.space, &seeded.thread, "agent-2").await;
+        let kept_note = save(&seeded, &seeded.thread, "Agent two note.")
+            .await
+            .expect("agent-2 note");
+
+        let off = crate::gdpr::ErasureHoldGate::Off;
+        let actor = erase_actor(&seeded);
+        assert_eq!(
+            erase_agent_memory_gated(
+                &seeded.pool,
+                &seeded.org,
+                &seeded.space,
+                "agent-1",
+                &off,
+                Some(&actor)
+            )
+            .await
+            .expect("the revocation"),
+            1
+        );
+        assert_eq!(
+            audit_rows_of(&seeded, &erased_note).await,
+            1,
+            "one audit row, written with the erasure"
+        );
+        assert_eq!(
+            audit_rows_of(&seeded, &kept_note).await,
+            0,
+            "another binding's note writes no audit row"
+        );
+        let (scope, decision, payload): (Option<String>, Option<String>, String) = sqlx::query_as(
+            "SELECT payload->'details'->>'scope', payload->'details'->>'decision_ref', payload::text \
+             FROM session_audit_outbox WHERE event_id = $1",
+        )
+        .bind(crate::audit_publisher::space_memory_deleted_event_id(&erased_note))
+        .fetch_one(&seeded.pool)
+        .await
+        .expect("the audit row");
+        assert_eq!(scope.as_deref(), Some("agent"));
+        assert_eq!(decision.as_deref(), Some("decision-1"));
+        assert!(
+            !payload.contains(NOTE),
+            "the audit row carries no note content"
+        );
+
+        assert_eq!(
+            erase_agent_memory_gated(
+                &seeded.pool,
+                &seeded.org,
+                &seeded.space,
+                "agent-1",
+                &off,
+                Some(&actor)
+            )
+            .await
+            .expect("a redelivered revocation"),
+            0
+        );
+        assert_eq!(
+            audit_rows_of(&seeded, &erased_note).await,
+            1,
+            "a redelivered revocation writes no second row"
+        );
+        sqlx::query("DELETE FROM session_audit_outbox WHERE event_id = $1")
+            .bind(crate::audit_publisher::space_memory_deleted_event_id(
+                &erased_note,
+            ))
+            .execute(&seeded.pool)
+            .await
+            .ok();
+        cleanup(&seeded).await;
+    }
+
+    /// With the audit switch off the revocation is the one statement it always was: the note goes and no audit row is
+    /// written.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn revoked_binding_with_the_audit_switch_off_writes_no_audit_row() {
+        let Some(seeded) = seed(REMEMBER).await else {
+            return;
+        };
+        let run = seed_wake_run(&seeded, &seeded.space, &seeded.thread, "agent-1").await;
+        let note = save(&seeded, &seeded.thread, NOTE)
+            .await
+            .expect("agent-1 note");
+        finish_run(&seeded, &run).await;
+
+        let off = crate::gdpr::ErasureHoldGate::Off;
+        assert_eq!(
+            erase_agent_memory_gated(
+                &seeded.pool,
+                &seeded.org,
+                &seeded.space,
+                "agent-1",
+                &off,
+                None
+            )
+            .await
+            .expect("the revocation"),
+            1
+        );
+        assert_eq!(
+            audit_rows_of(&seeded, &note).await,
+            0,
+            "off is today's erasure: no audit row"
+        );
+        cleanup(&seeded).await;
+    }
+
+    /// F-f08-08 (rel1): an erasure whose audit row cannot be written erases nothing. The long id makes the audit row's
+    /// event id longer than the outbox allows (128 characters), so that note's audit insert fails after the other
+    /// note's row was written; the transaction rolls back, both notes stay, and the error is the audit's (retryable).
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn revocation_whose_audit_row_cannot_be_written_erases_nothing() {
+        let Some(seeded) = seed(REMEMBER).await else {
+            return;
+        };
+        let run = seed_wake_run(&seeded, &seeded.space, &seeded.thread, "agent-1").await;
+        let ordinary = save(&seeded, &seeded.thread, NOTE)
+            .await
+            .expect("agent-1 note");
+        finish_run(&seeded, &run).await;
+        let long_id = format!("long-{}", "m".repeat(120));
+        sqlx::query(
+            "INSERT INTO agent_memory (id, org_id, scope, scope_id, key, content, kind, confidence, owner, \
+             source_links, review_state, source_label) \
+             VALUES ($1, $2, 'agent', $3, $4, 'agent note', 'fact', 0.9, '', $5, 'accepted', 'agent_memory')",
+        )
+        .bind(&long_id)
+        .bind(&seeded.org)
+        .bind(format!("{}:agent-1", seeded.space))
+        .bind(format!("k-{}", new_ulid()))
+        .bind(Vec::<String>::new())
+        .execute(&seeded.pool)
+        .await
+        .expect("seed a note with a long id");
+
+        let off = crate::gdpr::ErasureHoldGate::Off;
+        let actor = erase_actor(&seeded);
+        let refusal = erase_agent_memory_gated(
+            &seeded.pool,
+            &seeded.org,
+            &seeded.space,
+            "agent-1",
+            &off,
+            Some(&actor),
+        )
+        .await
+        .expect_err("the long note's audit row cannot be written");
+        assert!(
+            matches!(
+                refusal.downcast_ref::<crate::dreaming::SpaceMemoryDeleteError>(),
+                Some(crate::dreaming::SpaceMemoryDeleteError::AuditUnavailable(_))
+            ),
+            "{refusal:?}"
+        );
+        assert_eq!(
+            count(
+                &seeded,
+                "SELECT COUNT(*) FROM agent_memory WHERE org_id = $1 AND scope = 'agent'"
+            )
+            .await,
+            2,
+            "fail closed: no note is erased without its audit row"
+        );
+        assert_eq!(
+            audit_rows_of(&seeded, &ordinary).await,
+            0,
+            "the rolled-back erasure left no audit row"
+        );
+        cleanup(&seeded).await;
+    }
+
+    /// F-f08-11: with the run-bound switch on, a save that names its wake run writes, and the row is that agent's.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn bound_save_naming_the_wake_run_writes_for_that_agent() {
+        let Some(seeded) = seed("canary").await else {
+            return;
+        };
+        let wake = seed_wake_run(&seeded, &seeded.space, &seeded.thread, "agent-1").await;
+        let id = save_for(&seeded, &seeded.thread, &wake, true, NOTE)
+            .await
+            .expect("the agent's save, named by its run");
+        let (scope_id, links): (Option<String>, Vec<String>) =
+            sqlx::query_as("SELECT scope_id, source_links FROM agent_memory WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&seeded.pool)
+                .await
+                .unwrap();
+        assert_eq!(scope_id, Some(format!("{}:agent-1", seeded.space)));
+        assert!(
+            links.contains(&format!("run:{wake}")),
+            "the row cites the run that issued it: {links:?}"
+        );
+        cleanup(&seeded).await;
+    }
+
+    /// F-f08-11: a save naming a member's run, a finished run or another thread's run writes nothing.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn bound_save_naming_a_run_that_is_not_a_live_wake_here_writes_nothing() {
+        let Some(seeded) = seed("canary").await else {
+            return;
+        };
+        let member = format!("agent-memory-member-{}", new_ulid());
+        test_support::seed_space_run(
+            &seeded.pool,
+            &seeded.org,
+            &seeded.space,
+            &seeded.thread,
+            &member,
+            "queued",
+            "persistent",
+        )
+        .await;
+        assert_eq!(
+            save_for(&seeded, &seeded.thread, &member, true, NOTE).await,
+            Err(Skip::NotAgentTurn),
+            "a member's run is no agent's turn"
+        );
+
+        let done = seed_wake_run(&seeded, &seeded.space, &seeded.thread, "agent-1").await;
+        finish_run(&seeded, &done).await;
+        assert_eq!(
+            save_for(&seeded, &seeded.thread, &done, true, NOTE).await,
+            Err(Skip::NotAgentTurn),
+            "a finished run is no longer the turn"
+        );
+
+        let other_space = format!("{}-b", seeded.space);
+        let other_thread = format!("{}-b", seeded.thread);
+        test_support::seed_space_thread(
+            &seeded.pool,
+            &seeded.org,
+            &other_space,
+            &other_thread,
+            OWNER,
+        )
+        .await;
+        let there = seed_wake_run(&seeded, &other_space, &other_thread, "agent-1").await;
+        assert_eq!(
+            save_for(&seeded, &seeded.thread, &there, true, NOTE).await,
+            Err(Skip::NotAgentTurn),
+            "another thread's run is not this thread's turn"
+        );
+        assert_eq!(
+            count(
+                &seeded,
+                "SELECT COUNT(*) FROM agent_memory WHERE org_id = $1"
+            )
+            .await,
+            0
+        );
+        cleanup(&seeded).await;
+        test_support::clean_space(&seeded.pool, &seeded.org, &other_space).await;
+    }
+
+    /// F-f08-11: with the switch on, a save that names no run writes nothing, even with one live wake in the thread.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn bound_save_naming_no_run_writes_nothing() {
+        let Some(seeded) = seed("canary").await else {
+            return;
+        };
+        let _wake = seed_wake_run(&seeded, &seeded.space, &seeded.thread, "agent-1").await;
+        assert_eq!(
+            save_for(&seeded, &seeded.thread, "", true, NOTE).await,
+            Err(Skip::NotAgentTurn),
+            "no run named, no turn"
+        );
+        assert_eq!(
+            save_for(&seeded, &seeded.thread, "  ", true, NOTE).await,
+            Err(Skip::NotAgentTurn),
+            "a blank run is no run"
+        );
+        assert_eq!(
+            count(
+                &seeded,
+                "SELECT COUNT(*) FROM agent_memory WHERE org_id = $1"
+            )
+            .await,
+            0
+        );
+        cleanup(&seeded).await;
+    }
+
+    /// F-f08-11: two live wakes cannot be told apart by inference. With the switch on, the save names its own run.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn two_live_wakes_with_the_switch_on_write_for_the_named_one() {
+        let Some(seeded) = seed("canary").await else {
+            return;
+        };
+        let _first = seed_wake_run(&seeded, &seeded.space, &seeded.thread, "agent-1").await;
+        let second = seed_wake_run(&seeded, &seeded.space, &seeded.thread, "agent-2").await;
+        assert_eq!(
+            save_for(&seeded, &seeded.thread, "", false, NOTE).await,
+            Err(Skip::NotAgentTurn),
+            "switch off: two live wakes say nothing"
+        );
+        let id = save_for(&seeded, &seeded.thread, &second, true, "Agent two note.")
+            .await
+            .expect("named by its run");
+        let scope_id: Option<String> =
+            sqlx::query_scalar("SELECT scope_id FROM agent_memory WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&seeded.pool)
+                .await
+                .unwrap();
+        assert_eq!(scope_id, Some(format!("{}:agent-2", seeded.space)));
+        cleanup(&seeded).await;
+    }
+
+    /// F-f08-11: with the switch off, one live wake is still the agent a save is inferred to (today's rule).
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn switch_off_infers_the_one_live_wake() {
+        let Some(seeded) = seed("canary").await else {
+            return;
+        };
+        let _wake = seed_wake_run(&seeded, &seeded.space, &seeded.thread, "agent-1").await;
+        let id = save_for(&seeded, &seeded.thread, "", false, NOTE)
+            .await
+            .expect("one live wake: the save is inferred to it");
+        let scope_id: Option<String> =
+            sqlx::query_scalar("SELECT scope_id FROM agent_memory WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&seeded.pool)
+                .await
+                .unwrap();
+        assert_eq!(scope_id, Some(format!("{}:agent-1", seeded.space)));
         cleanup(&seeded).await;
     }
 }
