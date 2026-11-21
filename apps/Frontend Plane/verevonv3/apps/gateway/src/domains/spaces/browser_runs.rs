@@ -134,6 +134,10 @@ pub(super) fn routes() -> Router<AppState> {
             "/api/v1/spaces/{space_ref}/browser-runs/{run_id}/evidence/{evidence_id}",
             get(read_room_browser_evidence),
         )
+        .route(
+            "/api/v1/spaces/{space_ref}/browser-runs/{run_id}/stop",
+            post(stop_room_browser_run),
+        )
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1557,6 +1561,258 @@ fn sha256_digest(text: &str) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(text.as_bytes())))
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// D21h: the starter's Stop of a room browser run. `POST /api/v1/spaces/{space_ref}/browser-runs/{run_id}/stop` takes no
+// body. Order: the rollout flag (404), the org (403), the Space reference and the run id (400), the Space lifecycle (an
+// archived room may still stop its runs, D22aj), the delegated bearers, then per attempt Control's
+// `browser-run-stop-decision` (any current member; it binds the caller, the Space and the run) and model-gateway's
+// `POST /v1/spaces/:space_id/browser/runs/:run_id/stop`. The path's Space id is the decision's own `space_ref`, never the
+// caller's reference: model-gateway binds the decision to the path and checks the run's Space against it. Model-gateway
+// checks that the caller started the run (403 `browser_run_not_yours`) and owns the caller's live zero-retention check
+// (a typed 412, relayed); the gateway does not pre-refuse zero retention here because stopping is the safe direction
+// (D23). A stale decision is minted again once. The answer is 200 `{data:{run_id, status}}`, `status` being `cancelled`
+// or `already_terminal`.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The stop's decision key: one per run, so a repeated Stop asks the same thing again.
+const STOP_KEY_PREFIX: &str = "space-browser-stop-";
+
+/// `POST /api/v1/spaces/{space_ref}/browser-runs/{run_id}/stop` (D21h).
+async fn stop_room_browser_run(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path((space_ref, run_id)): Path<(String, String)>,
+) -> Response {
+    let (status, Json(payload)) = submit_stop(&state, &user, &headers, space_ref.trim(), run_id.trim()).await;
+    let mut response = (status, Json(payload)).into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+/// The whole starter Stop (D21h).
+pub(crate) async fn submit_stop(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    space_ref: &str,
+    run_id: &str,
+) -> Reply {
+    if !state.space_features.browser_run {
+        return start_refusal(
+            StatusCode::NOT_FOUND,
+            "feature_unavailable",
+            "Room browser runs are not enabled.",
+        );
+    }
+    let org_id = authorized_org_id(state, user).await;
+    if org_id.trim().is_empty() {
+        return start_refusal(
+            StatusCode::FORBIDDEN,
+            "active_membership_required",
+            "An active organization membership is required to stop a Space browser run.",
+        );
+    }
+    if !valid_space_ref(space_ref) {
+        return start_refusal(StatusCode::BAD_REQUEST, "invalid_space", "A Space reference is required.");
+    }
+    if !valid_id(run_id) {
+        return start_refusal(StatusCode::BAD_REQUEST, "invalid_run", "A browser run reference is required.");
+    }
+    match space_lifecycle_by_ref(state, user, &org_id, space_ref).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return start_refusal(StatusCode::NOT_FOUND, "space_not_found", "Space is not available.");
+        }
+        Err(()) => {
+            return start_refusal(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "space_lifecycle_unavailable",
+                "Space lifecycle is unavailable.",
+            );
+        }
+    }
+    let (model_bearer, execution, session) = tokio::join!(
+        crate::domains::chat::shared::model_token(state, user, headers),
+        crate::domains::chat::shared::required_execution_token(state, user, headers),
+        crate::domains::chat::shared::required_session_token(state, user, headers),
+    );
+    let execution = match execution {
+        Ok(token) => token,
+        Err(cause) => return crate::domains::chat::shared::delegated_auth_unavailable(cause),
+    };
+    let session = match session {
+        Ok(token) => token,
+        Err(cause) => return crate::domains::chat::shared::delegated_auth_unavailable(cause),
+    };
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let key = format!("{STOP_KEY_PREFIX}{run_id}");
+    for attempt in 0..2 {
+        let minted = match mint_control_decision(
+            state,
+            &org_id,
+            &actor,
+            "browser-run-stop-decision",
+            json!({ "space_ref": space_ref, "run_id": run_id, "idempotency_key": key }),
+        )
+        .await
+        {
+            Ok(minted) => minted,
+            Err((status, _)) => return stop_decision_refusal(status),
+        };
+        // The decision names the Space by its canonical id; model-gateway binds the path to it.
+        let space_id = match super::required_decision_string(&minted.decision, "space_ref") {
+            Ok(space_id) if valid_id(space_id) => space_id.to_owned(),
+            Ok(_) => return super::invalid_decision(),
+            Err(refusal) => return refusal,
+        };
+        if !minted.claims.is_object() {
+            return decision_unavailable();
+        }
+        let url = format!(
+            "{}/v1/spaces/{}/browser/runs/{}/stop",
+            state.model_gateway_url,
+            urlencoding::encode(&space_id),
+            urlencoding::encode(run_id),
+        );
+        let (status, Json(response)) = crate::domains::chat::shared::proxy_model_json_with_data_plane(
+            state,
+            Method::POST,
+            &url,
+            Some(json!({
+                "decision_token": minted.token,
+                "claims": minted.claims,
+                "idempotency_key": key,
+            })),
+            model_bearer.as_deref(),
+            None,
+            None,
+            Some(&execution),
+            None,
+            Some(&session),
+            user,
+        )
+        .await;
+        if status == StatusCode::CONFLICT
+            && refusal_code(&response) == Some("space_authority_stale")
+            && attempt == 0
+        {
+            continue;
+        }
+        if !status.is_success() {
+            return stop_relay_refusal(status, &response);
+        }
+        return stopped_answer(&response, run_id);
+    }
+    start_refusal(
+        StatusCode::CONFLICT,
+        "space_authority_stale",
+        "The Space authority changed; try again.",
+    )
+}
+
+/// Model-gateway's stop answer, reduced to the run id and its closed status. Anything else is a 502.
+fn stopped_answer(response: &Value, run_id: &str) -> Reply {
+    let answered_run = response.get("run_id").and_then(Value::as_str);
+    let status = response
+        .get("status")
+        .and_then(Value::as_str)
+        .filter(|status| matches!(*status, "cancelled" | "already_terminal"));
+    match (answered_run, status) {
+        (Some(answered), Some(status)) if answered == run_id => (
+            StatusCode::OK,
+            Json(json!({ "data": { "run_id": run_id, "status": status } })),
+        ),
+        _ => (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "invalid_model_gateway_response",
+                "Model Gateway returned an invalid browser run answer.",
+            )),
+        ),
+    }
+}
+
+/// The typed zero-retention refusal of a stop: model-gateway refuses a zero-retention caller before it reads the
+/// decision (the stop writes under the caller's credential; D26 tracks relaxing that).
+fn zdr_stop_refusal() -> Reply {
+    (
+        StatusCode::PRECONDITION_FAILED,
+        Json(json!({
+            "error": {
+                "code": "zdr_feature_not_supported",
+                "message": "This is not supported with zero data retention yet: stopping a browser run here. The request was refused before any change.",
+                "retryable": false,
+                "action": "turn_off_feature",
+                "feature": "browser_run_control",
+                "details": {},
+            }
+        })),
+    )
+}
+
+fn stop_not_authorized() -> Reply {
+    start_refusal(
+        StatusCode::FORBIDDEN,
+        "space_browser_stop_not_authorized",
+        "Stopping this browser run is not permitted.",
+    )
+}
+
+/// Control's refusal of the stop decision. Control gives no reason a browser may rely on, so every 403 is one code.
+fn stop_decision_refusal(status: StatusCode) -> Reply {
+    match status.as_u16() {
+        403 => stop_not_authorized(),
+        400 => start_refusal(StatusCode::BAD_REQUEST, "invalid_run", "A browser run reference is required."),
+        404 => start_refusal(StatusCode::NOT_FOUND, "space_not_found", "Space is not available."),
+        409 => start_refusal(
+            StatusCode::CONFLICT,
+            "space_authority_stale",
+            "The Space authority changed; try again.",
+        ),
+        _ => decision_unavailable(),
+    }
+}
+
+/// Model-gateway's refusal of the stop. Only the codes named here are relayed, each with a fixed message.
+fn stop_relay_refusal(status: StatusCode, body: &Value) -> Reply {
+    let code = refusal_code(body).unwrap_or_default();
+    match (status.as_u16(), code) {
+        (401, _) => start_refusal(StatusCode::UNAUTHORIZED, "unauthorized", "Authentication required."),
+        (412, _) => zdr_stop_refusal(),
+        (404, "feature_unavailable") => start_refusal(
+            StatusCode::NOT_FOUND,
+            "feature_unavailable",
+            "Room browser runs are not enabled.",
+        ),
+        (403, "browser_run_not_yours") => start_refusal(
+            StatusCode::FORBIDDEN,
+            "browser_run_not_yours",
+            "Only the member who started this browser run can stop it here.",
+        ),
+        (403, _) => stop_not_authorized(),
+        (400, _) => start_refusal(StatusCode::BAD_REQUEST, "invalid_run", "A browser run reference is required."),
+        (409, _) => start_refusal(
+            StatusCode::CONFLICT,
+            "space_authority_stale",
+            "The Space authority changed; try again.",
+        ),
+        (503, "space_decision_unavailable") => decision_unavailable(),
+        _ => start_refusal(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "browser_stop_unavailable",
+            "The browser run could not be stopped; try again.",
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! The room browser-run routes through the real router (WS20-S4 reads and evidence, WS20-S5 start, W3-DEC-GRANT and
@@ -2618,5 +2874,170 @@ mod tests {
         assert!(starts.iter().all(|body| {
             body["space_browser_authority"]["idempotency_key"] == SEND_KEY && body["thread_id"] == NEW_THREAD
         }));
+    }
+
+    // ---- D21h: the starter's Stop ----------------------------------------------------------------------------------
+
+    const STOP: &str = "/api/v1/spaces/space-room/browser-runs/run-1/stop";
+    /// The canonical Space id Control's decision names; the room's reference in the path is `space-room`.
+    const SPACE_ID: &str = "space-id-1";
+    const MODEL_STOP: &str = "/v1/spaces/space-id-1/browser/runs/run-1/stop";
+    const STOP_DECISION: &str = "/api/v1/internal/spaces/browser-run-stop-decision";
+
+    fn granted_stop() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"data": {
+            "decision": {"decision_ref": "stop-ref-1", "space_ref": SPACE_ID},
+            "token": "stop-decision-token",
+            "claims": {"run_id": RUN}
+        }}))
+    }
+
+    /// The browser fixture with the flag on, an execution-core bearer, and Control's stop decision answered by `stop`.
+    async fn stop_fixture(stop: ResponseTemplate) -> Fixture {
+        let mut fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        fixture.state.space_features.browser_run = true;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/execution-core/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "token": "execution-token" })))
+            .mount(&fixture._others[0])
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path(STOP_DECISION))
+            .respond_with(stop)
+            .mount(&fixture.user_core)
+            .await;
+        fixture
+    }
+
+    async fn mount_model_stop(fixture: &Fixture, answer: ResponseTemplate) {
+        Mock::given(wm_method("POST"))
+            .and(wm_path(MODEL_STOP))
+            .respond_with(answer)
+            .mount(&fixture.model)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn the_stop_is_404_and_calls_nothing_while_the_flag_is_off() {
+        let fixture = fixture(org_record(false), granted_read(), granted_browser()).await;
+        let (status, _, body) = send(fixture.state.clone(), "POST", STOP, None).await;
+        assert_eq!(status, 404);
+        assert_eq!(json_of(&body)["error"]["code"], "feature_unavailable");
+        assert!(hits(&fixture.user_core, "/internal/spaces/").await.is_empty());
+        assert!(hits(&fixture.model, "").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_stop_mints_the_decision_and_relays_to_the_decided_space_id_with_the_decided_authority_only() {
+        let fixture = stop_fixture(granted_stop()).await;
+        mount_model_stop(
+            &fixture,
+            ResponseTemplate::new(200).set_body_json(json!({
+                "run_id": RUN, "status": "cancelled", "cancelled": true, "result_turn": "written"
+            })),
+        )
+        .await;
+        let (status, headers, body) = send(fixture.state.clone(), "POST", STOP, None).await;
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(json_of(&body), json!({"data": {"run_id": RUN, "status": "cancelled"}}));
+        assert_eq!(header_text(&headers, "cache-control"), Some("no-store"));
+        let decisions = bodies(&fixture.user_core, "POST", STOP_DECISION).await;
+        assert_eq!(
+            decisions,
+            vec![json!({"space_ref": SPACE, "run_id": RUN, "idempotency_key": "space-browser-stop-run-1"})]
+        );
+        let relayed = fixture
+            .model
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|request| request.url.path() == MODEL_STOP)
+            .collect::<Vec<_>>();
+        assert_eq!(relayed.len(), 1);
+        assert_eq!(
+            relayed[0].body_json::<Value>().unwrap_or(Value::Null),
+            json!({
+                "decision_token": "stop-decision-token",
+                "claims": {"run_id": RUN},
+                "idempotency_key": "space-browser-stop-run-1"
+            })
+        );
+        assert!(relayed[0].headers.get("x-execution-authorization").is_some());
+        assert!(relayed[0].headers.get("x-session-authorization").is_some());
+    }
+
+    #[tokio::test]
+    async fn a_run_that_is_not_the_callers_is_browser_run_not_yours() {
+        let fixture = stop_fixture(granted_stop()).await;
+        mount_model_stop(
+            &fixture,
+            ResponseTemplate::new(403).set_body_json(json!({"error": {"code": "browser_run_not_yours"}})),
+        )
+        .await;
+        let (status, _, body) = send(fixture.state.clone(), "POST", STOP, None).await;
+        assert_eq!(status, 403);
+        assert_eq!(json_of(&body)["error"]["code"], "browser_run_not_yours");
+    }
+
+    #[tokio::test]
+    async fn control_refusing_the_stop_decision_is_one_typed_403_and_nothing_is_relayed() {
+        let fixture = stop_fixture(refused(403, "space_role_below_floor")).await;
+        let (status, _, body) = send(fixture.state.clone(), "POST", STOP, None).await;
+        assert_eq!(status, 403);
+        assert_eq!(json_of(&body)["error"]["code"], "space_browser_stop_not_authorized");
+        assert!(hits(&fixture.model, "/stop").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_model_gateway_zdr_412_is_the_typed_stop_refusal() {
+        let fixture = stop_fixture(granted_stop()).await;
+        mount_model_stop(
+            &fixture,
+            ResponseTemplate::new(412).set_body_json(json!({"error": {"code": "zdr_feature_not_supported"}})),
+        )
+        .await;
+        let (status, _, body) = send(fixture.state.clone(), "POST", STOP, None).await;
+        assert_eq!(status, 412);
+        assert_eq!(json_of(&body)["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(json_of(&body)["error"]["feature"], "browser_run_control");
+    }
+
+    #[tokio::test]
+    async fn a_stale_stop_is_minted_again_once_then_surfaced() {
+        let fixture = stop_fixture(granted_stop()).await;
+        mount_model_stop(&fixture, stale_answer()).await;
+        let (status, _, body) = send(fixture.state.clone(), "POST", STOP, None).await;
+        assert_eq!(status, 409);
+        assert_eq!(json_of(&body)["error"]["code"], "space_authority_stale");
+        assert_eq!(bodies(&fixture.user_core, "POST", STOP_DECISION).await.len(), 2);
+        assert_eq!(hits(&fixture.model, "/stop").await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_stop_answer_for_another_run_or_an_unknown_status_is_an_invalid_upstream_answer() {
+        for answer in [
+            json!({"run_id": "run-2", "status": "cancelled"}),
+            json!({"run_id": RUN, "status": "paused"}),
+        ] {
+            let fixture = stop_fixture(granted_stop()).await;
+            mount_model_stop(&fixture, ResponseTemplate::new(200).set_body_json(answer.clone())).await;
+            let (status, _, body) = send(fixture.state.clone(), "POST", STOP, None).await;
+            assert_eq!(status, 502, "{answer}");
+            assert_eq!(json_of(&body)["error"]["code"], "invalid_model_gateway_response");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_decision_without_a_space_id_is_never_relayed() {
+        let fixture = stop_fixture(ResponseTemplate::new(200).set_body_json(json!({"data": {
+            "decision": {"decision_ref": "stop-ref-1"},
+            "token": "stop-decision-token",
+            "claims": {"run_id": RUN}
+        }})))
+        .await;
+        let (status, _, _) = send(fixture.state.clone(), "POST", STOP, None).await;
+        assert_eq!(status, 502);
+        assert!(hits(&fixture.model, "/stop").await.is_empty());
     }
 }

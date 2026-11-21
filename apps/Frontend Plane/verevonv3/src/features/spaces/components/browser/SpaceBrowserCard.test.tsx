@@ -19,6 +19,7 @@ const browserRuns = vi.hoisted(() => ({
   readSpaceBrowserTimeline: vi.fn(),
   listSpaceBrowserRuns: vi.fn(),
   spaceBrowserEvidenceUrl: vi.fn(),
+  stopSpaceBrowserRunAsStarter: vi.fn(),
 }))
 vi.mock('@/shared/api/spaces-client/browser-runs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/shared/api/spaces-client/browser-runs')>()
@@ -128,6 +129,7 @@ beforeEach(() => {
   browserRuns.readSpaceBrowserTimeline.mockResolvedValue(timelineAnswer('running', [navigated, screenshot]))
   browserRuns.listSpaceBrowserRuns.mockReset()
   runStop.stopSpaceRun.mockReset()
+  browserRuns.stopSpaceBrowserRunAsStarter.mockReset()
 })
 
 afterEach(() => {
@@ -239,7 +241,7 @@ describe('the client answers fill the card (WS20-S5)', () => {
 
 // Before this, the card and the pane had an Open button and nothing else: the only Stop was the generic one on the run
 // card in the timeline, which hides itself from the run's own starter. A room manager or owner (when the listing says
-// manager Stop is on) now has Stop on the run itself. The starter's own stop has no route yet.
+// manager Stop is on) now has Stop on the run itself, and so has the run's own starter (D21h, below).
 describe('Stop on a live run (WS20, WS09-S8)', () => {
   const stopButton = () => screen.queryByRole('button', { name: 'Stopp kjøringen' })
 
@@ -360,5 +362,58 @@ describe('the start entry in a thread (WS20-S5)', () => {
     mountSection()
     await settle()
     expect(browseButton()).toBeNull()
+  })
+})
+
+// D21h: the run's starter stops their own live run through the starter route, whatever their room role and with no
+// manager switch. A starter who is also a manager still takes the starter route.
+describe("the starter's own Stop (D21h)", () => {
+  const stopButton = () => screen.queryByRole('button', { name: 'Stopp kjøringen' })
+
+  it('is offered to the starter on a live run without the manager switch, and not once the run has ended', async () => {
+    mountCard(STARTER, listRun, false)
+    await settle()
+    expect(stopButton()).not.toBeNull()
+    cleanup()
+
+    browserRuns.readSpaceBrowserTimeline.mockResolvedValue(timelineAnswer('completed', [navigated]))
+    mountCard(STARTER, listRun, false)
+    await settle()
+    expect(stopButton()).toBeNull()
+  })
+
+  it('calls the starter route, never the manager route, and says the stop was sent', async () => {
+    browserRuns.stopSpaceBrowserRunAsStarter.mockResolvedValue({ runId: RUN_ID, status: 'cancelled' })
+    mountCard(STARTER, listRun, true)
+    await settle()
+
+    fireEvent.click(stopButton() as HTMLElement)
+    await settle()
+    expect(browserRuns.stopSpaceBrowserRunAsStarter).toHaveBeenCalledWith(SPACE, RUN_ID)
+    expect(runStop.stopSpaceRun).not.toHaveBeenCalled()
+    expect(screen.getByText('Stopp sendt …')).toBeTruthy()
+  })
+
+  it('says only the starter can stop it when model-gateway says the run is not theirs', async () => {
+    browserRuns.stopSpaceBrowserRunAsStarter.mockRejectedValue(new ApiError('Forbidden', 403, 'browser_run_not_yours'))
+    mountCard(STARTER, listRun, false)
+    await settle()
+
+    fireEvent.click(stopButton() as HTMLElement)
+    await settle()
+    expect(screen.getByRole('alert').textContent).toContain('Bare den som startet kjøringen')
+    expect((stopButton() as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('says a zero-retention stop is not available yet', async () => {
+    browserRuns.stopSpaceBrowserRunAsStarter.mockRejectedValue(
+      new ApiError('Precondition failed', 412, 'zdr_feature_not_supported'),
+    )
+    mountCard(STARTER, listRun, false)
+    await settle()
+
+    fireEvent.click(stopButton() as HTMLElement)
+    await settle()
+    expect(screen.getByRole('alert').textContent).toContain('nulllagring')
   })
 })

@@ -6,6 +6,7 @@
 //   GET  /api/v1/spaces/{ref}/browser-runs?thread_id=&limit=        R2 -> { data: [run], meta: { next_cursor } }
 //   GET  /api/v1/spaces/{ref}/browser-runs/{run}/timeline?after=    R3 -> { data: { run, events, next_event_id, valid_until } }
 //   GET  /api/v1/spaces/{ref}/browser-runs/{run}/evidence/{id}      R4 -> image bytes, the run's starter only
+//   POST /api/v1/spaces/{ref}/browser-runs/{run}/stop               D21h -> { data: { run_id, status } }, the starter only
 // Errors arrive as the typed `{error:{code,message,details}}` envelope (ApiError). Their copy lives in
 // shared/i18n/errors.ts under the WS20 banner.
 import { requestJson, requestJsonPage } from '../http'
@@ -244,6 +245,29 @@ export async function readSpaceBrowserTimeline(
   const validUntil = text(data.valid_until)
   if (!validUntil) throw unreadable()
   return { run, events, nextEventId: text(data.next_event_id), validUntil }
+}
+
+/** What the starter's Stop answers: `already_terminal` means the run had ended before the stop arrived. */
+export type SpaceBrowserStopReceipt = {
+  readonly runId: string
+  readonly status: 'cancelled' | 'already_terminal'
+}
+
+/**
+ * The starter's own Stop of a room browser run (D21h): any room role, no manager switch. The gateway mints Control's
+ * stop decision and model-gateway checks the caller started the run (403 `browser_run_not_yours` otherwise). The
+ * request has no body; a repeated Stop asks the same thing again.
+ */
+export async function stopSpaceBrowserRunAsStarter(spaceRef: string, runId: string): Promise<SpaceBrowserStopReceipt> {
+  const raw = await requestJson<unknown>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/browser-runs/${encodeURIComponent(runId)}/stop`,
+    { method: 'POST' },
+  )
+  const data = isRecord(raw) ? raw : null
+  const answered = data ? text(data.run_id) : null
+  const status = data?.status
+  if (answered !== runId || (status !== 'cancelled' && status !== 'already_terminal')) throw unreadable()
+  return { runId, status }
 }
 
 /**

@@ -5,6 +5,7 @@ import {
   readSpaceBrowserTimeline,
   spaceBrowserHostProblem,
   startSpaceBrowserRun,
+  stopSpaceBrowserRunAsStarter,
 } from './browser-runs'
 
 type FetchCall = { url: string; init: RequestInit | undefined }
@@ -189,5 +190,25 @@ describe('browser run parsers (WS20-S5)', () => {
     await expect(readSpaceBrowserTimeline('room', 'run_1')).rejects.toThrow('space_browser_run_unreadable')
     stubFetch(200, { data: { events: [], valid_until: '2026-11-02T10:05:00Z' } })
     await expect(readSpaceBrowserTimeline('room', 'run_1')).rejects.toThrow('space_browser_run_unreadable')
+  })
+})
+
+describe('stopSpaceBrowserRunAsStarter (D21h)', () => {
+  it('posts to the starter stop route with no body and reads the closed status', async () => {
+    const calls = stubFetch(200, { data: { run_id: 'run 1', status: 'already_terminal' } })
+    await expect(stopSpaceBrowserRunAsStarter('room/a', 'run 1')).resolves.toEqual({
+      runId: 'run 1',
+      status: 'already_terminal',
+    })
+    expect(calls[0]?.url).toBe('/api/v1/spaces/room%2Fa/browser-runs/run%201/stop')
+    expect(calls[0]?.init?.method).toBe('POST')
+    expect(calls[0]?.init?.body).toBeUndefined()
+  })
+
+  it('throws for an answer about another run or an unknown status', async () => {
+    stubFetch(200, { data: { run_id: 'run_2', status: 'cancelled' } })
+    await expect(stopSpaceBrowserRunAsStarter('room', 'run_1')).rejects.toThrow('space_browser_run_unreadable')
+    stubFetch(200, { data: { run_id: 'run_1', status: 'paused' } })
+    await expect(stopSpaceBrowserRunAsStarter('room', 'run_1')).rejects.toThrow('space_browser_run_unreadable')
   })
 })

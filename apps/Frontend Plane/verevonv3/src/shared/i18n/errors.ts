@@ -1631,6 +1631,20 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Skjermbildet vises bare for den som startet kjøringen.',
     en: 'The screenshot is shown only to the person who started the run.',
   },
+  // D21h: the starter's own Stop of a room browser run (POST .../browser-runs/{run}/stop).
+  space_browser_stop_not_authorized: {
+    no: 'Du kan ikke stoppe denne nettleserkjøringen her. Ingenting er endret.',
+    en: 'You cannot stop this browser run here. Nothing was changed.',
+  },
+  browser_run_not_yours: {
+    no: 'Bare den som startet kjøringen kan stoppe den her. En leder i rommet kan også stoppe den.',
+    en: 'Only the person who started the run can stop it here. A room manager can also stop it.',
+  },
+  browser_stop_unavailable: {
+    no: 'Kjøringen kunne ikke stoppes akkurat nå. Prøv igjen.',
+    en: 'The run could not be stopped right now. Try again.',
+    retryable: true,
+  },
   evidence_not_found: { no: 'Skjermbildet finnes ikke lenger.', en: 'The screenshot is no longer available.' },
   evidence_too_large: { no: 'Skjermbildet er for stort til å vises.', en: 'The screenshot is too large to show.' },
   evidence_unsupported: { no: 'Dette bildeformatet kan ikke vises.', en: 'This image format cannot be shown.' },

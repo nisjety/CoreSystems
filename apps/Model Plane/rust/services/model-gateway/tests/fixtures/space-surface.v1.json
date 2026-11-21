@@ -1408,6 +1408,24 @@
       "reason": "Room browser run start (R1) persists a run and its thread results: an editor or above, refused for a zero-retention caller (typed 412) before any Control decision or Model Plane call."
     },
     {
+      "id": "bff:POST:/api/v1/spaces/{space_ref}/browser-runs/{run_id}/stop",
+      "kind": "route",
+      "plane": "frontend",
+      "service": "verevonv3-gateway",
+      "method": "POST",
+      "path": "/api/v1/spaces/{space_ref}/browser-runs/{run_id}/stop",
+      "handler": "domains/spaces/browser_runs.rs::stop_room_browser_run",
+      "route_class": "DurableWrite",
+      "decision_type": "browser-run-stop-decision",
+      "min_role": "viewer",
+      "zdr_class": "refuse",
+      "basis": "registry",
+      "idempotency": "idempotency_key",
+      "flag": "browser_run",
+      "payload_allow_list": [],
+      "reason": "The starter's Stop of a room browser run (D21h): any current member may ask Control for the stop decision, and model-gateway checks the caller started the run. The gateway relays model-gateway's live zero-retention refusal (typed 412) and does not pre-refuse, since stopping is the safe direction (D23); the end-to-end ZDR stop is still owed (D26). An archived room may still stop its runs."
+    },
+    {
       "id": "bff:POST:/api/v1/spaces/{space_ref}/canvas/versions",
       "kind": "route",
       "plane": "frontend",

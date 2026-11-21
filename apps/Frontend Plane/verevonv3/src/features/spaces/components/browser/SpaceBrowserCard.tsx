@@ -22,8 +22,9 @@ export interface SpaceBrowserCardProps {
   readonly startedByName: string
   readonly onOpen: (runId: string) => void
   /**
-   * Offers Stop on a live run: the listing says manager Stop is on and the viewer is the room's manager or owner
-   * (`canOfferBrowserStop`). Presentation only; Control decides and Session Core verifies on every call.
+   * Offers the manager's Stop on a live run: the listing says manager Stop is on and the viewer is the room's manager
+   * or owner (`canOfferBrowserStop`). The run's own starter has Stop regardless (D21h). Presentation only; Control
+   * decides and the planes verify on every call.
    */
   readonly canStop?: boolean
 }
@@ -104,8 +105,9 @@ export function SpaceBrowserCard(props: SpaceBrowserCardProps) {
         <button type="button" class="verevon-space-browser-card__open" onClick={() => props.onOpen(props.run.runId)}>
           {i18n.tr('Åpne', 'Open')}
         </button>
-        <Show when={props.canStop === true && isSpaceBrowserRunLive(feed.header() ?? props.run)}>
-          <SpaceBrowserRunStop spaceRef={props.spaceRef} runId={props.run.runId} />
+        {/* D21h: the starter always has Stop on their own live run; a manager has it when manager Stop is on. */}
+        <Show when={(starter() || props.canStop === true) && isSpaceBrowserRunLive(feed.header() ?? props.run)}>
+          <SpaceBrowserRunStop spaceRef={props.spaceRef} runId={props.run.runId} asStarter={starter()} />
         </Show>
       </div>
     </article>
