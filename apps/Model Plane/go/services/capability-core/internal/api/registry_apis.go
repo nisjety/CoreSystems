@@ -2293,6 +2293,13 @@ func authBindingIDFromSecretRef(secretRef string) string {
 	return id
 }
 
+// hydrateMCPServerView derives the read view of one stored server from its own row, on
+// every call. capability-core keeps no cache of this view (no map, TTL or memo sits
+// around mcpServerRow in this package), so a write that has committed is what the next
+// read returns. A stale binding can only live in a cache outside this package, such as
+// model-gateway's copy of the catalog, which this file does not control. The write
+// responses carry no view (a registration returns its id, a sharing update its id and
+// updated_at), so none can hold a view loaded before the write.
 func hydrateMCPServerView(server *mcpServerRow) {
 	server.ToolAllowlist = []string{}
 	server.AuthBindingID = ""
@@ -2845,6 +2852,13 @@ func (h *MCPHandler) get(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, s)
 }
 
+// mcpTxBeginner is the pool's transaction entry point. *pgxpool.Pool has it; the
+// unit-test fake does not, and the sharing update takes its statements outside a
+// transaction there (see patch).
+type mcpTxBeginner interface {
+	Begin(context.Context) (pgx.Tx, error)
+}
+
 func (h *MCPHandler) patch(w http.ResponseWriter, r *http.Request, id string) {
 	orgID, ok := mcpVerifiedOrganization(r, true)
 	if !ok {
@@ -2878,13 +2892,36 @@ func (h *MCPHandler) patch(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	var configJSON any
+	// The sharing change reads the stored config and writes a whole config back built
+	// from that read (C-24d, FU-14). A registration that commits in between would be
+	// written over, restoring its previous credential binding, tool allowlist or trust
+	// choice. So the read and the write share one transaction, and SELECT ... FOR
+	// UPDATE holds the row lock across them. A pool that cannot begin a transaction
+	// (the unit-test fake) takes the same statements outside one; the production pool
+	// is a *pgxpool.Pool and always can.
+	var writer registryDatabase = h.pool
+	var tx pgx.Tx
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback(r.Context())
+		}
+	}()
 	if update.SharedWith != nil {
 		var stored any
 		var scope, authKind string
-		if err := h.pool.QueryRow(r.Context(), `
-			SELECT config_json, scope, auth_kind
-			FROM mcp_servers WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL
-		`, id, orgID).Scan(&stored, &scope, &authKind); err != nil {
+		readQuery := `SELECT config_json, scope, auth_kind FROM mcp_servers WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL`
+		var reader registryDatabase = h.pool
+		if beginner, ok := h.pool.(mcpTxBeginner); ok {
+			begun, err := beginner.Begin(r.Context())
+			if err != nil {
+				slog.Error("begin MCP sharing update failed", "error", err)
+				jsonErr(w, "database unavailable", http.StatusInternalServerError)
+				return
+			}
+			tx, writer, reader = begun, begun, begun
+			readQuery += ` FOR UPDATE`
+		}
+		if err := reader.QueryRow(r.Context(), readQuery, id, orgID).Scan(&stored, &scope, &authKind); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				jsonErr(w, "MCP server not found", http.StatusNotFound)
 			} else {
@@ -2941,9 +2978,17 @@ func (h *MCPHandler) patch(w http.ResponseWriter, r *http.Request, id string) {
 	if (update.Enabled != nil && !*update.Enabled) || update.RolloutState == "quarantine" || update.RolloutState == "deprecated" {
 		query = withMCPToolCascade(query, "$6", "$5")
 	}
-	result, err := h.pool.Exec(r.Context(), query, enabled, update.RolloutState, configJSON, now, id, orgID)
+	result, err := writer.Exec(r.Context(), query, enabled, update.RolloutState, configJSON, now, id, orgID)
 	if !writeSingleScopedMutation(w, "MCP server", result, err) {
 		return
+	}
+	if tx != nil {
+		if err := tx.Commit(r.Context()); err != nil {
+			slog.Error("commit MCP sharing update failed", "error", err)
+			jsonErr(w, "database unavailable", http.StatusInternalServerError)
+			return
+		}
+		tx = nil
 	}
 	writeJSON(w, map[string]any{"id": id, "updated_at": now})
 }

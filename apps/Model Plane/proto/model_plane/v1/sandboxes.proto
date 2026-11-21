@@ -107,6 +107,14 @@ service SandboxManager {
   // caller's own sandbox bearer; service principals are refused.
   rpc DeleteThreadWorkspace(DeleteThreadWorkspaceRequest) returns (DeleteThreadWorkspaceResponse);
 
+  // Erase a deleted thread's rows and object-store prefix for the retention sweeper
+  // (F-f10-08, owner D-f10-7). Service-only: the caller must be a service principal
+  // holding sandbox:thread-workspace:erase:any, and a user is refused. org_id must be
+  // the verified organization, and owner_id only selects rows that must also match the
+  // org and the thread; a thread another owner shares is never erased. Gated by
+  // SANDBOX_MANAGER_SERVICE_THREAD_ERASE.
+  rpc EraseThreadWorkspaceForRetention(EraseThreadWorkspaceForRetentionRequest) returns (EraseThreadWorkspaceForRetentionResponse);
+
   // Read a lease's lifecycle: its state, the failure cause the latest thread-workspace apply recorded,
   // when it was last used, and the counts its thread workspace holds (WS22-S6). Descriptive, like
   // GetProcess: a released or expired lease still answers, so a client can say why its files are not kept.
@@ -245,6 +253,13 @@ message SnapshotRequest {
   // non-Space snapshot (existing behavior, unchanged) and for a
   // Space-scoped snapshot that hydrated nothing new.
   repeated WorkspaceChangedFile changed_files = 4;
+
+  // Paths this run removed since it hydrated its workspace, recorded as
+  // tombstones on this lease's own overlay (F-f05-16). Honoured only for a
+  // Space-scoped lease and only while SANDBOX_MANAGER_OVERLAY_TOMBSTONES_ENABLED
+  // is on; otherwise ignored. PromoteWorkspace deletes the Space row only when
+  // it still holds the base_hash the run saw.
+  repeated WorkspaceDeletedPath deleted_paths = 5;
 }
 
 message SnapshotResponse {
@@ -306,6 +321,18 @@ message WorkspaceChangedFile {
   // PromoteWorkspace compare-and-swap merge, not by SnapshotSandbox
   // itself.
   string base_hash = 4;
+}
+
+// A path a run removed, with the Space hash it saw when it hydrated.
+message WorkspaceDeletedPath {
+  // Path relative to the workspace root.
+  string path = 1;
+
+  // The Space-level hash this path had when this run's hydrate observed it.
+  // PromoteWorkspace deletes the Space row only while it still holds this
+  // hash. Empty means the path did not exist when the run hydrated (the run
+  // created and then removed it), so only the run's own overlay row is dropped.
+  string base_hash = 2;
 }
 
 message PromoteWorkspaceRequest {
@@ -738,6 +765,10 @@ message GetThreadWorkspaceRequest {
 
   // Caller's asserted backend id; must match the lease's pinned backend.
   string backend_id = 2;
+
+  // True when the caller's run keeps no content (zero retention or a waiver, DEC-32). sandbox-manager
+  // refuses the call; the flag can only raise the floor, a false value never lowers it.
+  bool zdr = 3;
 }
 
 // The thread's files at one revision.
@@ -772,6 +803,10 @@ message ApplyThreadWorkspaceChangesRequest {
 
   // Files removed.
   repeated ThreadDeletedPath deleted = 4;
+
+  // True when the caller's run keeps no content (zero retention or a waiver, DEC-32). sandbox-manager
+  // refuses the call; the flag can only raise the floor, a false value never lowers it.
+  bool zdr = 5;
 }
 
 // The outcome of one batch.
@@ -806,6 +841,25 @@ message DeleteThreadWorkspaceResponse {
 
   // Object-store prefix whose blobs were removed.
   string object_prefix = 2;
+}
+
+// Erase one deleted thread's workspace for the retention sweeper (F-f10-08).
+message EraseThreadWorkspaceForRetentionRequest {
+  // Organization that owns the thread. Must equal the verified organization.
+  string org_id = 1;
+
+  // Thread whose workspace to erase. A plain id: no wildcard, no path.
+  string thread_id = 2;
+
+  // Owner the thread's rows are keyed by, read by the sweeper from the thread row
+  // before the delete. Not an authority claim.
+  string owner_id = 3;
+}
+
+// What the retention erase removed.
+message EraseThreadWorkspaceForRetentionResponse {
+  // Rows removed.
+  int64 files_deleted = 1;
 }
 
 // --- WS22-S6 lease lifecycle status ---

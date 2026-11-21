@@ -195,7 +195,8 @@ type Grant struct {
 	// It is empty only for ordinary grants, never for an approval.
 	ParentGrantID string
 	// ReadOnly narrows the grant to the read level (WS21-S4). It is never
-	// cleared by a derive: a run grant is never wider than its parent.
+	// cleared by a derive: a run grant is never wider than its parent. The
+	// durable store keeps it in the read_only column (migration 0009).
 	ReadOnly  bool
 	ExpiresAt time.Time
 	// AbsoluteExpiresAt is the hard backstop a renewal can never pass. It equals
@@ -212,7 +213,8 @@ type CreateSessionParams struct {
 	AllowedDomains                       []string
 	TTL                                  time.Duration
 	Zdr                                  bool
-	// ReadOnly issues the grant at the read level (WS21-S4).
+	// ReadOnly issues the grant at the read level (WS21-S4). The server issues a
+	// non-ZDR one only with the durable read-only switch on (server.Options).
 	ReadOnly bool
 	// Budget is an optional budget claim (see Budget). MintedAtUnix must be
 	// zero; the store stamps it.

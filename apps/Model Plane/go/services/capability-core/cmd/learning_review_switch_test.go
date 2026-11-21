@@ -116,7 +116,7 @@ func TestStartLearningConsumerDoesNotSubscribeWhenSwitchedOff(t *testing.T) {
 	// nc is nil on purpose. A consumer that got past the switch would call
 	// nc.JetStream() and dereference it, so a regression shows up as a panic here
 	// instead of a quiet subscription.
-	startLearningConsumer(context.Background(), nil,
+	startLearningConsumer(context.Background(), nil, nil,
 		forbiddenSessionClient{t: t}, forbiddenInferenceClient{t: t})
 
 	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
@@ -141,7 +141,7 @@ func TestStartLearningConsumerSwitchedOffWinsOverMissingBackends(t *testing.T) {
 	t.Setenv(learningReviewEnabledEnv, "false")
 	logs := captureSlog(t)
 
-	startLearningConsumer(context.Background(), nil, nil, nil)
+	startLearningConsumer(context.Background(), nil, nil, nil, nil)
 
 	if !strings.Contains(logs.String(), learningReviewEnabledEnv) {
 		t.Fatalf("switched-off log must name %s even when the clients are nil: %q",

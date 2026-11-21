@@ -106,7 +106,7 @@ def web_policy_audiences: ["quarry", "browser-broker"];
 
 # The closed set of audiences an API key may be exchanged into
 # (API_KEY_EXCHANGE_AUDIENCE_SCOPES in api-key-exchange.ts).
-def api_key_exchange_audiences: ["model-gateway", "session-core", "inference-core", "quarry", "browser-broker"];
+def api_key_exchange_audiences: ["model-gateway", "session-core", "inference-core", "quarry", "browser-broker", "cost-core"];
 
 def check_maps($name; $row; $audiences; $scopes):
   (if ($row | has("scopesByAudience")) then
@@ -144,7 +144,7 @@ def check_maps($name; $row; $audiences; $scopes):
        $row.apiKeyExchange as $m
        | if ($m | non_empty_strings | not) then fail($name; "\"apiKeyExchange\" must be a non-empty array of non-empty strings")
          elif ($m | length) != ($m | unique | length) then fail($name; "\"apiKeyExchange\" lists an audience twice")
-         elif ([$m[] | IN(api_key_exchange_audiences[])] | all | not) then fail($name; "\"apiKeyExchange\" audiences must be model-gateway, session-core, inference-core, quarry or browser-broker")
+         elif ([$m[] | IN(api_key_exchange_audiences[])] | all | not) then fail($name; "\"apiKeyExchange\" audiences must be model-gateway, session-core, inference-core, quarry, browser-broker or cost-core")
          else . end
      else . end);
 

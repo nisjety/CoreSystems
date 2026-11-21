@@ -23,6 +23,11 @@ const DefaultSweepInterval = time.Hour
 // over several intervals instead of in one pass.
 const sweepBatch = 100
 
+// blobErasureSettle is how old a tombstone must be before the sweeper retries its
+// blobs. The erase that wrote it has normally finished its own blob removal by
+// then, so a retry does not race it.
+const blobErasureSettle = time.Minute
+
 // ErrThreadShared refuses to erase a thread id that another owner also holds in
 // the same org. Blobs live under the org and thread id alone, so erasing a
 // shared id would delete the other owner's blobs. Nothing is removed.
@@ -44,7 +49,9 @@ type BlobEraser interface {
 
 // Eraser deletes thread workspace rows. Blobs are removed afterwards by the
 // caller, and only once the rows are gone, so an erase that fails halfway can
-// never leave a row pointing at a blob that was already removed.
+// never leave a row pointing at a blob that was already removed. Every erase also
+// writes, in the same transaction, the tombstone (migration 0010) that its blob
+// removal is recorded against, so a blob removal that fails is retried.
 type Eraser struct {
 	pool database
 }
@@ -161,8 +168,74 @@ func (e *Eraser) EraseStaleLeases(ctx context.Context, cutoff time.Time) (int64,
 	return tag.RowsAffected(), nil
 }
 
-// eraseRows deletes a thread's files and then its header, inside the caller's
-// transaction, and reports how many files went.
+// ListPendingBlobErasures returns up to limit tombstones written before olderThan,
+// oldest first. A tombstone whose thread holds a workspace header under any owner
+// is left out: the thread id is live again, so its blobs may share the prefix with
+// the new workspace, and they are not removed here.
+func (e *Eraser) ListPendingBlobErasures(ctx context.Context, olderThan time.Time, limit int) ([]ThreadKey, error) {
+	rows, err := e.pool.Query(ctx, `
+		SELECT e.org_id, e.owner_id, e.thread_id FROM thread_workspace_erasures e
+		WHERE e.requested_at < $1
+		  AND NOT EXISTS (
+			SELECT 1 FROM thread_workspaces w
+			WHERE w.org_id = e.org_id AND w.thread_id = e.thread_id
+		  )
+		ORDER BY e.requested_at
+		LIMIT $2
+	`, olderThan, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list pending thread blob erasures: %w", err)
+	}
+	defer rows.Close()
+
+	var keys []ThreadKey
+	for rows.Next() {
+		var key ThreadKey
+		if err := rows.Scan(&key.OrgID, &key.OwnerID, &key.ThreadID); err != nil {
+			return nil, fmt.Errorf("scan pending thread blob erasure: %w", err)
+		}
+		keys = append(keys, key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list pending thread blob erasures: %w", err)
+	}
+	return keys, nil
+}
+
+// CompleteBlobErasure deletes the tombstone once the thread's blobs are gone. A
+// tombstone that is already gone is not an error.
+func (e *Eraser) CompleteBlobErasure(ctx context.Context, key ThreadKey) error {
+	if _, err := e.pool.Exec(ctx, `
+		DELETE FROM thread_workspace_erasures
+		WHERE org_id = $1 AND owner_id = $2 AND thread_id = $3
+	`, key.OrgID, key.OwnerID, key.ThreadID); err != nil {
+		return fmt.Errorf("complete thread blob erasure: %w", err)
+	}
+	return nil
+}
+
+// RecordBlobErasureAttempt counts one failed blob removal against the tombstone and
+// returns the attempts it now holds. A tombstone that is already gone counts zero.
+func (e *Eraser) RecordBlobErasureAttempt(ctx context.Context, key ThreadKey) (int64, error) {
+	var attempts int64
+	err := e.pool.QueryRow(ctx, `
+		UPDATE thread_workspace_erasures
+		SET attempts = attempts + 1, last_attempt_at = now()
+		WHERE org_id = $1 AND owner_id = $2 AND thread_id = $3
+		RETURNING attempts
+	`, key.OrgID, key.OwnerID, key.ThreadID).Scan(&attempts)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("record thread blob erasure attempt: %w", err)
+	}
+	return attempts, nil
+}
+
+// eraseRows deletes a thread's files and then its header, and records the tombstone
+// its blobs are removed against, inside the caller's transaction. It reports how
+// many files went.
 func eraseRows(ctx context.Context, tx pgx.Tx, orgID, ownerID, threadID string) (int64, error) {
 	var shared bool
 	if err := tx.QueryRow(ctx, `
@@ -176,6 +249,15 @@ func eraseRows(ctx context.Context, tx pgx.Tx, orgID, ownerID, threadID string) 
 	if shared {
 		return 0, ErrThreadShared
 	}
+	return eraseOwnedRows(ctx, tx, orgID, ownerID, threadID)
+}
+
+// eraseOwnedRows is eraseRows after its shared-owner check: it deletes one owner's
+// files and header and writes the tombstone, and it does not look at any other
+// owner. eraseRows calls it for every erase that must keep a shared thread id
+// safe; the orphan erase calls it directly, because a thread that no longer exists
+// has no other owner to protect.
+func eraseOwnedRows(ctx context.Context, tx pgx.Tx, orgID, ownerID, threadID string) (int64, error) {
 	files, err := tx.Exec(ctx, `
 		DELETE FROM thread_workspace_files
 		WHERE org_id = $1 AND owner_id = $2 AND thread_id = $3
@@ -189,6 +271,16 @@ func eraseRows(ctx context.Context, tx pgx.Tx, orgID, ownerID, threadID string) 
 	`, orgID, ownerID, threadID); err != nil {
 		return 0, fmt.Errorf("erase thread workspace header: %w", err)
 	}
+	// The tombstone is written in this transaction, so the rows and the record that
+	// their blobs remain commit or roll back together. A tombstone already there
+	// (an earlier blob removal failed) keeps its request time.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO thread_workspace_erasures (org_id, owner_id, thread_id)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (org_id, owner_id, thread_id) DO NOTHING
+	`, orgID, ownerID, threadID); err != nil {
+		return 0, fmt.Errorf("record thread blob erasure: %w", err)
+	}
 	return files.RowsAffected(), nil
 }
 
@@ -198,17 +290,24 @@ type idleEraser interface {
 	ListIdle(ctx context.Context, cutoff time.Time, limit int) ([]ThreadKey, error)
 	EraseIdle(ctx context.Context, key ThreadKey, cutoff time.Time) (bool, int64, error)
 	EraseStaleLeases(ctx context.Context, cutoff time.Time) (int64, error)
+	ListPendingBlobErasures(ctx context.Context, olderThan time.Time, limit int) ([]ThreadKey, error)
+	CompleteBlobErasure(ctx context.Context, key ThreadKey) error
+	RecordBlobErasureAttempt(ctx context.Context, key ThreadKey) (int64, error)
 }
 
-// Sweeper erases thread workspaces idle past the retention window (DEC-23), and
-// the thread lease rows that outlive them. It follows the process sweeper: a pass
-// runs at once on start and then once per interval, and a failed pass is logged
-// and tried again rather than stopping the service.
+// Sweeper erases thread workspaces idle past the retention window (DEC-23), the
+// thread lease rows that outlive them, and retries the blob removals that failed
+// (F-f06-02). It follows the process sweeper: a pass runs at once on start and
+// then once per interval, and a failed pass is logged and tried again rather than
+// stopping the service.
 type Sweeper struct {
 	rows      idleEraser
 	blobs     BlobEraser
 	retention time.Duration
 	interval  time.Duration
+	// orphans is the O-13 sweep for the workspaces of threads that no longer exist.
+	// Nil is the switch off: the pass does not run and nothing here changes.
+	orphans orphanSweep
 }
 
 // NewSweeper constructs a sweeper with the default cadence.
@@ -250,13 +349,49 @@ func (s *Sweeper) sweepAndLog(ctx context.Context, now time.Time) {
 	}
 }
 
+// retryBlobErasures removes the blobs of each tombstone old enough to retry, and
+// records a failed attempt against it. It works on up to sweepBatch tombstones per
+// pass, and a tombstone is retried once per pass, so a retry never runs faster than
+// the sweep interval. Nothing here logs a blob key or a path: an object store error
+// can carry one, so only the ids and the attempt count are logged.
+func (s *Sweeper) retryBlobErasures(ctx context.Context, now time.Time) error {
+	keys, err := s.rows.ListPendingBlobErasures(ctx, now.Add(-blobErasureSettle), sweepBatch)
+	if err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, err := s.blobs.DeleteThreadBlobs(ctx, key.OrgID, key.ThreadID); err != nil {
+			attempts, recErr := s.rows.RecordBlobErasureAttempt(ctx, key)
+			if recErr != nil && ctx.Err() == nil {
+				slog.Warn("thread blob erasure attempt was not recorded", "org_id", key.OrgID, "thread_id", key.ThreadID)
+			}
+			slog.Error("thread workspace blobs are still not removed; the erasure is kept for a retry", "org_id", key.OrgID, "thread_id", key.ThreadID, "attempts", attempts)
+			continue
+		}
+		if err := s.rows.CompleteBlobErasure(ctx, key); err != nil && ctx.Err() == nil {
+			slog.Warn("thread blob erasure is not closed; the next pass closes it", "org_id", key.OrgID, "thread_id", key.ThreadID)
+			continue
+		}
+		slog.Info("thread workspace blobs removed on retry", "org_id", key.OrgID, "thread_id", key.ThreadID)
+	}
+	return nil
+}
+
 // sweep erases every thread idle past the retention window as of now and returns
-// how many it erased. The rows go first and the blobs after, so a blob failure
-// leaves orphaned blobs that no row reaches, and that failure is logged for an
-// operator instead of being retried. The stale lease rows go last, so a failure
-// there cannot hold back an erasure in the same pass.
+// how many it erased. The pending blob removals are retried first. Then the rows
+// go and the blobs after: a blob failure leaves its tombstone, which a later pass
+// retries, so no blob is orphaned. The stale lease rows go last, so a failure there
+// cannot hold back an erasure in the same pass.
 func (s *Sweeper) sweep(ctx context.Context, now time.Time) (int, error) {
 	cutoff := now.Add(-s.retention)
+	// A failed listing of the retries is logged and does not hold back the idle
+	// erasures below, which the same pass is able to finish.
+	if err := s.retryBlobErasures(ctx, now); err != nil && ctx.Err() == nil {
+		slog.Warn("pending thread blob erasures were not listed", "error", err)
+	}
 	keys, err := s.rows.ListIdle(ctx, cutoff, sweepBatch)
 	if err != nil {
 		return 0, err
@@ -276,9 +411,22 @@ func (s *Sweeper) sweep(ctx context.Context, now time.Time) (int, error) {
 		}
 		erased++
 		slog.Info("thread workspace erased after retention", "org_id", key.OrgID, "thread_id", key.ThreadID, "files", files)
+		// The tombstone EraseIdle wrote covers a failure here: it stays for the next
+		// pass's retry. Only a successful removal closes it.
 		if _, err := s.blobs.DeleteThreadBlobs(ctx, key.OrgID, key.ThreadID); err != nil {
-			slog.Error("thread workspace blobs were not removed after their rows were erased", "org_id", key.OrgID, "thread_id", key.ThreadID, "error", err)
+			slog.Error("thread workspace blobs were not removed after their rows were erased; the erasure is kept for a retry", "org_id", key.OrgID, "thread_id", key.ThreadID)
+			continue
 		}
+		if err := s.rows.CompleteBlobErasure(ctx, key); err != nil {
+			slog.Warn("thread blob erasure is not closed; the next pass closes it", "org_id", key.OrgID, "thread_id", key.ThreadID)
+		}
+	}
+	// The orphan pass is one more erasure of the same kind, and a failure in it is
+	// logged without holding back the stale-lease pass below.
+	orphaned, err := s.sweepOrphans(ctx, now)
+	erased += orphaned
+	if err != nil && ctx.Err() == nil {
+		slog.Warn("orphan thread workspace sweep failed", "error", err)
 	}
 	stale, err := s.rows.EraseStaleLeases(ctx, cutoff)
 	if err != nil {

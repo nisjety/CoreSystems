@@ -531,8 +531,9 @@ func countUserTurns(transcript string) int {
 // "true", and with them off a review runs as it did before they existed. When
 // they are on, an unset bound takes its default, and a malformed bound is an
 // error, so the caller does not start a consumer it cannot bound. The returned
-// controls carry no [ReviewBudget]: the Redis counter is not wired, so until a
-// store is installed every review is skipped as budget_unavailable.
+// controls carry no [ReviewBudget]: the caller installs the counter store (see
+// NewPgReviewBudget), so until one is installed every review is skipped as
+// budget_unavailable.
 func CostControlsFromLookup(lookup func(string) string) (CostControls, bool, error) {
 	if lookup(learningReviewCostEnv) != "true" {
 		return CostControls{}, false, nil

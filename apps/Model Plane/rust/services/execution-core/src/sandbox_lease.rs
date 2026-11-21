@@ -1323,15 +1323,16 @@ mod concurrent_first_setup {
         AcquireLeaseRequest, AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse,
         AppendProcessOutputRequest, AppendProcessOutputResponse,
         ApplyThreadWorkspaceChangesRequest, ApplyThreadWorkspaceChangesResponse,
-        DeleteThreadWorkspaceRequest, DeleteThreadWorkspaceResponse, GetLeaseStatusRequest,
-        GetLeaseStatusResponse, GetProcessRequest, GetProcessResponse, GetThreadWorkspaceRequest,
-        GetThreadWorkspaceResponse, GetWorkspaceManifestRequest, GetWorkspaceManifestResponse,
-        ListProcessesRequest, ListProcessesResponse, PromoteWorkspaceRequest,
-        PromoteWorkspaceResponse, ReadProcessOutputRequest, ReadProcessOutputResponse,
-        ReconcileProcessesRequest, ReconcileProcessesResponse, RegisterProcessRequest,
-        RegisterProcessResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest,
-        SandboxHealthResponse, SnapshotRequest, SnapshotResponse, UpdateProcessStateRequest,
-        UpdateProcessStateResponse,
+        DeleteThreadWorkspaceRequest, DeleteThreadWorkspaceResponse,
+        EraseThreadWorkspaceForRetentionRequest, EraseThreadWorkspaceForRetentionResponse,
+        GetLeaseStatusRequest, GetLeaseStatusResponse, GetProcessRequest, GetProcessResponse,
+        GetThreadWorkspaceRequest, GetThreadWorkspaceResponse, GetWorkspaceManifestRequest,
+        GetWorkspaceManifestResponse, ListProcessesRequest, ListProcessesResponse,
+        PromoteWorkspaceRequest, PromoteWorkspaceResponse, ReadProcessOutputRequest,
+        ReadProcessOutputResponse, ReconcileProcessesRequest, ReconcileProcessesResponse,
+        RegisterProcessRequest, RegisterProcessResponse, ReleaseLeaseRequest, ReleaseLeaseResponse,
+        SandboxHealthRequest, SandboxHealthResponse, SnapshotRequest, SnapshotResponse,
+        UpdateProcessStateRequest, UpdateProcessStateResponse,
     };
     use tonic::{Request, Response, Status};
     use wiremock::matchers::{method, path};
@@ -1461,6 +1462,14 @@ mod concurrent_first_setup {
             _: Request<DeleteThreadWorkspaceRequest>,
         ) -> Result<Response<DeleteThreadWorkspaceResponse>, Status> {
             unused()
+        }
+        async fn erase_thread_workspace_for_retention(
+            &self,
+            _request: Request<EraseThreadWorkspaceForRetentionRequest>,
+        ) -> Result<Response<EraseThreadWorkspaceForRetentionResponse>, Status> {
+            Err(Status::unimplemented(
+                "erase_thread_workspace_for_retention",
+            ))
         }
         async fn get_lease_status(
             &self,

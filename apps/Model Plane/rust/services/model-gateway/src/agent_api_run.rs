@@ -38,7 +38,9 @@ use crate::agent_api_routes::{
     admit, api_key_invalid, envelope, internal_error, invalid_request, is_id, upstream_error,
     Missing,
 };
-use crate::auth::{Claims, VerifiedApiKeyInferenceBearer, VerifiedApiKeySessionBearer};
+use crate::auth::{
+    Claims, VerifiedApiKeyCostBearer, VerifiedApiKeyInferenceBearer, VerifiedApiKeySessionBearer,
+};
 use crate::http_routes::{authenticated_session_request, HttpJsonError};
 use crate::session_flow::{
     self, DirectAnswer, DirectCompletion, DirectCompletionError, DirectInferenceTerminal,
@@ -117,6 +119,7 @@ pub(crate) async fn start_run(
     Extension(claims): Extension<Claims>,
     session_bearer: Option<Extension<VerifiedApiKeySessionBearer>>,
     inference_bearer: Option<Extension<VerifiedApiKeyInferenceBearer>>,
+    cost_bearer: Option<Extension<VerifiedApiKeyCostBearer>>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<Value>), HttpJsonError> {
     // Key, scope, posture (a ZDR key is refused here, D6) and the session bearer, before anything.
@@ -194,8 +197,10 @@ pub(crate) async fn start_run(
             request_id,
             org_id: claims.org_id.clone(),
             owner: claims.sub.clone(),
+            key_id: key_id.to_owned(),
             inference_bearer,
             session_bearer,
+            cost_bearer: cost_bearer.map(|Extension(bearer)| bearer),
         };
         tokio::spawn(run_ask_turn(state, turn, permit));
     }
@@ -299,8 +304,12 @@ struct AskTurn {
     org_id: String,
     /// The key principal `apikey:<key_id>`, which owns the run.
     owner: String,
+    /// The Better Auth key id behind `owner`, for the budget check's `apikey:<key_id>` scope.
+    key_id: String,
     inference_bearer: VerifiedApiKeyInferenceBearer,
     session_bearer: VerifiedApiKeySessionBearer,
+    /// The key's own `aud=cost-core` bearer, delegated only while the key budget switches are on.
+    cost_bearer: Option<VerifiedApiKeyCostBearer>,
 }
 
 /// The model request of an Ask turn: the fixed instruction, the thread's turns and the input.
@@ -386,8 +395,10 @@ async fn run_ask_turn(state: AppState, turn: AskTurn, _permit: LiveRunPermit) {
         request_id,
         org_id,
         owner,
+        key_id,
         inference_bearer,
         session_bearer,
+        cost_bearer,
     } = turn;
     let cancelled = state
         .cancels
@@ -399,6 +410,36 @@ async fn run_ask_turn(state: AppState, turn: AskTurn, _permit: LiveRunPermit) {
     if let Err(error) = session_flow::ensure_direct_inference_run_liveness(&state, &run).await {
         warn!(%error, run_id = %run.run_id, "agent api run liveness heartbeat failed");
         return;
+    }
+
+    // O-18: the org's spend ceilings, checked for this key before the model is called. Off
+    // (AGENT_API_BUDGET_CHECK not the literal `true`), nothing here runs.
+    if crate::budget::agent_api_budget_check_enabled(&|name| std::env::var(name).ok()) {
+        if let Err((status, Json(refusal))) =
+            check_turn_budget(&state, &org_id, &key_id, cost_bearer.as_ref()).await
+        {
+            warn!(
+                run_id = %run.run_id,
+                %status,
+                code = %refusal["error"],
+                "agent api run refused by the budget check"
+            );
+            // The receipt vocabulary is Session Core's closed list; any other reason is recorded
+            // as `inference_failed`, and the typed refusal is in this log.
+            let reason = if status == StatusCode::PAYMENT_REQUIRED {
+                "budget_exceeded"
+            } else {
+                "budget_unavailable"
+            };
+            fail_run(
+                &state,
+                &run,
+                &session_bearer,
+                DirectInferenceTerminal::Failed(reason),
+            )
+            .await;
+            return;
+        }
     }
 
     let started = Instant::now();
@@ -480,6 +521,38 @@ async fn run_ask_turn(state: AppState, turn: AskTurn, _permit: LiveRunPermit) {
             );
         }
     }
+}
+
+/// O-18: the key turn's budget check. The org's ceilings are read as every other transport reads
+/// them (org-core, fails open: an unreadable ceiling is no ceiling), then `check_budget_for_key`
+/// asks cost-core about `apikey:<key_id>`: the gateway's own cost-core credential first, the key's
+/// own bearer only as the fallback. No gateway cost-core credential exists yet (F-f10-23b), so
+/// today the key's bearer is the only path; an org with a ceiling and no usable path fails closed.
+async fn check_turn_budget(
+    state: &AppState,
+    org_id: &str,
+    key_id: &str,
+    cost_bearer: Option<&VerifiedApiKeyCostBearer>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let limits = crate::org_quota::fetch_org_limits(
+        &state.http_client,
+        &state.org_core_base_url,
+        org_id,
+        &state.org_core_service_id,
+        &state.org_core_service_token,
+    )
+    .await;
+    crate::budget::check_budget_for_key(
+        &state.http_client,
+        org_id,
+        key_id,
+        crate::budget::KeyBudgetCredentials {
+            service_bearer: None,
+            key_bearer: cost_bearer.map(VerifiedApiKeyCostBearer::as_str),
+        },
+        limits,
+    )
+    .await
 }
 
 /// Resolves once the key's cancel of the run reached this replica.

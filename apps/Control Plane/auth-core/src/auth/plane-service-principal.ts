@@ -113,7 +113,8 @@ type ServicePrincipalConfig = {
    * may turn a user's API key into an `api_key` token for, through
    * `POST /api/:audience/api-key-exchange`. Each must be one of the closed
    * `API_KEY_EXCHANGE_AUDIENCE_SCOPES` audiences (`model-gateway`,
-   * `session-core`, `inference-core`, `quarry`, `browser-broker`), listed once.
+   * `session-core`, `inference-core`, `quarry`, `browser-broker`, `cost-core`),
+   * listed once.
    * Independent of `audiences`: opting in here gives the caller no
    * `/internal-token` for that audience, so the Verevon gateway gains no
    * service-token capability by holding it. Absent by default, so no principal

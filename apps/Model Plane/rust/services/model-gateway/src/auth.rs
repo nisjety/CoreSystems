@@ -201,6 +201,15 @@ const API_KEY_SESSION_HEADER: &str = "x-session-authorization";
 /// `aud=inference-core` bearer, which runs the Ask turn.
 const API_KEY_INFERENCE_HEADER: &str = "x-inference-authorization";
 
+/// O-18: the third downstream header a key may send, and only on the start route while
+/// [`crate::budget::key_budget_bearer_enabled`] is on: its own `aud=cost-core` bearer, which
+/// checks the budget of its own turns (the fallback to the gateway's own credential).
+const API_KEY_COST_HEADER: &str = "x-cost-authorization";
+
+/// O-18: the one scope a key's cost-core bearer carries (the key exchange mints no other for
+/// that audience).
+pub(crate) const API_KEY_SCOPE_BUDGET_CHECK: &str = "cost:budget:check";
+
 /// EP-12 S7: whether `method path` is the Agent API start route, the only route that calls a
 /// model with the key's inference bearer.
 fn agent_api_start_route(method: &str, path: &str) -> bool {
@@ -499,6 +508,36 @@ impl VerifiedApiKeyInferenceBearer {
 impl fmt::Debug for VerifiedApiKeyInferenceBearer {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("VerifiedApiKeyInferenceBearer([REDACTED])")
+    }
+}
+
+/// O-18: the independently verified `aud=cost-core` bearer of an `api_key` principal. Accepted
+/// only from `x-cost-authorization`, only on the Agent API start route while the key budget
+/// switches are on, exactly once, and only as the same key as the ingress token (same `sub`,
+/// `org_id`, `key_id`, `acting_user_id` and retention posture) holding `cost:budget:check`. A
+/// distinct type from [`VerifiedCostBearer`] on purpose: no user route can extract a key's cost
+/// bearer, and the start route can never extract a user's.
+#[derive(Clone)]
+pub struct VerifiedApiKeyCostBearer(Arc<str>);
+
+impl VerifiedApiKeyCostBearer {
+    fn new(token: &str) -> Self {
+        Self(Arc::from(token))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(token: &str) -> Self {
+        Self::new(token)
+    }
+}
+
+impl fmt::Debug for VerifiedApiKeyCostBearer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("VerifiedApiKeyCostBearer([REDACTED])")
     }
 }
 
@@ -1437,6 +1476,7 @@ async fn verify_delegated_api_key_session_bearer(
         API_KEY_SESSION_HEADER,
         "SESSION_CORE_AUTH_AUDIENCE",
         "session-core",
+        API_KEY_SCOPE_AGENT_RUNS,
     )
     .await
     .map(|token| token.map(|token| VerifiedApiKeySessionBearer::new(&token)))
@@ -1454,20 +1494,42 @@ async fn verify_delegated_api_key_inference_bearer(
         API_KEY_INFERENCE_HEADER,
         "INFERENCE_CORE_AUTH_AUDIENCE",
         "inference-core",
+        API_KEY_SCOPE_AGENT_RUNS,
     )
     .await
     .map(|token| token.map(|token| VerifiedApiKeyInferenceBearer::new(&token)))
 }
 
+/// O-18: verify the `aud=cost-core` bearer of an `api_key` principal on the start route (the
+/// caller checks the route and the switches), under the same binding rules as its other bearers
+/// but holding `cost:budget:check`, the one scope the key exchange mints for that audience.
+async fn verify_delegated_api_key_cost_bearer(
+    headers: &HeaderMap,
+    model_claims: &Claims,
+) -> Result<Option<VerifiedApiKeyCostBearer>, AuthRejection> {
+    verify_delegated_api_key_agent_bearer(
+        headers,
+        model_claims,
+        API_KEY_COST_HEADER,
+        "COST_CORE_AUTH_AUDIENCE",
+        "cost-core",
+        API_KEY_SCOPE_BUDGET_CHECK,
+    )
+    .await
+    .map(|token| token.map(|token| VerifiedApiKeyCostBearer::new(&token)))
+}
+
 /// The binding rules every Agent API downstream bearer of a key shares: exactly one header, the
-/// named audience, the same key as the ingress token holding `agent:runs`, and the same retention
-/// posture (a different one is the typed `zdr_posture_mismatch`). Anything else is a 403.
+/// named audience, the same key as the ingress token holding `required_scope` (`agent:runs`, or
+/// `cost:budget:check` for the cost-core bearer), and the same retention posture (a different one
+/// is the typed `zdr_posture_mismatch`). Anything else is a 403.
 async fn verify_delegated_api_key_agent_bearer(
     headers: &HeaderMap,
     model_claims: &Claims,
     header_name: &'static str,
     audience_env: &'static str,
     default_audience: &'static str,
+    required_scope: &'static str,
 ) -> Result<Option<String>, AuthRejection> {
     match headers.get_all(header_name).iter().count() {
         0 => return Ok(None),
@@ -1484,7 +1546,7 @@ async fn verify_delegated_api_key_agent_bearer(
         || claims.org_id != model_claims.org_id
         || claims.key_id != model_claims.key_id
         || claims.acting_user_id != model_claims.acting_user_id
-        || !claims.has_scope(API_KEY_SCOPE_AGENT_RUNS)
+        || !claims.has_scope(required_scope)
     {
         return Err(StatusCode::FORBIDDEN.into());
     }
@@ -1785,6 +1847,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
     let mut api_key_browser_bearer = None;
     let mut api_key_session_bearer = None;
     let mut api_key_inference_bearer = None;
+    let mut api_key_cost_bearer = None;
     let (
         data_plane_bearer,
         capability_bearer,
@@ -1853,10 +1916,15 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
                 && crate::agent_api_routes::enabled();
             let on_agent_api_start = on_agent_api_route
                 && agent_api_start_route(req.method().as_str(), req.uri().path());
+            // O-18: its own cost-core bearer too, on the start route only and only while the key
+            // budget switches are on; off, the header stays forbidden as it always was.
+            let on_agent_api_budget =
+                on_agent_api_start && crate::budget::key_budget_bearer_enabled();
             if API_KEY_FORBIDDEN_DELEGATIONS.iter().any(|header| {
                 req.headers().contains_key(*header)
                     && !(on_agent_api_route && *header == API_KEY_SESSION_HEADER)
                     && !(on_agent_api_start && *header == API_KEY_INFERENCE_HEADER)
+                    && !(on_agent_api_budget && *header == API_KEY_COST_HEADER)
             }) {
                 warn!("api key principal supplied a downstream delegation it may not hold");
                 return Err(StatusCode::FORBIDDEN.into());
@@ -1878,9 +1946,16 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
                     verify_delegated_api_key_inference_bearer(req.headers(), &token_data.claims)
                         .await?;
             }
+            if on_agent_api_budget {
+                api_key_cost_bearer =
+                    verify_delegated_api_key_cost_bearer(req.headers(), &token_data.claims).await?;
+            }
             (None, None, None, None, None, None, None, None, None, None)
         }
     };
+    if let Some(bearer) = api_key_cost_bearer {
+        req.extensions_mut().insert(bearer);
+    }
     if let Some(bearer) = api_key_browser_bearer {
         req.extensions_mut().insert(bearer);
     }
@@ -2296,6 +2371,8 @@ mod tests {
         std::env::remove_var("MODEL_GATEWAY_AUTH_DEV_BYPASS");
         std::env::remove_var("ALLOW_INSECURE_DEV_DEFAULTS");
         std::env::remove_var(crate::agent_api_routes::ENABLED_ENV);
+        std::env::remove_var(crate::budget::AGENT_API_BUDGET_CHECK_ENV);
+        std::env::remove_var(crate::budget::COST_CORE_ACCEPT_API_KEY_ENV);
     }
 
     fn test_router() -> Router {
@@ -3621,6 +3698,189 @@ mod tests {
         );
         // A user passes the fence on the key routes (the handler refuses it), as before.
         assert_eq!(status_of(base_claims(), "POST", "/v1/invoke").await, StatusCode::OK);
+    }
+
+    /// O-18: a key's own `aud=cost-core` bearer passes only on the start route, only while both
+    /// key budget switches are the literal `true`, once, and only as the same key holding
+    /// `cost:budget:check`. Off, the header stays forbidden, byte for byte as before.
+    #[tokio::test]
+    #[serial]
+    async fn delegated_api_key_cost_bearer_is_the_same_key_only_on_the_start_route_while_on() {
+        async fn echo_key_cost(
+            bearer: Option<axum::Extension<VerifiedApiKeyCostBearer>>,
+        ) -> String {
+            bearer.map_or_else(String::new, |bearer| bearer.0.as_str().to_owned())
+        }
+
+        clear_env();
+        reset_jwks_cache_for_test().await;
+        let kid = "test-kid-api-key-cost-delegation";
+        let server = start_jwks_mock(kid).await;
+        std::env::set_var(
+            "AUTH_CORE_JWKS_URL",
+            format!("{}/.well-known/jwks.json", server.uri()),
+        );
+        std::env::set_var("AUTH_CORE_AUDIENCE", "model-gateway");
+        std::env::set_var("AUTH_CORE_ISSUER", "auth-core");
+        std::env::set_var("COST_CORE_AUTH_AUDIENCE", "cost-core");
+
+        let agent = |claims: Claims| Claims {
+            scopes: vec![API_KEY_SCOPE_AGENT_RUNS.to_owned()],
+            ..claims
+        };
+        let cost_aud = |claims: Claims| Claims {
+            aud: Some("cost-core".into()),
+            scopes: vec![API_KEY_SCOPE_BUDGET_CHECK.to_owned()],
+            ..claims
+        };
+        let model_token = sign_jwt(&agent(api_key_claims("key-1")), kid);
+        let key_cost = sign_jwt(&cost_aud(api_key_claims("key-1")), kid);
+        let router = || {
+            Router::new()
+                .route("/v1/agent/runs", axum::routing::post(echo_key_cost))
+                .route("/v1/agent/runs/:run_id", get(echo_key_cost))
+                .layer(middleware::from_fn(require_auth))
+        };
+        let call = |method: &'static str, path: &'static str, token: &str| {
+            router().oneshot(
+                HttpRequest::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("authorization", format!("Bearer {model_token}"))
+                    .header("x-cost-authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        };
+
+        // Every switch state short of both literals keeps the header forbidden.
+        std::env::set_var(crate::agent_api_routes::ENABLED_ENV, "true");
+        let response = call("POST", "/v1/agent/runs", &key_cost).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "both switches off"
+        );
+        std::env::set_var(crate::budget::AGENT_API_BUDGET_CHECK_ENV, "true");
+        let response = call("POST", "/v1/agent/runs", &key_cost).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "cost-core does not admit a key"
+        );
+        std::env::remove_var(crate::budget::AGENT_API_BUDGET_CHECK_ENV);
+        std::env::set_var(crate::budget::COST_CORE_ACCEPT_API_KEY_ENV, "true");
+        let response = call("POST", "/v1/agent/runs", &key_cost).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "the check is off");
+        std::env::set_var(crate::budget::AGENT_API_BUDGET_CHECK_ENV, "True");
+        let response = call("POST", "/v1/agent/runs", &key_cost).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "only the literal true"
+        );
+
+        std::env::set_var(crate::budget::AGENT_API_BUDGET_CHECK_ENV, "true");
+        let response = call("POST", "/v1/agent/runs", &key_cost).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        assert_eq!(
+            body,
+            key_cost.as_bytes(),
+            "the key's own cost bearer is forwarded"
+        );
+
+        // Only the start route asks cost-core.
+        let response = call("GET", "/v1/agent/runs/r1", &key_cost).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "a read route");
+
+        let response = router()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/v1/agent/runs")
+                    .header("authorization", format!("Bearer {model_token}"))
+                    .header("x-cost-authorization", format!("Bearer {key_cost}"))
+                    .header("x-cost-authorization", format!("Bearer {key_cost}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "exactly one cost bearer"
+        );
+
+        // Another org, another key, a user's bearer and a bearer without the scope are refused.
+        let another_org = sign_jwt(
+            &cost_aud(Claims {
+                org_id: "org-other".into(),
+                ..api_key_claims("key-1")
+            }),
+            kid,
+        );
+        let another_key = sign_jwt(&cost_aud(api_key_claims("key-2")), kid);
+        let a_user = sign_jwt(
+            &Claims {
+                aud: Some("cost-core".into()),
+                scopes: vec![API_KEY_SCOPE_BUDGET_CHECK.to_owned()],
+                ..base_claims()
+            },
+            kid,
+        );
+        let wrong_scope = sign_jwt(
+            &Claims {
+                aud: Some("cost-core".into()),
+                ..agent(api_key_claims("key-1"))
+            },
+            kid,
+        );
+        for (case, token) in [
+            ("another org", another_org),
+            ("another key", another_key),
+            ("a user bearer", a_user),
+            ("without cost:budget:check", wrong_scope),
+        ] {
+            let response = call("POST", "/v1/agent/runs", &token).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{case}");
+        }
+
+        // A bearer for another audience is not a cost bearer.
+        let session_audience = sign_jwt(
+            &Claims {
+                aud: Some("session-core".into()),
+                ..cost_aud(api_key_claims("key-1"))
+            },
+            kid,
+        );
+        let response = call("POST", "/v1/agent/runs", &session_audience)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // A mixed retention posture is the typed refusal.
+        let zdr_cost = sign_jwt(
+            &cost_aud(Claims {
+                zdr: true,
+                ..api_key_claims("key-1")
+            }),
+            kid,
+        );
+        let response = call("POST", "/v1/agent/runs", &zdr_cost).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("zdr_posture_mismatch"));
+
+        // The switch gate itself.
+        assert!(crate::budget::key_budget_bearer_enabled());
+        clear_env();
+        assert!(!crate::budget::key_budget_bearer_enabled());
     }
 
     #[tokio::test]

@@ -30,6 +30,7 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/crypto"
 	"github.com/triodelab/model-plane/services/capability-core/internal/decisionkey"
 	"github.com/triodelab/model-plane/services/capability-core/internal/eventtrigger"
+	"github.com/triodelab/model-plane/services/capability-core/internal/learning"
 	"github.com/triodelab/model-plane/services/capability-core/internal/lettatools"
 	"github.com/triodelab/model-plane/services/capability-core/internal/notifyclient"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
@@ -217,6 +218,12 @@ func main() {
 	// degrade gracefully.
 	sessionClient, inferenceClient, runClient, memoryClient := dialBackendsWithMemory()
 
+	// LEARNING_PII_SCREEN_ENABLED: every learned skill candidate passes the PII and secret screen before the sink.
+	// Installed here, before the learning consumer and the /learn route are wired; off, nothing is assigned.
+	if installLearningPIIScreen(os.Getenv) {
+		slog.Info("learning PII screen installed", "switch", learningPIIScreenEnv)
+	}
+
 	// --- §4.3 reconcile event publisher -------------------------------------
 	// capability-core is the registry system-of-record; on a create/update it
 	// emits mp.v1.capability.<kind>.<action> so cache holders (the gateway's
@@ -247,7 +254,7 @@ func main() {
 			if memoryClient != nil {
 				learningOpts = append(learningOpts, sessionreview.WithMemoryControls(memoryClient))
 			}
-			startLearningConsumer(ctx, nc, sessionClient, inferenceClient, learningOpts...)
+			startLearningConsumer(ctx, nc, pool, sessionClient, inferenceClient, learningOpts...)
 
 			// Task lifecycle closer: a task the executor started stays in
 			// `running` until its run reaches a terminal state. Without this the
@@ -263,6 +270,10 @@ func main() {
 			startRunWatchConsumer(ctx, nc, pool)
 		}
 	}
+
+	// Organization erasure (verevon.gdpr.erasure.requested): binds only when CAPABILITY_CORE_ORG_ERASURE_ENABLED is the
+	// literal true, and then on its own shared-broker connection. Off, nothing starts (cmd/org_erasure.go).
+	startOrgErasureConsumer(ctx, pool)
 
 	// --- HTTP server on :8085 -----------------------------------------------
 	publicMux := http.NewServeMux()
@@ -371,6 +382,7 @@ func main() {
 	if learnOn && sessionClient != nil && inferenceClient != nil && memoryClient != nil {
 		learnOpts := []sessionreview.Option{sessionreview.WithMemoryControls(memoryClient)}
 		if cost, costOn, costErr := sessionreview.CostControlsFromLookup(os.Getenv); costErr == nil && costOn {
+			cost.Budget = sessionreview.NewPgReviewBudget(ctx, pool)
 			learnOpts = append(learnOpts, sessionreview.WithCostControls(cost))
 		}
 		learner = sessionreview.NewLearner(sessionClient, inferenceClient, os.Getenv("LEARNING_REVIEW_MODEL"), learnOpts...)
@@ -842,6 +854,13 @@ func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher, fireA
 	// the dispatcher exists; an absent Session Core client leaves those fires
 	// fail-closed in the dispatcher instead of falling back to a generic run.
 	dispatcher.SetScheduledRunSession(sessionClient)
+	// The org's ext.skills word a scheduled run is held to (P2-ec-01-rel1). It is read only while
+	// SKILL_EXT_POLICY_ENFORCED is the literal "true", the same switch the gateway reads, so one deploy
+	// setting drives both loops. Off, no word is stated and a scheduled run reads as it did before.
+	dispatcher.SetOrgExtSkills(
+		api.NewOrgAgentPolicyHandler(pool, api.OrgAgentPolicyAPIFromLookup(os.Getenv)),
+		os.Getenv("SKILL_EXT_POLICY_ENFORCED") == "true",
+	)
 	slog.Info("task workflow dispatch enabled",
 		"orchestrator_workflow_addr", addr,
 		"credential", map[bool]string{true: "minted service JWT (signed retention posture)",
@@ -937,6 +956,20 @@ func learningReviewEnabled() bool {
 	return enabled
 }
 
+// learningPIIScreenEnv names the switch that installs the deterministic PII and secret screen on every learned skill
+// candidate (learning.PIIScreen). Only the literal true turns it on; off, learning.Screen keeps its no-op default.
+const learningPIIScreenEnv = "LEARNING_PII_SCREEN_ENABLED"
+
+// installLearningPIIScreen installs learning.PIIScreen as the candidate screen when the switch reads the literal true,
+// and reports whether it did. It runs once at start-up, before any consumer or /learn route can propose a skill.
+func installLearningPIIScreen(lookup func(string) string) bool {
+	if lookup(learningPIIScreenEnv) == "true" {
+		learning.Screen = learning.PIIScreen
+		return true
+	}
+	return false
+}
+
 // startLearningConsumer wires the G7 learning-review trigger on the shared
 // session-core + inference-core clients: bind the durable JetStream
 // RUN_COMPLETED consumer (sessionreview.RunConsumer, on
@@ -945,8 +978,9 @@ func learningReviewEnabled() bool {
 // clients are nil (backends unset) or JetStream is unavailable, so the service
 // runs without the learning loop rather than failing to start. The
 // decode→review→persist core is unit-tested; this subscribe wiring is
-// e2e-verified only against the stack.
-func startLearningConsumer(ctx context.Context, nc *nats.Conn, sc mpv1.SessionCoreClient, ic mpv1.InferenceCoreClient, opts ...sessionreview.Option) {
+// e2e-verified only against the stack. With the cost controls on, the day caps
+// are counted in pool's learning_review_counters table.
+func startLearningConsumer(ctx context.Context, nc *nats.Conn, pool *pgxpool.Pool, sc mpv1.SessionCoreClient, ic mpv1.InferenceCoreClient, opts ...sessionreview.Option) {
 	if !learningReviewEnabled() {
 		// Checked before anything touches nc: a disabled review must neither bind
 		// the durable consumer nor read a single transcript.
@@ -966,6 +1000,7 @@ func startLearningConsumer(ctx context.Context, nc *nats.Conn, sc mpv1.SessionCo
 		return
 	}
 	if costOn {
+		costControls.Budget = sessionreview.NewPgReviewBudget(ctx, pool)
 		opts = append(opts, sessionreview.WithCostControls(costControls))
 	}
 	js, err := nc.JetStream()

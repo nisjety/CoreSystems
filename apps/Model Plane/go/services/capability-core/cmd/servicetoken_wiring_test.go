@@ -199,7 +199,7 @@ func TestStartLearningConsumerStaysDisabledWithoutBackends(t *testing.T) {
 		t.Fatal("unset backend addrs must yield no clients")
 	}
 	// nil clients → consumer disabled, no goroutine, no panic.
-	startLearningConsumer(context.Background(), nil, session, inference)
+	startLearningConsumer(context.Background(), nil, nil, session, inference)
 }
 
 func TestMintedTokenCarriesTheRequestOwnOrg(t *testing.T) {

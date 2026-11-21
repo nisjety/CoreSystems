@@ -87,6 +87,19 @@ func (s *PgStore) Ping(ctx context.Context) error {
 	return nil
 }
 
+// ReadOnlyColumnPresent reports whether browser_grants has the read_only column
+// (migration 0009). cmd/main.go asks before it lets the durable read-only switch
+// on: without the column a read-only grant would be stored with no read level.
+func (s *PgStore) ReadOnlyColumnPresent(ctx context.Context) (bool, error) {
+	var present bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		WHERE table_schema = current_schema() AND table_name = 'browser_grants' AND column_name = 'read_only')`).Scan(&present)
+	if err != nil {
+		return false, s.dbErr(ctx, "schema", err)
+	}
+	return present, nil
+}
+
 // clock is the store's now at the database's precision, so a grant returned
 // by a create equals the same grant read back.
 func (s *PgStore) clock() time.Time {
@@ -159,7 +172,8 @@ const grantColumns = `id, kind, org_id, owner_id, session_key, scope_url, allowe
 	COALESCE(budget_micro_usd, 0), COALESCE(budget_max_steps, 0), COALESCE(budget_max_runtime_s, 0),
 	COALESCE(budget_source, ''), COALESCE(budget_minted_at_unix, 0),
 	policy_mode, denied_domains, COALESCE(resource_id, ''), absolute_expires_at, COALESCE(key_id, ''),
-	COALESCE(consent_scope, ''), web_policy, COALESCE(mail_connection_id, ''), COALESCE(grant_origin, '')`
+	COALESCE(consent_scope, ''), web_policy, COALESCE(mail_connection_id, ''), COALESCE(grant_origin, ''),
+	read_only`
 
 // fetch reads one grant; lock is "", " FOR SHARE" or " FOR UPDATE". A
 // missing row is ErrGrantNotFound.
@@ -173,7 +187,7 @@ func (s *PgStore) fetch(ctx context.Context, q querier, op, id, lock string) (*G
 		&g.ParentGrantID, &g.ExpiresAt, &g.Revoked, &g.RevokedReason,
 		&g.Budget.MicroUSD, &g.Budget.MaxSteps, &g.Budget.MaxRuntimeS, &g.Budget.Source, &g.Budget.MintedAtUnix,
 		&g.PolicyMode, &g.DeniedDomains, &g.ResourceID, &g.AbsoluteExpiresAt, &g.KeyID,
-		&g.ConsentScope, &webPolicy, &g.MailConnectionID, &g.GrantOrigin,
+		&g.ConsentScope, &webPolicy, &g.MailConnectionID, &g.GrantOrigin, &g.ReadOnly,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrGrantNotFound
@@ -263,15 +277,17 @@ const insertGrant = `INSERT INTO browser_grants (id, kind, org_id, owner_id, ses
 	parent_grant_id, expires_at, absolute_expires_at,
 	budget_micro_usd, budget_max_steps, budget_max_runtime_s, budget_source, budget_minted_at_unix,
 	policy_mode, denied_domains, resource_id, key_id, consent_scope, web_policy,
-	mail_connection_id, grant_origin)
+	mail_connection_id, grant_origin, read_only)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, ''), $13, $19,
 	NULLIF($14::bigint, 0), NULLIF($15::int, 0), NULLIF($16::int, 0), NULLIF($17::text, ''), NULLIF($18::bigint, 0),
-	$20, $21, NULLIF($22::text, ''), NULLIF($23::text, ''), NULLIF($24::text, ''), $25::jsonb, NULLIF($26::text, ''), NULLIF($27::text, ''))`
+	$20, $21, NULLIF($22::text, ''), NULLIF($23::text, ''), NULLIF($24::text, ''), $25::jsonb, NULLIF($26::text, ''), NULLIF($27::text, ''),
+	$28::boolean)`
 
 // insertArgs returns the insertGrant arguments for g. The web_policy argument is
-// the JSON of the snapshot, or nil (SQL NULL) when there is none. The last two
-// are the fill_otp binding (migration 0007); an empty one is stored as NULL. An
-// encoding error is returned rather than stored as NULL.
+// the JSON of the snapshot, or nil (SQL NULL) when there is none. The two after
+// it are the fill_otp binding (migration 0007); an empty one is stored as NULL.
+// The last is the read level (migration 0009). An encoding error is returned
+// rather than stored as NULL.
 func insertArgs(g *Grant) ([]any, error) {
 	absolute := g.AbsoluteExpiresAt
 	if absolute.IsZero() {
@@ -291,7 +307,7 @@ func insertArgs(g *Grant) ([]any, error) {
 		nonNil(g.AllowedDialogIDs), nonNil(g.AllowedArtifactIDs), g.ParentGrantID, g.ExpiresAt,
 		g.Budget.MicroUSD, g.Budget.MaxSteps, g.Budget.MaxRuntimeS, g.Budget.Source, g.Budget.MintedAtUnix,
 		absolute, mode, nonNil(g.DeniedDomains), g.ResourceID, g.KeyID, g.ConsentScope, webPolicy,
-		g.MailConnectionID, g.GrantOrigin,
+		g.MailConnectionID, g.GrantOrigin, g.ReadOnly,
 	}, nil
 }
 
@@ -340,7 +356,7 @@ func (s *PgStore) CreateSession(ctx context.Context, p CreateSessionParams) (*Gr
 	g := &Grant{
 		ID: id, Kind: KindSession, OrgID: p.OrgID, OwnerID: p.OwnerID, SessionKey: p.SessionKey,
 		ScopeURL: p.ScopeURL, AllowedDomains: domains, Budget: budget, ExpiresAt: now.Add(p.TTL),
-		PolicyMode: PolicyModeAllowlist, KeyID: p.KeyID,
+		PolicyMode: PolicyModeAllowlist, KeyID: p.KeyID, ReadOnly: p.ReadOnly,
 		WebPolicy: p.WebPolicy.Clone(),
 	}
 	g.AbsoluteExpiresAt = g.ExpiresAt
@@ -444,8 +460,8 @@ func (s *PgStore) CreateScopedSensitiveApproval(ctx context.Context, p ApprovalP
 		}
 		// Must agree with the memory store's approval-parent check in grant.go
 		// (CreateScopedSensitiveApproval): a read-only parent carries no act
-		// authority, so it cannot mint an approval. No read_only column exists
-		// yet; this refusal keeps the two stores aligned once one is added.
+		// authority, so it cannot mint an approval. The read_only column (migration
+		// 0009) holds the level; this refusal keeps the two stores aligned.
 		if _, ok := approvalParents[parent.Kind]; !ok || parent.SessionKey != p.SessionKey || len(parent.AllowedActions) != 0 ||
 			parent.ReadOnly || parent.KeyID != "" {
 			return ErrApprovalParentInvalid
@@ -610,6 +626,8 @@ func (s *PgStore) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
 			SessionKey: p.SessionKey, ScopeURL: parent.ScopeURL, AllowedDomains: plan.domains,
 			Budget: budget, ParentGrantID: parent.ID, ExpiresAt: expires, AbsoluteExpiresAt: expires,
 			PolicyMode: PolicyModeAllowlist, ResourceID: plan.resourceID,
+			// The parent's read level, unchanged: a derived grant is never wider.
+			ReadOnly: parent.ReadOnly,
 			// The parent's snapshot, unchanged: a derived grant never loosens it.
 			WebPolicy: parent.WebPolicy.Clone(),
 		}

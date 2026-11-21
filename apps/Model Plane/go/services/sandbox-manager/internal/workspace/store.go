@@ -46,6 +46,16 @@ type ChangedFile struct {
 	BaseHash    string
 }
 
+// DeletedPath is one path a run removed, ready to record as a tombstone on its
+// workspace_files overlay. BaseHash is the Space-level hash the path had when
+// the run hydrated. Empty means the path did not exist then (the run created
+// and then removed it), so no tombstone is written and only the run's own
+// non-tombstone overlay row for it is dropped.
+type DeletedPath struct {
+	Path     string
+	BaseHash string
+}
+
 type workspaceDatabase interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 	Query(context.Context, string, ...any) (pgx.Rows, error)
@@ -68,6 +78,9 @@ func NewStore(pool *pgxpool.Pool) (*Store, error) {
 
 // GetManifest returns the layered manifest visible to runID: every Space
 // row (run_id IS NULL) shadowed path-for-path by runID's own overlay rows.
+// A winning overlay row that is a tombstone (deleted = true) hides the path:
+// the outer SELECT drops it after DISTINCT ON picked the winner, so a deleted
+// path shows neither the tombstone nor the Space row it shadows.
 // Empty spaceID is the caller's responsibility to avoid (a non-Space lease
 // has no manifest concept at all) — callers should not invoke this for one.
 func (s *Store) GetManifest(ctx context.Context, orgID, spaceID, runID string) ([]ManifestEntry, error) {
@@ -75,10 +88,13 @@ func (s *Store) GetManifest(ctx context.Context, orgID, spaceID, runID string) (
 		return nil, fmt.Errorf("org_id, space_id, and run_id are required")
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT DISTINCT ON (path) path, content_hash
-		FROM workspace_files
-		WHERE org_id = $1 AND space_id = $2 AND (run_id IS NULL OR run_id = $3)
-		ORDER BY path, run_id IS NULL ASC
+		SELECT path, content_hash FROM (
+			SELECT DISTINCT ON (path) path, content_hash, deleted
+			FROM workspace_files
+			WHERE org_id = $1 AND space_id = $2 AND (run_id IS NULL OR run_id = $3)
+			ORDER BY path, run_id IS NULL ASC
+		) t
+		WHERE NOT deleted
 	`, orgID, spaceID, runID)
 	if err != nil {
 		return nil, fmt.Errorf("get workspace manifest: %w", err)
@@ -114,9 +130,48 @@ func (s *Store) UpsertOverlay(ctx context.Context, orgID, spaceID, runID string,
 			VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, now())
 			ON CONFLICT (org_id, space_id, COALESCE(run_id, ''), path)
 			DO UPDATE SET content_hash = EXCLUDED.content_hash, size_bytes = EXCLUDED.size_bytes,
-			              base_hash = EXCLUDED.base_hash, updated_at = now()
+			              base_hash = EXCLUDED.base_hash, deleted = false, updated_at = now()
 		`, orgID, spaceID, runID, f.Path, f.ContentHash, f.BaseHash, f.SizeBytes); err != nil {
 			return fmt.Errorf("upsert workspace overlay file %q: %w", f.Path, err)
+		}
+	}
+	return nil
+}
+
+// UpsertTombstones records runID's removed paths as tombstones on its overlay
+// (run_id = runID, deleted = true, content_hash = the base hash the run saw,
+// size_bytes 0), one upsert per path against the same identity index as
+// UpsertOverlay. Idempotent, like UpsertOverlay. A later UpsertOverlay for the
+// same path un-tombstones it (the file was recreated). A deleted path with an
+// empty BaseHash never existed in the Space when the run hydrated, so no
+// tombstone is written: the run's own non-tombstone overlay row for it, if any,
+// is dropped instead, which leaves the run's view and a later Promote with
+// nothing for that path. No path or hash is logged here.
+func (s *Store) UpsertTombstones(ctx context.Context, orgID, spaceID, runID string, deleted []DeletedPath) error {
+	if orgID == "" || spaceID == "" || runID == "" {
+		return fmt.Errorf("org_id, space_id, and run_id are required")
+	}
+	for _, d := range deleted {
+		if d.Path == "" {
+			return fmt.Errorf("deleted path is required")
+		}
+		if d.BaseHash == "" {
+			if _, err := s.pool.Exec(ctx, `
+				DELETE FROM workspace_files
+				WHERE org_id = $1 AND space_id = $2 AND run_id = $3 AND path = $4 AND NOT deleted
+			`, orgID, spaceID, runID, d.Path); err != nil {
+				return fmt.Errorf("drop workspace overlay file %q: %w", d.Path, err)
+			}
+			continue
+		}
+		if _, err := s.pool.Exec(ctx, `
+			INSERT INTO workspace_files (org_id, space_id, run_id, path, content_hash, base_hash, size_bytes, deleted, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $5, 0, true, now())
+			ON CONFLICT (org_id, space_id, COALESCE(run_id, ''), path)
+			DO UPDATE SET content_hash = EXCLUDED.content_hash, base_hash = EXCLUDED.base_hash,
+			              size_bytes = 0, deleted = true, updated_at = now()
+		`, orgID, spaceID, runID, d.Path, d.BaseHash); err != nil {
+			return fmt.Errorf("upsert workspace overlay tombstone %q: %w", d.Path, err)
 		}
 	}
 	return nil
@@ -139,6 +194,12 @@ func (s *Store) UpsertOverlay(ctx context.Context, orgID, spaceID, runID string,
 // Anything else — the Space's current content differs from both — is
 // reported in the returned slice; every other path still merges.
 //
+// A tombstone overlay row (deleted = true, F-f05-16) deletes the Space's row
+// instead, by the same compare-and-swap rule: only while the Space row still
+// holds the tombstone's base_hash. An already-removed Space row is a success
+// (a replayed Promote), a Space row that changed since the run hydrated is
+// reported in the returned slice. See promoteTombstone.
+//
 // Deliberately re-reads each path's overlay row FRESH inside the same
 // statement that performs its compare-and-swap merge, rather than reading
 // the whole overlay once up front and reusing those Go-side values across
@@ -160,21 +221,25 @@ func (s *Store) Promote(ctx context.Context, orgID, spaceID, runID string) ([]st
 		return nil, fmt.Errorf("org_id, space_id, and run_id are required")
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT path
+		SELECT path, deleted
 		FROM workspace_files
 		WHERE org_id = $1 AND space_id = $2 AND run_id = $3
 	`, orgID, spaceID, runID)
 	if err != nil {
 		return nil, fmt.Errorf("promote workspace: list overlay paths: %w", err)
 	}
-	var paths []string
+	type overlayPath struct {
+		path    string
+		deleted bool
+	}
+	var paths []overlayPath
 	for rows.Next() {
-		var path string
-		if scanErr := rows.Scan(&path); scanErr != nil {
+		var entry overlayPath
+		if scanErr := rows.Scan(&entry.path, &entry.deleted); scanErr != nil {
 			rows.Close()
 			return nil, fmt.Errorf("promote workspace: scan overlay path: %w", scanErr)
 		}
-		paths = append(paths, path)
+		paths = append(paths, entry)
 	}
 	rowsErr := rows.Err()
 	rows.Close()
@@ -183,7 +248,18 @@ func (s *Store) Promote(ctx context.Context, orgID, spaceID, runID string) ([]st
 	}
 
 	var conflicts []string
-	for _, path := range paths {
+	for _, entry := range paths {
+		path := entry.path
+		if entry.deleted {
+			conflicted, delErr := s.promoteTombstone(ctx, orgID, spaceID, runID, path)
+			if delErr != nil {
+				return nil, delErr
+			}
+			if conflicted {
+				conflicts = append(conflicts, path)
+			}
+			continue
+		}
 		// The `overlay` CTE re-reads this ONE path's current row as part of
 		// this same statement — see the doc comment above for why that
 		// matters. If the overlay row somehow vanished between the listing
@@ -196,7 +272,7 @@ func (s *Store) Promote(ctx context.Context, orgID, spaceID, runID string) ([]st
 			WITH overlay AS (
 				SELECT content_hash, size_bytes, COALESCE(base_hash, '') AS base_hash
 				FROM workspace_files
-				WHERE org_id = $1 AND space_id = $2 AND run_id = $3 AND path = $4
+				WHERE org_id = $1 AND space_id = $2 AND run_id = $3 AND path = $4 AND NOT deleted
 			)
 			INSERT INTO workspace_files (org_id, space_id, run_id, path, content_hash, size_bytes, updated_at)
 			SELECT $1, $2, NULL, $4, overlay.content_hash, overlay.size_bytes, now()
@@ -214,4 +290,50 @@ func (s *Store) Promote(ctx context.Context, orgID, spaceID, runID string) ([]st
 		}
 	}
 	return conflicts, nil
+}
+
+// promoteTombstone merges one tombstone overlay row (F-f05-16): it deletes the
+// Space's row for the path while that row still holds the base_hash the run
+// saw when it hydrated, as ONE atomic compare-and-swap statement that re-reads
+// the tombstone fresh, the same idea as the upsert in Promote. When nothing was
+// deleted it tells the two cases apart in the same statement: no Space row at
+// all means the path is already gone (an idempotent replay, a success), while
+// a Space row that still exists holds something else, so someone changed the
+// path since the run hydrated and it is reported as a conflict. The tombstone
+// itself stays on the overlay like every other overlay row. Returns conflicted.
+func (s *Store) promoteTombstone(ctx context.Context, orgID, spaceID, runID, path string) (bool, error) {
+	rows, err := s.pool.Query(ctx, `
+		WITH overlay AS (
+			SELECT COALESCE(base_hash, '') AS base_hash
+			FROM workspace_files
+			WHERE org_id = $1 AND space_id = $2 AND run_id = $3 AND path = $4 AND deleted
+		), removed AS (
+			DELETE FROM workspace_files
+			WHERE org_id = $1 AND space_id = $2 AND run_id IS NULL AND path = $4
+			  AND content_hash = (SELECT base_hash FROM overlay)
+			RETURNING 1
+		)
+		SELECT (SELECT count(*) FROM removed),
+		       EXISTS (SELECT 1 FROM workspace_files
+		               WHERE org_id = $1 AND space_id = $2 AND run_id IS NULL AND path = $4)
+	`, orgID, spaceID, runID, path)
+	if err != nil {
+		return false, fmt.Errorf("promote workspace tombstone %q: %w", path, err)
+	}
+	defer rows.Close()
+	var removed int64
+	var spaceRowExisted bool
+	if !rows.Next() {
+		if rowsErr := rows.Err(); rowsErr != nil {
+			return false, fmt.Errorf("promote workspace tombstone %q: %w", path, rowsErr)
+		}
+		return false, fmt.Errorf("promote workspace tombstone %q: no result row", path)
+	}
+	if scanErr := rows.Scan(&removed, &spaceRowExisted); scanErr != nil {
+		return false, fmt.Errorf("promote workspace tombstone %q: scan: %w", path, scanErr)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return false, fmt.Errorf("promote workspace tombstone %q: %w", path, rowsErr)
+	}
+	return removed == 0 && spaceRowExisted, nil
 }

@@ -84,6 +84,7 @@ func main() {
 	var grants grant.Repository = ephemeral
 	var purger grant.Purger = ephemeral
 	var ready func(context.Context) error
+	var durable *grant.PgStore
 	if databaseURL != "" {
 		pool, err := newPool(ctx, databaseURL)
 		if err != nil {
@@ -92,6 +93,7 @@ func main() {
 		}
 		defer pool.Close()
 		pg := grant.NewPgStore(pool)
+		durable = pg
 		routed := grant.NewRouted(pg, ephemeral)
 		grants, purger, ready = routed, routed, pg.Ping
 		pingCtx, pingCancel := context.WithTimeout(ctx, 10*time.Second)
@@ -134,6 +136,7 @@ func main() {
 		slog.Error("browser-broker site policy configuration is invalid", "error", err)
 		os.Exit(1)
 	}
+	options.DurableReadOnly = durableReadOnlyReady(ctx, durable, options.DurableReadOnly)
 	slog.Info("browser site policy", "mode", string(options.SitePolicy))
 
 	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(authz.UnaryInterceptor(verifier)))
@@ -219,6 +222,7 @@ func purgeOnce(ctx context.Context, purger grant.Purger, now time.Time) {
 const (
 	envSitePolicy          = "BROWSER_BROKER_SITE_POLICY"
 	envAssistantTaskGrants = "BROWSER_BROKER_ASSISTANT_TASK_GRANTS_ENABLED"
+	envDurableReadOnly     = "BROWSER_BROKER_DURABLE_READ_ONLY_ENABLED"
 	envGrantMaxTTL         = "BROWSER_GRANT_MAX_TTL"
 	envOrgCoreURL          = "ORG_CORE_URL"
 	envOrgCoreToken        = "BROWSER_BROKER_ORG_CORE_TOKEN"
@@ -229,11 +233,12 @@ const (
 // policy is on, the org-core client. Enforce and shadow both refuse to start
 // without the client: a broker that cannot ask org-core must not run as if it had.
 func serverOptionsFromEnv(getenv func(string) string) (bbserver.Options, error) {
-	// The assistant task grants switch reads the exact literal "true" only: no
-	// trimming, no case folding, and no "1" or "on".
+	// The assistant task grants and durable read-only switches read the exact
+	// literal "true" only: no trimming, no case folding, and no "1" or "on".
 	options := bbserver.Options{
 		SitePolicy:                 sitepolicy.ParseMode(getenv(envSitePolicy)),
 		AssistantTaskGrantsEnabled: getenv(envAssistantTaskGrants) == "true",
+		DurableReadOnly:            getenv(envDurableReadOnly) == "true",
 	}
 	maxTTL, err := grantMaxTTLFromEnv(getenv)
 	if err != nil {
@@ -264,6 +269,35 @@ func grantMaxTTLFromEnv(getenv func(string) string) (time.Duration, error) {
 		return 0, errors.New("BROWSER_GRANT_MAX_TTL must be a duration such as 30m")
 	}
 	return min(max(d, bbserver.MinGrantTTL), bbserver.MaxGrantTTL), nil
+}
+
+// durableReadOnlyReady keeps the durable read-only switch on only when the
+// Postgres grant store has the read_only column (migration 0009). Without it a
+// non-ZDR read-only grant would be stored with no read level, so the switch is
+// held off and a warning says why. With no database (ephemeral development) the
+// in-memory store keeps the level itself, so the switch is taken as set.
+func durableReadOnlyReady(ctx context.Context, durable *grant.PgStore, switched bool) bool {
+	if !switched {
+		return false
+	}
+	if durable == nil {
+		return true
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	present, err := durable.ReadOnlyColumnPresent(checkCtx)
+	if err != nil {
+		slog.Warn("browser-broker durable read-only stays off: the grant store did not answer the column check",
+			"switch", envDurableReadOnly)
+		return false
+	}
+	if !present {
+		slog.Warn("browser-broker durable read-only stays off: browser_grants.read_only is absent; apply migration 0009, then restart",
+			"switch", envDurableReadOnly)
+		return false
+	}
+	slog.Info("browser-broker durable read-only is on", "switch", envDurableReadOnly)
+	return true
 }
 
 // errStartupRefused means no durable database is configured and the

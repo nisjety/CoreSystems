@@ -97,6 +97,13 @@ type Config struct {
 	// unsupported: none of them was written for a principal that is neither a
 	// person nor a registered service.
 	AcceptAPIKey bool
+	// AcceptAPIKeyHTTP lets HTTPMiddleware carry an api_key principal to the
+	// route authorizer instead of refusing it outright. It has no effect unless
+	// AcceptAPIKey is also set, and the middleware then requires a non-nil
+	// authorizer: the service names the one route a key may call (cost-core:
+	// POST /api/v1/budget/check), everything else stays refused. Off by
+	// default, so no HTTP service carries a key principal unless it opts in.
+	AcceptAPIKeyHTTP bool
 }
 
 type claims struct {
@@ -123,6 +130,8 @@ type Verifier struct {
 	static       *rsa.PublicKey
 	keys         map[string]*rsa.PublicKey
 	acceptAPIKey bool
+	// acceptAPIKeyHTTP is Config.AcceptAPIKeyHTTP, set only with acceptAPIKey.
+	acceptAPIKeyHTTP bool
 }
 
 // HTTPAuthorizer performs service-specific authorization after authentication.
@@ -145,6 +154,8 @@ func NewVerifier(config Config) (*Verifier, error) {
 		issuer:       issuer,
 		keys:         map[string]*rsa.PublicKey{},
 		acceptAPIKey: config.AcceptAPIKey,
+		// The HTTP opt-in is meaningless without the type itself.
+		acceptAPIKeyHTTP: config.AcceptAPIKey && config.AcceptAPIKeyHTTP,
 	}
 	if len(config.PublicKeyPEM) > 0 {
 		key, err := jwt.ParseRSAPublicKeyFromPEM(config.PublicKeyPEM)
@@ -319,14 +330,22 @@ func (v *Verifier) HTTPMiddleware(authorizer HTTPAuthorizer) func(http.Handler) 
 			}
 			// The HTTP path forwards X-User-ID downstream, which would name the
 			// key's owner as if the person had called. No HTTP entry point is
-			// built for an api_key principal (INNH-10 is gRPC to the broker), so
-			// it is refused here even when the verifier opted in.
-			if principal.PrincipalType == PrincipalTypeAPIKey {
+			// built for an api_key principal unless the service opts in
+			// (AcceptAPIKeyHTTP), so it is refused here even when the verifier
+			// accepts the type. An opted-in service gets the key principal only
+			// through its authorizer, which is mandatory for it, and the
+			// downstream identity headers then name the key (never its owner).
+			isKey := principal.PrincipalType == PrincipalTypeAPIKey
+			if isKey && (!v.acceptAPIKeyHTTP || authorizer == nil) {
 				writeHTTPAuthError(w, http.StatusForbidden, "request is not authorized")
 				return
 			}
+			actorHeader := principal.ActorID
+			if isKey {
+				actorHeader = APIKeySubjectPrefix + principal.KeyID
+			}
 			if conflicts(r.Header.Get("X-Org-ID"), principal.OrganizationID) ||
-				conflicts(r.Header.Get("X-User-ID"), principal.ActorID) {
+				conflicts(r.Header.Get("X-User-ID"), actorHeader) {
 				writeHTTPAuthError(w, http.StatusForbidden, "identity context does not match verified token")
 				return
 			}
@@ -340,7 +359,7 @@ func (v *Verifier) HTTPMiddleware(authorizer HTTPAuthorizer) func(http.Handler) 
 			request := r.Clone(withPrincipal(r.Context(), principal))
 			request.Header = r.Header.Clone()
 			request.Header.Set("X-Org-ID", principal.OrganizationID)
-			request.Header.Set("X-User-ID", principal.ActorID)
+			request.Header.Set("X-User-ID", actorHeader)
 			next.ServeHTTP(w, request)
 		})
 	}

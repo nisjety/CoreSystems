@@ -51,12 +51,18 @@ func setupWorkspaceDB(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("pool: %v", err)
 	}
-	sqlBytes, readErr := os.ReadFile(filepath.Join("..", "..", "migrations", "0001_workspace_manifest.up.sql"))
-	if readErr != nil {
-		t.Fatalf("read migration: %v", readErr)
-	}
-	if _, applyErr := pool.Exec(ctx, string(sqlBytes)); applyErr != nil {
-		t.Fatalf("apply migration: %v", applyErr)
+	// 0009 adds the tombstone column. The entrypoint re-applies every up file at
+	// each boot with no ledger, so each is applied twice to prove it is idempotent.
+	for _, name := range []string{"0001_workspace_manifest.up.sql", "0009_workspace_overlay_tombstones.up.sql"} {
+		sqlBytes, readErr := os.ReadFile(filepath.Join("..", "..", "migrations", name))
+		if readErr != nil {
+			t.Fatalf("read migration %s: %v", name, readErr)
+		}
+		for pass := 1; pass <= 2; pass++ {
+			if _, applyErr := pool.Exec(ctx, string(sqlBytes)); applyErr != nil {
+				t.Fatalf("apply migration %s (pass %d): %v", name, pass, applyErr)
+			}
+		}
 	}
 	pool.Close()
 	return dsn

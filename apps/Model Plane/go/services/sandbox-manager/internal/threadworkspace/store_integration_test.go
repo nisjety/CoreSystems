@@ -16,8 +16,8 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// setupThreadDB spins a throwaway Postgres and applies migration 0005, the
-// thread tables this store reads and writes.
+// setupThreadDB spins a throwaway Postgres and applies migrations 0005 and 0010, the
+// thread tables this store reads and writes and the erasure tombstones.
 func setupThreadDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -52,12 +52,14 @@ func setupThreadDB(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 
-	sqlBytes, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0005_thread_workspace.up.sql"))
-	if err != nil {
-		t.Fatalf("read migration 0005: %v", err)
-	}
-	if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
-		t.Fatalf("apply migration 0005: %v", err)
+	for _, name := range []string{"0005_thread_workspace.up.sql", "0010_thread_workspace_erasures.up.sql"} {
+		sqlBytes, err := os.ReadFile(filepath.Join("..", "..", "migrations", name))
+		if err != nil {
+			t.Fatalf("read migration %s: %v", name, err)
+		}
+		if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
+			t.Fatalf("apply migration %s: %v", name, err)
+		}
 	}
 	return pool
 }

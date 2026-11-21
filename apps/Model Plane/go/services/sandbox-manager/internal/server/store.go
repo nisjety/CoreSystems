@@ -67,6 +67,10 @@ type SnapshotStore interface {
 type WorkspaceStore interface {
 	GetManifest(ctx context.Context, orgID, spaceID, runID string) ([]workspace.ManifestEntry, error)
 	UpsertOverlay(ctx context.Context, orgID, spaceID, runID string, files []workspace.ChangedFile) error
+	// UpsertTombstones records runID's removed paths as tombstones on its
+	// overlay (F-f05-16): a path a tombstone wins is hidden from the manifest,
+	// and Promote deletes the Space row while it still holds the base hash.
+	UpsertTombstones(ctx context.Context, orgID, spaceID, runID string, deleted []workspace.DeletedPath) error
 	// Promote merges runID's own overlay into the Space's durable rows,
 	// per path, and returns the paths that conflicted (every other path
 	// still merged).

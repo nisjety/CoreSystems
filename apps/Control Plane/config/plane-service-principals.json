@@ -221,6 +221,25 @@
       "quarry": "tenant"
     }
   },
+  "execution-core-screening": {
+    "tenancy": "directory",
+    "audiences": [
+      "inference-core"
+    ],
+    "consumerEnv": "EXECUTION_CORE_SCREENING_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "inference-core": "tenant"
+    },
+    "scopes": [
+      "inference:invoke"
+    ],
+    "scopesByAudience": {
+      "inference-core": [
+        "inference:invoke"
+      ]
+    }
+  },
   "finspo-core": {
     "tenancy": "directory",
     "audiences": [
@@ -531,18 +550,21 @@
     "tenancy": "directory",
     "audiences": [
       "letta-bridge",
-      "inference-core"
+      "inference-core",
+      "sandbox-manager"
     ],
     "consumerEnv": "SESSION_CORE_SERVICE_API_KEY",
     "orgIds": [],
     "retentionByAudience": {
       "inference-core": "persistent",
-      "letta-bridge": "persistent"
+      "letta-bridge": "persistent",
+      "sandbox-manager": "persistent"
     },
     "scopes": [
       "inference:invoke",
       "memory:read",
-      "memory:write"
+      "memory:write",
+      "sandbox:thread-workspace:erase:any"
     ],
     "scopesByAudience": {
       "inference-core": [
@@ -551,6 +573,9 @@
       "letta-bridge": [
         "memory:read",
         "memory:write"
+      ],
+      "sandbox-manager": [
+        "sandbox:thread-workspace:erase:any"
       ]
     }
   },
@@ -577,7 +602,8 @@
       "session-core",
       "inference-core",
       "quarry",
-      "browser-broker"
+      "browser-broker",
+      "cost-core"
     ]
   },
   "verevon-gateway-retention-decision": {

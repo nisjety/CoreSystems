@@ -47,6 +47,12 @@ type Options struct {
 	// AssistantTaskGrantsEnabled lets a submitted task use the default ask
 	// decision within the organisation's act ceiling, for one exact host.
 	AssistantTaskGrantsEnabled bool
+	// DurableReadOnly lets a non-ZDR read-only grant be issued into the durable
+	// store, which keeps the level in browser_grants.read_only (migration 0009).
+	// Off, such a grant is refused, as before the column existed. The broker's
+	// main sets it from BROWSER_BROKER_DURABLE_READ_ONLY_ENABLED, and only once the
+	// column is confirmed present.
+	DurableReadOnly bool
 	// MaxRequestTTL caps a caller's requested grant lifetime
 	// (BROWSER_GRANT_MAX_TTL).
 	MaxRequestTTL time.Duration
@@ -82,6 +88,9 @@ func NewServerWithConfig(grants grant.Repository, cfg Config) *Server {
 	}
 }
 
+// reasonSpaceFloorUnavailable is the ErrorInfo reason of a refused Space grant (F-f02-19).
+const reasonSpaceFloorUnavailable = "SPACE_FLOOR_UNAVAILABLE"
+
 // AcquireGrant mints a new browser grant using the proto-defined session/mode contract.
 func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*AcquireGrantResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "AcquireGrant")))
@@ -114,6 +123,15 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	}
 	if (req.GetMailConnectionId() != "" || req.GetGrantOrigin() != "") && (!fillOtp || req.GetGrantKind() != "") {
 		return nil, status.Error(codes.InvalidArgument, grant.ErrFillOtpBindingUnexpected.Error())
+	}
+	// F-f02-19: a Space grant needs the Space browser floor, which the broker does not
+	// read yet (F-f02-20 wires it through org-core). Issuing one now would silently
+	// drop that floor, so any non-empty space_id is refused for every caller, API keys
+	// included, before any grant state is written. The raw value is tested, not a
+	// trimmed one: a whitespace-only space_id is refused too.
+	if req.GetSpaceId() != "" {
+		telemetry.GrantsDeniedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "space_floor_unavailable")))
+		return nil, keyRefusal(codes.FailedPrecondition, reasonSpaceFloorUnavailable, "browser grants for a Space are not available yet")
 	}
 	// An API key (INNH-10) has its own path and never reaches the user or
 	// service rules below.
@@ -196,9 +214,10 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	if readOnly && len(allowedActions) != 0 {
 		return nil, status.Error(codes.InvalidArgument, "a sensitive browser approval cannot be read-only")
 	}
-	// The durable store has no read-only column yet, so a durable grant would
-	// report full access. Refuse rather than drop the narrowing silently.
-	if readOnly && !zdr {
+	// A non-ZDR read-only grant is stored in the durable store, which keeps the
+	// level only with the read_only column (migration 0009) and the switch on.
+	// Otherwise refuse rather than drop the narrowing silently.
+	if readOnly && !zdr && !s.options.DurableReadOnly {
 		return nil, status.Error(codes.FailedPrecondition, "a read-only browser grant must be Zero Data Retention until the durable store persists it")
 	}
 	var deniedDomains []string

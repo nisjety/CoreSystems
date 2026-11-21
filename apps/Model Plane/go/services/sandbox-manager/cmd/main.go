@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/authz"
@@ -197,36 +200,64 @@ func main() {
 		slog.Info("thread workspace enabled", "max_files", threadLimits.MaxFiles, "max_bytes", threadLimits.MaxBytes)
 	}
 
-	// WS22-S5: erasure and the retention sweeper reach a thread's blobs through the
-	// object store. With the switch on and a durable database, a missing object
-	// store stops startup, because the workspace would keep user files that no
-	// erasure path could reach.
+	// WS22-S5 and F-f06-02: erasure and the retention sweeper reach a thread's blobs
+	// through the object store, whatever SANDBOX_MANAGER_THREAD_WORKSPACE says: a
+	// rollback must not strand the files a previous run wrote. With the switch on and
+	// a durable database, a missing object store stops startup, because the workspace
+	// would keep user files that no erasure path could reach. With the switch off the
+	// same gap is one warning.
 	var threadBlobs *objectstore.Client
 	var threadRetention = threadworkspace.DefaultRetention
-	if threadWorkspaceOn && threadEraser != nil {
-		blobConfig, blobsConfigured, blobConfigErr := objectstore.ConfigFromEnv(os.Getenv)
-		if blobConfigErr != nil || !blobsConfigured {
-			slog.Error("refusing to start sandbox-manager with the thread workspace enabled and no object store configured", "required", "MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY", "error", blobConfigErr)
+	if threadEraser != nil {
+		blobs, retention, err := threadErasureFromEnv(os.Getenv)
+		switch {
+		case err == nil:
+			threadBlobs, threadRetention = blobs, retention
+		case errors.Is(err, errObjectStore) && !threadWorkspaceOn:
+			slog.Warn("thread workspace erasure and retention are off: no usable object store is configured, so a previous run's thread blobs cannot be erased", "required", "MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY")
+		case errors.Is(err, errObjectStore):
+			slog.Error("refusing to start sandbox-manager with the thread workspace enabled and no object store configured", "required", "MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY", "error", err)
 			os.Exit(1)
-		}
-		blobs, err := objectstore.New(blobConfig)
-		if err != nil {
-			slog.Error("sandbox-manager object store unavailable", "error", err)
-			os.Exit(1)
-		}
-		retention, err := threadworkspace.RetentionFromEnv(os.Getenv)
-		if err != nil {
+		default:
 			slog.Error("sandbox-manager thread workspace retention is invalid", "error", err)
 			os.Exit(1)
 		}
-		threadBlobs, threadRetention = blobs, retention
+	}
+
+	// O-13: ask session-core whether the verified user owns the thread, on every
+	// thread-scoped path, and sweep the workspaces of threads that no longer exist.
+	// Read through the strict parser: only the literal "true" turns it on. On, a
+	// configuration that cannot reach session-core stops startup, because carrying
+	// on would serve thread workspaces with no ownership check at all.
+	threadOwnerOn := threadOwnerCheckEnabled(os.Getenv("SANDBOX_MANAGER_THREAD_OWNER_CHECK"))
+	var threadOwners *threadOwnerWiring
+	if threadOwnerOn {
+		wiring, err := threadOwnerFromEnv(os.Getenv)
+		if err != nil {
+			slog.Error("refusing to start sandbox-manager with the thread owner check enabled and no way to reach session-core", "error", err)
+			os.Exit(1)
+		}
+		defer func() { _ = wiring.conn.Close() }()
+		threadOwners = wiring
+		slog.Info("thread owner check enabled")
 	}
 
 	server := sbxserver.NewServer(leaseStore, snapStore, workspaceStore).WithProcessStore(processStore).
 		WithThreadWorkspace(threadWorkspaceOn, threadStore, threadLimits)
+	if threadOwners != nil {
+		server = server.WithThreadOwnerCheck(threadOwners.resolver)
+	}
 	if threadBlobs != nil {
 		server = server.WithThreadErasure(threadEraser, threadBlobs)
-		go threadworkspace.NewSweeper(threadEraser, threadBlobs, threadRetention).Start(ctx)
+		sweeper := threadworkspace.NewSweeper(threadEraser, threadBlobs, threadRetention)
+		if threadOwners != nil {
+			sweeper, err = orphanSweepFor(sweeper, threadEraser, threadOwners, os.Getenv)
+			if err != nil {
+				slog.Error("sandbox-manager orphan thread workspace sweep is invalid", "error", err)
+				os.Exit(1)
+			}
+		}
+		go sweeper.Start(ctx)
 		slog.Info("thread workspace retention sweeper started", "retention", threadRetention.String())
 	}
 	if capabilityVerifier != nil {
@@ -239,6 +270,10 @@ func main() {
 	}
 	// EP-9 E3 (D-E2): grant an egress-capable lease at off and record the tier instead of refusing it.
 	server = server.WithEgressTiers(egressTiersEnabled(os.Getenv("SANDBOX_MANAGER_EGRESS_TIERS")))
+	// F-f10-08: the service-callable retention erase, off unless the literal "true".
+	server = server.WithServiceThreadErase(serviceThreadEraseEnabled(os.Getenv("SANDBOX_MANAGER_SERVICE_THREAD_ERASE")))
+	// F-f05-16: Space overlay tombstones, dark until the literal "true".
+	server = server.WithOverlayTombstones(overlayTombstonesEnabled(os.Getenv("SANDBOX_MANAGER_OVERLAY_TOMBSTONES_ENABLED")))
 	grpcServer := grpc.NewServer(grpc.ChainUnaryInterceptor(authz.UnaryInterceptor(verifier), authz.ZDRGate()))
 	sbxserver.Register(grpcServer, server)
 	healthServerGRPC := health.NewServer()
@@ -262,6 +297,33 @@ func ephemeralDevelopmentEnabled(value string) bool {
 	return value == "true"
 }
 
+// errObjectStore means the object store is absent or cannot be used.
+var errObjectStore = errors.New("object store is not configured or not usable")
+
+// threadErasureFromEnv builds the object store client and the retention that erasure
+// and its sweeper use (WS22-S5). It reads both whatever
+// SANDBOX_MANAGER_THREAD_WORKSPACE says. A store that is absent or unusable is
+// errObjectStore. A retention that does not parse is returned as is: the sweeper it
+// would set would run, and a typo must not quietly change how long files are kept.
+func threadErasureFromEnv(getenv func(string) string) (*objectstore.Client, time.Duration, error) {
+	blobConfig, configured, err := objectstore.ConfigFromEnv(getenv)
+	if err != nil {
+		return nil, 0, fmt.Errorf("%w: %v", errObjectStore, err)
+	}
+	if !configured {
+		return nil, 0, errObjectStore
+	}
+	blobs, err := objectstore.New(blobConfig)
+	if err != nil {
+		return nil, 0, fmt.Errorf("%w: %v", errObjectStore, err)
+	}
+	retention, err := threadworkspace.RetentionFromEnv(getenv)
+	if err != nil {
+		return nil, 0, err
+	}
+	return blobs, retention, nil
+}
+
 // threadWorkspaceEnabled reads SANDBOX_MANAGER_THREAD_WORKSPACE with the same
 // strict rule as the ephemeral-development switch: only the literal "true"
 // enables it, so an empty, mistyped or capitalised value leaves it off.
@@ -269,7 +331,17 @@ func threadWorkspaceEnabled(value string) bool {
 	return value == "true"
 }
 
+// serviceThreadEraseEnabled reads SANDBOX_MANAGER_SERVICE_THREAD_ERASE strictly: only the literal "true" enables it.
+func serviceThreadEraseEnabled(value string) bool {
+	return value == "true"
+}
+
 // egressTiersEnabled reads SANDBOX_MANAGER_EGRESS_TIERS strictly: only the literal "true" enables it.
 func egressTiersEnabled(value string) bool {
+	return value == "true"
+}
+
+// overlayTombstonesEnabled reads SANDBOX_MANAGER_OVERLAY_TOMBSTONES_ENABLED strictly: only the literal "true" enables it.
+func overlayTombstonesEnabled(value string) bool {
 	return value == "true"
 }

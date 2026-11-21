@@ -170,6 +170,10 @@ pub struct ThreadWorkspace<'a> {
     /// The `path -> content_hash` the thread held when this call opened it: what
     /// a save compares against and what a save of a removal sends as its base.
     baseline: HashMap<String, String>,
+    /// The run's persistence-free flag, sent on every thread RPC this workspace makes so that
+    /// sandbox-manager refuses the call when it is set (F-f02-05). [`open`] refuses a persistence-free
+    /// run before a workspace exists, so the flag a built workspace carries is always false.
+    persistence_free: bool,
 }
 
 /// Opens the thread's workspace for one call: fetches its files from sandbox-manager
@@ -220,7 +224,12 @@ async fn open_in<'a>(
         .map_err(|error| Failure::new(Cause::Unavailable, error))?;
     let response = scope
         .sandbox_manager_client
-        .get_thread_workspace(scope.bearer, &lease.lease_id, &lease.backend_id)
+        .get_thread_workspace(
+            scope.bearer,
+            &lease.lease_id,
+            &lease.backend_id,
+            persistence_free,
+        )
         .await
         .inspect_err(|status| {
             warn!(code = ?status.code(), "sandbox-manager GetThreadWorkspace failed");
@@ -249,6 +258,7 @@ async fn open_in<'a>(
         prefix,
         path,
         baseline: HashMap::new(),
+        persistence_free,
     };
     let entries: Vec<WorkspaceFileEntry> = response
         .entries
@@ -374,6 +384,7 @@ impl ThreadWorkspace<'_> {
                 self.scope.bearer,
                 &self.lease_id,
                 &self.backend_id,
+                self.persistence_free,
                 changes,
                 deleted,
             )
@@ -612,16 +623,16 @@ mod tests {
         AcquireLeaseRequest, AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse,
         AppendProcessOutputRequest, AppendProcessOutputResponse,
         ApplyThreadWorkspaceChangesRequest, ApplyThreadWorkspaceChangesResponse,
-        DeleteThreadWorkspaceRequest, DeleteThreadWorkspaceResponse, GetLeaseStatusRequest,
-        GetLeaseStatusResponse, GetProcessRequest,
-        GetProcessResponse, GetThreadWorkspaceRequest, GetThreadWorkspaceResponse,
-        GetWorkspaceManifestRequest, GetWorkspaceManifestResponse, ListProcessesRequest,
-        ListProcessesResponse, PromoteWorkspaceRequest, PromoteWorkspaceResponse,
-        ReadProcessOutputRequest, ReadProcessOutputResponse, ReconcileProcessesRequest,
-        ReconcileProcessesResponse, RegisterProcessRequest, RegisterProcessResponse,
-        ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest, SandboxHealthResponse,
-        SnapshotRequest, SnapshotResponse, ThreadWorkspaceEntry, UpdateProcessStateRequest,
-        UpdateProcessStateResponse,
+        DeleteThreadWorkspaceRequest, DeleteThreadWorkspaceResponse,
+        EraseThreadWorkspaceForRetentionRequest, EraseThreadWorkspaceForRetentionResponse,
+        GetLeaseStatusRequest, GetLeaseStatusResponse, GetProcessRequest, GetProcessResponse,
+        GetThreadWorkspaceRequest, GetThreadWorkspaceResponse, GetWorkspaceManifestRequest,
+        GetWorkspaceManifestResponse, ListProcessesRequest, ListProcessesResponse,
+        PromoteWorkspaceRequest, PromoteWorkspaceResponse, ReadProcessOutputRequest,
+        ReadProcessOutputResponse, ReconcileProcessesRequest, ReconcileProcessesResponse,
+        RegisterProcessRequest, RegisterProcessResponse, ReleaseLeaseRequest, ReleaseLeaseResponse,
+        SandboxHealthRequest, SandboxHealthResponse, SnapshotRequest, SnapshotResponse,
+        ThreadWorkspaceEntry, UpdateProcessStateRequest, UpdateProcessStateResponse,
     };
     use tonic::{Request, Response, Status};
     use wiremock::matchers::any;
@@ -649,11 +660,17 @@ mod tests {
     struct FakeSandboxManager {
         rows: Arc<Mutex<ThreadRows>>,
         snapshots: Arc<Mutex<Vec<Vec<WorkspaceChangedFile>>>>,
+        /// The `zdr` flag of each thread RPC it served, in arrival order.
+        zdr_flags: Arc<Mutex<Vec<bool>>>,
     }
 
     impl FakeSandboxManager {
         fn snapshots(&self) -> Vec<Vec<WorkspaceChangedFile>> {
             self.snapshots.lock().expect("fake snapshots").clone()
+        }
+
+        fn zdr_flags(&self) -> Vec<bool> {
+            self.zdr_flags.lock().expect("fake zdr flags").clone()
         }
 
         fn insert(&self, path: &str, hash: &str, size: i64) {
@@ -798,6 +815,10 @@ mod tests {
             request: Request<GetThreadWorkspaceRequest>,
         ) -> Result<Response<GetThreadWorkspaceResponse>, Status> {
             let request = request.into_inner();
+            self.zdr_flags
+                .lock()
+                .expect("fake zdr flags")
+                .push(request.zdr);
             if request.lease_id != LEASE_ID {
                 return Err(Status::not_found("unknown thread lease"));
             }
@@ -822,6 +843,10 @@ mod tests {
             request: Request<ApplyThreadWorkspaceChangesRequest>,
         ) -> Result<Response<ApplyThreadWorkspaceChangesResponse>, Status> {
             let request = request.into_inner();
+            self.zdr_flags
+                .lock()
+                .expect("fake zdr flags")
+                .push(request.zdr);
             let mut rows = self.rows.lock().expect("fake rows");
             let mut conflicting_paths = Vec::new();
             for change in request.changes {
@@ -863,6 +888,15 @@ mod tests {
             _: Request<DeleteThreadWorkspaceRequest>,
         ) -> Result<Response<DeleteThreadWorkspaceResponse>, Status> {
             unused()
+        }
+
+        async fn erase_thread_workspace_for_retention(
+            &self,
+            _request: Request<EraseThreadWorkspaceForRetentionRequest>,
+        ) -> Result<Response<EraseThreadWorkspaceForRetentionResponse>, Status> {
+            Err(Status::unimplemented(
+                "erase_thread_workspace_for_retention",
+            ))
         }
 
         async fn get_lease_status(
@@ -987,6 +1021,42 @@ mod tests {
             std::fs::write(workspace.path().join(name), bytes).expect("the call writes its file");
         }
         workspace.commit().await.expect("the call saves")
+    }
+
+    /// The run's persistence-free flag is the request's own flag on both thread RPCs (F-f02-05).
+    /// sandbox-manager refuses a call that carries it, so a kept run's open and save send `false`,
+    /// and the client sends whatever it is told.
+    #[tokio::test]
+    async fn the_thread_rpcs_carry_the_runs_zdr_flag_to_sandbox_manager() {
+        let rig = rig().await;
+        let root = fresh_root("zdr-flag-wire");
+        save(&rig, &root, "thread-1", &[("notes.txt", b"kept")]).await;
+        assert_eq!(
+            rig.fake.zdr_flags(),
+            vec![false, false],
+            "a kept run's open and save send zdr=false"
+        );
+
+        rig.client
+            .get_thread_workspace("user-bearer", LEASE_ID, BACKEND_ID, true)
+            .await
+            .expect("the read is served");
+        rig.client
+            .apply_thread_workspace_changes(
+                "user-bearer",
+                LEASE_ID,
+                BACKEND_ID,
+                true,
+                Vec::new(),
+                Vec::new(),
+            )
+            .await
+            .expect("the write is served");
+        assert_eq!(
+            rig.fake.zdr_flags(),
+            vec![false, false, true, true],
+            "the client sends the flag it is given on both thread RPCs"
+        );
     }
 
     #[tokio::test]

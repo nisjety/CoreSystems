@@ -23,6 +23,16 @@ type fakeIdle struct {
 	ticks        chan struct{}
 	pruneErr     error
 	pruneCutoffs []time.Time
+	// The tombstones the retry drain lists, and what the sweeper recorded.
+	pending        []ThreadKey
+	pendingErr     error
+	pendingCutoffs []time.Time
+	pendingLimits  []int
+	completed      []ThreadKey
+	completeErr    error
+	attempts       map[ThreadKey]int64
+	// order is the sequence of listing calls, so a test can see the drain come first.
+	order []string
 }
 
 func newFakeIdle(threads ...ThreadKey) *fakeIdle {
@@ -33,6 +43,7 @@ func (f *fakeIdle) ListIdle(_ context.Context, cutoff time.Time, limit int) ([]T
 	f.mu.Lock()
 	f.cutoffs = append(f.cutoffs, cutoff)
 	f.limits = append(f.limits, limit)
+	f.order = append(f.order, "idle")
 	listErr := f.listErr
 	threads := append([]ThreadKey(nil), f.threads...)
 	f.mu.Unlock()
@@ -64,6 +75,38 @@ func (f *fakeIdle) EraseStaleLeases(_ context.Context, cutoff time.Time) (int64,
 	defer f.mu.Unlock()
 	f.pruneCutoffs = append(f.pruneCutoffs, cutoff)
 	return 0, f.pruneErr
+}
+
+func (f *fakeIdle) ListPendingBlobErasures(_ context.Context, olderThan time.Time, limit int) ([]ThreadKey, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.order = append(f.order, "pending")
+	f.pendingCutoffs = append(f.pendingCutoffs, olderThan)
+	f.pendingLimits = append(f.pendingLimits, limit)
+	if f.pendingErr != nil {
+		return nil, f.pendingErr
+	}
+	return append([]ThreadKey(nil), f.pending...), nil
+}
+
+func (f *fakeIdle) CompleteBlobErasure(_ context.Context, key ThreadKey) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.completeErr != nil {
+		return f.completeErr
+	}
+	f.completed = append(f.completed, key)
+	return nil
+}
+
+func (f *fakeIdle) RecordBlobErasureAttempt(_ context.Context, key ThreadKey) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.attempts == nil {
+		f.attempts = map[ThreadKey]int64{}
+	}
+	f.attempts[key]++
+	return f.attempts[key], nil
 }
 
 // fakeBlobs records every thread whose blobs it was asked to remove.

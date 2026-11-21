@@ -656,10 +656,16 @@ const quarryExtractTenantLanes = [
   'quarry-edge|inference-core',
   'quarry-edge|model-gateway',
 ];
+// The content-screening classifier call (F-f04-12, DEC-F04-3) is a tenant lane of its own: the one
+// call a Do run's tool result makes to inference-core under the run's organization, held by
+// execution-core-screening alone.
+const screeningTenantLanes = ['execution-core-screening|inference-core'];
+// Sorted, the order the registry lists its lanes in, so the tenant lanes compare equal to this list.
 const tenantLaneAllowList = [
   ...dataPlaneWorkerTenantLanes,
   ...quarryExtractTenantLanes,
-];
+  ...screeningTenantLanes,
+].sort();
 // The golden is vendored inside this tree (src/auth/fixtures, sha256-pinned and
 // checked against org-core's copy by interactive-retention-policy.org-core-
 // contract.spec.ts), so reading it needs nothing outside the service.
@@ -1022,6 +1028,50 @@ async function mintEveryLane(source: RetentionPolicy): Promise<Observation[]> {
     jest.restoreAllMocks();
   }
 }
+
+// Content-screening classifier (F-f04-12, DEC-F04-3), prepared dark. A Do run's tool result may be
+// screened by the gateway's classifier, which calls inference-core under the run's organization. That
+// call presents its own narrow principal, so execution-core's service credential is never reused for
+// it. Zero-retention and waived runs never mint it (execution-core decides that before the call).
+const screeningPrincipal = 'execution-core-screening';
+const screeningScopes = ['inference:invoke'];
+
+describeIfPolicy(
+  'principal policy content-screening principal (F-f04-12, dark)',
+  () => {
+    it('registers the screening principal for inference-core alone, on the tenant posture, with the one scope', () => {
+      const principal = policy?.[screeningPrincipal];
+      expect(principal).toMatchObject({
+        tenancy: 'directory',
+        orgIds: [],
+        audiences: ['inference-core'],
+        consumerEnv: 'EXECUTION_CORE_SCREENING_SERVICE_API_KEY',
+        scopes: screeningScopes,
+        scopesByAudience: { 'inference-core': screeningScopes },
+        retentionByAudience: { 'inference-core': 'tenant' },
+      });
+      expect(principal?.tokenExchange).toBeUndefined();
+      expect(Object.keys(principal?.scopesByAudience ?? {})).toEqual([
+        'inference-core',
+      ]);
+    });
+
+    it('reads its own key, and no other principal reads it', () => {
+      const readers = principalNames().filter(
+        (name) =>
+          policy?.[name]?.consumerEnv === 'EXECUTION_CORE_SCREENING_SERVICE_API_KEY',
+      );
+      expect(readers).toEqual([screeningPrincipal]);
+    });
+
+    it('does not widen execution-core: its own credential keeps its audiences and holds no screening scope', () => {
+      const execution = policy?.['execution-core'];
+      expect(execution?.consumerEnv).toBe('EXECUTION_CORE_SERVICE_API_KEY');
+      expect(execution?.audiences).not.toContain('inference-core');
+      expect(everyScopeOf('execution-core')).not.toContain(screeningScopes[0]);
+    });
+  },
+);
 
 // Goal judge (EP-7 S3/S6, OD-58), prepared dark. model-gateway's own
 // session-core credential is zero-retention with heartbeat and terminalize only,
@@ -2381,6 +2431,7 @@ describeIfPolicy('principal bundle R-13 PR 1: quarry-edge model lanes', () => {
       'data-orchestrator',
       'embedding-engine',
       'execution-core',
+      'execution-core-screening',
       'finspo-core',
       'graph-index',
       'imports-core',
@@ -2890,8 +2941,9 @@ describe('registry schema fields of R-13 PR 1: webPolicyByAudience and apiKeyExc
 
   it('refuses the whole registry for an apiKeyExchange that is not a duplicate-free list of exchange audiences', () => {
     // The closed set is API_KEY_EXCHANGE_AUDIENCE_SCOPES (api-key-exchange.ts):
-    // model-gateway, session-core and inference-core (EP-12 S2) and quarry and
-    // browser-broker (INNH-10). Anything else, and any repeat, is refused.
+    // model-gateway, session-core and inference-core (EP-12 S2), quarry and
+    // browser-broker (INNH-10) and cost-core (O-18). Anything else, and any
+    // repeat, is refused.
     for (const apiKeyExchange of [
       [],
       ['data-plane'],
@@ -2921,9 +2973,11 @@ describe('registry schema fields of R-13 PR 1: webPolicyByAudience and apiKeyExc
       (name) => policy?.[name]?.apiKeyExchange !== undefined,
     );
     expect(exchangers).toEqual(['verevon-gateway']);
-    // INNH-10 (browser agent) and EP-12 S2 (Agent API) audiences.
+    // INNH-10 (browser agent), EP-12 S2 (Agent API) and O-18 (cost-core: the
+    // key's own budget check) audiences.
     expect([...(policy?.['verevon-gateway']?.apiKeyExchange ?? [])].sort()).toEqual([
       'browser-broker',
+      'cost-core',
       'inference-core',
       'model-gateway',
       'quarry',

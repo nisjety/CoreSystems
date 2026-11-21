@@ -250,10 +250,17 @@ func main() {
 	// /api/v1/budget/check, and handleBudgetCheck pins org/user to the
 	// token's claims — an accepted second audience still only ever acts as
 	// the token's own org and user.
+	//
+	// O-18: with COST_CORE_ACCEPT_API_KEY=true the verifier also admits an
+	// api_key principal, over HTTP, and CostAuthorizer lets it call only the
+	// budget check for its own key. Off, the type stays refused as before.
+	acceptAPIKey := acceptAPIKeyEnabled(os.Getenv)
 	verifier, err := authctx.NewVerifier(authctx.Config{
-		Audiences: splitAudiences(requiredEnv("COST_CORE_AUTH_AUDIENCE")),
-		Issuer:    requiredEnv("AUTH_CORE_ISSUER"),
-		JWKSURL:   requiredEnv("AUTH_CORE_JWKS_URL"),
+		Audiences:        splitAudiences(requiredEnv("COST_CORE_AUTH_AUDIENCE")),
+		Issuer:           requiredEnv("AUTH_CORE_ISSUER"),
+		JWKSURL:          requiredEnv("AUTH_CORE_JWKS_URL"),
+		AcceptAPIKey:     acceptAPIKey,
+		AcceptAPIKeyHTTP: acceptAPIKey,
 	})
 	if err != nil {
 		slog.Error("cost-core authentication unavailable", "error", err)
@@ -338,6 +345,12 @@ func splitAudiences(raw string) []string {
 		}
 	}
 	return audiences
+}
+
+// acceptAPIKeyEnabled reads COST_CORE_ACCEPT_API_KEY (O-18): only the exact
+// literal "true" lets cost-core admit an api_key principal.
+func acceptAPIKeyEnabled(getenv func(string) string) bool {
+	return getenv("COST_CORE_ACCEPT_API_KEY") == "true"
 }
 
 // allowEphemeralLedger reads COST_CORE_ALLOW_EPHEMERAL, the explicit local-test

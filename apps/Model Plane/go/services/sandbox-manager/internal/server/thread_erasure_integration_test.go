@@ -126,6 +126,10 @@ func TestDeleteThreadWorkspaceRemovesRowsAndPrefix(t *testing.T) {
 	if n := objectsUnder(t, ctx, raw, bucket, "cas/thread/org-1/thread-1/"); n != 0 {
 		t.Fatalf("thread-1 prefix still holds %d blobs", n)
 	}
+	// F-f06-02: the tombstone the erase wrote is closed once its blobs are gone.
+	if n := countRows(t, ctx, pool, `SELECT count(*) FROM thread_workspace_erasures WHERE thread_id = $1`, "thread-1"); n != 0 {
+		t.Fatalf("thread-1's blob-erasure tombstone is still open after its blobs went: %d left", n)
+	}
 
 	// The sibling thread is untouched.
 	if n := countRows(t, ctx, pool, `SELECT count(*) FROM thread_workspace_files WHERE thread_id = $1`, "thread-10"); n != 1 {
@@ -171,12 +175,14 @@ func startThreadPostgres(t *testing.T, ctx context.Context) *pgxpool.Pool {
 		t.Fatalf("pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0005_thread_workspace.up.sql"))
-	if err != nil {
-		t.Fatalf("read migration 0005: %v", err)
-	}
-	if _, err := pool.Exec(ctx, string(migration)); err != nil {
-		t.Fatalf("apply migration 0005: %v", err)
+	for _, name := range []string{"0005_thread_workspace.up.sql", "0010_thread_workspace_erasures.up.sql"} {
+		migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", name))
+		if err != nil {
+			t.Fatalf("read migration %s: %v", name, err)
+		}
+		if _, err := pool.Exec(ctx, string(migration)); err != nil {
+			t.Fatalf("apply migration %s: %v", name, err)
+		}
 	}
 	return pool
 }

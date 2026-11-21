@@ -28,6 +28,12 @@ type workspaceDatabaseStub struct {
 	execTags  []pgconn.CommandTag
 	execCalls int
 
+	// queryRows, when non-empty, supplies one result per successive Query call
+	// (in order) instead of the single rows above — Promote lists the overlay
+	// first and then runs one statement per tombstone.
+	queryRows  []pgx.Rows
+	queryCalls int
+
 	queries []string
 	args    [][]any
 }
@@ -46,6 +52,11 @@ func (d *workspaceDatabaseStub) Exec(_ context.Context, query string, args ...an
 func (d *workspaceDatabaseStub) Query(_ context.Context, query string, args ...any) (pgx.Rows, error) {
 	d.queries = append(d.queries, query)
 	d.args = append(d.args, append([]any(nil), args...))
+	index := d.queryCalls
+	d.queryCalls++
+	if index < len(d.queryRows) {
+		return d.queryRows[index], d.queryErr
+	}
 	return d.rows, d.queryErr
 }
 
@@ -134,6 +145,9 @@ func TestGetManifestReturnsTheLayeredView(t *testing.T) {
 	}
 	if !strings.Contains(database.queries[0], "DISTINCT ON (path)") {
 		t.Fatalf("query does not layer overlay over space rows: %s", database.queries[0])
+	}
+	if !strings.Contains(database.queries[0], "WHERE NOT deleted") {
+		t.Fatalf("query does not hide a path whose winning overlay row is a tombstone: %s", database.queries[0])
 	}
 	if !strings.Contains(database.queries[0], "run_id IS NULL OR run_id = $3") {
 		t.Fatalf("query does not scope to this run's overlay: %s", database.queries[0])
@@ -252,8 +266,8 @@ func TestPromoteUpsertsOnePerOverlayPathAndReportsOnlyTheConflictingOne(t *testi
 	t.Parallel()
 	database := &workspaceDatabaseStub{
 		rows: &manifestRows{index: -1, values: [][]any{
-			{"clean.txt"},
-			{"stale.txt"},
+			{"clean.txt", false},
+			{"stale.txt", false},
 		}},
 		execTags: []pgconn.CommandTag{
 			pgconn.NewCommandTag("INSERT 0 1"), // clean.txt merges
@@ -279,6 +293,9 @@ func TestPromoteUpsertsOnePerOverlayPathAndReportsOnlyTheConflictingOne(t *testi
 		}
 		if !strings.Contains(q, "WITH overlay AS") {
 			t.Fatalf("upsert does not re-read its own overlay row fresh inside the statement: %s", q)
+		}
+		if !strings.Contains(q, "AND NOT deleted") {
+			t.Fatalf("upsert could merge a tombstone row as if it were content: %s", q)
 		}
 	}
 	wantFirstArgs := []any{"org-a", "space-1", "lease-1", "clean.txt"}

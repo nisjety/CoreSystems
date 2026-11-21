@@ -209,3 +209,76 @@ func TestAPIKeyPrincipal_GRPCOnly(t *testing.T) {
 		t.Fatalf("HTTP middleware let an api_key through: code %d called %v", recorder.Code, called)
 	}
 }
+
+// O-18: an HTTP service may opt in to carry the key principal to its
+// authorizer. The opt-in needs AcceptAPIKey, a non-nil authorizer, and names
+// the key (never its owner) in the downstream identity headers.
+func TestAPIKeyPrincipal_HTTPOptIn(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := func(acceptKey, acceptHTTP bool) *Verifier {
+		verifier, err := NewVerifier(Config{
+			Audiences:        []string{"browser-broker"},
+			Issuer:           testIssuer,
+			PublicKeyPEM:     pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}),
+			AcceptAPIKey:     acceptKey,
+			AcceptAPIKeyHTTP: acceptHTTP,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return verifier
+	}
+	raw := signMap(t, key, keyClaims())
+	serve := func(verifier *Verifier, authorizer HTTPAuthorizer, userHeader string) (int, string, bool) {
+		called := false
+		var forwarded string
+		handler := verifier.HTTPMiddleware(authorizer)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			called = true
+			forwarded = r.Header.Get("X-User-ID")
+		}))
+		request := httptest.NewRequest(http.MethodPost, "/", nil)
+		request.Header.Set("Authorization", "Bearer "+raw)
+		if userHeader != "" {
+			request.Header.Set("X-User-ID", userHeader)
+		}
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		return recorder.Code, forwarded, called
+	}
+	allow := func(Principal, *http.Request) error { return nil }
+
+	// Opted in with an authorizer: the key principal reaches the handler and the
+	// downstream user header names the key, not the owner.
+	if code, forwarded, called := serve(build(true, true), allow, ""); code != http.StatusOK || !called || forwarded != "apikey:key_123" {
+		t.Fatalf("opt-in: code=%d called=%v forwarded=%q", code, called, forwarded)
+	}
+	// The owner's id in the header is a conflict; the key's own subject is not.
+	if code, _, called := serve(build(true, true), allow, "user-a"); code != http.StatusForbidden || called {
+		t.Fatalf("owner header: code=%d called=%v", code, called)
+	}
+	if code, _, called := serve(build(true, true), allow, "apikey:key_123"); code != http.StatusOK || !called {
+		t.Fatalf("key header: code=%d called=%v", code, called)
+	}
+	// No authorizer, or an authorizer that refuses, stops it.
+	if code, _, called := serve(build(true, true), nil, ""); code != http.StatusForbidden || called {
+		t.Fatalf("nil authorizer: code=%d called=%v", code, called)
+	}
+	deny := func(Principal, *http.Request) error { return http.ErrNotSupported }
+	if code, _, called := serve(build(true, true), deny, ""); code != http.StatusForbidden || called {
+		t.Fatalf("denying authorizer: code=%d called=%v", code, called)
+	}
+	// The HTTP opt-in alone, or the type alone, still refuses (unchanged).
+	if code, _, called := serve(build(true, false), allow, ""); code != http.StatusForbidden || called {
+		t.Fatalf("type only: code=%d called=%v", code, called)
+	}
+	if code, _, called := serve(build(false, true), allow, ""); code != http.StatusUnauthorized || called {
+		t.Fatalf("http opt-in without the type: code=%d called=%v", code, called)
+	}
+}

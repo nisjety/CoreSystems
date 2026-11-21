@@ -287,11 +287,14 @@ func (s *MemorySnapshotStore) newID() (string, error) {
 type MemoryWorkspaceStore struct {
 	mu   sync.RWMutex
 	rows map[string]workspace.ChangedFile // key: org_id + "/" + space_id + "/" + coalesce(run_id, "") + "/" + path
+	// tombstones marks the overlay rows (same keys as rows) that are deletions
+	// (F-f05-16); the matching rows entry holds the base hash the run saw.
+	tombstones map[string]bool
 }
 
 // NewMemoryWorkspaceStore constructs an empty MemoryWorkspaceStore.
 func NewMemoryWorkspaceStore() *MemoryWorkspaceStore {
-	return &MemoryWorkspaceStore{rows: make(map[string]workspace.ChangedFile)}
+	return &MemoryWorkspaceStore{rows: make(map[string]workspace.ChangedFile), tombstones: make(map[string]bool)}
 }
 
 func workspaceRowKey(orgID, spaceID, runID, path string) string {
@@ -308,6 +311,7 @@ func (s *MemoryWorkspaceStore) GetManifest(_ context.Context, orgID, spaceID, ru
 	prefix := orgID + "/" + spaceID + "/"
 	spaceRows := make(map[string]workspace.ManifestEntry)
 	overlayRows := make(map[string]workspace.ManifestEntry)
+	hidden := make(map[string]bool)
 	for key, row := range s.rows {
 		rest, ok := strings.CutPrefix(key, prefix)
 		if !ok {
@@ -324,12 +328,18 @@ func (s *MemoryWorkspaceStore) GetManifest(_ context.Context, orgID, spaceID, ru
 			spaceRows[path] = entry
 		case runID:
 			overlayRows[path] = entry
+			if s.tombstones[key] {
+				hidden[path] = true
+			}
 		}
 	}
 
 	merged := spaceRows
 	for path, entry := range overlayRows {
 		merged[path] = entry // this run's overlay shadows the Space row for the same path
+	}
+	for path := range hidden {
+		delete(merged, path) // a winning tombstone hides the path altogether
 	}
 	entries := make([]workspace.ManifestEntry, 0, len(merged))
 	for _, e := range merged {
@@ -345,7 +355,35 @@ func (s *MemoryWorkspaceStore) UpsertOverlay(_ context.Context, orgID, spaceID, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, f := range files {
-		s.rows[workspaceRowKey(orgID, spaceID, runID, f.Path)] = f
+		key := workspaceRowKey(orgID, spaceID, runID, f.Path)
+		s.rows[key] = f
+		delete(s.tombstones, key) // a file recreated after deletion un-tombstones
+	}
+	return nil
+}
+
+// UpsertTombstones mirrors workspace.Store.UpsertTombstones: a removed path
+// becomes a tombstone overlay row holding the base hash the run saw; a removed
+// path with an empty base hash drops the run's own non-tombstone overlay row.
+func (s *MemoryWorkspaceStore) UpsertTombstones(_ context.Context, orgID, spaceID, runID string, deleted []workspace.DeletedPath) error {
+	if orgID == "" || spaceID == "" || runID == "" {
+		return fmt.Errorf("org_id, space_id, and run_id are required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, d := range deleted {
+		if d.Path == "" {
+			return fmt.Errorf("deleted path is required")
+		}
+		key := workspaceRowKey(orgID, spaceID, runID, d.Path)
+		if d.BaseHash == "" {
+			if !s.tombstones[key] {
+				delete(s.rows, key)
+			}
+			continue
+		}
+		s.rows[key] = workspace.ChangedFile{Path: d.Path, ContentHash: d.BaseHash, BaseHash: d.BaseHash}
+		s.tombstones[key] = true
 	}
 	return nil
 }
@@ -381,6 +419,18 @@ func (s *MemoryWorkspaceStore) Promote(_ context.Context, orgID, spaceID, runID 
 	for _, entry := range overlay {
 		spaceKey := workspaceRowKey(orgID, spaceID, "", entry.path)
 		existing, hasExisting := s.rows[spaceKey]
+		if s.tombstones[overlayPrefix+entry.path] {
+			// A tombstone deletes the Space row while it still holds the base
+			// hash the run saw; an already-gone row is an idempotent replay.
+			switch {
+			case !hasExisting:
+			case existing.ContentHash == entry.file.BaseHash:
+				delete(s.rows, spaceKey)
+			default:
+				conflicts = append(conflicts, entry.path)
+			}
+			continue
+		}
 		mergeable := !hasExisting ||
 			existing.ContentHash == entry.file.BaseHash ||
 			existing.ContentHash == entry.file.ContentHash

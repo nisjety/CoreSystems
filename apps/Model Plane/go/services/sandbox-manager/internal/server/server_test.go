@@ -834,6 +834,11 @@ func (f failingWorkspaceStore) UpsertOverlay(context.Context, string, string, st
 	return nil
 }
 
+func (f failingWorkspaceStore) UpsertTombstones(context.Context, string, string, string, []workspace.DeletedPath) error {
+	f.t.Fatal("UpsertTombstones must not be called for a non-Space lease")
+	return nil
+}
+
 func (f failingWorkspaceStore) Promote(context.Context, string, string, string) ([]string, error) {
 	f.t.Fatal("Promote must not be called by this test")
 	return nil, nil

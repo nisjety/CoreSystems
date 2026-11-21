@@ -19,16 +19,28 @@ type erasureRecorder struct {
 	events []string
 }
 
-// fakeRowErasure answers Erase with a fixed count or error and logs the call.
+// fakeRowErasure answers Erase with a fixed count or error and logs the call. It
+// also records each tombstone the server closed (F-f06-02), outside the event log so
+// the order of the rows and the blobs stays as the erase tests expect it.
 type fakeRowErasure struct {
-	log   *erasureRecorder
-	files int64
-	err   error
+	log         *erasureRecorder
+	files       int64
+	err         error
+	completed   []threadworkspace.ThreadKey
+	completeErr error
 }
 
 func (f *fakeRowErasure) Erase(_ context.Context, orgID, ownerID, threadID string) (int64, error) {
 	f.log.events = append(f.log.events, "rows "+orgID+"/"+ownerID+"/"+threadID)
 	return f.files, f.err
+}
+
+func (f *fakeRowErasure) CompleteBlobErasure(_ context.Context, key threadworkspace.ThreadKey) error {
+	if f.completeErr != nil {
+		return f.completeErr
+	}
+	f.completed = append(f.completed, key)
+	return nil
 }
 
 // fakeBlobErasure answers DeleteThreadBlobs with a fixed error and logs the call.
@@ -63,14 +75,23 @@ func erasureHarness(t *testing.T, enabled bool) (*threadHarness, *erasureRecorde
 	return h, log, rows, blobs
 }
 
-func TestDeleteThreadWorkspaceIsRefusedWhileTheSwitchIsOff(t *testing.T) {
+// TestDeleteThreadWorkspaceErasesWhileTheSwitchIsOff: a user can erase what a
+// previous run wrote after a rollback, so the feature switch does not gate erasure
+// (F-f06-02). The rows go first and the blobs after, as with the switch on.
+func TestDeleteThreadWorkspaceErasesWhileTheSwitchIsOff(t *testing.T) {
 	t.Parallel()
 	h, log, _, _ := erasureHarness(t, false)
 
-	_, err := h.s.DeleteThreadWorkspace(context.Background(), eraseRequest("org-1", "thread-1"))
-	assertStatusCode(t, err, codes.FailedPrecondition)
-	if len(log.events) != 0 {
-		t.Fatalf("erased with the switch off: %v", log.events)
+	resp, err := h.s.DeleteThreadWorkspace(context.Background(), eraseRequest("org-1", "thread-1"))
+	if err != nil {
+		t.Fatalf("DeleteThreadWorkspace with the switch off: %v", err)
+	}
+	if resp.GetFilesDeleted() != 3 {
+		t.Fatalf("files = %d, want 3", resp.GetFilesDeleted())
+	}
+	want := "rows org-1/user-1/thread-1|blobs org-1/thread-1"
+	if got := strings.Join(log.events, "|"); got != want {
+		t.Fatalf("events = %q, want %q", got, want)
 	}
 }
 

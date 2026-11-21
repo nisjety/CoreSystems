@@ -223,3 +223,34 @@ func TestThreadWorkspaceMethodsAreKnownAndScoped(t *testing.T) {
 		t.Fatal("GetThreadWorkspace with no scope unexpectedly authorized")
 	}
 }
+
+// TestRetentionEraseNeedsAServicePrincipalWithItsOwnScope pins F-f10-08: the
+// method is known, a user is refused (the user shortcut does not apply), and a
+// service holds it only with the narrow erase scope, not with sandbox:write.
+func TestRetentionEraseNeedsAServicePrincipalWithItsOwnScope(t *testing.T) {
+	method := MethodEraseThreadWorkspaceForRetention
+	if method != "/model_plane.v1.SandboxManager/EraseThreadWorkspaceForRetention" {
+		t.Fatalf("method name = %q", method)
+	}
+	scoped := authctx.Principal{OrganizationID: "org-a", ActorID: "service:session-core", PrincipalType: "service", Scopes: []string{ScopeThreadWorkspaceEraseAny}}
+	if err := Authorize(scoped, method, nil); err != nil {
+		t.Fatalf("service with the erase scope refused: %v", err)
+	}
+	for name, principal := range map[string]authctx.Principal{
+		"user":             {OrganizationID: "org-a", ActorID: "user-a", PrincipalType: "user"},
+		"user with scope":  {OrganizationID: "org-a", ActorID: "user-a", PrincipalType: "user", Scopes: []string{ScopeThreadWorkspaceEraseAny}},
+		"service no scope": {OrganizationID: "org-a", ActorID: "service:session-core", PrincipalType: "service"},
+		"service write":    {OrganizationID: "org-a", ActorID: "service:execution-core", PrincipalType: "service", Scopes: []string{ScopeWrite, ScopeRead}},
+	} {
+		if err := Authorize(principal, method, nil); err == nil {
+			t.Fatalf("%s unexpectedly authorized the retention erase", name)
+		}
+	}
+	// The narrow scope grants nothing else.
+	if err := Authorize(scoped, "/model_plane.v1.SandboxManager/DeleteThreadWorkspace", nil); err == nil {
+		t.Fatal("the erase scope unexpectedly authorized DeleteThreadWorkspace")
+	}
+	if err := Authorize(scoped, "/model_plane.v1.SandboxManager/GetThreadWorkspace", nil); err == nil {
+		t.Fatal("the erase scope unexpectedly authorized a workspace read")
+	}
+}

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/objectstore"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/telemetry"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/threadowner"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/threadworkspace"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/workspace"
 	"go.opentelemetry.io/otel/attribute"
@@ -65,18 +67,39 @@ type Server struct {
 	// refuses before it removes anything while either is nil.
 	threadErase ThreadEraser
 	threadBlobs threadworkspace.BlobEraser
+	// serviceThreadEraseEnabled is SANDBOX_MANAGER_SERVICE_THREAD_ERASE (F-f10-08).
+	// Off, EraseThreadWorkspaceForRetention is refused before it reads a field and
+	// DeleteThreadWorkspace is exactly as before. Read once at construction, like
+	// threadWorkspaceEnabled.
+	serviceThreadEraseEnabled bool
+	// threadOwners is the SANDBOX_MANAGER_THREAD_OWNER_CHECK resolver (O-13). Nil
+	// is the switch off: no thread-scoped path asks session-core anything and each
+	// behaves exactly as before. Set, every thread-scoped path asks it whether the
+	// verified user owns the thread, refuses a "no" as NOT_FOUND and any error as
+	// UNAVAILABLE, and never falls through.
+	threadOwners threadowner.Resolver
 	// egressTiersEnabled is SANDBOX_MANAGER_EGRESS_TIERS (EP-9 E3). Off, every
 	// lease records egress off, the response leaves egress_tier unset, and an
 	// egress-capable claim the decision does not grant is refused exactly as
 	// before. On, that claim gets its lease at off instead (D-E2) and the
 	// granted tier is recorded on the lease and reported back.
 	egressTiersEnabled bool
+	// overlayTombstonesEnabled is SANDBOX_MANAGER_OVERLAY_TOMBSTONES_ENABLED
+	// (F-f05-16). Off, SnapshotRequest.deleted_paths is ignored and a Space
+	// overlay records only changed files, exactly as before. On, a Space lease's
+	// removed paths are recorded as tombstones on its overlay. Read once at
+	// construction, like threadWorkspaceEnabled.
+	overlayTombstonesEnabled bool
+	// deletedPaths reads the removed paths off a snapshot request. A field so
+	// tests can inject paths before the generated Go carries deleted_paths;
+	// NewServer sets it to snapshotDeletedPaths.
+	deletedPaths func(*SnapshotRequest) []workspace.DeletedPath
 }
 
 // NewServer constructs a Server with the given stores. Space capability
 // verification starts disabled; call WithCapabilityVerifier to enable it.
 func NewServer(leases LeaseStore, snaps SnapshotStore, workspace WorkspaceStore) *Server {
-	return &Server{leases: leases, snapshots: snaps, workspace: workspace, principal: authz.Principal}
+	return &Server{leases: leases, snapshots: snaps, workspace: workspace, principal: authz.Principal, deletedPaths: snapshotDeletedPaths}
 }
 
 // WithCapabilityVerifier wires Space capability-decision verification and
@@ -120,10 +143,53 @@ func (s *Server) WithThreadErasure(rows ThreadEraser, blobs threadworkspace.Blob
 	return s
 }
 
+// WithServiceThreadErase wires the SANDBOX_MANAGER_SERVICE_THREAD_ERASE switch
+// (F-f10-08). See the serviceThreadEraseEnabled field for what it changes.
+func (s *Server) WithServiceThreadErase(enabled bool) *Server {
+	s.serviceThreadEraseEnabled = enabled
+	return s
+}
+
+// WithThreadOwnerCheck wires the SANDBOX_MANAGER_THREAD_OWNER_CHECK switch (O-13).
+// A nil resolver is the switch off. See the threadOwners field for what it changes.
+func (s *Server) WithThreadOwnerCheck(owners threadowner.Resolver) *Server {
+	s.threadOwners = owners
+	return s
+}
+
+// requireThreadOwner is the O-13 gate every thread-scoped path runs once the
+// caller and the thread id are known. Off it does nothing. On, only a definite
+// yes from session-core lets the call go on: a thread that is not the caller's
+// answers NOT_FOUND, the same as a thread that does not exist, so the answer
+// never tells a caller whether another user's thread id is real; session-core
+// being unreachable, or its answer unreadable, is UNAVAILABLE and the call stops.
+// The log carries ids only.
+func (s *Server) requireThreadOwner(ctx context.Context, principal authctx.Principal, threadID string) error {
+	if s.threadOwners == nil {
+		return nil
+	}
+	owns, err := s.threadOwners.OwnsThread(ctx, principal.OrganizationID, principal.ActorID, threadID)
+	if err != nil {
+		slog.Warn("thread ownership could not be verified; the request is refused", "org_id", principal.OrganizationID, "thread_id", threadID)
+		return status.Error(codes.Unavailable, "thread ownership could not be verified")
+	}
+	if !owns {
+		return status.Error(codes.NotFound, "thread not found")
+	}
+	return nil
+}
+
 // WithEgressTiers wires the SANDBOX_MANAGER_EGRESS_TIERS switch (EP-9 E3). See
 // the egressTiersEnabled field for what it changes.
 func (s *Server) WithEgressTiers(enabled bool) *Server {
 	s.egressTiersEnabled = enabled
+	return s
+}
+
+// WithOverlayTombstones wires the SANDBOX_MANAGER_OVERLAY_TOMBSTONES_ENABLED
+// switch (F-f05-16). See the overlayTombstonesEnabled field for what it changes.
+func (s *Server) WithOverlayTombstones(enabled bool) *Server {
+	s.overlayTombstonesEnabled = enabled
 	return s
 }
 
@@ -190,6 +256,14 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 		// Refused whatever the switch says: a ZDR turn keeps no thread files
 		// (DEC-23 D8), so nothing is written and nothing is hydrated.
 		return nil, status.Error(codes.FailedPrecondition, "thread workspace is refused under zero data retention")
+	}
+	if threadScope && strings.TrimSpace(req.GetSpaceId()) != "" {
+		// Refused whatever the switch says. With the switch off, a thread lease that
+		// named a Space fell through to the Space path and wrote a leases row with
+		// scope_type 'thread' that satisfies leases_thread_live_uq (migration 0006).
+		// A later switched-on AcquireThread would upsert onto it, and every thread RPC
+		// would answer "lease is not a thread lease" until it expired (D2-147).
+		return nil, status.Error(codes.InvalidArgument, "a thread lease cannot name a Space")
 	}
 	if threadScope && s.threadWorkspaceEnabled {
 		return s.acquireThread(ctx, principal, req, ttl)
@@ -301,6 +375,12 @@ func (s *Server) acquireThread(ctx context.Context, principal authctx.Principal,
 	if s.threads == nil {
 		return nil, status.Error(codes.FailedPrecondition, "thread workspace requires a durable database")
 	}
+	// O-13: ownership before any lease row is written, so a foreign or missing
+	// thread id never reaches the store.
+	if err := s.requireThreadOwner(ctx, principal, req.GetScopeId()); err != nil {
+		telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "thread_owner_refused")))
+		return nil, err
+	}
 	l, err := s.leases.AcquireThread(ctx, req.GetScopeId(), principal.OrganizationID, principal.ActorID, s.backendID, ttl)
 	if err != nil {
 		telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", leaseOutcome(err))))
@@ -366,6 +446,18 @@ func (s *Server) SnapshotSandbox(ctx context.Context, req *SnapshotRequest) (*Sn
 		return nil, mapErr(err)
 	}
 	defer s.leases.EndSnapshot(ctx, l.ID)
+	// Paths this run removed are recorded as tombstones on its overlay (F-f05-16).
+	// Only a Space lease has an overlay (a thread lease carries no space_id, so it
+	// ignores the field), and only while the switch is on. Written before the
+	// changed files so a path named in both ends up present, never lost.
+	if l.SpaceID != "" && s.overlayTombstonesEnabled && s.deletedPaths != nil {
+		if deleted := s.deletedPaths(req); len(deleted) > 0 {
+			if err := s.workspace.UpsertTombstones(ctx, principal.OrganizationID, l.SpaceID, l.ID, deleted); err != nil {
+				telemetry.SnapshotDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "workspace_tombstone_failed")))
+				return nil, status.Errorf(codes.Internal, "record workspace tombstones: %v", err)
+			}
+		}
+	}
 	// Record this run's overlay BEFORE creating the snapshot record — fail
 	// closed rather than risk a snapshot referencing content whose overlay
 	// row was never durably written. Upserting is idempotent, so if
@@ -483,11 +575,16 @@ func (s *Server) PromoteWorkspace(ctx context.Context, req *PromoteWorkspaceRequ
 	return &PromoteWorkspaceResponse{ConflictingPaths: conflicts}, nil
 }
 
-// threadLease resolves the lease a thread-workspace RPC names. It refuses while
-// the switch is off or no durable store is wired, then requires a user caller
-// and a thread lease. A Space lease is refused here, so no thread RPC can reach
-// a Space's rows.
-func (s *Server) threadLease(ctx context.Context, principal authctx.Principal, leaseID, backendID string) (*lease.Lease, error) {
+// threadLease resolves the lease a thread-workspace RPC names. It refuses a ZDR or
+// waived caller first, before the lease is read, whatever the switch says: a lease
+// acquired in an earlier turn is not proof the later turn may touch the files
+// (D2-149). It then refuses while the switch is off or no durable store is wired,
+// requires a user caller and a thread lease, and refuses a Space lease, so no
+// thread RPC can reach a Space's rows.
+func (s *Server) threadLease(ctx context.Context, principal authctx.Principal, leaseID, backendID string, zdr bool) (*lease.Lease, error) {
+	if zdr {
+		return nil, status.Error(codes.FailedPrecondition, "thread workspace is refused under zero data retention")
+	}
 	if !s.threadWorkspaceEnabled || s.threads == nil {
 		return nil, status.Error(codes.FailedPrecondition, "thread workspace is not enabled")
 	}
@@ -504,6 +601,12 @@ func (s *Server) threadLease(ctx context.Context, principal authctx.Principal, l
 	if l.ScopeType != "thread" || l.SpaceID != "" {
 		return nil, status.Error(codes.FailedPrecondition, "lease is not a thread lease")
 	}
+	// O-13: a lease minted before the thread was deleted, or before the check was
+	// switched on, is not proof of ownership now. GetThreadWorkspace and
+	// ApplyThreadWorkspaceChanges both come through here.
+	if err := s.requireThreadOwner(ctx, principal, l.ScopeID); err != nil {
+		return nil, err
+	}
 	return l, nil
 }
 
@@ -514,7 +617,7 @@ func (s *Server) GetThreadWorkspace(ctx context.Context, req *GetThreadWorkspace
 	if err != nil {
 		return nil, err
 	}
-	l, err := s.threadLease(ctx, principal, req.GetLeaseId(), req.GetBackendId())
+	l, err := s.threadLease(ctx, principal, req.GetLeaseId(), req.GetBackendId(), req.GetZdr())
 	if err != nil {
 		return nil, err
 	}
@@ -538,7 +641,7 @@ func (s *Server) ApplyThreadWorkspaceChanges(ctx context.Context, req *ApplyThre
 	if err != nil {
 		return nil, err
 	}
-	l, err := s.threadLease(ctx, principal, req.GetLeaseId(), req.GetBackendId())
+	l, err := s.threadLease(ctx, principal, req.GetLeaseId(), req.GetBackendId(), req.GetZdr())
 	if err != nil {
 		return nil, err
 	}
@@ -573,25 +676,36 @@ func (s *Server) ApplyThreadWorkspaceChanges(ctx context.Context, req *ApplyThre
 }
 
 // ThreadEraser is the rows half of erasure. threadworkspace.Eraser is the
-// production implementation.
+// production implementation. Erase also writes the tombstone that records the blob
+// removal still to come, and CompleteBlobErasure closes it (F-f06-02).
 type ThreadEraser interface {
 	Erase(ctx context.Context, orgID, ownerID, threadID string) (int64, error)
+	CompleteBlobErasure(ctx context.Context, key threadworkspace.ThreadKey) error
+}
+
+// closeBlobErasure deletes the tombstone once the thread's blobs are gone. A failure
+// is logged with the ids only and not returned: the blobs are removed, so the erase
+// has done its work, and the retention sweeper closes a tombstone left behind.
+func (s *Server) closeBlobErasure(ctx context.Context, orgID, ownerID, threadID string) {
+	key := threadworkspace.ThreadKey{OrgID: orgID, OwnerID: ownerID, ThreadID: threadID}
+	if err := s.threadErase.CompleteBlobErasure(ctx, key); err != nil {
+		slog.Warn("thread blob erasure is not closed; the retention sweeper closes it", "org_id", orgID, "thread_id", threadID)
+	}
 }
 
 // DeleteThreadWorkspace erases the caller's own thread workspace (WS22-S5). The
 // rows go first and the blobs under the thread's prefix after them. A blob
-// failure is reported, and a retry finds no rows and removes the prefix again,
-// so the erase always finishes. Only a user may erase, and only their own
-// threads: the rows are keyed by the caller's identity and no request field
-// names an owner.
+// failure is reported, and it leaves the tombstone the rows step wrote, which the
+// retention sweeper retries; a retry of this call finds no rows and removes the
+// prefix again, so the erase always finishes. It runs whatever
+// SANDBOX_MANAGER_THREAD_WORKSPACE says (F-f06-02): a rollback must not strand a
+// thread's files. Only a user may erase, and only their own threads: the rows are
+// keyed by the caller's identity and no request field names an owner.
 func (s *Server) DeleteThreadWorkspace(ctx context.Context, req *DeleteThreadWorkspaceRequest) (*DeleteThreadWorkspaceResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "DeleteThreadWorkspace")))
 	principal, err := s.principal(ctx)
 	if err != nil {
 		return nil, err
-	}
-	if !s.threadWorkspaceEnabled || s.threads == nil {
-		return nil, status.Error(codes.FailedPrecondition, "thread workspace is not enabled")
 	}
 	if principal.PrincipalType != "user" {
 		return nil, status.Error(codes.PermissionDenied, "a thread workspace belongs to a user, not a service principal")
@@ -609,6 +723,12 @@ func (s *Server) DeleteThreadWorkspace(ctx context.Context, req *DeleteThreadWor
 	if s.threadErase == nil || s.threadBlobs == nil {
 		return nil, status.Error(codes.FailedPrecondition, "thread workspace erasure requires the object store")
 	}
+	// O-13: only the thread's owner erases its workspace. A thread that no longer
+	// exists answers NOT_FOUND here like any other; the orphan sweep removes what a
+	// deleted thread left behind.
+	if err := s.requireThreadOwner(ctx, principal, req.GetThreadId()); err != nil {
+		return nil, err
+	}
 	files, err := s.threadErase.Erase(ctx, principal.OrganizationID, principal.ActorID, req.GetThreadId())
 	if errors.Is(err, threadworkspace.ErrThreadShared) {
 		return nil, status.Error(codes.PermissionDenied, "this thread is not yours to erase")
@@ -619,7 +739,65 @@ func (s *Server) DeleteThreadWorkspace(ctx context.Context, req *DeleteThreadWor
 	if _, err := s.threadBlobs.DeleteThreadBlobs(ctx, principal.OrganizationID, req.GetThreadId()); err != nil {
 		return nil, status.Errorf(codes.Internal, "thread workspace rows are erased but its blobs were not removed; retry the erase: %v", err)
 	}
+	s.closeBlobErasure(ctx, principal.OrganizationID, principal.ActorID, req.GetThreadId())
 	return &DeleteThreadWorkspaceResponse{FilesDeleted: files, ObjectPrefix: prefix}, nil
+}
+
+// eraseThreadWorkspaceForRetention is the body of EraseThreadWorkspaceForRetention
+// (F-f10-08, owner D-f10-7): session-core's retention sweeper erases a deleted
+// thread's workspace rows and blobs. It is the service twin of
+// DeleteThreadWorkspace and runs the same two steps in the same order, rows
+// first and the blobs under the thread's prefix after them, so a blob failure is
+// reported and a retry finishes the erase.
+//
+// The caller must be a service principal holding ScopeThreadWorkspaceEraseAny
+// (the interceptor checks it and this checks it again), and it can only name its
+// own organization: org_id must equal the verified one, never another org and
+// never a wildcard. owner_id is not an authority claim. It only selects rows that
+// must also match the org and the thread, and if another owner holds the same
+// thread id the erase is refused as ErrThreadShared, exactly as for a user. The
+// response is a row count; no thread, owner or path is logged or returned.
+func (s *Server) eraseThreadWorkspaceForRetention(ctx context.Context, orgID, threadID, ownerID string) (int64, error) {
+	principal, err := s.principal(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if !s.serviceThreadEraseEnabled {
+		return 0, status.Error(codes.FailedPrecondition, "service thread workspace erase is not enabled")
+	}
+	if principal.PrincipalType != "service" {
+		return 0, status.Error(codes.PermissionDenied, "the retention erase is for a service principal")
+	}
+	if !principal.HasScope(authz.ScopeThreadWorkspaceEraseAny) {
+		return 0, status.Error(codes.PermissionDenied, "required sandbox scope is missing")
+	}
+	if orgID == "" {
+		return 0, status.Error(codes.InvalidArgument, "org_id is required")
+	}
+	if orgID != principal.OrganizationID {
+		return 0, status.Error(codes.PermissionDenied, "organization does not match verified identity")
+	}
+	if _, err := objectstore.ThreadPrefix(principal.OrganizationID, threadID); err != nil {
+		return 0, status.Error(codes.InvalidArgument, "thread_id must be a plain key segment")
+	}
+	if strings.TrimSpace(ownerID) == "" {
+		return 0, status.Error(codes.InvalidArgument, "owner_id is required")
+	}
+	if s.threadErase == nil || s.threadBlobs == nil {
+		return 0, status.Error(codes.FailedPrecondition, "thread workspace erasure requires the object store")
+	}
+	files, err := s.threadErase.Erase(ctx, principal.OrganizationID, ownerID, threadID)
+	if errors.Is(err, threadworkspace.ErrThreadShared) {
+		return 0, status.Error(codes.PermissionDenied, "this thread is not yours to erase")
+	}
+	if err != nil {
+		return 0, status.Errorf(codes.Internal, "erase thread workspace rows: %v", err)
+	}
+	if _, err := s.threadBlobs.DeleteThreadBlobs(ctx, principal.OrganizationID, threadID); err != nil {
+		return 0, status.Errorf(codes.Internal, "thread workspace rows are erased but its blobs were not removed; retry the erase: %v", err)
+	}
+	s.closeBlobErasure(ctx, principal.OrganizationID, ownerID, threadID)
+	return files, nil
 }
 
 // recordActivity stamps the lease's last use and the cause the apply produced. It is best effort: the

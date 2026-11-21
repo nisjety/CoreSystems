@@ -18,6 +18,15 @@ const (
 	Audience   = "sandbox-manager"
 	ScopeRead  = "sandbox:read"
 	ScopeWrite = "sandbox:write"
+	// ScopeThreadWorkspaceEraseAny is the narrow scope behind
+	// EraseThreadWorkspaceForRetention (F-f10-08, owner D-f10-7): session-core's
+	// retention sweeper erases a deleted thread's workspace with it. It carries no
+	// read or write authority over a workspace and is held by no user.
+	ScopeThreadWorkspaceEraseAny = "sandbox:thread-workspace:erase:any"
+
+	// MethodEraseThreadWorkspaceForRetention is the full gRPC method name of the
+	// service-only retention erase.
+	MethodEraseThreadWorkspaceForRetention = "/model_plane.v1.SandboxManager/EraseThreadWorkspaceForRetention"
 )
 
 func NewVerifierFromEnv() (*authctx.Verifier, error) {
@@ -50,6 +59,17 @@ func Authorize(principal authctx.Principal, method string, request any) error {
 	}
 	required := ScopeRead
 	switch method {
+	// F-f10-08: a service-only method. It is listed with its RPC for the reason
+	// recorded above ActivateLease, and it never takes the user shortcut below: a
+	// user is refused, and a service needs its own narrow scope, not sandbox:write.
+	case MethodEraseThreadWorkspaceForRetention:
+		if principal.PrincipalType != "service" {
+			return errors.New("thread workspace retention erase is for a service principal")
+		}
+		if !principal.HasScope(ScopeThreadWorkspaceEraseAny) {
+			return errors.New("required sandbox scope is missing")
+		}
+		return nil
 	// A confirmed pre-existing bug, found and fixed here (2026-09-12, S3.3
 	// step 3.5.C design doc §8 item 3.5.C): ActivateLease was never listed
 	// in this switch, so any call to it through this real interceptor was
