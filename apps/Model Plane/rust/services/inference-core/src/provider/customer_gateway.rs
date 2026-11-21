@@ -358,7 +358,8 @@ fn residency_floor(floor: &str) -> Result<(), ProviderError> {
     }
 }
 
-/// One message in the gateway contract: its role, lower-cased and checked, its content and its name.
+/// One message in the gateway contract: its role, lower-cased and checked, its content and its name. A system
+/// message's name is the gateway's section tag, not an identity, so the broker takes it on the other roles only.
 fn broker_message(message: &ChatMessage) -> Result<BrokerMessage, ProviderError> {
     let role = message.role.trim().to_ascii_lowercase();
     if !ROLES.contains(&role.as_str()) {
@@ -366,10 +367,15 @@ fn broker_message(message: &ChatMessage) -> Result<BrokerMessage, ProviderError>
             detail: "a message role the customer gateway does not carry".to_owned(),
         });
     }
+    let name = if role == "system" {
+        String::new()
+    } else {
+        message.name.clone()
+    };
     Ok(BrokerMessage {
         role,
         content: message.content.clone(),
-        name: message.name.clone(),
+        name,
     })
 }
 
@@ -966,5 +972,30 @@ impl ProviderRouter for CustomerGatewayProvider {
                 .await;
         });
         Ok(rx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(role: &str, name: &str) -> ChatMessage {
+        ChatMessage {
+            compaction_summary: String::new(),
+            role: role.to_owned(),
+            content: "text".to_owned(),
+            name: name.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_system_message_reaches_the_broker_without_its_section_name() {
+        let system = broker_message(&message("system", "memory")).expect("a system message");
+        assert_eq!(system.role, "system");
+        assert!(system.name.is_empty(), "{}", system.name);
+        for role in ["user", "assistant"] {
+            let kept = broker_message(&message(role, "named")).expect("a message");
+            assert_eq!(kept.name, "named", "{role}");
+        }
     }
 }

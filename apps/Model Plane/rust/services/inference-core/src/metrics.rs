@@ -144,6 +144,10 @@ pub fn describe() {
         "Gemini tool declarations left out of a request because their schema cannot be expressed for Vertex, by refusal reason."
     );
     describe_counter!(
+        "inference_prompt_cache_key_rejected_total",
+        "Prompt-cache routing keys a caller sent in a shape the derivation never produces. The key is left out of the OpenAI request; the count has no label and never carries the key."
+    );
+    describe_counter!(
         REQUEST_SNAPSHOT_DROPPED_TOTAL,
         "Request snapshots that were not stored, by reason (queue_full: the capture queue was full; write_failed: session-core refused or was unreachable). The provider call is never affected."
     );

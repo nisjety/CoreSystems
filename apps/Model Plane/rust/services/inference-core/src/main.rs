@@ -79,6 +79,12 @@ async fn main() -> Result<()> {
         policy: chain.policy_handle(),
         client: chain.policy_client(),
         chain: chain.clone(),
+        // The cost-core the budget gate reads. Unset, the routing diff has no price facts.
+        prices: cfg
+            .cost_core_url
+            .as_deref()
+            .and_then(provider::price_source::PriceSource::new)
+            .map(std::sync::Arc::new),
     };
     let grpc_readiness = GrpcReadiness::new();
     let grpc_handle = tokio::spawn(grpc::serve_with_providers_and_readiness(

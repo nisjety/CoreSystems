@@ -107,7 +107,8 @@ fn the_promotion_switch_is_off_unless_the_literal_true() {
     }
 }
 
-/// The route facts count a model as ZDR-routed only from contractual ZDR up, and every chat model as served.
+/// The route facts count a model as ZDR-routed only from contractual ZDR up. The prices come from cost-core alone: a
+/// model the chat catalogue serves is not thereby priced.
 #[test]
 fn route_facts_mark_zdr_routes_from_contractual_zdr_up() {
     let model = |id: &str, tier| ModelInfo {
@@ -116,15 +117,20 @@ fn route_facts_mark_zdr_routes_from_contractual_zdr_up() {
         privacy_tier: tier,
         ..Default::default()
     };
-    let facts = route_facts(&[
+    let catalogue = [
         model("global", PrivacyTier::Global),
         model("eu", PrivacyTier::EuResident),
         model("zdr", PrivacyTier::ZdrContractual),
         model("sovereign", PrivacyTier::Sovereign),
-    ]);
+    ];
+    let prices = Some(vec!["global".to_owned(), "eu".to_owned()]);
     assert_eq!(
-        facts,
-        RouteFacts::new(["global", "eu", "zdr", "sovereign"], ["zdr", "sovereign"])
+        route_facts(&catalogue, prices.clone()),
+        RouteFacts::with_catalogue(prices, ["zdr", "sovereign"])
+    );
+    assert_eq!(
+        route_facts(&catalogue, None),
+        RouteFacts::with_catalogue(None, ["zdr", "sovereign"])
     );
 }
 
@@ -372,6 +378,7 @@ mod end_to_end {
             policy: live.clone(),
             client: Some(Arc::new(client)),
             chain,
+            prices: None,
         };
         let metrics = metrics_exporter_prometheus::PrometheusBuilder::new()
             .build_recorder()
@@ -464,6 +471,28 @@ mod end_to_end {
         assert!(
             (harness.live.load_full().budget_cap_usd - before).abs() < f64::EPSILON,
             "the live copy is unchanged"
+        );
+    }
+
+    /// With no cost-core configured the candidate still answers 202. Its diff names the prices as unavailable and every
+    /// routed model as unpriced, so a reviewer sees that nothing was priced.
+    #[tokio::test]
+    async fn switch_on_put_without_cost_core_reports_every_model_unpriced() {
+        let _env = env_lock().await;
+        std::env::set_var(SWITCH, "true");
+        let harness = harness(Ok(promoted_config())).await;
+
+        let (status, body) = put(&harness, &admin()).await;
+        std::env::remove_var(SWITCH);
+
+        assert_eq!(status, reqwest::StatusCode::ACCEPTED, "{body}");
+        let diff = &body["data"]["diff"];
+        assert_eq!(diff["price_source"], "unavailable", "{body}");
+        assert!(
+            diff["unknown_models"]
+                .as_array()
+                .is_some_and(|models| !models.is_empty()),
+            "{body}"
         );
     }
 

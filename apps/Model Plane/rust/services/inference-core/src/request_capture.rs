@@ -562,6 +562,32 @@ mod tests {
     }
 
     #[test]
+    fn the_manifest_keeps_the_section_tags_of_the_system_messages() {
+        let (capture, mut rx) = RequestCapture::with_queue(4);
+        let mut tagged = request(false);
+        let section = |name: &str, content: &str| provider::ChatMessage {
+            compaction_summary: String::new(),
+            role: "system".to_owned(),
+            content: content.to_owned(),
+            name: name.to_owned(),
+        };
+        tagged.messages.push(section("user_profile", "A profile."));
+        tagged.messages.push(section("memory", "A memory."));
+        assert_eq!(capture.offer(&call(&tagged, "run-1", false)), Offer::Queued);
+        let job = rx.try_recv().expect("queued");
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&job.snapshot_json).expect("a snapshot");
+        let tags: Vec<&str> = snapshot["messages"]
+            .as_array()
+            .expect("the manifest")
+            .iter()
+            .map(|entry| entry["source_tag"].as_str().expect("a tag"))
+            .collect();
+        // The untagged messages carry an empty tag; the two sections keep theirs, in order.
+        assert_eq!(tags, ["", "", "user_profile", "memory"]);
+    }
+
+    #[test]
     fn capture_queues_a_snapshot_without_message_bodies() {
         let (capture, mut rx) = RequestCapture::with_queue(4);
         let plain = request(false);

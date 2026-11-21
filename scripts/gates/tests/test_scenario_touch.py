@@ -123,8 +123,12 @@ def test_the_manifest_digest_ignores_line_endings(tmp_path):
     assert gate.manifest_digest(tmp_path) == lf
 
 
-def test_the_committed_exceptions_file_loads_empty():
-    assert gate.load_exceptions(REPO_ROOT) == []
+def test_the_working_tree_manifest_change_against_head_has_a_scenario_or_a_reviewed_exception():
+    # The gate's own decision for the working tree against HEAD. A regenerated golden with no reviewed
+    # exception for its own digest turns this red, and an exception for another digest does not cover
+    # it. Once the change is committed, the diff against HEAD is empty and this passes.
+    code, message = gate.run(REPO_ROOT, "HEAD")
+    assert code == gate.OK, message
 
 
 def test_the_committed_manifest_digest_matches_its_pin():

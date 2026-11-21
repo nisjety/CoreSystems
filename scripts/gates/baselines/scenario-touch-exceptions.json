@@ -1,4 +1,15 @@
 {
   "schema": "scenario-touch-exceptions-v1",
-  "exceptions": []
+  "exceptions": [
+    {
+      "manifest_sha256": "d1872a705d7a067871be276806359f8424951dc7babfd1d996587b95c4c65e28",
+      "reason": "switch-reader and const visibility edits only (exact-literal sweep V3b-V3e)",
+      "reviewed_by": "P2-ic-05 fixer diff review of the four changed items; lead to confirm before commit"
+    },
+    {
+      "manifest_sha256": "48754273a6baf5eb73861c77417a110e22c37462d04855e383b3fde5696b9d50",
+      "reason": "pin-only relative to the P2-ic-05 golden: 41 items newly pinned (24 named prompt consts, 9 tool builders, 8 tool blocks from 16 sources); none changed or removed, no prompt or tool text edited (P2-ic-05-rel1)",
+      "reviewed_by": "P2-ic-05-rel1 fixer diff review of the 41 added pins; lead to confirm before commit"
+    }
+  ]
 }

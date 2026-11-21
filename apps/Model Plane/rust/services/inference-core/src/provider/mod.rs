@@ -21,6 +21,7 @@ pub mod model_record;
 pub mod openai;
 pub mod overflow;
 pub mod policy_client;
+pub mod price_source;
 pub mod realtime;
 pub mod role;
 pub mod routing_diff;

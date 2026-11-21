@@ -28,6 +28,7 @@ use tracing::info;
 use crate::auth::JwtVerifier;
 use crate::provider::fallback::FallbackChain;
 use crate::provider::policy_client::{CandidateError, PolicyClient, PolicyWriteError};
+use crate::provider::price_source::PriceSource;
 use crate::provider::routing_diff::{self, RouteFacts};
 use crate::provider::routing_policy::RoutingPolicy;
 use crate::provider::{ModelInfo, PrivacyTier};
@@ -45,6 +46,9 @@ pub struct PolicyState {
     pub client: Option<Arc<PolicyClient>>,
     /// The chain the policy steers. A role table must fit its chat catalogue (EP-13 S4).
     pub chain: FallbackChain,
+    /// cost-core's price catalogue for the offline diff (EP-14 S10). `None` when `COST_CORE_URL` is unset, and the diff
+    /// then reports every routed model as unpriced.
+    pub prices: Option<Arc<PriceSource>>,
 }
 
 /// Start the HTTP health server on :8082. `metrics` is the handle of the
@@ -230,17 +234,16 @@ fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
         .into_response()
 }
 
-/// What the offline diff needs to know about the models this process can serve. inference-core holds no price table
-/// of its own, so a model counts as priced when the chat catalogue serves it; a model the catalogue does not serve is
-/// reported in the diff's `unknown_models`. A model has a ZDR route when its provider's privacy tier is contractual
-/// ZDR or stronger.
-fn route_facts(catalogue: &[ModelInfo]) -> RouteFacts {
-    let served = catalogue.iter().map(|model| model.id.as_str());
+/// What the offline diff needs to know about the models this process can serve. A model has a ZDR route when its
+/// provider's privacy tier is contractual ZDR or stronger, from the chat catalogue. Whether a model is priced comes only
+/// from cost-core's price catalogue (`prices`): a model the chat catalogue serves is not thereby priced, and a model
+/// the price catalogue does not list is reported in the diff's `unknown_models`.
+fn route_facts(catalogue: &[ModelInfo], prices: Option<Vec<String>>) -> RouteFacts {
     let zdr_routed = catalogue
         .iter()
         .filter(|model| model.privacy_tier >= PrivacyTier::ZdrContractual)
         .map(|model| model.id.as_str());
-    RouteFacts::new(served, zdr_routed)
+    RouteFacts::with_catalogue(prices, zdr_routed)
 }
 
 /// Record `policy` as a candidate and answer 202 with its id and offline diff (EP-14 S10). The live policy is never
@@ -260,7 +263,12 @@ async fn propose_policy_candidate(
             );
         }
     };
-    let facts = route_facts(&state.chain.list_models("chat", ""));
+    // The price facts are read once for this proposal and held for its diff only; nothing is cached across proposals.
+    let prices = match &state.prices {
+        Some(source) => source.rate_keys().await,
+        None => None,
+    };
+    let facts = route_facts(&state.chain.list_models("chat", ""), prices);
     let live = state.policy.load_full();
     let report = routing_diff::diff(&live, policy, &corpus, &facts);
     let diff = match serde_json::to_value(&report) {

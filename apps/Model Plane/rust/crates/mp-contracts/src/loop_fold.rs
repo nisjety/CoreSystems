@@ -370,6 +370,15 @@ pub fn former_spelling(literal: &str, value: Option<&str>) -> bool {
     })
 }
 
+/// Whether `value` is set to something the exact reader does not take, and that makes no claim about the
+/// switch: not the exact `literal`, not blank, and not an off word ([`is_explicit_off`]). Such a value reads
+/// as off, so a startup report names it: `y`, `t`, `tru` or a typo. It is for a startup report only, and it
+/// never turns a switch on.
+#[must_use]
+pub fn unreadable_switch_value(literal: &str, value: Option<&str>) -> bool {
+    value.is_some_and(|raw| raw != literal && !is_explicit_off(raw))
+}
+
 /// The explicit off words: an empty value (which is also an unset one), `0`, `false`, `off` and
 /// `no`. [`is_explicit_off`] reads a value against this list.
 pub const EXPLICIT_OFF_WORDS: &[&str] = &["", "0", "false", "off", "no"];
@@ -459,6 +468,12 @@ pub const EXT_CONNECTOR_TAINT: &str = "connector_taint";
 /// Written by execution-core's fold writer only. Read it with [`connector_scope_in`]. Ids only,
 /// never a credential.
 pub const EXT_CONNECTOR_SCOPE: &str = "connector_scope";
+
+/// The extension key of the id of the MCP form the gateway holds for an input pause with origin
+/// `mcp_elicitation` (EP-4 S7): a non-empty string. Written ONLY on that pause's fold, by
+/// execution-core's fold writer, so the resume can answer the held call and no other. Read it with
+/// [`pending_elicitation_in`]. An id only: never the form, its schema or the owner's answer.
+pub const EXT_PENDING_ELICITATION: &str = "pending_elicitation_id";
 
 /// Most tool definitions [`offered_tools_in`] accepts.
 pub const MAX_OFFERED_TOOLS: usize = 512;
@@ -614,6 +629,13 @@ fn non_empty_extension<'a>(fold: &'a LoopFoldV1, key: &str) -> Option<&'a str> {
         .get(key)
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.is_empty())
+}
+
+/// The id of the held MCP form a fold records ([`EXT_PENDING_ELICITATION`]); `None` when absent,
+/// empty or not a string.
+#[must_use]
+pub fn pending_elicitation_in(fold: &LoopFoldV1) -> Option<String> {
+    non_empty_extension(fold, EXT_PENDING_ELICITATION).map(str::to_owned)
 }
 
 /// The model a park fold was routed to ([`EXT_ROUTE_MODEL`]); `None` when absent, empty
@@ -1458,6 +1480,23 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_switch_value_is_neither_the_literal_nor_an_off_word() {
+        for value in ["y", "t", "tru", "ture", "enable", " true", "true ", "TRUE"] {
+            assert!(unreadable_switch_value("true", Some(value)), "{value:?}");
+        }
+        for value in ["true", "", "   ", "0", "false", "off", "OFF", "no", "No"] {
+            assert!(!unreadable_switch_value("true", Some(value)), "{value:?}");
+        }
+        assert!(
+            !unreadable_switch_value("true", None),
+            "an unset switch is not reported"
+        );
+        // The literal is compared exactly, so a switch whose literal is `1` judges `1` as the literal.
+        assert!(!unreadable_switch_value("1", Some("1")));
+        assert!(unreadable_switch_value("1", Some("true")));
+    }
+
+    #[test]
     fn the_explicit_off_words_are_off_after_trimming_and_case_folding() {
         for off in EXPLICIT_OFF_WORDS {
             assert!(is_explicit_off(off), "{off:?} is an off word");
@@ -1729,6 +1768,31 @@ mod tests {
             fold.extensions
                 .insert(EXT_CONNECTOR_SCOPE.to_owned(), bad.clone());
             assert_eq!(connector_scope_in(&fold), Some(Vec::new()), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_pending_elicitation_reads_an_id_and_nothing_else() {
+        let mut fold = fold();
+        assert_eq!(pending_elicitation_in(&fold), None, "absent");
+        fold.extensions.insert(
+            EXT_PENDING_ELICITATION.to_owned(),
+            serde_json::json!("el_01"),
+        );
+        assert_eq!(pending_elicitation_in(&fold).as_deref(), Some("el_01"));
+        // It survives the wire.
+        let back = LoopFoldV1::from_bytes(&fold.to_bytes().expect("serialize")).expect("parse");
+        assert_eq!(pending_elicitation_in(&back).as_deref(), Some("el_01"));
+        for bad in [
+            serde_json::json!(""),
+            serde_json::json!(3),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!(["el_01"]),
+        ] {
+            fold.extensions
+                .insert(EXT_PENDING_ELICITATION.to_owned(), bad.clone());
+            assert_eq!(pending_elicitation_in(&fold), None, "{bad}");
         }
     }
 }

@@ -19,6 +19,7 @@ fn one_call(tool: &str, arguments: &str, outcome: CallOutcome) -> Vec<CallRecord
         tool: tool.to_owned(),
         signature: call_signature(tool, arguments),
         outcome,
+        result_digest: None,
     }]
 }
 

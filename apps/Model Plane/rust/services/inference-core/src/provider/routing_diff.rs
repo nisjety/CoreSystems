@@ -91,13 +91,32 @@ pub fn embedded_corpus() -> Result<Vec<CorpusCase>, String> {
     load_corpus(ROUTING_CORPUS_V1)
 }
 
-/// What a diff needs to know about a model beyond its id: whether the price source has a row for it, and whether the
-/// attestation source has a ZDR route for it. The caller holds those sources, so this module stays pure.
+/// What a diff needs to know about a model beyond its id: whether it is priced, and whether the attestation source has a
+/// ZDR route for it. The caller holds those sources, so this module stays pure.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RouteFacts {
-    priced: BTreeSet<String>,
+    price: PriceView,
     zdr_routed: BTreeSet<String>,
 }
+
+/// Where the price facts come from. `Listed` is a fixed set of priced models. `Catalogue` holds the keys cost-core's
+/// price catalogue lists, as read for one proposal. `Unavailable` is a catalogue that could not be read, which prices
+/// nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PriceView {
+    Listed(BTreeSet<String>),
+    Catalogue(Vec<String>),
+    Unavailable,
+}
+
+impl Default for PriceView {
+    fn default() -> Self {
+        Self::Listed(BTreeSet::new())
+    }
+}
+
+/// The key of cost-core's default row. It is the ledger's fallback, not a price for any model.
+const DEFAULT_PRICE_KEY: &str = "default";
 
 impl RouteFacts {
     #[must_use]
@@ -106,7 +125,12 @@ impl RouteFacts {
         zdr_routed: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Self {
         Self {
-            priced: priced.into_iter().map(|model| key(model.as_ref())).collect(),
+            price: PriceView::Listed(
+                priced
+                    .into_iter()
+                    .map(|model| key(model.as_ref()))
+                    .collect(),
+            ),
             zdr_routed: zdr_routed
                 .into_iter()
                 .map(|model| key(model.as_ref()))
@@ -114,8 +138,48 @@ impl RouteFacts {
         }
     }
 
+    /// The facts for a diff whose prices come from cost-core's catalogue: `keys` as the catalogue listed them, or `None`
+    /// when it could not be read, which prices nothing.
+    #[must_use]
+    pub fn with_catalogue(
+        keys: Option<Vec<String>>,
+        zdr_routed: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Self {
+        Self {
+            price: keys.map_or(PriceView::Unavailable, |keys| {
+                PriceView::Catalogue(keys.into_iter().map(|known| key(&known)).collect())
+            }),
+            zdr_routed: zdr_routed
+                .into_iter()
+                .map(|model| key(model.as_ref()))
+                .collect(),
+        }
+    }
+
+    /// A model is priced when the catalogue lists it exactly, or lists a key it starts with: the lookup cost-core and
+    /// model-gateway share. The default row prices no model.
     fn is_priced(&self, model: &str) -> bool {
-        self.priced.contains(&key(model))
+        match &self.price {
+            PriceView::Listed(priced) => priced.contains(&key(model)),
+            PriceView::Catalogue(keys) => {
+                let model = key(model);
+                keys.iter().any(|known| {
+                    !known.is_empty()
+                        && known != DEFAULT_PRICE_KEY
+                        && (*known == model || model.starts_with(known.as_str()))
+                })
+            }
+            PriceView::Unavailable => false,
+        }
+    }
+
+    /// Where the price facts came from, as the diff reports them.
+    fn price_source(&self) -> &'static str {
+        match self.price {
+            PriceView::Listed(_) => "listed",
+            PriceView::Catalogue(_) => "cost_core",
+            PriceView::Unavailable => "unavailable",
+        }
     }
 
     fn is_zdr_routed(&self, model: &str) -> bool {
@@ -150,6 +214,9 @@ pub struct RoutingDiff {
     pub changed: usize,
     /// Every model the candidate can route to that has no price row, sorted.
     pub unknown_models: Vec<String>,
+    /// Where the price facts came from: `listed` for a fixed set, `cost_core` for cost-core's catalogue, and `unavailable`
+    /// when that catalogue could not be read, in which case every routed model is in `unknown_models`.
+    pub price_source: &'static str,
     /// The changed cells that lose a ZDR route: the live model has one, and the candidate's model does not.
     pub zdr_route_changes: Vec<DiffRow>,
 }
@@ -204,6 +271,7 @@ pub fn diff(
         rows,
         changed,
         unknown_models: unknown.into_iter().collect(),
+        price_source: facts.price_source(),
         zdr_route_changes,
     }
 }
@@ -434,5 +502,81 @@ mod tests {
         let first = diff(&live, &candidate, &corpus, &roster());
         assert_eq!(first, diff(&live, &candidate, &corpus, &roster()));
         assert_eq!(first.corpus, CORPUS_LABEL);
+    }
+
+    #[test]
+    fn a_catalogue_key_prices_its_model_exactly_and_a_key_prefix_prices_a_dated_name() {
+        let facts = RouteFacts::with_catalogue(
+            Some(vec!["gpt-5-nano".to_owned(), "claude-sonnet-4".to_owned()]),
+            std::iter::empty::<&str>(),
+        );
+        assert!(facts.is_priced("gpt-5-nano"));
+        assert!(facts.is_priced(" GPT-5-Nano "));
+        assert!(
+            facts.is_priced("claude-sonnet-4-6"),
+            "a dated name starts with its key"
+        );
+        assert!(!facts.is_priced("gpt-5-mini"));
+    }
+
+    #[test]
+    fn the_default_row_prices_no_model() {
+        let facts = RouteFacts::with_catalogue(
+            Some(vec!["default".to_owned()]),
+            std::iter::empty::<&str>(),
+        );
+        assert!(!facts.is_priced("default"));
+        assert!(!facts.is_priced("default-model"));
+        assert!(!facts.is_priced("gpt-5-nano"));
+    }
+
+    #[test]
+    fn an_unavailable_catalogue_prices_nothing_and_every_routed_model_is_unknown() {
+        let corpus = embedded_corpus().expect("the checked-in corpus loads");
+        let policy = RoutingPolicy::default();
+        let facts = RouteFacts::with_catalogue(None, std::iter::empty::<&str>());
+        assert!(!facts.is_priced("gpt-5-nano"));
+        let report = diff(&policy, &policy, &corpus, &facts);
+        assert_eq!(report.price_source, "unavailable");
+        let routed: BTreeSet<String> = routed_models(&policy).into_iter().collect();
+        assert!(!routed.is_empty());
+        assert_eq!(
+            report.unknown_models,
+            routed.into_iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_diff_names_where_its_prices_came_from() {
+        let corpus = embedded_corpus().expect("the checked-in corpus loads");
+        let policy = RoutingPolicy::default();
+        assert_eq!(
+            diff(&policy, &policy, &corpus, &roster()).price_source,
+            "listed"
+        );
+        let catalogue = RouteFacts::with_catalogue(
+            Some(vec!["gpt-5-nano".to_owned()]),
+            std::iter::empty::<&str>(),
+        );
+        assert_eq!(
+            diff(&policy, &policy, &corpus, &catalogue).price_source,
+            "cost_core"
+        );
+    }
+
+    #[test]
+    fn a_model_the_catalogue_does_not_price_is_flagged_as_unknown() {
+        let corpus = embedded_corpus().expect("the checked-in corpus loads");
+        let live = RoutingPolicy::default();
+        let mut candidate = RoutingPolicy::default();
+        candidate.table.budget.simple = "served-but-unpriced".to_owned();
+        let facts = RouteFacts::with_catalogue(
+            Some(vec!["gpt-5-nano".to_owned()]),
+            std::iter::empty::<&str>(),
+        );
+        let report = diff(&live, &candidate, &corpus, &facts);
+        assert!(report
+            .unknown_models
+            .contains(&"served-but-unpriced".to_owned()));
     }
 }

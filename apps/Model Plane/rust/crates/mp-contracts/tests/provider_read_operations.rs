@@ -5,15 +5,19 @@
 //! checks the executor against it. This test checks that the copy says what
 //! `READ_OPERATIONS` says, row for row, and that no write is listed as a read.
 //!
-//! The sha256 pin is not re-checked here: mp-contracts carries no sha2 dependency.
-//! A byte-level drift between the two copies is caught by the Go test
-//! `TestReadOperationsVendoredCopyIsByteIdentical`.
+//! The sha256 pin is checked here as well as in the Go test `TestReadOperationsGoldenIsPinned`.
+//! `READ_GOLDEN_SHA256` must name the same digest as that pin: a change to the golden moves both
+//! pins in one reviewed change. A byte-level drift between the two copies is caught by the Go
+//! test `TestReadOperationsVendoredCopyIsByteIdentical`.
 
 use mp_contracts::provider_reads::READ_OPERATIONS;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 const GOLDEN: &str = include_str!("fixtures/provider-read-operations.json");
+/// The digest the Go test pins for the golden: re-pin both when the golden changes.
+const READ_GOLDEN_SHA256: &str = "efc6009715aa27e1b0fb916ad6b6ddbaf84882abf845a4c22f5bb47b45499e4e";
 
 fn golden() -> Value {
     serde_json::from_str(GOLDEN).expect("golden parses as JSON")
@@ -26,6 +30,15 @@ fn string_list(value: &Value) -> Vec<&str> {
         .iter()
         .map(|item| item.as_str().expect("param is a string"))
         .collect()
+}
+
+#[test]
+fn provider_read_golden_bytes_match_the_pinned_sha256() {
+    let digest = format!("{:x}", Sha256::digest(GOLDEN.as_bytes()));
+    assert_eq!(
+        digest, READ_GOLDEN_SHA256,
+        "the golden changed: re-pin READ_GOLDEN_SHA256 and the Go pin together"
+    );
 }
 
 #[test]

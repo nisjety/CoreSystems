@@ -1504,11 +1504,30 @@ fn decode_base64_bytes(encoded: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Listed fields another provider names differently, as (the name it sends, the listed field): a Google
+/// event's title and link are `summary` and `htmlLink`, and a SharePoint site's title is its `displayName`.
+/// Mirrors `mp_contracts::provider_reads::FIELD_ALIASES`; the two copies of the shaping must agree.
+const FIELD_ALIASES: &[(&str, &str)] = &[
+    ("summary", "subject"),
+    ("htmlLink", "webLink"),
+    ("displayName", "name"),
+];
+
 fn shape_item(row: &Value, fields: &[&str]) -> Value {
     let mut out = serde_json::Map::new();
     for field in fields.iter().filter(|field| **field != "bodyText") {
         if let Some(value) = row.get(*field) {
             out.insert((*field).to_owned(), value.clone());
+        }
+    }
+    // A row with no value under a listed field takes its alias's value. Only a field the operation
+    // lists is filled, so the profile (which lists displayName but not name) keeps its shape.
+    for (alias, field) in FIELD_ALIASES {
+        if !fields.contains(field) || out.contains_key(*field) {
+            continue;
+        }
+        if let Some(value) = out.get(*alias).cloned() {
+            out.insert((*field).to_owned(), value);
         }
     }
     // Graph nests a sender's address; the model needs the address and name themselves.
@@ -1559,6 +1578,9 @@ fn read_fields(operation: &str) -> &'static [&'static str] {
             "location",
             "organizer",
             "webLink",
+            // Google's title and link: shape_item gives them the subject and webLink keys too.
+            "summary",
+            "htmlLink",
         ],
         "drive.files" | "sharepoint.drives" => &[
             "id",
@@ -1570,7 +1592,8 @@ fn read_fields(operation: &str) -> &'static [&'static str] {
             "webUrl",
             "webViewLink",
         ],
-        "sharepoint.sites" => &["id", "name", "webUrl"],
+        // The site's title: shape_item takes it as the name when a row has none.
+        "sharepoint.sites" => &["id", "name", "webUrl", "displayName"],
         "profile" => &["displayName", "mail", "userPrincipalName", "email"],
         _ => &[],
     }
@@ -2520,6 +2543,30 @@ mod tests {
             shape_read("drive.file.content", &exported, &doc).status,
             ReadStatus::Ok
         );
+    }
+
+    #[test]
+    fn a_google_event_and_a_site_keep_their_title_on_the_do_path() {
+        let request = serde_json::Map::new();
+        let events = serde_json::json!({ "items": [{
+            "summary": "Standup",
+            "htmlLink": "https://calendar.google.com/calendar/event?eid=abc",
+            "start": { "dateTime": "2026-11-23T09:00:00+01:00" }
+        }]});
+        let item = &shape_read("calendar.events", &request, &events).items[0];
+        assert_eq!(item["subject"], "Standup");
+        assert_eq!(
+            item["webLink"],
+            "https://calendar.google.com/calendar/event?eid=abc"
+        );
+        let sites = serde_json::json!({ "value": [{
+            "id": "s1",
+            "displayName": "Legal",
+            "webUrl": "https://contoso.sharepoint.com/sites/legal"
+        }]});
+        let site = &shape_read("sharepoint.sites", &request, &sites).items[0];
+        assert_eq!(site["name"], "Legal");
+        assert_eq!(site["displayName"], "Legal");
     }
 
     fn mail_input(operation: &str, body: &Value) -> String {

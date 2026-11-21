@@ -39,6 +39,13 @@ const SAFETY_FINISH_REASONS: &[&str] = &[
     "IMAGE_SAFETY",
 ];
 
+/// Finish reasons where the model tried to call a tool and the call failed, as Vertex names them.
+/// Each is refused as a typed error, never read as a final answer, since an empty tool round would
+/// look like one. The names are inferred, not read from a live call, so this list is data for the
+/// S8 live check to extend.
+const FUNCTION_CALL_FAILURE_FINISH_REASONS: &[&str] =
+    &["MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL"];
+
 /// One Vertex AI endpoint serving the configured Gemini models.
 pub struct GeminiProvider {
     client: reqwest::Client,
@@ -485,7 +492,7 @@ fn refused_choice() -> ProviderError {
 }
 
 /// The answer to a unary call. A blocked prompt or a safety finish is a typed
-/// refusal, never an empty answer.
+/// refusal, never an empty answer, and so is a function call the model tried and failed to make.
 fn parse_response(
     request_id: &str,
     model: &str,
@@ -502,6 +509,13 @@ fn parse_response(
             "vertex gemini answer has no candidate".to_owned(),
         ));
     }
+    if let Some(reason) = function_call_failure(candidate) {
+        // The closed token only: the model's own text never reaches the error.
+        return Err(ProviderError::InvalidResponse(format!(
+            "function_call_failed: {}",
+            reason.to_ascii_lowercase()
+        )));
+    }
     let counts = usage(json);
     Ok(InferResponse {
         request_id: request_id.to_owned(),
@@ -511,7 +525,7 @@ fn parse_response(
         input_tokens: counts.input,
         output_tokens: counts.output,
         cache_read_input_tokens: counts.cache_read,
-        tool_calls: function_calls(candidate),
+        tool_calls: function_calls(&call_id_scope(request_id, json), candidate),
         ..InferResponse::default()
     })
 }
@@ -528,6 +542,14 @@ fn safety_block(json: &serde_json::Value, candidate: &serde_json::Value) -> Opti
         .map(str::to_owned)
 }
 
+/// The finish reason of a candidate whose tool call failed, when it is one of
+/// [`FUNCTION_CALL_FAILURE_FINISH_REASONS`]. Any other finish reason is `None`.
+fn function_call_failure(candidate: &serde_json::Value) -> Option<&str> {
+    candidate["finishReason"]
+        .as_str()
+        .filter(|reason| FUNCTION_CALL_FAILURE_FINISH_REASONS.contains(reason))
+}
+
 /// The answer text of a candidate: its text parts in order, leaving out thought
 /// summaries.
 fn answer_text(candidate: &serde_json::Value) -> String {
@@ -540,11 +562,38 @@ fn answer_text(candidate: &serde_json::Value) -> String {
         .collect()
 }
 
-/// The function calls of a candidate, in the order the model made them. Vertex returns no
-/// call id, so one is synthesised from the position, which keeps it stable for the same
-/// answer. A thought signature on the part is not carried: no loop replays native
-/// function-call parts.
-fn function_calls(candidate: &serde_json::Value) -> Vec<ToolCall> {
+/// The scope of the call ids of one answer: the request id, then the answer's own `responseId`.
+/// A multi-round run sends the same request id on every round, so the request id alone would
+/// repeat call ids across rounds, while Vertex gives each answer its own `responseId`. When Vertex
+/// sends none, a fresh ULID stands in: the ids stay unique, but two parses of one body no longer
+/// give the same ids. The `responseId` field is to be confirmed by the S8 live check.
+fn call_id_scope(request_id: &str, json: &serde_json::Value) -> String {
+    let answer = match json["responseId"].as_str().map(str::trim) {
+        Some(id) if !id.is_empty() => id_safe(id),
+        _ => mp_ids::new_ulid(),
+    };
+    format!("{}-{answer}", id_safe(request_id))
+}
+
+/// Each character outside `[A-Za-z0-9_-]` becomes `_`, so an id built from the text stays within
+/// that alphabet.
+fn id_safe(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// The function calls of a candidate, in the order the model made them. Vertex returns no call id,
+/// so one is synthesised from the answer's scope and the position: unique within the answer, and
+/// stable for the same answer (see [`call_id_scope`]). A thought signature on the part is not
+/// carried: no loop replays native function-call parts.
+fn function_calls(scope: &str, candidate: &serde_json::Value) -> Vec<ToolCall> {
     candidate["content"]["parts"]
         .as_array()
         .into_iter()
@@ -552,7 +601,7 @@ fn function_calls(candidate: &serde_json::Value) -> Vec<ToolCall> {
         .filter_map(|part| part.get("functionCall"))
         .enumerate()
         .map(|(index, call)| ToolCall {
-            id: format!("gemini-call-{index}"),
+            id: format!("gemini-call-{scope}-{index}"),
             name: call["name"].as_str().unwrap_or_default().to_owned(),
             arguments_json: match call.get("args") {
                 Some(args) if !args.is_null() => args.to_string(),
@@ -998,6 +1047,7 @@ mod tests {
     #[test]
     fn function_call_maps_to_tool_calls_with_stable_ids() {
         let json = serde_json::json!({
+            "responseId": "resp-1",
             "candidates": [{
                 "content": { "role": "model", "parts": [
                     { "functionCall": { "name": "search", "args": { "q": "oslo" } } },
@@ -1010,12 +1060,129 @@ mod tests {
         let first = parse_response("req-1", MODEL, &json).expect("tool round");
         let again = parse_response("req-1", MODEL, &json).expect("tool round");
         let ids: Vec<&str> = first.tool_calls.iter().map(|call| call.id.as_str()).collect();
-        assert_eq!(ids, ["gemini-call-0", "gemini-call-1"]);
+        assert_eq!(
+            ids,
+            ["gemini-call-req-1-resp-1-0", "gemini-call-req-1-resp-1-1"]
+        );
         assert_eq!(first.tool_calls, again.tool_calls, "the ids are stable for one answer");
         assert_eq!(first.tool_calls[0].name, "search");
         assert_eq!(first.tool_calls[0].arguments_json, r#"{"q":"oslo"}"#);
         assert_eq!(first.tool_calls[1].arguments_json, r#"{"id":7}"#);
         assert!(first.content.is_empty());
+    }
+
+    #[test]
+    fn function_call_ids_are_unique_across_rounds_of_one_request() {
+        // A multi-round run sends the same request id on every round, so the ids must come from
+        // the answer, not from the request alone.
+        let round = |response_id: Option<&str>| {
+            let mut json = serde_json::json!({
+                "candidates": [{
+                    "content": { "role": "model", "parts": [
+                        { "functionCall": { "name": "search", "args": { "q": "oslo" } } },
+                        { "functionCall": { "name": "open", "args": { "id": 7 } } },
+                    ]},
+                    "finishReason": "STOP",
+                }],
+            });
+            if let Some(id) = response_id {
+                json["responseId"] = serde_json::json!(id);
+            }
+            json
+        };
+        let ids_of = |json: &serde_json::Value| -> Vec<String> {
+            parse_response("run-1", MODEL, json)
+                .expect("tool round")
+                .tool_calls
+                .into_iter()
+                .map(|call| call.id)
+                .collect()
+        };
+        // Two rounds, each with its own responseId, give disjoint ids.
+        let first_round = ids_of(&round(Some("resp-1")));
+        let second_round = ids_of(&round(Some("resp-2")));
+        assert!(
+            first_round.iter().all(|id| !second_round.contains(id)),
+            "two rounds never share a call id: {first_round:?} and {second_round:?}"
+        );
+        // Two rounds with no responseId at all: the ULID fallback keeps them apart too.
+        let bare_round = ids_of(&round(None));
+        let bare_again = ids_of(&round(None));
+        assert!(
+            bare_round.iter().all(|id| !bare_again.contains(id)),
+            "no responseId, yet two rounds share a call id: {bare_round:?} and {bare_again:?}"
+        );
+        // Within one answer the ids are distinct, and they stay in the id alphabet.
+        assert_ne!(first_round[0], first_round[1]);
+        assert_ne!(bare_round[0], bare_round[1]);
+        for id in first_round.iter().chain(&bare_round) {
+            assert!(
+                id.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                "{id} is outside the id alphabet"
+            );
+        }
+    }
+
+    #[test]
+    fn call_id_scope_keeps_the_request_and_answer_in_the_id_alphabet() {
+        let json = serde_json::json!({
+            "responseId": "resp 9/é",
+            "candidates": [{
+                "content": { "role": "model", "parts": [
+                    { "functionCall": { "name": "search", "args": { "q": "oslo" } } },
+                ]},
+                "finishReason": "STOP",
+            }],
+        });
+        // Each character outside [A-Za-z0-9_-] becomes `_` in both parts of the scope: the space,
+        // the slash and the accented letter are three characters, so `req 3/é` reads `req_3__`
+        // and `resp 9/é` reads `resp_9__`.
+        let odd = parse_response("req 3/é", MODEL, &json).expect("tool round");
+        assert_eq!(odd.tool_calls[0].id, "gemini-call-req_3__-resp_9__-0");
+    }
+
+    #[test]
+    fn a_failed_function_call_is_a_typed_error_not_an_empty_answer() {
+        for reason in FUNCTION_CALL_FAILURE_FINISH_REASONS {
+            let json = serde_json::json!({
+                "candidates": [{
+                    "content": { "role": "model", "parts": [
+                        { "text": "partial answer" },
+                        { "functionCall": { "name": "search", "args": { "q": "oslo" } } },
+                    ]},
+                    "finishReason": reason,
+                }],
+            });
+            let error = parse_response("req-1", MODEL, &json).expect_err("refused");
+            let expected = format!("function_call_failed: {}", reason.to_ascii_lowercase());
+            assert!(
+                matches!(&error, ProviderError::InvalidResponse(detail) if detail == &expected),
+                "{reason}: {error:?}"
+            );
+            assert!(
+                !format!("{error:?}").contains("partial answer"),
+                "the error carries no model text"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stop_with_a_function_call_is_still_a_tool_round() {
+        let json = serde_json::json!({
+            "responseId": "resp-stop",
+            "candidates": [{
+                "content": { "role": "model", "parts": [
+                    { "functionCall": { "name": "search", "args": { "q": "oslo" } } },
+                ]},
+                "finishReason": "STOP",
+            }],
+        });
+        let response = parse_response("req-1", MODEL, &json).expect("tool round");
+        assert_eq!(response.stop_reason, "end_turn");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].id, "gemini-call-req-1-resp-stop-0");
+        assert_eq!(response.tool_calls[0].name, "search");
     }
 
     #[test]

@@ -76,9 +76,10 @@ pub struct AuthCtx {
 }
 
 impl AuthCtx {
-    /// A context whose claims passed JWKS validation.
+    /// A context whose claims passed JWKS validation. Crate-internal: only the middleware builds one,
+    /// after the JWKS check, so no code outside this crate can mint a verified context.
     #[must_use]
-    pub const fn verified(claims: Claims) -> Self {
+    pub(crate) const fn verified(claims: Claims) -> Self {
         Self {
             claims,
             verification: Verification::Verified,
@@ -86,8 +87,9 @@ impl AuthCtx {
     }
 
     /// The observe-mode context for a token that failed verification. Its claims are unverified.
+    /// Crate-internal, like [`AuthCtx::verified`].
     #[must_use]
-    pub const fn observe(claims: Claims) -> Self {
+    pub(crate) const fn observe(claims: Claims) -> Self {
         Self {
             claims,
             verification: Verification::Unverified,

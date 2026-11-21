@@ -137,6 +137,18 @@ fn derive_scope_key(domain: &str, org_id: &str, thread_id: &str) -> String {
     hasher.finalize().to_hex()[..32].to_owned()
 }
 
+/// Whether `value` has the shape [`cache_scope_key`] derives: 32 lowercase hexadecimal ASCII characters,
+/// optionally followed by [`SUBAGENT_SCOPE_SUFFIX`] and nothing more. Anything else is not a routing key, so
+/// no caller may put it in a provider request body (F-f01-26).
+#[must_use]
+pub fn is_cache_scope_key(value: &str) -> bool {
+    let digest = value.strip_suffix(SUBAGENT_SCOPE_SUFFIX).unwrap_or(value);
+    digest.len() == 32
+        && digest
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +302,37 @@ mod tests {
             derive_scope_key("verevon.prompt-cache.v0", "org_1", "thread_1"),
             base
         );
+    }
+
+    #[test]
+    fn a_derived_cache_scope_key_has_the_routing_key_shape_with_or_without_the_suffix() {
+        let key = cache_scope_key("org_1", "thread_1").expect("both identifiers are present");
+        assert!(is_cache_scope_key(&key));
+        assert!(is_cache_scope_key(&format!("{key}{SUBAGENT_SCOPE_SUFFIX}")));
+    }
+
+    #[test]
+    fn only_the_derived_shape_is_a_cache_scope_key() {
+        let digest = "0123456789abcdef0123456789abcdef";
+        assert!(is_cache_scope_key(digest));
+        assert!(is_cache_scope_key(&format!("{digest}:sub")));
+        for value in [
+            "",
+            ":sub",
+            "0123456789ABCDEF0123456789ABCDEF",
+            "0123456789abcdef0123456789abcde",
+            "0123456789abcdef0123456789abcdef0",
+            "0123456789abcdef0123456789abcdef ",
+            "0123456789abcdef0123456789abcdef:sub ",
+            " 0123456789abcdef0123456789abcdef",
+            "0123456789abcdef0123456789abcdef:other",
+            "0123456789abcdef0123456789abcdef:sub:sub",
+            "0123456789abcdef0123456789abcdef:SUB",
+            // Thirty hex digits and one two-byte digit: 32 bytes, but not hexadecimal.
+            "0123456789abcdef0123456789abcd\u{0660}",
+            "prompt text that must never leave the process",
+        ] {
+            assert!(!is_cache_scope_key(value), "{value:?}");
+        }
     }
 }

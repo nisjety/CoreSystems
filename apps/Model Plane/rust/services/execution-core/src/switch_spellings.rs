@@ -9,7 +9,8 @@
 //! This module changes no reader and no switch value. A switch set to such a spelling stays off, as
 //! it does under its exact reader. [`warn_former_spellings`] logs one warning at startup, so the
 //! mismatch shows in the logs. The spelling test itself is the shared
-//! [`mp_contracts::loop_fold::former_spelling`]; only the name lives here.
+//! [`mp_contracts::loop_fold::former_spelling`]; only the name lives here. A value that is neither the
+//! literal, nor blank, nor an off word (`y`, `t`, a typo) is reported too, by [`reported_spellings`].
 
 use tracing::warn;
 
@@ -32,16 +33,59 @@ pub fn former_spellings(
         .collect()
 }
 
-/// Logs one warning for each switch that is set to a former spelling. Called once, at startup,
-/// before any listener or background worker starts. It changes no switch: each one stays off.
+/// How a switch set to a value its exact reader does not take is reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spelling {
+    /// A spelling a retired lenient reader took as on (see [`former_spellings`]).
+    Former,
+    /// Any other value that is neither the exact literal, nor blank, nor an off word: `y`, `t`, `tru`, a typo.
+    Other,
+}
+
+/// Each switch in [`EXACT_SWITCHES`] set to a value its exact reader does not take, with how it is reported,
+/// in table order. A switch is listed once: a former spelling is `Former` and never also `Other`. An unset,
+/// blank or off value is not listed.
+#[must_use]
+pub fn reported_spellings(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Vec<(&'static str, &'static str, Spelling)> {
+    EXACT_SWITCHES
+        .iter()
+        .copied()
+        .filter_map(|(name, literal)| {
+            let value = lookup(name);
+            let value = value.as_deref();
+            if mp_contracts::loop_fold::former_spelling(literal, value) {
+                Some((name, literal, Spelling::Former))
+            } else if mp_contracts::loop_fold::unreadable_switch_value(literal, value) {
+                Some((name, literal, Spelling::Other))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Logs one warning for each switch that is set to a value its exact reader does not take. Called once, at
+/// startup, before any listener or background worker starts. It changes no switch: each one stays off. The
+/// value is never logged, since a mis-set variable could hold anything: only the switch and its exact value
+/// are named.
 pub fn warn_former_spellings() {
-    for (name, exact_value) in former_spellings(|name| std::env::var(name).ok()) {
-        warn!(
-            switch = name,
-            exact_value,
-            "switch is set to a value its exact reader does not take, so it reads as off; \
-             set it to exactly this value to turn it on"
-        );
+    for (name, exact_value, spelling) in reported_spellings(|name| std::env::var(name).ok()) {
+        match spelling {
+            Spelling::Former => warn!(
+                switch = name,
+                exact_value,
+                "switch is set to a value its exact reader does not take, so it reads as off; \
+                 set it to exactly this value to turn it on"
+            ),
+            Spelling::Other => warn!(
+                switch = name,
+                exact_value,
+                "switch is set to a value other than its exact literal, so it reads as off; \
+                 set it to exactly this value to turn it on, or unset it to leave it off"
+            ),
+        }
     }
 }
 
@@ -66,6 +110,47 @@ mod tests {
         .into_iter()
         .map(|(name, _)| name)
         .collect()
+    }
+
+    /// The `(name, spelling)` pairs reported for the given `(name, value)` environment.
+    fn reported(env: &[(&'static str, &'static str)]) -> Vec<(&'static str, Spelling)> {
+        reported_spellings(|name| {
+            env.iter()
+                .find(|(set, _)| *set == name)
+                .map(|(_, value)| (*value).to_owned())
+        })
+        .into_iter()
+        .map(|(name, _, spelling)| (name, spelling))
+        .collect()
+    }
+
+    #[test]
+    fn a_value_that_is_neither_the_literal_nor_blank_nor_off_is_reported() {
+        // `y`, `t`, `tru` and a typo read as off, and each is reported once, as `Other`.
+        for value in ["y", "t", "tru", "ture"] {
+            assert_eq!(
+                reported(&[(BROWSER_AGENT, value)]),
+                vec![(BROWSER_AGENT, Spelling::Other)],
+                "{value:?}"
+            );
+        }
+        // A former spelling, padded or not, is reported once as `Former`, never also as `Other`.
+        for former in ["1", "TRUE", "yes", "on", "enabled", " true", "true "] {
+            assert_eq!(
+                reported(&[(BROWSER_AGENT, former)]),
+                vec![(BROWSER_AGENT, Spelling::Former)],
+                "{former:?}"
+            );
+        }
+        // The exact literal, a blank value, an off word and an unset switch are not reported.
+        assert!(
+            reported(&[(BROWSER_AGENT, "true")]).is_empty(),
+            "the exact literal"
+        );
+        for quiet in ["", "   ", "0", "false", "off", "no"] {
+            assert!(reported(&[(BROWSER_AGENT, quiet)]).is_empty(), "{quiet:?}");
+        }
+        assert!(reported(&[]).is_empty(), "an unset switch is not reported");
     }
 
     #[test]

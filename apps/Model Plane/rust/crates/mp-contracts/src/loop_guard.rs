@@ -26,6 +26,17 @@
 //!   at least two different calls among them, stops the loop. One call repeated
 //!   is a repeat, and the repeat rule owns that case.
 //!
+//! Result awareness (`LOOP_GUARD_RESULT_AWARE`, off unless set) changes the repeat
+//! and cycle rules. A call whose result digest differs from the digest that call
+//! last returned is progress: its run restarts, and it is kept out of the cycle
+//! check. A call with no digest, or with the digest it had before, is counted as it
+//! always was. The no-progress rule does not change.
+//!
+//! The digest leaves out what a tool stamps on every answer: a timestamp, a request
+//! id, a parked result's handle and its expiry, a timing (see [`result_digest`]).
+//! Without that, a repeated call that gets the same answer with a fresh stamp would
+//! be progress on every call, and no repeat or cycle would ever stop.
+//!
 //! [`LoopGuardMode`] decides what a verdict does to the loop that asks. This
 //! module only parses the switch.
 
@@ -74,6 +85,10 @@ pub enum LoopGuardMode {
 /// execution-core's Do loop.
 pub const ENV: &str = "LOOP_GUARD_MODE";
 
+/// The environment switch that turns on result awareness, `LOOP_GUARD_RESULT_AWARE`. Each consumer reads it
+/// once per process through [`result_aware_from_env_value`]. Off unless the value is the literal `true`.
+pub const RESULT_AWARE_ENV: &str = "LOOP_GUARD_RESULT_AWARE";
+
 /// Whether a set mode-switch value is one the mode does not read. Such a value falls to the weaker
 /// reading without an error: this guard observes, and a strengthening switch stays off. Unset, empty,
 /// `off`, and `shadow` or `enforce` in any case with surrounding whitespace are read. `OFF` is not
@@ -83,6 +98,19 @@ pub fn unreadable_mode_word(value: &str) -> bool {
     let word = value.trim();
     !(word.is_empty()
         || word == "off"
+        || word.eq_ignore_ascii_case("shadow")
+        || word.eq_ignore_ascii_case("enforce"))
+}
+
+/// Whether a set value of the approval step-up switch, `APPROVAL_STEP_UP_ENFORCED`, is one its gate does
+/// not take. The gate reads `shadow` and `enforce` trimmed and in any case, and any other value as off.
+/// So `off` in any case is a word it reads as off and is not flagged, where [`unreadable_mode_word`]
+/// flags `OFF`. Unset and blank values are never flagged.
+#[must_use]
+pub fn unreadable_step_up_word(value: &str) -> bool {
+    let word = value.trim();
+    !(word.is_empty()
+        || word.eq_ignore_ascii_case("off")
         || word.eq_ignore_ascii_case("shadow")
         || word.eq_ignore_ascii_case("enforce"))
 }
@@ -143,6 +171,9 @@ pub struct CallRecord {
     /// The call's [`call_signature`].
     pub signature: String,
     pub outcome: CallOutcome,
+    /// The call's [`result_digest`], when the call ran and the consumer computed one. `None` is an unknown
+    /// result, and an unknown result is judged as it always was.
+    pub result_digest: Option<String>,
 }
 
 /// Why the guard stopped a loop.
@@ -209,10 +240,12 @@ impl Verdict {
 #[derive(Debug, Default)]
 pub struct LoopGuard {
     repeats: HashMap<String, Repeats>,
-    /// The latest calls as (tool, signature), for the cycle check.
-    recent: VecDeque<(String, String)>,
+    /// The latest calls, for the cycle check.
+    recent: VecDeque<WindowCall>,
     /// The latest rounds, for the stall check.
     rounds: VecDeque<Round>,
+    /// Whether a call whose result changed is progress (see [`LoopGuard::with_result_awareness`]).
+    result_aware: bool,
 }
 
 #[derive(Debug, Default)]
@@ -220,6 +253,19 @@ struct Repeats {
     count: u32,
     /// The highest reminder level already given for this call.
     reminded: u8,
+    /// The digest of the result this call last returned. Only kept with result awareness on.
+    last_digest: Option<String>,
+}
+
+/// One call in the cycle window.
+#[derive(Debug)]
+struct WindowCall {
+    tool: String,
+    /// The call's signature. A stop names it, so it never carries a digest.
+    signature: String,
+    /// What the cycle check compares: the signature, or `signature#digest` for a call whose result changed.
+    /// A cycle through such a call needs the same result to recur, not only the same call.
+    key: String,
 }
 
 #[derive(Debug)]
@@ -234,6 +280,15 @@ impl LoopGuard {
         Self::default()
     }
 
+    /// Turns result awareness on or off, as `LOOP_GUARD_RESULT_AWARE` does. On, a call whose digest differs from
+    /// the one it last returned is progress: its run restarts, and it stays out of the cycle check. Off, every
+    /// call is judged as it was before digests existed.
+    #[must_use]
+    pub fn with_result_awareness(mut self, on: bool) -> Self {
+        self.result_aware = on;
+        self
+    }
+
     /// Observes one round's calls, in the order the model asked for them, and
     /// returns the verdict for the loop.
     ///
@@ -243,11 +298,29 @@ impl LoopGuard {
         if calls.is_empty() {
             return Verdict::Continue;
         }
+        let result_aware = self.result_aware;
         let mut reminder: u8 = 0;
         let mut repeat_stop = None;
         for call in calls {
+            // A digest counts only with result awareness on. No digest is unknown, and counts as before.
+            let digest = call.result_digest.as_deref().filter(|_| result_aware);
             let repeats = self.repeats.entry(call.signature.clone()).or_default();
+            // A result that differs from the one this call last returned is progress, not a repeat: the
+            // call's run restarts here.
+            let result_changed = digest.is_some_and(|now| {
+                repeats
+                    .last_digest
+                    .as_deref()
+                    .is_some_and(|seen| seen != now)
+            });
+            if result_changed {
+                repeats.count = 0;
+                repeats.reminded = 0;
+            }
             repeats.count += 1;
+            if let Some(now) = digest {
+                repeats.last_digest = Some(now.to_owned());
+            }
             if repeat_stop.is_none() && repeats.count >= STOP_AT {
                 repeat_stop = Some(LoopStop {
                     reason: StopReason::Repeat,
@@ -265,8 +338,15 @@ impl LoopGuard {
                 repeats.reminded = level;
                 reminder = reminder.max(level);
             }
-            self.recent
-                .push_back((call.tool.clone(), call.signature.clone()));
+            let key = match digest {
+                Some(now) if result_changed => format!("{}#{now}", call.signature),
+                _ => call.signature.clone(),
+            };
+            self.recent.push_back(WindowCall {
+                tool: call.tool.clone(),
+                signature: call.signature.clone(),
+                key,
+            });
             if self.recent.len() > CYCLE_WINDOW {
                 self.recent.pop_front();
             }
@@ -308,16 +388,15 @@ impl LoopGuard {
                 continue;
             }
             let start = len - span;
-            let signature_at = |index: usize| &self.recent[start + index].1;
-            let block: HashSet<&String> = (0..period).map(signature_at).collect();
-            let repeats =
-                (period..span).all(|index| signature_at(index) == signature_at(index - period));
+            let key_at = |index: usize| &self.recent[start + index].key;
+            let block: HashSet<&String> = (0..period).map(key_at).collect();
+            let repeats = (period..span).all(|index| key_at(index) == key_at(index - period));
             if block.len() > 1 && repeats {
-                let (tool, signature) = &self.recent[len - 1];
+                let last = &self.recent[len - 1];
                 return Some(LoopStop {
                     reason: StopReason::Cycle,
-                    tool: tool.clone(),
-                    signature_hash: signature.clone(),
+                    tool: last.tool.clone(),
+                    signature_hash: last.signature.clone(),
                     count: u32::try_from(span).unwrap_or(u32::MAX),
                 });
             }
@@ -339,12 +418,12 @@ impl LoopGuard {
         if distinct.len() < 2 {
             return None;
         }
-        let (tool, signature) = self.recent.back()?;
+        let last = self.recent.back()?;
         let covered: usize = self.rounds.iter().map(|round| round.signatures.len()).sum();
         Some(LoopStop {
             reason: StopReason::NoProgress,
-            tool: tool.clone(),
-            signature_hash: signature.clone(),
+            tool: last.tool.clone(),
+            signature_hash: last.signature.clone(),
             count: u32::try_from(covered).unwrap_or(u32::MAX),
         })
     }
@@ -387,6 +466,270 @@ pub fn normalise_query(query: &str) -> String {
         .join(" ")
 }
 
+/// The digest length in hex characters: 64 bits, enough to tell two results of one call apart within a turn.
+const RESULT_DIGEST_HEX_LEN: usize = 16;
+
+/// The placeholder a volatile timestamp becomes in the text a digest is taken over.
+const TIME_PLACEHOLDER: &str = "<time>";
+
+/// The placeholder a volatile request, trace, span or correlation id value becomes in that text.
+const ID_PLACEHOLDER: &str = "<id>";
+
+/// JSON keys that name a volatile field whole, matched on the key folded to lowercase letters and digits, so
+/// `checked_at`, `checkedAt` and `Checked-At` are one key: a server's clock, its timings, and a parked result's
+/// expiry. `now` and `as_of` are left out: they often wrap or date real data, so a change there can be progress.
+const VOLATILE_KEY_NAMES: [&str; 12] = [
+    "servertime",
+    "fetchedat",
+    "retrievedat",
+    "generatedat",
+    "checkedat",
+    "observedat",
+    "expiresat",
+    "traceparent",
+    "elapsedms",
+    "durationms",
+    "latencyms",
+    "tookms",
+];
+
+/// Folded JSON key endings that mark a volatile field: any `timestamp`, a request, trace, span or correlation id
+/// (`request_id`, `x-request-id`, `trace_id`), and a parked result's `handle_id`.
+const VOLATILE_KEY_ENDINGS: [&str; 6] = [
+    "timestamp",
+    "requestid",
+    "traceid",
+    "spanid",
+    "correlationid",
+    "handleid",
+];
+
+/// The request, trace, span and correlation id stems a keyed id value follows, lowercase.
+const ID_STEMS: [&[u8]; 4] = [b"request", b"trace", b"span", b"correlation"];
+
+/// The digest of one call's result, for result awareness: the BLAKE3 hash of the result's normalised text (see
+/// `normalised_result`), in hex and cut to 16 characters. The guard compares digests within one turn only. They
+/// are never persisted, logged or exported, and the result itself is never kept.
+#[must_use]
+pub fn result_digest(output: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(normalised_result(output).as_bytes());
+    let hex = hasher.finalize().to_hex().to_string();
+    hex[..RESULT_DIGEST_HEX_LEN].to_owned()
+}
+
+/// The text a result digest is taken over, with what a tool stamps on every answer left out. A JSON result is
+/// judged by its keys: the volatile keys go at every depth, and the rest is written back in canonical form
+/// (object keys sorted, no spacing), so the spacing and key order of an answer do not count. Any other result is
+/// judged by its text: an RFC 3339 date-time, or a `2026-11-21 10:15:30` stamp, becomes [`TIME_PLACEHOLDER`], and
+/// the value after a request, trace, span or correlation id becomes [`ID_PLACEHOLDER`]. A date with no clock, a
+/// number and every other value stay, so a change in them is still progress.
+fn normalised_result(output: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(output) {
+        Ok(mut value) => {
+            strip_volatile_keys(&mut value);
+            value.to_string()
+        }
+        Err(_) => scrub_volatile_tokens(output),
+    }
+}
+
+/// Removes the volatile keys from a JSON value, at every depth.
+fn strip_volatile_keys(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.retain(|key, _| !is_volatile_key(key));
+            map.values_mut().for_each(strip_volatile_keys);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(strip_volatile_keys),
+        _ => {}
+    }
+}
+
+/// Whether a JSON key names a volatile field, by [`VOLATILE_KEY_NAMES`] or [`VOLATILE_KEY_ENDINGS`].
+fn is_volatile_key(key: &str) -> bool {
+    let folded: String = key
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    VOLATILE_KEY_NAMES.contains(&folded.as_str())
+        || VOLATILE_KEY_ENDINGS
+            .iter()
+            .any(|ending| folded.ends_with(*ending))
+}
+
+/// Replaces the volatile tokens of a text: each timestamp becomes [`TIME_PLACEHOLDER`] and each keyed id value
+/// becomes [`ID_PLACEHOLDER`]. Both are looked for at every byte. A match is ASCII, so each cut lands on a char
+/// boundary, and every other byte, multi-byte characters included, is copied as it is.
+fn scrub_volatile_tokens(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let lower_text = text.to_ascii_lowercase();
+    let lower = lower_text.as_bytes();
+    let mut scrubbed = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        let token = timestamp_end(bytes, at)
+            .map(|end| (end, TIME_PLACEHOLDER))
+            .or_else(|| keyed_id_end(lower, at).map(|end| (end, ID_PLACEHOLDER)));
+        if let Some((end, placeholder)) = token {
+            scrubbed.push_str(&text[copied..at]);
+            scrubbed.push_str(placeholder);
+            copied = end;
+            at = end;
+        } else {
+            at += 1;
+        }
+    }
+    scrubbed.push_str(&text[copied..]);
+    scrubbed
+}
+
+/// The end of an RFC 3339 date-time (`2026-11-21T10:15:30.5+01:00`) or of a `2026-11-21 10:15:30` stamp that starts
+/// at `start`. A time needs a `T` or a space before its clock, and the zone, fraction and seconds are optional; a
+/// space needs the seconds. A bare date is content and is not matched.
+fn timestamp_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if start > 0 && bytes[start - 1].is_ascii_digit() {
+        return None;
+    }
+    let mut scan = Scan { bytes, at: start };
+    scan.digits(4)?;
+    scan.one_of(b"-")?;
+    scan.digits(2)?;
+    scan.one_of(b"-")?;
+    scan.digits(2)?;
+    let separator = scan.one_of(b"Tt ")?;
+    scan.digits(2)?;
+    scan.one_of(b":")?;
+    scan.digits(2)?;
+    let before_seconds = scan.at;
+    scan.optional(|s| {
+        s.one_of(b":")?;
+        s.digits(2)
+    });
+    if separator == b' ' && scan.at == before_seconds {
+        return None;
+    }
+    scan.optional(|s| {
+        s.one_of(b".,")?;
+        s.digit_run()
+    });
+    scan.optional(|s| s.one_of(b"Zz").map(|_| ()));
+    scan.optional(|s| {
+        s.one_of(b"+-")?;
+        s.digits(2)?;
+        s.optional(|z| {
+            let _ = z.one_of(b":");
+            z.digits(2)
+        });
+        Some(())
+    });
+    if scan.peek().is_some_and(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(scan.at)
+}
+
+/// The end of a request, trace, span or correlation id key and its value, when one starts at `start`. The key is
+/// a stem, one optional `-`, `_` or space, and `id` with no letter after it, so `request_id`, `x-request-id` and
+/// `Request ID` all match. The value follows any `:`, `=`, spaces and quotes, and is the run of letters, digits,
+/// `-` and `_`.
+fn keyed_id_end(lower: &[u8], start: usize) -> Option<usize> {
+    if start > 0 && lower[start - 1].is_ascii_alphanumeric() {
+        return None;
+    }
+    let stem = ID_STEMS
+        .iter()
+        .find(|stem| lower[start..].starts_with(stem))?;
+    let mut at = start + stem.len();
+    if matches!(lower.get(at).copied(), Some(b'-' | b'_' | b' ')) {
+        at += 1;
+    }
+    if !lower[at..].starts_with(b"id") {
+        return None;
+    }
+    at += 2;
+    if lower.get(at).is_some_and(u8::is_ascii_alphanumeric) {
+        return None;
+    }
+    while matches!(
+        lower.get(at).copied(),
+        Some(b':' | b'=' | b' ' | b'"' | b'\'')
+    ) {
+        at += 1;
+    }
+    let value_start = at;
+    while lower
+        .get(at)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_'))
+    {
+        at += 1;
+    }
+    (at > value_start).then_some(at)
+}
+
+/// A forward cursor over a result's bytes, for the volatile-token scanner.
+struct Scan<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl Scan<'_> {
+    /// Takes exactly `count` ASCII digits.
+    fn digits(&mut self, count: usize) -> Option<()> {
+        let run = self.bytes.get(self.at..self.at + count)?;
+        if !run.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        self.at += count;
+        Some(())
+    }
+
+    /// Takes one or more ASCII digits.
+    fn digit_run(&mut self) -> Option<()> {
+        let count = self.bytes[self.at..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if count == 0 {
+            return None;
+        }
+        self.at += count;
+        Some(())
+    }
+
+    /// Takes one byte of `options` and returns it.
+    fn one_of(&mut self, options: &[u8]) -> Option<u8> {
+        let byte = *self.bytes.get(self.at)?;
+        if !options.contains(&byte) {
+            return None;
+        }
+        self.at += 1;
+        Some(byte)
+    }
+
+    /// Runs `part`. When it fails the cursor goes back, so the part is simply absent.
+    fn optional(&mut self, part: impl FnOnce(&mut Self) -> Option<()>) {
+        let before = self.at;
+        if part(self).is_none() {
+            self.at = before;
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.at).copied()
+    }
+}
+
+/// Whether `LOOP_GUARD_RESULT_AWARE` turns result awareness on: the exact literal `true`, read through the
+/// shared strict parser. A padded or cased value, `1`, and an unset variable are off, as they are for every
+/// literal switch.
+#[must_use]
+pub fn result_aware_from_env_value(value: Option<&str>) -> bool {
+    crate::loop_fold::switch_from(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,7 +739,39 @@ mod tests {
             tool: tool.to_owned(),
             signature: call_signature(tool, arguments),
             outcome,
+            result_digest: None,
         }
+    }
+
+    /// A successful call of `tool` with `arguments`, whose result digests to `digest`.
+    fn answered(tool: &str, arguments: &str, digest: &str) -> CallRecord {
+        CallRecord {
+            result_digest: Some(digest.to_owned()),
+            ..call(tool, arguments, CallOutcome::Ok)
+        }
+    }
+
+    /// A guard with result awareness on.
+    fn aware() -> LoopGuard {
+        LoopGuard::new().with_result_awareness(true)
+    }
+
+    /// The verdict of each of `count` identical successful calls, the call `index` carrying the digest `digest(index)`.
+    fn verdicts_for(
+        guard: &mut LoopGuard,
+        arguments: &str,
+        count: u32,
+        digest: impl Fn(u32) -> Option<String>,
+    ) -> Vec<Verdict> {
+        (0..count)
+            .map(|index| {
+                let record = CallRecord {
+                    result_digest: digest(index),
+                    ..call("fetch_url", arguments, CallOutcome::Ok)
+                };
+                guard.observe_round(std::slice::from_ref(&record))
+            })
+            .collect()
     }
 
     fn failing_fetch(url: &str) -> CallRecord {
@@ -457,6 +832,32 @@ mod tests {
         }
         for word in ["enforced", "true", "1", "on", "OFF", "Off", "enforce-all"] {
             assert!(unreadable_mode_word(word), "{word:?} is not read");
+        }
+    }
+
+    #[test]
+    fn the_step_up_word_rule_reads_off_in_any_case_where_the_loop_guard_does_not() {
+        // The loop guard reads `OFF` as shadow, so it flags `OFF` and `Off`. The step-up gate reads
+        // every case of `off` as off, so it does not.
+        assert_eq!(
+            LoopGuardMode::from_env_value(Some("OFF")),
+            LoopGuardMode::Shadow
+        );
+        assert!(unreadable_mode_word("OFF") && unreadable_mode_word("Off"));
+        for word in ["off", "OFF", "Off", " off "] {
+            assert!(
+                !unreadable_step_up_word(word),
+                "{word:?} reads as off at the step-up gate"
+            );
+        }
+        for word in ["", "   ", "shadow", "Shadow", " enforce ", "ENFORCE"] {
+            assert!(!unreadable_step_up_word(word), "{word:?} is read");
+        }
+        for word in ["enforced", "true", "1", "on", "enforce-all", "y"] {
+            assert!(
+                unreadable_step_up_word(word),
+                "{word:?} is not read by the step-up gate"
+            );
         }
     }
 
@@ -738,5 +1139,458 @@ mod tests {
     fn loop_guard_normalise_query_collapses_case_and_whitespace() {
         assert_eq!(normalise_query("  Aquatiq \t  AS "), "aquatiq as");
         assert_eq!(normalise_query("   "), "");
+    }
+
+    #[test]
+    fn loop_guard_result_awareness_is_off_unless_asked_and_the_digests_change_nothing() {
+        let arguments = r#"{"url":"https://flip.example/page"}"#;
+        let changing = |index: u32| Some(format!("digest-{index}"));
+        let steady = |_: u32| Some("steady".to_owned());
+        let unknown = |_: u32| -> Option<String> { None };
+        let off_changing = verdicts_for(&mut LoopGuard::new(), arguments, 10, changing);
+        let off_steady = verdicts_for(&mut LoopGuard::new(), arguments, 10, steady);
+        let off_unknown = verdicts_for(&mut LoopGuard::new(), arguments, 10, unknown);
+        let on_unknown = verdicts_for(&mut aware(), arguments, 10, unknown);
+        assert_eq!(
+            off_changing, off_unknown,
+            "with the switch off, a digest is ignored"
+        );
+        assert_eq!(
+            off_steady, off_unknown,
+            "with the switch off, a digest is ignored"
+        );
+        assert_eq!(
+            on_unknown, off_unknown,
+            "a call with no digest is judged as before, even with the switch on"
+        );
+        assert!(matches!(
+            &off_unknown[7],
+            Verdict::Stop(stop) if stop.reason == StopReason::Repeat && stop.count == 8
+        ));
+    }
+
+    #[test]
+    fn loop_guard_a_call_whose_result_keeps_changing_never_reaches_stop_at() {
+        let mut guard = aware();
+        let calls: Vec<CallRecord> = (0..3 * STOP_AT)
+            .map(|index| answered("job_status", r#"{"job":"42"}"#, &format!("state-{index}")))
+            .collect();
+        let verdicts = one_call_per_round(&mut guard, &calls);
+        assert!(
+            verdicts.iter().all(|verdict| *verdict == Verdict::Continue),
+            "a result that moves on restarts the run, so it is neither reminded nor stopped: {verdicts:?}"
+        );
+    }
+
+    #[test]
+    fn loop_guard_the_same_result_repeated_eight_times_still_stops_at_eight() {
+        let arguments = r#"{"url":"https://same.example/page"}"#;
+        let mut guard = aware();
+        let calls: Vec<CallRecord> = (0..STOP_AT)
+            .map(|_| answered("fetch_url", arguments, "same-digest"))
+            .collect();
+        let verdicts = one_call_per_round(&mut guard, &calls);
+        assert_eq!(
+            verdicts[2],
+            Verdict::Remind {
+                level: 1,
+                text: REMIND_FIRST
+            }
+        );
+        assert_eq!(
+            verdicts[4],
+            Verdict::Remind {
+                level: 2,
+                text: REMIND_SECOND
+            }
+        );
+        let Verdict::Stop(stop) = &verdicts[7] else {
+            panic!(
+                "the eighth identical result must stop the loop, got {:?}",
+                verdicts[7]
+            );
+        };
+        assert_eq!(stop.reason, StopReason::Repeat);
+        assert_eq!(stop.count, STOP_AT);
+        assert_eq!(stop.signature_hash, call_signature("fetch_url", arguments));
+    }
+
+    #[test]
+    fn loop_guard_a_changed_result_restarts_the_reminder_ladder() {
+        let arguments = r#"{"url":"https://poll.example/page"}"#;
+        let digest = |index: u32| {
+            let state = if index < 5 { "first" } else { "second" };
+            Some(state.to_owned())
+        };
+        let verdicts = verdicts_for(&mut aware(), arguments, 8, digest);
+        assert_eq!(
+            verdicts[2],
+            Verdict::Remind {
+                level: 1,
+                text: REMIND_FIRST
+            },
+            "the third identical result reminds"
+        );
+        assert_eq!(
+            verdicts[4],
+            Verdict::Remind {
+                level: 2,
+                text: REMIND_SECOND
+            },
+            "the fifth identical result reminds again"
+        );
+        assert_eq!(
+            verdicts[5],
+            Verdict::Continue,
+            "the result changed: a new run starts"
+        );
+        assert_eq!(verdicts[6], Verdict::Continue);
+        assert_eq!(
+            verdicts[7],
+            Verdict::Remind {
+                level: 1,
+                text: REMIND_FIRST
+            },
+            "the third call of the new run reminds again, at the first level"
+        );
+    }
+
+    #[test]
+    fn loop_guard_a_polling_pair_whose_results_change_is_not_a_cycle() {
+        let mut guard = aware();
+        let mut calls = Vec::new();
+        for round in 0..6 {
+            calls.push(answered(
+                "job_status",
+                r#"{"job":"42"}"#,
+                &format!("status-{round}"),
+            ));
+            calls.push(answered(
+                "job_progress",
+                r#"{"job":"43"}"#,
+                &format!("progress-{round}"),
+            ));
+        }
+        let verdicts = one_call_per_round(&mut guard, &calls);
+        assert!(
+            verdicts.iter().all(|verdict| *verdict == Verdict::Continue),
+            "a pair polling changing results is progress, not a cycle: {verdicts:?}"
+        );
+    }
+
+    #[test]
+    fn loop_guard_a_pair_repeating_the_same_results_is_still_a_cycle() {
+        let mut guard = aware();
+        let a = answered("web_search", r#"{"query":"alpha"}"#, "result-a");
+        let b = answered("web_search", r#"{"query":"beta"}"#, "result-b");
+        let calls = [
+            a.clone(),
+            b.clone(),
+            a.clone(),
+            b.clone(),
+            a.clone(),
+            b.clone(),
+        ];
+        let verdicts = one_call_per_round(&mut guard, &calls);
+        assert_eq!(
+            verdicts[5],
+            Verdict::Stop(LoopStop {
+                reason: StopReason::Cycle,
+                tool: "web_search".to_owned(),
+                signature_hash: b.signature,
+                count: 6,
+            })
+        );
+    }
+
+    #[test]
+    fn loop_guard_one_call_cycling_through_the_same_results_stops_by_its_bare_signature() {
+        let arguments = r#"{"url":"https://flip.example/state"}"#;
+        let mut guard = aware();
+        let calls: Vec<CallRecord> = (0..8)
+            .map(|index| {
+                let digest = if index % 2 == 0 {
+                    "state-on"
+                } else {
+                    "state-off"
+                };
+                answered("fetch_url", arguments, digest)
+            })
+            .collect();
+        let verdicts = one_call_per_round(&mut guard, &calls);
+        assert!(verdicts[..6]
+            .iter()
+            .all(|verdict| !matches!(verdict, Verdict::Stop(_))));
+        let Verdict::Stop(stop) = &verdicts[6] else {
+            panic!(
+                "the results recur in the same order, which is a cycle: {:?}",
+                verdicts[6]
+            );
+        };
+        assert_eq!(stop.reason, StopReason::Cycle);
+        assert_eq!(stop.tool, "fetch_url");
+        assert_eq!(
+            stop.signature_hash,
+            call_signature("fetch_url", arguments),
+            "the stop names the call's signature, never a digest"
+        );
+    }
+
+    #[test]
+    fn loop_guard_the_no_progress_rule_is_unchanged_with_result_awareness_on() {
+        let mut guard = aware();
+        let rounds = [
+            vec![call(
+                "fetch_url",
+                r#"{"url":"https://a.example"}"#,
+                CallOutcome::Err,
+            )],
+            vec![call("web_search", r#"{"query":"b"}"#, CallOutcome::Err)],
+            vec![call(
+                "knowledge_search",
+                r#"{"query":"c"}"#,
+                CallOutcome::Suppressed,
+            )],
+            vec![call(
+                "fetch_url",
+                r#"{"url":"https://d.example"}"#,
+                CallOutcome::Err,
+            )],
+        ];
+        let verdicts: Vec<Verdict> = rounds
+            .iter()
+            .map(|round| guard.observe_round(round))
+            .collect();
+        let Verdict::Stop(stop) = &verdicts[3] else {
+            panic!(
+                "four stalled rounds must stop the loop, got {:?}",
+                verdicts[3]
+            );
+        };
+        assert_eq!(stop.reason, StopReason::NoProgress);
+        assert_eq!(stop.count, 4);
+    }
+
+    #[test]
+    fn loop_guard_result_digest_is_a_short_hash_of_the_result_and_never_the_result() {
+        let digest = result_digest("Bergen: 11 degrees, clear");
+        assert_eq!(digest.len(), 16);
+        assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(
+            digest,
+            result_digest("Bergen: 11 degrees, clear"),
+            "the same result digests the same"
+        );
+        assert_ne!(digest, result_digest("Bergen: 12 degrees, clear"));
+        assert!(!digest.contains("Bergen"), "{digest}");
+        assert_eq!(
+            result_digest("x"),
+            &blake3::hash(b"x").to_hex()[..16],
+            "the digest is the hash call_signature uses, cut to 16 characters"
+        );
+    }
+
+    #[test]
+    fn loop_guard_result_awareness_reads_only_the_literal_true() {
+        assert!(result_aware_from_env_value(Some("true")));
+        for value in [
+            None,
+            Some(""),
+            Some("TRUE"),
+            Some("True"),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+            Some("false"),
+            Some(" true "),
+        ] {
+            assert!(
+                !result_aware_from_env_value(value),
+                "{value:?} must read as off, as every literal switch reads it"
+            );
+        }
+    }
+
+    /// The answer of a status poll: the same status, with the server's clock, a request id and a timing stamped
+    /// on it. Only the stamps differ between two polls.
+    fn stamped_status(index: u32, status: &str) -> String {
+        format!(
+            r#"{{"status":"{status}","checked_at":"2026-11-21T10:00:{index:02}Z","request_id":"req-fixture-{index:04}","elapsed_ms":{}}}"#,
+            100 + index
+        )
+    }
+
+    #[test]
+    fn loop_guard_a_repeat_stamped_on_every_answer_still_reminds_and_stops() {
+        let arguments = r#"{"job":"42"}"#;
+        let outputs: Vec<String> = (0..STOP_AT)
+            .map(|index| stamped_status(index, "pending"))
+            .collect();
+        assert!(
+            outputs.windows(2).all(|pair| pair[0] != pair[1]),
+            "every poll is answered with new stamps"
+        );
+        let calls: Vec<CallRecord> = outputs
+            .iter()
+            .map(|output| answered("job_status", arguments, &result_digest(output)))
+            .collect();
+        let mut guard = aware();
+        let verdicts = one_call_per_round(&mut guard, &calls);
+        assert_eq!(
+            verdicts[2],
+            Verdict::Remind {
+                level: 1,
+                text: REMIND_FIRST
+            },
+            "the third identical answer reminds"
+        );
+        assert_eq!(
+            verdicts[4],
+            Verdict::Remind {
+                level: 2,
+                text: REMIND_SECOND
+            },
+            "the fifth identical answer reminds again"
+        );
+        assert_eq!(
+            verdicts[7],
+            Verdict::Stop(LoopStop {
+                reason: StopReason::Repeat,
+                tool: "job_status".to_owned(),
+                signature_hash: calls[7].signature.clone(),
+                count: STOP_AT,
+            }),
+            "the eighth identical answer stops the loop, though every poll carried new stamps"
+        );
+    }
+
+    #[test]
+    fn loop_guard_stamped_answers_are_judged_as_bare_ones_with_result_awareness_off() {
+        let arguments = r#"{"job":"42"}"#;
+        let stamped: Vec<CallRecord> = (0..STOP_AT)
+            .map(|index| {
+                let digest = result_digest(&stamped_status(index, "pending"));
+                answered("job_status", arguments, &digest)
+            })
+            .collect();
+        let bare: Vec<CallRecord> = (0..STOP_AT)
+            .map(|_| call("job_status", arguments, CallOutcome::Ok))
+            .collect();
+        assert_eq!(
+            one_call_per_round(&mut LoopGuard::new(), &stamped),
+            one_call_per_round(&mut LoopGuard::new(), &bare),
+            "with the switch off a digest is ignored, stamps and all"
+        );
+    }
+
+    #[test]
+    fn loop_guard_a_cycle_stamped_on_every_answer_still_stops() {
+        let mut guard = aware();
+        let calls: Vec<CallRecord> = (0..6)
+            .map(|index| {
+                let arguments = if index % 2 == 0 {
+                    r#"{"query":"alpha"}"#
+                } else {
+                    r#"{"query":"beta"}"#
+                };
+                let output = format!(
+                    r#"{{"hits":2,"fetched_at":"2026-11-21T10:00:{index:02}Z","request_id":"req-fixture-{index:04}"}}"#
+                );
+                answered("web_search", arguments, &result_digest(&output))
+            })
+            .collect();
+        let verdicts = one_call_per_round(&mut guard, &calls);
+        assert!(verdicts[..5]
+            .iter()
+            .all(|verdict| !matches!(verdict, Verdict::Stop(_))));
+        assert_eq!(
+            verdicts[5],
+            Verdict::Stop(LoopStop {
+                reason: StopReason::Cycle,
+                tool: "web_search".to_owned(),
+                signature_hash: calls[5].signature.clone(),
+                count: 6,
+            }),
+            "the same two answers recur in order, so the pair is a cycle"
+        );
+    }
+
+    #[test]
+    fn loop_guard_a_parked_result_read_again_under_a_new_handle_is_a_repeat() {
+        let arguments = r#"{"url":"https://big.example/report"}"#;
+        let mut guard = aware();
+        let calls: Vec<CallRecord> = (0..STOP_AT)
+            .map(|index| {
+                let envelope = format!(
+                    r#"{{"handle_id":"res_fixture-{index:04}","capability_id":"mcp__reports__fetch","size_bytes":52000,"summary":"JSON array of 300 rows","row_count":300,"expires_at":"2026-11-21T10:{index:02}:00.123456789+00:00","kind":"json","note":"The COMPLETE result is held under this handle."}}"#
+                );
+                answered("fetch_url", arguments, &result_digest(&envelope))
+            })
+            .collect();
+        let verdicts = one_call_per_round(&mut guard, &calls);
+        let Verdict::Stop(stop) = &verdicts[7] else {
+            panic!(
+                "the eighth read of one result must stop the loop, got {:?}",
+                verdicts[7]
+            );
+        };
+        assert_eq!(stop.reason, StopReason::Repeat);
+        assert_eq!(stop.count, STOP_AT);
+    }
+
+    #[test]
+    fn loop_guard_result_digest_leaves_out_the_stamps_and_keeps_the_answer() {
+        let first = r#"{"status":"pending","checked_at":"2026-11-21T10:15:30Z","request_id":"req-fixture-0001","elapsed_ms":120}"#;
+        let later = r#"{"elapsed_ms":4800,"request_id":"req-fixture-0002","checked_at":"2026-11-21T10:16:02.5+01:00","status":"pending"}"#;
+        assert_eq!(
+            result_digest(first),
+            result_digest(later),
+            "key order, stamps and timings are not the answer"
+        );
+        assert_ne!(
+            result_digest(first),
+            result_digest(&first.replace("pending", "done")),
+            "a changed status is progress"
+        );
+        assert_ne!(
+            result_digest(r#"{"count":3}"#),
+            result_digest(r#"{"count":4}"#),
+            "a number is content"
+        );
+        assert_ne!(
+            result_digest(r#"{"start":"2026-11-21T10:00:00+01:00"}"#),
+            result_digest(r#"{"start":"2026-11-21T11:00:00+01:00"}"#),
+            "a time under a key that is not a stamp is content"
+        );
+        assert_ne!(
+            result_digest(r#"{"now":{"temp":11}}"#),
+            result_digest(r#"{"now":{"temp":12}}"#),
+            "a 'now' block that carries data is content"
+        );
+        assert_eq!(
+            result_digest("Fetched 2026-11-21T10:15:30Z: Bergen 11 degrees"),
+            result_digest("Fetched 2026-11-21 10:16:02: Bergen 11 degrees"),
+            "a stamp in text is left out, whatever its separator"
+        );
+        assert_eq!(
+            result_digest("Oslo ☀ 2026-11-21T10:15:30Z é"),
+            result_digest("Oslo ☀ 2026-11-21T10:16:02Z é"),
+            "multi-byte text is kept whole around a stamp"
+        );
+        assert_eq!(
+            result_digest("Request ID: 4bf92f3577b3 Bergen 11 degrees"),
+            result_digest("Request ID: 7c21ef0a9d Bergen 11 degrees"),
+            "a request id in text is left out"
+        );
+        assert_ne!(
+            result_digest("due 2026-11-21"),
+            result_digest("due 2026-11-22"),
+            "a date with no clock is content"
+        );
+        assert_ne!(
+            result_digest("Bergen 11 degrees"),
+            result_digest("Bergen 12 degrees"),
+            "text that is not a stamp is content"
+        );
     }
 }

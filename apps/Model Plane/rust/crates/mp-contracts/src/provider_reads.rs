@@ -530,11 +530,29 @@ fn decode_base64_text(encoded: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// Listed fields another provider names differently, as (the name it sends, the listed field): a Google
+/// event's title and link are `summary` and `htmlLink`, and a SharePoint site's title is its `displayName`.
+const FIELD_ALIASES: &[(&str, &str)] = &[
+    ("summary", "subject"),
+    ("htmlLink", "webLink"),
+    ("displayName", "name"),
+];
+
 fn shape_item(row: &Value, fields: &[&str]) -> Value {
     let mut out = Map::new();
     for field in fields.iter().filter(|field| **field != "bodyText") {
         if let Some(value) = row.get(*field) {
             out.insert((*field).to_owned(), value.clone());
+        }
+    }
+    // A row with no value under a listed field takes its alias's value. Only a field the operation
+    // lists is filled, so the profile (which lists displayName but not name) keeps its shape.
+    for (alias, field) in FIELD_ALIASES {
+        if !fields.contains(field) || out.contains_key(*field) {
+            continue;
+        }
+        if let Some(value) = out.get(*alias).cloned() {
+            out.insert((*field).to_owned(), value);
         }
     }
     // Graph nests a sender's address; the model needs the address and name themselves.
@@ -585,6 +603,9 @@ fn read_fields(operation: &str) -> &'static [&'static str] {
             "location",
             "organizer",
             "webLink",
+            // Google's title and link: shape_item gives them the subject and webLink keys too.
+            "summary",
+            "htmlLink",
         ],
         "drive.files" | "sharepoint.drives" => &[
             "id",
@@ -596,7 +617,8 @@ fn read_fields(operation: &str) -> &'static [&'static str] {
             "webUrl",
             "webViewLink",
         ],
-        "sharepoint.sites" => &["id", "name", "webUrl"],
+        // The site's title: shape_item takes it as the name when a row has none.
+        "sharepoint.sites" => &["id", "name", "webUrl", "displayName"],
         "profile" => &["displayName", "mail", "userPrincipalName", "email"],
         _ => &[],
     }
@@ -758,5 +780,91 @@ mod tests {
         for bad in ["", "a/b", "a?b", "a#b", "a b", long.as_str()] {
             assert!(!is_connection_id(bad), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_google_event_is_titled_and_linked_under_the_keys_microsoft_uses() {
+        let result = json!({"items": [{
+            "id": "evt_1",
+            "summary": "Standup",
+            "htmlLink": "https://calendar.google.com/calendar/event?eid=abc",
+            "start": {"dateTime": "2026-11-23T09:00:00+01:00"},
+            "end": {"dateTime": "2026-11-23T09:15:00+01:00"},
+            "unlisted": "dropped"
+        }]});
+        let list = shape_read("calendar.events", &Map::new(), &result);
+        assert_eq!(list.status, ReadStatus::Ok);
+        let item = &list.items[0];
+        assert_eq!(item["summary"], "Standup");
+        assert_eq!(
+            item["htmlLink"],
+            "https://calendar.google.com/calendar/event?eid=abc"
+        );
+        assert_eq!(item["subject"], "Standup");
+        assert_eq!(
+            item["webLink"],
+            "https://calendar.google.com/calendar/event?eid=abc"
+        );
+        assert!(item.get("unlisted").is_none());
+        let rendered = render_provider_read(&list, &Map::new());
+        assert!(rendered.contains("\"subject\":\"Standup\""), "{rendered}");
+        assert!(
+            rendered.contains("\"webLink\":\"https://calendar.google.com/calendar/event?eid=abc\""),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_microsoft_event_renders_as_it_did() {
+        let result = json!({"value": [{
+            "id": "AAMk",
+            "subject": "Review",
+            "start": {"dateTime": "2026-11-23T09:00:00.0000000", "timeZone": "UTC"},
+            "end": {"dateTime": "2026-11-23T10:00:00.0000000", "timeZone": "UTC"},
+            "location": {"displayName": "Room 4"},
+            "organizer": {"emailAddress": {"name": "Ada", "address": "ada@example.com"}},
+            "webLink": "https://outlook.office.com/calendar/item/AAMk"
+        }]});
+        let list = shape_read("calendar.events", &Map::new(), &result);
+        assert_eq!(
+            list.items,
+            vec![json!({
+                "subject": "Review",
+                "start": {"dateTime": "2026-11-23T09:00:00.0000000", "timeZone": "UTC"},
+                "end": {"dateTime": "2026-11-23T10:00:00.0000000", "timeZone": "UTC"},
+                "location": {"displayName": "Room 4"},
+                "organizer": {"emailAddress": {"name": "Ada", "address": "ada@example.com"}},
+                "webLink": "https://outlook.office.com/calendar/item/AAMk"
+            })]
+        );
+    }
+
+    #[test]
+    fn a_site_keeps_its_display_name_and_takes_it_as_the_name_when_it_has_none() {
+        let result = json!({"value": [
+            {
+                "id": "s1",
+                "name": "marketing",
+                "displayName": "Marketing team",
+                "webUrl": "https://contoso.sharepoint.com/sites/marketing"
+            },
+            {
+                "id": "s2",
+                "displayName": "Legal",
+                "webUrl": "https://contoso.sharepoint.com/sites/legal"
+            }
+        ]});
+        let list = shape_read("sharepoint.sites", &Map::new(), &result);
+        assert_eq!(list.items[0]["displayName"], "Marketing team");
+        assert_eq!(list.items[0]["name"], "marketing");
+        assert_eq!(list.items[1]["name"], "Legal");
+        assert_eq!(list.items[1]["displayName"], "Legal");
+        // The profile lists displayName and not name, so its shape does not change.
+        let profile = shape_read(
+            "profile",
+            &Map::new(),
+            &json!({"displayName": "Ada Lovelace"}),
+        );
+        assert_eq!(profile.items, vec![json!({"displayName": "Ada Lovelace"})]);
     }
 }

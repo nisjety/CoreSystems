@@ -1,6 +1,16 @@
 {
   "entries": [
     {
+      "id": "prompt/agent_api_run.rs/ASK_SYSTEM_PROMPT",
+      "sha256": "0c4c4456d58e7afb88c072ae37c6ebda1bb2068e021aa098c6e98274f323bf58",
+      "source": "services/model-gateway/src/agent_api_run.rs"
+    },
+    {
+      "id": "prompt/assistant_navigation.rs/NAVIGATION_INSTRUCTIONS",
+      "sha256": "6a06b73d1d7c6a49f90d2ae0e9e2630b03aac4a16473e52f77abf9f8b6e3456f",
+      "source": "services/model-gateway/src/assistant_navigation.rs"
+    },
+    {
       "id": "prompt/author_guidance.rs/ALL",
       "sha256": "7eb86216127287d2d3caff555b63ab755ac8cdc96ce911f4d5421d71ac9b8ec1",
       "source": "services/model-gateway/src/author_guidance.rs"
@@ -91,6 +101,51 @@
       "source": "services/model-gateway/src/author_guidance.rs"
     },
     {
+      "id": "prompt/compaction.rs/CLEARED_TOOL_RESULT_NOTICE",
+      "sha256": "5103f903755738744f4f8dd3f2aa5e30b72a1ab289569ee53b32b64eda8eb5ad",
+      "source": "services/model-gateway/src/compaction.rs"
+    },
+    {
+      "id": "prompt/compaction.rs/DROPPED_HISTORY_NOTICE",
+      "sha256": "ef2c228fa1291cb32b58fc68d63edd4683e885e251f88bd980e80ecb16c7279d",
+      "source": "services/model-gateway/src/compaction.rs"
+    },
+    {
+      "id": "prompt/compaction.rs/PINNED_MESSAGE_PREAMBLE",
+      "sha256": "7f7b50073bf46b56e18bc9a71c74143255306a929ee235342d7e0b1e47da5525",
+      "source": "services/model-gateway/src/compaction.rs"
+    },
+    {
+      "id": "prompt/compaction.rs/PINNED_TRUNCATION_NOTICE",
+      "sha256": "cc2384a2e870ec3a986509d917f7e25412cc3f015d5591d580c6b7d2bbe20599",
+      "source": "services/model-gateway/src/compaction.rs"
+    },
+    {
+      "id": "prompt/compaction.rs/RUN_HISTORY_DROPPED_NOTICE",
+      "sha256": "b33d0076c964973fca8c4bf97eb58575cfd43a6148c470804874a19ef8244364",
+      "source": "services/model-gateway/src/compaction.rs"
+    },
+    {
+      "id": "prompt/context_reattach.rs/REATTACH_NO_MATCH_NOTICE",
+      "sha256": "2004b7c11d0ea0bfc2155d2c6171438bc13761cb1df70970e1f97c7386a40460",
+      "source": "services/model-gateway/src/context_reattach.rs"
+    },
+    {
+      "id": "prompt/context_reattach.rs/REATTACH_TRUNCATED_NOTICE",
+      "sha256": "e8b6381faaf5dc66dc4c881e813737046b9666011e1fed5d6c5080d43b27b520",
+      "source": "services/model-gateway/src/context_reattach.rs"
+    },
+    {
+      "id": "prompt/council_routes.rs/MEMBER_SYSTEM_PROMPT",
+      "sha256": "942465b9c445935220645dac6fc840c9ac07c678ab8b8930cb2d44bcf2bdd244",
+      "source": "services/model-gateway/src/council_routes.rs"
+    },
+    {
+      "id": "prompt/council_routes.rs/SYNTHESIS_SYSTEM_PROMPT",
+      "sha256": "9f22505b2b114990bce74397cef48f46ece52984e506a1c2abcc51edae822e70",
+      "source": "services/model-gateway/src/council_routes.rs"
+    },
+    {
       "id": "prompt/format_guidance.rs/CHART_KIND_PREFIXES",
       "sha256": "5f1b2853e784df1450d606f2974c67ec3af9fc23d36ba2be76fd2160c3332793",
       "source": "services/model-gateway/src/format_guidance.rs"
@@ -133,6 +188,11 @@
     {
       "id": "prompt/format_guidance.rs/STRUCTURAL_WORDS",
       "sha256": "cb58ba8d55b688caf90e3967d1118678894b5301ff4d406630d16984c74db29c",
+      "source": "services/model-gateway/src/format_guidance.rs"
+    },
+    {
+      "id": "prompt/format_guidance.rs/WIDGET_GUIDANCE_ENV",
+      "sha256": "12edb9dd72cb081ba4ac8a9550a17e422bbb785585eea7d32f46737ed16f4c92",
       "source": "services/model-gateway/src/format_guidance.rs"
     },
     {
@@ -192,18 +252,33 @@
     },
     {
       "id": "prompt/format_guidance.rs/widget_guidance_enabled",
-      "sha256": "b8474c37f5f98201c63890510e81fdc525e179b95951a504b772f082d0605433",
+      "sha256": "53d41c4651d4d89668033fa0857d5b12c38e876a862d175b0c09662dea45f57a",
       "source": "services/model-gateway/src/format_guidance.rs"
     },
     {
       "id": "prompt/format_guidance.rs/widget_guidance_enabled_from",
-      "sha256": "86009b4d7549cde01d1e4e16ee78b54ef46822c55266b05874c360692bf87afc",
+      "sha256": "a870787a49b497a6f2656edee8edd59d0e918639b9771b55c69944111bf74b39",
       "source": "services/model-gateway/src/format_guidance.rs"
     },
     {
       "id": "prompt/format_guidance.rs/widget_notice",
       "sha256": "78d96ec671866b65e37588f87daffff61acbef13e9d61c4589c296a1a33f4875",
       "source": "services/model-gateway/src/format_guidance.rs"
+    },
+    {
+      "id": "prompt/http_routes.rs/BROWSER_SUGGEST_SYSTEM_PROMPT",
+      "sha256": "b8c2addaa5c38b0a00506ebbc0cfd211dd4f334e1b82811feaad813c68d9be7e",
+      "source": "services/model-gateway/src/http_routes.rs"
+    },
+    {
+      "id": "prompt/http_routes.rs/DICTATE_SYSTEM_PROMPT",
+      "sha256": "8b36de89a8c79016ad018d83a19266df3d28630f4cf95218f99f0d966115e6dd",
+      "source": "services/model-gateway/src/http_routes.rs"
+    },
+    {
+      "id": "prompt/http_routes.rs/RECOMMEND_PLAN_SYSTEM_PROMPT",
+      "sha256": "d92f36b49c93839db106d2f9a10b2320861bb4b9f71a949f6199ab2262909629",
+      "source": "services/model-gateway/src/http_routes.rs"
     },
     {
       "id": "prompt/prompt_context.rs/COMPACTION_TOKEN_BUDGET_ENV",
@@ -257,7 +332,7 @@
     },
     {
       "id": "prompt/prompt_context.rs/enabled",
-      "sha256": "cd683c2e6bb4733cd6617813aee1b204cc7a6e38d3fd03087b4cc70e37757e6a",
+      "sha256": "612a59e88012f08188e9af670150ceb525f7e85252ece095bb8e48b3bb65b473",
       "source": "services/model-gateway/src/prompt_context.rs"
     },
     {
@@ -336,9 +411,74 @@
       "source": "services/model-gateway/src/prompt_context.rs"
     },
     {
+      "id": "prompt/reasoning_translate_routes.rs/SYSTEM_PROMPT",
+      "sha256": "f13be431a11cd3a9006c76380f3fc9cf07eb8cd8451b1373a5defc8e4d3b1dd3",
+      "source": "services/model-gateway/src/reasoning_translate_routes.rs"
+    },
+    {
+      "id": "prompt/retrieval.rs/LOW_CONFIDENCE_GROUNDING_NOTICE",
+      "sha256": "b2bd13836ce99d61487be67bb37f711624beb6d387132a5e971439a1c127a769",
+      "source": "services/model-gateway/src/retrieval.rs"
+    },
+    {
+      "id": "prompt/retrieval.rs/NO_GROUNDING_SYSTEM_NOTICE",
+      "sha256": "0993c0cc4fd5f8b7a0e87a2f2775a2421844aa59d5c3a081ee2e99ba8851378b",
+      "source": "services/model-gateway/src/retrieval.rs"
+    },
+    {
+      "id": "prompt/review_run.rs/SYSTEM_PROMPT",
+      "sha256": "4ebc044ac894f87b74f0078c9bd1c86c27ca1d937255073f2dfe0b19031df85b",
+      "source": "services/model-gateway/src/review_run.rs"
+    },
+    {
+      "id": "prompt/side_chat_routes.rs/SYSTEM_PROMPT",
+      "sha256": "7135e7b890eefcbfa8e343f2354eb427e5bba04ecff28c5971930339ca61171e",
+      "source": "services/model-gateway/src/side_chat_routes.rs"
+    },
+    {
+      "id": "prompt/source_validation.rs/CONVERSATION_SCOPE_NOTICE",
+      "sha256": "729c7c503be42e119090669e425d70252d4c89be104d2f3b86c6a6296f0168c6",
+      "source": "services/model-gateway/src/source_validation.rs"
+    },
+    {
+      "id": "prompt/source_validation.rs/KNOWLEDGE_ONLY_SCOPE_NOTICE",
+      "sha256": "9798fe6c6d3144a78a73399bb3d78779393e9b67bff528445c0d87e26bc9ce83",
+      "source": "services/model-gateway/src/source_validation.rs"
+    },
+    {
+      "id": "prompt/source_validation.rs/REQUIREMENTS_INSTRUCTION",
+      "sha256": "164f399958d2752afd46d0e775045669871c5c19546f28569c3d9b0f2e686187",
+      "source": "services/model-gateway/src/source_validation.rs"
+    },
+    {
+      "id": "prompt/source_validation.rs/REVIEW_INSTRUCTION",
+      "sha256": "e49b3c27b665b74c8972d95558db77fca1b771b05911a0bb04c864da271dafe2",
+      "source": "services/model-gateway/src/source_validation.rs"
+    },
+    {
+      "id": "prompt/source_validation.rs/WEB_ONLY_SCOPE_NOTICE",
+      "sha256": "35cfe75122b53391be7b5d000ff2735d027cd0b47b995a0b86bc8015075c48d1",
+      "source": "services/model-gateway/src/source_validation.rs"
+    },
+    {
       "id": "tool-builder/agent.rs/browser_act_tool_def",
       "sha256": "d174946e833ce1fc42b1fae1422d432ea68c166afe6996c472e333eb724658cc",
       "source": "services/execution-core/src/runtime_loop/agent.rs"
+    },
+    {
+      "id": "tool-builder/connector_reads.rs/custom_rest_tool_definition",
+      "sha256": "b65abf73d3305a65a9359aeff6d29eb8dc0a2383e6774f44a6020cca20019633",
+      "source": "services/model-gateway/src/connector_reads.rs"
+    },
+    {
+      "id": "tool-builder/connector_reads.rs/tool_definition",
+      "sha256": "50db1bb8341e44f77764d03b7aac1b8b0822f99a6366447b74c6318955c3f8cf",
+      "source": "services/model-gateway/src/connector_reads.rs"
+    },
+    {
+      "id": "tool-builder/connector_suggestion.rs/tool_definition",
+      "sha256": "f3a65002d0605af654d0a4e41dcfef87dbcd5173436da2770e07f900910c163e",
+      "source": "services/model-gateway/src/connector_suggestion.rs"
     },
     {
       "id": "tool-builder/deck_tool.rs/tool_definition",
@@ -346,9 +486,24 @@
       "source": "services/model-gateway/src/deck_tool.rs"
     },
     {
+      "id": "tool-builder/image_tool.rs/tool_definition",
+      "sha256": "52ad9f78d5256059fb5f3acc6076f02bc925c89ca905ebbc3744568bbb889728",
+      "source": "services/model-gateway/src/image_tool.rs"
+    },
+    {
       "id": "tool-builder/recall_conversations.rs/tool_definition",
       "sha256": "ca4242e642967e8a7f7f92059de70cd5fdf239378b0f7c02ab0de24781e344c2",
       "source": "services/model-gateway/src/recall_conversations.rs"
+    },
+    {
+      "id": "tool-builder/source_validation.rs/repair_tool",
+      "sha256": "688ca50cf768524ebfd7fd9bd18224220a70ca4c572f907463cd62fef2ce5620",
+      "source": "services/model-gateway/src/source_validation.rs"
+    },
+    {
+      "id": "tool-builder/source_validation.rs/review_tool",
+      "sha256": "f2dcf82a7fc1e82c1384495827e12b3a10545c69b278a6089f6a9f6636359c6b",
+      "source": "services/model-gateway/src/source_validation.rs"
     },
     {
       "id": "tool-builder/thread_reference_tools.rs/tool_definitions",
@@ -359,6 +514,21 @@
       "id": "tool-builder/tool_loop.rs/advertise_batched_search",
       "sha256": "39a2fe9c3848457605d5bcf252005a5f526cdb551b90c6558ed7228f6656a9aa",
       "source": "services/model-gateway/src/tool_loop.rs"
+    },
+    {
+      "id": "tool-builder/workspace_tools.rs/read_defs",
+      "sha256": "c352b35e3423b23a8c3e72af28c34bb98f0bef84dbe1a107740cc49668beb8c0",
+      "source": "services/execution-core/src/workspace_tools.rs"
+    },
+    {
+      "id": "tool-builder/workspace_tools.rs/tool_defs",
+      "sha256": "1715749923bc4cc84e5cc0e10fc4ba4c532baafd5c29cb95e7eb52ea02323ec5",
+      "source": "services/execution-core/src/workspace_tools.rs"
+    },
+    {
+      "id": "tool-builder/workspace_tools.rs/write_defs",
+      "sha256": "37f7ee7fa463cdd1d3f35973a17afe74b062f86c04a5a0456dea2489392b3e3c",
+      "source": "services/execution-core/src/workspace_tools.rs"
     },
     {
       "id": "tool/agent.rs/book_shipment",
@@ -561,6 +731,11 @@
       "source": "services/model-gateway/src/tool_loop.rs"
     },
     {
+      "id": "tool/tool_loop.rs/find_in_page",
+      "sha256": "b85dde2c009bf69d05379197c33f7b6d73c75af7f76d1462eac94522c5d69d05",
+      "source": "services/model-gateway/src/tool_loop.rs"
+    },
+    {
       "id": "tool/tool_loop.rs/get_statistics",
       "sha256": "6d87fbbe55f8525cbe69783fd127b8480938f0cae92b70e42f53ce4dc82e38c1",
       "source": "services/model-gateway/src/tool_loop.rs"
@@ -613,6 +788,11 @@
     {
       "id": "tool/tool_loop.rs/read_artifact",
       "sha256": "7169809e18e68cc28bd83d215a5854ee02fecdb8b43eb63bbabe0ab5853d47f9",
+      "source": "services/model-gateway/src/tool_loop.rs"
+    },
+    {
+      "id": "tool/tool_loop.rs/read_page",
+      "sha256": "dac0df885b33417e9fc51341d327ec47e95a2a94146c1091667785d7fe3cd487",
       "source": "services/model-gateway/src/tool_loop.rs"
     },
     {
@@ -669,6 +849,36 @@
       "id": "tool/tool_loop.rs/web_search",
       "sha256": "eed8eb1d8e8ccb7aef4daab55dc9fee9bc22f536a7ccadc1c0f91213e32a8724",
       "source": "services/model-gateway/src/tool_loop.rs"
+    },
+    {
+      "id": "tool/web_tools.rs/BATCH_TOOL",
+      "sha256": "5a6405c729f0460da6586e2cd1bd830953093cc88ea468cc252f3834e241c2da",
+      "source": "services/execution-core/src/web_tools.rs"
+    },
+    {
+      "id": "tool/web_tools.rs/CRAWL_PLAN_TOOL",
+      "sha256": "4441a590beb90e98672c8bbef1bc04d2e3a443551c16a4459ce8858ddf4ca2ce",
+      "source": "services/execution-core/src/web_tools.rs"
+    },
+    {
+      "id": "tool/web_tools.rs/CRAWL_SITE_TOOL",
+      "sha256": "cba58bae628f5dc6ec5910cfd630d805655a55cf8d69c81226a0a6f115950c0e",
+      "source": "services/execution-core/src/web_tools.rs"
+    },
+    {
+      "id": "tool/web_tools.rs/FIND_IN_PAGE_TOOL",
+      "sha256": "989b73f8b3fb4b037f2c0cf777b4db2104e2a180065a74ea798ff0570d1ef746",
+      "source": "services/execution-core/src/web_tools.rs"
+    },
+    {
+      "id": "tool/web_tools.rs/MAP_TOOL",
+      "sha256": "b142f3b1db33fcdfd10e47397d2bc50cf9fd94d9444f4c008c4b8269e11a4c58",
+      "source": "services/execution-core/src/web_tools.rs"
+    },
+    {
+      "id": "tool/web_tools.rs/READ_PAGE_TOOL",
+      "sha256": "d771b20460e58c9f28ccab99f82eb2cd164585c0011e847a09e1e3f1203db4a5",
+      "source": "services/execution-core/src/web_tools.rs"
     }
   ],
   "schema": "prompt-tool-manifest-v1"

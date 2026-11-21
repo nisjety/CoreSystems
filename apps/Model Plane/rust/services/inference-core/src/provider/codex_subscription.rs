@@ -978,7 +978,7 @@ impl CodexSubscriptionProvider {
                     cheap: false,
                     privacy_tier: PrivacyTier::classify(&caps),
                     residency_label: caps.residency.as_str().to_owned(),
-                    effort_levels: Vec::new(),
+                    effort_levels: effort::advertised_codex_levels(model),
                     context_window_tokens: record.context_window_tokens,
                     max_output_tokens: record.max_output_tokens,
                     lifecycle: record.lifecycle,
@@ -1036,6 +1036,29 @@ mod tests {
             .request_body(&request)
             .expect_err("the subscription catalog must be an allow-list");
         assert!(matches!(error, ProviderError::UnsupportedModel(_)));
+    }
+
+    #[test]
+    fn the_catalogue_row_lists_exactly_the_levels_the_adapter_renders() {
+        let provider = CodexSubscriptionProvider::new(
+            "http://integration",
+            "service-key",
+            vec!["gpt-5.5".to_owned(), "gpt-6-astra".to_owned()],
+        )
+        .expect("provider");
+        for model in provider.model_infos(false) {
+            assert_eq!(
+                model.effort_levels,
+                effort::advertised_codex_levels(&model.id),
+                "{}",
+                model.id
+            );
+            // A listed level is one the row accepts, so a request for it is applied as asked, not clamped.
+            for level in &model.effort_levels {
+                let row = effort::support(Family::Codex, &model.id);
+                assert!(row.levels.contains(level), "{}: {level:?}", model.id);
+            }
+        }
     }
 
     #[test]

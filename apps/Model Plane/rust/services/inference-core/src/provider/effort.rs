@@ -458,6 +458,23 @@ fn codex_wide_enabled() -> bool {
     *ENABLED.get_or_init(|| parse_enabled(std::env::var(CODEX_WIDE_ENV).ok().as_deref()))
 }
 
+/// The levels the catalogue lists for a Codex model: the ladder its row declares while the wide switch
+/// is on, and none while it is off, so the composer offers no level the adapter would not render.
+#[must_use]
+pub fn advertised_codex_levels(model: &str) -> Vec<Level> {
+    listed_codex_levels(support(Family::Codex, model), codex_wide_enabled())
+}
+
+/// The levels a Codex row lists while the wide switch is `wide`: the row's own ladder when it is on,
+/// none when it is off. Pure, so a test passes the switch instead of the process environment.
+fn listed_codex_levels(row: Support, wide: bool) -> Vec<Level> {
+    if wide {
+        row.levels.to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
 /// Bound a level by a cap: clamps down, never up. `None` is no cap, which is
 /// every caller's answer until the per-role cap (owned by Control, delivered by
 /// WS10) exists; the seam is here so that source plugs in without touching the
@@ -820,6 +837,38 @@ mod tests {
         assert_eq!(pair.support.levels, CODEX_LEVELS);
         assert_eq!((wide.matches)("gpt-5.5"), codex_wide_enabled());
         assert!((pair.matches)("gpt-5.5"));
+    }
+
+    #[test]
+    fn the_codex_catalogue_lists_the_wide_ladder_only_while_its_switch_is_on() {
+        let wide_row = Support {
+            wire: Wire::CodexEffort,
+            levels: CODEX_WIDE_LEVELS,
+            verified_on: None,
+        };
+        let pair_row = Support {
+            wire: Wire::CodexEffort,
+            levels: CODEX_LEVELS,
+            verified_on: None,
+        };
+        // On: the wide ladder, weakest first, with Medium and XHigh in it.
+        let on = listed_codex_levels(wide_row, true);
+        assert_eq!(
+            on,
+            vec![Level::Low, Level::Medium, Level::High, Level::XHigh]
+        );
+        assert!(on.windows(2).all(|pair| pair[0] < pair[1]));
+        // Off: nothing is listed, whichever ladder the row declares.
+        assert!(listed_codex_levels(wide_row, false).is_empty());
+        assert!(listed_codex_levels(pair_row, false).is_empty());
+        // The public catalogue reads the same switch the resolver does.
+        let expected = if codex_wide_enabled() {
+            CODEX_WIDE_LEVELS.to_vec()
+        } else {
+            Vec::new()
+        };
+        assert_eq!(advertised_codex_levels("gpt-5.5"), expected);
+        assert_eq!(advertised_codex_levels("gpt-6-astra"), expected);
     }
 
     #[test]

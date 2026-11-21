@@ -35,6 +35,14 @@ fn prompt_cache_key_from_env() -> bool {
     parse_enabled(std::env::var(PROMPT_CACHE_KEY_ENV).ok().as_deref())
 }
 
+/// Counts a routing key that is not the derived shape (F-f01-26). The count has no label, and the value is
+/// never logged: it came from a caller, and it is not sent to the provider either.
+fn count_malformed_cache_key(key: &str) {
+    if !key.is_empty() && !mp_contracts::prompt_tier::is_cache_scope_key(key) {
+        ::metrics::counter!("inference_prompt_cache_key_rejected_total").increment(1);
+    }
+}
+
 /// The reasoning-effort switch and the deployment aliases that tell an
 /// operator-named Azure deployment which model it really is.
 #[derive(Clone, Default)]
@@ -471,7 +479,8 @@ impl OpenAiProvider {
     /// Whether this request may carry the prompt-cache routing key. Azure's
     /// acceptance of the key is not yet verified, so only the first-party
     /// endpoint gets it. A ZDR request never does, the same rule the Anthropic
-    /// adapter applies to `cache_control`.
+    /// adapter applies to `cache_control`. The key must also have the derived
+    /// shape, so a caller cannot put other text into the body (F-f01-26).
     fn sends_prompt_cache_key(&self, req: &InferRequest) -> bool {
         let first_party = match &self.flavor {
             OpenAiFlavor::OpenAi { api_base } => {
@@ -484,6 +493,7 @@ impl OpenAiProvider {
             && self.provider_id.is_none()
             && !req.zdr
             && !req.cache_scope_key.is_empty()
+            && mp_contracts::prompt_tier::is_cache_scope_key(&req.cache_scope_key)
     }
 
     /// POST the chat completion and return the successful response.
@@ -512,6 +522,8 @@ impl OpenAiProvider {
             );
         }
 
+        // Once per request: the retry below sends the same key again, so it is counted before the loop.
+        count_malformed_cache_key(&req.cache_scope_key);
         loop {
             let body = self.request_body(req, stream, request_logprobs, plan);
             let response = self
@@ -645,7 +657,9 @@ fn build_request_body(
                 "role": m.role,
                 "content": message_content(req, index, &m.content),
             });
-            if !m.name.is_empty() {
+            // A system message's name is the gateway's section tag, not an identity, and some OpenAI-compatible
+            // endpoints reject a name on a system message: it is sent on the other roles only.
+            if !m.name.is_empty() && !m.role.eq_ignore_ascii_case("system") {
                 msg["name"] = serde_json::Value::String(m.name.clone());
             }
             msg
@@ -1382,6 +1396,37 @@ mod tests {
     }
 
     #[test]
+    fn a_system_message_is_sent_without_its_section_name_and_the_other_roles_keep_theirs() {
+        let mut req = make_request("gpt-4o");
+        let message = |role: &str, content: &str, name: &str| crate::provider::ChatMessage {
+            compaction_summary: String::new(),
+            role: role.to_owned(),
+            content: content.to_owned(),
+            name: name.to_owned(),
+        };
+        req.messages = vec![
+            message("system", "A profile.", "user_profile"),
+            message("user", "hi", "named-user"),
+            message("assistant", "ok", "named-assistant"),
+            message("tool", "{}", "search_web"),
+            message("System", "A memory.", "memory"),
+        ];
+        let body = legacy_body(&req, false, false);
+        assert_eq!(
+            body["messages"][0],
+            serde_json::json!({"role": "system", "content": "A profile."})
+        );
+        assert_eq!(body["messages"][1]["name"], "named-user");
+        assert_eq!(body["messages"][2]["name"], "named-assistant");
+        assert_eq!(body["messages"][3]["name"], "search_web");
+        assert!(
+            body["messages"][4].get("name").is_none(),
+            "{}",
+            body["messages"][4]
+        );
+    }
+
+    #[test]
     fn no_image_parts_is_byte_identical_to_today() {
         let req = make_request("gpt-4o");
         let body = legacy_body(&req, false, false);
@@ -1866,13 +1911,15 @@ mod tests {
             cache_scope_key: String::new(),
             ..scoped_request(false)
         };
-        assert!(sent_body(&provider, &keyless, false).get("prompt_cache_key").is_none());
+        let keyless_body = sent_body(&provider, &keyless, false);
+        assert!(keyless_body.get("prompt_cache_key").is_none());
 
         // A trailing slash names the same endpoint; any other endpoint does not get the key.
         let trailing_slash = format!("{DEFAULT_OPENAI_BASE}/");
         let mut slash = OpenAiProvider::new("key", Some(trailing_slash)).expect("provider");
         slash.prompt_cache_key = true;
-        assert!(sent_body(&slash, &req, false).get("prompt_cache_key").is_some());
+        let slash_body = sent_body(&slash, &req, false);
+        assert!(slash_body.get("prompt_cache_key").is_some());
 
         let mut elsewhere = [
             OpenAiProvider::new("key", Some("https://gateway.example.test/v1".to_owned()))
@@ -1887,8 +1934,9 @@ mod tests {
         ];
         for other in &mut elsewhere {
             other.prompt_cache_key = true;
+            let body = sent_body(other, &req, false);
             assert!(
-                sent_body(other, &req, false).get("prompt_cache_key").is_none(),
+                body.get("prompt_cache_key").is_none(),
                 "only the first-party endpoint takes the key"
             );
         }
@@ -1902,16 +1950,63 @@ mod tests {
         // Both the answer and the stream go through `post_chat`.
         for stream in [false, true] {
             let open = scoped_request(false);
+            let open_body = sent_body(&provider, &open, stream);
             assert!(
-                sent_body(&provider, &open, stream).get("prompt_cache_key").is_some(),
+                open_body.get("prompt_cache_key").is_some(),
                 "the same request without ZDR carries the key"
             );
 
             let req = scoped_request(true);
             let body = sent_body(&provider, &req, stream);
             assert!(body.get("prompt_cache_key").is_none());
-            assert_eq!(body.to_string(), legacy_body(&req, stream, false).to_string());
+            assert_eq!(
+                body.to_string(),
+                legacy_body(&req, stream, false).to_string()
+            );
         }
+    }
+
+    #[test]
+    fn a_malformed_prompt_cache_key_is_never_sent() {
+        let mut provider = OpenAiProvider::new("key", None).expect("provider");
+        provider.prompt_cache_key = true;
+        for key in [
+            "0123456789ABCDEF0123456789ABCDEF",
+            "0123456789abcdef0123456789abcde",
+            "0123456789abcdef0123456789abcdef:other",
+            "0123456789abcdef0123456789abcdef ",
+            "prompt text that must never leave the process",
+        ] {
+            let req = InferRequest {
+                cache_scope_key: key.to_owned(),
+                ..make_request("gpt-4o-mini")
+            };
+            let body = sent_body(&provider, &req, false);
+            assert!(body.get("prompt_cache_key").is_none(), "{key:?} was sent");
+            assert_eq!(
+                body.to_string(),
+                legacy_body(&req, false, false).to_string(),
+                "{key:?} changes the body"
+            );
+        }
+    }
+
+    #[test]
+    fn a_derived_key_with_the_subagent_suffix_is_sent_with_the_switch_on() {
+        let mut provider = OpenAiProvider::new("key", None).expect("provider");
+        provider.prompt_cache_key = true;
+        let key = format!(
+            "0123456789abcdef0123456789abcdef{}",
+            mp_contracts::prompt_tier::SUBAGENT_SCOPE_SUFFIX
+        );
+        let req = InferRequest {
+            cache_scope_key: key.clone(),
+            ..make_request("gpt-4o-mini")
+        };
+        assert_eq!(
+            sent_body(&provider, &req, false)["prompt_cache_key"],
+            key.as_str()
+        );
     }
 
     mod reasoning_effort {
