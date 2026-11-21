@@ -1,6 +1,8 @@
 import { requestJson } from './http'
 
-export type MembershipRole = 'member' | 'admin'
+// compliance is offered only while the Control Plane's ORG_COMPLIANCE_ROLE_ENABLED is on (O-21); the server
+// refuses it otherwise.
+export type MembershipRole = 'member' | 'admin' | 'compliance'
 
 export async function inviteMember(
   organizationId: string,

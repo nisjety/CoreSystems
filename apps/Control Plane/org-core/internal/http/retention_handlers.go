@@ -44,12 +44,25 @@ const (
 // The roles each retention act needs, read from org-core's membership table. An
 // admin sets the window; a hold is placed and released by an owner or a
 // compliance member, so an admin who could be the subject of a matter cannot lift
-// it; anyone who may act on holds may read them.
+// it; anyone who may act on holds may read them. With ORG_COMPLIANCE_ROLE_ENABLED
+// on (O-21) an admin may also place and release a hold (owner's decision), so the
+// write list is owner, admin, compliance; every placement and release still writes
+// the audit row naming the acting role.
 var (
 	retentionPolicyRoles = []string{"owner", "admin"}
 	legalHoldReadRoles   = []string{"owner", "admin", "compliance"}
 	legalHoldWriteRoles  = []string{"owner", "compliance"}
+	// legalHoldWriteRolesWithAdmin is the write list while the compliance switch is on.
+	legalHoldWriteRolesWithAdmin = []string{"owner", "admin", "compliance"}
 )
+
+// holdWriteRoles is the role list that may place or release a legal hold.
+func (s *Server) holdWriteRoles() []string {
+	if s.complianceRoleOn {
+		return legalHoldWriteRolesWithAdmin
+	}
+	return legalHoldWriteRoles
+}
 
 // registerRetentionRoutes mounts the routes only when ORG_RETENTION_POLICY_ENABLED
 // is "true": off, nothing is mounted and every path answers as it did before.
@@ -228,7 +241,7 @@ func (s *Server) placeLegalHold(c *gin.Context) {
 	if !ok {
 		return
 	}
-	actor, ok := s.authorizeRetention(c, orgID, legalHoldWriteRoles)
+	actor, ok := s.authorizeRetention(c, orgID, s.holdWriteRoles())
 	if !ok {
 		return
 	}
@@ -259,7 +272,7 @@ func (s *Server) releaseLegalHold(c *gin.Context) {
 	if !ok {
 		return
 	}
-	actor, ok := s.authorizeRetention(c, orgID, legalHoldWriteRoles)
+	actor, ok := s.authorizeRetention(c, orgID, s.holdWriteRoles())
 	if !ok {
 		return
 	}

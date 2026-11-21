@@ -41,6 +41,9 @@ type memoryRetentionStore struct {
 	policy  retention.Policy
 	holds   []retention.Hold
 	missing bool
+	// actorRoles is the acting role of every hold placement and release, in order,
+	// as the audit row names it.
+	actorRoles []string
 }
 
 func (m *memoryRetentionStore) GetPolicy(_ context.Context, orgID string) (*retention.Policy, error) {
@@ -77,6 +80,7 @@ func (m *memoryRetentionStore) PlaceHold(_ context.Context, _ string, actor rete
 			return retention.PlaceResult{Hold: existing, Existed: true}, nil
 		}
 	}
+	m.actorRoles = append(m.actorRoles, "place:"+actor.Role)
 	hold.CreatedBy = actor.ID
 	hold.CreatedAt = time.Now().UTC()
 	m.holds = append(m.holds, hold)
@@ -93,6 +97,7 @@ func (m *memoryRetentionStore) ReleaseHold(_ context.Context, _, holdID string, 
 		if !hold.Active() {
 			return retention.Hold{}, retention.ErrHoldAlreadyReleased
 		}
+		m.actorRoles = append(m.actorRoles, "release:"+actor.Role)
 		now := time.Now().UTC()
 		releasedBy := actor.ID
 		m.holds[i].ReleasedAt, m.holds[i].ReleasedBy = &now, &releasedBy
@@ -150,12 +155,19 @@ type retentionHarness struct {
 // guard. The route table itself is pinned by TestRetentionRoutesFollowTheSwitch.
 func newRetentionHarness(t *testing.T, roles map[string]string, threads retention.ThreadRetention) *retentionHarness {
 	t.Helper()
+	return newRetentionHarnessWithCompliance(t, roles, threads, false)
+}
+
+// newRetentionHarnessWithCompliance is the harness with ORG_COMPLIANCE_ROLE_ENABLED
+// set as complianceOn says (O-21).
+func newRetentionHarnessWithCompliance(t *testing.T, roles map[string]string, threads retention.ThreadRetention, complianceOn bool) *retentionHarness {
+	t.Helper()
 	credentials, err := parseServiceCredentials(retentionRegistry())
 	if err != nil {
 		t.Fatalf("parse registry: %v", err)
 	}
 	store := &memoryRetentionStore{}
-	server := &Server{callerRoles: fakeCallerRoles{roles: roles}, retentionOn: true}
+	server := &Server{callerRoles: fakeCallerRoles{roles: roles}, retentionOn: true, complianceRoleOn: complianceOn}
 	server.SetRetention(retention.NewService(store, threads, nil))
 
 	router := gin.New()
@@ -293,6 +305,51 @@ func TestHoldsArePlacedAndReleasedByOwnerOrCompliance(t *testing.T) {
 	}
 	if response := harness.do(http.MethodPost, legalHoldsV1Path+"/lh_"+strings.Repeat("0", 32)+"/release", "u-owner", nil); response.Code != http.StatusNotFound {
 		t.Fatalf("an unknown hold must be 404: status=%d", response.Code)
+	}
+}
+
+// O-21: with ORG_COMPLIANCE_ROLE_ENABLED on, an admin joins the owner and the
+// compliance member as a role that places and releases holds; a member and a
+// viewer never do. Every placement and release names the acting role in the audit.
+func TestAdminPlacesAndReleasesHoldsOnlyWithTheComplianceSwitchOn(t *testing.T) {
+	roles := map[string]string{"u-owner": "owner", "u-admin": "admin", "u-member": "member", "u-viewer": "viewer", "u-comp": "compliance"}
+	threadHold := func(thread string) []byte {
+		return jsonBody(map[string]any{"scope": "thread", "thread_id": thread, "hold_ref": "Matter 2026-17"})
+	}
+
+	off := newRetentionHarnessWithCompliance(t, roles, nil, false)
+	if response := off.do(http.MethodPost, legalHoldsV1Path, "u-admin", threadHold("thr-1")); response.Code != http.StatusForbidden {
+		t.Fatalf("switch off: an admin must not place a hold: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	on := newRetentionHarnessWithCompliance(t, roles, nil, true)
+	for _, user := range []string{"u-member", "u-viewer"} {
+		if response := on.do(http.MethodPost, legalHoldsV1Path, user, threadHold("thr-1")); response.Code != http.StatusForbidden {
+			t.Fatalf("switch on: %s must not place a hold: status=%d", user, response.Code)
+		}
+		if response := on.do(http.MethodGet, legalHoldsV1Path, user, nil); response.Code != http.StatusForbidden {
+			t.Fatalf("switch on: %s must not read the holds: status=%d", user, response.Code)
+		}
+	}
+	placed := on.do(http.MethodPost, legalHoldsV1Path, "u-admin", threadHold("thr-1"))
+	if placed.Code != http.StatusCreated {
+		t.Fatalf("switch on: admin placement: status=%d body=%s", placed.Code, placed.Body.String())
+	}
+	holdID := decodeBody(t, placed)["hold"].(map[string]any)["id"].(string)
+	releasePath := legalHoldsV1Path + "/" + holdID + "/release"
+	for _, user := range []string{"u-member", "u-viewer"} {
+		if response := on.do(http.MethodPost, releasePath, user, nil); response.Code != http.StatusForbidden {
+			t.Fatalf("switch on: %s must not release a hold: status=%d", user, response.Code)
+		}
+	}
+	if response := on.do(http.MethodPost, releasePath, "u-admin", nil); response.Code != http.StatusOK {
+		t.Fatalf("switch on: admin release: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := on.do(http.MethodPost, legalHoldsV1Path, "u-comp", threadHold("thr-2")); response.Code != http.StatusCreated {
+		t.Fatalf("switch on: compliance placement: status=%d", response.Code)
+	}
+	if got, want := strings.Join(on.store.actorRoles, ","), "place:admin,release:admin,place:compliance"; got != want {
+		t.Fatalf("the audit names the acting role: got %q want %q", got, want)
 	}
 }
 

@@ -26,7 +26,7 @@ func (s *Server) reserveOwnerEffect(c *gin.Context) {
 	if !ok {
 		return
 	}
-	reservation, err := s.spaceRepo.ReserveOwnerEffect(c.Request.Context(), decision, request.Commitment, time.Now().UTC())
+	reservation, err := s.spaceRepo.ReserveOwnerEffect(c.Request.Context(), decision, request.Commitment, time.Now().UTC(), s.runActionTargets)
 	if err != nil {
 		writeOwnerEffectReservationError(c, err)
 		return
@@ -39,7 +39,7 @@ func (s *Server) commitOwnerEffectReservation(c *gin.Context) {
 	if !ok {
 		return
 	}
-	reservation, err := s.spaceRepo.CommitOwnerEffectReservation(c.Request.Context(), strings.TrimSpace(c.Param("reservation_id")), decision, time.Now().UTC())
+	reservation, err := s.spaceRepo.CommitOwnerEffectReservation(c.Request.Context(), strings.TrimSpace(c.Param("reservation_id")), decision, time.Now().UTC(), s.runActionTargets)
 	if err != nil {
 		writeOwnerEffectReservationError(c, err)
 		return
@@ -68,7 +68,7 @@ func (s *Server) ownerEffectReservationRequest(c *gin.Context) (spaces.RunAction
 	decoder := json.NewDecoder(http.MaxBytesReader(c.Writer, c.Request.Body, 24*1024))
 	decoder.DisallowUnknownFields()
 	var request ownerEffectReservationRequest
-	if err := decoder.Decode(&request); err != nil || decoder.Decode(&struct{}{}) != io.EOF || request.Commitment.Validate() != nil || strings.TrimSpace(request.ControlDecisionToken) == "" {
+	if err := decoder.Decode(&request); err != nil || decoder.Decode(&struct{}{}) != io.EOF || request.Commitment.Validate(s.runActionTargets) != nil || strings.TrimSpace(request.ControlDecisionToken) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "valid owner effect reservation is required"})
 		return spaces.RunActionDecision{}, ownerEffectReservationRequest{}, false
 	}
@@ -77,7 +77,7 @@ func (s *Server) ownerEffectReservationRequest(c *gin.Context) (spaces.RunAction
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "owner effect reservation verifier unavailable"})
 		return spaces.RunActionDecision{}, ownerEffectReservationRequest{}, false
 	}
-	decision, err := spaces.VerifyRunActionDecision(key, request.ControlDecisionToken, time.Now().UTC())
+	decision, err := spaces.VerifyRunActionDecision(key, request.ControlDecisionToken, time.Now().UTC(), s.runActionTargets)
 	if err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "owner effect reservation denied"})
 		return spaces.RunActionDecision{}, ownerEffectReservationRequest{}, false

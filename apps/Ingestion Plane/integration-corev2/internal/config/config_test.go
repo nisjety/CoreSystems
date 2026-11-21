@@ -285,6 +285,131 @@ func TestNormalizeOAuthReturnURLAllowsHTTPOnlyForExplicitLocalLoopback(t *testin
 	}
 }
 
+// setTokenLeaseLoadEnv sets the variables Load needs, the same set TestLoadAcceptsBase64EncryptionKey
+// sets, without any token lease variable.
+func setTokenLeaseLoadEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("INTEGRATION_CREDENTIALS_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012")))
+	t.Setenv("INTERNAL_API_KEY", "dev")
+	t.Setenv("DATABASE_URL", "postgres://example")
+	t.Setenv("INTEGRATION_WEBHOOK_HOTPATH_URL", "http://integration-webhook-normalizer:3036/")
+	t.Setenv("FINSPO_API_KEY", "finspo-key")
+	t.Setenv("FINSPO_API_KEY_HEADER", "X-Finspo-Key")
+	t.Setenv("INTEGRATION_SERVICE_ID", "integration-corev2-prod")
+	t.Setenv("INTEGRATION_SERVICE_API_KEY", "integration-service-key")
+	t.Setenv("INTEGRATION_CORE_URL", "http://integration-corev2:3026/")
+	t.Setenv("FACEBOOK_CLIENT_ID", "facebook-app-id")
+	t.Setenv("META_APP_CLIENT_ID", "meta-app-id")
+	t.Setenv("META_APP_CLIENT_SECRET", "meta-app-secret")
+	t.Setenv("META_JS_SDK_API_VERSION", "23.0")
+	t.Setenv("META_JS_SDK_LOCALE", "nb_NO")
+	t.Setenv("META_BUSINESS_LOGIN_CONFIG_ID", "business-login-config")
+	t.Setenv("META_BUSINESS_LOGIN_SUPPORT_MESSAGING_CONFIG_ID", "support-messaging-config")
+	t.Setenv("META_BUSINESS_LOGIN_STUDIO_ADS_CONFIG_ID", "studio-ads-config")
+	t.Setenv("META_WEBHOOK_VERIFY_TOKEN", "meta-verify-token")
+	t.Setenv("META_WEBHOOK_SECRET", "meta-webhook-secret")
+	t.Setenv("THREADS_API_BASE_URL", "https://threads.test/v1/")
+}
+
+// F-f08-10: model-plane is not a default lease consumer, and the per-consumer lease auth is off
+// until the literal "true" turns it on.
+func TestTokenLeaseDefaultsOmitModelPlaneAndKeepPerConsumerAuthOff(t *testing.T) {
+	setTokenLeaseLoadEnv(t)
+	t.Setenv("INTEGRATION_TOKEN_LEASE_CONSUMERS", "")
+	t.Setenv("INTEGRATION_TOKEN_LEASE_PER_CONSUMER_AUTH", "")
+	t.Setenv("INTEGRATION_TOKEN_LEASE_CONSUMER_KEYS", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if len(cfg.TokenLeaseConsumers) == 0 {
+		t.Fatal("the default lease consumer list is empty")
+	}
+	for _, consumer := range cfg.TokenLeaseConsumers {
+		if consumer == "model-plane" {
+			t.Fatal("model-plane is a default lease consumer; it must not be")
+		}
+	}
+	if cfg.TokenLeasePerConsumerAuth || cfg.TokenLeaseConsumerKeys != "" {
+		t.Fatalf("per-consumer lease auth = %v with keys %q, want off and empty", cfg.TokenLeasePerConsumerAuth, cfg.TokenLeaseConsumerKeys)
+	}
+}
+
+// F-f08-10: the per-consumer switch reads only the literal "true", as the other switches do.
+func TestTokenLeasePerConsumerAuthIsReadStrictly(t *testing.T) {
+	for raw, want := range map[string]bool{"true": true, "1": false, "TRUE": false, "yes": false, "": false} {
+		setTokenLeaseLoadEnv(t)
+		t.Setenv("INTEGRATION_TOKEN_LEASE_PER_CONSUMER_AUTH", raw)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load returned error for %q: %v", raw, err)
+		}
+		if cfg.TokenLeasePerConsumerAuth != want {
+			t.Fatalf("INTEGRATION_TOKEN_LEASE_PER_CONSUMER_AUTH=%q reads as %v, want %v", raw, cfg.TokenLeasePerConsumerAuth, want)
+		}
+	}
+}
+
+// F-f08-10: the consumer keys parse the way CREDENTIAL_REF_SEAL_KEYS does: each entry is trimmed,
+// an entry that does not parse or names no consumer or no key is left out, and the first entry for
+// a name is kept.
+func TestTokenLeaseConsumerKeyMapSkipsUnparsableAndRepeatedEntries(t *testing.T) {
+	cfg := Config{TokenLeaseConsumerKeys: " social-publisher = fixture-lease-key-one-aaaaaaaaaaaaaaaaa , no-equals, =orphan-aaaaaaaaaaaaaaaaaaaaaaaaaaaa, email-worker=, social-publisher=fixture-lease-key-two-bbbbbbbbbbbbbbbbbb, finspo-core=fixture-lease-key-three-cccccccccccccc"}
+	keys := cfg.TokenLeaseConsumerKeyMap()
+	want := map[string]string{
+		"social-publisher": "fixture-lease-key-one-aaaaaaaaaaaaaaaaa",
+		"finspo-core":      "fixture-lease-key-three-cccccccccccccc",
+	}
+	if len(keys) != len(want) {
+		t.Fatalf("parsed %d consumer keys, want %d: %v", len(keys), len(want), keys)
+	}
+	for name, key := range want {
+		if keys[name] != key {
+			t.Fatalf("key for %s = %q, want %q", name, keys[name], key)
+		}
+	}
+}
+
+// F-f08-10: with the switch on, the keys are checked at startup. A short or placeholder key, a key
+// shared with another consumer or with the internal API key, a repeated name and a malformed entry
+// are refused, and each problem names the variable and the consumer, never a key value.
+func TestTokenLeaseConsumerKeyProblemsRefuseWeakReusedAndInternalKeys(t *testing.T) {
+	const internal = "fixture-internal-key-aaaaaaaaaaaaaaaaaaaaaaa"
+	const social = "fixture-lease-key-social-aaaaaaaaaaaaaaaaaaa"
+	const worker = "fixture-lease-key-worker-bbbbbbbbbbbbbbbbbbb"
+	base := "social-publisher=" + social
+
+	valid := Config{InternalAPIKey: internal, TokenLeaseConsumerKeys: base + ",email-worker=" + worker}
+	if problems := valid.tokenLeaseConsumerKeyProblems(); len(problems) != 0 {
+		t.Fatalf("valid keys reported problems: %v", problems)
+	}
+	if problems := (Config{InternalAPIKey: internal}).tokenLeaseConsumerKeyProblems(); len(problems) != 0 {
+		t.Fatalf("no keys reported problems: %v", problems)
+	}
+
+	refused := map[string]string{
+		"short key":       "email-worker=short-key",
+		"placeholder key": "email-worker=placeholder-lease-key-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"empty key":       "email-worker=",
+		"reused key":      "email-worker=" + social,
+		"internal key":    "email-worker=" + internal,
+		"repeated name":   "social-publisher=" + worker,
+		"malformed entry": "email-worker",
+	}
+	for label, extra := range refused {
+		cfg := Config{InternalAPIKey: internal, TokenLeaseConsumerKeys: base + "," + extra}
+		problems := cfg.tokenLeaseConsumerKeyProblems()
+		if len(problems) == 0 {
+			t.Fatalf("%s: no problem reported for %q", label, extra)
+		}
+		for _, problem := range problems {
+			if strings.Contains(problem, social) || strings.Contains(problem, worker) || strings.Contains(problem, internal) {
+				t.Fatalf("%s: a problem names a key value: %q", label, problem)
+			}
+		}
+	}
+}
+
 func TestLoadAcceptsBase64EncryptionKey(t *testing.T) {
 	t.Setenv("INTEGRATION_CREDENTIALS_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012")))
 	t.Setenv("INTERNAL_API_KEY", "dev")

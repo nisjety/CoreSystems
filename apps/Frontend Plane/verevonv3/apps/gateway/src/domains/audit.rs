@@ -40,6 +40,17 @@ const TOOL_ACTION_EVENT: &str = "tool_action";
 /// Longest filter or cursor value forwarded upstream.
 const MAX_FILTER_LEN: usize = 512;
 
+/// Who reads the whole org trail. O-21: a compliance member too, while
+/// `ORG_COMPLIANCE_ROLE_ENABLED` (read once into `AppState`) is on. Off, owner and
+/// admin only, as before.
+fn audit_org_wide_roles(state: &AppState) -> &'static [&'static str] {
+    if state.space_features.org_compliance_role {
+        &["owner", "admin", "compliance"]
+    } else {
+        &["owner", "admin"]
+    }
+}
+
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/v1/audit", get(list_audit))
@@ -90,7 +101,7 @@ async fn list_audit(
     let event = query.event.filter(|v| !v.trim().is_empty());
     let user_id = query.user_id.filter(|v| !v.trim().is_empty());
     let user_id = match scoped_user_id(
-        has_authorized_org_role(&user, &["owner", "admin"]),
+        has_authorized_org_role(&user, audit_org_wide_roles(&state)),
         &user.user_id,
         event.as_deref(),
         user_id,
@@ -274,6 +285,8 @@ mod tests {
         auth: MockServer,
         user_core: MockServer,
         audit_core: MockServer,
+        /// `ORG_COMPLIANCE_ROLE_ENABLED` as the gateway read it at boot (O-21).
+        compliance_role: bool,
     }
 
     impl Harness {
@@ -300,6 +313,7 @@ mod tests {
                 auth,
                 user_core,
                 audit_core: MockServer::start().await,
+                compliance_role: false,
             }
         }
 
@@ -308,6 +322,7 @@ mod tests {
             state.auth_core_url = self.auth.uri();
             state.user_core_url = self.user_core.uri();
             state.audit_core_url = self.audit_core.uri();
+            state.space_features.org_compliance_role = self.compliance_role;
             state
         }
 
@@ -393,6 +408,41 @@ mod tests {
             harness.upstream_query().await,
             vec!["org_id=org-1&event=tool_action"]
         );
+    }
+
+    /// O-21: a compliance member resolves, and reads the whole org trail, only while
+    /// the switch is on.
+    #[tokio::test]
+    async fn a_compliance_member_is_unpinned_only_while_the_switch_is_on() {
+        // Off, `compliance` is an unknown role to the membership authority.
+        let off = Harness::start("compliance").await;
+        off.mount_audit("compliance").await;
+        let (status, body) = off.get("/api/v1/audit?user_id=user-2").await;
+        assert_eq!(status, 503, "{body}");
+        assert!(off.upstream_query().await.is_empty());
+
+        let mut on = Harness::start("compliance").await;
+        on.compliance_role = true;
+        on.mount_audit("compliance").await;
+        let (status, body) = on.get("/api/v1/audit?user_id=user-2").await;
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = on.get("/api/v1/audit").await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            on.upstream_query().await,
+            vec!["org_id=org-1&user_id=user-2", "org_id=org-1"]
+        );
+    }
+
+    /// O-21 on: a member is still pinned to their own events.
+    #[tokio::test]
+    async fn a_member_is_still_pinned_with_the_switch_on() {
+        let mut harness = Harness::start("member").await;
+        harness.compliance_role = true;
+        harness.mount_audit("member").await;
+        let (status, body) = harness.get("/api/v1/audit?user_id=user-2").await;
+        assert_eq!(status, 403, "{body}");
+        assert!(harness.upstream_query().await.is_empty());
     }
 
     #[tokio::test]

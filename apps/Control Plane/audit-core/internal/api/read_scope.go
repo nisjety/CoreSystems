@@ -42,6 +42,13 @@ const (
 	toolActionEvent = "tool_action"
 )
 
+// canReadOrgAudit reports whether the signed delegation reads the whole org audit
+// trail: an owner or admin, and a compliance member while ORG_COMPLIANCE_ROLE_ENABLED
+// is on (O-21). Usage stays IsOrgAdmin (owner and admin) either way.
+func (a *API) canReadOrgAudit(authorization serviceAuthorization) bool {
+	return isAuditReaderRole(authorization.UserRole, a.complianceRoleOn)
+}
+
 // IsOrgAdmin reports whether the signed delegation names an org owner or admin.
 // Any other value, including an empty or unknown role, is not an admin.
 func (a serviceAuthorization) IsOrgAdmin() bool {
@@ -108,7 +115,7 @@ func logWouldDeny(route string, authorization serviceAuthorization, requestedUse
 // scope to serve, the narrowed filter, and ok=false when it already wrote a 403.
 func (a *API) resolveAuditScope(w http.ResponseWriter, r *http.Request, filter store.AuditFilter) (string, store.AuditFilter, bool) {
 	authorization, _ := serviceAuthorizationFromContext(r.Context())
-	if a.readMode == auditReadModeOff || authorization.IsOrgAdmin() {
+	if a.readMode == auditReadModeOff || a.canReadOrgAudit(authorization) {
 		return scopeOrg, filter, true
 	}
 	if a.readMode == auditReadModeReport {

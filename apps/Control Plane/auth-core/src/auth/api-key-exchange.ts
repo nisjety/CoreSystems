@@ -12,12 +12,14 @@
  * therefore never inherit a person's powers by default (INNH-10 OD-1, EP-12
  * D2).
  */
+import { isComplianceMember } from './organization-roles';
 import type { CanonicalTokenContext } from './plane-token-membership';
 
 /**
  * The closed table of audiences an API key may be exchanged into and the only
  * scopes each may carry. EP-12 adds the Agent API audiences (`agent:runs`),
- * INNH-10 the browser ones (`browser:agent`). A registry entry can only narrow
+ * INNH-10 the browser ones (`browser:agent`), O-18 the key's own budget check
+ * at cost-core (`cost:budget:check`). A registry entry can only narrow
  * this (its `apiKeyExchange` list names which of these audiences a caller may
  * use); nothing widens it.
  */
@@ -27,6 +29,8 @@ export const API_KEY_EXCHANGE_AUDIENCE_SCOPES = {
   'inference-core': ['agent:runs'],
   quarry: ['browser:agent'],
   'browser-broker': ['browser:agent'],
+  // O-18: a key checks the budget of its own turns at cost-core, nothing else.
+  'cost-core': ['cost:budget:check'],
 } as const satisfies Readonly<Record<string, readonly string[]>>;
 
 export type ApiKeyExchangeAudience =
@@ -136,6 +140,28 @@ function keyGrantsScope(
   permissions: VerifiedApiKey['permissions'],
   scope: string,
 ): boolean {
+  return (
+    keyListsScope(permissions, scope) ||
+    (IMPLIED_BY[scope] ?? []).some((holder) =>
+      keyListsScope(permissions, holder),
+    )
+  );
+}
+
+/**
+ * A scope a key holds through another it lists (O-18): a key allowed to run
+ * agent turns may check the budget of its own turns at cost-core, so no second
+ * permission has to be provisioned on every key. The implied scope is the key's
+ * own spend only; it never opens anything the held scope did not.
+ */
+const IMPLIED_BY: Readonly<Record<string, readonly string[]>> = {
+  'cost:budget:check': ['agent:runs'],
+};
+
+function keyListsScope(
+  permissions: VerifiedApiKey['permissions'],
+  scope: string,
+): boolean {
   const separator = scope.indexOf(':');
   if (!permissions || separator <= 0 || separator === scope.length - 1) {
     return false;
@@ -184,6 +210,10 @@ export function decideApiKeyExchange(
   // A banned owner keeps a member row; the key stops minting tokens while the
   // ban stands (the key itself is left alone, a ban can expire).
   if (ownerBanned) return deny('owner_banned');
+  // O-21: a compliance member runs no agents, so a key it owns carries no
+  // agent grant (agent:runs, browser:agent) whatever its permission map says.
+  // Switch off, compliance is not a role and this never applies.
+  if (isComplianceMember(membership.role)) return deny('scope_not_granted');
 
   const scopes = [...new Set(request.scopes.map((scope) => scope.trim()))];
   const audienceScopes: readonly string[] =

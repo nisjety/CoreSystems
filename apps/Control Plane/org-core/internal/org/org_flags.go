@@ -438,9 +438,9 @@ RETURNING dead_lettered_at IS NOT NULL`, eventID, GDPRAuditMaxAttempts, message)
 	return deadLettered, nil
 }
 
-// FlushOrgFlagAuditOutbox publishes pending flag-change audit intents, the same loop
-// FlushWebPolicyAuditOutbox runs. SetOrgFlag calls it once after a commit as best
-// effort; a failed publish stays pending for a later flush.
+// FlushOrgFlagAuditOutbox publishes pending flag-change audit intents. SetOrgFlag calls it
+// once after a commit as best effort, and cmd/server runs it on a ticker
+// (runOrgFlagAuditOutbox), so a failed publish is retried without another flag write.
 func (s *Service) FlushOrgFlagAuditOutbox(ctx context.Context, limit int) (GDPRAuditFlushResult, error) {
 	if limit < 1 || limit > 1000 {
 		return GDPRAuditFlushResult{}, fmt.Errorf("org flag audit outbox limit must be between 1 and 1000")

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -207,6 +208,16 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		APIKey:       cfg.Config.InternalAPIKey,
 		APIKeyHeader: cfg.Config.InternalAPIKeyHeader,
 	})
+	// F-f08-10: with INTEGRATION_TOKEN_LEASE_PER_CONSUMER_AUTH on, the token lease route takes its key
+	// per consumer, and the shared internal API key no longer opens it. Off, the route keeps internalAuth.
+	tokenLeaseAuth := internalAuth
+	if cfg.Config.TokenLeasePerConsumerAuth {
+		tokenLeaseKeys := cfg.Config.TokenLeaseConsumerKeyMap()
+		if len(tokenLeaseKeys) == 0 && cfg.Logger != nil {
+			cfg.Logger.Error().Msg("INTEGRATION_TOKEN_LEASE_PER_CONSUMER_AUTH is on but INTEGRATION_TOKEN_LEASE_CONSUMER_KEYS names no consumer; /internal/connectors/token answers 401")
+		}
+		tokenLeaseAuth = tokenLeaseConsumerAuth(cfg.Config.InternalAPIKeyHeader, tokenLeaseKeys)
+	}
 	codexSubscriptionModelPlaneAuth := auth.InternalOnly(auth.Config{
 		APIKey:       cfg.Config.CodexSubscriptionModelPlaneAPIKey,
 		APIKeyHeader: cfg.Config.InternalAPIKeyHeader,
@@ -1316,15 +1327,27 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		})
 	})
 
-	app.Post("/internal/connectors/token", chainHandlers(rateLimited, internalAuth, func(c *fiber.Ctx) error {
+	app.Post("/internal/connectors/token", chainHandlers(rateLimited, tokenLeaseAuth, func(c *fiber.Ctx) error {
 		var body tokenBody
 		if err := c.BodyParser(&body); err != nil {
 			return apiError(c, fiber.StatusBadRequest, "invalid_body", "Request body is invalid.")
 		}
-		if strings.TrimSpace(body.Consumer) == "" {
+		consumer := body.Consumer
+		if cfg.Config.TokenLeasePerConsumerAuth {
+			// The consumer is the name whose key the request presented. A body consumer may repeat that
+			// name or be left out, but it must not name another consumer.
+			authenticated := tokenLeaseAuthenticatedConsumer(c)
+			if authenticated == "" {
+				return apiError(c, fiber.StatusUnauthorized, "unauthorized", "authentication required")
+			}
+			if sent := strings.TrimSpace(body.Consumer); sent != "" && sent != authenticated {
+				return apiError(c, fiber.StatusForbidden, "consumer_mismatch", "consumer does not match the key this request presented.")
+			}
+			consumer = authenticated
+		} else if strings.TrimSpace(body.Consumer) == "" {
 			return apiError(c, fiber.StatusBadRequest, "consumer_required", "consumer is required for internal token leases.")
 		}
-		if !tokenLeaseConsumerAllowed(cfg.Config, body.Consumer) {
+		if !tokenLeaseConsumerAllowed(cfg.Config, consumer) {
 			return apiError(c, fiber.StatusForbidden, "consumer_not_allowed", "consumer is not allowed to lease provider tokens.")
 		}
 		var token oauth.AccessTokenResult
@@ -1368,7 +1391,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			}
 			return apiError(c, fiber.StatusBadGateway, "token_broker_failed", "Could not resolve a provider access token.")
 		}
-		if err := recordTokenLease(c.UserContext(), cfg, token, body.Consumer); err != nil {
+		if err := recordTokenLease(c.UserContext(), cfg, token, consumer); err != nil {
 			return apiError(c, fiber.StatusServiceUnavailable, "token_lease_audit_failed", "Token lease could not be persisted safely.")
 		}
 		return success(c, token)
@@ -2815,7 +2838,9 @@ func tokenLeaseConsumerAllowed(cfg config.Config, consumer string) bool {
 		return false
 	}
 	if len(cfg.TokenLeaseConsumers) == 0 {
-		return true
+		// F-f08-10: with the per-consumer switch on, an empty allow-list refuses every consumer. Off, an
+		// empty list is no restriction, as it always was.
+		return !cfg.TokenLeasePerConsumerAuth
 	}
 	for _, allowed := range cfg.TokenLeaseConsumers {
 		if strings.EqualFold(strings.TrimSpace(allowed), consumer) {
@@ -2823,6 +2848,56 @@ func tokenLeaseConsumerAllowed(cfg config.Config, consumer string) bool {
 		}
 	}
 	return false
+}
+
+// tokenLeaseConsumerLocal carries, for one request, the consumer whose own key the token lease route
+// authenticated (F-f08-10).
+const tokenLeaseConsumerLocal = "tokenLeaseConsumer"
+
+// tokenLeaseConsumerAuth authenticates POST /internal/connectors/token with the consumer's own key
+// (F-f08-10). The key comes from the internal key header, read as auth.InternalOnly reads it, and is
+// compared in constant time with every configured consumer key, without stopping at the first match.
+// The request's consumer is the one whose key it is. A key that matches no consumer, or more than one,
+// is refused, so a key shared by two consumers opens nothing. With no keys configured every request is
+// refused, so the route fails closed.
+func tokenLeaseConsumerAuth(header string, keys map[string]string) fiber.Handler {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		header = "X-Internal-API-Key"
+	}
+	names := make([]string, 0, len(keys))
+	for name := range keys {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return func(c *fiber.Ctx) error {
+		provided := strings.TrimSpace(c.Get(header))
+		if provided == "" {
+			provided = strings.TrimSpace(c.Get("x-internal-api-key"))
+		}
+		if provided == "" {
+			return apiError(c, fiber.StatusUnauthorized, "unauthorized", "authentication required")
+		}
+		matched, matches := "", 0
+		for _, name := range names {
+			if subtle.ConstantTimeCompare([]byte(provided), []byte(keys[name])) == 1 {
+				matched = name
+				matches++
+			}
+		}
+		if matches != 1 {
+			return apiError(c, fiber.StatusUnauthorized, "unauthorized", "invalid API key")
+		}
+		c.Locals(tokenLeaseConsumerLocal, matched)
+		return c.Next()
+	}
+}
+
+// tokenLeaseAuthenticatedConsumer returns the consumer that tokenLeaseConsumerAuth authenticated for
+// this request, or "" when the request did not pass it.
+func tokenLeaseAuthenticatedConsumer(c *fiber.Ctx) string {
+	name, _ := c.Locals(tokenLeaseConsumerLocal).(string)
+	return name
 }
 
 func filterConnectionsByCategory(connections []store.Connection, category string) []store.Connection {

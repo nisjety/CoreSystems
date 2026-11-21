@@ -130,6 +130,17 @@ var entitlementCatalog = []EntitlementSpec{
 		Get: func(p EffectPolicy) bool { return p.MessageModerateEntitled },
 		Set: func(p *EffectPolicy, v bool) { p.MessageModerateEntitled = v },
 	},
+	{
+		// F-f03-01 (DEC-19 D9): the agent browser for a Space. Control's own
+		// deny-by-default floor, read by org-core's browser-site resolve through the
+		// browser-floor route. Control issues no decision under it, so it gates no
+		// decision type. ZDRUnproven: a Space write refuses enabling it for a ZDR org
+		// until the browser plane has shown ZDR handling.
+		Key: "browser", Column: "browser_entitled",
+		Decisions: []string{}, ZDR: ZDRUnproven,
+		Get: func(p EffectPolicy) bool { return p.BrowserEntitled },
+		Set: func(p *EffectPolicy, v bool) { p.BrowserEntitled = v },
+	},
 }
 
 // effectPolicyPrivacyColumns are the nine privacy/attestation columns, in the

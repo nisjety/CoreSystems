@@ -290,6 +290,16 @@ func (s *Service) processClaimedErasure(ctx context.Context, operation ErasureOp
 			if !found {
 				break
 			}
+			// F-f02-16: org-core erases the member's browser site choices for this
+			// organisation before the child is published. A failure holds the child for retry.
+			if err := s.eraseChildBrowserSiteChoices(ctx, operation, child); err != nil {
+				terminal := child.Attempts >= maxErasureFanoutAttempts
+				nextAttempt := time.Now().UTC().Add(erasureRetryDelay(child.Attempts))
+				if failErr := s.erasureStore.FailErasureFanout(ctx, child.ChildEventID, child.Attempts, nextAttempt, err.Error(), terminal); failErr != nil {
+					return operation, fmt.Errorf("erase browser site choices: %v; persist child retry: %w", err, failErr)
+				}
+				return operation, fmt.Errorf("erase browser site choices: %w", err)
+			}
 			payload, err := erasureFanoutPayload(operation, child)
 			if err == nil {
 				err = s.erasureFanout.PublishGDPRErasure(ctx, child.ChildEventID, payload)

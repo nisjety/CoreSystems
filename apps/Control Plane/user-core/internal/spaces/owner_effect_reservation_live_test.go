@@ -175,7 +175,7 @@ func TestOwnerEffectReservationRepositoryRoundTripAgainstRealPostgres(t *testing
 		DecisionRef: "decision-owner-effect-" + suffix, RunID: "run-owner-effect-" + suffix,
 		ThreadID: "thread-owner-effect-" + suffix, OrgID: orgID, SpaceRef: spaceRef,
 		SubjectID: subjectID, ServiceAudience: ticketsCreateServiceAudience,
-		ActionID: "tickets.create", ActionSchemaHash: "sha256:" + strings.Repeat("a", 64),
+		ActionID: "tickets.create", ActionSchemaHash: ticketsCreateActionSchemaSHA256,
 		PayloadDigest: "sha256:" + strings.Repeat("b", 64), IdempotencyKey: "ticket-" + suffix,
 		RecipientAudienceRef: "personal:" + spaceRef + ":recipient:1", RecipientAudienceHash: audienceHash,
 		RecipientAudienceRevision: 1, PrivacyPolicyRef: "privacy-proof",
@@ -190,22 +190,22 @@ func TestOwnerEffectReservationRepositoryRoundTripAgainstRealPostgres(t *testing
 		IdempotencyKey: decision.IdempotencyKey, DecisionRef: decision.DecisionRef, GrantRef: "grant-" + suffix,
 	}
 	repository := NewRepository(db)
-	first, err := repository.ReserveOwnerEffect(ctx, decision, commitment, now)
+	first, err := repository.ReserveOwnerEffect(ctx, decision, commitment, now, RunActionTargetsTicketsOnly)
 	if err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
 	if first.Status != "reserved" || first.ReservationID == "" {
 		t.Fatalf("first reservation = %#v", first)
 	}
-	replay, err := repository.ReserveOwnerEffect(ctx, decision, commitment, now)
+	replay, err := repository.ReserveOwnerEffect(ctx, decision, commitment, now, RunActionTargetsTicketsOnly)
 	if err != nil || replay.ReservationID != first.ReservationID || replay.Status != "reserved" {
 		t.Fatalf("reservation replay = %#v/%v", replay, err)
 	}
-	committed, err := repository.CommitOwnerEffectReservation(ctx, first.ReservationID, decision, now)
+	committed, err := repository.CommitOwnerEffectReservation(ctx, first.ReservationID, decision, now, RunActionTargetsTicketsOnly)
 	if err != nil || committed.Status != "committed" {
 		t.Fatalf("commit = %#v/%v", committed, err)
 	}
-	committedReplay, err := repository.CommitOwnerEffectReservation(ctx, first.ReservationID, decision, now)
+	committedReplay, err := repository.CommitOwnerEffectReservation(ctx, first.ReservationID, decision, now, RunActionTargetsTicketsOnly)
 	if err != nil || committedReplay.Status != "committed" {
 		t.Fatalf("committed replay = %#v/%v", committedReplay, err)
 	}
@@ -221,14 +221,14 @@ func TestOwnerEffectReservationRepositoryRoundTripAgainstRealPostgres(t *testing
 	secondCommitment.PayloadDigest = second.PayloadDigest
 	secondCommitment.IdempotencyKey = second.IdempotencyKey
 	secondCommitment.GrantRef = "grant-revoked-" + suffix
-	reserved, err := repository.ReserveOwnerEffect(ctx, second, secondCommitment, now)
+	reserved, err := repository.ReserveOwnerEffect(ctx, second, secondCommitment, now, RunActionTargetsTicketsOnly)
 	if err != nil {
 		t.Fatalf("reserve before revocation: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE space_authority_revisions SET authority_revision=authority_revision+1 WHERE space_ref=$1`, spaceRef); err != nil {
 		t.Fatalf("advance authority revision: %v", err)
 	}
-	if _, err := repository.CommitOwnerEffectReservation(ctx, reserved.ReservationID, second, now); !errors.Is(err, ErrOwnerEffectReservationDenied) {
+	if _, err := repository.CommitOwnerEffectReservation(ctx, reserved.ReservationID, second, now, RunActionTargetsTicketsOnly); !errors.Is(err, ErrOwnerEffectReservationDenied) {
 		t.Fatalf("commit after revocation = %v, want ErrOwnerEffectReservationDenied", err)
 	}
 	var status, reason string

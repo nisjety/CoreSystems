@@ -285,6 +285,13 @@ type EffectPolicy struct {
 	// ThreadCreateEntitled, and both are inert under Zero Data Retention.
 	MessageReviseEntitled   bool `json:"message_revise_entitled"`
 	MessageModerateEntitled bool `json:"message_moderate_entitled"`
+	// BrowserEntitled (F-f03-01, DEC-19 D9) is a standing, deny-by-default floor for a
+	// Space's agents to use the agent browser at all. The organisation's site policy in
+	// org-core can allow a host, but a Space this floor does not entitle is refused every
+	// host before any browser grant is minted. It is Control's own floor, never inherited
+	// from AgentActionEntitled or SandboxCapabilityEntitled: browsing the web is its own
+	// power.
+	BrowserEntitled bool `json:"browser_entitled"`
 }
 
 func (p EffectPolicy) Validate() error {

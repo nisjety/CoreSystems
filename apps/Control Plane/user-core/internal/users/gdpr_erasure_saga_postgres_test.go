@@ -109,7 +109,10 @@ func newErasurePostgresFixture(t *testing.T) (*pgxpool.Pool, *Repository) {
 	return pool, NewRepository(&database.DB{Pool: pool})
 }
 
-func TestErasureSagaSnapshotsEveryActiveOrganizationBeforeAuthMutation(t *testing.T) {
+// TestErasureSagaSnapshotsEveryMembershipBeforeAuthMutation pins the pre-mutation snapshot over
+// every membership row, active or not. The removed organisation is in it too (P2-cp-04-rel1), so
+// the same fan-out erases the browser-site choices the member left there.
+func TestErasureSagaSnapshotsEveryMembershipBeforeAuthMutation(t *testing.T) {
 	pool, repo := newErasurePostgresFixture(t)
 	insertErasureSubject(t, pool, "u-multi-org", "org-primary")
 	if _, err := pool.Exec(context.Background(), `
@@ -138,13 +141,14 @@ func TestErasureSagaSnapshotsEveryActiveOrganizationBeforeAuthMutation(t *testin
 			}
 			orgs = append(orgs, orgID)
 		}
-		if strings.Join(orgs, ",") != "org-primary,org-secondary" {
+		if strings.Join(orgs, ",") != "org-inactive,org-primary,org-secondary" {
 			return nil, fmt.Errorf("durable pre-mutation org snapshot = %v", orgs)
 		}
 		return []byte(`{"success":true,"user_id":"u-multi-org"}`), nil
 	}}
 	fanout := &fakeErasureFanoutPublisher{}
 	svc := NewService(repo, nil, nil)
+	svc.SetBrowserSiteEraser(acceptingBrowserSiteEraser{})
 	svc.authEraser = auth
 	svc.erasureFanout = fanout
 
@@ -152,11 +156,15 @@ func TestErasureSagaSnapshotsEveryActiveOrganizationBeforeAuthMutation(t *testin
 	if err != nil {
 		t.Fatalf("hard erase multi-org subject: %v", err)
 	}
-	if !receipt.Success || fanout.calls != 2 {
-		t.Fatalf("receipt=%+v fanout calls=%d, want two acknowledged child events", receipt, fanout.calls)
+	if !receipt.Success || fanout.calls != 3 {
+		t.Fatalf("receipt=%+v fanout calls=%d, want three acknowledged child events", receipt, fanout.calls)
 	}
-	if fanout.eventIDs[0] == fanout.eventIDs[1] || len(fanout.eventIDs[0]) > 128 || len(fanout.eventIDs[1]) > 128 {
-		t.Fatalf("child IDs must be unique and bounded: %q %q", fanout.eventIDs[0], fanout.eventIDs[1])
+	seen := map[string]bool{}
+	for _, eventID := range fanout.eventIDs {
+		if seen[eventID] || len(eventID) > 128 {
+			t.Fatalf("child IDs must be unique and bounded: %q", fanout.eventIDs)
+		}
+		seen[eventID] = true
 	}
 	var published, total int
 	if err := pool.QueryRow(context.Background(), `
@@ -165,8 +173,8 @@ func TestErasureSagaSnapshotsEveryActiveOrganizationBeforeAuthMutation(t *testin
 	`, operationID).Scan(&published, &total); err != nil {
 		t.Fatalf("read fanout children: %v", err)
 	}
-	if published != 2 || total != 2 {
-		t.Fatalf("published=%d total=%d, want all two child PubAcks persisted", published, total)
+	if published != 3 || total != 3 {
+		t.Fatalf("published=%d total=%d, want all three child PubAcks persisted", published, total)
 	}
 }
 
@@ -180,6 +188,7 @@ func TestErasureSagaDoesNotCompleteUntilEveryChildHasPubAck(t *testing.T) {
 		t.Fatalf("insert second membership: %v", err)
 	}
 	svc := NewService(repo, nil, nil)
+	svc.SetBrowserSiteEraser(acceptingBrowserSiteEraser{})
 	svc.authEraser = &fakeAuthErasureExecutor{execute: func(context.Context, ErasureMode, string) ([]byte, error) {
 		return []byte(`{"success":true,"user_id":"u-partial-fanout"}`), nil
 	}}
@@ -230,6 +239,7 @@ func TestGDPRDeliveryHealthAndBoundedRequeuePreserveEvidence(t *testing.T) {
 	}
 
 	svc := NewService(repo, nil, nil)
+	svc.SetBrowserSiteEraser(acceptingBrowserSiteEraser{})
 	health, err := svc.GDPRDeliveryHealth(context.Background())
 	if err != nil {
 		t.Fatalf("delivery health: %v", err)
@@ -326,6 +336,7 @@ func TestErasureSagaPersistsBeforeMutationAndResumesWithoutRepeatingStages(t *te
 	}
 	fanout := &fakeErasureFanoutPublisher{failures: 1}
 	svc := NewService(repo, nil, nil)
+	svc.SetBrowserSiteEraser(acceptingBrowserSiteEraser{})
 	svc.authEraser = auth
 	svc.erasureFanout = fanout
 
@@ -429,6 +440,7 @@ func TestAnonymizeSagaScrubsLocalPIIAndCredentials(t *testing.T) {
 		return []byte(`{"success":true,"user_id":"u-anonymize","anonymized_email":"must-not-be-retained@example.test"}`), nil
 	}}
 	svc := NewService(repo, nil, nil)
+	svc.SetBrowserSiteEraser(acceptingBrowserSiteEraser{})
 	svc.authEraser = auth
 	svc.erasureFanout = &fakeErasureFanoutPublisher{}
 
@@ -473,6 +485,7 @@ func TestErasureSagaRejectsFalseAuthReceiptBeforeLocalMutation(t *testing.T) {
 		return []byte(`{"success":false,"user_id":"u-auth-fail","error":"auth refused"}`), nil
 	}}
 	svc := NewService(repo, nil, nil)
+	svc.SetBrowserSiteEraser(acceptingBrowserSiteEraser{})
 	svc.authEraser = auth
 	svc.erasureFanout = &fakeErasureFanoutPublisher{}
 
@@ -500,6 +513,7 @@ func TestErasureWorkerResumesPersistedOperationAfterRestart(t *testing.T) {
 	insertErasureSubject(t, pool, "u-worker", "org-worker")
 	ctx := context.Background()
 	svc := NewService(repo, nil, nil)
+	svc.SetBrowserSiteEraser(acceptingBrowserSiteEraser{})
 	svc.authEraser = &fakeAuthErasureExecutor{execute: func(context.Context, ErasureMode, string) ([]byte, error) {
 		return []byte(`{"success":true,"user_id":"u-worker"}`), nil
 	}}

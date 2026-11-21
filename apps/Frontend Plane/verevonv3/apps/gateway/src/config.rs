@@ -217,7 +217,8 @@ pub(crate) struct AppState {
     pub(crate) zdr_waiver_ui_enabled: bool,
     /// `GATEWAY_RETENTION_DECISION_SERVICE_API_KEY` (ZDR Z-19a): the gateway's own service credential
     /// for the Auth Core retention-decision policy token (`verevon-gateway-retention-decision`).
-    /// Trimmed; `None` when unset or blank, which makes every decision refuse with
+    /// Trimmed; a `change-me*` placeholder refuses boot unless `ALLOW_INSECURE_DEV_DEFAULTS=1`
+    /// (`upstream_secret`); `None` when unset or blank, which makes every decision refuse with
     /// `zdr_decision_unavailable`. A secret: never logged, never sent to a browser. `AppState` has no
     /// `Debug` impl, so it cannot be printed through the state either.
     pub(crate) retention_decision_service_api_key: Option<String>,
@@ -252,6 +253,11 @@ pub(crate) struct AppState {
     /// `credential_bindings_disabled` and nothing is sent to Integration Core. A rollout control, never an authorization
     /// input: Integration Core admits only an owner or admin and holds the sealed secret.
     pub(crate) credential_bindings_enabled: bool,
+    /// `AUTH_STEP_UP_ROUTE_ENABLED` (F-f03-15): whether `POST /api/v1/auth/step-up` exists, the gateway's relay of
+    /// Auth Core's password re-check behind a high-risk approval. Read once from the environment in `build_state`,
+    /// exactly `true` turns it on. Off, the route is not registered and answers 404 as before. A rollout control,
+    /// never an authorization input: Auth Core re-verifies the password and records the proof for the session.
+    pub(crate) auth_step_up_route_enabled: bool,
     /// "Forward an email to create a task" inbound pipeline (chat-wave2
     /// mail-task spec, owner ruling 2026-09-28: Postmark inbound,
     /// self-forward only). Empty token = the whole `/internal/mail-task/ingest`
@@ -339,6 +345,11 @@ pub(crate) struct SpaceFeatureFlags {
     /// never an authorization input: Quarry and model-gateway still decide each attach, and a Zero
     /// Data Retention run takes no attachment.
     pub(crate) browser_ai_run_attach_session: bool,
+    /// `BROWSER_DO_ENABLED` or `BROWSER_SITES_ENABLED` (WS21-S6), each the literal `true`: the browser-site routes and
+    /// the decide-time "remember" write of a `browser_site_consent` approval. Set once at startup through
+    /// `browser_sites::routes_enabled`, never in a handler. A rollout control, never an authorization input:
+    /// org-core decides the member's own choice, and admin policy and Quarry still decide at grant mint.
+    pub(crate) browser_sites_enabled: bool,
     /// `CHAT_LOCALE_HINT` (WS16-S6): stamp the viewer's interface language (`nb-NO` or `en-US`) on
     /// the model-bound body as the request-scoped `locale` field. Off removes the field, whatever
     /// the browser sent. A rollout control, never an authorization input: the field is a framing
@@ -351,6 +362,13 @@ pub(crate) struct SpaceFeatureFlags {
     /// and `source_ref` are ignored and every copy is a `chat-attachment`. A rollout control, never
     /// an authorization input: documents-api decides under the user's own scoped token.
     pub(crate) chat_artifact_promote: bool,
+    /// `GATEWAY_CHAT_PROJECTS_ENABLED` (WS18-S4, owner decision D-f06-C): a project start, a turn that names a Space
+    /// for a thread that does not exist yet, is refused with a typed 404 `chat_projects_disabled` before any upstream
+    /// call, and the composer capabilities report `chat_projects` only while it is on. Only the literal `true` turns
+    /// it on, never by default in development. Off, a turn with no thread is what it was. A rollout control, never an
+    /// authorization input: the Space role and the Model Plane decide each turn. The first release is append-only;
+    /// live following, approvals and plan hydration for project threads are not part of it.
+    pub(crate) chat_projects: bool,
     /// `CHAT_RESEARCH_RUNS` (Quarry v2 E4.6, Q4-062b): `GET /api/v1/chat/research-runs/{id}` and
     /// `POST /api/v1/chat/research-runs/{id}/cancel`, the person's read and stop of one addressable
     /// research run. Only the literal `true` turns it on; default off, never by default in development.
@@ -358,6 +376,20 @@ pub(crate) struct SpaceFeatureFlags {
     /// Model Gateway and Session Core decide that the run is the caller's own, and a zero-retention
     /// run comes back with ids, status and counters only.
     pub(crate) chat_research_runs: bool,
+    /// `WEB_DOMAIN_POLICY_BFF` (EP-9, O-23, D-f10-3): the org's web domain rules also bind this gateway's web search
+    /// (web, similar, images, videos and the answer stream) and the crawl action. Read once here. Only the literal
+    /// `true` turns it on, in every environment. Off, no handler calls Model Gateway for a domain check and every
+    /// search and crawl is what it was. On, the verdicts bind only when Model Gateway's own `WEB_DOMAIN_POLICY_MODE`
+    /// is `enforce` (under `shadow` the would-be refusals are logged, under `off` nothing is read). A rollout
+    /// control, never an authorization input: Model Gateway asks org-core under the caller's verified organisation.
+    pub(crate) web_domain_policy_bff: bool,
+    /// `ORG_COMPLIANCE_ROLE_ENABLED` (O-21): the compliance organisation role is live. Read once here, never in a
+    /// handler. Only the literal `true` turns it on, in every environment. On, an organisation admin joins the owner
+    /// and the compliance member in placing and releasing legal holds, and a compliance member reads the audit and
+    /// compliance reports. Off, the hold write list is the owner and compliance only and the audit routes stay owner
+    /// and admin only, byte for byte. A rollout control, never an authorization input: org-core and audit-core read
+    /// the same switch and decide again from the caller's own membership.
+    pub(crate) org_compliance_role: bool,
     /// `VEREVON_GATEWAY_CRAWL_ROBOTS_OVERRIDE` (WS14.S7): whether the UI crawl submit forwards
     /// `ignore_robots_txt: true` to the edge. Read once here, never in a handler. Exactly `true`
     /// enables it; any other value, and an unset variable, is off in every environment. A rollout
@@ -604,8 +636,30 @@ pub(crate) struct SpaceFeatureFlags {
     /// that forwards an identity provider's bearer token to org-core. Off (the default, in
     /// development too) answers the same 501 SCIM error as before the feature existed. A rollout
     /// control, never an authorization input: org-core resolves the token and the organization. Its
-    /// switch reads `1`, `true`, `yes` or `on`, the words the flag registry documents.
+    /// switch reads only the exact literal `true` (R-bff-02), read once by `SpaceFeatureFlags::from_env`.
     pub(crate) scim_edge: ScimEdgeConfig,
+    /// `ASSISTANT_NAVIGATION_ENABLED`: the assistant navigation model call (`POST /api/v1/ai/assistant-navigation`).
+    /// Only the literal `true` turns it on, in every environment. Off, the route answers 503
+    /// `assistant_navigation_unavailable` and no model call is made. Read once here, never in a handler.
+    pub(crate) assistant_navigation_enabled: bool,
+    /// `BROWSER_AI_RUN_REAL_GRANT` (WS21-S7): a workspace AI run starts under a real broker grant. Only the
+    /// literal `true` turns it on, and a zero-retention session never takes one. Read once here, never in a handler.
+    pub(crate) browser_ai_run_real_grant: bool,
+    /// `BROWSER_ASSISTANT_TASK_GRANTS`: an assistant task session asks for its own task-scoped grant. Only the
+    /// literal `true` turns it on. Read once here, never in a handler.
+    pub(crate) browser_assistant_task_grants: bool,
+    /// `BROWSER_DO_ENABLED` (WS21-S2): the agent browser's Do tools. Only the literal `true` turns it on. Read once
+    /// here, never in a handler; `browser_sites_enabled` reads the same value.
+    pub(crate) browser_do_enabled: bool,
+    /// `SANDBOX_THREAD_WORKSPACE_ENABLED` (WS22-S3): a thread's workspace is used and erased with the thread. Only
+    /// the literal `true` turns it on. Read once here, never in a handler.
+    pub(crate) sandbox_thread_workspace_enabled: bool,
+    /// `SKILL_MEMBER_AUTHORING` (EP-11 S1): a member may author private skills. Only the literal `true` turns it
+    /// on. Read once here, never in a handler.
+    pub(crate) skill_member_authoring: bool,
+    /// `SCHEDULE_CONTRACT_ENABLED` (DEC-16): a schedule create or renewal may carry a stored-consent contract to
+    /// Control. Only the literal `true` turns it on. Read once here, never in a handler.
+    pub(crate) schedule_contract_enabled: bool,
 }
 
 /// The SCIM edge switch and its org-core credential (principal `verevon-scim-edge`). The edge is
@@ -627,14 +681,15 @@ impl std::fmt::Debug for ScimEdgeConfig {
 }
 
 impl ScimEdgeConfig {
+    /// Read once, by `SpaceFeatureFlags::from_env` in `build_state`. `SCIM_EDGE_ENABLED` is on only for the
+    /// exact literal `true` (`1`, `yes` and `on` leave it off, and the startup report in `switch_spellings`
+    /// names them), and the edge also needs a secure credential.
     pub(crate) fn from_env() -> Self {
-        let flag = env_bool("SCIM_EDGE_ENABLED", false);
+        let flag = env_exact_true("SCIM_EDGE_ENABLED");
         let token = env::var("ORG_CORE_SCIM_EDGE_TOKEN").unwrap_or_default();
         let token = token.trim();
         let secure = service_token_is_secure(token);
-        if flag && !secure {
-            tracing::warn!("SCIM_EDGE_ENABLED is on but ORG_CORE_SCIM_EDGE_TOKEN is not a secure secret; the SCIM edge stays off");
-        }
+        warn_scim_edge_misconfiguration(&mut std::io::stderr().lock(), flag, secure);
         Self {
             enabled: flag && secure,
             token: if secure { token.to_owned() } else { String::new() },
@@ -642,8 +697,24 @@ impl ScimEdgeConfig {
     }
 }
 
+/// The startup refusal for a SCIM edge that is switched on without a secure credential. It goes to stderr,
+/// as the other startup refusals do, so it shows whatever `RUST_LOG` is. Nothing is written unless the switch
+/// is on and the credential is not a secure secret.
+fn warn_scim_edge_misconfiguration(out: &mut impl std::io::Write, flag: bool, secure: bool) {
+    if flag && !secure {
+        // A failed write to stderr must not stop the gateway from starting, so the error is dropped.
+        let _ = writeln!(
+            out,
+            "SCIM_EDGE_ENABLED is on but ORG_CORE_SCIM_EDGE_TOKEN is not a secure secret; the SCIM edge stays off"
+        );
+    }
+}
+
 impl SpaceFeatureFlags {
     pub(crate) fn from_env() -> Self {
+        // `BROWSER_DO_ENABLED` is read here once. It feeds the agent browser's Do switch and the browser-site
+        // routes (with `BROWSER_SITES_ENABLED`), so the two readings can never disagree.
+        let browser_do_enabled = env_exact_true("BROWSER_DO_ENABLED");
         Self {
             agent_wake_policy_api: space_flag("SPACE_AGENT_WAKE_POLICY_API"),
             addressed_wake_api: space_flag("SPACE_ADDRESSED_WAKE_API"),
@@ -655,11 +726,20 @@ impl SpaceFeatureFlags {
             agent_version_pinning: env::var("AGENT_VERSION_PINNING").is_ok_and(|value| value == "true"),
             browser_ai_run_attach_session: env::var("BROWSER_AI_RUN_ATTACH_SESSION")
                 .is_ok_and(|value| value == "true"),
+            browser_sites_enabled: crate::domains::browser_sites::routes_enabled(
+                browser_do_enabled,
+                env_exact_true("BROWSER_SITES_ENABLED"),
+            ),
             chat_locale_hint: space_flag("CHAT_LOCALE_HINT"),
             chat_artifact_promote: chat_artifact_promote_from(
                 env::var("CHAT_ARTIFACT_PROMOTE_ENABLED").ok().as_deref(),
             ),
+            chat_projects: chat_projects_from(
+                env::var("GATEWAY_CHAT_PROJECTS_ENABLED").ok().as_deref(),
+            ),
             chat_research_runs: env_exact_true("CHAT_RESEARCH_RUNS"),
+            web_domain_policy_bff: env_exact_true("WEB_DOMAIN_POLICY_BFF"),
+            org_compliance_role: env_exact_true("ORG_COMPLIANCE_ROLE_ENABLED"),
             crawl_robots_override: crate::domains::knowledge::quarry::crawl_robots_override_from(
                 env::var(crate::domains::knowledge::quarry::CRAWL_ROBOTS_OVERRIDE_FLAG)
                     .ok()
@@ -716,6 +796,13 @@ impl SpaceFeatureFlags {
             timeline_api: space_flag("SPACE_TIMELINE_API"),
             system_entries_api: space_flag("SPACE_SYSTEM_ENTRIES_API"),
             scim_edge: ScimEdgeConfig::from_env(),
+            assistant_navigation_enabled: env_exact_true("ASSISTANT_NAVIGATION_ENABLED"),
+            browser_ai_run_real_grant: env_exact_true("BROWSER_AI_RUN_REAL_GRANT"),
+            browser_assistant_task_grants: env_exact_true("BROWSER_ASSISTANT_TASK_GRANTS"),
+            browser_do_enabled,
+            sandbox_thread_workspace_enabled: env_exact_true("SANDBOX_THREAD_WORKSPACE_ENABLED"),
+            skill_member_authoring: env_exact_true("SKILL_MEMBER_AUTHORING"),
+            schedule_contract_enabled: env_exact_true("SCHEDULE_CONTRACT_ENABLED"),
         }
     }
 }
@@ -750,8 +837,9 @@ pub(crate) const BFF_EXACT_TRUE_SPACE_SWITCHES: [&str; 6] = [
 
 /// The default-off browser switches that read only the exact literal `true`, each through
 /// [`exact_true_flag`] or [`env_exact_true`] in `build_state` (V3e-bff-3). The startup report in
-/// `switch_spellings` lists them, so a former spelling such as `1`, `yes` or `TRUE` is logged.
-pub(crate) const BROWSER_EXACT_TRUE_SWITCHES: [&str; 9] = [
+/// `switch_spellings` lists them, so a former spelling such as `1`, `yes` or `TRUE` is logged. The last three
+/// were read per request before R-bff-01 and are read once now, by `SpaceFeatureFlags::from_env`.
+pub(crate) const BROWSER_EXACT_TRUE_SWITCHES: [&str; 12] = [
     "BROWSER_HUMAN_BROWSE",
     "BROWSER_RECIPES",
     "BROWSER_CONSENT_API",
@@ -761,6 +849,20 @@ pub(crate) const BROWSER_EXACT_TRUE_SWITCHES: [&str; 9] = [
     "BROWSER_REGION_ATTACH",
     "BROWSER_TAB_MENTIONS",
     "BROWSER_POLICY_ADMIN_API",
+    "BROWSER_DO_ENABLED",
+    "BROWSER_AI_RUN_REAL_GRANT",
+    "BROWSER_ASSISTANT_TASK_GRANTS",
+];
+
+/// The BFF switches outside the Space and browser families that read only the exact literal `true`. Each is read
+/// once, by `SpaceFeatureFlags::from_env` (or `ScimEdgeConfig::from_env` for `SCIM_EDGE_ENABLED`), in `build_state`,
+/// and never in a handler. The startup report in `switch_spellings` lists them too.
+pub(crate) const BFF_EXACT_TRUE_SWITCHES: [&str; 5] = [
+    "ASSISTANT_NAVIGATION_ENABLED",
+    "SCIM_EDGE_ENABLED",
+    "SCHEDULE_CONTRACT_ENABLED",
+    "SANDBOX_THREAD_WORKSPACE_ENABLED",
+    "SKILL_MEMBER_AUTHORING",
 ];
 
 /// Whether a Space switch reads only the exact literal `true`: a name in either list above. Every other
@@ -918,22 +1020,30 @@ pub(crate) async fn build_state() -> Result<AppState> {
         insight_core_url: env_url("INSIGHT_CORE_URL", "http://insight-core:3163"),
         leads_core_url: env_url("LEADS_CORE_URL", "http://leads-core:3164"),
         anbud_core_url: env_url("ANBUD_CORE_URL", "http://anbud-core:3138"),
-        anbud_api_key: env::var("ANBUD_API_KEY").unwrap_or_default().trim().to_owned(),
+        anbud_api_key: upstream_secret(
+            "ANBUD_API_KEY",
+            &env::var("ANBUD_API_KEY").unwrap_or_default(),
+        )?,
         anbud_api_key_header: env::var("ANBUD_API_KEY_HEADER")
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "X-API-Key".to_owned()),
         marketing_core_url: env_url("MARKETING_CORE_URL", "http://marketing-core:3165"),
-        marketing_core_service_key: env::var("MARKETING_CORE_SERVICE_KEY").unwrap_or_default().trim().to_owned(),
+        marketing_core_service_key: upstream_secret(
+            "MARKETING_CORE_SERVICE_KEY",
+            &env::var("MARKETING_CORE_SERVICE_KEY").unwrap_or_default(),
+        )?,
         marketing_core_organization_id: env::var("MARKETING_CORE_ORGANIZATION_ID").unwrap_or_default().trim().to_owned(),
         // shipping-core (Ingestion Plane) — freight aggregator; on the
         // inter-plane bus, so the in-network name resolves from the gateway.
         shipping_core_url: env_url("SHIPPING_CORE_URL", "http://shipping-core:8080"),
         user_core_url: env_url("USER_CORE_URL", "http://user-core:3012"),
         application_convex_url: std::env::var("APPLICATION_CONVEX_URL").unwrap_or_default(),
-        application_convex_service_key: std::env::var("APPLICATION_CONVEX_SERVICE_KEY")
-            .unwrap_or_default(),
+        application_convex_service_key: upstream_secret(
+            "APPLICATION_CONVEX_SERVICE_KEY",
+            &std::env::var("APPLICATION_CONVEX_SERVICE_KEY").unwrap_or_default(),
+        )?,
         graph_index_url: env_url("GRAPH_INDEX_URL", "http://dpv2-graph-index:9203"),
         quarry_edge_url: env_url("QUARRY_EDGE_URL", "http://quarry-edge:8082"),
         model_recommend_url: env_url(
@@ -976,18 +1086,15 @@ pub(crate) async fn build_state() -> Result<AppState> {
         // owns web/images/answer; autocomplete-core backs typeahead suggestions.
         searxng_url: env_url("SEARXNG_URL", "http://searxng:8080"),
         autocomplete_core_url: env_url("AUTOCOMPLETE_CORE_URL", "http://autocomplete-core:3219"),
-        autocomplete_token: env::var("AUTOCOMPLETE_INTERNAL_TOKEN")
-            .unwrap_or_default()
-            .trim()
-            .to_owned(),
+        autocomplete_token: autocomplete_internal_token()?,
         zammad_api_url: env_url("ZAMMAD_API_URL", "http://zammad-railsserver:3000"),
         remote_support_rendezvous_url: optional_env("REMOTE_SUPPORT_RENDEZVOUS_URL"),
         remote_support_relay_url: optional_env("REMOTE_SUPPORT_RELAY_URL"),
         remote_support_server_public_key: optional_env("REMOTE_SUPPORT_SERVER_PUBLIC_KEY"),
-        zammad_api_token: env::var("ZAMMAD_API_TOKEN")
-            .unwrap_or_default()
-            .trim()
-            .to_owned(),
+        zammad_api_token: upstream_secret(
+            "ZAMMAD_API_TOKEN",
+            &env::var("ZAMMAD_API_TOKEN").unwrap_or_default(),
+        )?,
         audience_token_cache: new_audience_token_cache(),
         #[cfg(test)]
         browser_run_store: crate::domains::browser::new_browser_run_store(),
@@ -1017,19 +1124,27 @@ pub(crate) async fn build_state() -> Result<AppState> {
         zdr_waiver_ui_enabled: zdr_waiver_ui_enabled_from(
             env::var("ZDR_WAIVER_UI_ENABLED").ok().as_deref(),
         ),
-        retention_decision_service_api_key: Some(optional_env(
+        retention_decision_service_api_key: Some(upstream_secret(
             "GATEWAY_RETENTION_DECISION_SERVICE_API_KEY",
-        ))
+            &optional_env("GATEWAY_RETENTION_DECISION_SERVICE_API_KEY"),
+        )?)
         .filter(|value| !value.is_empty()),
         agent_definition_versions: agent_definition_versions_enabled(),
         chat_process_output_enabled: chat_process_output_enabled(),
         chat_snapshots_enabled: chat_snapshots_enabled(),
         event_triggers_enabled: event_triggers_ui_enabled(),
         credential_bindings_enabled: credential_bindings_ui_enabled(),
-        mail_task_ingest_service_token: optional_env("MAIL_TASK_INGEST_SERVICE_TOKEN"),
+        auth_step_up_route_enabled: auth_step_up_route_enabled(),
+        mail_task_ingest_service_token: upstream_secret(
+            "MAIL_TASK_INGEST_SERVICE_TOKEN",
+            &optional_env("MAIL_TASK_INGEST_SERVICE_TOKEN"),
+        )?,
         mail_task_nats_url: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_URL"),
         mail_task_nats_user: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_USER"),
-        mail_task_nats_password: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_PASSWORD"),
+        mail_task_nats_password: upstream_secret(
+            "VEREVON_GATEWAY_MAIL_TASK_NATS_PASSWORD",
+            &optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_PASSWORD"),
+        )?,
         // See the field doc comment: no production wiring yet.
         mail_task_pipeline: None,
         space_features: SpaceFeatureFlags::from_env(),
@@ -1144,6 +1259,58 @@ fn internal_api_key() -> Result<String> {
             anyhow::bail!("INTERNAL_API_KEY must be set and cannot be a change-me* placeholder");
         }
     }
+}
+
+/// `AUTOCOMPLETE_INTERNAL_TOKEN`, the bearer the BFF presents to autocomplete-core. An unset or
+/// empty value is allowed and keeps typeahead disabled. A `change-me*` placeholder (any case) gets
+/// the same refusal as `INTERNAL_API_KEY`: it boots only when `ALLOW_INSECURE_DEV_DEFAULTS` is the
+/// exact literal `1`.
+fn autocomplete_internal_token() -> Result<String> {
+    let trimmed = env::var("AUTOCOMPLETE_INTERNAL_TOKEN")
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if !trimmed.to_ascii_lowercase().starts_with("change-me") {
+        return Ok(trimmed);
+    }
+    if insecure_dev_defaults_enabled() {
+        eprintln!(
+            "WARN: AUTOCOMPLETE_INTERNAL_TOKEN is a `change-me*` placeholder; autocomplete-core \
+             calls WILL 401 (running anyway: ALLOW_INSECURE_DEV_DEFAULTS=1)"
+        );
+        return Ok(trimmed);
+    }
+    anyhow::bail!(
+        "AUTOCOMPLETE_INTERNAL_TOKEN cannot be a `change-me*` placeholder; unset it to disable \
+         typeahead, set the real shared token, or set ALLOW_INSECURE_DEV_DEFAULTS=1 to override"
+    )
+}
+
+/// `build_state` reads these upstream secrets through here (P2-bff-05-rel1, the R-ing-04 rule):
+/// `ANBUD_API_KEY`, `MARKETING_CORE_SERVICE_KEY`, `APPLICATION_CONVEX_SERVICE_KEY`,
+/// `ZAMMAD_API_TOKEN`, `MAIL_TASK_INGEST_SERVICE_TOKEN`, `VEREVON_GATEWAY_MAIL_TASK_NATS_PASSWORD`,
+/// `GATEWAY_RETENTION_DECISION_SERVICE_API_KEY`. The value is trimmed. A `change-me*` placeholder
+/// (any case) refuses boot unless `ALLOW_INSECURE_DEV_DEFAULTS` is the exact literal `1`, as
+/// `AUTOCOMPLETE_INTERNAL_TOKEN` does. Without that refusal the placeholder boots and goes out as a
+/// credential, which gives silent 401s. The mail-task ingest token is the key the gateway checks
+/// inbound delegations with, so a public placeholder there would also let anyone forge them. An
+/// unset or blank value stays allowed and still leaves the integration off.
+fn upstream_secret(name: &str, raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if !trimmed.to_ascii_lowercase().starts_with("change-me") {
+        return Ok(trimmed.to_owned());
+    }
+    if insecure_dev_defaults_enabled() {
+        eprintln!(
+            "WARN: {name} is a `change-me*` placeholder, a public value and not a secret \
+             (running anyway: ALLOW_INSECURE_DEV_DEFAULTS=1)"
+        );
+        return Ok(trimmed.to_owned());
+    }
+    anyhow::bail!(
+        "{name} cannot be a `change-me*` placeholder; unset it to leave that integration off, \
+         set the real shared secret, or set ALLOW_INSECURE_DEV_DEFAULTS=1 to override"
+    )
 }
 
 fn required_service_token(name: &str) -> Result<String> {
@@ -1306,6 +1473,18 @@ fn event_triggers_ui_from(value: Option<&str>) -> bool {
     value == Some("true")
 }
 
+/// `AUTH_STEP_UP_ROUTE_ENABLED`, read once by `build_state` (F-f03-15). Off unless it is exactly `true`. The
+/// step-up route is registered from `AppState` when the router is built, never read from the environment.
+fn auth_step_up_route_enabled() -> bool {
+    auth_step_up_route_enabled_from(env::var("AUTH_STEP_UP_ROUTE_ENABLED").ok().as_deref())
+}
+
+/// Exactly the word `true`, for the same reason as `credential_bindings_ui_from`: a stray `1` or `TRUE` would
+/// register a route that relays a password re-check before anyone chose to.
+pub(crate) fn auth_step_up_route_enabled_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
 /// `CREDENTIAL_BINDINGS_UI_ENABLED`, read once by `build_state` (W4-CC-8). Off unless it is exactly `true`. The binding
 /// and custom connector routes read it from `AppState` at request time, never from the environment.
 fn credential_bindings_ui_enabled() -> bool {
@@ -1320,6 +1499,12 @@ fn credential_bindings_ui_from(value: Option<&str>) -> bool {
 /// Exactly the word `true` (EP-3 S8): a promote switch that a stray `1` turned on would start
 /// copying thread work product into the knowledge base before anyone chose to.
 fn chat_artifact_promote_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// Exactly the word `true` (WS18-S4, D-f06-C): a stray `1` would let a project start reach the model before anyone
+/// chose to. Read once in `SpaceFeatureFlags::from_env`, and the stream handler sees it only through `AppState`.
+fn chat_projects_from(value: Option<&str>) -> bool {
     value == Some("true")
 }
 
@@ -1509,10 +1694,10 @@ fn canonical_public_origin(value: &str, production_like: bool) -> Result<String>
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_public_origin, chat_artifact_promote_from, continue_park_form_from,
-        continue_question_form_from, dev_flags_allowed, model_entitlement_admin_from,
-        service_token_is_secure, standard_http_client, validate_service_token_distinctness,
-        SpaceFeatureFlags,
+        canonical_public_origin, chat_artifact_promote_from, chat_projects_from,
+        continue_park_form_from, continue_question_form_from, dev_flags_allowed,
+        model_entitlement_admin_from, service_token_is_secure, standard_http_client,
+        validate_service_token_distinctness, SpaceFeatureFlags,
     };
 
     #[tokio::test]
@@ -1749,6 +1934,37 @@ mod tests").next().unwrap_or(&config);
         }
     }
 
+    /// WS18-S4 (D-f06-C): the project-chat switch is on only for the exact word `true`, and a default
+    /// `SpaceFeatureFlags` has it off with the browser-site switch. The stream handler reads it only through `AppState`.
+    #[test]
+    fn the_chat_projects_flag_is_on_only_for_the_exact_word_true() {
+        assert!(chat_projects_from(Some("true")));
+        for value in [
+            None,
+            Some(""),
+            Some("false"),
+            Some("TRUE"),
+            Some(" true"),
+            Some("true "),
+            Some("1"),
+            Some("yes"),
+            Some("on"),
+        ] {
+            assert!(!chat_projects_from(value), "{value:?}");
+        }
+        assert!(!SpaceFeatureFlags::default().chat_projects);
+        assert!(!SpaceFeatureFlags::default().browser_sites_enabled);
+        let streams = include_str!("domains/chat/streams.rs").replace("\r\n", "\n");
+        let handlers = streams
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or(&streams);
+        assert!(
+            !handlers.contains("GATEWAY_CHAT_PROJECTS_ENABLED"),
+            "a handler reads the env"
+        );
+    }
+
     /// EP-3 S8: the artifact promote switch is on only for the exact word `true`, read once in
     /// `SpaceFeatureFlags::from_env`, and the documents handler sees it only through `AppState`.
     #[test]
@@ -1913,6 +2129,62 @@ mod tests").next().unwrap_or(&config);
         let vars = [
             ("APP_ENV", Some("production")),
             ("CHAT_RESEARCH_RUNS", Some("true")),
+        ];
+        with_env(&vars, || assert!(read()));
+    }
+
+    /// `WEB_DOMAIN_POLICY_BFF` (O-23) is default off in every environment and reads only the literal `true`:
+    /// `1`, `yes`, `on`, `TRUE` and a padded `true` leave the BFF's search and crawl exactly as they were.
+    #[test]
+    fn web_domain_policy_bff_flag_is_default_off_and_reads_only_the_literal_true() {
+        assert!(!super::SpaceFeatureFlags::default().web_domain_policy_bff);
+        let read = || super::SpaceFeatureFlags::from_env().web_domain_policy_bff;
+        for app_env in [None, Some("production"), Some("development")] {
+            with_env(
+                &[("APP_ENV", app_env), ("WEB_DOMAIN_POLICY_BFF", None)],
+                || {
+                    assert!(!read(), "APP_ENV={app_env:?}");
+                },
+            );
+        }
+        for value in ["", "0", "1", "yes", "on", "TRUE", " true", "true ", "enforce"] {
+            let vars = [
+                ("APP_ENV", Some("development")),
+                ("WEB_DOMAIN_POLICY_BFF", Some(value)),
+            ];
+            with_env(&vars, || assert!(!read(), "{value:?}"));
+        }
+        let vars = [
+            ("APP_ENV", Some("production")),
+            ("WEB_DOMAIN_POLICY_BFF", Some("true")),
+        ];
+        with_env(&vars, || assert!(read()));
+    }
+
+    /// `ORG_COMPLIANCE_ROLE_ENABLED` (O-21) is default off in every environment and reads only the literal `true`:
+    /// `1`, `yes`, `on`, `TRUE` and a padded `true` leave the hold and audit role lists exactly as they were.
+    #[test]
+    fn org_compliance_role_flag_is_default_off_and_reads_only_the_literal_true() {
+        assert!(!super::SpaceFeatureFlags::default().org_compliance_role);
+        let read = || super::SpaceFeatureFlags::from_env().org_compliance_role;
+        for app_env in [None, Some("production"), Some("development")] {
+            with_env(
+                &[("APP_ENV", app_env), ("ORG_COMPLIANCE_ROLE_ENABLED", None)],
+                || {
+                    assert!(!read(), "APP_ENV={app_env:?}");
+                },
+            );
+        }
+        for value in ["", "0", "1", "yes", "on", "TRUE", " true", "true "] {
+            let vars = [
+                ("APP_ENV", Some("development")),
+                ("ORG_COMPLIANCE_ROLE_ENABLED", Some(value)),
+            ];
+            with_env(&vars, || assert!(!read(), "{value:?}"));
+        }
+        let vars = [
+            ("APP_ENV", Some("production")),
+            ("ORG_COMPLIANCE_ROLE_ENABLED", Some("true")),
         ];
         with_env(&vars, || assert!(read()));
     }
@@ -2145,6 +2417,274 @@ mod tests").next().unwrap_or(&config);
         });
     }
 
+    /// R-ing-04: `AUTOCOMPLETE_INTERNAL_TOKEN` gets the same refusal as `INTERNAL_API_KEY`. Any
+    /// `change-me*` value (any case, padded or not) refuses to boot unless `ALLOW_INSECURE_DEV_DEFAULTS`
+    /// is the exact literal `1`; `true` and the other spellings leave the refusal in place.
+    #[test]
+    fn autocomplete_token_refuses_change_me_placeholders_unless_the_switch_is_exactly_one() {
+        for placeholder in ["change-me", "change-me-x", "CHANGE-ME-X", " change-me-x "] {
+            for flag in [
+                None,
+                Some("0"),
+                Some("true"),
+                Some("TRUE"),
+                Some("yes"),
+                Some("on"),
+            ] {
+                let vars = [
+                    ("AUTOCOMPLETE_INTERNAL_TOKEN", Some(placeholder)),
+                    ("ALLOW_INSECURE_DEV_DEFAULTS", flag),
+                ];
+                with_env(&vars, || {
+                    assert!(
+                        super::autocomplete_internal_token().is_err(),
+                        "{placeholder:?} {flag:?}"
+                    );
+                });
+            }
+        }
+        for placeholder in ["change-me", "change-me-x"] {
+            let vars = [
+                ("AUTOCOMPLETE_INTERNAL_TOKEN", Some(placeholder)),
+                ("ALLOW_INSECURE_DEV_DEFAULTS", Some("1")),
+            ];
+            with_env(&vars, || {
+                assert_eq!(super::autocomplete_internal_token().unwrap(), placeholder);
+            });
+        }
+    }
+
+    /// R-ing-04: a real autocomplete token passes through trimmed with the insecure switch off, and an
+    /// unset token stays allowed (empty means typeahead is disabled, as before).
+    #[test]
+    fn autocomplete_token_accepts_a_real_value_and_keeps_unset_allowed() {
+        let real = "fixture-autocomplete-token-aaaaaaaaaaaaaaaa";
+        let padded = format!("  {real}  ");
+        let vars = [
+            ("AUTOCOMPLETE_INTERNAL_TOKEN", Some(padded.as_str())),
+            ("ALLOW_INSECURE_DEV_DEFAULTS", None),
+        ];
+        with_env(&vars, || {
+            assert_eq!(super::autocomplete_internal_token().unwrap(), real);
+        });
+        let vars = [
+            ("AUTOCOMPLETE_INTERNAL_TOKEN", None),
+            ("ALLOW_INSECURE_DEV_DEFAULTS", None),
+        ];
+        with_env(&vars, || {
+            assert_eq!(super::autocomplete_internal_token().unwrap(), "");
+        });
+    }
+
+    /// The rule `upstream_secret` applies: the value is trimmed, a case-insensitive `change-me`
+    /// prefix is refused unless the switch is exactly `1`, and an empty value passes through.
+    #[test]
+    fn upstream_secret_trims_and_refuses_change_me_unless_the_switch_is_exactly_one() {
+        for raw in ["change-me", " CHANGE-ME-x ", "Change-Me-x"] {
+            for flag in [None, Some("0"), Some("true"), Some("TRUE"), Some(" 1")] {
+                with_env(&[("ALLOW_INSECURE_DEV_DEFAULTS", flag)], || {
+                    assert!(
+                        super::upstream_secret("ANBUD_API_KEY", raw).is_err(),
+                        "{raw:?} {flag:?}"
+                    );
+                });
+            }
+            with_env(&[("ALLOW_INSECURE_DEV_DEFAULTS", Some("1"))], || {
+                assert_eq!(
+                    super::upstream_secret("ANBUD_API_KEY", raw).unwrap(),
+                    raw.trim()
+                );
+            });
+        }
+        with_env(&[("ALLOW_INSECURE_DEV_DEFAULTS", None)], || {
+            assert_eq!(
+                super::upstream_secret("ZAMMAD_API_TOKEN", "  fixture-zammad-token-0001 ").unwrap(),
+                "fixture-zammad-token-0001"
+            );
+            assert_eq!(
+                super::upstream_secret("ZAMMAD_API_TOKEN", "  ").unwrap(),
+                ""
+            );
+        });
+    }
+
+    /// The seven upstream secrets `build_state` reads through `upstream_secret` (P2-bff-05-rel1).
+    const UPSTREAM_SECRETS: [&str; 7] = [
+        "ANBUD_API_KEY",
+        "MARKETING_CORE_SERVICE_KEY",
+        "APPLICATION_CONVEX_SERVICE_KEY",
+        "ZAMMAD_API_TOKEN",
+        "MAIL_TASK_INGEST_SERVICE_TOKEN",
+        "VEREVON_GATEWAY_MAIL_TASK_NATS_PASSWORD",
+        "GATEWAY_RETENTION_DECISION_SERVICE_API_KEY",
+    ];
+
+    /// Fake core tokens: distinct from each other and from the fake internal key, each at least 32
+    /// characters, so `build_state` boots with nothing but the secret under test.
+    const FAKE_CORE_TOKENS: [(&str, &str); 7] = [
+        (
+            "SESSION_CORE_SERVICE_TOKEN",
+            "fixture-session-core-service-token-0001",
+        ),
+        (
+            "USER_CORE_SERVICE_TOKEN",
+            "fixture-user-core-service-token-0001",
+        ),
+        (
+            "BILLING_CORE_SERVICE_TOKEN",
+            "fixture-billing-core-service-token-0001",
+        ),
+        (
+            "ORG_CORE_SERVICE_TOKEN",
+            "fixture-org-core-service-token-0001",
+        ),
+        (
+            "AUDIT_CORE_SERVICE_TOKEN",
+            "fixture-audit-core-service-token-0001",
+        ),
+        (
+            "NOTIFICATION_CORE_SERVICE_TOKEN",
+            "fixture-notification-core-service-token-0001",
+        ),
+        (
+            "CONVERSATION_CORE_SERVICE_TOKEN",
+            "fixture-conversation-core-service-token-0001",
+        ),
+    ];
+
+    /// Sets the given env values (`None` removes one) and puts the previous values back on drop.
+    /// Async tests hold `TEST_ENV_LOCK` across their awaits with it; `with_env` is for sync tests.
+    struct EnvOverlay(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl EnvOverlay {
+        fn apply(vars: Vec<(&'static str, Option<String>)>) -> Self {
+            let previous = vars
+                .into_iter()
+                .map(|(key, value)| {
+                    let old = std::env::var_os(key);
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                    (key, old)
+                })
+                .collect();
+            Self(previous)
+        }
+    }
+
+    impl Drop for EnvOverlay {
+        fn drop(&mut self) {
+            for (key, old) in self.0.drain(..).rev() {
+                match old {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    /// Boots `build_state` with `secret` set to `value`, every other upstream secret unset, and
+    /// `ALLOW_INSECURE_DEV_DEFAULTS` set to `insecure`. Holds the shared env lock across the boot.
+    async fn boot_with(
+        secret: &'static str,
+        value: Option<&str>,
+        insecure: Option<&str>,
+    ) -> anyhow::Result<super::AppState> {
+        let _lock = super::TEST_ENV_LOCK.lock().await;
+        let mut vars: Vec<(&'static str, Option<String>)> = vec![
+            ("APP_ENV", Some("development".to_owned())),
+            (
+                "VEREVON_PUBLIC_ORIGIN",
+                Some("http://localhost:5173".to_owned()),
+            ),
+            ("GATEWAY_CACHE_REDIS_URL", None),
+            ("AUTOCOMPLETE_INTERNAL_TOKEN", None),
+            ("ALLOW_INSECURE_DEV_DEFAULTS", insecure.map(str::to_owned)),
+            (
+                "INTERNAL_API_KEY",
+                Some("fixture-internal-key-0001".to_owned()),
+            ),
+        ];
+        for (key, token) in FAKE_CORE_TOKENS {
+            vars.push((key, Some(token.to_owned())));
+        }
+        for upstream in UPSTREAM_SECRETS {
+            let value = if upstream == secret {
+                value.map(str::to_owned)
+            } else {
+                None
+            };
+            vars.push((upstream, value));
+        }
+        let _env = EnvOverlay::apply(vars);
+        super::build_state().await
+    }
+
+    /// The value `build_state` stored for one upstream secret: `None` only for the retention key,
+    /// which is an `Option`, when it is unset.
+    fn stored_upstream_secret(state: &super::AppState, name: &str) -> Option<String> {
+        match name {
+            "ANBUD_API_KEY" => Some(state.anbud_api_key.clone()),
+            "MARKETING_CORE_SERVICE_KEY" => Some(state.marketing_core_service_key.clone()),
+            "APPLICATION_CONVEX_SERVICE_KEY" => Some(state.application_convex_service_key.clone()),
+            "ZAMMAD_API_TOKEN" => Some(state.zammad_api_token.clone()),
+            "MAIL_TASK_INGEST_SERVICE_TOKEN" => Some(state.mail_task_ingest_service_token.clone()),
+            "VEREVON_GATEWAY_MAIL_TASK_NATS_PASSWORD" => {
+                Some(state.mail_task_nats_password.clone())
+            }
+            "GATEWAY_RETENTION_DECISION_SERVICE_API_KEY" => {
+                state.retention_decision_service_api_key.clone()
+            }
+            other => panic!("{other} is not one of the upstream secrets"),
+        }
+    }
+
+    /// P2-bff-05-rel1: `build_state` applies the R-ing-04 rule to the seven upstream secrets it
+    /// used to read raw. A `change-me*` placeholder, padded or in any case, refuses boot unless
+    /// `ALLOW_INSECURE_DEV_DEFAULTS` is exactly `1`; at `1` it boots with the trimmed value. A real
+    /// value is stored trimmed (`APPLICATION_CONVEX_SERVICE_KEY` was not), and an unset one stays
+    /// allowed.
+    #[tokio::test]
+    async fn upstream_secrets_refuse_change_me_at_boot_unless_the_switch_is_exactly_one() {
+        const REAL: &str = "  fixture-upstream-secret-0001  ";
+        for secret in UPSTREAM_SECRETS {
+            for placeholder in ["change-me", "  CHANGE-ME-upstream  "] {
+                for insecure in [None, Some("0"), Some("true"), Some("yes")] {
+                    let Err(error) = boot_with(secret, Some(placeholder), insecure).await else {
+                        panic!("{secret} {placeholder:?} {insecure:?} must refuse to boot");
+                    };
+                    assert!(error.to_string().contains(secret), "{error:#}");
+                }
+                let state = boot_with(secret, Some(placeholder), Some("1"))
+                    .await
+                    .unwrap_or_else(|error| panic!("{secret} must boot at 1: {error:#}"));
+                assert_eq!(
+                    stored_upstream_secret(&state, secret).as_deref(),
+                    Some(placeholder.trim()),
+                    "{secret} keeps the trimmed placeholder at 1"
+                );
+            }
+            let state = boot_with(secret, Some(REAL), None)
+                .await
+                .unwrap_or_else(|error| panic!("{secret} with a real value: {error:#}"));
+            assert_eq!(
+                stored_upstream_secret(&state, secret).as_deref(),
+                Some("fixture-upstream-secret-0001"),
+                "{secret} is stored trimmed"
+            );
+            let state = boot_with(secret, None, None)
+                .await
+                .unwrap_or_else(|error| panic!("{secret} unset: {error:#}"));
+            assert!(
+                stored_upstream_secret(&state, secret)
+                    .unwrap_or_default()
+                    .is_empty(),
+                "{secret} unset stays empty"
+            );
+        }
+    }
+
     /// WS14.S7: `VEREVON_GATEWAY_CRAWL_ROBOTS_OVERRIDE` is off unless it is exactly `true`, in every
     /// environment, development included, and is read into `SpaceFeatureFlags` rather than per request.
     #[test]
@@ -2201,6 +2741,117 @@ mod tests").next().unwrap_or(&config);
             ("BROWSER_AI_RUN_ATTACH_SESSION", Some("true")),
         ];
         with_env(&vars, || assert!(read()));
+    }
+
+    /// R-bff-01: the seven switches that the BFF used to read per request are read once, at startup, into
+    /// `SpaceFeatureFlags`, and each is on only for the exact literal `true`. Unset and every other spelling,
+    /// including `1`, `yes`, `on`, `TRUE`, `True`, a padded `true` and an empty value, is off, in production too.
+    #[test]
+    fn bff_switches_read_once_at_startup_are_on_only_for_the_exact_true() {
+        /// The field of `SpaceFeatureFlags` that a switch's name is read into.
+        fn field(flags: &super::SpaceFeatureFlags, name: &str) -> bool {
+            match name {
+                "ASSISTANT_NAVIGATION_ENABLED" => flags.assistant_navigation_enabled,
+                "BROWSER_AI_RUN_REAL_GRANT" => flags.browser_ai_run_real_grant,
+                "BROWSER_ASSISTANT_TASK_GRANTS" => flags.browser_assistant_task_grants,
+                "BROWSER_DO_ENABLED" => flags.browser_do_enabled,
+                "SANDBOX_THREAD_WORKSPACE_ENABLED" => flags.sandbox_thread_workspace_enabled,
+                "SCHEDULE_CONTRACT_ENABLED" => flags.schedule_contract_enabled,
+                "SKILL_MEMBER_AUTHORING" => flags.skill_member_authoring,
+                other => panic!("{other} is not one of the seven switches"),
+            }
+        }
+        for name in [
+            "ASSISTANT_NAVIGATION_ENABLED",
+            "BROWSER_AI_RUN_REAL_GRANT",
+            "BROWSER_ASSISTANT_TASK_GRANTS",
+            "BROWSER_DO_ENABLED",
+            "SANDBOX_THREAD_WORKSPACE_ENABLED",
+            "SCHEDULE_CONTRACT_ENABLED",
+            "SKILL_MEMBER_AUTHORING",
+        ] {
+            assert!(
+                super::BFF_EXACT_TRUE_SWITCHES.contains(&name)
+                    || super::BROWSER_EXACT_TRUE_SWITCHES.contains(&name),
+                "{name} is not in an exact-true table, so the startup report does not name it"
+            );
+            with_env(&[("APP_ENV", Some("production")), (name, None)], || {
+                assert!(
+                    !field(&super::SpaceFeatureFlags::from_env(), name),
+                    "{name} unset"
+                );
+            });
+            for value in ["", "1", "yes", "on", "TRUE", "True", " true", "true "] {
+                let vars = [("APP_ENV", Some("production")), (name, Some(value))];
+                with_env(&vars, || {
+                    assert!(
+                        !field(&super::SpaceFeatureFlags::from_env(), name),
+                        "{name}={value:?}"
+                    );
+                });
+            }
+            let vars = [("APP_ENV", Some("production")), (name, Some("true"))];
+            with_env(&vars, || {
+                assert!(
+                    field(&super::SpaceFeatureFlags::from_env(), name),
+                    "{name}=true"
+                );
+            });
+        }
+    }
+
+    /// R-bff-02: `SCIM_EDGE_ENABLED` is read with the exact literal reader. Only `true`, with a secure
+    /// `ORG_CORE_SCIM_EDGE_TOKEN`, arms the edge. `1`, `yes`, `on`, `TRUE` and a padded `true` leave it off, and the
+    /// startup report in `switch_spellings` names the first of them.
+    #[test]
+    fn scim_edge_is_on_only_for_the_exact_true_with_a_secure_credential() {
+        let secure = "scim-edge-fixture-aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let armed = |flag: Option<&str>, token: Option<&str>| {
+            let vars = [
+                ("SCIM_EDGE_ENABLED", flag),
+                ("ORG_CORE_SCIM_EDGE_TOKEN", token),
+            ];
+            with_env(&vars, || super::ScimEdgeConfig::from_env().enabled)
+        };
+        assert!(armed(Some("true"), Some(secure)));
+        for flag in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("yes"),
+            Some("on"),
+            Some("TRUE"),
+            Some(" true"),
+            Some("true "),
+        ] {
+            assert!(!armed(flag, Some(secure)), "{flag:?}");
+        }
+        // The exact `true` still needs a secure credential: an absent, short or placeholder one leaves it off.
+        for token in [
+            None,
+            Some(""),
+            Some("short"),
+            Some("test-scim-edge-fixture-aaaaaaaaaaaaaaaaaaaaaa"),
+        ] {
+            assert!(!armed(Some("true"), token), "{token:?}");
+        }
+    }
+
+    /// R-bff-02: the SCIM misconfiguration line is a startup line on stderr, not a `tracing` event that the
+    /// default log level drops. It is written only when the switch is on and the credential is not secure.
+    #[test]
+    fn the_scim_misconfiguration_line_goes_to_stderr_only_when_it_applies() {
+        let mut out = Vec::new();
+        super::warn_scim_edge_misconfiguration(&mut out, true, false);
+        assert_eq!(
+            String::from_utf8(out).expect("the line is UTF-8"),
+            "SCIM_EDGE_ENABLED is on but ORG_CORE_SCIM_EDGE_TOKEN is not a secure secret; the SCIM edge stays off\n",
+        );
+        for (flag, secure) in [(false, false), (false, true), (true, true)] {
+            let mut out = Vec::new();
+            super::warn_scim_edge_misconfiguration(&mut out, flag, secure);
+            assert!(out.is_empty(), "flag={flag} secure={secure}");
+        }
     }
 
     /// WS04-S9 / WS16-S6 / WS16-S8 / WS12-S3: the resolver, the locale hint, the sidebar and the DM

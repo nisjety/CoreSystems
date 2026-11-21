@@ -62,6 +62,26 @@ type Service struct {
 	domainResolver  DomainTXTResolver         // nil unless ORG_DOMAIN_VERIFICATION_ENABLED (WS05-S6)
 	identityAdmin   IdentityProviderAdmin     // nil unless auth-core's SSO admin credential is set (WS05-S7)
 	scimProvisioner ScimMembershipProvisioner // nil unless ORG_SCIM_ENABLED and the auth-core credential are set (WS05-S8)
+	// browserSiteChoices erases a member's agent-browser site choices when the membership
+	// ends (F-f02-16). Nil until SetBrowserSiteChoiceEraser; a removal refuses to run
+	// without it, so no membership ends with its choices left behind.
+	browserSiteChoices BrowserSiteChoiceEraser
+}
+
+// BrowserSiteChoiceEraser erases one member's remembered agent-browser site choices in
+// one organisation once the member is no longer active (F-f02-16). browsersites.Service
+// satisfies it. Every path that ends a membership calls it.
+type BrowserSiteChoiceEraser interface {
+	DeleteRemovedMemberData(ctx context.Context, orgID, userID string) (int64, int64, error)
+}
+
+// errBrowserSiteChoicesUnwired refuses a membership removal when the choice eraser is not
+// wired, before anything is written.
+var errBrowserSiteChoicesUnwired = errors.New("browser site choice eraser is not configured")
+
+// SetBrowserSiteChoiceEraser wires the eraser. Pass a nil interface, never a typed nil.
+func (s *Service) SetBrowserSiteChoiceEraser(eraser BrowserSiteChoiceEraser) {
+	s.browserSiteChoices = eraser
 }
 
 func NewService(repo *Repository, publisher Publisher, cache ...*rediscache.Client) *Service {
@@ -317,25 +337,61 @@ func (s *Service) ListOrganizationMembers(ctx context.Context, orgID string) ([]
 	return s.repo.ListOrganizationMembers(ctx, orgID)
 }
 
-// RemoveOrganizationMember soft-deletes a member from an org.
+// RemoveOrganizationMember soft-deletes a member from an org. The member's remembered
+// agent-browser site choices are erased after the status update (F-f02-16). A failure is
+// returned, so the caller retries: the retry runs both steps again. The removal event is
+// sent either way, because the membership has ended.
 func (s *Service) RemoveOrganizationMember(ctx context.Context, orgID, userID string) error {
 	if orgID == "" || userID == "" {
 		return fmt.Errorf("organization id and user id are required")
 	}
+	if s.browserSiteChoices == nil {
+		return errBrowserSiteChoicesUnwired
+	}
 	if err := s.repo.RemoveOrganizationMember(ctx, orgID, userID); err != nil {
 		return err
 	}
+	eraseErr := s.eraseRemovedMemberChoices(ctx, orgID, userID)
 
 	orgName := ""
 	if existing, err := s.repo.GetOrganization(ctx, orgID); err == nil && existing != nil {
 		orgName = existing.Name
 	}
 	s.publishMemberRemoved(ctx, orgID, orgName, userID)
-	return nil
+	return eraseErr
 }
 
+// ReconcileOrganizationMember applies one Auth projection revision of a membership. A
+// remove also erases the member's remembered site choices (F-f02-16), which is the path
+// membership removals take in production. The erase runs on every remove, applied or
+// not, so a retried remove finishes what a failed one could not. It erases nothing while
+// the member is active, so a stale remove that a later upsert superseded leaves an active
+// member's choices alone.
 func (s *Service) ReconcileOrganizationMember(ctx context.Context, orgID, userID, role, action string, revision int64) (bool, error) {
-	return s.repo.ReconcileOrganizationMember(ctx, orgID, userID, role, action, revision)
+	if action == "remove" && s.browserSiteChoices == nil {
+		return false, errBrowserSiteChoicesUnwired
+	}
+	applied, err := s.repo.ReconcileOrganizationMember(ctx, orgID, userID, role, action, revision)
+	if err != nil {
+		return applied, err
+	}
+	if action == "remove" {
+		if eraseErr := s.eraseRemovedMemberChoices(ctx, orgID, userID); eraseErr != nil {
+			return applied, eraseErr
+		}
+	}
+	return applied, nil
+}
+
+// eraseRemovedMemberChoices erases a member's remembered site choices after the
+// membership ended. The eraser refuses to erase while the member is active. A failure is
+// logged without ids and returned.
+func (s *Service) eraseRemovedMemberChoices(ctx context.Context, orgID, userID string) error {
+	if _, _, err := s.browserSiteChoices.DeleteRemovedMemberData(ctx, orgID, userID); err != nil {
+		log.Printf("org-core: browser site choices not erased for a removed member: %v", err)
+		return fmt.Errorf("erase browser site choices: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) ReconcileOrganizationProjection(

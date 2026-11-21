@@ -62,12 +62,21 @@ func TestEveryEntitledFieldOfEffectPolicyHasACatalogueRow(t *testing.T) {
 	}
 }
 
+// noControlDecisionEntitlements are catalogue bits that gate no Control decision type,
+// with the reason. Control issues no decision under them: another plane reads the stored
+// bit. Such a row lists no Decisions, and its ZDR class is still checked.
+var noControlDecisionEntitlements = map[string]string{
+	"browser": "F-f03-01: org-core reads the Space's browser floor through the browser-floor route; Control issues no decision under it",
+}
+
 func TestEntitlementCatalogueIsWellFormedAndOrdered(t *testing.T) {
 	wantOrder := []string{
 		"thread_create", "thread_read", "retrieval_read", "import_write",
 		"agent_action", "schedule_fire", "sandbox_capability", "process_registry",
 		// W2 rows, appended in build order.
 		"run_control", "approval_grant", "dm_create", "message_revise", "message_moderate",
+		// F-f03-01 row: the agent browser floor for a Space.
+		"browser",
 	}
 	var gotOrder []string
 	seenKeys := map[string]bool{}
@@ -80,7 +89,11 @@ func TestEntitlementCatalogueIsWellFormedAndOrdered(t *testing.T) {
 		if spec.Column != spec.Key+"_entitled" {
 			t.Errorf("key %q column %q: column must be key + _entitled", spec.Key, spec.Column)
 		}
-		if len(spec.Decisions) == 0 {
+		if _, floorOnly := noControlDecisionEntitlements[spec.Key]; floorOnly {
+			if len(spec.Decisions) != 0 {
+				t.Errorf("key %q is a floor read by another plane and must list no Control decision, got %v", spec.Key, spec.Decisions)
+			}
+		} else if len(spec.Decisions) == 0 {
 			t.Errorf("key %q gates no decision type", spec.Key)
 		}
 		switch spec.ZDR {
@@ -138,7 +151,7 @@ func TestEntitlementValuesDiffAndColumnLists(t *testing.T) {
 	}
 
 	list := entitlementColumnList()
-	if !strings.HasPrefix(list, "thread_create_entitled, ") || !strings.HasSuffix(list, ", message_moderate_entitled") {
+	if !strings.HasPrefix(list, "thread_create_entitled, ") || !strings.HasSuffix(list, ", browser_entitled") {
 		t.Fatalf("entitlementColumnList = %q", list)
 	}
 	full := effectPolicyColumnList()
@@ -280,6 +293,15 @@ func TestEntitlementZDRClassIsBoundToTheRealIssueFunctions(t *testing.T) {
 		if _, dbOnly := zdrDBOnlyEntitlements[spec.Key]; dbOnly {
 			if spec.ZDR != ZDRInert {
 				t.Errorf("%s ZDR refusal lives in the DM eligibility query and must be classed zdr_inert", spec.Key)
+			}
+			continue
+		}
+		if _, floorOnly := noControlDecisionEntitlements[spec.Key]; floorOnly {
+			// No Control decision is issued under this bit, so there is no issue function to
+			// probe. Its refusal under ZDR is the Space write path's, which must treat it as
+			// unproven until the reading plane shows ZDR handling.
+			if spec.ZDR != ZDRUnproven {
+				t.Errorf("%s is read by another plane under a Space ZDR and must be classed zdr_unproven, got %q", spec.Key, spec.ZDR)
 			}
 			continue
 		}

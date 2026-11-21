@@ -124,9 +124,9 @@ describe('plane user scope contract', () => {
       const scope = 'session:memory-controls:read';
       const holdersOfScope = ['capability-core', 'orchestrator-core'];
       for (const principal of holdersOfScope) {
-        expect(
-          registry[principal].scopesByAudience['session-core'],
-        ).toContain(scope);
+        expect(registry[principal].scopesByAudience['session-core']).toContain(
+          scope,
+        );
       }
       for (const [principal, entry] of Object.entries(registry)) {
         const holders = Object.entries(entry.scopesByAudience ?? {})
@@ -201,5 +201,76 @@ describe('plane user scope contract', () => {
         expect(modelGatewayScopesForRole(role)).not.toContain(scope);
       }
     }
+  });
+
+  // O-21: the compliance role reads and runs no agents. Each case sets the
+  // switch itself; off, compliance is not a role and is treated as any unknown
+  // role is today.
+  describe('compliance role (ORG_COMPLIANCE_ROLE_ENABLED)', () => {
+    const original = process.env.ORG_COMPLIANCE_ROLE_ENABLED;
+    afterEach(() => {
+      if (original === undefined) {
+        delete process.env.ORG_COMPLIANCE_ROLE_ENABLED;
+      } else {
+        process.env.ORG_COMPLIANCE_ROLE_ENABLED = original;
+      }
+    });
+
+    it('with the switch on, grants Data and wiki reads only', () => {
+      process.env.ORG_COMPLIANCE_ROLE_ENABLED = 'true';
+      const reads = ['data:read', 'documents:read', 'wiki.read'];
+      expect(planeScopesForRole('compliance')).toEqual(reads);
+      expect(planeScopesForRole(' Compliance ', 'data-plane')).toEqual(reads);
+    });
+
+    it('with the switch on, gives no Model Plane scope beyond capability:read', () => {
+      process.env.ORG_COMPLIANCE_ROLE_ENABLED = 'true';
+      expect(planeScopesForRole('compliance', 'capability-core')).toEqual([
+        'capability:read',
+      ]);
+      for (const audience of [
+        'inference-core',
+        'cost-core',
+        'session-core',
+        'execution-core',
+        'letta-bridge',
+        'browser-broker',
+        'sandbox-manager',
+        'bridge-core',
+      ] as const) {
+        expect(planeScopesForRole('compliance', audience)).toEqual([]);
+      }
+      expect(modelGatewayScopesForRole('compliance')).toEqual([]);
+    });
+
+    it('with the switch on, never carries a write or admin scope on any audience', () => {
+      process.env.ORG_COMPLIANCE_ROLE_ENABLED = 'true';
+      for (const audience of [
+        'data-plane',
+        'quarry',
+        'ingestion',
+        'control-plane',
+        'application-plane',
+        'capability-core',
+      ] as const) {
+        for (const scope of planeScopesForRole('compliance', audience)) {
+          expect(scope).not.toMatch(/write|admin|orchestrate|approve|invoke/);
+        }
+      }
+    });
+
+    it('with the switch off, leaves every audience as it was', () => {
+      delete process.env.ORG_COMPLIANCE_ROLE_ENABLED;
+      expect(planeScopesForRole('compliance')).toEqual(
+        planeScopesForRole('member'),
+      );
+      expect(planeScopesForRole('compliance', 'inference-core')).toEqual([
+        'inference:invoke',
+      ]);
+      process.env.ORG_COMPLIANCE_ROLE_ENABLED = '1';
+      expect(planeScopesForRole('compliance', 'inference-core')).toEqual([
+        'inference:invoke',
+      ]);
+    });
   });
 });

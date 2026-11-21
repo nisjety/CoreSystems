@@ -156,7 +156,7 @@ func decodeComplianceCursor(orgID, raw string) (int64, bool) {
 }
 
 func (a *API) complianceEvents(w http.ResponseWriter, r *http.Request) {
-	authorization, ok := requireComplianceRole(w, r)
+	authorization, ok := requireComplianceRole(w, r, a.complianceRoleOn)
 	if !ok {
 		return
 	}
@@ -232,7 +232,7 @@ func complianceFilterDetails(query url.Values) map[string]string {
 }
 
 func (a *API) complianceManifest(w http.ResponseWriter, r *http.Request) {
-	authorization, ok := requireComplianceRole(w, r)
+	authorization, ok := requireComplianceRole(w, r, a.complianceRoleOn)
 	if !ok {
 		return
 	}
@@ -267,7 +267,7 @@ type complianceVerifyRequest struct {
 }
 
 func (a *API) complianceVerify(w http.ResponseWriter, r *http.Request) {
-	authorization, ok := requireComplianceRole(w, r)
+	authorization, ok := requireComplianceRole(w, r, a.complianceRoleOn)
 	if !ok {
 		return
 	}
@@ -319,7 +319,7 @@ func (a *API) complianceVerify(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) complianceKeys(w http.ResponseWriter, r *http.Request) {
-	authorization, ok := requireComplianceRole(w, r)
+	authorization, ok := requireComplianceRole(w, r, a.complianceRoleOn)
 	if !ok {
 		return
 	}
@@ -354,7 +354,7 @@ type exportStatusReader interface {
 // destination how far it has delivered and how it last failed, against the
 // chain head. It never carries a destination URL or secret.
 func (a *API) complianceExportStatus(w http.ResponseWriter, r *http.Request) {
-	authorization, ok := requireComplianceRole(w, r)
+	authorization, ok := requireComplianceRole(w, r, a.complianceRoleOn)
 	if !ok {
 		return
 	}

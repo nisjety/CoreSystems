@@ -519,7 +519,7 @@ func TestRequireComplianceRoleAcceptsOnlyOwnerAndAdmin(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodGet, complianceEventsURL, nil)
 	recorder := httptest.NewRecorder()
-	if _, ok := requireComplianceRole(recorder, request); ok || recorder.Code != http.StatusForbidden {
+	if _, ok := requireComplianceRole(recorder, request, false); ok || recorder.Code != http.StatusForbidden {
 		t.Fatalf("a request with no authorization in its context must be refused, got ok=%t status=%d", ok, recorder.Code)
 	}
 }

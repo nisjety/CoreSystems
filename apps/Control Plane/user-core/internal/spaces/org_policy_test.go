@@ -26,6 +26,9 @@ func allEntitlements(value bool) map[string]bool {
 // is "every bit the presets cover", not "every bit".
 var explicitOnlyEntitlements = []string{
 	"run_control", "approval_grant", "dm_create", "message_revise", "message_moderate",
+	// F-f03-01: the agent browser floor is a deny-by-default power an admin enables for a
+	// Space on its own; no preset turns it on.
+	"browser",
 }
 
 func presetCoveredEntitlements() map[string]bool {
@@ -209,7 +212,7 @@ func TestBuildOrgPolicyViewNotProvisionedShape(t *testing.T) {
 		if row.Enabled || row.Effective || row.ZDRBlocked {
 			t.Errorf("%s is on or blocked in a not-provisioned org: %+v", row.Key, row)
 		}
-		if len(row.Decisions) == 0 {
+		if _, floorOnly := noControlDecisionEntitlements[row.Key]; !floorOnly && len(row.Decisions) == 0 {
 			t.Errorf("%s lists no decisions", row.Key)
 		}
 	}

@@ -71,7 +71,9 @@ type RunActionDecisionRequest struct {
 	Nonce            string
 }
 
-func (r RunActionDecisionRequest) Validate() error {
+// Validate checks the binding a Model execution lane presents, for the operator's table mode. The action
+// must be admitted in that mode, and the schema hash it names must be the one the table holds for it.
+func (r RunActionDecisionRequest) Validate(mode RunActionTargetsMode) error {
 	for name, value := range map[string]string{
 		"action_id": r.ActionID, "action_schema_hash": r.ActionSchemaHash,
 		"payload_digest": r.PayloadDigest, "idempotency_key": r.IdempotencyKey,
@@ -92,8 +94,14 @@ func (r RunActionDecisionRequest) Validate() error {
 		len(strings.TrimSpace(r.DecisionRef)) > 200 || len(strings.TrimSpace(r.Nonce)) > 200 {
 		return fmt.Errorf("run action decision binding is oversized")
 	}
-	if _, found := runActionTarget(strings.TrimSpace(r.ActionID)); !found {
+	target, found := runActionTargetForMode(strings.TrimSpace(r.ActionID), mode)
+	if !found {
 		return fmt.Errorf("run action is not owner-approved")
+	}
+	// The decision binds the schema the table holds for the action. A caller that names
+	// another schema is refused here, so no decision carries a schema the owner did not approve.
+	if strings.TrimSpace(r.ActionSchemaHash) != target.SchemaHash {
+		return fmt.Errorf("run action schema hash is not owner-approved")
 	}
 	return nil
 }
@@ -134,7 +142,9 @@ type RunActionDecision struct {
 	Nonce                      string    `json:"nonce"`
 }
 
-func (d RunActionDecision) Validate() error {
+// Validate checks a decision for the operator's table mode: the action must be admitted in that mode, and
+// the decision must carry the schema hash the table holds for it.
+func (d RunActionDecision) Validate(mode RunActionTargetsMode) error {
 	for name, value := range map[string]string{
 		"decision_ref": d.DecisionRef, "run_id": d.RunID, "thread_id": d.ThreadID,
 		"org_id": d.OrgID, "space_ref": d.SpaceRef, "subject_id": d.SubjectID,
@@ -154,9 +164,12 @@ func (d RunActionDecision) Validate() error {
 	if !validSHA256Commitment(d.ActionSchemaHash) || !validSHA256Commitment(d.PayloadDigest) {
 		return fmt.Errorf("run action decision commitments are invalid")
 	}
-	target, found := runActionTargetFor(d.ActionID)
+	target, found := runActionTargetForMode(d.ActionID, mode)
 	if !found || d.ServiceAudience != target.ServiceAudience {
 		return fmt.Errorf("run action decision target is invalid")
+	}
+	if strings.TrimSpace(d.ActionSchemaHash) != target.SchemaHash {
+		return fmt.Errorf("run action decision schema hash is invalid")
 	}
 	if d.RecipientAudienceRevision <= 0 || d.AuthorityRevision <= 0 || len(d.Permissions) != 1 || d.Permissions[0] != target.Permission {
 		return fmt.Errorf("run action decision authority is invalid")
@@ -170,15 +183,16 @@ func (d RunActionDecision) Validate() error {
 // IssueRunActionDecision requires Control's freshly resolved Space evidence to
 // match Session Core's immutable run projection exactly. Session Core's source
 // authorization reference is carried only as provenance; it is never named or
-// treated as a target owner resource authorization.
-func IssueRunActionDecision(evidence PersonalThreadDecisionEvidence, authority RunActionAuthority, request RunActionDecisionRequest, now time.Time) (RunActionDecision, error) {
+// treated as a target owner resource authorization. The action must be admitted
+// in the operator's table mode, and the request's schema hash must be the table's.
+func IssueRunActionDecision(evidence PersonalThreadDecisionEvidence, authority RunActionAuthority, request RunActionDecisionRequest, now time.Time, mode RunActionTargetsMode) (RunActionDecision, error) {
 	if err := evidence.ValidateForAgentAction(); err != nil {
 		return RunActionDecision{}, err
 	}
 	if err := authority.Validate(); err != nil {
 		return RunActionDecision{}, err
 	}
-	if err := request.Validate(); err != nil || now.IsZero() {
+	if err := request.Validate(mode); err != nil || now.IsZero() {
 		return RunActionDecision{}, fmt.Errorf("run action decision request is invalid")
 	}
 	// The run is bound to the thread's original creation authorization. This is
@@ -195,7 +209,7 @@ func IssueRunActionDecision(evidence PersonalThreadDecisionEvidence, authority R
 	) || evidence.ResourceAuthorizationRef != expectedSourceRef {
 		return RunActionDecision{}, fmt.Errorf("run action authority does not match current Control authority")
 	}
-	target, _ := runActionTargetFor(request.ActionID)
+	target, _ := runActionTargetForMode(request.ActionID, mode)
 	return RunActionDecision{
 		DecisionRef:                strings.TrimSpace(request.DecisionRef),
 		RunID:                      strings.TrimSpace(authority.RunID),
@@ -235,11 +249,11 @@ func IssueRunActionDecision(evidence PersonalThreadDecisionEvidence, authority R
 // signed bearer remains local to the execution-to-owner hop. Any effective
 // membership, audience, privacy, or entitlement change advances authority and
 // must make the old claim set ineligible before the owner commits its effect.
-func ValidateCurrentRunActionDecision(evidence PersonalThreadDecisionEvidence, decision RunActionDecision) error {
+func ValidateCurrentRunActionDecision(evidence PersonalThreadDecisionEvidence, decision RunActionDecision, mode RunActionTargetsMode) error {
 	if err := evidence.ValidateForAgentAction(); err != nil {
 		return fmt.Errorf("current agent action authority is ineligible: %w", err)
 	}
-	if err := decision.Validate(); err != nil {
+	if err := decision.Validate(mode); err != nil {
 		return fmt.Errorf("run action decision is invalid: %w", err)
 	}
 	expectedSourceRef := fmt.Sprintf("control:%s:thread-create:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
@@ -264,12 +278,13 @@ func ValidateCurrentRunActionDecision(evidence PersonalThreadDecisionEvidence, d
 }
 
 // SignRunActionDecision uses a different envelope version from a Space thread
-// decision, so neither recipient can accidentally accept the other contract.
-func SignRunActionDecision(key SigningKey, decision RunActionDecision) (string, error) {
+// decision, so neither recipient can accidentally accept the other contract. A
+// decision is signed only while its action is admitted in the operator's mode.
+func SignRunActionDecision(key SigningKey, decision RunActionDecision, mode RunActionTargetsMode) (string, error) {
 	if strings.TrimSpace(key.ID) == "" || len(key.PrivateKey) != ed25519.PrivateKeySize {
 		return "", fmt.Errorf("valid run action signing key is required")
 	}
-	if err := decision.Validate(); err != nil {
+	if err := decision.Validate(mode); err != nil {
 		return "", err
 	}
 	payload, err := json.Marshal(decision)
@@ -284,7 +299,7 @@ func SignRunActionDecision(key SigningKey, decision RunActionDecision) (string, 
 // accepting it back on the private owner-effect reservation hop. The envelope
 // is not persisted; its immutable facts are copied into the reservation ledger
 // only after this verification and a fresh authority-fence check succeed.
-func VerifyRunActionDecision(key SigningKey, token string, now time.Time) (RunActionDecision, error) {
+func VerifyRunActionDecision(key SigningKey, token string, now time.Time, mode RunActionTargetsMode) (RunActionDecision, error) {
 	if strings.TrimSpace(key.ID) == "" || len(key.PrivateKey) != ed25519.PrivateKeySize || now.IsZero() {
 		return RunActionDecision{}, fmt.Errorf("valid run action verification key is required")
 	}
@@ -311,7 +326,7 @@ func VerifyRunActionDecision(key SigningKey, token string, now time.Time) (RunAc
 	if err := decoder.Decode(&decision); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		return RunActionDecision{}, fmt.Errorf("run action decision claims are invalid")
 	}
-	if err := decision.Validate(); err != nil || decision.ExpiresAt.Before(now) || decision.IssuedAt.After(now.Add(time.Minute)) {
+	if err := decision.Validate(mode); err != nil || decision.ExpiresAt.Before(now) || decision.IssuedAt.After(now.Add(time.Minute)) {
 		return RunActionDecision{}, fmt.Errorf("run action decision is invalid or expired")
 	}
 	return decision, nil

@@ -3,7 +3,8 @@
 //! org-core stores the window and the holds, checks every rule and answers the
 //! retention sweeper; this module is only the Frontend Plane's door to it. An owner
 //! or admin sets the window; an owner or a compliance member places and releases a
-//! hold. It decides nothing about what is kept.
+//! hold, and with `ORG_COMPLIANCE_ROLE_ENABLED` on an admin does too. It decides
+//! nothing about what is kept.
 //!
 //! Two role gates guard every call, on purpose: this gateway's session role and
 //! org-core's own membership table, because the role this gateway forwards is a
@@ -39,9 +40,22 @@ const PUT_FIELDS: [&str; 2] = ["expected_revision", "thread_days"];
 const HOLD_FIELDS: [&str; 3] = ["scope", "thread_id", "hold_ref"];
 
 /// Who may read holds, and who may place or release one. An admin sets the
-/// window but cannot lift a hold that could concern them.
+/// window but, as built, cannot lift a hold that could concern them.
 const HOLD_READ_ROLES: [&str; 3] = ["owner", "admin", "compliance"];
 const HOLD_WRITE_ROLES: [&str; 2] = ["owner", "compliance"];
+/// O-21 (`ORG_COMPLIANCE_ROLE_ENABLED`, read once into `AppState`): with the
+/// compliance role live, an organisation admin may also place and release holds.
+const HOLD_WRITE_ROLES_WITH_ADMIN: [&str; 3] = ["owner", "admin", "compliance"];
+
+/// The roles that may place or release a hold under the switch's current value.
+/// Off, exactly the owner and compliance list this gateway always had.
+fn hold_write_roles(state: &AppState) -> &'static [&'static str] {
+    if state.space_features.org_compliance_role {
+        &HOLD_WRITE_ROLES_WITH_ADMIN
+    } else {
+        &HOLD_WRITE_ROLES
+    }
+}
 
 fn not_enabled() -> GatewayJsonResponse {
     (
@@ -164,7 +178,7 @@ pub(crate) async fn place_legal_hold(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> GatewayJsonResponse {
-    if let Err(response) = require_org_role(&user, &id, &HOLD_WRITE_ROLES) {
+    if let Err(response) = require_org_role(&user, &id, hold_write_roles(&state)) {
         return response;
     }
     if let Err(message) = validate_hold_body(&body) {
@@ -179,7 +193,7 @@ pub(crate) async fn release_legal_hold(
     Extension(user): Extension<AuthenticatedUser>,
     Path((id, hold_id)): Path<(String, String)>,
 ) -> GatewayJsonResponse {
-    if let Err(response) = require_org_role(&user, &id, &HOLD_WRITE_ROLES) {
+    if let Err(response) = require_org_role(&user, &id, hold_write_roles(&state)) {
         return response;
     }
     if !valid_hold_id(&hold_id) {
@@ -412,8 +426,10 @@ mod tests {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
         for role in ["member", "compliance"] {
             let up = Upstreams::start(role).await;
+            // `compliance` resolves as a role only while the gateway's O-21 switch is
+            // on; it still never sets the window.
             let (status, body) = send(
-                up.state(),
+                state_with_compliance_role(&up, role == "compliance"),
                 "PUT",
                 "/api/v1/orgs/org-1/retention",
                 Some(json!({"expected_revision": 0, "thread_days": 90})),
@@ -466,8 +482,10 @@ mod tests {
                 })),
             )
             .await;
+        // The role exists for this gateway only with the switch on (O-21); the
+        // owner-and-compliance write list is the same either way.
         let (status, body) = send(
-            compliance.state(),
+            state_with_compliance_role(&compliance, true),
             "POST",
             "/api/v1/orgs/org-1/legal-holds",
             Some(thread_hold()),
@@ -475,6 +493,106 @@ mod tests {
         .await;
         assert_eq!(status, 201, "{body}");
         assert_eq!(body["hold"]["id"], HOLD_ID);
+    }
+
+    /// `state` with `ORG_COMPLIANCE_ROLE_ENABLED` as the gateway read it at boot.
+    fn state_with_compliance_role(up: &Upstreams, on: bool) -> AppState {
+        let mut state = up.state();
+        state.space_features.org_compliance_role = on;
+        state
+    }
+
+    /// O-21 off: an admin's place and release stop at this gateway, org-core sees
+    /// nothing, and a member and a viewer are refused the same.
+    #[tokio::test]
+    async fn with_the_compliance_switch_off_admin_member_and_viewer_cannot_place_or_release() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for role in ["admin", "member", "viewer"] {
+            let up = Upstreams::start(role).await;
+            let (status, _) = send(
+                state_with_compliance_role(&up, false),
+                "POST",
+                "/api/v1/orgs/org-1/legal-holds",
+                Some(thread_hold()),
+            )
+            .await;
+            assert_eq!(status, 403, "{role} place");
+            let (status, _) = send(
+                state_with_compliance_role(&up, false),
+                "POST",
+                &format!("/api/v1/orgs/org-1/legal-holds/{HOLD_ID}/release"),
+                None,
+            )
+            .await;
+            assert_eq!(status, 403, "{role} release");
+            assert_eq!(up.org_core_requests().await, 0, "{role}");
+        }
+    }
+
+    /// O-21 on: an admin's place and release are forwarded to org-core, which
+    /// decides again; a member and a viewer are still refused here.
+    #[tokio::test]
+    async fn with_the_compliance_switch_on_an_admin_places_and_releases_a_hold() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let admin = Upstreams::start("admin").await;
+        admin
+            .org_core(
+                "POST",
+                ORG_CORE_HOLDS,
+                Some(thread_hold()),
+                ResponseTemplate::new(201).set_body_json(json!({
+                    "hold": {"id": HOLD_ID, "scope": "thread", "target_ref": "thr-1"},
+                    "existed": false
+                })),
+            )
+            .await;
+        admin
+            .org_core(
+                "POST",
+                &format!("{ORG_CORE_HOLDS}/{HOLD_ID}/release"),
+                None,
+                ResponseTemplate::new(200).set_body_json(json!({"id": HOLD_ID})),
+            )
+            .await;
+        let (status, body) = send(
+            state_with_compliance_role(&admin, true),
+            "POST",
+            "/api/v1/orgs/org-1/legal-holds",
+            Some(thread_hold()),
+        )
+        .await;
+        assert_eq!(status, 201, "{body}");
+        assert_eq!(body["hold"]["id"], HOLD_ID);
+        let (status, _) = send(
+            state_with_compliance_role(&admin, true),
+            "POST",
+            &format!("/api/v1/orgs/org-1/legal-holds/{HOLD_ID}/release"),
+            None,
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(admin.org_core_requests().await, 2);
+
+        for role in ["member", "viewer"] {
+            let up = Upstreams::start(role).await;
+            let (status, _) = send(
+                state_with_compliance_role(&up, true),
+                "POST",
+                "/api/v1/orgs/org-1/legal-holds",
+                Some(thread_hold()),
+            )
+            .await;
+            assert_eq!(status, 403, "{role} place");
+            let (status, _) = send(
+                state_with_compliance_role(&up, true),
+                "POST",
+                &format!("/api/v1/orgs/org-1/legal-holds/{HOLD_ID}/release"),
+                None,
+            )
+            .await;
+            assert_eq!(status, 403, "{role} release");
+            assert_eq!(up.org_core_requests().await, 0, "{role}");
+        }
     }
 
     #[tokio::test]

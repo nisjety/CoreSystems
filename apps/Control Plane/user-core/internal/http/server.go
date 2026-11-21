@@ -41,6 +41,9 @@ type Server struct {
 	mailTaskEffectPolicy   MailTaskEffectPolicyResolver
 	runActionAuthority     RunActionAuthorityResolver
 	scheduledStepAuthority ScheduledStepAuthorityResolver
+	// runActionTargets is RUN_ACTION_TARGETS, read once at construction (F-f03-10). Only the exact
+	// literal "table" widens the owner actions a Model may be offered; unset or unknown is tickets_only.
+	runActionTargets spaces.RunActionTargetsMode
 	// scheduleContractsEnabled is SCHEDULE_CONTRACT_ENABLED. Off by default: a
 	// create request carrying a stored-consent contract is refused.
 	scheduleContractsEnabled bool
@@ -59,6 +62,16 @@ type Server struct {
 	// spaceMemoryDecisions is CONTROL_SPACE_MEMORY_DECISIONS (EP-8 S7). Off: the
 	// memory-decision route answers 404 and the BFF reports not authorized.
 	spaceMemoryDecisions bool
+
+	// spaceSkillWriteDecisions is SPACE_SKILL_WRITE_DECISIONS (F-f10-18). Off:
+	// the skill-write-decision route answers 404 and no decision is signed.
+	spaceSkillWriteDecisions bool
+
+	// complianceRoleOn is ORG_COMPLIANCE_ROLE_ENABLED (O-21). Off: a canonical
+	// membership decision carrying the compliance role is refused as an unsupported
+	// role, as before. On: it is a valid organisation role. Only the literal "true"
+	// turns it on.
+	complianceRoleOn bool
 
 	port                   string
 	httpClient             *http.Client
@@ -153,6 +166,7 @@ func NewServer(userService *users.Service, aclRepo *users.AclRepository, sharedP
 		authMembershipService: strings.TrimRight(strings.TrimSpace(os.Getenv("AUTH_SERVICE_URL")), "/"),
 		authMembershipToken:   strings.TrimSpace(os.Getenv("USER_CORE_MEMBERSHIP_SERVICE_TOKEN")),
 		publisher:             sharedPublisher,
+		runActionTargets:      spaces.RunActionTargetsModeFromLookup(os.Getenv),
 	}
 	if userService != nil {
 		s.removeMembershipProjection = userService.RemoveMembership
@@ -176,6 +190,8 @@ func NewServer(userService *users.Service, aclRepo *users.AclRepository, sharedP
 	if s.internalKey == "" {
 		log.Warn().Msg("INTERNAL_API_KEY/INTERNAL_SERVICE_SECRET not set; outbound internal calls will fail")
 	}
+
+	s.complianceRoleOn = os.Getenv("ORG_COMPLIANCE_ROLE_ENABLED") == "true"
 
 	s.setupRoutes()
 

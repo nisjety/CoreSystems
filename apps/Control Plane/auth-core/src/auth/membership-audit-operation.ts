@@ -3,6 +3,7 @@ import {
   type OutboxRevision,
 } from './outbox-revision';
 import type { MembershipAuditHookAction } from './membership-audit-hook-evidence';
+import { isCanonicalOrganizationRole } from './organization-roles';
 
 export type MembershipAuditOperationMember = Readonly<{
   id: string;
@@ -43,7 +44,6 @@ export type MembershipAuditOperationCaptureResult =
   | Readonly<{ status: 'bad_request' }>
   | Readonly<{ status: 'invalid' }>;
 
-const CANONICAL_PROJECT_ROLES = new Set(['owner', 'admin', 'member', 'viewer']);
 const MEMBERSHIP_MUTATION_PATHS = new Set([
   '/organization/update-member-role',
   '/organization/remove-member',
@@ -69,7 +69,7 @@ function boundedString(value: unknown, maxLength: number): string | null {
 function canonicalProjectRole(value: unknown): string | null {
   if (typeof value !== 'string' || value.includes(',')) return null;
   const normalized = value.trim().toLowerCase();
-  return CANONICAL_PROJECT_ROLES.has(normalized) ? normalized : null;
+  return isCanonicalOrganizationRole(normalized) ? normalized : null;
 }
 
 export async function captureMembershipAuditOperationResult(

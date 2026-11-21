@@ -371,7 +371,16 @@ go run ./cmd/api
   Callers must include a stable `consumer` such as `finspo-core`; token leases
   are audited against that consumer identity before any provider token leaves
   this service. `INTEGRATION_TOKEN_LEASE_CONSUMERS` is the allowlist for these
-  internal consumers.
+  internal consumers. Its default no longer includes `model-plane`: that plane
+  redeems credential references and never leases a raw provider token.
+  With `INTEGRATION_TOKEN_LEASE_PER_CONSUMER_AUTH=true` (only the literal `true`
+  turns it on), each consumer presents its own key from
+  `INTEGRATION_TOKEN_LEASE_CONSUMER_KEYS`, a comma-separated list of
+  `consumer=key` pairs. The consumer is the name that key belongs to. A body
+  `consumer` may repeat that name or be left out; any other name is refused with
+  `consumer_mismatch`. The shared internal API key no longer opens the route. An
+  empty allowlist then refuses every consumer, and no keys configured answers 401.
+  Move each caller onto its own key before the switch goes on.
 - Expired provider tokens are refreshed through in-process singleflight and,
   with the Postgres repository, a transaction-scoped advisory lock per
   connection. A replica re-reads the connection under the lock before calling

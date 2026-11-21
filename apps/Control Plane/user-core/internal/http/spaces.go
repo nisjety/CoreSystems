@@ -23,6 +23,7 @@ const capabilityCorePrincipal = "capability-core"
 const orchestratorCorePrincipal = "orchestrator-core"
 const executionCorePrincipal = "execution-core"
 const conversationCorePrincipal = "conversation-core"
+const orgCorePrincipal = "org-core"
 
 // requireSpaceLifecycleRegistrar admits only the narrowly-scoped Application
 // lifecycle workload. A general service credential, bearer token, or forged
@@ -114,6 +115,20 @@ func (s *Server) requireSpaceImportReauthorizer(c *gin.Context) {
 	if c.GetString("auth_method") != "service_principal" ||
 		c.GetString("service_id") != importsCorePrincipal {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Imports Core Space reauthorization principal required"})
+		return
+	}
+	c.Next()
+}
+
+// requireSpaceBrowserFloorReader admits only org-core's service identity, and only with
+// the spaces:browser-floor:read scope, to read one Space's browser floor (F-f03-01). It
+// refuses a user delegation: the floor is a machine answer for the site decision, not a
+// member's view.
+func (s *Server) requireSpaceBrowserFloorReader(c *gin.Context) {
+	if c.GetString("auth_method") != "service_principal" ||
+		c.GetString("service_id") != orgCorePrincipal ||
+		!hasServiceScope(c, "spaces:browser-floor:read") {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "org-core browser floor principal required"})
 		return
 	}
 	c.Next()
@@ -828,6 +843,8 @@ type scheduleCreateDecisionRequest struct {
 	IdempotencyKey    string `json:"idempotency_key"`
 	ContractDigest    string `json:"contract_digest"`
 	ContractExpiresAt string `json:"contract_expires_at"`
+	// RenewalOf names the existing schedule whose approval this decision renews (O-10).
+	RenewalOf string `json:"renewal_of"`
 }
 
 type watchCreateDecisionRequest struct {
@@ -967,6 +984,7 @@ func (s *Server) issueScheduleCreateDecision(c *gin.Context) {
 		IdempotencyKey: request.IdempotencyKey, Nonce: nonce,
 		ContractDigest: request.ContractDigest, ContractExpiresAt: request.ContractExpiresAt,
 		ContractsEnabled: s.scheduleContractsEnabled,
+		RenewalOf:        strings.TrimSpace(request.RenewalOf),
 	}, time.Now().UTC())
 	if err != nil {
 		writeSpaceIssuerDenial(c, err, "Space schedule creation is not authorized")

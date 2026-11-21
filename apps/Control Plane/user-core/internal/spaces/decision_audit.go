@@ -100,6 +100,7 @@ var decisionAuditRoutes = map[string]DecisionAuditRoute{
 	"/run-wake-decision":                {Name: "run_wake"},
 	"/run-control-decision":             {Name: "run_control", EffectBound: true},
 	"/memory-decision":                  {Name: "space_memory", EffectBound: true},
+	"/skill-write-decision":             {Name: "space_skill_write", EffectBound: true},
 	"/thread-read-decision":             {Name: "thread_read"},
 	"/personal-retrieval-decision":      {Name: "retrieval"},
 	"/retrieval-decision":               {Name: "retrieval"},

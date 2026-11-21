@@ -106,6 +106,7 @@ type Service struct {
 	erasureFanout    ErasureFanoutPublisher
 	erasureWorker    *erasureWorker
 	orgCoreClient    OrgCoreSuccessionClient
+	siteEraser       BrowserSiteEraser
 }
 
 // NewService creates a new user service

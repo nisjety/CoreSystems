@@ -752,3 +752,93 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
     ).rejects.toBeInstanceOf(ForbiddenException);
   });
 });
+
+// O-21: the compliance role reads audit and legal holds and runs no agents. The
+// model-gateway admits an interactive user token on chat, session and run routes
+// with no scope at all, so the mint itself is the gate.
+describe('ModelPlaneTokenController compliance role agent refusal', () => {
+  const original = process.env.ORG_COMPLIANCE_ROLE_ENABLED;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockReadFreshStepUp.mockResolvedValue(undefined);
+    mockResolveInteractiveRetentionPosture.mockResolvedValue({
+      zdr: false,
+      authority: 'interactive-org-retention-policy',
+    });
+    mockGetSession.mockResolvedValue({
+      user: { id: 'user-a', email: 'user-a@example.test' },
+      session: { id: 'session-a', activeOrganizationId: 'org-a' },
+    });
+  });
+
+  afterEach(() => {
+    if (original === undefined) {
+      delete process.env.ORG_COMPLIANCE_ROLE_ENABLED;
+    } else {
+      process.env.ORG_COMPLIANCE_ROLE_ENABLED = original;
+    }
+  });
+
+  const build = (role: string) => {
+    mockResolveCanonicalTokenContext.mockResolvedValue({
+      orgId: 'org-a',
+      role,
+    });
+    const tokenService = {
+      issueModelPlaneToken: jest.fn().mockReturnValue({ token: 'minted' }),
+    };
+    const controller = new ModelPlaneTokenController(
+      tokenService as never,
+      { publishAuditDurable: jest.fn() } as never,
+    );
+    return { tokenService, controller };
+  };
+  const request = { headers: { cookie: 'session=test' } } as never;
+
+  it('switch on: a compliance member gets a typed 403 and nothing is signed', async () => {
+    process.env.ORG_COMPLIANCE_ROLE_ENABLED = 'true';
+    const { tokenService, controller } = build('compliance');
+
+    const refusal = await controller
+      .getToken(request)
+      .catch((error: unknown) => error);
+
+    expect(refusal).toMatchObject({
+      status: 403,
+      response: { error: { code: 'compliance_role_cannot_run_agents' } },
+    });
+    expect(tokenService.issueModelPlaneToken).not.toHaveBeenCalled();
+    expect(mockResolveInteractiveRetentionPosture).not.toHaveBeenCalled();
+  });
+
+  it.each(['member', 'viewer', 'admin', 'owner'])(
+    'switch on: %s still mints',
+    async (role) => {
+      process.env.ORG_COMPLIANCE_ROLE_ENABLED = 'true';
+      const { tokenService, controller } = build(role);
+
+      await expect(controller.getToken(request)).resolves.toMatchObject({
+        token: 'minted',
+        role,
+      });
+      expect(tokenService.issueModelPlaneToken).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['', 'false', '1', 'TRUE'])(
+    'switch %j: a compliance role value mints exactly as a member does',
+    async (value) => {
+      if (value === '') delete process.env.ORG_COMPLIANCE_ROLE_ENABLED;
+      else process.env.ORG_COMPLIANCE_ROLE_ENABLED = value;
+      const { tokenService, controller } = build('compliance');
+
+      await expect(controller.getToken(request)).resolves.toMatchObject({
+        token: 'minted',
+      });
+      expect(tokenService.issueModelPlaneToken).toHaveBeenCalledWith(
+        expect.objectContaining({ scopes: undefined }),
+      );
+    },
+  );
+});

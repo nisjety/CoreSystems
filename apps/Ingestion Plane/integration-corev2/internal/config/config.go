@@ -98,6 +98,15 @@ type Config struct {
 	RateLimitWindow              time.Duration
 	TokenLeaseConsumers          []string
 
+	// TokenLeasePerConsumerAuth is INTEGRATION_TOKEN_LEASE_PER_CONSUMER_AUTH (F-f08-10). Only the
+	// literal "true" turns it on. On, POST /internal/connectors/token takes the consumer from the key
+	// the request presents, and the shared internal API key no longer opens the route. Off, the route
+	// is as it was. Rotating callers onto their own keys is an operations step done before it goes on.
+	TokenLeasePerConsumerAuth bool
+	// TokenLeaseConsumerKeys is INTEGRATION_TOKEN_LEASE_CONSUMER_KEYS: consumer=key pairs, comma
+	// separated, read only with TokenLeasePerConsumerAuth. The values are secrets and are never logged.
+	TokenLeaseConsumerKeys string
+
 	// Codex subscription sign-in state lives in this service-owned directory
 	// (one Codex auth.json per connection, written by the Codex CLI sign-in
 	// and refreshed in place by the broker), never in the integration
@@ -433,7 +442,12 @@ func Load() (Config, error) {
 		RateLimitEnabled:    envBool("INTEGRATION_RATE_LIMIT_ENABLED", true),
 		RateLimitMax:        envInt("INTEGRATION_RATE_LIMIT_MAX", 120),
 		RateLimitWindow:     envDuration("INTEGRATION_RATE_LIMIT_WINDOW", time.Minute),
-		TokenLeaseConsumers: envCSV("INTEGRATION_TOKEN_LEASE_CONSUMERS", "finspo-core,conversation-core,data-plane-v2,model-plane,application-plane,verevon-v2-bff,verevon-v3-gateway,social-publisher,email-worker"),
+		TokenLeaseConsumers: envCSV("INTEGRATION_TOKEN_LEASE_CONSUMERS", "finspo-core,conversation-core,data-plane-v2,application-plane,verevon-v2-bff,verevon-v3-gateway,social-publisher,email-worker"),
+
+		// F-f08-10: model-plane is no longer a default lease consumer. It redeems credential references,
+		// never a raw provider token. The per-consumer keys for the lease route are off unless the literal "true".
+		TokenLeasePerConsumerAuth: envStrictTrue("INTEGRATION_TOKEN_LEASE_PER_CONSUMER_AUTH"),
+		TokenLeaseConsumerKeys:    strings.TrimSpace(os.Getenv("INTEGRATION_TOKEN_LEASE_CONSUMER_KEYS")),
 
 		// Exactly "true" only: envBool uses ParseBool, which would also switch this on for "1" or "T".
 		CustomerGatewayConnectionsEnabled:  strings.TrimSpace(os.Getenv("CUSTOMER_GATEWAY_CONNECTIONS_ENABLED")) == "true",
@@ -606,6 +620,11 @@ func (c Config) ValidateRuntime() error {
 	}
 	if c.CredentialBindingsEnabled {
 		if problems := c.credentialRefSealKeyProblems(); len(problems) > 0 {
+			return fmt.Errorf("%s", problems[0])
+		}
+	}
+	if c.TokenLeasePerConsumerAuth {
+		if problems := c.tokenLeaseConsumerKeyProblems(); len(problems) > 0 {
 			return fmt.Errorf("%s", problems[0])
 		}
 	}
@@ -816,6 +835,68 @@ func (c Config) credentialRefSealKeyProblems() []string {
 		}
 		if other, reused := owners[key]; reused {
 			problems = append(problems, "CREDENTIAL_REF_SEAL_KEYS key for "+name+" must not reuse the key for "+other)
+		}
+		owners[key] = name
+	}
+	return problems
+}
+
+// TokenLeaseConsumerKeyMap returns the consumer keys that INTEGRATION_TOKEN_LEASE_CONSUMER_KEYS
+// names. Entries that do not parse, and repeats, are left out; tokenLeaseConsumerKeyProblems
+// reports them. The values are secrets: callers compare them and never log them.
+func (c Config) TokenLeaseConsumerKeyMap() map[string]string {
+	keys := map[string]string{}
+	for _, entry := range strings.Split(c.TokenLeaseConsumerKeys, ",") {
+		name, key, found := strings.Cut(strings.TrimSpace(entry), "=")
+		name, key = strings.TrimSpace(name), strings.TrimSpace(key)
+		if !found || name == "" || key == "" {
+			continue
+		}
+		if _, repeated := keys[name]; repeated {
+			continue
+		}
+		keys[name] = key
+	}
+	return keys
+}
+
+// tokenLeaseConsumerKeyProblems lists what is wrong with INTEGRATION_TOKEN_LEASE_CONSUMER_KEYS,
+// checked when TokenLeasePerConsumerAuth is on. Each entry is consumer=key. Each key is a
+// non-placeholder secret of at least 32 bytes, distinct from every other consumer's key and from
+// both internal API keys, so one key names one consumer. No entries at all is not a problem here:
+// the route then answers 401, and NewServer logs that once. Problems name the variable and the
+// consumer, never a key value.
+func (c Config) tokenLeaseConsumerKeyProblems() []string {
+	var problems []string
+	internalKeys := []string{strings.TrimSpace(c.InternalAPIKey), c.ControlPlaneInternalAPIKey()}
+	seen := map[string]bool{}
+	owners := map[string]string{}
+	for _, entry := range strings.Split(c.TokenLeaseConsumerKeys, ",") {
+		trimmed := strings.TrimSpace(entry)
+		if trimmed == "" {
+			continue
+		}
+		name, key, found := strings.Cut(trimmed, "=")
+		name, key = strings.TrimSpace(name), strings.TrimSpace(key)
+		if !found || name == "" {
+			problems = append(problems, "INTEGRATION_TOKEN_LEASE_CONSUMER_KEYS entries must be consumer=key")
+			continue
+		}
+		if seen[name] {
+			problems = append(problems, "INTEGRATION_TOKEN_LEASE_CONSUMER_KEYS names "+name+" more than once")
+			continue
+		}
+		seen[name] = true
+		if !validDedicatedServiceToken(key) {
+			problems = append(problems, "INTEGRATION_TOKEN_LEASE_CONSUMER_KEYS key for "+name+" must be a non-placeholder secret of at least 32 bytes")
+		}
+		for _, internal := range internalKeys {
+			if internal != "" && key == internal {
+				problems = append(problems, "INTEGRATION_TOKEN_LEASE_CONSUMER_KEYS key for "+name+" must not reuse the internal API key")
+			}
+		}
+		if other, reused := owners[key]; reused {
+			problems = append(problems, "INTEGRATION_TOKEN_LEASE_CONSUMER_KEYS key for "+name+" must not reuse the key for "+other)
 		}
 		owners[key] = name
 	}

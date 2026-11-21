@@ -31,6 +31,7 @@ const (
 	scimEdgePrincipal         = "verevon-scim-edge"
 	quarryEdgePrincipal       = "quarry-edge"
 	sessionCorePrincipal      = "session-core"
+	userCorePrincipal         = "user-core"
 	serviceDelegationMaxAge   = 30 * time.Second
 	serviceDelegationSkew     = 5 * time.Second
 	serviceDelegationMaxBody  = 1 << 20
@@ -87,6 +88,10 @@ var orgServiceScopeAllowlist = map[string]struct{}{
 	// (validateServiceCredential); the decision is the broker's input at grant
 	// mint and the Model Plane's web-domain check, never a member's list.
 	"org:browser-site:read:any": {},
+	// Erasure of one member's remembered site choices and redaction of their history rows,
+	// through DELETE /internal/orgs/:orgId/members/:userId/browser-sites and nothing else
+	// (F-f02-16). Held by user-core's principal alone (validateServiceCredential).
+	"org:browser-site:erase:any": {},
 	// Quarry's per-org browser-profile key custody (WS17.E2): generate a data key
 	// under the org's KEK (wrap) and unwrap/rewrap it, through
 	// /internal/orgs/:orgId/keys/... and nothing else. Held by quarry-edge alone in
@@ -230,6 +235,11 @@ func validateServiceCredential(credential serviceCredential, principals map[stri
 		// Model Plane services that apply the org's domain rules before a web call
 		// (EP-9 W3). The set is closed: every other principal is refused.
 		if scope == "org:browser-site:read:any" && !browserSiteReaderPrincipal(credential.Principal) {
+			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
+		}
+		// The erase scope removes a user's choices and redacts their history, so it is
+		// pinned to the one principal that erases users: user-core (F-f02-16).
+		if scope == "org:browser-site:erase:any" && credential.Principal != userCorePrincipal {
 			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
 		}
 		// The web policy read feeds a token claim that bounds what agents may do, so
@@ -584,6 +594,12 @@ func internalOrganizationScopes(method string, rest []string) []string {
 		return []string{"org:model-entitlement:read:any"}
 	case len(rest) == 3 && rest[1] == "browser-sites" && rest[2] == "resolve" && method == http.MethodGet:
 		return []string{"org:browser-site:read:any"}
+	// The org's stored domain rules for the Model Plane's crawl read (EP-9 O-23).
+	case len(rest) == 3 && rest[1] == "browser-sites" && rest[2] == "rules" && method == http.MethodGet:
+		return []string{"org:browser-site:read:any"}
+	// User self-erasure of one member's remembered site choices (F-f02-16), user-core only.
+	case len(rest) == 4 && rest[1] == "members" && rest[3] == "browser-sites" && method == http.MethodDelete:
+		return []string{"org:browser-site:erase:any"}
 	case len(rest) == 2 && rest[1] == "web-policy" && method == http.MethodGet:
 		return []string{"org:web-policy:read:any"}
 	// The organisation flag values for a backend reader (W5-079-b).

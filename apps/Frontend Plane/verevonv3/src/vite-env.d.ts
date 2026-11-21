@@ -152,6 +152,14 @@ interface ImportMetaEnv {
 	readonly VITE_APPROVAL_SCOPE_GRANTS?: string;
 	/** "true" shows the rules proposed from "Always" approvals in settings, to confirm or dismiss (WS13-S7). Default off. */
 	readonly VITE_APPROVAL_RULE_PROPOSALS?: string;
+	/** "true" offers the compliance role in the member list and invitation pickers (O-21, the twin of the Control Plane's ORG_COMPLIANCE_ROLE_ENABLED). Default off. */
+	readonly VITE_ORG_COMPLIANCE_ROLE?: string;
+	/** "true" shows the model picker's data-use line (zero data retention and training statements from the catalogue). Off until counsel approves the English and Norwegian copy (DEC-F08-03). Default off. */
+	readonly VITE_MODEL_DATA_USE_LABEL?: string;
+	/** "true" shows the Memory on this thread control in the chat sidebar's thread menu, for a chat thread (WS07-S6). Default off. */
+	readonly VITE_CHAT_THREAD_MEMORY_MODE?: string;
+	/** "true" offers the org's delegable read tools in the schedule consent card, and renews a lapsed schedule approval in place (F-f05-20, F-f05-20b). Default off. */
+	readonly VITE_SCHEDULE_DELEGABLE_TOOLS_ENABLED?: string;
 }
 
 interface ImportMeta {

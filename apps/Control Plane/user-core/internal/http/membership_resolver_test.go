@@ -205,3 +205,46 @@ func TestMembershipAuthorityRedirectIsNotFollowedAndCredentialIsNotLeaked(t *tes
 		t.Fatal("redirect target must not be called")
 	}
 }
+
+// O-21: the compliance role is a valid canonical organisation role only while
+// ORG_COMPLIANCE_ROLE_ENABLED is the literal "true".
+func TestResolveMembershipAcceptsComplianceOnlyWithTheSwitchOn(t *testing.T) {
+	handler := func(w stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		_, _ = w.Write([]byte(`{"version":"v1","member":true,"role":" Compliance "}`))
+	}
+
+	off := membershipServer(t, handler)
+	if _, role, err := off.resolveMembershipFromAuthCore(context.Background(), "user-1", "org-1"); err == nil || role != "" {
+		t.Fatalf("switch off: role/error = %q/%v, want the unsupported-role refusal", role, err)
+	}
+
+	on := membershipServer(t, handler)
+	on.complianceRoleOn = true
+	orgID, role, err := on.resolveMembershipFromAuthCore(context.Background(), "user-1", "org-1")
+	if err != nil || orgID != "org-1" || role != "compliance" {
+		t.Fatalf("switch on: membership = (%q, %q, %v), want (org-1, compliance, nil)", orgID, role, err)
+	}
+}
+
+func TestComplianceRoleSwitchIsReadStrictlyAtBoot(t *testing.T) {
+	for value, want := range map[string]bool{"true": true, "TRUE": false, "1": false, "": false} {
+		t.Setenv("ORG_COMPLIANCE_ROLE_ENABLED", value)
+		if got := NewServer(nil, nil, nil, nil, "3012").complianceRoleOn; got != want {
+			t.Fatalf("ORG_COMPLIANCE_ROLE_ENABLED=%q: complianceRoleOn=%v, want %v", value, got, want)
+		}
+	}
+}
+
+func TestIsSupportedOrganizationRole(t *testing.T) {
+	for _, role := range []string{"owner", "admin", "member", "viewer"} {
+		if !isSupportedOrganizationRole(role, false) || !isSupportedOrganizationRole(role, true) {
+			t.Fatalf("%s must be supported either way", role)
+		}
+	}
+	if isSupportedOrganizationRole("compliance", false) || !isSupportedOrganizationRole("compliance", true) {
+		t.Fatal("compliance is supported only with the switch on")
+	}
+	if isSupportedOrganizationRole("superuser", true) || isSupportedOrganizationRole("", true) {
+		t.Fatal("an unknown role is never supported")
+	}
+}

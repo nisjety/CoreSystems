@@ -148,10 +148,26 @@ where
     String::deserialize(deserializer).map(AuthorityOptionalString::Value)
 }
 
+/// The membership decision with the compliance role off: `compliance` is an unknown
+/// role and the authority reads as unavailable, as it always was.
+#[cfg(test)]
 fn active_membership_from_authority_body(
     user: &AuthenticatedUser,
     status: StatusCode,
     body: &[u8],
+) -> ActiveMembershipResolution {
+    active_membership_from_authority_body_with(user, status, body, false)
+}
+
+/// `compliance_role` is `ORG_COMPLIANCE_ROLE_ENABLED` (O-21), read once into
+/// `AppState`. Only then is `compliance` a canonical role here; the four base tiers
+/// are always. user-core refuses the value itself while its own switch is off, so
+/// this is never the only check.
+fn active_membership_from_authority_body_with(
+    user: &AuthenticatedUser,
+    status: StatusCode,
+    body: &[u8],
+    compliance_role: bool,
 ) -> ActiveMembershipResolution {
     if scope_org_id(user).is_none() {
         return ActiveMembershipResolution::Missing;
@@ -189,7 +205,8 @@ fn active_membership_from_authority_body(
     let role = role.trim().to_ascii_lowercase();
     if organization_id.is_empty()
         || scope_org_id(user) != Some(organization_id)
-        || !matches!(role.as_str(), "owner" | "admin" | "member" | "viewer")
+        || !(matches!(role.as_str(), "owner" | "admin" | "member" | "viewer")
+            || (compliance_role && role == "compliance"))
     {
         return ActiveMembershipResolution::AuthorityUnavailable;
     }
@@ -268,7 +285,12 @@ pub(crate) async fn resolve_active_membership(
         }
         body.extend_from_slice(&chunk);
     }
-    active_membership_from_authority_body(user, status, &body)
+    active_membership_from_authority_body_with(
+        user,
+        status,
+        &body,
+        state.space_features.org_compliance_role,
+    )
 }
 
 /// Re-prime the per-(user, active-org) session-context cache from a live
@@ -2810,6 +2832,54 @@ mod tests {
                 ActiveMembershipResolution::AuthorityUnavailable
             );
         }
+    }
+
+    /// O-21: `compliance` is a canonical role only while the switch is on; off it is
+    /// as unknown as `superadmin`, and the base tiers are unaffected either way.
+    #[test]
+    fn active_membership_accepts_compliance_only_with_the_switch_on() {
+        let user = user_with_active_org(Some("org-1"));
+        let body = serde_json::to_vec(&json!({
+            "userId": "user-1", "orgId": "org-1", "role": " Compliance ",
+            "onboardingStatus": "COMPLETED"
+        }))
+        .unwrap();
+        assert_eq!(
+            active_membership_from_authority_body_with(&user, StatusCode::OK, &body, false),
+            ActiveMembershipResolution::AuthorityUnavailable
+        );
+        assert_eq!(
+            active_membership_from_authority_body(&user, StatusCode::OK, &body),
+            ActiveMembershipResolution::AuthorityUnavailable
+        );
+        let ActiveMembershipResolution::Member(membership) =
+            active_membership_from_authority_body_with(&user, StatusCode::OK, &body, true)
+        else {
+            panic!("compliance must resolve with the switch on");
+        };
+        assert_eq!(membership.role, "compliance");
+        for role in ["owner", "admin", "member", "viewer"] {
+            let body = serde_json::to_vec(&json!({
+                "userId": "user-1", "orgId": "org-1", "role": role,
+                "onboardingStatus": "COMPLETED"
+            }))
+            .unwrap();
+            for on in [false, true] {
+                assert!(matches!(
+                    active_membership_from_authority_body_with(&user, StatusCode::OK, &body, on),
+                    ActiveMembershipResolution::Member(_)
+                ));
+            }
+        }
+        let unknown = serde_json::to_vec(&json!({
+            "userId": "user-1", "orgId": "org-1", "role": "auditor",
+            "onboardingStatus": "COMPLETED"
+        }))
+        .unwrap();
+        assert_eq!(
+            active_membership_from_authority_body_with(&user, StatusCode::OK, &unknown, true),
+            ActiveMembershipResolution::AuthorityUnavailable
+        );
     }
 
     #[test]

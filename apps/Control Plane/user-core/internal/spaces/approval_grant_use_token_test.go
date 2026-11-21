@@ -212,7 +212,7 @@ func TestApprovalGrantUseIsNotInterchangeableWithOtherEnvelopes(t *testing.T) {
 	if _, err := VerifyDecision(verification, token, expectedDecision(now)); err == nil {
 		t.Fatal("a Space decision verifier accepted an approval-grant-use token")
 	}
-	if _, err := VerifyRunActionDecision(key, token, now); err == nil {
+	if _, err := VerifyRunActionDecision(key, token, now, RunActionTargetsTicketsOnly); err == nil {
 		t.Fatal("the run-action verifier accepted an approval-grant-use token")
 	}
 
@@ -220,11 +220,11 @@ func TestApprovalGrantUseIsNotInterchangeableWithOtherEnvelopes(t *testing.T) {
 	evidence := validPersonalThreadEvidence()
 	evidence.AgentActionEntitled = true
 	evidence.ResourceAuthorizationRef = "control:space-personal:thread-create:7"
-	decision, err := IssueRunActionDecision(evidence, validRunActionAuthority(), validRunActionRequest(), now)
+	decision, err := IssueRunActionDecision(evidence, validRunActionAuthority(), validRunActionRequest(), now, RunActionTargetsTicketsOnly)
 	if err != nil {
 		t.Fatalf("IssueRunActionDecision: %v", err)
 	}
-	decisionToken, err := SignRunActionDecision(key, decision)
+	decisionToken, err := SignRunActionDecision(key, decision, RunActionTargetsTicketsOnly)
 	if err != nil {
 		t.Fatalf("SignRunActionDecision: %v", err)
 	}

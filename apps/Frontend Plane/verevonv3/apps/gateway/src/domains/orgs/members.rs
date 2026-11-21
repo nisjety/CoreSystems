@@ -151,6 +151,12 @@ fn valid_member_email(value: &str) -> bool {
     !local.is_empty() && !domain.is_empty() && !domain.contains('@')
 }
 
+/// O-21: the roles the invite and role-change routes forward to auth-core.
+/// "owner" is never assignable here; "compliance" only with the switch on.
+fn member_role_assignable(role: &str, compliance_on: bool) -> bool {
+    matches!(role, "member" | "admin") || (compliance_on && role == "compliance")
+}
+
 fn valid_member_subject_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
@@ -223,13 +229,18 @@ pub(crate) async fn invite_member(
     let email_valid = raw_email
         .is_some_and(|value| value.len() <= 320 && !value.chars().any(char::is_control))
         && email.as_deref().is_some_and(valid_member_email);
-    if !email_valid || !matches!(role, "member" | "admin") {
+    // O-21: "compliance" is an assignable role only while the switch is on
+    // (read once into AppState); off, the two-role match and text are unchanged.
+    let compliance_on = state.space_features.org_compliance_role;
+    if !email_valid || !member_role_assignable(role, compliance_on) {
+        let message = if compliance_on {
+            "A valid email and member/admin/compliance role are required."
+        } else {
+            "A valid email and member/admin role are required."
+        };
         return (
             StatusCode::BAD_REQUEST,
-            Json(error(
-                "validation_error",
-                "A valid email and member/admin role are required.",
-            )),
+            Json(error("validation_error", message)),
         )
             .into_response();
     }
@@ -419,14 +430,16 @@ pub(crate) async fn update_member_role(
         .get("role")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|role| matches!(*role, "member" | "admin"));
+        .filter(|role| member_role_assignable(role, state.space_features.org_compliance_role));
     let Some(role) = role else {
+        let message = if state.space_features.org_compliance_role {
+            "Role must be member, admin or compliance; owner transfer uses a separate flow."
+        } else {
+            "Role must be member or admin; owner transfer uses a separate flow."
+        };
         return (
             StatusCode::BAD_REQUEST,
-            Json(error(
-                "validation_error",
-                "Role must be member or admin; owner transfer uses a separate flow.",
-            )),
+            Json(error("validation_error", message)),
         )
             .into_response();
     };
@@ -894,5 +907,155 @@ mod tests {
         let invalid =
             accept_invitation(State(state), cookie_headers(), Path("../escape".to_owned())).await;
         assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    }
+
+    fn state_with_compliance(auth_core: &MockServer, on: bool) -> AppState {
+        let mut state = state_for(auth_core);
+        state.space_features.org_compliance_role = on;
+        state
+    }
+
+    async fn mock_role_authority() -> MockServer {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/organization/list-members"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "members": [{ "id": "member-record", "userId": "target-user", "role": "member" }]
+            })))
+            .mount(&auth)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/auth/organization/invite-member"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "inv_1" })))
+            .mount(&auth)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/auth/organization/update-member-role"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "role": "x" })))
+            .mount(&auth)
+            .await;
+        auth
+    }
+
+    async fn invite_as(state: AppState, role: &str) -> Response {
+        invite_member(
+            State(state),
+            Extension(admin_user()),
+            cookie_headers(),
+            Path("org-active".to_owned()),
+            Json(json!({ "email": "invitee@example.com", "role": role })),
+        )
+        .await
+    }
+
+    async fn change_role_to(state: AppState, role: &str) -> Response {
+        update_member_role(
+            State(state),
+            Extension(admin_user()),
+            cookie_headers(),
+            Path(("org-active".to_owned(), "target-user".to_owned())),
+            Json(json!({ "role": role })),
+        )
+        .await
+    }
+
+    #[test]
+    fn member_role_assignable_never_admits_owner_and_gates_compliance() {
+        for on in [false, true] {
+            assert!(member_role_assignable("member", on));
+            assert!(member_role_assignable("admin", on));
+            assert!(!member_role_assignable("owner", on));
+            assert!(!member_role_assignable("viewer", on));
+            assert!(!member_role_assignable("", on));
+            assert!(!member_role_assignable("Compliance", on));
+        }
+        assert!(!member_role_assignable("compliance", false));
+        assert!(member_role_assignable("compliance", true));
+    }
+
+    #[tokio::test]
+    async fn compliance_role_is_refused_on_invite_and_role_change_with_the_switch_off() {
+        let auth = mock_role_authority().await;
+
+        let invited = invite_as(state_with_compliance(&auth, false), "compliance").await;
+        assert_eq!(invited.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(invited).await,
+            json!({
+                "error": {
+                    "code": "validation_error",
+                    "message": "A valid email and member/admin role are required."
+                }
+            })
+        );
+
+        let changed = change_role_to(state_with_compliance(&auth, false), "compliance").await;
+        assert_eq!(changed.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(changed).await,
+            json!({
+                "error": {
+                    "code": "validation_error",
+                    "message": "Role must be member or admin; owner transfer uses a separate flow."
+                }
+            })
+        );
+
+        let received = auth.received_requests().await.expect("request recording");
+        assert!(
+            received.is_empty(),
+            "auth-core must get no request, got {received:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compliance_role_is_forwarded_to_auth_core_with_the_switch_on() {
+        let auth = mock_role_authority().await;
+
+        let invited = invite_as(state_with_compliance(&auth, true), "compliance").await;
+        assert_eq!(invited.status(), StatusCode::OK);
+        let changed = change_role_to(state_with_compliance(&auth, true), "compliance").await;
+        assert_eq!(changed.status(), StatusCode::OK);
+
+        let received = auth.received_requests().await.expect("request recording");
+        let body_of = |path: &str| -> Value {
+            let request = received
+                .iter()
+                .find(|request| request.url.path() == path)
+                .unwrap_or_else(|| panic!("no request reached {path}"));
+            serde_json::from_slice(&request.body).expect("JSON body")
+        };
+        let invite_body = body_of("/api/auth/organization/invite-member");
+        assert_eq!(invite_body["role"], "compliance");
+        assert_eq!(invite_body["organizationId"], "org-active");
+        let role_body = body_of("/api/auth/organization/update-member-role");
+        assert_eq!(role_body["role"], "compliance");
+        assert_eq!(role_body["memberId"], "member-record");
+    }
+
+    #[tokio::test]
+    async fn owner_and_unknown_roles_stay_refused_with_the_switch_on() {
+        let auth = mock_role_authority().await;
+
+        for role in ["owner", "viewer", "superuser", ""] {
+            let changed = change_role_to(state_with_compliance(&auth, true), role).await;
+            assert_eq!(
+                changed.status(),
+                StatusCode::BAD_REQUEST,
+                "role change {role:?}"
+            );
+            assert_eq!(
+                response_json(changed).await["error"]["message"],
+                "Role must be member, admin or compliance; owner transfer uses a separate flow."
+            );
+            let invited = invite_as(state_with_compliance(&auth, true), role).await;
+            assert_eq!(invited.status(), StatusCode::BAD_REQUEST, "invite {role:?}");
+        }
+
+        let received = auth.received_requests().await.expect("request recording");
+        assert!(
+            received.is_empty(),
+            "auth-core must get no request, got {received:?}"
+        );
     }
 }

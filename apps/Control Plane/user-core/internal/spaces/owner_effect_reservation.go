@@ -29,7 +29,10 @@ type OwnerEffectReservationCommitment struct {
 	GrantRef         string `json:"grant_ref"`
 }
 
-func (c OwnerEffectReservationCommitment) Validate() error {
+// Validate checks the commitment's shape and that its action is admitted in the
+// operator's mode. The admitted row owns its audience; decision.Validate(mode)
+// requires the decision to carry exactly that audience before any row is written.
+func (c OwnerEffectReservationCommitment) Validate(mode RunActionTargetsMode) error {
 	for name, value := range map[string]string{
 		"operation_id": c.OperationID, "action_id": c.ActionID,
 		"action_schema_hash": c.ActionSchemaHash, "payload_digest": c.PayloadDigest,
@@ -41,7 +44,7 @@ func (c OwnerEffectReservationCommitment) Validate() error {
 			return fmt.Errorf("owner effect reservation %s is invalid", name)
 		}
 	}
-	if audience, found := runActionTarget(strings.TrimSpace(c.ActionID)); !found || audience != ticketsCreateServiceAudience {
+	if _, found := runActionTargetForMode(strings.TrimSpace(c.ActionID), mode); !found {
 		return fmt.Errorf("owner effect reservation action is not approved")
 	}
 	if !validSHA256Commitment(strings.TrimSpace(c.ActionSchemaHash)) || !validSHA256Commitment(strings.TrimSpace(c.PayloadDigest)) {
@@ -85,14 +88,14 @@ type OwnerEffectReservation struct {
 	Reason        string
 }
 
-func (r *Repository) ReserveOwnerEffect(ctx context.Context, decision RunActionDecision, commitment OwnerEffectReservationCommitment, now time.Time) (*OwnerEffectReservation, error) {
+func (r *Repository) ReserveOwnerEffect(ctx context.Context, decision RunActionDecision, commitment OwnerEffectReservationCommitment, now time.Time, mode RunActionTargetsMode) (*OwnerEffectReservation, error) {
 	if r == nil || r.db == nil || now.IsZero() || decision.ExpiresAt.Before(now) {
 		return nil, ErrOwnerEffectReservationDenied
 	}
-	if err := decision.Validate(); err != nil {
+	if err := decision.Validate(mode); err != nil {
 		return nil, ErrOwnerEffectReservationDenied
 	}
-	if err := commitment.Validate(); err != nil || commitment.ActionID != decision.ActionID ||
+	if err := commitment.Validate(mode); err != nil || commitment.ActionID != decision.ActionID ||
 		commitment.ActionSchemaHash != decision.ActionSchemaHash || commitment.PayloadDigest != decision.PayloadDigest ||
 		commitment.IdempotencyKey != decision.IdempotencyKey || commitment.DecisionRef != decision.DecisionRef {
 		return nil, ErrOwnerEffectReservationDenied
@@ -119,7 +122,7 @@ func (r *Repository) ReserveOwnerEffect(ctx context.Context, decision RunActionD
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
 	}
-	if err := r.validateCurrentOwnerEffectAuthority(ctx, decision, now); err != nil {
+	if err := r.validateCurrentOwnerEffectAuthority(ctx, decision, now, mode); err != nil {
 		return nil, err
 	}
 	reservationID, err := randomOwnerEffectReservationID()
@@ -157,11 +160,11 @@ INSERT INTO space_owner_effect_reservations (
 // CommitOwnerEffectReservation is the Control authorization linearization
 // point. The caller supplies the same signed decision only for this direct
 // hop; it is verified at the HTTP boundary and never persisted here.
-func (r *Repository) CommitOwnerEffectReservation(ctx context.Context, reservationID string, decision RunActionDecision, now time.Time) (*OwnerEffectReservation, error) {
+func (r *Repository) CommitOwnerEffectReservation(ctx context.Context, reservationID string, decision RunActionDecision, now time.Time, mode RunActionTargetsMode) (*OwnerEffectReservation, error) {
 	if r == nil || r.db == nil || strings.TrimSpace(reservationID) == "" || now.IsZero() || decision.ExpiresAt.Before(now) {
 		return nil, ErrOwnerEffectReservationDenied
 	}
-	if err := decision.Validate(); err != nil {
+	if err := decision.Validate(mode); err != nil {
 		return nil, ErrOwnerEffectReservationDenied
 	}
 	tx, err := r.db.Pool.Begin(ctx)
@@ -192,7 +195,7 @@ func (r *Repository) CommitOwnerEffectReservation(ctx context.Context, reservati
 	if err := tx.QueryRow(ctx, `SELECT 1 FROM space_authority_revisions WHERE space_ref=$1 FOR UPDATE`, decision.SpaceRef).Scan(&authorityFence); err != nil {
 		return nil, ErrOwnerEffectReservationDenied
 	}
-	if err := r.validateCurrentOwnerEffectAuthority(ctx, decision, now); err != nil {
+	if err := r.validateCurrentOwnerEffectAuthority(ctx, decision, now, mode); err != nil {
 		return nil, err
 	}
 	committedAt := now.UTC()
@@ -219,12 +222,12 @@ func (r *Repository) GetOwnerEffectReservation(ctx context.Context, reservationI
 	return reservation, err
 }
 
-func (r *Repository) validateCurrentOwnerEffectAuthority(ctx context.Context, decision RunActionDecision, now time.Time) error {
+func (r *Repository) validateCurrentOwnerEffectAuthority(ctx context.Context, decision RunActionDecision, now time.Time, mode RunActionTargetsMode) error {
 	evidence, err := r.ResolveAgentActionDecisionEvidence(ctx, decision.SpaceRef, decision.OrgID, decision.SubjectID)
 	if err != nil {
 		return ErrOwnerEffectReservationDenied
 	}
-	if err := ValidateCurrentRunActionDecision(evidence, decision); err != nil || decision.ExpiresAt.Before(now) {
+	if err := ValidateCurrentRunActionDecision(evidence, decision, mode); err != nil || decision.ExpiresAt.Before(now) {
 		return ErrOwnerEffectReservationDenied
 	}
 	return nil

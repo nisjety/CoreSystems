@@ -1,0 +1,3 @@
+-- Reverses 035. Nothing is restored: the choices this deleted and the identities this redacted
+-- are the erasure the migration exists to make, and migration 034's down keeps its tombstones
+-- for the same reason. Rolling back removes no data.

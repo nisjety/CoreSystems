@@ -38,6 +38,9 @@ type Server struct {
 	// browserSites is set by SetBrowserSites (WS21-S3): the agent-browser site
 	// policy of record, read by the broker and administered through these routes.
 	browserSites browserSiteService
+	// browserSpaceFloorOn is BROWSER_SPACE_FLOOR_ENABLED (P2-cp-01). Off, the internal
+	// resolve ignores space_id; on, a Space-scoped resolve applies the Space floor.
+	browserSpaceFloorOn bool
 
 	// siemEnabled mounts the SIEM destination routes (WS06-S7,
 	// ORG_SIEM_DESTINATIONS_ENABLED); siem is the service behind them.
@@ -72,6 +75,12 @@ type Server struct {
 	// SetRetention. Off, none of the routes is mounted.
 	retentionOn bool
 	retention   retentionService
+
+	// complianceRoleOn accepts "compliance" as an organisation role and lets an
+	// admin place and release legal holds (O-21, ORG_COMPLIANCE_ROLE_ENABLED, only
+	// "true" turns it on). Off, "compliance" is refused as a role value and the hold
+	// role lists are the ones built before.
+	complianceRoleOn bool
 
 	// orgFlagsOn mounts the organisation flag routes (W5-079-b, ORG_FLAGS_ENABLED, only
 	// "true" turns it on); orgFlags is set with the service. Off, none of the routes is
@@ -173,8 +182,10 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 	// (ValidateOrgKeysConfig).
 	s.keysOn = orgkeys.Enabled(os.Getenv)
 	s.retentionOn = retention.Enabled(os.Getenv)
+	s.complianceRoleOn = orgcore.ComplianceRoleEnabled(os.Getenv)
 	s.orgFlagsOn = orgFlagsEnabled(os.Getenv)
 	s.roleCapabilitiesOn = roleCapabilitiesEnabled(os.Getenv)
+	s.browserSpaceFloorOn = browserSpaceFloorEnabled(os.Getenv)
 	s.setupRoutes()
 	s.httpServer = &http.Server{
 		Addr:              ":" + strconv.Itoa(port),
@@ -379,6 +390,14 @@ func (s *Server) setupRoutes() {
 	// model-gateway and execution-core read. Own scope org:browser-site:read:any,
 	// held by browser-broker, model-gateway and execution-core alone; no-store.
 	internal.GET("/orgs/:orgId/browser-sites/resolve", s.getBrowserSitesInternal)
+	// The org's stored web domain rules (mode, revision, host and rule) for the Model
+	// Plane's O-23 read, which model-gateway serves to the BFF so a crawl carries them
+	// to Quarry. Same scope as /resolve; no-store; an org with no policy answers open.
+	internal.GET("/orgs/:orgId/browser-sites/rules", s.getBrowserSiteRulesInternal)
+	// User self-erasure (F-f02-16): one member's remembered site choices and their history
+	// rows in one organisation. Own scope org:browser-site:erase:any, held by user-core's
+	// principal alone; no-store. Machine-to-machine, so the membership guard does not apply.
+	internal.DELETE("/orgs/:orgId/members/:userId/browser-sites", s.eraseBrowserSiteChoicesInternal)
 	// The org's effective web policy for Auth Core's web_policy token claim
 	// (WS7.H, read by WS7.I). Own scope org:web-policy:read:any, held by auth-core
 	// alone; no-store.

@@ -27,7 +27,7 @@ func validRunActionAuthority() RunActionAuthority {
 func validRunActionRequest() RunActionDecisionRequest {
 	return RunActionDecisionRequest{
 		ActionID:         "tickets.create",
-		ActionSchemaHash: "sha256:" + strings.Repeat("a", 64),
+		ActionSchemaHash: ticketsCreateActionSchemaSHA256,
 		PayloadDigest:    "sha256:" + strings.Repeat("b", 64),
 		IdempotencyKey:   "run-1:tickets.create:1",
 		DecisionRef:      "decision-1",
@@ -42,7 +42,7 @@ func TestIssueRunActionDecisionIsTargetBoundWithoutWideningThreadAuthority(t *te
 	authority := validRunActionAuthority()
 	now := time.Date(2026, time.August, 15, 12, 0, 0, 0, time.UTC)
 
-	decision, err := IssueRunActionDecision(evidence, authority, validRunActionRequest(), now)
+	decision, err := IssueRunActionDecision(evidence, authority, validRunActionRequest(), now, RunActionTargetsTicketsOnly)
 	if err != nil {
 		t.Fatalf("IssueRunActionDecision: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestIssueRunActionDecisionIsTargetBoundWithoutWideningThreadAuthority(t *te
 	if strings.Contains(strings.ToLower(strings.Join(decision.Permissions, ",")), "resource") {
 		t.Fatalf("thread context must not grant a target resource: %#v", decision)
 	}
-	if err := decision.Validate(); err != nil {
+	if err := decision.Validate(RunActionTargetsTicketsOnly); err != nil {
 		t.Fatalf("issued run action decision did not validate: %v", err)
 	}
 }
@@ -87,6 +87,9 @@ func TestIssueRunActionDecisionFailsClosedOnStaleOrIneligibleAuthority(t *testin
 		"invalid action schema": func(_ *PersonalThreadDecisionEvidence, _ *RunActionAuthority, r *RunActionDecisionRequest) {
 			r.ActionSchemaHash = "sha256:not-a-digest"
 		},
+		"schema the table does not hold": func(_ *PersonalThreadDecisionEvidence, _ *RunActionAuthority, r *RunActionDecisionRequest) {
+			r.ActionSchemaHash = "sha256:" + strings.Repeat("e", 64)
+		},
 		"oversized idempotency key": func(_ *PersonalThreadDecisionEvidence, _ *RunActionAuthority, r *RunActionDecisionRequest) {
 			r.IdempotencyKey = strings.Repeat("a", 201)
 		},
@@ -98,7 +101,7 @@ func TestIssueRunActionDecisionFailsClosedOnStaleOrIneligibleAuthority(t *testin
 			authority := validRunActionAuthority()
 			request := validRunActionRequest()
 			mutate(&evidence, &authority, &request)
-			if _, err := IssueRunActionDecision(evidence, authority, request, now); err == nil {
+			if _, err := IssueRunActionDecision(evidence, authority, request, now, RunActionTargetsTicketsOnly); err == nil {
 				t.Fatal("ineligible or stale run authority unexpectedly issued a target decision")
 			}
 		})
@@ -110,11 +113,11 @@ func TestValidateCurrentRunActionDecisionRejectsSupersededControlFacts(t *testin
 	evidence := validPersonalThreadEvidence()
 	evidence.AgentActionEntitled = true
 	evidence.ResourceAuthorizationRef = "control:space-personal:thread-create:7"
-	decision, err := IssueRunActionDecision(evidence, validRunActionAuthority(), validRunActionRequest(), now)
+	decision, err := IssueRunActionDecision(evidence, validRunActionAuthority(), validRunActionRequest(), now, RunActionTargetsTicketsOnly)
 	if err != nil {
 		t.Fatalf("IssueRunActionDecision() error = %v", err)
 	}
-	if err := ValidateCurrentRunActionDecision(evidence, decision); err != nil {
+	if err := ValidateCurrentRunActionDecision(evidence, decision, RunActionTargetsTicketsOnly); err != nil {
 		t.Fatalf("ValidateCurrentRunActionDecision() error = %v", err)
 	}
 
@@ -138,7 +141,7 @@ func TestValidateCurrentRunActionDecisionRejectsSupersededControlFacts(t *testin
 		t.Run(name, func(t *testing.T) {
 			current := evidence
 			mutate(&current)
-			if err := ValidateCurrentRunActionDecision(current, decision); err == nil {
+			if err := ValidateCurrentRunActionDecision(current, decision, RunActionTargetsTicketsOnly); err == nil {
 				t.Fatal("superseded Control facts unexpectedly authorized the old decision")
 			}
 		})
@@ -150,22 +153,22 @@ func TestVerifyRunActionDecisionRejectsTamperingAndExpiry(t *testing.T) {
 	evidence := validPersonalThreadEvidence()
 	evidence.AgentActionEntitled = true
 	evidence.ResourceAuthorizationRef = "control:space-personal:thread-create:7"
-	decision, err := IssueRunActionDecision(evidence, validRunActionAuthority(), validRunActionRequest(), now)
+	decision, err := IssueRunActionDecision(evidence, validRunActionAuthority(), validRunActionRequest(), now, RunActionTargetsTicketsOnly)
 	if err != nil {
 		t.Fatalf("IssueRunActionDecision() error = %v", err)
 	}
 	key := SigningKey{ID: "control-test", PrivateKey: ed25519.NewKeyFromSeed([]byte("0123456789abcdef0123456789abcdef"))}
-	token, err := SignRunActionDecision(key, decision)
+	token, err := SignRunActionDecision(key, decision, RunActionTargetsTicketsOnly)
 	if err != nil {
 		t.Fatalf("SignRunActionDecision() error = %v", err)
 	}
-	if _, err := VerifyRunActionDecision(key, token, now.Add(time.Minute)); err != nil {
+	if _, err := VerifyRunActionDecision(key, token, now.Add(time.Minute), RunActionTargetsTicketsOnly); err != nil {
 		t.Fatalf("VerifyRunActionDecision() error = %v", err)
 	}
-	if _, err := VerifyRunActionDecision(key, token+"x", now.Add(time.Minute)); err == nil {
+	if _, err := VerifyRunActionDecision(key, token+"x", now.Add(time.Minute), RunActionTargetsTicketsOnly); err == nil {
 		t.Fatal("tampered decision token accepted")
 	}
-	if _, err := VerifyRunActionDecision(key, token, decision.ExpiresAt.Add(time.Second)); err == nil {
+	if _, err := VerifyRunActionDecision(key, token, decision.ExpiresAt.Add(time.Second), RunActionTargetsTicketsOnly); err == nil {
 		t.Fatal("expired decision token accepted")
 	}
 }

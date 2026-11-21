@@ -215,10 +215,18 @@ VALUES ($1, $2, $3, $4)`, orgID, rule.Host, rule.Rule, rule.Note); err != nil {
 		if err != nil {
 			return fmt.Errorf("encode browser site history: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `
+		var historyID int64
+		if err := tx.QueryRow(ctx, `
 INSERT INTO org_browser_site_history (org_id, change_kind, revision, actor_id, before_set, after_set)
-VALUES ($1, 'policy', $2, $3, $4::jsonb, $5::jsonb)`, orgID, next, actorID, string(beforeJSON), string(afterJSON)); err != nil {
+VALUES ($1, 'policy', $2, $3, $4::jsonb, $5::jsonb)
+RETURNING id`, orgID, next, actorID, string(beforeJSON), string(afterJSON)).Scan(&historyID); err != nil {
 			return fmt.Errorf("record browser site history: %w", err)
+		}
+		if err := enqueueAudit(ctx, tx, auditChange{
+			orgID: orgID, event: BrowserSitePolicyChanged, revision: next, historyID: historyID,
+			details: map[string]any{"mode": req.Mode, "rule_count": len(req.Rules), "revision": next},
+		}); err != nil {
+			return err
 		}
 		saved = after
 		return nil
@@ -320,7 +328,14 @@ RETURNING host, level, expires_at, updated_at`,
 		if err != nil {
 			return err
 		}
-		return recordPrefHistory(ctx, tx, orgID, revision, userID, string(beforeJSON), string(afterJSON))
+		historyID, err := recordPrefHistory(ctx, tx, orgID, revision, userID, string(beforeJSON), string(afterJSON))
+		if err != nil {
+			return err
+		}
+		return enqueueAudit(ctx, tx, auditChange{
+			orgID: orgID, event: BrowserSitePrefChanged, revision: revision, host: saved.Host, historyID: historyID,
+			details: map[string]any{"host": saved.Host, "level": saved.Level, "revision": revision},
+		})
 	})
 	if err != nil {
 		return Pref{}, err
@@ -357,8 +372,79 @@ DELETE FROM user_browser_site_prefs WHERE org_id = $1 AND user_id = $2 AND host 
 		if err != nil {
 			return err
 		}
-		return recordPrefHistory(ctx, tx, orgID, revision, userID, string(beforeJSON), "{}")
+		historyID, err := recordPrefHistory(ctx, tx, orgID, revision, userID, string(beforeJSON), "{}")
+		if err != nil {
+			return err
+		}
+		return enqueueAudit(ctx, tx, auditChange{
+			orgID: orgID, event: BrowserSitePrefChanged, revision: revision, host: host, historyID: historyID,
+			details: map[string]any{"host": host, "level": "none", "revision": revision},
+		})
 	})
+}
+
+// erasedTombstone replaces a member's id in the history once the member's choice rows
+// are redacted. The service refuses it as a member id, so no member can hold it.
+// migration 034's trigger names the same value.
+const erasedTombstone = "erased"
+
+// DeleteUserData erases one member's remembered choices in one organisation and redacts
+// the member's choice rows in the history. It is the erasure hook: user self-erasure
+// calls it whether or not the member is still an active member. It returns the counts
+// only: the choices deleted and the history rows redacted.
+func (r *Repository) DeleteUserData(ctx context.Context, orgID, userID string) (int64, int64, error) {
+	return r.eraseMemberData(ctx, orgID, userID, false)
+}
+
+// DeleteRemovedMemberData is DeleteUserData for a membership that has ended. While the
+// member is an active member it erases nothing, so a removal that a later re-add
+// superseded (an out-of-order projection message) cannot take an active member's
+// choices. The check and the erase share one transaction under the member's lock.
+func (r *Repository) DeleteRemovedMemberData(ctx context.Context, orgID, userID string) (int64, int64, error) {
+	return r.eraseMemberData(ctx, orgID, userID, true)
+}
+
+// eraseMemberData runs both erasure statements under the member's advisory lock, so a
+// choice written at the same time cannot land between the delete and the redaction. With
+// onlyInactive the statements also require that the member is not an active member.
+func (r *Repository) eraseMemberData(ctx context.Context, orgID, userID string, onlyInactive bool) (int64, int64, error) {
+	if r == nil || r.db == nil {
+		return 0, 0, errors.New("browser site repository not configured")
+	}
+	var prefs, history int64
+	err := r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		if err := lockMember(ctx, tx, orgID, userID); err != nil {
+			return err
+		}
+		deleted, err := tx.Exec(ctx, `
+DELETE FROM user_browser_site_prefs p
+WHERE p.org_id = $1 AND p.user_id = $2
+  AND ($3::bool = FALSE OR NOT EXISTS (
+    SELECT 1 FROM organization_members m
+    WHERE m.org_id = p.org_id AND m.user_id = p.user_id AND m.status = 'active'))`,
+			orgID, userID, onlyInactive)
+		if err != nil {
+			return fmt.Errorf("delete browser site choices: %w", err)
+		}
+		redacted, err := tx.Exec(ctx, `
+UPDATE org_browser_site_history h
+SET subject_user_id = $4, actor_id = $4, before_set = '{}'::jsonb, after_set = '{}'::jsonb
+WHERE h.org_id = $1 AND h.change_kind = 'user_pref' AND h.subject_user_id = $2
+  AND ($3::bool = FALSE OR NOT EXISTS (
+    SELECT 1 FROM organization_members m
+    WHERE m.org_id = h.org_id AND m.user_id = $2 AND m.status = 'active'))`,
+			orgID, userID, onlyInactive, erasedTombstone)
+		if err != nil {
+			return fmt.Errorf("redact browser site history: %w", err)
+		}
+		prefs = deleted.RowsAffected()
+		history = redacted.RowsAffected()
+		return nil
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	return prefs, history, nil
 }
 
 // lockPolicy returns the organisation's current revision (0 when none) and holds
@@ -404,10 +490,18 @@ func lockMember(ctx context.Context, tx pgx.Tx, orgID, userID string) error {
 }
 
 func loadPrefsFor(ctx context.Context, tx pgx.Tx, orgID, userID string, hosts []string) (map[string]Pref, error) {
+	// A choice is read only while the member is an ACTIVE member, in this same
+	// statement, so a removed member's choice is not applied even before its rows are
+	// erased (F-f02-16). A member who is not active gets no choice: the admin's answer
+	// alone.
 	rows, err := tx.Query(ctx, `
-SELECT host, level, expires_at, updated_at
-FROM user_browser_site_prefs
-WHERE org_id = $1 AND user_id = $2 AND host = ANY($3)`, orgID, userID, hosts)
+SELECT p.host, p.level, p.expires_at, p.updated_at
+FROM user_browser_site_prefs p
+WHERE p.org_id = $1 AND p.user_id = $2 AND p.host = ANY($3)
+  AND EXISTS (
+    SELECT 1 FROM organization_members m
+    WHERE m.org_id = p.org_id AND m.user_id = p.user_id AND m.status = 'active'
+  )`, orgID, userID, hosts)
 	if err != nil {
 		return nil, fmt.Errorf("read browser site choices: %w", err)
 	}
@@ -458,13 +552,17 @@ func encodePrefSnapshot(pref Pref, present bool) ([]byte, error) {
 	return encoded, nil
 }
 
-func recordPrefHistory(ctx context.Context, tx pgx.Tx, orgID string, revision int64, userID, beforeJSON, afterJSON string) error {
-	if _, err := tx.Exec(ctx, `
+// recordPrefHistory appends the history row of one choice write and returns its id, which the
+// audit intent of the same write carries.
+func recordPrefHistory(ctx context.Context, tx pgx.Tx, orgID string, revision int64, userID, beforeJSON, afterJSON string) (int64, error) {
+	var historyID int64
+	if err := tx.QueryRow(ctx, `
 INSERT INTO org_browser_site_history (org_id, change_kind, revision, actor_id, subject_user_id, before_set, after_set)
-VALUES ($1, 'user_pref', $2, $3, $3, $4::jsonb, $5::jsonb)`, orgID, revision, userID, beforeJSON, afterJSON); err != nil {
-		return fmt.Errorf("record browser site history: %w", err)
+VALUES ($1, 'user_pref', $2, $3, $3, $4::jsonb, $5::jsonb)
+RETURNING id`, orgID, revision, userID, beforeJSON, afterJSON).Scan(&historyID); err != nil {
+		return 0, fmt.Errorf("record browser site history: %w", err)
 	}
-	return nil
+	return historyID, nil
 }
 
 func mapWriteError(err error) error {

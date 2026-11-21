@@ -11,6 +11,7 @@ import (
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/spaces"
 	"github.com/gin-gonic/gin"
+	"github.com/rs/zerolog/log"
 )
 
 // runActionDecisionRequest contains only immutable identifiers and commitments
@@ -29,10 +30,14 @@ type runActionDecisionRequest struct {
 // modelActionViewRequest intentionally has no action, subject, Space, target
 // resource, or policy fields. Control derives the only viewable action from
 // independently resolved current authority; clients can name only the source
-// run whose eligibility they need rechecked.
+// run whose eligibility they need rechecked. action_ids (F-f03-10) is the one
+// optional narrowing: the actions the caller wants named. The table and the
+// operator mode still decide which of them are admitted, and an absent or null
+// list keeps the v1 view.
 type modelActionViewRequest struct {
-	RunID string `json:"run_id"`
-	OrgID string `json:"org_id"`
+	RunID     string   `json:"run_id"`
+	OrgID     string   `json:"org_id"`
+	ActionIDs []string `json:"action_ids,omitempty"`
 }
 
 // issueModelActionView issues a short-lived, view-only token for Capability
@@ -46,6 +51,12 @@ func (s *Server) issueModelActionView(c *gin.Context) {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil || decoder.Decode(&struct{}{}) != io.EOF || strings.TrimSpace(request.RunID) == "" || strings.TrimSpace(request.OrgID) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "valid model action run is required"})
+		return
+	}
+	// A list of action ids is refused as malformed before any Control lookup. A null list is the same
+	// as an absent one, so it keeps the v1 view.
+	if request.ActionIDs != nil && !spaces.ValidModelActionViewActionIDs(request.ActionIDs) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "valid model action ids are required"})
 		return
 	}
 	if s.spaceRepo == nil || s.runActionAuthority == nil {
@@ -74,6 +85,30 @@ func (s *Server) issueModelActionView(c *gin.Context) {
 	nonce, err := randomDecisionPart()
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "model action entropy unavailable"})
+		return
+	}
+	if request.ActionIDs != nil {
+		// v2: the view names the requested actions the table admits in the operator's mode. Ids
+		// outside the table or the mode are dropped, and a view that admits none is refused as v1 is.
+		view, err := spaces.IssueModelActionViewV2(evidence, authority, spaces.ModelActionViewRequest{
+			DecisionRef: decisionRef,
+			Nonce:       nonce,
+			ActionIDs:   request.ActionIDs,
+			Targets:     s.runActionTargets,
+		}, time.Now().UTC())
+		if err != nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": "model action is not authorized"})
+			return
+		}
+		token, err := spaces.SignModelActionViewV2(key, view)
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "model action signing failed"})
+			return
+		}
+		for actionID := range view.ActionSchemaHashes {
+			log.Info().Str("action_id", actionID).Str("mode", string(s.runActionTargets)).Msg("model action view issued")
+		}
+		c.JSON(http.StatusOK, gin.H{"data": gin.H{"token": token}})
 		return
 	}
 	view, err := spaces.IssueModelActionView(evidence, authority, spaces.ModelActionViewRequest{
@@ -144,16 +179,17 @@ func (s *Server) issueRunActionDecision(c *gin.Context) {
 		ActionID: strings.TrimSpace(request.ActionID), ActionSchemaHash: strings.TrimSpace(request.ActionSchemaHash),
 		PayloadDigest: strings.TrimSpace(request.PayloadDigest), IdempotencyKey: strings.TrimSpace(request.IdempotencyKey),
 		DecisionRef: decisionRef, Nonce: nonce,
-	}, time.Now().UTC())
+	}, time.Now().UTC(), s.runActionTargets)
 	if err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "run action is not authorized"})
 		return
 	}
-	token, err := spaces.SignRunActionDecision(key, decision)
+	token, err := spaces.SignRunActionDecision(key, decision, s.runActionTargets)
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "run action signing failed"})
 		return
 	}
+	log.Info().Str("action_id", decision.ActionID).Str("mode", string(s.runActionTargets)).Msg("run action decision issued")
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
 }
 
@@ -189,7 +225,7 @@ func (s *Server) checkCurrentRunActionAuthority(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "valid run action authority is required"})
 		return
 	}
-	if err := decision.Validate(); err != nil {
+	if err := decision.Validate(s.runActionTargets); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "valid run action authority is required"})
 		return
 	}
@@ -197,7 +233,7 @@ func (s *Server) checkCurrentRunActionAuthority(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if err := spaces.ValidateCurrentRunActionDecision(evidence, decision); err != nil {
+	if err := spaces.ValidateCurrentRunActionDecision(evidence, decision, s.runActionTargets); err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "current Control authority does not authorize this action"})
 		return
 	}

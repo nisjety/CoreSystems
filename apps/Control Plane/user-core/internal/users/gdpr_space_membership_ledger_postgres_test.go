@@ -40,6 +40,7 @@ func TestErasureSagaPseudonymisesSpaceMembershipLedger(t *testing.T) {
 	svc := NewService(repo, nil, nil)
 	svc.authEraser = auth
 	svc.erasureFanout = &fakeErasureFanoutPublisher{}
+	svc.SetBrowserSiteEraser(acceptingBrowserSiteEraser{})
 	if _, err := svc.HardEraseUser(ctx, "u-ledger", "u-ledger", "self", "org-ledger"); err != nil {
 		t.Fatalf("hard erase: %v", err)
 	}

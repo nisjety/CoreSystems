@@ -126,6 +126,11 @@ SELECT before_set, after_set FROM org_browser_site_history WHERE org_id = $1 AND
 SELECT count(*) FROM org_browser_site_history WHERE org_id = $1 AND change_kind = 'user_pref' AND subject_user_id = 'member-1' AND actor_id = 'member-1'`, orgA).Scan(&prefHistory); err != nil || prefHistory != 1 {
 		t.Fatalf("a member choice must leave one history row by the member: %d err=%v", prefHistory, err)
 	}
+	// The resolver applies a choice only to an ACTIVE member (F-f02-16), so member-1 is
+	// seeded as one before the snapshot reads the choice.
+	if _, err := db.Pool.Exec(ctx, `INSERT INTO organization_members (org_id, user_id, role, status) VALUES ($1, 'member-1', 'member', 'active')`, orgA); err != nil {
+		t.Fatalf("seed member-1 as an active member: %v", err)
+	}
 	set, prefs, err := repo.Snapshot(ctx, orgA, "member-1", []string{"open.example.com", "blocked.example.com"})
 	if err != nil || set.Revision != 2 || prefs["open.example.com"].Level != LevelAct || len(prefs) != 1 {
 		t.Fatalf("snapshot must carry the policy and the member's live choice: set=%+v prefs=%+v err=%v", set, prefs, err)
@@ -209,5 +214,118 @@ SELECT count(*) FROM org_browser_site_history WHERE org_id = $1 AND change_kind 
 		if err := db.Pool.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM %s WHERE org_id = $1`, table), orgA).Scan(&left); err != nil || left != 0 {
 			t.Fatalf("%d %s rows survived the hard delete of the organisation (err=%v)", left, table, err)
 		}
+	}
+}
+
+// TestControlLifecycleBrowserSiteChoicesFollowTheMembership runs against the disposable
+// lifecycle Postgres and proves F-f02-16 on the real tables: a removed member's choice is
+// not applied, the removal erases the choice and redacts its history rows, a removal that a
+// re-add superseded erases nothing for the active member, the self-erasure hook erases
+// whether or not the member is active, and the migration-034 trigger admits only the
+// redaction of a choice row.
+func TestControlLifecycleBrowserSiteChoicesFollowTheMembership(t *testing.T) {
+	dsn := os.Getenv("CONTROL_LIFECYCLE_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("CONTROL_LIFECYCLE_TEST_DATABASE_URL is not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	db, err := database.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to disposable Postgres: %v", err)
+	}
+	defer db.Close()
+	if err := testfixture.VerifyLifecycleMarker(ctx, db.Pool, dsn, "org_lifecycle", os.Getenv("CONTROL_LIFECYCLE_FIXTURE_ID")); err != nil {
+		t.Fatalf("refusing unsafe lifecycle database: %v", err)
+	}
+	if err := database.RunMigrations(ctx, db, "../../migrations"); err != nil {
+		t.Fatalf("apply org-core migrations: %v", err)
+	}
+
+	suffix := time.Now().UnixNano()
+	orgM := fmt.Sprintf("org-browser-membership-%d", suffix)
+	seedBrowserSiteOrganization(t, ctx, db, orgM)
+	for _, user := range []string{"removed-1", "active-2"} {
+		if _, err := db.Pool.Exec(ctx, `INSERT INTO organization_members (org_id, user_id, role, status) VALUES ($1, $2, 'member', 'active')`, orgM, user); err != nil {
+			t.Fatalf("seed member %s: %v", user, err)
+		}
+	}
+	repo := NewRepository(db)
+	live := time.Now().Add(time.Hour)
+	if _, err := repo.PutPref(ctx, orgM, "removed-1", 0, Pref{Host: "news.example.com", Level: LevelAct, ExpiresAt: live}); err != nil {
+		t.Fatalf("seed the removed member's choice: %v", err)
+	}
+	if _, err := repo.PutPref(ctx, orgM, "active-2", 0, Pref{Host: "news.example.com", Level: LevelAct, ExpiresAt: live}); err != nil {
+		t.Fatalf("seed the active member's choice: %v", err)
+	}
+
+	// While active, the choice is applied.
+	_, prefs, err := repo.Snapshot(ctx, orgM, "removed-1", []string{"news.example.com"})
+	if err != nil || len(prefs) != 1 {
+		t.Fatalf("an active member's choice must be read: prefs=%+v err=%v", prefs, err)
+	}
+
+	// Removed, the choice is not applied even before its rows are erased.
+	if _, err := db.Pool.Exec(ctx, `UPDATE organization_members SET status = 'removed' WHERE org_id = $1 AND user_id = 'removed-1'`, orgM); err != nil {
+		t.Fatalf("remove member: %v", err)
+	}
+	if _, prefs, err := repo.Snapshot(ctx, orgM, "removed-1", []string{"news.example.com"}); err != nil || len(prefs) != 0 {
+		t.Fatalf("a removed member's choice must not be read: prefs=%+v err=%v", prefs, err)
+	}
+
+	// The removal erases the choice and redacts its history row, and says so by count.
+	prefsDeleted, historyRedacted, err := repo.DeleteRemovedMemberData(ctx, orgM, "removed-1")
+	if err != nil || prefsDeleted != 1 || historyRedacted != 1 {
+		t.Fatalf("removal erase: prefs=%d history=%d err=%v; want 1, 1, nil", prefsDeleted, historyRedacted, err)
+	}
+	var left int
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM user_browser_site_prefs WHERE org_id = $1 AND user_id = 'removed-1'`, orgM).Scan(&left); err != nil || left != 0 {
+		t.Fatalf("the removed member's choice rows survived: %d err=%v", left, err)
+	}
+	if err := db.Pool.QueryRow(ctx, `
+SELECT count(*) FROM org_browser_site_history
+WHERE org_id = $1 AND change_kind = 'user_pref' AND subject_user_id = 'erased' AND actor_id = 'erased'
+  AND before_set = '{}'::jsonb AND after_set = '{}'::jsonb AND revision = 0`, orgM).Scan(&left); err != nil || left != 1 {
+		t.Fatalf("the redacted history row must keep the revision and drop the content: %d err=%v", left, err)
+	}
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM org_browser_site_history WHERE org_id = $1 AND (subject_user_id = 'removed-1' OR actor_id = 'removed-1')`, orgM).Scan(&left); err != nil || left != 0 {
+		t.Fatalf("no history row may still name the removed member: %d err=%v", left, err)
+	}
+
+	// Erasing again finds nothing: the erasure is idempotent.
+	if prefsDeleted, historyRedacted, err := repo.DeleteRemovedMemberData(ctx, orgM, "removed-1"); err != nil || prefsDeleted != 0 || historyRedacted != 0 {
+		t.Fatalf("a second erase must find nothing: prefs=%d history=%d err=%v", prefsDeleted, historyRedacted, err)
+	}
+
+	// A stale removal that a later re-add superseded finds an ACTIVE member and erases nothing.
+	if prefsDeleted, historyRedacted, err := repo.DeleteRemovedMemberData(ctx, orgM, "active-2"); err != nil || prefsDeleted != 0 || historyRedacted != 0 {
+		t.Fatalf("a removal erase must leave an active member's choices alone: prefs=%d history=%d err=%v", prefsDeleted, historyRedacted, err)
+	}
+	if _, prefs, err := repo.Snapshot(ctx, orgM, "active-2", []string{"news.example.com"}); err != nil || len(prefs) != 1 {
+		t.Fatalf("the active member's choice must survive a stale removal: prefs=%+v err=%v", prefs, err)
+	}
+
+	// The runtime role may change a choice row only by the redaction. A tampered before set
+	// is refused by the migration-034 trigger; a redaction that also moves the revision is
+	// refused by the column grant, which does not include revision.
+	for _, statement := range []string{
+		`UPDATE org_browser_site_history SET before_set = '{"host":"tampered"}'::jsonb WHERE org_id = $1 AND subject_user_id = 'active-2'`,
+		`UPDATE org_browser_site_history SET subject_user_id = 'erased', actor_id = 'erased', before_set = '{}'::jsonb, after_set = '{}'::jsonb, revision = 99 WHERE org_id = $1 AND subject_user_id = 'active-2'`,
+	} {
+		err := db.WithOrgScope(ctx, orgM, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, statement, orgM)
+			return err
+		})
+		if err == nil {
+			t.Fatalf("the history trigger must refuse %q", statement)
+		}
+	}
+
+	// The self-erasure hook erases a member's choices and redacts their history whether or
+	// not the member is active.
+	prefsDeleted, historyRedacted, err = repo.DeleteUserData(ctx, orgM, "active-2")
+	if err != nil || prefsDeleted != 1 || historyRedacted != 1 {
+		t.Fatalf("self-erasure of an active member: prefs=%d history=%d err=%v; want 1, 1, nil", prefsDeleted, historyRedacted, err)
 	}
 }

@@ -123,10 +123,22 @@ func (s *Server) resolveMembershipFromAuthCore(
 		return "", "", fmt.Errorf("canonical membership grant omitted role")
 	}
 	role := strings.ToLower(strings.TrimSpace(*decision.Role))
-	if role != "owner" && role != "admin" && role != "member" && role != "viewer" {
+	if !isSupportedOrganizationRole(role, s.complianceRoleOn) {
 		return "", "", fmt.Errorf("canonical membership authority returned unsupported role")
 	}
 	return requestedOrgID, role, nil
+}
+
+// isSupportedOrganizationRole is the canonical organisation role list: the four
+// base tiers, plus compliance while ORG_COMPLIANCE_ROLE_ENABLED is on (O-21).
+func isSupportedOrganizationRole(role string, complianceOn bool) bool {
+	switch role {
+	case "owner", "admin", "member", "viewer":
+		return true
+	case "compliance":
+		return complianceOn
+	}
+	return false
 }
 
 // callCanonicalMembershipAuthority retries one transport-level failure only.

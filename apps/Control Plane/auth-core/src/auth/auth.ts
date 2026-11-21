@@ -21,6 +21,7 @@ import {
 import { apiKey } from '@better-auth/api-key';
 import { passkey } from '@better-auth/passkey';
 import { ac, roles } from './permissions';
+import { organizationRoleOptions } from './organization-access';
 import { sso } from '@better-auth/sso';
 import { db } from '../db';
 import * as schema from '../db/schema';
@@ -1155,6 +1156,9 @@ const authOptions: BetterAuthOptions = {
             // administrative permissions required by onboarding, and avoids a
             // supported configuration that could create an org with no owner.
             creatorRole: 'owner',
+            // The compliance role (O-21, ORG_COMPLIANCE_ROLE_ENABLED): added only
+            // while the switch is on; off, the plugin keeps its built-in roles.
+            ...organizationRoleOptions(),
             membershipLimit: parsePositiveInt(
               process.env.ORG_MEMBERSHIP_LIMIT,
               100,

@@ -25,6 +25,11 @@ import {
   loadOrganizationRole,
 } from '../nats/api-key-revocation.publisher';
 import {
+  COMPLIANCE_ROLE,
+  OrganizationRoleSchema,
+  complianceRoleEnabled,
+} from './organization-roles';
+import {
   authorizeAuthInternalServiceToken,
   loadAuthInternalServiceCredentials,
 } from '../internal/internal-service-auth';
@@ -589,14 +594,14 @@ const OrganizationApiRecordSchema = z.object({
 });
 
 const OrganizationListApiRecordSchema = OrganizationApiRecordSchema.extend({
-  role: z.enum(['owner', 'admin', 'member']),
+  role: OrganizationRoleSchema,
   memberCount: z.number().optional(),
 });
 
 const InviteMemberSchema = z.object({
   organizationId: z.string().min(1),
   email: z.string().email(),
-  role: z.enum(['owner', 'admin', 'member']),
+  role: OrganizationRoleSchema,
   expiresAt: z.coerce.date().optional(),
 });
 
@@ -1908,7 +1913,7 @@ const getOrganizationsListProcedure = os
             name: z.string(),
             slug: z.string(),
             logo: z.string().nullable(),
-            role: z.enum(['owner', 'admin', 'member']),
+            role: OrganizationRoleSchema,
             memberCount: z.number().optional(),
             createdAt: z.string(),
           }),
@@ -1977,7 +1982,7 @@ const inviteMemberProcedure = os
         .object({
           id: z.string(),
           email: z.string(),
-          role: z.enum(['owner', 'admin', 'member']),
+          role: OrganizationRoleSchema,
           expiresAt: z.string(),
         })
         .optional(),
@@ -2080,7 +2085,7 @@ const switchOrganizationProcedure = os
           id: z.string(),
           name: z.string(),
           slug: z.string(),
-          role: z.enum(['owner', 'admin', 'member']),
+          role: OrganizationRoleSchema,
         })
         .optional(),
       error: z.string().optional(),
@@ -2110,7 +2115,7 @@ const switchOrganizationProcedure = os
           id?: string;
           name?: string;
           slug?: string;
-          role?: 'owner' | 'admin' | 'member';
+          role?: z.infer<typeof OrganizationRoleSchema>;
         };
         console.log('✅ Organization switched successfully:', data);
 
@@ -3675,7 +3680,7 @@ const adminGetUserProcedure = os
             z.object({
               id: z.string(),
               name: z.string(),
-              role: z.enum(['owner', 'admin', 'member']),
+              role: OrganizationRoleSchema,
             }),
           ),
         })
@@ -3742,7 +3747,9 @@ const adminGetUserProcedure = os
             id: membership.id,
             name: membership.name,
             role:
-              membership.role === 'owner' || membership.role === 'admin'
+              membership.role === 'owner' ||
+              membership.role === 'admin' ||
+              (membership.role === COMPLIANCE_ROLE && complianceRoleEnabled())
                 ? membership.role
                 : 'member',
           })),

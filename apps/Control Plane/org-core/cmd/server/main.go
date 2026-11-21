@@ -137,6 +137,7 @@ func main() {
 		go runGDPRAuditOutbox(ctx, orgService, 5*time.Second)
 		go runSIEMAuditOutbox(ctx, orgService, 5*time.Second)
 		go runIdentityAuditOutbox(ctx, orgService, 5*time.Second)
+		go runOrgFlagAuditOutbox(ctx, orgService, 5*time.Second)
 	}
 
 	// Wire shared cross-plane publisher (verevon-nats)
@@ -190,7 +191,22 @@ func main() {
 	server.SetModelEntitlements(modelentitlement.NewService(modelentitlement.NewRepository(db), orgService))
 	// Agent-browser site policy (WS21-S3). Read by the browser broker at grant mint;
 	// administered and chosen through the /api/v1 browser-sites routes.
-	server.SetBrowserSites(browsersites.NewService(browsersites.NewRepository(db), time.Now))
+	browserSites := browsersites.NewService(browsersites.NewRepository(db), time.Now)
+	server.SetBrowserSites(browserSites)
+	// F-f06-11: every site policy and choice write queues a content-free audit intent when
+	// ORG_BROWSER_SITE_AUDIT_ENABLED is the literal "true". The switch is read once here. The
+	// publisher loop below runs whatever it says, so intents already queued still drain.
+	browserSites.SetAuditEnabled(browsersites.AuditEnabled(os.Getenv))
+	if natsClient != nil {
+		browserSites.SetAuditPublisher(natsClient)
+		go runBrowserSiteAuditOutbox(ctx, browserSites, 5*time.Second)
+	}
+	// F-f03-02: a Space-scoped resolve reads the Space's browser floor from user-core with the
+	// server's own user-core URL and service token. A missing URL or token leaves the floor
+	// unread, so a Space-scoped resolve refuses every host.
+	server.SetBrowserSpaceFloor()
+	// A membership that ends takes its remembered site choices with it (F-f02-16).
+	orgService.SetBrowserSiteChoiceEraser(browserSites)
 	// Retention policy and legal holds (EP-9 C1); read by session-core's sweeper. No thread
 	// retention reader yet: thread holds are placed without the ZDR receipt check.
 	// The typed-nil guard matters: a nil *nats.Client inside the interface is non-nil.
@@ -403,6 +419,71 @@ func runIdentityAuditOutbox(ctx context.Context, service *orgcore.Service, inter
 		if result.Published > 0 || result.DeadLettered > 0 {
 			log.Printf(
 				"org-core identity audit outbox published=%d dead_lettered=%d",
+				result.Published, result.DeadLettered,
+			)
+		}
+	}
+	flush()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			flush()
+		}
+	}
+}
+
+// orgFlagAuditFlusher is the seam runOrgFlagAuditOutbox drives. *orgcore.Service satisfies it.
+type orgFlagAuditFlusher interface {
+	FlushOrgFlagAuditOutbox(ctx context.Context, limit int) (orgcore.GDPRAuditFlushResult, error)
+}
+
+// runOrgFlagAuditOutbox publishes the audit intents of organisation flag writes (W5-079-b).
+// SetOrgFlag flushes once after each commit, but a publish that fails there stays pending, and
+// nothing else retries it until the next flag write in any organisation (P2-cp-06-rel1). So this
+// loop flushes on its own ticks. It runs whatever ORG_FLAGS_ENABLED says, so rows still pending
+// when the switch is turned off drain. Off, the routes write no row, so a flush finds nothing new.
+func runOrgFlagAuditOutbox(ctx context.Context, service orgFlagAuditFlusher, interval time.Duration) {
+	flush := func() {
+		result, err := service.FlushOrgFlagAuditOutbox(ctx, 100)
+		if err != nil {
+			log.Printf("org-core org flag audit outbox retry failed: %v", err)
+		}
+		if result.Published > 0 || result.DeadLettered > 0 {
+			log.Printf(
+				"org-core org flag audit outbox published=%d dead_lettered=%d",
+				result.Published, result.DeadLettered,
+			)
+		}
+	}
+	flush()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			flush()
+		}
+	}
+}
+
+// runBrowserSiteAuditOutbox publishes the audit intents of agent-browser site policy writes and
+// member choice writes (F-f06-11). It runs whatever ORG_BROWSER_SITE_AUDIT_ENABLED says, so rows
+// still pending when the switch is turned off drain. Logs carry counts only, never a host.
+func runBrowserSiteAuditOutbox(ctx context.Context, service *browsersites.Service, interval time.Duration) {
+	flush := func() {
+		result, err := service.FlushBrowserSiteAuditOutbox(ctx, 100)
+		if err != nil {
+			log.Printf("org-core browser site audit outbox retry failed: %v", err)
+		}
+		if result.Published > 0 || result.DeadLettered > 0 {
+			log.Printf(
+				"org-core browser site audit outbox published=%d dead_lettered=%d",
 				result.Published, result.DeadLettered,
 			)
 		}

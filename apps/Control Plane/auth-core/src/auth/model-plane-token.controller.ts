@@ -66,6 +66,10 @@ import {
   type CanonicalTokenContext,
   resolveCanonicalTokenContext,
 } from './plane-token-membership';
+import {
+  complianceCannotRunAgents,
+  isComplianceMember,
+} from './organization-roles';
 import { modelGatewayScopesForRole } from './plane-token-scopes';
 import { ZDR_WAIVER_ENABLED_TOKEN } from './retention-decision.service';
 import {
@@ -190,6 +194,15 @@ export class ModelPlaneTokenController {
       throw new BadRequestException(
         'No active organisation on session; user-core returned no orgId',
       );
+    }
+
+    // O-21: the compliance role reads audit and legal holds and runs no agents.
+    // The model-gateway admits an interactive user token on its chat, session and
+    // run routes without any scope, so the only way to keep a compliance member
+    // off them is to sign nothing for it. Switch off, compliance is not a role
+    // and the mint is unchanged.
+    if (isComplianceMember(sessionContext.role)) {
+      throw complianceCannotRunAgents();
     }
 
     // ZDR-Z-14b: a relayed per-connection waiver decision is verified against

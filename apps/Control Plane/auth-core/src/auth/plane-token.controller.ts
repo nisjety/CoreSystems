@@ -84,6 +84,10 @@ import {
   resolveCanonicalTokenContext,
   type CanonicalTokenContext,
 } from './plane-token-membership';
+import {
+  complianceCannotRunAgents,
+  isComplianceMember,
+} from './organization-roles';
 import { planeScopesForRole } from './plane-token-scopes';
 import { ZDR_WAIVER_ENABLED_TOKEN } from './retention-decision.service';
 import {
@@ -159,6 +163,23 @@ const TOKEN_EXCHANGE_ALLOWED_SUBJECT_AUDIENCES: readonly PlaneAudience[] = [
  * one HTTP round trip. See design-2 §1.3. Each token also carries its own
  * `jti` so the resource server can consume it exactly once. */
 const TOKEN_EXCHANGE_TTL_SECONDS = 90;
+
+/**
+ * O-21: the interactive audiences whose bearer lets a user start or drive an
+ * agent (sessions, execution, inference, sandboxes, the browser broker and the
+ * agent bridges). A compliance member (ORG_COMPLIANCE_ROLE_ENABLED) is refused a
+ * token for each of them; the read audiences (data, capability, cost, control,
+ * application) are not in the set.
+ */
+const AGENT_RUNNING_AUDIENCES: ReadonlySet<string> = new Set([
+  'session-core',
+  'execution-core',
+  'inference-core',
+  'sandbox-manager',
+  'browser-broker',
+  'letta-bridge',
+  'bridge-core',
+]);
 
 @ApiTags('Plane Auth')
 @Controller('api')
@@ -269,6 +290,17 @@ export class PlaneTokenController {
       throw new BadRequestException(
         'No active organisation on session; user-core returned no orgId',
       );
+    }
+
+    // O-21: a compliance member (ORG_COMPLIANCE_ROLE_ENABLED) runs no agents, so
+    // no bearer for an agent-running audience is signed for it. Reads (data,
+    // capability list, cost, application plane) are unchanged. Switch off,
+    // compliance is not a role and nothing here applies.
+    if (
+      AGENT_RUNNING_AUDIENCES.has(audience) &&
+      isComplianceMember(sessionContext.role)
+    ) {
+      throw complianceCannotRunAgents();
     }
 
     // ZDR-Z-14b: a relayed per-connection waiver decision is verified against

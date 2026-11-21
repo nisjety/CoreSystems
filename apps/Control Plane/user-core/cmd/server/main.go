@@ -356,15 +356,29 @@ func main() {
 	if orgCoreServicePrincipal == "" {
 		orgCoreServicePrincipal = "user-core"
 	}
-	if orgCoreClient := clients.NewOrgCoreClient(
+	orgCoreClient := clients.NewOrgCoreClient(
 		os.Getenv("ORG_CORE_BASE_URL"),
 		orgCoreServicePrincipal,
 		os.Getenv("ORG_CORE_SERVICE_TOKEN"),
-	); orgCoreClient != nil {
+	)
+	// The same client serves the succession pre-flight and the browser-site erase
+	// step (F-f02-16). A typed nil must not be boxed into an interface, so the
+	// eraser is set only when the client exists.
+	var browserSiteEraser users.BrowserSiteEraser
+	if orgCoreClient != nil {
 		userService.SetOrgCoreClient(orgCoreClient)
+		browserSiteEraser = orgCoreClient
 		log.Println("✅ GDPR: org-core succession client wired (admin-succession pre-flight active)")
 	} else {
 		log.Println("⚠️  GDPR: ORG_CORE_BASE_URL/ORG_CORE_SERVICE_TOKEN not set — sole-owner/admin self-erasure will return 503 succession_unavailable until a successor client is configured")
+	}
+	// Every erasure erases the member's browser site choices in each organisation of its
+	// snapshot, through this client (F-f02-16). There is no switch: erasure is never gated.
+	// With no client, each fan-out child is held for retry, so the erasure waits for
+	// ORG_CORE_BASE_URL and ORG_CORE_SERVICE_TOKEN rather than completing with choices left.
+	userService.SetBrowserSiteEraser(browserSiteEraser)
+	if browserSiteEraser == nil {
+		log.Println("GDPR: ORG_CORE_BASE_URL/ORG_CORE_SERVICE_TOKEN are not set; browser-site erasure cannot run, so erasure fan-outs will not complete until they are")
 	}
 	userService.StartErasureSaga()
 
@@ -430,6 +444,11 @@ func main() {
 	// memory). Strict literal true; off by default; a rollout control, never an
 	// authorization input.
 	httpServer.SetSpaceMemoryDecisions(os.Getenv("CONTROL_SPACE_MEMORY_DECISIONS") == "true")
+	// F-f10-18: Space skill write decisions (a manager or owner creates, changes or
+	// deletes a Space skill). Strict literal true; off by default; a rollout
+	// control, never an authorization input. Enable only together with
+	// capability-core's SKILL_SPACE_WRITE_VERIFY.
+	httpServer.SetSpaceSkillWriteDecisions(os.Getenv("SPACE_SKILL_WRITE_DECISIONS") == "true")
 	// WS03-S3: org-admin Space policy writes. Strict literal true; off by default.
 	httpServer.SetSpacePolicyAdminWrites(os.Getenv("SPACE_POLICY_ADMIN_WRITES") == "true")
 	// WS04-S10: durable membership events (ledger as outbox, PubAck publish,

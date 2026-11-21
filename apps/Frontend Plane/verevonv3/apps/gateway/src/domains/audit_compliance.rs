@@ -37,6 +37,10 @@ use crate::{
 
 const COMPLIANCE_BASE: &str = "/v1/compliance/audit";
 const ADMIN_ROLES: &[&str] = &["owner", "admin"];
+/// O-21 (`ORG_COMPLIANCE_ROLE_ENABLED`, read once into `AppState`): with the
+/// compliance role live, a compliance member also reads, verifies and exports the
+/// audit trail. SIEM destinations stay owner and admin only.
+const AUDIT_READER_ROLES_WITH_COMPLIANCE: &[&str] = &["owner", "admin", "compliance"];
 
 const EVENTS_QUERY: &[&str] = &[
     "event", "user_id", "plane", "outcome", "since", "until", "limit", "cursor",
@@ -85,13 +89,45 @@ fn refusal(status: StatusCode, code: &'static str, message: &str) -> Response {
     (status, Json(error(code, message))).into_response()
 }
 
+/// The owner or admin gate: the SIEM destination routes.
 async fn admin_caller(state: &AppState, user: &AuthenticatedUser) -> Result<AdminCaller, Response> {
-    if !has_authorized_org_role(user, ADMIN_ROLES) {
-        return Err(refusal(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "Audit compliance requires an organization owner or admin role.",
-        ));
+    caller_with_roles(
+        state,
+        user,
+        ADMIN_ROLES,
+        "Audit compliance requires an organization owner or admin role.",
+    )
+    .await
+}
+
+/// The audit read gate: events, manifest, keys, export status and verify. Owner
+/// and admin; a compliance member too while the switch is on, in which case only
+/// the 403 text names the third role. Off, this is `admin_caller` byte for byte.
+async fn reader_caller(
+    state: &AppState,
+    user: &AuthenticatedUser,
+) -> Result<AdminCaller, Response> {
+    if state.space_features.org_compliance_role {
+        caller_with_roles(
+            state,
+            user,
+            AUDIT_READER_ROLES_WITH_COMPLIANCE,
+            "Audit compliance requires an organization owner, admin or compliance role.",
+        )
+        .await
+    } else {
+        admin_caller(state, user).await
+    }
+}
+
+async fn caller_with_roles(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    roles: &[&str],
+    refusal_message: &str,
+) -> Result<AdminCaller, Response> {
+    if !has_authorized_org_role(user, roles) {
+        return Err(refusal(StatusCode::FORBIDDEN, "forbidden", refusal_message));
     }
     let org_id = authorized_org_id(state, user).await;
     let role = user
@@ -152,7 +188,7 @@ async fn compliance_get(
     route: &str,
     allowed: &[&str],
 ) -> Response {
-    let caller = match admin_caller(&state, &user).await {
+    let caller = match reader_caller(&state, &user).await {
         Ok(caller) => caller,
         Err(response) => return response,
     };
@@ -227,7 +263,7 @@ async fn verify(
     Extension(user): Extension<AuthenticatedUser>,
     body: Bytes,
 ) -> Response {
-    let caller = match admin_caller(&state, &user).await {
+    let caller = match reader_caller(&state, &user).await {
         Ok(caller) => caller,
         Err(response) => return response,
     };
@@ -383,6 +419,8 @@ mod tests {
         user_core: MockServer,
         audit_core: MockServer,
         org_core: MockServer,
+        /// `ORG_COMPLIANCE_ROLE_ENABLED` as the gateway read it at boot (O-21).
+        compliance_role: bool,
     }
 
     impl Harness {
@@ -410,6 +448,7 @@ mod tests {
                 user_core,
                 audit_core: MockServer::start().await,
                 org_core: MockServer::start().await,
+                compliance_role: false,
             }
         }
 
@@ -419,6 +458,7 @@ mod tests {
             state.user_core_url = self.user_core.uri();
             state.audit_core_url = self.audit_core.uri();
             state.org_core_url = self.org_core.uri();
+            state.space_features.org_compliance_role = self.compliance_role;
             state
         }
 
@@ -496,6 +536,99 @@ mod tests {
         }
         assert_eq!(harness.audit_core_requests().await, 0);
         assert_eq!(harness.org_core_requests().await, 0);
+    }
+
+    /// O-21 off: a compliance member reads nothing here.
+    #[tokio::test]
+    async fn a_compliance_member_does_not_resolve_at_all_while_the_switch_is_off() {
+        // Off, `compliance` is an unknown role to the membership authority, so the
+        // gateway answers the same 503 it gives any unknown role; nothing is read.
+        let harness = Harness::start("compliance").await;
+        let (status, payload) = harness
+            .send("GET", "/api/v1/audit/compliance/events", None)
+            .await;
+        assert_eq!(status, 503, "{payload}");
+        assert_eq!(
+            payload["error"]["code"],
+            "organization_membership_authority_unavailable"
+        );
+        assert_eq!(harness.audit_core_requests().await, 0);
+    }
+
+    /// O-21 on: a compliance member reads, verifies and gets the same query
+    /// scrubbing; the signed role that audit-core re-checks is `compliance`. SIEM
+    /// destinations stay owner and admin only.
+    #[tokio::test]
+    async fn a_compliance_member_reads_and_verifies_but_cannot_touch_siem_destinations_with_the_switch_on(
+    ) {
+        let mut harness = Harness::start("compliance").await;
+        harness.compliance_role = true;
+        delegated("compliance", "GET", "/v1/compliance/audit/events")
+            .and(wm_query("org_id", "org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [], "meta": {"count": 0, "head_seq": 3}, "error": null
+            })))
+            .expect(1)
+            .mount(&harness.audit_core)
+            .await;
+        delegated("compliance", "POST", "/v1/compliance/audit/verify")
+            .and(wm_query("org_id", "org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"status": "verified"}, "error": null
+            })))
+            .expect(1)
+            .mount(&harness.audit_core)
+            .await;
+        let (status, body) = harness
+            .send("GET", "/api/v1/audit/compliance/events?org_id=org-2", None)
+            .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["meta"]["head_seq"], 3);
+        let (status, body) = harness
+            .send("POST", "/api/v1/audit/compliance/verify", Some(json!({})))
+            .await;
+        assert_eq!(status, 200, "{body}");
+
+        for (method, uri, body) in [
+            ("GET", "/api/v1/audit/siem-destinations", None),
+            (
+                "POST",
+                "/api/v1/audit/siem-destinations",
+                Some(json!({"kind": "ndjson_webhook"})),
+            ),
+            ("DELETE", "/api/v1/audit/siem-destinations/d-1", None),
+        ] {
+            let (status, payload) = harness.send(method, uri, body).await;
+            assert_eq!(status, 403, "{method} {uri}");
+            assert_eq!(
+                payload["error"]["message"],
+                "Audit compliance requires an organization owner or admin role."
+            );
+        }
+        assert_eq!(harness.org_core_requests().await, 0);
+    }
+
+    /// O-21 on: a member and a viewer are refused every audit route, with the text
+    /// that names the third role.
+    #[tokio::test]
+    async fn a_member_and_a_viewer_are_still_refused_with_the_switch_on() {
+        for role in ["member", "viewer"] {
+            let mut harness = Harness::start(role).await;
+            harness.compliance_role = true;
+            let (status, payload) = harness
+                .send("GET", "/api/v1/audit/compliance/events", None)
+                .await;
+            assert_eq!(status, 403, "{role}");
+            assert_eq!(
+                payload["error"]["message"],
+                "Audit compliance requires an organization owner, admin or compliance role."
+            );
+            let (status, _) = harness
+                .send("POST", "/api/v1/audit/compliance/verify", Some(json!({})))
+                .await;
+            assert_eq!(status, 403, "{role}");
+            assert_eq!(harness.audit_core_requests().await, 0, "{role}");
+        }
     }
 
     #[tokio::test]

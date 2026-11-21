@@ -224,6 +224,69 @@ describe('API-key exchange policy', () => {
     }
   });
 
+  // O-18: a key checks the budget of its own turns at cost-core. The scope is
+  // held directly or through agent:runs, bound to the key's own org, and the
+  // cost-core audience carries no other scope.
+  it('mints cost:budget:check for the cost-core audience to a key that runs agents or lists it', () => {
+    const costRequest = (scopes: readonly string[] = ['cost:budget:check']) =>
+      request({ audience: 'cost-core', scopes });
+    expect(
+      decideApiKeyExchange(key(), member, costRequest(), now),
+    ).toMatchObject({
+      allowed: true,
+      grant: {
+        audience: 'cost-core',
+        keyId: 'key-1',
+        orgId: 'org-a',
+        scopes: ['cost:budget:check'],
+      },
+    });
+    expect(
+      decideApiKeyExchange(
+        key({ permissions: { cost: ['budget:check'] } }),
+        member,
+        costRequest(),
+        now,
+      ),
+    ).toMatchObject({ allowed: true });
+    // A key holding neither is refused, and so is any scope the audience lacks.
+    expect(
+      decideApiKeyExchange(
+        key({ permissions: { browser: ['agent'] } }),
+        member,
+        costRequest(),
+        now,
+      ),
+    ).toEqual({ allowed: false, reason: 'scope_not_granted' });
+    for (const scopes of [['agent:runs'], ['cost:budget:check', 'cost:read']]) {
+      expect(
+        decideApiKeyExchange(key(), member, costRequest(scopes), now),
+      ).toEqual({ allowed: false, reason: 'scope_not_granted' });
+    }
+    // The implied scope never crosses orgs: the key is bound to org-a.
+    expect(
+      decideApiKeyExchange(
+        key(),
+        { orgId: 'org-b', role: 'member' },
+        request({
+          audience: 'cost-core',
+          orgId: 'org-b',
+          scopes: ['cost:budget:check'],
+        }),
+        now,
+      ),
+    ).toMatchObject({ allowed: false });
+    // And agent:runs is not widened by the cost scope's existence.
+    expect(
+      decideApiKeyExchange(
+        key({ permissions: { cost: ['budget:check'] } }),
+        member,
+        request(),
+        now,
+      ),
+    ).toEqual({ allowed: false, reason: 'scope_not_granted' });
+  });
+
   it('keeps the audience table closed', () => {
     expect(API_KEY_EXCHANGE_AUDIENCE_SCOPES).toEqual({
       'model-gateway': ['agent:runs'],
@@ -231,6 +294,7 @@ describe('API-key exchange policy', () => {
       'inference-core': ['agent:runs'],
       quarry: ['browser:agent'],
       'browser-broker': ['browser:agent'],
+      'cost-core': ['cost:budget:check'],
     });
     expect(isApiKeyExchangeAudience('execution-core')).toBe(false);
     expect(isApiKeyExchangeAudience('toString')).toBe(false);
@@ -270,5 +334,57 @@ describe('API-key exchange policy', () => {
     expect(apiKeyVerificationDenial('KEY_NOT_FOUND')).toBe('key_invalid');
     expect(apiKeyVerificationDenial('INVALID_API_KEY')).toBe('key_invalid');
     expect(apiKeyVerificationDenial(undefined)).toBe('key_invalid');
+  });
+
+  // O-21: a compliance member runs no agents, so a key it owns grants none.
+  describe('compliance owner (ORG_COMPLIANCE_ROLE_ENABLED)', () => {
+    const original = process.env.ORG_COMPLIANCE_ROLE_ENABLED;
+    const compliance = { orgId: 'org-a', role: 'compliance' };
+
+    afterEach(() => {
+      if (original === undefined) {
+        delete process.env.ORG_COMPLIANCE_ROLE_ENABLED;
+      } else {
+        process.env.ORG_COMPLIANCE_ROLE_ENABLED = original;
+      }
+    });
+
+    it.each([
+      ['model-gateway', 'agent:runs'],
+      ['session-core', 'agent:runs'],
+      ['inference-core', 'agent:runs'],
+      ['quarry', 'browser:agent'],
+      ['browser-broker', 'browser:agent'],
+    ])('switch on: refuses %s for a key a compliance member owns', (audience, scope) => {
+      process.env.ORG_COMPLIANCE_ROLE_ENABLED = 'true';
+      expect(
+        decideApiKeyExchange(
+          key(),
+          compliance,
+          request({ audience, scopes: [scope] }),
+          now,
+        ),
+      ).toEqual({ allowed: false, reason: 'scope_not_granted' });
+    });
+
+    it('switch on: a member and an admin owner are still granted', () => {
+      process.env.ORG_COMPLIANCE_ROLE_ENABLED = 'true';
+      for (const role of ['member', 'admin', 'owner']) {
+        expect(
+          decideApiKeyExchange(key(), { orgId: 'org-a', role }, request(), now),
+        ).toMatchObject({ allowed: true });
+      }
+    });
+
+    it.each(['', 'false', '1', 'TRUE'])(
+      'switch %j: the owner role value changes nothing',
+      (value) => {
+        if (value === '') delete process.env.ORG_COMPLIANCE_ROLE_ENABLED;
+        else process.env.ORG_COMPLIANCE_ROLE_ENABLED = value;
+        expect(
+          decideApiKeyExchange(key(), compliance, request(), now),
+        ).toMatchObject({ allowed: true });
+      },
+    );
   });
 });

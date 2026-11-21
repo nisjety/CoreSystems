@@ -16,8 +16,8 @@ import { and, asc, eq } from 'drizzle-orm';
 
 import { db } from '../db';
 import { member } from '../db/schema';
+import { isCanonicalOrganizationRole } from './organization-roles';
 
-const allowedRoles = new Set(['owner', 'admin', 'member', 'viewer']);
 const placeholderPrefixes = [
   'test',
   'placeholder',
@@ -116,7 +116,7 @@ export function buildMembershipDecision(
     return { version: 'v1', member: false, role: null };
   }
   const role = membership.role.trim().toLowerCase();
-  if (!allowedRoles.has(role)) {
+  if (!isCanonicalOrganizationRole(role)) {
     throw new Error('canonical membership has an unsupported role');
   }
   return { version: 'v1', member: true, role };
@@ -141,7 +141,7 @@ export function buildMembershipList(
       throw new Error('canonical membership is ambiguous');
     }
     seenUsers.add(userID);
-    if (!allowedRoles.has(role)) {
+    if (!isCanonicalOrganizationRole(role)) {
       throw new Error('canonical membership has an unsupported role');
     }
     return { user_id: userID, role, status: 'active' as const };
@@ -252,7 +252,8 @@ export class MembershipAuthorityController {
   @HttpCode(HttpStatus.OK)
   async decide(
     @Headers('x-user-core-membership-token') callerToken: string | undefined,
-    @Headers('x-learning-core-membership-token') learningCallerToken: string | undefined,
+    @Headers('x-learning-core-membership-token')
+    learningCallerToken: string | undefined,
     @Body() body: unknown,
   ): Promise<MembershipDecision> {
     const hasUserCoreCredential = Boolean(callerToken?.trim());

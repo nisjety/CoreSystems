@@ -61,6 +61,7 @@ import {
 } from '@/shared/api/membership-client'
 import type { MetaFacebookSdkConfig } from '@/shared/integrations/meta-facebook-sdk'
 import { getSession } from '@/shared/session/session-store'
+import { assignableRoleOptions, complianceRoleEnabled } from '@/features/settings/lib/org-roles'
 import { hasWorkspaceAdminAccess } from '@/shared/session/access'
 import {
   getOrganizationAgentLearningPolicy,
@@ -779,10 +780,7 @@ function MembersSection(props: { orgId: string | null }) {
           label={i18n.tr('Rolle', 'Role')}
           value={inviteRole()}
           onChange={(event) => setInviteRole(event.currentTarget.value as MembershipRole)}
-          options={[
-            { value: 'member', label: i18n.tr('Medlem', 'Member') },
-            { value: 'admin', label: i18n.tr('Administrator', 'Admin') },
-          ]}
+          options={assignableRoleOptions(i18n.tr)}
         />
         <SettingsButton
           variant="primary"
@@ -815,8 +813,9 @@ function MembersSection(props: { orgId: string | null }) {
                       <Show when={member.role === 'owner'}>
                         <option value="owner">{i18n.tr('Eier', 'Owner')}</option>
                       </Show>
-                      <option value="member">{i18n.tr('Medlem', 'Member')}</option>
-                      <option value="admin">{i18n.tr('Administrator', 'Admin')}</option>
+                      <For each={assignableRoleOptions(i18n.tr, member.role)}>
+                        {(option) => <option value={option.value}>{option.label}</option>}
+                      </For>
                     </select>
                     <span>{member.status}</span>
                     <button
@@ -853,6 +852,14 @@ function MembersSection(props: { orgId: string | null }) {
                 'Auth Core currently supports owner, admin, and member. Owner transfer and custom role administration require separate explicit contracts.',
               )}
             </p>
+            <Show when={complianceRoleEnabled()}>
+              <p>
+                {i18n.tr(
+                  'Etterlevelse kan lese revisjon og oppbevaringspålegg og kan sette og oppheve dem, men kan ikke kjøre agenter.',
+                  'Compliance can read audit and legal holds and may place and release them, but cannot run agents.',
+                )}
+              </p>
+            </Show>
           </div>
         </div>
       </div>

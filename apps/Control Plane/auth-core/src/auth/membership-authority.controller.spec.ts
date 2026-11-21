@@ -18,6 +18,43 @@ import {
 const TOKEN = '0123456789abcdef0123456789abcdef';
 const LEARNING_TOKEN = 'learning-core-membership-token-0123456789abcdef';
 
+describe('membership decision roles (O-21 compliance role)', () => {
+  const original = process.env.ORG_COMPLIANCE_ROLE_ENABLED;
+  afterEach(() => {
+    if (original === undefined) {
+      delete process.env.ORG_COMPLIANCE_ROLE_ENABLED;
+    } else {
+      process.env.ORG_COMPLIANCE_ROLE_ENABLED = original;
+    }
+  });
+
+  it('refuses a compliance membership while the switch is off', () => {
+    delete process.env.ORG_COMPLIANCE_ROLE_ENABLED;
+    expect(() => buildMembershipDecision({ role: 'compliance' })).toThrow(
+      'canonical membership has an unsupported role',
+    );
+    expect(() =>
+      buildMembershipList('org-1', [{ userId: 'u-1', role: 'compliance' }]),
+    ).toThrow('canonical membership has an unsupported role');
+  });
+
+  it('serves a compliance membership with the switch on', () => {
+    process.env.ORG_COMPLIANCE_ROLE_ENABLED = 'true';
+    expect(buildMembershipDecision({ role: ' Compliance ' })).toEqual({
+      version: 'v1',
+      member: true,
+      role: 'compliance',
+    });
+    expect(
+      buildMembershipList('org-1', [{ userId: 'u-1', role: 'compliance' }])
+        .members,
+    ).toEqual([{ user_id: 'u-1', role: 'compliance', status: 'active' }]);
+    expect(() => buildMembershipDecision({ role: 'auditor' })).toThrow(
+      'canonical membership has an unsupported role',
+    );
+  });
+});
+
 describe('MembershipAuthorityController', () => {
   const originalEnv = { ...process.env };
 

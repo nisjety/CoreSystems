@@ -357,6 +357,22 @@ func IssueModelActionViewV2(evidence PersonalThreadDecisionEvidence, authority R
 	return view, nil
 }
 
+// ValidModelActionViewActionIDs reports whether the action ids of a v2 view request are within the bounds
+// the view contract allows: one to maxModelActionViewV2Actions entries, each non-empty once trimmed and at
+// most maxModelActionIDBytes long. Which of them the table admits is decided by the operator mode, not here.
+func ValidModelActionViewActionIDs(actionIDs []string) bool {
+	if len(actionIDs) == 0 || len(actionIDs) > maxModelActionViewV2Actions {
+		return false
+	}
+	for _, actionID := range actionIDs {
+		actionID = strings.TrimSpace(actionID)
+		if actionID == "" || len(actionID) > maxModelActionIDBytes {
+			return false
+		}
+	}
+	return true
+}
+
 // admittedActionSchemaHashes maps each requested action the table admits in the
 // mode to the schema hash the table holds for it.
 func admittedActionSchemaHashes(actionIDs []string, mode RunActionTargetsMode) (map[string]string, error) {

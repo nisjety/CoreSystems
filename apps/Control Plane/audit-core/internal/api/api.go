@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -28,6 +29,10 @@ type API struct {
 	nonces      *delegationNonceCache
 	readiness   func(context.Context) Readiness
 	readMode    string
+	// complianceRoleOn is ORG_COMPLIANCE_ROLE_ENABLED (O-21), read once in New.
+	// Only the literal "true" turns it on. On, a compliance member reads the whole
+	// org audit trail and the compliance API; usage stays owner and admin only.
+	complianceRoleOn bool
 }
 
 type eventStore interface {
@@ -106,11 +111,12 @@ func New(s eventStore, rawCredentials string, readiness ...func(context.Context)
 		provider = readiness[0]
 	}
 	return &API{
-		store:       s,
-		credentials: credentials,
-		nonces:      newDelegationNonceCache(100_000),
-		readiness:   provider,
-		readMode:    readMode,
+		store:            s,
+		credentials:      credentials,
+		nonces:           newDelegationNonceCache(100_000),
+		readiness:        provider,
+		readMode:         readMode,
+		complianceRoleOn: complianceRoleEnabled(os.Getenv),
 	}, nil
 }
 

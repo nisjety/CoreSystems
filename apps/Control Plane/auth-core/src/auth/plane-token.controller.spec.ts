@@ -327,6 +327,7 @@ describe('PlaneTokenController interactive capability scope issuance', () => {
   it.each([
     ['member', ['capability:read']],
     ['viewer', ['capability:read']],
+    ['compliance', ['capability:read']],
     ['admin', ['capability:read', 'capability:write']],
     ['owner', ['capability:read', 'capability:write']],
   ] as const)(
@@ -740,4 +741,132 @@ describe('PlaneTokenController service-only audience gate', () => {
       principal_type: 'user',
     });
   });
+});
+
+// O-21: a compliance member (ORG_COMPLIANCE_ROLE_ENABLED) runs no agents.
+describe('PlaneTokenController compliance role agent refusal', () => {
+  const original = process.env.ORG_COMPLIANCE_ROLE_ENABLED;
+  const AGENT_AUDIENCES = [
+    'session-core',
+    'execution-core',
+    'inference-core',
+    'sandbox-manager',
+    'browser-broker',
+    'letta-bridge',
+    'bridge-core',
+  ] as const;
+  const READ_AUDIENCES = [
+    'data-plane',
+    'capability-core',
+    'cost-core',
+    'application-plane',
+  ] as const;
+
+  beforeEach(() => {
+    mockGetSession.mockReset();
+    mockResolveCanonicalTokenContext.mockReset();
+    mockResolveInteractiveRetentionPosture.mockReset();
+    mockResolveFreshExecutionRetentionProof.mockReset();
+    mockGetSession.mockResolvedValue({
+      user: { id: 'user-a', email: 'user@example.test' },
+      session: { activeOrganizationId: 'org-a' },
+    });
+    mockResolveCanonicalTokenContext.mockResolvedValue({
+      orgId: 'org-a',
+      role: 'compliance',
+    });
+    mockResolveInteractiveRetentionPosture.mockResolvedValue({
+      zdr: false,
+      authority: 'interactive-org-retention-policy',
+    });
+  });
+
+  afterEach(() => {
+    if (original === undefined) {
+      delete process.env.ORG_COMPLIANCE_ROLE_ENABLED;
+    } else {
+      process.env.ORG_COMPLIANCE_ROLE_ENABLED = original;
+    }
+  });
+
+  const controllerWith = () => {
+    const tokens = {
+      isInteractivePlaneAudience: jest.fn().mockReturnValue(true),
+      issuePlaneToken: jest.fn().mockReturnValue({ token: 'interactive' }),
+    };
+    return {
+      tokens,
+      controller: new PlaneTokenController(tokens as never, {} as never),
+    };
+  };
+
+  it.each(AGENT_AUDIENCES)(
+    'switch on: refuses %s to a compliance member with a typed 403 and signs nothing',
+    async (audience) => {
+      process.env.ORG_COMPLIANCE_ROLE_ENABLED = 'true';
+      const { tokens, controller } = controllerWith();
+
+      const refusal = await controller
+        .getToken(audience, { headers: { cookie: 'session=test' } } as never)
+        .catch((error: unknown) => error);
+
+      expect(refusal).toMatchObject({
+        status: 403,
+        response: {
+          error: { code: 'compliance_role_cannot_run_agents' },
+        },
+      });
+      expect(tokens.issuePlaneToken).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(READ_AUDIENCES)(
+    'switch on: still mints the read audience %s for a compliance member',
+    async (audience) => {
+      process.env.ORG_COMPLIANCE_ROLE_ENABLED = 'true';
+      const { tokens, controller } = controllerWith();
+
+      await expect(
+        controller.getToken(audience, {
+          headers: { cookie: 'session=test' },
+        } as never),
+      ).resolves.toMatchObject({ token: 'interactive', role: 'compliance' });
+      expect(tokens.issuePlaneToken).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(AGENT_AUDIENCES)(
+    'switch on: a member still mints %s',
+    async (audience) => {
+      process.env.ORG_COMPLIANCE_ROLE_ENABLED = 'true';
+      mockResolveCanonicalTokenContext.mockResolvedValue({
+        orgId: 'org-a',
+        role: 'member',
+      });
+      const { tokens, controller } = controllerWith();
+
+      await expect(
+        controller.getToken(audience, {
+          headers: { cookie: 'session=test' },
+        } as never),
+      ).resolves.toMatchObject({ token: 'interactive' });
+      expect(tokens.issuePlaneToken).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['', 'false', '1', 'TRUE'])(
+    'switch %j: compliance is not refused here, the mint is unchanged',
+    async (value) => {
+      if (value === '') delete process.env.ORG_COMPLIANCE_ROLE_ENABLED;
+      else process.env.ORG_COMPLIANCE_ROLE_ENABLED = value;
+      const { tokens, controller } = controllerWith();
+
+      await expect(
+        controller.getToken('session-core', {
+          headers: { cookie: 'session=test' },
+        } as never),
+      ).resolves.toMatchObject({ token: 'interactive' });
+      expect(tokens.issuePlaneToken).toHaveBeenCalledTimes(1);
+    },
+  );
 });

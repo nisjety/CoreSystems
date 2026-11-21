@@ -2669,6 +2669,191 @@ func TestRecordTokenLeaseFailsClosedOnMissingConnectionOrAuditIntent(t *testing.
 	}
 }
 
+// F-f08-10: the per-consumer lease keys. The fixtures below are low-entropy and used only here.
+const (
+	keyedLeaseSocialKey = "fixture-lease-key-social-aaaaaaaaaaaaaaaaaaa"
+	keyedLeaseWorkerKey = "fixture-lease-key-worker-bbbbbbbbbbbbbbbbbbb"
+	keyedLeaseBody      = `{"organizationId":"org-1","connectionId":"conn-keyed-lease","connectorType":"x"`
+)
+
+// seedKeyedLeaseConnection stores one active connection with an encrypted token for the keyed lease tests.
+func seedKeyedLeaseConnection(t *testing.T, cfg config.Config, repo *store.MemoryRepository) {
+	t.Helper()
+	vault, err := secretcrypto.NewVault(cfg.EncryptionKey)
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	encrypted, err := vault.Encrypt("access-token", []byte("conn-keyed-lease"))
+	if err != nil {
+		t.Fatalf("Encrypt error: %v", err)
+	}
+	if _, err := repo.UpsertConnection(t.Context(), store.Connection{
+		ID: "conn-keyed-lease", ProviderKey: "x", ConnectorType: "x", OrganizationID: "org-1", UserID: "user-1",
+		Status: "active", EncryptedAccessToken: encrypted, AccessTokenExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("UpsertConnection error: %v", err)
+	}
+}
+
+// keyedLeaseApp serves the token route with the per-consumer switch on, the given allow-list and keys.
+func keyedLeaseApp(t *testing.T, consumers []string, keys string) (*fiber.App, *fakeEventsPublisher) {
+	t.Helper()
+	cfg, repo, service := testOAuthStack(t)
+	cfg.TokenLeasePerConsumerAuth = true
+	cfg.TokenLeaseConsumers = consumers
+	cfg.TokenLeaseConsumerKeys = keys
+	seedKeyedLeaseConnection(t, cfg, repo)
+	publisher := &fakeEventsPublisher{}
+	return NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service, Events: publisher}), publisher
+}
+
+// postKeyedLease posts one token lease with the given internal key header, and returns the status and body.
+func postKeyedLease(t *testing.T, app *fiber.App, key, body string) (int, string) {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/internal/connectors/token", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if key != "" {
+		req.Header.Set("X-Internal-API-Key", key)
+	}
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	payload, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	return resp.StatusCode, string(payload)
+}
+
+// F-f08-10: with the switch on, the key a request presents names the consumer. The right key leases
+// for that consumer, with a matching body consumer or with none, and the lease records that consumer.
+func TestTokenLeasePerConsumerKeyLeasesForTheConsumerWhoseKeyItIs(t *testing.T) {
+	app, publisher := keyedLeaseApp(t, []string{"social-publisher", "email-worker"},
+		"social-publisher="+keyedLeaseSocialKey+",email-worker="+keyedLeaseWorkerKey)
+	if status, body := postKeyedLease(t, app, keyedLeaseSocialKey, keyedLeaseBody+`,"consumer":"social-publisher"}`); status != http.StatusOK {
+		t.Fatalf("matching consumer: status = %d, want 200: %s", status, body)
+	}
+	if status, body := postKeyedLease(t, app, keyedLeaseSocialKey, keyedLeaseBody+`}`); status != http.StatusOK {
+		t.Fatalf("absent consumer: status = %d, want 200: %s", status, body)
+	}
+	if len(publisher.events) != 2 {
+		t.Fatalf("events = %d, want one lease event per request", len(publisher.events))
+	}
+	for _, event := range publisher.events {
+		if event.Data["consumer"] != "social-publisher" {
+			t.Fatalf("lease recorded for %v, want the consumer the key names", event.Data["consumer"])
+		}
+	}
+}
+
+// F-f08-10: a wrong key, the shared internal API key and no key at all are refused 401, and no token leaves.
+func TestTokenLeasePerConsumerKeyRefusesWrongSharedAndMissingKeys(t *testing.T) {
+	app, publisher := keyedLeaseApp(t, []string{"social-publisher"}, "social-publisher="+keyedLeaseSocialKey)
+	body := keyedLeaseBody + `,"consumer":"social-publisher"}`
+	for label, key := range map[string]string{
+		"wrong key":           "fixture-lease-key-wrong-zzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+		"shared internal key": "dev-key",
+		"no key":              "",
+	} {
+		if status, _ := postKeyedLease(t, app, key, body); status != http.StatusUnauthorized {
+			t.Fatalf("%s: status = %d, want 401", label, status)
+		}
+	}
+	if len(publisher.events) != 0 {
+		t.Fatalf("a refused request leased a token: %#v", publisher.events)
+	}
+}
+
+// F-f08-10: a key shared by two consumers names neither, so it opens nothing.
+func TestTokenLeasePerConsumerKeySharedByTwoConsumersOpensNothing(t *testing.T) {
+	app, publisher := keyedLeaseApp(t, []string{"social-publisher", "email-worker"},
+		"social-publisher="+keyedLeaseSocialKey+",email-worker="+keyedLeaseSocialKey)
+	if status, _ := postKeyedLease(t, app, keyedLeaseSocialKey, keyedLeaseBody+`}`); status != http.StatusUnauthorized {
+		t.Fatalf("shared key status = %d, want 401", status)
+	}
+	if len(publisher.events) != 0 {
+		t.Fatal("a key shared by two consumers leased a token")
+	}
+}
+
+// F-f08-10: a body consumer that is present and names another consumer is refused 403 consumer_mismatch.
+func TestTokenLeasePerConsumerKeyRefusesABodyConsumerThatIsNotTheKeysName(t *testing.T) {
+	app, publisher := keyedLeaseApp(t, []string{"social-publisher", "email-worker"},
+		"social-publisher="+keyedLeaseSocialKey+",email-worker="+keyedLeaseWorkerKey)
+	status, body := postKeyedLease(t, app, keyedLeaseSocialKey, keyedLeaseBody+`,"consumer":"email-worker"}`)
+	if status != http.StatusForbidden || !strings.Contains(body, "consumer_mismatch") {
+		t.Fatalf("differing body consumer: status = %d, body %s; want 403 consumer_mismatch", status, body)
+	}
+	if len(publisher.events) != 0 {
+		t.Fatal("a differing body consumer leased a token")
+	}
+}
+
+// F-f08-10: a consumer that holds a key but is not on the allow-list is refused 403 consumer_not_allowed.
+func TestTokenLeasePerConsumerKeyRefusesAConsumerOutsideTheList(t *testing.T) {
+	app, publisher := keyedLeaseApp(t, []string{"social-publisher"},
+		"social-publisher="+keyedLeaseSocialKey+",email-worker="+keyedLeaseWorkerKey)
+	status, body := postKeyedLease(t, app, keyedLeaseWorkerKey, keyedLeaseBody+`}`)
+	if status != http.StatusForbidden || !strings.Contains(body, "consumer_not_allowed") {
+		t.Fatalf("consumer outside the list: status = %d, body %s; want 403 consumer_not_allowed", status, body)
+	}
+	if len(publisher.events) != 0 {
+		t.Fatal("a consumer outside the list leased a token")
+	}
+}
+
+// F-f08-10: with the switch on and no keys configured the route fails closed: every request is 401,
+// including one that presents the shared internal API key.
+func TestTokenLeasePerConsumerKeyFailsClosedWithoutKeys(t *testing.T) {
+	app, publisher := keyedLeaseApp(t, []string{"social-publisher"}, "")
+	for _, key := range []string{"dev-key", keyedLeaseSocialKey, ""} {
+		if status, _ := postKeyedLease(t, app, key, keyedLeaseBody+`,"consumer":"social-publisher"}`); status != http.StatusUnauthorized {
+			t.Fatalf("no keys configured, key %q: status = %d, want 401", key, status)
+		}
+	}
+	if len(publisher.events) != 0 {
+		t.Fatal("a route with no keys leased a token")
+	}
+}
+
+// F-f08-10: with the switch off the route is as it was: the shared internal API key leases, a missing
+// body consumer is still refused, and the configured consumer keys are ignored.
+func TestTokenLeaseSwitchOffKeepsTheSharedKeyAndIgnoresConsumerKeys(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	cfg.TokenLeaseConsumers = []string{"social-publisher"}
+	cfg.TokenLeaseConsumerKeys = "social-publisher=" + keyedLeaseSocialKey
+	seedKeyedLeaseConnection(t, cfg, repo)
+	publisher := &fakeEventsPublisher{}
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service, Events: publisher})
+
+	if status, body := postKeyedLease(t, app, "dev-key", keyedLeaseBody+`,"consumer":"social-publisher"}`); status != http.StatusOK {
+		t.Fatalf("shared key with the switch off: status = %d, want 200: %s", status, body)
+	}
+	if status, _ := postKeyedLease(t, app, keyedLeaseSocialKey, keyedLeaseBody+`,"consumer":"social-publisher"}`); status != http.StatusUnauthorized {
+		t.Fatalf("a consumer key with the switch off: status = %d, want 401", status)
+	}
+	if status, body := postKeyedLease(t, app, "dev-key", keyedLeaseBody+`}`); status != http.StatusBadRequest || !strings.Contains(body, "consumer_required") {
+		t.Fatalf("missing consumer with the switch off: status = %d, body %s; want 400 consumer_required", status, body)
+	}
+}
+
+// F-f08-10: an empty allow-list refuses every consumer only when the per-consumer switch is on; off, it
+// is no restriction as it always was.
+func TestTokenLeaseEmptyAllowListRefusesOnlyWithTheSwitchOn(t *testing.T) {
+	if !tokenLeaseConsumerAllowed(config.Config{}, "social-publisher") {
+		t.Fatal("switch off, empty allow-list: a consumer must be allowed as before")
+	}
+	if tokenLeaseConsumerAllowed(config.Config{TokenLeasePerConsumerAuth: true}, "social-publisher") {
+		t.Fatal("switch on, empty allow-list: every consumer must be refused")
+	}
+	listed := config.Config{TokenLeasePerConsumerAuth: true, TokenLeaseConsumers: []string{"social-publisher"}}
+	if !tokenLeaseConsumerAllowed(listed, "social-publisher") || tokenLeaseConsumerAllowed(listed, "email-worker") {
+		t.Fatal("switch on, listed consumer: only the listed consumer is allowed")
+	}
+}
+
 type auditInsertFailureTransaction struct {
 	store.AuditTransaction
 }

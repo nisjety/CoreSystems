@@ -79,6 +79,22 @@ const qualifiedErasureOperationColumns = `
 	operation.completed_at, operation.last_error, operation.created_at,
 	operation.updated_at`
 
+// erasureOrganizationSnapshotSQL names the organisations a user erasure fans out to: every
+// organisation the erased user has a membership row in, whatever its status, plus the one the
+// request named (P2-cp-04-rel1). It was limited to active memberships before, so the org-core
+// erase of a browser-site choice never reached an organisation the user had been removed from.
+// Org-core's erase answers ok with no rows where nothing remains, so the wider fan-out is safe.
+const erasureOrganizationSnapshotSQL = `
+SELECT DISTINCT org_id
+FROM (
+	SELECT org_id FROM user_org_memberships
+	WHERE user_id=$1
+	UNION ALL SELECT $2
+) affected
+WHERE length(trim(org_id)) BETWEEN 1 AND 255
+ORDER BY org_id
+`
+
 func (r *Repository) BeginErasureOperation(ctx context.Context, requested ErasureOperation) (ErasureOperation, error) {
 	tx, err := r.db.Pool.Begin(ctx)
 	if err != nil {
@@ -108,16 +124,7 @@ func (r *Repository) BeginErasureOperation(ctx context.Context, requested Erasur
 		return ErasureOperation{}, fmt.Errorf("erasure operation identity collision")
 	}
 	if operation.FanoutSnapshotAt == nil {
-		rows, queryErr := tx.Query(ctx, `
-			SELECT DISTINCT org_id
-			FROM (
-				SELECT org_id FROM user_org_memberships
-				WHERE user_id=$1 AND status='active'
-				UNION ALL SELECT $2
-			) affected
-			WHERE length(trim(org_id)) BETWEEN 1 AND 255
-			ORDER BY org_id
-		`, requested.UserID, requested.OrgID)
+		rows, queryErr := tx.Query(ctx, erasureOrganizationSnapshotSQL, requested.UserID, requested.OrgID)
 		if queryErr != nil {
 			return ErasureOperation{}, fmt.Errorf("snapshot erasure organizations: %w", queryErr)
 		}
