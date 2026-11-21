@@ -4,6 +4,7 @@ import FinetuneJobsPage from '@/features/finetune/components/FinetuneJobsPage'
 import { OrgDeletionDangerZone } from '@/features/settings/components/OrgDeletionDangerZone'
 import { AuditComplianceSection } from '@/features/settings/components/AuditComplianceSection'
 import { AuditLogSection } from '@/features/settings/components/AuditLogSection'
+import { OrgRetentionSection } from '@/features/settings/components/OrgRetentionSection'
 import { TrustCenterSection } from '@/features/settings/components/TrustCenterSection'
 import { McpServersSection } from '@/features/settings/components/McpServersSection'
 import { SkillsSection } from '@/features/settings/components/SkillsSection'
@@ -513,6 +514,9 @@ function WorkspaceSettingsSection(props: {
       <Match when={props.section === 'trust'}>
         <TrustCenterSection />
         <AuditComplianceSection />
+        {/* EP-9-C1 / D21i: the retention window and legal holds. Built with the org-core routes but never mounted;
+            the section gates itself by org role (window: owner/admin, holds: owner/admin read, owner/compliance write). */}
+        <OrgRetentionSection />
       </Match>
       <Match when={props.section === 'audit-log'}>
         <AuditLogSection />

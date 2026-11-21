@@ -410,9 +410,8 @@ mod tests {
     #[tokio::test]
     async fn a_member_and_a_viewer_cannot_set_the_window() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        // Only an owner or an admin sets the window. The membership authority issues owner, admin,
-        // member and viewer, so those are the session roles that reach this gate ("compliance" is not one).
-        for role in ["member", "viewer"] {
+        // Only an owner or an admin sets the window. Compliance (D21i) holds legal holds, not the window.
+        for role in ["member", "viewer", "compliance"] {
             let up = Upstreams::start(role).await;
             let (status, body) = send(
                 up.state(),
@@ -445,8 +444,8 @@ mod tests {
     #[tokio::test]
     async fn an_owner_places_a_hold_and_an_admin_cannot() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        // A hold is placed by an owner or a compliance member. The membership authority issues no
-        // "compliance" session role, so the owner stands in for the placing role here.
+        // A hold is placed by an owner or a compliance member (see the compliance test below); an
+        // admin sets the window but cannot place or lift a hold.
         let admin = Upstreams::start("admin").await;
         let (status, _) = send(
             admin.state(),
@@ -479,6 +478,65 @@ mod tests {
         .await;
         assert_eq!(status, 201, "{body}");
         assert_eq!(body["hold"]["id"], HOLD_ID);
+    }
+
+    /// D21i: a compliance member is a real session role now (Control's fifth canonical org role). It
+    /// reads, places and lifts legal holds through the gateway, with its own delegated identity.
+    #[tokio::test]
+    async fn a_compliance_member_views_places_and_lifts_a_hold() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let up = Upstreams::start("compliance").await;
+        up.org_core(
+            "GET",
+            ORG_CORE_HOLDS,
+            None,
+            ResponseTemplate::new(200).set_body_json(json!({"holds": []})),
+        )
+        .await;
+        up.org_core(
+            "POST",
+            ORG_CORE_HOLDS,
+            Some(thread_hold()),
+            ResponseTemplate::new(201).set_body_json(json!({
+                "hold": {"id": HOLD_ID, "scope": "thread", "target_ref": "thr-1"},
+                "existed": false
+            })),
+        )
+        .await;
+        up.org_core(
+            "POST",
+            &format!("{ORG_CORE_HOLDS}/{HOLD_ID}/release"),
+            None,
+            ResponseTemplate::new(200).set_body_json(json!({"id": HOLD_ID})),
+        )
+        .await;
+        let (status, body) = send(up.state(), "GET", "/api/v1/orgs/org-1/legal-holds", None).await;
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = send(
+            up.state(),
+            "POST",
+            "/api/v1/orgs/org-1/legal-holds",
+            Some(thread_hold()),
+        )
+        .await;
+        assert_eq!(status, 201, "{body}");
+        let (status, body) = send(
+            up.state(),
+            "POST",
+            &format!("/api/v1/orgs/org-1/legal-holds/{HOLD_ID}/release"),
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let roles: Vec<String> = up
+            .org_core
+            .received_requests()
+            .await
+            .expect("recording")
+            .iter()
+            .filter_map(|request| request.headers.get("x-user-role").and_then(|v| v.to_str().ok()).map(str::to_owned))
+            .collect();
+        assert_eq!(roles, vec!["compliance"; 3], "org-core sees the compliance role, not a stand-in");
     }
 
     #[tokio::test]

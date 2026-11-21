@@ -189,7 +189,10 @@ fn active_membership_from_authority_body(
     let role = role.trim().to_ascii_lowercase();
     if organization_id.is_empty()
         || scope_org_id(user) != Some(organization_id)
-        || !matches!(role.as_str(), "owner" | "admin" | "member" | "viewer")
+        // D21i: compliance is Control's fifth canonical org role (b28c2ef4c). It is accepted here as a membership,
+        // never widened: only the routes that name it (the legal-hold reads and writes) let it through, and every
+        // other role list leaves it out, so it fails closed as a 403 rather than as an unreadable authority (503).
+        || !matches!(role.as_str(), "owner" | "admin" | "member" | "viewer" | "compliance")
     {
         return ActiveMembershipResolution::AuthorityUnavailable;
     }
@@ -2744,6 +2747,25 @@ mod tests {
             ),
             ActiveMembershipResolution::AuthorityUnavailable
         );
+    }
+
+    #[test]
+    fn active_membership_accepts_the_compliance_role_as_it_is() {
+        let user = user_with_active_org(Some("org-active"));
+        let context = json!({
+            "userId": "user-1",
+            "orgId": "org-active",
+            "role": "Compliance",
+            "onboardingStatus": "COMPLETED"
+        });
+        let ActiveMembershipResolution::Member(membership) = active_membership_from_authority_body(
+            &user,
+            StatusCode::OK,
+            &serde_json::to_vec(&context).unwrap(),
+        ) else {
+            panic!("a compliance membership is a membership (D21i)")
+        };
+        assert_eq!(membership.role, "compliance");
     }
 
     #[test]
