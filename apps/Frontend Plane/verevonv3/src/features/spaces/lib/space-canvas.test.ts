@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { SpaceCanvasVersion, SpaceRosterMember } from '@/shared/api/spaces-client'
 
 import {
+  CANVAS_CLEAR_CONTENT,
+  canOfferCanvasClear,
   canvasChangeNote,
   canvasCompareOrder,
   canvasLeavesRoom,
@@ -177,3 +179,13 @@ describe('WS19-S7 canvas leave guard, compare and restore line', () => {
     expect(canvasChangeNote(edit, versionNoOf, en)).toBeNull()
   })
 })
+
+describe('canOfferCanvasClear (D22aq)', () => {
+  it('offers the clear to a room manager or owner only, and clears with one newline', () => {
+    expect(canOfferCanvasClear('manager')).toBe(true)
+    expect(canOfferCanvasClear('owner')).toBe(true)
+    for (const role of ['editor', 'viewer', 'member', '', undefined]) expect(canOfferCanvasClear(role)).toBe(false)
+    expect(CANVAS_CLEAR_CONTENT).toBe(String.fromCharCode(10))
+  })
+})
+

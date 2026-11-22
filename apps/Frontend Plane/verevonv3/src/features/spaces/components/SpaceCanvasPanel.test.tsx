@@ -147,7 +147,7 @@ function NavigationProbe() {
   return null
 }
 
-function renderPanel(options: { readonly tab?: SpaceTabId } = {}) {
+function renderPanel(options: { readonly tab?: SpaceTabId; readonly canClear?: boolean } = {}) {
   const tab = options.tab ?? 'lerret'
   const Router = createRouter({
     routes: [
@@ -157,7 +157,13 @@ function renderPanel(options: { readonly tab?: SpaceTabId } = {}) {
           <>
             <NavigationProbe />
             <ActiveSpaceTabContext value={() => tab}>
-              <SpaceCanvasPanel spaceRef="room-1" roster={() => ROSTER} orgId="org-1" actorId="user-kari" />
+              <SpaceCanvasPanel
+                spaceRef="room-1"
+                roster={() => ROSTER}
+                orgId="org-1"
+                actorId="user-kari"
+                canClear={options.canClear}
+              />
             </ActiveSpaceTabContext>
           </>
         ),
@@ -682,3 +688,56 @@ describe('SpaceCanvasPanel: differences, history and restore (WS19-S7)', () => {
     expect(textarea().value).toBe('Plan A, endret')
   })
 })
+
+// D22aq: a room manager or owner clears the canvas by saving one newline over the head on screen.
+describe('Clear canvas (D22aq)', () => {
+  const clearButton = () => screen.queryByRole('button', { name: 'Tøm lerretet' })
+
+  it('is offered only to a viewer the room marks as manager or owner, on a canvas that is not already cleared', async () => {
+    spacesClient.getSpaceCanvas.mockResolvedValue(viewRead(2, 'Plan'))
+    renderPanel({ canClear: false })
+    await screen.findByRole('button', { name: 'Rediger' })
+    expect(clearButton()).toBeNull()
+    cleanup()
+
+    spacesClient.getSpaceCanvas.mockResolvedValue(viewRead(2, 'Plan'))
+    renderPanel({ canClear: true })
+    await screen.findByRole('button', { name: 'Rediger' })
+    expect(clearButton()).not.toBeNull()
+    cleanup()
+
+    spacesClient.getSpaceCanvas.mockResolvedValue(viewRead(3, '\n'))
+    renderPanel({ canClear: true })
+    await screen.findByRole('button', { name: 'Rediger' })
+    expect(clearButton()).toBeNull()
+  })
+
+  it('asks to confirm, then saves one newline over the head through spaces.save_canvas', async () => {
+    spacesClient.getSpaceCanvas.mockResolvedValue(viewRead(2, 'Plan'))
+    actions.executeAction.mockResolvedValue(stored(3))
+    renderPanel({ canClear: true })
+    fireEvent.click(await screen.findByRole('button', { name: 'Tøm lerretet' }))
+    expect(actions.executeAction).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Bekreft at lerretet tømmes' }))
+
+    expect(await screen.findByText('Lagret som versjon 3.')).toBeTruthy()
+    expect(actions.executeAction).toHaveBeenCalledTimes(1)
+    const [action, actor, input, options] = actions.executeAction.mock.calls[0] ?? []
+    expect(action).toBe('spaces.save_canvas')
+    expect(actor).toEqual(ACTOR)
+    expect(input).toMatchObject({ spaceRef: 'room-1', expectedVersionId: 'v2', content: '\n' })
+    expect(options).toEqual({ idempotencyKey: input.clientSaveId })
+  })
+
+  it('a newer head refuses the clear, says nothing was cleared, and reads the canvas again', async () => {
+    spacesClient.getSpaceCanvas.mockResolvedValueOnce(viewRead(2, 'Plan')).mockResolvedValue(viewRead(3, 'Ola skrev dette.'))
+    actions.executeAction.mockRejectedValue(new ApiError('moved', 409, 'canvas_head_moved'))
+    renderPanel({ canClear: true })
+    fireEvent.click(await screen.findByRole('button', { name: 'Tøm lerretet' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Bekreft at lerretet tømmes' }))
+
+    expect(await screen.findByText(/Lerretet ble ikke tømt/)).toBeTruthy()
+    await vi.waitFor(() => expect(spacesClient.getSpaceCanvas).toHaveBeenCalledTimes(2))
+  })
+})
+

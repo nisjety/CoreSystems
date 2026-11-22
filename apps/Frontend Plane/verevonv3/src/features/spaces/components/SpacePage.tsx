@@ -92,6 +92,7 @@ import { SpaceBrowserStartPanel } from './browser/SpaceBrowserStartPanel'
 import { SpaceBrowserThreadSection } from './browser/SpaceBrowserThreadSection'
 import { SpaceBrowserView } from './browser/SpaceBrowserView'
 import { canOfferBrowserStop, spaceBrowserStartOffered } from '../lib/space-browser'
+import { canOfferCanvasClear } from '../lib/space-canvas'
 import { SpaceShareToRoomDialog } from './SpaceShareToRoomDialog'
 import { spaceThreadPaneEnabled } from '../lib/space-thread-deep-link'
 import { isDmKind, withSpaceKindTraits } from '../lib/space-kind'
@@ -915,6 +916,7 @@ export default function SpacePage() {
                         roster={() => (roster.error ? [] : roster() ?? [])}
                         orgId={current().membership.org_id}
                         actorId={current().membership.subject_id}
+                        canClear={canOfferCanvasClear(current().membership.role)}
                       />
                     ),
                     arbeid: <SpaceWorkPanel spaceRef={current().space.space_ref} liveRuns={agentWork()?.live === true} />,

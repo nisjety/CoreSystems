@@ -17,7 +17,14 @@ import {
 import { useI18n } from '@/shared/i18n'
 import { canvasErrorMessage } from '@/shared/i18n/errors'
 
-import { CANVAS_REFRESH_MS, CANVAS_TAB_ID, canvasLeavesRoom, canvasVersionMeta, sameCanvasText } from '../lib/space-canvas'
+import {
+  CANVAS_CLEAR_CONTENT,
+  CANVAS_REFRESH_MS,
+  CANVAS_TAB_ID,
+  canvasLeavesRoom,
+  canvasVersionMeta,
+  sameCanvasText,
+} from '../lib/space-canvas'
 import {
   CANVAS_MAX_BYTES,
   canvasDraftProblem,
@@ -36,6 +43,7 @@ import { formatWhenWithTime } from '../lib/space-thread-presentation'
 import { useActiveSpaceTab } from './SpaceCockpit'
 import { SpaceCanvasDiff } from './SpaceCanvasDiff'
 import { SpaceCanvasHistory } from './SpaceCanvasHistory'
+import { SpaceConfirmButton } from './SpaceConfirmButton'
 import './space-canvas.css'
 
 /** The typed 404 a save or a restore answers when the room's canvas is gone (D21n), never a head conflict. */
@@ -85,6 +93,11 @@ export interface SpaceCanvasPanelProps {
   readonly orgId?: string
   /** The signed-in member's subject id, the actor of a save. */
   readonly actorId?: string
+  /**
+   * D22aq: offer "Clear canvas" (a room manager or owner, `canOfferCanvasClear`). Presentation only; the clear is an
+   * ordinary save of one newline, decided by Control and wiki-store like any other.
+   */
+  readonly canClear?: boolean
 }
 
 type PanelState =
@@ -191,6 +204,8 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
   const [notice, setNotice] = createSignal<Notice | null>(null)
   const [historyOpen, setHistoryOpen] = createSignal(false)
   const [restoring, setRestoring] = createSignal(false)
+  const [clearing, setClearing] = createSignal(false)
+  const [clearFailure, setClearFailure] = createSignal<{ readonly error: unknown; readonly stale: boolean } | null>(null)
   const [restoreFailure, setRestoreFailure] = createSignal<{ readonly error: unknown } | null>(null)
   const [restoreConflict, setRestoreConflict] = createSignal<RestoreConflict>(null)
   const viewState = createMemo(() => {
@@ -560,6 +575,32 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
     }
   }
 
+  // D22aq: clear the canvas by saving one newline over the head on screen, through the same save action as an edit. A
+  // newer head refuses it (nothing is cleared) and the view is read again, so the manager decides on what is there now.
+  const clearCanvas = async () => {
+    const view = viewState()
+    const who = actor()
+    if (!view || !who || clearing() || restoring() || !writeAllowed()) return
+    const spaceRef = props.spaceRef
+    setClearing(true)
+    setClearFailure(null)
+    try {
+      const result = await saveSpaceCanvasVersion(spaceRef, who, {
+        expectedVersionId: view.head.versionId,
+        content: CANVAS_CLEAR_CONTENT,
+        clientSaveId: crypto.randomUUID(),
+      })
+      if (spaceRef === props.spaceRef) settleSaved(spaceRef, result, CANVAS_CLEAR_CONTENT)
+    } catch (error) {
+      if (spaceRef !== props.spaceRef) return
+      const stale = isStaleSaveRefusal(error)
+      setClearFailure({ error, stale })
+      if (stale || isCanvasRemoved(error)) void read(spaceRef, false)
+    } finally {
+      setClearing(false)
+    }
+  }
+
   return (
     <section class="verevon-space-view verevon-space-canvas" aria-labelledby="space-canvas-title">
       <div class="verevon-space-view__heading">
@@ -613,6 +654,26 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
                   >
                     {tr('Rediger', 'Edit')}
                   </button>
+                </Show>
+                <Show
+                  when={
+                    props.canClear === true &&
+                    view().canWrite &&
+                    actor() !== null &&
+                    view().head.content !== undefined &&
+                    view().head.content !== CANVAS_CLEAR_CONTENT
+                  }
+                >
+                  <SpaceConfirmButton
+                    label={clearing() ? tr('Tømmer …', 'Clearing…') : tr('Tøm lerretet', 'Clear canvas')}
+                    consequence={tr(
+                      'Lerretet blir tomt for alle i rommet. Teksten blir værende i historikken og kan gjenopprettes.',
+                      'The canvas becomes empty for everyone in the room. The text stays in the history and can be restored.',
+                    )}
+                    confirmLabel={tr('Bekreft at lerretet tømmes', 'Confirm clearing the canvas')}
+                    disabled={clearing() || restoring()}
+                    onConfirm={() => void clearCanvas()}
+                  />
                 </Show>
                 <button
                   type="button"
@@ -675,6 +736,18 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
                       </>
                     }
                   />
+                )}
+              </Show>
+              <Show when={clearFailure()}>
+                {(failure) => (
+                  <p class="verevon-space-canvas__error" role="alert">
+                    {failure().stale
+                      ? tr(
+                          'Noen andre har lagret en nyere versjon. Lerretet ble ikke tømt; se over den nyeste og prøv igjen.',
+                          'Someone else saved a newer version. The canvas was not cleared; review the latest and try again.',
+                        )
+                      : canvasErrorMessage(failure().error, tr)}
+                  </p>
                 )}
               </Show>
               <Show when={restoreFailure()}>

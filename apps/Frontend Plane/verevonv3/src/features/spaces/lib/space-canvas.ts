@@ -17,6 +17,20 @@ export const CANVAS_FEATURE = 'canvas'
 /** The conditional refresh, while the tab is active and the document is visible. */
 export const CANVAS_REFRESH_MS = 15_000
 
+/**
+ * D22aq: a canvas is cleared by saving one newline. wiki-store keeps no empty version (a document is 1 byte or more), so
+ * this one-character version is the cleared state, and it is in the history like any other save.
+ */
+export const CANVAS_CLEAR_CONTENT = '\n'
+
+/**
+ * Whether the viewer is offered "Clear canvas": a room manager or owner (D22aq), the same role rule the room's other
+ * manager actions use (`canOfferBrowserStop`). Presentation only: the save still goes through Control and wiki-store.
+ */
+export function canOfferCanvasClear(role: string | undefined): boolean {
+  return role === 'manager' || role === 'owner'
+}
+
 type Translate = (noText: string, enText: string) => string
 
 /**
