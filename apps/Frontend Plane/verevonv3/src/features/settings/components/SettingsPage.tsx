@@ -4,7 +4,11 @@ import { VerevonWorkspaceSettingsPage } from '@/features/settings/components/Wor
 import { isWorkspaceSettingsSection, type SectionDetail } from '@/features/settings/lib/settings-sections'
 import { searchSettingsSections } from '@/features/settings/lib/settings-search'
 import { useI18n } from '@/shared/i18n'
-import { hasPlatformAdminAccess } from '@/shared/session/access'
+import {
+  COMPLIANCE_SETTINGS_SECTION,
+  hasPlatformAdminAccess,
+  isComplianceOnlySettingsViewer,
+} from '@/shared/session/access'
 import { getSession } from '@/shared/session/session-store'
 import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
 
@@ -14,6 +18,8 @@ const optionId = (sectionId: string) => `settings-search-option-${sectionId}`
 export default function SettingsPage() {
   const params = useParams<{ section?: string }>()
   const section = () => {
+    // A compliance-only member sees the Trust Center's legal holds and nothing else, whatever the URL names (D21i).
+    if (isComplianceOnlySettingsViewer(getSession())) return COMPLIANCE_SETTINGS_SECTION
     const value = params.section ?? ''
     return isWorkspaceSettingsSection(value)
       ? value
@@ -43,7 +49,9 @@ function SettingsSearch() {
   // must not offer a page the navigation withholds.
   const results = createMemo(() =>
     searchSettingsSections(query()).filter(
-      (hit) => hit.id !== 'platform-users' || hasPlatformAdminAccess(getSession()),
+      (hit) =>
+        (hit.id !== 'platform-users' || hasPlatformAdminAccess(getSession())) &&
+        (!isComplianceOnlySettingsViewer(getSession()) || hit.id === COMPLIANCE_SETTINGS_SECTION),
     ),
   )
   const showResults = () => open() && query().trim() !== ''

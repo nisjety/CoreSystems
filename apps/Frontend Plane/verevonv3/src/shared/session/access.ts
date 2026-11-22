@@ -26,6 +26,35 @@ export function shouldShowWorkspaceAdminNavigation(session: SessionState): boole
 }
 
 /**
+ * D21i: the organization's compliance role (Control's fifth canonical org role). It views, places and lifts legal
+ * holds and nothing else an admin does.
+ */
+export function hasComplianceRole(session: SessionState): boolean {
+  return session.status === 'authenticated' && roleMatches(session.activeOrg?.role, ['compliance'])
+}
+
+/**
+ * Who may open workspace settings at all: an owner or admin, or a compliance member (owner decision after D21i).
+ * What a compliance member sees there is narrowed by {@link isComplianceOnlySettingsViewer}.
+ */
+export function hasSettingsAccess(session: SessionState): boolean {
+  return hasWorkspaceAdminAccess(session) || hasComplianceRole(session)
+}
+
+/** A compliance member with no admin access: workspace settings show them the Trust Center's legal holds only. */
+export function isComplianceOnlySettingsViewer(session: SessionState): boolean {
+  return hasComplianceRole(session) && !hasWorkspaceAdminAccess(session)
+}
+
+/** The Settings entry in the navigation: shown while the session is unknown, and to anyone who may open settings. */
+export function shouldShowSettingsNavigation(session: SessionState): boolean {
+  return session.status !== 'authenticated' || hasSettingsAccess(session)
+}
+
+/** The only settings section a compliance-only viewer may open. */
+export const COMPLIANCE_SETTINGS_SECTION = 'trust'
+
+/**
  * Platform super-admin: a top-level Better Auth `admin`/`superadmin` role,
  * NOT merely an org owner/admin. Gates cross-org surfaces (e.g. the all-users
  * directory) — an org owner can manage their own org's members but must not

@@ -2,7 +2,7 @@ import { Show, createEffect, lazy } from 'solid-js'
 import { createRouter, useNavigate, useParams } from '@solidjs/router'
 import type { JSX } from '@solidjs/web'
 import { AppShell } from '@/app/shell/AppShell'
-import { hasWorkspaceAdminAccess } from '@/shared/session/access'
+import { hasSettingsAccess } from '@/shared/session/access'
 import { getSession } from '@/shared/session/session-store'
 import { shouldEnableSceneMode } from '@/demo/scene-mode'
 import { startLongTaskBeacon } from '@/shared/build/long-task-beacon'
@@ -143,12 +143,16 @@ function RequireOnboarding(props: { children: JSX.Element }) {
   )
 }
 
-function RequireWorkspaceAdmin(props: { children: JSX.Element }) {
+/**
+ * Workspace settings: an owner or admin, or a compliance member (owner decision after D21i). A compliance-only
+ * viewer is pinned to the Trust Center inside SettingsPage; the gateway and Control decide every call regardless.
+ */
+function RequireSettingsAccess(props: { children: JSX.Element }) {
   const navigate = useNavigate()
   const session = getSession()
 
   createEffectRedirect(
-    () => ({ status: session.status, onboardingStatus: session.onboardingStatus, isWorkspaceAdmin: hasWorkspaceAdminAccess(session) }),
+    () => ({ status: session.status, onboardingStatus: session.onboardingStatus, mayOpenSettings: hasSettingsAccess(session) }),
     (curr) => {
       if (curr.status === 'unauthenticated') {
         navigate('/login', { replace: true })
@@ -158,7 +162,7 @@ function RequireWorkspaceAdmin(props: { children: JSX.Element }) {
         navigate('/onboarding', { replace: true })
         return
       }
-      if (curr.status === 'authenticated' && !curr.isWorkspaceAdmin) {
+      if (curr.status === 'authenticated' && !curr.mayOpenSettings) {
         navigate('/dashboard', { replace: true })
       }
     },
@@ -169,7 +173,7 @@ function RequireWorkspaceAdmin(props: { children: JSX.Element }) {
       when={
         session.status === 'authenticated' &&
         session.onboardingStatus === 'COMPLETED' &&
-        hasWorkspaceAdminAccess(session)
+        hasSettingsAccess(session)
       }
       fallback={<SessionLoading />}
     >
@@ -291,17 +295,17 @@ export const Router = createRouter({
         {
           path: '/settings',
           component: () => (
-            <RequireWorkspaceAdmin>
+            <RequireSettingsAccess>
               <SettingsPage />
-            </RequireWorkspaceAdmin>
+            </RequireSettingsAccess>
           ),
         },
         {
           path: '/settings/:section',
           component: () => (
-            <RequireWorkspaceAdmin>
+            <RequireSettingsAccess>
               <SettingsPage />
-            </RequireWorkspaceAdmin>
+            </RequireSettingsAccess>
           ),
         },
       ],

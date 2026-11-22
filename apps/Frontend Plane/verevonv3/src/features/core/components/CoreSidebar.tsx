@@ -89,7 +89,11 @@ import { getModelEntitlement } from '@/shared/api/model-entitlement-client'
 import { useI18n, translateApiError } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { cn } from '@/shared/lib/cn'
-import { hasWorkspaceAdminAccess, shouldShowWorkspaceAdminNavigation } from '@/shared/session/access'
+import {
+  hasWorkspaceAdminAccess,
+  isComplianceOnlySettingsViewer,
+  shouldShowSettingsNavigation,
+} from '@/shared/session/access'
 import { getSession } from '@/shared/session/session-store'
 import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-preview'
 import { applyAttentionBadge, waitingThreadCount } from '@/features/core/lib/attention-badge'
@@ -139,7 +143,19 @@ export function CoreSidebar(props: {
     return !modelAccess.error && answer !== undefined && answer.orgId === modelAccessOrgId() && answer.state.enabled === true
   }
   const visibleSections = () => applyDemoModeNavGate(props.navigationSections ?? sidebarSections, { modelAccessEnabled: modelAccessEnabled() })
-    .filter((section) => section.id !== 'settings' || shouldShowWorkspaceAdminNavigation(session))
+    .filter((section) => section.id !== 'settings' || shouldShowSettingsNavigation(session))
+    // A compliance-only member opens settings at the Trust Center and is offered nothing else there (D21i).
+    .map((section): SidebarSection =>
+      section.id === 'settings' && isComplianceOnlySettingsViewer(session)
+        ? {
+            ...section,
+            href: '/settings/trust',
+            panelGroups: section.panelGroups
+              .map((group) => ({ ...group, items: group.items.filter((item) => item.id === 'settings-trust') }))
+              .filter((group) => group.items.length > 0),
+          }
+        : section,
+    )
     .map((section) => localizeSidebarSection(section, i18n))
   const activeSection = () => getSidebarSectionForPath(location.pathname, props.activeRoute, visibleSections())
   // These workspaces retain their routes and contextual navigation; the rail

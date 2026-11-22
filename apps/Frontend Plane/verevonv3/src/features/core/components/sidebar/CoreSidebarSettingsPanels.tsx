@@ -31,7 +31,7 @@ import { SidebarPanelTitle } from '@/features/core/components/sidebar/CoreSideba
 import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 import { getSession } from '@/shared/session/session-store'
-import { hasPlatformAdminAccess, hasWorkspaceAdminAccess } from '@/shared/session/access'
+import { hasPlatformAdminAccess, hasWorkspaceAdminAccess, isComplianceOnlySettingsViewer } from '@/shared/session/access'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { probeSpacePolicyAdminAvailable } from '@/shared/api/space-policy-client'
 import { getPersonalAgentsFeature } from '@/shared/api/spaces-client'
@@ -129,6 +129,17 @@ export function SettingsExpandedSidebarPanel(props: { modelAccessEnabled: boolea
         {i18n.tr('Innstillinger', 'Settings')}
       </SidebarPanelTitle>
 
+      <Show
+        when={!isComplianceOnlySettingsViewer(session)}
+        fallback={
+          // D21i: a compliance-only member is offered the Trust Center (legal holds) alone.
+          <SettingsSectionLinks
+            ariaLabel={i18n.tr('Innstillingsseksjoner', 'Settings sections')}
+            sections={[{ id: 'trust', label: i18n.tr('Tillitssenter', 'Trust Center'), icon: Fingerprint, href: '/settings/trust' }]}
+            activeSectionId={activeSectionId()}
+          />
+        }
+      >
       <SettingsSectionLinks
         ariaLabel={i18n.tr('Innstillingsseksjoner', 'Settings sections')}
         // Model access is listed only while the gateway reports the admin switch on (CoreSidebar reads it).
@@ -146,6 +157,7 @@ export function SettingsExpandedSidebarPanel(props: { modelAccessEnabled: boolea
         )}
         activeSectionId={activeSectionId()}
       />
+      </Show>
     </div>
   )
 }

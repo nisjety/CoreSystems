@@ -64,7 +64,7 @@ import {
 } from '@/shared/api/membership-client'
 import type { MetaFacebookSdkConfig } from '@/shared/integrations/meta-facebook-sdk'
 import { getSession } from '@/shared/session/session-store'
-import { hasWorkspaceAdminAccess } from '@/shared/session/access'
+import { hasWorkspaceAdminAccess, isComplianceOnlySettingsViewer } from '@/shared/session/access'
 import {
   getOrganizationAgentLearningPolicy,
   getOrganizationSupportAIMode,
@@ -512,8 +512,11 @@ function WorkspaceSettingsSection(props: {
         <IntegrationsSection />
       </Match>
       <Match when={props.section === 'trust'}>
-        <TrustCenterSection />
-        <AuditComplianceSection />
+        {/* A compliance-only member gets the legal holds and nothing an admin reads here (D21i). */}
+        <Show when={!isComplianceOnlySettingsViewer(getSession())}>
+          <TrustCenterSection />
+          <AuditComplianceSection />
+        </Show>
         {/* EP-9-C1 / D21i: the retention window and legal holds. Built with the org-core routes but never mounted;
             the section gates itself by org role (window: owner/admin, holds: owner/admin read, owner/compliance write). */}
         <OrgRetentionSection />

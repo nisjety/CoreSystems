@@ -7,7 +7,7 @@ import AccountSettingsPage from '@/features/settings/components/AccountSettingsP
 import { clearSession, markSessionOnboardingComplete, setSessionUser } from '@/shared/session/session-store'
 
 // WS17: the person's own personal agents and memory are reached from the account page. The workspace Settings route
-// is admin-only (RequireWorkspaceAdmin in App.tsx), so before these sections were mounted here an ordinary member
+// is admin-only (RequireSettingsAccess in App.tsx; compliance sees the Trust Center only), so before these sections were mounted here an ordinary member
 // could not create an agent, choose a primary agent, edit an agent's access, share a memory to a room or restore a
 // withheld note at all. The page is rendered for a plain `member` on purpose.
 
