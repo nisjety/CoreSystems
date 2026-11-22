@@ -36,7 +36,7 @@ CHECKER="$SCRIPT_DIR/space-self-api-registry-check.mjs"
 GOLDEN="apps/Model Plane/api/contracts/space-self-api-registry.json"
 # The digest the golden must hash to. Pinned here, not read from the sidecar, so a golden that is
 # edited together with its sidecar still fails until this pin is updated in the same change.
-GOLDEN_SHA256="635587a25114dcd34d183a7de0ff43e13ce935a990d849a57a063a6640c09f8d"
+GOLDEN_SHA256="bbb06e7cf8f4716f1eff38898f97985b3bcd37056285ac17918bc5561a3af684"
 
 # Byte-identical copies of the golden.
 COPIES=(

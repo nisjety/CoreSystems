@@ -175,7 +175,7 @@
       "service_audience": "data-plane-canvas",
       "decision_type": "run_action",
       "permission": "canvas:read",
-      "min_role": "viewer",
+      "min_role": "editor",
       "risk": "low",
       "default_level": "allow",
       "approval": "none",

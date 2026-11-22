@@ -7,7 +7,7 @@
 // the rows here against the golden and the pin.
 
 /** The sha256 of the vendored golden. Changing the golden changes this too. */
-export const REGISTRY_GOLDEN_DIGEST = '635587a25114dcd34d183a7de0ff43e13ce935a990d849a57a063a6640c09f8d'
+export const REGISTRY_GOLDEN_DIGEST = 'bbb06e7cf8f4716f1eff38898f97985b3bcd37056285ac17918bc5561a3af684'
 
 export type SpaceSelfApiActionId = 'space.thread.rename' | 'space.thread.pin' | 'space.thread.post_card'
 
