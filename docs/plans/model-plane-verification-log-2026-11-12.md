@@ -345,3 +345,29 @@ Passed: zdr-contract-sync 197/0, model-entitlement-contract-sync 5/0, space-cont
 | integration-corev2 | 35 failures (Windows protected-file/symlink checks; clarity nil after binding error; read-operations golden misses 4 Google operations) | yes (same set at base) | G6; the 4 Google operations are a real pre-existing gap |
 | verevonv3 gateway | --bin stack overflow on default Windows test stack; orgs::retention (2); only_the_continue_handler_relays (run_live RELAYED) | yes (afcee0802) | base 031e7965d does not compile the gateway |
 | verevonv3 SPA | 28 vitest files | yes (base export) | branch fixes browser-errors and gateway zdr_log sensitive-field test |
+
+## Audit phase 2 run r1: lead shared edits (2026-11-23)
+
+Applied from docs/plans/model-plane-audit-p2-r1-shared-edits-2026-11-21.md in commits 2f7a6f1c8 (flag registry and
+compose), df567910f (sandbox-manager principal), 9f0d0f332 (bindings regenerated), df831c492 (OpenAPI) and 6feb0f70e
+(user-core migration 045).
+
+| Area | What was applied | Check |
+|---|---|---|
+| Flag registry | 42 new rows, every switch default off and exact literal; SKILL_EXT_POLICY_ENFORCED gains capability-core; SPACE_DELETION_HOLD_RELEASE and PERMANENT_REFUSAL_PARK purposes rewritten; LOOP_GUARD_MODE and APPROVAL_STEP_UP_ENFORCED leave the unregistered lists with choice-read pins; SCIM_EDGE_ENABLED row now says onLiteral true (its reader went exact in r1) | flag-registry go test pass |
+| Compose | Model Plane (session-core, model-gateway, execution-core, capability-core, cost-core, sandbox-manager incl. inter-plane-bus), Control Plane (org-core, user-core, auth-core, audit-core, gateway principal scope), verevonv3 gateway/frontend and production, Application Plane and convex-core (Space switches now default false, matching startup.sh) | registry ratchet, sandbox-manager cmd pins, audit-core, org-core and auth-core deployment contracts, convex-core compose tests 53/53 |
+| Principals | sandbox-manager principal, session:thread-owner:resolve on session-core only | parity 37/37, zdr-contract-sync 207/207, repin check, auth-core policy contract 104/104 |
+| Bindings | Go, Python and TS for attention, browser, execution, gateway, memory, orchestration, sessions, thread_goals; sandbox-manager retention erase handler no longer behind a build tag | go/gen tests, build and vet of every Go service, sandbox-manager go test, gencode pin test 5/5, buf breaking pass, buf lint ratchet only the 4 findings that predate r1 (routing_policy x3, runs.zdr_waived) |
+| Rust pins | session-core EXACT_SWITCHES (+2), gateway PHASE_SWITCHES (+2) and strict-parser table (+1) | session-core cargo check, gateway zdr_switch_tests 8/8, mp-contracts prompt_tool_manifest 14/14 |
+| Migration | user-core 045 widens the owner-effect reservation action check | user-core database package tests; not run against Postgres |
+
+Not done, still owed (each is code or an owner call, not a shared edit):
+- P2-go-06 items 4-6: runs.proto ThreadsExist RPC, session-core accepting session:thread-owner:resolve on ResolveThreadOwner,
+  and sandbox-manager's existence transport. Until then SANDBOX_MANAGER_THREAD_OWNER_CHECK must stay off.
+- P2-sc-08-rel1: scope session:agent-memory:write for execution-core plus its mint; SESSION_CORE_AGENT_MEMORY_RUN_BOUND stays off.
+- P2-ec-03 item 4 (P2-cp-11): scope orchestration:question:service-origin; MCP_DO_ELICITATION stays off.
+- P2-ic-05 and P2-ic-05-rel1 goldens landed in one commit (e7727f00f), not the planned two; the fixture equals the rel1 snapshot.
+- OpenAPI SDK models (TypeScript and Python) not regenerated; ApprovalCause still lacks the EP-1 assist fields (older drift).
+- Optional items skipped: integration-corev2 .env.example (cp-06 E), VITE_BROWSER_SITES in vite-env.d.ts, depth-register rows
+  D2-1013/1016 (mg-04-rel1), the loop-guard digest note in the decisions ledger (ic-02-rel1).
+- Purposes of 26 new registry rows were shortened to the 240-character limit.
