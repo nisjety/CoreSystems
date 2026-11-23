@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const { checkClientVersion } = vi.hoisted(() => ({ checkClientVersion: vi.fn((_options?: { force?: boolean }) => Promise.resolve()) }))
 vi.mock('@/shared/build/version-check', () => ({ checkClientVersion }))
 
+import { localeStorageKey } from '@/shared/i18n'
 import { FailureCard } from './FailureCard'
 
 function apiError(status: number): Error {
@@ -25,6 +26,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  window.localStorage.removeItem(localeStorageKey)
 })
 
 describe('FailureCard', () => {
@@ -95,5 +97,17 @@ describe('FailureCard', () => {
   it('never renders the error message', () => {
     render(() => <FailureCard error={new Error('super secret detail')} region="outlet" />)
     expect(screen.getByRole('alert').textContent).not.toContain('super secret detail')
+  })
+
+  it('a root card reads the stored locale, because the root boundary renders outside I18nProvider', () => {
+    window.localStorage.setItem(localeStorageKey, 'en')
+    render(() => <FailureCard error={new Error('boom')} region="root" onRetry={() => undefined} />)
+    expect(screen.getByRole('heading', { name: 'Something went wrong here' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Reload' })).toBeTruthy()
+  })
+
+  it('a root card is Norwegian when no locale is stored', () => {
+    render(() => <FailureCard error={new Error('boom')} region="root" onRetry={() => undefined} />)
+    expect(screen.getByRole('heading', { name: 'Noe gikk galt her' })).toBeTruthy()
   })
 })

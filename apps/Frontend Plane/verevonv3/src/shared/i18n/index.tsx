@@ -110,7 +110,8 @@ export function localeDateTime(locale: Locale): string {
   return localeIntl(locale)
 }
 
-function readInitialLocale(): Locale {
+/** The locale the user stored, or the default. Safe before any provider exists (the root error card reads it). */
+export function readInitialLocale(): Locale {
   try {
     const stored = window.localStorage.getItem(localeStorageKey)
     if (isLocale(stored)) return stored

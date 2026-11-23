@@ -1,7 +1,8 @@
 import { createEffect, createSignal, Show } from 'solid-js'
 
 import { checkClientVersion } from '@/shared/build/version-check'
-import { useI18n } from '@/shared/i18n'
+import { readInitialLocale, useI18n } from '@/shared/i18n'
+import { pickLocaleText } from '@/shared/i18n/locales'
 import { cn } from '@/shared/lib/cn'
 import { Button } from '@/shared/ui/Button'
 import {
@@ -30,6 +31,10 @@ export interface FailureCardProps {
  */
 export function FailureCard(props: FailureCardProps) {
   const i18n = useI18n()
+  // The root boundary (index.tsx) renders outside I18nProvider, so its context is the Norwegian fallback whatever the
+  // user chose. A root card reads the stored locale instead (WS07-S1).
+  const tr = (noText: string, enText: string) =>
+    props.region === 'root' ? pickLocaleText(readInitialLocale(), noText, enText) : i18n.tr(noText, enText)
   const [copied, setCopied] = createSignal(false)
   const errorClass = () => classifyClientError(props.error)
   const copy = () => FAILURE_COPY[errorClass()]
@@ -56,26 +61,26 @@ export function FailureCard(props: FailureCardProps) {
       data-failure-class={errorClass()}
       data-failure-region={props.region}
     >
-      <h2 class="failure-card__title">{i18n.tr(copy().titleNo, copy().titleEn)}</h2>
-      <p class="failure-card__body">{i18n.tr(copy().bodyNo, copy().bodyEn)}</p>
+      <h2 class="failure-card__title">{tr(copy().titleNo, copy().titleEn)}</h2>
+      <p class="failure-card__body">{tr(copy().bodyNo, copy().bodyEn)}</p>
       <div class="failure-card__actions">
         <Button variant="primary" size="sm" onClick={() => window.location.reload()}>
-          {i18n.tr(FAILURE_ACTIONS.reload.no, FAILURE_ACTIONS.reload.en)}
+          {tr(FAILURE_ACTIONS.reload.no, FAILURE_ACTIONS.reload.en)}
         </Button>
         <Show when={errorClass() !== 'stale_deploy' && props.onRetry}>
           <Button variant="secondary" size="sm" onClick={() => props.onRetry?.()}>
-            {i18n.tr(FAILURE_ACTIONS.retry.no, FAILURE_ACTIONS.retry.en)}
+            {tr(FAILURE_ACTIONS.retry.no, FAILURE_ACTIONS.retry.en)}
           </Button>
         </Show>
         <Show when={errorClass() === 'session_expired'}>
           <Button variant="secondary" size="sm" onClick={() => window.location.assign('/login')}>
-            {i18n.tr(FAILURE_ACTIONS.signIn.no, FAILURE_ACTIONS.signIn.en)}
+            {tr(FAILURE_ACTIONS.signIn.no, FAILURE_ACTIONS.signIn.en)}
           </Button>
         </Show>
         <Button variant="ghost" size="sm" onClick={() => void copyDetails()}>
           {copied()
-            ? i18n.tr(FAILURE_ACTIONS.copied.no, FAILURE_ACTIONS.copied.en)
-            : i18n.tr(FAILURE_ACTIONS.copyDetails.no, FAILURE_ACTIONS.copyDetails.en)}
+            ? tr(FAILURE_ACTIONS.copied.no, FAILURE_ACTIONS.copied.en)
+            : tr(FAILURE_ACTIONS.copyDetails.no, FAILURE_ACTIONS.copyDetails.en)}
         </Button>
       </div>
     </div>
