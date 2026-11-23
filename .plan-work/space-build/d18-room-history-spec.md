@@ -25,6 +25,14 @@ they can see past conversations if that is need. with a date filter too."
 - Optional, not built (tracked as a spa item): the member-facing hidden-history note ("Earlier messages are hidden") may also say that room files stay visible.
 - Owner to confirm: a pre-floor room file stays visible while the message that posted it is hidden. This follows from the ruling as written.
 
+## Post-floor content and creation time (D21c, owner ruling 2026-11-19)
+- Post-floor content that restates pre-floor turns is acceptable. A message created after a windowed member's floor stays visible to that member even when it quotes, repeats or summarises what was said before the floor. The window does not check content for that overlap.
+- The window goes by creation time. For a per-member window (D18), a message created before the floor instant (`history_floor_at`: the member's join, or the chosen date) is hidden, and one created at or after it passes this floor. The code applies this as `m.created_at >= floor_at` (`message_floor_sql` and `floor_admits_at` in `apps/Model Plane/rust/services/session-core/src/space/audience_window.rs`).
+- An edit does not move a message's creation time: the code writes revisions to `message_revisions` and leaves the message's `created_at` alone. So a message created before the floor stays hidden after it is edited past the floor. This follows from the ruling as written.
+- The ruling covers post-floor content only. It does not make a pre-floor message visible to a windowed member, and a stored thread title or preview is not shown under a floor.
+- The WS04-S11 since-join floor (`history_floor_revision`, on the audience revision) is a separate test, and this rule does not change it.
+- Owner to confirm (not decided by the ruling, and not changed by this item): (a) room memory is judged by its message sources, so every linked message must exist and be at or after the floor, and a memory with no message link is shown only when it is the member's own save or share and was first written at or after the floor; (b) agent-scope notes (`scope = 'agent'`) are always hidden to a windowed member, because their text is made from the whole run context. Both rules are in `history_floor_admits_sql` (`apps/Model Plane/rust/services/session-core/src/space/memory_scope.rs`). Both can hide post-floor content that restates pre-floor turns, which the ruling accepts.
+
 ## Existing machinery to build on (do not duplicate)
 - Control user-core `internal/spaces/history_window.go`: `history_mode` on `registered_spaces`,
   `applyHistoryFloor` derives `HistoryFloorRevision` from `space_recipient_audiences` snapshots and puts it
