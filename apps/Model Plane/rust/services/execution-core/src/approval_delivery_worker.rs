@@ -118,7 +118,7 @@ const MAX_TOKEN_TTL_SECONDS: u64 = 3600;
 
 /// The resumable tool names — see the module doc for why the rest of the gated
 /// set (`browser_agent`, arbitrary MCP tools, …) isn't here. A tool's class says
-/// whether it is gated, never whether it can be resumed: that stays this list.
+/// whether it is gated, never whether it can be resumed: that stays `RESUMABLE_KINDS`.
 const PROVIDER_ACTION_TOOL_NAME: &str = crate::space_gate::PROVIDER_ACTION_TOOL;
 const SHIPMENT_BOOKING_TOOL_NAME: &str = crate::space_gate::SHIPMENT_BOOKING_TOOL;
 const TICKETS_CREATE_TOOL_NAME: &str = crate::space_gate::TICKETS_CREATE_TOOL;
@@ -473,6 +473,10 @@ fn parse_resumable_action(
     descriptor: &ContinuationDescriptor,
 ) -> Result<ResumableAction, &'static str> {
     if descriptor.org_id.trim().is_empty() || descriptor.user_id.trim().is_empty() {
+        return Err(FAILURE_INVALID_CONTINUATION);
+    }
+    // The registry gates the arms (WS10-S9): a tool the card does not promise is never parsed.
+    if !crate::space_gate::is_resumable_tool(&descriptor.tool_name) {
         return Err(FAILURE_INVALID_CONTINUATION);
     }
     match descriptor.tool_name.as_str() {
@@ -1622,6 +1626,60 @@ mod tests {
             parse_resumable_action(&descriptor),
             Err(FAILURE_INVALID_CONTINUATION)
         ));
+    }
+
+    /// The parity fixture of each tool that has a `parse_resumable_action` arm. A new registry kind
+    /// needs its arm, this fixture and an `action_label` arm (`NEW_KIND_CHECKLIST`, item 5).
+    fn parity_fixture(tool_name: &str) -> Option<&'static str> {
+        match tool_name {
+            PROVIDER_ACTION_TOOL_NAME => Some(VALID_DESCRIPTOR),
+            SHIPMENT_BOOKING_TOOL_NAME => Some(VALID_SHIPMENT_DESCRIPTOR),
+            TICKETS_CREATE_TOOL_NAME => Some(VALID_TICKET_DESCRIPTOR),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn every_resumable_kind_has_an_arm_a_fixture_and_an_action_label() {
+        // The card promises exactly the registry's kinds, so each one must state its proof, run
+        // from its descriptor, and have a label the card can show (WS10-S9 parity).
+        for kind in crate::space_gate::RESUMABLE_KINDS {
+            assert!(
+                !kind.idempotency.trim().is_empty() && !kind.binding.trim().is_empty(),
+                "{}: the registry entry states no proof",
+                kind.tool_name
+            );
+            let raw = parity_fixture(kind.tool_name)
+                .unwrap_or_else(|| panic!("{}: no parity fixture", kind.tool_name));
+            let descriptor = parse_descriptor(raw).expect("a parity fixture is a valid descriptor");
+            assert_eq!(
+                descriptor.tool_name, kind.tool_name,
+                "a fixture names its own tool"
+            );
+            assert!(
+                parse_resumable_action(&descriptor).is_ok(),
+                "{}: parse_resumable_action has no arm that accepts the fixture",
+                kind.tool_name
+            );
+            let label = crate::space_gate::action_label(kind.tool_name, "{}");
+            assert!(
+                label != "Use a tool" && !label.starts_with("Use the tool "),
+                "{}: space_gate::action_label has no arm for it",
+                kind.tool_name
+            );
+        }
+    }
+
+    #[test]
+    fn a_tool_outside_the_registry_is_never_parsed() {
+        // The registry gates the worker: a valid provider-action input under a tool the registry
+        // does not list is refused, so no arm can run a kind the card does not promise.
+        let raw = VALID_DESCRIPTOR.replace("execute_provider_action", "space.thread.rename");
+        let descriptor = parse_descriptor(&raw).expect("valid JSON");
+        assert_eq!(
+            parse_resumable_action(&descriptor).err(),
+            Some(FAILURE_INVALID_CONTINUATION)
+        );
     }
 
     #[test]

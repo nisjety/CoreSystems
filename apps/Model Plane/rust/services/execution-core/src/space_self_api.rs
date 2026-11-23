@@ -13,7 +13,8 @@
 //!   A view that names anything outside the registry is refused whole.
 //! * Only a run whose tool profile is `space_self_api` is offered these rows (`offered_tools`).
 //! * A row whose effective level is `ask` is not offered unless `EXECUTION_CORE_SPACE_SELF_API_RESUMABLE`
-//!   is on, because approval resume for this kind is WS10-S9.
+//!   is on AND the row is a resumable kind (`space_gate::is_resumable_tool`). No Space row is one
+//!   today (plan SD-21), so the switch alone offers none (`ask_row_offerable`).
 //! * A row this build cannot execute is dropped, never offered and never executed: every row not in
 //!   `BUILT_ACTIONS`, which is the phase 2 and 3 rows today. A row is offered only at golden phase 1.
 //!
@@ -52,7 +53,8 @@ use crate::tool_bridge::ToolExecution;
 pub(crate) const TOOL_PROFILE: &str = "space_self_api";
 /// The rollout switch of the view, the adapter and the probe. Unset or `0` offers no Space tool.
 pub(crate) const SWITCH_ENV: &str = "EXECUTION_CORE_SPACE_SELF_API";
-/// Lets an `ask` row be offered. Set only once WS10-S9 registers the resumable kind.
+/// Lets an `ask` row be offered, and only one that is also a resumable kind (`ask_row_offerable`).
+/// Stays `0` while no Space row is registered as a resumable kind.
 pub(crate) const RESUMABLE_ENV: &str = "EXECUTION_CORE_SPACE_SELF_API_RESUMABLE";
 
 const LEGACY_ACTION_ID: &str = sa::LEGACY_ACTION_ID;
@@ -256,6 +258,14 @@ pub(crate) fn resumable() -> bool {
     )
 }
 
+/// Whether a row at level `ask` may be offered: the switch is on AND the row is a resumable kind
+/// the delivery worker can run from its descriptor (`space_gate::is_resumable_tool`). The switch
+/// alone is never enough, so turning it on cannot offer a row with no resume path.
+#[must_use]
+pub(crate) fn ask_row_offerable(action_id: &str, switch_on: bool) -> bool {
+    switch_on && crate::space_gate::is_resumable_tool(action_id)
+}
+
 /// One tool of a Control-authorized Capability Core view, as the view signs and writes it.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ViewTool {
@@ -341,10 +351,10 @@ pub(crate) fn admit_view(
                 );
                 continue;
             }
-            if asks && !resumable() {
+            if asks && !ask_row_offerable(&row.action_id, resumable()) {
                 tracing::info!(
                     action = %row.action_id,
-                    "space action at level ask is not offered without EXECUTION_CORE_SPACE_SELF_API_RESUMABLE"
+                    "space action at level ask is not offered: not a resumable kind, or the resumable switch is off"
                 );
                 continue;
             }
@@ -1113,3 +1123,19 @@ impl SpaceSelfApiClient {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_ask_row_needs_the_switch_and_a_resumable_kind() {
+        // A Space thread row is not a resumable kind (plan SD-21), so the switch alone offers no
+        // ask row, even when it is on.
+        assert!(!ask_row_offerable(RENAME_ACTION, false));
+        assert!(!ask_row_offerable(RENAME_ACTION, true));
+        // A registered kind is offerable only with the switch on.
+        let kind = crate::space_gate::PROVIDER_ACTION_TOOL;
+        assert!(!ask_row_offerable(kind, false));
+        assert!(ask_row_offerable(kind, true));
+    }
+}

@@ -29,9 +29,9 @@ pub(crate) const RESUME_NONE: &str = "none";
 // A "resumable kind" is a tool whose granted approval the approval delivery worker can run cold,
 // as the requester, from the encrypted continuation descriptor (`action_continuation`). This is
 // the single list: the card's `resume_class`, the once-token exclusion and the worker's
-// `parse_resumable_action` all read it, and the parity test (owed to the test phase) fails when
-// the worker's match arms and this list drift. Everything not listed here is `none`: its grant
-// lets the agent retry the exact action once, and the card says so.
+// `parse_resumable_action` all read it, and the parity test in approval_delivery_worker.rs fails
+// when a listed kind lacks its match arm, its fixture or its action label. Everything not listed
+// here is `none`: its grant lets the agent retry the exact action once, and the card says so.
 //
 // Space adds no kind to this list (plan SD-21): a Space run is never loop-owned, so there is no
 // in-place resume to promise. Adding a kind is its own later change and must pass
