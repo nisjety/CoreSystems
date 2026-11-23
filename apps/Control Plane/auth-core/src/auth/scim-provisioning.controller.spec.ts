@@ -189,6 +189,7 @@ describe('ScimProvisioningController (WS05-S8)', () => {
     queue(
       [{ id: ORG }], // the organisation exists
       [], // no user with that e-mail yet
+      [], // no membership row yet (the D22l check)
       [{ id: 'member-1', role: 'member' }], // the membership row is inserted
       commandResult(1), // exactly one audit transition is bound to the actor
     );
@@ -226,6 +227,7 @@ describe('ScimProvisioningController (WS05-S8)', () => {
     queue(
       [{ id: ORG }],
       [{ id: 'user-1' }],
+      [], // no membership yet (the D22l check)
       [{ id: 'member-1', role: 'compliance' }],
       commandResult(1),
     );
@@ -247,18 +249,20 @@ describe('ScimProvisioningController (WS05-S8)', () => {
     queue(
       [{ id: ORG }],
       [{ id: 'user-1' }],
+      [{ id: 'member-1', role: 'member' }], // the D22l check finds a member, not an owner or admin
       [], // the insert hits the unique membership and returns nothing
-      [{ id: 'member-1', role: 'admin' }], // the canonical row is read back
+      [{ id: 'member-1', role: 'member' }], // the canonical row is read back
     );
     const result = await controller().provision(
       TOKEN,
       provisionBody({ role: 'admin' }),
     );
 
+    // The existing role is answered unchanged, whatever role the request names.
     expect(result).toEqual({
       userId: 'user-1',
       memberId: 'member-1',
-      role: 'admin',
+      role: 'member',
       memberCreated: false,
       userCreated: false,
     });
@@ -270,10 +274,62 @@ describe('ScimProvisioningController (WS05-S8)', () => {
     ).toBe(false);
   });
 
+  it.each(['owner', 'admin'])(
+    'refuses to bind an existing %s with 409 manual_adoption_required before the insert (D22l)',
+    async (role) => {
+      queue(
+        [{ id: ORG }],
+        [{ id: 'user-1' }],
+        [{ id: 'member-1', role }], // the existing membership is an owner or admin
+      );
+      const error = await rejectionOf(
+        controller().provision(TOKEN, provisionBody()),
+      );
+
+      expect(error).toBeInstanceOf(ConflictException);
+      expect(responseOf(error)).toMatchObject({
+        code: 'manual_adoption_required',
+      });
+      expect(
+        mockStatements.some((s) => s.text.includes('INSERT INTO member')),
+      ).toBe(false);
+      expect(
+        mockStatements.some((s) =>
+          s.text.includes('organization_membership_audit_outbox'),
+        ),
+      ).toBe(false);
+      expect(mockCreateUser).not.toHaveBeenCalled();
+    },
+  );
+
+  it('refuses an owner that lands between the D22l check and the insert', async () => {
+    queue(
+      [{ id: ORG }],
+      [{ id: 'user-1' }],
+      [], // no membership when checked
+      [], // a concurrent owner insert wins the unique membership
+      [{ id: 'member-1', role: 'owner' }], // the canonical row read back is the owner
+    );
+    const error = await rejectionOf(
+      controller().provision(TOKEN, provisionBody()),
+    );
+
+    expect(error).toBeInstanceOf(ConflictException);
+    expect(responseOf(error)).toMatchObject({
+      code: 'manual_adoption_required',
+    });
+    expect(
+      mockStatements.some((s) =>
+        s.text.includes('organization_membership_audit_outbox'),
+      ),
+    ).toBe(false);
+  });
+
   it('rolls the membership back and answers 503 when the audit transition is not bound', async () => {
     queue(
       [{ id: ORG }],
       [{ id: 'user-1' }],
+      [], // no membership yet (the D22l check)
       [{ id: 'member-1', role: 'member' }],
       commandResult(0),
     );

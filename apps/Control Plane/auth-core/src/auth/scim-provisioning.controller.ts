@@ -26,7 +26,8 @@ import { auth } from './auth';
  *   POST /api/v1/internal/scim/memberships/provision
  *     find or create the user (no password: sign-in is SSO only), add the
  *     member row with the role org-core names (never `owner`), and bind the
- *     membership audit actor in the same transaction.
+ *     membership audit actor in the same transaction. An existing owner or
+ *     admin is never bound: 409 manual_adoption_required (D22l), nothing written.
  *   POST /api/v1/internal/scim/memberships/deprovision
  *     remove the member row through `apply_membership_mutation` (kind
  *     `scim_deprovision`, migration 030) so the operation row, the projection
@@ -44,6 +45,9 @@ const EMAIL = /^[^\s@]{1,64}@[^\s@]{1,255}\.[^\s@]{2,63}$/;
 // role a person held when they were deprovisioned (org-core decides that; a
 // SCIM create is always `member`).
 const PROVISION_ROLES = new Set(['member', 'viewer', 'admin', 'compliance']);
+// D22l: a person who already holds one of these roles is never bound to a SCIM
+// record. The refusal is a 409 for manual handling; nothing is written.
+const ADOPTION_REFUSED_ROLES = new Set(['owner', 'admin']);
 
 function credentialMatches(expected: string, received?: string): boolean {
   const expectedDigest = createHash('sha256').update(expected).digest();
@@ -104,6 +108,23 @@ export class ScimProvisioningController {
     return rows.length === 1 ? rows[0].id : null;
   }
 
+  /** D22l: refuse to bind an existing owner or admin. Throwing rolls the transaction back. */
+  private refuseAdoption(
+    organizationId: string,
+    userId: string,
+    row: MemberRow | undefined,
+  ): void {
+    if (!row || !ADOPTION_REFUSED_ROLES.has(row.role)) return;
+    this.logger.log(
+      `scim provision refused org=${organizationId} user=${userId} existing=${row.role}`,
+    );
+    throw new ConflictException({
+      code: 'manual_adoption_required',
+      message:
+        'This person already holds an owner or admin role in the organization and must be handled manually.',
+    });
+  }
+
   @Post('provision')
   @HttpCode(HttpStatus.OK)
   async provision(
@@ -150,6 +171,14 @@ export class ScimProvisioningController {
       }
       const resolvedUserId = userId;
       const result = await sqlClient.begin(async (tx) => {
+        // D22l: checked before the ON CONFLICT insert, so an existing owner or
+        // admin row is never returned to be bound.
+        const [current] = await tx<MemberRow[]>`
+          SELECT id, role FROM member
+          WHERE organization_id = ${organizationId} AND user_id = ${resolvedUserId}
+          LIMIT 1
+        `;
+        this.refuseAdoption(organizationId, resolvedUserId, current);
         const inserted = await tx<MemberRow[]>`
           INSERT INTO member (id, organization_id, user_id, role, created_at)
           VALUES (${randomUUID()}, ${organizationId}, ${resolvedUserId}, ${role}, NOW())
@@ -163,6 +192,8 @@ export class ScimProvisioningController {
             LIMIT 1
           `;
           if (existing.length !== 1) throw new Error('canonical member unavailable');
+          // An owner or admin inserted concurrently, after the check above.
+          this.refuseAdoption(organizationId, resolvedUserId, existing[0]);
           return { created: false, member: existing[0] };
         }
         const member = inserted[0];
@@ -202,7 +233,12 @@ export class ScimProvisioningController {
         userCreated,
       };
     } catch (error) {
-      if (error instanceof BadRequestException) throw error;
+      if (
+        error instanceof BadRequestException ||
+        error instanceof ConflictException
+      ) {
+        throw error;
+      }
       this.unavailable('provision', error);
     }
   }
