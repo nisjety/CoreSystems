@@ -12,9 +12,10 @@ import (
 
 // WS14-S3: room-file admission. A room file is a documents row with
 // type = 'space_upload' and a space_ref taken from a verified Control Space
-// import decision. Admission runs inside the insert transaction of a NEW row,
-// under a per-(org, Space) advisory lock, so the count, the byte sum and the
-// hash lookup see every concurrent upload to the same Space.
+// import decision. Admission runs inside the transaction that writes the row, a
+// NEW row or a same-key refresh of one, under a per-(org, Space) advisory lock,
+// so the count, the byte sum and the hash lookup see every concurrent upload to
+// the same Space.
 
 // SpaceFileType is the documents.type of a room file.
 const SpaceFileType = "space_upload"
@@ -44,7 +45,25 @@ func (e *SpaceFileQuotaError) Error() string {
 	return "room file quota exceeded: " + e.Limit
 }
 
-func checkSpaceFileAdmissionTx(ctx context.Context, tx pgx.Tx, input model.CreateDocumentInput) error {
+// sameRoomFileKey reports whether an idempotency key that already names a live row
+// may be reused for this write. A room file refreshes only a room file of the same
+// Space, and an ordinary write never rewrites a room file: a key collision across
+// either line is an ownership conflict, never a silent move of content between the
+// two.
+func sameRoomFileKey(existing *model.Document, input model.CreateDocumentInput) bool {
+	existingRoomFile := existing.Type == SpaceFileType
+	if input.SpaceFile == nil {
+		return !existingRoomFile
+	}
+	return existingRoomFile && existing.SpaceRef != nil && *existing.SpaceRef == input.SpaceRef
+}
+
+// checkSpaceFileAdmissionTx admits one room file inside the caller's transaction.
+// refreshing names the row a same-key refresh rewrites in place, or "" for a new
+// row. That row is left out of the count, the byte sum and the hash lookup: it
+// already holds the Space's budget and its own hash, so the refresh is judged on
+// the room the file leaves behind, not on a room that counts the file twice.
+func checkSpaceFileAdmissionTx(ctx context.Context, tx pgx.Tx, input model.CreateDocumentInput, refreshing string) error {
 	constraints := input.SpaceFile
 	if constraints == nil {
 		return nil
@@ -64,7 +83,8 @@ func checkSpaceFileAdmissionTx(ctx context.Context, tx pgx.Tx, input model.Creat
 			SELECT document_id FROM documents
 			WHERE org_id = $1 AND space_ref = $2 AND type = 'space_upload'
 			  AND deleted_at IS NULL AND metadata->>'sha256' = $3
-			LIMIT 1`, input.OrgID, input.SpaceRef, constraints.SHA256).Scan(&existing)
+			  AND document_id <> $4
+			LIMIT 1`, input.OrgID, input.SpaceRef, constraints.SHA256, refreshing).Scan(&existing)
 		if err == nil {
 			return &SpaceFileDuplicateError{DocumentID: existing}
 		}
@@ -80,7 +100,7 @@ func checkSpaceFileAdmissionTx(ctx context.Context, tx pgx.Tx, input model.Creat
 			SELECT count(*), COALESCE(sum(octet_length(content)), 0)
 			FROM documents
 			WHERE org_id = $1 AND space_ref = $2 AND type = 'space_upload'
-			  AND deleted_at IS NULL`, input.OrgID, input.SpaceRef).Scan(&files, &textBytes); err != nil {
+			  AND deleted_at IS NULL AND document_id <> $3`, input.OrgID, input.SpaceRef, refreshing).Scan(&files, &textBytes); err != nil {
 			return fmt.Errorf("room file quota count: %w", err)
 		}
 		if constraints.MaxFiles > 0 && files+1 > constraints.MaxFiles {

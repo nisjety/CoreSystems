@@ -286,6 +286,11 @@ func (r *DocumentRepo) CreateWithOutbox(
 						if !idempotencyOwnerMatches(existing, ownerID) {
 							return nil, ErrIdempotencyOwnershipConflict
 						}
+						// WS14-S3: a room file and an ordinary document never share a
+						// row, and a room file refresh stays in its own Space.
+						if !sameRoomFileKey(existing, input) {
+							return nil, ErrIdempotencyOwnershipConflict
+						}
 						if documentContentUnchanged(existing, input) {
 							// An ACL move on identical bytes is NOT idempotent reuse —
 							// who may read the document changed — so it emits the
@@ -317,6 +322,14 @@ func (r *DocumentRepo) CreateWithOutbox(
 							v := normalizeVisibility(input.Visibility)
 							sourceVisibility = &v
 						}
+						if input.SpaceFile != nil {
+							// WS14-S3: a same-key room file refresh is admitted like a new
+							// file. The row it rewrites is left out of the Space's quota and
+							// hash lookup, because it already holds both.
+							if err := checkSpaceFileAdmissionTx(ctx, tx, input, existing.DocumentID); err != nil {
+								return nil, err
+							}
+						}
 						updatedRow := tx.QueryRow(ctx, `
 							UPDATE documents SET source=$3,type=$4,title=$5,content=$6,metadata=$7,
 							zdr_classification=$8,extraction_trace=$9,status='pending',error_message=NULL,
@@ -343,7 +356,7 @@ func (r *DocumentRepo) CreateWithOutbox(
 				// WS14-S3: a NEW room file is admitted under a per-Space lock so
 				// the quota count and the hash lookup cannot race another upload.
 				if input.SpaceFile != nil {
-					if err := checkSpaceFileAdmissionTx(ctx, tx, input); err != nil {
+					if err := checkSpaceFileAdmissionTx(ctx, tx, input, ""); err != nil {
 						return nil, err
 					}
 				}
