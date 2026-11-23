@@ -9,6 +9,9 @@ set +x
 # It prints only route-family labels and HTTP status codes: never bearer values,
 # organization identifiers, URLs containing tenant identifiers, or bodies.
 # Quickwit is exercised only through its tenant-scoped dry-run preview.
+# The room canvas (WS19-S3) is gated by WIKISTORE_SPACE_CANVAS, which is read before any credential. DPV2_MATRIX_SPACE_CANVAS=on|off
+# declares that flag for the stack under test (off by default, as compose ships it). Its zdr row needs DPV2_USER_BEARER to carry
+# zdr=true, as the isolated runner mints it.
 
 PASS=0
 FAIL=0
@@ -71,6 +74,15 @@ case "$TRANSPORT" in
     ;;
   *)
     configuration_error "DPV2_MATRIX_TRANSPORT must be compose or external"
+    ;;
+esac
+
+CANVAS_MODE=${DPV2_MATRIX_SPACE_CANVAS:-off}
+case "$CANVAS_MODE" in
+  on|off)
+    ;;
+  *)
+    configuration_error "DPV2_MATRIX_SPACE_CANVAS must be on or off"
     ;;
 esac
 
@@ -274,6 +286,36 @@ run_family \
   "$DPV2_USER_BEARER" \
   "" \
   ""
+
+# WS19-S3 room canvas on wiki-store. The canvas gate answers before any credential is read, so the expected answers follow the flag
+# that DPV2_MATRIX_SPACE_CANVAS declares. Off (compose's default), every row is the gate's 404 space_canvas_disabled. On, the rows are
+# the credential, tenant and scope refusals, in the order the routes apply them. No row holds a Control Space decision, so none can
+# succeed, and the matrix never expects 200. The zdr row sends DPV2_USER_BEARER: every canvas route refuses a zdr=true token with
+# 412 before its handler runs.
+CANVAS_PROBE_SPACE=matrix-probe-space
+CANVAS_BASE="$WIKI_BASE/v1/space-canvas/spaces/$CANVAS_PROBE_SPACE"
+CANVAS_SAVE_BODY='{"content":"authorization regression probe","idempotency_key":"matrix-probe-save-0001"}'
+CANVAS_RESTORE_BODY='{"idempotency_key":"matrix-probe-restore-0001"}'
+
+run_canvas_family() {
+  local family=$1
+  local method=$2
+  local url=$3
+  local body=$4
+  local unauthenticated=404 forged=404 zdr=404 spoofed=404 scope=404
+  if [ "$CANVAS_MODE" = on ]; then
+    unauthenticated=401 forged=401 zdr=412 spoofed=403 scope=403
+  fi
+  assert_status "$family" "no credentials" "$unauthenticated" wiki-store "$method" "$url" "" "" "$body"
+  assert_status "$family" "forged org header" "$forged" wiki-store "$method" "$url" "" "$DPV2_SPOOF_ORG_ID" "$body"
+  assert_status "$family" "zdr bearer" "$zdr" wiki-store "$method" "$url" "$DPV2_USER_BEARER" "" "$body"
+  assert_status "$family" "bearer plus spoofed org" "$spoofed" wiki-store "$method" "$url" "$DPV2_USER_BEARER" "$DPV2_SPOOF_ORG_ID" "$body"
+  assert_status "$family" "service without scope" "$scope" wiki-store "$method" "$url" "$DPV2_SERVICE_BEARER" "" "$body"
+}
+
+run_canvas_family canvas-versions GET "$CANVAS_BASE/versions" ""
+run_canvas_family canvas-save POST "$CANVAS_BASE/versions" "$CANVAS_SAVE_BODY"
+run_canvas_family canvas-restore POST "$CANVAS_BASE/versions/matrix-probe-version/restore" "$CANVAS_RESTORE_BODY"
 
 QUICKWIT_OWN=$(printf '{"org_id":"%s","dry_run":true,"clear":false,"global":false,"break_glass":false}' "$DPV2_TEST_ORG_ID")
 QUICKWIT_SPOOF=$(printf '{"org_id":"%s","dry_run":true,"clear":false,"global":false,"break_glass":false}' "$DPV2_SPOOF_ORG_ID")

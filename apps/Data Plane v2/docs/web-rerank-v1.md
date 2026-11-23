@@ -263,7 +263,8 @@ service refusal from the route table; 429 `rate_limited`.
    project's retrieval-engine, and tears the project down. To run the matrix by hand instead, set
    `DPV2_MATRIX_TRANSPORT=compose`, `DPV2_COMPOSE_PROJECT=<isolated project>`, `DPV2_TEST_ORG_ID`,
    `DPV2_SPOOF_ORG_ID`, `DPV2_USER_BEARER`, `DPV2_SERVICE_BEARER`, `DPV2_QUALITY_BEARER` and
-   `DPV2_QUICKWIT_ADMIN_BEARER`. `scripts/smoke-test.sh --with-auth-matrix` needs the same bearers.
+   `DPV2_QUICKWIT_ADMIN_BEARER`. `scripts/smoke-test.sh --with-auth-matrix` needs the same bearers. `DPV2_MATRIX_SPACE_CANVAS`
+   is optional (`off` by default) and states the room canvas flag of the stack under test.
 
    The service bearer is a `service:quarry-edge` token with `data:read` only. The fixture signs it with the key
    the isolated data plane trusts (`mint-service`), so the scope check and the route table under test are the
@@ -272,7 +273,9 @@ service refusal from the route table; 429 `rate_limited`.
    `zdr` claim is false: a signed `zdr` claim skips every rerank call with reason `zdr`. The fixture reads
    `JWT_ZDR` for `mint-service` (default `true`, as for the user bearers), so mint the step 3 bearer with `JWT_ZDR=false`.
 
-   Pass: the matrix section prints `Results: 33 passed, 0 failed`; the five service rows print PASS with statuses
+   Pass: the matrix section prints `Results: 48 passed, 0 failed` (the fifteen room canvas rows expect 404 while
+   `WIKISTORE_SPACE_CANVAS` is off, its default; `DPV2_MATRIX_SPACE_CANVAS=on` is only for a stack that runs with it on);
+   the five service rows print PASS with statuses
    401 (no token on the route), 403 (user token on the route), 403 (service without the scope), 403 (service on
    the admin route) and 200 (service on `/v1/retrieve`); and the runner ends with its own PASS line. No token or
    org id is printed. The runner was not run for this record; the orchestrator runs it.

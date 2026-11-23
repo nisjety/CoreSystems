@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 set +x
+# The canvas posture is set per run below, never inherited from the caller's shell.
+unset DPV2_MATRIX_SPACE_CANVAS FAKE_SPACE_CANVAS
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 SCRIPT="$ROOT/scripts/auth-regression-matrix.sh"
@@ -91,6 +93,24 @@ if [ "$service" = "quickwit-adapter" ]; then
   fi
 fi
 
+# WS19-S3 canvas rows on wiki-store. The gate answers 404 before any credential is read while the stack's flag is off. On, the answers
+# follow the middleware: no bearer 401, a tenant header that conflicts with the bearer 403, the user token refused as zdr 412, and a
+# service token without the wiki scope 403.
+if [ "$service" = "wiki-store" ] && printf '%s' "$config" | grep -Fq '/v1/space-canvas/'; then
+  if [ "${FAKE_SPACE_CANVAS:-off}" != "on" ]; then
+    printf '404'
+  elif ! printf '%s' "$config" | grep -Fq 'Authorization: Bearer '; then
+    printf '401'
+  elif printf '%s' "$config" | grep -Fq 'matrix-spoof-org'; then
+    printf '403'
+  elif [ "$bearer" = "service" ]; then
+    printf '403'
+  else
+    printf '412'
+  fi
+  exit 0
+fi
+
 if ! printf '%s' "$config" | grep -Fq 'Authorization: Bearer '; then
   printf '401'
 elif printf '%s' "$config" | grep -Fq 'matrix-spoof-org'; then
@@ -137,12 +157,15 @@ run_matrix >"$TMP/matrix.out" 2>&1 || {
   fail "matrix rejected the safe fixture"
 }
 
-# 28 family assertions (seven families x four shapes) plus the five QB-T08 service rows.
-grep -Fq '33 passed, 0 failed' "$TMP/matrix.out" || fail "matrix did not execute 7 x 4 + 5 assertions"
-[ "$(wc -l <"$TMP/docker.log" | tr -d ' ')" = "33" ] || fail "unexpected transport request count"
-for service in graph-index data-quality data-orchestrator documents-api wiki-store quickwit-adapter; do
+# 28 family assertions (seven families x four shapes), the five QB-T08 service rows and the fifteen canvas rows (three routes x five
+# shapes): 48 transport requests in all, with the canvas flag off (the default posture).
+grep -Fq '48 passed, 0 failed' "$TMP/matrix.out" || fail "matrix did not execute 7 x 4 + 5 + 3 x 5 assertions"
+[ "$(wc -l <"$TMP/docker.log" | tr -d ' ')" = "48" ] || fail "unexpected transport request count"
+for service in graph-index data-quality data-orchestrator documents-api quickwit-adapter; do
   [ "$(grep -Fxc "$service" "$TMP/docker.log")" = "4" ] || fail "$service was not covered four times"
 done
+# wiki-store: four wiki-family shapes plus the fifteen canvas rows.
+[ "$(grep -Fxc wiki-store "$TMP/docker.log")" = "19" ] || fail "wiki-store was not covered nineteen times"
 # retrieval-engine: four retrieval-family shapes plus the five service rows.
 [ "$(grep -Fxc retrieval-engine "$TMP/docker.log")" = "9" ] || fail "retrieval-engine was not covered nine times"
 
@@ -168,6 +191,57 @@ for call in \
   grep -Fxq "$call" "$TMP/docker.log.calls" || fail "a service row does not send the bearer and route it encodes: $call"
 done
 
+# WS19-S3 canvas rows with the flag off (the default posture): every row is the gate's 404, and each canvas route is sent the bearers
+# its rows name. List and save share the versions route: each sends no credentials twice, the user token twice and the service token once.
+for family in canvas-versions canvas-save canvas-restore; do
+  for shape in 'no credentials' 'forged org header' 'zdr bearer' 'bearer plus spoofed org' 'service without scope'; do
+    grep -Fxq "$(printf '  PASS %-24s %-28s status=%s' "$family" "$shape" 404)" "$TMP/matrix.out" ||
+      fail "canvas row did not pass as the flag-off 404: $family $shape"
+  done
+done
+canvas_versions="/v1/space-canvas/spaces/matrix-probe-space/versions"
+canvas_restore="$canvas_versions/matrix-probe-version/restore"
+[ "$(grep -Fxc "wiki-store none $canvas_versions" "$TMP/docker.log.calls")" = "4" ] || fail "canvas versions were not sent without credentials twice each"
+[ "$(grep -Fxc "wiki-store user $canvas_versions" "$TMP/docker.log.calls")" = "4" ] || fail "canvas versions did not carry the user bearer twice each"
+[ "$(grep -Fxc "wiki-store service $canvas_versions" "$TMP/docker.log.calls")" = "2" ] || fail "canvas versions did not carry the service bearer once each"
+[ "$(grep -Fxc "wiki-store none $canvas_restore" "$TMP/docker.log.calls")" = "2" ] || fail "canvas restore was not sent without credentials twice"
+[ "$(grep -Fxc "wiki-store user $canvas_restore" "$TMP/docker.log.calls")" = "2" ] || fail "canvas restore did not carry the user bearer twice"
+[ "$(grep -Fxc "wiki-store service $canvas_restore" "$TMP/docker.log.calls")" = "1" ] || fail "canvas restore did not carry the service bearer once"
+
+# The same rows with the flag on, with the stack and the matrix in agreement: each row answers its credential, tenant or scope refusal.
+: >"$TMP/docker.log"
+: >"$TMP/docker.log.calls"
+FAKE_SPACE_CANVAS=on DPV2_MATRIX_SPACE_CANVAS=on run_matrix >"$TMP/canvas-on.out" 2>&1 || {
+  sed -n '1,200p' "$TMP/canvas-on.out" >&2
+  fail "matrix rejected the canvas flag-on posture"
+}
+grep -Fq '48 passed, 0 failed' "$TMP/canvas-on.out" || fail "the flag-on matrix did not execute 48 assertions"
+for family in canvas-versions canvas-save canvas-restore; do
+  for pair in 'no credentials 401' 'forged org header 401' 'zdr bearer 412' 'bearer plus spoofed org 403' 'service without scope 403'; do
+    shape=${pair% *}
+    status=${pair##* }
+    grep -Fxq "$(printf '  PASS %-24s %-28s status=%s' "$family" "$shape" "$status")" "$TMP/canvas-on.out" ||
+      fail "canvas row did not pass as encoded with the flag on: $family $shape $status"
+  done
+done
+
+# The stack's flag and the declared flag must agree. An enabled canvas gate against the flag-off expectation fails the run on the
+# canvas rows, which is the case that matters when a production-style run meets an accidentally enabled flag.
+if FAKE_SPACE_CANVAS=on run_matrix >"$TMP/canvas-stack-on.out" 2>&1; then
+  fail "matrix passed an enabled canvas stack against the flag-off expectation"
+fi
+grep -Fq 'FAIL canvas-versions' "$TMP/canvas-stack-on.out" || fail "the enabled canvas stack was not reported on a canvas row"
+if DPV2_MATRIX_SPACE_CANVAS=yes run_matrix >"$TMP/canvas-mode.out" 2>&1; then
+  fail "matrix accepted an unknown canvas posture"
+fi
+grep -Fq 'DPV2_MATRIX_SPACE_CANVAS must be on or off' "$TMP/canvas-mode.out" || fail "an unknown canvas posture was not named"
+
+# The matrix holds no Control Space decision, so no canvas row can reach the decision check and succeed. A row that names the
+# decision header would have to be reviewed for that property first.
+if grep -Fq 'X-Space-Decision' "$SCRIPT"; then
+  fail "the matrix names the Control Space decision header, so a canvas row could succeed"
+fi
+
 # A row whose encoded expectation is wrong must FAIL the run, not pass silently.
 sed 's/"no credentials" 401 retrieval-engine POST "\$RERANK_URL"/"no credentials" 403 retrieval-engine POST "$RERANK_URL"/' \
   "$SCRIPT" >"$TMP/mutated-matrix.sh"
@@ -186,7 +260,7 @@ fi
 
 : >"$TMP/docker.log"
 DPV2_COMPOSE_PROJECT="isolated-matrix" run_matrix >"$TMP/project-matrix.out" 2>&1 || fail "matrix rejected an explicit isolated Compose project"
-[ "$(grep -c '^project=isolated-matrix$' "$TMP/docker.log")" = "33" ] || fail "matrix ignored the isolated Compose project"
+[ "$(grep -c '^project=isolated-matrix$' "$TMP/docker.log")" = "48" ] || fail "matrix ignored the isolated Compose project"
 
 # Never echo disposable identifiers or credentials, even on success.
 for secret in matrix-own-org matrix-spoof-org header.payload.signature service.payload.signature quality.payload.signature admin.payload.signature; do
