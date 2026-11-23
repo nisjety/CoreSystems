@@ -273,7 +273,7 @@ service refusal from the route table; 429 `rate_limited`.
    `zdr` claim is false: a signed `zdr` claim skips every rerank call with reason `zdr`. The fixture reads
    `JWT_ZDR` for `mint-service` (default `true`, as for the user bearers), so mint the step 3 bearer with `JWT_ZDR=false`.
 
-   Pass: the matrix section prints `Results: 48 passed, 0 failed` (the fifteen room canvas rows expect 404 while
+   Pass: the matrix section prints `Results: 58 passed, 0 failed` (the twenty-five room canvas rows, five routes by five shapes, expect 404 while
    `WIKISTORE_SPACE_CANVAS` is off, its default; `DPV2_MATRIX_SPACE_CANVAS=on` is only for a stack that runs with it on);
    the five service rows print PASS with statuses
    401 (no token on the route), 403 (user token on the route), 403 (service without the scope), 403 (service on

@@ -313,7 +313,9 @@ run_canvas_family() {
   assert_status "$family" "service without scope" "$scope" wiki-store "$method" "$url" "$DPV2_SERVICE_BEARER" "" "$body"
 }
 
+run_canvas_family canvas-head GET "$CANVAS_BASE" ""
 run_canvas_family canvas-versions GET "$CANVAS_BASE/versions" ""
+run_canvas_family canvas-version GET "$CANVAS_BASE/versions/matrix-probe-version" ""
 run_canvas_family canvas-save POST "$CANVAS_BASE/versions" "$CANVAS_SAVE_BODY"
 run_canvas_family canvas-restore POST "$CANVAS_BASE/versions/matrix-probe-version/restore" "$CANVAS_RESTORE_BODY"
 
