@@ -1,6 +1,7 @@
 import { cleanup, render } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { I18nProvider, localeStorageKey } from '@/shared/i18n'
 import { clearSpaceRoomFeatures, publishSpaceRoomFeatures } from '../../lib/space-room-features'
 
 // The rows of one thread, read-only: deleted and edited messages (WS12-S7), the per-turn files of a message
@@ -228,5 +229,60 @@ describe('SpaceTurnList: a person’s post as markdown (WS15-S4)', () => {
     expect(document.querySelector('.verevon-room-turn__markdown [data-md]')?.textContent).toBe(text)
     expect(document.body.textContent).not.toContain('SLUTT PÅ VEDLEGG')
     expect(document.querySelector('.verevon-space-attachment-chip')?.textContent).toBe('a.txt')
+  })
+})
+
+// WS16-S1: a turn's time, in the header and in the gutter of a grouped row, and the time of an edit, read in the
+// reader's locale. The second and third turns group under the first (same author, within five minutes), so their
+// times sit in the gutter; the third is edited, and its "(edited)" note carries the time of the change.
+describe('SpaceTurnList: turn times follow the reader’s locale (WS16-S1)', () => {
+  const turns = () => [
+    { role: 'user', content: 'Første', authorSubjectId: 'u-ola', createdAt: at(14, 32) },
+    { role: 'user', content: 'Andre', authorSubjectId: 'u-ola', createdAt: at(14, 33) },
+    {
+      role: 'user',
+      content: 'Rettet',
+      authorSubjectId: 'u-ola',
+      createdAt: at(14, 34),
+      revisionState: 'edited',
+      revisedAt: at(15, 4),
+    },
+  ]
+
+  function renderLocalised(locale: 'no' | 'en') {
+    window.localStorage.setItem(localeStorageKey, locale)
+    return render(() => (
+      <I18nProvider>
+        <SpaceTurnList
+          turns={() => turns() as never}
+          roster={() => roster as never}
+          viewerSubjectId={() => 'u-kari'}
+          agentName="Lagerhjelpen"
+        />
+      </I18nProvider>
+    ))
+  }
+
+  afterEach(() => {
+    window.localStorage.removeItem(localeStorageKey)
+  })
+
+  it('draws the times as Norwegian clock times for a Norwegian reader', () => {
+    renderLocalised('no')
+    const times = [...document.querySelectorAll('.verevon-room-turn__time')].map((el) => el.textContent)
+    expect(times).toEqual(['14:32', '14:33', '14:34'])
+    expect(document.querySelector('[data-revision-state="edited"]')?.getAttribute('title')).toMatch(/31\. oktober 2026/)
+  })
+
+  it('draws the times, and the time of the edit, in English for an English reader', () => {
+    renderLocalised('en')
+    const times = [...document.querySelectorAll('.verevon-room-turn__time')].map((el) => el.textContent ?? '')
+    expect(times).toHaveLength(3)
+    expect(times[0]).toMatch(/^02:32\s?PM$/)
+    expect(times[1]).toMatch(/^02:33\s?PM$/)
+    expect(times[2]).toMatch(/^02:34\s?PM$/)
+    const marker = document.querySelector('[data-revision-state="edited"]') as HTMLElement
+    expect(marker.textContent).toBe('(edited)')
+    expect(marker.getAttribute('title')).toMatch(/October 31, 2026.*3:04\s?PM/)
   })
 })

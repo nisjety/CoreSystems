@@ -309,7 +309,8 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
         const grouped = () =>
           !(index() === 1 && props.earlierTurns?.() !== undefined)
           && continuesTurnGroup(visibleTurns()[index() - 1], turn, props.agentName)
-        const time = () => formatTurnTime(turn.createdAt)
+        // WS16-S1: the reader's locale, so an English reader sees the turn's time in English.
+        const time = () => formatTurnTime(turn.createdAt, { locale: i18n.locale() })
         // WS12-S7: per-row edit state. A refetch after a change builds new turn objects, which
         // closes the editor and clears any error.
         const [editing, setEditing] = createSignal(false)
@@ -507,7 +508,7 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
                 <span
                   class="verevon-room-turn__edited"
                   data-revision-state="edited"
-                  title={formatTurnTime(turn.revisedAt)?.full}
+                  title={formatTurnTime(turn.revisedAt, { locale: i18n.locale() })?.full}
                 >
                   {i18n.tr('(redigert)', '(edited)')}
                 </span>
@@ -581,7 +582,7 @@ export function PostTurnHeader(props: {
   readonly status?: PostStatus
 }) {
   const i18n = useI18n()
-  const at = () => formatTurnTime(props.time)
+  const at = () => formatTurnTime(props.time, { locale: i18n.locale() })
   return (
     <div class="verevon-room-turn__header">
       <strong class="verevon-room-turn__author">
