@@ -27,7 +27,7 @@ func TestSpaceImportDecisionRequiresAValidTargetedSignature(t *testing.T) {
 	decision := spaceImportDecisionClaims{
 		DecisionRef: "decision-1", OrgID: "org-1", SpaceRef: "space:org-1:user-1", SubjectID: "user-1",
 		ServiceAudience: spaceImportDecisionAudience, ActionID: spaceImportDecisionAction,
-		ActionSchemaHash: spaceImportDecisionSchema, PayloadDigest: "sha256:payload", IdempotencyKey: "import-1",
+		ActionSchemaHash: spaceImportDecisionSchema, PayloadDigest: testPayloadDigest, IdempotencyKey: "import-1",
 		RecipientAudienceRef: "audience:user-1", PrivacyPolicyRef: "privacy:org-1", ResourceAuthorizationRef: "resource:import-1",
 		AuthorityRevision: 1, MembershipRevision: 1, PrivacyRevision: 1, RecipientAudienceRevision: 1, EntitlementRevision: 1,
 		Permissions: []string{"documents:write"}, Purpose: "knowledge_import", LawfulBasis: "contract", PrivacyClass: "internal",
@@ -158,7 +158,7 @@ func TestPersonalSpaceConnectorImportRefusesZDRBearerBeforeAnyWrite(t *testing.T
 				bearer:   f.auth.serviceTokenZDR(testOrg, "imports-core", true, "documents:write"),
 				body:     map[string]any{"type": "notion", "metadata": map[string]any{}},
 			})
-			if rec.Code != 403 || !strings.Contains(rec.Body.String(), "zdr=true forbids durable document persistence") {
+			if rec.Code != 412 || !strings.Contains(rec.Body.String(), "zdr=true forbids durable document persistence") {
 				t.Fatalf("%d %s", rec.Code, rec.Body.String())
 			}
 			if rec.Header().Get(spaceImportAcceptedHeader) != "" {
@@ -198,5 +198,33 @@ func TestSpaceImportDecisionValidateRefusesEveryUnauthorisedShape(t *testing.T) 
 	// A decision for another tenant is refused for this request's org.
 	if err := base().validate("org-2", now); err == nil {
 		t.Error("decision for org-1 accepted for org-2")
+	}
+}
+
+// DEPTH-WS14-S3-1: the payload digest is Control's sha256 commitment, so presence
+// is not enough. Any other shape is refused, including the placeholder the
+// fixtures used to carry, so a decision cannot authorise a write by carrying a
+// free-form string.
+func TestSpaceImportDecisionRequiresAShaDigestCommitment(t *testing.T) {
+	now := time.Now().UTC()
+	d := baseDecision("org-1", "space:org-1:room-7", "user-1", "space_upload")
+	d.PayloadDigest = "sha256:" + strings.Repeat("0123456789abcdef", 4)
+	if err := d.validate("org-1", now); err != nil {
+		t.Fatalf("a Control-shaped digest was refused: %v", err)
+	}
+	refused := map[string]string{
+		"placeholder":       "sha256:payload",
+		"empty":             "",
+		"short hex":         "sha256:" + strings.Repeat("a", 63),
+		"long hex":          "sha256:" + strings.Repeat("a", 65),
+		"uppercase hex":     "sha256:" + strings.Repeat("A", 64),
+		"no algorithm":      strings.Repeat("a", 64),
+		"non-hex character": "sha256:" + strings.Repeat("g", 64),
+	}
+	for name, digest := range refused {
+		d.PayloadDigest = digest
+		if err := d.validate("org-1", now); err == nil {
+			t.Errorf("%s: digest %q was accepted", name, digest)
+		}
 	}
 }

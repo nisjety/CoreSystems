@@ -113,13 +113,17 @@ func newDecisionSigner(t *testing.T) *decisionSigner {
 	return &decisionSigner{t: t, key: privateKey, id: "control-key-1"}
 }
 
+// testPayloadDigest is shaped like a Control-minted payload_digest: sha256 plus 64
+// lowercase hex characters. It is a fixture, not a real commitment.
+const testPayloadDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 // decision returns a valid space_upload decision for (org, space, subject).
 func baseDecision(org, space, subject, sourceType string) spaceImportDecisionClaims {
 	now := time.Now().UTC()
 	return spaceImportDecisionClaims{
 		DecisionRef: "decision-1", OrgID: org, SpaceRef: space, SubjectID: subject,
 		ServiceAudience: spaceImportDecisionAudience, ActionID: spaceImportDecisionAction,
-		ActionSchemaHash: spaceImportDecisionSchema, PayloadDigest: "sha256:payload", IdempotencyKey: "upload-1",
+		ActionSchemaHash: spaceImportDecisionSchema, PayloadDigest: testPayloadDigest, IdempotencyKey: "upload-1",
 		RecipientAudienceRef: "audience:" + subject, PrivacyPolicyRef: "privacy:" + org, ResourceAuthorizationRef: "resource:upload-1",
 		AuthorityRevision: 1, MembershipRevision: 1, PrivacyRevision: 1, RecipientAudienceRevision: 1, EntitlementRevision: 1,
 		Permissions: []string{"documents:write"}, Purpose: "room_file", LawfulBasis: "contract", PrivacyClass: "internal",

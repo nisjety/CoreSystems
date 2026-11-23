@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -26,6 +27,11 @@ const (
 // with the catalogue's durable-mutation envelope rather than a generic authority
 // failure.
 var errSpaceImportDecisionZDR = errors.New("Space import decision was issued under zero data retention")
+
+// spaceImportPayloadDigestPattern is the only payload_digest shape Control mints:
+// "sha256:" and 64 lowercase hex characters (personalImportPayloadDigest). The
+// digest is Control's commitment to the request identity, not to the body bytes.
+var spaceImportPayloadDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 type spaceImportDecisionClaims struct {
 	DecisionRef               string    `json:"decision_ref"`
@@ -138,7 +144,7 @@ func configuredSpaceDecisionKeys() (map[string]ed25519.PublicKey, error) {
 func (d spaceImportDecisionClaims) validate(orgID string, now time.Time) error {
 	for _, value := range []string{
 		d.DecisionRef, d.OrgID, d.SpaceRef, d.SubjectID, d.RecipientAudienceRef,
-		d.PrivacyPolicyRef, d.ResourceAuthorizationRef, d.PayloadDigest, d.IdempotencyKey,
+		d.PrivacyPolicyRef, d.ResourceAuthorizationRef, d.IdempotencyKey,
 		d.Purpose, d.LawfulBasis, d.PrivacyClass, d.RetentionClass, d.Residency,
 		d.DeletionScope, d.ImportSourceType, d.Nonce,
 	} {
@@ -148,6 +154,12 @@ func (d spaceImportDecisionClaims) validate(orgID string, now time.Time) error {
 	}
 	if d.ZeroDataRetention {
 		return errSpaceImportDecisionZDR
+	}
+	// The shape is checked, not just presence. The digest still does not cover
+	// the uploaded bytes: Control mints it before they exist, so a true body
+	// binding needs a Control-signed body digest (DEPTH-WS14-S3-1, cross-plane).
+	if !spaceImportPayloadDigestPattern.MatchString(d.PayloadDigest) {
+		return fmt.Errorf("Space import decision payload digest is not a sha256 commitment")
 	}
 	if d.OrgID != orgID || d.ServiceAudience != spaceImportDecisionAudience || d.ActionID != spaceImportDecisionAction || d.ActionSchemaHash != spaceImportDecisionSchema || d.IssuedAt.After(now.Add(time.Minute)) || !d.ExpiresAt.After(now) || d.AuthorityRevision <= 0 || d.MembershipRevision <= 0 || d.PrivacyRevision <= 0 || d.RecipientAudienceRevision <= 0 || d.EntitlementRevision <= 0 {
 		return fmt.Errorf("Space import decision does not authorize this write")

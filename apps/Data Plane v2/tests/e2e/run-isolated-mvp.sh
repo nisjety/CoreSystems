@@ -218,7 +218,7 @@ single_response=$({
 } | "${compose[@]}" exec -T documents-api curl --config - 2>/dev/null)
 single_status=${single_response##*$'\n'}
 single_response_body=${single_response%$'\n'*}
-[ "$single_status" = "403" ] || { echo "isolated ZDR single guard failed" >&2; exit 1; }
+[ "$single_status" = "412" ] || { echo "isolated ZDR single guard failed" >&2; exit 1; }
 SINGLE_RESPONSE_BODY="$single_response_body" node -e '
   const value=JSON.parse(process.env.SINGLE_RESPONSE_BODY);
   if (!value.error || value.error.code !== "zdr_durable_mutation_forbidden" ||

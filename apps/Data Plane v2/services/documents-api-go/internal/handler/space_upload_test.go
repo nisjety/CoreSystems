@@ -187,12 +187,12 @@ func TestRoomFileRefusesVerifiedZDRAndNonImportsCorePrincipal(t *testing.T) {
 	zdr := uploadDecision("user-1")
 	zdr.ZeroDataRetention = true
 	rec = f.post(uploadRequest{decision: zdr})
-	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), zdrDurableMutationCode) {
+	if rec.Code != http.StatusPreconditionFailed || !strings.Contains(rec.Body.String(), zdrDurableMutationCode) {
 		t.Fatalf("zdr decision: %d %s", rec.Code, rec.Body.String())
 	}
 	// A token whose signed posture is zdr=true cannot persist a durable file.
 	rec = f.post(uploadRequest{decision: uploadDecision("user-1"), bearer: f.auth.serviceTokenZDR(testOrg, "imports-core", true, "documents:write")})
-	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "zdr=true forbids durable document persistence") {
+	if rec.Code != http.StatusPreconditionFailed || !strings.Contains(rec.Body.String(), "zdr=true forbids durable document persistence") {
 		t.Fatalf("zdr token: %d %s", rec.Code, rec.Body.String())
 	}
 	if rec.Header().Get(spaceImportAcceptedHeader) != "" {

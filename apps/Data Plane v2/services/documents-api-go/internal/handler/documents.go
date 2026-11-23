@@ -98,12 +98,12 @@ const (
 )
 
 // writeZDRDurableMutationRefusal answers a durable write that zero data retention
-// refuses. The status is the one this route already returned (403). The body is
+// refuses. The status is the catalogue's 412, the one the canvas answers with too. The body is
 // the typed envelope {error:{code,message,retryable,action,details}}; the catalogue
 // fixes retryable false and action none for this code. reason names the
 // fail-closed rule that applied. It is static policy text, never document content.
 func writeZDRDurableMutationRefusal(w http.ResponseWriter, reason string) {
-	writeJSON(w, http.StatusForbidden, map[string]any{"error": map[string]any{
+	writeJSON(w, http.StatusPreconditionFailed, map[string]any{"error": map[string]any{
 		"code":      zdrDurableMutationCode,
 		"message":   zdrDurableMutationMessage,
 		"retryable": false,

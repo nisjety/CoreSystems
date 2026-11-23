@@ -51,13 +51,13 @@ func durableMutationContractEntry(t *testing.T) zdrContractEntry {
 	return zdrContractEntry{}
 }
 
-// assertZDRDurableMutationRefusal checks the 403 body against the catalogue entry
+// assertZDRDurableMutationRefusal checks the 412 body against the catalogue entry
 // and the fail-closed rule that applied (details.reason).
 func assertZDRDurableMutationRefusal(t *testing.T, rec *httptest.ResponseRecorder, reason string) {
 	t.Helper()
 	entry := durableMutationContractEntry(t)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403; body %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("status = %d, want 412; body %s", rec.Code, rec.Body.String())
 	}
 	body := decodeError(t, rec)
 	if _, flat := body["code"]; flat {
@@ -110,8 +110,8 @@ func TestZDRDecisionRefusalForARoomFileIsTheTypedEnvelope(t *testing.T) {
 func TestZDRRefusalWritesExactlyTheCatalogueFields(t *testing.T) {
 	rec := httptest.NewRecorder()
 	writeZDRDurableMutationRefusal(rec, "ingest_policy.zdr_mode=on or ephemeral_only=true forbids durable document persistence")
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", rec.Code)
+	if rec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("status = %d, want 412", rec.Code)
 	}
 	if got := rec.Header().Get("Content-Type"); got != "application/json" {
 		t.Fatalf("content type = %q", got)
