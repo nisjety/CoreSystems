@@ -1388,15 +1388,15 @@ describe('SpacePage', () => {
   // Regression: the Agent tab's instructions were fetched ten times per Space,
   // and again on every 30s membership recheck.
   //
-  // `SpacePage` passes `tabs={{ chat: <.../>, agent: <.../>, ... }}` to
-  // `SpaceCockpit`. Solid's JSX compiler wraps a dynamic prop expression in a
-  // getter, so that object literal compiled to `get tabs() { return { ... } }`
-  // — a factory, not a value. Every *read* of `props.tabs` re-ran
-  // `createComponent` for every panel, so every read mounted a fresh
+  // `SpacePage` passes `tabs={{ chat: () => <.../>, agent: () => <.../>, ... }}`
+  // to `SpaceCockpit`: each tab is a factory that the cockpit calls once, inside
+  // its own boundary (DEPTH-WS07-COCKPIT-ISOLATION). Before that, the tabs were
+  // elements built by the caller, and every *read* of `props.tabs` re-ran that
+  // object literal and so mounted every panel again: a fresh
   // `SpaceInstructionsSection` (a `createResource` on mount => one GET) and a
   // fresh `SpaceRoomComposer` (losing whatever was typed into it).
   //
-  // `SpaceCockpit` reads `props.tabs` twice per panel — once for `<Show>`'s
+  // Then, `SpaceCockpit` read `props.tabs` twice per panel — once for `<Show>`'s
   // `when`, once for its `children` — over six tabs, of which four are
   // supplied: 6 `when` reads + 4 `children` reads = the ten observed requests.
   // Both reads sit inside memos that track `current()`, so the 30s recheck
