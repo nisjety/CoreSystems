@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, within } from '@solidjs/testing-library'
 import { flush } from 'solid-js'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { I18nProvider, localeStorageKey } from '@/shared/i18n'
 import { clearSpaceRoomFeatures, primeSpaceRoomFeatures } from '../lib/space-room-features'
@@ -41,7 +41,7 @@ describe('SpaceCockpit', () => {
 
   it('shows supplied content for the active tab', () => {
     render(() => (
-      <SpaceCockpit initialTab="aktivitet" tabs={{ aktivitet: <p>Ekte aktivitet</p> }} />
+      <SpaceCockpit initialTab="aktivitet" tabs={{ aktivitet: () => <p>Ekte aktivitet</p> }} />
     ))
     expect(screen.getByText('Ekte aktivitet')).toBeTruthy()
   })
@@ -66,7 +66,7 @@ describe('SpaceCockpit', () => {
   describe('tab selection', () => {
     it('switches panels on click', () => {
       render(() => (
-        <SpaceCockpit tabs={{ chat: <p>Tråder</p>, medlemmer: <p>Roster</p> }} />
+        <SpaceCockpit tabs={{ chat: () => <p>Tråder</p>, medlemmer: () => <p>Roster</p> }} />
       ))
       expect(screen.getByText('Tråder')).toBeTruthy()
       fireEvent.click(screen.getByRole('tab', { name: 'Medlemmer' }))
@@ -114,13 +114,13 @@ describe('SpaceCockpit', () => {
   describe('deep links', () => {
     it('opens the tab named in the hash', () => {
       window.location.hash = '#aktivitet'
-      render(() => <SpaceCockpit tabs={{ aktivitet: <p>Fra dyplenke</p> }} />)
+      render(() => <SpaceCockpit tabs={{ aktivitet: () => <p>Fra dyplenke</p> }} />)
       expect(screen.getByText('Fra dyplenke')).toBeTruthy()
     })
 
     it('falls back to the default tab for an unknown hash instead of rendering nothing', () => {
       window.location.hash = '#noe-som-ikke-finnes'
-      render(() => <SpaceCockpit tabs={{ chat: <p>Standard</p> }} />)
+      render(() => <SpaceCockpit tabs={{ chat: () => <p>Standard</p> }} />)
       expect(screen.getByText('Standard')).toBeTruthy()
     })
 
@@ -130,7 +130,7 @@ describe('SpaceCockpit', () => {
       ['activity', 'aktivitet', 'Aktivitetsinnhold'],
     ] as const)('keeps the legacy #%s link pointed at %s', (legacyHash, tab, label) => {
       window.location.hash = `#${legacyHash}`
-      render(() => <SpaceCockpit tabs={{ [tab]: <p>{label}</p> }} />)
+      render(() => <SpaceCockpit tabs={{ [tab]: () => <p>{label}</p> }} />)
       expect(screen.getByText(label)).toBeTruthy()
     })
 
@@ -161,7 +161,7 @@ describe('SpaceCockpit', () => {
       mounted += 1
       return <p>panel</p>
     }
-    render(() => <SpaceCockpit initialTab="chat" tabs={{ chat: <Counting /> }} />)
+    render(() => <SpaceCockpit initialTab="chat" tabs={{ chat: () => <Counting /> }} />)
     expect(mounted).toBe(1)
   })
 
@@ -198,7 +198,7 @@ describe('SpaceCockpit artifacts tab (WS07-S12)', () => {
       const active = useActiveSpaceTab()
       return <p data-testid="active-tab">{active()}</p>
     }
-    render(() => <SpaceCockpit initialTab="chat" tabs={{ artefakter: <Probe /> }} />)
+    render(() => <SpaceCockpit initialTab="chat" tabs={{ artefakter: () => <Probe /> }} />)
     expect(screen.getByTestId('active-tab').textContent).toBe('chat')
     fireEvent.click(screen.getByRole('tab', { name: 'Artefakter' }))
     flush()
@@ -254,7 +254,7 @@ describe('SpaceCockpit canvas tab (WS19-S5)', () => {
   it('lists lerret second, after chat, and passes it the content the page supplies', () => {
     primeSpaceRoomFeatures({ canvas: true })
     render(() => (
-      <SpaceCockpit initialTab="chat" tabs={{ chat: <p>Tråder</p>, lerret: <p>Rommets lerret</p> }} />
+      <SpaceCockpit initialTab="chat" tabs={{ chat: () => <p>Tråder</p>, lerret: () => <p>Rommets lerret</p> }} />
     ))
     const labels = screen.getAllByRole('tab').map((tab) => tab.textContent)
     expect(labels).toEqual(['Samtaler', 'Lerret', 'Arbeid', 'Kunnskap', 'Aktivitet', 'Agent', 'Medlemmer'])
@@ -268,7 +268,7 @@ describe('SpaceCockpit canvas tab (WS19-S5)', () => {
 
   it('draws no lerret tab and no lerret panel when the room does not say features.canvas', () => {
     primeSpaceRoomFeatures({ canvas: false })
-    render(() => <SpaceCockpit initialTab="chat" tabs={{ lerret: <p>Rommets lerret</p> }} />)
+    render(() => <SpaceCockpit initialTab="chat" tabs={{ lerret: () => <p>Rommets lerret</p> }} />)
     expect(screen.queryByRole('tab', { name: 'Lerret' })).toBeNull()
     expect(document.getElementById('space-panel-lerret')).toBeNull()
     expect(screen.queryByText('Rommets lerret')).toBeNull()
@@ -286,5 +286,75 @@ describe('SpaceCockpit canvas tab (WS19-S5)', () => {
     window.location.hash = '#lerret'
     render(() => <SpaceCockpit />)
     expect(screen.getByRole('tab', { name: 'Lerret' }).getAttribute('aria-selected')).toBe('true')
+  })
+})
+
+// DEPTH-WS07-COCKPIT-ISOLATION: tab content is a factory that the cockpit calls inside that tab's RegionBoundary. A
+// panel that throws while it is built fails its own tab and nothing else. Before the factories, the caller built every
+// panel element, so a throw happened before any boundary existed and escaped the whole cockpit.
+describe('SpaceCockpit tab isolation (DEPTH-WS07-COCKPIT-ISOLATION)', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('SPIKE: a panel that throws while it is built fails only its own tab, and the other tabs keep working', async () => {
+    function Broken(): never {
+      throw new Error('panel exploded')
+    }
+    render(() => (
+      <SpaceCockpit initialTab="chat" tabs={{ chat: () => <p>Tråder ok</p>, arbeid: () => <Broken /> }} />
+    ))
+    fireEvent.click(screen.getByRole('tab', { name: 'Arbeid' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert.getAttribute('data-failure-region')).toBe('space-tab')
+    expect(alert.closest('[role="tabpanel"]')?.id).toBe('space-panel-arbeid')
+    // Only the failing tab carries a card; the rest of the cockpit is still there.
+    expect(document.querySelectorAll('[data-failure-region="space-tab"]')).toHaveLength(1)
+    expect(screen.getByRole('tablist')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Samtaler' }))
+    flush()
+    expect(screen.getByText('Tråder ok')).toBeTruthy()
+  })
+
+  it('SPIKE: Retry builds a failed panel again, so a panel that failed once can recover', async () => {
+    let builds = 0
+    render(() => (
+      <SpaceCockpit
+        initialTab="arbeid"
+        tabs={{
+          arbeid: () => {
+            builds += 1
+            if (builds === 1) throw new Error('first build fails')
+            return <p>Arbeid gjenopprettet</p>
+          },
+        }}
+      />
+    ))
+    const alert = await screen.findByRole('alert')
+    fireEvent.click(within(alert).getByRole('button', { name: /retry|prøv igjen/i }))
+    expect(await screen.findByText('Arbeid gjenopprettet')).toBeTruthy()
+    expect(builds).toBe(2)
+  })
+
+  it('builds a healthy panel once, inside its boundary', () => {
+    let builds = 0
+    render(() => (
+      <SpaceCockpit
+        initialTab="chat"
+        tabs={{
+          chat: () => {
+            builds += 1
+            return <p>Tråder en gang</p>
+          },
+        }}
+      />
+    ))
+    expect(screen.getByText('Tråder en gang')).toBeTruthy()
+    expect(builds).toBe(1)
   })
 })

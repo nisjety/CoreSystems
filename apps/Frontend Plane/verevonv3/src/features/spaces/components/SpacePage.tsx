@@ -859,7 +859,7 @@ export default function SpacePage() {
                 />
                 <SpaceCockpit
                   tabs={{
-                    chat: (
+                    chat: () => (
                       <>
                       <SpaceRoomSearch
                         spaceRef={current().space.space_ref}
@@ -910,7 +910,7 @@ export default function SpacePage() {
                       />
                       </>
                     ),
-                    lerret: (
+                    lerret: () => (
                       <SpaceCanvasPanel
                         spaceRef={current().space.space_ref}
                         roster={() => (roster.error ? [] : roster() ?? [])}
@@ -919,12 +919,12 @@ export default function SpacePage() {
                         canClear={canOfferCanvasClear(current().membership.role)}
                       />
                     ),
-                    arbeid: <SpaceWorkPanel spaceRef={current().space.space_ref} liveRuns={agentWork()?.live === true} />,
-                    kunnskap: <SpaceKnowledgePanel spaceRef={current().space.space_ref} />,
-                    artefakter: (
+                    arbeid: () => <SpaceWorkPanel spaceRef={current().space.space_ref} liveRuns={agentWork()?.live === true} />,
+                    kunnskap: () => <SpaceKnowledgePanel spaceRef={current().space.space_ref} />,
+                    artefakter: () => (
                       <SpaceArtifactsTab spaceRef={current().space.space_ref} live={liveArtifacts} />
                     ),
-                    filer: (
+                    filer: () => (
                       <SpaceFilesPanel
                         spaceRef={current().space.space_ref}
                         viewerSubjectId={() => current().membership.subject_id}
@@ -933,7 +933,7 @@ export default function SpacePage() {
                         limits={() => current().limits?.room_files}
                       />
                     ),
-                    aktivitet: (
+                    aktivitet: () => (
                       <SpaceActivityPanel
                         spaceRef={current().space.space_ref}
                         threads={currentThreads}
@@ -941,7 +941,7 @@ export default function SpacePage() {
                         liveRuns={agentWork()?.live === true}
                       />
                     ),
-                    agent: (
+                    agent: () => (
                       <>
                         <SpaceInstructionsSection
                           spaceRef={current().space.space_ref}
@@ -976,7 +976,7 @@ export default function SpacePage() {
                         />
                       </>
                     ),
-                    medlemmer: (
+                    medlemmer: () => (
                       <SpaceMembersPanel
                         spaceRef={current().space.space_ref}
                         role={current().membership.role}

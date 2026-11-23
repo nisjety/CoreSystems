@@ -1,4 +1,4 @@
-import { createContext, createEffect, createMemo, createSignal, For, Show, useContext, type Accessor, type Setter } from 'solid-js'
+import { createContext, createEffect, createMemo, createSignal, For, Show, untrack, useContext, type Accessor, type Setter } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 
 import { useI18n } from '@/shared/i18n'
@@ -51,10 +51,13 @@ export type { SpaceTabId }
 
 export interface SpaceCockpitProps {
   /**
-   * Content per tab. An omitted tab is not an error — it renders the
-   * "not published yet" state naming its owner plane.
+   * Content per tab, as a factory. The cockpit calls it inside that tab's
+   * RegionBoundary, so a panel that throws while it is built fails its own tab
+   * and nothing else (DEPTH-WS07-COCKPIT-ISOLATION). An element would be built by
+   * the caller, outside every boundary. An omitted tab is not an error — it
+   * renders the "not published yet" state naming its owner plane.
    */
-  readonly tabs?: Partial<Record<SpaceTabId, JSX.Element>>
+  readonly tabs?: Partial<Record<SpaceTabId, () => JSX.Element>>
   /** Starting tab when the URL carries no recognized hash. */
   readonly initialTab?: SpaceTabId
 }
@@ -167,15 +170,15 @@ function SpaceCockpitView(props: {
           // `props.tabs` directly.
           //
           // `props.tabs` is a getter over the caller's object literal, so every
-          // read re-runs that literal — and Solid JSX constructs a component
-          // eagerly, so re-running it MOUNTS every panel again. This `For` has
-          // six tabs and each read `props.tabs` twice (once for `when`, once
-          // for the child), so a single context resolve produced twelve
-          // constructions of all six panels. Panels that fetch on mount
-          // (`SpaceWorkPanel`, `SpaceKnowledgePanel`,
-          // `SpaceInstructionsSection`) each fired a burst of identical
-          // requests — measured live as six `/work` and six `/knowledge` calls
-          // inside 3ms, repeated on every membership recheck.
+          // read re-runs that literal. Tab content is a factory now, so that
+          // literal only builds closures and re-running it constructs nothing;
+          // before, a re-run MOUNTED every panel again (Solid JSX constructs a
+          // component eagerly). This `For` has six tabs and each read `props.tabs`
+          // twice, so a single context resolve produced twelve constructions of
+          // all six panels. Panels that fetch on mount (`SpaceWorkPanel`,
+          // `SpaceKnowledgePanel`, `SpaceInstructionsSection`) each fired a burst
+          // of identical requests — measured live as six `/work` and six
+          // `/knowledge` calls inside 3ms, repeated on every membership recheck.
           const content = createMemo(() => tabs()[tab.id])
           return (
             <section
@@ -200,8 +203,11 @@ function SpaceCockpitView(props: {
                   </div>
                 }
               >
+                {/* The factory runs here, inside this tab's boundary, and is read again on Retry, so a panel
+                    that failed to build is built again. `untrack`: a signal read in the factory body is not a
+                    reason to rebuild the panel (a component body is untracked already). */}
                 <RegionBoundary region="space-tab" resetKey={active} compact>
-                  {content()}
+                  {untrack(() => content()?.())}
                 </RegionBoundary>
               </Show>
             </section>
