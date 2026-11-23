@@ -13,9 +13,17 @@ import { describe, expect, it } from 'vitest';
 
 const SPACES_ROOT = resolve(process.cwd(), 'src/features/spaces');
 // Measured on the tree after the English twins were recognised (77 before, when every pair was counted).
-// The one literal left is the typed slash-command alias 'søk' in space-slash-commands.ts: a name the parser
-// matches, not copy, with no English twin to sit beside. Lower it when the count falls; never raise it.
+// The one literal left is the typed slash-command alias 'søk' in space-slash-commands.ts: input vocabulary the
+// parser matches (beside 'search', which the composer displays, and 'sok'), not copy, so it is no pair. Lower it
+// when the count falls; never raise it.
 const BASELINE = 1;
+
+// The calls that take a Norwegian text followed by its English twin as the very next argument. Only these count as
+// a call pair: any other call with a Norwegian argument is counted, whatever stands beside it.
+const PAIR_CALLEES: ReadonlySet<string> = new Set(['p', 'translate', 'tabCommand', 'limitError', 'failureText']);
+
+// The tables of `key: [no, en]` rows. Only a two-element array that is a row of one of these counts as an array pair.
+const PAIR_TABLES: ReadonlySet<string> = new Set(['ACTION_VERBS']);
 
 const NORWEGIAN_LETTER = /[æøåÆØÅ]/;
 const TEST_FILE = /\.(test|spec)\.tsx?$/;
@@ -78,11 +86,27 @@ function propertyKey(property: ts.ObjectLiteralElementLike): string | undefined 
   return ts.isIdentifier(property.name) || ts.isStringLiteral(property.name) ? property.name.text : undefined;
 }
 
+/** The called name: `p` for `p(...)`, `tr` for `i18n.tr(...)`. */
+function calleeName(callee: ts.Expression): string | undefined {
+  if (ts.isIdentifier(callee)) return callee.text;
+  if (ts.isPropertyAccessExpression(callee)) return callee.name.text;
+  return undefined;
+}
+
+/** True when the array is the value of one row of an object literal assigned to a variable named in `PAIR_TABLES`. */
+function isPairTableRow(array: ts.ArrayLiteralExpression): boolean {
+  const row = array.parent;
+  if (!ts.isPropertyAssignment(row) || row.initializer !== array || !ts.isObjectLiteralExpression(row.parent)) return false;
+  const table = row.parent.parent;
+  return ts.isVariableDeclaration(table) && ts.isIdentifier(table.name) && PAIR_TABLES.has(table.name.text);
+}
+
 /**
  * True when a Norwegian text sits beside its English twin, in one of the pair shapes the app writes: an object
- * with a `no` (or `labelNo`) key and its `en` (or `labelEn`) key; a call argument whose neighbour is the English
- * text, as in `p(no, en)` or `translate(no, en)`; a two-element array `[no, en]`; or a `const X_NO` declared
- * beside a `const X_EN` in the same file. A Norwegian text with no English neighbour is not a pair.
+ * with a `no` (or `labelNo`) key and its `en` (or `labelEn`) key; an argument of one of the `PAIR_CALLEES` whose
+ * next argument is the English text, as in `p(no, en)` or `translate(no, en)`; a `[no, en]` row of one of the
+ * `PAIR_TABLES`; or a `const X_NO` declared beside a `const X_EN` in the same file. Any other neighbour, even an
+ * ASCII one, is not a twin.
  */
 function hasEnglishTwin(text: TextNode, variables: ReadonlyMap<string, ts.Expression | undefined>): boolean {
   const parent = text.parent;
@@ -96,12 +120,13 @@ function hasEnglishTwin(text: TextNode, variables: ReadonlyMap<string, ts.Expres
     );
   }
   if (ts.isCallExpression(parent)) {
+    const name = calleeName(parent.expression);
+    if (name === undefined || !PAIR_CALLEES.has(name)) return false;
     const args: readonly ts.Node[] = parent.arguments;
-    const at = args.indexOf(text);
-    return isEnglishText(args[at + 1]) || isEnglishText(args[at - 1]);
+    return isEnglishText(args[args.indexOf(text) + 1]);
   }
   if (ts.isArrayLiteralExpression(parent)) {
-    return parent.elements.length === 2 && parent.elements.some((element) => element !== text && isEnglishText(element));
+    return parent.elements.length === 2 && parent.elements[0] === text && isEnglishText(parent.elements[1]) && isPairTableRow(parent);
   }
   if (ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) {
     const wanted = englishNameFor(parent.name.text);
@@ -200,12 +225,31 @@ describe('Norwegian literals outside tr() (WS16-S1)', () => {
       "const a = { no: 'Åpne', en: 'Open' };",
       "const b = { labelNo: 'Søk', labelEn: 'Search' };",
       "const c = p('Åpne', 'Open');",
-      "const d = ['Åpnet side', 'Opened page'];",
+      "const ACTION_VERBS: Record<string, [string, string]> = { navigate: ['Åpnet side', 'Opened page'] };",
       "const E_NO = 'Åpne';",
       "const E_EN = 'Open';",
       'const f = translate(`Åpne ${n}`, `Open ${n}`);',
+      "const g = i18n.p('Lukk', 'Close');",
+      "const h = tabCommand('work', ['work', 'arbeid'], 'arbeid', 'Gå til Arbeid', 'Go to Work');",
+      "const k = failureText(error, 'Filen ble ikke fjernet.', 'The file was not removed.');",
+      "const l = limitError('Gruppen finnes allerede.', 'Section already exists.');",
     ].join('\n');
     expect(norwegianLiteralCount('sample.ts', source)).toBe(0);
+  });
+
+  it('counts a Norwegian text beside an ASCII neighbour outside the known pair shapes', () => {
+    const source = [
+      "el.setAttribute('title', 'Åpne');",
+      "const a = g('Åpne', 'Lagre');",
+      "const b = ['Lukk', 'Åpne'];",
+      "const c = ['Åpnet side', 'Opened page'];",
+      "const OTHER = { navigate: ['Åpnet side', 'Opened page'] };",
+      "const d = p('Open', 'Åpne');",
+      "const ACTION_VERBS = { navigate: ['Opened page', 'Åpnet side'] };",
+    ].join('\n');
+    // Each line holds one Norwegian text with no recognised twin: a callee outside PAIR_CALLEES, an array that is
+    // not a PAIR_TABLES row, an English text before (not after) the Norwegian one, and a table row in en-no order.
+    expect(norwegianLiteralCount('sample.ts', source)).toBe(7);
   });
 
   it('counts a Norwegian text whose neighbour is not an English twin', () => {
