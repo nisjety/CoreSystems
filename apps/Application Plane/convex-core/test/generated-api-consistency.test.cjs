@@ -3,10 +3,15 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 
-// convex/_generated/api.d.ts is hand-edited whenever a function module is added,
-// because `convex codegen` needs a running deployment. Its imports and its
-// fullApi map must name exactly the modules codegen would register, with the
-// same namespace alias on both sides. The codegen diff itself is a live check.
+const { API_DTS, API_JS, convexVersion, functionModulePaths, generateApiFiles } = require('./helpers/convex-api-codegen.cjs');
+
+// The `convex codegen` CLI needs a configured deployment, but convex/_generated/
+// api.d.ts and api.js are a pure function of the function-module list. The
+// helper reproduces them offline from the installed convex package's own
+// template and prettier, and the last tests below byte-compare the checked-in
+// files against that output. Regenerate with:
+//   node test/helpers/convex-api-codegen.cjs --write
+// The structural tests (imports and fullApi aliases) keep a readable failure.
 
 const convexDirectory = path.resolve(__dirname, '..', 'convex');
 const generated = fs.readFileSync(path.join(convexDirectory, '_generated', 'api.d.ts'), 'utf8');
@@ -57,4 +62,26 @@ test('api.d.ts still declares the fullApi object and the public and internal API
   assert.match(generated, /declare const fullApi: ApiFromModules<\{/);
   assert.match(generated, /export declare const api: FilterApi<\s*typeof fullApi,\s*FunctionReference<any, "public">\s*>;/);
   assert.match(generated, /export declare const internal: FilterApi<\s*typeof fullApi,\s*FunctionReference<any, "internal">\s*>;/);
+});
+
+test('the codegen helper module list matches the structural expectation', () => {
+  assert.deepEqual(functionModulePaths().map((modulePath) => modulePath.replace(/\.ts$/, '')), expectedModules());
+});
+
+test('api.d.ts is byte-equal to the pinned convex codegen output', async () => {
+  const { DTS } = await generateApiFiles();
+  assert.equal(
+    fs.readFileSync(API_DTS, 'utf8'),
+    DTS,
+    `convex/_generated/api.d.ts differs from convex ${convexVersion()} codegen; run node test/helpers/convex-api-codegen.cjs --write`,
+  );
+});
+
+test('api.js is byte-equal to the pinned convex codegen output', async () => {
+  const { JS } = await generateApiFiles();
+  assert.equal(
+    fs.readFileSync(API_JS, 'utf8'),
+    JS,
+    `convex/_generated/api.js differs from convex ${convexVersion()} codegen; run node test/helpers/convex-api-codegen.cjs --write`,
+  );
 });

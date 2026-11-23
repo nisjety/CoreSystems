@@ -76,13 +76,15 @@ test('every literal query(table).withIndex(name) names an index declared on that
     /\.query\(\s*["'](\w+)["']\s*\)\s*\.withIndex\(\s*["'](\w+)["']/g,
     indexes,
   );
-  assert.ok(checked > 200, `expected the literal index references to be read, saw ${checked}`);
+  // 234 references on 2026-11-23; a floor, so a reader regression that drops them fails.
+  assert.ok(checked >= 234, `expected the literal index references to be read, saw ${checked}`);
   assert.deepEqual(missing, []);
 });
 
-test('every take(table, index) pair in the purge helpers names an index declared on that table', () => {
+test('every literal take(table, index) pair under convex/ names an index declared on that table', () => {
   const { indexes } = declaredIndexes();
   const { checked, missing } = undeclaredReferences(/\btake\(\s*["'](\w+)["']\s*,\s*["'](\w+)["']/g, indexes);
-  assert.ok(checked > 0);
+  // 18 pairs on 2026-11-23; a floor, so a reader regression that drops them fails.
+  assert.ok(checked >= 18, `expected the take(table, index) pairs to be read, saw ${checked}`);
   assert.deepEqual(missing, []);
 });
