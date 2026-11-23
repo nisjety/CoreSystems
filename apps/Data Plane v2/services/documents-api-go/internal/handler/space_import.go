@@ -2,7 +2,9 @@ package handler
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -64,6 +66,11 @@ type spaceImportDecisionClaims struct {
 	IssuedAt                  time.Time `json:"issued_at"`
 	ExpiresAt                 time.Time `json:"expires_at"`
 	Nonce                     string    `json:"nonce"`
+	// ContentDigest is Control's signed commitment to the posted body
+	// (DEPTH-WS14-S3-1 step 3): "sha256:" + hex(sha256(content)), where content
+	// is the exact UTF-8 "content" string of the create request. Control does
+	// not mint it yet; once present it is always enforced (matchesContent).
+	ContentDigest string `json:"content_digest,omitempty"`
 }
 
 // verifySpaceImportDecision proves that Imports Core was issued fresh Control
@@ -157,9 +164,13 @@ func (d spaceImportDecisionClaims) validate(orgID string, now time.Time) error {
 	}
 	// The shape is checked, not just presence. The digest still does not cover
 	// the uploaded bytes: Control mints it before they exist, so a true body
-	// binding needs a Control-signed body digest (DEPTH-WS14-S3-1, cross-plane).
+	// binding needs a Control-signed body digest (DEPTH-WS14-S3-1, cross-plane);
+	// documents-api enforces content_digest (matchesContent) once Control mints it.
 	if !spaceImportPayloadDigestPattern.MatchString(d.PayloadDigest) {
 		return fmt.Errorf("Space import decision payload digest is not a sha256 commitment")
+	}
+	if d.ContentDigest != "" && !spaceImportPayloadDigestPattern.MatchString(d.ContentDigest) {
+		return fmt.Errorf("Space import decision content digest is not a sha256 commitment")
 	}
 	if d.OrgID != orgID || d.ServiceAudience != spaceImportDecisionAudience || d.ActionID != spaceImportDecisionAction || d.ActionSchemaHash != spaceImportDecisionSchema || d.IssuedAt.After(now.Add(time.Minute)) || !d.ExpiresAt.After(now) || d.AuthorityRevision <= 0 || d.MembershipRevision <= 0 || d.PrivacyRevision <= 0 || d.RecipientAudienceRevision <= 0 || d.EntitlementRevision <= 0 {
 		return fmt.Errorf("Space import decision does not authorize this write")
@@ -170,6 +181,24 @@ func (d spaceImportDecisionClaims) validate(orgID string, now time.Time) error {
 		}
 	}
 	return fmt.Errorf("Space import decision lacks documents:write")
+}
+
+// spaceImportContentDigest is the canonical body digest a Control-signed
+// content_digest commits to: sha256 over the posted "content" string's UTF-8
+// bytes, as "sha256:" and 64 lowercase hex characters.
+func spaceImportContentDigest(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// matchesContent binds the write to the signed body when the decision carries a
+// content digest. A decision without one is the legacy request-identity-only
+// shape and is accepted as before until Control and Imports Core mint it.
+func (d spaceImportDecisionClaims) matchesContent(content string) bool {
+	if d.ContentDigest == "" {
+		return true
+	}
+	return d.ContentDigest == spaceImportContentDigest(content)
 }
 
 func (d spaceImportDecisionClaims) matchesDocumentInputType(documentType string) bool {

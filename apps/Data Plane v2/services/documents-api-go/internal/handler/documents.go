@@ -306,6 +306,10 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "Space import authority does not match document source type")
 		return
 	}
+	if spaceImportAuthority != nil && !spaceImportAuthority.matchesContent(input.Content) {
+		writeError(w, http.StatusForbidden, "Space import authority does not match the posted content")
+		return
+	}
 	// WS14-S3: a room file exists only under a space_upload decision. Without
 	// one the type is refused, so no caller can mint a room-file row by name.
 	spaceFile := spaceImportAuthority != nil && spaceImportAuthority.isSpaceUpload()
