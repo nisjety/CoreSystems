@@ -38,7 +38,9 @@
 //!    2 removes. Also measured: `/tmp` is read-only inside the sandbox (the
 //!    earlier `--tmpfs /tmp` is shadowed by the `--ro-bind / /` that follows it),
 //!    which is why anything needing scratch space must be pointed at a writable
-//!    root. `--tmpfs /proc` placed AFTER the `--ro-bind` does work under
+//!    root. The same shadowing hid the fresh `/dev` until WS06-S10 moved
+//!    `--dev /dev` after the root bind: `--ro-bind` remounts `nodev`, so the
+//!    covered `/dev/null` could not be opened (EACCES). `--tmpfs /proc` placed AFTER the `--ro-bind` does work under
 //!    `CapEff=0` and empties `/proc` entirely; it is not adopted because an empty
 //!    `/proc` is untested against the numeric stack (`OpenBLAS` reads
 //!    `/proc/cpuinfo`), and breaking real work to hide a process list is the wrong
@@ -221,14 +223,20 @@ fn assemble_argv(
         "--unshare-uts".into(),
         "--unshare-ipc".into(),
         "--new-session".into(),
-        "--dev".into(),
-        "/dev".into(),
         "--tmpfs".into(),
         "/tmp".into(),
         // Read-only root baseline; writable roots are bound over it below.
         "--ro-bind".into(),
         "/".into(),
         "/".into(),
+        // `--dev /dev` AFTER the root (WS06-S10 D1): bwrap applies mounts in
+        // order and `--ro-bind` adds `nodev` recursively, so a `--dev` emitted
+        // before the root bind was covered by the container's `/dev` mounted
+        // `nodev`, and opening `/dev/null` failed with EACCES inside the sandbox
+        // (seen in the production-profile CI run: `cannot create /dev/null:
+        // Permission denied`, and every `subprocess.DEVNULL` in check.py).
+        "--dev".into(),
+        "/dev".into(),
     ];
 
     // `--clearenv` FIRST, then the allowlist: bwrap applies options in order, so
@@ -899,6 +907,61 @@ mod tests {
             assert!(windowed(&argv, &["--dev", "/dev"]));
             assert!(windowed(&argv, &["--tmpfs", "/tmp"]));
             assert!(windowed(&argv, &["--ro-bind", "/", "/"]));
+        }
+    }
+
+    /// WS06-S10 D1: the fresh `/dev` must be mounted AFTER the read-only root.
+    /// bwrap applies mounts in order and `--ro-bind` remounts `nodev`
+    /// recursively, so a `--dev /dev` placed before it is covered by the
+    /// container's `/dev` and `/dev/null` cannot be opened (EACCES). Token
+    /// presence alone cannot catch that, so this asserts the order, for every
+    /// launch shape, and that nothing after `--dev` re-covers `/dev`.
+    #[test]
+    fn dev_is_mounted_after_the_read_only_root() {
+        let root = PathBuf::from("/tmp/verevon-egress");
+        let socket = PathBuf::from("/tmp/verevon-egress/call-1/egress.sock");
+        let env = vec![("PATH".to_owned(), "/usr/bin:/bin".to_owned())];
+        let ro = [(PathBuf::from("/srv/org"), PathBuf::from("/org"))];
+        let cwd = PathBuf::from("/work");
+        let shapes: Vec<(MpSandboxPolicy, LaunchOptions<'_>)> = vec![
+            (
+                MpSandboxPolicy::ReadOnly {
+                    network: MpNetworkPolicy::Disabled,
+                },
+                LaunchOptions::default(),
+            ),
+            (
+                MpSandboxPolicy::WorkspaceWrite {
+                    writable_roots: vec![PathBuf::from("/work")],
+                    network: MpNetworkPolicy::AllowDomains(vec!["example.com".into()]),
+                },
+                LaunchOptions {
+                    env: SandboxEnv::Only(&env),
+                    extra_ro_binds: &ro,
+                    cwd: Some(&cwd),
+                    egress: Some(bridge(&root, &socket)),
+                    ..LaunchOptions::default()
+                },
+            ),
+        ];
+        for (policy, options) in shapes {
+            let argv =
+                build_bwrap_argv_with(&policy, "python3", &args(&["main.py"]), options)
+                    .expect("wrapped");
+            let root_bind = argv
+                .windows(3)
+                .position(|w| w[0] == "--ro-bind" && w[1] == "/" && w[2] == "/")
+                .expect("read-only root");
+            let dev = argv
+                .windows(2)
+                .position(|w| w[0] == "--dev" && w[1] == "/dev")
+                .expect("--dev /dev");
+            assert!(dev > root_bind, "--dev must follow --ro-bind / /: {argv:?}");
+            let end = argv.iter().position(|a| a == "--").expect("separator");
+            assert!(
+                !argv[dev + 2..end].iter().any(|a| a == "/" || a == "/dev"),
+                "nothing after --dev may re-cover /dev: {argv:?}"
+            );
         }
     }
 

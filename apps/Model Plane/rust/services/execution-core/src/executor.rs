@@ -1207,6 +1207,14 @@ mod tests {
         assert_eq!(DEFAULT_QUEUE_WAIT_MS, 5000);
     }
 
+    /// This process's resident set size, from procfs. `None` off Linux.
+    fn process_rss_bytes() -> Option<u64> {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let line = status.lines().find(|l| l.starts_with("VmRSS:"))?;
+        let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kib * 1024)
+    }
+
     #[tokio::test]
     async fn read_capped_stops_at_the_cap_and_reports_it() {
         let data = vec![b'a'; 20_000];
@@ -1240,6 +1248,23 @@ mod tests {
     /// which ceiling tripped.
     #[tokio::test]
     async fn a_child_printing_100_mb_is_killed_at_the_output_cap() {
+        // WS06-S10 DoD: execution-core's own RSS stays flat while the child prints
+        // 100 MB through the real spawn_capture path. Sampled on Linux (procfs);
+        // elsewhere the sampler reports nothing and only the cap is asserted.
+        let rss_before = process_rss_bytes();
+        let peak = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(rss_before.unwrap_or(0)));
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sampler = {
+            let (peak, done) = (peak.clone(), done.clone());
+            tokio::spawn(async move {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    if let Some(rss) = process_rss_bytes() {
+                        peak.fetch_max(rss, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+        };
         let started = std::time::Instant::now();
         let out = execute_sandboxed_with_timeout(
             &passthrough_policy(),
@@ -1249,6 +1274,17 @@ mod tests {
         )
         .await
         .expect("spawn sh");
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        sampler.await.expect("rss sampler");
+        if let Some(before) = rss_before {
+            let growth = peak.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(before);
+            // Buffering the stream would grow RSS by ~100 MB; the 1 MiB cap plus
+            // parallel-test noise stays far below 32 MiB.
+            assert!(
+                growth < 32 * 1024 * 1024,
+                "execution-core RSS grew by {growth} bytes while the child printed 100 MB"
+            );
+        }
         assert_eq!(
             out.limit_hit,
             Some(LimitHit::Output {

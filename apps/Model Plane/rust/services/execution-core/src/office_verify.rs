@@ -824,7 +824,19 @@ sys.stdout.buffer.write(data)
 
     #[tokio::test]
     async fn libreoffice_converts_a_docx_to_pdf_under_the_bwrap_policy() {
-        if !python_available() || !soffice_available() || !crate::sandbox::is_supported() {
+        let present = [
+            ("python3", python_available()),
+            ("soffice", soffice_available()),
+            ("bwrap", crate::sandbox::is_supported()),
+        ];
+        if let Some((missing, _)) = present.iter().find(|(_, ok)| !ok) {
+            // WS06-S10 D10: a job that installs the render stack sets this so a
+            // missing tool fails loudly instead of passing by skipping. Test-only;
+            // never read by the service.
+            assert!(
+                std::env::var_os("EXECUTION_TEST_REQUIRE_SANDBOX_RENDER").is_none(),
+                "EXECUTION_TEST_REQUIRE_SANDBOX_RENDER is set but {missing} is unavailable"
+            );
             return;
         }
         let (_stdout, rendered) = run_checker(
