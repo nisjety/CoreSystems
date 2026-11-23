@@ -54,7 +54,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::auth::{Claims, VerifiedSessionBearer};
-use crate::http_routes::{authenticated_session_request, require_non_zdr_durable_mutation};
+use crate::http_routes::authenticated_session_request;
 use crate::room_run::{RoomFrame, RoomProjector, SnapshotHead};
 use crate::state::AppState;
 use crate::stream_buffer::RunPointer;
@@ -479,11 +479,19 @@ async fn stop_live_producer(
     }
 }
 
+/// The room manager's Stop posture gate (step 1 of [`room_run_stop`]). A stop writes a `RUN_CANCELLED`
+/// receipt of ids and a reason, never turn content, so a plain zero-retention caller is admitted (D23,
+/// D22aj), as the starter's own stop is (`browser.rs::stop_posture_gate`). A waived caller is still refused,
+/// typed, by the resolver.
+fn stop_posture_gate(claims: &Claims) -> Result<(), impl axum::response::IntoResponse> {
+    crate::zdr_posture::zdr_or_refuse(claims, &crate::zdr_posture::Route::plain(false)).map(|_zdr| ())
+}
+
 /// A room manager or owner stops another member's live run. Authority is Session Core's
 /// `RunService.CancelRunAsRoomManager` (Control `model.run.control` decision, membership, audience
 /// ceiling, run-in-this-Space, zero-retention); this handler gates the posture, the rollout flag and
 /// the request shape, forwards the decision in the call and then stops the producer. A durable
-/// mutation: a zero-retention or waived caller is refused first, typed.
+/// mutation: a waived caller is refused first, typed. A plain zero-retention caller may stop (D23/D22aj).
 async fn room_run_stop(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -491,8 +499,9 @@ async fn room_run_stop(
     Path((space_id, run_id)): Path<(String, String)>,
     Json(body): Json<StopBody>,
 ) -> Response {
-    // 1. A durable mutation refuses a zero-retention or waived caller before anything else.
-    if let Err(refusal) = require_non_zdr_durable_mutation(&claims) {
+    // 1. The posture gate (D23/D22aj): a stop writes ids and a reason, so a plain zero-retention caller may
+    // stop. A waived caller is refused, typed.
+    if let Err(refusal) = stop_posture_gate(&claims) {
         count_stop("zdr");
         return refusal.into_response();
     }
@@ -750,5 +759,40 @@ impl Live {
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stop_posture_gate;
+    use crate::auth::Claims;
+
+    fn stop_claims(zdr: bool) -> Claims {
+        Claims {
+            key_id: None,
+            acting_user_id: None,
+            sub: "user-a".to_owned(),
+            iss: "auth-core".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr,
+            sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
+
+    /// D23/D22aj: a plain zero-retention caller may stop a room run, as may any other caller.
+    #[test]
+    fn stop_posture_gate_admits_a_zdr_caller() {
+        assert!(stop_posture_gate(&stop_claims(true)).is_ok());
+        assert!(stop_posture_gate(&stop_claims(false)).is_ok());
     }
 }

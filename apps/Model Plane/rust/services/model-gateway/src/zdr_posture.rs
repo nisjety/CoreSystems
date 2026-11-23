@@ -1007,8 +1007,9 @@ pub(crate) mod tests {
             // Human posts in a Space room (WS01-S4) store free text under a member's name.
             ("space_routes/posts.rs", "create_space_post"),
             ("space_routes/posts.rs", "append_space_post"),
-            // A manager's Stop writes a RUN_CANCELLED receipt on someone else's run (WS09-S8).
-            ("space_routes/runs.rs", "room_run_stop"),
+            // NOTE: the room manager's Stop (`space_routes/runs.rs::room_run_stop`, WS09-S8) is intentionally
+            // absent from this list (D23/D22aj): a stop writes a RUN_CANCELLED receipt of ids and a reason, never
+            // turn content, so a plain zero-retention caller may stop. Its gate is `stop_posture_gate`.
             // NOTE: the room starter's own Stop (`space_routes/browser.rs::room_browser_run_stop`,
             // D21h) is intentionally absent from this list — see the doc comment above.
             // A member's approval decision keeps its free-text reason (WS10-S6).

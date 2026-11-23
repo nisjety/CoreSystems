@@ -619,6 +619,8 @@ pub struct RoomProjector {
     text_truncated: bool,
     steps: Vec<RoomStep>,
     step_index: HashMap<String, usize>,
+    /// Buffer milliseconds at which each step started, kept until the step has its time.
+    step_started_ms: HashMap<String, u64>,
     /// Call ids of internal tools, whose results must also emit nothing.
     ignored_calls: HashSet<String>,
     steer: u32,
@@ -641,6 +643,7 @@ impl RoomProjector {
             text_truncated: false,
             steps: Vec::new(),
             step_index: HashMap::new(),
+            step_started_ms: HashMap::new(),
             ignored_calls: HashSet::new(),
             steer: 0,
             plan: None,
@@ -790,16 +793,35 @@ impl RoomProjector {
         self.text_truncated = true;
     }
 
-    fn upsert_step(&mut self, id: &str, class: StepClass, state: StepState, seq: u64, out: &mut Vec<Emitted>) {
+    /// Upsert one step and emit it. A step's time is the buffer milliseconds from its first `running`
+    /// frame to its first settled frame; a step with no start (a source check) carries none.
+    fn upsert_step(
+        &mut self,
+        id: &str,
+        class: StepClass,
+        state: StepState,
+        seq: u64,
+        at_ms: Option<u64>,
+        out: &mut Vec<Emitted>,
+    ) {
         let step = match self.step_index.get(id).copied() {
             Some(index) => {
+                let started = self.step_started_ms.get(id).copied();
                 let step = &mut self.steps[index];
                 step.state = state;
+                if step.ms.is_none() && state != StepState::Running {
+                    if let (Some(started), Some(now)) = (started, at_ms) {
+                        step.ms = Some(now.saturating_sub(started));
+                    }
+                }
                 step.clone()
             }
             None => {
                 if self.steps.len() >= self.limits.max_steps {
                     return;
+                }
+                if let (StepState::Running, Some(now)) = (state, at_ms) {
+                    self.step_started_ms.insert(id.to_owned(), now);
                 }
                 let step = RoomStep { id: id.to_owned(), class, state, ms: None };
                 self.step_index.insert(id.to_owned(), self.steps.len());
@@ -821,7 +843,7 @@ impl RoomProjector {
             "tool_call" => {
                 let name = data.get("name").and_then(Value::as_str).unwrap_or_default();
                 match StepClass::for_tool(name) {
-                    Some(class) => self.upsert_step(&id, class, StepState::Running, event.seq, out),
+                    Some(class) => self.upsert_step(&id, class, StepState::Running, event.seq, event.at_ms, out),
                     None => {
                         self.ignored_calls.insert(id);
                     }
@@ -842,7 +864,7 @@ impl RoomProjector {
                 if state == StepState::Ok && data.get("error").is_some_and(|error| !error.is_null()) {
                     state = StepState::Error;
                 }
-                self.upsert_step(&id, class, state, event.seq, out);
+                self.upsert_step(&id, class, state, event.seq, event.at_ms, out);
             }
             "step_update" => {
                 // Only the post-tool source check is a step of its own; every other step_update is
@@ -852,7 +874,7 @@ impl RoomProjector {
                 }
                 let status = data.get("status").and_then(Value::as_str).unwrap_or_default();
                 let state = StepState::from_result_status(status);
-                self.upsert_step(&id, StepClass::Check, state, event.seq, out);
+                self.upsert_step(&id, StepClass::Check, state, event.seq, event.at_ms, out);
             }
             _ => {}
         }
@@ -1089,7 +1111,7 @@ mod tests {
     use super::*;
 
     fn event(seq: u64, name: &str, data: Value) -> BufferedEvent {
-        BufferedEvent { seq, event: name.to_owned(), data: data.to_string(), delta: String::new() }
+        BufferedEvent { seq, event: name.to_owned(), data: data.to_string(), delta: String::new(), at_ms: None }
     }
 
     #[test]
@@ -1253,7 +1275,7 @@ mod tests {
 
     #[test]
     fn a_legacy_text_record_is_text_and_hidden_text_is_a_count() {
-        let legacy = BufferedEvent { seq: 4, event: String::new(), data: String::new(), delta: SENTINEL.to_owned() };
+        let legacy = BufferedEvent { seq: 4, event: String::new(), data: String::new(), delta: SENTINEL.to_owned(), at_ms: None };
         let mut hidden = RoomProjector::new(RoomLimits::DEFAULT, false);
         let frames = hidden.apply_batch([&legacy]);
         assert_eq!(frames, vec![Emitted { seq: 4, frame: RoomFrame::TextProgress { chars: 12 } }]);
@@ -1335,6 +1357,64 @@ mod tests {
             ],
             "an unknown status is an error, a result with no call is not guessed at"
         );
+    }
+
+    /// A buffered frame stamped `at_ms`, as the stream buffer stamps each frame it keeps.
+    fn timed(seq: u64, name: &str, data: Value, at_ms: u64) -> BufferedEvent {
+        BufferedEvent { at_ms: Some(at_ms), ..event(seq, name, data) }
+    }
+
+    #[test]
+    fn a_step_takes_the_milliseconds_from_its_call_to_its_first_result() {
+        let mut projector = RoomProjector::new(RoomLimits::DEFAULT, false);
+        let frames = projector.apply_batch([
+            &timed(0, "tool_call", json!({"id":"a","name":"web_search"}), 10_000),
+            &timed(1, "tool_result", json!({"id":"a","status":"ok"}), 10_840),
+            &timed(2, "tool_result", json!({"id":"a","status":"error"}), 12_000),
+        ]);
+        let times: Vec<Option<u64>> = frames
+            .iter()
+            .filter_map(|emitted| match &emitted.frame {
+                RoomFrame::Step(step) => Some(step.ms),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(times, vec![None, Some(840), Some(840)], "the first settled time stands");
+    }
+
+    #[test]
+    fn a_step_from_an_unstamped_buffer_carries_no_milliseconds() {
+        let mut projector = RoomProjector::new(RoomLimits::DEFAULT, false);
+        let frames = projector.apply_batch([
+            &event(0, "tool_call", json!({"id":"a","name":"web_search"})),
+            &event(1, "tool_result", json!({"id":"a","status":"ok"})),
+        ]);
+        let steps: Vec<&RoomStep> = frames
+            .iter()
+            .filter_map(|emitted| match &emitted.frame {
+                RoomFrame::Step(step) => Some(step),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(steps.len(), 2);
+        assert!(steps.iter().all(|step| step.ms.is_none()));
+    }
+
+    #[test]
+    fn a_stored_work_summary_keeps_the_time_of_each_settled_step() {
+        let replay = Replay {
+            deltas: vec![
+                timed(0, "tool_call", json!({"id":"a","name":"web_search"}), 1_000),
+                timed(1, "tool_result", json!({"id":"a","status":"ok"}), 1_250),
+                timed(2, "tool_call", json!({"id":"b","name":"code_interpreter"}), 2_000),
+            ],
+            done: None,
+            ended: None,
+            found: true,
+        };
+        let work = work_summary_from_buffer(&replay, RoomLimits::DEFAULT).expect("a summary");
+        assert_eq!(work["steps"][0]["ms"], json!(250));
+        assert!(work["steps"][1].get("ms").is_none(), "a step still running has no time");
     }
 
     #[test]

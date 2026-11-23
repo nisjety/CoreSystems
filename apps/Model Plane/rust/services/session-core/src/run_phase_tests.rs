@@ -87,12 +87,17 @@ fn run_phase_refusal_is_aborted_with_the_error_code_and_the_active_run_trailers(
 }
 
 #[test]
-fn run_phase_sql_derives_running_only_from_an_open_unexpired_obligation() {
+fn run_phase_sql_derives_a_live_phase_only_from_an_open_unexpired_obligation() {
     let sql = RUN_PHASE_SQL;
     assert!(sql.contains("r.status = 'queued'"));
     assert!(sql.contains("rp_o.state IN ('open', 'processing')"));
     assert!(sql.contains("rp_o.deadline_at > now()"));
-    assert!(sql.contains("THEN 'running' ELSE r.status END"));
+    // WS10-S1: a requested, unexpired approval of the run reads awaiting_approval, else running.
+    assert!(sql.contains("FROM approvals AS rp_a"));
+    assert!(sql.contains("rp_a.run_id = r.id"));
+    assert!(sql.contains("rp_a.status = 'requested'"));
+    assert!(sql.contains("(rp_a.expires_at IS NULL OR rp_a.expires_at > now())"));
+    assert!(sql.contains("THEN 'awaiting_approval' ELSE 'running' END) ELSE r.status END"));
     assert_eq!(run_phase_sql!("x").replace("x.", "r."), sql, "the alias is the only difference");
 }
 
@@ -216,6 +221,54 @@ async fn run_phase_pg_queued_run_with_an_open_obligation_lists_as_running() {
         .await
         .expect("complete");
     assert_eq!(phase(&pool, &run.run_id).await, "completed");
+    clean_space(&pool, &org, &space).await;
+}
+
+#[tokio::test]
+#[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+async fn run_phase_pg_a_requested_unexpired_approval_reads_as_awaiting_approval() {
+    let _switch = GuardSwitch::hold();
+    let Some((pool, org, space, thread)) = seeded("approval").await else { return };
+    let run = start(&pool, &org, &thread, "k-approval").await.expect("the run starts");
+    assert_eq!(phase(&pool, &run.run_id).await, "running", "{NEEDS_DB}");
+    let approval = mp_ids::new_ulid();
+    sqlx::query(
+        "INSERT INTO approvals (id, run_id, kind, status, org_id, user_id, expires_at)
+         VALUES ($1, $2, 'plan', 'requested', $3, $4, now() + interval '10 minutes')",
+    )
+    .bind(&approval)
+    .bind(&run.run_id)
+    .bind(&org)
+    .bind(OWNER)
+    .execute(&pool)
+    .await
+    .expect("the approval is requested");
+    assert_eq!(phase(&pool, &run.run_id).await, "awaiting_approval");
+    // Decided, or past its expiry, the approval no longer holds the run: it reads running again.
+    sqlx::query("UPDATE approvals SET status = 'granted' WHERE id = $1")
+        .bind(&approval)
+        .execute(&pool)
+        .await
+        .expect("decide");
+    assert_eq!(phase(&pool, &run.run_id).await, "running");
+    sqlx::query("UPDATE approvals SET status = 'requested', expires_at = now() - interval '1 minute' WHERE id = $1")
+        .bind(&approval)
+        .execute(&pool)
+        .await
+        .expect("expire");
+    assert_eq!(phase(&pool, &run.run_id).await, "running");
+    // The stored status is still queued: awaiting_approval is derived, never written.
+    let stored: String = sqlx::query_scalar("SELECT status FROM runs WHERE id = $1")
+        .bind(&run.run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("status");
+    assert_eq!(stored, "queued");
+    sqlx::query("DELETE FROM approvals WHERE id = $1")
+        .bind(&approval)
+        .execute(&pool)
+        .await
+        .expect("the approval row is removed before its run");
     clean_space(&pool, &org, &space).await;
 }
 

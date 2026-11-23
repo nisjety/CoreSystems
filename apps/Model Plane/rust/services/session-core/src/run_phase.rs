@@ -8,7 +8,8 @@
 //!   therefore `queued` for its whole life, which a room shows as "Queued".
 //!   [`run_phase_sql!`] derives the honest phase: a `queued` run whose one managed
 //!   terminalization obligation is still open (`open` or `processing`) and inside
-//!   its deadline is `running`. Nothing is written; readers select the expression.
+//!   its deadline is `running`, or `awaiting_approval` while a requested, unexpired approval holds it.
+//!   Nothing is written; readers select the expression.
 //! * **Thread run guard.** A Space thread carries at most one live root run. The
 //!   guard runs inside the start transaction, under a per-thread advisory lock, so
 //!   two concurrent starts cannot both pass. A refused start is gRPC `Aborted`
@@ -41,6 +42,10 @@ pub(crate) const ACTIVE_RUN_TRAILER: &str = "x-mp-active-run-id";
 
 /// SQL expression for a run's honest phase, over a `runs` row aliased `$alias`.
 /// A macro expanding to a literal so it composes inside `concat!` constants.
+///
+/// A live run (`queued`, obligation open and inside its deadline) reads `awaiting_approval` while it
+/// holds a requested, unexpired approval (the predicate the attention list uses), else `running`.
+/// The thread guard reads the stored status, so the phase never changes who holds a thread.
 macro_rules! run_phase_sql {
     ($alias:literal) => {
         concat!(
@@ -53,7 +58,14 @@ macro_rules! run_phase_sql {
             ".id
                   AND rp_o.state IN ('open', 'processing')
                   AND rp_o.deadline_at > now()
-            ) THEN 'running' ELSE ",
+            ) THEN (CASE WHEN EXISTS (
+                SELECT 1 FROM approvals AS rp_a
+                WHERE rp_a.run_id = ",
+            $alias,
+            ".id
+                  AND rp_a.status = 'requested'
+                  AND (rp_a.expires_at IS NULL OR rp_a.expires_at > now())
+            ) THEN 'awaiting_approval' ELSE 'running' END) ELSE ",
             $alias,
             ".status END"
         )

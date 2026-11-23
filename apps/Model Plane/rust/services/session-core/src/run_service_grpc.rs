@@ -74,12 +74,11 @@ pub(crate) async fn authorize_run_owner(
 /// session-core's `ResolveRunSpace` both refuse a ZDR caller outright, so a ZDR starter still
 /// cannot actually stop a run today"). Stopping an already-running run is the safe direction under
 /// zero data retention — it writes a `RUN_CANCELLED` receipt naming who stopped it and why, never
-/// turn content — so this is the one durable run-control mutation a ZDR caller or service may still
-/// issue. Every other mutating RPC in this crate keeps going through `authorize_operation` and its
-/// ZDR refusal unchanged; `cancel_run_as_room_manager` (a different stop path, the room manager's,
-/// not the starter's) also keeps its own explicit ZDR refusal.
+/// turn content — so the room manager's stop (`cancel_run_as_room_manager`, WS09-S8, D23 too) shares
+/// this check: a ZDR caller or service may stop a run through either path. Every other mutating RPC
+/// in this crate keeps going through `authorize_operation` and its ZDR refusal unchanged.
 #[allow(clippy::result_large_err)]
-fn authorize_run_stop(caller: &VerifiedIdentity) -> Result<(), Status> {
+pub(crate) fn authorize_run_stop(caller: &VerifiedIdentity) -> Result<(), Status> {
     if caller.is_service() {
         caller.require_service_scope("session:write")?;
     }

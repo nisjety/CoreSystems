@@ -178,7 +178,7 @@ fn working_sql() -> String {
            JOIN threads t ON t.id = r.thread_id AND t.org_id = r.org_id
           WHERE r.org_id = $1 AND r.space_id = $2 AND r.parent_run_id IS NULL
             AND r.retention_class = 'persistent'
-            AND ({RUN_PHASE_SQL}) IN ('queued', 'running')
+            AND ({RUN_PHASE_SQL}) IN ('queued', 'running', 'awaiting_approval')
             AND r.updated_at > now() - make_interval(mins => $4)
             AND {THREAD_SCOPE}"
     )

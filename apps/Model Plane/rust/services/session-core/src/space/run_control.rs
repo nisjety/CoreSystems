@@ -9,19 +9,20 @@
 //!
 //! Checks, in order, each one failing closed:
 //!
-//! 1. The caller is a user principal with `session:write`. A zero-retention credential is refused
-//!    with the typed `zdr_durable_mutation_forbidden` (a stop writes a `RUN_CANCELLED` receipt).
+//! 1. The caller is a user principal, or a service holding `session:write`. A zero-retention
+//!    credential may stop a run (D23): the `RUN_CANCELLED` receipt names ids and a reason, never turn
+//!    content, so the check is [`authorize_run_stop`].
 //! 2. The Control decision verifies (signature, key, audience `model-plane`, subject = caller, org,
 //!    Space, action `model.run.control`, permissions exactly `["run:cancel"]`, digest bound to this
 //!    `run_id` and the operation `cancel`, the request's idempotency key, window) through
-//!    [`crate::grpc::verify_run_control_space_decision`]. A decision that carries the zero-retention
-//!    claim is refused with the same typed refusal.
+//!    [`crate::grpc::verify_run_control_space_decision`]. A decision issued under zero retention
+//!    verifies for a stop too (D23).
 //! 3. The caller holds no row in `space_membership_revocations` for this Space.
 //! 4. The run is a ROOT run of a thread of THIS Space and org, inside the decision's audience
 //!    ceiling. A run anywhere else, or beyond the ceiling, is `NotFound`: there is no oracle for a
 //!    run id the caller may not see.
-//! 5. The run's retention class is `persistent`; a zero-retention or waived run is refused with the
-//!    typed refusal.
+//! 5. The run's retention class is `persistent`, `zdr` or `zdr_waived` (D23); any other class is
+//!    refused with the typed refusal.
 //!
 //! Then the same transaction as `CancelRun` flips the run and writes the `RUN_CANCELLED` receipt,
 //! which names `cancelled_by` (the manager), `acting_as: "room_manager"` and the decision
@@ -35,8 +36,8 @@ use mp_contracts::zdr_refusal::Refusal;
 use sqlx::PgPool;
 use tonic::Status;
 
-use crate::auth::{authorize_operation, VerifiedIdentity};
-use crate::run_service_grpc::{cancel_run_terminalize, ActingAs};
+use crate::auth::VerifiedIdentity;
+use crate::run_service_grpc::{authorize_run_stop, cancel_run_terminalize, ActingAs};
 
 /// Longest id accepted on the request.
 const MAX_ID_BYTES: usize = 128;
@@ -49,6 +50,12 @@ const ACTING_AS_ROOM_MANAGER: &str = "room_manager";
 
 fn zdr_refusal() -> Status {
     Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(tonic::Code::FailedPrecondition)
+}
+
+/// Whether a stop may proceed on a run of this retention class (D23). The stop writes no turn content,
+/// so a zero-retention or waived run stops like any other; a class this crate does not know is refused.
+fn stop_admits_retention(retention_class: &str) -> bool {
+    matches!(retention_class, "persistent" | "zdr" | "zdr_waived")
 }
 
 /// The receipt reason: a short token of lowercase letters, digits and underscores, else the
@@ -81,11 +88,9 @@ pub(crate) async fn cancel_run_as_room_manager(
     caller: &VerifiedIdentity,
     req: &pb::CancelRunAsRoomManagerRequest,
 ) -> Result<pb::CancelRunAsRoomManagerResponse, Status> {
-    // `session:write` also refuses a zero-retention credential with the typed refusal.
-    authorize_operation(caller, "session:write")?;
-    if caller.zdr() {
-        return Err(zdr_refusal());
-    }
+    // A zero-retention credential may stop a run (D23): the receipt is content-free. Only the
+    // service-scope check applies, as for the starter's CancelRun.
+    authorize_run_stop(caller)?;
     let run_id = req.run_id.trim();
     let space_id = req.space_id.trim();
     let idempotency_key = req.idempotency_key.trim();
@@ -115,9 +120,7 @@ pub(crate) async fn cancel_run_as_room_manager(
         idempotency_key,
         now,
     )?;
-    if decision.zero_data_retention {
-        return Err(zdr_refusal());
-    }
+    // A decision issued under zero retention verifies for a stop too (D23): nothing new is retained.
 
     // A removed member is refused even while the decision they hold has not expired.
     let (revoked,): (bool,) = sqlx::query_as(
@@ -152,7 +155,8 @@ pub(crate) async fn cancel_run_as_room_manager(
     .map_err(|error| Status::internal(error.to_string()))?
     .ok_or_else(|| Status::not_found("run not found"))?;
 
-    if row.retention_class != "persistent" {
+    // A stop is the safe direction under every posture this crate knows (D23).
+    if !stop_admits_retention(&row.retention_class) {
         return Err(zdr_refusal());
     }
 
@@ -307,15 +311,6 @@ mod tests {
         VerifiedIdentity::user_for_test("org-1", "manager-1")
     }
 
-    fn assert_durable_mutation_refusal(status: &Status) {
-        assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{status:?}");
-        assert_eq!(
-            Refusal::from_status(status),
-            Some(Refusal::DURABLE_MUTATION_FORBIDDEN),
-            "{status:?}"
-        );
-    }
-
     /// The control every refusal below is measured against: the well-formed decision verifies for
     /// the manager, the Space, the run and the key it was issued for.
     fn assert_well_formed_decision_verifies() {
@@ -351,8 +346,10 @@ mod tests {
         assert_eq!(receipt_reason(&"a".repeat(41)), "room_manager_stop");
     }
 
+    /// D23: a zero-retention credential passes the caller gate. The empty decision then refuses the
+    /// request before any row is read, so the refusal is the decision's, never the ZDR one.
     #[tokio::test]
-    async fn room_stop_a_zero_retention_credential_is_refused_with_the_durable_mutation_refusal() {
+    async fn room_stop_a_zero_retention_credential_passes_the_caller_gate() {
         let zdr = VerifiedIdentity::user_for_test_with_zdr("org-1", "manager-1", true);
         let refused = cancel_run_as_room_manager(
             &lazy_pool(),
@@ -360,25 +357,31 @@ mod tests {
             &stop_request("run-1", "space-1", "stop-1", String::new()),
         )
         .await
-        .expect_err("a stop writes a durable receipt, so zero retention is refused");
-        assert_durable_mutation_refusal(&refused);
+        .expect_err("an empty decision stops nothing");
+        assert_ne!(Refusal::from_status(&refused), Some(Refusal::DURABLE_MUTATION_FORBIDDEN), "{refused:?}");
+        assert_ne!(refused.code(), tonic::Code::Internal, "no row was read: {refused:?}");
     }
 
-    #[tokio::test]
-    async fn room_stop_a_decision_with_the_zero_retention_claim_is_refused_with_the_durable_mutation_refusal() {
+    /// D23: a decision issued under zero retention verifies for a stop, so the claim alone refuses nothing.
+    #[test]
+    fn room_stop_a_decision_with_the_zero_retention_claim_verifies_for_a_stop() {
         let _keys = StreamKeysEnv::publish();
         assert_well_formed_decision_verifies();
         let token = control_token("org-1", "manager-1", "space-1", "stop-1", ("run-1", "cancel"), |claims| {
             claims["zero_data_retention"] = json!(true);
         });
-        let refused = cancel_run_as_room_manager(
-            &lazy_pool(),
-            &manager(),
-            &stop_request("run-1", "space-1", "stop-1", token),
+        let decision = crate::grpc::verify_run_control_space_decision(
+            &token,
+            DECISION_REF,
+            "org-1",
+            "manager-1",
+            "space-1",
+            "run-1",
+            "stop-1",
+            Utc::now(),
         )
-        .await
-        .expect_err("a decision that names zero retention stops nothing");
-        assert_durable_mutation_refusal(&refused);
+        .expect("a stop may be decided under zero retention (D23)");
+        assert!(decision.zero_data_retention);
     }
 
     #[tokio::test]
@@ -449,6 +452,17 @@ mod tests {
             .expect_err(what);
             assert_eq!(refused.code(), tonic::Code::PermissionDenied, "{what}");
             assert_eq!(refused.message(), message, "{what}");
+        }
+    }
+
+    /// D23: every retention class this crate knows stops; an unknown class is refused.
+    #[test]
+    fn room_stop_admits_every_known_retention_class_and_no_other() {
+        for class in ["persistent", "zdr", "zdr_waived"] {
+            assert!(stop_admits_retention(class), "{class}");
+        }
+        for class in ["", "standard", "Persistent", "zdr_unknown"] {
+            assert!(!stop_admits_retention(class), "{class}");
         }
     }
 
@@ -589,7 +603,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
-    async fn room_stop_zero_retention_and_waived_runs_are_refused_with_the_durable_mutation_refusal() {
+    async fn room_stop_zero_retention_and_waived_runs_stop_like_any_other_run() {
         let Some(room) = room("zr").await else {
             return;
         };
@@ -599,11 +613,10 @@ mod tests {
         test_support::seed_space_run(&room.pool, &room.org, &room.space, &room.thread, &waived_run, "queued", "zdr_waived")
             .await;
         for run in [&zdr_run, &waived_run] {
-            let refused = stop(&room, &room.org, &room.space, run)
+            let stopped = stop(&room, &room.org, &room.space, run)
                 .await
-                .expect_err("a run that keeps no state is not stopped through the room");
-            assert_durable_mutation_refusal(&refused);
-            assert_eq!(status_of(&room.pool, run).await, "queued", "nothing was cancelled");
+                .expect("a stop writes only ids and a reason, so zero retention does not refuse it (D23)");
+            assert!(stopped.cancelled, "{run}");
         }
         test_support::clean_space(&room.pool, &room.org, &room.space).await;
     }

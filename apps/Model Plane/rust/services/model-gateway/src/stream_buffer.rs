@@ -117,6 +117,10 @@ pub struct BufferedEvent {
     /// serialized as `""` on every frame.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub delta: String,
+    /// When `append` buffered this frame, in Unix milliseconds (step timing, WS09-S3). A record written
+    /// before timing has none, so a step read from it carries no `ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_ms: Option<u64>,
 }
 
 impl BufferedEvent {
@@ -125,6 +129,15 @@ impl BufferedEvent {
     pub fn is_legacy_text(&self) -> bool {
         self.event.is_empty()
     }
+}
+
+/// Unix milliseconds now: the stamp `append` gives each buffered frame. `None` when the clock reads
+/// before the epoch, so the frame carries no time and no step is timed from it.
+fn unix_millis_now() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
 }
 
 /// Terminal info captured when a stream completes, so a late resumer still
@@ -206,6 +219,7 @@ impl InMemoryStreamBuffer {
             event: event.to_owned(),
             data: data.to_owned(),
             delta: String::new(),
+            at_ms: unix_millis_now(),
         });
         if entry.deltas.len() > MAX_DELTAS_PER_STREAM {
             let overflow = entry.deltas.len() - MAX_DELTAS_PER_STREAM;
@@ -434,6 +448,7 @@ impl RedisStreamBuffer {
             event: event.to_owned(),
             data: data.to_owned(),
             delta: String::new(),
+            at_ms: unix_millis_now(),
         }) else {
             return;
         };
@@ -751,6 +766,22 @@ mod tests {
         let after0 = store.replay_after("req_1", Some(0)).await;
         assert_eq!(after0.deltas.len(), 2);
         assert_eq!(after0.deltas[0].seq, 1);
+    }
+
+    #[tokio::test]
+    async fn append_stamps_each_frame_with_the_time_it_was_buffered() {
+        let store = StreamBufferStore::new();
+        store.append("req_timed", 0, "tool_call", "{}").await;
+        let replay = store.replay_after("req_timed", None).await;
+        let at_ms = replay.deltas[0].at_ms.expect("a frame buffered now carries a time");
+        assert!(at_ms > 1_600_000_000_000, "a Unix time in milliseconds, not a counter");
+    }
+
+    #[test]
+    fn a_record_written_before_timing_still_parses_without_a_stamp() {
+        let frame: BufferedEvent = serde_json::from_str(r#"{"seq":3,"event":"tool_call","data":"{}"}"#)
+            .expect("a record from before timing parses");
+        assert_eq!(frame.at_ms, None);
     }
 
     #[tokio::test]
