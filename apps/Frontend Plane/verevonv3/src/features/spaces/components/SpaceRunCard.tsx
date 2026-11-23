@@ -11,6 +11,13 @@ import {
   summedStepSeconds,
   workSummaryLine,
 } from '../lib/room-run-grammar'
+import {
+  RUN_STOP_TIMEOUT_MS,
+  RunStopTimeout,
+  runStopCanBePressed,
+  runStopStateForCode,
+  type RunStopState,
+} from '../lib/space-run-stop'
 import { elapsedSeconds, totalSteps, type SpaceRunView } from '../lib/space-run-view'
 import './space-run.css'
 
@@ -48,23 +55,29 @@ export function SpaceRunCard(props: SpaceRunCardProps) {
   const timer = setInterval(() => setNow(Date.now()), 1000)
   onCleanup(() => clearInterval(timer))
   const [showAll, setShowAll] = createSignal(false)
-  // One stop attempt = one key; a retry after a failure reuses it so the server de-duplicates.
+  // One stop attempt = one key; a retry after a failure or a timeout reuses it, so the server de-duplicates.
   const stopKey = `stop-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
-  const [stopState, setStopState] = createSignal<'idle' | 'pending' | 'sent' | 'forbidden' | 'zdr' | 'failed'>('idle')
+  const [stopState, setStopState] = createSignal<RunStopState>('idle')
 
   const requestStop = async () => {
     const target = props.stop
-    if (!target || stopState() === 'pending' || stopState() === 'sent') return
+    if (!target || !runStopCanBePressed(stopState())) return
     setStopState('pending')
+    // A stop that has not answered in time is "not confirmed yet", not a failure: the reader may send it
+    // again with the same key, and the server de-duplicates.
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timedOut = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new RunStopTimeout()), RUN_STOP_TIMEOUT_MS)
+    })
     try {
-      await stopSpaceRun(target.spaceRef, target.runId, stopKey)
+      await Promise.race([stopSpaceRun(target.spaceRef, target.runId, stopKey), timedOut])
       // The run's end arrives as a `finished` frame; until then the card says the stop was sent.
       setStopState('sent')
     } catch (error) {
-      const code = error instanceof ApiError ? error.code : ''
-      if (code === 'space_run_control_not_authorized') setStopState('forbidden')
-      else if (code === 'zdr_durable_mutation_forbidden') setStopState('zdr')
-      else setStopState('failed')
+      if (error instanceof RunStopTimeout) setStopState('timeout')
+      else setStopState(runStopStateForCode(error instanceof ApiError ? error.code : ''))
+    } finally {
+      clearTimeout(timer)
     }
   }
 
@@ -92,9 +105,9 @@ export function SpaceRunCard(props: SpaceRunCardProps) {
         fallback={
           <details class="verevon-run-work">
             <summary>
-              {/* The time is the sum of recorded step times; the live path carries none today, so this reads
-                  "Used N tools" until the server stamps steps (a clock here would keep running after the end). */}
-              {workSummaryLine(asWork(), i18n.tr, summedStepSeconds(asWork()))}
+              {/* The time is the sum of the step times the server stamped (WS09-S3); none when it stamped none. The
+                  count is every step taken, one still open at the end included, so it matches the list below. */}
+              {workSummaryLine(asWork(), i18n.tr, summedStepSeconds(asWork()), totalSteps(props.view))}
             </summary>
             <ul class="verevon-run-work__steps">
               <For each={steps()}>
@@ -132,7 +145,7 @@ export function SpaceRunCard(props: SpaceRunCardProps) {
             <button
               type="button"
               class="verevon-run-card__stop-button"
-              disabled={stopState() === 'pending' || stopState() === 'sent' || stopState() === 'zdr'}
+              disabled={!runStopCanBePressed(stopState())}
               onClick={() => { void requestStop() }}
             >
               {i18n.tr('Stopp kjøringen', 'Stop this run')}
@@ -154,6 +167,11 @@ export function SpaceRunCard(props: SpaceRunCardProps) {
                   'Med nulllagring av data kan kjøringen ikke stoppes herfra ennå. Ingenting er endret.',
                   'With zero data retention the run cannot be stopped from here yet. Nothing was changed.',
                 )}
+              </span>
+            </Show>
+            <Show when={stopState() === 'timeout'}>
+              <span role="alert">
+                {i18n.tr('Stoppen er ikke bekreftet ennå. Prøv igjen.', 'The stop is not confirmed yet. Try again.')}
               </span>
             </Show>
             <Show when={stopState() === 'failed'}>

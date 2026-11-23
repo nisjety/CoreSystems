@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiError } from '@/shared/api/api-error'
 import type { RoomRunStepClass, RoomRunStepState, SpaceRunWork } from '@/shared/api/spaces-client/run-work'
+import { RUN_STOP_TIMEOUT_MS } from '../lib/space-run-stop'
 import { emptySpaceRunView, type SpaceRunView } from '../lib/space-run-view'
 
 // WS09-S5: the live card for somebody else's run (its steps and headline, the streamed text or its progress, the
@@ -193,6 +194,61 @@ describe('SpaceRunCard: Stop (WS09-S8)', () => {
   it('offers no Stop once the run has ended, even to a manager', () => {
     const { container } = renderCard(view({ steps: [], finished: { outcome: 'stopped', reason: null } }), { stop: target })
     expect(stopButton(container)).toBeNull()
+  })
+})
+
+describe('SpaceRunCard: stop states, awaiting approval and the step count (WS09-S8, WS10-S1)', () => {
+  const running = () => view({ steps: [step('s1', 'web', 'running')] })
+
+  it('closes Stop after the organisation refuses it, so no retry is offered that cannot work', async () => {
+    stop.stopSpaceRun.mockRejectedValue(new ApiError('forbidden', 403, 'space_run_control_not_authorized'))
+    const { container } = renderCard(running(), { stop: target })
+    ;(stopButton(container) as HTMLButtonElement).click()
+    await screen.findByRole('alert')
+    expect(stopButton(container)?.disabled).toBe(true)
+    stopButton(container)?.click()
+    expect(stop.stopSpaceRun).toHaveBeenCalledTimes(1)
+  })
+
+  it('says a stop that gets no answer in time is not confirmed yet, and lets the reader send it again with the same key', async () => {
+    vi.useFakeTimers()
+    try {
+      stop.stopSpaceRun
+        .mockReturnValueOnce(new Promise<never>(() => {}))
+        .mockResolvedValueOnce({ runId: 'run-1', status: 'cancelled', cancelled: true, receiptId: 'r-3' })
+      const { container } = renderCard(running(), { stop: target })
+      ;(stopButton(container) as HTMLButtonElement).click()
+      await vi.advanceTimersByTimeAsync(RUN_STOP_TIMEOUT_MS)
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe('Stoppen er ikke bekreftet ennå. Prøv igjen.')
+      expect(stopButton(container)?.disabled).toBe(false)
+      stopButton(container)?.click()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(container.querySelector('[role="status"]')?.textContent).toBe('Stopp sendt …')
+      expect(stop.stopSpaceRun).toHaveBeenCalledTimes(2)
+      expect(stop.stopSpaceRun.mock.calls[1]?.[2]).toBe(stop.stopSpaceRun.mock.calls[0]?.[2])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('says a run waiting for approval so in its headline, even while a step is still open', () => {
+    const { container } = renderCard(view({ phase: 'awaiting_approval', steps: [step('s1', 'effect', 'running')] }))
+    expect(container.querySelector('.verevon-run-card__headline')?.textContent).toBe('Venter på godkjenning')
+  })
+
+  it('counts a step still open when the run ended, so the disclosure says the real number', () => {
+    const { container } = renderCard(
+      view({ steps: [step('s1', 'web', 'ok'), step('s2', 'code', 'running')], finished: { outcome: 'stopped', reason: null } }),
+    )
+    expect(container.querySelector('details.verevon-run-work > summary')?.textContent).toBe('Brukte 2 verktøy')
+    expect(container.querySelectorAll('.verevon-run-work__step')).toHaveLength(2)
+  })
+
+  it('counts the steps that scrolled out of the kept window as well', () => {
+    const { container } = renderCard(
+      view({ steps: [step('s1', 'web', 'ok')], stepsDropped: 2, finished: { outcome: 'completed', reason: null } }),
+    )
+    expect(container.querySelector('details.verevon-run-work > summary')?.textContent).toBe('Brukte 3 verktøy')
   })
 })
 

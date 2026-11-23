@@ -8,6 +8,13 @@ import {
 } from '@/features/spaces/lib/activity-grammar'
 import { liveRunIdOfRow } from '@/features/spaces/lib/room-run-grammar'
 import { COPY, say } from '@/features/spaces/lib/space-copy'
+import {
+  RUN_STOP_TIMEOUT_MS,
+  RunStopTimeout,
+  runStopCanBePressed,
+  runStopStateForCode,
+  type RunStopState,
+} from '@/features/spaces/lib/space-run-stop'
 import { formatWhenWithTime } from '@/features/spaces/lib/space-thread-presentation'
 import { ApiError } from '@/shared/api/api-error'
 import { stopSpaceRun } from '@/shared/api/spaces-client/run-stop'
@@ -68,8 +75,6 @@ function rowClass(item: SpaceActivityItem): string {
     .join(' ')
 }
 
-type RunStopState = 'idle' | 'pending' | 'sent' | 'forbidden' | 'zdr' | 'failed'
-
 /**
  * The stop attempts of one feed, by run. A row is rebuilt whenever the feed's items change, which is on every live
  * frame, so an attempt cannot live in its row: the row would lose its "sent", and its key, on the next frame. One run
@@ -90,18 +95,23 @@ function createRunStops() {
     return fresh
   }
   const request = async (spaceRef: string, runId: string) => {
-    const current = stateOf(runId)
-    if (current === 'pending' || current === 'sent') return
+    if (!runStopCanBePressed(stateOf(runId))) return
     setState(runId, 'pending')
+    // A stop that has not answered in time is "not confirmed yet", not a failure: the reader may send it again
+    // under the same key, and the server de-duplicates (as the run card does).
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timedOut = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new RunStopTimeout()), RUN_STOP_TIMEOUT_MS)
+    })
     try {
-      await stopSpaceRun(spaceRef, runId, keyFor(runId))
+      await Promise.race([stopSpaceRun(spaceRef, runId, keyFor(runId)), timedOut])
       // The run's end arrives with the room's next read; until then the row says the stop was sent.
       setState(runId, 'sent')
     } catch (error) {
-      const code = error instanceof ApiError ? error.code : ''
-      if (code === 'space_run_control_not_authorized') setState(runId, 'forbidden')
-      else if (code === 'zdr_durable_mutation_forbidden') setState(runId, 'zdr')
-      else setState(runId, 'failed')
+      if (error instanceof RunStopTimeout) setState(runId, 'timeout')
+      else setState(runId, runStopStateForCode(error instanceof ApiError ? error.code : ''))
+    } finally {
+      clearTimeout(timer)
     }
   }
   return { stateOf, request }
@@ -110,7 +120,8 @@ function createRunStops() {
 /**
  * The manager's Stop on one live run row. Its attempt belongs to the feed (see `createRunStops`), so the row can be
  * rebuilt on a live frame without losing it. The copy is the run card's. A zero-retention refusal holds the control:
- * the organisation's policy does not change between two clicks, so a retry would be refused the same way.
+ * the organisation's policy does not change between two clicks, so a retry would be refused the same way; so does a
+ * refusal for the organisation's own setting. A timeout or a failure leaves the control open for a retry.
  */
 function RunStopButton(props: { readonly object: string; readonly state: RunStopState; readonly onStop: () => void }) {
   const i18n = useI18n()
@@ -121,7 +132,7 @@ function RunStopButton(props: { readonly object: string; readonly state: RunStop
         type="button"
         class="verevon-run-card__stop-button"
         aria-label={`${label()}: ${props.object}`}
-        disabled={props.state === 'pending' || props.state === 'sent' || props.state === 'zdr'}
+        disabled={!runStopCanBePressed(props.state)}
         onClick={() => props.onStop()}
       >
         {label()}
@@ -143,6 +154,11 @@ function RunStopButton(props: { readonly object: string; readonly state: RunStop
             'Med nulllagring av data kan kjøringen ikke stoppes herfra ennå. Ingenting er endret.',
             'With zero data retention the run cannot be stopped from here yet. Nothing was changed.',
           )}
+        </span>
+      </Show>
+      <Show when={props.state === 'timeout'}>
+        <span role="alert">
+          {i18n.tr('Stoppen er ikke bekreftet ennå. Prøv igjen.', 'The stop is not confirmed yet. Try again.')}
         </span>
       </Show>
       <Show when={props.state === 'failed'}>

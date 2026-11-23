@@ -51,8 +51,12 @@ export function stepLine(step: { readonly class: RoomRunStepClass; readonly stat
   return `${stepDoing(step.class, tr)}, ${stepStateLabel(step.state, tr)}`
 }
 
-/** The headline of a live run: what the newest running step is, else a plain "Working". */
-export function runHeadline(view: Pick<SpaceRunView, 'steps'>, tr: Tr): string {
+/**
+ * The headline of a live run: that it waits for an approval, else what the newest running step is, else a
+ * plain "Working". A run waiting for approval says so even while a step is still open (WS10-S1).
+ */
+export function runHeadline(view: Pick<SpaceRunView, 'steps'> & { readonly phase?: string }, tr: Tr): string {
+  if (view.phase === 'awaiting_approval') return tr('Venter på godkjenning', 'Waiting for approval')
   const running = view.steps.filter((step) => step.state === 'running')
   const last = running[running.length - 1] ?? view.steps[view.steps.length - 1]
   return last ? stepDoing(last.class, tr) : tr('Jobber', 'Working')
@@ -69,14 +73,16 @@ export function durationLabel(totalSeconds: number, tr: Tr): string {
 
 /**
  * "Used 4 tools in 12 s" for the collapsed disclosure after a run. The time is left out when it is not
- * known; `steer` adds the count of messages the owner steered in.
+ * known; `steer` adds the count of messages the owner steered in. `stepCount` is the count of steps taken, when
+ * that is more than the summary's own steps (a live run also counts the steps still open and those scrolled out).
  */
 export function workSummaryLine(
   work: Pick<SpaceRunWork, 'steps' | 'steer'>,
   tr: Tr,
   elapsedSecondsTotal?: number,
+  stepCount = work.steps.length,
 ): string {
-  const n = work.steps.length
+  const n = stepCount
   const base =
     n === 0
       ? tr('Brukte ingen verktøy', 'Used no tools')

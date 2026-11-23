@@ -86,6 +86,13 @@ describe('runHeadline (WS09-S5)', () => {
     expect(runHeadline({ steps: [liveStep('a', 'web', 'ok'), liveStep('b', 'code', 'ok')] }, en)).toBe('Running code')
   })
 
+  it('says a run waiting for approval so, before its steps', () => {
+    expect(runHeadline({ phase: 'awaiting_approval', steps: [liveStep('a', 'effect', 'running')] }, en)).toBe(
+      'Waiting for approval',
+    )
+    expect(runHeadline({ phase: 'awaiting_approval', steps: [] }, no)).toBe('Venter på godkjenning')
+  })
+
   it('says Working when there is no step yet', () => {
     expect(runHeadline({ steps: [] }, en)).toBe('Working')
     expect(runHeadline({ steps: [] }, no)).toBe('Jobber')
@@ -102,6 +109,10 @@ describe('workSummaryLine (WS09-S5)', () => {
     expect(workSummaryLine({ steps: steps(1), steer: 0 }, en)).toBe('Used 1 tool')
     expect(workSummaryLine({ steps: steps(1), steer: 0 }, no)).toBe('Brukte 1 verktøy')
     expect(workSummaryLine({ steps: steps(4), steer: 0 }, en)).toBe('Used 4 tools')
+  })
+
+  it('counts the steps it is told to, when the live view holds more than the summary keeps', () => {
+    expect(workSummaryLine({ steps: steps(1), steer: 0 }, en, undefined, 4)).toBe('Used 4 tools')
   })
 
   it('adds the time in seconds, or in minutes and seconds, when it is known', () => {

@@ -9,6 +9,7 @@ import {
   type SpaceActivityItem,
 } from '@/features/spaces/lib/activity-grammar'
 import { activityFromRunView, liveRunIdOfRow, withLiveRunItems } from '@/features/spaces/lib/room-run-grammar'
+import { RUN_STOP_TIMEOUT_MS } from '@/features/spaces/lib/space-run-stop'
 import { emptySpaceRunView, type SpaceRunView } from '@/features/spaces/lib/space-run-view'
 import { ApiError } from '@/shared/api/api-error'
 
@@ -138,6 +139,41 @@ describe('SpaceActivityFeed: the manager Stop on a live run row (WS09-S8)', () =
     const alert = await screen.findByRole('alert')
     expect(alert.textContent).toBe('Organisasjonen din har ikke slått på stopping av andre medlemmers kjøringer.')
     expect(screen.queryByText('Stopp sendt …')).toBeNull()
+  })
+
+  it('closes Stop after the organisation refuses it, so no retry is offered that cannot work', async () => {
+    stop.stopSpaceRun.mockRejectedValue(new ApiError('forbidden', 403, 'space_run_control_not_authorized'))
+    const { container } = render(() => (
+      <SpaceActivityFeed threads={[]} items={[runRow('run-1', 'running')]} stop={{ spaceRef: 'room-1' }} />
+    ))
+    stopButtons(container)[0]?.click()
+    await screen.findByRole('alert')
+    expect(stopButtons(container)[0]?.disabled).toBe(true)
+    stopButtons(container)[0]?.click()
+    expect(stop.stopSpaceRun).toHaveBeenCalledTimes(1)
+  })
+
+  it('says a stop that gets no answer in time is not confirmed yet, and lets the reader send it again under the same key', async () => {
+    vi.useFakeTimers()
+    try {
+      stop.stopSpaceRun
+        .mockReturnValueOnce(new Promise<never>(() => {}))
+        .mockResolvedValueOnce({ runId: 'run-1', status: 'cancelled', cancelled: true, receiptId: 'r-3' })
+      const { container } = render(() => (
+        <SpaceActivityFeed threads={[]} items={[runRow('run-1', 'running')]} stop={{ spaceRef: 'room-1' }} />
+      ))
+      stopButtons(container)[0]?.click()
+      await vi.advanceTimersByTimeAsync(RUN_STOP_TIMEOUT_MS)
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe('Stoppen er ikke bekreftet ennå. Prøv igjen.')
+      expect(stopButtons(container)[0]?.disabled).toBe(false)
+      stopButtons(container)[0]?.click()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(container.querySelector('[role="status"]')?.textContent).toBe('Stopp sendt …')
+      expect(stop.stopSpaceRun).toHaveBeenCalledTimes(2)
+      expect(stop.stopSpaceRun.mock.calls[1]?.[2]).toBe(stop.stopSpaceRun.mock.calls[0]?.[2])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('says a zero-retention refusal is a refusal, with nothing changed, and offers no retry', async () => {

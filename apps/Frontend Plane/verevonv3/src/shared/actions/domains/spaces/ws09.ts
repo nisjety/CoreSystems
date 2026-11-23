@@ -6,8 +6,8 @@ import type { ActionDescriptor } from '@/shared/actions/types'
 // dispatchers_spaces/ws09.rs. Authority is Control's `model.run.control` decision (role manager or
 // owner, the organisation's `run_control_entitled`, current audience), verified again by Session
 // Core. Deliberately NOT model-executable (model-access.ts closes it): a model stopping a human's
-// run is an authority inversion. Refused typed for a Zero Data Retention organisation
-// (`zdr_durable_mutation_forbidden`), 403 `space_run_control_not_authorized` for anyone else.
+// run is an authority inversion. Allowed under Zero Data Retention too (D23): the stop writes only ids and a
+// reason. Refused typed, 403 `space_run_control_not_authorized`, for anyone else.
 
 const spaceStopRunInput = z.object({
   spaceRef: z.string().trim().min(1).max(200),
