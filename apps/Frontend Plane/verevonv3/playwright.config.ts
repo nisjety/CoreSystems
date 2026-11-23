@@ -71,6 +71,13 @@ const PRODUCT_RECORDING_SPEC = /product-recording\.spec\.ts/
  */
 const CHUNK_RECOVERY_SPEC = /chunk-recovery\.spec\.ts/
 /**
+ * Client resilience (WS07-S1..S3, M1-S7 browser cases) runs against the same kind of
+ * production preview, but the build needs a SOURCE_REVISION (a `dev` build id never runs
+ * the stale-tab or contract checks): `SOURCE_REVISION=e2e-local pnpm exec vite build`.
+ * No backend and no sign-in, so it has its own project with no setup dependency.
+ */
+const CLIENT_RESILIENCE_SPEC = /client-resilience\.spec\.ts/
+/**
  * Space specs (`space-<feature>.spec.ts`, plan M0-T0) sign in from seeded storage states
  * (E2E_STORAGE_STATE_A..F, written by `scripts/space-e2e-seed.sh`) and need no setup
  * project. They run against E2E_BASE_URL (a second Vite server, not :5173) and use
@@ -114,7 +121,7 @@ export default defineConfig({
     {
       name: 'e2e',
       testMatch: /.*\.spec\.ts/,
-      testIgnore: [BROWSER_WORKSPACE_SPECS, BROWSER_GRANT_PROD_SPEC, CHAT_WORKSPACE_SPECS, PRODUCT_READINESS_SPECS, PRODUCT_RECORDING_SPEC, CHUNK_RECOVERY_SPEC, STUDIO_DEMO_SPECS, SPACE_SPECS],
+      testIgnore: [BROWSER_WORKSPACE_SPECS, BROWSER_GRANT_PROD_SPEC, CHAT_WORKSPACE_SPECS, PRODUCT_READINESS_SPECS, PRODUCT_RECORDING_SPEC, CHUNK_RECOVERY_SPEC, CLIENT_RESILIENCE_SPEC, STUDIO_DEMO_SPECS, SPACE_SPECS],
       dependencies: ['setup'],
       use: { ...devices['Desktop Chrome'], storageState: STORAGE_STATE },
     },
@@ -143,6 +150,11 @@ export default defineConfig({
     {
       name: 'chunk-recovery',
       testMatch: CHUNK_RECOVERY_SPEC,
+      use: { ...devices['Desktop Chrome'], baseURL: CHUNK_BASE_URL },
+    },
+    {
+      name: 'client-resilience',
+      testMatch: CLIENT_RESILIENCE_SPEC,
       use: { ...devices['Desktop Chrome'], baseURL: CHUNK_BASE_URL },
     },
     {
