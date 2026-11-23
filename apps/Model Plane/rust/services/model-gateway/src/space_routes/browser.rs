@@ -1202,6 +1202,17 @@ fn stop_read_refusal(status: &tonic::Status) -> ApiError {
     }
 }
 
+/// The stop route's own posture gate (step 1 of [`room_browser_run_stop`]). Unlike `room_read_gate`
+/// and the room start's own check in this file, a plain ZDR posture is NOT refused here: D23/D22aj
+/// rule that a stop is issued and honoured under ZDR too, since stopping is always the safe
+/// direction, and execution-core and session-core's stop paths no longer refuse it (space-w3
+/// decision log, commit 4880cad98). Only a refusal the resolver itself raises is answered — a waiver
+/// names a model connection, never a browser route, so it is refused here as a route mismatch.
+fn stop_posture_gate(claims: &Claims) -> Result<(), ApiError> {
+    crate::zdr_posture::zdr_or_refuse(claims, &crate::zdr_posture::Route::plain(false))
+        .map(|_zdr| ())
+}
+
 /// The run must be in the Space the path and the decision name: `resolved` is the run's own Space
 /// as Session Core reported it to its owner.
 fn check_run_in_space(resolved: &str, space_id: &str) -> Result<(), ApiError> {
@@ -1276,14 +1287,17 @@ async fn resolve_starter_run(
 /// started a room browser run stops it, whatever their room role, with no browser or run-control
 /// entitlement.
 ///
-/// Order, each step failing closed: the caller's live zero-retention posture (412, before anything
-/// else: the stop drives Execution Core and writes a durable cancel and a result turn under this
-/// credential, and Execution Core refuses a zero-retention caller), the rollout switch (404), the
-/// request shape and a user principal (400/403), the Control `model.space.browser_run_stop` decision
-/// bound to the path's Space and run and to the caller (403, 409 to re-mint), then the run's
-/// ownership: Session Core must report the run in THIS Space to its owner, the caller, and it must be
-/// a browser run (403 `browser_run_not_yours`). Control cannot see who started a run, so this check
-/// is what makes the decision "the starter's".
+/// Order, each step failing closed: the caller's posture is resolved but, unlike the room start and
+/// the room reads in this file, a ZDR posture is not itself refused here (D23/D22aj: the decision is
+/// issued and honoured under ZDR too, since stopping is always the safe direction, and execution-core
+/// and session-core's stop paths no longer refuse it — space-w3 decision log, commit 4880cad98). Only
+/// a refusal the resolver itself raises is answered here (a waiver names a model connection, never a
+/// browser route, so it is refused as a route mismatch). Then the rollout switch (404), the request
+/// shape and a user principal (400/403), the Control `model.space.browser_run_stop` decision bound to
+/// the path's Space and run and to the caller (403, 409 to re-mint), then the run's ownership: Session
+/// Core must report the run in THIS Space to its owner, the caller, and it must be a browser run (403
+/// `browser_run_not_yours`). Control cannot see who started a run, so this check is what makes the
+/// decision "the starter's".
 ///
 /// Then the owner's own Stop ([`stop_owned_browser_run`], with the caller's delegated execution and
 /// session bearers, reason `starter_stop`), the durable cancel in Session Core under the same reason
@@ -1291,7 +1305,9 @@ async fn resolve_starter_run(
 /// derived grant at once (D16 revoke path), and the room's result turn for the stopped run.
 ///
 /// A Space under zero data retention (the decision says so, D23) is still stopped: stopping is the
-/// safe direction. Only the result turn is left out there.
+/// safe direction. Nothing new is retained anywhere on this path: the `RUN_CANCELLED` receipt Session
+/// Core writes carries only the run id, the reason and who stopped it (never turn content), and
+/// [`writes_stop_result_turn`] still leaves the room's result turn out for a ZDR Space.
 pub(crate) async fn room_browser_run_stop(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1300,18 +1316,10 @@ pub(crate) async fn room_browser_run_stop(
     Path((space_id, run_id)): Path<(String, String)>,
     Json(body): Json<SpaceBrowserAuthority>,
 ) -> Response {
-    // 1. The caller's live zero-retention posture. A waiver names a model connection, never a
-    //    browser route, so it is refused as a route mismatch (`zdr_or_refuse`).
-    match crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(false)) {
-        Ok(false) => {}
-        Ok(true) => {
-            return (
-                StatusCode::PRECONDITION_FAILED,
-                Json(Refusal::feature_not_supported("browser_run_control").json_body()),
-            )
-                .into_response()
-        }
-        Err(refusal) => return refusal.into_response(),
+    // 1. The caller's posture gate ([`stop_posture_gate`]): unlike the room start and the room reads
+    //    below, a plain ZDR posture is not refused here (D23/D22aj).
+    if let Err(refusal) = stop_posture_gate(&claims) {
+        return refusal.into_response();
     }
     // 2. The rollout switch, the same as the start and the room reads.
     if !state.space_browser_run.enabled() {
@@ -1460,10 +1468,59 @@ pub(crate) async fn room_browser_run_stop(
 #[cfg(test)]
 mod stop_tests {
     use super::*;
+    use crate::auth::ZdrWaiverClaim;
 
     fn code(error: ApiError) -> (StatusCode, String) {
         let (status, Json(body)) = error;
         (status, body["error"]["code"].as_str().unwrap_or_default().to_owned())
+    }
+
+    fn stop_claims(zdr: bool) -> Claims {
+        Claims {
+            key_id: None,
+            acting_user_id: None,
+            sub: "user-a".to_owned(),
+            iss: "auth-core".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr,
+            sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
+
+    /// D23/D22aj: unlike `room_read_gate` and the room start's own posture check, the stop route's
+    /// gate admits a plain ZDR posture (`stop_claims(true)`) — the decision check downstream is what
+    /// actually authorizes the stop, and D23 rules a stop is honoured under ZDR too.
+    #[test]
+    fn stop_posture_gate_admits_a_zdr_caller() {
+        assert!(stop_posture_gate(&stop_claims(true)).is_ok());
+        assert!(stop_posture_gate(&stop_claims(false)).is_ok());
+    }
+
+    /// A waiver never names a browser route, so it still fails closed here as a route mismatch —
+    /// the one posture refusal this gate keeps, unlike the plain-ZDR case above.
+    #[test]
+    fn stop_posture_gate_still_refuses_a_waiver_route_mismatch() {
+        let mut waived = stop_claims(false);
+        waived.org_zdr = Some(true);
+        waived.zdr_waiver = Some(ZdrWaiverClaim {
+            version: 1,
+            provider: "anthropic".to_owned(),
+            connection: "conn-1".to_owned(),
+        });
+        assert_eq!(
+            code(stop_posture_gate(&waived).expect_err("a waiver never binds a browser route")),
+            (StatusCode::FORBIDDEN, "zdr_waiver_route_mismatch".to_owned())
+        );
     }
 
     /// D21h: every verification failure is one 403, and only the window re-mints.

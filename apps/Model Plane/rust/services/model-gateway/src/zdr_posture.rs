@@ -962,6 +962,14 @@ pub(crate) mod tests {
     /// revision), so they stay in this list. The shared capability-core proxy (`proxy_to_capability_core`)
     /// exempts only the removals `zdr_allowed_removal` names, and a waived token keeps its route mismatch
     /// there. Reads of durable state are not guarded here: they send nothing to a processor.
+    ///
+    /// `space_routes/browser.rs::room_browser_run_stop` is deliberately NOT in this list, unlike every
+    /// other durable mutation here: D23/D22aj rule that a starter's Stop is issued and honoured under ZDR
+    /// too (stopping is always the safe direction), and its own `stop_posture_gate` only refuses a
+    /// resolver-raised posture error (a waiver route mismatch), never a plain ZDR token. What it writes
+    /// is still a receipt that names only ids and the reason, never turn content, and it writes no result
+    /// turn into a ZDR Space (`writes_stop_result_turn`) — see `stop_tests` in that file and the space-w3
+    /// decision log for the full account.
     #[test]
     fn every_durable_mutation_refuses_a_zdr_or_waived_token_before_it_runs() {
         const DURABLE_MUTATIONS: &[(&str, &str)] = &[
@@ -1001,9 +1009,8 @@ pub(crate) mod tests {
             ("space_routes/posts.rs", "append_space_post"),
             // A manager's Stop writes a RUN_CANCELLED receipt on someone else's run (WS09-S8).
             ("space_routes/runs.rs", "room_run_stop"),
-            // The starter's Stop of a room browser run writes a RUN_CANCELLED receipt and a result
-            // turn under the caller's credential (D21h).
-            ("space_routes/browser.rs", "room_browser_run_stop"),
+            // NOTE: the room starter's own Stop (`space_routes/browser.rs::room_browser_run_stop`,
+            // D21h) is intentionally absent from this list — see the doc comment above.
             // A member's approval decision keeps its free-text reason (WS10-S6).
             ("space_routes/approvals.rs", "decide_space_approval"),
             // A thread goal is user content in a durable store (EP-7 S1).

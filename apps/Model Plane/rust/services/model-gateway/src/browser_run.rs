@@ -7374,29 +7374,58 @@ mod tests {
             assert!(h.runs.cancels.lock().expect("cancels").is_empty());
         }
 
-        /// D21h: the caller's live zero-retention posture is refused first, typed, and the switch
-        /// off is 404; neither reads the decision.
+        /// D21h: with the switch off the stop is 404 before the decision is read.
         #[tokio::test]
-        async fn a_zero_retention_caller_or_the_switch_off_is_refused_first() {
-            use axum::response::IntoResponse as _;
+        async fn the_switch_off_is_refused_before_any_key_is_read() {
             let mut h = Harness::new(true).await;
             let signing = enable_starter_stop(&mut h.state);
-            let response = crate::space_routes::browser::room_browser_run_stop(
-                State(h.state.clone()),
-                Extension(browser_claims(true)),
-                VerifiedExecutionBearer::for_test("execution-token"),
-                VerifiedSessionBearer::for_test("session-token"),
-                Path(("space-room-1".to_owned(), "run-x".to_owned())),
-                Json(stop_body(&signing, "user-a", "run-x", false)),
-            )
-            .await
-            .into_response();
-            assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
             h.state.space_browser_run = crate::space_routes::browser::SpaceBrowserRunPolicy::off();
             let (status, _) =
                 starter_stop(&h, "space-room-1", "run-x", stop_body(&signing, "user-a", "run-x", false)).await;
             assert_eq!(status, StatusCode::NOT_FOUND);
             assert!(h.runs.cancels.lock().expect("cancels").is_empty());
+        }
+
+        /// D23/D22aj: unlike every other durable browser mutation in this file, a ZDR caller's own
+        /// Stop is not refused at the posture gate — it reaches the Control decision check and stops
+        /// the run exactly as a persistent caller's Stop does (space-w3 decision log; the backend no
+        /// longer refuses it either, commit 4880cad98). The decision itself is not ZDR here, so the
+        /// result turn is still written, proving this is a real success and not the already-covered
+        /// `a_zero_retention_space_is_stopped_without_a_result_turn` skip path.
+        #[tokio::test]
+        async fn a_zero_retention_callers_stop_reaches_the_decision_check_and_succeeds() {
+            use axum::response::IntoResponse as _;
+            let mut h = Harness::new(true).await;
+            let signing = enable_starter_stop(&mut h.state);
+            *h.space_read.space.lock().expect("space") = "space-room-1".to_owned();
+            h.execution.execute_hangs.store(true, Ordering::SeqCst);
+            let Json(started) = h
+                .start(Some("retry-1"), browser_request("session-1"))
+                .await
+                .expect("start");
+            let run_id = started["run_id"].as_str().expect("run id").to_owned();
+            assert!(eventually(|| h.dispatches().len() == 1).await);
+
+            let response = crate::space_routes::browser::room_browser_run_stop(
+                State(h.state.clone()),
+                Extension(browser_claims(true)),
+                VerifiedExecutionBearer::for_test("execution-token"),
+                VerifiedSessionBearer::for_test("session-token"),
+                Path(("space-room-1".to_owned(), run_id.clone())),
+                Json(stop_body(&signing, "user-a", &run_id, false)),
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .expect("body");
+            let body: Value = serde_json::from_slice(&bytes).expect("json");
+            assert_eq!(body["status"], "cancelled", "{body}");
+            assert_eq!(body["result_turn"], "written", "{body}");
+            let cancels = h.runs.cancels.lock().expect("cancels").clone();
+            assert_eq!(cancels.len(), 1, "one durable cancel");
+            assert_eq!(cancels[0].reason, "starter_stop");
         }
 
         /// D21h: a Stop on another route that durably cancelled the run (the starter's room Stop, a
