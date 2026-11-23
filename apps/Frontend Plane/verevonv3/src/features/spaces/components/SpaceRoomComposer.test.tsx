@@ -2,7 +2,9 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/te
 import { createSignal, For, flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { reloadGuardCount } from '@/app/chunk-recovery'
 import { ApiError } from '@/shared/api/http'
+import { hasUnsavedWork, hasUnsavedWorkProbes } from '@/shared/build/unsaved-work'
 import { translateApiError } from '@/shared/i18n/errors'
 import { CATALOGUE_TIER_WAIT_MS } from '@/features/dashboard/home/submit-privacy-tier'
 import type { SpaceRunLiveHandlers } from '@/shared/api/space-run-live-client'
@@ -2896,5 +2898,47 @@ describe('SpaceRoomComposer — structured mentions and addressed wakes (WS08-S6
     typeInRoomBox('Hei alle')
     expect(screen.queryByRole('list', { name: 'Adressert til' })).toBeNull()
     expect(spacesClient.createSpacePost).not.toHaveBeenCalled()
+  })
+})
+
+// WS07-S3: the room box and the thread pane's reply box each register their own unsaved-work probe. Words typed in
+// either one hold a reload, and a probe is released when its box leaves the page.
+describe('SpaceRoomComposer — unsaved-work probe (WS07-S3)', () => {
+  it('holds a reload only while words are typed in the room box', () => {
+    renderRoom()
+    expect(hasUnsavedWorkProbes()).toBe(true)
+    expect(hasUnsavedWork()).toBe(false)
+    typeInRoomBox('Et halvferdig svar')
+    expect(hasUnsavedWork()).toBe(true)
+    typeInRoomBox('')
+    expect(hasUnsavedWork()).toBe(false)
+  })
+
+  it('the room box and the thread pane box each hold a probe, so one never hides the other', () => {
+    const view = render(() => (
+      <>
+        <SpaceRoomComposer spaceRef="room-1" roster={() => []} agents={() => []} threads={() => []} />
+        <SpaceRoomComposer
+          spaceRef="room-1"
+          roster={() => []}
+          agents={() => []}
+          threads={() => []}
+          replyTarget={() => ({ threadId: 'thr_7', title: 'Innkjøp' })}
+          onClearReplyTarget={() => undefined}
+          replyTargetFixed
+        />
+      </>
+    ))
+    expect(reloadGuardCount()).toBe(2)
+
+    // Words only in the pane's reply box are still unsaved work.
+    const [, paneBox] = screen.getAllByRole('textbox') as HTMLTextAreaElement[]
+    fireEvent.input(paneBox as HTMLTextAreaElement, { target: { value: 'Svar i tråden' } })
+    flush()
+    expect(hasUnsavedWork()).toBe(true)
+
+    view.unmount()
+    expect(reloadGuardCount()).toBe(0)
+    expect(hasUnsavedWorkProbes()).toBe(false)
   })
 })

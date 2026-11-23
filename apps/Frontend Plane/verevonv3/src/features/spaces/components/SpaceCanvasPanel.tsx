@@ -5,6 +5,7 @@ import type { JSX } from '@solidjs/web'
 import { ChatMarkdown } from '@/features/chat/components/ChatMessages'
 import type { ActionActor } from '@/shared/actions/types'
 import { ApiError, clientError } from '@/shared/api/http'
+import { registerUnsavedWork } from '@/shared/build/unsaved-work'
 import {
   getSpaceCanvas,
   getSpaceCanvasVersion,
@@ -289,6 +290,10 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
   }
   window.addEventListener('beforeunload', guardUnload)
   onCleanup(() => window.removeEventListener('beforeunload', guardUnload))
+
+  // Unsaved-work probe (WS07-S3): an edited draft, and a save still in flight, are work a reload would drop. A draft that
+  // matches the text it started from is not work, so an open editor with nothing changed does not hold a reload.
+  onCleanup(registerUnsavedWork('space.canvas-editor', () => dirty() || editing()?.busy === true))
 
   // Leaving the room with an edited draft asks first: a move to another room, out of the Spaces, or back or forward.
   // A move within this room keeps the panel and its draft mounted, so it is not asked about. Declining keeps the page.

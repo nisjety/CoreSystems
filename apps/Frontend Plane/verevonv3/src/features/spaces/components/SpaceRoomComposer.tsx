@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, createUniqueId, For, onCleanup, Show } from 'solid-js'
 
 import { ChatMarkdown, QueuedInputStrip } from '@/features/chat/components/ChatMessages'
 import type { ChatArtifact, QueuedInput } from '@/features/chat/components/chat-types'
@@ -84,6 +84,7 @@ import { createTurnPrivacyTierResolver } from '@/features/dashboard/home/submit-
 import { readAiModelSelection, type AiModelSelection } from '@/shared/ai/model-selection'
 import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
 import { getSession } from '@/shared/session/session-store'
+import { registerUnsavedWork } from '@/shared/build/unsaved-work'
 import { useHomeDraft } from '@/features/dashboard/home/home-draft'
 import { spaceRoomFeature, spaceRoomFeatureWithDevOverride } from '../lib/space-room-features'
 import { canAddRoomFiles, roomFilesDurableEnabled, roomFilesFlag, roomFilesFromChips, roomFilesLimits } from '../lib/room-files'
@@ -683,6 +684,23 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   }
   const sendWhenReadyOffered = () => busyReplyThread() !== undefined && files().length === 0
   props.registerFocusHandle?.(() => textareaRef?.focus())
+  // Unsaved-work probe (WS07-S3). A reload, from chunk recovery or from the `enforce` contract policy, must not drop the
+  // words in the box, an attachment not yet sent, a send in flight, or a message the run has not taken. One key per box:
+  // the room's composer and the thread pane's reply box are mounted together, so each takes its own registration.
+  onCleanup(
+    registerUnsavedWork(
+      `space.${props.replyTargetFixed === true ? 'pane' : 'room'}-composer.${createUniqueId()}`,
+      () =>
+        text().trim().length > 0 ||
+        files().length > 0 ||
+        preparing() ||
+        submitting() ||
+        postBusy() ||
+        Boolean(midRun.deferred()) ||
+        resendQueue.length > 0 ||
+        midRun.entries().some((entry) => entry.state === 'pending' || entry.state === 'refused'),
+    ),
+  )
   // A message waiting for the agent to be free goes out when the run it waits behind says it is done:
   // the `finished` frame of that run's live stream. The composer holds the run's live view while the
   // message waits; the store shares one stream per run, so beside the run strip this opens no second.

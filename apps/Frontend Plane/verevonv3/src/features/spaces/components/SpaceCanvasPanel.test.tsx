@@ -4,6 +4,7 @@ import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { SpaceCanvas, SpaceCanvasRead, SpaceCanvasVersion, SpaceRosterMember } from '@/shared/api/spaces-client'
+import { hasUnsavedWork, hasUnsavedWorkProbes } from '@/shared/build/unsaved-work'
 import { fireEvent } from '@/test/fire-event'
 import { render } from '@/test/render'
 
@@ -741,3 +742,29 @@ describe('Clear canvas (D22aq)', () => {
   })
 })
 
+// WS07-S3: the canvas editor registers an unsaved-work probe, so a reload (chunk recovery or the `enforce` contract
+// policy) never drops an edited draft or a save in flight.
+describe('SpaceCanvasPanel: unsaved-work probe (WS07-S3)', () => {
+  it('holds a reload only while the draft differs from the text it started from', async () => {
+    spacesClient.getSpaceCanvas.mockResolvedValue(viewRead(1, 'Plan A'))
+    renderPanel()
+    fireEvent.click(await screen.findByRole('button', { name: 'Rediger' }))
+    expect(hasUnsavedWorkProbes()).toBe(true)
+    expect(hasUnsavedWork()).toBe(false)
+
+    fireEvent.input(textarea(), { target: { value: 'Endret' } })
+    expect(hasUnsavedWork()).toBe(true)
+
+    fireEvent.input(textarea(), { target: { value: 'Plan A' } })
+    expect(hasUnsavedWork()).toBe(false)
+  })
+
+  it('releases its probe when the panel leaves the page', async () => {
+    spacesClient.getSpaceCanvas.mockResolvedValue(viewRead(1, 'Plan A'))
+    renderPanel()
+    await screen.findByRole('button', { name: 'Rediger' })
+    expect(hasUnsavedWorkProbes()).toBe(true)
+    cleanup()
+    expect(hasUnsavedWorkProbes()).toBe(false)
+  })
+})
