@@ -6,8 +6,10 @@
  * global.css. Every selector therefore carries an `html:root` prefix (extra
  * specificity) instead of relying on source order.
  *
- * Motion is not handled here: every Space `animation:` already sits inside a
- * `prefers-reduced-motion: no-preference` block in global.css.
+ * Motion is not handled here: every `animation:` on a class that Space markup
+ * renders (its own classes, and those of the shared components it mounts, such
+ * as the model picker popover and the chat thinking dots) sits inside a
+ * `prefers-reduced-motion: no-preference` block. ui-baseline.test.ts checks it.
  */
 
 /* ---- forced colors -------------------------------------------------------
@@ -24,6 +26,20 @@
     border: 1px solid CanvasText;
     opacity: 1;
     box-shadow: none;
+  }
+
+  /* The "working" and "typing" dots are background (and box-shadow) only too.
+     They sit beside text that says the same thing, so they take the text
+     colour rather than Highlight. */
+  html:root .verevon-space-room-composer__typing-dots span {
+    forced-color-adjust: none;
+    background: CanvasText;
+  }
+
+  html:root .verevon-room-turn__working-dots {
+    forced-color-adjust: none;
+    background: CanvasText;
+    box-shadow: 7px 0 0 CanvasText, 14px 0 0 CanvasText;
   }
 
   html:root .verevon-activity-row.verevon-activity-row--critical {

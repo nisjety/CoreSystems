@@ -16663,7 +16663,6 @@ h3 {
   box-shadow: 0 20px 80px rgb(17 17 17 / 15%);
   color: var(--ink);
   font-family: var(--font-sans);
-  animation: verevonPopoverIn 180ms cubic-bezier(0.19, 1, 0.22, 1) both;
 }
 
 .dark .verevon-popover {
@@ -16672,12 +16671,20 @@ h3 {
   color: var(--verevon-surface-soft);
 }
 
-.verevon-popover-up {
-  animation-name: verevonPopoverUpIn;
-}
+/* The popover entrance (also the model picker menu in the Space room composer)
+   plays only without a reduced-motion preference; under reduce it appears in place. */
+@media (prefers-reduced-motion: no-preference) {
+  .verevon-popover {
+    animation: verevonPopoverIn 180ms cubic-bezier(0.19, 1, 0.22, 1) both;
+  }
 
-.verevon-popover-side {
-  animation-name: verevonPopoverSideIn;
+  .verevon-popover-up {
+    animation-name: verevonPopoverUpIn;
+  }
+
+  .verevon-popover-side {
+    animation-name: verevonPopoverSideIn;
+  }
 }
 
 .verevon-settings-view {
@@ -24883,15 +24890,23 @@ body.verevon-chat-canvas-resizing * {
   height: 5px;
   border-radius: 50%;
   background: var(--verevon-chat-fjord, var(--border-strong)); /* machine cognition — the fjord voice */
-  animation: verevonThinkingDot 1.2s ease-in-out infinite;
 }
 
-.verevon-thinking-dots span:nth-child(2) {
-  animation-delay: 0.2s;
-}
+/* The thinking dots and the streaming cursor below also render in the Space room
+   (ChatMessages, SpaceRoomComposer). They animate only without a reduced-motion
+   preference; the reduce block further down stays as a second guard. */
+@media (prefers-reduced-motion: no-preference) {
+  .verevon-thinking-dots span {
+    animation: verevonThinkingDot 1.2s ease-in-out infinite;
+  }
 
-.verevon-thinking-dots span:nth-child(3) {
-  animation-delay: 0.4s;
+  .verevon-thinking-dots span:nth-child(2) {
+    animation-delay: 0.2s;
+  }
+
+  .verevon-thinking-dots span:nth-child(3) {
+    animation-delay: 0.4s;
+  }
 }
 
 @keyframes verevonThinkingDot {
@@ -24913,7 +24928,12 @@ body.verevon-chat-canvas-resizing * {
   display: inline-block;
   margin-left: 1px;
   color: var(--verevon-chat-fjord, var(--border-strong));
-  animation: verevonStreamingCursor 0.8s step-end infinite;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .verevon-chat-streaming::after {
+    animation: verevonStreamingCursor 0.8s step-end infinite;
+  }
 }
 
 @keyframes verevonStreamingCursor {
@@ -33955,8 +33975,12 @@ body.verevon-chat-canvas-resizing * {
   color: var(--coral);
 }
 
-.onboarding-phase-spinner {
-  animation: onboarding-spin 1s linear infinite;
+/* Also the /spaces provisioning spinner. Under reduced motion the icon stands
+   still; the card's text says what is happening. */
+@media (prefers-reduced-motion: no-preference) {
+  .onboarding-phase-spinner {
+    animation: onboarding-spin 1s linear infinite;
+  }
 }
 
 /* Larger display headline for intro step, matching v1 AuthPage */

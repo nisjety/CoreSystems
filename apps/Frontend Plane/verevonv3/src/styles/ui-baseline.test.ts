@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -153,6 +153,7 @@ const globalRules = readRules(globalPath)
 
 const COMPACT = 'html:root[data-density="compact"]'
 const DOTS = ['.core-sidebar-working-dot', '.core-sidebar-unread-dot', '.verevon-space-presence__dot']
+const TEXT_DOTS = ['.verevon-space-room-composer__typing-dots span', '.verevon-room-turn__working-dots']
 
 describe('ui-baseline.css selectors', () => {
   it('prefixes every rule with html:root, so the result does not depend on import order', () => {
@@ -175,15 +176,34 @@ describe('forced colours', () => {
   })
 
   it('names dots that a component renders, so the rule has something to restore', () => {
-    const features = filesUnder(join(srcRoot, 'features'), (name) => name.endsWith('.tsx') && !name.endsWith('.test.tsx'))
-    const markup = features.map((file) => readFileSync(file, 'utf8')).join('\n')
-    for (const dot of DOTS) expect(markup.includes(dot.slice(1)), `${dot} is rendered`).toBe(true)
+    // Class tokens are read from string literals only, so a class named in a comment does not count as rendered.
+    const rendered = classTokens(filesUnder(join(srcRoot, 'features'), (name) => name.endsWith('.tsx') && !name.endsWith('.test.tsx')))
+    for (const dot of [...DOTS, ...TEXT_DOTS]) {
+      const root = dot.slice(1).split(' ')[0] ?? ''
+      expect(rendered.has(root), `${dot} is rendered`).toBe(true)
+    }
+  })
+
+  it('keeps the typing and working dots visible in the text colour, all three working dots included', () => {
+    for (const dot of TEXT_DOTS) {
+      const rule = forced.find((candidate) => candidate.selectors.includes(`html:root ${dot}`))
+      expect(rule, dot).toBeDefined()
+      const declared = (prop: string): string | undefined => rule?.declarations.find((d) => d.prop === prop)?.value
+      expect(declared('forced-color-adjust'), dot).toBe('none')
+      expect(declared('background'), dot).toBe('CanvasText')
+    }
+    // The second and third working dots are box-shadows of the first, so they need a system colour too.
+    const working = forced.find((rule) => rule.selectors.includes('html:root .verevon-room-turn__working-dots'))
+    const shadow = working?.declarations.find((d) => d.prop === 'box-shadow')?.value ?? ''
+    expect(shadow.match(/CanvasText/g)).toHaveLength(2)
+    expect(topLevelValue(globalRules, '.verevon-room-turn__working-dots', 'box-shadow')?.split(',')).toHaveLength(2)
   })
 
   it('keeps the critical activity row outlined and the muted rows at full opacity', () => {
     const critical = forced.find((rule) => rule.selectors.includes('html:root .verevon-activity-row.verevon-activity-row--critical'))
     expect(critical?.declarations).toContainEqual({ prop: 'border', value: '2px solid CanvasText' })
-    expect(forced.flatMap((rule) => rule.selectors)).toContain('html:root .verevon-activity-row.verevon-activity-row--muted')
+    const muted = forced.find((rule) => rule.selectors.includes('html:root .verevon-activity-row.verevon-activity-row--muted'))
+    expect(muted?.declarations).toContainEqual({ prop: 'opacity', value: '1' })
   })
 
   it('draws focus rings in a system colour', () => {
@@ -215,14 +235,47 @@ describe('prefers-contrast: more', () => {
     '--verevon-sidebar-muted',
   ]
 
+  // WCAG 2 contrast. Text needs 4.5:1 (1.4.3) and borders 3:1 (1.4.11), on white for light and on the dark surface
+  // #171717 for dark. Translucent colours are composited over that surface first.
+  type Rgb = [number, number, number]
+  const parseColour = (value: string, surface: Rgb): Rgb => {
+    const hex = /^#([0-9a-f]{6})$/i.exec(value)
+    if (hex) return [0, 2, 4].map((at) => Number.parseInt((hex[1] ?? '').slice(at, at + 2), 16)) as Rgb
+    const rgb = /^rgb\(\s*(\d+)\s+(\d+)\s+(\d+)\s*(?:\/\s*(\d+(?:\.\d+)?)%)?\s*\)$/i.exec(value)
+    if (!rgb) throw new Error(`unparsed colour ${value}`)
+    const alpha = rgb[4] === undefined ? 1 : Number(rgb[4]) / 100
+    return [1, 2, 3].map((at, index) => Number(rgb[at]) * alpha + surface[index]! * (1 - alpha)) as Rgb
+  }
+  const luminance = ([r, g, b]: Rgb): number => {
+    const channel = (c: number): number => (c / 255 <= 0.03928 ? c / 255 / 12.92 : ((c / 255 + 0.055) / 1.055) ** 2.4)
+    return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+  }
+  const contrast = (value: string, surface: Rgb): number => {
+    const [a, b] = [luminance(parseColour(value, surface)), luminance(surface)].sort((x, y) => y - x)
+    return (a! + 0.05) / (b! + 0.05)
+  }
+  const tokenValue = (rule: CssRule | undefined, token: string): string =>
+    rule?.declarations.find((d) => d.prop === token)?.value ?? ''
+  const WHITE: Rgb = [255, 255, 255]
+  const DARK_SURFACE: Rgb = [0x17, 0x17, 0x17]
+  const TEXT = ['--verevon-text-muted', '--verevon-e-muted', '--verevon-text-subtle']
+
   it('moves the muted text, border and sidebar tokens to high-contrast values on :root', () => {
     const light = more.find((rule) => rule.selectors.length === 1 && rule.selectors[0] === 'html:root')
     expect(light?.declarations.map((d) => d.prop)).toEqual(expect.arrayContaining(LIGHT_TOKENS))
+    for (const token of TEXT) expect(contrast(tokenValue(light, token), WHITE), token).toBeGreaterThanOrEqual(4.5)
+    for (const token of ['--verevon-border', '--verevon-border-soft', '--verevon-border-strong']) {
+      expect(contrast(tokenValue(light, token), WHITE), token).toBeGreaterThanOrEqual(3)
+    }
   })
 
   it('repeats them under html:root.dark, which outranks html:root', () => {
     const dark = more.find((rule) => rule.selectors.includes('html:root.dark'))
     expect(dark?.declarations.map((d) => d.prop)).toEqual(expect.arrayContaining(DARK_TOKENS))
+    for (const token of TEXT) expect(contrast(tokenValue(dark, token), DARK_SURFACE), token).toBeGreaterThanOrEqual(4.5)
+    for (const token of ['--verevon-border', '--verevon-border-soft', '--verevon-d-border']) {
+      expect(contrast(tokenValue(dark, token), DARK_SURFACE), token).toBeGreaterThanOrEqual(3)
+    }
   })
 })
 
@@ -253,21 +306,93 @@ describe('compact density', () => {
   })
 })
 
+// ---- what Space renders ----------------------------------------------------------------------------------------
+// Space markup is the feature folder, the sidebar's Space components, and every component file those import
+// directly (one hop: the model picker, the chat message list, ...). A class token is any hyphenated word inside a
+// string literal of those files, so `class="onboarding-phase-spinner"` and classList keys both count.
+
+const isSource = (name: string): boolean => /\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name)
+
+function spaceSourceFiles(): string[] {
+  return [
+    ...filesUnder(join(srcRoot, 'features', 'spaces'), isSource),
+    ...filesUnder(join(srcRoot, 'features', 'core', 'components', 'sidebar'), (name) =>
+      isSource(name) && /^(?:Space|CoreSidebarSpacesPanel)/.test(name),
+    ),
+  ]
+}
+
+function resolveImport(fromFile: string, specifier: string): string | undefined {
+  const base = specifier.startsWith('@/') ? join(srcRoot, specifier.slice(2)) : specifier.startsWith('.') ? join(dirname(fromFile), specifier) : undefined
+  if (!base) return undefined
+  return [`${base}.tsx`, join(base, 'index.tsx')].find((candidate) => existsSync(candidate))
+}
+
+/** The Space source files plus the component files they import directly. */
+function spaceRenderedFiles(): string[] {
+  const own = spaceSourceFiles()
+  const files = new Set(own)
+  for (const file of own) {
+    for (const match of readFileSync(file, 'utf8').matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)) {
+      const resolved = resolveImport(file, match[1] ?? '')
+      if (resolved) files.add(resolved)
+    }
+  }
+  return [...files]
+}
+
+function classTokens(files: string[]): Set<string> {
+  const tokens = new Set<string>()
+  for (const file of files) {
+    for (const literal of readFileSync(file, 'utf8').matchAll(/(['"`])((?:(?!\1)[^\\\n]|\\.)*)\1/g)) {
+      for (const word of (literal[2] ?? '').split(/\s+/)) {
+        if (/^[a-z][a-z0-9]*(?:[-_]+[a-z0-9]+)+$/.test(word)) tokens.add(word)
+      }
+    }
+  }
+  return tokens
+}
+
+/** The hyphenated classes a selector names. Bare state words such as `.dark` or `.active` are left out. */
+const selectorClasses = (selectorText: string): string[] =>
+  [...selectorText.matchAll(/\.([a-zA-Z_][\w-]*)/g)].map((match) => match[1] ?? '').filter((name) => /[-_]/.test(name))
+
+/** True when Space markup carries every hyphenated class the selector needs, so the rule can match in a Space view. */
+const matchesSpaceMarkup = (selectorText: string, rendered: Set<string>): boolean => {
+  const classes = selectorClasses(selectorText)
+  return classes.length > 0 && classes.every((name) => rendered.has(name))
+}
+
 describe('reduced motion over Space CSS', () => {
   const SPACE_SELECTOR =
     /\.(?:verevon-space|verevon-room|verevon-activity|verevon-attention|core-sidebar-working-dot|core-sidebar-unread-dot)/
   const NO_PREFERENCE = /\(\s*prefers-reduced-motion\s*:\s*no-preference\s*\)/
   const isMotion = (declaration: Declaration): boolean =>
     declaration.prop.startsWith('animation') && declaration.value.replace(/!important/gi, '').trim() !== 'none'
+  const rendered = classTokens(spaceRenderedFiles())
 
-  it('every Space animation sits inside prefers-reduced-motion: no-preference', () => {
+  it('reads the class tokens of the shared components Space mounts', () => {
+    // The model picker menu, the streaming cursor on the Space answer, and the /spaces provisioning spinner are
+    // classes from outside the feature folder. If these go missing, the scan below has gone blind to them.
+    for (const token of ['verevon-popover', 'verevon-chat-streaming', 'onboarding-phase-spinner']) {
+      expect(rendered.has(token), token).toBe(true)
+    }
+  })
+
+  it('every animation on a class Space renders sits inside prefers-reduced-motion: no-preference', () => {
     const motion: string[] = []
     const unguarded: string[] = []
     for (const file of filesUnder(srcRoot, (name) => name.endsWith('.css'))) {
+      // src/demo is the film-only /scene route; its sheets are scoped to a scene attribute the product never sets.
+      if (toPosix(relative(srcRoot, file)).startsWith('demo/')) continue
       const dedicated = isSpaceSheet(file)
       for (const rule of readRules(file)) {
         if (rule.atRules.some((at) => at.startsWith('@keyframes'))) continue
-        if (!dedicated && !SPACE_SELECTOR.test(rule.selectorText)) continue
+        const spaceRule =
+          dedicated ||
+          SPACE_SELECTOR.test(rule.selectorText) ||
+          matchesSpaceMarkup(rule.selectorText, rendered)
+        if (!spaceRule) continue
         if (!rule.declarations.some(isMotion)) continue
         const label = `${toPosix(relative(srcRoot, file))}: ${rule.selectorText.replace(/\s+/g, ' ')}`
         motion.push(label)
@@ -280,6 +405,10 @@ describe('reduced motion over Space CSS', () => {
       '.core-sidebar-working-dot',
       '.verevon-space-room-composer__typing-dots span',
       '.verevon-run-card__dots',
+      '.verevon-popover',
+      '.verevon-thinking-dots span',
+      '.verevon-chat-streaming::after',
+      '.onboarding-phase-spinner',
     ]) {
       expect(motion.some((label) => label.includes(selector)), selector).toBe(true)
     }
