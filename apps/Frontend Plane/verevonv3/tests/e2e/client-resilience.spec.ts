@@ -3,9 +3,12 @@ import { expect, test, type Page } from '@playwright/test'
 /**
  * Client resilience against a PRODUCTION build (WS07-S1..S3; M1-S7 browser cases).
  *
- *   pnpm exec vite build
+ *   SOURCE_REVISION=e2e-local pnpm exec vite build
  *   pnpm exec vite preview --port 5176 --strictPort
  *   CLIENT_RESILIENCE_E2E=1 CHUNK_E2E_BASE_URL=http://localhost:5176 pnpm exec playwright test tests/e2e/client-resilience.spec.ts
+ *
+ * The build needs a SOURCE_REVISION: without one the build id is `dev`, and the stale-tab and contract
+ * checks never run in a dev build, so the banner cases would wait for a request that is never sent.
  *
  * Needs no backend and no live stack. Each case blocks one lazy chunk, or answers the
  * client-config call, and checks what the client itself does: one automatic reload, the
