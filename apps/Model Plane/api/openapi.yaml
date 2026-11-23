@@ -2161,6 +2161,7 @@ components:
             - auto_posture_provider_write
             - browser_human_assist
             - tainted_egress
+            - browser_site_consent
             - unclassified_gate
         tool:
           type: string
@@ -2192,6 +2193,13 @@ components:
             True when the card offers Always: the "Always allow this tool" rule switch and the
             standing-scope switch are both on and the cause is a pinned MCP tool pause that a
             confirmed rule lifts. It is true exactly when the decide route would accept promote.
+        max_level:
+          type: string
+          nullable: true
+          enum:
+            - read
+            - act
+          description: The highest level the org's site policy allows for host on a browser_site_consent pause. Null for any other cause.
 
     ApprovalRuleProposal:
       type: object
