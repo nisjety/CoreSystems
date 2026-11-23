@@ -62,7 +62,8 @@ test.describe('lazy chunk failure inside the shell', () => {
   test.skip(!ENABLED, SKIP_REASON)
 
   test('one automatic reload, then the stale-deploy card in the outlet only, and the shell stays', async ({ page }) => {
-    // A route inside the shell (not a standalone surface), so its failure reaches the outlet's boundary.
+    // A route inside the shell, so its failure reaches the outlet's boundary. A standalone surface such as /login
+    // draws the stale-build notice only (AppShell's RoutedFailure hides chunk errors), which chunk-recovery.spec covers.
     await page.route('**/assets/NotFoundPage-*.js', (route) => route.fulfill({ status: 404, body: 'gone' }))
     const loads = countDocumentLoads(page)
 
