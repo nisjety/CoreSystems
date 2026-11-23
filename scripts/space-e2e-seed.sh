@@ -2,8 +2,9 @@
 # Space E2E seed (slice M0-T0, plan section 6.0 "T0 item: seed script").
 #
 # Seeds, on the LOCAL dev stack only:
-#   org X  "Space E2E Org X"  : A owner; B, C, E members (Space roles editor/viewer/none are
-#                               granted later through the Space membership routes)
+#   org X  "Space E2E Org X"  : A owner; B, C, E members. A also owns the managed room
+#                               "Space E2E Room": B is its editor, C its viewer, E has no Space
+#                               role (granted through the Space membership routes, WS04-S6)
 #   org Y  "Space E2E Org Y"  : D owner (a different org)
 #   org Z  "ZDR-TEST space e2e": F owner (zero-data-retention org, see step 5)
 # and writes Playwright storage states E2E_STORAGE_STATE_A..F plus a secret-free
@@ -19,7 +20,9 @@
 #
 # Usage (from the repo root; nothing is sent without --apply):
 #   bash scripts/space-e2e-seed.sh                 # prints the plan
-#   bash scripts/space-e2e-seed.sh --apply [--ensure-room] [--skip-policy] [--skip-zdr]
+#   bash scripts/space-e2e-seed.sh --apply [--ensure-room] [--skip-roles] [--skip-policy] [--skip-zdr]
+#     --ensure-room   also ensure the organization room (its ref goes to organization_room_ref)
+#     --skip-roles    do not create the managed room or grant B/C their Space roles
 #
 # Environment (values are never printed):
 #   E2E_BASE_URL                   same-origin SPA/gateway URL on loopback (default http://localhost:5173)
@@ -41,11 +44,12 @@ AUTH_DIR="$FV/tests/e2e/.auth"
 # node and Playwright want native paths (Git Bash gives /c/...); other shells pass through unchanged.
 native() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
 
-apply=0; ensure_room=0; skip_policy=0; skip_zdr=0
+apply=0; ensure_room=0; skip_roles=0; skip_policy=0; skip_zdr=0
 for arg in "$@"; do
   case "$arg" in
     --apply) apply=1 ;;
     --ensure-room) ensure_room=1 ;;
+    --skip-roles) skip_roles=1 ;;
     --skip-policy) skip_policy=1 ;;
     --skip-zdr) skip_zdr=1 ;;
     *) echo "unknown argument: $arg" >&2; exit 1 ;;
@@ -70,6 +74,7 @@ plan only (pass --apply to send):
   1. sign up + verify six accounts space-e2e-{a..f}@verevon.dev through auth-core (${AUTH_CORE_URL})
   2. gateway (${BASE_URL}): org X (A owner; B, C, E members), org Y (D), org Z "ZDR-TEST space e2e" (F);
      writes storage states E2E_STORAGE_STATE_A..F and space-e2e-seed.json into ${AUTH_DIR}
+     room "Space E2E Room" owned by A: B editor, C viewer, E no Space role (skipped with --skip-roles)
   3. effect policy on org X (and org Z) through set-space-effect-policy.sh when CONTROL_SPACE_POLICY_TOKEN is set
   4. ZDR switch on org Z through zdr-seed-test-org.mjs when ORG_CORE_SERVICE_TOKEN is set
   5. write the environment contract file (paths only)
@@ -98,10 +103,11 @@ for key in A B C D E F; do
   echo "    user ${key} verified"
 done
 
-echo "2/5 Orgs, memberships and storage states through the gateway"
+echo "2/5 Orgs, memberships, the Space room roles and storage states through the gateway"
 AUTH_NATIVE="$(native "$AUTH_DIR")"
 session_args=(--apply --base-url "$BASE_URL" --password-file "$(native "$PASSWORD_FILE")" --out-dir "$AUTH_NATIVE")
 [[ "$ensure_room" == 1 ]] && session_args+=(--ensure-room)
+[[ "$skip_roles" == 1 ]] && session_args+=(--skip-roles)
 node "$(native "$ROOT")/scripts/space-e2e-seed-session.mjs" "${session_args[@]}"
 
 SUMMARY="$AUTH_NATIVE/space-e2e-seed.json"
@@ -158,3 +164,8 @@ echo "5/5 Environment contract (paths only, no secrets)"
 } > "$AUTH_DIR/space-e2e.env.sh"
 echo "    wrote ${AUTH_DIR}/space-e2e.env.sh (source it; set E2E_SPACE_REF by hand if it is empty)"
 echo "    org X=${ORG_X} org Y=$(field orgs.Y.id) org Z=${ORG_Z}"
+if [[ "$skip_roles" == 1 ]]; then
+  echo "    Space roles skipped (--skip-roles): E2E_SPACE_REF stays empty unless you set it by hand"
+else
+  echo "    managed room (E2E_SPACE_REF)=$(field space_ref): A owner, B editor, C viewer, E no Space role"
+fi

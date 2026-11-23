@@ -5,9 +5,13 @@
 // that through apps/Control Plane/scripts/seed-verified-test-user.sh). This half
 // talks to the same-origin gateway like a browser does:
 //
-//   org X  : A (owner), B, C, E   -- B/C/E are plain org members; Space roles
-//                                    (editor, viewer, none) are granted by the
-//                                    Space membership routes, not here
+//   org X  : A (owner), B, C, E   -- B/C/E are plain org members. A then creates the
+//                                    managed room "Space E2E Room" and, through the Space
+//                                    membership routes (WS04-S6), makes B its editor and C its
+//                                    viewer; E holds no Space role. The organization room is not
+//                                    used: its roster follows the organization and Control refuses
+//                                    member writes there (room_roster_derived), so it cannot carry
+//                                    the roles.
 //   org Y  : D (owner)            -- a different org: cross-org negative cases
 //   org Z  : F (owner)            -- named "ZDR-TEST ..." so the ZDR operator seed
 //                                    (apps/Frontend Plane/verevonv3/apps/gateway/
@@ -164,18 +168,26 @@ async function currentOrg(session) {
   if (res.status !== 200) throw new SeedError(`/api/v1/session/current returned ${res.status}`)
   return {
     orgId: res.json?.data?.org?.id ?? null,
+    orgName: res.json?.data?.org?.name ?? null,
     onboardingStatus: res.json?.data?.onboardingStatus ?? null,
   }
 }
 
+const succeeded = (res) => res.status >= 200 && res.status < 300
+const errorCode = (res) => (res.json?.error?.code ? ` (${res.json.error.code})` : '')
+
 async function ensureOwnedOrg(session, key, name) {
+  // The gateway answers 200 with the caller's existing owned organization (it dedupes) and 201 for a new one.
+  // A 409 organization_conflict is another owner's organization with the same name, so it is not reused.
   const created = await session.call('POST', '/api/v1/onboarding/actions/create-organization', { name, plan: 'trial' })
   if (![200, 201].includes(created.status)) {
-    const duplicate = created.status === 400 && created.json?.error?.message === 'Organization already exists'
-    if (!duplicate) throw new SeedError(`create-organization for user ${key} returned ${created.status}`)
+    throw new SeedError(`create-organization for user ${key} returned ${created.status}${errorCode(created)}`)
   }
-  const { orgId } = await currentOrg(session)
+  const { orgId, orgName } = await currentOrg(session)
   if (!orgId) throw new SeedError(`user ${key} has no active organization after create-organization`)
+  if (orgName && orgName !== name) {
+    throw new SeedError(`user ${key} is in organization "${orgName}", not "${name}": reset the dev accounts before seeding`)
+  }
   return orgId
 }
 
@@ -205,8 +217,7 @@ async function joinOrg(origin, domain, key, password, owner, orgId, pg) {
   const member = await signIn(origin, domain, key, password)
   const before = await currentOrg(member.session)
   if (before.orgId !== orgId) {
-    const invitationId =
-      pick(invite.json, 'data.id', 'data.invitation.id', 'data.invitationId', 'id') ?? pendingInvitationId(pg, orgId, email)
+    const invitationId = invitationIdOf(invite.json) ?? pendingInvitationId(pg, orgId, email)
     // Re-run after a partial seed: no pending invitation and already a member is fine.
     if (invitationId) {
       const accepted = await member.session.call('POST', `/api/v1/orgs/invitations/${encodeURIComponent(invitationId)}/accept`)
@@ -227,8 +238,129 @@ function writeState(outDir, key, member) {
   return file
 }
 
+// ---- Space roles (WS04-S6 membership routes) ------------------------------------------------
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+const encoded = (value) => encodeURIComponent(value)
+
+/** Invitation id of a committed invite: auth-core answers `{ success, invitation: { id, email, role, expiresAt } }`. */
+export const invitationIdOf = (json) => pick(json, 'invitation.id', 'data.invitation.id')
+
+/** Space ref of a room or organization-room answer: `202 { data: { space: { space_ref, ... } } }`. */
+export const spaceRefOf = (json) => pick(json, 'data.space.space_ref')
+
+export const ROOM_NAME = 'Space E2E Room'
+/** The Space roles the seed grants in ROOM_NAME. E is deliberately absent: E keeps no Space role. */
+export const ROOM_ROLE_GRANTS = Object.freeze({ B: 'editor', C: 'viewer' })
+
+/** A (the owner) creates a managed room. Its creator becomes the registration owner. */
+export async function createManagedRoom(owner, name) {
+  const res = await owner.session.call('POST', '/api/v1/spaces', { kind: 'room', name })
+  if (!succeeded(res)) throw new SeedError(`creating room "${name}" returned ${res.status}${errorCode(res)}`)
+  const ref = spaceRefOf(res.json)
+  if (!ref) throw new SeedError(`creating room "${name}" answered without data.space.space_ref`)
+  return ref
+}
+
+/**
+ * Control registers a new room asynchronously (Convex `pending_registration`, then the registration worker).
+ * Control refuses member writes until the room is active, and the owner's membership read is the proof.
+ */
+export async function awaitRoomRegistration(owner, spaceRef, { attempts = 90, delayMs = 2000, sleep = pause } = {}) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const res = await owner.session.call('GET', `/api/v1/spaces/${encoded(spaceRef)}/membership`)
+    if (res.status === 200 && pick(res.json, 'data.role') === 'owner') return
+    if (attempt < attempts) await sleep(delayMs)
+  }
+  throw new SeedError(
+    `room ${spaceRef} is not active in Control after ${attempts} checks; the Space registration worker must drain it, then re-run the seed`,
+  )
+}
+
+/**
+ * Makes `role` the subject's Space role. Adding carries the role; a subject who already holds another role
+ * (a re-run) is changed with PATCH.
+ */
+export async function grantRoomRole(owner, spaceRef, subjectId, role, label = 'member') {
+  const membersPath = `/api/v1/spaces/${encoded(spaceRef)}/members`
+  const added = await owner.session.call('POST', membersPath, { subject_id: subjectId, role })
+  if (!succeeded(added)) throw new SeedError(`adding ${label} as ${role} returned ${added.status}${errorCode(added)}`)
+  if (pick(added.json, 'data.role') === role) return
+  const changed = await owner.session.call('PATCH', `${membersPath}/${encoded(subjectId)}`, { role })
+  if (!succeeded(changed)) {
+    throw new SeedError(`changing ${label} to ${role} returned ${changed.status}${errorCode(changed)}`)
+  }
+}
+
+/** The caller's own view of a room: the HTTP status, the role (200 only) and whether the audience includes them. */
+export async function readRoomMembership(session, spaceRef) {
+  const res = await session.call('GET', `/api/v1/spaces/${encoded(spaceRef)}/membership`)
+  const ok = res.status === 200
+  return {
+    status: res.status,
+    role: ok ? (pick(res.json, 'data.role') ?? null) : null,
+    recipientReady: ok && res.json?.data?.recipient_ready === true,
+  }
+}
+
+/** Bounded wait for the member's audience. Not fatal: a late audience is healed by the reconcile cron. */
+export async function awaitRecipientReady(session, spaceRef, { attempts = 15, delayMs = 2000, sleep = pause } = {}) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    if ((await readRoomMembership(session, spaceRef)).recipientReady) return true
+    if (attempt < attempts) await sleep(delayMs)
+  }
+  return false
+}
+
+/**
+ * Creates (or reuses, while Control still shows A as its owner) ROOM_NAME and grants ROOM_ROLE_GRANTS through
+ * the membership routes. The organization room is never used: its roster follows the organization.
+ */
+export async function grantSpaceRoles({ owner, members, existingRef = null, roomName = ROOM_NAME, sleep = pause, log = () => {} }) {
+  let ref = null
+  if (existingRef && (await readRoomMembership(owner.session, existingRef)).role === 'owner') ref = existingRef
+  if (!ref) {
+    ref = await createManagedRoom(owner, roomName)
+    log(`room "${roomName}" created; waiting for Control to register it`)
+  }
+  await awaitRoomRegistration(owner, ref, { sleep })
+  const roles = {}
+  for (const [key, role] of Object.entries(ROOM_ROLE_GRANTS)) {
+    const member = members[key]
+    if (!member?.userId) throw new SeedError(`user ${key} has no user id, so the membership route cannot name them`)
+    await grantRoomRole(owner, ref, member.userId, role, `user ${key}`)
+    const seen = await readRoomMembership(member.session, ref)
+    if (seen.role !== role) throw new SeedError(`user ${key} reads role "${seen.role}" in the room, expected "${role}"`)
+    const ready = await awaitRecipientReady(member.session, ref, { sleep })
+    if (!ready) log(`user ${key} is not in the room audience yet; the reconcile cron will catch up`)
+    roles[key] = { role, recipient_ready: ready }
+  }
+  if (members.E) {
+    const outsider = await readRoomMembership(members.E.session, ref)
+    if (outsider.status === 200) throw new SeedError('user E can read the room but must hold no Space role')
+  }
+  roles.E = { role: 'none' }
+  return { space_ref: ref, roles }
+}
+
+/** The Space ref an earlier run recorded, or null: a missing or unreadable summary just means no reuse. */
+function previousRoomRef(file) {
+  try {
+    return JSON.parse(readFileSync(file, 'utf8')).space_ref ?? null
+  } catch {
+    return null
+  }
+}
+
 export function parseArgs(argv) {
-  const options = { apply: false, ensureRoom: false, pgContainer: 'controlplane-postgres', pgUser: 'coresystem', pgDatabase: 'auth_service' }
+  const options = {
+    apply: false,
+    ensureRoom: false,
+    skipRoles: false,
+    pgContainer: 'controlplane-postgres',
+    pgUser: 'coresystem',
+    pgDatabase: 'auth_service',
+  }
   const valued = {
     '--base-url': 'baseUrl',
     '--password-file': 'passwordFile',
@@ -241,6 +373,7 @@ export function parseArgs(argv) {
     const flag = argv[i]
     if (flag === '--apply') options.apply = true
     else if (flag === '--ensure-room') options.ensureRoom = true
+    else if (flag === '--skip-roles') options.skipRoles = true
     else if (valued[flag]) {
       options[valued[flag]] = argv[i + 1]
       i += 1
@@ -263,7 +396,10 @@ export async function run(options) {
     `org Z "${ORG_Z_NAME}": F owner (ZDR switch is a separate operator step)`,
     `storage states and space-e2e-seed.json -> ${options.outDir}`,
   ]
-  if (options.ensureRoom) plan.push('A ensures the organization room and its space_ref is recorded')
+  if (options.ensureRoom) plan.push('A ensures the organization room (recorded as organization_room_ref)')
+  if (!options.skipRoles) {
+    plan.push(`managed room "${ROOM_NAME}" owned by A: B editor, C viewer, E no Space role (Space membership routes)`)
+  }
   if (!options.apply) {
     console.log(`plan only (pass --apply to send):\n  ${plan.join('\n  ')}`)
     return null
@@ -273,7 +409,18 @@ export async function run(options) {
   mkdirSync(options.outDir, { recursive: true })
   const pg = { container: options.pgContainer, user: options.pgUser, database: options.pgDatabase }
 
-  const summary = { gateway_origin: origin, users: {}, orgs: {}, states: {}, space_ref: null }
+  // space_ref is the managed room that carries the Space roles (E2E_SPACE_REF); organization_room_ref is the
+  // organization's own room, which holds no roles the seed can grant.
+  const summary = {
+    gateway_origin: origin,
+    users: {},
+    orgs: {},
+    states: {},
+    space_ref: null,
+    organization_room_ref: null,
+    room: null,
+    roles: null,
+  }
   const owners = {}
   for (const [key, orgKey, name] of [['A', 'X', ORG_X_NAME], ['D', 'Y', ORG_Y_NAME], ['F', 'Z', ORG_Z_NAME]]) {
     const owner = await signIn(origin, domain, key, password)
@@ -284,17 +431,29 @@ export async function run(options) {
     summary.users[key] = { email: emailFor(key), user_id: owner.userId ?? null, org: orgKey, role: 'owner' }
     summary.states[key] = writeState(options.outDir, key, owner)
   }
+  const members = {}
   for (const key of ['B', 'C', 'E']) {
     const member = await joinOrg(origin, domain, key, password, owners.A, summary.orgs.X.id, pg)
+    members[key] = member
     summary.users[key] = { email: emailFor(key), user_id: member.userId ?? null, org: 'X', role: 'member' }
     summary.states[key] = writeState(options.outDir, key, member)
   }
   if (options.ensureRoom) {
     const room = await owners.A.session.call('POST', '/api/v1/spaces/organization-room', {})
-    // UNVERIFIED response shape: tolerate the three spellings the gateway has used.
-    const ref = pick(room.json, 'data.space_ref', 'data.spaceRef', 'data.space.space_ref')
-    if (ref) summary.space_ref = ref
-    else console.warn(`organization-room returned ${room.status} without a space_ref: set E2E_SPACE_REF by hand`)
+    if (!succeeded(room)) throw new SeedError(`organization-room returned ${room.status}${errorCode(room)}`)
+    summary.organization_room_ref = spaceRefOf(room.json) ?? null
+    if (!summary.organization_room_ref) throw new SeedError('organization-room answered without data.space.space_ref')
+  }
+  if (!options.skipRoles) {
+    const granted = await grantSpaceRoles({
+      owner: owners.A,
+      members,
+      existingRef: previousRoomRef(join(options.outDir, 'space-e2e-seed.json')),
+      log: (line) => console.log(`    ${line}`),
+    })
+    summary.space_ref = granted.space_ref
+    summary.room = { name: ROOM_NAME, owner: 'A' }
+    summary.roles = granted.roles
   }
   writeFileSync(join(options.outDir, 'space-e2e-seed.json'), JSON.stringify(summary, null, 2))
   return summary
