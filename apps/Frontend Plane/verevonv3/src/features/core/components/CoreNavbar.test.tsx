@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flush } from 'solid-js'
 import { I18nProvider } from '@/shared/i18n'
 import { CoreNavbar, shouldDeferGlobalSlashSearch } from './CoreNavbar'
-import { commandPaletteEnabled, setCommandPaletteFeature } from '@/features/command/command-registry'
+import { commandPaletteEnabled, registerCommands, setCommandPaletteFeature } from '@/features/command/command-registry'
 
 afterEach(() => {
   cleanup()
@@ -123,7 +123,7 @@ describe('CoreNavbar command palette switch (DEPTH-WS13-S6-1)', () => {
     setCommandPaletteFeature(undefined)
   })
 
-  it('keeps the old knowledge search dialog when the gateway says the palette is off, even if the build turns it on', async () => {
+  it('keeps the old knowledge search dialog when the gateway says the palette is off, even if the palette was on', async () => {
     setCommandPaletteFeature(true)
     stubShell(featuresAnswer({ command_palette: false }))
     renderNavbar()
@@ -147,12 +147,70 @@ describe('CoreNavbar command palette switch (DEPTH-WS13-S6-1)', () => {
     expect(screen.queryByRole('dialog', { name: /knowledge search|kunnskapssøk/i })).toBeNull()
   })
 
+  // Seeded off: under vitest the build default is on, so a reset to "no answer" would read true and fail here.
   it('leaves the switch as it was when the features read fails', async () => {
-    setCommandPaletteFeature(true)
+    setCommandPaletteFeature(false)
     const fetchMock = stubShell(() => new Response(null, { status: 503 }))
     renderNavbar()
-    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/api/v1/spaces/features'))).toBe(true))
-    await new Promise((resolve) => setTimeout(resolve, 20))
-    expect(commandPaletteEnabled()).toBe(true)
+    const featuresCall = () => fetchMock.mock.calls.findIndex(([url]) => String(url).endsWith('/api/v1/spaces/features'))
+    await waitFor(() => expect(featuresCall()).toBeGreaterThanOrEqual(0))
+    // Wait for the read itself to settle, then let its continuation run, instead of a fixed delay.
+    await fetchMock.mock.results[featuresCall()]?.value
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    flush()
+    expect(commandPaletteEnabled()).toBe(false)
+  })
+
+  // The link the room search relies on: SpaceRoomSearch registers a `mod+f` command, and only the hotkey layer the
+  // navbar installs while the switch is on turns a Ctrl/Cmd+F press into that command. A stand-in command with the
+  // same binding proves the switch -> layer -> mod+f step without mounting a room.
+  function registerRoomSearchStandIn(): { run: ReturnType<typeof vi.fn>; dispose: () => void } {
+    const run = vi.fn()
+    const dispose = registerCommands([
+      { id: 'test.space.search', labelNo: 'Søk', labelEn: 'Search', group: 'room', hotkey: 'mod+f', kind: 'ui', run },
+    ])
+    return { run, dispose }
+  }
+
+  function pressModF(modifier: 'ctrlKey' | 'metaKey'): KeyboardEvent {
+    flush()
+    const event = new KeyboardEvent('keydown', { key: 'f', [modifier]: true, bubbles: true, cancelable: true })
+    window.dispatchEvent(event)
+    flush()
+    return event
+  }
+
+  it('turns Ctrl+F and Cmd+F into the room search command when the gateway says the palette is on', async () => {
+    setCommandPaletteFeature(false)
+    stubShell(featuresAnswer({ command_palette: true }))
+    const standIn = registerRoomSearchStandIn()
+    try {
+      renderNavbar()
+      await waitFor(() => expect(commandPaletteEnabled()).toBe(true))
+      await waitFor(() => {
+        expect(pressModF('ctrlKey').defaultPrevented).toBe(true)
+        expect(standIn.run).toHaveBeenCalled()
+      })
+      standIn.run.mockClear()
+      expect(pressModF('metaKey').defaultPrevented).toBe(true)
+      expect(standIn.run).toHaveBeenCalledOnce()
+    } finally {
+      standIn.dispose()
+    }
+  })
+
+  it('leaves Ctrl+F to the browser when the gateway says the palette is off', async () => {
+    setCommandPaletteFeature(true)
+    stubShell(featuresAnswer({ command_palette: false }))
+    const standIn = registerRoomSearchStandIn()
+    try {
+      renderNavbar()
+      await waitFor(() => expect(commandPaletteEnabled()).toBe(false))
+      const event = pressModF('ctrlKey')
+      expect(event.defaultPrevented).toBe(false)
+      expect(standIn.run).not.toHaveBeenCalled()
+    } finally {
+      standIn.dispose()
+    }
   })
 })
