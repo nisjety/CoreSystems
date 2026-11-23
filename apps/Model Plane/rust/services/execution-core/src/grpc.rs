@@ -2007,7 +2007,13 @@ impl ExecutionCore for ExecutionService {
     ) -> Result<Response<pb::CancelRunResponse>, Status> {
         let session_bearer = delegated_session_bearer(&request)?;
         let caller = self.auth.authenticate(&request).await?;
-        enforce_persistence_free_execution(&caller, false, "run_control")?;
+        // D23/D22aj (space-w3 decision log, Round 7's open gap): stopping an already-running run is
+        // always the safe direction under zero data retention, so unlike `resume_run` and `pause_run`
+        // just above and below — which still go through `enforce_persistence_free_execution` and keep
+        // refusing a ZDR caller — `cancel_run` does not. Nothing here creates or exposes retained
+        // data: the latch this call flips is in-memory, and Session Core's own `CancelRun` is the
+        // durable receipt authority for the stop. Every other `run_control` RPC, and every other
+        // feature gated by `enforce_persistence_free_execution`, is unaffected.
         let req = request.into_inner();
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;

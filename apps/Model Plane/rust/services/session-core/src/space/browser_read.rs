@@ -639,7 +639,15 @@ impl SpaceBrowserRead for SpaceBrowserReadGrpc {
         request: Request<pb::ResolveRunSpaceRequest>,
     ) -> Result<Response<pb::ResolveRunSpaceResponse>, Status> {
         let caller = identity(&request)?;
-        refuse_zero_retention(&caller)?;
+        // D23/D22aj: unlike every other read in this file, this one is reached on the starter-Stop
+        // path (model-gateway's `resolve_starter_run`) as well as Execution Core's pre-dispatch
+        // Space check for a `browser_agent` step. A zero-retention starter must still be able to
+        // stop their own run, so `refuse_zero_retention` is deliberately not called here. This stays
+        // narrow: the run's owner-only check below (`run_owner_matches`) is untouched, nothing but a
+        // Space id is returned, and a ZDR caller reaching Execution Core's pre-dispatch check is
+        // still refused there by `enforce_persistence_free_execution` before any step actually runs.
+        // Every other RPC in this file — the room list/timeline/evidence reads and the active-run
+        // count — keeps calling `refuse_zero_retention` exactly as before.
         authorize_operation(&caller, SPACE_BROWSER_READ_SCOPE)?;
         let req = request.into_inner();
         if req.run_id.trim().is_empty()

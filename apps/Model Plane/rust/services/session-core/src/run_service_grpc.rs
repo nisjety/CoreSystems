@@ -69,6 +69,23 @@ pub(crate) async fn authorize_run_owner(
     authorize_owner_row(caller, &org_id, &user_id, intent)
 }
 
+/// `authorize_operation`'s scope check for `CancelRun`, deliberately without its shared ZDR
+/// refusal (D23/D22aj, space-w3 decision log Round 7's open gap: "execution-core's `CancelRun` and
+/// session-core's `ResolveRunSpace` both refuse a ZDR caller outright, so a ZDR starter still
+/// cannot actually stop a run today"). Stopping an already-running run is the safe direction under
+/// zero data retention — it writes a `RUN_CANCELLED` receipt naming who stopped it and why, never
+/// turn content — so this is the one durable run-control mutation a ZDR caller or service may still
+/// issue. Every other mutating RPC in this crate keeps going through `authorize_operation` and its
+/// ZDR refusal unchanged; `cancel_run_as_room_manager` (a different stop path, the room manager's,
+/// not the starter's) also keeps its own explicit ZDR refusal.
+#[allow(clippy::result_large_err)]
+fn authorize_run_stop(caller: &VerifiedIdentity) -> Result<(), Status> {
+    if caller.is_service() {
+        caller.require_service_scope("session:write")?;
+    }
+    Ok(())
+}
+
 async fn authorize_thread_owner(
     pool: &PgPool,
     caller: &VerifiedIdentity,
@@ -1068,7 +1085,7 @@ impl RunService for RunServiceImpl {
         let started = Instant::now();
         let result: Result<Response<pb::CancelRunResponse>, Status> = async {
             let caller = identity(&request)?;
-            authorize_operation(&caller, "session:write")?;
+            authorize_run_stop(&caller)?;
             let req = request.into_inner();
             if req.run_id.is_empty() {
                 return Err(Status::invalid_argument("run_id is required"));
@@ -1294,6 +1311,27 @@ mod tests {
         assert!(!is_terminal("running"));
         assert!(!is_terminal("queued"));
         assert!(!is_terminal("awaiting_approval"));
+    }
+
+    /// D23/D22aj: `authorize_run_stop` (CancelRun's gate) admits a ZDR user, unlike
+    /// `authorize_operation`'s shared ZDR refusal every other mutating RPC still goes through.
+    #[test]
+    fn authorize_run_stop_admits_a_zdr_user() {
+        let zdr_user = VerifiedIdentity::user_for_test_with_zdr("org-1", "user-1", true);
+        assert!(authorize_run_stop(&zdr_user).is_ok());
+        let persistent_user = VerifiedIdentity::user_for_test("org-1", "user-1");
+        assert!(authorize_run_stop(&persistent_user).is_ok());
+    }
+
+    /// A ZDR service caller is also admitted by `authorize_run_stop` (the stop is still safe when
+    /// a service acts for the run), but it must still hold `session:write` like any other service.
+    #[test]
+    fn authorize_run_stop_still_checks_a_services_scope() {
+        let zdr_service_with_scope =
+            VerifiedIdentity::service_for_test("org-1", &["session:write"], true);
+        assert!(authorize_run_stop(&zdr_service_with_scope).is_ok());
+        let zdr_service_without_scope = VerifiedIdentity::service_for_test("org-1", &[], true);
+        assert!(authorize_run_stop(&zdr_service_without_scope).is_err());
     }
 
     fn scheduled_step_request() -> pb::ResolveScheduledStepAuthorityRequest {
@@ -2606,6 +2644,37 @@ mod tests {
         assert!(!again.cancelled);
         assert_eq!(again.receipt_id, cancelled.receipt_id);
         assert_eq!(count_events(&pool, &run_id, "RUN_CANCELLED").await, 1);
+    }
+
+    /// D23/D22aj end-to-end: a zero-retention owner's own `CancelRun` still succeeds and still
+    /// writes the durable `RUN_CANCELLED` receipt — the ZDR-stop promise this decision makes.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres; sets the fold store switch, so run with --test-threads=1"]
+    async fn a_zero_retention_owner_can_still_cancel_their_own_run() {
+        use crate::loop_checkpoint::test_support::scratch_pool;
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let (run_id, org, user) = started_managed_run(&pool, "cancel-zdr").await;
+        let cancelled = RunServiceImpl::new(pool.clone())
+            .cancel_run(identity_request(
+                pb::CancelRunRequest {
+                    run_id: run_id.clone(),
+                    reason: "test".to_owned(),
+                },
+                VerifiedIdentity::user_for_test_with_zdr(&org, &user, true),
+            ))
+            .await
+            .expect("a ZDR owner's own cancel is not refused")
+            .into_inner();
+        assert!(cancelled.cancelled);
+        assert_eq!(count_events(&pool, &run_id, "RUN_CANCELLED").await, 1);
+        let status: String = sqlx::query_scalar("SELECT status FROM runs WHERE id = $1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("status");
+        assert_eq!(status, "cancelled");
     }
 
     /// A cancel that arrives while a continuation holds the park (it has claimed it, or has

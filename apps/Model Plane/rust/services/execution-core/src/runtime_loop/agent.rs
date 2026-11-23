@@ -16696,6 +16696,9 @@ mod tests {
             // Unspecified, which resolves to `DEFAULT_MAX_CHILDREN` — the
             // tests that DO care (the child-ceiling tests) set it explicitly.
             max_subagents: 0,
+            // Empty is the ordinary run, exactly as before the field existed (WS18-S4); the tests
+            // that DO care set it explicitly.
+            tool_profile: String::new(),
             // No route named, which is what every run that predates the fields
             // sends — the tests that DO care use `subscription_request()`.
             provider_hint: String::new(),
