@@ -11,6 +11,7 @@ import { memberContext, requireMembers, requireSpaceRef } from './space-fixtures
  * Fixture contract on top of space-fixtures.ts:
  *   E2E_SPACE_REF            a Space whose conversation holds an agent artifact with at least two versions,
  *                            with the room artifact surfaces on (features.room_artifacts)
+ *   E2E_STORAGE_STATE_A      the signed-in member A of that Space (all three tests)
  *   E2E_STORAGE_STATE_B      a second member of that Space whose history window includes the conversation
  *
  * A missing fixture skips these tests on a laptop and fails them under E2E_REQUIRE_SPACE=1.
@@ -95,7 +96,8 @@ test('the Artifacts tab lists the room artifacts, and the version stepper walks 
     await revised.click()
 
     const dialog = sheet(page)
-    await expect(dialog).toBeVisible()
+    // The tab fetches the thread's transcript before the sheet opens.
+    await expect(dialog).toBeVisible({ timeout: LOAD_WAIT })
     const stepper = dialog.locator('.verevon-chat-artifact-versions')
     const previous = stepper.getByRole('button', { name: /^(Forrige versjon|Previous version)$/ })
     const next = stepper.getByRole('button', { name: /^(Neste versjon|Next version)$/ })
@@ -129,7 +131,7 @@ test('a second member of the Space sees the same artifacts in the Artifacts tab 
     expect(titlesA.length, 'the fixture Space lists at least one artifact to A').toBeGreaterThan(0)
 
     const titlesB = await artifactTitles(pageB, ref)
-    expect(titlesB, 'B lists the artifact A lists').toContain(titlesA[0])
+    for (const title of titlesA) expect(titlesB, `B lists "${title}", which A lists`).toContain(title)
 
     await pageB.locator('.verevon-space-artifacts__entry').filter({ hasText: titlesA[0]! }).first().click()
     const dialog = sheet(pageB)

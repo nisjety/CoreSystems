@@ -61,6 +61,7 @@ function renderSheet(onClose: () => void = () => {}) {
 function tabStopsOf(root: HTMLElement): HTMLElement[] {
   return Array.from(root.querySelectorAll<HTMLElement>('button, a[href], input, select, textarea, [tabindex]'))
     .filter((element) => element.tabIndex >= 0 && !(element as HTMLButtonElement).disabled)
+    .filter((element) => !element.hasAttribute('data-focus-sentinel'))
 }
 
 afterEach(() => {
@@ -197,6 +198,25 @@ describe('SpaceArtifactSheet keyboard focus trap (DEPTH-WS07-S11-1)', () => {
     const dialog = await screen.findByRole('dialog')
     page.behind.focus()
     expect(dialog.contains(document.activeElement)).toBe(true)
+  })
+
+  it('hands focus from the trailing sentinel (a Tab out of the preview frame) back to the first stop', async () => {
+    buildPage()
+    renderSheet()
+    const dialog = await screen.findByRole('dialog')
+    const sentinel = dialog.querySelector<HTMLElement>('[data-focus-sentinel]')!
+    expect(sentinel).not.toBeNull()
+    expect(dialog.lastElementChild).toBe(sentinel)
+    // A frame keeps its key presses to itself, so the sheet only sees focus arrive here.
+    const frame = document.createElement('iframe')
+    dialog.querySelector('.verevon-space-artifact-sheet__body')!.append(frame)
+    frame.focus()
+    sentinel.focus()
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Lukk' }))
+    // The sentinel is never the stop a wrapped Tab lands on: Shift+Tab from the first
+    // stop goes to the last real stop, here the frame.
+    expect(fireEvent.keyDown(document.activeElement!, { key: 'Tab', shiftKey: true })).toBe(false)
+    expect(document.activeElement).toBe(frame)
   })
 
   it('keeps Escape closing the sheet from inside it', async () => {

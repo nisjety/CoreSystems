@@ -16,7 +16,16 @@ import './space-artifacts.css'
  * While it is open Tab stays inside the sheet (a focus trap), and the page
  * behind it is inert: it takes no focus or clicks and is hidden from assistive
  * technology. The announcer's live regions stay live. Everything is released
- * when the sheet closes, before the opener is focused again.
+ * when the sheet closes, before the opener is focused again. The shell's toast
+ * host is part of that background, so a toast raised while the sheet is open is
+ * neither announced nor reachable until it closes (normal modal behaviour).
+ *
+ * The one place the sheet's keydown handler cannot see is the HTML preview
+ * frame (drawn only after "Run preview"): key presses inside a frame do not
+ * cross into this document. A Tab out of the frame therefore lands on the
+ * trailing focus sentinel, which hands focus back to the first stop, so focus
+ * still stays inside. Escape pressed inside the frame does not close the
+ * sheet; the reader tabs out of the frame first.
  *
  * The room surface decides what may be drawn: document and code as text, HTML
  * only after "Run preview", everything else a "not available" card. Nothing
@@ -122,6 +131,16 @@ export function SpaceArtifactSheet(props: {
         <div class="verevon-space-artifact-sheet__body">
           <ArtifactsPanel items={[...ordered()]} surface="room" />
         </div>
+        {/* Reached only by a Tab that leaves the preview frame (whose keydown never
+            reaches onKeyDown); it is not a tab stop of its own. */}
+        <span
+          class="sr-only"
+          tabindex="0"
+          data-focus-sentinel=""
+          onFocus={() => {
+            if (dialog) (tabStops(dialog)[0] ?? dialog).focus()
+          }}
+        />
       </section>
     </div>
   )
@@ -138,6 +157,7 @@ const TAB_STOP_SELECTOR = 'a[href], button, input:not([type="hidden"]), select, 
 function tabStops(root: HTMLElement): HTMLElement[] {
   return Array.from(root.querySelectorAll<HTMLElement>(TAB_STOP_SELECTOR)).filter((element) => {
     if (element.tabIndex < 0 || element.matches(':disabled')) return false
+    if (element.hasAttribute('data-focus-sentinel')) return false
     for (let node: HTMLElement | null = element; node && node !== root; node = node.parentElement) {
       if (node.hidden || node.hasAttribute('inert')) return false
     }
