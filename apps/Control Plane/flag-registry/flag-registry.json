@@ -2226,7 +2226,7 @@
       "source": "compose",
       "default": "true",
       "stage": "dark",
-      "purpose": "D18/D21o: signs history_floor_at onto a canvas read decision for wiki-store to window. Off, the decision carries no floor and the canvas shows whole even to a windowed member. Only the literal true turns it on.",
+      "purpose": "D18/D21o: signs history_floor_at onto a canvas read decision for wiki-store. Off, a canvas read or save by a member with a timestamp floor is refused (space_history_floor_unsupported). Never authorization. Only literal true turns it on.",
       "onDefaultReason": "Dev default on alongside SPACE_MEMBER_HISTORY_WINDOWS; wiki-store's verifier already applies history_floor_at. docker-compose.production.yml pins it to the literal false, so it is off in production until a release decision.",
       "declarations": [
         { "service": "user-core", "env": "SPACE_CANVAS_HISTORY_WINDOW", "default": "true" }

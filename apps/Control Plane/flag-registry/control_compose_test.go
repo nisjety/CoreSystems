@@ -110,21 +110,23 @@ var spaceHistoryWindowSwitches = []string{
 	"SPACE_CANVAS_HISTORY_WINDOW",
 }
 
-// productionServiceHeader matches a service name at the two-space indent the production
-// overlay uses. productionEnvEntry matches a literal environment entry at the six-space
-// indent under a service. Interpolated entries and deeper keys do not match it.
-var (
-	productionServiceHeader = regexp.MustCompile(`^  ([a-z0-9][a-z0-9-]*):\s*$`)
-	productionEnvEntry      = regexp.MustCompile(`^      ([A-Z][A-Z0-9_]*):\s*"?([^"$#]*?)"?\s*(#.*)?$`)
-)
+// productionGatewayCompose is the Verevon v3 production overlay. It pins the gateway's copy of
+// SPACE_MEMBER_HISTORY_WINDOWS, which the registry's onDefaultReason names. It indents by four
+// spaces where the Control Plane overlay indents by two.
+const productionGatewayCompose = "apps/Frontend Plane/verevonv3/docker-compose.production.yml"
 
-// productionServiceEnv returns the literal environment entries that the production overlay
-// writes for one service, keyed by variable name with the value as written.
-func productionServiceEnv(t *testing.T, service string) map[string]string {
+// productionServiceEnv returns the literal environment entries that a production overlay
+// writes for one service, keyed by variable name with the value as written. indent is the
+// overlay's indent step: a service name sits at one step and an environment entry at three.
+// Interpolated entries and deeper keys do not match.
+func productionServiceEnv(t *testing.T, path, service string, indent int) map[string]string {
 	t.Helper()
-	data, err := os.ReadFile(repoFile(productionControlCompose))
+	step := strings.Repeat(" ", indent)
+	productionServiceHeader := regexp.MustCompile(`^` + step + `([a-z0-9][a-z0-9-]*):\s*$`)
+	productionEnvEntry := regexp.MustCompile(`^` + step + step + step + `([A-Z][A-Z0-9_]*):\s*"?([^"$#]*?)"?\s*(#.*)?$`)
+	data, err := os.ReadFile(repoFile(path))
 	if err != nil {
-		t.Fatalf("read %s: %v", productionControlCompose, err)
+		t.Fatalf("read %s: %v", path, err)
 	}
 	env := make(map[string]string)
 	inServices, inService := false, false
@@ -151,7 +153,7 @@ func productionServiceEnv(t *testing.T, service string) map[string]string {
 		}
 	}
 	if err := sc.Err(); err != nil {
-		t.Fatalf("scan %s: %v", productionControlCompose, err)
+		t.Fatalf("scan %s: %v", path, err)
 	}
 	return env
 }
@@ -162,7 +164,7 @@ func productionServiceEnv(t *testing.T, service string) map[string]string {
 // production is turned off, so the reason cannot claim an off that no file sets.
 func TestSpaceHistoryWindowSwitchesArePinnedOffInProduction(t *testing.T) {
 	reg := loadShipped(t)
-	env := productionServiceEnv(t, "user-core")
+	env := productionServiceEnv(t, productionControlCompose, "user-core", 2)
 	if len(env) == 0 {
 		t.Fatalf("no user-core environment read from %s; the scanner or the path is wrong", productionControlCompose)
 	}
@@ -185,5 +187,30 @@ func TestSpaceHistoryWindowSwitchesArePinnedOffInProduction(t *testing.T) {
 		if !strings.Contains(f.OnDefaultReason, "docker-compose.production.yml") {
 			t.Errorf("%s: onDefaultReason does not name docker-compose.production.yml, where production is turned off", name)
 		}
+	}
+}
+
+// TestMemberHistoryWindowsGatewayIsPinnedOffInProduction holds the other half of the
+// SPACE_MEMBER_HISTORY_WINDOWS onDefaultReason: the gateway declares the switch too, so the
+// Verevon v3 production overlay must write it as the literal false on the gateway service.
+func TestMemberHistoryWindowsGatewayIsPinnedOffInProduction(t *testing.T) {
+	const name = "SPACE_MEMBER_HISTORY_WINDOWS"
+	reg := loadShipped(t)
+	f, ok := reg.Flag(name)
+	if !ok {
+		t.Fatalf("%s has no registry entry", name)
+	}
+	if !strings.Contains(f.OnDefaultReason, "verevonv3 docker-compose.production.yml") {
+		t.Errorf("%s: onDefaultReason does not name the verevonv3 production overlay that pins the gateway", name)
+	}
+	env := productionServiceEnv(t, productionGatewayCompose, "gateway", 4)
+	if len(env) == 0 {
+		t.Fatalf("no gateway environment read from %s; the scanner or the path is wrong", productionGatewayCompose)
+	}
+	switch got, ok := env[name]; {
+	case !ok:
+		t.Errorf("%s is not written in the gateway environment of %s; production would inherit the dev default", name, productionGatewayCompose)
+	case got != "false":
+		t.Errorf("%s: %s writes %q for the gateway, want the literal \"false\"", name, productionGatewayCompose, got)
 	}
 }

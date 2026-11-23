@@ -506,8 +506,10 @@ services:
             # it to the literal false in docker-compose.production.yml until a release decision.
             SPACE_MEMBER_HISTORY_WINDOWS: ${SPACE_MEMBER_HISTORY_WINDOWS:-true}
             # D18/D21o: signs a canvas read's history_floor_at for wiki-store to window (verify.go
-            # already applies it). Strict literal true; on in local dev alongside the member windows
-            # switch above; docker-compose.production.yml pins it to the literal false.
+            # already applies it). Off, a canvas read or save by a member with a timestamp floor is
+            # refused (space_history_floor_unsupported), never served whole. Strict literal true; on
+            # in local dev alongside the member windows switch above; docker-compose.production.yml
+            # pins it to the literal false.
             SPACE_CANVAS_HISTORY_WINDOW: ${SPACE_CANVAS_HISTORY_WINDOW:-true}
             # WS12-S1: Control accepts the dm/group_dm kinds and serves
             # POST /api/v1/internal/spaces/dm-eligibility. Strict literal true; off by
