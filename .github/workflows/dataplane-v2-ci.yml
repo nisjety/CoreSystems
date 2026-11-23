@@ -191,6 +191,77 @@ jobs:
           TEST_DATABASE_URL: postgres://dataplane:dataplane@localhost:5432/documents_test?sslmode=disable
         run: go test -tags=integration -v ./internal/repo/...
 
+  # WS19-S1. The room canvas store (wiki-store-go internal/canvas, and the canvas routes in internal/handler) skips every
+  # Postgres test unless WIKI_TEST_DATABASE_URL names a disposable *_test database, so none of those tests ran in CI before
+  # this job. It builds the schema the way production does (init.sql, then every migration through the real migrator, which
+  # also creates dataplane_app) and runs the canvas packages with the variable set. A skipped test fails the job, so the gate
+  # cannot pass by skipping. The wiki-table and outbox suites of internal/repo and internal/events are not wired here yet.
+  wiki-store-postgres-tests:
+    name: wiki-store-go canvas Postgres tests (WIKI_TEST_DATABASE_URL, real migrations)
+    runs-on: ubuntu-latest
+    needs: go-build
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dataplane
+          POSTGRES_PASSWORD: dataplane
+          POSTGRES_DB: wiki_store_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dataplane"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: apps/Data Plane v2/services/wiki-store-go/go.mod
+          cache-dependency-path: |
+            apps/Data Plane v2/services/wiki-store-go/go.sum
+            apps/Data Plane v2/tools/migrator/go.sum
+            apps/Data Plane v2/shared/go/go.sum
+
+      - name: PostgreSQL client (psql applies init.sql)
+        run: |
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          psql --version
+
+      - name: Apply init.sql and every migration through the real migrator
+        env:
+          DATABASE_URL: postgres://dataplane:dataplane@127.0.0.1:5432/wiki_store_test?sslmode=disable
+        run: |
+          (cd tools/migrator && CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/migrator" .)
+          psql "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 -f infra/postgres/init.sql
+          "$RUNNER_TEMP/migrator" up --migrations-dir infra/postgres/migrations
+          # Row-level security is enforced only when the runtime role is subject to it.
+          role=$(psql "$DATABASE_URL" -X -tA -c "SELECT rolcanlogin::text || ':' || rolbypassrls::text || ':' || rolsuper::text FROM pg_roles WHERE rolname = 'dataplane_app'")
+          if [ "$role" != "false:false:false" ]; then
+            echo "dataplane_app must be NOLOGIN NOBYPASSRLS NOSUPERUSER (got '${role:-absent}'): RLS would be inert" >&2
+            exit 1
+          fi
+
+      - name: Run the canvas Postgres tests (a skipped gated test fails the job)
+        working-directory: "apps/Data Plane v2/services/wiki-store-go"
+        env:
+          WIKI_TEST_DATABASE_URL: postgres://dataplane:dataplane@127.0.0.1:5432/wiki_store_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test -count=1 -p 1 -v ./internal/canvas/... ./internal/handler/... 2>&1 | tee canvas-postgres-tests.log
+          if grep -q -- "--- SKIP:" canvas-postgres-tests.log; then
+            echo "A canvas Postgres test skipped, so its gate did not run" >&2
+            exit 1
+          fi
+          echo "Canvas Postgres tests passed: $(grep -c -- "--- PASS:" canvas-postgres-tests.log) PASS line(s)" >> "$GITHUB_STEP_SUMMARY"
+
   # CR-N1. The Postgres-gated tests of the CR chain (and the crates it touches)
   # used to be compiled and never run: Rust ones are #[ignore]d, Go ones t.Skip
   # and `go test` reports `ok` (tests/contract/postgres exits 0 with 13 SKIP when
