@@ -28,6 +28,7 @@ use super::super::dispatchers::{
 pub(in crate::domains::actions) async fn dispatch_agents_create_personal(
     state: &AppState,
     user: &AuthenticatedUser,
+    headers: &HeaderMap,
     input: &Value,
 ) -> Response {
     let mut body = json!({
@@ -40,7 +41,7 @@ pub(in crate::domains::actions) async fn dispatch_agents_create_personal(
     if !ticket_string(input, "avatarColor").is_empty() {
         body["avatar_color"] = json!(ticket_string(input, "avatarColor"));
     }
-    let (status, Json(payload)) = create_personal_agent_core(state, user, &body).await;
+    let (status, Json(payload)) = create_personal_agent_core(state, user, headers, &body).await;
     owner_json_response_to_envelope("agents.create_personal", user, status, payload)
 }
 
@@ -260,5 +261,38 @@ mod tests {
             read(dispatch_memory_declassify_to_space(&state, &user(), &HeaderMap::new(), &snake).await).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(body["error"]["code"], "invalid_request");
+    }
+
+    /// `agents.create_personal` reads the request headers for the ZDR check, as `POST /api/v1/me/agents` does: an
+    /// `x-zdr` header is refused with the typed 412 before any Control or Convex call.
+    #[tokio::test]
+    async fn the_create_personal_arm_honours_the_request_zdr_header() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"metadata": {"interactiveRetention": {"zdr": false}}}
+            })))
+            .mount(&server)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.org_core_url = server.uri();
+        state.user_core_url = server.uri();
+        state.application_convex_url = server.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.space_features.personal_agents_api = true;
+        let mut headers = HeaderMap::new();
+        headers.insert("x-zdr", "true".parse().unwrap());
+
+        let input = json!({"name": "Helper", "clientRequestId": "req-1"});
+        let (status, body) =
+            read(dispatch_agents_create_personal(&state, &user(), &headers, &input).await).await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert!(
+            server.received_requests().await.unwrap_or_default().is_empty(),
+            "the header flag reaches no org-core, Control or Convex call"
+        );
     }
 }

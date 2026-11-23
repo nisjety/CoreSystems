@@ -1095,10 +1095,14 @@ pub(super) async fn execute_action(
             boxed_dispatch(|| dispatch_space_update_instructions(&state, &user, &body.input)).await
         }
         "spaces.create_space_agent" => {
-            boxed_dispatch(|| dispatch_space_create_agent(&state, &user, &body.input)).await
+            boxed_dispatch(|| dispatch_space_create_agent(&state, &user, &headers, &body.input))
+                .await
         }
         "agents.create_personal" => {
-            boxed_dispatch(|| dispatch_agents_create_personal(&state, &user, &body.input)).await
+            boxed_dispatch(|| {
+                dispatch_agents_create_personal(&state, &user, &headers, &body.input)
+            })
+            .await
         }
         "agents.update_access" => {
             boxed_dispatch(|| dispatch_agents_update_access(&state, &user, &body.input)).await

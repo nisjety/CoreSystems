@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 use axum::{
     extract::{Extension, Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::{delete, get, put},
     Json, Router,
 };
@@ -100,9 +100,10 @@ async fn list_my_agents(
 async fn create_personal_agent(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
-    create_personal_agent_core(&state, &user, &body).await
+    create_personal_agent_core(&state, &user, &headers, &body).await
 }
 
 async fn set_primary_agent(
@@ -256,10 +257,11 @@ async fn register_subject(
 /// failure leaves an unlisted draft and a retryable 503. The same `client_request_id` replays the same
 /// definition (200), so the retry runs the remaining steps. The name and the instructions are stored
 /// content: a Zero Data Retention org is refused (typed 412) after the flag and membership, before any
-/// Control or Convex call.
+/// Control or Convex call. A request that carries the `x-zdr` header or a body `zdr` flag is refused the same way.
 pub(crate) async fn create_personal_agent_core(
     state: &AppState,
     user: &AuthenticatedUser,
+    headers: &HeaderMap,
     body: &Value,
 ) -> (StatusCode, Json<Value>) {
     if !state.space_features.personal_agents_api {
@@ -271,7 +273,7 @@ pub(crate) async fn create_personal_agent_core(
     }
     // Zero Data Retention, before any Control or Convex call. A failed org posture lookup is the typed 503.
     if let Some((status, Json(refusal))) =
-        durable_write_refusal(state, user, None, Some(body)).await
+        durable_write_refusal(state, user, Some(headers), Some(body)).await
     {
         return label_zdr(status, refusal);
     }
@@ -1170,12 +1172,26 @@ mod tests {
 
     /// One request through the real router with the session cookie: the status and the JSON body.
     async fn call(state: AppState, method: &str, uri: &str, body: Option<Value>) -> (u16, Value) {
+        call_with_headers(state, method, uri, body, &[]).await
+    }
+
+    /// [`call`] with extra request headers, such as the `x-zdr` flag.
+    async fn call_with_headers(
+        state: AppState,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (u16, Value) {
         let mut builder = Request::builder()
             .method(method)
             .uri(uri)
             .header("cookie", "better-auth.session_token=session-1");
         if body.is_some() {
             builder = builder.header("content-type", "application/json");
+        }
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
         }
         let request = builder
             .body(Body::from(body.map(|value| value.to_string()).unwrap_or_default()))
@@ -1317,6 +1333,29 @@ mod tests {
         assert_eq!(reply["error"]["code"], "zdr_durable_mutation_forbidden");
         assert!(calls_to(&f.org_core, ORG_PATH).await.is_empty(), "the body flag decides first");
         assert!(convex_ops(&f.convex).await.is_empty(), "no Convex request");
+    }
+
+    /// The `x-zdr` request header is refused the same way as the body flag: the typed 412 before the organisation
+    /// posture is read, and no Control or Convex call.
+    #[tokio::test]
+    async fn an_x_zdr_header_is_refused_on_create_without_an_org_core_lookup() {
+        let f = fixture().await;
+        session(&f).await;
+        answer(&f.org_core, "GET", ORG_PATH, org_record(false)).await;
+        let (status, reply) = call_with_headers(
+            f.state.clone(),
+            "POST",
+            "/api/v1/me/agents",
+            Some(create_body()),
+            &[("x-zdr", "true")],
+        )
+        .await;
+        assert_eq!(status, 412, "{reply}");
+        assert_eq!(reply["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert_eq!(reply["error"]["details"]["surface"], "personal_agents");
+        assert!(calls_to(&f.org_core, ORG_PATH).await.is_empty(), "the request flag decides first");
+        assert!(convex_ops(&f.convex).await.is_empty(), "no Convex request");
+        assert!(calls_to(&f.user_core, "/api/v1/internal/").await.is_empty(), "no Control request");
     }
 
     /// A non-ZDR org passes the guard and reaches the Convex draft create, which is the first write.

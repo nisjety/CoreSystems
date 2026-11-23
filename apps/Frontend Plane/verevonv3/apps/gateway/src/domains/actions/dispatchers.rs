@@ -7125,6 +7125,7 @@ pub(super) async fn dispatch_space_update_instructions(
 pub(super) async fn dispatch_space_create_agent(
     state: &AppState,
     user: &AuthenticatedUser,
+    headers: &HeaderMap,
     input: &Value,
 ) -> Response {
     let space_ref = ticket_string(input, "spaceRef");
@@ -7142,6 +7143,7 @@ pub(super) async fn dispatch_space_create_agent(
     let (status, Json(payload)) = create_space_agent(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
+        headers.clone(),
         PathExtractor(space_ref.to_owned()),
         Json(Value::Object(body)),
     )
@@ -9256,6 +9258,72 @@ mod memory_restore_action_tests {
         assert_eq!(
             bodies_at(&stack.model, "/v1/memories/mem-1/restore").await,
             vec![json!({"space_kind_evidence": "kind-claim-token"})]
+        );
+    }
+}
+
+#[cfg(test)]
+mod space_agent_create_zdr_header_tests {
+    //! W3-DEC-ZDR (request header) through the `spaces.create_space_agent` dispatcher: the `x-zdr` header is the
+    //! request's own flag, so the create is refused with the typed 412 before the org posture read and before any
+    //! Control or Convex call.
+    use axum::http::StatusCode;
+    use http_body_util::BodyExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "User One".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    async fn read(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn the_create_space_agent_arm_honours_the_request_zdr_header() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"metadata": {"interactiveRetention": {"zdr": false}}}
+            })))
+            .mount(&server)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.org_core_url = server.uri();
+        state.user_core_url = server.uri();
+        state.application_convex_url = server.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-zdr", "true".parse().unwrap());
+
+        let input = json!({"spaceRef": "space-room", "name": "Møtereferent"});
+        let (status, body) =
+            read(dispatch_space_create_agent(&state, &user(), &headers, &input).await).await;
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert_eq!(body["error"]["details"]["surface"], "room_agents");
+        assert!(
+            server.received_requests().await.unwrap_or_default().is_empty(),
+            "the header flag reaches no org-core, Control or Convex call"
         );
     }
 }

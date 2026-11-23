@@ -3938,6 +3938,7 @@ const ROOM_AGENTS_SURFACE: &str = "room_agents";
 pub(crate) async fn create_space_agent(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Path(space_ref): Path<String>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
@@ -3952,11 +3953,11 @@ pub(crate) async fn create_space_agent(
             )),
         );
     }
-    // Zero Data Retention: the agent's name and instructions are stored content. A ZDR org is refused
-    // here, before the name check, the Control role check and the Convex write (a failed posture lookup
-    // is the typed 503).
+    // Zero Data Retention: the agent's name and instructions are stored content. A ZDR org, or a request
+    // that carries the `x-zdr` header or a body `zdr` flag, is refused here, before the name check, the
+    // Control role check and the Convex write (a failed posture lookup is the typed 503).
     if let Some((status, Json(mut refusal))) =
-        crate::zdr::durable_write_refusal(&state, &user, None, Some(&body)).await
+        crate::zdr::durable_write_refusal(&state, &user, Some(&headers), Some(&body)).await
     {
         if status == StatusCode::PRECONDITION_FAILED {
             if let Some(object) = refusal.get_mut("error").and_then(Value::as_object_mut) {
@@ -9927,6 +9928,17 @@ mod tests {
         confirmation: Value,
         body: Value,
     ) -> (u16, Value, MockServer, MockServer, MockServer) {
+        create_space_agent_probe_with_headers(role, org_core, confirmation, body, &[]).await
+    }
+
+    /// [`create_space_agent_probe`] with extra request headers, such as the `x-zdr` flag.
+    async fn create_space_agent_probe_with_headers(
+        role: &str,
+        org_core: ResponseTemplate,
+        confirmation: Value,
+        body: Value,
+        headers: &[(&str, &str)],
+    ) -> (u16, Value, MockServer, MockServer, MockServer) {
         let org = MockServer::start().await;
         Mock::given(wm_method("GET"))
             .and(wm_path("/api/v1/organizations/org-1"))
@@ -10003,16 +10015,16 @@ mod tests {
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         state.org_core_url = org.uri();
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/spaces/space-room/agents")
+            .header("cookie", "better-auth.session_token=session-1")
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
         let response = crate::build_router(state)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/spaces/space-room/agents")
-                    .header("cookie", "better-auth.session_token=session-1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
+            .oneshot(request.body(Body::from(body.to_string())).unwrap())
             .await
             .unwrap();
         let status = response.status().as_u16();
@@ -10173,6 +10185,36 @@ mod tests {
         assert!(
             application.received_requests().await.expect("convex calls").is_empty(),
             "a body flag reaches no Convex read or write"
+        );
+        assert_control_asked_only_for_the_session(
+            &user_core.received_requests().await.expect("control calls"),
+        );
+        assert!(
+            org.received_requests().await.expect("org calls").is_empty(),
+            "the request flag decides before the org posture is read"
+        );
+    }
+
+    /// The `x-zdr` header is the request's own flag, as the body `zdr` is: it refuses the room agent create with the
+    /// typed 412 before the org posture read and before any Control or Convex call, even for an org that is not ZDR.
+    #[tokio::test]
+    async fn an_x_zdr_header_refuses_the_room_agent_create_before_any_upstream_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, application, user_core, org) = create_space_agent_probe_with_headers(
+            "owner",
+            org_zdr_posture(false),
+            json!({"status": "applied"}),
+            json!({"name": "Møtereferent", "instructions": "Skriv referat."}),
+            &[("x-zdr", "true")],
+        )
+        .await;
+
+        assert_eq!(status, 412, "{body}");
+        assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert_eq!(body["error"]["details"]["surface"], "room_agents");
+        assert!(
+            application.received_requests().await.expect("convex calls").is_empty(),
+            "a header flag reaches no Convex read or write"
         );
         assert_control_asked_only_for_the_session(
             &user_core.received_requests().await.expect("control calls"),
