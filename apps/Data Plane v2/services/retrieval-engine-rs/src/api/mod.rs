@@ -4088,6 +4088,323 @@ mod space_files_tests {
         }
     }
 
+    // ── WS14-S5 at the handler: the listing's paging, provenance and refusals, against `fake_pg` ───────────────
+    //
+    // `tests/space_files_listing.rs` reads the SQL and, given a disposable database, runs it. These run the real
+    // listing handler and check what it SENDS (the page size, the cursor position, the type filter) and what it
+    // returns (the page, its cursor, each file's provenance), and that a refused listing reads no file at all.
+
+    const LISTING_COLUMNS: [&str; 15] = [
+        "document_id",
+        "title",
+        "source",
+        "type",
+        "status",
+        "zdr_classification",
+        "updated_at",
+        "owner_id",
+        "created_at",
+        "filename",
+        "content_type",
+        "size_bytes",
+        "sha256",
+        "extension",
+        "text_chars",
+    ];
+
+    /// One listing row as `SPACE_DOCUMENTS_SQL` returns it: the document's own columns, then the six provenance
+    /// columns the upload stamped, each NULL when the upload did not stamp it.
+    fn listing_row(id: &str, updated_at: &str, stamped: [Option<&str>; 6]) -> Vec<Option<Vec<u8>>> {
+        let mut row = vec![
+            fake_pg::text(id),
+            fake_pg::text("Brief"),
+            fake_pg::text("upload"),
+            fake_pg::text("pdf"),
+            fake_pg::text("ready"),
+            fake_pg::text("none"),
+            fake_pg::text(updated_at),
+            fake_pg::text("user-1"),
+            fake_pg::text("2026-11-09 07:30:00+00"),
+        ];
+        row.extend(
+            stamped
+                .into_iter()
+                .map(|value| value.and_then(fake_pg::text)),
+        );
+        row
+    }
+
+    fn listing_reply(rows: Vec<Vec<Option<Vec<u8>>>>) -> fake_pg::Reply {
+        fake_pg::Reply {
+            columns: LISTING_COLUMNS
+                .iter()
+                .map(|name| (*name, fake_pg::OID_TEXT))
+                .collect(),
+            rows,
+        }
+    }
+
+    /// Runs the listing handler and returns its JSON body, or the refusal it answered with.
+    async fn listing(
+        room: &Room,
+        req: SpaceKnowledgeRequest,
+    ) -> Result<serde_json::Value, AppError> {
+        use axum::response::IntoResponse as _;
+        let response = space_knowledge(
+            State(room.pipeline.clone()),
+            Some(user(&[])),
+            room.headers.clone(),
+            Json(req),
+        )
+        .await?
+        .into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("the listing body");
+        Ok(serde_json::from_slice(&bytes).expect("a JSON listing"))
+    }
+
+    /// The listing statements the room ran, in order.
+    fn listing_runs(room: &Room) -> Vec<fake_pg::Executed> {
+        room.fake.runs_of(SPACE_DOCUMENTS_SQL)
+    }
+
+    /// The `int8` a page size is bound as, read from the parameter at `index` (0-based, so `$5` is 4).
+    fn bound_int8(run: &fake_pg::Executed, index: usize) -> i64 {
+        let bytes = run.params[index]
+            .as_deref()
+            .expect("a bound page size is not NULL");
+        i64::from_be_bytes(bytes.try_into().expect("an int8 parameter is 8 bytes"))
+    }
+
+    #[tokio::test]
+    async fn the_room_listing_pages_by_the_cursor_it_returns_and_the_next_read_binds_that_position()
+    {
+        let room = room(Window::Open).await;
+        room.fake.answer(
+            "ORDER BY updated_at DESC, document_id DESC",
+            listing_reply(vec![
+                listing_row("doc-3", "2026-11-12 10:00:00+00", [None; 6]),
+                listing_row("doc-2", "2026-11-11 09:00:00+00", [None; 6]),
+                listing_row("doc-1", "2026-11-10 08:00:00+00", [None; 6]),
+            ]),
+        );
+
+        // A page of two asks the database for three rows, one past the page, and names the last row it keeps.
+        let first = listing(
+            &room,
+            SpaceKnowledgeRequest {
+                limit: Some(2),
+                types: None,
+                cursor: None,
+            },
+        )
+        .await
+        .expect("the first page reads");
+        assert_eq!(first["documents"].as_array().map(Vec::len), Some(2));
+        assert_eq!(first["documents_truncated"], serde_json::json!(true));
+        let next = first["next_cursor"]
+            .as_str()
+            .expect("a full page names its next position")
+            .to_string();
+        let runs = listing_runs(&room);
+        assert_eq!(runs.len(), 1, "{:?}", room.fake.executed());
+        assert_eq!(bound_int8(&runs[0], 4), 3, "$5 is the page size plus one");
+        assert_eq!(
+            runs[0].text(6),
+            None,
+            "the first page carries no cursor updated_at"
+        );
+        assert_eq!(
+            runs[0].text(7),
+            None,
+            "the first page carries no cursor document_id"
+        );
+
+        // The next read binds exactly the position the cursor names.
+        listing(
+            &room,
+            SpaceKnowledgeRequest {
+                limit: Some(2),
+                types: None,
+                cursor: Some(next),
+            },
+        )
+        .await
+        .expect("the next page reads");
+        let runs = listing_runs(&room);
+        assert_eq!(runs.len(), 2, "{:?}", room.fake.executed());
+        assert_eq!(
+            runs[1].text(6).as_deref(),
+            Some("2026-11-11 09:00:00+00"),
+            "$7 is the cursor's updated_at"
+        );
+        assert_eq!(
+            runs[1].text(7).as_deref(),
+            Some("doc-2"),
+            "$8 is the cursor's document_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_room_file_carries_the_provenance_its_upload_stamped_and_never_its_text() {
+        let room = room(Window::Open).await;
+        room.fake.answer(
+            "ORDER BY updated_at DESC, document_id DESC",
+            listing_reply(vec![
+                listing_row(
+                    "doc-1",
+                    "2026-11-10 08:00:00+00",
+                    [
+                        Some("brief.pdf"),
+                        Some("application/pdf"),
+                        Some("2048"),
+                        Some("ab12cd"),
+                        Some("pdf"),
+                        Some("512"),
+                    ],
+                ),
+                listing_row("doc-2", "2026-11-09 08:00:00+00", [None; 6]),
+                listing_row(
+                    "doc-3",
+                    "2026-11-08 08:00:00+00",
+                    [
+                        Some("notes.txt"),
+                        Some("text/plain"),
+                        Some("about 2 KB"),
+                        None,
+                        None,
+                        None,
+                    ],
+                ),
+            ]),
+        );
+
+        let body = listing(
+            &room,
+            SpaceKnowledgeRequest {
+                limit: None,
+                types: None,
+                cursor: None,
+            },
+        )
+        .await
+        .expect("the listing reads");
+        let documents = body["documents"].as_array().expect("the documents");
+        assert_eq!(documents.len(), 3);
+        assert_eq!(documents[0]["uploaded_by"], "user-1");
+        assert_eq!(documents[0]["created_at"], "2026-11-09 07:30:00+00");
+        assert_eq!(
+            documents[0]["metadata"],
+            serde_json::json!({
+                "filename": "brief.pdf",
+                "content_type": "application/pdf",
+                "size_bytes": 2048,
+                "sha256": "ab12cd",
+                "extension": "pdf",
+                "text_chars": 512,
+            }),
+            "the stamped sizes are numbers"
+        );
+        assert_eq!(
+            documents[1]["metadata"],
+            serde_json::json!({}),
+            "an unstamped file carries no provenance key"
+        );
+        assert_eq!(
+            documents[2]["metadata"]["size_bytes"], "about 2 KB",
+            "a size that does not parse stays text"
+        );
+        assert!(
+            body["next_cursor"].is_null(),
+            "a page that is the whole room names no next position"
+        );
+        for document in documents {
+            assert!(
+                document.get("content").is_none(),
+                "the listing never returns document text"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_listing_with_a_bad_type_filter_or_cursor_is_refused_before_it_reads_a_file() {
+        let room = room(Window::Open).await;
+        let bad_requests = [
+            SpaceKnowledgeRequest {
+                limit: None,
+                types: Some((0..=10).map(|index| format!("type-{index}")).collect()),
+                cursor: None,
+            },
+            SpaceKnowledgeRequest {
+                limit: None,
+                types: Some(vec![String::new()]),
+                cursor: None,
+            },
+            SpaceKnowledgeRequest {
+                limit: None,
+                types: None,
+                cursor: Some("not a cursor".to_string()),
+            },
+        ];
+        for req in bad_requests {
+            let refusal = listing(&room, req)
+                .await
+                .expect_err("a malformed listing request is refused");
+            assert_eq!(refusal.status, axum::http::StatusCode::BAD_REQUEST);
+        }
+        assert!(
+            listing_runs(&room).is_empty(),
+            "a refused listing reads no file: {:?}",
+            room.fake.executed()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_listing_clamps_its_page_size_and_binds_the_type_filter_only_when_one_is_sent() {
+        let room = room(Window::Open).await;
+        room.fake.answer(
+            "ORDER BY updated_at DESC, document_id DESC",
+            listing_reply(Vec::new()),
+        );
+
+        listing(
+            &room,
+            SpaceKnowledgeRequest {
+                limit: Some(0),
+                types: None,
+                cursor: None,
+            },
+        )
+        .await
+        .expect("a zero page reads");
+        listing(
+            &room,
+            SpaceKnowledgeRequest {
+                limit: Some(10_000),
+                types: Some(vec!["pdf".to_string()]),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("a page past the maximum reads");
+
+        let runs = listing_runs(&room);
+        assert_eq!(runs.len(), 2, "{:?}", room.fake.executed());
+        assert_eq!(
+            bound_int8(&runs[0], 4),
+            2,
+            "a page below one is raised to one, plus the extra row"
+        );
+        assert!(runs[0].params[5].is_none(), "no type filter binds NULL");
+        assert_eq!(
+            bound_int8(&runs[1], 4),
+            201,
+            "a page past the maximum is capped at 200, plus the extra row"
+        );
+        assert!(runs[1].params[5].is_some(), "a type filter binds its list");
+    }
+
     #[tokio::test]
     async fn the_wiki_retrieval_sends_the_members_floor_and_a_closed_window_returns_no_page() {
         for window in WINDOWS {
