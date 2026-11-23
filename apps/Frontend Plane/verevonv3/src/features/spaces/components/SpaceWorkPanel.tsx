@@ -46,6 +46,11 @@ export interface SpaceWorkPanelProps {
    * line. Absent or false: the polled rows, as before.
    */
   readonly liveRuns?: boolean
+  /**
+   * Offers the manager's Stop on a live run row (WS09-S8): the listing says manager Stop is on and the reader is the
+   * room's manager or owner. Presentation only; Control decides on every stop. Absent means no Stop.
+   */
+  readonly canStopRuns?: boolean
 }
 
 function sectionLabel(section: string, tr: (no: string, en: string) => string): string {
@@ -196,6 +201,7 @@ export function SpaceWorkPanel(props: SpaceWorkPanelProps) {
             'Ingenting kjører eller er planlagt i dette rommet nå.',
             'Nothing is running or scheduled in this Space right now.',
           )}
+          stop={props.canStopRuns === true ? { spaceRef: props.spaceRef } : undefined}
         />
       </Show>
 

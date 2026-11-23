@@ -116,6 +116,12 @@ export function unavailableNote(code: string | null, tr: Tr): string | undefined
 }
 
 /**
+ * The id prefix a run's row carries in Work and Activity. `activityFromRun` (activity-grammar) and
+ * `activityFromRunView` both give it `work-run:<run id>`, so a live row replaces the polled one in place.
+ */
+const RUN_ROW_ID_PREFIX = 'work-run:'
+
+/**
  * A live run as one Work / Activity row. Its id is the one `activityFromRun` gives the same run
  * (`work-run:<id>`), so the feed shows the live row IN PLACE of the polled one rather than twice.
  */
@@ -137,7 +143,7 @@ export function activityFromRunView(view: SpaceRunView, spaceRef: string, tr: Tr
   const seconds = elapsedSeconds(view, now)
   if (!ended && seconds > 0) detail.push(durationLabel(seconds, tr))
   return {
-    id: `work-run:${view.runId}`,
+    id: `${RUN_ROW_ID_PREFIX}${view.runId}`,
     renderClass: 'run',
     verb: say(tr, COPY.verb.run),
     object: view.agentName || tr('Agent', 'Agent'),
@@ -172,4 +178,15 @@ export function withLiveRunItems(
   const liveItems = live.map((view) => activityFromRunView(view, spaceRef, tr, now))
   const liveIds = new Set(liveItems.map((item) => item.id))
   return [...liveItems, ...items.filter((item) => !liveIds.has(item.id))]
+}
+
+/**
+ * The run a Work or Activity row is for, when that run is still in flight. The feed offers the manager's Stop only on
+ * these (WS09-S8). Undefined for a conversation, schedule, process, effect or authority row, and for a run that has
+ * ended, whose outcome is no longer live.
+ */
+export function liveRunIdOfRow(item: SpaceActivityItem): string | undefined {
+  if (item.renderClass !== 'run' || !item.outcome.live) return undefined
+  if (!item.id.startsWith(RUN_ROW_ID_PREFIX)) return undefined
+  return item.id.slice(RUN_ROW_ID_PREFIX.length) || undefined
 }

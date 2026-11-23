@@ -50,7 +50,7 @@ export function SpaceRunCard(props: SpaceRunCardProps) {
   const [showAll, setShowAll] = createSignal(false)
   // One stop attempt = one key; a retry after a failure reuses it so the server de-duplicates.
   const stopKey = `stop-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
-  const [stopState, setStopState] = createSignal<'idle' | 'pending' | 'sent' | 'forbidden' | 'failed'>('idle')
+  const [stopState, setStopState] = createSignal<'idle' | 'pending' | 'sent' | 'forbidden' | 'zdr' | 'failed'>('idle')
 
   const requestStop = async () => {
     const target = props.stop
@@ -62,7 +62,9 @@ export function SpaceRunCard(props: SpaceRunCardProps) {
       setStopState('sent')
     } catch (error) {
       const code = error instanceof ApiError ? error.code : ''
-      setStopState(code === 'space_run_control_not_authorized' ? 'forbidden' : 'failed')
+      if (code === 'space_run_control_not_authorized') setStopState('forbidden')
+      else if (code === 'zdr_durable_mutation_forbidden') setStopState('zdr')
+      else setStopState('failed')
     }
   }
 
@@ -130,7 +132,7 @@ export function SpaceRunCard(props: SpaceRunCardProps) {
             <button
               type="button"
               class="verevon-run-card__stop-button"
-              disabled={stopState() === 'pending' || stopState() === 'sent'}
+              disabled={stopState() === 'pending' || stopState() === 'sent' || stopState() === 'zdr'}
               onClick={() => { void requestStop() }}
             >
               {i18n.tr('Stopp kjøringen', 'Stop this run')}
@@ -143,6 +145,14 @@ export function SpaceRunCard(props: SpaceRunCardProps) {
                 {i18n.tr(
                   'Organisasjonen din har ikke slått på stopping av andre medlemmers kjøringer.',
                   "Your organisation has not enabled stopping other members' runs.",
+                )}
+              </span>
+            </Show>
+            <Show when={stopState() === 'zdr'}>
+              <span role="alert">
+                {i18n.tr(
+                  'Med nulllagring av data kan kjøringen ikke stoppes herfra ennå. Ingenting er endret.',
+                  'With zero data retention the run cannot be stopped from here yet. Nothing was changed.',
                 )}
               </span>
             </Show>

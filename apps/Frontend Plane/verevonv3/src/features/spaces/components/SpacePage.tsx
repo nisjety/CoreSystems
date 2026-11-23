@@ -925,7 +925,13 @@ export default function SpacePage() {
                         canClear={canOfferCanvasClear(current().membership.role)}
                       />
                     ),
-                    arbeid: () => <SpaceWorkPanel spaceRef={current().space.space_ref} liveRuns={agentWork()?.live === true} />,
+                    arbeid: () => (
+                      <SpaceWorkPanel
+                        spaceRef={current().space.space_ref}
+                        liveRuns={agentWork()?.live === true}
+                        canStopRuns={canOfferBrowserStop(agentWork()?.stop_manager, current().membership.role)}
+                      />
+                    ),
                     kunnskap: () => <SpaceKnowledgePanel spaceRef={current().space.space_ref} />,
                     artefakter: () => (
                       <SpaceArtifactsTab spaceRef={current().space.space_ref} live={liveArtifacts} />
@@ -945,6 +951,7 @@ export default function SpacePage() {
                         threads={currentThreads}
                         threadsLoading={() => threads.loading}
                         liveRuns={agentWork()?.live === true}
+                        canStopRuns={canOfferBrowserStop(agentWork()?.stop_manager, current().membership.role)}
                       />
                     ),
                     agent: () => (

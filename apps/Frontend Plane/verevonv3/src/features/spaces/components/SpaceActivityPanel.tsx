@@ -60,6 +60,11 @@ export interface SpaceActivityPanelProps {
    * is followed through the room's live view and shows its current step in place of the polled line.
    */
   readonly liveRuns?: boolean
+  /**
+   * Offers the manager's Stop on a live run row (WS09-S8): the listing says manager Stop is on and the reader is the
+   * room's manager or owner. Presentation only; Control decides on every stop. Absent means no Stop.
+   */
+  readonly canStopRuns?: boolean
 }
 
 type ActivityLens = 'all' | 'attention' | 'work' | 'conversation' | 'authority'
@@ -265,6 +270,7 @@ export function SpaceActivityPanel(props: SpaceActivityPanelProps) {
                 'Nothing in this Space matches this filter.',
               )
         }
+        stop={props.canStopRuns === true ? { spaceRef: props.spaceRef } : undefined}
       />
       </Show>
 
