@@ -1,0 +1,11 @@
+{
+  "id": "convex-typecheck",
+  "cwd": "apps/Application Plane/convex-core",
+  "command": "pnpm exec tsc --noEmit",
+  "git_sha": "e603fde78e0432e3a636989e75146ba9d6439ef7",
+  "exit_code": 0,
+  "duration_ms": 2793,
+  "parse_note": "",
+  "failing_count": 0,
+  "failing_ids": []
+}

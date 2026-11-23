@@ -1,0 +1,127 @@
+{
+  "captured_at": "2026-11-23T10:07:57.461Z",
+  "git_sha": "e603fde78e0432e3a636989e75146ba9d6439ef7",
+  "tree": "clean",
+  "host": "win32",
+  "node": "v24.19.0",
+  "pnpm": "11.21.0",
+  "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+  "go": "go version go1.26.5 windows/amd64",
+  "commands": [
+    {
+      "id": "auth-core-jest",
+      "exit_code": 0,
+      "failing_count": 0
+    },
+    {
+      "id": "spa-vitest",
+      "exit_code": 1,
+      "failing_count": 2
+    },
+    {
+      "id": "spa-node-tests",
+      "exit_code": 1,
+      "failing_count": 1
+    },
+    {
+      "id": "spa-typecheck",
+      "exit_code": 1,
+      "failing_count": 17
+    },
+    {
+      "id": "spa-lint",
+      "exit_code": 1,
+      "failing_count": 2
+    },
+    {
+      "id": "gateway-cargo",
+      "exit_code": 0,
+      "failing_count": 0
+    },
+    {
+      "id": "model-plane-cargo",
+      "exit_code": 101,
+      "failing_count": 5
+    },
+    {
+      "id": "convex-test",
+      "exit_code": 0,
+      "failing_count": 0
+    },
+    {
+      "id": "convex-typecheck",
+      "exit_code": 0,
+      "failing_count": 0
+    },
+    {
+      "id": "convex-lint",
+      "exit_code": 0,
+      "failing_count": 0
+    },
+    {
+      "id": "go-cp-audit-core",
+      "exit_code": 0,
+      "failing_count": 0
+    },
+    {
+      "id": "go-cp-billing-core",
+      "exit_code": 0,
+      "failing_count": 0
+    },
+    {
+      "id": "go-cp-org-core",
+      "exit_code": 0,
+      "failing_count": 0
+    },
+    {
+      "id": "go-cp-session-core",
+      "exit_code": 0,
+      "failing_count": 0
+    },
+    {
+      "id": "go-cp-user-core",
+      "exit_code": 0,
+      "failing_count": 0
+    },
+    {
+      "id": "go-mp-bridge-core",
+      "exit_code": 0,
+      "failing_count": 0
+    },
+    {
+      "id": "go-mp-browser-broker",
+      "exit_code": 0,
+      "failing_count": 0
+    },
+    {
+      "id": "go-mp-capability-core",
+      "exit_code": 0,
+      "failing_count": 0
+    },
+    {
+      "id": "go-mp-cost-core",
+      "exit_code": 0,
+      "failing_count": 0
+    },
+    {
+      "id": "go-mp-letta-bridge",
+      "exit_code": 0,
+      "failing_count": 0
+    },
+    {
+      "id": "go-mp-nats-provisioner",
+      "exit_code": 0,
+      "failing_count": 0
+    },
+    {
+      "id": "go-mp-orchestrator-core",
+      "exit_code": 0,
+      "failing_count": 0
+    },
+    {
+      "id": "go-mp-sandbox-manager",
+      "exit_code": 0,
+      "failing_count": 0
+    }
+  ]
+}

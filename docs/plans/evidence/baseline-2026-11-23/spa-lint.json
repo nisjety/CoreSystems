@@ -1,0 +1,14 @@
+{
+  "id": "spa-lint",
+  "cwd": "apps/Frontend Plane/verevonv3",
+  "command": "pnpm exec eslint . -f json -o \"<out>\"",
+  "git_sha": "e603fde78e0432e3a636989e75146ba9d6439ef7",
+  "exit_code": 1,
+  "duration_ms": 36750,
+  "parse_note": "",
+  "failing_count": 2,
+  "failing_ids": [
+    "src/features/chat/components/chat-normalizers.ts|no-restricted-syntax|Bare label in a data table: translate it where it renders with i18n.tr(no, en), not in the data.",
+    "src/features/chat/components/chat-normalizers.ts|no-restricted-syntax|Norwegian text outside i18n.tr(no, en): the English locale would show it unchanged."
+  ]
+}

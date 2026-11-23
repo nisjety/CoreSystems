@@ -1,0 +1,17 @@
+{
+  "id": "model-plane-cargo",
+  "cwd": "apps/Model Plane/rust",
+  "command": "cargo test --workspace --no-fail-fast",
+  "git_sha": "e603fde78e0432e3a636989e75146ba9d6439ef7",
+  "exit_code": 101,
+  "duration_ms": 1486234,
+  "parse_note": "",
+  "failing_count": 5,
+  "failing_ids": [
+    "unknown::every_guard_goes_red_when_the_code_it_guards_regresses",
+    "unknown::every_zdr_refusal_in_the_gateway_carries_a_catalogue_kind",
+    "unknown::executor::tests::cwd_applies_and_the_inherited_environment_is_replaced",
+    "unknown::the_do_loop_dispatches_every_tool_call_with_an_empty_hook_context",
+    "unknown::the_pause_site_mints_loop_for_not_zdr_and_not_waived_and_the_old_name_is_gone"
+  ]
+}

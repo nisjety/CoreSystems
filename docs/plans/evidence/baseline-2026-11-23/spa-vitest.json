@@ -1,0 +1,14 @@
+{
+  "id": "spa-vitest",
+  "cwd": "apps/Frontend Plane/verevonv3",
+  "command": "pnpm exec vitest run --reporter=json --outputFile=\"<out>\"",
+  "git_sha": "e603fde78e0432e3a636989e75146ba9d6439ef7",
+  "exit_code": 1,
+  "duration_ms": 315237,
+  "parse_note": "",
+  "failing_count": 2,
+  "failing_ids": [
+    "src/features/support/components/SupportPage.test.tsx::(suite failed to run)",
+    "src/shared/api/quarry-client.test.ts::(suite failed to run)"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "id": "go-cp-user-core",
+  "cwd": "apps/Control Plane/user-core",
+  "command": "go test -json ./...",
+  "git_sha": "e603fde78e0432e3a636989e75146ba9d6439ef7",
+  "exit_code": 0,
+  "duration_ms": 31359,
+  "parse_note": "",
+  "failing_count": 0,
+  "failing_ids": []
+}

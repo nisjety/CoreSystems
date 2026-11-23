@@ -1,0 +1,11 @@
+{
+  "id": "go-mp-cost-core",
+  "cwd": "apps/Model Plane/go/services/cost-core",
+  "command": "go test -json ./...",
+  "git_sha": "e603fde78e0432e3a636989e75146ba9d6439ef7",
+  "exit_code": 0,
+  "duration_ms": 18623,
+  "parse_note": "",
+  "failing_count": 0,
+  "failing_ids": []
+}

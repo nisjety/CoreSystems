@@ -1,0 +1,11 @@
+{
+  "id": "go-mp-bridge-core",
+  "cwd": "apps/Model Plane/go/services/bridge-core",
+  "command": "go test -json ./...",
+  "git_sha": "e603fde78e0432e3a636989e75146ba9d6439ef7",
+  "exit_code": 0,
+  "duration_ms": 19097,
+  "parse_note": "",
+  "failing_count": 0,
+  "failing_ids": []
+}

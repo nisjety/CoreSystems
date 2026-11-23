@@ -1,0 +1,29 @@
+{
+  "id": "spa-typecheck",
+  "cwd": "apps/Frontend Plane/verevonv3",
+  "command": "pnpm exec tsc -b",
+  "git_sha": "e603fde78e0432e3a636989e75146ba9d6439ef7",
+  "exit_code": 1,
+  "duration_ms": 15480,
+  "parse_note": "",
+  "failing_count": 17,
+  "failing_ids": [
+    "src/features/support/components/RemoteSupportPage.tsx|TS2307|Cannot find module '@verevon/remote-core' or its corresponding type declarations.",
+    "src/features/support/components/RemoteSupportPage.tsx|TS2488|Type '[string, string] | undefined' must have a '[Symbol.iterator]()' method that returns an iterator.",
+    "src/features/support/components/RemoteSupportPage.tsx|TS2556|A spread argument must either have a tuple type or be passed to a rest parameter.",
+    "src/features/support/components/RemoteSupportPage.tsx|TS7006|Parameter 'error' implicitly has an 'any' type.",
+    "src/features/support/components/RemoteSupportPage.tsx|TS7006|Parameter 'frame' implicitly has an 'any' type.",
+    "src/features/support/components/RemoteSupportPage.tsx|TS7031|Binding element 'granted' implicitly has an 'any' type.",
+    "src/features/support/components/RemoteSupportPage.tsx|TS7031|Binding element 'level' implicitly has an 'any' type.",
+    "src/features/support/components/RemoteSupportPage.tsx|TS7031|Binding element 'ms' implicitly has an 'any' type.",
+    "src/features/support/components/RemoteSupportPage.tsx|TS7031|Binding element 'next' implicitly has an 'any' type.",
+    "src/features/support/components/RemoteSupportPage.tsx|TS7031|Binding element 'nextState' implicitly has an 'any' type.",
+    "src/features/support/components/RemoteSupportPage.tsx|TS7031|Binding element 'reason' implicitly has an 'any' type.",
+    "src/features/support/components/RemoteSupportPage.tsx|TS7031|Binding element 'target' implicitly has an 'any' type.",
+    "src/shared/api/quarry-client.ts|TS2307|Cannot find module '@quarry/client' or its corresponding type declarations.",
+    "src/shared/api/quarry-client.ts|TS7006|Parameter 'init' implicitly has an 'any' type.",
+    "src/shared/api/quarry-client.ts|TS7006|Parameter 'input' implicitly has an 'any' type.",
+    "src/shared/api/quarry-client.ts|TS7006|Parameter 'r' implicitly has an 'any' type.",
+    "src/shared/api/schedule-contract.test.ts|TS2352|Conversion of type '{ name: string; schedule_expr: string; timezone?: string | undefined; description?: string | undefined; task_template?: CronTaskTemplate | undefined; enabled?: boolean | undefined; space_ref?: string | undefined; } | undefined' to type '{ task_template: Record<string, unknown>; }' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first."
+  ]
+}

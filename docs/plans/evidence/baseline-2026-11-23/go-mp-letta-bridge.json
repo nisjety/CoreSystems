@@ -1,0 +1,11 @@
+{
+  "id": "go-mp-letta-bridge",
+  "cwd": "apps/Model Plane/go/services/letta-bridge",
+  "command": "go test -json ./...",
+  "git_sha": "e603fde78e0432e3a636989e75146ba9d6439ef7",
+  "exit_code": 0,
+  "duration_ms": 17331,
+  "parse_note": "",
+  "failing_count": 0,
+  "failing_ids": []
+}

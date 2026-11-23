@@ -1,0 +1,13 @@
+{
+  "id": "spa-node-tests",
+  "cwd": "apps/Frontend Plane/verevonv3",
+  "command": "node --test --test-reporter=tap apps/gateway/scripts/security-coverage-gate.test.mjs apps/gateway/scripts/action-surface-contract.test.mjs apps/gateway/scripts/product-truth-contract.test.mjs apps/gateway/scripts/zdr-seed-test-org.test.mjs",
+  "git_sha": "e603fde78e0432e3a636989e75146ba9d6439ef7",
+  "exit_code": 1,
+  "duration_ms": 408,
+  "parse_note": "",
+  "failing_count": 1,
+  "failing_ids": [
+    "every registered action has exactly one live gateway dispatcher contract"
+  ]
+}
