@@ -322,6 +322,59 @@ describe('SpaceRoomTimeline — pending posts (WS01-S6)', () => {
     expect(document.querySelector('.verevon-room-turn--pending')).not.toBeNull()
   })
 
+  it('draws an accepted new post inside its listed thread, in place of the preview, not at the end', async () => {
+    // The transcript is still out: the listing alone names the thread.
+    spacesClient.loadSpaceTranscript.mockImplementation(() => new Promise(() => undefined))
+    const pending = [entry({ threadId: 't9', content: 'Mitt nye innlegg', stage: 'accepted', messageId: 'm-9' })]
+    renderRoom(
+      [
+        { thread_id: 't1', space_id: 'room-1', title: 'Innkjøp', preview: 'Eksisterende', latest_run_status: 'completed' },
+        { thread_id: 't9', space_id: 'room-1', title: 'Mitt nye innlegg', preview: 'Mitt nye innlegg', latest_run_status: 'completed' },
+      ],
+      [agent],
+      { pendingPosts: () => pending },
+    )
+    await screen.findByText('Eksisterende')
+    const row = document.querySelector('.verevon-room-turn--pending')
+    expect(row?.closest('.verevon-room-post')?.getAttribute('data-thread-id')).toBe('t9')
+    expect(row?.textContent).toContain('Sendt')
+    // Drawn once: no end-of-timeline card, and the listing preview steps aside for the row.
+    expect(document.querySelector('.verevon-room-post--pending')).toBeNull()
+    expect(screen.getAllByText('Mitt nye innlegg')).toHaveLength(1)
+  })
+
+  it('swaps an accepted new post for its real first turn by message id', async () => {
+    const onRecorded = vi.fn()
+    const pending = [entry({ threadId: 't9', content: 'Mitt nye innlegg', stage: 'accepted', messageId: 'm-9' })]
+    spacesClient.loadSpaceTranscript.mockImplementation(async (_spaceRef: string, threadId: string) => ({
+      state: 'ok',
+      threadId,
+      turns: threadId === 't9' ? [{ role: 'user', content: 'Mitt nye innlegg', messageId: 'm-9' }] : [],
+    }))
+    renderRoom(
+      [{ thread_id: 't9', space_id: 'room-1', title: 'Nytt', latest_run_status: 'completed' }],
+      [agent],
+      { pendingPosts: () => pending, onRecorded },
+    )
+    await waitFor(() => expect(onRecorded).toHaveBeenCalledWith(['m-9']))
+    expect(screen.getAllByText('Mitt nye innlegg')).toHaveLength(1)
+    expect(document.querySelector('.verevon-room-turn--pending')).toBeNull()
+    expect(document.querySelector('.verevon-room-post--pending')).toBeNull()
+  })
+
+  it('keeps an accepted new post at the end while the room does not list its thread yet', async () => {
+    const pending = [entry({ threadId: 't9', stage: 'accepted', messageId: 'm-9' })]
+    renderRoom(
+      [{ thread_id: 't1', space_id: 'room-1', title: 'Innkjøp', preview: 'Eksisterende', latest_run_status: 'completed' }],
+      [agent],
+      { pendingPosts: () => pending },
+    )
+    await screen.findByText('Eksisterende')
+    const posts = [...document.querySelectorAll('.verevon-room-timeline > li')]
+    expect(posts[posts.length - 1]?.classList.contains('verevon-room-post--pending')).toBe(true)
+    expect(screen.getAllByText('Hei fra meg')).toHaveLength(1)
+  })
+
   it('draws nothing extra without a journal', async () => {
     renderRoom([{ thread_id: 't1', space_id: 'room-1', title: 'Innkjøp', preview: 'Eksisterende', latest_run_status: 'completed' }])
     await screen.findByText('Eksisterende')

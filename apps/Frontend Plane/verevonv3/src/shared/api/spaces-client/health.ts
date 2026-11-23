@@ -1,5 +1,7 @@
 // WS01-S8 (optional probe): the gateway's unauthenticated `GET /health` answers whether the service is
-// reachable at all, so a room can say so before a send. Same origin as the rest of the client
+// reachable at all, so a room can say so before a send. It is a liveness check of the gateway alone: the
+// gateway answers it without asking any upstream, so a down room backend behind a live gateway still reads as
+// reachable here and shows only when a send or a room read fails. Same origin as the rest of the client
 // (`gatewayBaseUrl()`, proxied by nginx and the dev server), no credentials, no content. The answer is a
 // status code, never a claim about any room, and it is never an authorization input.
 import { gatewayBaseUrl } from '../config'

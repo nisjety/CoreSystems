@@ -120,7 +120,7 @@ describe('space send journal (WS01-S6)', () => {
   })
 
   describe('reconcile', () => {
-    it('drops an accepted post_new when its thread is listed', () => {
+    it('without a message id, drops an accepted post_new when its thread is listed', () => {
       const journal = makeJournal()
       journal.begin({ sendId: 's1', kind: 'post_new', spaceRef: 'room', content: 'a' })
       journal.update('s1', { stage: 'accepted', threadId: 'thr_1' })
@@ -282,9 +282,12 @@ describe('space send journal (WS01-S6)', () => {
       expect(journal.get('s2')).toBeDefined()
     })
 
-    it('drops an accepted new post by its message id too, not only by its thread being listed', () => {
+    it('keeps an accepted new post named by its message id when its thread is listed, and drops it by that id', () => {
       const journal = makeJournal()
       accepted(journal, 's1', 'post_new', 'msg_1')
+      // Listed is not recorded: the row stays inside its thread until the record carries the message.
+      journal.reconcile('room', [{ thread_id: 'thr_1' }])
+      expect(journal.get('s1')).toMatchObject({ stage: 'accepted', messageId: 'msg_1' })
       journal.recorded('room', ['msg_1'])
       expect(journal.get('s1')).toBeUndefined()
     })

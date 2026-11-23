@@ -1,6 +1,6 @@
 import { cleanup, render, screen, waitFor } from '@solidjs/testing-library'
 import { createSignal, flush } from 'solid-js'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { noteRoomFresh } from '../lib/space-connectivity'
 import type { SpaceStreamState } from '../lib/space-stream'
@@ -102,6 +102,18 @@ describe('SpaceLiveIndicator — last fresh time (WS01-S8)', () => {
   const at = Date.parse('2026-11-23T13:05:00Z')
   const iso = new Date(at).toISOString()
   const freshTime = () => document.querySelector('.verevon-space-live__fresh')
+  // The time rides the room's connectivity_banner rollout flag; these cases turn it on in the dev build.
+  beforeEach(() => vi.stubEnv('VITE_SPACE_CONNECTIVITY_BANNER_UI', 'true'))
+  afterEach(() => vi.unstubAllEnvs())
+
+  it('draws no time with the connectivity_banner flag off, and the indicator reads as before', () => {
+    vi.stubEnv('VITE_SPACE_CONNECTIVITY_BANNER_UI', 'false')
+    noteRoomFresh('indicator-room-flag-off', at)
+    flush()
+    renderIndicator('live', 'indicator-room-flag-off')
+    expect(freshTime()).toBeNull()
+    expect(indicator()?.textContent).toBe('Live')
+  })
 
   it('says when the room last heard from its server, after a live stream', () => {
     noteRoomFresh('indicator-room-live', at)

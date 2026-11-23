@@ -11,3 +11,12 @@
   color: var(--warning-ink);
   font-size: 12px;
 }
+
+/* The last-fresh time: beside the banner, outside its live region, so a new minute is not announced again. */
+.verevon-space-connectivity__fresh {
+  margin: 4px 0 0;
+  color: var(--warning-ink);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}

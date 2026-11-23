@@ -12,9 +12,12 @@ import { spaceRoomFeatureWithDevOverride } from './space-room-features'
  *   not be resumed marks the room `unreachable` even though the browser still
  *   believes it is online (a service restart, a proxy cut); the next send that
  *   reaches the server clears it; and
- * - the optional `/health` probe (`checkSpaceService`), which says the service
- *   is down before a send does. Any sign that the service answers (the probe, a
- *   send that reaches it, a room read or a stream frame) clears it again.
+ * - the optional `/health` probe (`checkSpaceService`). The gateway's `/health`
+ *   answers without asking any upstream, so the probe can say only that the
+ *   gateway itself cannot be reached before a send does; a room backend behind a
+ *   live gateway still shows only when a send or a room read fails. Any sign that
+ *   the service answers (the probe, a send that reaches it, a room read or a
+ *   stream frame) clears it again.
  *
  * `online` says nothing and renders nothing. The state is presentation only: it
  * never gates a send (a send that fails is reported by its own exchange) and is
@@ -57,12 +60,18 @@ export async function checkSpaceService(): Promise<void> {
   else if (aliveSeq === aliveBefore) setServiceDown(true)
 }
 
-// The last moment each room heard from its server (a stream frame or a listing read). One slot: the room on screen.
-const [lastFresh, setLastFresh] = createSignal<{ readonly spaceRef: string; readonly at: number } | undefined>(undefined)
+// The last moment each room heard from its server (a stream frame or a listing read), per room, so a switch between
+// rooms or a late read for another room never blanks the one on screen. Memory only: a room ref and a time, no content.
+const [lastFresh, setLastFresh] = createSignal<ReadonlyMap<string, number>>(new Map())
 
-/** A frame or a listing read from this room's server: the room is as fresh as this moment, and the service is up. */
+/**
+ * A frame or a listing read from this room's server: the room is as fresh as this moment, and the service is up. It
+ * also clears an earlier failed send's `unreachable`, since the room's server has just answered: a newer stamp beside
+ * a sentence saying the room cannot be reached would contradict itself.
+ */
 export function noteRoomFresh(spaceRef: string, at: number = Date.now()): void {
-  setLastFresh({ spaceRef, at })
+  setLastFresh((current) => new Map(current).set(spaceRef, at))
+  if (untrack(sendUnreachable)) setSendUnreachable(false)
   noteServiceAlive()
 }
 
@@ -71,8 +80,7 @@ export function noteRoomFresh(spaceRef: string, at: number = Date.now()): void {
  * session. Reactive. The stamp shows how old what is on screen is; it never says the room is current.
  */
 export function roomLastFreshAt(spaceRef: string): number | undefined {
-  const fresh = lastFresh()
-  return fresh && fresh.spaceRef === spaceRef ? fresh.at : undefined
+  return lastFresh().get(spaceRef)
 }
 
 /** A send's stream dropped and resuming it did not work. */
@@ -91,7 +99,7 @@ export function noteSendTransportOk(): void {
  * Returns the stop function. Coming back online also clears `unreachable`: the
  * next send finds out for itself, and a banner that outlives its cause is worse
  * than none. The service is probed once when the watch starts online, and again
- * when the browser comes back, so a down service shows before a send.
+ * when the browser comes back, so a gateway that cannot be reached shows before a send.
  */
 export function watchBrowserConnectivity(): () => void {
   if (typeof window === 'undefined') return () => undefined

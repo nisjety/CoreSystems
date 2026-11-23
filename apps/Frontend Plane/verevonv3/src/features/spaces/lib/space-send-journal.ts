@@ -10,8 +10,10 @@ import type { SpaceMentionsInput } from '@/shared/api/spaces-client'
  * - `queued`   held because the browser is offline; it sends when the browser is back;
  * - `sending`  the request is on its way;
  * - `accepted` the server stored it (the receipt names the thread and the message); the entry stays
- *              only until the room shows it, so the optimistic row never doubles the real one: a new
- *              post when the room lists its thread, a reply when the room's record carries its message id;
+ *              only until the room shows it, so the optimistic row never doubles the real one: once the
+ *              room's record carries its message id (a new post's row sits in its listed thread until
+ *              then); a receipt that named no message id falls back to the listing (a new post when its
+ *              thread is listed, a reply when its thread's `updated_at` moves past the one it was sent against);
  * - `failed`   it did not land; the entry keeps the text, says why, and a retry reuses the SAME
  *              `sendId`, so a send whose answer was lost lands once.
  *
@@ -73,9 +75,9 @@ export interface SpaceSendJournal {
   readonly update: (sendId: string, patch: Partial<Omit<SpaceJournalEntry, 'sendId'>>) => void
   readonly remove: (sendId: string) => void
   /**
-   * Drop accepted entries the room's own listing now shows: a new post whose thread is listed. A reply named by its
-   * message id waits for `recorded`; only a reply whose receipt named no message id falls back to its thread's
-   * `updated_at` moving past the one it was sent against.
+   * Drop accepted entries the room's own listing shows, for receipts that named no message id only: a new post whose
+   * thread is listed, a reply whose thread's `updated_at` moved past the one it was sent against. An entry named by its
+   * message id (a new post or a reply) waits for `recorded`, so it is swapped for its real turn by id.
    */
   readonly reconcile: (
     spaceRef: string,
@@ -146,9 +148,9 @@ export function createSpaceSendJournal(): SpaceSendJournal {
         if (entry.spaceRef !== spaceRef || entry.stage !== 'accepted' || !entry.threadId) return true
         const thread = byId.get(entry.threadId)
         if (!thread) return true
-        if (entry.kind === 'post_new') return false
-        // A reply the receipt named by its message id is settled by the record carrying that id, not by a timestamp.
+        // A post the receipt named by its message id is settled by the record carrying that id, not by the listing.
         if (entry.messageId) return true
+        if (entry.kind === 'post_new') return false
         return !movedForward(thread.updated_at, entry.baselineUpdatedAt)
       })
       return next.length === current.length ? current : next

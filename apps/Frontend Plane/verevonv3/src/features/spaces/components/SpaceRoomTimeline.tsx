@@ -32,7 +32,7 @@ import { SpaceRestrictedNotice } from './SpaceRestrictedNotice'
 import { SpaceHistoryNotice } from './SpaceHistoryNotice'
 import { SpaceHistoryWindowNote } from './SpaceHistoryWindowNote'
 import { ownWindowHidden } from '../lib/space-history-window'
-import { SpacePendingNewPost, SpacePendingReplies } from './SpacePendingPost'
+import { SpacePendingNewPost, SpacePendingReplies, SpacePendingTurn } from './SpacePendingPost'
 import type { SpaceJournalEntry } from '../lib/space-send-journal'
 import { spaceRoomFeatureWithDevOverride } from '../lib/space-room-features'
 import { threadPinnedByAgent, threadRenamedByAgent } from '../lib/space-self-api'
@@ -149,8 +149,9 @@ export interface SpaceRoomTimelineProps {
   readonly liveArtifacts?: (threadId: string) => readonly ChatArtifact[]
   /**
    * This browser's own posts that the room's projection does not carry yet (WS01-S6, the send
-   * journal's entries). A new post is drawn as a post of its own at the end; a reply is drawn
-   * after the real turns of the thread it goes to. Absent means no optimistic rows.
+   * journal's entries). A new post is drawn as a post of its own at the end until the room lists
+   * its thread, then in that thread's own place until its turns are read; a reply is drawn after
+   * the real turns of the thread it goes to. Absent means no optimistic rows.
    */
   readonly pendingPosts?: () => readonly SpaceJournalEntry[]
   /**
@@ -305,8 +306,15 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
   const windowHidden = () => sharedRead() && ownWindowHidden(props.historyWindow?.())
   // Read where it is used, so a flag the room publishes after the timeline is drawn reaches the chips too.
   const artifactsOn = () => roomArtifactsEnabled()
+  // A new post whose thread the room lists is drawn inside that thread's post (swapped by its message id there); only
+  // one whose thread is not listed yet (or not named yet) is drawn at the end, so it is never drawn twice.
+  const listedThreadIds = createMemo(() => new Set(orderedThreads().map((thread) => thread.thread_id)))
   const pendingNewPosts = () =>
-    (props.pendingPosts?.() ?? []).filter((entry) => entry.kind === 'post_new')
+    (props.pendingPosts?.() ?? []).filter((entry) => (
+      entry.kind === 'post_new' && !(entry.threadId !== undefined && listedThreadIds().has(entry.threadId))
+    ))
+  const pendingRootFor = (threadId: string) =>
+    (props.pendingPosts?.() ?? []).find((entry) => entry.kind === 'post_new' && entry.threadId === threadId)
   const pendingRepliesFor = (threadId: string) =>
     (props.pendingPosts?.() ?? []).filter((entry) => entry.kind === 'post_reply' && entry.threadId === threadId)
 
@@ -533,6 +541,7 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
               onOpenThread={props.onOpenThread}
               onApprovalSettled={props.onApprovalSettled}
               pendingReplies={() => pendingRepliesFor(thread.thread_id)}
+              pendingRoot={() => pendingRootFor(thread.thread_id)}
               onRecorded={props.onRecorded}
               collapse={() => props.collapseLongThreads?.() === true && props.onOpenThread !== undefined}
             />
@@ -618,6 +627,8 @@ function SpaceRoomPost(props: {
   readonly onOpenThread?: (thread: SpaceThread) => void
   /** This browser's own replies to this thread that the transcript does not show yet. */
   readonly pendingReplies?: () => readonly SpaceJournalEntry[]
+  /** This browser's own new post that started this thread, while the transcript does not show it yet. */
+  readonly pendingRoot?: () => SpaceJournalEntry | undefined
   /** The message ids of this post's turns, reported when its transcript changes (see `SpaceRoomTimelineProps.onRecorded`). */
   readonly onRecorded?: (messageIds: readonly string[]) => void
   /** Collapse a long thread to first + last three and show the reply count (needs the pane). */
@@ -725,6 +736,13 @@ function SpaceRoomPost(props: {
   const pendingReplies = (): readonly SpaceJournalEntry[] => {
     const entries = props.pendingReplies?.() ?? []
     return entries.length === 0 ? entries : entries.filter((entry) => !isRecorded(entry))
+  }
+  // The new post that started this thread, drawn in place of the thread's listing fallback (its preview) until the
+  // transcript is read: then its real first turn takes the place, and the record carrying its message id settles the
+  // entry. It never sits beside real turns, so it is never drawn twice.
+  const pendingRoot = (): SpaceJournalEntry | undefined => {
+    const entry = props.pendingRoot?.()
+    return entry && !isRecorded(entry) ? entry : undefined
   }
   // Tells the page which message ids this record holds, so the journal settles those replies at once, not on its timer.
   createEffect(
@@ -1044,6 +1062,7 @@ function SpaceRoomPost(props: {
       <Show
         when={turns().length > 0}
         fallback={
+          <Show when={pendingRoot()} fallback={
           <div class="verevon-room-turn">
             <MemberAvatar name={starterName()} subjectId={props.thread.owner_subject_id} />
             <div class="verevon-room-turn__content">
@@ -1084,6 +1103,9 @@ function SpaceRoomPost(props: {
               </Show>
             </div>
           </div>
+          }>
+            {(entry) => <SpacePendingTurn entry={entry()} />}
+          </Show>
         }
       >
         <SpaceTurnList

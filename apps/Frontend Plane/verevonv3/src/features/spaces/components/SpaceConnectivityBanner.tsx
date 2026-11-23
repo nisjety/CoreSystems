@@ -17,8 +17,11 @@ import './space-connectivity.css'
  * connection looks exactly as it did before. The live region announces the
  * change once, not every render.
  *
- * With `spaceRef`, the sentence also says when the room last heard from its
- * server, in the reader's own clock, so what is on screen is dated honestly.
+ * With `spaceRef`, a line beside the sentence also says when the room last heard
+ * from its server, in the reader's own clock, so what is on screen is dated
+ * honestly. That line sits outside the live region: the minute it shows changes
+ * while the banner is up, and the sentence must be announced once, not again on
+ * every new minute.
  */
 export function SpaceConnectivityBanner(props: { readonly spaceRef?: string }) {
   const i18n = useI18n()
@@ -43,16 +46,15 @@ export function SpaceConnectivityBanner(props: { readonly spaceRef?: string }) {
               'Rommet kan ikke nås akkurat nå. Meldingen din er ikke tapt: bruk «Prøv igjen», så sendes den én gang.',
               'The room cannot be reached right now. Your message is not lost: use "Try again" and it is sent once.',
             )}
-        <Show when={lastFresh()}>
-          {(fresh) => (
-            <>
-              {' '}
-              {i18n.tr('Sist oppdatert kl.', 'Last updated at')}{' '}
-              <time datetime={fresh().iso}>{fresh().short}</time>
-            </>
-          )}
-        </Show>
       </p>
+      <Show when={lastFresh()}>
+        {(fresh) => (
+          <p class="verevon-space-connectivity__fresh">
+            {i18n.tr('Sist oppdatert kl.', 'Last updated at')}{' '}
+            <time datetime={fresh().iso}>{fresh().short}</time>
+          </p>
+        )}
+      </Show>
     </Show>
   )
 }

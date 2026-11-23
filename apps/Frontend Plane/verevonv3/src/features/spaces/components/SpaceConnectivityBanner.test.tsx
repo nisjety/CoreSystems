@@ -135,6 +135,7 @@ describe('SpaceConnectivityBanner — last fresh time (WS01-S8)', () => {
   const at = Date.parse('2026-11-23T13:05:00Z')
   const iso = new Date(at).toISOString()
   const shortTime = formatTurnTime(iso, { locale: 'no' })?.short
+  const fresh = () => document.querySelector('.verevon-space-connectivity__fresh')
 
   it('says when the room last heard from its server, beside an offline sentence', async () => {
     noteRoomFresh('banner-room-offline', at)
@@ -145,9 +146,13 @@ describe('SpaceConnectivityBanner — last fresh time (WS01-S8)', () => {
     flush()
     const banner = await screen.findByRole('status')
     expect(banner.textContent).toContain('Du er frakoblet')
-    expect(banner.textContent).toContain('Sist oppdatert kl.')
-    expect(banner.querySelector('time')?.getAttribute('datetime')).toBe(iso)
-    expect(banner.querySelector('time')?.textContent).toBe(shortTime)
+    // The time sits beside the live region, not in it, so a new minute is not announced again.
+    expect(banner.textContent).not.toContain('Sist oppdatert')
+    expect(banner.querySelector('time')).toBeNull()
+    expect(fresh()?.textContent).toContain('Sist oppdatert kl.')
+    expect(fresh()?.closest('[aria-live]')).toBeNull()
+    expect(fresh()?.querySelector('time')?.getAttribute('datetime')).toBe(iso)
+    expect(fresh()?.querySelector('time')?.textContent).toBe(shortTime)
   })
 
   it('says the same for an unreachable room', async () => {
@@ -158,7 +163,19 @@ describe('SpaceConnectivityBanner — last fresh time (WS01-S8)', () => {
     flush()
     const banner = await screen.findByRole('status')
     expect(banner.getAttribute('data-state')).toBe('unreachable')
-    expect(banner.querySelector('time')?.textContent).toBe(shortTime)
+    expect(fresh()?.querySelector('time')?.textContent).toBe(shortTime)
+  })
+
+  it('a room read after a failed send clears the unreachable sentence, so a newer time never sits beside it', async () => {
+    render(() => <SpaceConnectivityBanner spaceRef="banner-room-recovered" />)
+    noteSendTransportLost()
+    flush()
+    expect((await screen.findByRole('status')).getAttribute('data-state')).toBe('unreachable')
+    noteRoomFresh('banner-room-recovered', at + 60_000)
+    flush()
+    await waitFor(() => expect(screen.queryByRole('status')).toBeNull())
+    expect(fresh()).toBeNull()
+    expect(spaceConnectivity()).toBe('online')
   })
 
   it('shows no time for another room', async () => {
@@ -169,8 +186,7 @@ describe('SpaceConnectivityBanner — last fresh time (WS01-S8)', () => {
     flush()
     const banner = await screen.findByRole('status')
     expect(banner.textContent).toContain('Rommet kan ikke nås')
-    expect(banner.querySelector('time')).toBeNull()
-    expect(banner.textContent).not.toContain('Sist oppdatert')
+    expect(fresh()).toBeNull()
   })
 
   it('shows no time when no room is named', async () => {
@@ -179,7 +195,18 @@ describe('SpaceConnectivityBanner — last fresh time (WS01-S8)', () => {
     render(() => <SpaceConnectivityBanner />)
     noteSendTransportLost()
     flush()
-    const banner = await screen.findByRole('status')
-    expect(banner.querySelector('time')).toBeNull()
+    await screen.findByRole('status')
+    expect(fresh()).toBeNull()
+  })
+
+  it('keeps each room its own time, so another room heard from later does not blank this one', async () => {
+    noteRoomFresh('banner-room-kept', at)
+    noteRoomFresh('banner-room-later', at + 120_000)
+    flush()
+    render(() => <SpaceConnectivityBanner spaceRef="banner-room-kept" />)
+    noteSendTransportLost()
+    flush()
+    await screen.findByRole('status')
+    expect(fresh()?.querySelector('time')?.getAttribute('datetime')).toBe(iso)
   })
 })
