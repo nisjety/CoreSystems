@@ -1376,3 +1376,21 @@ latency removal optimization; a JetStream/durable-consumer revocation proof,
 restart across multiple replicas, and Control-Plane `resource_grants`
 consolidation remain release/staging work. Hydration never imports credentials;
 OAuth dispatch continues through capability-core's encrypted token resolver.
+
+## Space release note: owner document listing refused by default (2026-11-23)
+
+Owner ruling D11 from the Space W3 decisions (`.plan-work/space-build/w3-decisions.md`: ship as a release item, release note only). The default was set by W3-FIX-8 (`4fa05ba6e`). This note supersedes the `OWNER_LIST_SPACE_REFUSE` row of `docs/plans/model-plane-coding-complete-2026-11-11.md`, which still shows the old default `false`.
+
+- **What changes for Space turns.** A Space-scoped turn no longer lists the organisation's document titles. In the inline loop (model-gateway), `knowledge_list_documents` is removed from the tools offered to a Space turn, and a call to it is refused before any Data Plane request. In the Do loop (execution-core), a call is refused before its arguments are read and before any RPC. The flag governs only this inventory read. The inline loop's other organisation-wide knowledge reads (`knowledge_search`, `knowledge_graph_search`, `knowledge_wiki_search`, `knowledge_contradictions`) stay withheld from Space turns under their own rule (SD-22, W3-FIX-7), which this flag does not change.
+- **Default.** `OWNER_LIST_SPACE_REFUSE` is `true`, the fail-closed choice from plan OD-06 (`docs/plans/model-plane-open-decisions.md`). `apps/Model Plane/deploy/docker-compose.yml` and `apps/Model Plane/deploy/docker-compose.production.yml` set `${OWNER_LIST_SPACE_REFUSE:-true}` on model-gateway and execution-core. The flag registry (`apps/Control Plane/flag-registry/flag-registry.json`) records `default` and `codeDefault` as `true`.
+- **Opt-out.** Only the literal value `false` turns the refusal off, and then Space turns list the organisation-wide inventory again. Unset, empty, `true`, `1`, `TRUE` and a padded ` false` keep the refusal on. Both live readers follow this rule: `owner_list_space_refuse_on` in model-gateway's `src/tool_loop.rs` and `space_refuse_enabled` in execution-core's `src/owner_reads.rs`.
+- **Operators.** Keep the switch on (the default) before `MODEL_ACTION_ADMISSION=table` is set in any Space-capable deployment; the rollout runbook (`apps/Model Plane/docs/runbooks/space-self-api-rollout.md`) requires that order. The runbook's production value is `true`. To restore the organisation-wide listing, set `OWNER_LIST_SPACE_REFUSE=false` in the environment that Compose interpolates. Both services read it from there, and it reintroduces org-wide document titles into Space turns.
+- **Scope.** The default narrows what a Space turn can read. It grants nothing and widens no ACL.
+- **Verification (2026-11-23, branch `space-w3`).**
+  - `go test -run TestOwnerListSpaceRefuse -count=1 ./...` in `apps/Control Plane/flag-registry`: PASS (`TestOwnerListSpaceRefuseShipsOnByDefault`).
+  - `cargo test -p model-gateway --lib owner_list_space_refuse_is_off_only_for_the_literal_false`: PASS.
+  - `cargo test -p model-gateway --test owner_list_space_refuse_compose_test`: PASS, 3 of 3.
+  - `cargo test -p execution-core --lib space_switch_parse`: FAIL, 1 test. See the first known gap below.
+- **Known gaps (not closed by this note).**
+  - The execution-core test `space_switch_parse::only_the_literal_true_switches_the_space_refusal_on` (`src/owner_reads.rs`) still expects the strict-true reading that W3-FIX-8 replaced. It fails on ` true`, `true` with a trailing newline, `TRUE`, `1`, empty and unset, all of which correctly keep the refusal on. The code is right; the test and its doc comment need updating. Owner: execution-core.
+  - `model-gateway` `src/sse.rs` `owner_list_space_refuse_enabled` (strict literal `true`) has no non-test callers and contradicts the rule above. Delete it with its test. Owner: model-gateway.
