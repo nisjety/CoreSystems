@@ -37,3 +37,17 @@ export async function getSpaceFeatures(): Promise<SpaceFeatureFlags> {
   }
   return flags
 }
+
+/**
+ * The palette's switch: `features.command_palette` as the gateway states it (WS13-S6, DEPTH-WS13-S6-1).
+ * `undefined` when the read fails or the gateway names no `command_palette` key (an older gateway), so the
+ * build default stays in place. Presentation only, never an authorization input.
+ */
+export async function getCommandPaletteFeature(): Promise<boolean | undefined> {
+  try {
+    const flags = await getSpaceFeatures()
+    return 'command_palette' in flags ? flags.command_palette === true : undefined
+  } catch {
+    return undefined
+  }
+}

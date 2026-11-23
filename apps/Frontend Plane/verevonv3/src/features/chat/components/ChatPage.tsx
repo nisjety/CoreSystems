@@ -652,10 +652,11 @@ export default function ChatPage() {
   useChatShortcuts(chatShortcutActions)
 
   // Registered while the page is mounted, so its shortcuts appear in the palette and the shortcut sheet only there.
+  // It runs again when the palette flag changes, so a gateway answer that lands after mount still registers them.
   createEffect(
-    () => undefined,
-    () => {
-      if (!commandPaletteEnabled()) return undefined
+    () => commandPaletteEnabled(),
+    (enabled) => {
+      if (!enabled) return undefined
       return registerChatCommands(chatShortcutActions)
     },
   )

@@ -137,19 +137,29 @@ export function __resetCommandsForTests(): void {
 
 /**
  * Rollout switch for the palette (`space_command_palette_ui`). Presentation
- * only, never an authorization input. Until the gateway's
- * `GET /api/v1/spaces/features` carries `command_palette` (WS13-S3), the build
- * flag `VITE_SPACE_COMMAND_PALETTE_UI` decides: '1' on, '0' off, unset means on
- * in dev and off in production. `setCommandPaletteFeature` lets the features
- * route override it later without another change here.
+ * only, never an authorization input. The gateway's `GET /api/v1/spaces/features`
+ * carries `command_palette` (WS13-S3); the shell reads it once at boot and passes
+ * it here (DEPTH-WS13-S6-1). Until that answer lands the build flag
+ * `VITE_SPACE_COMMAND_PALETTE_UI` decides: '1' on, '0' off, unset means on in
+ * dev and off in production.
+ *
+ * The value is a plain variable, so a read straight after a write is current
+ * (Solid applies signal writes at flush). The version signal tells the readers
+ * that track the switch (the palette host, the chat commands, the palette's
+ * JSX) to run again when the answer changes, so an answer that lands after
+ * mount still brings the palette and its hotkeys up, or puts the old dialog back.
  */
 let featureOverride: boolean | undefined
+const [featureVersion, setFeatureVersion] = createSignal(0)
 
 export function setCommandPaletteFeature(enabled: boolean | undefined): void {
+  if (featureOverride === enabled) return
   featureOverride = enabled
+  setFeatureVersion((value) => value + 1)
 }
 
 export function commandPaletteEnabled(): boolean {
+  featureVersion()
   if (featureOverride !== undefined) return featureOverride
   const raw = import.meta.env.VITE_SPACE_COMMAND_PALETTE_UI
   if (raw === '1') return true

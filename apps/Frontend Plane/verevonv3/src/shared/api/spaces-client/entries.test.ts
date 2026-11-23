@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { getSpaceFeatures, resolveSpaceEntry } from './entries'
+import { getCommandPaletteFeature, getSpaceFeatures, resolveSpaceEntry } from './entries'
 
 type FetchCall = { url: string; init: RequestInit | undefined }
 
@@ -62,5 +62,24 @@ describe('getSpaceFeatures (WS13-S4a)', () => {
       thread_fork: true,
     })
     expect(calls[0]?.url.endsWith('/api/v1/spaces/features')).toBe(true)
+  })
+})
+
+describe('getCommandPaletteFeature (DEPTH-WS13-S6-1)', () => {
+  it('reports the gateway answer for command_palette, true or false', async () => {
+    stubFetch(200, { data: { features: { command_palette: true } } })
+    await expect(getCommandPaletteFeature()).resolves.toBe(true)
+    stubFetch(200, { data: { features: { command_palette: false } } })
+    await expect(getCommandPaletteFeature()).resolves.toBe(false)
+  })
+
+  it('answers undefined when the gateway names no command_palette key, so the build default stays', async () => {
+    stubFetch(200, { data: { features: { message_search: true } } })
+    await expect(getCommandPaletteFeature()).resolves.toBeUndefined()
+  })
+
+  it('answers undefined when the read fails, so the build default stays', async () => {
+    stubFetch(503, { error: { code: 'search_unavailable', message: 'unavailable', details: {} } })
+    await expect(getCommandPaletteFeature()).resolves.toBeUndefined()
   })
 })

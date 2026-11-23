@@ -39,6 +39,7 @@ import {
   type NavbarSearchResult,
   type ThemePayload,
 } from '@/shared/api/navbar-client'
+import { getCommandPaletteFeature } from '@/shared/api/spaces-client/entries'
 import { shouldShowWorkspaceAdminNavigation } from '@/shared/session/access'
 import { clearSession, getSession, loadSession } from '@/shared/session/session-store'
 import { useI18n, translateApiError } from '@/shared/i18n'
@@ -52,7 +53,7 @@ import './core-navbar-env-pill.css'
 import { homeOverviewLabel, parseHomeOverview } from '@/shared/actions/home-overview'
 import { CommandPalette } from '@/features/command/CommandPalette'
 import { ShortcutSheet } from '@/features/command/ShortcutSheet'
-import { commandPaletteEnabled, registerCommands, type CommandContext } from '@/features/command/command-registry'
+import { commandPaletteEnabled, registerCommands, setCommandPaletteFeature, type CommandContext } from '@/features/command/command-registry'
 import { createDefaultCommands } from '@/features/command/default-commands'
 import { installHotkeys } from '@/features/command/hotkeys'
 import { spaceRefFromPathname } from '@/features/command/palette-providers'
@@ -161,16 +162,33 @@ export function CoreNavbar(props: {
     setSheetOpen(false)
   }
 
+  // Runs again whenever the flag changes, so the palette and its hotkeys come up or go away when the gateway's
+  // answer lands, without a reload.
   createEffect(
-    () => undefined,
-    () => {
-      if (!commandPaletteEnabled()) return undefined
+    () => commandPaletteEnabled(),
+    (enabled) => {
+      if (!enabled) return undefined
       const dispose = registerCommands(createDefaultCommands({ deferSlash: shouldDeferGlobalSlashSearch }))
       const removeHotkeys = installHotkeys(commandContext)
       return () => {
         removeHotkeys()
         dispose()
       }
+    },
+  )
+
+  // DEPTH-WS13-S6-1: the gateway's `features.command_palette` is the production switch for the palette, its hotkeys
+  // (Ctrl/Cmd+F among them) and the platform slash commands. Read once when the shell mounts. An unknown answer (the
+  // read failed, or an older gateway names no such key) leaves the build default in place. The offline surfaces make
+  // no backend call.
+  createEffect(
+    () => undefined,
+    () => {
+      if (offline()) return undefined
+      void getCommandPaletteFeature().then((enabled) => {
+        if (enabled !== undefined) setCommandPaletteFeature(enabled)
+      })
+      return undefined
     },
   )
 
