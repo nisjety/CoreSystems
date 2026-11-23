@@ -40,6 +40,7 @@ services:
             SPACE_COMMAND_PALETTE_UI: "false"
             SPACE_THREAD_FORK_API: "false"
             SPACE_THREAD_SCOPE_RESOLVE: "false"
+            GATEWAY_CHAT_PROJECTS_ENABLED: "false"
             SPACE_ATTENTION_API: "false"
             SPACE_ATTENTION_UI: "false"
             SPACE_STATUS_API: "false"

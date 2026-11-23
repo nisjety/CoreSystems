@@ -57,7 +57,7 @@ fn every_phase_switch_is_declared_in_the_gateway_compose_block() {
 // the three ZDR ones above.
 
 /// Every switch the gateway reads that this phase added.
-const PHASE_SWITCHES: [&str; 11] = [
+const PHASE_SWITCHES: [&str; 13] = [
     "GATEWAY_ZDR_EFFECTIVE_POSTURE_ENABLED",
     "ZDR_WAIVER_UI_ENABLED",
     "SPACE_THREAD_SCOPE_RESOLVE",
@@ -69,11 +69,13 @@ const PHASE_SWITCHES: [&str; 11] = [
     "CREDENTIAL_BINDINGS_UI_ENABLED",
     "CHAT_MEDIA_TRANSCRIPTS_ENABLED",
     "CLIENT_ENV_IDENTITY",
+    "AUTH_STEP_UP_ROUTE_ENABLED",
+    "GATEWAY_CHAT_PROJECTS_ENABLED",
 ];
 
 #[test]
 fn every_strict_phase_switch_is_on_only_for_the_exact_word_true() {
-    let parsers: [(&str, fn(Option<&str>) -> bool); 8] = [
+    let parsers: [(&str, fn(Option<&str>) -> bool); 9] = [
         (
             "VEREVON_GATEWAY_CONTINUE_QUESTION_ENABLED",
             super::continue_question_form_from,
@@ -97,6 +99,7 @@ fn every_strict_phase_switch_is_on_only_for_the_exact_word_true() {
             super::chat_media_transcripts_from,
         ),
         ("CLIENT_ENV_IDENTITY", super::client_env_identity_from),
+        ("GATEWAY_CHAT_PROJECTS_ENABLED", super::chat_projects_from),
     ];
     for (name, parse) in parsers {
         assert!(parse(Some("true")), "{name}");

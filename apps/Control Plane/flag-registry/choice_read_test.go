@@ -17,12 +17,14 @@ type choiceReadPin struct {
 }
 
 var choiceReadPins = []choiceReadPin{
+	{"APPROVAL_STEP_UP_ENFORCED", ChoiceReadAnyCase, "model-gateway http_routes.rs: ApprovalStepUpGate::from_raw trims and lowercases shadow and enforce; any other value is off"},
 	{"CLIENT_VERSION_POLICY", ChoiceReadAnyCase, "gateway client_contract.rs: ClientVersionPolicy::parse trims and lowercases"},
 	{"CONTENT_WRITE_POLICY", ChoiceReadExact, "session-core write_policy.rs: enforce and report are exact; a padded off reads as off in the service and is refused here"},
 	{"CONTROL_PLANE_ENFORCEMENT", ChoiceReadAnyCase, "gateway config.rs: trims and lowercases (retrieval-engine reads the same name exactly; see the README)"},
 	{"CRAWL_APPROVAL_MODE", ChoiceReadAnyCase, "gateway domains/knowledge.rs: parse_crawl_approval_mode trims and lowercases"},
 	{"EXECUTION_CORE_SPACE_APPROVAL_GATE", ChoiceReadAnyCase, "execution-core space_gate.rs: GateMode::parse trims and lowercases"},
 	{"LETTA_TOOL_SEARCH_MODE", "", "capability-core lettatools client.go: TrimSpace, then an exact match against vector, fts and hybrid"},
+	{"LOOP_GUARD_MODE", ChoiceReadAnyCase, "model-gateway tool_loop.rs and execution-core agent.rs: LoopGuardMode::from_env_value trims and folds shadow and enforce; off matches exactly after trimming; any other value reads as shadow"},
 	{"MCP_DO_TOOLS", ChoiceReadExact, "execution-core mcp_gateway.rs: from_raw matches read and all exactly"},
 	{"MODEL_ACTION_ADMISSION", ChoiceReadExact, "capability-core model_action_view.go (os.Getenv) and execution-core ticket_tools.rs and owner_reads.rs: the literal table, exactly"},
 	{"MODEL_GATEWAY_AI_CHAT_METERING", ChoiceReadExact, "model-gateway http_routes.rs: AiChatMetering::parse matches service and all exactly, with no trimming"},

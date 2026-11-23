@@ -49,6 +49,8 @@ var exactSwitchPins = []exactSwitchPin{
 	{"SESSION_CORE_AUTHZ_DECISION_AUDIT", PlaneModel, SourceCode, "false"},
 	{"SESSION_CORE_ROUTING_CANDIDATES_ENABLED", PlaneModel, SourceCompose, "false"},
 	{"SESSION_CORE_SPACE_HISTORY_FLOOR", PlaneModel, SourceCompose, "false"},
+	{"SESSION_CORE_SPACE_MEMORY_DELETE_AUDIT", PlaneModel, SourceCompose, "false"},
+	{"SESSION_CORE_TODO_RECITATION_ENABLED", PlaneModel, SourceCompose, "false"},
 	{"SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED", PlaneModel, SourceCompose, "false"},
 	{"SESSION_CORE_TRACE_CONSUMER", PlaneModel, SourceCode, "false"},
 	{"SESSION_SPACE_MEMORY_ENABLED", PlaneModel, SourceCompose, "false"},

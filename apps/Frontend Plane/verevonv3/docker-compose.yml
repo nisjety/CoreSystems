@@ -281,6 +281,7 @@ services:
       MODEL_ENTITLEMENT_ADMIN_ENABLED: ${MODEL_ENTITLEMENT_ADMIN_ENABLED:-false}
       # EP-3 S8: save a document artifact version to knowledge from the Output panel. Only the literal `true`.
       CHAT_ARTIFACT_PROMOTE_ENABLED: ${CHAT_ARTIFACT_PROMOTE_ENABLED:-false}
+      GATEWAY_CHAT_PROJECTS_ENABLED: ${GATEWAY_CHAT_PROJECTS_ENABLED:-false}
       # W5 (F-t3-090): transcribe an audio upload into a private transcript document, POST /api/v1/chat/transcripts.
       # Only the literal `true` enables it; off, the route answers 404 media_transcripts_disabled. Zero Data Retention
       # callers are refused whatever this says.
@@ -296,12 +297,17 @@ services:
       CHAT_SNAPSHOTS_ENABLED: ${CHAT_SNAPSHOTS_ENABLED:-false}
       # Quarry v2 E4.6: the research run read and stop routes. Exact literal true, default off.
       CHAT_RESEARCH_RUNS: ${CHAT_RESEARCH_RUNS:-false}
+      # EP-9 O-23: the org's web domain rules also bind the BFF web search and every crawl start. Exact literal true, default off. Binds only when Model Gateway's WEB_DOMAIN_POLICY_MODE is enforce.
+      WEB_DOMAIN_POLICY_BFF: ${WEB_DOMAIN_POLICY_BFF:-false}
       # WS16-S6: stamps the viewer interface language on the model-bound body as the locale field. Off removes the field.
       CHAT_LOCALE_HINT: ${CHAT_LOCALE_HINT:-true}
       # W4-CC-8 (F-t3-057): the organisation's credential bindings (/api/v1/credential-bindings) and the custom REST
       # connector (/api/v1/connectors/custom-rest). Only the literal `true` enables them; off, they answer 404
       # credential_bindings_disabled. Pairs with the Ingestion Plane's CREDENTIAL_BINDINGS_ENABLED. Owners and admins only.
       CREDENTIAL_BINDINGS_UI_ENABLED: ${CREDENTIAL_BINDINGS_UI_ENABLED:-false}
+      AUTH_STEP_UP_ROUTE_ENABLED: ${AUTH_STEP_UP_ROUTE_ENABLED:-false}
+      # O-21: compliance org role accepted as a member role; owner, admin and compliance place and release legal holds. Exact literal true, default off.
+      ORG_COMPLIANCE_ROLE_ENABLED: ${ORG_COMPLIANCE_ROLE_ENABLED:-false}
       # W4-T7: the event trigger routes (/api/v1/event-triggers and its dry run). Only the literal true enables it; off, the routes are not mounted.
       EVENT_TRIGGERS_UI_ENABLED: ${EVENT_TRIGGERS_UI_ENABLED:-false}
       # Schedule contracts (DEC-16): only the literal true lets a create carry a stored-consent contract to Control.
@@ -581,6 +587,7 @@ services:
       VITE_ALLOW_DEV_AUTH_BYPASS: ${VITE_ALLOW_DEV_AUTH_BYPASS:-false}
       VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY:-}
       VITE_PLAN_EXECUTE_ENABLED: ${VITE_PLAN_EXECUTE_ENABLED:-false}
+      VITE_ORG_COMPLIANCE_ROLE: ${VITE_ORG_COMPLIANCE_ROLE:-false}
       VITE_DEEP_RESEARCH_PLAN_TURN: ${VITE_DEEP_RESEARCH_PLAN_TURN:-false}
       VITE_CHAT_PROJECTS_ENABLED: ${VITE_CHAT_PROJECTS_ENABLED:-false}
       # EP-6 S8: mounts the agent builder page at /agents/:agentId/edit. Only the literal `true`; pairs with

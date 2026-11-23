@@ -161,7 +161,7 @@ services:
       # by default everywhere, development included, and on only for the exact literal
       # true (the gateway's SPACE_REACTIONS_API is read the same way). Never an
       # authorization input.
-      SPACE_REACTIONS: ${SPACE_REACTIONS:-0}
+      SPACE_REACTIONS: ${SPACE_REACTIONS:-false}
       # WS11-S6 flag SPACE_ATTENTION_INGEST: apply Space attention events from the
       # MODEL_PLANE_SPACE_EVENTS durable. Off by default everywhere (never an
       # authorization input); set empty to acknowledge and drop events.
@@ -171,14 +171,24 @@ services:
       SPACE_ATTENTION_OUT_OF_APP: ${SPACE_ATTENTION_OUT_OF_APP:-0}
       NOTIFICATION_CORE_URL: ${NOTIFICATION_CORE_URL:-http://notification-core:3140}
       NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN: ${NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN:-}
-      # Space deletion re-drive flag SPACE_DELETION_HOLD_RELEASE: spaces:redriveModelDeletionAfterLegalHoldRelease
-      # re-asks the Model owner after its legal hold is lifted, and the trusted receipt path may leave a
-      # legal-hold block. Off by default everywhere; with it off a hold stays terminal, as before.
-      SPACE_DELETION_HOLD_RELEASE: ${SPACE_DELETION_HOLD_RELEASE:-0}
+      # Space deletion re-drive flag SPACE_DELETION_HOLD_RELEASE: the re-drive covers Model, Data and Ingestion owners,
+      # re-asking each one after its legal hold is lifted, and the trusted receipt path may leave a legal-hold block.
+      # Off by default everywhere; only the literal true turns it on. With it off a hold stays terminal, as before.
+      SPACE_DELETION_HOLD_RELEASE: ${SPACE_DELETION_HOLD_RELEASE:-false}
       # Space deletion flag SPACE_DELETION_PERMANENT_REFUSAL_PARK: on, a permanent owner refusal (400, 401, 403, 412)
-      # parks that owner's delivery as failed_permanent, which nothing re-arms yet, instead of retrying it. Off by
-      # default everywhere; with it off such a refusal releases for a retry, as before.
-      SPACE_DELETION_PERMANENT_REFUSAL_PARK: ${SPACE_DELETION_PERMANENT_REFUSAL_PARK:-0}
+      # parks that owner's delivery as failed_permanent. The re-drive covers Model, Data and Ingestion owners;
+      # failed_permanent rows are listed by listParkedDeletionOwnerDeliveries and re-armed by
+      # rearmParkedDeletionOwnerDelivery. Off by default everywhere; only the literal true turns it on. With it off
+      # such a refusal releases for a retry, as before.
+      SPACE_DELETION_PERMANENT_REFUSAL_PARK: ${SPACE_DELETION_PERMANENT_REFUSAL_PARK:-false}
+      # Space deletion flag SPACE_DELETION_AUTH_SWEEP: on, spaceDeletionAuthorization:sweepAuthorizationEvents re-drives an
+      # authorization claim whose worker died before its acknowledgement, and a claim that throws after it is released for
+      # retry. Off by default; only the literal true turns it on. Read at call time.
+      SPACE_DELETION_AUTH_SWEEP: ${SPACE_DELETION_AUTH_SWEEP:-false}
+      # Space delivery flag SPACE_DELIVERY_LEASE_SWEEP: on, spaces:sweepExpiredDeliveryLeases re-drives an expired claim on a
+      # Space deletion owner delivery, Space registration or recipient-audience registration whose worker died before its
+      # acknowledgement. Off by default everywhere; with it off such a claim waits for another run's claim, as before.
+      SPACE_DELIVERY_LEASE_SWEEP: ${SPACE_DELIVERY_LEASE_SWEEP:-false}
     # G49 (verevon-gap.md §8.33): mount the host `./convex/` directory so
     # the dev server (running `npx convex dev` per startup.sh) picks up
     # function changes without requiring an image rebuild. Without this

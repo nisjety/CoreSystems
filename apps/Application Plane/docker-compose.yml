@@ -168,7 +168,7 @@ services:
             SPACE_DM_OPEN: ${SPACE_DM_OPEN:-0}
             # WS12-S8 flag SPACE_REACTIONS: message reactions (ids, one emoji, a time).
             # Off by default everywhere; never an authorization input.
-            SPACE_REACTIONS: ${SPACE_REACTIONS:-0}
+            SPACE_REACTIONS: ${SPACE_REACTIONS:-false}
             # WS11-S6 flag SPACE_ATTENTION_INGEST: apply Space attention events from the
             # MODEL_PLANE_SPACE_EVENTS durable. Off by default everywhere (never an
             # authorization input); set empty to acknowledge and drop events.
@@ -856,6 +856,9 @@ services:
             NOTIFICATION_GDPR_SHARED_NATS_URL: nats://control-shared-nats:4222
             NOTIFICATION_GDPR_SHARED_NATS_USER: notification-core-gdpr
             NOTIFICATION_GDPR_SHARED_NATS_PASSWORD: ${NOTIFICATION_CORE_GDPR_NATS_PASSWORD:?NOTIFICATION_CORE_GDPR_NATS_PASSWORD is required}
+            # Organization and user erasure (F-f05-10): off by default and read as the literal "true". It rides the
+            # shared Control-Plane broker above and binds the notification-core-org-erasure durable (F-f05-11).
+            NOTIFICATION_ORG_ERASURE_ENABLED: ${NOTIFICATION_ORG_ERASURE_ENABLED:-false}
         depends_on:
             jetstream-provisioner:
                 condition: service_completed_successfully

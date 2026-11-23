@@ -41,6 +41,18 @@
       ]
     },
     {
+      "name": "AGENT_API_BUDGET_CHECK",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "O-18 / F-f10-23b: Agent API key turns are checked against the org's spend ceilings (cost-core budget check for apikey:<key_id>) before the model call. Off, a key turn is not budget-checked. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "model-gateway", "env": "AGENT_API_BUDGET_CHECK", "default": "false" }
+      ]
+    },
+    {
       "name": "AGENT_ASK_USER_ENABLED",
       "kind": "switch",
       "onLiteral": "true",
@@ -250,6 +262,20 @@
       ]
     },
     {
+      "name": "APPROVAL_STEP_UP_ENFORCED",
+      "kind": "choice",
+      "choiceRead": "anyCase",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "off",
+      "values": ["off", "shadow", "enforce"],
+      "purpose": "WS13-S5 / F-f03-14: off changes nothing; shadow counts a grant that lacks a fresh re-authentication for its cause and lets it through; enforce refuses it with step_up_required. Unknown values are off.",
+      "declarations": [
+        { "service": "model-gateway", "env": "APPROVAL_STEP_UP_ENFORCED", "default": "off" }
+      ],
+      "codePath": "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs"
+    },
+    {
       "name": "APPROVAL_WAIVER_REFUSE",
       "kind": "switch",
       "onLiteral": "true",
@@ -394,6 +420,20 @@
         { "service": "auth-core", "env": "AUTH_CORE_ZDR_EFFECTIVE_POSTURE_ENABLED", "default": "false" }
       ],
       "codePath": "apps/Control Plane/auth-core/src/auth/interactive-retention-policy.ts"
+    },
+    {
+      "name": "AUTH_STEP_UP_ROUTE_ENABLED",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "F-f03-15: the gateway's relay of Auth Core's password re-check behind a high-risk Model Plane approval (POST /api/v1/auth/step-up). Off, the route is not registered and answers 404. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "AUTH_STEP_UP_ROUTE_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
       "name": "AZURE_ANTHROPIC_ZDR_CONFIRMED",
@@ -592,6 +632,20 @@
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser_sites.rs"
     },
     {
+      "name": "BROWSER_SPACE_FLOOR_ENABLED",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "Space floor for the agent browser in the org-core browser-sites resolve (P2-cp-01): on, a Space that is not entitled, or whose floor is unreadable, is refused every host. Off, space_id is ignored. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "org-core", "env": "BROWSER_SPACE_FLOOR_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/org-core/internal/http/browser_sites_handlers.go"
+    },
+    {
       "name": "BROWSER_TAB_MENTIONS",
       "kind": "switch",
       "onLiteral": "true",
@@ -653,6 +707,17 @@
         { "service": "gateway", "env": "CHAT_ARTIFACT_PROMOTE_ENABLED", "default": "false" }
       ],
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
+      "name": "CHAT_ATTACHMENT_HOSTED_IMAGE_HOSTS",
+      "kind": "text",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "",
+      "purpose": "F-f01-12: comma-separated lower-case hosts a hosted image URL may name (*. and a domain for any subdomain). Set, the URL must be https, with no userinfo, no IP literal and a listed host, else attachment_encoding_invalid. Empty: any.",
+      "declarations": [
+        { "service": "model-gateway", "env": "CHAT_ATTACHMENT_HOSTED_IMAGE_HOSTS", "default": "" }
+      ]
     },
     {
       "name": "CHAT_DO_ATTACHMENTS_ENABLED",
@@ -987,6 +1052,19 @@
       "stage": "dark",
       "purpose": "ZDR-Z-03d: conversation-core's org-core reader uses the effective posture (retention_posture.effective_zdr) instead of the raw interactiveRetention.zdr flag. Only the literal true turns it on.",
       "codePath": "apps/Application Plane/conversation-core/conversation-core-go/internal/config/config.go"
+    },
+    {
+      "name": "COST_CORE_ACCEPT_API_KEY",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "O-18: cost-core admits an api_key principal on POST /api/v1/budget/check only, for its own key (user_id apikey:<key_id>). model-gateway reads the same literal for the key's own cost-core bearer. Off, refused. Only the literal true.",
+      "declarations": [
+        { "service": "cost-core", "env": "COST_CORE_ACCEPT_API_KEY", "default": "false" },
+        { "service": "model-gateway", "env": "COST_CORE_ACCEPT_API_KEY", "default": "false" }
+      ]
     },
     {
       "name": "COST_CORE_ALLOW_EPHEMERAL",
@@ -1453,6 +1531,30 @@
       ]
     },
     {
+      "name": "EXECUTION_PROMPT_SECTION_NAMES",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f08-16/F-f08-15: a run seeds its tagged authored sections, profile and memory as named system messages. The gateway needs MODEL_GATEWAY_PROMPT_SECTION_NAMES on to send them. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_PROMPT_SECTION_NAMES", "default": "false" }
+      ]
+    },
+    {
+      "name": "EXECUTION_SCREEN_INFERENCE_CREDENTIAL",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f04-12: a Do run's tool-result screening call may present the screening principal's classifier credential; off, none. Needs CONTENT_SAFETY_SCREEN_RPC and the gateway CONTENT_SAFETY_SEMANTIC_INLINE. Never ZDR. Only the literal true.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_SCREEN_INFERENCE_CREDENTIAL", "default": "false" }
+      ]
+    },
+    {
       "name": "EXECUTION_SHADOW_REVIEWER",
       "kind": "switch",
       "onLiteral": "true",
@@ -1501,6 +1603,20 @@
         { "service": "gateway", "env": "GATEWAY_AGENT_API_ENABLED", "default": "false" }
       ],
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_api.rs"
+    },
+    {
+      "name": "GATEWAY_CHAT_PROJECTS_ENABLED",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "WS18-S4: while off, a project start (first send of a chat in a Space, no thread_id) is refused with 404 chat_projects_disabled on every chat path; capabilities omit chat_projects. Flip with VITE_CHAT_PROJECTS_ENABLED. Literal true only.",
+      "declarations": [
+        { "service": "gateway", "env": "GATEWAY_CHAT_PROJECTS_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
       "name": "GATEWAY_RATE_CLASSES",
@@ -1816,6 +1932,17 @@
       "codePath": "apps/Ingestion Plane/integration-corev2/internal/config/config.go"
     },
     {
+      "name": "INTEGRATION_TOKEN_LEASE_PER_CONSUMER_AUTH",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "ingestion-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "F-f08-10: POST /internal/connectors/token takes the consumer from the presented key (INTEGRATION_TOKEN_LEASE_CONSUMER_KEYS), and the shared internal key no longer opens it. Off, unchanged. No keys, 401. Only the literal true.",
+      "codePath": "apps/Ingestion Plane/integration-corev2/internal/config/config.go"
+    },
+    {
       "name": "INTEGRATION_ZDR_EFFECTIVE_POSTURE_ENABLED",
       "kind": "switch",
       "onLiteral": "true",
@@ -1836,6 +1963,18 @@
       "purpose": "Isolated e2e marker for the dev-only gates. Each gate opens only when it and ALLOW_INSECURE_DEV_DEFAULTS are the literal 1: model-gateway (also ALLOW_UNVERIFIED_LEGACY_EVENTS), autocomplete-core, imports-core (also ALLOW_LEGACY_TENANT_KEY).",
       "devOnly": true,
       "codePath": "apps/Model Plane/rust/services/model-gateway/src/doc_indexed_consumer.rs"
+    },
+    {
+      "name": "LEARNING_PII_SCREEN_ENABLED",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f01-23: installs the PII and secret screen (learning.PIIScreen) on each learned skill candidate; a candidate with an e-mail, national id, card, IBAN, phone or secret is dropped, never redacted. Off, a no-op. Only the literal true.",
+      "declarations": [
+        { "service": "capability-core", "env": "LEARNING_PII_SCREEN_ENABLED", "default": "false" }
+      ]
     },
     {
       "name": "LEARNING_REVIEW_ENABLED",
@@ -1885,6 +2024,33 @@
       ]
     },
     {
+      "name": "LOOP_GUARD_MODE",
+      "kind": "choice",
+      "choiceRead": "anyCase",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "",
+      "values": ["", "off", "shadow", "enforce"],
+      "purpose": "WS25-S1/S2: unset or off builds no guard. shadow logs verdicts only; enforce reminds the model and ends a loop. shadow and enforce read in any case; any other value, OFF included, reads as shadow. Enforce only after shadow data (D2-824).",
+      "declarations": [
+        { "service": "execution-core", "env": "LOOP_GUARD_MODE", "default": "" },
+        { "service": "model-gateway", "env": "LOOP_GUARD_MODE", "default": "" }
+      ]
+    },
+    {
+      "name": "LOOP_GUARD_RESULT_AWARE",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "WS25-S2 (F-f05-08): with LOOP_GUARD_MODE on, a call whose result changed since its last run is progress, not a repeat or cycle, so polling is not stopped. Off keeps today's rules. Only the literal true turns it on; enable with enforce.",
+      "declarations": [
+        { "service": "execution-core", "env": "LOOP_GUARD_RESULT_AWARE", "default": "false" },
+        { "service": "model-gateway", "env": "LOOP_GUARD_RESULT_AWARE", "default": "false" }
+      ]
+    },
+    {
       "name": "MCP_APPS_ENABLED",
       "kind": "switch",
       "onLiteral": "true",
@@ -1927,6 +2093,19 @@
       "purpose": "Background DNS revalidator for MCP servers in capability-core. Only the exact value false turns it off.",
       "onDefaultReason": "Background revalidator on by default. No compose line sets it, so only the process environment can opt out.",
       "codePath": "apps/Model Plane/go/services/capability-core/cmd/main.go"
+    },
+    {
+      "name": "MCP_DO_ELICITATION",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "EP-4 S7: a Do run's MCP call may carry a server's form to the run's owner as a resume question. Needs the gateway's MCP_ELICITATION_ENABLED and AGENT_ASK_USER_RESUME_ENABLED; run one gateway replica (DEC-F08-06). Only the literal true.",
+      "declarations": [
+        { "service": "execution-core", "env": "MCP_DO_ELICITATION", "default": "false" }
+      ],
+      "codePath": "apps/Model Plane/rust/services/execution-core/src/mcp_gateway.rs"
     },
     {
       "name": "MCP_DO_TOOLS",
@@ -2289,6 +2468,19 @@
       "codePath": "apps/Model Plane/rust/services/model-gateway/src/budget.rs"
     },
     {
+      "name": "MODEL_GATEWAY_BUDGET_WINDOW_PER_CAP",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f02-04: the cost cap and the token cap are each measured over their own reset window, not the widest. Needs MODEL_GATEWAY_BUDGET_WINDOW on; deploy cost-core first. Off keeps the shared window. Only the literal true turns it on.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_BUDGET_WINDOW_PER_CAP", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_GATEWAY_BYO_GATEWAY",
       "kind": "switch",
       "onLiteral": "true",
@@ -2441,6 +2633,19 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_DO_RUN_CAP",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f04-08: a Do run states the smaller of the request and org token ceilings, and of a goal turn's remaining allowance. Execution-core holds it only with EXECUTION_RUN_TOKEN_CAP on. Off sends none. Only the literal true turns it on.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_DO_RUN_CAP", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_GATEWAY_EFFORT_LADDER",
       "kind": "switch",
       "onLiteral": "true",
@@ -2521,6 +2726,19 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_GOAL_SEGMENT_TOPUP",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f09-11: each /continue segment of a goal run debits its metered usage to the goal through session-core TopUpGoalTurn. Needs MODEL_GATEWAY_THREAD_GOALS_ENABLED and SESSION_CORE_THREAD_GOALS_ENABLED. Never for ZDR. Only the literal true.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_GOAL_SEGMENT_TOPUP", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_GATEWAY_GOAL_UNATTENDED_ENABLED",
       "kind": "switch",
       "onLiteral": "true",
@@ -2596,6 +2814,18 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_MODEL_ACCESS_FAIL_CLOSED",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f01-11: only the literal true makes an admission question inference-core cannot answer refuse the turn with model_entitlement_unavailable (503), before any row. Unimplemented and NotFound serve. Off, inference-core's pre-check decides.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_MODEL_ACCESS_FAIL_CLOSED", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_GATEWAY_MODEL_COUNCIL_ENABLED",
       "kind": "switch",
       "onLiteral": "true",
@@ -2646,6 +2876,18 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_PROMPT_SECTION_NAMES",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f08-16/F-f08-15: an Ask turn sends one named system message per authored source, and the profile and memory blocks carry section tags. A run also needs EXECUTION_PROMPT_SECTION_NAMES on. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_PROMPT_SECTION_NAMES", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_GATEWAY_QUARRY_ATTRIBUTION",
       "kind": "switch",
       "onLiteral": "true",
@@ -2655,6 +2897,18 @@
       "purpose": "Q4 E4.6 (062a): the gateway's web reads send x-request-id and, off ZDR, x-verevon-parent-run to Quarry so its traces join the chat run. Only the literal true.",
       "declarations": [
         { "service": "model-gateway", "env": "MODEL_GATEWAY_QUARRY_ATTRIBUTION", "default": "false" }
+      ]
+    },
+    {
+      "name": "MODEL_GATEWAY_QUEUED_UNDELIVERED_IDS",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f01-09: the chat stream's done frame names the accepted mid-run messages the loop never took (undelivered_client_message_ids), so the SPA resends those. Needs MODEL_GATEWAY_SEND_RECEIPTS on. Off, unchanged. Only the literal true.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_QUEUED_UNDELIVERED_IDS", "default": "false" }
       ]
     },
     {
@@ -3210,6 +3464,17 @@
       "codePath": "apps/Control Plane/user-core/internal/nats/runtime_auth.go"
     },
     {
+      "name": "NOTIFICATION_ORG_ERASURE_ENABLED",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "application-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "F-f05-10: on, a GDPR erasure of an organization, or of one user on subject user or user_anonymize, hard-deletes its notification-core rows, Web Push keys included. Off, nothing is erased. Only the literal true turns it on.",
+      "codePath": "apps/Application Plane/notification-core/internal/config/config.go"
+    },
+    {
       "name": "ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED",
       "kind": "switch",
       "onLiteral": "true",
@@ -3233,6 +3498,38 @@
       "declarations": [
         { "service": "capability-core", "env": "ORG_AGENT_POLICY_API", "default": "false" }
       ]
+    },
+    {
+      "name": "ORG_BROWSER_SITE_AUDIT_ENABLED",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "F-f06-11: org-core queues a content-free audit intent, in the same transaction, for each agent-browser site policy write and member choice write or delete. Off, nothing is queued; queued ones still publish. Only the literal true.",
+      "declarations": [
+        { "service": "org-core", "env": "ORG_BROWSER_SITE_AUDIT_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/org-core/internal/browsersites/audit.go"
+    },
+    {
+      "name": "ORG_COMPLIANCE_ROLE_ENABLED",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "O-21: org-core, user-core, auth-core, audit-core and the gateway accept compliance as a member role, and owner, admin and compliance may place and release legal holds. Off, compliance is refused as a role. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "org-core", "env": "ORG_COMPLIANCE_ROLE_ENABLED", "default": "false" },
+        { "service": "user-core", "env": "ORG_COMPLIANCE_ROLE_ENABLED", "default": "false" },
+        { "service": "auth-core", "env": "ORG_COMPLIANCE_ROLE_ENABLED", "default": "false" },
+        { "service": "audit-core", "env": "ORG_COMPLIANCE_ROLE_ENABLED", "default": "false" },
+        { "service": "gateway", "env": "ORG_COMPLIANCE_ROLE_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/org-core/internal/org/compliance_role.go"
     },
     {
       "name": "ORG_CORE_KEYS_ENABLED",
@@ -3583,6 +3880,19 @@
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
+      "name": "SANDBOX_MANAGER_OVERLAY_TOMBSTONES_ENABLED",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "off",
+      "purpose": "F-f05-16: SnapshotSandbox records a Space lease's deleted_paths as overlay tombstones and PromoteWorkspace deletes the Space row with compare-and-swap. Only the exact literal true enables it; off, deleted_paths is ignored.",
+      "declarations": [
+        { "service": "sandbox-manager", "env": "SANDBOX_MANAGER_OVERLAY_TOMBSTONES_ENABLED", "default": "off" }
+      ],
+      "codePath": "apps/Model Plane/go/services/sandbox-manager/cmd/main.go"
+    },
+    {
       "name": "SANDBOX_MANAGER_REQUIRE_RETENTION_CLAIM",
       "kind": "switch",
       "onLiteral": "true",
@@ -3594,6 +3904,33 @@
         { "service": "sandbox-manager", "env": "SANDBOX_MANAGER_REQUIRE_RETENTION_CLAIM", "default": "off" }
       ],
       "codePath": "apps/Model Plane/go/services/sandbox-manager/internal/authz/zdr_gate.go"
+    },
+    {
+      "name": "SANDBOX_MANAGER_SERVICE_THREAD_ERASE",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "F-f10-08: EraseThreadWorkspaceForRetention lets the retention sweeper erase a deleted thread's workspace rows and object prefix with a service credential. Only the exact literal true enables it; off, the call is refused.",
+      "declarations": [
+        { "service": "sandbox-manager", "env": "SANDBOX_MANAGER_SERVICE_THREAD_ERASE", "default": "false" }
+      ],
+      "codePath": "apps/Model Plane/go/services/sandbox-manager/cmd/main.go"
+    },
+    {
+      "name": "SANDBOX_MANAGER_THREAD_OWNER_CHECK",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "O-13: sandbox-manager asks session-core ResolveThreadOwner before every thread-scoped lease, read, write and erase (NOT_FOUND if not owner, UNAVAILABLE if unreachable) and sweeps workspaces of gone threads. Only the exact literal true.",
+      "declarations": [
+        { "service": "sandbox-manager", "env": "SANDBOX_MANAGER_THREAD_OWNER_CHECK", "default": "false" }
+      ],
+      "codePath": "apps/Model Plane/go/services/sandbox-manager/cmd/thread_owner.go"
     },
     {
       "name": "SANDBOX_THREAD_WORKSPACE_ENABLED",
@@ -3627,10 +3964,11 @@
     {
       "name": "SCIM_EDGE_ENABLED",
       "kind": "switch",
+      "onLiteral": "true",
       "owner": "frontend-plane",
       "source": "code",
       "default": "false",
-      "purpose": "WS05-S8: the public SCIM edge (/api/v1/scim/v2/*). It also needs ORG_CORE_SCIM_EDGE_TOKEN set to a secure secret, or it stays off. Only 1, true, yes or on turns it on.",
+      "purpose": "WS05-S8: the public SCIM edge (/api/v1/scim/v2/*). It also needs ORG_CORE_SCIM_EDGE_TOKEN set to a secure secret, or it stays off. Only the literal true turns it on; 1, yes and on leave it off.",
       "declarations": [
         { "service": "gateway", "env": "SCIM_EDGE_ENABLED", "default": "false" }
       ],
@@ -3648,6 +3986,32 @@
         { "service": "session-core", "env": "SESSION_AGENT_MEMORY_ENABLED", "default": "false" }
       ],
       "codePath": "apps/Model Plane/rust/services/session-core/src/space_memory.rs"
+    },
+    {
+      "name": "SESSION_CORE_AGENT_MEMORY_RUN_BOUND",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "EP-8 S10 (F-f08-11): an agent's own memory save must name the run that issued it, and only that live wake run writes; an empty run_id writes nothing. Needs SESSION_AGENT_MEMORY_ENABLED. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "session-core", "env": "SESSION_CORE_AGENT_MEMORY_RUN_BOUND", "default": "false" }
+      ],
+      "codePath": "apps/Model Plane/rust/services/session-core/src/space_memory.rs"
+    },
+    {
+      "name": "SESSION_CORE_APPROVAL_DECISION_RECORD",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f03-16: a decided approval reads back its content-free decision record (source, scope, rule id, step-up, cause code), and the gateway projects it as Approval.decision. Off, approvals read as before. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "session-core", "env": "SESSION_CORE_APPROVAL_DECISION_RECORD", "default": "false" }
+      ],
+      "codePath": "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs"
     },
     {
       "name": "SESSION_CORE_APPROVAL_MEMBER_DECIDE",
@@ -3673,6 +4037,19 @@
       "codePath": "apps/Model Plane/rust/services/session-core/src/audit_publisher.rs"
     },
     {
+      "name": "SESSION_CORE_APPROVAL_STEP_UP_CAUSE",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "WS13-S5 (F-f03-12): session-core stamps step_up_required on approval causes in the v1 step-up set, and the chat posture never grants a stamped cause. Rollout: APPROVAL_STEP_UP_ENFORCED shadow, then this, then enforce. Only the literal true.",
+      "declarations": [
+        { "service": "session-core", "env": "SESSION_CORE_APPROVAL_STEP_UP_CAUSE", "default": "false" }
+      ],
+      "codePath": "apps/Model Plane/rust/crates/mp-contracts/src/approval_cause.rs"
+    },
+    {
       "name": "SESSION_CORE_AUTHZ_DECISION_AUDIT",
       "kind": "switch",
       "onLiteral": "true",
@@ -3681,6 +4058,31 @@
       "default": "false",
       "purpose": "Writes an authz_decision audit event when DecideApproval records who decided an approval. Only the exact literal true turns it on; with it off, nothing is written.",
       "codePath": "apps/Model Plane/rust/services/session-core/src/audit_publisher.rs"
+    },
+    {
+      "name": "SESSION_CORE_CRASH_PARK_NOTICE_ENABLED",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "O-02: tell the person once a crash-parked run has waited SESSION_CORE_CRASH_PARK_NOTICE_SECONDS (one RUN_ATTENTION per park). Needs SESSION_CORE_CRASH_PARK_ENABLED and SESSION_CORE_ATTENTION_EVENTS_ENABLED. Literal true.",
+      "declarations": [
+        { "service": "session-core", "env": "SESSION_CORE_CRASH_PARK_NOTICE_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Model Plane/rust/services/session-core/src/loop_checkpoint.rs"
+    },
+    {
+      "name": "SESSION_CORE_CRASH_PARK_NOTICE_SECONDS",
+      "kind": "text",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "14400",
+      "purpose": "O-02: the wait before the crash-park notice, in seconds (four hours by default), clamped to 600 up to SESSION_CORE_PARK_TTL_SECONDS. Read only while the notice switch is on; a value that is not a whole number reads as the default.",
+      "declarations": [
+        { "service": "session-core", "env": "SESSION_CORE_CRASH_PARK_NOTICE_SECONDS", "default": "14400" }
+      ],
+      "codePath": "apps/Model Plane/rust/services/session-core/src/loop_checkpoint.rs"
     },
     {
       "name": "SESSION_CORE_GDPR_THREAD_MEMORY_ERASURE",
@@ -3708,6 +4110,19 @@
       "codePath": "apps/Model Plane/rust/services/session-core/src/routing_policy_grpc.rs"
     },
     {
+      "name": "SESSION_CORE_SCHEDULED_OUTCOME_EVENTS_ENABLED",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f05-05: a finished scheduled run writes one content-free SCHEDULED_RUN_OUTCOME outbox row (ids and one closed outcome word), persistent runs only, in the transaction that settles it. Only the literal true turns it on.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "session-core", "env": "SESSION_CORE_SCHEDULED_OUTCOME_EVENTS_ENABLED", "default": "false" }
+      ]
+    },
+    {
       "name": "SESSION_CORE_SPACE_HISTORY_FLOOR",
       "kind": "switch",
       "onLiteral": "true",
@@ -3719,6 +4134,32 @@
         { "service": "session-core", "env": "SESSION_CORE_SPACE_HISTORY_FLOOR", "default": "false" }
       ],
       "codePath": "apps/Model Plane/rust/services/session-core/src/space/audience_window.rs"
+    },
+    {
+      "name": "SESSION_CORE_SPACE_MEMORY_DELETE_AUDIT",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "EP-8 S7: writes a content-free space_memory_deleted audit row (ids and closed codes only) in the same transaction as a manager's delete of a Space memory row, and refuses the delete if it cannot be written. Only the literal true.",
+      "declarations": [
+        { "service": "session-core", "env": "SESSION_CORE_SPACE_MEMORY_DELETE_AUDIT", "default": "false" }
+      ],
+      "codePath": "apps/Model Plane/rust/services/session-core/src/audit_publisher.rs"
+    },
+    {
+      "name": "SESSION_CORE_TODO_RECITATION_ENABLED",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "WS02-S12: recites a plan's todos into the Volatile prompt tier, for the plan's owner only, bounded to 40 todos and 6000 characters. Off by default: no model-facing todo producer exists yet. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "session-core", "env": "SESSION_CORE_TODO_RECITATION_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Model Plane/rust/services/session-core/src/orchestration_store.rs"
     },
     {
       "name": "SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED",
@@ -3864,7 +4305,8 @@
       "default": "false",
       "purpose": "EP-11 S9: the org's ext.skills policy is read. Needs ORG_AGENT_POLICY_MODE=enforce, or every authored skill is withheld. Only the literal true turns it on.",
       "declarations": [
-        { "service": "model-gateway", "env": "SKILL_EXT_POLICY_ENFORCED", "default": "false" }
+        { "service": "model-gateway", "env": "SKILL_EXT_POLICY_ENFORCED", "default": "false" },
+        { "service": "capability-core", "env": "SKILL_EXT_POLICY_ENFORCED", "default": "false" }
       ]
     },
     {
@@ -3976,13 +4418,24 @@
       "codePath": "apps/Control Plane/user-core/internal/spaces/decision_audit.go"
     },
     {
+      "name": "SPACE_DELETION_AUTH_SWEEP",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "application-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "Space deletion: on, an authorization claim that died before its acknowledgement is re-driven every 5 minutes, and a claim that throws after it is released for retry. Off, it waits for another run. Only the literal true turns it on.",
+      "codePath": "apps/Application Plane/convex-core/convex/spaceDeletionAuthorization.ts"
+    },
+    {
       "name": "SPACE_DELETION_HOLD_RELEASE",
       "kind": "switch",
       "onLiteral": "true",
       "owner": "application-plane",
       "source": "code",
       "default": "false",
-      "purpose": "Lets a space deletion re-drive after a legal-hold release (redriveModelDeletionAfterLegalHoldRelease). Read at call time. Only the literal true turns it on; off, a legal-hold block is terminal.",
+      "purpose": "Lets a space deletion re-drive after a legal-hold release, for the Model, Data and Ingestion owners. Read at call time. Only the literal true turns it on; off, a legal-hold block is terminal.",
       "codePath": "apps/Application Plane/convex-core/convex/spaceDeletionReceipts.ts"
     },
     {
@@ -3993,8 +4446,19 @@
       "source": "code",
       "default": "false",
       "stage": "dark",
-      "purpose": "Space deletion: on, a permanent owner refusal (400, 401, 403, 412) parks that owner's delivery as failed_permanent, which nothing re-arms yet. Off, such a refusal retries as before. Only the literal true turns it on.",
+      "purpose": "Permanent refusals park as failed_permanent. Re-drive covers Model, Data and Ingestion. failed_permanent rows are listed by listParkedDeletionOwnerDeliveries, re-armed by rearmParkedDeletionOwnerDelivery. Only the literal true turns it on.",
       "codePath": "apps/Application Plane/convex-core/convex/spaceDeletionReceipts.ts"
+    },
+    {
+      "name": "SPACE_DELIVERY_LEASE_SWEEP",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "application-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "Space delivery: on, spaces:sweepExpiredDeliveryLeases re-drives an expired claim on a Space deletion, registration or audience delivery. Off, such a claim waits for another run's claim. Only the literal true turns it on.",
+      "codePath": "apps/Application Plane/convex-core/convex/spaces.ts"
     },
     {
       "name": "SPACE_DM_REGISTRATION",
@@ -4147,6 +4611,16 @@
       "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
     },
     {
+      "name": "SPACE_REACTIONS",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "application-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "WS12-S8: the Convex half of the gateway's SPACE_REACTIONS_API pair, message reactions (ids, one emoji, a time). Off, writes are refused and reads return nothing. Never an authorization input. Only the literal true turns it on.",
+      "codePath": "apps/Application Plane/convex-core/convex/spaceReactions.ts"
+    },
+    {
       "name": "SPACE_REACTIONS_API",
       "kind": "switch",
       "onLiteral": "true",
@@ -4293,6 +4767,20 @@
       "purpose": "EP-9 E2: per-tier sandbox egress on the Space capability decision. Off, the decision keeps the v1 form and the egress ceiling columns are neither read nor written. A rollout control. Only the literal true turns it on.",
       "declarations": [
         { "service": "user-core", "env": "SPACE_SANDBOX_EGRESS_TIERS", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
+    },
+    {
+      "name": "SPACE_SKILL_WRITE_DECISIONS",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "F-f10-18: user-core signs model.space.skill.write decisions (skill:write, 60 s) for a shared Space's manager or owner to write a Space skill; off, 404. Needs capability-core SKILL_SPACE_WRITE_VERIFY. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "user-core", "env": "SPACE_SKILL_WRITE_DECISIONS", "default": "false" }
       ],
       "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
     },
@@ -4703,6 +5191,31 @@
       "codePath": "apps/Frontend Plane/verevonv3/src/features/automations/components/AutomationsHub.tsx"
     },
     {
+      "name": "VITE_MODEL_DATA_USE_LABEL",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "F-f08-17 (DEC-F08-03): the model picker's data-use line (zero data retention and training statements). Off until counsel approves the English and Norwegian copy; the owner then turns it on. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/src/shared/components/AiModelPicker.tsx"
+    },
+    {
+      "name": "VITE_ORG_COMPLIANCE_ROLE",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "O-21 SPA twin of ORG_COMPLIANCE_ROLE_ENABLED: offers the compliance role in the member list and invitation role pickers. Flip it together with the server switch. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "frontend", "env": "VITE_ORG_COMPLIANCE_ROLE", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/src/features/settings/lib/org-roles.ts"
+    },
+    {
       "name": "VITE_PLAN_EXECUTE_ENABLED",
       "kind": "switch",
       "onLiteral": "true",
@@ -4714,6 +5227,18 @@
         { "service": "frontend", "env": "VITE_PLAN_EXECUTE_ENABLED", "default": "false" }
       ],
       "codePath": "apps/Frontend Plane/verevonv3/src/shared/chat/plan-execute.ts"
+    },
+    {
+      "name": "VITE_SCHEDULE_DELEGABLE_TOOLS_ENABLED",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "orgOverridable": false,
+      "purpose": "F-f05-20: the schedule consent card offers the org's delegable read tools (asked once per tab) and Renew approval renews a lapsed schedule approval in place. Off, no tool is offered and renewal makes a new schedule. Only the literal true.",
+      "codePath": "apps/Frontend Plane/verevonv3/src/shared/api/schedule-from-chat.ts"
     },
     {
       "name": "VITE_SHELL_TOASTS",
@@ -4746,6 +5271,20 @@
       "purpose": "Background watch sweeper in capability-core. Only the exact value false turns it off.",
       "onDefaultReason": "Background sweeper on by default. No compose line sets it, so only the process environment can opt out.",
       "codePath": "apps/Model Plane/go/services/capability-core/cmd/main.go"
+    },
+    {
+      "name": "WEB_DOMAIN_POLICY_BFF",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "EP-9 O-23: the org's web domain rules also bind the BFF's web search, the single-page URL query and every crawl start. Off, no domain check is asked. Binds only when WEB_DOMAIN_POLICY_MODE is enforce. Only the literal true.",
+      "declarations": [
+        { "service": "gateway", "env": "WEB_DOMAIN_POLICY_BFF", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
       "name": "WEB_POLICY_CLAIM_ENABLED",
@@ -4887,7 +5426,6 @@
     "EXECUTION_SCHEDULED_AGENT_ENABLED",
     "LEARN_COMMAND_ENABLED",
     "LETTA_TOOL_SEARCH_ALLOW_INSECURE_LOOPBACK",
-    "LOOP_GUARD_MODE",
     "MEMORY_CONTROLS_ENABLED",
     "MODEL_ENTITLEMENT_MODE",
     "MODEL_GATEWAY_LOOP_PARKING_ENABLED",
@@ -4923,7 +5461,6 @@
     "AGENT_MEMORY_DISABLE_AUTH",
     "AGENT_MEMORY_TOPIC_EXTRACTION",
     "ANTHROPIC_NATIVE_CONTEXT_MANAGEMENT",
-    "APPROVAL_STEP_UP_ENFORCED",
     "BROWSER_AGENT_POLICY_ENFORCED",
     "BROWSER_BROKER_SITE_POLICY",
     "CODE_INTERPRETER_ENFORCEMENT_REPORT",

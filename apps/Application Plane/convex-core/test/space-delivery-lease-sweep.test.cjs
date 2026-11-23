@@ -440,10 +440,10 @@ test('startup.sh hands SPACE_DELIVERY_LEASE_SWEEP to Convex, defaulting to the w
   );
 });
 
-test('the convex-gateway block of the convex-core compose passes SPACE_DELIVERY_LEASE_SWEEP once, with the off default 0', () => {
+test('the convex-gateway block of the convex-core compose passes SPACE_DELIVERY_LEASE_SWEEP once, with the off default false', () => {
   const compose = readTextFile(path.join(CONVEX_CORE, 'docker-compose.yml'));
   const lines = composeServiceLines(compose, 'convex-gateway').filter((line) => /^ {6}SPACE_DELIVERY_LEASE_SWEEP:/.test(line));
-  assert.deepEqual(lines, ['      SPACE_DELIVERY_LEASE_SWEEP: ${SPACE_DELIVERY_LEASE_SWEEP:-0}']);
+  assert.deepEqual(lines, ['      SPACE_DELIVERY_LEASE_SWEEP: ${SPACE_DELIVERY_LEASE_SWEEP:-false}']);
 });
 
 test('the flag registry holds one dark switch row for SPACE_DELIVERY_LEASE_SWEEP that reads only the literal true and names spaces.ts', () => {

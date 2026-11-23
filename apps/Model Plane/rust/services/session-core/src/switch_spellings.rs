@@ -21,6 +21,8 @@ use tracing::warn;
 pub const EXACT_SWITCHES: &[(&str, &str)] = &[
     (crate::audit_publisher::AUTHZ_DECISION_AUDIT_ENV, "true"),
     (crate::audit_publisher::APPROVAL_NOTIFY_ENV, "true"),
+    (crate::audit_publisher::SPACE_MEMORY_DELETE_AUDIT_ENV, "true"),
+    (crate::orchestration_store::TODO_RECITATION_ENV, "true"),
     (crate::dream_extractor::LLM_EXTRACTION_ENV, "true"),
     (crate::memory_grounding::GROUNDING_ENABLED_ENV, "true"),
     (crate::space::attention_outbox::EMIT_ENV, "true"),
