@@ -86,6 +86,30 @@ func persistentZDRReason(claims *authctx.Claims, input *model.CreateDocumentInpu
 	return ""
 }
 
+// zdrDurableMutationCode and zdrDurableMutationMessage are the Model Plane
+// catalogue's refusal of a durable write under zero data retention
+// (zdr_refusal.rs DURABLE_MUTATION_FORBIDDEN). The message is the catalogue's
+// English fallback; a client matches the code, and the SPA owns the wording.
+const (
+	zdrDurableMutationCode    = "zdr_durable_mutation_forbidden"
+	zdrDurableMutationMessage = "Zero Data Retention credentials cannot create, change, or delete durable state."
+)
+
+// writeZDRDurableMutationRefusal answers a durable write that zero data retention
+// refuses. The status is the one this route already returned (403). The body is
+// the typed envelope {error:{code,message,retryable,action,details}}; the catalogue
+// fixes retryable false and action none for this code. reason names the
+// fail-closed rule that applied. It is static policy text, never document content.
+func writeZDRDurableMutationRefusal(w http.ResponseWriter, reason string) {
+	writeJSON(w, http.StatusForbidden, map[string]any{"error": map[string]any{
+		"code":      zdrDurableMutationCode,
+		"message":   zdrDurableMutationMessage,
+		"retryable": false,
+		"action":    "none",
+		"details":   map[string]any{"reason": reason},
+	}})
+}
+
 func lifecycleEventFactory(userID string) repo.OutboxEventFactory {
 	return func(document *model.Document, updated bool) (string, []byte, error) {
 		if updated {
@@ -269,6 +293,10 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 	input.OrgID = orgID
 	spaceImportAuthority, err := verifySpaceImportDecision(r)
 	if err != nil {
+		if errors.Is(err, errSpaceImportDecisionZDR) {
+			writeZDRDurableMutationRefusal(w, errSpaceImportDecisionZDR.Error())
+			return
+		}
 		writeError(w, http.StatusForbidden, "invalid Space import authority")
 		return
 	}
@@ -334,7 +362,7 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// ZDR enforcement at the receive boundary: this durable-document API cannot
 	// create even a metadata row under an ephemeral-only policy.
 	if reason := persistentZDRReason(verifiedClaims(r), &input); reason != "" {
-		writeError(w, http.StatusForbidden, reason)
+		writeZDRDurableMutationRefusal(w, reason)
 		return
 	}
 

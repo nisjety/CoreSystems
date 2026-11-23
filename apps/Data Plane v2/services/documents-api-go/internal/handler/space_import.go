@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -19,6 +20,12 @@ const (
 	spaceImportDecisionSchema   = "sha256:ingestion-import-v1"
 	maxSpaceImportDecisionBytes = 16 * 1024
 )
+
+// errSpaceImportDecisionZDR refuses a signed decision that Control issued under
+// zero data retention. It is a zero-retention refusal, so the handler answers it
+// with the catalogue's durable-mutation envelope rather than a generic authority
+// failure.
+var errSpaceImportDecisionZDR = errors.New("Space import decision was issued under zero data retention")
 
 type spaceImportDecisionClaims struct {
 	DecisionRef               string    `json:"decision_ref"`
@@ -139,7 +146,10 @@ func (d spaceImportDecisionClaims) validate(orgID string, now time.Time) error {
 			return fmt.Errorf("incomplete Space import decision")
 		}
 	}
-	if d.OrgID != orgID || d.ServiceAudience != spaceImportDecisionAudience || d.ActionID != spaceImportDecisionAction || d.ActionSchemaHash != spaceImportDecisionSchema || d.ZeroDataRetention || d.IssuedAt.After(now.Add(time.Minute)) || !d.ExpiresAt.After(now) || d.AuthorityRevision <= 0 || d.MembershipRevision <= 0 || d.PrivacyRevision <= 0 || d.RecipientAudienceRevision <= 0 || d.EntitlementRevision <= 0 {
+	if d.ZeroDataRetention {
+		return errSpaceImportDecisionZDR
+	}
+	if d.OrgID != orgID || d.ServiceAudience != spaceImportDecisionAudience || d.ActionID != spaceImportDecisionAction || d.ActionSchemaHash != spaceImportDecisionSchema || d.IssuedAt.After(now.Add(time.Minute)) || !d.ExpiresAt.After(now) || d.AuthorityRevision <= 0 || d.MembershipRevision <= 0 || d.PrivacyRevision <= 0 || d.RecipientAudienceRevision <= 0 || d.EntitlementRevision <= 0 {
 		return fmt.Errorf("Space import decision does not authorize this write")
 	}
 	for _, permission := range d.Permissions {
