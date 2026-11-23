@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/attention.proto.
  */
 export const file_model_plane_v1_attention: GenFile = /*@__PURE__*/
-  fileDesc("Ch5tb2RlbF9wbGFuZS92MS9hdHRlbnRpb24ucHJvdG8SDm1vZGVsX3BsYW5lLnYxIs0BCg1BdHRlbnRpb25JdGVtEhEKCXRocmVhZF9pZBgBIAEoCRItCgVzdGF0ZRgCIAEoDjIeLm1vZGVsX3BsYW5lLnYxLkF0dGVudGlvblN0YXRlEi8KBnJlYXNvbhgDIAEoDjIfLm1vZGVsX3BsYW5lLnYxLkF0dGVudGlvblJlYXNvbhIpCgVzaW5jZRgEIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDgoGdW5zZWVuGAUgASgIEg4KBnJ1bl9pZBgGIAEoCSJFCg9BdHRlbnRpb25Db3VudHMSEQoJbmVlZHNfeW91GAEgASgFEg8KB3dvcmtpbmcYAiABKAUSDgoGdW5zZWVuGAMgASgFIkYKFExpc3RBdHRlbnRpb25SZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIPCgd1c2VyX2lkGAIgASgJEg0KBWxpbWl0GAMgASgFIp8BChVMaXN0QXR0ZW50aW9uUmVzcG9uc2USDwoHZW5hYmxlZBgBIAEoCBIsCgVpdGVtcxgCIAMoCzIdLm1vZGVsX3BsYW5lLnYxLkF0dGVudGlvbkl0ZW0SLwoGY291bnRzGAMgASgLMh8ubW9kZWxfcGxhbmUudjEuQXR0ZW50aW9uQ291bnRzEhYKDnN0cmVhbV9lbmFibGVkGAQgASgIIksKFU1hcmtUaHJlYWRTZWVuUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSDwoHdXNlcl9pZBgCIAEoCRIRCgl0aHJlYWRfaWQYAyABKAkiKwoWTWFya1RocmVhZFNlZW5SZXNwb25zZRIRCgl0aHJlYWRfaWQYASABKAkiOQoWU3RyZWFtQXR0ZW50aW9uUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSDwoHdXNlcl9pZBgCIAEoCSKjAgoXU3RyZWFtQXR0ZW50aW9uUmVzcG9uc2USDQoFZXBvY2gYASABKAkSCwoDc2VxGAIgASgEEjUKCHNuYXBzaG90GAMgASgLMiEubW9kZWxfcGxhbmUudjEuQXR0ZW50aW9uU25hcHNob3RIABJACg50aHJlYWRfY2hhbmdlZBgEIAEoCzImLm1vZGVsX3BsYW5lLnYxLkF0dGVudGlvblRocmVhZENoYW5nZWRIABIxCgZyZXN5bmMYBSABKAsyHy5tb2RlbF9wbGFuZS52MS5BdHRlbnRpb25SZXN5bmNIABI3CgloZWFydGJlYXQYBiABKAsyIi5tb2RlbF9wbGFuZS52MS5BdHRlbnRpb25IZWFydGJlYXRIAEIHCgVmcmFtZSJyChFBdHRlbnRpb25TbmFwc2hvdBIsCgVpdGVtcxgBIAMoCzIdLm1vZGVsX3BsYW5lLnYxLkF0dGVudGlvbkl0ZW0SLwoGY291bnRzGAIgASgLMh8ubW9kZWxfcGxhbmUudjEuQXR0ZW50aW9uQ291bnRzInYKFkF0dGVudGlvblRocmVhZENoYW5nZWQSKwoEaXRlbRgBIAEoCzIdLm1vZGVsX3BsYW5lLnYxLkF0dGVudGlvbkl0ZW0SLwoGY291bnRzGAIgASgLMh8ubW9kZWxfcGxhbmUudjEuQXR0ZW50aW9uQ291bnRzIhEKD0F0dGVudGlvblJlc3luYyIUChJBdHRlbnRpb25IZWFydGJlYXQqpgIKDkF0dGVudGlvblN0YXRlEh8KG0FUVEVOVElPTl9TVEFURV9VTlNQRUNJRklFRBAAEiIKHkFUVEVOVElPTl9TVEFURV9ORUVEU19BUFBST1ZBTBABEh8KG0FUVEVOVElPTl9TVEFURV9ORUVEU19JTlBVVBACEh4KGkFUVEVOVElPTl9TVEFURV9QTEFOX1JFQURZEAMSGwoXQVRURU5USU9OX1NUQVRFX1dPUktJTkcQBBIdChlBVFRFTlRJT05fU1RBVEVfQ09NUExFVEVEEAUSGgoWQVRURU5USU9OX1NUQVRFX0ZBSUxFRBAGEhwKGEFUVEVOVElPTl9TVEFURV9BUkNISVZFRBAHEhgKFEFUVEVOVElPTl9TVEFURV9JRExFEAgqpAEKD0F0dGVudGlvblJlYXNvbhIgChxBVFRFTlRJT05fUkVBU09OX1VOU1BFQ0lGSUVEEAASHQoZQVRURU5USU9OX1JFQVNPTl9BUFBST1ZBTBABEhkKFUFUVEVOVElPTl9SRUFTT05fUExBThACEhoKFkFUVEVOVElPTl9SRUFTT05fSU5QVVQQAxIZChVBVFRFTlRJT05fUkVBU09OX0dPQUwQBTK3AgoQQXR0ZW50aW9uU2VydmljZRJcCg1MaXN0QXR0ZW50aW9uEiQubW9kZWxfcGxhbmUudjEuTGlzdEF0dGVudGlvblJlcXVlc3QaJS5tb2RlbF9wbGFuZS52MS5MaXN0QXR0ZW50aW9uUmVzcG9uc2USXwoOTWFya1RocmVhZFNlZW4SJS5tb2RlbF9wbGFuZS52MS5NYXJrVGhyZWFkU2VlblJlcXVlc3QaJi5tb2RlbF9wbGFuZS52MS5NYXJrVGhyZWFkU2VlblJlc3BvbnNlEmQKD1N0cmVhbUF0dGVudGlvbhImLm1vZGVsX3BsYW5lLnYxLlN0cmVhbUF0dGVudGlvblJlcXVlc3QaJy5tb2RlbF9wbGFuZS52MS5TdHJlYW1BdHRlbnRpb25SZXNwb25zZTABQj1aO2dpdGh1Yi5jb20vdHJpb2RlbGFiL21vZGVsLXBsYW5lL2dlbi9nby9tb2RlbF9wbGFuZS92MTttcHYxYgZwcm90bzM", [file_google_protobuf_timestamp]);
+  fileDesc("Ch5tb2RlbF9wbGFuZS92MS9hdHRlbnRpb24ucHJvdG8SDm1vZGVsX3BsYW5lLnYxIs0BCg1BdHRlbnRpb25JdGVtEhEKCXRocmVhZF9pZBgBIAEoCRItCgVzdGF0ZRgCIAEoDjIeLm1vZGVsX3BsYW5lLnYxLkF0dGVudGlvblN0YXRlEi8KBnJlYXNvbhgDIAEoDjIfLm1vZGVsX3BsYW5lLnYxLkF0dGVudGlvblJlYXNvbhIpCgVzaW5jZRgEIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDgoGdW5zZWVuGAUgASgIEg4KBnJ1bl9pZBgGIAEoCSJFCg9BdHRlbnRpb25Db3VudHMSEQoJbmVlZHNfeW91GAEgASgFEg8KB3dvcmtpbmcYAiABKAUSDgoGdW5zZWVuGAMgASgFIkYKFExpc3RBdHRlbnRpb25SZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIPCgd1c2VyX2lkGAIgASgJEg0KBWxpbWl0GAMgASgFIp8BChVMaXN0QXR0ZW50aW9uUmVzcG9uc2USDwoHZW5hYmxlZBgBIAEoCBIsCgVpdGVtcxgCIAMoCzIdLm1vZGVsX3BsYW5lLnYxLkF0dGVudGlvbkl0ZW0SLwoGY291bnRzGAMgASgLMh8ubW9kZWxfcGxhbmUudjEuQXR0ZW50aW9uQ291bnRzEhYKDnN0cmVhbV9lbmFibGVkGAQgASgIIksKFU1hcmtUaHJlYWRTZWVuUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSDwoHdXNlcl9pZBgCIAEoCRIRCgl0aHJlYWRfaWQYAyABKAkiKwoWTWFya1RocmVhZFNlZW5SZXNwb25zZRIRCgl0aHJlYWRfaWQYASABKAkiOQoWU3RyZWFtQXR0ZW50aW9uUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSDwoHdXNlcl9pZBgCIAEoCSKjAgoXU3RyZWFtQXR0ZW50aW9uUmVzcG9uc2USDQoFZXBvY2gYASABKAkSCwoDc2VxGAIgASgEEjUKCHNuYXBzaG90GAMgASgLMiEubW9kZWxfcGxhbmUudjEuQXR0ZW50aW9uU25hcHNob3RIABJACg50aHJlYWRfY2hhbmdlZBgEIAEoCzImLm1vZGVsX3BsYW5lLnYxLkF0dGVudGlvblRocmVhZENoYW5nZWRIABIxCgZyZXN5bmMYBSABKAsyHy5tb2RlbF9wbGFuZS52MS5BdHRlbnRpb25SZXN5bmNIABI3CgloZWFydGJlYXQYBiABKAsyIi5tb2RlbF9wbGFuZS52MS5BdHRlbnRpb25IZWFydGJlYXRIAEIHCgVmcmFtZSJyChFBdHRlbnRpb25TbmFwc2hvdBIsCgVpdGVtcxgBIAMoCzIdLm1vZGVsX3BsYW5lLnYxLkF0dGVudGlvbkl0ZW0SLwoGY291bnRzGAIgASgLMh8ubW9kZWxfcGxhbmUudjEuQXR0ZW50aW9uQ291bnRzInYKFkF0dGVudGlvblRocmVhZENoYW5nZWQSKwoEaXRlbRgBIAEoCzIdLm1vZGVsX3BsYW5lLnYxLkF0dGVudGlvbkl0ZW0SLwoGY291bnRzGAIgASgLMh8ubW9kZWxfcGxhbmUudjEuQXR0ZW50aW9uQ291bnRzIhEKD0F0dGVudGlvblJlc3luYyIUChJBdHRlbnRpb25IZWFydGJlYXQipgEKHkNvbmZpcm1BdHRlbnRpb25XYWl0aW5nUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSDwoHdXNlcl9pZBgCIAEoCRIRCgl0aHJlYWRfaWQYAyABKAkSDgoGcnVuX2lkGAQgASgJEhEKCXNvdXJjZV9pZBgFIAEoCRItCgVzdGF0ZRgGIAEoDjIeLm1vZGVsX3BsYW5lLnYxLkF0dGVudGlvblN0YXRlIkMKH0NvbmZpcm1BdHRlbnRpb25XYWl0aW5nUmVzcG9uc2USDwoHZW5hYmxlZBgBIAEoCBIPCgd3YWl0aW5nGAIgASgIKqYCCg5BdHRlbnRpb25TdGF0ZRIfChtBVFRFTlRJT05fU1RBVEVfVU5TUEVDSUZJRUQQABIiCh5BVFRFTlRJT05fU1RBVEVfTkVFRFNfQVBQUk9WQUwQARIfChtBVFRFTlRJT05fU1RBVEVfTkVFRFNfSU5QVVQQAhIeChpBVFRFTlRJT05fU1RBVEVfUExBTl9SRUFEWRADEhsKF0FUVEVOVElPTl9TVEFURV9XT1JLSU5HEAQSHQoZQVRURU5USU9OX1NUQVRFX0NPTVBMRVRFRBAFEhoKFkFUVEVOVElPTl9TVEFURV9GQUlMRUQQBhIcChhBVFRFTlRJT05fU1RBVEVfQVJDSElWRUQQBxIYChRBVFRFTlRJT05fU1RBVEVfSURMRRAIKsEBCg9BdHRlbnRpb25SZWFzb24SIAocQVRURU5USU9OX1JFQVNPTl9VTlNQRUNJRklFRBAAEh0KGUFUVEVOVElPTl9SRUFTT05fQVBQUk9WQUwQARIZChVBVFRFTlRJT05fUkVBU09OX1BMQU4QAhIaChZBVFRFTlRJT05fUkVBU09OX0lOUFVUEAMSGQoVQVRURU5USU9OX1JFQVNPTl9HT0FMEAUSGwoXQVRURU5USU9OX1JFQVNPTl9QQVJLRUQQBjKzAwoQQXR0ZW50aW9uU2VydmljZRJcCg1MaXN0QXR0ZW50aW9uEiQubW9kZWxfcGxhbmUudjEuTGlzdEF0dGVudGlvblJlcXVlc3QaJS5tb2RlbF9wbGFuZS52MS5MaXN0QXR0ZW50aW9uUmVzcG9uc2USXwoOTWFya1RocmVhZFNlZW4SJS5tb2RlbF9wbGFuZS52MS5NYXJrVGhyZWFkU2VlblJlcXVlc3QaJi5tb2RlbF9wbGFuZS52MS5NYXJrVGhyZWFkU2VlblJlc3BvbnNlEmQKD1N0cmVhbUF0dGVudGlvbhImLm1vZGVsX3BsYW5lLnYxLlN0cmVhbUF0dGVudGlvblJlcXVlc3QaJy5tb2RlbF9wbGFuZS52MS5TdHJlYW1BdHRlbnRpb25SZXNwb25zZTABEnoKF0NvbmZpcm1BdHRlbnRpb25XYWl0aW5nEi4ubW9kZWxfcGxhbmUudjEuQ29uZmlybUF0dGVudGlvbldhaXRpbmdSZXF1ZXN0Gi8ubW9kZWxfcGxhbmUudjEuQ29uZmlybUF0dGVudGlvbldhaXRpbmdSZXNwb25zZUK2AQoSY29tLm1vZGVsX3BsYW5lLnYxQg5BdHRlbnRpb25Qcm90b1ABWjtnaXRodWIuY29tL3RyaW9kZWxhYi9tb2RlbC1wbGFuZS9nZW4vZ28vbW9kZWxfcGxhbmUvdjE7bXB2MaICA01YWKoCDU1vZGVsUGxhbmUuVjHKAg1Nb2RlbFBsYW5lXFYx4gIZTW9kZWxQbGFuZVxWMVxHUEJNZXRhZGF0YeoCDk1vZGVsUGxhbmU6OlYxYgZwcm90bzM", [file_google_protobuf_timestamp]);
 
 /**
  * One thread that needs attention or is working. Identifiers and the closed state only: no title,
@@ -423,6 +423,92 @@ export const AttentionHeartbeatSchema: GenMessage<AttentionHeartbeat> = /*@__PUR
   messageDesc(file_model_plane_v1_attention, 11);
 
 /**
+ * Asks whether one waiting item still waits on its owner (F-f05-03). A service asks before it announces
+ * the item, so an item decided since the announcement is not announced again.
+ *
+ * @generated from message model_plane.v1.ConfirmAttentionWaitingRequest
+ */
+export type ConfirmAttentionWaitingRequest = Message<"model_plane.v1.ConfirmAttentionWaitingRequest"> & {
+  /**
+   * The organization the item belongs to. Must match the verified caller.
+   *
+   * @generated from field: string org_id = 1;
+   */
+  orgId: string;
+
+  /**
+   * The owner the item belongs to. The row must belong to this owner, so a service names the person it
+   * acts for and gets no answer about another person's item.
+   *
+   * @generated from field: string user_id = 2;
+   */
+  userId: string;
+
+  /**
+   * The thread the item belongs to.
+   *
+   * @generated from field: string thread_id = 3;
+   */
+  threadId: string;
+
+  /**
+   * The run the item belongs to: the run that raised the row, or for a goal the run of its last settled turn.
+   *
+   * @generated from field: string run_id = 4;
+   */
+  runId: string;
+
+  /**
+   * The row that waits: the approval, the proposed plan or the approval that names it, the run question or the goal.
+   *
+   * @generated from field: string source_id = 5;
+   */
+  sourceId: string;
+
+  /**
+   * The state the item was announced in. Only a state that raises an item can be waiting; any other is not waiting.
+   *
+   * @generated from field: model_plane.v1.AttentionState state = 6;
+   */
+  state: AttentionState;
+};
+
+/**
+ * Describes the message model_plane.v1.ConfirmAttentionWaitingRequest.
+ * Use `create(ConfirmAttentionWaitingRequestSchema)` to create a new message.
+ */
+export const ConfirmAttentionWaitingRequestSchema: GenMessage<ConfirmAttentionWaitingRequest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_attention, 12);
+
+/**
+ * Whether the item still waits on its owner (F-f05-03).
+ *
+ * @generated from message model_plane.v1.ConfirmAttentionWaitingResponse
+ */
+export type ConfirmAttentionWaitingResponse = Message<"model_plane.v1.ConfirmAttentionWaitingResponse"> & {
+  /**
+   * False while the attention switch is off. Waiting is then false too.
+   *
+   * @generated from field: bool enabled = 1;
+   */
+  enabled: boolean;
+
+  /**
+   * Whether the row still waits in the state the request names. Carries no content.
+   *
+   * @generated from field: bool waiting = 2;
+   */
+  waiting: boolean;
+};
+
+/**
+ * Describes the message model_plane.v1.ConfirmAttentionWaitingResponse.
+ * Use `create(ConfirmAttentionWaitingResponseSchema)` to create a new message.
+ */
+export const ConfirmAttentionWaitingResponseSchema: GenMessage<ConfirmAttentionWaitingResponse> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_attention, 13);
+
+/**
  * The attention state of a thread. The set is closed: a new state needs a new number here and a
  * row in Session Core's derivation, and nothing else may invent one.
  *
@@ -542,6 +628,14 @@ export enum AttentionReason {
    * @generated from enum value: ATTENTION_REASON_GOAL = 5;
    */
   GOAL = 5,
+
+  /**
+   * A run a crash parked waits for its owner to continue it (O-02). Named only once the park has waited the
+   * notice time, and only while the crash-park notice is on; the state is NEEDS_INPUT.
+   *
+   * @generated from enum value: ATTENTION_REASON_PARKED = 6;
+   */
+  PARKED = 6,
 }
 
 /**
@@ -552,7 +646,7 @@ export const AttentionReasonSchema: GenEnum<AttentionReason> = /*@__PURE__*/
 
 /**
  * AttentionService: the closed attention state of a thread (build plan WS16 S1).
- * 
+ *
  * Session Core derives the state from rows it already owns (runs, approvals, plans and run
  * questions). Nothing stores the conclusion, so nothing can go stale. The unseen marker is the
  * one unread definition (`threads.last_read_at`, WS17 S7).
@@ -591,6 +685,16 @@ export const AttentionService: GenService<{
     methodKind: "server_streaming";
     input: typeof StreamAttentionRequestSchema;
     output: typeof StreamAttentionResponseSchema;
+  },
+  /**
+   * Whether one waiting item still waits on its owner. For service callers holding session:read; content-free.
+   *
+   * @generated from rpc model_plane.v1.AttentionService.ConfirmAttentionWaiting
+   */
+  confirmAttentionWaiting: {
+    methodKind: "unary";
+    input: typeof ConfirmAttentionWaitingRequestSchema;
+    output: typeof ConfirmAttentionWaitingResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_model_plane_v1_attention, 0);

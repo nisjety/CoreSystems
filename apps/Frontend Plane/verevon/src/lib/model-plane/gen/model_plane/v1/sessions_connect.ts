@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AppendMessageRequest, AppendMessageResponse, ArchiveThreadRequest, ArchiveThreadResponse, ArchiveThreadsRequest, ArchiveThreadsResponse, BindGrantToRunRequest, BindGrantToRunResponse, ClaimLoopCheckpointRequest, ClaimLoopCheckpointResponse, ClaimScheduledStepRequest, ClaimScheduledStepResponse, CloseLoopCheckpointRequest, CloseLoopCheckpointResponse, CompactNowRequest, CompactNowResponse, CompleteDirectRunWithMessageRequest, CompleteDirectRunWithMessageResponse, CompleteStepRequest, CompleteStepResponse, CountWaivedRunsRequest, CountWaivedRunsResponse, CreateThreadRequest, CreateThreadResponse, DecideSkillProposalRequest, DecideSkillProposalResponse, DeleteSpaceThreadsRequest, DeleteSpaceThreadsResponse, DeleteThreadRequest, DeleteThreadResponse, DeleteThreadsRequest, DeleteThreadsResponse, FinalizeToolActionRequest, FinalizeToolActionResponse, ForkThreadRequest, ForkThreadResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, GetThreadGrantRequest, GetThreadGrantResponse, HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, IncrementPromoteUseRequest, IncrementPromoteUseResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListLearningLedgerRequest, ListLearningLedgerResponse, ListThreadsRequest, ListThreadsResponse, ListToolActionsRequest, ListToolActionsResponse, PrepareScheduledRunThreadRequest, PrepareScheduledRunThreadResponse, PrepareUserOwnedThreadRequest, PrepareUserOwnedThreadResponse, ReadThreadForReferenceRequest, ReadThreadForReferenceResponse, RecordRunContextRequest, RecordRunContextResponse, RecordRunOutputRequest, RecordRunOutputResponse, RecordScheduledRunResultRequest, RecordScheduledRunResultResponse, RecordScheduledStepReceiptRequest, RecordScheduledStepReceiptResponse, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse, ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse, ResolveMessageTargetRequest, ResolveMessageTargetResponse, ReviseMessageRequest, ReviseMessageResponse, SaveCheckpointRequest, SaveCheckpointResponse, SaveLoopCheckpointRequest, SaveLoopCheckpointResponse, SearchMessagesRequest, SearchMessagesResponse, SetActiveLeafRequest, SetActiveLeafResponse, SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse, SetRunModeRequest, SetRunModeResponse, StartManagedRunRequest, StartManagedRunResponse, StartRunRequest, StartRunResponse, StartScheduledRunRequest, UndoLearningEntryRequest, UndoLearningEntryResponse, UpdateThreadPresentationRequest, UpdateThreadPresentationResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse } from "./sessions_pbjs";
+import { AppendMessageRequest, AppendMessageResponse, ArchiveThreadRequest, ArchiveThreadResponse, ArchiveThreadsRequest, ArchiveThreadsResponse, BindGrantToRunRequest, BindGrantToRunResponse, ClaimLoopCheckpointRequest, ClaimLoopCheckpointResponse, ClaimScheduledStepRequest, ClaimScheduledStepResponse, CloseLoopCheckpointRequest, CloseLoopCheckpointResponse, CompactNowRequest, CompactNowResponse, CompleteDirectRunWithMessageRequest, CompleteDirectRunWithMessageResponse, CompleteStepRequest, CompleteStepResponse, CountWaivedRunsRequest, CountWaivedRunsResponse, CreateThreadRequest, CreateThreadResponse, DecideSkillProposalRequest, DecideSkillProposalResponse, DeleteSpaceThreadsRequest, DeleteSpaceThreadsResponse, DeleteThreadRequest, DeleteThreadResponse, DeleteThreadsRequest, DeleteThreadsResponse, FinalizeToolActionRequest, FinalizeToolActionResponse, ForkThreadRequest, ForkThreadResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, GetThreadGrantRequest, GetThreadGrantResponse, HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, IncrementPromoteUseRequest, IncrementPromoteUseResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListLearningLedgerRequest, ListLearningLedgerResponse, ListThreadsRequest, ListThreadsResponse, ListToolActionsRequest, ListToolActionsResponse, PrepareScheduledRunThreadRequest, PrepareScheduledRunThreadResponse, PrepareUserOwnedThreadRequest, PrepareUserOwnedThreadResponse, ReadThreadForReferenceRequest, ReadThreadForReferenceResponse, RecordRunContextRequest, RecordRunContextResponse, RecordRunOutputRequest, RecordRunOutputResponse, RecordScheduledRunResultRequest, RecordScheduledRunResultResponse, RecordScheduledStepReceiptRequest, RecordScheduledStepReceiptResponse, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse, ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse, ResolveMessageTargetRequest, ResolveMessageTargetResponse, ReviseMessageRequest, ReviseMessageResponse, SaveCheckpointRequest, SaveCheckpointResponse, SaveLoopCheckpointRequest, SaveLoopCheckpointResponse, SearchMessagesRequest, SearchMessagesResponse, SetActiveLeafRequest, SetActiveLeafResponse, SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse, SetRunModeRequest, SetRunModeResponse, StartManagedRunRequest, StartManagedRunResponse, StartRunRequest, StartRunResponse, StartScheduledRunRequest, UndoLearningEntryRequest, UndoLearningEntryResponse, UpdateThreadPresentationRequest, UpdateThreadPresentationResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse, WithdrawMessageRequest, WithdrawMessageResponse } from "./sessions_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 import { Event } from "./events_pbjs";
 
@@ -672,7 +672,9 @@ export const MessageTreeService = {
      * rewind: the leaf becomes the target and nothing is deleted. Any other target is
      * a version switch: the leaf becomes the newest turn beneath it, so the chosen
      * branch shows its own continuation. With `exact` set, the leaf is the target
-     * itself (an undo of a rewind). Owner only, with `session:write`. Refused with
+     * itself (an undo of a rewind). With `to_root` set and no target, the leaf moves to the
+     * thread root instead, and no turn is active until the next append starts a new first
+     * turn (WS17 S9). Owner only, with `session:write`. Refused with
      * zdr_durable_mutation_forbidden for a zero-retention caller, and with
      * zdr_feature_not_supported (feature message_versions) for a waived caller or a
      * thread that holds a waived run. Refused for a Space thread and a thread with a
@@ -777,6 +779,39 @@ export const MessageRevisionService = {
       name: "ResolveMessageTarget",
       I: ResolveMessageTargetRequest,
       O: ResolveMessageTargetResponse,
+      kind: MethodKind.Unary,
+    },
+  }
+} as const;
+
+/**
+ * MessageWithdrawalService: take back a mid-run message that was stored before the run took it
+ * (build plan O-01, DEC-F01-03). A separate service, as MessageSearch and MessageTreeService are, so
+ * that SessionCore and every mock of it stay source-compatible.
+ *
+ * @generated from service model_plane.v1.MessageWithdrawalService
+ */
+export const MessageWithdrawalService = {
+  typeName: "model_plane.v1.MessageWithdrawalService",
+  methods: {
+    /**
+     * Mark one of the caller's own not-yet-answered user messages as withdrawn, named by the
+     * client_message_id it was stored under. The row stays on the record with `withdrawn_at` set and its
+     * text and metadata cleared; every transcript, model-context, search, export and memory reader leaves
+     * it out, and the thread view (ListConversation with include_withdrawn_notes) answers one text-free
+     * `withdrawn` note in its place. Idempotent: withdrawing a withdrawn message answers
+     * `already_withdrawn`. Owner only, with `session:write`. Refused with
+     * zdr_durable_mutation_forbidden for a zero-retention caller and with zdr_feature_not_supported
+     * (feature message_withdrawal) for a waived caller or a thread that holds a waived run. NOT_FOUND when
+     * the thread holds no such message of the caller; FAILED_PRECONDITION `message_already_answered` once
+     * an assistant answer follows it.
+     *
+     * @generated from rpc model_plane.v1.MessageWithdrawalService.WithdrawMessage
+     */
+    withdrawMessage: {
+      name: "WithdrawMessage",
+      I: WithdrawMessageRequest,
+      O: WithdrawMessageResponse,
       kind: MethodKind.Unary,
     },
   }

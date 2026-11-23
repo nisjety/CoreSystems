@@ -25,6 +25,7 @@ const (
 	ThreadGoalService_ClaimGoalTurn_FullMethodName            = "/model_plane.v1.ThreadGoalService/ClaimGoalTurn"
 	ThreadGoalService_BindGoalTurnRun_FullMethodName          = "/model_plane.v1.ThreadGoalService/BindGoalTurnRun"
 	ThreadGoalService_SettleGoalTurn_FullMethodName           = "/model_plane.v1.ThreadGoalService/SettleGoalTurn"
+	ThreadGoalService_TopUpGoalTurn_FullMethodName            = "/model_plane.v1.ThreadGoalService/TopUpGoalTurn"
 	ThreadGoalService_RecordGoalVerdict_FullMethodName        = "/model_plane.v1.ThreadGoalService/RecordGoalVerdict"
 	ThreadGoalService_GetGoalTurnForJudge_FullMethodName      = "/model_plane.v1.ThreadGoalService/GetGoalTurnForJudge"
 	ThreadGoalService_ListRunToolCallsForJudge_FullMethodName = "/model_plane.v1.ThreadGoalService/ListRunToolCallsForJudge"
@@ -68,6 +69,11 @@ type ThreadGoalServiceClient interface {
 	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
 	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	SettleGoalTurn(ctx context.Context, in *SettleGoalTurnRequest, opts ...grpc.CallOption) (*ThreadGoalResponse, error)
+	// F-f09-11. Debit one continuation segment's usage on a settled turn, idempotent per segment.
+	// Response type is shared by several goal RPCs; renaming it would break generated code.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+	TopUpGoalTurn(ctx context.Context, in *TopUpGoalTurnRequest, opts ...grpc.CallOption) (*ThreadGoalResponse, error)
 	// EP-7 S3. Record the completion judge's verdict on a settled turn (goal-judge principal only,
 	// session:goal-verdict:write; refuses a thread holding a zero-retention or waived run).
 	// Response type is shared by several goal RPCs; renaming it would break generated code.
@@ -152,6 +158,16 @@ func (c *threadGoalServiceClient) SettleGoalTurn(ctx context.Context, in *Settle
 	return out, nil
 }
 
+func (c *threadGoalServiceClient) TopUpGoalTurn(ctx context.Context, in *TopUpGoalTurnRequest, opts ...grpc.CallOption) (*ThreadGoalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ThreadGoalResponse)
+	err := c.cc.Invoke(ctx, ThreadGoalService_TopUpGoalTurn_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *threadGoalServiceClient) RecordGoalVerdict(ctx context.Context, in *RecordGoalVerdictRequest, opts ...grpc.CallOption) (*ThreadGoalResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ThreadGoalResponse)
@@ -220,6 +236,11 @@ type ThreadGoalServiceServer interface {
 	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
 	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	SettleGoalTurn(context.Context, *SettleGoalTurnRequest) (*ThreadGoalResponse, error)
+	// F-f09-11. Debit one continuation segment's usage on a settled turn, idempotent per segment.
+	// Response type is shared by several goal RPCs; renaming it would break generated code.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+	TopUpGoalTurn(context.Context, *TopUpGoalTurnRequest) (*ThreadGoalResponse, error)
 	// EP-7 S3. Record the completion judge's verdict on a settled turn (goal-judge principal only,
 	// session:goal-verdict:write; refuses a thread holding a zero-retention or waived run).
 	// Response type is shared by several goal RPCs; renaming it would break generated code.
@@ -261,6 +282,9 @@ func (UnimplementedThreadGoalServiceServer) BindGoalTurnRun(context.Context, *Bi
 }
 func (UnimplementedThreadGoalServiceServer) SettleGoalTurn(context.Context, *SettleGoalTurnRequest) (*ThreadGoalResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SettleGoalTurn not implemented")
+}
+func (UnimplementedThreadGoalServiceServer) TopUpGoalTurn(context.Context, *TopUpGoalTurnRequest) (*ThreadGoalResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method TopUpGoalTurn not implemented")
 }
 func (UnimplementedThreadGoalServiceServer) RecordGoalVerdict(context.Context, *RecordGoalVerdictRequest) (*ThreadGoalResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RecordGoalVerdict not implemented")
@@ -400,6 +424,24 @@ func _ThreadGoalService_SettleGoalTurn_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ThreadGoalService_TopUpGoalTurn_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TopUpGoalTurnRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ThreadGoalServiceServer).TopUpGoalTurn(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ThreadGoalService_TopUpGoalTurn_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ThreadGoalServiceServer).TopUpGoalTurn(ctx, req.(*TopUpGoalTurnRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ThreadGoalService_RecordGoalVerdict_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RecordGoalVerdictRequest)
 	if err := dec(in); err != nil {
@@ -484,6 +526,10 @@ var ThreadGoalService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SettleGoalTurn",
 			Handler:    _ThreadGoalService_SettleGoalTurn_Handler,
+		},
+		{
+			MethodName: "TopUpGoalTurn",
+			Handler:    _ThreadGoalService_TopUpGoalTurn_Handler,
 		},
 		{
 			MethodName: "RecordGoalVerdict",

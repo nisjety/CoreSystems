@@ -3,12 +3,12 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { ListAttentionRequest, ListAttentionResponse, MarkThreadSeenRequest, MarkThreadSeenResponse, StreamAttentionRequest, StreamAttentionResponse } from "./attention_pbjs";
+import { ConfirmAttentionWaitingRequest, ConfirmAttentionWaitingResponse, ListAttentionRequest, ListAttentionResponse, MarkThreadSeenRequest, MarkThreadSeenResponse, StreamAttentionRequest, StreamAttentionResponse } from "./attention_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
  * AttentionService: the closed attention state of a thread (build plan WS16 S1).
- * 
+ *
  * Session Core derives the state from rows it already owns (runs, approvals, plans and run
  * questions). Nothing stores the conclusion, so nothing can go stale. The unseen marker is the
  * one unread definition (`threads.last_read_at`, WS17 S7).
@@ -52,6 +52,17 @@ export const AttentionService = {
       I: StreamAttentionRequest,
       O: StreamAttentionResponse,
       kind: MethodKind.ServerStreaming,
+    },
+    /**
+     * Whether one waiting item still waits on its owner. For service callers holding session:read; content-free.
+     *
+     * @generated from rpc model_plane.v1.AttentionService.ConfirmAttentionWaiting
+     */
+    confirmAttentionWaiting: {
+      name: "ConfirmAttentionWaiting",
+      I: ConfirmAttentionWaitingRequest,
+      O: ConfirmAttentionWaitingResponse,
+      kind: MethodKind.Unary,
     },
   }
 } as const;

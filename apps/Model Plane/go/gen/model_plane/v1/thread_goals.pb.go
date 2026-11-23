@@ -983,6 +983,116 @@ func (x *SettleGoalTurnRequest) GetUsageSource() string {
 	return ""
 }
 
+// F-f09-11. Debit the metered usage of one later segment of a goal turn's run: a run that paused
+// (approval, question, park) is settled with its first segment's usage, and each /continue segment
+// after it spends more. Called with the owner's session bearer, never by a service. The run must
+// belong to a goal's already settled turn (`not_found` `thread_goal_turn_not_found` for a run in no
+// goal, `failed_precondition` `thread_goal_turn_unsettled` before the first settle). Idempotent per
+// (goal, turn, segment_key): a segment already debited answers the goal as it stands. It adds the
+// tokens and the cost to the goal, never a turn, and applies the same stop rules as a settle. Off
+// unless SESSION_CORE_THREAD_GOALS_ENABLED is the literal `true`. Ids and counts only.
+type TopUpGoalTurnRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The org the run belongs to; must match the caller's org.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// The run whose continuation segment spent the usage; it names the goal and the turn.
+	RunId string `protobuf:"bytes,2,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// Opaque id of the continuation dispatch (the request id), at most 128 characters. Never
+	// content: it only makes the debit idempotent.
+	SegmentKey string `protobuf:"bytes,3,opt,name=segment_key,json=segmentKey,proto3" json:"segment_key,omitempty"`
+	// Input tokens of the segment's metered calls (a subscription call counts none).
+	MeteredInputTokens uint64 `protobuf:"varint,4,opt,name=metered_input_tokens,json=meteredInputTokens,proto3" json:"metered_input_tokens,omitempty"`
+	// Output tokens of the segment's metered calls.
+	MeteredOutputTokens uint64 `protobuf:"varint,5,opt,name=metered_output_tokens,json=meteredOutputTokens,proto3" json:"metered_output_tokens,omitempty"`
+	// The segment's spend in micro-USD, or any negative value when it could not be priced (adds
+	// no cost). Bounded as SettleGoalTurnRequest.cost_usd_micros is.
+	CostUsdMicros int64 `protobuf:"varint,6,opt,name=cost_usd_micros,json=costUsdMicros,proto3" json:"cost_usd_micros,omitempty"`
+	// A closed token naming how the spend was priced ("metered", "subscription"); empty when
+	// unknown.
+	CostBasis     string `protobuf:"bytes,7,opt,name=cost_basis,json=costBasis,proto3" json:"cost_basis,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TopUpGoalTurnRequest) Reset() {
+	*x = TopUpGoalTurnRequest{}
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TopUpGoalTurnRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TopUpGoalTurnRequest) ProtoMessage() {}
+
+func (x *TopUpGoalTurnRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TopUpGoalTurnRequest.ProtoReflect.Descriptor instead.
+func (*TopUpGoalTurnRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_thread_goals_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *TopUpGoalTurnRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *TopUpGoalTurnRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *TopUpGoalTurnRequest) GetSegmentKey() string {
+	if x != nil {
+		return x.SegmentKey
+	}
+	return ""
+}
+
+func (x *TopUpGoalTurnRequest) GetMeteredInputTokens() uint64 {
+	if x != nil {
+		return x.MeteredInputTokens
+	}
+	return 0
+}
+
+func (x *TopUpGoalTurnRequest) GetMeteredOutputTokens() uint64 {
+	if x != nil {
+		return x.MeteredOutputTokens
+	}
+	return 0
+}
+
+func (x *TopUpGoalTurnRequest) GetCostUsdMicros() int64 {
+	if x != nil {
+		return x.CostUsdMicros
+	}
+	return 0
+}
+
+func (x *TopUpGoalTurnRequest) GetCostBasis() string {
+	if x != nil {
+		return x.CostBasis
+	}
+	return ""
+}
+
 // EP-7 S3. Record the completion judge's verdict on a settled goal turn. Called only by the
 // goal-judge principal (service:model-gateway-goal-judge) holding session:goal-verdict:write; a
 // person or any other caller is refused. A thread that holds a zero-retention or waived run is
@@ -1018,7 +1128,7 @@ type RecordGoalVerdictRequest struct {
 
 func (x *RecordGoalVerdictRequest) Reset() {
 	*x = RecordGoalVerdictRequest{}
-	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[10]
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1030,7 +1140,7 @@ func (x *RecordGoalVerdictRequest) String() string {
 func (*RecordGoalVerdictRequest) ProtoMessage() {}
 
 func (x *RecordGoalVerdictRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[10]
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1043,7 +1153,7 @@ func (x *RecordGoalVerdictRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecordGoalVerdictRequest.ProtoReflect.Descriptor instead.
 func (*RecordGoalVerdictRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_thread_goals_proto_rawDescGZIP(), []int{10}
+	return file_model_plane_v1_thread_goals_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *RecordGoalVerdictRequest) GetGoalId() string {
@@ -1125,7 +1235,7 @@ type GetGoalTurnForJudgeRequest struct {
 
 func (x *GetGoalTurnForJudgeRequest) Reset() {
 	*x = GetGoalTurnForJudgeRequest{}
-	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[11]
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1137,7 +1247,7 @@ func (x *GetGoalTurnForJudgeRequest) String() string {
 func (*GetGoalTurnForJudgeRequest) ProtoMessage() {}
 
 func (x *GetGoalTurnForJudgeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[11]
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1150,7 +1260,7 @@ func (x *GetGoalTurnForJudgeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetGoalTurnForJudgeRequest.ProtoReflect.Descriptor instead.
 func (*GetGoalTurnForJudgeRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_thread_goals_proto_rawDescGZIP(), []int{11}
+	return file_model_plane_v1_thread_goals_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *GetGoalTurnForJudgeRequest) GetGoalId() string {
@@ -1208,7 +1318,7 @@ type GetGoalTurnForJudgeResponse struct {
 
 func (x *GetGoalTurnForJudgeResponse) Reset() {
 	*x = GetGoalTurnForJudgeResponse{}
-	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[12]
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1220,7 +1330,7 @@ func (x *GetGoalTurnForJudgeResponse) String() string {
 func (*GetGoalTurnForJudgeResponse) ProtoMessage() {}
 
 func (x *GetGoalTurnForJudgeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[12]
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1233,7 +1343,7 @@ func (x *GetGoalTurnForJudgeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetGoalTurnForJudgeResponse.ProtoReflect.Descriptor instead.
 func (*GetGoalTurnForJudgeResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_thread_goals_proto_rawDescGZIP(), []int{12}
+	return file_model_plane_v1_thread_goals_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *GetGoalTurnForJudgeResponse) GetGoal() *ThreadGoal {
@@ -1288,7 +1398,7 @@ type ListRunToolCallsForJudgeRequest struct {
 
 func (x *ListRunToolCallsForJudgeRequest) Reset() {
 	*x = ListRunToolCallsForJudgeRequest{}
-	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[13]
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1300,7 +1410,7 @@ func (x *ListRunToolCallsForJudgeRequest) String() string {
 func (*ListRunToolCallsForJudgeRequest) ProtoMessage() {}
 
 func (x *ListRunToolCallsForJudgeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[13]
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1313,7 +1423,7 @@ func (x *ListRunToolCallsForJudgeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRunToolCallsForJudgeRequest.ProtoReflect.Descriptor instead.
 func (*ListRunToolCallsForJudgeRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_thread_goals_proto_rawDescGZIP(), []int{13}
+	return file_model_plane_v1_thread_goals_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ListRunToolCallsForJudgeRequest) GetOrgId() string {
@@ -1346,7 +1456,7 @@ type JudgeToolCall struct {
 
 func (x *JudgeToolCall) Reset() {
 	*x = JudgeToolCall{}
-	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[14]
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1358,7 +1468,7 @@ func (x *JudgeToolCall) String() string {
 func (*JudgeToolCall) ProtoMessage() {}
 
 func (x *JudgeToolCall) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[14]
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1371,7 +1481,7 @@ func (x *JudgeToolCall) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use JudgeToolCall.ProtoReflect.Descriptor instead.
 func (*JudgeToolCall) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_thread_goals_proto_rawDescGZIP(), []int{14}
+	return file_model_plane_v1_thread_goals_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *JudgeToolCall) GetActionId() string {
@@ -1407,7 +1517,7 @@ type ListRunToolCallsForJudgeResponse struct {
 
 func (x *ListRunToolCallsForJudgeResponse) Reset() {
 	*x = ListRunToolCallsForJudgeResponse{}
-	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[15]
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1419,7 +1529,7 @@ func (x *ListRunToolCallsForJudgeResponse) String() string {
 func (*ListRunToolCallsForJudgeResponse) ProtoMessage() {}
 
 func (x *ListRunToolCallsForJudgeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[15]
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1432,7 +1542,7 @@ func (x *ListRunToolCallsForJudgeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRunToolCallsForJudgeResponse.ProtoReflect.Descriptor instead.
 func (*ListRunToolCallsForJudgeResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_thread_goals_proto_rawDescGZIP(), []int{15}
+	return file_model_plane_v1_thread_goals_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ListRunToolCallsForJudgeResponse) GetCalls() []*JudgeToolCall {
@@ -1528,7 +1638,17 @@ const file_model_plane_v1_thread_goals_proto_rawDesc = "" +
 	"cost_basis\x18\t \x01(\tR\tcostBasis\x12!\n" +
 	"\fjudge_tokens\x18\n" +
 	" \x01(\x04R\vjudgeTokens\x12!\n" +
-	"\fusage_source\x18\v \x01(\tR\vusageSource\"\xfe\x01\n" +
+	"\fusage_source\x18\v \x01(\tR\vusageSource\"\x92\x02\n" +
+	"\x14TopUpGoalTurnRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x15\n" +
+	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x1f\n" +
+	"\vsegment_key\x18\x03 \x01(\tR\n" +
+	"segmentKey\x120\n" +
+	"\x14metered_input_tokens\x18\x04 \x01(\x04R\x12meteredInputTokens\x122\n" +
+	"\x15metered_output_tokens\x18\x05 \x01(\x04R\x13meteredOutputTokens\x12&\n" +
+	"\x0fcost_usd_micros\x18\x06 \x01(\x03R\rcostUsdMicros\x12\x1d\n" +
+	"\n" +
+	"cost_basis\x18\a \x01(\tR\tcostBasis\"\xfe\x01\n" +
 	"\x18RecordGoalVerdictRequest\x12\x17\n" +
 	"\agoal_id\x18\x01 \x01(\tR\x06goalId\x12\x15\n" +
 	"\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x17\n" +
@@ -1560,14 +1680,15 @@ const file_model_plane_v1_thread_goals_proto_rawDesc = "" +
 	"\x04tool\x18\x02 \x01(\tR\x04tool\x12\x16\n" +
 	"\x06status\x18\x03 \x01(\tR\x06status\"W\n" +
 	" ListRunToolCallsForJudgeResponse\x123\n" +
-	"\x05calls\x18\x01 \x03(\v2\x1d.model_plane.v1.JudgeToolCallR\x05calls2\x9b\a\n" +
+	"\x05calls\x18\x01 \x03(\v2\x1d.model_plane.v1.JudgeToolCallR\x05calls2\xf6\a\n" +
 	"\x11ThreadGoalService\x12Y\n" +
 	"\rSetThreadGoal\x12$.model_plane.v1.SetThreadGoalRequest\x1a\".model_plane.v1.ThreadGoalResponse\x12Y\n" +
 	"\rGetThreadGoal\x12$.model_plane.v1.GetThreadGoalRequest\x1a\".model_plane.v1.ThreadGoalResponse\x12_\n" +
 	"\x10UpdateThreadGoal\x12'.model_plane.v1.UpdateThreadGoalRequest\x1a\".model_plane.v1.ThreadGoalResponse\x12\\\n" +
 	"\rClaimGoalTurn\x12$.model_plane.v1.ClaimGoalTurnRequest\x1a%.model_plane.v1.ClaimGoalTurnResponse\x12b\n" +
 	"\x0fBindGoalTurnRun\x12&.model_plane.v1.BindGoalTurnRunRequest\x1a'.model_plane.v1.BindGoalTurnRunResponse\x12[\n" +
-	"\x0eSettleGoalTurn\x12%.model_plane.v1.SettleGoalTurnRequest\x1a\".model_plane.v1.ThreadGoalResponse\x12a\n" +
+	"\x0eSettleGoalTurn\x12%.model_plane.v1.SettleGoalTurnRequest\x1a\".model_plane.v1.ThreadGoalResponse\x12Y\n" +
+	"\rTopUpGoalTurn\x12$.model_plane.v1.TopUpGoalTurnRequest\x1a\".model_plane.v1.ThreadGoalResponse\x12a\n" +
 	"\x11RecordGoalVerdict\x12(.model_plane.v1.RecordGoalVerdictRequest\x1a\".model_plane.v1.ThreadGoalResponse\x12n\n" +
 	"\x13GetGoalTurnForJudge\x12*.model_plane.v1.GetGoalTurnForJudgeRequest\x1a+.model_plane.v1.GetGoalTurnForJudgeResponse\x12}\n" +
 	"\x18ListRunToolCallsForJudge\x12/.model_plane.v1.ListRunToolCallsForJudgeRequest\x1a0.model_plane.v1.ListRunToolCallsForJudgeResponseB\xb8\x01\n" +
@@ -1585,7 +1706,7 @@ func file_model_plane_v1_thread_goals_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_thread_goals_proto_rawDescData
 }
 
-var file_model_plane_v1_thread_goals_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_model_plane_v1_thread_goals_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_model_plane_v1_thread_goals_proto_goTypes = []any{
 	(*ThreadGoal)(nil),                       // 0: model_plane.v1.ThreadGoal
 	(*SetThreadGoalRequest)(nil),             // 1: model_plane.v1.SetThreadGoalRequest
@@ -1597,40 +1718,43 @@ var file_model_plane_v1_thread_goals_proto_goTypes = []any{
 	(*BindGoalTurnRunRequest)(nil),           // 7: model_plane.v1.BindGoalTurnRunRequest
 	(*BindGoalTurnRunResponse)(nil),          // 8: model_plane.v1.BindGoalTurnRunResponse
 	(*SettleGoalTurnRequest)(nil),            // 9: model_plane.v1.SettleGoalTurnRequest
-	(*RecordGoalVerdictRequest)(nil),         // 10: model_plane.v1.RecordGoalVerdictRequest
-	(*GetGoalTurnForJudgeRequest)(nil),       // 11: model_plane.v1.GetGoalTurnForJudgeRequest
-	(*GetGoalTurnForJudgeResponse)(nil),      // 12: model_plane.v1.GetGoalTurnForJudgeResponse
-	(*ListRunToolCallsForJudgeRequest)(nil),  // 13: model_plane.v1.ListRunToolCallsForJudgeRequest
-	(*JudgeToolCall)(nil),                    // 14: model_plane.v1.JudgeToolCall
-	(*ListRunToolCallsForJudgeResponse)(nil), // 15: model_plane.v1.ListRunToolCallsForJudgeResponse
-	(*timestamppb.Timestamp)(nil),            // 16: google.protobuf.Timestamp
+	(*TopUpGoalTurnRequest)(nil),             // 10: model_plane.v1.TopUpGoalTurnRequest
+	(*RecordGoalVerdictRequest)(nil),         // 11: model_plane.v1.RecordGoalVerdictRequest
+	(*GetGoalTurnForJudgeRequest)(nil),       // 12: model_plane.v1.GetGoalTurnForJudgeRequest
+	(*GetGoalTurnForJudgeResponse)(nil),      // 13: model_plane.v1.GetGoalTurnForJudgeResponse
+	(*ListRunToolCallsForJudgeRequest)(nil),  // 14: model_plane.v1.ListRunToolCallsForJudgeRequest
+	(*JudgeToolCall)(nil),                    // 15: model_plane.v1.JudgeToolCall
+	(*ListRunToolCallsForJudgeResponse)(nil), // 16: model_plane.v1.ListRunToolCallsForJudgeResponse
+	(*timestamppb.Timestamp)(nil),            // 17: google.protobuf.Timestamp
 }
 var file_model_plane_v1_thread_goals_proto_depIdxs = []int32{
-	16, // 0: model_plane.v1.ThreadGoal.created_at:type_name -> google.protobuf.Timestamp
-	16, // 1: model_plane.v1.ThreadGoal.updated_at:type_name -> google.protobuf.Timestamp
+	17, // 0: model_plane.v1.ThreadGoal.created_at:type_name -> google.protobuf.Timestamp
+	17, // 1: model_plane.v1.ThreadGoal.updated_at:type_name -> google.protobuf.Timestamp
 	0,  // 2: model_plane.v1.ThreadGoalResponse.goal:type_name -> model_plane.v1.ThreadGoal
 	0,  // 3: model_plane.v1.GetGoalTurnForJudgeResponse.goal:type_name -> model_plane.v1.ThreadGoal
-	14, // 4: model_plane.v1.ListRunToolCallsForJudgeResponse.calls:type_name -> model_plane.v1.JudgeToolCall
+	15, // 4: model_plane.v1.ListRunToolCallsForJudgeResponse.calls:type_name -> model_plane.v1.JudgeToolCall
 	1,  // 5: model_plane.v1.ThreadGoalService.SetThreadGoal:input_type -> model_plane.v1.SetThreadGoalRequest
 	2,  // 6: model_plane.v1.ThreadGoalService.GetThreadGoal:input_type -> model_plane.v1.GetThreadGoalRequest
 	3,  // 7: model_plane.v1.ThreadGoalService.UpdateThreadGoal:input_type -> model_plane.v1.UpdateThreadGoalRequest
 	5,  // 8: model_plane.v1.ThreadGoalService.ClaimGoalTurn:input_type -> model_plane.v1.ClaimGoalTurnRequest
 	7,  // 9: model_plane.v1.ThreadGoalService.BindGoalTurnRun:input_type -> model_plane.v1.BindGoalTurnRunRequest
 	9,  // 10: model_plane.v1.ThreadGoalService.SettleGoalTurn:input_type -> model_plane.v1.SettleGoalTurnRequest
-	10, // 11: model_plane.v1.ThreadGoalService.RecordGoalVerdict:input_type -> model_plane.v1.RecordGoalVerdictRequest
-	11, // 12: model_plane.v1.ThreadGoalService.GetGoalTurnForJudge:input_type -> model_plane.v1.GetGoalTurnForJudgeRequest
-	13, // 13: model_plane.v1.ThreadGoalService.ListRunToolCallsForJudge:input_type -> model_plane.v1.ListRunToolCallsForJudgeRequest
-	4,  // 14: model_plane.v1.ThreadGoalService.SetThreadGoal:output_type -> model_plane.v1.ThreadGoalResponse
-	4,  // 15: model_plane.v1.ThreadGoalService.GetThreadGoal:output_type -> model_plane.v1.ThreadGoalResponse
-	4,  // 16: model_plane.v1.ThreadGoalService.UpdateThreadGoal:output_type -> model_plane.v1.ThreadGoalResponse
-	6,  // 17: model_plane.v1.ThreadGoalService.ClaimGoalTurn:output_type -> model_plane.v1.ClaimGoalTurnResponse
-	8,  // 18: model_plane.v1.ThreadGoalService.BindGoalTurnRun:output_type -> model_plane.v1.BindGoalTurnRunResponse
-	4,  // 19: model_plane.v1.ThreadGoalService.SettleGoalTurn:output_type -> model_plane.v1.ThreadGoalResponse
-	4,  // 20: model_plane.v1.ThreadGoalService.RecordGoalVerdict:output_type -> model_plane.v1.ThreadGoalResponse
-	12, // 21: model_plane.v1.ThreadGoalService.GetGoalTurnForJudge:output_type -> model_plane.v1.GetGoalTurnForJudgeResponse
-	15, // 22: model_plane.v1.ThreadGoalService.ListRunToolCallsForJudge:output_type -> model_plane.v1.ListRunToolCallsForJudgeResponse
-	14, // [14:23] is the sub-list for method output_type
-	5,  // [5:14] is the sub-list for method input_type
+	10, // 11: model_plane.v1.ThreadGoalService.TopUpGoalTurn:input_type -> model_plane.v1.TopUpGoalTurnRequest
+	11, // 12: model_plane.v1.ThreadGoalService.RecordGoalVerdict:input_type -> model_plane.v1.RecordGoalVerdictRequest
+	12, // 13: model_plane.v1.ThreadGoalService.GetGoalTurnForJudge:input_type -> model_plane.v1.GetGoalTurnForJudgeRequest
+	14, // 14: model_plane.v1.ThreadGoalService.ListRunToolCallsForJudge:input_type -> model_plane.v1.ListRunToolCallsForJudgeRequest
+	4,  // 15: model_plane.v1.ThreadGoalService.SetThreadGoal:output_type -> model_plane.v1.ThreadGoalResponse
+	4,  // 16: model_plane.v1.ThreadGoalService.GetThreadGoal:output_type -> model_plane.v1.ThreadGoalResponse
+	4,  // 17: model_plane.v1.ThreadGoalService.UpdateThreadGoal:output_type -> model_plane.v1.ThreadGoalResponse
+	6,  // 18: model_plane.v1.ThreadGoalService.ClaimGoalTurn:output_type -> model_plane.v1.ClaimGoalTurnResponse
+	8,  // 19: model_plane.v1.ThreadGoalService.BindGoalTurnRun:output_type -> model_plane.v1.BindGoalTurnRunResponse
+	4,  // 20: model_plane.v1.ThreadGoalService.SettleGoalTurn:output_type -> model_plane.v1.ThreadGoalResponse
+	4,  // 21: model_plane.v1.ThreadGoalService.TopUpGoalTurn:output_type -> model_plane.v1.ThreadGoalResponse
+	4,  // 22: model_plane.v1.ThreadGoalService.RecordGoalVerdict:output_type -> model_plane.v1.ThreadGoalResponse
+	13, // 23: model_plane.v1.ThreadGoalService.GetGoalTurnForJudge:output_type -> model_plane.v1.GetGoalTurnForJudgeResponse
+	16, // 24: model_plane.v1.ThreadGoalService.ListRunToolCallsForJudge:output_type -> model_plane.v1.ListRunToolCallsForJudgeResponse
+	15, // [15:25] is the sub-list for method output_type
+	5,  // [5:15] is the sub-list for method input_type
 	5,  // [5:5] is the sub-list for extension type_name
 	5,  // [5:5] is the sub-list for extension extendee
 	0,  // [0:5] is the sub-list for field type_name
@@ -1647,7 +1771,7 @@ func file_model_plane_v1_thread_goals_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_thread_goals_proto_rawDesc), len(file_model_plane_v1_thread_goals_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   16,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

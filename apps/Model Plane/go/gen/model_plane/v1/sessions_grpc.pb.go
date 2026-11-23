@@ -2327,7 +2327,9 @@ type MessageTreeServiceClient interface {
 	// rewind: the leaf becomes the target and nothing is deleted. Any other target is
 	// a version switch: the leaf becomes the newest turn beneath it, so the chosen
 	// branch shows its own continuation. With `exact` set, the leaf is the target
-	// itself (an undo of a rewind). Owner only, with `session:write`. Refused with
+	// itself (an undo of a rewind). With `to_root` set and no target, the leaf moves to the
+	// thread root instead, and no turn is active until the next append starts a new first
+	// turn (WS17 S9). Owner only, with `session:write`. Refused with
 	// zdr_durable_mutation_forbidden for a zero-retention caller, and with
 	// zdr_feature_not_supported (feature message_versions) for a waived caller or a
 	// thread that holds a waived run. Refused for a Space thread and a thread with a
@@ -2366,7 +2368,9 @@ type MessageTreeServiceServer interface {
 	// rewind: the leaf becomes the target and nothing is deleted. Any other target is
 	// a version switch: the leaf becomes the newest turn beneath it, so the chosen
 	// branch shows its own continuation. With `exact` set, the leaf is the target
-	// itself (an undo of a rewind). Owner only, with `session:write`. Refused with
+	// itself (an undo of a rewind). With `to_root` set and no target, the leaf moves to the
+	// thread root instead, and no turn is active until the next append starts a new first
+	// turn (WS17 S9). Owner only, with `session:write`. Refused with
 	// zdr_durable_mutation_forbidden for a zero-retention caller, and with
 	// zdr_feature_not_supported (feature message_versions) for a waived caller or a
 	// thread that holds a waived run. Refused for a Space thread and a thread with a
@@ -2803,6 +2807,137 @@ var MessageRevisionService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResolveMessageTarget",
 			Handler:    _MessageRevisionService_ResolveMessageTarget_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "model_plane/v1/sessions.proto",
+}
+
+const (
+	MessageWithdrawalService_WithdrawMessage_FullMethodName = "/model_plane.v1.MessageWithdrawalService/WithdrawMessage"
+)
+
+// MessageWithdrawalServiceClient is the client API for MessageWithdrawalService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// MessageWithdrawalService: take back a mid-run message that was stored before the run took it
+// (build plan O-01, DEC-F01-03). A separate service, as MessageSearch and MessageTreeService are, so
+// that SessionCore and every mock of it stay source-compatible.
+type MessageWithdrawalServiceClient interface {
+	// Mark one of the caller's own not-yet-answered user messages as withdrawn, named by the
+	// client_message_id it was stored under. The row stays on the record with `withdrawn_at` set and its
+	// text and metadata cleared; every transcript, model-context, search, export and memory reader leaves
+	// it out, and the thread view (ListConversation with include_withdrawn_notes) answers one text-free
+	// `withdrawn` note in its place. Idempotent: withdrawing a withdrawn message answers
+	// `already_withdrawn`. Owner only, with `session:write`. Refused with
+	// zdr_durable_mutation_forbidden for a zero-retention caller and with zdr_feature_not_supported
+	// (feature message_withdrawal) for a waived caller or a thread that holds a waived run. NOT_FOUND when
+	// the thread holds no such message of the caller; FAILED_PRECONDITION `message_already_answered` once
+	// an assistant answer follows it.
+	WithdrawMessage(ctx context.Context, in *WithdrawMessageRequest, opts ...grpc.CallOption) (*WithdrawMessageResponse, error)
+}
+
+type messageWithdrawalServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewMessageWithdrawalServiceClient(cc grpc.ClientConnInterface) MessageWithdrawalServiceClient {
+	return &messageWithdrawalServiceClient{cc}
+}
+
+func (c *messageWithdrawalServiceClient) WithdrawMessage(ctx context.Context, in *WithdrawMessageRequest, opts ...grpc.CallOption) (*WithdrawMessageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WithdrawMessageResponse)
+	err := c.cc.Invoke(ctx, MessageWithdrawalService_WithdrawMessage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// MessageWithdrawalServiceServer is the server API for MessageWithdrawalService service.
+// All implementations must embed UnimplementedMessageWithdrawalServiceServer
+// for forward compatibility.
+//
+// MessageWithdrawalService: take back a mid-run message that was stored before the run took it
+// (build plan O-01, DEC-F01-03). A separate service, as MessageSearch and MessageTreeService are, so
+// that SessionCore and every mock of it stay source-compatible.
+type MessageWithdrawalServiceServer interface {
+	// Mark one of the caller's own not-yet-answered user messages as withdrawn, named by the
+	// client_message_id it was stored under. The row stays on the record with `withdrawn_at` set and its
+	// text and metadata cleared; every transcript, model-context, search, export and memory reader leaves
+	// it out, and the thread view (ListConversation with include_withdrawn_notes) answers one text-free
+	// `withdrawn` note in its place. Idempotent: withdrawing a withdrawn message answers
+	// `already_withdrawn`. Owner only, with `session:write`. Refused with
+	// zdr_durable_mutation_forbidden for a zero-retention caller and with zdr_feature_not_supported
+	// (feature message_withdrawal) for a waived caller or a thread that holds a waived run. NOT_FOUND when
+	// the thread holds no such message of the caller; FAILED_PRECONDITION `message_already_answered` once
+	// an assistant answer follows it.
+	WithdrawMessage(context.Context, *WithdrawMessageRequest) (*WithdrawMessageResponse, error)
+	mustEmbedUnimplementedMessageWithdrawalServiceServer()
+}
+
+// UnimplementedMessageWithdrawalServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedMessageWithdrawalServiceServer struct{}
+
+func (UnimplementedMessageWithdrawalServiceServer) WithdrawMessage(context.Context, *WithdrawMessageRequest) (*WithdrawMessageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method WithdrawMessage not implemented")
+}
+func (UnimplementedMessageWithdrawalServiceServer) mustEmbedUnimplementedMessageWithdrawalServiceServer() {
+}
+func (UnimplementedMessageWithdrawalServiceServer) testEmbeddedByValue() {}
+
+// UnsafeMessageWithdrawalServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to MessageWithdrawalServiceServer will
+// result in compilation errors.
+type UnsafeMessageWithdrawalServiceServer interface {
+	mustEmbedUnimplementedMessageWithdrawalServiceServer()
+}
+
+func RegisterMessageWithdrawalServiceServer(s grpc.ServiceRegistrar, srv MessageWithdrawalServiceServer) {
+	// If the following call panics, it indicates UnimplementedMessageWithdrawalServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&MessageWithdrawalService_ServiceDesc, srv)
+}
+
+func _MessageWithdrawalService_WithdrawMessage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WithdrawMessageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MessageWithdrawalServiceServer).WithdrawMessage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MessageWithdrawalService_WithdrawMessage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MessageWithdrawalServiceServer).WithdrawMessage(ctx, req.(*WithdrawMessageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// MessageWithdrawalService_ServiceDesc is the grpc.ServiceDesc for MessageWithdrawalService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var MessageWithdrawalService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "model_plane.v1.MessageWithdrawalService",
+	HandlerType: (*MessageWithdrawalServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "WithdrawMessage",
+			Handler:    _MessageWithdrawalService_WithdrawMessage_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -1012,7 +1012,8 @@ type FetchResponse struct {
 	RequestId string `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	// Originally-requested URL.
 	Url string `protobuf:"bytes,2,opt,name=url,proto3" json:"url,omitempty"`
-	// URL after redirect chain (Quarry follows up to 5 hops).
+	// URL after the redirect chain (Quarry follows up to 5 hops); empty means the final URL is
+	// unknown (the caller must treat it as the requested URL and never as a verified host).
 	FinalUrl string `protobuf:"bytes,3,opt,name=final_url,json=finalUrl,proto3" json:"final_url,omitempty"`
 	// HTTP status from the upstream.
 	Status int32 `protobuf:"varint,4,opt,name=status,proto3" json:"status,omitempty"`
@@ -1316,7 +1317,8 @@ type ExtractStructuredResponse struct {
 	RequestId string `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	// Originally-requested URL.
 	Url string `protobuf:"bytes,2,opt,name=url,proto3" json:"url,omitempty"`
-	// URL after redirect chain.
+	// URL after the redirect chain; empty means the final URL is unknown (the caller must treat it
+	// as the requested URL and never as a verified host).
 	FinalUrl string `protobuf:"bytes,3,opt,name=final_url,json=finalUrl,proto3" json:"final_url,omitempty"`
 	// Page title (carried through from the fetch step).
 	Title string `protobuf:"bytes,4,opt,name=title,proto3" json:"title,omitempty"`

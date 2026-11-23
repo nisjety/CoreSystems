@@ -654,7 +654,15 @@ type RunAgentRequest struct {
 	// the same read the Ask loop's skills use, so the two loops cannot disagree. Execution-core never reads org-core and
 	// never trusts a client-supplied value: it filters the skills it injects and recovers by it, and acts only on a
 	// non-empty word. The word is a policy setting, never skill text.
-	ExtSkills     string `protobuf:"bytes,28,opt,name=ext_skills,json=extSkills,proto3" json:"ext_skills,omitempty"`
+	ExtSkills string `protobuf:"bytes,28,opt,name=ext_skills,json=extSkills,proto3" json:"ext_skills,omitempty"`
+	// The metered input and output tokens this run may spend across all its rounds (additive, F-f04-08). 0 = no cap:
+	// every run that predates the field, and every run while the gateway's MODEL_GATEWAY_DO_RUN_CAP is off. The gateway
+	// states the smaller of the request's cap and the org's ceiling (budget::min_cap), and a goal turn's remaining
+	// allowance when that is smaller, only while MODEL_GATEWAY_DO_RUN_CAP is the literal `true`. Execution-core ends the
+	// run at the next round boundary once the cap is spent, and only while its own EXECUTION_RUN_TOKEN_CAP is on; an
+	// executor that predates the field skips it as an unknown field. Cost is not sent: execution-core cannot price a
+	// round. Field 29 is the next free number on this message.
+	MaxRunTokens  uint64 `protobuf:"varint,29,opt,name=max_run_tokens,json=maxRunTokens,proto3" json:"max_run_tokens,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -883,6 +891,13 @@ func (x *RunAgentRequest) GetExtSkills() string {
 		return x.ExtSkills
 	}
 	return ""
+}
+
+func (x *RunAgentRequest) GetMaxRunTokens() uint64 {
+	if x != nil {
+		return x.MaxRunTokens
+	}
+	return 0
 }
 
 // WideResearchRequest is what a person asked a wide-research run to cover (Wave 3 EP-2 S8/S9). It only
@@ -2239,8 +2254,19 @@ type ExecuteStepRequest struct {
 	// model's arguments. Absent or empty selects nothing; a zero-retention step
 	// ignores it.
 	ConnectorScope *ConnectorScope `protobuf:"bytes,15,opt,name=connector_scope,json=connectorScope,proto3" json:"connector_scope,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// This step is an MCP-app call made outside the run loop (F-f10-21): an app drawn under a
+	// chat answer asks its host to call a tool on its own server. execution-core then accepts it
+	// only for an `mcp__` tool and only with `permission_mode = "ask"`; a call that would pause
+	// for approval answers FAILED_PRECONDITION `app_call_requires_chat` and creates no approval,
+	// no fold and no event; and the step writes no checkpoint, no step row and no run snapshot, so
+	// an app call can never advance, finish or fail the run it was drawn under. The tool's class
+	// and definition digest come from the capability-core registry binding resolved for this very
+	// call, never from execution-core's in-process view of the run. Written by model-gateway's
+	// app-call route only. False (the default) is the ordinary step, byte for byte. Field 16 is
+	// the next free number on this message.
+	SideCall      bool `protobuf:"varint,16,opt,name=side_call,json=sideCall,proto3" json:"side_call,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ExecuteStepRequest) Reset() {
@@ -2376,6 +2402,13 @@ func (x *ExecuteStepRequest) GetConnectorScope() *ConnectorScope {
 		return x.ConnectorScope
 	}
 	return nil
+}
+
+func (x *ExecuteStepRequest) GetSideCall() bool {
+	if x != nil {
+		return x.SideCall
+	}
+	return false
 }
 
 // RunAttachment — one attached input, carried by value for one call. The bytes
@@ -2929,7 +2962,8 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"tool_calls\x18\t \x01(\rR\ttoolCalls\x12!\n" +
 	"\finput_tokens\x18\n" +
 	" \x01(\rR\vinputTokens\x12#\n" +
-	"\routput_tokens\x18\v \x01(\rR\foutputTokens\"\xf3\t\n" +
+	"\routput_tokens\x18\v \x01(\rR\foutputTokens\"\x99\n" +
+	"\n" +
 	"\x0fRunAgentRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x12\n" +
@@ -2963,7 +2997,8 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\x14agent_tool_allowlist\x18\x1a \x01(\v2\".model_plane.v1.AgentToolAllowlistR\x12agentToolAllowlist\x12 \n" +
 	"\vcoordinator\x18\x1b \x01(\bR\vcoordinator\x12\x1d\n" +
 	"\n" +
-	"ext_skills\x18\x1c \x01(\tR\textSkills\"\x93\x01\n" +
+	"ext_skills\x18\x1c \x01(\tR\textSkills\x12$\n" +
+	"\x0emax_run_tokens\x18\x1d \x01(\x04R\fmaxRunTokens\"\x93\x01\n" +
 	"\x13WideResearchRequest\x12\x19\n" +
 	"\bitem_cap\x18\x01 \x01(\rR\aitemCap\x12\x14\n" +
 	"\x05items\x18\x02 \x03(\tR\x05items\x12\x19\n" +
@@ -3067,7 +3102,7 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\routput_tokens\x18\x04 \x01(\x04R\foutputTokens\x125\n" +
 	"\x17cache_read_input_tokens\x18\x05 \x01(\x04R\x14cacheReadInputTokens\x12=\n" +
 	"\x1bcache_creation_input_tokens\x18\x06 \x01(\x04R\x18cacheCreationInputTokens\x12)\n" +
-	"\x10inference_rounds\x18\a \x01(\rR\x0finferenceRounds\"\xd6\x04\n" +
+	"\x10inference_rounds\x18\a \x01(\rR\x0finferenceRounds\"\xf3\x04\n" +
 	"\x12ExecuteStepRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
 	"\astep_id\x18\x02 \x01(\tR\x06stepId\x12\x1b\n" +
@@ -3085,7 +3120,8 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\vattachments\x18\f \x03(\v2\x1d.model_plane.v1.RunAttachmentR\vattachments\x12\x1b\n" +
 	"\tthread_id\x18\r \x01(\tR\bthreadId\x12=\n" +
 	"\fskill_mounts\x18\x0e \x03(\v2\x1a.model_plane.v1.SkillMountR\vskillMounts\x12G\n" +
-	"\x0fconnector_scope\x18\x0f \x01(\v2\x1e.model_plane.v1.ConnectorScopeR\x0econnectorScope\"\xcf\x01\n" +
+	"\x0fconnector_scope\x18\x0f \x01(\v2\x1e.model_plane.v1.ConnectorScopeR\x0econnectorScope\x12\x1b\n" +
+	"\tside_call\x18\x10 \x01(\bR\bsideCall\"\xcf\x01\n" +
 	"\rRunAttachment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +

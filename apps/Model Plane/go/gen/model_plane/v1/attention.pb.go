@@ -117,6 +117,9 @@ const (
 	// its token budget or turn cap or was judged blocked. Derived only while the thread has no other
 	// pending row and the thread goals switch is on, so a flag-off response never carries it.
 	AttentionReason_ATTENTION_REASON_GOAL AttentionReason = 5
+	// A run a crash parked waits for its owner to continue it (O-02). Named only once the park has waited the
+	// notice time, and only while the crash-park notice is on; the state is NEEDS_INPUT.
+	AttentionReason_ATTENTION_REASON_PARKED AttentionReason = 6
 )
 
 // Enum value maps for AttentionReason.
@@ -127,6 +130,7 @@ var (
 		2: "ATTENTION_REASON_PLAN",
 		3: "ATTENTION_REASON_INPUT",
 		5: "ATTENTION_REASON_GOAL",
+		6: "ATTENTION_REASON_PARKED",
 	}
 	AttentionReason_value = map[string]int32{
 		"ATTENTION_REASON_UNSPECIFIED": 0,
@@ -134,6 +138,7 @@ var (
 		"ATTENTION_REASON_PLAN":        2,
 		"ATTENTION_REASON_INPUT":       3,
 		"ATTENTION_REASON_GOAL":        5,
+		"ATTENTION_REASON_PARKED":      6,
 	}
 )
 
@@ -947,6 +952,154 @@ func (*AttentionHeartbeat) Descriptor() ([]byte, []int) {
 	return file_model_plane_v1_attention_proto_rawDescGZIP(), []int{11}
 }
 
+// Asks whether one waiting item still waits on its owner (F-f05-03). A service asks before it announces
+// the item, so an item decided since the announcement is not announced again.
+type ConfirmAttentionWaitingRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The organization the item belongs to. Must match the verified caller.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// The owner the item belongs to. The row must belong to this owner, so a service names the person it
+	// acts for and gets no answer about another person's item.
+	UserId string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// The thread the item belongs to.
+	ThreadId string `protobuf:"bytes,3,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	// The run the item belongs to: the run that raised the row, or for a goal the run of its last settled turn.
+	RunId string `protobuf:"bytes,4,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// The row that waits: the approval, the proposed plan or the approval that names it, the run question or the goal.
+	SourceId string `protobuf:"bytes,5,opt,name=source_id,json=sourceId,proto3" json:"source_id,omitempty"`
+	// The state the item was announced in. Only a state that raises an item can be waiting; any other is not waiting.
+	State         AttentionState `protobuf:"varint,6,opt,name=state,proto3,enum=model_plane.v1.AttentionState" json:"state,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConfirmAttentionWaitingRequest) Reset() {
+	*x = ConfirmAttentionWaitingRequest{}
+	mi := &file_model_plane_v1_attention_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConfirmAttentionWaitingRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConfirmAttentionWaitingRequest) ProtoMessage() {}
+
+func (x *ConfirmAttentionWaitingRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_attention_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConfirmAttentionWaitingRequest.ProtoReflect.Descriptor instead.
+func (*ConfirmAttentionWaitingRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_attention_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *ConfirmAttentionWaitingRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *ConfirmAttentionWaitingRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *ConfirmAttentionWaitingRequest) GetThreadId() string {
+	if x != nil {
+		return x.ThreadId
+	}
+	return ""
+}
+
+func (x *ConfirmAttentionWaitingRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *ConfirmAttentionWaitingRequest) GetSourceId() string {
+	if x != nil {
+		return x.SourceId
+	}
+	return ""
+}
+
+func (x *ConfirmAttentionWaitingRequest) GetState() AttentionState {
+	if x != nil {
+		return x.State
+	}
+	return AttentionState_ATTENTION_STATE_UNSPECIFIED
+}
+
+// Whether the item still waits on its owner (F-f05-03).
+type ConfirmAttentionWaitingResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// False while the attention switch is off. Waiting is then false too.
+	Enabled bool `protobuf:"varint,1,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	// Whether the row still waits in the state the request names. Carries no content.
+	Waiting       bool `protobuf:"varint,2,opt,name=waiting,proto3" json:"waiting,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConfirmAttentionWaitingResponse) Reset() {
+	*x = ConfirmAttentionWaitingResponse{}
+	mi := &file_model_plane_v1_attention_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConfirmAttentionWaitingResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConfirmAttentionWaitingResponse) ProtoMessage() {}
+
+func (x *ConfirmAttentionWaitingResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_attention_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConfirmAttentionWaitingResponse.ProtoReflect.Descriptor instead.
+func (*ConfirmAttentionWaitingResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_attention_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *ConfirmAttentionWaitingResponse) GetEnabled() bool {
+	if x != nil {
+		return x.Enabled
+	}
+	return false
+}
+
+func (x *ConfirmAttentionWaitingResponse) GetWaiting() bool {
+	if x != nil {
+		return x.Waiting
+	}
+	return false
+}
+
 var File_model_plane_v1_attention_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_attention_proto_rawDesc = "" +
@@ -996,7 +1149,17 @@ const file_model_plane_v1_attention_proto_rawDesc = "" +
 	"\x04item\x18\x01 \x01(\v2\x1d.model_plane.v1.AttentionItemR\x04item\x127\n" +
 	"\x06counts\x18\x02 \x01(\v2\x1f.model_plane.v1.AttentionCountsR\x06counts\"\x11\n" +
 	"\x0fAttentionResync\"\x14\n" +
-	"\x12AttentionHeartbeat*\xa6\x02\n" +
+	"\x12AttentionHeartbeat\"\xd7\x01\n" +
+	"\x1eConfirmAttentionWaitingRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x1b\n" +
+	"\tthread_id\x18\x03 \x01(\tR\bthreadId\x12\x15\n" +
+	"\x06run_id\x18\x04 \x01(\tR\x05runId\x12\x1b\n" +
+	"\tsource_id\x18\x05 \x01(\tR\bsourceId\x124\n" +
+	"\x05state\x18\x06 \x01(\x0e2\x1e.model_plane.v1.AttentionStateR\x05state\"U\n" +
+	"\x1fConfirmAttentionWaitingResponse\x12\x18\n" +
+	"\aenabled\x18\x01 \x01(\bR\aenabled\x12\x18\n" +
+	"\awaiting\x18\x02 \x01(\bR\awaiting*\xa6\x02\n" +
 	"\x0eAttentionState\x12\x1f\n" +
 	"\x1bATTENTION_STATE_UNSPECIFIED\x10\x00\x12\"\n" +
 	"\x1eATTENTION_STATE_NEEDS_APPROVAL\x10\x01\x12\x1f\n" +
@@ -1006,17 +1169,19 @@ const file_model_plane_v1_attention_proto_rawDesc = "" +
 	"\x19ATTENTION_STATE_COMPLETED\x10\x05\x12\x1a\n" +
 	"\x16ATTENTION_STATE_FAILED\x10\x06\x12\x1c\n" +
 	"\x18ATTENTION_STATE_ARCHIVED\x10\a\x12\x18\n" +
-	"\x14ATTENTION_STATE_IDLE\x10\b*\xa4\x01\n" +
+	"\x14ATTENTION_STATE_IDLE\x10\b*\xc1\x01\n" +
 	"\x0fAttentionReason\x12 \n" +
 	"\x1cATTENTION_REASON_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19ATTENTION_REASON_APPROVAL\x10\x01\x12\x19\n" +
 	"\x15ATTENTION_REASON_PLAN\x10\x02\x12\x1a\n" +
 	"\x16ATTENTION_REASON_INPUT\x10\x03\x12\x19\n" +
-	"\x15ATTENTION_REASON_GOAL\x10\x052\xb7\x02\n" +
+	"\x15ATTENTION_REASON_GOAL\x10\x05\x12\x1b\n" +
+	"\x17ATTENTION_REASON_PARKED\x10\x062\xb3\x03\n" +
 	"\x10AttentionService\x12\\\n" +
 	"\rListAttention\x12$.model_plane.v1.ListAttentionRequest\x1a%.model_plane.v1.ListAttentionResponse\x12_\n" +
 	"\x0eMarkThreadSeen\x12%.model_plane.v1.MarkThreadSeenRequest\x1a&.model_plane.v1.MarkThreadSeenResponse\x12d\n" +
-	"\x0fStreamAttention\x12&.model_plane.v1.StreamAttentionRequest\x1a'.model_plane.v1.StreamAttentionResponse0\x01B\xb6\x01\n" +
+	"\x0fStreamAttention\x12&.model_plane.v1.StreamAttentionRequest\x1a'.model_plane.v1.StreamAttentionResponse0\x01\x12z\n" +
+	"\x17ConfirmAttentionWaiting\x12..model_plane.v1.ConfirmAttentionWaitingRequest\x1a/.model_plane.v1.ConfirmAttentionWaitingResponseB\xb6\x01\n" +
 	"\x12com.model_plane.v1B\x0eAttentionProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -1032,28 +1197,30 @@ func file_model_plane_v1_attention_proto_rawDescGZIP() []byte {
 }
 
 var file_model_plane_v1_attention_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_model_plane_v1_attention_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_model_plane_v1_attention_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_model_plane_v1_attention_proto_goTypes = []any{
-	(AttentionState)(0),             // 0: model_plane.v1.AttentionState
-	(AttentionReason)(0),            // 1: model_plane.v1.AttentionReason
-	(*AttentionItem)(nil),           // 2: model_plane.v1.AttentionItem
-	(*AttentionCounts)(nil),         // 3: model_plane.v1.AttentionCounts
-	(*ListAttentionRequest)(nil),    // 4: model_plane.v1.ListAttentionRequest
-	(*ListAttentionResponse)(nil),   // 5: model_plane.v1.ListAttentionResponse
-	(*MarkThreadSeenRequest)(nil),   // 6: model_plane.v1.MarkThreadSeenRequest
-	(*MarkThreadSeenResponse)(nil),  // 7: model_plane.v1.MarkThreadSeenResponse
-	(*StreamAttentionRequest)(nil),  // 8: model_plane.v1.StreamAttentionRequest
-	(*StreamAttentionResponse)(nil), // 9: model_plane.v1.StreamAttentionResponse
-	(*AttentionSnapshot)(nil),       // 10: model_plane.v1.AttentionSnapshot
-	(*AttentionThreadChanged)(nil),  // 11: model_plane.v1.AttentionThreadChanged
-	(*AttentionResync)(nil),         // 12: model_plane.v1.AttentionResync
-	(*AttentionHeartbeat)(nil),      // 13: model_plane.v1.AttentionHeartbeat
-	(*timestamppb.Timestamp)(nil),   // 14: google.protobuf.Timestamp
+	(AttentionState)(0),                     // 0: model_plane.v1.AttentionState
+	(AttentionReason)(0),                    // 1: model_plane.v1.AttentionReason
+	(*AttentionItem)(nil),                   // 2: model_plane.v1.AttentionItem
+	(*AttentionCounts)(nil),                 // 3: model_plane.v1.AttentionCounts
+	(*ListAttentionRequest)(nil),            // 4: model_plane.v1.ListAttentionRequest
+	(*ListAttentionResponse)(nil),           // 5: model_plane.v1.ListAttentionResponse
+	(*MarkThreadSeenRequest)(nil),           // 6: model_plane.v1.MarkThreadSeenRequest
+	(*MarkThreadSeenResponse)(nil),          // 7: model_plane.v1.MarkThreadSeenResponse
+	(*StreamAttentionRequest)(nil),          // 8: model_plane.v1.StreamAttentionRequest
+	(*StreamAttentionResponse)(nil),         // 9: model_plane.v1.StreamAttentionResponse
+	(*AttentionSnapshot)(nil),               // 10: model_plane.v1.AttentionSnapshot
+	(*AttentionThreadChanged)(nil),          // 11: model_plane.v1.AttentionThreadChanged
+	(*AttentionResync)(nil),                 // 12: model_plane.v1.AttentionResync
+	(*AttentionHeartbeat)(nil),              // 13: model_plane.v1.AttentionHeartbeat
+	(*ConfirmAttentionWaitingRequest)(nil),  // 14: model_plane.v1.ConfirmAttentionWaitingRequest
+	(*ConfirmAttentionWaitingResponse)(nil), // 15: model_plane.v1.ConfirmAttentionWaitingResponse
+	(*timestamppb.Timestamp)(nil),           // 16: google.protobuf.Timestamp
 }
 var file_model_plane_v1_attention_proto_depIdxs = []int32{
 	0,  // 0: model_plane.v1.AttentionItem.state:type_name -> model_plane.v1.AttentionState
 	1,  // 1: model_plane.v1.AttentionItem.reason:type_name -> model_plane.v1.AttentionReason
-	14, // 2: model_plane.v1.AttentionItem.since:type_name -> google.protobuf.Timestamp
+	16, // 2: model_plane.v1.AttentionItem.since:type_name -> google.protobuf.Timestamp
 	2,  // 3: model_plane.v1.ListAttentionResponse.items:type_name -> model_plane.v1.AttentionItem
 	3,  // 4: model_plane.v1.ListAttentionResponse.counts:type_name -> model_plane.v1.AttentionCounts
 	10, // 5: model_plane.v1.StreamAttentionResponse.snapshot:type_name -> model_plane.v1.AttentionSnapshot
@@ -1064,17 +1231,20 @@ var file_model_plane_v1_attention_proto_depIdxs = []int32{
 	3,  // 10: model_plane.v1.AttentionSnapshot.counts:type_name -> model_plane.v1.AttentionCounts
 	2,  // 11: model_plane.v1.AttentionThreadChanged.item:type_name -> model_plane.v1.AttentionItem
 	3,  // 12: model_plane.v1.AttentionThreadChanged.counts:type_name -> model_plane.v1.AttentionCounts
-	4,  // 13: model_plane.v1.AttentionService.ListAttention:input_type -> model_plane.v1.ListAttentionRequest
-	6,  // 14: model_plane.v1.AttentionService.MarkThreadSeen:input_type -> model_plane.v1.MarkThreadSeenRequest
-	8,  // 15: model_plane.v1.AttentionService.StreamAttention:input_type -> model_plane.v1.StreamAttentionRequest
-	5,  // 16: model_plane.v1.AttentionService.ListAttention:output_type -> model_plane.v1.ListAttentionResponse
-	7,  // 17: model_plane.v1.AttentionService.MarkThreadSeen:output_type -> model_plane.v1.MarkThreadSeenResponse
-	9,  // 18: model_plane.v1.AttentionService.StreamAttention:output_type -> model_plane.v1.StreamAttentionResponse
-	16, // [16:19] is the sub-list for method output_type
-	13, // [13:16] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	0,  // 13: model_plane.v1.ConfirmAttentionWaitingRequest.state:type_name -> model_plane.v1.AttentionState
+	4,  // 14: model_plane.v1.AttentionService.ListAttention:input_type -> model_plane.v1.ListAttentionRequest
+	6,  // 15: model_plane.v1.AttentionService.MarkThreadSeen:input_type -> model_plane.v1.MarkThreadSeenRequest
+	8,  // 16: model_plane.v1.AttentionService.StreamAttention:input_type -> model_plane.v1.StreamAttentionRequest
+	14, // 17: model_plane.v1.AttentionService.ConfirmAttentionWaiting:input_type -> model_plane.v1.ConfirmAttentionWaitingRequest
+	5,  // 18: model_plane.v1.AttentionService.ListAttention:output_type -> model_plane.v1.ListAttentionResponse
+	7,  // 19: model_plane.v1.AttentionService.MarkThreadSeen:output_type -> model_plane.v1.MarkThreadSeenResponse
+	9,  // 20: model_plane.v1.AttentionService.StreamAttention:output_type -> model_plane.v1.StreamAttentionResponse
+	15, // 21: model_plane.v1.AttentionService.ConfirmAttentionWaiting:output_type -> model_plane.v1.ConfirmAttentionWaitingResponse
+	18, // [18:22] is the sub-list for method output_type
+	14, // [14:18] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_attention_proto_init() }
@@ -1094,7 +1264,7 @@ func file_model_plane_v1_attention_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_attention_proto_rawDesc), len(file_model_plane_v1_attention_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   12,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

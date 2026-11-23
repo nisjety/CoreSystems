@@ -189,8 +189,9 @@ export type AcquireGrantRequest = Message<"model_plane.v1.AcquireGrantRequest"> 
   grantOrigin: string;
 
   /**
-   * The Space the run belongs to (WS21-S8). The site policy reads the Space
-   * floor from it; empty outside a Space. Tag 11 (R-6 allocates 10 to zdr).
+   * The Space the run belongs to (WS21-S8). Reserved: the broker refuses a
+   * non-empty value until the Space floor is wired (space_floor_unavailable).
+   * Empty outside a Space. Tag 11 (R-6 allocates 10 to zdr).
    *
    * @generated from field: string space_id = 11;
    */

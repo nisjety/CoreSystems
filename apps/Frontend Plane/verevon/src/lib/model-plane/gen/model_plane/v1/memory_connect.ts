@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { DeleteMemoryRequest, DeleteMemoryResponse, GetMemoryControlsRequest, GetMemoryControlsResponse, GetUserProfileRequest, IndexMemoryRequest, IndexMemoryResponse, ListMemoryRequest, ListMemoryResponse, MemoryHealthRequest, MemoryHealthResponse, RebuildUserProfileRequest, ResetMemoryRequest, ResetMemoryResponse, SearchMemoryRequest, SearchMemoryResponse, SetMemoryControlsRequest, SetMemoryControlsResponse, SetUserProfileRequest, UserProfileResponse } from "./memory_pbjs";
+import { CheckMemoryWriteRequest, CheckMemoryWriteResponse, DeleteMemoryRequest, DeleteMemoryResponse, EraseAgentMemoryRequest, EraseAgentMemoryResponse, GetMemoryControlsRequest, GetMemoryControlsResponse, GetUserProfileRequest, IndexMemoryRequest, IndexMemoryResponse, ListMemoryRequest, ListMemoryResponse, MemoryHealthRequest, MemoryHealthResponse, RebuildUserProfileRequest, ResetMemoryRequest, ResetMemoryResponse, SearchMemoryRequest, SearchMemoryResponse, SetMemoryControlsRequest, SetMemoryControlsResponse, SetUserProfileRequest, UserProfileResponse } from "./memory_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -118,6 +118,9 @@ export const MemoryService = {
      * an empty answer with skip_reason "zdr", never an error. Refused with
      * failed_precondition "profile_not_enabled" while SESSION_USER_PROFILE_ENABLED
      * is off.
+     * Response type is shared by the user profile RPCs; renaming it would break generated code.
+     * buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+     * buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
      *
      * @generated from rpc model_plane.v1.MemoryService.GetUserProfile
      */
@@ -132,6 +135,9 @@ export const MemoryService = {
      * themselves; a stale expected_revision is refused (failed_precondition
      * "profile_revision_stale"); a ZDR or waived credential is refused
      * zdr_feature_not_supported (feature "user_profile").
+     * Response type is shared by the user profile RPCs; renaming it would break generated code.
+     * buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+     * buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
      *
      * @generated from rpc model_plane.v1.MemoryService.SetUserProfile
      */
@@ -145,6 +151,9 @@ export const MemoryService = {
      * Rebuild the profile from the person's accepted memories. Refused while
      * memory is paused, off or disabled; an edited profile is kept unless force
      * is set. Same caller and ZDR rules as SetUserProfile.
+     * Response type is shared by the user profile RPCs; renaming it would break generated code.
+     * buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+     * buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
      *
      * @generated from rpc model_plane.v1.MemoryService.RebuildUserProfile
      */
@@ -152,6 +161,41 @@ export const MemoryService = {
       name: "RebuildUserProfile",
       I: RebuildUserProfileRequest,
       O: UserProfileResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Erase one named agent's memory in one Space (EP-6 P3, EP-8 S10): every
+     * scope = 'agent' row of that (Space, agent) binding. Called after the
+     * binding is revoked. Authorized by a Control Space memory decision issued to
+     * the Space's owner or admin for this agent; a person only, never a service.
+     * Open to a ZDR caller too: erasure only removes. Not gated by
+     * SESSION_AGENT_MEMORY_ENABLED, so rows written while it was on are erased too.
+     *
+     * @generated from rpc model_plane.v1.MemoryService.EraseAgentMemory
+     */
+    eraseAgentMemory: {
+      name: "EraseAgentMemory",
+      I: EraseAgentMemoryRequest,
+      O: EraseAgentMemoryResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Ask the one memory content policy (injection, hidden characters, credential
+     * shapes, org-scope origin and size) whether a write of this content to this
+     * scope by this origin would be allowed. It writes and stores nothing, and the
+     * content is never logged: a refusal is counted and logged with the rule, the
+     * origin and a content hash only. For a writer that stores agent_memory rows
+     * itself (capability-core's /api/v1/memory proxy) and must ask before its
+     * INSERT or UPDATE. Authorized like GetMemoryControls (the
+     * session:memory-controls:read scope for a service caller). An allow is also
+     * the answer while the policy mode is off.
+     *
+     * @generated from rpc model_plane.v1.MemoryService.CheckMemoryWrite
+     */
+    checkMemoryWrite: {
+      name: "CheckMemoryWrite",
+      I: CheckMemoryWriteRequest,
+      O: CheckMemoryWriteResponse,
       kind: MethodKind.Unary,
     },
   }

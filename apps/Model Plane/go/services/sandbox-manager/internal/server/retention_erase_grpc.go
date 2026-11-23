@@ -1,5 +1,3 @@
-//go:build retention_erase_gen
-
 package server
 
 import (

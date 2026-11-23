@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/memory.proto.
  */
 export const file_model_plane_v1_memory: GenFile = /*@__PURE__*/
-  fileDesc("Chttb2RlbF9wbGFuZS92MS9tZW1vcnkucHJvdG8SDm1vZGVsX3BsYW5lLnYxIrABChNTZWFyY2hNZW1vcnlSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRINCgVxdWVyeRgCIAEoCRIUCgx0b3BpY19maWx0ZXIYAyADKAkSDQoFbGltaXQYBCABKA0SDgoGb3JnX2lkGAUgASgJEjEKDXVwZGF0ZWRfYWZ0ZXIYBiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEg8KB3VzZXJfaWQYByABKAkimQEKFFNlYXJjaE1lbW9yeVJlc3BvbnNlEiwKB2VudHJpZXMYASADKAsyGy5tb2RlbF9wbGFuZS52MS5NZW1vcnlFbnRyeRIQCghkZWdyYWRlZBgCIAEoCBIaChJkZWdyYWRhdGlvbl9yZWFzb24YAyABKAkSEwoLc2tpcF9yZWFzb24YBCABKAkSEAoId2l0aGhlbGQYBSABKA0iwwIKC01lbW9yeUVudHJ5EhEKCW1lbW9yeV9pZBgBIAEoCRIRCgl0aHJlYWRfaWQYAiABKAkSDQoFdG9waWMYAyABKAkSDwoHY29udGVudBgEIAEoCRINCgVzY29yZRgFIAEoAhIuCgp1cGRhdGVkX2F0GAYgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIPCgd1c2VyX2lkGAcgASgJEjQKCnByb3ZlbmFuY2UYCCABKA4yIC5tb2RlbF9wbGFuZS52MS5NZW1vcnlQcm92ZW5hbmNlEhgKEG9yaWdpbl9zcGFjZV9yZWYYCSABKAkSFwoPd2l0aGhlbGRfcmVhc29uGAogASgJEg0KBXNjb3BlGAsgASgJEhAKCHNjb3BlX2lkGAwgASgJEhQKDHNvdXJjZV9sYWJlbBgNIAEoCSKLAQoSSW5kZXhNZW1vcnlSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRINCgV0b3BpYxgCIAEoCRIPCgdjb250ZW50GAMgASgJEg4KBm9yZ19pZBgEIAEoCRIPCgd1c2VyX2lkGAUgASgJEhEKCW1lbW9yeV9pZBgGIAEoCRIOCgZvcmlnaW4YByABKAkiVgoTSW5kZXhNZW1vcnlSZXNwb25zZRIRCgltZW1vcnlfaWQYASABKAkSEAoIZGVncmFkZWQYAiABKAgSGgoSZGVncmFkYXRpb25fcmVhc29uGAMgASgJIhUKE01lbW9yeUhlYWx0aFJlcXVlc3QiTAoUTWVtb3J5SGVhbHRoUmVzcG9uc2USDgoGc3RhdHVzGAEgASgJEg0KBXJlYWR5GAIgASgIEhUKDW1lbW9yeV9zdGF0dXMYAyABKAkinwEKEUxpc3RNZW1vcnlSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIPCgd1c2VyX2lkGAIgASgJEg0KBWxpbWl0GAMgASgNEhAKCHNwYWNlX2lkGAQgASgJEiIKGnNwYWNlX2NvbnRyb2xfZGVjaXNpb25fcmVmGAUgASgJEiQKHHNwYWNlX2NvbnRyb2xfZGVjaXNpb25fdG9rZW4YBiABKAkihwEKEkxpc3RNZW1vcnlSZXNwb25zZRIsCgdlbnRyaWVzGAEgAygLMhsubW9kZWxfcGxhbmUudjEuTWVtb3J5RW50cnkSEAoIZGVncmFkZWQYAiABKAgSGgoSZGVncmFkYXRpb25fcmVhc29uGAMgASgJEhUKDWhpZGRlbl9yZWFzb24YBCABKAkipQEKE0RlbGV0ZU1lbW9yeVJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEg8KB3VzZXJfaWQYAiABKAkSEQoJbWVtb3J5X2lkGAMgASgJEhAKCHNwYWNlX2lkGAQgASgJEiIKGnNwYWNlX2NvbnRyb2xfZGVjaXNpb25fcmVmGAUgASgJEiQKHHNwYWNlX2NvbnRyb2xfZGVjaXNpb25fdG9rZW4YBiABKAkiVQoURGVsZXRlTWVtb3J5UmVzcG9uc2USDwoHZGVsZXRlZBgBIAEoCBIQCghkZWdyYWRlZBgCIAEoCBIaChJkZWdyYWRhdGlvbl9yZWFzb24YAyABKAkiOwoYR2V0TWVtb3J5Q29udHJvbHNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIPCgd1c2VyX2lkGAIgASgJImcKGFNldE1lbW9yeUNvbnRyb2xzUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSDwoHdXNlcl9pZBgCIAEoCRIqCgVzdGF0ZRgDIAEoDjIbLm1vZGVsX3BsYW5lLnYxLk1lbW9yeVN0YXRlIpQCCg5NZW1vcnlDb250cm9scxIqCgVzdGF0ZRgBIAEoDjIbLm1vZGVsX3BsYW5lLnYxLk1lbW9yeVN0YXRlEhkKEW9yZ19tZW1vcnlfcG9saWN5GAIgASgJEhsKE29yZ19sZWFybmluZ19wb2xpY3kYAyABKAkSEwoLdXNlX2FsbG93ZWQYBCABKAgSGgoSZ2VuZXJhdGlvbl9hbGxvd2VkGAUgASgIEhgKEGxlYXJuaW5nX2FsbG93ZWQYBiABKAgSDgoGcmVhc29uGAcgASgJEhMKC2hpZGRlbl9yb3dzGAggASgNEi4KCnVwZGF0ZWRfYXQYCSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIk0KGUdldE1lbW9yeUNvbnRyb2xzUmVzcG9uc2USMAoIY29udHJvbHMYASABKAsyHi5tb2RlbF9wbGFuZS52MS5NZW1vcnlDb250cm9scyJNChlTZXRNZW1vcnlDb250cm9sc1Jlc3BvbnNlEjAKCGNvbnRyb2xzGAEgASgLMh4ubW9kZWxfcGxhbmUudjEuTWVtb3J5Q29udHJvbHMiRgoSUmVzZXRNZW1vcnlSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIPCgd1c2VyX2lkGAIgASgJEg8KB2NvbmZpcm0YAyABKAgiegoTUmVzZXRNZW1vcnlSZXNwb25zZRIXCg9kdXJhYmxlX2RlbGV0ZWQYASABKA0SHAoUc2VtYW50aWNfdW5jb25maXJtZWQYAiABKA0SEAoIZGVncmFkZWQYAyABKAgSGgoSZGVncmFkYXRpb25fcmVhc29uGAQgASgJIq8BCgtVc2VyUHJvZmlsZRIPCgdjb250ZW50GAEgASgJEhkKEXNvdXJjZV9tZW1vcnlfaWRzGAIgAygJEg4KBm9yaWdpbhgDIAEoCRIQCghyZXZpc2lvbhgEIAEoBBIuCgp1cGRhdGVkX2F0GAUgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIiChpzb3VyY2VzX2RlbGV0ZWRfc2luY2VfZWRpdBgGIAEoDSI4ChVHZXRVc2VyUHJvZmlsZVJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEg8KB3VzZXJfaWQYAiABKAkiZAoVU2V0VXNlclByb2ZpbGVSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIPCgd1c2VyX2lkGAIgASgJEg8KB2NvbnRlbnQYAyABKAkSGQoRZXhwZWN0ZWRfcmV2aXNpb24YBCABKAQiSwoZUmVidWlsZFVzZXJQcm9maWxlUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSDwoHdXNlcl9pZBgCIAEoCRINCgVmb3JjZRgDIAEoCCJYChNVc2VyUHJvZmlsZVJlc3BvbnNlEiwKB3Byb2ZpbGUYASABKAsyGy5tb2RlbF9wbGFuZS52MS5Vc2VyUHJvZmlsZRITCgtza2lwX3JlYXNvbhgCIAEoCSpzChBNZW1vcnlQcm92ZW5hbmNlEiEKHU1FTU9SWV9QUk9WRU5BTkNFX1VOU1BFQ0lGSUVEEAASHAoYTUVNT1JZX1BST1ZFTkFOQ0VfU1RBVEVEEAESHgoaTUVNT1JZX1BST1ZFTkFOQ0VfSU5GRVJSRUQQAipvCgtNZW1vcnlTdGF0ZRIcChhNRU1PUllfU1RBVEVfVU5TUEVDSUZJRUQQABITCg9NRU1PUllfU1RBVEVfT04QARIXChNNRU1PUllfU1RBVEVfUEFVU0VEEAISFAoQTUVNT1JZX1NUQVRFX09GRhADMpUICg1NZW1vcnlTZXJ2aWNlElkKDFNlYXJjaE1lbW9yeRIjLm1vZGVsX3BsYW5lLnYxLlNlYXJjaE1lbW9yeVJlcXVlc3QaJC5tb2RlbF9wbGFuZS52MS5TZWFyY2hNZW1vcnlSZXNwb25zZRJWCgtJbmRleE1lbW9yeRIiLm1vZGVsX3BsYW5lLnYxLkluZGV4TWVtb3J5UmVxdWVzdBojLm1vZGVsX3BsYW5lLnYxLkluZGV4TWVtb3J5UmVzcG9uc2USUwoKTGlzdE1lbW9yeRIhLm1vZGVsX3BsYW5lLnYxLkxpc3RNZW1vcnlSZXF1ZXN0GiIubW9kZWxfcGxhbmUudjEuTGlzdE1lbW9yeVJlc3BvbnNlElkKDERlbGV0ZU1lbW9yeRIjLm1vZGVsX3BsYW5lLnYxLkRlbGV0ZU1lbW9yeVJlcXVlc3QaJC5tb2RlbF9wbGFuZS52MS5EZWxldGVNZW1vcnlSZXNwb25zZRJTCgZIZWFsdGgSIy5tb2RlbF9wbGFuZS52MS5NZW1vcnlIZWFsdGhSZXF1ZXN0GiQubW9kZWxfcGxhbmUudjEuTWVtb3J5SGVhbHRoUmVzcG9uc2USaAoRR2V0TWVtb3J5Q29udHJvbHMSKC5tb2RlbF9wbGFuZS52MS5HZXRNZW1vcnlDb250cm9sc1JlcXVlc3QaKS5tb2RlbF9wbGFuZS52MS5HZXRNZW1vcnlDb250cm9sc1Jlc3BvbnNlEmgKEVNldE1lbW9yeUNvbnRyb2xzEigubW9kZWxfcGxhbmUudjEuU2V0TWVtb3J5Q29udHJvbHNSZXF1ZXN0GikubW9kZWxfcGxhbmUudjEuU2V0TWVtb3J5Q29udHJvbHNSZXNwb25zZRJWCgtSZXNldE1lbW9yeRIiLm1vZGVsX3BsYW5lLnYxLlJlc2V0TWVtb3J5UmVxdWVzdBojLm1vZGVsX3BsYW5lLnYxLlJlc2V0TWVtb3J5UmVzcG9uc2USXAoOR2V0VXNlclByb2ZpbGUSJS5tb2RlbF9wbGFuZS52MS5HZXRVc2VyUHJvZmlsZVJlcXVlc3QaIy5tb2RlbF9wbGFuZS52MS5Vc2VyUHJvZmlsZVJlc3BvbnNlElwKDlNldFVzZXJQcm9maWxlEiUubW9kZWxfcGxhbmUudjEuU2V0VXNlclByb2ZpbGVSZXF1ZXN0GiMubW9kZWxfcGxhbmUudjEuVXNlclByb2ZpbGVSZXNwb25zZRJkChJSZWJ1aWxkVXNlclByb2ZpbGUSKS5tb2RlbF9wbGFuZS52MS5SZWJ1aWxkVXNlclByb2ZpbGVSZXF1ZXN0GiMubW9kZWxfcGxhbmUudjEuVXNlclByb2ZpbGVSZXNwb25zZUI9WjtnaXRodWIuY29tL3RyaW9kZWxhYi9tb2RlbC1wbGFuZS9nZW4vZ28vbW9kZWxfcGxhbmUvdjE7bXB2MWIGcHJvdG8z", [file_google_protobuf_timestamp]);
+  fileDesc("Chttb2RlbF9wbGFuZS92MS9tZW1vcnkucHJvdG8SDm1vZGVsX3BsYW5lLnYxIrABChNTZWFyY2hNZW1vcnlSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRINCgVxdWVyeRgCIAEoCRIUCgx0b3BpY19maWx0ZXIYAyADKAkSDQoFbGltaXQYBCABKA0SDgoGb3JnX2lkGAUgASgJEjEKDXVwZGF0ZWRfYWZ0ZXIYBiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEg8KB3VzZXJfaWQYByABKAkimQEKFFNlYXJjaE1lbW9yeVJlc3BvbnNlEiwKB2VudHJpZXMYASADKAsyGy5tb2RlbF9wbGFuZS52MS5NZW1vcnlFbnRyeRIQCghkZWdyYWRlZBgCIAEoCBIaChJkZWdyYWRhdGlvbl9yZWFzb24YAyABKAkSEwoLc2tpcF9yZWFzb24YBCABKAkSEAoId2l0aGhlbGQYBSABKA0iwwIKC01lbW9yeUVudHJ5EhEKCW1lbW9yeV9pZBgBIAEoCRIRCgl0aHJlYWRfaWQYAiABKAkSDQoFdG9waWMYAyABKAkSDwoHY29udGVudBgEIAEoCRINCgVzY29yZRgFIAEoAhIuCgp1cGRhdGVkX2F0GAYgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIPCgd1c2VyX2lkGAcgASgJEjQKCnByb3ZlbmFuY2UYCCABKA4yIC5tb2RlbF9wbGFuZS52MS5NZW1vcnlQcm92ZW5hbmNlEhgKEG9yaWdpbl9zcGFjZV9yZWYYCSABKAkSFwoPd2l0aGhlbGRfcmVhc29uGAogASgJEg0KBXNjb3BlGAsgASgJEhAKCHNjb3BlX2lkGAwgASgJEhQKDHNvdXJjZV9sYWJlbBgNIAEoCSKbAQoSSW5kZXhNZW1vcnlSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRINCgV0b3BpYxgCIAEoCRIPCgdjb250ZW50GAMgASgJEg4KBm9yZ19pZBgEIAEoCRIPCgd1c2VyX2lkGAUgASgJEhEKCW1lbW9yeV9pZBgGIAEoCRIOCgZvcmlnaW4YByABKAkSDgoGcnVuX2lkGAggASgJIlYKE0luZGV4TWVtb3J5UmVzcG9uc2USEQoJbWVtb3J5X2lkGAEgASgJEhAKCGRlZ3JhZGVkGAIgASgIEhoKEmRlZ3JhZGF0aW9uX3JlYXNvbhgDIAEoCSIVChNNZW1vcnlIZWFsdGhSZXF1ZXN0IkwKFE1lbW9yeUhlYWx0aFJlc3BvbnNlEg4KBnN0YXR1cxgBIAEoCRINCgVyZWFkeRgCIAEoCBIVCg1tZW1vcnlfc3RhdHVzGAMgASgJIrkBChFMaXN0TWVtb3J5UmVxdWVzdBIOCgZvcmdfaWQYASABKAkSDwoHdXNlcl9pZBgCIAEoCRINCgVsaW1pdBgDIAEoDRIQCghzcGFjZV9pZBgEIAEoCRIiChpzcGFjZV9jb250cm9sX2RlY2lzaW9uX3JlZhgFIAEoCRIkChxzcGFjZV9jb250cm9sX2RlY2lzaW9uX3Rva2VuGAYgASgJEhgKEGFnZW50X3N1YmplY3RfaWQYByABKAkihwEKEkxpc3RNZW1vcnlSZXNwb25zZRIsCgdlbnRyaWVzGAEgAygLMhsubW9kZWxfcGxhbmUudjEuTWVtb3J5RW50cnkSEAoIZGVncmFkZWQYAiABKAgSGgoSZGVncmFkYXRpb25fcmVhc29uGAMgASgJEhUKDWhpZGRlbl9yZWFzb24YBCABKAkipQEKE0RlbGV0ZU1lbW9yeVJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEg8KB3VzZXJfaWQYAiABKAkSEQoJbWVtb3J5X2lkGAMgASgJEhAKCHNwYWNlX2lkGAQgASgJEiIKGnNwYWNlX2NvbnRyb2xfZGVjaXNpb25fcmVmGAUgASgJEiQKHHNwYWNlX2NvbnRyb2xfZGVjaXNpb25fdG9rZW4YBiABKAkiVQoURGVsZXRlTWVtb3J5UmVzcG9uc2USDwoHZGVsZXRlZBgBIAEoCBIQCghkZWdyYWRlZBgCIAEoCBIaChJkZWdyYWRhdGlvbl9yZWFzb24YAyABKAkiTgoYR2V0TWVtb3J5Q29udHJvbHNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIPCgd1c2VyX2lkGAIgASgJEhEKCXRocmVhZF9pZBgDIAEoCSJnChhTZXRNZW1vcnlDb250cm9sc1JlcXVlc3QSDgoGb3JnX2lkGAEgASgJEg8KB3VzZXJfaWQYAiABKAkSKgoFc3RhdGUYAyABKA4yGy5tb2RlbF9wbGFuZS52MS5NZW1vcnlTdGF0ZSKUAgoOTWVtb3J5Q29udHJvbHMSKgoFc3RhdGUYASABKA4yGy5tb2RlbF9wbGFuZS52MS5NZW1vcnlTdGF0ZRIZChFvcmdfbWVtb3J5X3BvbGljeRgCIAEoCRIbChNvcmdfbGVhcm5pbmdfcG9saWN5GAMgASgJEhMKC3VzZV9hbGxvd2VkGAQgASgIEhoKEmdlbmVyYXRpb25fYWxsb3dlZBgFIAEoCBIYChBsZWFybmluZ19hbGxvd2VkGAYgASgIEg4KBnJlYXNvbhgHIAEoCRITCgtoaWRkZW5fcm93cxgIIAEoDRIuCgp1cGRhdGVkX2F0GAkgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCJNChlHZXRNZW1vcnlDb250cm9sc1Jlc3BvbnNlEjAKCGNvbnRyb2xzGAEgASgLMh4ubW9kZWxfcGxhbmUudjEuTWVtb3J5Q29udHJvbHMiTQoZU2V0TWVtb3J5Q29udHJvbHNSZXNwb25zZRIwCghjb250cm9scxgBIAEoCzIeLm1vZGVsX3BsYW5lLnYxLk1lbW9yeUNvbnRyb2xzIkYKElJlc2V0TWVtb3J5UmVxdWVzdBIOCgZvcmdfaWQYASABKAkSDwoHdXNlcl9pZBgCIAEoCRIPCgdjb25maXJtGAMgASgIInoKE1Jlc2V0TWVtb3J5UmVzcG9uc2USFwoPZHVyYWJsZV9kZWxldGVkGAEgASgNEhwKFHNlbWFudGljX3VuY29uZmlybWVkGAIgASgNEhAKCGRlZ3JhZGVkGAMgASgIEhoKEmRlZ3JhZGF0aW9uX3JlYXNvbhgEIAEoCSKvAQoLVXNlclByb2ZpbGUSDwoHY29udGVudBgBIAEoCRIZChFzb3VyY2VfbWVtb3J5X2lkcxgCIAMoCRIOCgZvcmlnaW4YAyABKAkSEAoIcmV2aXNpb24YBCABKAQSLgoKdXBkYXRlZF9hdBgFIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASIgoac291cmNlc19kZWxldGVkX3NpbmNlX2VkaXQYBiABKA0iOAoVR2V0VXNlclByb2ZpbGVSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIPCgd1c2VyX2lkGAIgASgJImQKFVNldFVzZXJQcm9maWxlUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSDwoHdXNlcl9pZBgCIAEoCRIPCgdjb250ZW50GAMgASgJEhkKEWV4cGVjdGVkX3JldmlzaW9uGAQgASgEIksKGVJlYnVpbGRVc2VyUHJvZmlsZVJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEg8KB3VzZXJfaWQYAiABKAkSDQoFZm9yY2UYAyABKAgiWAoTVXNlclByb2ZpbGVSZXNwb25zZRIsCgdwcm9maWxlGAEgASgLMhsubW9kZWxfcGxhbmUudjEuVXNlclByb2ZpbGUSEwoLc2tpcF9yZWFzb24YAiABKAkisAEKF0VyYXNlQWdlbnRNZW1vcnlSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIQCghzcGFjZV9pZBgCIAEoCRIYChBhZ2VudF9zdWJqZWN0X2lkGAMgASgJEiIKGnNwYWNlX2NvbnRyb2xfZGVjaXNpb25fcmVmGAQgASgJEiQKHHNwYWNlX2NvbnRyb2xfZGVjaXNpb25fdG9rZW4YBSABKAkSDwoHdXNlcl9pZBgGIAEoCSIqChhFcmFzZUFnZW50TWVtb3J5UmVzcG9uc2USDgoGZXJhc2VkGAEgASgEImoKF0NoZWNrTWVtb3J5V3JpdGVSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIPCgd1c2VyX2lkGAIgASgJEg8KB2NvbnRlbnQYAyABKAkSDQoFc2NvcGUYBCABKAkSDgoGb3JpZ2luGAUgASgJIkEKGENoZWNrTWVtb3J5V3JpdGVSZXNwb25zZRIPCgdhbGxvd2VkGAEgASgIEhQKDHJlZnVzYWxfY29kZRgCIAEoCSpzChBNZW1vcnlQcm92ZW5hbmNlEiEKHU1FTU9SWV9QUk9WRU5BTkNFX1VOU1BFQ0lGSUVEEAASHAoYTUVNT1JZX1BST1ZFTkFOQ0VfU1RBVEVEEAESHgoaTUVNT1JZX1BST1ZFTkFOQ0VfSU5GRVJSRUQQAipvCgtNZW1vcnlTdGF0ZRIcChhNRU1PUllfU1RBVEVfVU5TUEVDSUZJRUQQABITCg9NRU1PUllfU1RBVEVfT04QARIXChNNRU1PUllfU1RBVEVfUEFVU0VEEAISFAoQTUVNT1JZX1NUQVRFX09GRhADMuMJCg1NZW1vcnlTZXJ2aWNlElkKDFNlYXJjaE1lbW9yeRIjLm1vZGVsX3BsYW5lLnYxLlNlYXJjaE1lbW9yeVJlcXVlc3QaJC5tb2RlbF9wbGFuZS52MS5TZWFyY2hNZW1vcnlSZXNwb25zZRJWCgtJbmRleE1lbW9yeRIiLm1vZGVsX3BsYW5lLnYxLkluZGV4TWVtb3J5UmVxdWVzdBojLm1vZGVsX3BsYW5lLnYxLkluZGV4TWVtb3J5UmVzcG9uc2USUwoKTGlzdE1lbW9yeRIhLm1vZGVsX3BsYW5lLnYxLkxpc3RNZW1vcnlSZXF1ZXN0GiIubW9kZWxfcGxhbmUudjEuTGlzdE1lbW9yeVJlc3BvbnNlElkKDERlbGV0ZU1lbW9yeRIjLm1vZGVsX3BsYW5lLnYxLkRlbGV0ZU1lbW9yeVJlcXVlc3QaJC5tb2RlbF9wbGFuZS52MS5EZWxldGVNZW1vcnlSZXNwb25zZRJTCgZIZWFsdGgSIy5tb2RlbF9wbGFuZS52MS5NZW1vcnlIZWFsdGhSZXF1ZXN0GiQubW9kZWxfcGxhbmUudjEuTWVtb3J5SGVhbHRoUmVzcG9uc2USaAoRR2V0TWVtb3J5Q29udHJvbHMSKC5tb2RlbF9wbGFuZS52MS5HZXRNZW1vcnlDb250cm9sc1JlcXVlc3QaKS5tb2RlbF9wbGFuZS52MS5HZXRNZW1vcnlDb250cm9sc1Jlc3BvbnNlEmgKEVNldE1lbW9yeUNvbnRyb2xzEigubW9kZWxfcGxhbmUudjEuU2V0TWVtb3J5Q29udHJvbHNSZXF1ZXN0GikubW9kZWxfcGxhbmUudjEuU2V0TWVtb3J5Q29udHJvbHNSZXNwb25zZRJWCgtSZXNldE1lbW9yeRIiLm1vZGVsX3BsYW5lLnYxLlJlc2V0TWVtb3J5UmVxdWVzdBojLm1vZGVsX3BsYW5lLnYxLlJlc2V0TWVtb3J5UmVzcG9uc2USXAoOR2V0VXNlclByb2ZpbGUSJS5tb2RlbF9wbGFuZS52MS5HZXRVc2VyUHJvZmlsZVJlcXVlc3QaIy5tb2RlbF9wbGFuZS52MS5Vc2VyUHJvZmlsZVJlc3BvbnNlElwKDlNldFVzZXJQcm9maWxlEiUubW9kZWxfcGxhbmUudjEuU2V0VXNlclByb2ZpbGVSZXF1ZXN0GiMubW9kZWxfcGxhbmUudjEuVXNlclByb2ZpbGVSZXNwb25zZRJkChJSZWJ1aWxkVXNlclByb2ZpbGUSKS5tb2RlbF9wbGFuZS52MS5SZWJ1aWxkVXNlclByb2ZpbGVSZXF1ZXN0GiMubW9kZWxfcGxhbmUudjEuVXNlclByb2ZpbGVSZXNwb25zZRJlChBFcmFzZUFnZW50TWVtb3J5EicubW9kZWxfcGxhbmUudjEuRXJhc2VBZ2VudE1lbW9yeVJlcXVlc3QaKC5tb2RlbF9wbGFuZS52MS5FcmFzZUFnZW50TWVtb3J5UmVzcG9uc2USZQoQQ2hlY2tNZW1vcnlXcml0ZRInLm1vZGVsX3BsYW5lLnYxLkNoZWNrTWVtb3J5V3JpdGVSZXF1ZXN0GigubW9kZWxfcGxhbmUudjEuQ2hlY2tNZW1vcnlXcml0ZVJlc3BvbnNlQrMBChJjb20ubW9kZWxfcGxhbmUudjFCC01lbW9yeVByb3RvUAFaO2dpdGh1Yi5jb20vdHJpb2RlbGFiL21vZGVsLXBsYW5lL2dlbi9nby9tb2RlbF9wbGFuZS92MTttcHYxogIDTVhYqgINTW9kZWxQbGFuZS5WMcoCDU1vZGVsUGxhbmVcVjHiAhlNb2RlbFBsYW5lXFYxXEdQQk1ldGFkYXRh6gIOTW9kZWxQbGFuZTo6VjFiBnByb3RvMw", [file_google_protobuf_timestamp]);
 
 /**
  * @generated from message model_plane.v1.SearchMemoryRequest
@@ -62,11 +62,11 @@ export type SearchMemoryRequest = Message<"model_plane.v1.SearchMemoryRequest"> 
 
   /**
    * The user this search is on behalf of, for per-user scoping.
-   * 
+   *
    * When set, results are limited to memories owned by this user plus those
    * owned by nobody (org/workspace/policy scope) -- the same rule session-core's
    * durable query applies (`scope = 'user' AND owner = $3`).
-   * 
+   *
    * Empty means no user filter, which is org-wide. That was the ONLY behaviour
    * before this field existed, and it was safe only because the single caller
    * always passed a `thread_id` and a thread has one owner. This boundary did
@@ -200,7 +200,7 @@ export type MemoryEntry = Message<"model_plane.v1.MemoryEntry"> & {
    * How this memory came to exist, so a person reading "what do you remember
    * about me" can tell what they ASKED Verevon to remember from what Verevon
    * decided to remember on its own.
-   * 
+   *
    * Three-valued rather than a bool: "stated" covers both an explicit
    * save-memory tool call and a phrase the deterministic matcher recognised
    * ("husk at ..."), which are equally the user's own words; "inferred" is a
@@ -323,6 +323,17 @@ export type IndexMemoryRequest = Message<"model_plane.v1.IndexMemoryRequest"> & 
    * @generated from field: string origin = 7;
    */
   origin: string;
+
+  /**
+   * The run that issued this save (EP-8 S10). The execution loop sets it from
+   * its own run, never from the model's input. With SESSION_CORE_AGENT_MEMORY_RUN_BOUND
+   * on, session-core writes an AGENT_SELF note only when this run is a live wake
+   * run of an agent on the thread, and an empty value writes nothing. Every other
+   * caller leaves it empty. An identifier only, never logged with content.
+   *
+   * @generated from field: string run_id = 8;
+   */
+  runId: string;
 };
 
 /**
@@ -462,6 +473,17 @@ export type ListMemoryRequest = Message<"model_plane.v1.ListMemoryRequest"> & {
    * @generated from field: string space_control_decision_token = 6;
    */
   spaceControlDecisionToken: string;
+
+  /**
+   * Lists one named agent's notes in the Space (EP-6 P3, EP-8 S10) instead of
+   * every row of the Space. Set only with `space_id`, under the same Control
+   * decision; without `space_id` it is refused. A ZDR or waived caller is
+   * refused with the `named_agent` catalogue refusal, and the list is empty
+   * while SESSION_AGENT_MEMORY_ENABLED is off. Empty keeps the Space list.
+   *
+   * @generated from field: string agent_subject_id = 7;
+   */
+  agentSubjectId: string;
 };
 
 /**
@@ -608,6 +630,8 @@ export const DeleteMemoryResponseSchema: GenMessage<DeleteMemoryResponse> = /*@_
   messageDesc(file_model_plane_v1_memory, 10);
 
 /**
+ * Request to read one user's memory controls.
+ *
  * @generated from message model_plane.v1.GetMemoryControlsRequest
  */
 export type GetMemoryControlsRequest = Message<"model_plane.v1.GetMemoryControlsRequest"> & {
@@ -624,6 +648,16 @@ export type GetMemoryControlsRequest = Message<"model_plane.v1.GetMemoryControls
    * @generated from field: string user_id = 2;
    */
   userId: string;
+
+  /**
+   * Optional thread (F-f06-07). When set, the controls answer the thread-aware decision for it: the thread's own
+   * memory mode and its containment are folded in, so use_allowed and reason say what a recall in that thread would
+   * do. The caller must own the thread (a service caller reads it for the thread's owner). Empty keeps the user-level
+   * view that the settings page reads.
+   *
+   * @generated from field: string thread_id = 3;
+   */
+  threadId: string;
 };
 
 /**
@@ -634,6 +668,8 @@ export const GetMemoryControlsRequestSchema: GenMessage<GetMemoryControlsRequest
   messageDesc(file_model_plane_v1_memory, 11);
 
 /**
+ * Request to set one user's memory state.
+ *
  * @generated from message model_plane.v1.SetMemoryControlsRequest
  */
 export type SetMemoryControlsRequest = Message<"model_plane.v1.SetMemoryControlsRequest"> & {
@@ -720,8 +756,9 @@ export type MemoryControls = Message<"model_plane.v1.MemoryControls"> & {
   /**
    * Closed token for what decided the above: "on", "user_paused", "user_off",
    * "org_disabled", "zdr", "policy_unavailable". The thread-scoped tokens
-   * "space_scope" and "agent_run_scope" come from a thread's own recall or
-   * write (SearchMemory, IndexMemory), not from this message.
+   * "thread_off", "space_scope" and "agent_run_scope" come from a thread's own
+   * memory mode and containment: a recall or write in that thread (SearchMemory,
+   * IndexMemory), or this message when GetMemoryControlsRequest names the thread.
    *
    * @generated from field: string reason = 7;
    */
@@ -751,10 +788,14 @@ export const MemoryControlsSchema: GenMessage<MemoryControls> = /*@__PURE__*/
   messageDesc(file_model_plane_v1_memory, 13);
 
 /**
+ * Response carrying one user's memory controls.
+ *
  * @generated from message model_plane.v1.GetMemoryControlsResponse
  */
 export type GetMemoryControlsResponse = Message<"model_plane.v1.GetMemoryControlsResponse"> & {
   /**
+   * The user's memory controls.
+   *
    * @generated from field: model_plane.v1.MemoryControls controls = 1;
    */
   controls?: MemoryControls | undefined;
@@ -768,10 +809,14 @@ export const GetMemoryControlsResponseSchema: GenMessage<GetMemoryControlsRespon
   messageDesc(file_model_plane_v1_memory, 14);
 
 /**
+ * Response to a set, carrying the user's memory controls.
+ *
  * @generated from message model_plane.v1.SetMemoryControlsResponse
  */
 export type SetMemoryControlsResponse = Message<"model_plane.v1.SetMemoryControlsResponse"> & {
   /**
+   * The user's memory controls.
+   *
    * @generated from field: model_plane.v1.MemoryControls controls = 1;
    */
   controls?: MemoryControls | undefined;
@@ -785,6 +830,8 @@ export const SetMemoryControlsResponseSchema: GenMessage<SetMemoryControlsRespon
   messageDesc(file_model_plane_v1_memory, 15);
 
 /**
+ * Request to erase one user's durable memory; confirm must be true.
+ *
  * @generated from message model_plane.v1.ResetMemoryRequest
  */
 export type ResetMemoryRequest = Message<"model_plane.v1.ResetMemoryRequest"> & {
@@ -819,6 +866,8 @@ export const ResetMemoryRequestSchema: GenMessage<ResetMemoryRequest> = /*@__PUR
   messageDesc(file_model_plane_v1_memory, 16);
 
 /**
+ * Counts of rows erased by a memory reset, and whether any copy is unconfirmed.
+ *
  * @generated from message model_plane.v1.ResetMemoryResponse
  */
 export type ResetMemoryResponse = Message<"model_plane.v1.ResetMemoryResponse"> & {
@@ -921,6 +970,8 @@ export const UserProfileSchema: GenMessage<UserProfile> = /*@__PURE__*/
   messageDesc(file_model_plane_v1_memory, 18);
 
 /**
+ * Request to read one user's profile.
+ *
  * @generated from message model_plane.v1.GetUserProfileRequest
  */
 export type GetUserProfileRequest = Message<"model_plane.v1.GetUserProfileRequest"> & {
@@ -947,6 +998,8 @@ export const GetUserProfileRequestSchema: GenMessage<GetUserProfileRequest> = /*
   messageDesc(file_model_plane_v1_memory, 19);
 
 /**
+ * Request to replace one user's profile text with an edit.
+ *
  * @generated from message model_plane.v1.SetUserProfileRequest
  */
 export type SetUserProfileRequest = Message<"model_plane.v1.SetUserProfileRequest"> & {
@@ -987,6 +1040,8 @@ export const SetUserProfileRequestSchema: GenMessage<SetUserProfileRequest> = /*
   messageDesc(file_model_plane_v1_memory, 20);
 
 /**
+ * Request to rebuild one user's profile from their accepted memories.
+ *
  * @generated from message model_plane.v1.RebuildUserProfileRequest
  */
 export type RebuildUserProfileRequest = Message<"model_plane.v1.RebuildUserProfileRequest"> & {
@@ -1020,6 +1075,8 @@ export const RebuildUserProfileRequestSchema: GenMessage<RebuildUserProfileReque
   messageDesc(file_model_plane_v1_memory, 21);
 
 /**
+ * The user's profile, and why it is not used in conversations.
+ *
  * @generated from message model_plane.v1.UserProfileResponse
  */
 export type UserProfileResponse = Message<"model_plane.v1.UserProfileResponse"> & {
@@ -1047,6 +1104,167 @@ export type UserProfileResponse = Message<"model_plane.v1.UserProfileResponse"> 
  */
 export const UserProfileResponseSchema: GenMessage<UserProfileResponse> = /*@__PURE__*/
   messageDesc(file_model_plane_v1_memory, 22);
+
+/**
+ * Request to erase one agent's memory in one Space (EP-6 P3).
+ *
+ * @generated from message model_plane.v1.EraseAgentMemoryRequest
+ */
+export type EraseAgentMemoryRequest = Message<"model_plane.v1.EraseAgentMemoryRequest"> & {
+  /**
+   * Tenant context.
+   *
+   * @generated from field: string org_id = 1;
+   */
+  orgId: string;
+
+  /**
+   * The Space the agent was bound in. Bound into the Control decision.
+   *
+   * @generated from field: string space_id = 2;
+   */
+  spaceId: string;
+
+  /**
+   * The agent's subject id in that Space (the revoked binding's subject).
+   * Bound into the Control decision as its row id.
+   *
+   * @generated from field: string agent_subject_id = 3;
+   */
+  agentSubjectId: string;
+
+  /**
+   * The Control `model.space.memory.manage` decision reference, issued for
+   * this Space and agent. Never logged.
+   *
+   * @generated from field: string space_control_decision_ref = 4;
+   */
+  spaceControlDecisionRef: string;
+
+  /**
+   * The signed Control `model.space.memory.manage` decision token, issued for
+   * this Space and agent. Never logged.
+   *
+   * @generated from field: string space_control_decision_token = 5;
+   */
+  spaceControlDecisionToken: string;
+
+  /**
+   * The person asking. Must be the caller; the decision is issued to them.
+   *
+   * @generated from field: string user_id = 6;
+   */
+  userId: string;
+};
+
+/**
+ * Describes the message model_plane.v1.EraseAgentMemoryRequest.
+ * Use `create(EraseAgentMemoryRequestSchema)` to create a new message.
+ */
+export const EraseAgentMemoryRequestSchema: GenMessage<EraseAgentMemoryRequest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_memory, 23);
+
+/**
+ * What an agent memory erase removed.
+ *
+ * @generated from message model_plane.v1.EraseAgentMemoryResponse
+ */
+export type EraseAgentMemoryResponse = Message<"model_plane.v1.EraseAgentMemoryResponse"> & {
+  /**
+   * How many durable agent rows were erased. Zero when the agent had none.
+   *
+   * @generated from field: uint64 erased = 1;
+   */
+  erased: bigint;
+};
+
+/**
+ * Describes the message model_plane.v1.EraseAgentMemoryResponse.
+ * Use `create(EraseAgentMemoryResponseSchema)` to create a new message.
+ */
+export const EraseAgentMemoryResponseSchema: GenMessage<EraseAgentMemoryResponse> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_memory, 24);
+
+/**
+ * Request to check one memory write against the content policy.
+ *
+ * @generated from message model_plane.v1.CheckMemoryWriteRequest
+ */
+export type CheckMemoryWriteRequest = Message<"model_plane.v1.CheckMemoryWriteRequest"> & {
+  /**
+   * Tenant context.
+   *
+   * @generated from field: string org_id = 1;
+   */
+  orgId: string;
+
+  /**
+   * The person the write is for. Must be the caller when the caller is a user.
+   *
+   * @generated from field: string user_id = 2;
+   */
+  userId: string;
+
+  /**
+   * The text that would be stored. Never logged or kept by the check.
+   *
+   * @generated from field: string content = 3;
+   */
+  content: string;
+
+  /**
+   * The scope the row would be written to: "user", "org" or "global".
+   *
+   * @generated from field: string scope = 4;
+   */
+  scope: string;
+
+  /**
+   * Who asked for the write: "user", "model_tool", "delegation" or "workflow".
+   * Empty and unknown values are read as "model_tool", which earns no rights
+   * that belong to the person alone (org-wide memory).
+   *
+   * @generated from field: string origin = 5;
+   */
+  origin: string;
+};
+
+/**
+ * Describes the message model_plane.v1.CheckMemoryWriteRequest.
+ * Use `create(CheckMemoryWriteRequestSchema)` to create a new message.
+ */
+export const CheckMemoryWriteRequestSchema: GenMessage<CheckMemoryWriteRequest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_memory, 25);
+
+/**
+ * The content policy's verdict on one memory write.
+ *
+ * @generated from message model_plane.v1.CheckMemoryWriteResponse
+ */
+export type CheckMemoryWriteResponse = Message<"model_plane.v1.CheckMemoryWriteResponse"> & {
+  /**
+   * True when the write may go ahead.
+   *
+   * @generated from field: bool allowed = 1;
+   */
+  allowed: boolean;
+
+  /**
+   * The rule that refused it, one of the closed tokens "injection_marker",
+   * "hidden_characters", "secret_like", "scope_not_permitted" or "too_long".
+   * Empty when allowed. Names the rule only, never the content.
+   *
+   * @generated from field: string refusal_code = 2;
+   */
+  refusalCode: string;
+};
+
+/**
+ * Describes the message model_plane.v1.CheckMemoryWriteResponse.
+ * Use `create(CheckMemoryWriteResponseSchema)` to create a new message.
+ */
+export const CheckMemoryWriteResponseSchema: GenMessage<CheckMemoryWriteResponse> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_memory, 26);
 
 /**
  * MemoryProvenance — who decided a memory was worth keeping.
@@ -1090,6 +1308,8 @@ export const MemoryProvenanceSchema: GenEnum<MemoryProvenance> = /*@__PURE__*/
  */
 export enum MemoryState {
   /**
+   * Unset state, the zero value. Setting it is refused.
+   *
    * @generated from enum value: MEMORY_STATE_UNSPECIFIED = 0;
    */
   UNSPECIFIED = 0,
@@ -1225,6 +1445,9 @@ export const MemoryService: GenService<{
    * an empty answer with skip_reason "zdr", never an error. Refused with
    * failed_precondition "profile_not_enabled" while SESSION_USER_PROFILE_ENABLED
    * is off.
+   * Response type is shared by the user profile RPCs; renaming it would break generated code.
+   * buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+   * buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
    *
    * @generated from rpc model_plane.v1.MemoryService.GetUserProfile
    */
@@ -1238,6 +1461,9 @@ export const MemoryService: GenService<{
    * themselves; a stale expected_revision is refused (failed_precondition
    * "profile_revision_stale"); a ZDR or waived credential is refused
    * zdr_feature_not_supported (feature "user_profile").
+   * Response type is shared by the user profile RPCs; renaming it would break generated code.
+   * buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+   * buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
    *
    * @generated from rpc model_plane.v1.MemoryService.SetUserProfile
    */
@@ -1250,6 +1476,9 @@ export const MemoryService: GenService<{
    * Rebuild the profile from the person's accepted memories. Refused while
    * memory is paused, off or disabled; an edited profile is kept unless force
    * is set. Same caller and ZDR rules as SetUserProfile.
+   * Response type is shared by the user profile RPCs; renaming it would break generated code.
+   * buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+   * buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
    *
    * @generated from rpc model_plane.v1.MemoryService.RebuildUserProfile
    */
@@ -1257,6 +1486,39 @@ export const MemoryService: GenService<{
     methodKind: "unary";
     input: typeof RebuildUserProfileRequestSchema;
     output: typeof UserProfileResponseSchema;
+  },
+  /**
+   * Erase one named agent's memory in one Space (EP-6 P3, EP-8 S10): every
+   * scope = 'agent' row of that (Space, agent) binding. Called after the
+   * binding is revoked. Authorized by a Control Space memory decision issued to
+   * the Space's owner or admin for this agent; a person only, never a service.
+   * Open to a ZDR caller too: erasure only removes. Not gated by
+   * SESSION_AGENT_MEMORY_ENABLED, so rows written while it was on are erased too.
+   *
+   * @generated from rpc model_plane.v1.MemoryService.EraseAgentMemory
+   */
+  eraseAgentMemory: {
+    methodKind: "unary";
+    input: typeof EraseAgentMemoryRequestSchema;
+    output: typeof EraseAgentMemoryResponseSchema;
+  },
+  /**
+   * Ask the one memory content policy (injection, hidden characters, credential
+   * shapes, org-scope origin and size) whether a write of this content to this
+   * scope by this origin would be allowed. It writes and stores nothing, and the
+   * content is never logged: a refusal is counted and logged with the rule, the
+   * origin and a content hash only. For a writer that stores agent_memory rows
+   * itself (capability-core's /api/v1/memory proxy) and must ask before its
+   * INSERT or UPDATE. Authorized like GetMemoryControls (the
+   * session:memory-controls:read scope for a service caller). An allow is also
+   * the answer while the policy mode is off.
+   *
+   * @generated from rpc model_plane.v1.MemoryService.CheckMemoryWrite
+   */
+  checkMemoryWrite: {
+    methodKind: "unary";
+    input: typeof CheckMemoryWriteRequestSchema;
+    output: typeof CheckMemoryWriteResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_model_plane_v1_memory, 0);

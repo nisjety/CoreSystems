@@ -19,9 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AttentionService_ListAttention_FullMethodName   = "/model_plane.v1.AttentionService/ListAttention"
-	AttentionService_MarkThreadSeen_FullMethodName  = "/model_plane.v1.AttentionService/MarkThreadSeen"
-	AttentionService_StreamAttention_FullMethodName = "/model_plane.v1.AttentionService/StreamAttention"
+	AttentionService_ListAttention_FullMethodName           = "/model_plane.v1.AttentionService/ListAttention"
+	AttentionService_MarkThreadSeen_FullMethodName          = "/model_plane.v1.AttentionService/MarkThreadSeen"
+	AttentionService_StreamAttention_FullMethodName         = "/model_plane.v1.AttentionService/StreamAttention"
+	AttentionService_ConfirmAttentionWaiting_FullMethodName = "/model_plane.v1.AttentionService/ConfirmAttentionWaiting"
 )
 
 // AttentionServiceClient is the client API for AttentionService service.
@@ -42,6 +43,8 @@ type AttentionServiceClient interface {
 	MarkThreadSeen(ctx context.Context, in *MarkThreadSeenRequest, opts ...grpc.CallOption) (*MarkThreadSeenResponse, error)
 	// The per-person attention stream (WS16 S5): a snapshot, then the changes, resyncs and heartbeats.
 	StreamAttention(ctx context.Context, in *StreamAttentionRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StreamAttentionResponse], error)
+	// Whether one waiting item still waits on its owner. For service callers holding session:read; content-free.
+	ConfirmAttentionWaiting(ctx context.Context, in *ConfirmAttentionWaitingRequest, opts ...grpc.CallOption) (*ConfirmAttentionWaitingResponse, error)
 }
 
 type attentionServiceClient struct {
@@ -91,6 +94,16 @@ func (c *attentionServiceClient) StreamAttention(ctx context.Context, in *Stream
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AttentionService_StreamAttentionClient = grpc.ServerStreamingClient[StreamAttentionResponse]
 
+func (c *attentionServiceClient) ConfirmAttentionWaiting(ctx context.Context, in *ConfirmAttentionWaitingRequest, opts ...grpc.CallOption) (*ConfirmAttentionWaitingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConfirmAttentionWaitingResponse)
+	err := c.cc.Invoke(ctx, AttentionService_ConfirmAttentionWaiting_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AttentionServiceServer is the server API for AttentionService service.
 // All implementations must embed UnimplementedAttentionServiceServer
 // for forward compatibility.
@@ -109,6 +122,8 @@ type AttentionServiceServer interface {
 	MarkThreadSeen(context.Context, *MarkThreadSeenRequest) (*MarkThreadSeenResponse, error)
 	// The per-person attention stream (WS16 S5): a snapshot, then the changes, resyncs and heartbeats.
 	StreamAttention(*StreamAttentionRequest, grpc.ServerStreamingServer[StreamAttentionResponse]) error
+	// Whether one waiting item still waits on its owner. For service callers holding session:read; content-free.
+	ConfirmAttentionWaiting(context.Context, *ConfirmAttentionWaitingRequest) (*ConfirmAttentionWaitingResponse, error)
 	mustEmbedUnimplementedAttentionServiceServer()
 }
 
@@ -127,6 +142,9 @@ func (UnimplementedAttentionServiceServer) MarkThreadSeen(context.Context, *Mark
 }
 func (UnimplementedAttentionServiceServer) StreamAttention(*StreamAttentionRequest, grpc.ServerStreamingServer[StreamAttentionResponse]) error {
 	return status.Error(codes.Unimplemented, "method StreamAttention not implemented")
+}
+func (UnimplementedAttentionServiceServer) ConfirmAttentionWaiting(context.Context, *ConfirmAttentionWaitingRequest) (*ConfirmAttentionWaitingResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ConfirmAttentionWaiting not implemented")
 }
 func (UnimplementedAttentionServiceServer) mustEmbedUnimplementedAttentionServiceServer() {}
 func (UnimplementedAttentionServiceServer) testEmbeddedByValue()                          {}
@@ -196,6 +214,24 @@ func _AttentionService_StreamAttention_Handler(srv interface{}, stream grpc.Serv
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AttentionService_StreamAttentionServer = grpc.ServerStreamingServer[StreamAttentionResponse]
 
+func _AttentionService_ConfirmAttentionWaiting_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConfirmAttentionWaitingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AttentionServiceServer).ConfirmAttentionWaiting(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AttentionService_ConfirmAttentionWaiting_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AttentionServiceServer).ConfirmAttentionWaiting(ctx, req.(*ConfirmAttentionWaitingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AttentionService_ServiceDesc is the grpc.ServiceDesc for AttentionService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -210,6 +246,10 @@ var AttentionService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "MarkThreadSeen",
 			Handler:    _AttentionService_MarkThreadSeen_Handler,
+		},
+		{
+			MethodName: "ConfirmAttentionWaiting",
+			Handler:    _AttentionService_ConfirmAttentionWaiting_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -1566,6 +1566,7 @@ message ResolveMessageTargetResponse {
 
 // --- WithdrawMessage (O-01) ---
 
+// Takes back one sent message by its client_message_id (O-01). Ids only, never content.
 message WithdrawMessageRequest {
   // Required. The owning org; must equal the caller's org and the thread's org.
   string org_id = 1;
@@ -1576,6 +1577,7 @@ message WithdrawMessageRequest {
   string client_message_id = 3;
 }
 
+// The outcome of a withdrawal: the message id, whether it was already withdrawn, and when.
 message WithdrawMessageResponse {
   // The durable id of the withdrawn message.
   string message_id = 1;

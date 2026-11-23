@@ -528,7 +528,13 @@ type IndexMemoryRequest struct {
 	// subagent's outcome) or "workflow" (an orchestrator write). Empty, and any
 	// other value, is read as "model_tool", so only "user" may write org-wide
 	// memory.
-	Origin        string `protobuf:"bytes,7,opt,name=origin,proto3" json:"origin,omitempty"`
+	Origin string `protobuf:"bytes,7,opt,name=origin,proto3" json:"origin,omitempty"`
+	// The run that issued this save (EP-8 S10). The execution loop sets it from
+	// its own run, never from the model's input. With SESSION_CORE_AGENT_MEMORY_RUN_BOUND
+	// on, session-core writes an AGENT_SELF note only when this run is a live wake
+	// run of an agent on the thread, and an empty value writes nothing. Every other
+	// caller leaves it empty. An identifier only, never logged with content.
+	RunId         string `protobuf:"bytes,8,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -608,6 +614,13 @@ func (x *IndexMemoryRequest) GetMemoryId() string {
 func (x *IndexMemoryRequest) GetOrigin() string {
 	if x != nil {
 		return x.Origin
+	}
+	return ""
+}
+
+func (x *IndexMemoryRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
 	}
 	return ""
 }
@@ -1123,7 +1136,12 @@ type GetMemoryControlsRequest struct {
 	// Tenant context.
 	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
 	// The user whose controls are read. A user caller may only read their own.
-	UserId        string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	UserId string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// Optional thread (F-f06-07). When set, the controls answer the thread-aware decision for it: the thread's own
+	// memory mode and its containment are folded in, so use_allowed and reason say what a recall in that thread would
+	// do. The caller must own the thread (a service caller reads it for the thread's owner). Empty keeps the user-level
+	// view that the settings page reads.
+	ThreadId      string `protobuf:"bytes,3,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1168,6 +1186,13 @@ func (x *GetMemoryControlsRequest) GetOrgId() string {
 func (x *GetMemoryControlsRequest) GetUserId() string {
 	if x != nil {
 		return x.UserId
+	}
+	return ""
+}
+
+func (x *GetMemoryControlsRequest) GetThreadId() string {
+	if x != nil {
+		return x.ThreadId
 	}
 	return ""
 }
@@ -1256,8 +1281,9 @@ type MemoryControls struct {
 	LearningAllowed bool `protobuf:"varint,6,opt,name=learning_allowed,json=learningAllowed,proto3" json:"learning_allowed,omitempty"`
 	// Closed token for what decided the above: "on", "user_paused", "user_off",
 	// "org_disabled", "zdr", "policy_unavailable". The thread-scoped tokens
-	// "space_scope" and "agent_run_scope" come from a thread's own recall or
-	// write (SearchMemory, IndexMemory), not from this message.
+	// "thread_off", "space_scope" and "agent_run_scope" come from a thread's own
+	// memory mode and containment: a recall or write in that thread (SearchMemory,
+	// IndexMemory), or this message when GetMemoryControlsRequest names the thread.
 	Reason string `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`
 	// How many of the user's rows the list hides under this decision (a count,
 	// never a row). Zero unless the state is off or the org disabled memory.
@@ -2256,7 +2282,7 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	" \x01(\tR\x0ewithheldReason\x12\x14\n" +
 	"\x05scope\x18\v \x01(\tR\x05scope\x12\x19\n" +
 	"\bscope_id\x18\f \x01(\tR\ascopeId\x12!\n" +
-	"\fsource_label\x18\r \x01(\tR\vsourceLabel\"\xc6\x01\n" +
+	"\fsource_label\x18\r \x01(\tR\vsourceLabel\"\xdd\x01\n" +
 	"\x12IndexMemoryRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x14\n" +
 	"\x05topic\x18\x02 \x01(\tR\x05topic\x12\x18\n" +
@@ -2264,7 +2290,8 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\x06org_id\x18\x04 \x01(\tR\x05orgId\x12\x17\n" +
 	"\auser_id\x18\x05 \x01(\tR\x06userId\x12\x1b\n" +
 	"\tmemory_id\x18\x06 \x01(\tR\bmemoryId\x12\x16\n" +
-	"\x06origin\x18\a \x01(\tR\x06origin\"}\n" +
+	"\x06origin\x18\a \x01(\tR\x06origin\x12\x15\n" +
+	"\x06run_id\x18\b \x01(\tR\x05runId\"}\n" +
 	"\x13IndexMemoryResponse\x12\x1b\n" +
 	"\tmemory_id\x18\x01 \x01(\tR\bmemoryId\x12\x1a\n" +
 	"\bdegraded\x18\x02 \x01(\bR\bdegraded\x12-\n" +
@@ -2297,10 +2324,11 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\x14DeleteMemoryResponse\x12\x18\n" +
 	"\adeleted\x18\x01 \x01(\bR\adeleted\x12\x1a\n" +
 	"\bdegraded\x18\x02 \x01(\bR\bdegraded\x12-\n" +
-	"\x12degradation_reason\x18\x03 \x01(\tR\x11degradationReason\"J\n" +
+	"\x12degradation_reason\x18\x03 \x01(\tR\x11degradationReason\"g\n" +
 	"\x18GetMemoryControlsRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
-	"\auser_id\x18\x02 \x01(\tR\x06userId\"}\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x1b\n" +
+	"\tthread_id\x18\x03 \x01(\tR\bthreadId\"}\n" +
 	"\x18SetMemoryControlsRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x121\n" +
