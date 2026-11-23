@@ -145,6 +145,9 @@ services:
       USER_AUTH_INTERNAL_CLIENT_CREDENTIAL_FILE: /run/secrets/user_auth_internal_client_credential
       AUTH_CORE_JWT_PUBLIC_KEY_FILE: /run/secrets/auth_convex_public_key
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required in production}
+      # D18/D21o: pinned off in production. The base file defaults both history-window switches on for local dev only.
+      SPACE_MEMBER_HISTORY_WINDOWS: "false"
+      SPACE_CANVAS_HISTORY_WINDOW: "false"
     volumes: !reset []
     secrets:
       - source: user_core_grpc_service_credentials

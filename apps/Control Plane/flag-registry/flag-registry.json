@@ -2227,7 +2227,7 @@
       "default": "true",
       "stage": "dark",
       "purpose": "D18/D21o: signs history_floor_at onto a canvas read decision for wiki-store to window. Off, the decision carries no floor and the canvas shows whole even to a windowed member. Only the literal true turns it on.",
-      "onDefaultReason": "Dev default on alongside SPACE_MEMBER_HISTORY_WINDOWS; wiki-store's verifier already applies history_floor_at. Not declared in docker-compose.production.yml, so false in production until that flag ships there.",
+      "onDefaultReason": "Dev default on alongside SPACE_MEMBER_HISTORY_WINDOWS; wiki-store's verifier already applies history_floor_at. docker-compose.production.yml pins it to the literal false, so it is off in production until a release decision.",
       "declarations": [
         { "service": "user-core", "env": "SPACE_CANVAS_HISTORY_WINDOW", "default": "true" }
       ],
@@ -2280,7 +2280,7 @@
       "default": "true",
       "stage": "dark",
       "purpose": "D18/D21o: per-member room history windows. Off refuses the invite's don't-share choice and the admin history-window change (503); gates those writes only, never an authorization input. A stored window is enforced regardless.",
-      "onDefaultReason": "Dev default on in both the gateway (already declared true/false in verevonv3 compose) and now user-core, so the dev UI stops reading the feature as on while Control was still off. False in production (verevonv3 docker-compose.production.yml) until a release decision.",
+      "onDefaultReason": "Dev default on in both the gateway and user-core, so the dev UI stops reading the feature as on while Control was still off. Production pins it to the literal false in both: the gateway in verevonv3 docker-compose.production.yml and user-core in apps/Control Plane/docker-compose.production.yml, until a release decision.",
       "declarations": [
         { "service": "gateway", "env": "SPACE_MEMBER_HISTORY_WINDOWS", "default": "true" },
         { "service": "user-core", "env": "SPACE_MEMBER_HISTORY_WINDOWS", "default": "true" }

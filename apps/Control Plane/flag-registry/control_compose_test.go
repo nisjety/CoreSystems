@@ -1,8 +1,12 @@
 package flagregistry
 
 import (
+	"bufio"
+	"bytes"
 	"os"
+	"regexp"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -90,6 +94,96 @@ func TestControlPlaneComposeScanNamesEachService(t *testing.T) {
 	for host := range want {
 		if !seen[host] {
 			t.Errorf("%s: not scanned from the Control Plane compose", host)
+		}
+	}
+}
+
+// productionControlCompose is the Control Plane production overlay. Compose layers it over
+// controlPlaneCompose, so a variable the overlay does not write keeps the base default. The
+// registry ratchet does not read it.
+const productionControlCompose = "apps/Control Plane/docker-compose.production.yml"
+
+// spaceHistoryWindowSwitches are the two D18/D21o switches. Both default on in the dev
+// compose, so the production overlay must write each one as the literal false.
+var spaceHistoryWindowSwitches = []string{
+	"SPACE_MEMBER_HISTORY_WINDOWS",
+	"SPACE_CANVAS_HISTORY_WINDOW",
+}
+
+// productionServiceHeader matches a service name at the two-space indent the production
+// overlay uses. productionEnvEntry matches a literal environment entry at the six-space
+// indent under a service. Interpolated entries and deeper keys do not match it.
+var (
+	productionServiceHeader = regexp.MustCompile(`^  ([a-z0-9][a-z0-9-]*):\s*$`)
+	productionEnvEntry      = regexp.MustCompile(`^      ([A-Z][A-Z0-9_]*):\s*"?([^"$#]*?)"?\s*(#.*)?$`)
+)
+
+// productionServiceEnv returns the literal environment entries that the production overlay
+// writes for one service, keyed by variable name with the value as written.
+func productionServiceEnv(t *testing.T, service string) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(repoFile(productionControlCompose))
+	if err != nil {
+		t.Fatalf("read %s: %v", productionControlCompose, err)
+	}
+	env := make(map[string]string)
+	inServices, inService := false, false
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	for sc.Scan() {
+		line := strings.TrimRight(sc.Text(), "\r")
+		if composeTopLevel.MatchString(line) {
+			inServices = line == "services:"
+			inService = false
+			continue
+		}
+		if !inServices {
+			continue
+		}
+		if m := productionServiceHeader.FindStringSubmatch(line); m != nil {
+			inService = m[1] == service
+			continue
+		}
+		if !inService {
+			continue
+		}
+		if m := productionEnvEntry.FindStringSubmatch(line); m != nil {
+			env[m[1]] = strings.TrimSpace(m[2])
+		}
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("scan %s: %v", productionControlCompose, err)
+	}
+	return env
+}
+
+// TestSpaceHistoryWindowSwitchesArePinnedOffInProduction pins the D21o production rule. Each
+// switch defaults on for local dev, so the production overlay must write it as the literal
+// false on user-core. The registry's onDefaultReason must also name that overlay as the place
+// production is turned off, so the reason cannot claim an off that no file sets.
+func TestSpaceHistoryWindowSwitchesArePinnedOffInProduction(t *testing.T) {
+	reg := loadShipped(t)
+	env := productionServiceEnv(t, "user-core")
+	if len(env) == 0 {
+		t.Fatalf("no user-core environment read from %s; the scanner or the path is wrong", productionControlCompose)
+	}
+	for _, name := range spaceHistoryWindowSwitches {
+		f, ok := reg.Flag(name)
+		if !ok {
+			t.Errorf("%s has no registry entry", name)
+			continue
+		}
+		if f.Default != "true" {
+			t.Errorf("%s: default is %q; the local-dev default is on, and production pins it off", name, f.Default)
+		}
+		got, ok := env[name]
+		switch {
+		case !ok:
+			t.Errorf("%s is not written in the user-core environment of %s; production would inherit the dev default", name, productionControlCompose)
+		case got != "false":
+			t.Errorf("%s: %s writes %q, want the literal \"false\"", name, productionControlCompose, got)
+		}
+		if !strings.Contains(f.OnDefaultReason, "docker-compose.production.yml") {
+			t.Errorf("%s: onDefaultReason does not name docker-compose.production.yml, where production is turned off", name)
 		}
 	}
 }
