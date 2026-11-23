@@ -116,6 +116,7 @@ import { publishSpaceThreads, publishSpaceUnread, retractSpaceThreads } from '..
 import { refreshSpaceAttention } from '../lib/space-attention'
 import { unreadThreadIds } from '../lib/space-unread'
 import { createSpaceSendJournal, type SpaceSendJournal } from '../lib/space-send-journal'
+import { noteRoomFresh } from '../lib/space-connectivity'
 import { createSpaceTimelineStore, type SpaceTimelineStore } from '../lib/space-timeline-store'
 import { ApiError } from '@/shared/api/api-error'
 import { registerUnsavedWork } from '@/shared/build/unsaved-work'
@@ -304,6 +305,7 @@ export default function SpacePage() {
             headStale = false
             const projection = store.projection()
             if (projection) {
+              noteRoomFresh(ref)
               if (request === latestThreadRequest) setThreadsUnavailable(false)
               return projection
             }
@@ -317,6 +319,7 @@ export default function SpacePage() {
           }
         }
         const projection = await getSpaceThreads(ref)
+        noteRoomFresh(ref)
         if (request === latestThreadRequest) setThreadsUnavailable(false)
         return projection
       } catch {
@@ -608,6 +611,8 @@ export default function SpacePage() {
         onState: (next) => {
           if (streamController === controller) setStreamState(next)
         },
+        // Every frame that proves the server answers stamps the room, so the live indicator can say how fresh it is.
+        onFrame: () => noteRoomFresh(ref),
       })
       streamController = controller
       controller.start()
@@ -753,7 +758,7 @@ export default function SpacePage() {
                               </span>
                             )}
                           </Show>
-                          <SpaceLiveIndicator state={streamState} />
+                          <SpaceLiveIndicator state={streamState} spaceRef={current().space.space_ref} />
                         </div>
                       }
                       onHidden={() => navigate('/spaces')}
@@ -798,7 +803,7 @@ export default function SpacePage() {
                           </span>
                         )}
                       </Show>
-                      <SpaceLiveIndicator state={streamState} />
+                      <SpaceLiveIndicator state={streamState} spaceRef={current().space.space_ref} />
                     </div>
                   }
                   onOpenMembers={() => {
@@ -1348,6 +1353,8 @@ function SpaceConversationPanel(props: {
             onOpenThread={props.onOpenThread}
             openThreadId={props.openThreadId}
             pendingPosts={props.journal ? () => props.journal?.forSpace(props.spaceRef) ?? [] : undefined}
+            // The message ids the room's record now carries settle this browser's accepted replies (WS01-S6).
+            onRecorded={props.journal ? (messageIds) => props.journal?.recorded(props.spaceRef, messageIds) : undefined}
             unreadThreadIds={props.unreadThreadIds}
             // A pin or retitle changes the server's order and names; re-read
             // rather than trust this browser's copy of either.

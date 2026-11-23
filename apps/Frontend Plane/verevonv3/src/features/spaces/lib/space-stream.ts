@@ -20,6 +20,11 @@ export type SpaceStreamOptions = {
   /** Ask the page to re-read its listing. Called coalesced, never per frame. */
   onChange: () => void
   onState?: (state: SpaceStreamState) => void
+  /**
+   * A frame that proves the room's server is answering (a live `connected`, a `heartbeat`, a room event). The page
+   * stamps the room as heard from at that moment; a closing or error frame does not count.
+   */
+  onFrame?: () => void
   /** Injectable for tests. */
   random?: () => number
   now?: () => number
@@ -206,6 +211,7 @@ export function createSpaceStreamController(options: SpaceStreamOptions): SpaceS
           giveUp('permanent')
           return
         }
+        options.onFrame?.()
         const resumed = data.resumed === true
         if (!resumed) {
           // The head of a fresh stream is the baseline for the next frame.
@@ -226,6 +232,7 @@ export function createSpaceStreamController(options: SpaceStreamOptions): SpaceS
         }
         cursor = sseCursor && sseCursor.generation === generation && sseCursor.seq === seq ? sseCursor : { generation, seq }
         failures = 0
+        options.onFrame?.()
         // A `hidden` stub keeps the sequence contiguous and tells us nothing
         // we may see; everything else (including run state) is one refetch.
         if (data.kind !== 'hidden') scheduleRefetch()
@@ -233,6 +240,7 @@ export function createSpaceStreamController(options: SpaceStreamOptions): SpaceS
       }
       case 'heartbeat': {
         failures = 0
+        options.onFrame?.()
         // The cursor is deliberately not advanced from a heartbeat: rows up to
         // `head` may still be in flight, and adopting it would skip them.
         if (cursor && data.generation !== undefined && String(data.generation) !== cursor.generation) resnapshot()

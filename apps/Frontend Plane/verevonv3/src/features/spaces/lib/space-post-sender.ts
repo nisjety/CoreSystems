@@ -133,11 +133,23 @@ export function createSpacePostSender(options: SpacePostSenderOptions): SpacePos
       // a later identical send safe), but this composer no longer shows it.
       if (!journal.get(sendId)) return
       noteSendTransportOk()
-      journal.update(sendId, { stage: 'accepted', threadId: receipt.threadId })
+      // The stored message's id is what the room's record names it by; a receipt without one leaves it unset.
+      const messageId = receipt.messageId ? receipt.messageId : undefined
+      journal.update(sendId, {
+        stage: 'accepted',
+        threadId: receipt.threadId,
+        ...(messageId ? { messageId } : {}),
+      })
       setTimeout(() => {
         if (journal.get(sendId)?.stage === 'accepted') journal.remove(sendId)
       }, ACCEPTED_TTL_MS)
-      options.onAccepted?.({ ...entry, stage: 'accepted', threadId: receipt.threadId, failure: undefined }, receipt)
+      options.onAccepted?.({
+        ...entry,
+        stage: 'accepted',
+        threadId: receipt.threadId,
+        ...(messageId ? { messageId } : {}),
+        failure: undefined,
+      }, receipt)
     } catch (error) {
       if (!journal.get(sendId)) return
       const failure = classify(error, options.describeError)

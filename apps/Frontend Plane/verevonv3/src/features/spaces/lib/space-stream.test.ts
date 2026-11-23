@@ -804,3 +804,35 @@ describe('zero retention: the stream fails closed (WS02-S5)', () => {
     expect(onChange).not.toHaveBeenCalled()
   })
 })
+
+// WS01-S8: a frame that proves the server answers stamps the room as heard from; a closing or error frame does not.
+describe('room freshness frames (WS01-S8)', () => {
+  it('reports a live connected frame, a heartbeat and a room event as frames from the server', async () => {
+    const onFrame = vi.fn()
+    make({ onFrame }).start()
+    connectedFrame(calls[0])
+    expect(onFrame).toHaveBeenCalledTimes(1)
+    emit(calls[0], 'heartbeat', { head: 5, generation: 'g1' }, 'g1.5')
+    expect(onFrame).toHaveBeenCalledTimes(2)
+    spaceEvent(calls[0], 6)
+    expect(onFrame).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not report a closing frame, an error frame, or a frame that is not a room event', async () => {
+    const onFrame = vi.fn()
+    make({ onFrame }).start()
+    connectedFrame(calls[0])
+    onFrame.mockClear()
+    emit(calls[0], 'closing', { code: 'lease_expired', reconnect: true, retry_after_ms: 0 }, 'g1.5')
+    emit(calls[0], 'error', { error: { code: 'upstream_unavailable' } })
+    spaceEvent(calls[0], 9, { generation: undefined })
+    expect(onFrame).not.toHaveBeenCalled()
+  })
+
+  it('does not report a connection that is poll_only, since the server serves no rows on it', () => {
+    const onFrame = vi.fn()
+    make({ onFrame }).start()
+    connectedFrame(calls[0], { mode: 'poll_only' })
+    expect(onFrame).not.toHaveBeenCalled()
+  })
+})

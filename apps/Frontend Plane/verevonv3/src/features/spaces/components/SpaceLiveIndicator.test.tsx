@@ -2,15 +2,17 @@ import { cleanup, render, screen, waitFor } from '@solidjs/testing-library'
 import { createSignal, flush } from 'solid-js'
 import { afterEach, describe, expect, it } from 'vitest'
 
+import { noteRoomFresh } from '../lib/space-connectivity'
 import type { SpaceStreamState } from '../lib/space-stream'
+import { formatTurnTime } from '../lib/space-thread-presentation'
 import { SpaceLiveIndicator } from './SpaceLiveIndicator'
 
 afterEach(() => cleanup())
 
 // No I18nProvider wraps these renders, so the copy is the Norwegian default, as in the page tests.
-function renderIndicator(initial: SpaceStreamState) {
+function renderIndicator(initial: SpaceStreamState, spaceRef?: string) {
   const [state, setState] = createSignal<SpaceStreamState>(initial)
-  const view = render(() => <SpaceLiveIndicator state={state} />)
+  const view = render(() => <SpaceLiveIndicator state={state} spaceRef={spaceRef} />)
   const set = (next: SpaceStreamState) => {
     setState(next)
     flush()
@@ -92,5 +94,47 @@ describe('SpaceLiveIndicator (WS02-S5)', () => {
     view.set('degraded')
     expect(region().textContent).toBe('')
     expect(indicator()?.getAttribute('data-state')).toBe('degraded')
+  })
+})
+
+// WS01-S8: beside a live or degraded stream the indicator dates the room by its last moment of contact.
+describe('SpaceLiveIndicator — last fresh time (WS01-S8)', () => {
+  const at = Date.parse('2026-11-23T13:05:00Z')
+  const iso = new Date(at).toISOString()
+  const freshTime = () => document.querySelector('.verevon-space-live__fresh')
+
+  it('says when the room last heard from its server, after a live stream', () => {
+    noteRoomFresh('indicator-room-live', at)
+    flush()
+    renderIndicator('live', 'indicator-room-live')
+    expect(freshTime()?.getAttribute('datetime')).toBe(iso)
+    expect(freshTime()?.textContent).toBe(`Sist oppdatert ${formatTurnTime(iso, { locale: 'no' })?.short}`)
+    // The state word stays exactly what it was: the time sits beside the indicator, not inside it.
+    expect(indicator()?.textContent).toBe('Live')
+  })
+
+  it('says it for a degraded stream too', () => {
+    noteRoomFresh('indicator-room-degraded', at)
+    flush()
+    renderIndicator('degraded', 'indicator-room-degraded')
+    expect(freshTime()?.getAttribute('datetime')).toBe(iso)
+    expect(indicator()?.textContent).toBe('Oppdateres hvert par sekunder')
+  })
+
+  it('draws no time for a state that is not a claim about the connection, or for another room', () => {
+    noteRoomFresh('indicator-room-quiet', at)
+    flush()
+    const idle = renderIndicator('idle', 'indicator-room-quiet')
+    expect(freshTime()).toBeNull()
+    idle.unmount()
+    renderIndicator('live', 'indicator-room-elsewhere')
+    expect(freshTime()).toBeNull()
+  })
+
+  it('draws no time when no room is named', () => {
+    noteRoomFresh('indicator-room-unnamed', at)
+    flush()
+    renderIndicator('live')
+    expect(freshTime()).toBeNull()
   })
 })

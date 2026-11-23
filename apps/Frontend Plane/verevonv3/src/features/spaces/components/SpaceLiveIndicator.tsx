@@ -1,7 +1,9 @@
 import { createEffect, createSignal, Show } from 'solid-js'
 
 import { useI18n } from '@/shared/i18n'
+import { roomLastFreshAt } from '../lib/space-connectivity'
 import type { SpaceStreamState } from '../lib/space-stream'
+import { formatTurnTime } from '../lib/space-thread-presentation'
 import './space-live-indicator.css'
 
 /**
@@ -11,12 +13,19 @@ import './space-live-indicator.css'
  * connection (`idle`, `connecting`, `unavailable`) render nothing, so a room
  * that never had a stream looks exactly as it did before.
  *
+ * Beside a live or degraded stream, with `spaceRef`, it also says when the room
+ * last heard from its server ("Sist oppdatert 14:32"), in the reader's clock.
+ *
  * A polite live region announces transitions only, never the steady state.
  */
-export function SpaceLiveIndicator(props: { state: () => SpaceStreamState }) {
+export function SpaceLiveIndicator(props: { state: () => SpaceStreamState; spaceRef?: string }) {
   const i18n = useI18n()
   const [announcement, setAnnouncement] = createSignal('')
   let previous: SpaceStreamState = 'idle'
+  const lastFresh = () => {
+    const at = props.spaceRef ? roomLastFreshAt(props.spaceRef) : undefined
+    return at === undefined ? undefined : formatTurnTime(new Date(at).toISOString(), { locale: i18n.locale() })
+  }
 
   createEffect(
     () => props.state(),
@@ -42,6 +51,13 @@ export function SpaceLiveIndicator(props: { state: () => SpaceStreamState }) {
             ? i18n.tr('Live', 'Live')
             : i18n.tr('Oppdateres hvert par sekunder', 'Refreshing every few seconds')}
         </span>
+        <Show when={lastFresh()}>
+          {(fresh) => (
+            <time class="verevon-space-live__fresh" datetime={fresh().iso}>
+              {i18n.tr('Sist oppdatert', 'Last updated')} {fresh().short}
+            </time>
+          )}
+        </Show>
       </Show>
       <span class="verevon-space-live__announce" role="status" aria-live="polite" aria-atomic="true">
         {announcement()}

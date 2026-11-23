@@ -20,6 +20,12 @@
   background: var(--verevon-warning, #b7791f);
 }
 
+/* The last-fresh time (WS01-S8): quiet and tabular, so the digits do not jitter as they change. */
+.verevon-space-live__fresh {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
 .verevon-space-live__announce {
   position: absolute;
   width: 1px;

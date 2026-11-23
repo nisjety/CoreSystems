@@ -262,13 +262,15 @@ describe('SpaceRoomTimeline — pending posts (WS01-S6)', () => {
           ]
         : [],
     }))
+    // A stable list, as the journal's own: the row is keyed by its entry, so a re-read keeps the same element.
+    const pending = [entry({ kind: 'post_reply', threadId: 't1', content: 'Mitt svar' })]
     renderRoom(
       [
         { thread_id: 't1', space_id: 'room-1', title: 'En', latest_run_status: 'completed' },
         { thread_id: 't2', space_id: 'room-1', title: 'To', preview: 'Annen', latest_run_status: 'completed' },
       ],
       [agent],
-      { pendingPosts: () => [entry({ kind: 'post_reply', threadId: 't1', content: 'Mitt svar' })] },
+      { pendingPosts: () => pending },
     )
     const reply = await screen.findByText('Mitt svar')
     const answer = await screen.findByText('Assistentens oppsummering')
@@ -276,6 +278,48 @@ describe('SpaceRoomTimeline — pending posts (WS01-S6)', () => {
     expect(answer.compareDocumentPosition(reply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(reply.closest('.verevon-room-post')).toBe(answer.closest('.verevon-room-post'))
     expect(screen.getAllByText('Mitt svar')).toHaveLength(1)
+  })
+
+  it('swaps an accepted reply for its real turn by message id, and reports the ids the record holds', async () => {
+    const onRecorded = vi.fn()
+    const pending = [entry({ kind: 'post_reply', threadId: 't1', content: 'Mitt svar', stage: 'accepted', messageId: 'm-2' })]
+    spacesClient.loadSpaceTranscript.mockImplementation(async (_spaceRef: string, threadId: string) => ({
+      state: 'ok',
+      threadId,
+      turns: threadId === 't1'
+        ? [
+            { role: 'user', content: 'Første', messageId: 'm-1' },
+            { role: 'user', content: 'Mitt svar', messageId: 'm-2' },
+          ]
+        : [],
+    }))
+    renderRoom(
+      [{ thread_id: 't1', space_id: 'room-1', title: 'En', latest_run_status: 'completed' }],
+      [agent],
+      { pendingPosts: () => pending, onRecorded },
+    )
+    await screen.findByText('Første')
+    await waitFor(() => expect(onRecorded).toHaveBeenCalledWith(['m-1', 'm-2']))
+    // The real turn stands where the optimistic row was; the row is not drawn beside it.
+    expect(screen.getAllByText('Mitt svar')).toHaveLength(1)
+    expect(document.querySelector('.verevon-room-turn--pending')).toBeNull()
+  })
+
+  it('keeps an accepted reply whose message the record does not carry yet', async () => {
+    const pending = [entry({ kind: 'post_reply', threadId: 't1', content: 'Mitt svar', stage: 'accepted', messageId: 'm-2' })]
+    spacesClient.loadSpaceTranscript.mockImplementation(async (_spaceRef: string, threadId: string) => ({
+      state: 'ok',
+      threadId,
+      turns: threadId === 't1' ? [{ role: 'user', content: 'Første', messageId: 'm-1' }] : [],
+    }))
+    renderRoom(
+      [{ thread_id: 't1', space_id: 'room-1', title: 'En', latest_run_status: 'completed' }],
+      [agent],
+      { pendingPosts: () => pending },
+    )
+    await screen.findByText('Første')
+    expect(screen.getByText('Mitt svar')).toBeTruthy()
+    expect(document.querySelector('.verevon-room-turn--pending')).not.toBeNull()
   })
 
   it('draws nothing extra without a journal', async () => {

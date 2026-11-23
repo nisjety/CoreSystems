@@ -154,6 +154,11 @@ export interface SpaceRoomTimelineProps {
    */
   readonly pendingPosts?: () => readonly SpaceJournalEntry[]
   /**
+   * The message ids of the turns this room has read for a post, reported whenever a post's transcript changes (WS01-S6).
+   * The page settles the journal's accepted replies that the record now carries. Absent: the journal is left to its timer.
+   */
+  readonly onRecorded?: (messageIds: readonly string[]) => void
+  /**
    * `features.human_posts` (WS01-S7b, reshaped in U2). On, a thread with replies shows its root
    * message and one reply-summary row (who replied, how many, the latest reply, how long ago) that
    * opens the pane, the way Slack and Teams fold a thread. Takes effect only with `onOpenThread`
@@ -528,6 +533,7 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
               onOpenThread={props.onOpenThread}
               onApprovalSettled={props.onApprovalSettled}
               pendingReplies={() => pendingRepliesFor(thread.thread_id)}
+              onRecorded={props.onRecorded}
               collapse={() => props.collapseLongThreads?.() === true && props.onOpenThread !== undefined}
             />
             </>
@@ -612,6 +618,8 @@ function SpaceRoomPost(props: {
   readonly onOpenThread?: (thread: SpaceThread) => void
   /** This browser's own replies to this thread that the transcript does not show yet. */
   readonly pendingReplies?: () => readonly SpaceJournalEntry[]
+  /** The message ids of this post's turns, reported when its transcript changes (see `SpaceRoomTimelineProps.onRecorded`). */
+  readonly onRecorded?: (messageIds: readonly string[]) => void
   /** Collapse a long thread to first + last three and show the reply count (needs the pane). */
   readonly collapse?: () => boolean
   /** The windowed store (WS15-S8): the transcript tail is read lazily through it instead of per post. */
@@ -706,6 +714,25 @@ function SpaceRoomPost(props: {
     const all = transcript()?.turns ?? []
     return props.artifactsOn() ? all : all.filter((turn) => turn.content.length > 0 || turn.revisionState === 'deleted')
   }
+  // WS01-S6: the message ids this post's record carries (every turn read so far, not only the drawn window).
+  const recordedMessageIds = (): readonly string[] => (transcript()?.turns ?? []).flatMap((turn) => (
+    turn.messageId ? [turn.messageId] : []
+  ))
+  // A reply the record now carries is drawn by its real turn, so its optimistic row steps aside in the same place. A
+  // reply with no message id (the receipt named none) keeps its row until the journal's own fallback settles it.
+  const isRecorded = (entry: SpaceJournalEntry): boolean =>
+    entry.messageId !== undefined && recordedMessageIds().includes(entry.messageId)
+  const pendingReplies = (): readonly SpaceJournalEntry[] => {
+    const entries = props.pendingReplies?.() ?? []
+    return entries.length === 0 ? entries : entries.filter((entry) => !isRecorded(entry))
+  }
+  // Tells the page which message ids this record holds, so the journal settles those replies at once, not on its timer.
+  createEffect(
+    () => recordedMessageIds(),
+    (ids) => {
+      if (ids.length > 0) props.onRecorded?.(ids)
+    },
+  )
   // WS12-S7: edit and delete controls for this post's turns; a change re-reads this post's transcript.
   const lifecycle = createSpaceTurnLifecycle({
     spaceRef: () => props.spaceRef,
@@ -1124,7 +1151,7 @@ function SpaceRoomPost(props: {
         </button>
       </Show>
 
-      <SpacePendingReplies entries={props.pendingReplies?.() ?? []} />
+      <SpacePendingReplies entries={pendingReplies()} />
 
       <Show when={pendingLive().length > 0}>
         <div class="verevon-space-artifact-chips">

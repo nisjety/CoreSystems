@@ -48,6 +48,7 @@ function flushingJournal(): SpaceSendJournal {
     update: settled(inner.update),
     remove: settled(inner.remove),
     reconcile: settled(inner.reconcile),
+    recorded: settled(inner.recorded),
   }
 }
 
@@ -134,6 +135,23 @@ describe('space post sender (WS01-S6)', () => {
         baselineUpdatedAt: '2026-10-27T10:00:00Z',
         sendId: input.clientSendId,
       })
+    })
+
+    it('stores the receipt message id on the accepted entry, and hands it to onAccepted', async () => {
+      replyInSpaceThread.mockResolvedValue({ ...receipt, threadId: 'thr_9', messageId: 'msg_42' })
+      const h = harness()
+      await send(h, { content: 'reply', replyThreadId: 'thr_9' })
+      expect(h.journal.entries()[0]).toMatchObject({ stage: 'accepted', threadId: 'thr_9', messageId: 'msg_42' })
+      expect(h.onAccepted.mock.calls[0]?.[0]).toMatchObject({ messageId: 'msg_42', stage: 'accepted' })
+    })
+
+    it('leaves the message id unset when the receipt names none, rather than inventing one', async () => {
+      createSpacePost.mockResolvedValue({ ...receipt, messageId: '' })
+      const h = harness()
+      await send(h, { content: 'hello' })
+      expect(h.journal.entries()[0]?.stage).toBe('accepted')
+      expect('messageId' in (h.journal.entries()[0] ?? {})).toBe(false)
+      expect('messageId' in (h.onAccepted.mock.calls[0]?.[0] ?? {})).toBe(false)
     })
 
     it('ignores a blank post', async () => {

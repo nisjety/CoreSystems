@@ -9,8 +9,9 @@ import type { SpaceMentionsInput } from '@/shared/api/spaces-client'
  *
  * - `queued`   held because the browser is offline; it sends when the browser is back;
  * - `sending`  the request is on its way;
- * - `accepted` the server stored it (the receipt names the thread); the entry stays only until
- *              the room's own projection shows it, so the optimistic row never doubles the real one;
+ * - `accepted` the server stored it (the receipt names the thread and the message); the entry stays
+ *              only until the room shows it, so the optimistic row never doubles the real one: a new
+ *              post when the room lists its thread, a reply when the room's record carries its message id;
  * - `failed`   it did not land; the entry keeps the text, says why, and a retry reuses the SAME
  *              `sendId`, so a send whose answer was lost lands once.
  *
@@ -40,11 +41,19 @@ export interface SpaceJournalEntry {
   readonly spaceRef: string
   /** The thread a reply goes to; for a new post, the thread the receipt named once accepted. */
   readonly threadId?: string
+  /**
+   * The server's id for the stored post (the receipt's `message_id`), once accepted. The room's record names a
+   * message by it, so an accepted reply is swapped for its real turn by this id, never by a timestamp.
+   */
+  readonly messageId?: string
   readonly content: string
   readonly stage: SpaceJournalStage
   readonly failure?: SpaceJournalFailure
   readonly createdAt: number
-  /** A reply's thread `updated_at` when it was sent, so the projection moving past it means "it is in the record". */
+  /**
+   * A reply's thread `updated_at` when it was sent. Only the fallback for a receipt that named no message id: there,
+   * the projection moving past it means "it is in the record".
+   */
   readonly baselineUpdatedAt?: string
   /** WS08: the ids picked in the box. Kept so a retry under the same key sends the same body. */
   readonly mentions?: SpaceMentionsInput
@@ -64,13 +73,19 @@ export interface SpaceSendJournal {
   readonly update: (sendId: string, patch: Partial<Omit<SpaceJournalEntry, 'sendId'>>) => void
   readonly remove: (sendId: string) => void
   /**
-   * Drop accepted entries the room's own projection now shows: a new post whose thread is listed,
-   * a reply whose thread's `updated_at` moved past the one it was sent against.
+   * Drop accepted entries the room's own listing now shows: a new post whose thread is listed. A reply named by its
+   * message id waits for `recorded`; only a reply whose receipt named no message id falls back to its thread's
+   * `updated_at` moving past the one it was sent against.
    */
   readonly reconcile: (
     spaceRef: string,
     threads: readonly { readonly thread_id: string; readonly updated_at?: string }[],
   ) => void
+  /**
+   * Drop accepted entries whose stored message the room's record now carries: the message ids of the turns this room
+   * has read. The swap is by id, so a message the room shows is never drawn twice.
+   */
+  readonly recorded: (spaceRef: string, messageIds: readonly string[]) => void
 }
 
 /**
@@ -132,11 +147,27 @@ export function createSpaceSendJournal(): SpaceSendJournal {
         const thread = byId.get(entry.threadId)
         if (!thread) return true
         if (entry.kind === 'post_new') return false
+        // A reply the receipt named by its message id is settled by the record carrying that id, not by a timestamp.
+        if (entry.messageId) return true
         return !movedForward(thread.updated_at, entry.baselineUpdatedAt)
       })
       return next.length === current.length ? current : next
     })
   }
 
-  return { entries, forSpace, get, begin, update, remove, reconcile }
+  function recorded(spaceRef: string, messageIds: readonly string[]): void {
+    if (messageIds.length === 0) return
+    const shown = new Set(messageIds)
+    setEntries((current) => {
+      const next = current.filter((entry) => !(
+        entry.spaceRef === spaceRef
+        && entry.stage === 'accepted'
+        && entry.messageId !== undefined
+        && shown.has(entry.messageId)
+      ))
+      return next.length === current.length ? current : next
+    })
+  }
+
+  return { entries, forSpace, get, begin, update, remove, reconcile, recorded }
 }

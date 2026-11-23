@@ -17,6 +17,7 @@ function makeJournal(): SpaceSendJournal {
     update: settled(inner.update),
     remove: settled(inner.remove),
     reconcile: settled(inner.reconcile),
+    recorded: settled(inner.recorded),
   }
 }
 
@@ -135,7 +136,7 @@ describe('space send journal (WS01-S6)', () => {
       expect(journal.get('s1')).toBeDefined()
     })
 
-    it('drops an accepted post_reply only once the thread updated_at moved past the baseline', () => {
+    it('without a message id, drops an accepted post_reply only once the thread updated_at moved past the baseline', () => {
       const journal = makeJournal()
       journal.begin({
         sendId: 's1',
@@ -150,6 +151,21 @@ describe('space send journal (WS01-S6)', () => {
       expect(journal.get('s1')).toBeDefined()
       journal.reconcile('room', [{ thread_id: 'thr_1', updated_at: '2026-10-27T10:05:00Z' }])
       expect(journal.get('s1')).toBeUndefined()
+    })
+
+    it('keeps an accepted post_reply that names its message, whatever the thread updated_at says', () => {
+      const journal = makeJournal()
+      journal.begin({
+        sendId: 's1',
+        kind: 'post_reply',
+        spaceRef: 'room',
+        threadId: 'thr_1',
+        content: 'a',
+        baselineUpdatedAt: '2026-10-27T10:00:00Z',
+      })
+      journal.update('s1', { stage: 'accepted', messageId: 'msg_1' })
+      journal.reconcile('room', [{ thread_id: 'thr_1', updated_at: '2026-10-27T10:05:00Z' }])
+      expect(journal.get('s1')).toBeDefined()
     })
 
     it('keeps an accepted post_reply when the thread updated_at moves back, not forward', () => {
@@ -228,6 +244,74 @@ describe('space send journal (WS01-S6)', () => {
       journal.begin({ sendId: 's1', kind: 'post_new', spaceRef: 'room', content: 'a' })
       const before = journal.entries()
       journal.reconcile('room', [{ thread_id: 'thr_1' }])
+      expect(journal.entries()).toBe(before)
+    })
+  })
+
+  describe('recorded (WS01-S6): the record names the stored message', () => {
+    const accepted = (
+      journal: SpaceSendJournal,
+      sendId: string,
+      kind: 'post_new' | 'post_reply',
+      messageId: string | undefined,
+      spaceRef = 'room',
+    ) => {
+      journal.begin({
+        sendId,
+        kind,
+        spaceRef,
+        threadId: 'thr_1',
+        content: 'a',
+        ...(kind === 'post_reply' ? { baselineUpdatedAt: '2026-10-27T10:00:00Z' } : {}),
+      })
+      journal.update(sendId, { stage: 'accepted', threadId: 'thr_1', ...(messageId ? { messageId } : {}) })
+    }
+
+    it('stores the receipt message id on the accepted entry', () => {
+      const journal = makeJournal()
+      accepted(journal, 's1', 'post_reply', 'msg_1')
+      expect(journal.get('s1')).toMatchObject({ stage: 'accepted', messageId: 'msg_1' })
+    })
+
+    it('drops an accepted reply once the record carries its message id, and keeps the others', () => {
+      const journal = makeJournal()
+      accepted(journal, 's1', 'post_reply', 'msg_1')
+      accepted(journal, 's2', 'post_reply', 'msg_2')
+      journal.recorded('room', ['msg_1', 'msg_other'])
+      expect(journal.get('s1')).toBeUndefined()
+      expect(journal.get('s2')).toBeDefined()
+    })
+
+    it('drops an accepted new post by its message id too, not only by its thread being listed', () => {
+      const journal = makeJournal()
+      accepted(journal, 's1', 'post_new', 'msg_1')
+      journal.recorded('room', ['msg_1'])
+      expect(journal.get('s1')).toBeUndefined()
+    })
+
+    it('never drops an entry that has no message id yet, or a send that is not accepted', () => {
+      const journal = makeJournal()
+      journal.begin({ sendId: 'q', kind: 'post_reply', spaceRef: 'room', threadId: 'thr_1', content: 'a', stage: 'queued' })
+      journal.begin({ sendId: 'f', kind: 'post_reply', spaceRef: 'room', threadId: 'thr_1', content: 'b' })
+      journal.update('f', { stage: 'failed', failure, messageId: 'msg_9' })
+      accepted(journal, 'a', 'post_reply', undefined)
+      journal.recorded('room', ['msg_9'])
+      expect(journal.entries().map((entry) => entry.sendId).sort()).toEqual(['a', 'f', 'q'])
+    })
+
+    it('never touches another space', () => {
+      const journal = makeJournal()
+      accepted(journal, 's1', 'post_reply', 'msg_1', 'other')
+      journal.recorded('room', ['msg_1'])
+      expect(journal.get('s1')).toBeDefined()
+    })
+
+    it('does nothing for an empty list and keeps the same entries array when nothing is dropped', () => {
+      const journal = makeJournal()
+      accepted(journal, 's1', 'post_reply', 'msg_1')
+      const before = journal.entries()
+      journal.recorded('room', [])
+      journal.recorded('room', ['msg_unknown'])
       expect(journal.entries()).toBe(before)
     })
   })

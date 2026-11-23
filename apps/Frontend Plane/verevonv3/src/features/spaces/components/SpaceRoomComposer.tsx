@@ -1554,7 +1554,7 @@ ${managers.map((m) => `@${m.label}`).join(' ')} ${request}`
         </p>
       </Show>
 
-      <SpaceConnectivityBanner />
+      <SpaceConnectivityBanner spaceRef={props.spaceRef} />
 
       <form
         onSubmit={(event) => { event.preventDefault(); void submitMessage() }}

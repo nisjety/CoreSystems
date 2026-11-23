@@ -1,16 +1,20 @@
 import { createSignal, untrack } from 'solid-js'
 
+import { probeSpaceService } from '@/shared/api/spaces-client'
 import { spaceRoomFeatureWithDevOverride } from './space-room-features'
 
 /**
  * What the room's composer may honestly say about the connection (WS01-S8,
- * F-t1-033). Two facts feed it and neither is guessed:
+ * F-t1-033). Three facts feed it and none is guessed:
  *
- * - the browser's own `online`/`offline` events (`navigator.onLine`), and
+ * - the browser's own `online`/`offline` events (`navigator.onLine`);
  * - the outcome of the last send's transport: a stream that dropped and could
  *   not be resumed marks the room `unreachable` even though the browser still
  *   believes it is online (a service restart, a proxy cut); the next send that
- *   reaches the server clears it.
+ *   reaches the server clears it; and
+ * - the optional `/health` probe (`checkSpaceService`), which says the service
+ *   is down before a send does. Any sign that the service answers (the probe, a
+ *   send that reaches it, a room read or a stream frame) clears it again.
  *
  * `online` says nothing and renders nothing. The state is presentation only: it
  * never gates a send (a send that fails is reported by its own exchange) and is
@@ -24,11 +28,51 @@ function browserOnline(): boolean {
 
 const [browserIsOnline, setBrowserIsOnline] = createSignal(browserOnline())
 const [sendUnreachable, setSendUnreachable] = createSignal(false)
+const [serviceDown, setServiceDown] = createSignal(false)
 
-/** The current state: offline wins, then an unresumable send, else online. */
+/** The current state: offline wins, then an unresumable send or a down service, else online. */
 export function spaceConnectivity(): SpaceConnectivity {
   if (!browserIsOnline()) return 'offline'
-  return sendUnreachable() ? 'unreachable' : 'online'
+  return sendUnreachable() || serviceDown() ? 'unreachable' : 'online'
+}
+
+// Counts every sign that the service answers. A down answer from a probe that started before the last sign is stale.
+let aliveSeq = 0
+
+/** A sign that the service answers: a send reached it, a room read or a stream frame came back, or a probe did. */
+function noteServiceAlive(): void {
+  aliveSeq += 1
+  // Writes only on a change, as the watcher below does: most signs of life find the service already up.
+  if (untrack(serviceDown)) setServiceDown(false)
+}
+
+/**
+ * Asks the gateway's `/health` whether it answers and records the answer. A down answer is ignored when any sign of
+ * life arrived while the probe was out, so a slow answer cannot undo a newer one. Never throws.
+ */
+export async function checkSpaceService(): Promise<void> {
+  const aliveBefore = aliveSeq
+  const up = await probeSpaceService()
+  if (up) noteServiceAlive()
+  else if (aliveSeq === aliveBefore) setServiceDown(true)
+}
+
+// The last moment each room heard from its server (a stream frame or a listing read). One slot: the room on screen.
+const [lastFresh, setLastFresh] = createSignal<{ readonly spaceRef: string; readonly at: number } | undefined>(undefined)
+
+/** A frame or a listing read from this room's server: the room is as fresh as this moment, and the service is up. */
+export function noteRoomFresh(spaceRef: string, at: number = Date.now()): void {
+  setLastFresh({ spaceRef, at })
+  noteServiceAlive()
+}
+
+/**
+ * When this room last heard from its server, in epoch milliseconds, or undefined when it has not in this page
+ * session. Reactive. The stamp shows how old what is on screen is; it never says the room is current.
+ */
+export function roomLastFreshAt(spaceRef: string): number | undefined {
+  const fresh = lastFresh()
+  return fresh && fresh.spaceRef === spaceRef ? fresh.at : undefined
 }
 
 /** A send's stream dropped and resuming it did not work. */
@@ -39,13 +83,15 @@ export function noteSendTransportLost(): void {
 /** A send reached the server (its stream opened, or the server answered). */
 export function noteSendTransportOk(): void {
   setSendUnreachable(false)
+  noteServiceAlive()
 }
 
 /**
  * Follow the browser's connectivity events for as long as the caller lives.
  * Returns the stop function. Coming back online also clears `unreachable`: the
  * next send finds out for itself, and a banner that outlives its cause is worse
- * than none.
+ * than none. The service is probed once when the watch starts online, and again
+ * when the browser comes back, so a down service shows before a send.
  */
 export function watchBrowserConnectivity(): () => void {
   if (typeof window === 'undefined') return () => undefined
@@ -58,8 +104,11 @@ export function watchBrowserConnectivity(): () => void {
   const back = () => {
     setBrowserIsOnline(true)
     setSendUnreachable(false)
+    void checkSpaceService()
   }
   sync()
+  // A probe writes its answer only after the request returns, never inside the caller's body.
+  if (browserOnline()) void checkSpaceService()
   window.addEventListener('offline', sync)
   window.addEventListener('online', back)
   return () => {
