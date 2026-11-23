@@ -291,6 +291,18 @@ pub(crate) fn admit_view(
     actions: &[ViewTool],
     view_v2: bool,
 ) -> Result<Vec<ToolDefinition>, Status> {
+    admit_view_with_switch(run_id, view_run_id, actions, view_v2, resumable())
+}
+
+/// `admit_view` with the resumable switch passed in, so a test can prove the switch reaches the
+/// ask gate only through `ask_row_offerable` (WS10-S9) without touching the process env.
+fn admit_view_with_switch(
+    run_id: &str,
+    view_run_id: &str,
+    actions: &[ViewTool],
+    view_v2: bool,
+    resumable_switch: bool,
+) -> Result<Vec<ToolDefinition>, Status> {
     if view_run_id != run_id || actions.len() > MAX_VIEW_ACTIONS {
         return Err(Status::permission_denied(
             "model action view response is not run-bound",
@@ -351,7 +363,7 @@ pub(crate) fn admit_view(
                 );
                 continue;
             }
-            if asks && !ask_row_offerable(&row.action_id, resumable()) {
+            if asks && !ask_row_offerable(&row.action_id, resumable_switch) {
                 tracing::info!(
                     action = %row.action_id,
                     "space action at level ask is not offered: not a resumable kind, or the resumable switch is off"
@@ -1137,5 +1149,42 @@ mod tests {
         let kind = crate::space_gate::PROVIDER_ACTION_TOOL;
         assert!(!ask_row_offerable(kind, false));
         assert!(ask_row_offerable(kind, true));
+    }
+
+    fn view_tool(action_id: &str, level: &str) -> ViewTool {
+        let row = golden()
+            .expect("the golden registry loads")
+            .row(action_id)
+            .expect("the row is in the golden registry");
+        ViewTool {
+            name: row.action_id.clone(),
+            description: "Rename the thread".to_owned(),
+            parameters_json: row.parameters_json.clone(),
+            action_schema_hash: row.schema_sha256.clone(),
+            requires_approval: row.approval == "owner_approval",
+            level: Some(level.to_owned()),
+            autonomy_rung: None,
+        }
+    }
+
+    #[test]
+    fn the_resumable_switch_alone_never_offers_a_space_ask_row() {
+        // The view path, not just the helper: a signed `ask` on a Space thread row stays unoffered
+        // with the switch on, because the row is not a resumable kind (WS10-S9). A call site that
+        // read the switch alone would offer it here.
+        let asked = [view_tool(RENAME_ACTION, "ask")];
+        for switch_on in [false, true] {
+            let offered = admit_view_with_switch("run-1", "run-1", &asked, true, switch_on)
+                .expect("a well-formed view is admitted");
+            assert!(
+                offered.is_empty(),
+                "switch {switch_on}: an ask row with no resume path was offered"
+            );
+        }
+        // The same row signed `allow` is offered either way, so the refusal above is the ask gate.
+        let allowed = [view_tool(RENAME_ACTION, "allow")];
+        let offered = admit_view_with_switch("run-1", "run-1", &allowed, true, true)
+            .expect("a well-formed view is admitted");
+        assert_eq!(offered.len(), 1, "an allowed built row is offered");
     }
 }

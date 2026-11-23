@@ -17,7 +17,7 @@
 //! The offer is narrow. `SPACE_CANVAS_AGENT_TOOLS` is a rollout switch, off by default, and never an authorization input. A row
 //! is offered only through the signed model-action view (`space_self_api::admit_view`) and only to a run whose tool profile
 //! carries the canvas marker (`space_self_api::offered_under_profile`, W3-DEC-CANVAS). The write row's level is `ask`, so it is
-//! not offered until the approval resume of WS10-S9 exists. An incomplete configuration disables the adapter. No canvas row is
+//! not offered until it is a registered resumable kind (`space_gate::is_resumable_tool`, WS19-OQ2); the switch alone never offers it. An incomplete configuration disables the adapter. No canvas row is
 //! attested by an owner in this build, so Capability Core does not list either row for a run.
 
 use std::sync::OnceLock;

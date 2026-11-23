@@ -472,11 +472,20 @@ fn parse_descriptor(raw: &str) -> Result<ContinuationDescriptor, &'static str> {
 fn parse_resumable_action(
     descriptor: &ContinuationDescriptor,
 ) -> Result<ResumableAction, &'static str> {
+    parse_resumable_action_in(descriptor, crate::space_gate::is_resumable_tool)
+}
+
+/// `parse_resumable_action` with the registry passed in, so a test can supply a registry that
+/// leaves out a kind that has an arm and prove the gate, not the match default, refuses it.
+fn parse_resumable_action_in(
+    descriptor: &ContinuationDescriptor,
+    is_resumable_tool: fn(&str) -> bool,
+) -> Result<ResumableAction, &'static str> {
     if descriptor.org_id.trim().is_empty() || descriptor.user_id.trim().is_empty() {
         return Err(FAILURE_INVALID_CONTINUATION);
     }
     // The registry gates the arms (WS10-S9): a tool the card does not promise is never parsed.
-    if !crate::space_gate::is_resumable_tool(&descriptor.tool_name) {
+    if !is_resumable_tool(&descriptor.tool_name) {
         return Err(FAILURE_INVALID_CONTINUATION);
     }
     match descriptor.tool_name.as_str() {
@@ -1680,6 +1689,20 @@ mod tests {
             parse_resumable_action(&descriptor).err(),
             Some(FAILURE_INVALID_CONTINUATION)
         );
+        assert!(!crate::space_gate::is_resumable_tool("space.thread.rename"));
+    }
+
+    #[test]
+    fn the_registry_gate_refuses_a_kind_that_has_an_arm() {
+        // The match has an arm for the provider action, so only the gate can refuse it. A
+        // registry without it refuses the valid fixture; the real registry accepts it.
+        let descriptor = parse_descriptor(VALID_DESCRIPTOR).expect("valid JSON");
+        assert!(parse_resumable_action_in(&descriptor, |_| true).is_ok());
+        assert_eq!(
+            parse_resumable_action_in(&descriptor, |_| false).err(),
+            Some(FAILURE_INVALID_CONTINUATION)
+        );
+        assert!(parse_resumable_action(&descriptor).is_ok());
     }
 
     #[test]
