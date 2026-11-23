@@ -932,4 +932,118 @@ mod tests {
             .expect_err("a blank lease is refused before any RPC");
         assert_eq!(applied.code(), tonic::Code::InvalidArgument);
     }
+
+    // ---- Cross-language trailer test (DEPTH-WS06-SANDBOX) ------------------------------
+    //
+    // sandbox-manager's Go ZDR gate (internal/authz/zdr_gate.go, pinned by
+    // zdr_gate_test.go) refuses every SandboxManager method for a ZDR principal
+    // with FailedPrecondition and the trailer `x-mp-provider-error:
+    // zdr_durable_mutation_forbidden` (go/pkg/zdrrefusal). An interceptor
+    // refusal sends no message, so grpc-go writes a trailers-only response: one
+    // HEADERS frame carrying the status and the trailers. This mock answers
+    // every method in exactly that shape, and the test proves the refusal
+    // reaches this client's callers typed, over a real tonic HTTP/2 connection.
+
+    use tonic::codegen::{http, BoxFuture, Service};
+
+    /// The Go catalogue values, spelled out so a rename on either side fails here.
+    const GO_KIND_TRAILER: &str = "x-mp-provider-error";
+    const GO_DURABLE_MUTATION_FORBIDDEN: &str = "zdr_durable_mutation_forbidden";
+
+    /// Answers every SandboxManager method the way the Go ZDR gate does.
+    #[derive(Clone)]
+    struct ZdrGateRefusal;
+
+    impl tonic::server::NamedService for ZdrGateRefusal {
+        const NAME: &'static str = "model_plane.v1.SandboxManager";
+    }
+
+    impl Service<http::Request<tonic::body::BoxBody>> for ZdrGateRefusal {
+        type Response = http::Response<tonic::body::BoxBody>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _request: http::Request<tonic::body::BoxBody>) -> Self::Future {
+            Box::pin(async move {
+                let mut response = http::Response::new(tonic::body::empty_body());
+                let headers = response.headers_mut();
+                headers.insert("content-type", "application/grpc".parse().unwrap());
+                headers.insert(
+                    "grpc-status",
+                    (tonic::Code::FailedPrecondition as i32).to_string().parse().unwrap(),
+                );
+                headers.insert(
+                    "grpc-message",
+                    "Zero Data Retention credentials cannot create, change, or delete durable state."
+                        .parse()
+                        .unwrap(),
+                );
+                headers.insert(GO_KIND_TRAILER, GO_DURABLE_MUTATION_FORBIDDEN.parse().unwrap());
+                Ok(response)
+            })
+        }
+    }
+
+    async fn refusing_sandbox_manager() -> SandboxManagerClient {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(ZdrGateRefusal)
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        SandboxManagerClient::new(channel)
+    }
+
+    fn assert_typed_durable_mutation_refusal(error: &Status) {
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{error:?}");
+        assert_eq!(
+            mp_contracts::zdr_refusal::Refusal::from_status(error),
+            Some(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN),
+            "the Go gate's trailer must parse as the catalogue refusal: {error:?}"
+        );
+    }
+
+    #[test]
+    fn the_go_trailer_names_match_the_rust_catalogue() {
+        assert_eq!(GO_KIND_TRAILER, mp_contracts::zdr_refusal::KIND_TRAILER);
+        assert_eq!(
+            GO_DURABLE_MUTATION_FORBIDDEN,
+            mp_contracts::zdr_refusal::code::DURABLE_MUTATION_FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn a_go_zdr_gate_refusal_reaches_callers_as_a_typed_refusal() {
+        let client = refusing_sandbox_manager().await;
+        let released = client
+            .release_lease("bearer", "lease-1", "backend-1")
+            .await
+            .expect_err("the gate refuses ReleaseLease");
+        assert_typed_durable_mutation_refusal(&released);
+        let health = client
+            .health("bearer")
+            .await
+            .expect_err("the gate refuses SandboxManager.Health too");
+        assert_typed_durable_mutation_refusal(&health);
+        let workspace = client
+            .get_thread_workspace("bearer", "lease-1", "backend-1")
+            .await
+            .expect_err("the gate refuses GetThreadWorkspace");
+        assert_typed_durable_mutation_refusal(&workspace);
+    }
 }

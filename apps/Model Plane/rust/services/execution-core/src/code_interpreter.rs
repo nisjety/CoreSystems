@@ -902,7 +902,7 @@ async fn run_in_root(
     staged.push(program_file);
     staged.extend(request.files_in.iter().map(|file| file.name.as_str()));
     let files = collect_output_files(root, &staged, &pre_call_baseline);
-    let office = office_verify::verify_outputs(&files).await;
+    let office = office_verify::verify_outputs(&files, admission).await;
 
     // Attached only while the switch is on, so the result is byte-identical without it.
     let sandbox = enforcement_report_requested().then(|| {

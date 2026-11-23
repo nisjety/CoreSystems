@@ -350,6 +350,10 @@ fn stage(root: &std::path::Path, kind: OfficeKind, bytes: &[u8]) -> Result<Strin
 
 /// One file's check, sandboxed. The workspace is removed when this returns on
 /// every path, including the timeout and the refusal to run unsandboxed.
+///
+/// `admission` is the run's own spawn admission (WS06-S9, DEPTH-WS06-SANDBOX):
+/// the checker serves the same run as the program that wrote the file, so a
+/// Space-scoped run's verifier spawn needs that run's lease like any other.
 async fn run_checker(
     kind: OfficeKind,
     bytes: Vec<u8>,
@@ -357,6 +361,7 @@ async fn run_checker(
     mode: Mode,
     preview_max_bytes: u64,
     pages: usize,
+    admission: executor::SpawnAdmission<'_>,
 ) -> Result<(String, RenderedFiles), String> {
     let workspace = Workspace::create(WORKSPACE_TAG, kind.as_str())
         .map_err(|error| format!("the verifier could not create its workspace: {error}"))?;
@@ -371,13 +376,15 @@ async fn run_checker(
         args.push(RENDER_ARG.to_owned());
         args.push(pages.to_string());
     }
-    let outcome = executor::execute_sandboxed_in_dir(
+    let outcome = executor::execute_sandboxed_in_dir_with_ro_binds(
         &policy,
         PYTHON_PROGRAM,
         &args,
         root,
         &child_env_for(root),
+        &[],
         timeout,
+        &admission,
     )
     .await
     .map_err(|error| format!("the verifier did not run: {error}"))?;
@@ -397,8 +404,13 @@ async fn run_checker(
 }
 
 /// Verify the Office files among `files`. Returns an empty result when the switch
-/// is off, so the caller's output does not change.
-pub async fn verify_outputs(files: &[OutputFile]) -> Verification {
+/// is off, so the caller's output does not change. `admission` is the admission
+/// the run's own program spawn was made on; every checker spawn passes it on.
+pub async fn verify_outputs(
+    files: &[OutputFile],
+    admission: &executor::SpawnAdmission<'_>,
+) -> Verification {
+    let admission = *admission;
     let mode = parse_mode(env("CODE_INTERPRETER_OFFICE_VERIFY").as_deref());
     if mode == Mode::Off {
         return Verification::default();
@@ -409,7 +421,15 @@ pub async fn verify_outputs(files: &[OutputFile]) -> Verification {
     let preview_pages = env("OFFICE_PREVIEW_PAGES");
     verify_with(subjects(files), max_files, gate(), |kind, bytes| {
         let pages = parse_preview_pages(kind, preview_pages.as_deref());
-        run_checker(kind, bytes, timeout, mode, preview_max_bytes, pages)
+        run_checker(
+            kind,
+            bytes,
+            timeout,
+            mode,
+            preview_max_bytes,
+            pages,
+            admission,
+        )
     })
     .await
 }
@@ -729,9 +749,38 @@ sys.stdout.buffer.write(data)
             Mode::Structural,
             DEFAULT_PREVIEW_MAX_BYTES,
             DEFAULT_PREVIEW_PAGES,
+            executor::SpawnAdmission::NOT_SPACE,
         )
         .await;
         assert_eq!(count(), before, "no verifier workspace is left behind");
+    }
+
+    /// DEPTH-WS06-SANDBOX: the checker spawn is admitted on the run's own
+    /// admission, so a Space-scoped run without a lease cannot get a verifier
+    /// process either. With bubblewrap present the lease rule refuses it; without
+    /// it the isolation rule refuses first. Either way nothing runs, and the
+    /// verifier's workspace is gone.
+    #[tokio::test]
+    async fn a_space_run_without_a_lease_gets_no_checker_spawn() {
+        let space_no_lease = executor::SpawnAdmission {
+            space_scoped: true,
+            lease_id: Some("  "),
+        };
+        let error = run_checker(
+            OfficeKind::Docx,
+            b"not a package".to_vec(),
+            Duration::from_secs(5),
+            Mode::Structural,
+            DEFAULT_PREVIEW_MAX_BYTES,
+            DEFAULT_PREVIEW_PAGES,
+            space_no_lease,
+        )
+        .await
+        .expect_err("a Space spawn without a lease is refused");
+        assert!(error.starts_with("the verifier did not run:"), "{error}");
+        if crate::sandbox::is_supported() {
+            assert!(error.contains("requires a sandbox lease"), "{error}");
+        }
     }
 
     #[tokio::test]
@@ -846,6 +895,7 @@ sys.stdout.buffer.write(data)
             Mode::Render,
             DEFAULT_PREVIEW_MAX_BYTES,
             DEFAULT_PREVIEW_PAGES,
+            executor::SpawnAdmission::NOT_SPACE,
         )
         .await
         .expect("the sandboxed render runs");
