@@ -91,8 +91,9 @@ func TestRoomFileSameKeyRefreshIsAdmittedLikeANewFile(t *testing.T) {
 		t.Fatalf("A after the admitted refresh = content %q hash %s", content, hash)
 	}
 
-	// A refresh that keeps the row's own hash is not a duplicate of itself. The room
-	// now holds 4 + 4 bytes, so this one is admitted too.
+	// A refresh that keeps the row's own hash is not a duplicate of itself. A holds
+	// 6 bytes and B 4; with A left out, this 4-byte refresh is judged at 4 + 4 of 10,
+	// so it is admitted too (counting A's own 6 would refuse it).
 	again, err := r.CreateWithOutbox(ctx, withKey(roomFile(org, roomSpace, "u1", sha(3), "dddd", limits(sha(3))), "ka"), lifecycleFactory)
 	if err != nil {
 		t.Fatalf("refresh that keeps its own hash: %v", err)

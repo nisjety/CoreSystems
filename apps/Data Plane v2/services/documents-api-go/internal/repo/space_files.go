@@ -49,11 +49,17 @@ func (e *SpaceFileQuotaError) Error() string {
 // may be reused for this write. A room file refreshes only a room file of the same
 // Space, and an ordinary write never rewrites a room file: a key collision across
 // either line is an ownership conflict, never a silent move of content between the
-// two.
+// two. An ordinary write keeps the same Space line too: it rewrites only a row with
+// the same space_ref (both empty, or equal), so a key reused across Spaces, or
+// between a Space-scoped row and an unscoped one, is a conflict as well.
 func sameRoomFileKey(existing *model.Document, input model.CreateDocumentInput) bool {
 	existingRoomFile := existing.Type == SpaceFileType
 	if input.SpaceFile == nil {
-		return !existingRoomFile
+		existingSpace := ""
+		if existing.SpaceRef != nil {
+			existingSpace = *existing.SpaceRef
+		}
+		return !existingRoomFile && existingSpace == input.SpaceRef
 	}
 	return existingRoomFile && existing.SpaceRef != nil && *existing.SpaceRef == input.SpaceRef
 }

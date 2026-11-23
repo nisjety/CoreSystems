@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/go-chi/chi/v5"
 )
 
 // zdrContractEntry is one row of the Model Plane ZDR refusal catalogue
@@ -126,5 +128,25 @@ func TestZDRRefusalWritesExactlyTheCatalogueFields(t *testing.T) {
 		if !want[key] {
 			t.Fatalf("unexpected error key %q in %s", key, rec.Body.String())
 		}
+	}
+}
+
+// A verified zdr=true user cannot delete a document or a room file either: the
+// catalogue's durable-mutation refusal covers delete. The handler has no repository
+// here, so a delete that got past the refusal would panic the test.
+func TestZDRDeleteIsTheTypedEnvelope(t *testing.T) {
+	auth := newTestAuth(t)
+	stub := &stubGrants{}
+	h := NewDocumentHandler(nil, nil).WithSpaceFiles(roomFilesOn(stub))
+	router := chi.NewRouter()
+	router.Delete("/v1/documents/{documentID}", h.Delete)
+	req := httptest.NewRequest(http.MethodDelete, "/v1/documents/doc-1", nil)
+	req.Header.Set("Authorization", "Bearer "+auth.userToken(testOrg, "user-1", true))
+	req.Header.Set("X-Org-ID", testOrg)
+	rec := httptest.NewRecorder()
+	auth.wrap(router).ServeHTTP(rec, req)
+	assertZDRDurableMutationRefusal(t, rec, zdrDeleteReason)
+	if len(stub.revokes) != 0 {
+		t.Fatal("Control was asked to revoke under a ZDR refusal")
 	}
 }

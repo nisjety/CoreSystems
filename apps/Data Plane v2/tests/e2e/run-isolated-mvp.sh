@@ -221,7 +221,8 @@ single_response_body=${single_response%$'\n'*}
 [ "$single_status" = "403" ] || { echo "isolated ZDR single guard failed" >&2; exit 1; }
 SINGLE_RESPONSE_BODY="$single_response_body" node -e '
   const value=JSON.parse(process.env.SINGLE_RESPONSE_BODY);
-  if (value.error !== "verified token zdr=true forbids durable document persistence") process.exit(1);
+  if (!value.error || value.error.code !== "zdr_durable_mutation_forbidden" ||
+      !value.error.details || value.error.details.reason !== "verified token zdr=true forbids durable document persistence") process.exit(1);
 ' || { echo "isolated ZDR single guard returned the wrong contract" >&2; exit 1; }
 
 source_object_body='{"connector":"isolated","source":"isolated://signed-zdr-source-object","external_id":"signed-zdr-source-object","name":"signed-zdr-source-object.txt"}'

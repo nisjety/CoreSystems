@@ -93,6 +93,8 @@ func persistentZDRReason(claims *authctx.Claims, input *model.CreateDocumentInpu
 const (
 	zdrDurableMutationCode    = "zdr_durable_mutation_forbidden"
 	zdrDurableMutationMessage = "Zero Data Retention credentials cannot create, change, or delete durable state."
+	// zdrDeleteReason is details.reason when ZDR refuses a document delete.
+	zdrDeleteReason = "verified token zdr=true forbids durable document deletion"
 )
 
 // writeZDRDurableMutationRefusal answers a durable write that zero data retention
@@ -408,6 +410,13 @@ func (h *DocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	// Without this, any org member could delete a private doc they cannot read by
 	// guessing its id (confused deputy). A no-viewer (service) caller keeps the
 	// legacy org-scoped behaviour. deletedBy records who performed the deletion.
+	// ZDR: a verified zdr=true credential cannot delete durable state either (the
+	// catalogue's zdr_durable_mutation_forbidden covers create, change and delete).
+	// The refusal runs before the lookup, so it reveals nothing about the id.
+	if claims := verifiedClaims(r); claims != nil && claims.ZDRPresent && claims.ZDR {
+		writeZDRDurableMutationRefusal(w, zdrDeleteReason)
+		return
+	}
 	viewer := viewerID(r)
 	document, err := h.repo.Get(r.Context(), orgID, docID, viewer, h.grantedDocs(r, orgID, viewer))
 	if err != nil {
