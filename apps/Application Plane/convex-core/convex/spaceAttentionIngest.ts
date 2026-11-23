@@ -297,10 +297,11 @@ export const ingestSpaceEvent = internalMutation({
 
     // Erasure does not depend on the audience or the Space still being active.
     if (ev.kind === "thread.deleted") {
-      const more = await purgeThreadRows(ctx, ev.orgId, ev.threadId);
+      const more = await purgeThreadRows(ctx, ev.orgId, ev.spaceRef, ev.threadId);
       if (more) {
         await ctx.scheduler.runAfter(0, internal.spaceAttentionIngest.purgeThread, {
           externalOrgId: ev.orgId,
+          spaceRef: ev.spaceRef,
           threadId: ev.threadId,
         });
       }
@@ -475,7 +476,7 @@ async function deleteBatch(ctx: any, rows: any[], orgId: string): Promise<boolea
   return deleted > 0 && rows.length >= PURGE_BATCH;
 }
 
-async function purgeThreadRows(ctx: any, orgId: string, threadId: string): Promise<boolean> {
+async function purgeThreadRows(ctx: any, orgId: string, spaceRef: string, threadId: string): Promise<boolean> {
   let more = false;
   more = (await deleteBatch(
     ctx,
@@ -487,14 +488,20 @@ async function purgeThreadRows(ctx: any, orgId: string, threadId: string): Promi
     await ctx.db.query("spaceThreadFollows").withIndex("by_thread", (q: any) => q.eq("threadId", threadId)).take(PURGE_BATCH),
     orgId,
   )) || more;
+  // WS12-S8: the thread's message reactions. by_space_thread leads with spaceRef, so the Space is named too.
+  more = (await deleteBatch(
+    ctx,
+    await ctx.db.query("spaceReactions").withIndex("by_space_thread", (q: any) => q.eq("spaceRef", spaceRef).eq("threadId", threadId)).take(PURGE_BATCH),
+    orgId,
+  )) || more;
   return more;
 }
 
-/** A thread was deleted: its items and follows go. Pages itself until empty. */
+/** A thread was deleted: its items, follows and message reactions go. Pages itself until empty. */
 export const purgeThread = internalMutation({
-  args: { externalOrgId: v.string(), threadId: v.string() },
+  args: { externalOrgId: v.string(), spaceRef: v.string(), threadId: v.string() },
   handler: async (ctx, args): Promise<{ more: boolean }> => {
-    const more = await purgeThreadRows(ctx, args.externalOrgId, args.threadId);
+    const more = await purgeThreadRows(ctx, args.externalOrgId, args.spaceRef, args.threadId);
     if (more) await ctx.scheduler.runAfter(0, internal.spaceAttentionIngest.purgeThread, args);
     return { more };
   },
@@ -502,8 +509,8 @@ export const purgeThread = internalMutation({
 
 /**
  * A Space is being deleted: every attention, follow, preference, reminder,
- * agent-activity, read-marker, presence, reaction and pin row for it goes. Scheduled beside
- * the audience purge in `spaces.ts`.
+ * agent-activity, read-marker, presence, reaction, pin, room-notice and DM-hide
+ * row for it goes. Scheduled beside the audience purge in `spaces.ts`.
  */
 export const purgeSpace = internalMutation({
   args: { externalOrgId: v.string(), spaceRef: v.string() },
@@ -522,6 +529,10 @@ export const purgeSpace = internalMutation({
     // WS12-S8: message reactions of the Space.
     more = (await deleteBatch(ctx, await take("spaceReactions", "by_space_thread", (q) => q.eq("spaceRef", spaceRef)), org)) || more;
     more = (await deleteBatch(ctx, await take("spacePins", "by_space", (q) => q.eq("spaceRef", spaceRef)), org)) || more;
+    // WS15-S12: room notices of the Space (by_space_and_created leads with spaceRef).
+    more = (await deleteBatch(ctx, await take("spaceRoomNotices", "by_space_and_created", (q) => q.eq("spaceRef", spaceRef)), org)) || more;
+    // WS12-S2: per-viewer DM hides of the Space.
+    more = (await deleteBatch(ctx, await take("spaceDmHides", "by_space", (q) => q.eq("spaceRef", spaceRef)), org)) || more;
     if (more) await ctx.scheduler.runAfter(0, internal.spaceAttentionIngest.purgeSpace, args);
     return { more };
   },

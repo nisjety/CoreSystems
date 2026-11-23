@@ -467,7 +467,7 @@ test('thread.deleted with a full batch reschedules purgeThread', async (t) => {
   await apply(ctx, threadDeleted());
   assert.equal(tables.spaceAttentionItems.length, 0);
   assert.equal(log.scheduled.length, 1);
-  assert.deepEqual(log.scheduled[0].args, { externalOrgId: ORG, threadId: THREAD });
+  assert.deepEqual(log.scheduled[0].args, { externalOrgId: ORG, spaceRef: SPACE, threadId: THREAD });
 });
 
 test('purgeThread deletes one batch and reschedules itself while a full batch was deleted', async () => {
@@ -479,12 +479,61 @@ test('purgeThread deletes one batch and reschedules itself while a full batch wa
     state: 'following',
   }));
   const { ctx, tables, log } = makeCtx({ spaceThreadFollows: rows });
-  const first = await purgeThread._handler(ctx, { externalOrgId: ORG, threadId: THREAD });
+  const first = await purgeThread._handler(ctx, { externalOrgId: ORG, spaceRef: SPACE, threadId: THREAD });
   assert.deepEqual(first, { more: true });
   assert.equal(tables.spaceThreadFollows.length, 0);
   assert.equal(log.scheduled.length, 1);
-  const second = await purgeThread._handler(ctx, { externalOrgId: ORG, threadId: THREAD });
+  const second = await purgeThread._handler(ctx, { externalOrgId: ORG, spaceRef: SPACE, threadId: THREAD });
   assert.deepEqual(second, { more: false });
+  assert.equal(log.scheduled.length, 1, 'an empty pass does not reschedule');
+});
+
+test('thread.deleted purges the thread\'s message reactions in its Space and nothing else', async (t) => {
+  withEnv(t, { SPACE_ATTENTION_INGEST: '1' });
+  const reaction = (extra = {}) => ({
+    externalOrgId: ORG,
+    spaceRef: SPACE,
+    threadId: THREAD,
+    messageId: 'msg_1',
+    emoji: '\u{1F44D}',
+    externalAuthId: 'alice',
+    createdAt: 1,
+    ...extra,
+  });
+  const { ctx, tables, log } = makeCtx({
+    spaceReactions: [
+      reaction(),
+      reaction({ messageId: 'msg_2', externalAuthId: 'bob' }),
+      reaction({ threadId: 'thread_2' }),
+      reaction({ spaceRef: 'space_2' }),
+      reaction({ externalOrgId: 'org_other' }),
+    ],
+  });
+  const result = await apply(ctx, threadDeleted());
+  assert.deepEqual(result, { status: 'applied', reason: 'thread_purged' });
+  assert.deepEqual(
+    tables.spaceReactions.map((row) => [row.spaceRef, row.threadId, row.externalOrgId]),
+    [[SPACE, 'thread_2', ORG], ['space_2', THREAD, ORG], [SPACE, THREAD, 'org_other']],
+  );
+  assert.deepEqual(log.scheduled, [], 'a short purge does not reschedule');
+});
+
+test('purgeThread pages through a full batch of reactions and reschedules itself', async () => {
+  const rows = Array.from({ length: 200 }, (_, i) => ({
+    externalOrgId: ORG,
+    spaceRef: SPACE,
+    threadId: THREAD,
+    messageId: `msg_${i}`,
+    emoji: '\u{1F44D}',
+    externalAuthId: `u${i}`,
+    createdAt: 1,
+  }));
+  const args = { externalOrgId: ORG, spaceRef: SPACE, threadId: THREAD };
+  const { ctx, tables, log } = makeCtx({ spaceReactions: rows });
+  assert.deepEqual(await purgeThread._handler(ctx, args), { more: true });
+  assert.equal(tables.spaceReactions.length, 0);
+  assert.deepEqual(log.scheduled.map((call) => call.args), [args]);
+  assert.deepEqual(await purgeThread._handler(ctx, args), { more: false });
   assert.equal(log.scheduled.length, 1, 'an empty pass does not reschedule');
 });
 
@@ -500,6 +549,16 @@ test('purgeSpace deletes every table\'s rows for the Space and nothing of anothe
     spaceReminders: [mine({ externalAuthId: 'a' })],
     spaceReactions: [mine({ threadId: THREAD })],
     spacePins: [mine({ threadId: THREAD, pinnedAt: 1 }), mine({ externalOrgId: 'org_other', threadId: THREAD, pinnedAt: 2 })],
+    spaceRoomNotices: [
+      mine({ noticeId: 'n1', kind: 'room_renamed', createdAt: 1 }),
+      mine({ spaceRef: 'space_2', noticeId: 'n2', kind: 'room_renamed', createdAt: 1 }),
+      mine({ externalOrgId: 'org_other', noticeId: 'n3', kind: 'room_renamed', createdAt: 1 }),
+    ],
+    spaceDmHides: [
+      mine({ externalAuthId: 'a', hiddenAt: 1 }),
+      mine({ spaceRef: 'space_2', externalAuthId: 'a', hiddenAt: 1 }),
+      mine({ externalOrgId: 'org_other', externalAuthId: 'a', hiddenAt: 1 }),
+    ],
   };
   const { ctx, tables, log } = makeCtx(tablesIn);
   const result = await purgeSpace._handler(ctx, { externalOrgId: ORG, spaceRef: SPACE });
@@ -510,6 +569,8 @@ test('purgeSpace deletes every table\'s rows for the Space and nothing of anothe
   }
   assert.equal(tables.spaceAttentionItems.length, 2, 'the other Space and the other org are untouched');
   assert.equal(tables.spacePins.length, 1, 'the Space\'s pins go; the other org\'s pin stays');
+  assert.equal(tables.spaceRoomNotices.length, 2, 'room notices of the other Space and the other org stay');
+  assert.equal(tables.spaceDmHides.length, 2, 'DM hides of the other Space and the other org stay');
   assert.deepEqual(log.scheduled, []);
 });
 
@@ -525,6 +586,31 @@ test('purgeSpace reschedules itself when a table returned a full batch', async (
   assert.deepEqual(result, { more: true });
   assert.equal(tables.spaceAttentionItems.length, 0);
   assert.deepEqual(log.scheduled[0].args, { externalOrgId: ORG, spaceRef: SPACE });
+});
+
+test('purgeSpace reschedules itself when a room-notice or DM-hide batch was full', async () => {
+  const notices = Array.from({ length: 200 }, (_, i) => ({
+    externalOrgId: ORG,
+    spaceRef: SPACE,
+    noticeId: `n${i}`,
+    kind: 'room_renamed',
+    createdAt: i,
+  }));
+  const notice = makeCtx({ spaceRoomNotices: notices });
+  assert.deepEqual(await purgeSpace._handler(notice.ctx, { externalOrgId: ORG, spaceRef: SPACE }), { more: true });
+  assert.equal(notice.tables.spaceRoomNotices.length, 0);
+  assert.deepEqual(notice.log.scheduled[0].args, { externalOrgId: ORG, spaceRef: SPACE });
+
+  const hides = Array.from({ length: 200 }, (_, i) => ({
+    externalOrgId: ORG,
+    spaceRef: SPACE,
+    externalAuthId: `u${i}`,
+    hiddenAt: 1,
+  }));
+  const hide = makeCtx({ spaceDmHides: hides });
+  assert.deepEqual(await purgeSpace._handler(hide.ctx, { externalOrgId: ORG, spaceRef: SPACE }), { more: true });
+  assert.equal(hide.tables.spaceDmHides.length, 0);
+  assert.equal(hide.log.scheduled.length, 1);
 });
 
 test('purgeSubject removes the member\'s rows in that org only', async () => {

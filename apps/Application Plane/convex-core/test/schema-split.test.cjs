@@ -200,6 +200,9 @@ test('WS11-S6: every index the attention ingest and its erasure paths name exist
     ['spaceReadMarkers', 'by_org_and_subject', 'externalOrgId'],
     ['spacePresence', 'by_space', 'spaceRef'],
     ['spacePresence', 'by_space_and_subject', 'spaceRef'],
+    ['spaceReactions', 'by_space_thread', 'spaceRef'],
+    ['spaceRoomNotices', 'by_space_and_created', 'spaceRef'],
+    ['spaceDmHides', 'by_space', 'spaceRef'],
   ];
   const missing = [];
   for (const [table, name, first] of expected) {

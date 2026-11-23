@@ -294,16 +294,18 @@ test('approval and wake code do not import the reactions module (a reaction gran
   // Any quoted path to the module (import, export from, require or dynamic import, with or without an extension), or a generated reference.
   const importsReactions = /["']\.\/spaceReactions(?:\.[cm]?[jt]s)?["']|internal\.spaceReactions\b|api\.spaceReactions\b/;
   assert.deepEqual(modules.filter((name) => importsReactions.test(sourceOf(name))), []);
-  // Approval and wake code is any module whose source says so. Only the Space erasure purge may name the table
-  // (it deletes rows when a Space is deleted and decides nothing), so that is the one permitted mention.
+  // Approval and wake code is any module whose source says so. Only the erasure purges may name the table
+  // (they delete rows when a thread or a Space is deleted and decide nothing), so those are the permitted mentions.
   const approvalOrWake = modules.filter((name) => /approval|wake/i.test(sourceOf(name)));
   assert.ok(approvalOrWake.length > 0, 'approval and wake modules are found');
   for (const name of approvalOrWake) {
     const source = sourceOf(name);
     if (!source.includes('"spaceReactions"')) continue;
     assert.equal(name, 'spaceAttentionIngest.ts', `${name} must not name the reactions table`);
-    assert.equal(source.split('"spaceReactions"').length - 1, 1, 'the erasure purge is the only mention');
-    const purge = source.slice(source.indexOf('export const purgeSpace'), source.indexOf('export const purgeSubject'));
-    assert.ok(purge.includes('"spaceReactions"'), 'the one mention sits inside purgeSpace');
+    assert.equal(source.split('"spaceReactions"').length - 1, 2, 'the thread and Space erasure purges are the only mentions');
+    const threadPurge = source.slice(source.indexOf('async function purgeThreadRows'), source.indexOf('export const purgeThread'));
+    const spacePurge = source.slice(source.indexOf('export const purgeSpace'), source.indexOf('export const purgeSubject'));
+    assert.ok(threadPurge.includes('"spaceReactions"'), 'one mention sits inside purgeThreadRows');
+    assert.ok(spacePurge.includes('"spaceReactions"'), 'the other mention sits inside purgeSpace');
   }
 });
