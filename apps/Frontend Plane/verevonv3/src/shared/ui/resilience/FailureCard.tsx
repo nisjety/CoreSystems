@@ -1,8 +1,8 @@
 import { createEffect, createSignal, Show } from 'solid-js'
 
 import { checkClientVersion } from '@/shared/build/version-check'
-import { readInitialLocale, useI18n } from '@/shared/i18n'
-import { pickLocaleText } from '@/shared/i18n/locales'
+import { useI18n } from '@/shared/i18n'
+import { pickLocaleText, readInitialLocale } from '@/shared/i18n/locales'
 import { cn } from '@/shared/lib/cn'
 import { Button } from '@/shared/ui/Button'
 import {

@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const { checkClientVersion } = vi.hoisted(() => ({ checkClientVersion: vi.fn((_options?: { force?: boolean }) => Promise.resolve()) }))
 vi.mock('@/shared/build/version-check', () => ({ checkClientVersion }))
 
-import { localeStorageKey } from '@/shared/i18n'
+import { I18nProvider, localeStorageKey, useI18n } from '@/shared/i18n'
 import { FailureCard } from './FailureCard'
 
 function apiError(status: number): Error {
@@ -108,6 +108,29 @@ describe('FailureCard', () => {
 
   it('a root card is Norwegian when no locale is stored', () => {
     render(() => <FailureCard error={new Error('boom')} region="root" onRetry={() => undefined} />)
+    expect(screen.getByRole('heading', { name: 'Noe gikk galt her' })).toBeTruthy()
+  })
+
+  it('a non-root card follows the provider locale, including a switch after render', async () => {
+    let setLocale: ((locale: 'no' | 'en') => void) | undefined
+    function Grab() {
+      setLocale = useI18n().setLocale
+      return null
+    }
+    render(() => (
+      <I18nProvider>
+        <Grab />
+        <FailureCard error={new Error('boom')} region="outlet" onRetry={() => undefined} />
+      </I18nProvider>
+    ))
+    expect(screen.getByRole('heading', { name: 'Noe gikk galt her' })).toBeTruthy()
+    setLocale?.('en')
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Something went wrong here' })).toBeTruthy())
+  })
+
+  it('a non-root card outside a provider uses the context, not the stored locale', () => {
+    window.localStorage.setItem(localeStorageKey, 'en')
+    render(() => <FailureCard error={new Error('boom')} region="outlet" onRetry={() => undefined} />)
     expect(screen.getByRole('heading', { name: 'Noe gikk galt her' })).toBeTruthy()
   })
 })

@@ -2,13 +2,13 @@ import { createContext, createEffect, createSignal, untrack, useContext, type Ac
 import type { JSX } from '@solidjs/web'
 import {
   defaultLocale,
-  isLocale,
   localeCode,
   localeHtmlLang,
   localeIntl,
   localeStorageKey,
   oppositeLocale,
   pickLocaleText,
+  readInitialLocale,
   type Locale,
 } from '@/shared/i18n/locales'
 
@@ -110,18 +110,6 @@ export function localeDateTime(locale: Locale): string {
   return localeIntl(locale)
 }
 
-/** The locale the user stored, or the default. Safe before any provider exists (the root error card reads it). */
-export function readInitialLocale(): Locale {
-  try {
-    const stored = window.localStorage.getItem(localeStorageKey)
-    if (isLocale(stored)) return stored
-  } catch {
-    return defaultLocale
-  }
-
-  return defaultLocale
-}
-
 export type { Locale }
-export { localeStorageKey }
+export { localeStorageKey, readInitialLocale }
 export { LocalizedError, translateApiError } from '@/shared/i18n/errors'
