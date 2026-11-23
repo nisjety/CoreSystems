@@ -456,6 +456,17 @@ fn require_spawn_admission_with(
             "sandbox egress is not available; refusing a spawn with network access",
         ));
     }
+    require_space_admission(policy, admission)
+}
+
+/// The Space half of the admission rules (WS06-S9): no `DangerFullAccess` or
+/// `External` for a Space, and a Space spawn needs a lease. Host-independent, so
+/// a spawn site may run it before it prepares anything; the full gate runs it
+/// again at the spawn.
+pub(crate) fn require_space_admission(
+    policy: &MpSandboxPolicy,
+    admission: &SpawnAdmission<'_>,
+) -> std::io::Result<()> {
     if admission.space_scoped {
         if matches!(
             policy,

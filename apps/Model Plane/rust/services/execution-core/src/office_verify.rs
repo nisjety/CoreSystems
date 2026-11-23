@@ -363,6 +363,15 @@ async fn run_checker(
     pages: usize,
     admission: executor::SpawnAdmission<'_>,
 ) -> Result<(String, RenderedFiles), String> {
+    // The Space rules first, before any workspace exists: they do not depend on
+    // the host, so a Space run without a lease is refused the same way with or
+    // without bubblewrap. The spawn below runs the full gate again.
+    let space_check = MpSandboxPolicy::WorkspaceWrite {
+        writable_roots: Vec::new(),
+        network: MpNetworkPolicy::Disabled,
+    };
+    executor::require_space_admission(&space_check, &admission)
+        .map_err(|error| format!("the verifier did not run: {error}"))?;
     let workspace = Workspace::create(WORKSPACE_TAG, kind.as_str())
         .map_err(|error| format!("the verifier could not create its workspace: {error}"))?;
     let root = workspace.path();
@@ -755,11 +764,12 @@ sys.stdout.buffer.write(data)
         assert_eq!(count(), before, "no verifier workspace is left behind");
     }
 
-    /// DEPTH-WS06-SANDBOX: the checker spawn is admitted on the run's own
-    /// admission, so a Space-scoped run without a lease cannot get a verifier
-    /// process either. With bubblewrap present the lease rule refuses it; without
-    /// it the isolation rule refuses first. Either way nothing runs, and the
-    /// verifier's workspace is gone.
+    /// DEPTH-WS06-SANDBOX: the checker is admitted on the run's own admission,
+    /// so a Space-scoped run without a lease cannot get a verifier process
+    /// either. The Space rule runs before the workspace is made and does not
+    /// depend on bubblewrap, so this discriminates on every host: if the
+    /// admission were dropped (NOT_SPACE), the refusal would be the isolation
+    /// rule's or the checker would run, and the lease message would be missing.
     #[tokio::test]
     async fn a_space_run_without_a_lease_gets_no_checker_spawn() {
         let space_no_lease = executor::SpawnAdmission {
@@ -778,8 +788,29 @@ sys.stdout.buffer.write(data)
         .await
         .expect_err("a Space spawn without a lease is refused");
         assert!(error.starts_with("the verifier did not run:"), "{error}");
-        if crate::sandbox::is_supported() {
-            assert!(error.contains("requires a sandbox lease"), "{error}");
+        assert!(error.contains("requires a sandbox lease"), "{error}");
+    }
+
+    /// The same rule with a lease: the Space pre-check admits it, so whatever
+    /// refuses or runs next is the spawn gate, not the lease rule.
+    #[tokio::test]
+    async fn a_space_run_with_a_lease_passes_the_space_pre_check() {
+        let space_with_lease = executor::SpawnAdmission {
+            space_scoped: true,
+            lease_id: Some("lease-1"),
+        };
+        let outcome = run_checker(
+            OfficeKind::Docx,
+            b"not a package".to_vec(),
+            Duration::from_secs(5),
+            Mode::Structural,
+            DEFAULT_PREVIEW_MAX_BYTES,
+            DEFAULT_PREVIEW_PAGES,
+            space_with_lease,
+        )
+        .await;
+        if let Err(error) = outcome {
+            assert!(!error.contains("requires a sandbox lease"), "{error}");
         }
     }
 

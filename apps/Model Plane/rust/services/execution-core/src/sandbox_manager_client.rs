@@ -946,7 +946,9 @@ mod tests {
 
     use tonic::codegen::{http, BoxFuture, Service};
 
-    /// The Go catalogue values, spelled out so a rename on either side fails here.
+    /// The Go catalogue values. The test below checks them against the Rust
+    /// catalogue and against the Go source itself, so a rename on either side
+    /// fails here.
     const GO_KIND_TRAILER: &str = "x-mp-provider-error";
     const GO_DURABLE_MUTATION_FORBIDDEN: &str = "zdr_durable_mutation_forbidden";
 
@@ -1024,6 +1026,25 @@ mod tests {
         assert_eq!(
             GO_DURABLE_MUTATION_FORBIDDEN,
             mp_contracts::zdr_refusal::code::DURABLE_MUTATION_FORBIDDEN
+        );
+        // The Go side: read go/pkg/zdrrefusal/zdrrefusal.go so a rename there fails
+        // here too. A build context without the Go tree (an image build) skips it.
+        let go_source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../go/pkg/zdrrefusal/zdrrefusal.go");
+        let Ok(go) = std::fs::read_to_string(&go_source) else {
+            eprintln!("skipping the Go half: {} is not present", go_source.display());
+            return;
+        };
+        let go_const = |name: &str| -> Option<String> {
+            go.lines().find_map(|line| {
+                let (lhs, rhs) = line.trim().split_once('=')?;
+                (lhs.trim() == name).then(|| rhs.trim().trim_matches('"').to_owned())
+            })
+        };
+        assert_eq!(go_const("KindTrailer").as_deref(), Some(GO_KIND_TRAILER));
+        assert_eq!(
+            go_const("DurableMutationForbidden").as_deref(),
+            Some(GO_DURABLE_MUTATION_FORBIDDEN)
         );
     }
 
