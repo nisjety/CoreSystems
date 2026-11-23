@@ -50323,15 +50323,21 @@ so it
   height: 4px;
   border-radius: 50%;
   background: currentColor;
-  animation: verevon-typing-bounce 1.2s ease-in-out infinite;
 }
 
-.verevon-space-room-composer__typing-dots span:nth-child(2) {
-  animation-delay: 0.15s;
-}
+/* Motion only where no-preference allows it; the reduce block below holds the dots still. */
+@media (prefers-reduced-motion: no-preference) {
+  .verevon-space-room-composer__typing-dots span {
+    animation: verevon-typing-bounce 1.2s ease-in-out infinite;
+  }
 
-.verevon-space-room-composer__typing-dots span:nth-child(3) {
-  animation-delay: 0.3s;
+  .verevon-space-room-composer__typing-dots span:nth-child(2) {
+    animation-delay: 0.15s;
+  }
+
+  .verevon-space-room-composer__typing-dots span:nth-child(3) {
+    animation-delay: 0.3s;
+  }
 }
 
 @keyframes verevon-typing-bounce {
