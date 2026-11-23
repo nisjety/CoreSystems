@@ -227,7 +227,24 @@ pub(crate) async fn sweep_once(pool: &PgPool, retention_days: i64) -> Result<u64
     Ok(count)
 }
 
-/// Prunes old swallowed-error rows and exports the remaining counts per source word.
+/// Every source word a trigger writes to `space_event_errors`: migrations 0072 (the log), 0080 and 0135 (the
+/// attention outbox). The gauge reports each one on every pass, zero included (see `report_errors`).
+pub(crate) const SPACE_EVENT_ERROR_SOURCES: &[&str] = &[
+    "messages_insert",
+    "threads_insert",
+    "threads_update",
+    "threads_archive",
+    "threads_delete",
+    "runs_insert",
+    "runs_update",
+    "attention_ref",
+    "attention_event_id",
+    "attention_outbox",
+];
+
+/// Prunes old swallowed-error rows and exports the counts per source word. Every known source is set on each
+/// pass, so a source whose rows were pruned reads 0 again: an alert on the gauge clears instead of holding its
+/// last value until the process restarts.
 async fn report_errors(pool: &PgPool, retention_days: i64) -> Result<()> {
     sqlx::query("DELETE FROM space_event_errors WHERE at < now() - make_interval(days => $1::int)")
         .bind(i32::try_from(retention_days).unwrap_or(i32::MAX))
@@ -237,6 +254,9 @@ async fn report_errors(pool: &PgPool, retention_days: i64) -> Result<()> {
         sqlx::query_as("SELECT source, count(*) FROM space_event_errors GROUP BY source")
             .fetch_all(pool)
             .await?;
+    for source in SPACE_EVENT_ERROR_SOURCES {
+        metrics::gauge!("mp_session_space_event_errors", "source" => *source).set(0.0);
+    }
     for (source, count) in rows {
         // Source words are the fixed set written by the trigger functions.
         metrics::gauge!("mp_session_space_event_errors", "source" => source).set(count as f64);
@@ -700,6 +720,52 @@ mod tests {
         assert!(migration.contains("RAISE EXCEPTION 'space_event_emit: refs key outside the allowlist'"));
         assert!(migration.contains("jsonb_typeof(p_refs) <> 'object'"));
         assert!(migration.contains("CHECK (pg_column_size(refs) <= 512)"));
+    }
+
+    /// DEPTH-WS11-S5-1 and DEPTH-WS11-S5-2, as text (the DB test is `#[ignore]`d): migration 0135 reads a
+    /// post's mentions from message_mentions, and publishes a run's agent from runs.agent_subject_id, never
+    /// from runs.agent_id (the agent kind a run was started with).
+    #[test]
+    fn attention_outbox_fixes_read_message_mentions_and_the_wake_agent() {
+        let migration = include_str!("../../migrations/0135_space_attention_outbox_fixes.sql");
+        for required in [
+            "CREATE OR REPLACE FUNCTION space_message_mentions(p_message_id TEXT)",
+            "FROM message_mentions AS mm",
+            "AND mm.subject_kind = 'user'",
+            "LIMIT 10",
+            "CREATE OR REPLACE FUNCTION space_attention_to_outbox()",
+            "'agent_id',\n",
+            "coalesce((SELECT r.agent_subject_id FROM runs r WHERE r.id = NEW.run_id), '')",
+        ] {
+            assert!(migration.contains(required), "migration 0135 must contain {required}");
+        }
+        assert!(!migration.contains("metadata -> 'mentions'"), "mentions are not read from messages.metadata");
+        assert!(!migration.contains("r.agent_id"), "runs.agent_id is the agent kind, never the agent subject");
+
+        // The reversal restores the 0080 reader it replaces, so a revert really is the old behaviour.
+        let revert = include_str!("../../migrations/revert/0135_space_attention_outbox_fixes.down.sql");
+        assert!(revert.contains("x.metadata -> 'mentions'"));
+        assert!(!revert.contains("r.agent_subject_id"));
+    }
+
+    /// The gauge reports every source a trigger writes, so an alert on the attention source cannot miss a writer.
+    #[test]
+    fn every_space_event_error_source_is_reported() {
+        use std::collections::BTreeSet;
+
+        let mut written = BTreeSet::new();
+        for migration in [
+            include_str!("../../migrations/0072_space_event_log.sql"),
+            include_str!("../../migrations/0080_space_attention_outbox.sql"),
+            include_str!("../../migrations/0135_space_attention_outbox_fixes.sql"),
+        ] {
+            for statement in migration.split("INSERT INTO space_event_errors").skip(1) {
+                let source = statement.split("VALUES ('").nth(1).and_then(|rest| rest.split('\'').next());
+                written.insert(source.expect("a source literal").to_owned());
+            }
+        }
+        let reported: BTreeSet<String> = SPACE_EVENT_ERROR_SOURCES.iter().map(|source| (*source).to_owned()).collect();
+        assert_eq!(written, reported, "SPACE_EVENT_ERROR_SOURCES names every source a trigger writes");
     }
 }
 
@@ -1347,8 +1413,12 @@ mod db_tests {
         assert_eq!(run_state["causation_id"], run.as_str());
         assert_eq!(
             sorted_keys(&run_state["payload"]),
-            ["audience_revision", "kind", "run_id", "space_ref", "space_seq", "starter_subject_id", "state", "thread_id"]
+            [
+                "agent_id", "audience_revision", "kind", "run_id", "space_ref", "space_seq", "starter_subject_id",
+                "state", "thread_id"
+            ]
         );
+        assert_eq!(run_state["payload"]["agent_id"], "", "a run that was not a wake carries no agent subject");
         assert_eq!(run_state["payload"]["run_id"], run.as_str());
         assert_eq!(run_state["payload"]["state"], "queued");
         assert_eq!(run_state["payload"]["starter_subject_id"], "owner-1");
@@ -1381,6 +1451,109 @@ mod db_tests {
             ["audience_revision", "kind", "space_ref", "space_seq", "thread_id"]
         );
         assert_eq!(tombstone["payload"]["thread_id"], thread.as_str());
+
+        drop_outbox(&pool, &org).await;
+        clean_space(&pool, &org, &space).await;
+        set_attention_emit(&pool, attention_before).await;
+        set_event_log(&pool, log_before).await;
+    }
+
+    /// DEPTH-WS11-S5-1 and DEPTH-WS11-S5-2 (migration 0135): a post's human mentions reach the outbox payload
+    /// from message_mentions, capped at ten and never agent mentions, and a wake run carries the agent
+    /// subject the Control decision named as `agent_id`.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn space_event_attention_post_mentions_and_wake_agent_cross_in_the_payload() {
+        let Some(pool) = connect().await else { return };
+        let (log_before, attention_before) = emit_flags(&pool).await;
+        set_event_log(&pool, true).await;
+        set_attention_emit(&pool, true).await;
+        let (org, space) = ids("mention");
+        let thread = format!("thread-{space}");
+        let message = format!("m-mention-{space}");
+        let run = format!("run-wake-{space}");
+        seed_space_thread(&pool, &org, &space, &thread, "owner-1").await;
+
+        // The post and its mention rows are written in one transaction, as WS08 does. The trigger reads the
+        // rows at commit, so they must be visible from that same transaction.
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content, space_id, recipient_audience_ref, \
+             recipient_audience_revision, recipient_audience_hash, authority_revision, \
+             resource_authorization_ref, author_subject_id) \
+             VALUES ($1, $2, 'user', 'body', $3, 'audience-1', 1, 'sha256:audience-1', 1, 'resource-1', 'member-2')",
+        )
+        .bind(&message)
+        .bind(&thread)
+        .bind(&space)
+        .execute(&mut *tx)
+        .await
+        .expect("insert the post");
+        for index in 0..12_i16 {
+            sqlx::query(
+                "INSERT INTO message_mentions
+                 (org_id, message_id, thread_id, space_id, subject_id, subject_kind, ordinal)
+                 VALUES ($1, $2, $3, $4, $5, 'user', $6)",
+            )
+            .bind(&org)
+            .bind(&message)
+            .bind(&thread)
+            .bind(&space)
+            .bind(format!("cap-{index:02}"))
+            .bind(index)
+            .execute(&mut *tx)
+            .await
+            .expect("insert a human mention");
+        }
+        sqlx::query(
+            "INSERT INTO message_mentions (org_id, message_id, thread_id, space_id, subject_id, subject_kind,
+                                           wake_expectation, refusal_code, ordinal)
+             VALUES ($1, $2, $3, $4, 'agent-mention-1', 'agent', 'refused', 'mention_not_enabled', 12)",
+        )
+        .bind(&org)
+        .bind(&message)
+        .bind(&thread)
+        .bind(&space)
+        .execute(&mut *tx)
+        .await
+        .expect("insert an agent mention");
+        tx.commit().await.expect("commit the post");
+
+        // The post crosses with its human mentions, sorted and capped at ten. The agent mention never crosses.
+        let rows = space_outbox(&pool, &space).await;
+        assert_eq!(rows.len(), 1, "the thread.created row does not cross");
+        let post = &rows[0].2;
+        assert_eq!(post["event_type"], "SPACE_MESSAGE_APPENDED");
+        let expected: Vec<String> = (0..10).map(|index| format!("cap-{index:02}")).collect();
+        assert_eq!(post["payload"]["mentions"], serde_json::json!(expected));
+        assert!(!post.to_string().contains("agent-mention-1"), "an agent mention never crosses: {post}");
+
+        // A wake: the run names the agent subject the Control decision admitted. runs.agent_id stays the agent
+        // kind the run was started with and is never published as the agent.
+        sqlx::query(
+            "INSERT INTO runs (id, thread_id, goal, status, org_id, user_id, space_id, space_decision_ref, \
+             recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, \
+             privacy_policy_ref, resource_authorization_ref, authority_revision, retention_class, \
+             turn_origin, trigger_message_id, agent_subject_id) \
+             VALUES ($1, $2, 'goal', 'queued', $3, 'owner-1', $4, 'decision-1', 'audience-1', 1, \
+             'sha256:audience-1', 'privacy-1', 'resource-1', 1, 'persistent', 'direct', $5, 'agent-wake-01')",
+        )
+        .bind(&run)
+        .bind(&thread)
+        .bind(&org)
+        .bind(&space)
+        .bind(&message)
+        .execute(&pool)
+        .await
+        .expect("insert the wake run");
+        let rows = space_outbox(&pool, &space).await;
+        assert_eq!(rows.len(), 2);
+        let run_state = &rows[1].2;
+        assert_eq!(run_state["event_type"], "SPACE_RUN_STATE_CHANGED");
+        assert_eq!(run_state["payload"]["run_id"], run.as_str());
+        assert_eq!(run_state["payload"]["agent_id"], "agent-wake-01");
+        assert_eq!(run_state["payload"]["starter_subject_id"], "owner-1");
+        assert!(!run_state.to_string().contains("general-v1"), "runs.agent_id is never published: {run_state}");
 
         drop_outbox(&pool, &org).await;
         clean_space(&pool, &org, &space).await;
