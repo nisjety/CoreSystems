@@ -16,6 +16,14 @@ they can see past conversations if that is need. with a date filter too."
 5. Per-member setting overrides the room's `history_mode` for that member. Room `since_join` with no
    per-member row keeps behaving exactly as WS04-S11 does today.
 
+## What the window covers (D21b, owner ruling 2026-11-19)
+- The window narrows two surfaces only: the conversation (transcript, timeline reads, and the thread activity and attention built from them) and the canvas.
+- Room files, knowledge retrieval and the sandbox workspace stay shared under D18. The window does not narrow them by join point or by date, and their access rules are unchanged. A room file posted before a member's floor stays visible to that member, even though the message that posted it is hidden. The window hides messages, not room files.
+- Conversation-derived artifacts and room memory are not named in the ruling. They keep the window, including when retrieval returns them, until the owner rules otherwise.
+- Fail closed: an item that is not clearly one of the three shared surfaces is treated as conversation content and hidden from a windowed member.
+- Current code is out of line with this rule: the Data Plane retrieval engine (`retrieval-engine-rs`) applies the member floor to document and wiki listings and retrieval. Removing that is a code change tracked as D21b-CODE, not part of this document.
+- The member-facing hidden-history note ("Earlier messages are hidden") should also say that files stay visible.
+
 ## Existing machinery to build on (do not duplicate)
 - Control user-core `internal/spaces/history_window.go`: `history_mode` on `registered_spaces`,
   `applyHistoryFloor` derives `HistoryFloorRevision` from `space_recipient_audiences` snapshots and puts it
