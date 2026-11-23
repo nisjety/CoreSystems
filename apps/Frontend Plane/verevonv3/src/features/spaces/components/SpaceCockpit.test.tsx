@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, within } from '@solidjs/testing-library'
-import { flush } from 'solid-js'
+import { createSignal, flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { I18nProvider, localeStorageKey } from '@/shared/i18n'
@@ -341,7 +341,7 @@ describe('SpaceCockpit tab isolation (DEPTH-WS07-COCKPIT-ISOLATION)', () => {
     expect(builds).toBe(2)
   })
 
-  it('builds a healthy panel once, inside its boundary', () => {
+  it('builds a healthy panel once, inside its boundary, and a tab switch does not build it again', () => {
     let builds = 0
     render(() => (
       <SpaceCockpit
@@ -351,10 +351,36 @@ describe('SpaceCockpit tab isolation (DEPTH-WS07-COCKPIT-ISOLATION)', () => {
             builds += 1
             return <p>Tråder en gang</p>
           },
+          medlemmer: () => <p>Roster</p>,
         }}
       />
     ))
-    expect(screen.getByText('Tråder en gang')).toBeTruthy()
+    const panel = screen.getByText('Tråder en gang')
+    expect(panel.closest('[role="tabpanel"]')?.id).toBe('space-panel-chat')
     expect(builds).toBe(1)
+
+    // Each switch changes the boundary's resetKey; with no failure pending, the healthy panel stays as it is.
+    fireEvent.click(screen.getByRole('tab', { name: 'Medlemmer' }))
+    flush()
+    fireEvent.click(screen.getByRole('tab', { name: 'Samtaler' }))
+    flush()
+    expect(builds).toBe(1)
+    expect(screen.getByText('Tråder en gang')).toBe(panel)
+    expect(document.querySelectorAll('[data-failure-region="space-tab"]')).toHaveLength(0)
+  })
+
+  it('builds the new panel when the caller hands a mounted tab a different factory', () => {
+    const [which, setWhich] = createSignal<'a' | 'b'>('a')
+    render(() => (
+      <SpaceCockpit
+        initialTab="chat"
+        tabs={{ chat: which() === 'a' ? () => <p>Panel A</p> : () => <p>Panel B</p> }}
+      />
+    ))
+    expect(screen.getByText('Panel A')).toBeTruthy()
+    setWhich('b')
+    flush()
+    expect(screen.queryByText('Panel A')).toBeNull()
+    expect(screen.getByText('Panel B')).toBeTruthy()
   })
 })

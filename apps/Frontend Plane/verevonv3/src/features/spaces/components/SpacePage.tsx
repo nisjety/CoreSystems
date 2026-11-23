@@ -118,6 +118,7 @@ import { unreadThreadIds } from '../lib/space-unread'
 import { createSpaceSendJournal, type SpaceSendJournal } from '../lib/space-send-journal'
 import { createSpaceTimelineStore, type SpaceTimelineStore } from '../lib/space-timeline-store'
 import { ApiError } from '@/shared/api/api-error'
+import { registerUnsavedWork } from '@/shared/build/unsaved-work'
 import { hereSentence, readPresence, typingSentence } from '../lib/space-presence'
 import { createSpaceStreamController, type SpaceStreamController, type SpaceStreamState } from '../lib/space-stream'
 import { SpaceLiveIndicator } from './SpaceLiveIndicator'
@@ -1440,6 +1441,9 @@ function SpaceInstructionsSection(props: { readonly spaceRef: string; readonly r
   const [dirty, setDirty] = createSignal(false)
   const [submitting, setSubmitting] = createSignal(false)
   const [formError, setFormError] = createSignal<string | null>(null)
+  // Unsaved-work probe (WS07-S3): edited instructions not yet saved, or a save in flight, hold a reload from chunk
+  // recovery or the `enforce` contract policy, as the room composer and the canvas editor do.
+  onCleanup(registerUnsavedWork('space.instructions-editor', () => dirty() || submitting()))
   const canEdit = createMemo(() => canEditSpaceInstructions(props.role))
   const value = createMemo(() => (dirty() ? draft() : saved() ?? ''))
   const artifactRulePresent = createMemo(() => hasArtifactRule(value()))

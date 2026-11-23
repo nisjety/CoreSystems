@@ -4,6 +4,7 @@ import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiError } from '@/shared/api/http'
+import { hasUnsavedWork } from '@/shared/build/unsaved-work'
 import { emptySpaceRunView, type SpaceRunView } from '../lib/space-run-view'
 import SpacePage from './SpacePage'
 
@@ -2235,6 +2236,25 @@ describe('SpacePage', () => {
       fireEvent.click(panel.getByRole('button', { name: /Lagre instrukser/ }))
       await waitFor(() => expect(spacesClient.updateSpaceInstructions).toHaveBeenCalledTimes(1))
       expect(spacesClient.updateSpaceInstructions).toHaveBeenCalledWith('space_personal_1', draft)
+    })
+
+    // WS07-S3: an unsaved instructions draft is work a reload would drop, so it registers an unsaved-work probe.
+    it('holds a reload while the edited instructions are unsaved, and lets go once they are saved', async () => {
+      spacesClient.getSpaceContext.mockResolvedValue(contextFor('editor'))
+      spacesClient.getSpaceInstructions.mockResolvedValue('Svar kort.')
+      renderSpacePage()
+      const { panel, field } = await openInstructions()
+      await waitFor(() => expect(field.value).toBe('Svar kort.'))
+      expect(hasUnsavedWork()).toBe(false)
+
+      fireEvent.click(panel.getByRole('button', { name: ADD }))
+      flush()
+      await waitFor(() => expect(field.value).toContain(RULE_NO_START))
+      expect(hasUnsavedWork()).toBe(true)
+
+      fireEvent.click(panel.getByRole('button', { name: /Lagre instrukser/ }))
+      await waitFor(() => expect(spacesClient.updateSpaceInstructions).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(hasUnsavedWork()).toBe(false))
     })
 
     it('never appends the rule on its own when the instructions load', async () => {

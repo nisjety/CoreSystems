@@ -180,6 +180,14 @@ function SpaceCockpitView(props: {
           // of identical requests — measured live as six `/work` and six
           // `/knowledge` calls inside 3ms, repeated on every membership recheck.
           const content = createMemo(() => tabs()[tab.id])
+          // Tracks WHICH factory the caller supplies, so a new factory for a mounted tab builds the new panel (as a
+          // new element did before the factories). The call itself is untracked: a signal the factory body reads is
+          // not a reason to rebuild the panel (a component body is untracked already). A caller whose `tabs` object
+          // reads signals therefore rebuilds every panel whenever one of them changes; SpacePage's reads none.
+          const build = () => {
+            const make = content()
+            return make ? untrack(make) : undefined
+          }
           return (
             <section
               role="tabpanel"
@@ -204,10 +212,11 @@ function SpaceCockpitView(props: {
                 }
               >
                 {/* The factory runs here, inside this tab's boundary, and is read again on Retry, so a panel
-                    that failed to build is built again. `untrack`: a signal read in the factory body is not a
-                    reason to rebuild the panel (a component body is untracked already). */}
+                    that failed to build is built again. `resetKey={active}` clears only a pending failure: a
+                    healthy panel is not rebuilt on a tab switch, but a failed one is built again (and repeats
+                    its mount-time reads) each time the active tab changes while it keeps failing (WS07-S1). */}
                 <RegionBoundary region="space-tab" resetKey={active} compact>
-                  {untrack(() => content()?.())}
+                  {build()}
                 </RegionBoundary>
               </Show>
             </section>

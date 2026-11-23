@@ -767,4 +767,22 @@ describe('SpaceCanvasPanel: unsaved-work probe (WS07-S3)', () => {
     cleanup()
     expect(hasUnsavedWorkProbes()).toBe(false)
   })
+
+  it('a save in flight holds a reload even when the draft matches its start text, and lets go once it lands', async () => {
+    spacesClient.getSpaceCanvas.mockResolvedValue(viewRead(1, 'Plan A'))
+    let land: (value: unknown) => void = () => {}
+    actions.executeAction.mockImplementation(() => new Promise((resolve) => (land = resolve)))
+    renderPanel()
+    fireEvent.click(await screen.findByRole('button', { name: 'Rediger' }))
+    // Saving the unchanged text: the draft is not dirty, so only the save in flight can hold the reload.
+    expect(hasUnsavedWork()).toBe(false)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Lagre' }))
+    await vi.waitFor(() => expect(actions.executeAction).toHaveBeenCalledTimes(1))
+    expect(screen.getByRole('button', { name: 'Lagrer ...' })).toBeTruthy()
+    expect(hasUnsavedWork()).toBe(true)
+
+    land(stored(2))
+    await vi.waitFor(() => expect(hasUnsavedWork()).toBe(false))
+  })
 })

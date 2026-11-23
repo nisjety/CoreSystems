@@ -2941,4 +2941,65 @@ describe('SpaceRoomComposer — unsaved-work probe (WS07-S3)', () => {
     expect(reloadGuardCount()).toBe(0)
     expect(hasUnsavedWorkProbes()).toBe(false)
   })
+
+  it('an attachment in an otherwise empty box holds a reload until the chip is removed', async () => {
+    vi.stubEnv('VITE_SPACE_TURN_ATTACHMENTS', '')
+    const restoreObjectUrls = stubObjectUrls()
+    try {
+      publishRoomFeatures({ room_files: { turn_attachments: true } })
+      renderRoom()
+      expect(hasUnsavedWork()).toBe(false)
+
+      pickRoomFiles([fixtureFile('Notat.txt', 'Lagerliste: 12 paller', 'text/plain')])
+      expect(roomBox().value).toBe('')
+      expect(hasUnsavedWork()).toBe(true)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Fjern Notat.txt' }))
+      flush()
+      await waitFor(() => expect(hasUnsavedWork()).toBe(false))
+    } finally {
+      clearSpaceRoomFeatures()
+      restoreObjectUrls()
+    }
+  })
+
+  it('a send in flight holds a reload after the box is cleared, and lets go once the turn is done', async () => {
+    const stream = scriptedStream()
+    renderRoom()
+    typeInRoomBox('Oppsummer uka')
+    submitRoomBox()
+    await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(1))
+
+    // With drafts off the box is emptied at Send, so only the send itself is left to hold the reload.
+    expect(roomBox().value).toBe('')
+    expect(hasUnsavedWork()).toBe(true)
+
+    stream.handlers().onConnected?.({ requestId: 'req-1', threadId: 't-1' })
+    stream.handlers().onDone?.({})
+    stream.finish()
+    await waitFor(() => expect(hasUnsavedWork()).toBe(false))
+  })
+
+  it('a message queued behind another member’s run holds a reload while the box is empty', async () => {
+    publishSpaceThreads('room-1', [{ thread_id: 't1', space_id: 'room-1', title: 'Innkjøp', latest_run_status: 'running' }])
+    flush()
+    // The room allows steering, as in the mid-run steer cases: that is where a send waits for a busy thread.
+    render(() => (
+      <SpaceRoomComposer
+        spaceRef="room-1"
+        roster={() => []}
+        agents={() => []}
+        threads={() => []}
+        replyTarget={() => ({ threadId: 't1', title: 'Innkjøp' })}
+        agentWork={() => ({ live: false, text: false, steer_owner: true, stop_manager: false }) as never}
+      />
+    ))
+    typeInRoomBox('Oppdater lista')
+    submitRoomBox()
+
+    expect(await screen.findByText(/Venter på at agenten blir ferdig/)).toBeTruthy()
+    expect(chatClient.streamChat).not.toHaveBeenCalled()
+    expect(roomBox().value).toBe('')
+    expect(hasUnsavedWork()).toBe(true)
+  })
 })
