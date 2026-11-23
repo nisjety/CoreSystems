@@ -2851,9 +2851,9 @@
   "source": "docs/plans/space-hybrid-build-plan-2026-10-14.md 3.C WS09 slice table (line 1823) and S8 file list",
   "title": "Manager Stop end to end: CancelRunAsRoomManager, routes, action contract, SPA button, owner-copy fix",
   "tier": "SLICE",
-  "status": "partial",
-  "evidence": "Built: components/SpaceRunCard.tsx imports and calls stopSpaceRun (:4, :60; defined in shared/api/spaces-client/run-stop.ts). Gap: components/SpaceActivityFeed.tsx has no stop control and no stopSpaceRun or stop_manager reference. The stop_manager gate is applied in SpaceRoomTimeline.tsx and SpacePage.tsx.",
-  "remaining_work": "Add the manager or owner Stop to SpaceActivityFeed.tsx, reusing stopSpaceRun and the stop_manager gate the timeline already applies. Keep it available in archived rooms (D22aj: archived-room stop is allowed).",
+  "status": "done",
+  "evidence": "Commit ecb32d81d, 7 files + 1 new test under features/spaces, LF-consistent, no whole-file rewrite. 140 files/2283 tests pass in features/spaces; tsc6 has only the 21 pre-existing quarry-client errors. Other builders' uncommitted edits sit in the same tree (gateway run_live.rs, SpaceRunCard.tsx, room-run-grammar.ts, ws09.ts, new space-run-stop.ts, 5 other gateway spaces files) - none touched by this item or this review.",
+  "remaining_work": "",
   "groups": [
    "spa"
   ],
@@ -2862,8 +2862,8 @@
   "reader": "3C",
   "key": "WS09-S8",
   "needs_owner": false,
-  "refresh_note": "The cross-language digest proof stays with DEPTH-XLANG-GOLDENS.",
-  "refreshed": "2026-11-23"
+  "refresh_note": "P2 owner decision: a manager's own live run gets Stop in Work/Activity but not in the timeline (needs a starter field on the runs listing, gw/sc). P2 product gap: agent_work.stop_manager is only the rollout flag, not the per-org run_control_entitled bit SD-20 names (migration 038 defaults false) - once rolled out, non-entitled orgs will see a Stop the server 403s. P2 ZDR: gateway/model-gateway refuse a manager Stop on a ZDR run (D23 only relaxed the starter path) - same gap tracked under C-PRIO-02 item 4. P3s: no timeout/unknown-outcome state in the feed (card has one, in another builder's uncommitted edit, so they'll diverge); RunStopButton stays enabled after a 403; per-instance attempt state forgets 'sent' on tab switch (harmless); jsdom click() quirk makes two tests weaker than they look; no archived-room test; 'work-run:' prefix duplicated in two files. Flag SPACE_RUN_MANAGER_STOP correctly off in production.",
+  "refreshed": "2026-11-24"
  },
  {
   "id": "WS09-S9",
@@ -7997,8 +7997,8 @@
   "title": "Data Plane DB tests never run; W3-FIX-3 end-to-end label harness and WS14-S5 handler tests not written; wiki-store Postgres CI job missing",
   "tier": "DEPTH",
   "status": "partial",
-  "evidence": "Canvas Postgres tests are written (wiki-store internal/canvas/repo_postgres_test.go and window_postgres_test.go) but gated on WIKI_TEST_DATABASE_URL, and no CI job sets it (.github/workflows/dataplane-v2-ci.yml). retrieval-engine tests/space_files_listing.rs keeps its DB tests #[ignore]d. No W3-FIX-3 label harness: tests/pipeline_e2e.rs has no space or label test; tests/service_scope.rs has only a closed-backend pipeline test (pipeline_with_closed_backends at :364); no gRPC label e2e exists.",
-  "remaining_work": "(1) Add the wiki-store Postgres job to .github/workflows/dataplane-v2-ci.yml and run the gated Go and Rust DB tests on a disposable Postgres, canvas migrations up and down included (a live run). (2) Build a RetrievalPipeline harness with stubbed embedding and search, then write the W3-FIX-3 unary and stream label e2e for retrieval_svc.rs. (3) Write the WS14-S5 handler-level listing tests; only DB-gated listing tests were found.",
+  "evidence": "Commits 0b1d80bde, 3dfd9374b on top of 04fdfda33. git status clean under dat paths; Cargo.lock/Cargo.toml untouched. All uncommitted dirty files in the tree are outside dat (spa, run, sc areas from other interrupted builders). rustfmt clean on new code. C: 117.5GB free at review time.",
+  "remaining_work": "(a) wiki-store-postgres-tests CI job runs only migrator up, never down-then-up for the canvas migration pair (20261116102141 + 20261116112048). (b) retrieval-engine's 4 #[ignore] DB tests in tests/space_files_listing.rs (incl. keyset paging at :208) never run in CI (rust-integration-tests omits --ignored; EXEMPT_UNITS marks them follow-up). (c) No live run has proven any of this on a real Postgres. Blocked: Needs a CI workflow edit (migrator down/up round trip + --ignored DB tests against a Postgres service) plus an actual run against a disposable Postgres 16. Neither the builder nor this review started a database.",
   "groups": [
    "dat"
   ],
@@ -8007,8 +8007,8 @@
   "reader": "depth",
   "key": "DEPTH-TEST-DBTIER-DAT",
   "needs_owner": false,
-  "refresh_note": "The ledger's 'not written' is stale for the wiki-store canvas Postgres tests, which exist now. The open gaps are the CI job, the label harness and handler-level WS14-S5 coverage.",
-  "refreshed": "2026-11-23"
+  "refresh_note": "1) --bin vs --lib target claim confirmed correct (mod api in src/main.rs only). 2) The new 'pages by the returned cursor' test only proves the cursor is bound, not that paging is gap/repeat-free (FakePg returns the same 3 rows both reads) — real paging proof is still only the never-run ignored test. 3) Provenance test only checks absence of a 'content' key, not presence of real fields — would not catch a 'text' key regression. 4) Forged-decision test asserts PermissionDenied only, same status as a key-config failure, so it doesn't isolate signature refusal on its own (companion valid-decision tests cover that case though). 5) Stale comment at retrieval_svc.rs:1088-1090. 6) Ledger's own evidence text ('no CI job sets WIKI_TEST_DATABASE_URL') is now stale — the job exists.",
+  "refreshed": "2026-11-24"
  },
  {
   "id": "DEPTH-TEST-EXEC-CORE",
