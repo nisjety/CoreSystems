@@ -19,10 +19,11 @@ they can see past conversations if that is need. with a date filter too."
 ## What the window covers (D21b, owner ruling 2026-11-19)
 - The window narrows two surfaces only: the conversation (transcript, timeline reads, and the thread activity and attention built from them) and the canvas.
 - Room files, knowledge retrieval and the sandbox workspace stay shared under D18. The window does not narrow them by join point or by date, and their access rules are unchanged. A room file posted before a member's floor stays visible to that member, even though the message that posted it is hidden. The window hides messages, not room files.
-- Conversation-derived artifacts and room memory are not named in the ruling. They keep the window, including when retrieval returns them, until the owner rules otherwise.
-- Fail closed: an item that is not clearly one of the three shared surfaces is treated as conversation content and hidden from a windowed member.
-- Current code is out of line with this rule: the Data Plane retrieval engine (`retrieval-engine-rs`) applies the member floor to document and wiki listings and retrieval. Removing that is a code change tracked as D21b-CODE, not part of this document.
-- The member-facing hidden-history note ("Earlier messages are hidden") should also say that files stay visible.
+- Interpretation, pending owner confirmation (not part of the ruling): conversation-derived artifacts and room memory are not named in the ruling. Read fail-closed, they keep the window, including when retrieval returns them, until the owner rules otherwise.
+- Interpretation, pending owner confirmation (not part of the ruling): an item that is not clearly one of the three shared surfaces is treated as conversation content and hidden from a windowed member (fail closed).
+- Not yet implemented in code: the Data Plane retrieval engine (`retrieval-engine-rs`) still applies the member floor to document and wiki listings and retrieval, and Control user-core copies the member's floor onto every shared retrieval decision. This over-hides (it exposes nothing). Removing it is a code change tracked as D21b-CODE (dat, ctl), not part of this document; until it lands, do not record this ruling as implemented.
+- Optional, not built (tracked as a spa item): the member-facing hidden-history note ("Earlier messages are hidden") may also say that room files stay visible.
+- Owner to confirm: a pre-floor room file stays visible while the message that posted it is hidden. This follows from the ruling as written.
 
 ## Existing machinery to build on (do not duplicate)
 - Control user-core `internal/spaces/history_window.go`: `history_mode` on `registered_spaces`,
