@@ -29,8 +29,8 @@
 //! `POST /api/v1/spaces/{space_ref}/runs/{run_id}/stop {idempotency_key?}` lets a room manager or
 //! owner stop another member's live run. Same order as the live view, with a Control
 //! `model.run.control` decision in place of the read decision: flag `SPACE_RUN_MANAGER_STOP` (404
-//! `feature_unavailable`), membership, shape, the Zero Data Retention pre-check before any Control
-//! call (412 `zdr_durable_mutation_forbidden`), Space lifecycle, then Control (403
+//! `feature_unavailable`), membership, shape, before any Control call. A zero-retention organisation
+//! may stop too (D23: the stop writes only ids and a reason), then Space lifecycle, then Control (403
 //! `space_run_control_not_authorized` for a caller below manager, an org without
 //! `run_control_entitled`, or a personal Space). The decision rides to model-gateway in a POST
 //! body and is verified again by Session Core, which is the authority. Relayed codes are the closed
@@ -313,7 +313,7 @@ async fn space_run_stop(
 }
 
 /// The stop route's whole work, shared with the `spaces.stop_run` action dispatcher so the flag, the
-/// Zero Data Retention refusal, the Control decision and the typed errors exist once.
+/// Control decision and the typed errors exist once.
 pub(crate) async fn stop_run_core(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -359,10 +359,8 @@ pub(crate) async fn stop_run_core(
         }
     };
 
-    // 3. Zero Data Retention fails closed, before any Control call. A stop writes a durable receipt.
-    if let Some(refusal) = crate::zdr::durable_write_refusal(state, user, headers, Some(body)).await {
-        return refusal;
-    }
+    // 3. No Zero Data Retention refusal (D23): a stop writes only ids and a reason, so it is the safe
+    // direction under every posture. Session Core refuses only what it must.
 
     // 4. Space lifecycle.
     match space_lifecycle_by_ref(state, user, &org_id, space_ref).await {
@@ -854,16 +852,26 @@ mod tests {
         assert!(calls_to(&fixture.user_core, "run-control-decision").await.is_empty());
     }
 
+    /// D23: a stop is the safe direction under zero data retention, so a zero-retention organisation's
+    /// manager may stop a run. The stop goes to Control and then to model-gateway like any other.
     #[tokio::test]
-    async fn a_zdr_org_gets_412_before_any_control_call() {
+    async fn a_zdr_org_may_stop_a_run_and_the_stop_reaches_control_and_model_gateway() {
         let mut fixture = fixture("admin", org_record(true), declined(), granted_stop()).await;
         fixture.state.space_features.run_manager_stop = true;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/spaces/space-room/runs/run-1/stop"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "cancelled", "cancelled": true, "receipt_id": "rcpt-zdr"
+            })))
+            .mount(&fixture.model_gateway)
+            .await;
         let (status, _, body) =
             call(fixture.state.clone(), "POST", STOP, &[], Some(json!({}))).await;
-        assert_eq!(status, 412);
-        assert_eq!(json_of(&body)["error"]["code"], "zdr_durable_mutation_forbidden");
-        assert!(calls_to(&fixture.user_core, "run-control-decision").await.is_empty());
-        assert!(fixture.model_gateway.received_requests().await.unwrap_or_default().is_empty());
+        let text = String::from_utf8_lossy(&body).to_string();
+        assert_eq!(status, 200, "{text}");
+        assert_eq!(json_of(&body)["data"]["cancelled"], true);
+        assert_eq!(calls_to(&fixture.user_core, "run-control-decision").await.len(), 1);
+        assert_eq!(calls_to(&fixture.model_gateway, "/runs/run-1/stop").await.len(), 1);
     }
 
     #[tokio::test]

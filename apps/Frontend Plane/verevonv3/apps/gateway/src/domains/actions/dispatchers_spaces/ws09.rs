@@ -1,7 +1,7 @@
 //! WS09-S8: the `spaces.stop_run` action dispatcher. It rides the same function as `POST
 //! /api/v1/spaces/{space_ref}/runs/{run_id}/stop` in `domains/spaces/run_live.rs`
-//! (`stop_run_core`), so the rollout flag, the Zero Data Retention refusal, the Control
-//! `model.run.control` decision and the typed errors exist once. The id is not model-executable
+//! (`stop_run_core`), so the rollout flag, the Control `model.run.control` decision and the typed
+//! errors exist once (a zero-retention organisation may stop too, D23). The id is not model-executable
 //! (`model-access.ts` closes it): a model stopping a human's run is an authority inversion.
 
 use axum::{http::HeaderMap, response::Response};
