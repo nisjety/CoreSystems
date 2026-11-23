@@ -2443,6 +2443,7 @@ describeIfPolicy('principal bundle R-13 PR 1: quarry-edge model lanes', () => {
       'orchestrator-core',
       'quarry-edge',
       'retrieval-engine',
+      'sandbox-manager',
       'session-core',
       'verevon-gateway',
       'verevon-gateway-retention-decision',

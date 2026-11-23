@@ -546,6 +546,25 @@
       ]
     }
   },
+  "sandbox-manager": {
+    "tenancy": "directory",
+    "audiences": [
+      "session-core"
+    ],
+    "consumerEnv": "SANDBOX_MANAGER_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "session-core": "persistent"
+    },
+    "scopes": [
+      "session:thread-owner:resolve"
+    ],
+    "scopesByAudience": {
+      "session-core": [
+        "session:thread-owner:resolve"
+      ]
+    }
+  },
   "session-core": {
     "tenancy": "directory",
     "audiences": [
