@@ -5,7 +5,12 @@ const { getFunctionName } = require('convex/server');
 
 const ingest = require('../convex/spaceAttentionIngest.ts');
 const { makeCtx } = require('./helpers/fake-convex.cjs');
-const { COURIER_MAX_ATTEMPTS, COURIER_RETRY_DELAYS_MS, COURIER_ZDR_REFUSAL } = require('../convex/spaceAttentionCourier.ts');
+const {
+  COURIER_MAX_ATTEMPTS,
+  COURIER_REQUEST_TIMEOUT_MS,
+  COURIER_RETRY_DELAYS_MS,
+  COURIER_ZDR_REFUSAL,
+} = require('../convex/spaceAttentionCourier.ts');
 
 const ORG = 'org_ext';
 const SPACE = 'space_1';
@@ -736,7 +741,7 @@ test('takeBudget allows 30 out-of-app requests per recipient per window, then re
   assert.equal(await takeBudget(ctx, 'alice', now + 60 * 60 * 1000), true, 'a new window starts after an hour');
 });
 
-/// --- deliverOutOfApp (WS11-S9, DEPTH-WS11-COURIER) ------------------------------------------
+// --- deliverOutOfApp (WS11-S9, DEPTH-WS11-COURIER) ------------------------------------------
 
 function stubFetch(t, behavior) {
   const original = globalThis.fetch;
@@ -881,7 +886,7 @@ test('the courier sends nothing unless the event carried a literal false ZDR pos
   assert.equal(calls.length, 0);
 });
 
-test('the gate runs on every attempt: a member who set dnd after the decision gets no request', async (t) => {
+test('the gate reads the current member status: a member in dnd gets no request', async (t) => {
   withEnv(t, COURIER_ENV);
   const calls = stubFetch(t, async () => ({ ok: true, status: 202 }));
   const { ctx } = courierCtx(
@@ -1028,4 +1033,66 @@ test('a retry is stopped by a dnd set while it waited, and by the flag going off
   withEnv(t, { SPACE_ATTENTION_OUT_OF_APP: undefined });
   assert.deepEqual(await deliverOutOfApp._handler(off.ctx, later.args), { delivered: false, reason: 'disabled' });
   assert.equal(calls.length, 2, 'only the two first attempts reached the network');
+});
+
+test('a request that never answers is bounded by the timeout and retried', async (t) => {
+  withEnv(t, COURIER_ENV);
+  const warnings = quiet(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let sent;
+  const reached = new Promise((resolve) => {
+    sent = resolve;
+  });
+  // Never settles and ignores the abort signal: only the timeout can end the attempt.
+  const calls = stubFetch(t, () => {
+    sent();
+    return new Promise(() => {});
+  });
+  const { ctx, log } = courierCtx();
+  const pending = deliverOutOfApp._handler(ctx, COURIER_ARGS);
+  await reached;
+  assert.ok(calls[0].init.signal, 'the request carries an abort signal');
+  t.mock.timers.tick(COURIER_REQUEST_TIMEOUT_MS - 1);
+  await Promise.resolve();
+  assert.equal(calls[0].init.signal.aborted, false, 'not aborted before the timeout');
+  t.mock.timers.tick(1);
+  assert.deepEqual(await pending, { delivered: false, reason: 'timeout' });
+  assert.equal(calls[0].init.signal.aborted, true, 'the request is aborted');
+  assert.equal(warnings[0], '[space-attention] courier timed out');
+  assert.equal(log.scheduled.length, 1);
+  assert.equal(lastScheduled(log).delay, COURIER_RETRY_DELAYS_MS[0]);
+  assert.equal(lastScheduled(log).args.attempt, 2);
+});
+
+test('a fetch that rejects on abort is also a retryable timeout, not "unreachable"', async (t) => {
+  withEnv(t, COURIER_ENV);
+  quiet(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let sent;
+  const reached = new Promise((resolve) => {
+    sent = resolve;
+  });
+  stubFetch(t, (url, init) => {
+    sent();
+    return new Promise((resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(new Error('This operation was aborted')));
+    });
+  });
+  const { ctx, log } = courierCtx();
+  const pending = deliverOutOfApp._handler(ctx, COURIER_ARGS);
+  await reached;
+  t.mock.timers.tick(COURIER_REQUEST_TIMEOUT_MS);
+  assert.deepEqual(await pending, { delivered: false, reason: 'timeout' });
+  assert.equal(log.scheduled.length, 1);
+});
+
+test('a prompt answer clears the timeout', async (t) => {
+  withEnv(t, COURIER_ENV);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const calls = stubFetch(t, async () => ({ ok: true, status: 202 }));
+  const { ctx, log } = courierCtx();
+  assert.deepEqual(await deliverOutOfApp._handler(ctx, COURIER_ARGS), { delivered: true, reason: 'accepted' });
+  t.mock.timers.tick(COURIER_REQUEST_TIMEOUT_MS);
+  assert.equal(calls[0].init.signal.aborted, false, 'a settled request is never aborted afterwards');
+  assert.equal(log.scheduled.length, 0);
 });

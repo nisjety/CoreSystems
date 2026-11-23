@@ -159,11 +159,16 @@ export const COURIER_ZDR_REFUSAL = "zdr_durable_mutation_forbidden";
  * The wait after each failed attempt: attempt 1 fails, wait `[0]`, send
  * attempt 2, and so on. Five attempts in all. Every retry sends the same body,
  * so the same idempotency key. notification-core answers a replay of a request
- * it already delivered or suppressed from the store, without sending again; it
- * dispatches only one it stored but did not deliver. A retry cannot double-send.
+ * it already delivered or suppressed from the store, without sending again, but
+ * it re-dispatches one it stored and did not deliver (accepted or failed). In
+ * that case the guard against a second message is the provider's dedupe on the
+ * request id, not the courier's key alone.
  */
 export const COURIER_RETRY_DELAYS_MS: readonly number[] = [30_000, 120_000, 600_000, 1_800_000];
 export const COURIER_MAX_ATTEMPTS = COURIER_RETRY_DELAYS_MS.length + 1;
+
+/** One attempt waits at most this long for notification-core; no answer in time is a retryable "timeout". */
+export const COURIER_REQUEST_TIMEOUT_MS = 10_000;
 
 /** The wait before the attempt that follows a failed one, or null when no attempt is left. */
 export function courierRetryDelayMs(failedAttempt: number): number | null {

@@ -56,6 +56,7 @@ import { writeAttentionItem } from "./spaceAttention";
 import {
   COURIER_MAX_ATTEMPTS,
   COURIER_PATH,
+  COURIER_REQUEST_TIMEOUT_MS,
   COURIER_ZDR_REFUSAL,
   buildCourierRequest,
   courierGateDecision,
@@ -439,15 +440,25 @@ export const ingestSpaceEvent = internalMutation({
  * `NOTIFICATION_CORE_URL` and `NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN` are
  * set; a missing one is a quiet "not delivered", never a thrown error.
  *
- * Every attempt runs the same checks: the flag; the ZDR posture the event
- * carried, which must be the literal `false` (anything else is refused, fail
+ * Every attempt runs the same checks: the flag; the ZDR posture stamped on the
+ * job, which must be the literal `false` (anything else is refused, fail
  * closed); then `courierGate`, which reads the Space, the audience and the
- * recipient's status as they are now. A send that gets no answer, or a 408, 429
- * or 5xx, is retried on `COURIER_RETRY_DELAYS_MS`; any other refusal is final.
- * Each attempt sends the same body, so the idempotency key
- * `<eventId>:<recipient>` repeats and notification-core cannot double-send.
- * Whether anything is actually sent also depends on notification-core's own
- * delivery mode and the recipient's per-type email preference.
+ * recipient's status as they are now. The ZDR check reads only the stamped
+ * flag, not the organization's live posture (Convex holds none): today every
+ * caller stamps `false` (ZDR events are refused at ingest, reminder routes are
+ * refused by the gateway under ZDR), so the refusal fires only for jobs queued
+ * without the field and for future callers. An organization that turns ZDR on
+ * after the job was queued is not stopped here.
+ *
+ * Each request is bounded by `COURIER_REQUEST_TIMEOUT_MS`; a send that throws,
+ * gets no answer in time, or gets a 408, 429 or 5xx is retried on
+ * `COURIER_RETRY_DELAYS_MS`; any other refusal is final. Each attempt sends the
+ * same body, so the idempotency key `<eventId>:<recipient>` repeats. That key
+ * alone does not prevent a duplicate: notification-core re-dispatches a stored
+ * request it did not deliver, and what stops a second message is the
+ * provider's dedupe on the request id. Whether anything is actually sent also
+ * depends on notification-core's own delivery mode and the recipient's
+ * per-type email preference.
  */
 export const deliverOutOfApp = internalAction({
   args: {
@@ -504,20 +515,36 @@ export const deliverOutOfApp = internalAction({
 
     const body = JSON.stringify(request);
     let failure: string;
+    const abort = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => {
+        abort.abort();
+        resolve("timeout");
+      }, COURIER_REQUEST_TIMEOUT_MS);
+    });
     try {
-      const response = await fetch(`${baseUrl}${COURIER_PATH}`, {
-        method: "POST",
-        headers: await signCourierRequest(secret, request.organization_id, body),
-        body,
-      });
-      if (response.ok) return { delivered: true, reason: "accepted" };
-      // Status only: the response body is never logged.
-      console.warn(`[space-attention] courier refused: status ${response.status}`);
-      failure = `http_${response.status}`;
-      if (!isRetryableCourierStatus(response.status)) return { delivered: false, reason: failure };
+      const headers = await signCourierRequest(secret, request.organization_id, body);
+      // The race bounds the attempt even if the fetch ignores the abort signal.
+      const response = await Promise.race([
+        fetch(`${baseUrl}${COURIER_PATH}`, { method: "POST", headers, body, signal: abort.signal }),
+        timedOut,
+      ]);
+      if (response === "timeout") {
+        console.warn("[space-attention] courier timed out");
+        failure = "timeout";
+      } else {
+        if (response.ok) return { delivered: true, reason: "accepted" };
+        // Status only: the response body is never logged.
+        console.warn(`[space-attention] courier refused: status ${response.status}`);
+        failure = `http_${response.status}`;
+        if (!isRetryableCourierStatus(response.status)) return { delivered: false, reason: failure };
+      }
     } catch {
       console.warn("[space-attention] courier unreachable");
-      failure = "unreachable";
+      failure = abort.signal.aborted ? "timeout" : "unreachable";
+    } finally {
+      clearTimeout(timer);
     }
     return await retryOrGiveUp(failure);
   },
