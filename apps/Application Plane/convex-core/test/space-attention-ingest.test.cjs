@@ -1,8 +1,11 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
+const { getFunctionName } = require('convex/server');
+
 const ingest = require('../convex/spaceAttentionIngest.ts');
 const { makeCtx } = require('./helpers/fake-convex.cjs');
+const { COURIER_MAX_ATTEMPTS, COURIER_RETRY_DELAYS_MS, COURIER_ZDR_REFUSAL } = require('../convex/spaceAttentionCourier.ts');
 
 const ORG = 'org_ext';
 const SPACE = 'space_1';
@@ -387,6 +390,7 @@ test('with the out-of-app flag on, awaiting_approval schedules one refs-only cou
     messageId: undefined,
     runId: 'run_1',
     actorKind: 'agent',
+    zdr: false,
   });
   assert.equal(tables.spaceAttentionBudget.length, 1);
   assert.equal(tables.spaceAttentionBudget[0].count, 1);
@@ -732,7 +736,7 @@ test('takeBudget allows 30 out-of-app requests per recipient per window, then re
   assert.equal(await takeBudget(ctx, 'alice', now + 60 * 60 * 1000), true, 'a new window starts after an hour');
 });
 
-// --- deliverOutOfApp (WS11-S9) --------------------------------------------------------------
+/// --- deliverOutOfApp (WS11-S9, DEPTH-WS11-COURIER) ------------------------------------------
 
 function stubFetch(t, behavior) {
   const original = globalThis.fetch;
@@ -756,6 +760,7 @@ const COURIER_ARGS = {
   threadId: THREAD,
   messageId: 'msg_1',
   actorKind: 'user',
+  zdr: false,
 };
 const COURIER_ENV = {
   SPACE_ATTENTION_OUT_OF_APP: '1',
@@ -763,26 +768,53 @@ const COURIER_ENV = {
   NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN: 'k'.repeat(40),
 };
 
+/**
+ * An action ctx over the same fake tables. `runQuery` runs the real
+ * `courierGate` handler, so the gate reads whatever rows a test sets;
+ * `ctx.runQueryCalls` counts the reads.
+ */
+function courierCtx(tables = spaceTables(['alice'])) {
+  const made = makeCtx(tables);
+  made.ctx.runQueryCalls = 0;
+  made.ctx.runQuery = async (ref, args) => {
+    made.ctx.runQueryCalls += 1;
+    assert.equal(getFunctionName(ref), 'spaceAttentionIngest:courierGate');
+    return ingest.courierGate._handler(made.ctx, args);
+  };
+  return made;
+}
+
+/** The most recent `ctx.scheduler.runAfter` call: its delay, function and args. */
+function lastScheduled(log) {
+  return log.scheduled[log.scheduled.length - 1];
+}
+
 test('deliverOutOfApp is disabled without the flag, and never calls the network', async (t) => {
   withEnv(t, { ...COURIER_ENV, SPACE_ATTENTION_OUT_OF_APP: undefined });
   const calls = stubFetch(t, async () => ({ ok: true, status: 200 }));
-  assert.deepEqual(await deliverOutOfApp._handler({}, COURIER_ARGS), { delivered: false, reason: 'disabled' });
+  const { ctx, log } = courierCtx();
+  assert.deepEqual(await deliverOutOfApp._handler(ctx, COURIER_ARGS), { delivered: false, reason: 'disabled' });
   assert.equal(calls.length, 0);
+  assert.equal(ctx.runQueryCalls, 0);
+  assert.equal(log.scheduled.length, 0);
 });
 
-test('deliverOutOfApp is not_configured without the URL or the token', async (t) => {
+test('deliverOutOfApp is not_configured without the URL or the token, and that is final', async (t) => {
   const calls = stubFetch(t, async () => ({ ok: true, status: 200 }));
+  const { ctx, log } = courierCtx();
   withEnv(t, { ...COURIER_ENV, NOTIFICATION_CORE_URL: undefined });
-  assert.deepEqual(await deliverOutOfApp._handler({}, COURIER_ARGS), { delivered: false, reason: 'not_configured' });
+  assert.deepEqual(await deliverOutOfApp._handler(ctx, COURIER_ARGS), { delivered: false, reason: 'not_configured' });
   withEnv(t, { ...COURIER_ENV, NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN: '   ' });
-  assert.deepEqual(await deliverOutOfApp._handler({}, COURIER_ARGS), { delivered: false, reason: 'not_configured' });
+  assert.deepEqual(await deliverOutOfApp._handler(ctx, COURIER_ARGS), { delivered: false, reason: 'not_configured' });
   assert.equal(calls.length, 0);
+  assert.equal(log.scheduled.length, 0);
 });
 
 test('deliverOutOfApp does not send an unsupported kind', async (t) => {
   withEnv(t, COURIER_ENV);
   const calls = stubFetch(t, async () => ({ ok: true, status: 200 }));
-  assert.deepEqual(await deliverOutOfApp._handler({}, { ...COURIER_ARGS, kind: 'party' }), {
+  const { ctx } = courierCtx();
+  assert.deepEqual(await deliverOutOfApp._handler(ctx, { ...COURIER_ARGS, kind: 'party' }), {
     delivered: false,
     reason: 'unsupported_kind',
   });
@@ -792,9 +824,11 @@ test('deliverOutOfApp does not send an unsupported kind', async (t) => {
 test('deliverOutOfApp posts one signed refs-only request to /api/v1/notification-requests', async (t) => {
   withEnv(t, COURIER_ENV);
   const calls = stubFetch(t, async () => ({ ok: true, status: 202 }));
-  const result = await deliverOutOfApp._handler({}, COURIER_ARGS);
+  const { ctx, log } = courierCtx();
+  const result = await deliverOutOfApp._handler(ctx, COURIER_ARGS);
   assert.deepEqual(result, { delivered: true, reason: 'accepted' });
   assert.equal(calls.length, 1);
+  assert.equal(log.scheduled.length, 0, 'an accepted request schedules nothing');
   assert.equal(calls[0].url, 'http://notification-core:3140/api/v1/notification-requests');
   assert.equal(calls[0].init.method, 'POST');
   const headers = calls[0].init.headers;
@@ -812,16 +846,186 @@ test('deliverOutOfApp maps a non-2xx answer to http_<status> and logs the status
   withEnv(t, COURIER_ENV);
   const warnings = quiet(t);
   stubFetch(t, async () => ({ ok: false, status: 403, text: async () => 'SECRET BODY' }));
-  assert.deepEqual(await deliverOutOfApp._handler({}, COURIER_ARGS), { delivered: false, reason: 'http_403' });
+  const { ctx, log } = courierCtx();
+  assert.deepEqual(await deliverOutOfApp._handler(ctx, COURIER_ARGS), { delivered: false, reason: 'http_403' });
   assert.deepEqual(warnings, ['[space-attention] courier refused: status 403']);
+  assert.equal(log.scheduled.length, 0, 'a refusal is final');
 });
 
-test('deliverOutOfApp never throws: a network failure is "unreachable"', async (t) => {
+test('deliverOutOfApp never throws: a network failure is "unreachable", and the first retry is scheduled', async (t) => {
   withEnv(t, COURIER_ENV);
   const warnings = quiet(t);
   stubFetch(t, async () => {
     throw new Error('connect ECONNREFUSED 10.0.0.9:3140');
   });
-  assert.deepEqual(await deliverOutOfApp._handler({}, COURIER_ARGS), { delivered: false, reason: 'unreachable' });
+  const { ctx, log } = courierCtx();
+  assert.deepEqual(await deliverOutOfApp._handler(ctx, COURIER_ARGS), { delivered: false, reason: 'unreachable' });
   assert.equal(warnings.some((line) => line.includes('10.0.0.9')), false, 'the error text is not logged');
+  assert.equal(log.scheduled.length, 1);
+  assert.equal(lastScheduled(log).delay, COURIER_RETRY_DELAYS_MS[0]);
+});
+
+test('the courier sends nothing unless the event carried a literal false ZDR posture, and reads nothing either', async (t) => {
+  withEnv(t, COURIER_ENV);
+  const calls = stubFetch(t, async () => ({ ok: true, status: 202 }));
+  for (const zdr of [undefined, true, 'false', 0, null]) {
+    const { ctx, log } = courierCtx();
+    assert.deepEqual(
+      await deliverOutOfApp._handler(ctx, { ...COURIER_ARGS, zdr }),
+      { delivered: false, reason: COURIER_ZDR_REFUSAL },
+      String(zdr),
+    );
+    assert.equal(ctx.runQueryCalls, 0, String(zdr));
+    assert.equal(log.scheduled.length, 0, String(zdr));
+  }
+  assert.equal(calls.length, 0);
+});
+
+test('the gate runs on every attempt: a member who set dnd after the decision gets no request', async (t) => {
+  withEnv(t, COURIER_ENV);
+  const calls = stubFetch(t, async () => ({ ok: true, status: 202 }));
+  const { ctx } = courierCtx(
+    spaceTables(['alice'], {
+      spaceMemberStatus: [{ externalOrgId: ORG, externalAuthId: 'alice', state: 'dnd', updatedAt: 1 }],
+    }),
+  );
+  assert.deepEqual(await deliverOutOfApp._handler(ctx, COURIER_ARGS), { delivered: false, reason: 'dnd' });
+  assert.equal(calls.length, 0);
+});
+
+test('an expired dnd no longer stops the request', async (t) => {
+  withEnv(t, COURIER_ENV);
+  const calls = stubFetch(t, async () => ({ ok: true, status: 202 }));
+  const { ctx } = courierCtx(
+    spaceTables(['alice'], {
+      spaceMemberStatus: [
+        { externalOrgId: ORG, externalAuthId: 'alice', state: 'dnd', updatedAt: 1, expiresAt: Date.now() - 1000 },
+      ],
+    }),
+  );
+  assert.deepEqual(await deliverOutOfApp._handler(ctx, COURIER_ARGS), { delivered: true, reason: 'accepted' });
+  assert.equal(calls.length, 1);
+});
+
+test('the gate stops a closed Space, another organization\'s Space, and a recipient no longer in the audience', async (t) => {
+  withEnv(t, COURIER_ENV);
+  const calls = stubFetch(t, async () => ({ ok: true, status: 202 }));
+  const active = spaceTables(['alice']);
+  const cases = [
+    [{ ...active, spaces: [{ spaceRef: SPACE, externalOrgId: ORG, lifecycle: 'archived' }] }, 'space_unavailable'],
+    [{ ...active, spaces: [{ spaceRef: SPACE, externalOrgId: 'org_other', lifecycle: 'active' }] }, 'space_unavailable'],
+    [spaceTables(['bob']), 'not_in_audience'],
+    [
+      { ...active, spaceRecipientAudiences: [{ ...active.spaceRecipientAudiences[0], controlState: 'pending' }] },
+      'not_in_audience',
+    ],
+  ];
+  for (const [tables, reason] of cases) {
+    const { ctx } = courierCtx(tables);
+    assert.deepEqual(await deliverOutOfApp._handler(ctx, COURIER_ARGS), { delivered: false, reason }, reason);
+  }
+  assert.equal(calls.length, 0);
+});
+
+test('a failed gate read is retried, not dropped', async (t) => {
+  withEnv(t, COURIER_ENV);
+  quiet(t);
+  const calls = stubFetch(t, async () => ({ ok: true, status: 202 }));
+  const { ctx, log } = courierCtx();
+  ctx.runQuery = async () => {
+    throw new Error('read timed out');
+  };
+  assert.deepEqual(await deliverOutOfApp._handler(ctx, COURIER_ARGS), { delivered: false, reason: 'gate_unavailable' });
+  assert.equal(calls.length, 0, 'nothing is sent without a gate');
+  assert.equal(lastScheduled(log).delay, COURIER_RETRY_DELAYS_MS[0]);
+  assert.equal(lastScheduled(log).args.attempt, 2);
+});
+
+test('a network failure is retried with the same body and idempotency key, and the retry can deliver', async (t) => {
+  withEnv(t, COURIER_ENV);
+  quiet(t);
+  let answers = 0;
+  const calls = stubFetch(t, async () => {
+    answers += 1;
+    if (answers === 1) throw new Error('socket hang up');
+    return { ok: true, status: 202 };
+  });
+  const { ctx, log } = courierCtx();
+  assert.deepEqual(await deliverOutOfApp._handler(ctx, COURIER_ARGS), { delivered: false, reason: 'unreachable' });
+  const retry = lastScheduled(log);
+  assert.equal(getFunctionName(retry.fn), 'spaceAttentionIngest:deliverOutOfApp');
+  assert.equal(retry.delay, COURIER_RETRY_DELAYS_MS[0]);
+  assert.equal(retry.args.attempt, 2);
+  assert.deepEqual(await deliverOutOfApp._handler(ctx, retry.args), { delivered: true, reason: 'accepted' });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].init.body, calls[0].init.body, 'the retry sends the same body');
+  assert.equal(JSON.parse(calls[1].init.body).idempotency_key, 'evt_1:alice');
+  assert.notEqual(
+    calls[1].init.headers['x-delegation-nonce'],
+    calls[0].init.headers['x-delegation-nonce'],
+    'each attempt is signed afresh',
+  );
+  assert.equal(log.scheduled.length, 1, 'an accepted retry schedules nothing more');
+});
+
+test('408, 429 and 5xx are retried; any other refusal is final', async (t) => {
+  withEnv(t, COURIER_ENV);
+  quiet(t);
+  let status = 500;
+  stubFetch(t, async () => ({ ok: false, status, text: async () => '' }));
+  for (const code of [408, 429, 500, 502, 503, 504]) {
+    status = code;
+    const { ctx, log } = courierCtx();
+    assert.deepEqual(await deliverOutOfApp._handler(ctx, COURIER_ARGS), { delivered: false, reason: `http_${code}` });
+    assert.equal(log.scheduled.length, 1, `${code} is retried`);
+  }
+  for (const code of [400, 401, 403, 404, 409, 413, 422]) {
+    status = code;
+    const { ctx, log } = courierCtx();
+    assert.deepEqual(await deliverOutOfApp._handler(ctx, COURIER_ARGS), { delivered: false, reason: `http_${code}` });
+    assert.equal(log.scheduled.length, 0, `${code} is final`);
+  }
+});
+
+test('five attempts in all: the waits follow the schedule, then the last failure is final', async (t) => {
+  withEnv(t, COURIER_ENV);
+  quiet(t);
+  const calls = stubFetch(t, async () => ({ ok: false, status: 503, text: async () => '' }));
+  const { ctx, log } = courierCtx();
+  const delays = [];
+  let args = COURIER_ARGS;
+  let result = null;
+  for (let i = 0; i < 10; i += 1) {
+    result = await deliverOutOfApp._handler(ctx, args);
+    if (log.scheduled.length === delays.length) break;
+    const next = lastScheduled(log);
+    delays.push(next.delay);
+    args = next.args;
+  }
+  assert.deepEqual(result, { delivered: false, reason: 'http_503' });
+  assert.equal(calls.length, COURIER_MAX_ATTEMPTS);
+  assert.deepEqual(delays, COURIER_RETRY_DELAYS_MS);
+  assert.equal(args.attempt, COURIER_MAX_ATTEMPTS);
+});
+
+test('a retry is stopped by a dnd set while it waited, and by the flag going off', async (t) => {
+  withEnv(t, COURIER_ENV);
+  quiet(t);
+  const calls = stubFetch(t, async () => ({ ok: false, status: 503, text: async () => '' }));
+
+  const dnd = courierCtx();
+  await deliverOutOfApp._handler(dnd.ctx, COURIER_ARGS);
+  const retry = lastScheduled(dnd.log);
+  dnd.tables.spaceMemberStatus = [
+    { _id: 'status_1', externalOrgId: ORG, externalAuthId: 'alice', state: 'dnd', updatedAt: 2 },
+  ];
+  assert.deepEqual(await deliverOutOfApp._handler(dnd.ctx, retry.args), { delivered: false, reason: 'dnd' });
+  assert.equal(dnd.log.scheduled.length, 1, 'nothing more is scheduled');
+
+  const off = courierCtx();
+  await deliverOutOfApp._handler(off.ctx, COURIER_ARGS);
+  const later = lastScheduled(off.log);
+  withEnv(t, { SPACE_ATTENTION_OUT_OF_APP: undefined });
+  assert.deepEqual(await deliverOutOfApp._handler(off.ctx, later.args), { delivered: false, reason: 'disabled' });
+  assert.equal(calls.length, 2, 'only the two first attempts reached the network');
 });

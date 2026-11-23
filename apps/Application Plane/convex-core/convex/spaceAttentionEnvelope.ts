@@ -42,6 +42,8 @@ export interface ParsedSpaceEvent {
   readonly starterSubjectId: string;
   /** Not carried by Session Core today; read when a later version adds it. */
   readonly agentId?: string;
+  /** Literal `false`: the parser refuses every other value. The courier checks it again before any send. */
+  readonly zdr: false;
 }
 
 export type ParseResult =
@@ -103,7 +105,7 @@ export function parseSpaceEvent(raw: unknown): ParseResult {
   const threadId = idOrNull(payload.thread_id);
   if (!threadId) return REJECT("thread_id");
 
-  const base = { eventId, orgId, spaceRef, kind, threadId };
+  const base = { eventId, orgId, spaceRef, kind, threadId, zdr: false as const };
 
   if (kind === "message.appended") {
     const messageId = idOrNull(payload.message_id);

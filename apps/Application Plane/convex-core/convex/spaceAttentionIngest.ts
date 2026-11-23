@@ -33,7 +33,7 @@
  */
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
-import { internalAction, internalMutation } from "./_generated/server";
+import { internalAction, internalMutation, internalQuery } from "./_generated/server";
 import {
   DEFAULT_ROOM_LEVEL,
   MAX_ITEMS_PER_RECIPIENT,
@@ -53,7 +53,16 @@ import {
 } from "./spaceAttentionRules";
 import { parseSpaceEvent, planMessageRecipients, type ParsedSpaceEvent } from "./spaceAttentionEnvelope";
 import { writeAttentionItem } from "./spaceAttention";
-import { COURIER_PATH, buildCourierRequest, signCourierRequest } from "./spaceAttentionCourier";
+import {
+  COURIER_MAX_ATTEMPTS,
+  COURIER_PATH,
+  COURIER_ZDR_REFUSAL,
+  buildCourierRequest,
+  courierGateDecision,
+  courierRetryDelayMs,
+  isRetryableCourierStatus,
+  signCourierRequest,
+} from "./spaceAttentionCourier";
 
 /** Events are kept for dedupe this long (matches the stream's 48 h retention). */
 const EVENT_DEDUPE_MS = 48 * 60 * 60 * 1000;
@@ -78,12 +87,12 @@ interface Signal {
   readonly runId?: string;
 }
 
-async function loadAudience(ctx: any, ev: ParsedSpaceEvent): Promise<Set<string>> {
+async function loadAudience(ctx: any, orgId: string, spaceRef: string): Promise<Set<string>> {
   const audience = await ctx.db
     .query("spaceRecipientAudiences")
-    .withIndex("by_space_and_state", (q: any) => q.eq("spaceRef", ev.spaceRef).eq("state", "active"))
+    .withIndex("by_space_and_state", (q: any) => q.eq("spaceRef", spaceRef).eq("state", "active"))
     .first();
-  if (!audience || audience.controlState !== "acknowledged" || audience.externalOrgId !== ev.orgId) {
+  if (!audience || audience.controlState !== "acknowledged" || audience.externalOrgId !== orgId) {
     return new Set();
   }
   return new Set<string>(audience.recipientExternalAuthIds);
@@ -140,10 +149,10 @@ async function isObserving(ctx: any, ev: ParsedSpaceEvent, recipient: string, no
   return !!row && row.externalOrgId === ev.orgId && row.status !== "offline" && now - row.updatedAt <= OBSERVING_WINDOW_MS;
 }
 
-async function memberStateOf(ctx: any, ev: ParsedSpaceEvent, recipient: string, now: number): Promise<MemberState | null> {
+async function memberStateOf(ctx: any, orgId: string, recipient: string, now: number): Promise<MemberState | null> {
   const row = await ctx.db
     .query("spaceMemberStatus")
-    .withIndex("by_org_and_subject", (q: any) => q.eq("externalOrgId", ev.orgId).eq("externalAuthId", recipient))
+    .withIndex("by_org_and_subject", (q: any) => q.eq("externalOrgId", orgId).eq("externalAuthId", recipient))
     .first();
   if (!row) return null;
   if (typeof row.expiresAt === "number" && row.expiresAt <= now) return null;
@@ -226,7 +235,7 @@ async function applySignal(
     isRunStarter: signal.isRunStarter === true,
     observingAndSuppressed: await isObserving(ctx, ev, recipient, now),
     existing,
-    memberState: await memberStateOf(ctx, ev, recipient, now),
+    memberState: await memberStateOf(ctx, ev.orgId, recipient, now),
   });
 
   if (decision.item !== "none") {
@@ -263,6 +272,7 @@ async function applySignal(
       messageId: signal.messageId,
       runId: signal.runId,
       actorKind: signal.actorKind,
+      zdr: ev.zdr,
     });
   }
   return { decision, outOfApp };
@@ -323,7 +333,7 @@ export const ingestSpaceEvent = internalMutation({
       return await finish({ status: "dropped", reason: "space_unavailable" });
     }
 
-    const audience = await loadAudience(ctx, ev);
+    const audience = await loadAudience(ctx, ev.orgId, ev.spaceRef);
     let items = 0;
     let outOfApp = 0;
     const tally = (r: { decision: DeliveryDecision; outOfApp: boolean }) => {
@@ -422,12 +432,20 @@ export const ingestSpaceEvent = internalMutation({
 });
 
 /**
- * The out-of-app courier (WS11-S9). S6 decides and schedules (flag, rules,
- * budget); this posts one refs-only request to notification-core as service id
+ * The out-of-app courier (WS11-S9; retries and the delivery gate,
+ * DEPTH-WS11-COURIER). S6 decides and schedules (flag, rules, budget); this
+ * posts one refs-only request to notification-core as service id
  * `space-attention`. Off unless `SPACE_ATTENTION_OUT_OF_APP` is on and both
  * `NOTIFICATION_CORE_URL` and `NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN` are
- * set; a missing one is a quiet "not delivered", never a thrown error. The
- * idempotency key is `<eventId>:<recipient>`, so a retry cannot double-send.
+ * set; a missing one is a quiet "not delivered", never a thrown error.
+ *
+ * Every attempt runs the same checks: the flag; the ZDR posture the event
+ * carried, which must be the literal `false` (anything else is refused, fail
+ * closed); then `courierGate`, which reads the Space, the audience and the
+ * recipient's status as they are now. A send that gets no answer, or a 408, 429
+ * or 5xx, is retried on `COURIER_RETRY_DELAYS_MS`; any other refusal is final.
+ * Each attempt sends the same body, so the idempotency key
+ * `<eventId>:<recipient>` repeats and notification-core cannot double-send.
  * Whether anything is actually sent also depends on notification-core's own
  * delivery mode and the recipient's per-type email preference.
  */
@@ -442,15 +460,50 @@ export const deliverOutOfApp = internalAction({
     messageId: v.optional(v.string()),
     runId: v.optional(v.string()),
     actorKind: v.string(),
+    // Absent on a job queued before this check existed: refused, never sent.
+    zdr: v.optional(v.boolean()),
+    // 1-based. Absent on the first attempt.
+    attempt: v.optional(v.number()),
   },
-  handler: async (_ctx, args): Promise<{ delivered: boolean; reason: string }> => {
+  handler: async (ctx, args): Promise<{ delivered: boolean; reason: string }> => {
     if (!envFlagOn(process.env.SPACE_ATTENTION_OUT_OF_APP)) return { delivered: false, reason: "disabled" };
+    if (args.zdr !== false) return { delivered: false, reason: COURIER_ZDR_REFUSAL };
     const baseUrl = (process.env.NOTIFICATION_CORE_URL || "").trim().replace(/\/+$/, "");
     const secret = (process.env.NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN || "").trim();
     if (!baseUrl || !secret) return { delivered: false, reason: "not_configured" };
     const request = buildCourierRequest(args);
     if (!request) return { delivered: false, reason: "unsupported_kind" };
+
+    const attempt = args.attempt ?? 1;
+    const retryOrGiveUp = async (reason: string): Promise<{ delivered: boolean; reason: string }> => {
+      const delay = courierRetryDelayMs(attempt);
+      if (delay === null) {
+        console.warn(`[space-attention] courier gave up after ${attempt} attempts`);
+        return { delivered: false, reason };
+      }
+      await ctx.scheduler.runAfter(delay, internal.spaceAttentionIngest.deliverOutOfApp, {
+        ...args,
+        attempt: attempt + 1,
+      });
+      console.warn(`[space-attention] courier attempt ${attempt + 1} of ${COURIER_MAX_ATTEMPTS} scheduled`);
+      return { delivered: false, reason };
+    };
+
+    let gate: { send: boolean; reason: string };
+    try {
+      gate = await ctx.runQuery(internal.spaceAttentionIngest.courierGate, {
+        externalOrgId: args.externalOrgId,
+        spaceRef: args.spaceRef,
+        recipientAuthId: args.recipientAuthId,
+      });
+    } catch {
+      console.warn("[space-attention] courier gate unavailable");
+      return await retryOrGiveUp("gate_unavailable");
+    }
+    if (!gate.send) return { delivered: false, reason: gate.reason };
+
     const body = JSON.stringify(request);
+    let failure: string;
     try {
       const response = await fetch(`${baseUrl}${COURIER_PATH}`, {
         method: "POST",
@@ -460,11 +513,36 @@ export const deliverOutOfApp = internalAction({
       if (response.ok) return { delivered: true, reason: "accepted" };
       // Status only: the response body is never logged.
       console.warn(`[space-attention] courier refused: status ${response.status}`);
-      return { delivered: false, reason: `http_${response.status}` };
+      failure = `http_${response.status}`;
+      if (!isRetryableCourierStatus(response.status)) return { delivered: false, reason: failure };
     } catch {
       console.warn("[space-attention] courier unreachable");
-      return { delivered: false, reason: "unreachable" };
+      failure = "unreachable";
     }
+    return await retryOrGiveUp(failure);
+  },
+});
+
+/**
+ * The delivery gate for `deliverOutOfApp` (DEPTH-WS11-COURIER). Re-reads, for
+ * the courier's own moment, the three things the decision read: the Space is
+ * still active in the event's organization, the recipient is still in its
+ * active, acknowledged audience, and the recipient is not in dnd. Internal
+ * only; the action reaches it through `ctx.runQuery`.
+ */
+export const courierGate = internalQuery({
+  args: { externalOrgId: v.string(), spaceRef: v.string(), recipientAuthId: v.string() },
+  handler: async (ctx, args): Promise<{ send: boolean; reason: string }> => {
+    const now = Date.now();
+    const space = await ctx.db
+      .query("spaces")
+      .withIndex("by_space_ref", (q: any) => q.eq("spaceRef", args.spaceRef))
+      .first();
+    const spaceActive = !!space && space.externalOrgId === args.externalOrgId && space.lifecycle === "active";
+    const recipientInAudience =
+      spaceActive && (await loadAudience(ctx, args.externalOrgId, args.spaceRef)).has(args.recipientAuthId);
+    const memberState = await memberStateOf(ctx, args.externalOrgId, args.recipientAuthId, now);
+    return courierGateDecision({ spaceActive, recipientInAudience, memberState });
   },
 });
 

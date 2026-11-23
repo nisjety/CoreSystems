@@ -274,6 +274,7 @@ test('fireReminder with the out-of-app flag on schedules one courier action and 
   assert.equal(log.scheduled[0].args.eventId, `reminder:${reminderId}`);
   assert.equal(log.scheduled[0].args.recipientAuthId, AUTH);
   assert.equal(log.scheduled[0].args.actorKind, 'system');
+  assert.equal(log.scheduled[0].args.zdr, false, 'the courier checks the ZDR posture it was given');
   assert.equal(tables.spaceAttentionBudget[0].count, 1);
 });
 

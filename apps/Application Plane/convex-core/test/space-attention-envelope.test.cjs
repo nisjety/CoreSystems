@@ -86,6 +86,7 @@ test('a message.appended event parses to ids and closed words only', () => {
     threadOwnerSubjectId: 'bob',
     mentions: ['carol'],
     starterSubjectId: '',
+    zdr: false,
   });
 });
 
@@ -121,6 +122,7 @@ test('a run.state_changed event parses, and an agent id is kept only when presen
     threadOwnerSubjectId: '',
     mentions: [],
     starterSubjectId: 'alice',
+    zdr: false,
   });
   assert.equal('agentId' in plain.event, false);
 
@@ -142,6 +144,7 @@ test('a thread.deleted event carries ids only', () => {
     threadOwnerSubjectId: '',
     mentions: [],
     starterSubjectId: '',
+    zdr: false,
   });
 });
 

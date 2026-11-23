@@ -302,6 +302,10 @@ export const fireReminder = internalMutation({
         threadId: row.threadId,
         messageId: row.messageId,
         actorKind: "system",
+        // No event envelope here. A reminder exists only for an organization the gateway let create
+        // one (it refuses the reminder routes under ZDR, typed 412), and the row holds no content.
+        // Convex keeps no organization ZDR posture to re-read at fire time, so the courier takes this.
+        zdr: false,
       });
     }
     return { status: "fired", reason: decision.reason };

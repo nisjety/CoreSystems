@@ -11,7 +11,11 @@
  * hide-preview rule is satisfied out of app by construction. It is always
  * `retention_mode: "standard"`; the projection admits persistent events only,
  * and notification-core refuses any other mode for this principal.
+ *
+ * Also pure: the check run before every attempt (`courierGateDecision`) and the
+ * retry schedule (`courierRetryDelayMs`, `isRetryableCourierStatus`).
  */
+import type { MemberState } from "./spaceAttentionRules";
 
 export const COURIER_SERVICE_ID = "space-attention";
 /** notification-core's verifier audience: a literal, never derived from the URL. */
@@ -142,4 +146,59 @@ export async function signCourierRequest(
     "x-delegation-body-sha256": digest,
     "x-delegation-signature": signature,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Gate and retries (DEPTH-WS11-COURIER)
+// ---------------------------------------------------------------------------
+
+/** The catalogue code (zdr_refusal.rs) for a notification that would leave under ZDR: it creates durable state. */
+export const COURIER_ZDR_REFUSAL = "zdr_durable_mutation_forbidden";
+
+/**
+ * The wait after each failed attempt: attempt 1 fails, wait `[0]`, send
+ * attempt 2, and so on. Five attempts in all. Every retry sends the same body,
+ * so the same idempotency key. notification-core answers a replay of a request
+ * it already delivered or suppressed from the store, without sending again; it
+ * dispatches only one it stored but did not deliver. A retry cannot double-send.
+ */
+export const COURIER_RETRY_DELAYS_MS: readonly number[] = [30_000, 120_000, 600_000, 1_800_000];
+export const COURIER_MAX_ATTEMPTS = COURIER_RETRY_DELAYS_MS.length + 1;
+
+/** The wait before the attempt that follows a failed one, or null when no attempt is left. */
+export function courierRetryDelayMs(failedAttempt: number): number | null {
+  if (!Number.isInteger(failedAttempt) || failedAttempt < 1) return null;
+  return failedAttempt <= COURIER_RETRY_DELAYS_MS.length ? COURIER_RETRY_DELAYS_MS[failedAttempt - 1] : null;
+}
+
+/** Throttling, timeouts and server-side failures are worth another attempt. Any other refusal (4xx) is final. */
+export function isRetryableCourierStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+export interface CourierGateInput {
+  /** The Space exists, is active and belongs to the event's organization. */
+  readonly spaceActive: boolean;
+  /** The recipient is in the Space's active, acknowledged audience. */
+  readonly recipientInAudience: boolean;
+  /** The recipient's current status with its expiry applied; null when there is none. */
+  readonly memberState: MemberState | null;
+}
+
+export interface CourierGate {
+  readonly send: boolean;
+  /** A closed word for logs and tests. */
+  readonly reason: string;
+}
+
+/**
+ * Checked before every attempt, not only the first: the decision was made when
+ * the event arrived, and a retry can come minutes later. The in-app item is not
+ * affected; only the out-of-app request is withheld.
+ */
+export function courierGateDecision(input: CourierGateInput): CourierGate {
+  if (!input.spaceActive) return { send: false, reason: "space_unavailable" };
+  if (!input.recipientInAudience) return { send: false, reason: "not_in_audience" };
+  if (input.memberState === "dnd") return { send: false, reason: "dnd" };
+  return { send: true, reason: "send" };
 }

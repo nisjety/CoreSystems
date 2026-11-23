@@ -3,12 +3,18 @@ const test = require('node:test');
 
 const {
   COURIER_AUDIENCE,
+  COURIER_MAX_ATTEMPTS,
   COURIER_PATH,
+  COURIER_RETRY_DELAYS_MS,
   COURIER_SERVICE_ID,
   COURIER_TYPES,
+  COURIER_ZDR_REFUSAL,
   buildCourierRequest,
   courierCanonical,
   courierDeepLink,
+  courierGateDecision,
+  courierRetryDelayMs,
+  isRetryableCourierStatus,
   signCourierRequest,
 } = require('../convex/spaceAttentionCourier.ts');
 
@@ -160,4 +166,47 @@ test('a fresh nonce is generated per request when none is given and fits the ver
   assert.notEqual(one['x-delegation-nonce'], two['x-delegation-nonce']);
   assert.match(one['x-delegation-nonce'], /^[A-Za-z0-9_-]{16,128}$/);
   assert.match(one['x-delegation-timestamp'], /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+});
+
+test('the retry schedule is four waits (30 s, 2 min, 10 min, 30 min): five attempts in all', () => {
+  assert.deepEqual(COURIER_RETRY_DELAYS_MS, [30_000, 120_000, 600_000, 1_800_000]);
+  assert.equal(COURIER_MAX_ATTEMPTS, 5);
+  assert.equal(courierRetryDelayMs(1), 30_000);
+  assert.equal(courierRetryDelayMs(4), 1_800_000);
+  assert.equal(courierRetryDelayMs(5), null, 'no attempt follows the last one');
+  assert.equal(courierRetryDelayMs(0), null);
+  assert.equal(courierRetryDelayMs(1.5), null);
+  assert.equal(courierRetryDelayMs(Number.NaN), null);
+});
+
+test('only throttling, timeouts and server failures are retried; every other refusal is final', () => {
+  for (const status of [408, 429, 500, 502, 503, 504]) {
+    assert.equal(isRetryableCourierStatus(status), true, String(status));
+  }
+  for (const status of [200, 202, 400, 401, 403, 404, 409, 413, 422]) {
+    assert.equal(isRetryableCourierStatus(status), false, String(status));
+  }
+});
+
+test('the gate sends only to an active Space and an audience member who is not in dnd', () => {
+  const open = { spaceActive: true, recipientInAudience: true, memberState: null };
+  assert.deepEqual(courierGateDecision(open), { send: true, reason: 'send' });
+  for (const memberState of ['available', 'away', 'offline']) {
+    assert.equal(courierGateDecision({ ...open, memberState }).send, true, memberState);
+  }
+  assert.deepEqual(courierGateDecision({ ...open, memberState: 'dnd' }), { send: false, reason: 'dnd' });
+  assert.deepEqual(courierGateDecision({ ...open, recipientInAudience: false }), {
+    send: false,
+    reason: 'not_in_audience',
+  });
+  assert.deepEqual(courierGateDecision({ ...open, spaceActive: false }), { send: false, reason: 'space_unavailable' });
+  assert.deepEqual(
+    courierGateDecision({ spaceActive: false, recipientInAudience: false, memberState: 'dnd' }),
+    { send: false, reason: 'space_unavailable' },
+    'the Space is checked first',
+  );
+});
+
+test('a ZDR refusal from the courier is the catalogue code for a durable create', () => {
+  assert.equal(COURIER_ZDR_REFUSAL, 'zdr_durable_mutation_forbidden');
 });
