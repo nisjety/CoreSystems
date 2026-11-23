@@ -22,7 +22,9 @@
  * the literal `false` are refused by the envelope parser, so no ZDR content
  * path reaches these tables. `SPACE_ATTENTION_INGEST` (Convex env, read at
  * handler time) is a rollout switch only: unset or off means events are
- * acknowledged and dropped.
+ * acknowledged and dropped. Erasure is the exception: a `thread.deleted` event
+ * purges its rows with the switch off too (no dedupe row is written then, so a
+ * later replay purges again; the purge is idempotent).
  *
  * # Delivery rules
  *
@@ -273,7 +275,19 @@ async function applySignal(
 export const ingestSpaceEvent = internalMutation({
   args: { event: v.any() },
   handler: async (ctx, args): Promise<IngestResult> => {
-    if (!envFlagOn(process.env.SPACE_ATTENTION_INGEST)) return { status: "disabled" };
+    if (!envFlagOn(process.env.SPACE_ATTENTION_INGEST)) {
+      // DEPTH-3D-PURGE: erasure is not gated by the rollout switch. The event is
+      // acked either way and never redelivered, so a gated erasure would be lost.
+      const off = parseSpaceEvent(args.event);
+      if (off.ok) {
+        const ev = (off as { event: ParsedSpaceEvent }).event;
+        if (ev.kind === "thread.deleted") {
+          await eraseThread(ctx, ev.orgId, ev.spaceRef, ev.threadId);
+          return { status: "applied", reason: "thread_purged" };
+        }
+      }
+      return { status: "disabled" };
+    }
 
     const parsed = parseSpaceEvent(args.event);
     if (!parsed.ok) {
@@ -297,14 +311,7 @@ export const ingestSpaceEvent = internalMutation({
 
     // Erasure does not depend on the audience or the Space still being active.
     if (ev.kind === "thread.deleted") {
-      const more = await purgeThreadRows(ctx, ev.orgId, ev.spaceRef, ev.threadId);
-      if (more) {
-        await ctx.scheduler.runAfter(0, internal.spaceAttentionIngest.purgeThread, {
-          externalOrgId: ev.orgId,
-          spaceRef: ev.spaceRef,
-          threadId: ev.threadId,
-        });
-      }
+      await eraseThread(ctx, ev.orgId, ev.spaceRef, ev.threadId);
       return await finish({ status: "applied", reason: "thread_purged" });
     }
 
@@ -476,7 +483,19 @@ async function deleteBatch(ctx: any, rows: any[], orgId: string): Promise<boolea
   return deleted > 0 && rows.length >= PURGE_BATCH;
 }
 
-async function purgeThreadRows(ctx: any, orgId: string, spaceRef: string, threadId: string): Promise<boolean> {
+/** Purge one batch of a deleted thread's rows and schedule `purgeThread` for the rest. */
+async function eraseThread(ctx: any, orgId: string, spaceRef: string, threadId: string): Promise<void> {
+  const more = await purgeThreadRows(ctx, orgId, spaceRef, threadId);
+  if (more) {
+    await ctx.scheduler.runAfter(0, internal.spaceAttentionIngest.purgeThread, {
+      externalOrgId: orgId,
+      spaceRef,
+      threadId,
+    });
+  }
+}
+
+async function purgeThreadRows(ctx: any, orgId: string, spaceRef: string | undefined, threadId: string): Promise<boolean> {
   let more = false;
   more = (await deleteBatch(
     ctx,
@@ -489,17 +508,21 @@ async function purgeThreadRows(ctx: any, orgId: string, spaceRef: string, thread
     orgId,
   )) || more;
   // WS12-S8: the thread's message reactions. by_space_thread leads with spaceRef, so the Space is named too.
-  more = (await deleteBatch(
-    ctx,
-    await ctx.db.query("spaceReactions").withIndex("by_space_thread", (q: any) => q.eq("spaceRef", spaceRef).eq("threadId", threadId)).take(PURGE_BATCH),
-    orgId,
-  )) || more;
+  // A job queued before spaceRef was an argument has none; it still purges items and follows.
+  if (spaceRef !== undefined) {
+    more = (await deleteBatch(
+      ctx,
+      await ctx.db.query("spaceReactions").withIndex("by_space_thread", (q: any) => q.eq("spaceRef", spaceRef).eq("threadId", threadId)).take(PURGE_BATCH),
+      orgId,
+    )) || more;
+  }
   return more;
 }
 
 /** A thread was deleted: its items, follows and message reactions go. Pages itself until empty. */
 export const purgeThread = internalMutation({
-  args: { externalOrgId: v.string(), spaceRef: v.string(), threadId: v.string() },
+  // spaceRef is optional only so a job queued with the older arguments still validates.
+  args: { externalOrgId: v.string(), spaceRef: v.optional(v.string()), threadId: v.string() },
   handler: async (ctx, args): Promise<{ more: boolean }> => {
     const more = await purgeThreadRows(ctx, args.externalOrgId, args.spaceRef, args.threadId);
     if (more) await ctx.scheduler.runAfter(0, internal.spaceAttentionIngest.purgeThread, args);

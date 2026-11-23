@@ -537,6 +537,50 @@ test('purgeThread pages through a full batch of reactions and reschedules itself
   assert.equal(log.scheduled.length, 1, 'an empty pass does not reschedule');
 });
 
+test('flag off: thread.deleted still purges items, follows and reactions, and writes no dedupe row', async (t) => {
+  for (const value of [undefined, '0']) {
+    withEnv(t, { SPACE_ATTENTION_INGEST: value });
+    const { ctx, tables, log } = makeCtx({
+      spaceAttentionItems: [
+        { externalOrgId: ORG, recipientAuthId: 'bob', spaceRef: SPACE, kind: 'reply', threadId: THREAD, state: 'open', count: 1 },
+        { externalOrgId: ORG, recipientAuthId: 'bob', spaceRef: SPACE, kind: 'reply', threadId: 'thread_2', state: 'open', count: 1 },
+      ],
+      spaceThreadFollows: [follow('bob')],
+      spaceReactions: [
+        { externalOrgId: ORG, spaceRef: SPACE, threadId: THREAD, messageId: 'msg_1', emoji: '\u{1F44D}', externalAuthId: 'alice', createdAt: 1 },
+      ],
+    });
+    const result = await apply(ctx, threadDeleted());
+    assert.deepEqual(result, { status: 'applied', reason: 'thread_purged' }, String(value));
+    assert.deepEqual(tables.spaceAttentionItems.map((row) => row.threadId), ['thread_2']);
+    assert.equal(tables.spaceThreadFollows.length, 0);
+    assert.equal(tables.spaceReactions.length, 0);
+    assert.deepEqual(log.inserts, [], 'no dedupe row while the switch is off');
+    assert.deepEqual(log.scheduled, []);
+  }
+});
+
+test('flag off: a malformed or zdr thread.deleted event is still only acknowledged', async (t) => {
+  withEnv(t, { SPACE_ATTENTION_INGEST: '0' });
+  const { ctx, tables, log } = makeCtx({ spaceThreadFollows: [follow('bob')] });
+  assert.deepEqual(await apply(ctx, threadDeleted({ zdr: true })), { status: 'disabled' });
+  assert.equal(tables.spaceThreadFollows.length, 1);
+  assert.deepEqual(log.inserts, []);
+});
+
+test('purgeThread queued with the older arguments (no spaceRef) validates and purges items and follows', async () => {
+  const { ctx, tables, log } = makeCtx({
+    spaceThreadFollows: [follow('bob')],
+    spaceReactions: [
+      { externalOrgId: ORG, spaceRef: SPACE, threadId: THREAD, messageId: 'msg_1', emoji: '\u{1F44D}', externalAuthId: 'alice', createdAt: 1 },
+    ],
+  });
+  assert.deepEqual(await purgeThread._handler(ctx, { externalOrgId: ORG, threadId: THREAD }), { more: false });
+  assert.equal(tables.spaceThreadFollows.length, 0);
+  assert.equal(tables.spaceReactions.length, 1, 'without a Space the reaction index cannot be addressed');
+  assert.deepEqual(log.scheduled, []);
+});
+
 test('purgeSpace deletes every table\'s rows for the Space and nothing of another Space or org', async () => {
   const mine = (extra = {}) => ({ externalOrgId: ORG, spaceRef: SPACE, ...extra });
   const tablesIn = {
