@@ -742,10 +742,24 @@ mod tests {
         assert!(!migration.contains("metadata -> 'mentions'"), "mentions are not read from messages.metadata");
         assert!(!migration.contains("r.agent_id"), "runs.agent_id is the agent kind, never the agent subject");
 
-        // The reversal restores the 0080 reader it replaces, so a revert really is the old behaviour.
+        // The reversal restores both 0080 function bodies verbatim, so a revert really is the old behaviour.
+        let original = include_str!("../../migrations/0080_space_attention_outbox.sql");
         let revert = include_str!("../../migrations/revert/0135_space_attention_outbox_fixes.down.sql");
-        assert!(revert.contains("x.metadata -> 'mentions'"));
-        assert!(!revert.contains("r.agent_subject_id"));
+        for function in ["space_message_mentions(", "space_attention_to_outbox("] {
+            let restored = function_body(revert, function);
+            assert_eq!(restored, function_body(original, function), "the revert restores the 0080 {function}");
+            assert_ne!(restored, function_body(migration, function), "0135 really replaces {function}");
+        }
+    }
+
+    /// The text of `CREATE OR REPLACE FUNCTION <name>` up to its closing `$$;`, line endings normalised.
+    fn function_body(sql: &str, name: &str) -> String {
+        let start = sql.find(&format!("CREATE OR REPLACE FUNCTION {name}")).expect("the function is defined");
+        let len = sql[start..].find("
+$$;").expect("the function body is closed");
+        sql[start..start + len].replace("
+", "
+")
     }
 
     /// The gauge reports every source a trigger writes, so an alert on the attention source cannot miss a writer.
@@ -753,17 +767,26 @@ mod tests {
     fn every_space_event_error_source_is_reported() {
         use std::collections::BTreeSet;
 
+        // Every forward migration is scanned, so a later migration that adds a source fails here until the
+        // gauge (and the alert on it) knows the new word.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
         let mut written = BTreeSet::new();
-        for migration in [
-            include_str!("../../migrations/0072_space_event_log.sql"),
-            include_str!("../../migrations/0080_space_attention_outbox.sql"),
-            include_str!("../../migrations/0135_space_attention_outbox_fixes.sql"),
-        ] {
+        let mut writers = 0;
+        for entry in std::fs::read_dir(&dir).expect("the migrations directory") {
+            let path = entry.expect("a migrations entry").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("sql") {
+                continue;
+            }
+            let migration = std::fs::read_to_string(&path).expect("a readable migration");
+            if migration.contains("INSERT INTO space_event_errors") {
+                writers += 1;
+            }
             for statement in migration.split("INSERT INTO space_event_errors").skip(1) {
                 let source = statement.split("VALUES ('").nth(1).and_then(|rest| rest.split('\'').next());
                 written.insert(source.expect("a source literal").to_owned());
             }
         }
+        assert!(writers >= 3, "the scan sees the writers of 0072, 0080 and 0135");
         let reported: BTreeSet<String> = SPACE_EVENT_ERROR_SOURCES.iter().map(|source| (*source).to_owned()).collect();
         assert_eq!(written, reported, "SPACE_EVENT_ERROR_SOURCES names every source a trigger writes");
     }
@@ -1459,8 +1482,9 @@ mod db_tests {
     }
 
     /// DEPTH-WS11-S5-1 and DEPTH-WS11-S5-2 (migration 0135): a post's human mentions reach the outbox payload
-    /// from message_mentions, capped at ten and never agent mentions, and a wake run carries the agent
-    /// subject the Control decision named as `agent_id`.
+    /// from message_mentions, capped at ten and never agent mentions, and a run's `agent_subject_id` crosses as
+    /// `agent_id`. The row below sets that column directly: this proves the trigger reads it, not that only a
+    /// Control-verified wake sets it (that is the wake path in terminalization.rs).
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
     async fn space_event_attention_post_mentions_and_wake_agent_cross_in_the_payload() {
@@ -1528,8 +1552,8 @@ mod db_tests {
         assert_eq!(post["payload"]["mentions"], serde_json::json!(expected));
         assert!(!post.to_string().contains("agent-mention-1"), "an agent mention never crosses: {post}");
 
-        // A wake: the run names the agent subject the Control decision admitted. runs.agent_id stays the agent
-        // kind the run was started with and is never published as the agent.
+        // A run carrying an agent subject (set directly here; in production only the verified wake path sets
+        // it). runs.agent_id stays the agent kind the run was started with and is never published as the agent.
         sqlx::query(
             "INSERT INTO runs (id, thread_id, goal, status, org_id, user_id, space_id, space_decision_ref, \
              recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, \
