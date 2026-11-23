@@ -274,7 +274,7 @@ describe('ScimProvisioningController (WS05-S8)', () => {
     ).toBe(false);
   });
 
-  it.each(['owner', 'admin'])(
+  it.each(['owner', 'admin', 'member,owner', 'admin,member', 'viewer, Owner'])(
     'refuses to bind an existing %s with 409 manual_adoption_required before the insert (D22l)',
     async (role) => {
       queue(
@@ -302,27 +302,43 @@ describe('ScimProvisioningController (WS05-S8)', () => {
     },
   );
 
-  it('refuses an owner that lands between the D22l check and the insert', async () => {
+  it.each(['owner', 'member,owner', 'admin,member'])(
+    'refuses a %s row that lands between the D22l check and the insert',
+    async (role) => {
+      queue(
+        [{ id: ORG }],
+        [{ id: 'user-1' }],
+        [], // no membership when checked
+        [], // a concurrent owner or admin insert wins the unique membership
+        [{ id: 'member-1', role }], // the canonical row read back holds owner or admin
+      );
+      const error = await rejectionOf(
+        controller().provision(TOKEN, provisionBody()),
+      );
+
+      expect(error).toBeInstanceOf(ConflictException);
+      expect(responseOf(error)).toMatchObject({
+        code: 'manual_adoption_required',
+      });
+      expect(
+        mockStatements.some((s) =>
+          s.text.includes('organization_membership_audit_outbox'),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it('binds a multi-role row that holds neither owner nor admin', async () => {
     queue(
       [{ id: ORG }],
       [{ id: 'user-1' }],
       [], // no membership when checked
-      [], // a concurrent owner insert wins the unique membership
-      [{ id: 'member-1', role: 'owner' }], // the canonical row read back is the owner
+      [], // a concurrent insert wins the unique membership
+      [{ id: 'member-1', role: 'member,compliance' }],
     );
-    const error = await rejectionOf(
-      controller().provision(TOKEN, provisionBody()),
-    );
+    const result = await controller().provision(TOKEN, provisionBody());
 
-    expect(error).toBeInstanceOf(ConflictException);
-    expect(responseOf(error)).toMatchObject({
-      code: 'manual_adoption_required',
-    });
-    expect(
-      mockStatements.some((s) =>
-        s.text.includes('organization_membership_audit_outbox'),
-      ),
-    ).toBe(false);
+    expect(result).toMatchObject({ memberCreated: false });
   });
 
   it('rolls the membership back and answers 503 when the audit transition is not bound', async () => {

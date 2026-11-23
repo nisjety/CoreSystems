@@ -49,6 +49,14 @@ const PROVISION_ROLES = new Set(['member', 'viewer', 'admin', 'compliance']);
 // record. The refusal is a 409 for manual handling; nothing is written.
 const ADOPTION_REFUSED_ROLES = new Set(['owner', 'admin']);
 
+// Better Auth may store several comma-separated roles in member.role (for
+// example "member,owner"), so every token is checked, not the whole string.
+function holdsAdoptionRefusedRole(role: string | null | undefined): boolean {
+  return (role ?? '')
+    .split(',')
+    .some((token) => ADOPTION_REFUSED_ROLES.has(token.trim().toLowerCase()));
+}
+
 function credentialMatches(expected: string, received?: string): boolean {
   const expectedDigest = createHash('sha256').update(expected).digest();
   const receivedDigest = createHash('sha256')
@@ -114,7 +122,7 @@ export class ScimProvisioningController {
     userId: string,
     row: MemberRow | undefined,
   ): void {
-    if (!row || !ADOPTION_REFUSED_ROLES.has(row.role)) return;
+    if (!row || !holdsAdoptionRefusedRole(row.role)) return;
     this.logger.log(
       `scim provision refused org=${organizationId} user=${userId} existing=${row.role}`,
     );

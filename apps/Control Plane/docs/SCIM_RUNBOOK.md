@@ -19,7 +19,7 @@ Rules that cannot be configured away:
 
 - The role is always `member`. A `roles` or `groups` attribute is ignored, so SCIM can never grant admin.
 - The last owner is never removed: 409 `mutability`, audited as `org.scim.deprovision.refused_last_owner`.
-- An existing owner or admin is never bound to a SCIM record (D22l). A POST or re-activation for a person who already holds one of those roles answers 409 `uniqueness` and writes nothing; auth-core answers `manual_adoption_required` and the person is handled by hand.
+- An existing owner or admin is never bound to a SCIM record (D22l). A POST or re-activation for a person who already holds one of those roles (alone or in a comma-separated role list such as `member,owner`) answers 409 `uniqueness` and writes nothing; auth-core answers `manual_adoption_required` and the person is handled by hand.
 - Only `userName` (an e-mail whose domain is verified for the org), `externalId` and `active` are read. Other attributes are accepted and ignored so IdP retries never fail.
 - Re-activation restores `role_at_deactivation`, except `owner`, which comes back as `admin`.
 - `DELETE` answers 204 and keeps a tombstone.
