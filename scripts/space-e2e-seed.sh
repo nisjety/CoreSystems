@@ -75,6 +75,7 @@ plan only (pass --apply to send):
   2. gateway (${BASE_URL}): org X (A owner; B, C, E members), org Y (D), org Z "ZDR-TEST space e2e" (F);
      writes storage states E2E_STORAGE_STATE_A..F and space-e2e-seed.json into ${AUTH_DIR}
      room "Space E2E Room" owned by A: B editor, C viewer, E no Space role (skipped with --skip-roles)
+     rooms "Space E2E Canvas Room" (A, no canvas yet) and "Space E2E ZDR Room" (F, org Z) for the fixture refs
   3. effect policy on org X (and org Z) through set-space-effect-policy.sh when CONTROL_SPACE_POLICY_TOKEN is set
   4. ZDR switch on org Z through zdr-seed-test-org.mjs when ORG_CORE_SERVICE_TOKEN is set
   5. write the environment contract file (paths only)
@@ -159,13 +160,20 @@ echo "5/5 Environment contract (paths only, no secrets)"
 {
   for key in A B C D E F; do echo "export E2E_STORAGE_STATE_${key}=\"${AUTH_NATIVE}/space-e2e-state-${key}.json\""; done
   echo "export E2E_SPACE_REF=\"$(field space_ref)\""
+  # A fixture room Control has not registered yet is not exported (fixture_rooms_ready); re-run to pick it up.
+  no_canvas_ref=""; [[ "$(field fixture_rooms_ready.no_canvas)" == true ]] && no_canvas_ref="$(field space_ref_no_canvas)"
+  zdr_ref=""; [[ "$(field fixture_rooms_ready.zdr)" == true ]] && zdr_ref="$(field space_ref_zdr)"
+  echo "export E2E_SPACE_REF_NO_CANVAS=\"${no_canvas_ref}\""
+  echo "export E2E_SPACE_REF_ZDR=\"${zdr_ref}\""
   echo "export E2E_REQUIRE_SPACE=1"
   echo "export E2E_BASE_URL=\"${BASE_URL}\""
 } > "$AUTH_DIR/space-e2e.env.sh"
 echo "    wrote ${AUTH_DIR}/space-e2e.env.sh (source it; set E2E_SPACE_REF by hand if it is empty)"
 echo "    org X=${ORG_X} org Y=$(field orgs.Y.id) org Z=${ORG_Z}"
 if [[ "$skip_roles" == 1 ]]; then
-  echo "    Space roles skipped (--skip-roles): E2E_SPACE_REF stays empty unless you set it by hand"
+  echo "    Space roles skipped (--skip-roles): the room refs are the previous run's, if any (empty ones are set by hand)"
 else
   echo "    managed room (E2E_SPACE_REF)=$(field space_ref): A owner, B editor, C viewer, E no Space role"
+  echo "    no-canvas room (E2E_SPACE_REF_NO_CANVAS)=${no_canvas_ref}; ZDR room (E2E_SPACE_REF_ZDR)=${zdr_ref}"
+  echo "    an empty fixture ref means that room was not ready yet: re-run the seed (the specs that need it fail at a gate)"
 fi

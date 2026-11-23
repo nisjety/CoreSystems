@@ -22,15 +22,24 @@ import {
   assertLoopback,
   awaitRecipientReady,
   awaitRoomRegistration,
+  CANVAS_ROOM_NAME,
+  confirmOwnedOrg,
   createManagedRoom,
   emailFor,
+  ensureFixtureRoom,
+  ensureManagedRoom,
   grantRoomRole,
   grantSpaceRoles,
   invitationIdOf,
+  isReusableRoom,
   parseArgs,
+  previousSummary,
   readRoomMembership,
+  roomHasNoCanvas,
   run,
   spaceRefOf,
+  userIdOf,
+  ZDR_ROOM_NAME,
 } from '../space-e2e-seed-session.mjs'
 
 describe('seed fixtures', () => {
@@ -123,6 +132,8 @@ describe('run', () => {
     assert.match(text, /org Z/)
     assert.match(text, /ensures the organization room/)
     assert.match(text, /managed room "Space E2E Room" owned by A: B editor, C viewer, E no Space role/)
+    assert.match(text, /room "Space E2E Canvas Room" owned by A with no canvas yet/)
+    assert.match(text, /room "Space E2E ZDR Room" owned by F in org Z/)
     assert.doesNotMatch(text, /password/i)
   })
 
@@ -135,7 +146,7 @@ describe('run', () => {
     } finally {
       console.log = original
     }
-    assert.doesNotMatch(lines.join('\n'), /managed room/)
+    assert.doesNotMatch(lines.join('\n'), /managed room|Canvas Room|ZDR Room/)
   })
 
   it('refuses a non-loopback base URL before doing anything', async () => {
@@ -222,6 +233,59 @@ describe('verified answer shapes', () => {
     assert.equal(spaceRefOf({ data: { space: { space_ref: 'room-1', kind: 'room' } } }), 'room-1')
     assert.equal(spaceRefOf({ data: { space_ref: 'room-1' } }), undefined)
   })
+
+  it("reads the user id from GET /api/v1/me's { user: { id } } (user-core's answer, relayed by the gateway)", () => {
+    // Shape of user-core GetMe (internal/http/handlers.go) after merge_session_user_profile in the gateway.
+    const me = { user: { id: 'user-b', email: 'space-e2e-b@verevon.dev', name: 'Space E2E B', image: '' } }
+    assert.equal(userIdOf(me), 'user-b')
+    assert.equal(userIdOf({ data: { user: { id: 'user-b' } } }), 'user-b')
+    assert.equal(userIdOf({ user: {} }), undefined)
+    assert.equal(userIdOf(null), undefined)
+  })
+
+  it('reads a summary an earlier run wrote, and treats a missing or broken one as empty', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'seed-summary-'))
+    try {
+      const file = join(dir, 'space-e2e-seed.json')
+      assert.deepEqual(previousSummary(file), {})
+      writeFileSync(file, '{not json')
+      assert.deepEqual(previousSummary(file), {})
+      writeFileSync(file, JSON.stringify({ space_ref: 'room-1', space_ref_zdr: 'room-z' }))
+      assert.deepEqual(previousSummary(file), { space_ref: 'room-1', space_ref_zdr: 'room-z' })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('confirmOwnedOrg (the org-name guard)', () => {
+  const current = (...answers) => {
+    let i = 0
+    return fakeSession(() => ok({ data: { org: answers[Math.min(i++, answers.length - 1)] } }))
+  }
+
+  it('accepts the named organization', async () => {
+    assert.equal(await confirmOwnedOrg(current({ id: 'org-x', name: ORG_X_NAME }), 'A', ORG_X_NAME, { sleep: noSleep }), 'org-x')
+  })
+
+  it('refuses another organization by name', async () => {
+    await assert.rejects(
+      confirmOwnedOrg(current({ id: 'org-q', name: 'Other' }), 'A', ORG_X_NAME, { sleep: noSleep }),
+      /is in organization "Other", not "Space E2E Org X"/,
+    )
+  })
+
+  it('reads an empty name again (the gateway lookup failed) and accepts the name once it is reported', async () => {
+    const session = current({ id: 'org-x', name: '' }, { id: 'org-x', name: ORG_X_NAME })
+    assert.equal(await confirmOwnedOrg(session, 'A', ORG_X_NAME, { attempts: 3, sleep: noSleep }), 'org-x')
+    assert.equal(session.calls.length, 2)
+  })
+
+  it('never takes an empty name as a match', async () => {
+    const session = current({ id: 'org-x', name: '' })
+    await assert.rejects(confirmOwnedOrg(session, 'A', ORG_X_NAME, { attempts: 3, sleep: noSleep }), /did not report the name/)
+    assert.equal(session.calls.length, 3)
+  })
 })
 
 describe('managed room and Space roles (WS04-S6 membership routes)', () => {
@@ -276,16 +340,58 @@ describe('managed room and Space roles (WS04-S6 membership routes)', () => {
   })
 
   it("reads the caller's own role and whether the audience includes them", async () => {
-    assert.deepEqual(await readRoomMembership(fakeSession(() => ok({ data: { role: 'viewer', recipient_ready: true } })), 'room-1'), {
+    // Control's CurrentMembership JSON (user-core internal/spaces/authority.go), relayed in { data }.
+    const fact = { space_ref: 'room-1', role: 'viewer', recipient_ready: true, roster_mode: 'managed', state: 'active' }
+    assert.deepEqual(await readRoomMembership(fakeSession(() => ok({ data: fact })), 'room-1'), {
       status: 200,
       role: 'viewer',
       recipientReady: true,
+      rosterMode: 'managed',
+      state: 'active',
     })
     assert.deepEqual(await readRoomMembership(fakeSession(() => refuse(404, 'room_not_found')), 'room-1'), {
       status: 404,
       role: null,
       recipientReady: false,
+      rosterMode: null,
+      state: null,
     })
+  })
+
+  it('reuses only an active, managed room the caller owns', () => {
+    const base = { status: 200, role: 'owner', recipientReady: true, rosterMode: 'managed', state: 'active' }
+    assert.equal(isReusableRoom(base), true)
+    assert.equal(isReusableRoom({ ...base, rosterMode: 'org_derived' }), false, 'the organization room refuses member writes')
+    assert.equal(isReusableRoom({ ...base, state: 'archived' }), false, 'an archived room refuses member writes')
+    assert.equal(isReusableRoom({ ...base, role: 'editor' }), false)
+    assert.equal(isReusableRoom({ ...base, rosterMode: null }), false, 'an answer without the roster mode is not trusted')
+    assert.equal(isReusableRoom({ ...base, status: 404 }), false)
+  })
+
+  it('retries the first add while Control still answers member_not_in_organization, then succeeds', async () => {
+    let posts = 0
+    const owner = {
+      session: fakeSession(() => (posts++ < 2 ? refuse(422, 'member_not_in_organization') : ok({ data: { role: 'editor' } }))),
+    }
+    const sleeps = []
+    await grantRoomRole(owner, 'room-1', 'user-b', 'editor', 'user B', { attempts: 5, delayMs: 9, sleep: async (ms) => sleeps.push(ms) })
+    assert.equal(owner.session.calls.length, 3)
+    assert.deepEqual(sleeps, [9, 9])
+  })
+
+  it('gives up on member_not_in_organization after the bounded retries and names the code', async () => {
+    const owner = { session: fakeSession(() => refuse(422, 'member_not_in_organization')) }
+    await assert.rejects(
+      grantRoomRole(owner, 'room-1', 'user-b', 'editor', 'user B', { attempts: 3, sleep: noSleep }),
+      (e) => e instanceof SeedError && /422 \(member_not_in_organization\)/.test(e.message),
+    )
+    assert.equal(owner.session.calls.length, 3)
+  })
+
+  it('does not retry any other refusal', async () => {
+    const owner = { session: fakeSession(() => refuse(409, 'room_archived')) }
+    await assert.rejects(grantRoomRole(owner, 'room-1', 'user-b', 'editor', 'user B', { attempts: 5, sleep: noSleep }), /room_archived/)
+    assert.equal(owner.session.calls.length, 1)
   })
 
   it('reports an audience that is still not ready after a bounded wait, without failing', async () => {
@@ -296,13 +402,22 @@ describe('managed room and Space roles (WS04-S6 membership routes)', () => {
 
   describe('grantSpaceRoles', () => {
     /** Owner A's gateway answers the room routes; B and C read the role they were granted; E reads nothing. */
-    function world({ bRole = 'editor', cRole = 'viewer', ready = true, eReads = false, registered = true, oldRoomOwned = false } = {}) {
+    function world({
+      bRole = 'editor',
+      cRole = 'viewer',
+      ready = true,
+      eReads = false,
+      registered = true,
+      oldRoomOwned = false,
+      oldRoom = { roster_mode: 'managed', state: 'active' },
+    } = {}) {
       const owner = fakeSession((method, path, body) => {
         if (method === 'POST' && path === '/api/v1/spaces') return ok({ data: { space: { space_ref: 'room-1' } } }, 202)
         const read = MEMBERSHIP.exec(path)
         if (method === 'GET' && read) {
           const ref = read[1]
-          if ((ref === 'room-1' && registered) || (ref === 'old-room' && oldRoomOwned)) return ok({ data: { role: 'owner' } })
+          if (ref === 'room-1' && registered) return ok({ data: { role: 'owner', roster_mode: 'managed', state: 'active' } })
+          if (ref === 'old-room' && oldRoomOwned) return ok({ data: { role: 'owner', ...oldRoom } })
           return refuse(404, 'room_not_found')
         }
         if (method === 'POST' && MEMBERS.test(path)) return ok({ data: { role: body.role, changed: true, member_count: 3 } })
@@ -346,6 +461,36 @@ describe('managed room and Space roles (WS04-S6 membership routes)', () => {
       assert.equal(w.owner.session.calls.some((c) => c.method === 'POST' && c.path === '/api/v1/spaces'), false)
     })
 
+    it('does not reuse a recorded organization room (an older seed recorded it): it creates the managed room', async () => {
+      const w = world({ oldRoomOwned: true, oldRoom: { roster_mode: 'org_derived', state: 'active' } })
+      const result = await grantSpaceRoles({ owner: w.owner, members: w.members, existingRef: 'old-room', sleep: noSleep })
+      assert.equal(result.space_ref, 'room-1')
+      assert.equal(w.owner.session.calls.some((c) => c.method !== 'GET' && c.path.startsWith('/api/v1/spaces/old-room/')), false)
+    })
+
+    it('does not reuse a recorded room that is archived', async () => {
+      const w = world({ oldRoomOwned: true, oldRoom: { roster_mode: 'managed', state: 'archived' } })
+      const result = await grantSpaceRoles({ owner: w.owner, members: w.members, existingRef: 'old-room', sleep: noSleep })
+      assert.equal(result.space_ref, 'room-1')
+    })
+
+    it('hands the new ref to onCreated before waiting for registration, so a timeout leaves it recorded', async () => {
+      const w = world({ registered: false })
+      const recorded = []
+      await assert.rejects(
+        grantSpaceRoles({ owner: w.owner, members: w.members, sleep: noSleep, onCreated: (ref) => recorded.push(ref) }),
+        /not active in Control/,
+      )
+      assert.deepEqual(recorded, ['room-1'])
+    })
+
+    it('refuses a member without a user id before creating any room', async () => {
+      const w = world()
+      w.members.B.userId = undefined
+      await assert.rejects(grantSpaceRoles({ owner: w.owner, members: w.members, sleep: noSleep }), /user B has no user id/)
+      assert.equal(w.owner.session.calls.length, 0)
+    })
+
     it('creates a new room when the recorded one is no longer owned by A', async () => {
       const w = world({ oldRoomOwned: false })
       const result = await grantSpaceRoles({ owner: w.owner, members: w.members, existingRef: 'old-room', sleep: noSleep })
@@ -385,6 +530,80 @@ describe('managed room and Space roles (WS04-S6 membership routes)', () => {
       assert.deepEqual(result.roles.B, { role: 'editor', recipient_ready: false })
       assert.match(logs.join('\n'), /user B is not in the room audience yet/)
     })
+  })
+})
+
+describe('fixture rooms (E2E_SPACE_REF_NO_CANVAS, E2E_SPACE_REF_ZDR)', () => {
+  const CANVAS = /^\/api\/v1\/spaces\/([^/]+)\/canvas$/
+  /** An owner whose recorded room `old` reads as given and whose new rooms register at once. */
+  function owner({ old = { role: 'owner', roster_mode: 'managed', state: 'active' }, canvas = null, createStatus = 202, registered = true } = {}) {
+    return {
+      session: fakeSession((method, path) => {
+        if (method === 'POST' && path === '/api/v1/spaces') {
+          return createStatus < 300 ? ok({ data: { space: { space_ref: 'room-new' } } }, createStatus) : refuse(createStatus, 'zdr_refused')
+        }
+        const read = MEMBERSHIP.exec(path)
+        if (method === 'GET' && read) {
+          if (read[1] === 'old') return ok({ data: old })
+          if (read[1] === 'room-new' && registered) return ok({ data: { role: 'owner', roster_mode: 'managed', state: 'active' } })
+          return refuse(404, 'room_not_found')
+        }
+        if (method === 'GET' && CANVAS.test(path)) return ok({ data: { canvas, head: null, can_write: true } })
+        return refuse(500, `unexpected ${method} ${path}`)
+      }),
+    }
+  }
+  const creates = (o) => o.session.calls.filter((c) => c.method === 'POST' && c.path === '/api/v1/spaces')
+
+  it('have distinct names that are not the role room', () => {
+    assert.equal(new Set([ROOM_NAME, CANVAS_ROOM_NAME, ZDR_ROOM_NAME]).size, 3)
+  })
+
+  it('reads a room with no canvas (200 with canvas null) as a create-path fixture, and one with a canvas as not', async () => {
+    assert.equal(await roomHasNoCanvas(owner().session, 'old'), true)
+    assert.equal(await roomHasNoCanvas(owner({ canvas: { head_version_id: 'v1' } }).session, 'old'), false)
+  })
+
+  it('reuses the recorded no-canvas room while it still has no canvas', async () => {
+    const o = owner()
+    const ref = await ensureFixtureRoom(o, { existingRef: 'old', name: CANVAS_ROOM_NAME, keep: (r) => roomHasNoCanvas(o.session, r), sleep: noSleep })
+    assert.equal(ref, 'old')
+    assert.equal(creates(o).length, 0)
+  })
+
+  it('creates a fresh no-canvas room once the recorded one has a canvas, and records it at once', async () => {
+    const o = owner({ canvas: { head_version_id: 'v1' } })
+    const recorded = []
+    const ref = await ensureFixtureRoom(o, {
+      existingRef: 'old',
+      name: CANVAS_ROOM_NAME,
+      keep: (r) => roomHasNoCanvas(o.session, r),
+      onCreated: (r) => recorded.push(r),
+      sleep: noSleep,
+    })
+    assert.equal(ref, 'room-new')
+    assert.deepEqual(recorded, ['room-new'])
+    assert.deepEqual(creates(o)[0].body, { kind: 'room', name: CANVAS_ROOM_NAME })
+  })
+
+  it('does not reuse an organization room as a fixture', async () => {
+    const o = owner({ old: { role: 'owner', roster_mode: 'org_derived', state: 'active' } })
+    assert.equal(await ensureManagedRoom(o, { existingRef: 'old', name: ZDR_ROOM_NAME }).then((r) => r.ref), 'room-new')
+  })
+
+  it('is not fatal: a refused create or a room that never registers logs and returns null', async () => {
+    const logs = []
+    assert.equal(await ensureFixtureRoom(owner({ createStatus: 403 }), { name: ZDR_ROOM_NAME, sleep: noSleep, log: (l) => logs.push(l) }), null)
+    assert.match(logs.join('\n'), /room "Space E2E ZDR Room" is not ready: .*zdr_refused/)
+    const recorded = []
+    const ref = await ensureFixtureRoom(owner({ registered: false }), {
+      name: ZDR_ROOM_NAME,
+      onCreated: (r) => recorded.push(r),
+      sleep: noSleep,
+      log: () => {},
+    })
+    assert.equal(ref, null)
+    assert.deepEqual(recorded, ['room-new'], 'the unregistered room stays recorded for the next run')
   })
 })
 
