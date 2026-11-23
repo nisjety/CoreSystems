@@ -194,12 +194,12 @@ jobs:
   # WS19-S1. The room canvas store (wiki-store-go internal/canvas, and the canvas routes in internal/handler) skips every
   # Postgres test unless WIKI_TEST_DATABASE_URL names a disposable *_test database, so none of those tests ran in CI before
   # this job. It builds the schema the way production does (init.sql, then every migration through the real migrator, which
-  # also creates dataplane_app) and runs the canvas packages with the variable set. A skipped test fails the job, so the gate
-  # cannot pass by skipping. The wiki-table and outbox suites of internal/repo and internal/events are not wired here yet.
+  # applies the migration that creates dataplane_app) and runs the canvas packages with the variable set. A skipped test fails
+  # the job, so the gate cannot pass by skipping. It has no `needs`: a failed or skipped upstream job would skip this one, and a
+  # skipped job never fails the gate. The wiki-table and outbox suites of internal/repo and internal/events are not wired here yet.
   wiki-store-postgres-tests:
     name: wiki-store-go canvas Postgres tests (WIKI_TEST_DATABASE_URL, real migrations)
     runs-on: ubuntu-latest
-    needs: go-build
     timeout-minutes: 30
     services:
       postgres:
@@ -242,6 +242,13 @@ jobs:
           (cd tools/migrator && CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/migrator" .)
           psql "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 -f infra/postgres/init.sql
           "$RUNNER_TEMP/migrator" up --migrations-dir infra/postgres/migrations
+          # Every forward migration file must be recorded (a file the migrator silently ignores is a schema gap).
+          forward=$(find infra/postgres/migrations -maxdepth 1 -type f -name '*.sql' ! -name '*.down.sql' | grep -Ec '/[0-9]{14}_[^/]+\.sql$' || true)
+          applied=$(psql "$DATABASE_URL" -X -tA -c "SELECT count(*) FROM schema_migrations")
+          if [ "$applied" != "$forward" ]; then
+            echo "schema_migrations holds $applied row(s) but $forward forward migration file(s) exist" >&2
+            exit 1
+          fi
           # Row-level security is enforced only when the runtime role is subject to it.
           role=$(psql "$DATABASE_URL" -X -tA -c "SELECT rolcanlogin::text || ':' || rolbypassrls::text || ':' || rolsuper::text FROM pg_roles WHERE rolname = 'dataplane_app'")
           if [ "$role" != "false:false:false" ]; then

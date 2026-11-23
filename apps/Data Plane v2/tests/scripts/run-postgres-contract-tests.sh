@@ -478,6 +478,13 @@ lint_wiki_wiring() {
   grep -Fq 'WIKI_TEST_DATABASE_URL:' <<<"$block" || lint_fail "job wiki-store-postgres-tests must set WIKI_TEST_DATABASE_URL"
   grep -Fq 'services/wiki-store-go' <<<"$block" || lint_fail "job wiki-store-postgres-tests must run its tests in services/wiki-store-go"
   grep -Fq -- '--- SKIP:' <<<"$block" || lint_fail "job wiki-store-postgres-tests must fail when a gated test skips (no '--- SKIP:' check in the job)"
+  # The guard must exit non-zero: an `exit 1` on the '--- SKIP:' line or within the three lines after it.
+  awk '/--- SKIP:/ { n = 4 } n > 0 { if ($0 ~ /exit[ \t]+[1-9]/) found = 1; n-- } END { exit !found }' <<<"$block" \
+    || lint_fail "job wiki-store-postgres-tests: its '--- SKIP:' check does not exit non-zero, so a skipping run would pass"
+  # go test is piped through tee; without pipefail a failing test exits 0.
+  grep -Eq '^[[:space:]]*set -o pipefail' <<<"$block" || lint_fail "job wiki-store-postgres-tests must 'set -o pipefail' (go test | tee hides a failing test otherwise)"
+  # A dependency that fails or skips would skip this job, and a skipped job never fails the gate.
+  if grep -Eq '^    needs:' <<<"$block"; then lint_fail "job wiki-store-postgres-tests must not declare needs: a failed or skipped upstream job would skip it silently"; fi
   if grep -Eq 'continue-on-error:[[:space:]]*true' <<<"$block"; then lint_fail "job wiki-store-postgres-tests must not set continue-on-error: a failing canvas test would pass"; fi
   printf 'lint: wiki-store Postgres job checked (%s)\n' "$(basename "$wf")"
 }
@@ -912,6 +919,12 @@ self_test() {
   st_check fail "a canvas Postgres job that does not set WIKI_TEST_DATABASE_URL is rejected" bash -c "$(declare -f lint_fail lint_wiki_wiring warn); lint_bad=0; lint_wiki_wiring '$t/wf-wiki-novar.yml'; exit \$lint_bad"
   sed 's/--- SKIP:/--- NOTICE:/' "$t/wf-wiki-good.yml" >"$t/wf-wiki-noskip.yml"
   st_check fail "a canvas Postgres job without the skip guard is rejected" bash -c "$(declare -f lint_fail lint_wiki_wiring warn); lint_bad=0; lint_wiki_wiring '$t/wf-wiki-noskip.yml'; exit \$lint_bad"
+  sed 's/then exit 1; fi/then echo skipped; fi/' "$t/wf-wiki-good.yml" >"$t/wf-wiki-noexit.yml"
+  st_check fail "a canvas Postgres job whose skip guard does not exit non-zero is rejected" bash -c "$(declare -f lint_fail lint_wiki_wiring warn); lint_bad=0; lint_wiki_wiring '$t/wf-wiki-noexit.yml'; exit \$lint_bad"
+  sed '/set -o pipefail/d' "$t/wf-wiki-good.yml" >"$t/wf-wiki-nopipefail.yml"
+  st_check fail "a canvas Postgres job without set -o pipefail is rejected" bash -c "$(declare -f lint_fail lint_wiki_wiring warn); lint_bad=0; lint_wiki_wiring '$t/wf-wiki-nopipefail.yml'; exit \$lint_bad"
+  sed 's/^  wiki-store-postgres-tests:/  wiki-store-postgres-tests:\n    needs: go-build/' "$t/wf-wiki-good.yml" >"$t/wf-wiki-needs.yml"
+  st_check fail "a canvas Postgres job that needs another job is rejected" bash -c "$(declare -f lint_fail lint_wiki_wiring warn); lint_bad=0; lint_wiki_wiring '$t/wf-wiki-needs.yml'; exit \$lint_bad"
 
   echo "admin URL guards"
   st_check ok "a local _test database is accepted" bash -c "$(declare -f die parse_admin_url); export TEST_DATABASE_URL='postgres://u:p@127.0.0.1:5432/x_test?sslmode=disable'; parse_admin_url"
