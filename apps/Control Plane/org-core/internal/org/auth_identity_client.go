@@ -152,6 +152,8 @@ func (c *AuthCoreIdentityClient) doAt(ctx context.Context, prefix, method, path 
 		return ErrSCIMLastOwner
 	case resp.StatusCode == http.StatusConflict && problem.Code == "membership_conflict":
 		return ErrSCIMMembershipConflict
+	case resp.StatusCode == http.StatusConflict && problem.Code == "manual_adoption_required":
+		return ErrSCIMManualAdoption
 	}
 	return fmt.Errorf("%w: auth-core answered %d", ErrSSOUnavailable, resp.StatusCode)
 }

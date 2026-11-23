@@ -70,6 +70,9 @@ var (
 	ErrSCIMLastOwner = errors.New("cannot deprovision the only owner")
 	// ErrSCIMMembershipConflict is a concurrent membership change; the IdP retries.
 	ErrSCIMMembershipConflict = errors.New("membership changed concurrently")
+	// ErrSCIMManualAdoption refuses to bind an existing owner or admin to a SCIM
+	// record (D22l); an organisation administrator handles that person by hand.
+	ErrSCIMManualAdoption = errors.New("an existing owner or admin must be handled manually")
 	// ErrSCIMInvalidFilter is a filter other than userName eq / externalId eq.
 	ErrSCIMInvalidFilter = errors.New("scim filter is not supported")
 
@@ -386,7 +389,9 @@ func (s *Service) GetSCIMUser(ctx context.Context, auth *SCIMTokenAuth, scimID s
 	return rec, nil
 }
 
-// CreateSCIMUser is POST /Users. The role is always `member`.
+// CreateSCIMUser is POST /Users. The role is always `member`. An existing owner
+// or admin is refused by auth-core (ErrSCIMManualAdoption, D22l): no SCIM record
+// is written, so the IdP's retry gets the same answer until a person acts.
 func (s *Service) CreateSCIMUser(ctx context.Context, auth *SCIMTokenAuth, in SCIMUserInput) (*SCIMUserRecord, error) {
 	if err := s.requireSCIM(); err != nil {
 		return nil, err

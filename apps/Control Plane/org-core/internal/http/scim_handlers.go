@@ -379,6 +379,8 @@ func writeSCIMUserError(c *gin.Context, operation string, err error) {
 		writeSCIMError(c, http.StatusConflict, "uniqueness", "A user with this userName already exists.")
 	case errors.Is(err, orgcore.ErrSCIMLastOwner):
 		writeSCIMError(c, http.StatusConflict, "mutability", "The only organization owner cannot be deactivated.")
+	case errors.Is(err, orgcore.ErrSCIMManualAdoption):
+		writeSCIMError(c, http.StatusConflict, "uniqueness", "This user already holds the owner or admin role in this organization and must be handled manually.")
 	case errors.Is(err, orgcore.ErrSCIMMembershipConflict):
 		c.Header("Retry-After", "5")
 		writeSCIMError(c, http.StatusServiceUnavailable, "", "Membership changed concurrently; retry.")

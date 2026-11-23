@@ -19,6 +19,7 @@ Rules that cannot be configured away:
 
 - The role is always `member`. A `roles` or `groups` attribute is ignored, so SCIM can never grant admin.
 - The last owner is never removed: 409 `mutability`, audited as `org.scim.deprovision.refused_last_owner`.
+- An existing owner or admin is never bound to a SCIM record (D22l). A POST or re-activation for a person who already holds one of those roles answers 409 `uniqueness` and writes nothing; auth-core answers `manual_adoption_required` and the person is handled by hand.
 - Only `userName` (an e-mail whose domain is verified for the org), `externalId` and `active` are read. Other attributes are accepted and ignored so IdP retries never fail.
 - Re-activation restores `role_at_deactivation`, except `owner`, which comes back as `admin`.
 - `DELETE` answers 204 and keeps a tombstone.
@@ -94,6 +95,7 @@ Record the first real run (IdP log, `organization_scim_users` row, `member` row 
 | 401 with `WWW-Authenticate` | token revoked, expired, wrong org, or mistyped | create a new token |
 | 400 `invalidValue` on POST | `userName` domain not verified for this org | verify the domain first |
 | 409 `uniqueness` | the `userName` already exists in this org | look it up with `filter=userName eq "..."` |
+| 409 `uniqueness` on POST or re-activation, and the person is already an owner or admin | SCIM never binds an existing owner or admin (D22l) | change the person's role in the admin panel first, then let the IdP retry; the same answer comes back until then |
 | 409 `mutability` on deprovision | the user is the last owner | transfer ownership first; the refusal is audited |
 | 429 | over 300 requests per minute for the token | honour `Retry-After` |
 | deprovision answered 200 but user-core still `active` | `member_removed` event not consumed | check user-core logs for the subscriber and NATS connectivity; the row corrects itself on the next event, it does not poll |

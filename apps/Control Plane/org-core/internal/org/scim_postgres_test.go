@@ -436,6 +436,27 @@ func TestSCIMDeactivatingTheLastOwnerIsRefusedAndAudited(t *testing.T) {
 	}
 }
 
+// D22l: SCIM never binds an existing owner or admin. auth-core answers
+// manual_adoption_required; the refusal writes no SCIM record and no provisioned
+// audit row, so the IdP's retry gets the same answer until a person acts.
+func TestSCIMCreateUserRefusesAnExistingOwnerOrAdminWithoutAWrite(t *testing.T) {
+	h := newScimHarness(t)
+	org := h.orgWithDomain(t, "scim-adopt", "adopt.example.com")
+	auth := h.authFor(t, org)
+	const userName = "owner@adopt.example.com"
+	h.prov.provisionErr = ErrSCIMManualAdoption
+	if _, err := h.service.CreateSCIMUser(h.ctx, auth, SCIMUserInput{UserName: userName}); !errors.Is(err, ErrSCIMManualAdoption) {
+		t.Fatalf("binding an existing owner or admin = %v, want ErrSCIMManualAdoption", err)
+	}
+	var records int
+	if err := h.db.Pool.QueryRow(h.ctx, `SELECT COUNT(*) FROM organization_scim_users WHERE org_id = $1 AND user_name = $2`, org, userName).Scan(&records); err != nil || records != 0 {
+		t.Fatalf("a refused adoption left %d SCIM records (err %v)", records, err)
+	}
+	if n := h.outboxCount(t, org, IdentityEventSCIMUserProvisioned); n != 0 {
+		t.Fatalf("a refused adoption left %d provisioned audit rows", n)
+	}
+}
+
 func TestSCIMDeleteKeepsATombstoneIsIdempotentAndReviveReusesTheId(t *testing.T) {
 	h := newScimHarness(t)
 	org := h.orgWithDomain(t, "scim-delete", "delete.example.com")

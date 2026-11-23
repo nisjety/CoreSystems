@@ -694,6 +694,7 @@ func TestSCIMCreateUserMapsEachFailureToAScimError(t *testing.T) {
 		{"domain not verified", `{"userName":"ada@corp.example.com"}`, orgcore.ErrSCIMDomainNotVerified, http.StatusBadRequest, "invalidValue", ""},
 		{"bad userName", `{"userName":"nope"}`, &orgcore.SCIMRequestError{Reason: "userName"}, http.StatusBadRequest, "invalidValue", ""},
 		{"membership conflict", `{"userName":"ada@corp.example.com"}`, orgcore.ErrSCIMMembershipConflict, http.StatusServiceUnavailable, "", "5"},
+		{"existing owner or admin (D22l)", `{"userName":"ada@corp.example.com"}`, orgcore.ErrSCIMManualAdoption, http.StatusConflict, "uniqueness", ""},
 		{"auth-core unavailable", `{"userName":"ada@corp.example.com"}`, orgcore.ErrSSOUnavailable, http.StatusServiceUnavailable, "", "30"},
 		{"unexpected", `{"userName":"ada@corp.example.com"}`, errors.New("pq: connection refused"), http.StatusInternalServerError, "", ""},
 	}
