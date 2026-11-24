@@ -230,6 +230,24 @@ describe('SpaceTurnList: a person’s post as markdown (WS15-S4)', () => {
     expect(document.body.textContent).not.toContain('SLUTT PÅ VEDLEGG')
     expect(document.querySelector('.verevon-space-attachment-chip')?.textContent).toBe('a.txt')
   })
+
+  it('picks out mentions on the markdown path too, with the mention picker on (DEPTH-WS08-S6-2)', async () => {
+    publishSpaceRoomFeatures({ human_markdown: true, mention_picker: true })
+    renderTurns([{ role: 'user', content: 'Takk @Kari Nordmann og @Ola Hansen', authorSubjectId: 'u-ola' }])
+    await Promise.resolve()
+    const marks = [...document.querySelectorAll('.verevon-room-turn__markdown mark.verevon-space-mention')]
+    expect(marks.map((mark) => mark.textContent)).toEqual(['@Kari Nordmann', '@Ola Hansen'])
+    // The reader (u-kari) is emphasized as self.
+    expect(marks.map((mark) => (mark as HTMLElement).dataset.self ?? null)).toEqual(['true', null])
+  })
+
+  it('leaves the markdown path unmarked while the mention picker is off', async () => {
+    publishSpaceRoomFeatures({ human_markdown: true })
+    renderTurns([{ role: 'user', content: 'Takk @Kari Nordmann', authorSubjectId: 'u-ola' }])
+    await Promise.resolve()
+    expect(document.querySelector('.verevon-room-turn__markdown [data-md]')?.textContent).toBe('Takk @Kari Nordmann')
+    expect(document.querySelector('mark')).toBeNull()
+  })
 })
 
 // WS16-S1: a turn's time, in the header and in the gutter of a grouped row, and the time of an edit, read in the

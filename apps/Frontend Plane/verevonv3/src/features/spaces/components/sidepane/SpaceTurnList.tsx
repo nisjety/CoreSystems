@@ -29,7 +29,7 @@ import { SpaceIdentityHoverCard } from '../SpaceIdentityHoverCard'
 import { agentAvatarColor, agentForName, memberTint } from '../../lib/agent-avatar'
 import { splitRoomMessage } from '../../lib/room-attachments'
 import { spaceRoomFeature, spaceRoomFeatureWithDevOverride } from '../../lib/space-room-features'
-import { MentionText } from '../MentionText'
+import { MentionMarkdown, MentionText } from '../MentionText'
 import { WakeStatus } from '../WakeStatus'
 import { agentCardModel, memberCardModel } from '../../lib/agent-activity'
 import type { IdentityCardModel } from '../../lib/agent-activity'
@@ -251,6 +251,13 @@ export interface SpaceTurnListProps {
 
 export function SpaceTurnList(props: SpaceTurnListProps) {
   const i18n = useI18n()
+  // Every name that can be mentioned in this room (people and agents), and the reader's own.
+  const mentionNames = () => [
+    ...props.roster().map((member) => member.display_name),
+    ...(props.agents?.() ?? []).map((agent) => agent.name ?? ''),
+  ]
+  const viewerDisplayName = () =>
+    props.roster().find((member) => member.subject_id === props.viewerSubjectId?.())?.display_name
   const humanMarkdownOn = () =>
     spaceRoomFeatureWithDevOverride('human_markdown', import.meta.env.VITE_SPACE_HUMAN_MARKDOWN)
   const authorOf = (turn: TranscriptTurn) =>
@@ -462,19 +469,30 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
                           >
                             <MentionText
                               text={splitRoomMessage(turn.content).text}
-                              names={[
-                                ...props.roster().map((member) => member.display_name),
-                                ...(props.agents?.() ?? []).map((agent) => agent.name ?? ''),
-                              ]}
-                              viewerName={props.roster().find((member) => member.subject_id === props.viewerSubjectId?.())?.display_name}
+                              names={mentionNames()}
+                              viewerName={viewerDisplayName()}
                             />
                           </Show>
                         </p>
                       }
                     >
-                      <div class="verevon-room-turn__markdown">
-                        <ChatMarkdown content={splitRoomMessage(turn.content).text} />
-                      </div>
+                      {/* DEPTH-WS08-S6-2: the markdown path picks out mentions too (text nodes only,
+                          links and code left alone), behind the same mention_picker switch. */}
+                      <Show
+                        when={spaceRoomFeature('mention_picker')}
+                        fallback={
+                          <div class="verevon-room-turn__markdown">
+                            <ChatMarkdown content={splitRoomMessage(turn.content).text} />
+                          </div>
+                        }
+                      >
+                        <MentionMarkdown
+                          class="verevon-room-turn__markdown"
+                          text={splitRoomMessage(turn.content).text}
+                          names={mentionNames()}
+                          viewerName={viewerDisplayName()}
+                        />
+                      </Show>
                     </Show>
                     {/* WS08-S6: where the agents named in this post stand. Only the person who posted has
                         entries (their browser drives the wakes), so nobody else sees anything here. */}
