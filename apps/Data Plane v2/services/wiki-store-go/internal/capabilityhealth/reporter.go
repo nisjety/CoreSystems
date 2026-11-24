@@ -1,6 +1,6 @@
 // Package capabilityhealth reports wiki-store's room canvas readiness to Capability Core (P-CFG, WS19-S9).
 //
-// Capability Core names wiki-store (service:wiki-store) as the only attester of the two room canvas capabilities on its
+// Capability Core names wiki-store (token subject service:wiki-store, registry key wiki-store) as the only attester of the two room canvas capabilities on its
 // owner-action lane. This reporter is that attester. It is narrower than a process health check: it attests only after its probe
 // says the canvas routes are actually able to serve (the WIKISTORE_SPACE_CANVAS switch is on, a Control decision key set is
 // loaded and the canvas store answers). A failed probe, mint, row read or attestation attests nothing, and Capability Core's
@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -32,8 +33,12 @@ const (
 	maxResponseBytes = 64 << 10
 )
 
-// Capabilities is the fixed list this reporter attests, in order.
+// Capabilities is the full list this reporter can attest, in order. The write row is attested only when Config.AttestWrite is set.
 var Capabilities = []string{CanvasReadCapabilityID, CanvasWriteCapabilityID}
+
+// serviceIDPattern is Auth Core's principal registry key rule. The x-service-id header is the bare registry key (wiki-store),
+// never the token subject (service:wiki-store): Auth Core builds the subject itself, and a colon can never match a key.
+var serviceIDPattern = regexp.MustCompile(`(?i)^[a-z0-9][a-z0-9._-]{1,127}$`)
 
 // Probe reports whether the canvas routes can serve. A nil error is ready.
 type Probe func(ctx context.Context) error
@@ -48,6 +53,10 @@ type Config struct {
 	Interval          time.Duration
 	HTTPClient        *http.Client
 	Probe             Probe
+	// AttestWrite attests cap.tool.space.canvas.write as well as the read row. space.canvas.write defaults to "ask", so every
+	// approved agent write lands on the approved-continuation save lane; the write row is only attested when that lane is on
+	// (WIKISTORE_SPACE_CANVAS_CONTINUATION), otherwise an approved write would fail terminally with authority_changed.
+	AttestWrite bool
 }
 
 // Configured reports whether any value of the optional block is set. An unset block disables the reporter.
@@ -69,6 +78,7 @@ type Reporter struct {
 	interval          time.Duration
 	http              *http.Client
 	probe             Probe
+	capabilities      []string
 }
 
 type tokenRequest struct {
@@ -109,6 +119,9 @@ func New(cfg Config) (*Reporter, error) {
 	if cfg.Probe == nil {
 		return nil, errors.New("canvas capability health reporter requires a readiness probe")
 	}
+	if !serviceIDPattern.MatchString(strings.TrimSpace(cfg.ServiceID)) {
+		return nil, errors.New("canvas capability health reporter service id must be the bare Auth Core registry key (wiki-store), not a service: subject")
+	}
 	capURL, err := validateURL(cfg.CapabilityCoreURL, "Capability Core URL")
 	if err != nil {
 		return nil, err
@@ -127,6 +140,10 @@ func New(cfg Config) (*Reporter, error) {
 			return http.ErrUseLastResponse
 		}}
 	}
+	attested := []string{CanvasReadCapabilityID}
+	if cfg.AttestWrite {
+		attested = append(attested, CanvasWriteCapabilityID)
+	}
 	return &Reporter{
 		capabilityCoreURL: capURL,
 		authCoreURL:       authURL,
@@ -135,6 +152,7 @@ func New(cfg Config) (*Reporter, error) {
 		interval:          interval,
 		http:              client,
 		probe:             cfg.Probe,
+		capabilities:      attested,
 	}, nil
 }
 
@@ -176,7 +194,7 @@ func (r *Reporter) Attest(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, capabilityID := range Capabilities {
+	for _, capabilityID := range r.capabilities {
 		if err := r.attestOne(ctx, token, capabilityID); err != nil {
 			return err
 		}

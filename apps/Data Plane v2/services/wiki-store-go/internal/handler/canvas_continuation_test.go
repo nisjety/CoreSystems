@@ -81,7 +81,9 @@ func TestCanvasContinuationRefusesEverythingOutsideTheLane(t *testing.T) {
 		code         string
 	}{
 		{"the lane is off", false,
-			func(t *testing.T) string { return continuationBearer(t, canvasContinuationServiceID, continuationScopes...) },
+			func(t *testing.T) string {
+				return continuationBearer(t, canvasContinuationServiceID, continuationScopes...)
+			},
 			agentDecision, http.StatusForbidden, spacedecision.CodeDecisionMismatch},
 		{"another service", true,
 			func(t *testing.T) string { return continuationBearer(t, "service:other-plane", continuationScopes...) },
@@ -89,8 +91,15 @@ func TestCanvasContinuationRefusesEverythingOutsideTheLane(t *testing.T) {
 		{"no continuation scope", true,
 			func(t *testing.T) string { return continuationBearer(t, canvasContinuationServiceID, "wiki.write") },
 			agentDecision, http.StatusForbidden, spacedecision.CodeDecisionMismatch},
+		{"a continuation scope without wiki.write", true,
+			func(t *testing.T) string {
+				return continuationBearer(t, canvasContinuationServiceID, canvasContinuationScope)
+			},
+			agentDecision, http.StatusForbidden, "insufficient_scope"},
 		{"a human decision from a service", true,
-			func(t *testing.T) string { return continuationBearer(t, canvasContinuationServiceID, continuationScopes...) },
+			func(t *testing.T) string {
+				return continuationBearer(t, canvasContinuationServiceID, continuationScopes...)
+			},
 			humanDecision, http.StatusForbidden, spacedecision.CodeDecisionMismatch},
 		{"a decision for another org", true,
 			func(t *testing.T) string {
@@ -98,12 +107,16 @@ func TestCanvasContinuationRefusesEverythingOutsideTheLane(t *testing.T) {
 			},
 			agentDecision, http.StatusForbidden, spacedecision.CodeDecisionMismatch},
 		{"a decision for another Space", true,
-			func(t *testing.T) string { return continuationBearer(t, canvasContinuationServiceID, continuationScopes...) },
+			func(t *testing.T) string {
+				return continuationBearer(t, canvasContinuationServiceID, continuationScopes...)
+			},
 			func(t *testing.T) string {
 				return canvasRouteRunToken(t, save, func(run *spacedecision.RunClaims) { run.SpaceRef = "space-other" })
 			}, http.StatusForbidden, spacedecision.CodeDecisionMismatch},
 		{"a read decision on the save", true,
-			func(t *testing.T) string { return continuationBearer(t, canvasContinuationServiceID, continuationScopes...) },
+			func(t *testing.T) string {
+				return continuationBearer(t, canvasContinuationServiceID, continuationScopes...)
+			},
 			func(t *testing.T) string {
 				return canvasRouteRunToken(t, save, func(run *spacedecision.RunClaims) {
 					run.ActionID, run.ActionSchemaHash = spacedecision.ActionRunCanvasRead, spacedecision.SchemaRunCanvasRead
@@ -111,7 +124,9 @@ func TestCanvasContinuationRefusesEverythingOutsideTheLane(t *testing.T) {
 				})
 			}, http.StatusForbidden, spacedecision.CodeDecisionMismatch},
 		{"a decision under a history floor", true,
-			func(t *testing.T) string { return continuationBearer(t, canvasContinuationServiceID, continuationScopes...) },
+			func(t *testing.T) string {
+				return continuationBearer(t, canvasContinuationServiceID, continuationScopes...)
+			},
 			func(t *testing.T) string {
 				return canvasRouteRunToken(t, save, func(run *spacedecision.RunClaims) {
 					at := run.IssuedAt
@@ -119,7 +134,9 @@ func TestCanvasContinuationRefusesEverythingOutsideTheLane(t *testing.T) {
 				})
 			}, http.StatusForbidden, spacedecision.CodeHistoryFloor},
 		{"a decision under zero data retention", true,
-			func(t *testing.T) string { return continuationBearer(t, canvasContinuationServiceID, continuationScopes...) },
+			func(t *testing.T) string {
+				return continuationBearer(t, canvasContinuationServiceID, continuationScopes...)
+			},
 			func(t *testing.T) string {
 				return canvasRouteRunToken(t, save, func(run *spacedecision.RunClaims) { run.ZeroDataRetention = true })
 			}, http.StatusPreconditionFailed, canvasZDRCode},

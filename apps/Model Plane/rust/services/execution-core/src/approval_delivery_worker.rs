@@ -1804,8 +1804,13 @@ mod tests {
             crate::space_gate::action_label(CANVAS_WRITE_TOOL_NAME, "{}"),
             "Save the room canvas"
         );
-        // Not registered yet: the real registry refuses it before the arm.
-        if !crate::space_gate::is_resumable_tool(CANVAS_WRITE_TOOL_NAME) {
+        // The real registry decides: unregistered it refuses the kind before the arm; registered it must reach the canvas arm.
+        if crate::space_gate::is_resumable_tool(CANVAS_WRITE_TOOL_NAME) {
+            assert!(matches!(
+                parse_resumable_action(&descriptor),
+                Ok(ResumableAction::CanvasWrite(_))
+            ));
+        } else {
             assert_eq!(
                 parse_resumable_action(&descriptor).err(),
                 Some(FAILURE_INVALID_CONTINUATION)

@@ -59,9 +59,14 @@ func (f *fakePlanes) handler(t *testing.T) http.Handler {
 
 func newTestReporter(t *testing.T, url string, probe Probe) *Reporter {
 	t.Helper()
+	return newTestReporterWith(t, url, probe, true)
+}
+
+func newTestReporterWith(t *testing.T, url string, probe Probe, attestWrite bool) *Reporter {
+	t.Helper()
 	reporter, err := New(Config{
-		CapabilityCoreURL: url, AuthCoreURL: url, ServiceID: "service:wiki-store",
-		Credential: strings.Repeat("k", 32), Probe: probe,
+		CapabilityCoreURL: url, AuthCoreURL: url, ServiceID: "wiki-store",
+		Credential: strings.Repeat("k", 32), Probe: probe, AttestWrite: attestWrite,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -80,8 +85,8 @@ func TestReporterAttestsBothCanvasRowsOnTheOwnerLane(t *testing.T) {
 	if err := newTestReporter(t, server.URL, readyProbe).Attest(context.Background()); err != nil {
 		t.Fatalf("Attest: %v", err)
 	}
-	if planes.mintHeaders.Get("x-service-id") != "service:wiki-store" {
-		t.Fatalf("minted as %q, want service:wiki-store", planes.mintHeaders.Get("x-service-id"))
+	if planes.mintHeaders.Get("x-service-id") != "wiki-store" {
+		t.Fatalf("minted as %q, want the bare registry key wiki-store", planes.mintHeaders.Get("x-service-id"))
 	}
 	if planes.mintBody.OrgID != "global" || strings.Join(planes.mintBody.Scopes, ",") != readScope+","+ownerHealthScope {
 		t.Fatalf("token request = %+v", planes.mintBody)
@@ -93,6 +98,19 @@ func TestReporterAttestsBothCanvasRowsOnTheOwnerLane(t *testing.T) {
 		if a.Version != "3" || a.State != "available" || a.ReasonCode != "runtime_healthy" {
 			t.Fatalf("attestation = %+v", a)
 		}
+	}
+}
+
+// With the approved-continuation lane off, only the read row is attested: every approved write would otherwise fail terminally.
+func TestReporterAttestsOnlyTheReadRowWhenTheContinuationLaneIsOff(t *testing.T) {
+	planes := &fakePlanes{}
+	server := httptest.NewServer(planes.handler(t))
+	defer server.Close()
+	if err := newTestReporterWith(t, server.URL, readyProbe, false).Attest(context.Background()); err != nil {
+		t.Fatalf("Attest: %v", err)
+	}
+	if len(planes.attested) != 1 || planes.attested[0].ID != CanvasReadCapabilityID {
+		t.Fatalf("attested = %+v, want only the read row", planes.attested)
 	}
 }
 
@@ -110,7 +128,7 @@ func TestReporterAttestsNothingWhenTheProbeFails(t *testing.T) {
 	}
 }
 
-// Capability Core refusing the attester (for example while no principal carries service:wiki-store) is an error, never a success.
+// Capability Core refusing the attester (for example while no principal row carries wiki-store) is an error, never a success.
 func TestReporterReportsARefusedAttestation(t *testing.T) {
 	planes := &fakePlanes{attestStatus: http.StatusForbidden}
 	server := httptest.NewServer(planes.handler(t))
@@ -125,7 +143,7 @@ func TestNewRefusesAPartialOrUnsafeBlock(t *testing.T) {
 	if (Config{}).Configured() {
 		t.Fatal("an empty block reads as configured")
 	}
-	full := Config{CapabilityCoreURL: "http://cap:8080", AuthCoreURL: "http://auth:3011", ServiceID: "service:wiki-store",
+	full := Config{CapabilityCoreURL: "http://cap:8080", AuthCoreURL: "http://auth:3011", ServiceID: "wiki-store",
 		Credential: strings.Repeat("k", 32), Probe: readyProbe}
 	if _, err := New(full); err != nil {
 		t.Fatalf("full block refused: %v", err)
@@ -142,6 +160,13 @@ func TestNewRefusesAPartialOrUnsafeBlock(t *testing.T) {
 	noProbe.Probe = nil
 	if _, err := New(noProbe); err == nil {
 		t.Fatal("a block without a probe was accepted")
+	}
+	for _, id := range []string{"service:wiki-store", "wiki store", "-wiki-store"} {
+		subject := full
+		subject.ServiceID = id
+		if _, err := New(subject); err == nil {
+			t.Fatalf("service id %q was accepted; Auth Core keys are bare registry keys", id)
+		}
 	}
 	unsafe := full
 	unsafe.CapabilityCoreURL = "http://user:pass@cap:8080"

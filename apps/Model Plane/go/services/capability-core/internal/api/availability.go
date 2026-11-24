@@ -57,7 +57,7 @@ const (
 
 // Room canvas capability ids (WS19-S9). The owner is wiki-store, so these rows name wiki-store as their only attester.
 // wiki-store's reporter (wiki-store-go/internal/capabilityhealth) attests them after its canvas probe; until Auth Core's
-// principal registry carries service:wiki-store no token names it, so both rows stay unattested. The generic and tenant
+// principal registry carries a wiki-store row (bare key wiki-store, token subject service:wiki-store) no token names it, so both rows stay unattested. The generic and tenant
 // lanes refuse the ids because they are owner-action ids.
 const (
 	spaceCanvasReadCapabilityID  = "cap.tool.space.canvas.read"

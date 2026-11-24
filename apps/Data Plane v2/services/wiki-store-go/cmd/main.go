@@ -173,6 +173,8 @@ func main() {
 		ServiceID:         cfg.CapabilityHealthServiceID,
 		Credential:        cfg.CapabilityHealthCredential,
 		Probe:             capabilityhealth.CanvasProbe(cfg.SpaceCanvasEnabled, len(canvasKeys), pool.Ping),
+		// space.canvas.write defaults to "ask": approved writes need the continuation lane, so the write row follows its switch.
+		AttestWrite: cfg.SpaceCanvasEnabled && cfg.SpaceCanvasContinuationEnabled,
 	}
 	if healthCfg.Configured() {
 		reporter, reporterErr := capabilityhealth.New(healthCfg)

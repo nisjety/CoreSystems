@@ -20,7 +20,7 @@ const (
 	ConversationCoreServiceID = "service:conversation-core"
 	BrowserBrokerServiceID    = "service:browser-broker"
 	// WikiStoreServiceID owns the room canvas capabilities (WS19-S9). Its probe and reporter live in wiki-store-go
-	// (internal/capabilityhealth); the owner lane accepts it once Auth Core's principal registry carries this identity.
+	// (internal/capabilityhealth); the owner lane accepts this token subject once Auth Core's principal registry carries the bare key wiki-store.
 	WikiStoreServiceID = "service:wiki-store"
 
 	ReadScope  = "capability:read"
