@@ -50,6 +50,8 @@ func TestEveryMembershipWriterRefusesOrIsAKnownDMPath(t *testing.T) {
 	registrationPaths := map[string]string{
 		"Register":                     "seeds the fixed roster inside the registration transaction",
 		"purgeControlSpaceProjections": "deletes every row when the Space is deleted",
+		// D22o: GDPR erasure removes only the erased person's own row; it never adds anyone.
+		"EraseDMParticipantTx": "removes an erased person from DM rosters (D22o)",
 	}
 	// writers that must refuse a DM, and the text that proves it.
 	refusals := map[string][]string{

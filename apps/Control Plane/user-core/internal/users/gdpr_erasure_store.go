@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/spaces"
 )
 
 type erasureOperationStore interface {
@@ -263,6 +265,13 @@ func (r *Repository) CompleteErasureLocalStage(ctx context.Context, operation Er
 		if _, err := tx.Exec(ctx, statement.query, operation.UserID, ledgerPseudonym); err != nil {
 			return fmt.Errorf("pseudonymize %s: %w", statement.name, err)
 		}
+	}
+
+	// D22o (F-t1-016): the erased person leaves every DM and group DM roster;
+	// the DM and the peers' memberships stay. Same transaction as the ledger
+	// pseudonym above, so a retry neither half-erases nor repeats.
+	if _, err := spaces.EraseDMParticipantTx(ctx, tx, operation.UserID, ledgerPseudonym); err != nil {
+		return fmt.Errorf("erase direct message rosters: %w", err)
 	}
 
 	switch operation.Mode {
