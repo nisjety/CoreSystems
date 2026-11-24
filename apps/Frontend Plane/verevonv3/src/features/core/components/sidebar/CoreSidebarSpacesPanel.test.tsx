@@ -14,6 +14,7 @@ import { setRoomDirectoryListed } from '@/shared/api/spaces-client'
 import { removeClientValuesWithPrefix } from '@/shared/session/client-storage'
 import { clearSession, markSessionOnboardingComplete, setSessionUser } from '@/shared/session/session-store'
 import { SPACE_SIDEBAR_DEBOUNCE_MS } from '@/features/spaces/lib/space-sidebar-store'
+import { notifySpacesListChanged } from '@/features/spaces/lib/space-list-changed'
 import { publishSpaceThreads, publishSpaceUnread, resetLiveWorkForTests, retractSpaceThreads } from '@/features/spaces/lib/space-live-work'
 
 const spacesClient = vi.hoisted(() => ({
@@ -209,6 +210,23 @@ describe('SpacesExpandedSidebarPanel', () => {
     expect(live.getAttribute('data-archived')).toBeNull()
     // Archived sinks below the live room, whatever the server order.
     expect(live.compareDocumentPosition(archived) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  // DEPTH-WS04-S2-1: a rename saved on the room page (SpacePage's onSaved announces it) is read again here.
+  it('reads the listing again when a room page announces a rename, and shows the new name', async () => {
+    renderSpacesSidebar()
+    expect(await screen.findByRole('link', { name: 'Launch room' })).toBeTruthy()
+    const readsBefore = spacesClient.listSpaces.mock.calls.length
+    spacesClient.listSpaces.mockResolvedValue([
+      personalSpace,
+      { space_ref: 'space_shared', name: 'Release room', kind: 'shared', lifecycle: 'active' },
+    ])
+
+    notifySpacesListChanged()
+
+    expect(await screen.findByRole('link', { name: 'Release room' })).toBeTruthy()
+    expect(screen.queryByRole('link', { name: 'Launch room' })).toBeNull()
+    expect(spacesClient.listSpaces.mock.calls.length).toBeGreaterThan(readsBefore)
   })
 
   // WS12-S3: direct messages get their own group; the channels group never lists them.
