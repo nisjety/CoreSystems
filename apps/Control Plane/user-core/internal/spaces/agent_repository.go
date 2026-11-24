@@ -170,7 +170,12 @@ func (r *Repository) VisibleAgents(ctx context.Context, orgID, actorID string) (
 // VisibleAgent returns one visible agent definition, or (nil, nil) when the actor may
 // not see it. The caller answers that the same way as an unknown id.
 func (r *Repository) VisibleAgent(ctx context.Context, orgID, actorID, agentSubjectID string) (*AgentView, error) {
-	views, err := r.visibleAgents(ctx, orgID, actorID, strings.TrimSpace(agentSubjectID))
+	agentSubjectID = strings.TrimSpace(agentSubjectID)
+	if agentSubjectID == "" {
+		// A blank id would match every visible agent ($3 = ''); it names none.
+		return nil, nil
+	}
+	views, err := r.visibleAgents(ctx, orgID, actorID, agentSubjectID)
 	if err != nil || len(views) == 0 {
 		return nil, err
 	}
@@ -182,6 +187,11 @@ func (r *Repository) VisibleAgent(ctx context.Context, orgID, actorID, agentSubj
 // when the actor may not see the definition, like VisibleAgent. Control is the authority
 // for the list; the Convex copy is only a display projection (DEPTH-WS17-S5-ACCESS-READ).
 func (r *Repository) VisibleAgentAccess(ctx context.Context, orgID, actorID, agentSubjectID string) (*AgentView, []AgentAccessEntry, error) {
+	agentSubjectID = strings.TrimSpace(agentSubjectID)
+	if agentSubjectID == "" {
+		// A blank id would match every visible agent ($3 = '') and answer the first one's list; it names none.
+		return nil, nil, nil
+	}
 	if r == nil || r.db == nil {
 		return nil, nil, AgentError(503, CodeAgentRegistryUnavailable, "agent registry is unavailable", nil)
 	}
@@ -190,7 +200,7 @@ func (r *Repository) VisibleAgentAccess(ctx context.Context, orgID, actorID, age
 		return nil, nil, fmt.Errorf("begin agent access read: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	views, err := visibleAgentsIn(ctx, tx, orgID, actorID, strings.TrimSpace(agentSubjectID))
+	views, err := visibleAgentsIn(ctx, tx, orgID, actorID, agentSubjectID)
 	if err != nil || len(views) == 0 {
 		return nil, nil, err
 	}

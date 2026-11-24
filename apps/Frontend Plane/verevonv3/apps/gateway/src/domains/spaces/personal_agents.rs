@@ -600,8 +600,10 @@ pub(crate) async fn get_agent_access_core(
         .map(|entry| json!({ "principal_id": field(entry, "principal_id"), "role": field(entry, "role") }))
         .collect();
 
-    // Display cache only: the owner label. A missing row or an outage yields no label.
-    let definition = convex_gateway_call(
+    // Display cache only: the owner label; an outage yields no label. Convex answering that it has no row
+    // is a 404, though: the save writes that projection after Control accepts, so opening the editor for
+    // a row Convex lacks would commit in Control and then fail the projection write (E-PRIO-01).
+    let definition = match convex_gateway_call(
         state,
         "query",
         "spaceAgents:agentDefinitionForGateway",
@@ -612,7 +614,11 @@ pub(crate) async fn get_agent_access_core(
         }),
     )
     .await
-    .unwrap_or(Value::Null);
+    {
+        Ok(Value::Null) => return not_found(),
+        Ok(definition) => definition,
+        Err(_) => Value::Null,
+    };
 
     ok_data(json!({
         "agent_ref": agent_id,
@@ -1853,6 +1859,27 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["data"]["entries"], json!([]));
         assert!(body["data"]["owner_label"].is_null());
+    }
+
+    /// Convex reachable but without the row: 404, so the editor is not opened for a save whose projection
+    /// write would fail after Control had accepted it.
+    #[tokio::test]
+    async fn a_missing_convex_row_is_404_on_the_access_read() {
+        let f = fixture().await;
+        answer(
+            &f.user_core,
+            "GET",
+            "/api/v1/internal/agents/subjects/agent-agent-1",
+            control(json!({
+                "agent_subject_id": "agent-agent-1", "owner_user_id": "user-1", "visibility": "owner",
+                "add_policy": "owner_only", "revision": 2, "role": "owner", "entries": [],
+            })),
+        )
+        .await;
+        convex(&f, "spaceAgents:agentDefinitionForGateway", convex_value(Value::Null)).await;
+        let (status, Json(body)) = get_agent_access_core(&f.state, &user(), "agent-1").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(body.pointer("/error/code").is_some(), "typed envelope: {body}");
     }
 
     /// Control refusing the read (not visible) is relayed, and Convex is not asked.
