@@ -156,6 +156,34 @@ test('setStatusForGateway refuses bidi and control text with invalid_status and 
   assert.deepEqual(log.inserts, []);
 });
 
+test('clearStatusForGateway removes only the caller\'s own row in this organization, and is idempotent', async (t) => {
+  withServiceKey(t);
+  const base = { serviceKey: SERVICE_KEY, externalAuthId: AUTH, externalOrgId: ORG };
+  const { ctx, tables, log } = makeCtx(
+    memberTables({
+      spaceMemberStatus: [
+        { externalOrgId: ORG, externalAuthId: AUTH, state: 'dnd', text: 'In a meeting', updatedAt: 1 },
+        { externalOrgId: ORG, externalAuthId: 'bob', state: 'away', updatedAt: 2 },
+        { externalOrgId: 'org_other', externalAuthId: AUTH, state: 'offline', updatedAt: 3 },
+      ],
+    }),
+  );
+  assert.deepEqual(await spaceMemberStatus.clearStatusForGateway._handler(ctx, base), { cleared: true });
+  assert.equal(log.deletes.length, 1, 'exactly the own row in this organization is deleted');
+  assert.deepEqual(
+    tables.spaceMemberStatus.map((row) => `${row.externalOrgId}:${row.externalAuthId}`),
+    [`${ORG}:bob`, `org_other:${AUTH}`],
+    "another member's row and the same person's row in another organization are untouched",
+  );
+  // Nothing left to clear: the same call answers cleared false and deletes nothing more.
+  assert.deepEqual(await spaceMemberStatus.clearStatusForGateway._handler(ctx, base), { cleared: false });
+  assert.equal(log.deletes.length, 1);
+  await assert.rejects(
+    () => spaceMemberStatus.clearStatusForGateway._handler(ctx, { ...base, serviceKey: 'not-the-key' }),
+    /Unauthorized/,
+  );
+});
+
 test('agentChipState: working and waiting rows are shown while fresh', () => {
   assert.equal(agentChipState({ state: 'working', updatedAt: NOW - 1000 }, NOW), 'working');
   assert.equal(agentChipState({ state: 'waiting', updatedAt: NOW - 1000 }, NOW), 'waiting');
