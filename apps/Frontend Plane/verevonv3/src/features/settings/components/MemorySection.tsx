@@ -28,6 +28,7 @@ import { translateApiError, useI18n } from '@/shared/i18n'
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
 import { MemoryDeclassifyDialog } from '@/features/spaces/components/MemoryDeclassifyDialog'
 import { memoryDeclassifyOffered } from '@/features/spaces/lib/space-memory-share'
+import { MemorySpaceShares } from '@/features/settings/components/MemorySpaceShares'
 
 /**
  * "What do you remember about me" — lists durable memory entries the system
@@ -245,6 +246,8 @@ export function MemorySection() {
   const [shareOffered] = createResource(() => memoryDeclassifyOffered())
   // The personal memory whose share dialog is open.
   const [sharingEntry, setSharingEntry] = createSignal<MemoryEntry | null>(null)
+  // W3 D21g: bumped after a share, so the "Shared to rooms" list is read again.
+  const [sharesVersion, setSharesVersion] = createSignal(0)
   // WS17-D9: the withheld row being restored, if any (one at a time).
   const [restoringId, setRestoringId] = createSignal<string | null>(null)
 
@@ -715,6 +718,10 @@ export function MemorySection() {
         </Show>
       </Show>
 
+      <Show when={shareOffered() === true}>
+        <MemorySpaceShares version={sharesVersion()} />
+      </Show>
+
       <div class="verevon-settings-list-card">
         <div class="verevon-settings-integration-row">
           <div>
@@ -773,6 +780,7 @@ export function MemorySection() {
             memoryId={entry().memoryId}
             initialText={entry().content}
             onClose={() => setSharingEntry(null)}
+            onShared={() => setSharesVersion((version) => version + 1)}
           />
         )}
       </Show>

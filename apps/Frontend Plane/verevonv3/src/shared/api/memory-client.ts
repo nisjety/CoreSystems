@@ -491,6 +491,46 @@ export function retractSpaceMemoryResultFrom(raw: unknown): RetractSpaceMemoryRe
 }
 
 /**
+ * One live share of the person's own memory into a room (W3 D21g): the room copy a take-back names, the room, the personal
+ * memory it came from and when it was first shared (ISO string, or `null` when the server did not say).
+ */
+export interface SpaceMemoryShare {
+  roomMemoryId: string
+  spaceRef: string
+  sourceMemoryId: string
+  sharedAt: string | null
+}
+
+/** Reads `GET /api/v1/memory/space-shares` `data`. A row without a room copy id or a room is dropped, never guessed. */
+export function spaceMemorySharesFrom(raw: unknown): SpaceMemoryShare[] {
+  const body = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  const rows = Array.isArray(body.shares) ? body.shares : []
+  const shares: SpaceMemoryShare[] = []
+  for (const item of rows) {
+    const row = item && typeof item === 'object' ? (item as Record<string, unknown>) : {}
+    const roomMemoryId = typeof row.room_memory_id === 'string' ? row.room_memory_id.trim() : ''
+    const spaceRef = typeof row.space_ref === 'string' ? row.space_ref.trim() : ''
+    if (!roomMemoryId || !spaceRef) continue
+    shares.push({
+      roomMemoryId,
+      spaceRef,
+      sourceMemoryId: typeof row.source_memory_id === 'string' ? row.source_memory_id.trim() : '',
+      sharedAt: typeof row.shared_at === 'string' && row.shared_at !== '' ? row.shared_at : null,
+    })
+  }
+  return shares
+}
+
+/**
+ * The signed-in person's own live shares into rooms, newest first (W3 D21g), so a share can be taken back after its dialog
+ * has closed. The server takes the person from the session and lists only their own shares; the gateway answers 404
+ * `feature_disabled` while sharing is off. The take-back itself is the `memory.retract_from_space` action.
+ */
+export async function listSpaceMemoryShares(): Promise<SpaceMemoryShare[]> {
+  return spaceMemorySharesFrom(await requestJson<unknown>('/api/v1/memory/space-shares'))
+}
+
+/**
  * What restoring one withheld memory answers (WS17-D9, `memory.restore`): the row's id, with `restored` true when it is
  * ordinary personal memory again. Written only through the action registry; a reply that does not match throws, and the
  * caller reports the restore as not made.
