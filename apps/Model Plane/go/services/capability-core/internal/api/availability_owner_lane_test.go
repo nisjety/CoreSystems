@@ -49,8 +49,8 @@ func ownerActionHealthRecorderFor(t *testing.T, handler *CapabilitiesHandler, ca
 }
 
 // WS18-S2: the owner-action lane attests exactly its attester table. Conversation Core attests the ticket; execution-core
-// attests the three Model-owned Space rows and the schedule follow-up; the two room canvas rows have wiki-store as their
-// attester, which no caller here is; pause_self has no attester at all, so no caller attests it.
+// attests the three Model-owned Space rows and the schedule follow-up; wiki-store attests the two room canvas rows and nothing
+// else; pause_self has no attester at all, so no caller attests it.
 func TestOwnerActionLaneAttestsExactlyItsAttesterTable(t *testing.T) {
 	const pauseSelfCapabilityID = "cap.tool.space.agent.pause_self"
 	cases := []struct {
@@ -70,6 +70,11 @@ func TestOwnerActionLaneAttestsExactlyItsAttesterTable(t *testing.T) {
 		{"conversation-core may not attest schedule follow_up", spaceScheduleFollowUpCapabilityID, authz.ConversationCoreServiceID, http.StatusForbidden},
 		{"conversation-core may not attest the room canvas read", spaceCanvasReadCapabilityID, authz.ConversationCoreServiceID, http.StatusForbidden},
 		{"execution-core may not attest the room canvas write", spaceCanvasWriteCapabilityID, authz.ExecutionCoreServiceID, http.StatusForbidden},
+		// P-CFG: wiki-store, the canvas owner, attests both canvas rows (its reporter is wiki-store-go/internal/capabilityhealth).
+		{"wiki-store attests the room canvas read", spaceCanvasReadCapabilityID, authz.WikiStoreServiceID, http.StatusOK},
+		{"wiki-store attests the room canvas write", spaceCanvasWriteCapabilityID, authz.WikiStoreServiceID, http.StatusOK},
+		{"wiki-store may not attest thread rename", spaceThreadRenameCapabilityID, authz.WikiStoreServiceID, http.StatusForbidden},
+		{"wiki-store may not attest the ticket", ownerActionTicketCapabilityID, authz.WikiStoreServiceID, http.StatusForbidden},
 		{"conversation-core may not attest pause_self", pauseSelfCapabilityID, authz.ConversationCoreServiceID, http.StatusForbidden},
 		{"execution-core may not attest pause_self", pauseSelfCapabilityID, authz.ExecutionCoreServiceID, http.StatusForbidden},
 		{"an unrelated service may not attest the owner lane", spaceThreadRenameCapabilityID, "service:unrelated", http.StatusForbidden},

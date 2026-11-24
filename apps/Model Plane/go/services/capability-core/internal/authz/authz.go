@@ -19,8 +19,8 @@ const (
 	ExecutionCoreServiceID    = "service:execution-core"
 	ConversationCoreServiceID = "service:conversation-core"
 	BrowserBrokerServiceID    = "service:browser-broker"
-	// WikiStoreServiceID owns the room canvas capabilities (WS19-S9). No principal carries it yet, so the owner lane
-	// refuses every attester for those ids until a wiki-store health probe is registered.
+	// WikiStoreServiceID owns the room canvas capabilities (WS19-S9). Its probe and reporter live in wiki-store-go
+	// (internal/capabilityhealth); the owner lane accepts it once Auth Core's principal registry carries this identity.
 	WikiStoreServiceID = "service:wiki-store"
 
 	ReadScope  = "capability:read"
@@ -111,7 +111,8 @@ func AuthorizeHTTP(principal authctx.Principal, request *http.Request) error {
 	}
 	if request.URL.Path == "/api/v1/capabilities/owner-actions/health" {
 		if request.Method == http.MethodPost && principal.PrincipalType == "service" &&
-			(principal.ActorID == ConversationCoreServiceID || principal.ActorID == ExecutionCoreServiceID) &&
+			(principal.ActorID == ConversationCoreServiceID || principal.ActorID == ExecutionCoreServiceID ||
+				principal.ActorID == WikiStoreServiceID) &&
 			principal.OrganizationID == "global" && principal.HasScope(OwnerActionHealthWriteScope) {
 			return nil
 		}

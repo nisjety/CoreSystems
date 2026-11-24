@@ -32,6 +32,8 @@ type CanvasHandler struct {
 	repo    canvasStore
 	enabled bool
 	keys    spacedecision.KeySet
+	// continuation admits the approved-continuation lane on the save route (canvas_continuation.go). Off by default.
+	continuation bool
 }
 
 // canvasStore is the part of the canvas repository the routes use. *canvas.Repo implements it. The route tests give the handler
@@ -275,7 +277,8 @@ func (h *CanvasHandler) SaveVersion(w http.ResponseWriter, r *http.Request) {
 		writeCanvasStoreError(w, err)
 		return
 	}
-	caller, refused := h.verifyCaller(r, bearer, spaceRef)
+	// A service bearer is admitted here only through the approved-continuation lane (D22z, canvas_continuation.go).
+	caller, refused := h.verifyWriteCaller(r, bearer, spaceRef)
 	if refused != nil {
 		refused.write(w)
 		return

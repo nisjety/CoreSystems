@@ -89,6 +89,8 @@ func TestAuthorizeHTTPOwnerActionHealthRouteAdmitsOnlyTheTwoGlobalOwners(t *test
 	browser.Scopes = []string{OwnerActionHealthWriteScope, BrowserHealthWriteScope}
 	unrelated := conversation
 	unrelated.ActorID = "service:unrelated"
+	wikiStore := conversation
+	wikiStore.ActorID = WikiStoreServiceID
 
 	tests := []struct {
 		name      string
@@ -101,6 +103,8 @@ func TestAuthorizeHTTPOwnerActionHealthRouteAdmitsOnlyTheTwoGlobalOwners(t *test
 		{"a tenant user holding the scope may not attest", tenantUser, true},
 		{"browser-broker holding the owner scope may not attest", browser, true},
 		{"an unrelated global service may not attest", unrelated, true},
+		// P-CFG: the room canvas owner; the attester table still limits it to the two canvas rows.
+		{"wiki-store in global may attest the room canvas rows", wikiStore, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -51,6 +51,16 @@ type Config struct {
 	ControlSpaceDecisionPublicKeysJSON  string
 	ControlSpaceDecisionKeyID           string
 	ControlSpaceDecisionPublicKeyBase64 string
+	// SpaceCanvasContinuationEnabled is the WIKISTORE_SPACE_CANVAS_CONTINUATION switch (strict literal "true", off by default).
+	// On, the canvas save also admits the approved-continuation lane (D22z): execution-core's service bearer with
+	// wiki.canvas.continue and an agent run-action decision. The switch grants nothing; the bearer, scope and decision decide.
+	SpaceCanvasContinuationEnabled bool
+	// Capability health (P-CFG, WS19-S9): wiki-store attests the room canvas capabilities to Capability Core on the owner-action
+	// lane. All four values together enable the reporter; none disables it; a partial block is an operator error.
+	CapabilityCoreURL           string
+	CapabilityHealthAuthCoreURL string
+	CapabilityHealthServiceID   string
+	CapabilityHealthCredential  string
 }
 
 func Load() *Config {
@@ -82,6 +92,12 @@ func Load() *Config {
 		ControlSpaceDecisionPublicKeysJSON:  strings.TrimSpace(os.Getenv("CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON")),
 		ControlSpaceDecisionKeyID:           strings.TrimSpace(os.Getenv("CONTROL_SPACE_DECISION_KEY_ID")),
 		ControlSpaceDecisionPublicKeyBase64: strings.TrimSpace(os.Getenv("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64")),
+		SpaceCanvasContinuationEnabled:      strings.TrimSpace(os.Getenv("WIKISTORE_SPACE_CANVAS_CONTINUATION")) == "true",
+
+		CapabilityCoreURL:           strings.TrimSpace(os.Getenv("WIKISTORE_CAPABILITY_CORE_URL")),
+		CapabilityHealthAuthCoreURL: strings.TrimSpace(os.Getenv("WIKISTORE_CAPABILITY_HEALTH_AUTH_CORE_URL")),
+		CapabilityHealthServiceID:   strings.TrimSpace(os.Getenv("WIKISTORE_CAPABILITY_HEALTH_SERVICE_ID")),
+		CapabilityHealthCredential:  strings.TrimSpace(os.Getenv("WIKISTORE_SERVICE_API_KEY")),
 	}
 }
 

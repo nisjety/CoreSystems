@@ -22,6 +22,7 @@ import (
 	wikipb "github.com/triodelab/dataplane/gen/go/wiki/v1"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/authctx"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/canvas"
+	"github.com/triodelab/dataplane/services/wiki-store-go/internal/capabilityhealth"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/config"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/eventauth"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/events"
@@ -159,7 +160,29 @@ func main() {
 		}
 	}
 	log.Info().Bool("space_canvas", cfg.SpaceCanvasEnabled).Int("control_decision_keys", len(canvasKeys)).Msg("room canvas posture")
-	canvasHandler := handler.NewCanvasHandler(canvas.NewRepo(pool), cfg.SpaceCanvasEnabled, canvasKeys)
+	// D22z: the approved-continuation lane of the canvas save is off unless WIKISTORE_SPACE_CANVAS_CONTINUATION=true.
+	canvasHandler := handler.NewCanvasHandler(canvas.NewRepo(pool), cfg.SpaceCanvasEnabled, canvasKeys).
+		WithContinuation(cfg.SpaceCanvasEnabled && cfg.SpaceCanvasContinuationEnabled)
+	log.Info().Bool("space_canvas_continuation", cfg.SpaceCanvasEnabled && cfg.SpaceCanvasContinuationEnabled).Msg("room canvas continuation lane posture")
+
+	// P-CFG: wiki-store attests the room canvas capabilities to Capability Core on the owner-action lane. An unset block disables
+	// the reporter; a partial block is logged and disables it. A failed attestation never changes this service's serving status.
+	healthCfg := capabilityhealth.Config{
+		CapabilityCoreURL: cfg.CapabilityCoreURL,
+		AuthCoreURL:       cfg.CapabilityHealthAuthCoreURL,
+		ServiceID:         cfg.CapabilityHealthServiceID,
+		Credential:        cfg.CapabilityHealthCredential,
+		Probe:             capabilityhealth.CanvasProbe(cfg.SpaceCanvasEnabled, len(canvasKeys), pool.Ping),
+	}
+	if healthCfg.Configured() {
+		reporter, reporterErr := capabilityhealth.New(healthCfg)
+		if reporterErr != nil {
+			log.Warn().Err(reporterErr).Msg("room canvas capability health reporter disabled")
+		} else {
+			go reporter.Start(ctx, func(format string, args ...any) { log.Warn().Msgf(format, args...) })
+			log.Info().Msg("room canvas capability health reporter enabled")
+		}
+	}
 	// WS19-S8 canvas purge for Space deletion. It is not gated by the canvas flag (see MountCanvasPurgeRoute).
 	canvasPurgeHandler := handler.NewCanvasPurgeHandler(canvas.NewRepo(pool))
 
