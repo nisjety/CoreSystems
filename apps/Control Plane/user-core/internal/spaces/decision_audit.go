@@ -82,17 +82,20 @@ type DecisionAuditOutbox interface {
 }
 
 // DecisionAuditRoute is one issuer route. Name is the decision_kind carried in
-// details; EffectBound says an issued decision of this route is audited.
+// details; EffectBound says an issued decision of this route is audited (and,
+// B-REC-03, that the issue fails closed when its audit row cannot be written);
+// Batch says a 200 carries per-row results whose denied rows are audited.
 type DecisionAuditRoute struct {
 	Name        string
 	EffectBound bool
+	Batch       bool
 }
 
 // decisionAuditRoutes maps the path under /api/v1/internal/spaces to its row.
 // Reads, retrieval and appends are issuer routes (their denials are audited)
 // but never effect-bound. The batch thread-read-decisions route reports a
-// per-row status in a 200 body and is not an issuer of a single decision, so it
-// is not listed (see the depth file).
+// per-row status in a 200 body: B-REC-03 audits each denied row of it, plus its
+// own whole-batch refusals, like any other issuer route.
 var decisionAuditRoutes = map[string]DecisionAuditRoute{
 	"/personal-thread-decision":         {Name: "thread_create"},
 	"/thread-decision":                  {Name: "thread_create"},
@@ -121,6 +124,7 @@ var decisionAuditRoutes = map[string]DecisionAuditRoute{
 	"/scheduled-run-decision":           {Name: "scheduled_run", EffectBound: true},
 	"/scheduled-run-execution-decision": {Name: "scheduled_run", EffectBound: true},
 	"/scheduled-step-decision":          {Name: "scheduled_step", EffectBound: true},
+	"/thread-read-decisions":            {Name: "thread_read", Batch: true},
 }
 
 // DecisionAuditRouteFor resolves a request path (full path or route pattern)
@@ -148,19 +152,49 @@ type DeniedDecisionAudit struct {
 	Status       int
 	Reason       string // the DenialCode, empty for an untyped refusal
 	ResolvableBy string
-	OccurredAt   time.Time
+	// ActorRole is the closed actor word (see the DecisionAuditActor* consts).
+	ActorRole string
+	// BatchRow marks one denied row of a 200 batch answer (Status is then 200).
+	BatchRow   bool
+	OccurredAt time.Time
+}
+
+// Closed actor_role words for decision audit rows (B-REC-03). The issuer
+// routes are called by service principals; the role is who the call speaks for,
+// never an authorization input.
+const (
+	DecisionAuditActorDelegatedUser = "delegated_user"
+	DecisionAuditActorService       = "service"
+	DecisionAuditActorUser          = "user"
+)
+
+// Batch row reasons that mean "Control could not decide", not "Control refused".
+const batchRowReasonUnavailable = "unavailable"
+
+// deniedOutcome maps a refusal onto audit-core's outcome words: an availability
+// refusal (503, or a batch row Control could not resolve) is "error"; a policy
+// or conflict refusal (403, 409, a denied batch row) is "denied".
+func (in DeniedDecisionAudit) deniedOutcome() string {
+	if in.Status == 503 || (in.BatchRow && in.Reason == batchRowReasonUnavailable) {
+		return "error"
+	}
+	return "denied"
 }
 
 // BuildDeniedDecisionAudit renders the denial event. The id collapses retries:
-// the same route, org, subject, Space and minute is one row.
+// the same route, org, subject, Space and minute is one row. A 403 keeps the
+// original id; any other status (409, 503, a batch row) folds the status in, so
+// an availability refusal never collapses into a policy refusal of that minute.
 func BuildDeniedDecisionAudit(in DeniedDecisionAudit) (eventID, subject string, payload []byte, err error) {
 	if strings.TrimSpace(in.OrgID) == "" {
 		return "", "", nil, fmt.Errorf("space decision denial audit needs an org")
 	}
 	at := in.OccurredAt.UTC()
-	sum := sha256.Sum256([]byte(strings.Join([]string{
-		in.Route, in.OrgID, in.SubjectID, in.SpaceRef, fmt.Sprint(at.Unix() / 60),
-	}, "|")))
+	parts := []string{in.Route, in.OrgID, in.SubjectID, in.SpaceRef, fmt.Sprint(at.Unix() / 60)}
+	if in.Status != 403 {
+		parts = append(parts, fmt.Sprint(in.Status))
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
 	eventID = "space-denial:" + hex.EncodeToString(sum[:])
 	details := map[string]any{
 		"decision_kind": in.Kind,
@@ -176,7 +210,10 @@ func BuildDeniedDecisionAudit(in DeniedDecisionAudit) (eventID, subject string, 
 	if in.ResolvableBy != "" {
 		details["resolvable_by"] = clampAuditString(in.ResolvableBy)
 	}
-	payload, err = encodeDecisionAudit(eventID, at, in.OrgID, in.SubjectID, auditEventSpaceDecisionDenied, in.SpaceRef, "denied", details)
+	if in.BatchRow {
+		details["batch_row"] = true
+	}
+	payload, err = encodeDecisionAudit(eventID, at, in.OrgID, in.SubjectID, in.ActorRole, auditEventSpaceDecisionDenied, in.SpaceRef, in.deniedOutcome(), details)
 	return eventID, AuditSubjectSpaceDecisionDenied, payload, err
 }
 
@@ -193,6 +230,7 @@ type IssuedDecisionAudit struct {
 	AuthorityRevision int64
 	ExpiresAt         time.Time
 	ZeroDataRetention bool
+	ActorRole         string
 	OccurredAt        time.Time
 }
 
@@ -223,11 +261,11 @@ func BuildIssuedDecisionAudit(in IssuedDecisionAudit) (eventID, subject string, 
 		details["expires_at"] = in.ExpiresAt.UTC().Format(time.RFC3339)
 	}
 	at := in.OccurredAt.UTC()
-	payload, err = encodeDecisionAudit(eventID, at, in.OrgID, in.SubjectID, auditEventSpaceDecisionIssued, in.SpaceRef, "ok", details)
+	payload, err = encodeDecisionAudit(eventID, at, in.OrgID, in.SubjectID, in.ActorRole, auditEventSpaceDecisionIssued, in.SpaceRef, "ok", details)
 	return eventID, AuditSubjectSpaceDecisionIssued, payload, err
 }
 
-func encodeDecisionAudit(eventID string, at time.Time, orgID, userID, event, spaceRef, outcome string, details map[string]any) ([]byte, error) {
+func encodeDecisionAudit(eventID string, at time.Time, orgID, userID, actorRole, event, spaceRef, outcome string, details map[string]any) ([]byte, error) {
 	body := map[string]any{
 		"event_id":    eventID,
 		"occurred_at": at.Format(time.RFC3339Nano),
@@ -240,6 +278,9 @@ func encodeDecisionAudit(eventID string, at time.Time, orgID, userID, event, spa
 	}
 	if userID != "" {
 		body["user_id"] = userID
+	}
+	if actorRole != "" {
+		body["actor_role"] = clampAuditString(actorRole)
 	}
 	if spaceRef != "" {
 		body["subject"] = "space:" + clampAuditString(spaceRef)

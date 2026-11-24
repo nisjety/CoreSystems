@@ -22,19 +22,35 @@ import (
 //   - a 403 the handler itself produced -> space_decision_denied (a refusal from
 //     a scope guard aborts the chain and is not audited here: it is not a Space
 //     authority decision);
-//   - a 200 carrying data.decision on an effect-bound route -> space_decision_issued.
+//   - a 409 or 503 the handler produced -> space_decision_denied too (B-REC-03),
+//     with outcome "denied" for a conflict and "error" for an availability
+//     refusal;
+//   - a 200 carrying data.decision on an effect-bound route -> space_decision_issued;
+//   - a 200 of the batch thread-read-decisions route -> one space_decision_denied
+//     row per denied result row (B-REC-03).
 //
-// The middleware never changes the response, the status or the decision: the
-// writer wrapper only copies the first bytes of the body. The request body is
-// read for four identifiers (org, subject, Space, action) and restored. The
-// token, payload digest, nonce and recipient references are never read into the
-// event. Writing the row is best effort: an outbox failure is logged and never
-// turns a refusal into an issue or an issue into a refusal.
+// Every row carries actor_role (delegated_user, service or user).
+//
+// A refusal is never changed: its row is best effort, an outbox failure is
+// logged and a refusal stays a refusal. An effect-bound issue fails closed
+// (B-REC-03): its response is held until the issued row is in the outbox, and
+// when the row cannot be built or written the caller gets a typed 503
+// (space_decision_audit_unavailable) instead of the decision and token, so no
+// effect can be authorized by a decision the org audit trail does not hold.
+// The request body is read for four identifiers (org, subject, Space, action)
+// and restored. The token, payload digest, nonce and recipient references are
+// never read into the event.
 
 const (
 	decisionAuditMaxRequestBody  = 1 << 20
 	decisionAuditMaxResponseBody = 64 << 10
-	decisionAuditWriteTimeout    = 3 * time.Second
+	// A full batch (60 rows, each with a token) is larger than one decision.
+	decisionAuditMaxBatchResponseBody = 1 << 20
+	decisionAuditWriteTimeout         = 3 * time.Second
+
+	// decisionAuditUnavailableCode is the typed refusal of an effect-bound issue
+	// whose audit row could not be recorded.
+	decisionAuditUnavailableCode = "space_decision_audit_unavailable"
 )
 
 // decisionAuditSink is the wired producer: the flags plus the outbox.
@@ -53,11 +69,12 @@ func (s *Server) SetSpaceDecisionAudit(cfg spaces.DecisionAuditConfig, outbox sp
 type decisionAuditWriter struct {
 	gin.ResponseWriter
 	buf       bytes.Buffer
+	limit     int
 	truncated bool
 }
 
 func (w *decisionAuditWriter) capture(p []byte) {
-	if room := decisionAuditMaxResponseBody - w.buf.Len(); room > 0 {
+	if room := w.limit - w.buf.Len(); room > 0 {
 		if len(p) > room {
 			w.buf.Write(p[:room])
 			w.truncated = true
@@ -77,6 +94,82 @@ func (w *decisionAuditWriter) Write(p []byte) (int, error) {
 func (w *decisionAuditWriter) WriteString(s string) (int, error) {
 	w.capture([]byte(s))
 	return w.ResponseWriter.WriteString(s)
+}
+
+// decisionAuditHoldWriter holds the whole answer of an effect-bound issuer
+// route: nothing reaches the client until the middleware has decided whether
+// to release it or to replace it with the fail-closed refusal. Headers set by
+// the handler go straight to the real header map.
+type decisionAuditHoldWriter struct {
+	gin.ResponseWriter
+	buf     bytes.Buffer
+	status  int
+	written bool
+}
+
+func (w *decisionAuditHoldWriter) WriteHeader(code int) {
+	if code > 0 && !w.written {
+		w.status = code
+	}
+}
+
+func (w *decisionAuditHoldWriter) WriteHeaderNow() { w.written = true }
+
+func (w *decisionAuditHoldWriter) Write(p []byte) (int, error) {
+	w.written = true
+	return w.buf.Write(p)
+}
+
+func (w *decisionAuditHoldWriter) WriteString(s string) (int, error) {
+	w.written = true
+	return w.buf.WriteString(s)
+}
+
+func (w *decisionAuditHoldWriter) Status() int {
+	if w.status == 0 {
+		return http.StatusOK
+	}
+	return w.status
+}
+
+func (w *decisionAuditHoldWriter) Size() int {
+	if !w.written {
+		return -1
+	}
+	return w.buf.Len()
+}
+
+func (w *decisionAuditHoldWriter) Written() bool { return w.written }
+
+// Flush is held too: a flush would commit the status before the audit row.
+func (w *decisionAuditHoldWriter) Flush() {}
+
+// release sends the held answer unchanged.
+func (w *decisionAuditHoldWriter) release() {
+	if !w.written && w.status == 0 {
+		return
+	}
+	w.ResponseWriter.WriteHeader(w.Status())
+	if w.buf.Len() > 0 {
+		_, _ = w.ResponseWriter.Write(w.buf.Bytes())
+	} else {
+		w.ResponseWriter.WriteHeaderNow()
+	}
+}
+
+// refuse drops the held answer (decision and token included) and sends the
+// typed fail-closed refusal instead.
+func (w *decisionAuditHoldWriter) refuse() {
+	body, _ := json.Marshal(gin.H{"error": gin.H{
+		"code":    decisionAuditUnavailableCode,
+		"message": "Space decision audit unavailable; the decision was not released",
+		"details": gin.H{},
+	}})
+	header := w.ResponseWriter.Header()
+	header.Del("Content-Length")
+	header.Set("Content-Type", "application/json; charset=utf-8")
+	w.ResponseWriter.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.ResponseWriter.Write(body)
 }
 
 // decisionAuditRequestIDs are the only request fields the middleware reads.
@@ -115,9 +208,10 @@ func (r decisionAuditRequestIDs) flattened() decisionAuditRequestIDs {
 // decisionAuditResponse is the allowlisted view of an answer. The token field
 // is deliberately absent.
 type decisionAuditResponse struct {
-	// Typed refusal body.
-	Code         string `json:"code"`
-	ResolvableBy string `json:"resolvable_by"`
+	// Typed refusal body: {"code":...} or the envelope {"error":{"code":...}}.
+	Code         string          `json:"code"`
+	ResolvableBy string          `json:"resolvable_by"`
+	Error        json.RawMessage `json:"error"`
 	// Issued body: {"data":{"decision":{...}}}.
 	Data *struct {
 		Decision *struct {
@@ -134,6 +228,58 @@ type decisionAuditResponse struct {
 	} `json:"data"`
 }
 
+// refusalCode is the typed code of a refusal in either body shape.
+func (r decisionAuditResponse) refusalCode() (code, resolvableBy string) {
+	code, resolvableBy = r.Code, r.ResolvableBy
+	if code == "" && len(r.Error) > 0 && r.Error[0] == '{' {
+		var envelope struct {
+			Code    string `json:"code"`
+			Details struct {
+				ResolvableBy string `json:"resolvable_by"`
+			} `json:"details"`
+		}
+		if json.Unmarshal(r.Error, &envelope) == nil {
+			code = envelope.Code
+			if resolvableBy == "" {
+				resolvableBy = envelope.Details.ResolvableBy
+			}
+		}
+	}
+	return code, resolvableBy
+}
+
+// decisionAuditBatchResponse is the allowlisted view of a batch answer: the
+// per-row decision and token are deliberately absent.
+type decisionAuditBatchResponse struct {
+	Data *struct {
+		Results []struct {
+			SpaceRef string `json:"space_ref"`
+			Status   string `json:"status"`
+			Reason   string `json:"reason"`
+		} `json:"results"`
+	} `json:"data"`
+}
+
+// decisionAuditActorRole is who the issuer call speaks for. The gateway's
+// verified delegation speaks for a user; any other service principal for
+// itself; a bearer caller is a user. It is an audit label, never authority.
+func decisionAuditActorRole(c *gin.Context) string {
+	switch c.GetString("auth_method") {
+	case "service_principal":
+		if c.GetBool("delegation_verified") {
+			return spaces.DecisionAuditActorDelegatedUser
+		}
+		return spaces.DecisionAuditActorService
+	case "bearer":
+		return spaces.DecisionAuditActorUser
+	}
+	return ""
+}
+
+func isAuditedRefusal(status int) bool {
+	return status == http.StatusForbidden || status == http.StatusConflict || status == http.StatusServiceUnavailable
+}
+
 func (s *Server) spaceDecisionAuditMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sink := s.spaceDecisionAudit
@@ -142,7 +288,8 @@ func (s *Server) spaceDecisionAuditMiddleware() gin.HandlerFunc {
 			return
 		}
 		route, row, ok := spaces.DecisionAuditRouteFor(c.Request.URL.Path)
-		if !ok || (!sink.cfg.Denied && !(sink.cfg.Issued && row.EffectBound)) {
+		auditIssued := sink.cfg.Issued && row.EffectBound
+		if !ok || (!sink.cfg.Denied && !auditIssued) {
 			c.Next()
 			return
 		}
@@ -158,57 +305,129 @@ func (s *Server) spaceDecisionAuditMiddleware() gin.HandlerFunc {
 			_ = json.Unmarshal(head, &ids)
 			ids = ids.flattened()
 		}
+		actorRole := decisionAuditActorRole(c)
 
-		writer := &decisionAuditWriter{ResponseWriter: c.Writer}
+		if auditIssued {
+			holdAndAuditEffectBound(c, sink, route, row, ids, actorRole)
+			return
+		}
+
+		limit := decisionAuditMaxResponseBody
+		if row.Batch {
+			limit = decisionAuditMaxBatchResponseBody
+		}
+		writer := &decisionAuditWriter{ResponseWriter: c.Writer, limit: limit}
 		c.Writer = writer
 		c.Next()
 		if c.IsAborted() || writer.truncated {
 			return
 		}
-
 		now := time.Now().UTC()
 		status := c.Writer.Status()
 		switch {
-		case status == http.StatusForbidden && sink.cfg.Denied:
-			var answer decisionAuditResponse
-			_ = json.Unmarshal(writer.buf.Bytes(), &answer)
-			orgID := firstNonEmpty(c.GetString("org_id"), ids.OrgID)
-			eventID, subject, payload, err := spaces.BuildDeniedDecisionAudit(spaces.DeniedDecisionAudit{
-				Route: route, Kind: row.Name, OrgID: orgID,
-				SubjectID: firstNonEmpty(c.GetString("user_id"), ids.SubjectID),
-				SpaceRef:  ids.SpaceRef, ActionID: ids.ActionID, Status: status,
-				Reason: answer.Code, ResolvableBy: answer.ResolvableBy, OccurredAt: now,
-			})
-			sink.enqueue(c, eventID, subject, payload, err)
-		case status == http.StatusOK && sink.cfg.Issued && row.EffectBound:
-			var answer decisionAuditResponse
-			if json.Unmarshal(writer.buf.Bytes(), &answer) != nil || answer.Data == nil || answer.Data.Decision == nil {
-				return
-			}
-			d := answer.Data.Decision
-			eventID, subject, payload, err := spaces.BuildIssuedDecisionAudit(spaces.IssuedDecisionAudit{
-				Route: route, Kind: row.Name, DecisionRef: d.DecisionRef,
-				OrgID:     firstNonEmpty(d.OrgID, c.GetString("org_id")),
-				SubjectID: firstNonEmpty(d.SubjectID, c.GetString("user_id")),
-				SpaceRef:  firstNonEmpty(d.SpaceRef, ids.SpaceRef), ActionID: firstNonEmpty(d.ActionID, ids.ActionID),
-				ServiceAudience: d.ServiceAudience, AuthorityRevision: d.AuthorityRevision,
-				ExpiresAt: d.ExpiresAt, ZeroDataRetention: d.ZeroDataRetention, OccurredAt: now,
-			})
-			sink.enqueue(c, eventID, subject, payload, err)
+		case isAuditedRefusal(status) && sink.cfg.Denied:
+			sink.enqueueRefusal(c, route, row, ids, actorRole, status, writer.buf.Bytes(), now)
+		case status == http.StatusOK && row.Batch && sink.cfg.Denied:
+			sink.enqueueBatchDenials(c, route, row, actorRole, writer.buf.Bytes(), now)
 		}
 	}
 }
 
-func (k decisionAuditSink) enqueue(c *gin.Context, eventID, subject string, payload []byte, buildErr error) {
+// holdAndAuditEffectBound runs the handler with its answer held. A refusal is
+// released unchanged (its row best effort); an issued decision is released only
+// once its row is in the outbox, otherwise the typed 503 replaces it.
+func holdAndAuditEffectBound(c *gin.Context, sink decisionAuditSink, route string, row spaces.DecisionAuditRoute, ids decisionAuditRequestIDs, actorRole string) {
+	hold := &decisionAuditHoldWriter{ResponseWriter: c.Writer}
+	c.Writer = hold
+	defer func() {
+		// A panic leaves the real writer to the recovery middleware.
+		if recovered := recover(); recovered != nil {
+			c.Writer = hold.ResponseWriter
+			panic(recovered)
+		}
+	}()
+	c.Next()
+	c.Writer = hold.ResponseWriter
+
+	status := hold.Status()
+	if c.IsAborted() || status != http.StatusOK {
+		hold.release()
+		if !c.IsAborted() && isAuditedRefusal(status) && sink.cfg.Denied {
+			sink.enqueueRefusal(c, route, row, ids, actorRole, status, hold.buf.Bytes(), time.Now().UTC())
+		}
+		return
+	}
+	var answer decisionAuditResponse
+	if json.Unmarshal(hold.buf.Bytes(), &answer) != nil || answer.Data == nil || answer.Data.Decision == nil {
+		// A 200 that carries no decision issued nothing to audit.
+		hold.release()
+		return
+	}
+	d := answer.Data.Decision
+	eventID, subject, payload, err := spaces.BuildIssuedDecisionAudit(spaces.IssuedDecisionAudit{
+		Route: route, Kind: row.Name, DecisionRef: d.DecisionRef,
+		OrgID:     firstNonEmpty(d.OrgID, c.GetString("org_id")),
+		SubjectID: firstNonEmpty(d.SubjectID, c.GetString("user_id")),
+		SpaceRef:  firstNonEmpty(d.SpaceRef, ids.SpaceRef), ActionID: firstNonEmpty(d.ActionID, ids.ActionID),
+		ServiceAudience: d.ServiceAudience, AuthorityRevision: d.AuthorityRevision,
+		ExpiresAt: d.ExpiresAt, ZeroDataRetention: d.ZeroDataRetention,
+		ActorRole: actorRole, OccurredAt: time.Now().UTC(),
+	})
+	if !sink.enqueue(c, eventID, subject, payload, err) {
+		log.Printf("user-core space decision audit: %s issue on %s withheld (fail closed)", row.Name, route)
+		hold.refuse()
+		return
+	}
+	hold.release()
+}
+
+func (k decisionAuditSink) enqueueRefusal(c *gin.Context, route string, row spaces.DecisionAuditRoute, ids decisionAuditRequestIDs, actorRole string, status int, body []byte, now time.Time) {
+	var answer decisionAuditResponse
+	_ = json.Unmarshal(body, &answer)
+	code, resolvableBy := answer.refusalCode()
+	eventID, subject, payload, err := spaces.BuildDeniedDecisionAudit(spaces.DeniedDecisionAudit{
+		Route: route, Kind: row.Name, OrgID: firstNonEmpty(c.GetString("org_id"), ids.OrgID),
+		SubjectID: firstNonEmpty(c.GetString("user_id"), ids.SubjectID),
+		SpaceRef:  ids.SpaceRef, ActionID: ids.ActionID, Status: status,
+		Reason: code, ResolvableBy: resolvableBy, ActorRole: actorRole, OccurredAt: now,
+	})
+	k.enqueue(c, eventID, subject, payload, err)
+}
+
+// enqueueBatchDenials writes one row per denied result row of a 200 batch
+// answer. Issued rows are thread reads and, like the single route, never
+// audited as issued.
+func (k decisionAuditSink) enqueueBatchDenials(c *gin.Context, route string, row spaces.DecisionAuditRoute, actorRole string, body []byte, now time.Time) {
+	var answer decisionAuditBatchResponse
+	if json.Unmarshal(body, &answer) != nil || answer.Data == nil {
+		return
+	}
+	for _, result := range answer.Data.Results {
+		if result.Status != "denied" {
+			continue
+		}
+		eventID, subject, payload, err := spaces.BuildDeniedDecisionAudit(spaces.DeniedDecisionAudit{
+			Route: route, Kind: row.Name, OrgID: c.GetString("org_id"), SubjectID: c.GetString("user_id"),
+			SpaceRef: result.SpaceRef, Status: http.StatusOK, Reason: result.Reason,
+			ActorRole: actorRole, BatchRow: true, OccurredAt: now,
+		})
+		k.enqueue(c, eventID, subject, payload, err)
+	}
+}
+
+// enqueue writes one row and reports whether it is in the outbox.
+func (k decisionAuditSink) enqueue(c *gin.Context, eventID, subject string, payload []byte, buildErr error) bool {
 	if buildErr != nil {
 		log.Printf("user-core space decision audit: not recorded: %v", buildErr)
-		return
+		return false
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), decisionAuditWriteTimeout)
 	defer cancel()
 	if err := k.outbox.EnqueueAudit(ctx, eventID, subject, payload); err != nil {
 		log.Printf("user-core space decision audit: enqueue %s failed: %v", eventID, err)
+		return false
 	}
+	return true
 }
 
 func firstNonEmpty(values ...string) string {

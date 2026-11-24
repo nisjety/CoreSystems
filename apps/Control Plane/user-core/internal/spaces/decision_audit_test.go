@@ -270,3 +270,59 @@ func TestDecisionAuditRouteForCoversTheBrowserRunStopDecision(t *testing.T) {
 		t.Fatalf("browser-run-stop-decision = %q %+v %v, want an effect-bound space_browser_run_stop row", route, row, ok)
 	}
 }
+
+// B-REC-03: actor_role on both kinds, availability refusals are "error" and do
+// not collapse into a 403 of the same minute, batch rows are marked.
+func TestDecisionAuditActorRoleOutcomeAndBatchRows(t *testing.T) {
+	at := time.Date(2026, 11, 2, 10, 15, 5, 0, time.UTC)
+	in := deniedFixture(at)
+	in.ActorRole = DecisionAuditActorDelegatedUser
+	id403, _, payload, err := BuildDeniedDecisionAudit(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body := decodeAudit(t, payload); body["actor_role"] != "delegated_user" || body["outcome"] != "denied" {
+		t.Fatalf("403 body = %v", body)
+	}
+	in.Status = 503
+	id503, _, payload, _ := BuildDeniedDecisionAudit(in)
+	if id503 == id403 {
+		t.Fatal("a 503 must not collapse into the 403 of the same minute")
+	}
+	if body := decodeAudit(t, payload); body["outcome"] != "error" {
+		t.Fatalf("503 outcome = %v", body["outcome"])
+	}
+	in.Status = 409
+	if _, _, payload, _ = BuildDeniedDecisionAudit(in); decodeAudit(t, payload)["outcome"] != "denied" {
+		t.Fatal("a 409 is a denial")
+	}
+	in.Status, in.BatchRow, in.Reason = 200, true, "unavailable"
+	_, _, payload, _ = BuildDeniedDecisionAudit(in)
+	body := decodeAudit(t, payload)
+	if body["outcome"] != "error" || body["details"].(map[string]any)["batch_row"] != true {
+		t.Fatalf("batch row body = %v", body)
+	}
+	in.Reason = "not_member"
+	if _, _, payload, _ = BuildDeniedDecisionAudit(in); decodeAudit(t, payload)["outcome"] != "denied" {
+		t.Fatal("a denied batch row is a denial")
+	}
+
+	issued := issuedFixture(at)
+	issued.ActorRole = DecisionAuditActorService
+	_, _, payload, _ = BuildIssuedDecisionAudit(issued)
+	if decodeAudit(t, payload)["actor_role"] != "service" {
+		t.Fatal("issued row must carry actor_role")
+	}
+	issued.ActorRole = ""
+	_, _, payload, _ = BuildIssuedDecisionAudit(issued)
+	if _, present := decodeAudit(t, payload)["actor_role"]; present {
+		t.Fatal("an empty actor_role must be omitted")
+	}
+}
+
+func TestBatchThreadReadDecisionsRouteIsDenialAuditedOnly(t *testing.T) {
+	route, row, ok := DecisionAuditRouteFor("/api/v1/internal/spaces/thread-read-decisions")
+	if !ok || route != "/thread-read-decisions" || !row.Batch || row.EffectBound || row.Name != "thread_read" {
+		t.Fatalf("batch route = %q %+v %v", route, row, ok)
+	}
+}

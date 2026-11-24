@@ -66,6 +66,21 @@ func newAuditHarness(t *testing.T, cfg spaces.DecisionAuditConfig, wireOutbox bo
 	}
 	h.engine = gin.New()
 	group := h.engine.Group("/api/v1/internal/spaces")
+	// Stand-in for service auth: the probe header picks the verified caller.
+	group.Use(func(c *gin.Context) {
+		switch c.GetHeader("X-Probe-Auth") {
+		case "delegated":
+			c.Set("auth_method", "service_principal")
+			c.Set("service_id", "verevon-gateway")
+			c.Set("delegation_verified", true)
+			c.Set("org_id", "org-d")
+			c.Set("user_id", "user-d")
+		case "service":
+			c.Set("auth_method", "service_principal")
+			c.Set("service_id", "capability-core")
+		}
+		c.Next()
+	})
 	group.Use(server.spaceDecisionAuditMiddleware())
 	probe := func(c *gin.Context) {
 		raw, _ := io.ReadAll(c.Request.Body)
@@ -80,6 +95,8 @@ func newAuditHarness(t *testing.T, cfg spaces.DecisionAuditConfig, wireOutbox bo
 			status = http.StatusForbidden
 		case "400":
 			status = http.StatusBadRequest
+		case "409":
+			status = http.StatusConflict
 		case "503":
 			status = http.StatusServiceUnavailable
 		}
@@ -88,6 +105,7 @@ func newAuditHarness(t *testing.T, cfg spaces.DecisionAuditConfig, wireOutbox bo
 	for _, path := range []string{
 		"/thread-decision", "/thread-read-decision", "/retrieval-decision", "/thread-append-decision",
 		"/watch-observe-decision", "/run-control-decision", "/import-decision", "/schedule-create-decision", "/membership",
+		"/thread-read-decisions",
 	} {
 		group.POST(path, probe)
 	}
@@ -184,9 +202,100 @@ func TestAuditMiddlewareIgnoresScopeGuardAbortsAndNonRefusals(t *testing.T) {
 	h := newAuditHarness(t, enabledBoth, true)
 	h.post("/thread-decision", auditRequestBody, map[string]string{"X-Probe-Abort": "1"})
 	h.post("/thread-decision", auditRequestBody, map[string]string{"X-Probe-Status": "400", "X-Probe-Body": `{"error":"bad"}`})
-	h.post("/thread-decision", auditRequestBody, map[string]string{"X-Probe-Status": "503", "X-Probe-Body": `{"error":"down"}`})
+	h.post("/run-control-decision", auditRequestBody, map[string]string{"X-Probe-Abort": "1"})
+	h.post("/run-control-decision", auditRequestBody, map[string]string{"X-Probe-Status": "400", "X-Probe-Body": `{"error":"bad"}`})
 	if h.recorder.count() != 0 {
-		t.Fatalf("aborted chain, 400 and 503 wrote %d rows: %+v", h.recorder.count(), h.recorder.rows)
+		t.Fatalf("aborted chain and 400 wrote %d rows: %+v", h.recorder.count(), h.recorder.rows)
+	}
+}
+
+// B-REC-03: availability (503) and conflict (409) refusals are audited too,
+// in either refusal body shape, and the response is never changed.
+func TestAuditMiddlewareAuditsAvailabilityAndConflictRefusals(t *testing.T) {
+	h := newAuditHarness(t, enabledDeniedOnly, true)
+	unavailable := `{"error":"Space authority repository unavailable"}`
+	rec := h.post("/thread-decision", auditRequestBody, map[string]string{"X-Probe-Status": "503", "X-Probe-Body": unavailable})
+	if rec.Code != http.StatusServiceUnavailable || rec.Body.String() != unavailable {
+		t.Fatalf("503 must be unchanged: %d %s", rec.Code, rec.Body.String())
+	}
+	conflict := `{"error":{"code":"space_ref_conflict","message":"x","details":{"resolvable_by":"space_owner"}}}`
+	rec = h.post("/run-control-decision", auditRequestBody, map[string]string{"X-Probe-Status": "409", "X-Probe-Body": conflict})
+	if rec.Code != http.StatusConflict || rec.Body.String() != conflict {
+		t.Fatalf("409 must be unchanged: %d %s", rec.Code, rec.Body.String())
+	}
+	if h.recorder.count() != 2 {
+		t.Fatalf("rows = %d, want 2: %+v", h.recorder.count(), h.recorder.rows)
+	}
+	first, second := h.recorder.rows[0].payload, h.recorder.rows[1].payload
+	for _, want := range []string{`"status":503`, `"outcome":"error"`, `"decision_kind":"thread_create"`} {
+		if !strings.Contains(first, want) {
+			t.Errorf("503 row lacks %s: %s", want, first)
+		}
+	}
+	for _, want := range []string{`"status":409`, `"outcome":"denied"`, `"reason":"space_ref_conflict"`, `"resolvable_by":"space_owner"`, `"decision_kind":"run_control"`} {
+		if !strings.Contains(second, want) {
+			t.Errorf("409 row lacks %s: %s", want, second)
+		}
+	}
+	if h.recorder.rows[0].subject != spaces.AuditSubjectSpaceDecisionDenied || h.recorder.rows[1].subject != spaces.AuditSubjectSpaceDecisionDenied {
+		t.Fatalf("subjects = %+v", h.recorder.rows)
+	}
+}
+
+// B-REC-03: each denied row of a 200 batch answer is one denial row; issued
+// rows (thread reads) and their tokens are never audited.
+func TestAuditMiddlewareAuditsBatchRowDenials(t *testing.T) {
+	h := newAuditHarness(t, enabledBoth, true)
+	batch := `{"data":{"results":[` +
+		`{"space_ref":"space-a","status":"issued","decision":{"decision_ref":"d-a"},"token":"tok-secret-a"},` +
+		`{"space_ref":"space-b","status":"denied","reason":"not_member"},` +
+		`{"space_ref":"space-c","status":"denied","reason":"unavailable"}]}}`
+	rec := h.post("/thread-read-decisions", `{"items":[]}`, map[string]string{"X-Probe-Body": batch, "X-Probe-Auth": "delegated"})
+	if rec.Code != http.StatusOK || rec.Body.String() != batch {
+		t.Fatalf("batch answer must be unchanged: %d %s", rec.Code, rec.Body.String())
+	}
+	if h.recorder.count() != 2 {
+		t.Fatalf("rows = %d, want 2 (one per denied row): %+v", h.recorder.count(), h.recorder.rows)
+	}
+	b, c := h.recorder.rows[0], h.recorder.rows[1]
+	if b.eventID == c.eventID {
+		t.Fatal("two denied rows must be two events")
+	}
+	for _, want := range []string{`"space:space-b"`, `"reason":"not_member"`, `"outcome":"denied"`, `"batch_row":true`, `"org_id":"org-d"`, `"user_id":"user-d"`, `"actor_role":"delegated_user"`, `"decision_kind":"thread_read"`} {
+		if !strings.Contains(b.payload, want) {
+			t.Errorf("row b lacks %s: %s", want, b.payload)
+		}
+	}
+	if !strings.Contains(c.payload, `"reason":"unavailable"`) || !strings.Contains(c.payload, `"outcome":"error"`) {
+		t.Errorf("row c = %s", c.payload)
+	}
+	for _, row := range h.recorder.rows {
+		if strings.Contains(row.payload, "tok-secret") || strings.Contains(row.payload, "space-a") {
+			t.Errorf("a batch row leaks the issued row: %s", row.payload)
+		}
+	}
+
+	// The batch route's own whole-batch refusals are audited like any route.
+	h.recorder.rows = nil
+	h.post("/thread-read-decisions", `{"items":[]}`, map[string]string{"X-Probe-Status": "503", "X-Probe-Body": `{"error":"down"}`, "X-Probe-Auth": "delegated"})
+	if h.recorder.count() != 1 || !strings.Contains(h.recorder.rows[0].payload, `"status":503`) {
+		t.Fatalf("batch 503 rows = %+v", h.recorder.rows)
+	}
+}
+
+// B-REC-03: every row names who the call spoke for.
+func TestAuditMiddlewareSetsActorRole(t *testing.T) {
+	h := newAuditHarness(t, enabledBoth, true)
+	h.post("/thread-decision", auditRequestBody, map[string]string{"X-Probe-Status": "403", "X-Probe-Body": deniedBody, "X-Probe-Auth": "delegated"})
+	h.post("/run-control-decision", auditRequestBody, map[string]string{"X-Probe-Body": issuedBody, "X-Probe-Auth": "service"})
+	if h.recorder.count() != 2 {
+		t.Fatalf("rows = %+v", h.recorder.rows)
+	}
+	if !strings.Contains(h.recorder.rows[0].payload, `"actor_role":"delegated_user"`) {
+		t.Errorf("denied row = %s", h.recorder.rows[0].payload)
+	}
+	if !strings.Contains(h.recorder.rows[1].payload, `"actor_role":"service"`) {
+		t.Errorf("issued row = %s", h.recorder.rows[1].payload)
 	}
 }
 
@@ -258,7 +367,9 @@ func TestAuditMiddlewareIgnoresNonIssuerPathsAndMethods(t *testing.T) {
 	}
 }
 
-func TestAuditMiddlewareOutboxFailureLeavesTheResponseUntouched(t *testing.T) {
+// B-REC-03: an outbox failure never changes a refusal, but an effect-bound
+// issue fails closed: the decision and token are withheld behind a typed 503.
+func TestAuditMiddlewareOutboxFailureFailsAnEffectBoundIssueClosed(t *testing.T) {
 	h := newAuditHarness(t, enabledBoth, true)
 	h.recorder.err = errors.New("outbox down")
 
@@ -266,9 +377,55 @@ func TestAuditMiddlewareOutboxFailureLeavesTheResponseUntouched(t *testing.T) {
 	if rec.Code != http.StatusForbidden || rec.Body.String() != deniedBody {
 		t.Fatalf("a refusal must stay a refusal: %d %s", rec.Code, rec.Body.String())
 	}
+	rec = h.post("/run-control-decision", auditRequestBody, map[string]string{"X-Probe-Status": "403", "X-Probe-Body": deniedBody})
+	if rec.Code != http.StatusForbidden || rec.Body.String() != deniedBody {
+		t.Fatalf("an effect-bound refusal must stay a refusal: %d %s", rec.Code, rec.Body.String())
+	}
 	rec = h.post("/run-control-decision", auditRequestBody, map[string]string{"X-Probe-Body": issuedBody})
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("an unaudited effect-bound issue must fail closed, got %d %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "tok-secret-value") || strings.Contains(rec.Body.String(), "dec-1") {
+		t.Fatalf("the withheld decision leaked: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"space_decision_audit_unavailable"`) || !strings.Contains(rec.Body.String(), `"details":{}`) {
+		t.Fatalf("refusal must be the typed envelope: %s", rec.Body.String())
+	}
+
+	// A non-effect-bound 200 is not held and passes through.
+	rec = h.post("/thread-read-decision", auditRequestBody, map[string]string{"X-Probe-Body": issuedBody})
 	if rec.Code != http.StatusOK || rec.Body.String() != issuedBody {
-		t.Fatalf("an issue must stay an issue: %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("a read issue must pass: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// B-REC-03: a decision whose row cannot even be built (no decision_ref) fails
+// closed too; a 200 that carries no decision is released untouched.
+func TestAuditMiddlewareUnbuildableIssuedRowFailsClosed(t *testing.T) {
+	h := newAuditHarness(t, enabledBoth, true)
+	noRef := `{"data":{"decision":{"org_id":"org-1","space_ref":"space-1"},"token":"tok-secret-value"}}`
+	rec := h.post("/run-control-decision", auditRequestBody, map[string]string{"X-Probe-Body": noRef})
+	if rec.Code != http.StatusServiceUnavailable || strings.Contains(rec.Body.String(), "tok-secret-value") {
+		t.Fatalf("unbuildable issued row must fail closed: %d %s", rec.Code, rec.Body.String())
+	}
+	other := `{"data":{"status":"ok"}}`
+	rec = h.post("/run-control-decision", auditRequestBody, map[string]string{"X-Probe-Body": other})
+	if rec.Code != http.StatusOK || rec.Body.String() != other {
+		t.Fatalf("a 200 without a decision must pass: %d %s", rec.Code, rec.Body.String())
+	}
+	if h.recorder.count() != 0 {
+		t.Fatalf("rows = %+v", h.recorder.rows)
+	}
+}
+
+// With the issued kind off, an effect-bound route is not held: an outbox
+// failure cannot affect the issue (the rollout switch is never authority).
+func TestAuditMiddlewareDeniedOnlyNeverHoldsAnIssue(t *testing.T) {
+	h := newAuditHarness(t, enabledDeniedOnly, true)
+	h.recorder.err = errors.New("outbox down")
+	rec := h.post("/run-control-decision", auditRequestBody, map[string]string{"X-Probe-Body": issuedBody})
+	if rec.Code != http.StatusOK || rec.Body.String() != issuedBody {
+		t.Fatalf("denied-only must not hold an issue: %d %s", rec.Code, rec.Body.String())
 	}
 }
 
