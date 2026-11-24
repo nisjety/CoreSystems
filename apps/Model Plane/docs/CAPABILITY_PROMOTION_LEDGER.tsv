@@ -32,6 +32,7 @@ cap.tool.shipping.read	source_only	working-tree	-	-	-	-	-	No immutable candidate
 cap.tool.space.agent.pause_self	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
 cap.tool.space.canvas.read	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
 cap.tool.space.canvas.write	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.tool.space.directory.resolve	source_only	working-tree	-	-	-	-	-	Admission row seeded enabled by migration 0048 (A-REC-03-TOOL); capability unattested, no immutable candidate or live owner evidence.
 cap.tool.space.schedule.follow_up	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
 cap.tool.space.thread.pin	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
 cap.tool.space.thread.post_card	source_only	working-tree	-	-	-	-	-	Admission row enabled by migration 0047 (owner decision D3); promotion still needs candidate and live evidence.

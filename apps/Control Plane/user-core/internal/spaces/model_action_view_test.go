@@ -170,7 +170,8 @@ func TestModelActionViewV2ListsOnlyEntitledEnabledRows(t *testing.T) {
 	}
 
 	t.Setenv(spaceSelfAPIActionsEnv, strings.Join(runActionRegistryIDs(), ","))
-	want := []string{"space.agent.pause_self", "space.thread.pin", "space.thread.post_card", "space.thread.rename", "tickets.create"}
+	// A-REC-03-TOOL: the directory resolver is a run-action read at the viewer floor, so an editor's view lists it.
+	want := []string{"space.agent.pause_self", "space.directory.resolve", "space.thread.pin", "space.thread.post_card", "space.thread.rename", "tickets.create"}
 	if got := listed(t, evidence); !slices.Equal(got, want) {
 		t.Fatalf("every golden id allowlisted lists %v, want %v", got, want)
 	}

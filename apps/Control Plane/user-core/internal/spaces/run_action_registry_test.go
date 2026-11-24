@@ -54,7 +54,7 @@ func withRunActionRegistryRow(t *testing.T, actionID string, mutate func(*runAct
 	t.Cleanup(func() { runActionRegistry = previous })
 }
 
-// The embedded copy loads as one strict document with the golden's eight rows, and
+// The embedded copy loads as one strict document with the golden's nine rows, and
 // its tickets.create row carries exactly the values Control pinned for that action
 // before the registry existed.
 func TestRunActionRegistryMatchesGolden(t *testing.T) {
@@ -66,8 +66,8 @@ func TestRunActionRegistryMatchesGolden(t *testing.T) {
 		t.Fatalf("loadRunActionRegistry: %v", err)
 	}
 	wantIDs := []string{
-		"space.agent.pause_self", "space.canvas.read", "space.canvas.write", "space.schedule.follow_up",
-		"space.thread.pin", "space.thread.post_card", "space.thread.rename", "tickets.create",
+		"space.agent.pause_self", "space.canvas.read", "space.canvas.write", "space.directory.resolve",
+		"space.schedule.follow_up", "space.thread.pin", "space.thread.post_card", "space.thread.rename", "tickets.create",
 	}
 	if got := runActionRegistryIDs(); !slices.Equal(got, wantIDs) || len(rows) != len(wantIDs) {
 		t.Fatalf("registry ids = %v (%d rows), want %v", got, len(rows), wantIDs)

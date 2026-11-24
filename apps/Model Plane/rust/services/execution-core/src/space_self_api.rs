@@ -220,11 +220,20 @@ pub(crate) fn requires_owner_approval(name: &str) -> bool {
     registry_row(name).is_some_and(|row| row.approval == "owner_approval")
 }
 
-/// The capabilities this build executes and may attest on the owner lane.
+/// The capabilities this build executes and may attest on the owner lane: the run-thread rows, and the directory resolver row
+/// (A-REC-03-TOOL) only while its own switch and configuration are complete.
 #[must_use]
 pub(crate) fn attested_capability_ids() -> Vec<String> {
+    attested_capability_ids_with(crate::space_directory_tool::is_built_action(
+        crate::space_directory_tool::ACTION,
+    ))
+}
+
+fn attested_capability_ids_with(directory_built: bool) -> Vec<String> {
     BUILT_ACTIONS
         .iter()
+        .copied()
+        .chain(directory_built.then_some(crate::space_directory_tool::ACTION))
         .filter_map(|action_id| registry_row(action_id).map(|row| row.capability_id.clone()))
         .collect()
 }
@@ -1190,5 +1199,73 @@ mod tests {
         let offered = admit_view_with_switch("run-1", "run-1", &allowed, true, true)
             .expect("a well-formed view is admitted");
         assert_eq!(offered.len(), 1, "an allowed built row is offered");
+    }
+
+    const DIRECTORY: &str = crate::space_directory_tool::ACTION;
+
+    #[test]
+    fn the_golden_directory_row_is_the_tools_own_contract() {
+        // A-REC-03-TOOL: the golden names the row with the tool's exact parameter bytes, a read-only rung, no approval and
+        // Control as its owner, so the view's byte check and the tool's closed parser agree.
+        let row = golden()
+            .expect("the golden registry loads")
+            .row(DIRECTORY)
+            .expect("the golden names the directory row");
+        assert!(is_space_action(DIRECTORY));
+        assert_eq!(
+            row.parameters_json,
+            crate::space_directory_tool::PARAMETERS_JSON
+        );
+        assert_eq!(row.argument_order, ["query", "kind"]);
+        assert_eq!(row.decision_type, "run_action");
+        assert_eq!(row.autonomy_rung, "read_only");
+        assert_eq!(row.approval, "none");
+        assert_eq!(row.default_level, "allow");
+        assert_eq!(row.owner_plane, "control");
+        assert_eq!(row.capability_id, "cap.tool.space.directory.resolve");
+        assert_eq!(row.phase, OFFERED_PHASE);
+        assert_eq!(registry_risky(DIRECTORY), Some(false));
+        assert!(!requires_owner_approval(DIRECTORY));
+        assert_eq!(autonomy_rung(DIRECTORY), Some(AutonomyRung::ReadOnly));
+    }
+
+    #[test]
+    fn the_directory_row_is_offered_under_the_self_api_marker_only() {
+        assert!(offered_under_profile(TOOL_PROFILE, DIRECTORY));
+        assert!(!offered_under_profile(CANVAS_TOOL_PROFILE, DIRECTORY));
+        assert!(!offered_under_profile("", DIRECTORY));
+    }
+
+    #[test]
+    fn the_directory_row_follows_its_own_switch_in_the_view_and_the_attested_set() {
+        // Switched off (the default), the view drops the row and the owner lane attests only the thread rows.
+        if !crate::space_directory_tool::enabled() {
+            let tool = ViewTool {
+                description: crate::space_directory_tool::DESCRIPTION.to_owned(),
+                ..view_tool(DIRECTORY, "allow")
+            };
+            let offered = admit_view_with_switch("run-1", "run-1", &[tool], true, false)
+                .expect("a well-formed view is admitted");
+            assert!(
+                offered.is_empty(),
+                "the switched-off directory row was offered"
+            );
+            assert_eq!(
+                attested_capability_ids(),
+                attested_capability_ids_with(false)
+            );
+        }
+        let directory_cap = "cap.tool.space.directory.resolve".to_owned();
+        assert!(!attested_capability_ids_with(false).contains(&directory_cap));
+        let built = attested_capability_ids_with(true);
+        assert!(built.contains(&directory_cap));
+        assert_eq!(built.len(), BUILT_ACTIONS.len() + 1);
+    }
+
+    #[test]
+    fn a_directory_view_row_that_disagrees_with_the_golden_refuses_the_view() {
+        let mut tool = view_tool(DIRECTORY, "allow");
+        tool.parameters_json = r#"{"type":"object","properties":{"query":{"type":"string"},"room":{"type":"string"}},"required":["query"],"additionalProperties":false}"#.to_owned();
+        assert!(admit_view_with_switch("run-1", "run-1", &[tool], true, false).is_err());
     }
 }

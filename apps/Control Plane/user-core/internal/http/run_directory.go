@@ -79,8 +79,8 @@ func readRunDirectoryMembership(ctx context.Context, reader runDirectoryAuthorit
 	return runDirectoryMembership{Role: membership.Role, ZeroDataRetention: policy.ZeroDataRetention}, nil
 }
 
-// runDirectoryAdmitted is the registry and allowlist check; tests replace it
-// while the golden row is not vendored yet.
+// runDirectoryAdmitted is the registry and allowlist check (the golden row is
+// vendored since A-REC-03-TOOL, at the viewer floor); tests replace it.
 var runDirectoryAdmitted = spaces.RunActionReadAdmitted
 
 type runDirectoryRequest struct {

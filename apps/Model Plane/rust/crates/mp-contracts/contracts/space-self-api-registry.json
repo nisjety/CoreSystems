@@ -218,6 +218,33 @@
       "zdr": "refuse",
       "ui_action_id": null,
       "phase": 1
+    },
+    {
+      "action_id": "space.directory.resolve",
+      "capability_id": "cap.tool.space.directory.resolve",
+      "owner_plane": "control",
+      "owner_service": "user-core",
+      "service_audience": "control-plane-user-core",
+      "decision_type": "run_action",
+      "permission": "spaces:directory:run-read",
+      "min_role": "viewer",
+      "risk": "low",
+      "default_level": "allow",
+      "approval": "none",
+      "autonomy_rung": "read_only",
+      "reversible": true,
+      "max_per_run": 10,
+      "reservation": false,
+      "argument_order": [
+        "query",
+        "kind"
+      ],
+      "parameters_json": "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":100,\"description\":\"A full name, a unique name prefix, or an exact email.\"},\"kind\":{\"type\":\"string\",\"enum\":[\"person\",\"agent\",\"any\"],\"description\":\"What to look for. Defaults to person.\"}},\"required\":[\"query\"],\"additionalProperties\":false}",
+      "schema_sha256": "sha256:b0d9f062f7def9dd1299885f26df5bdfd1503015df71369f45d11904b209931f",
+      "hash_basis": "parameters_json",
+      "zdr": "refuse",
+      "ui_action_id": null,
+      "phase": 1
     }
   ],
   "digest_vectors": [

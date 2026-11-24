@@ -15,7 +15,7 @@ func withRunActionTargets(t *testing.T, rows []runActionTargetRow) {
 }
 
 // The table is the projection of the golden registry (registry/space-self-api-registry.json):
-// its eight rows in sorted id order. The tickets.create row is the row the table was
+// its nine rows in sorted id order. The tickets.create row is the row the table was
 // seeded with before the registry existed, unchanged.
 func TestRunActionTargetTableSeedsTicketsCreateOnly(t *testing.T) {
 	want := []runActionTargetRow{
@@ -25,6 +25,8 @@ func TestRunActionTargetTableSeedsTicketsCreateOnly(t *testing.T) {
 			Class: "read_only", HashBasis: "parameters_json", SchemaHash: "sha256:7760a5a5ce90f1c50ad52b3bb68cfcb409a0d348b55eb2f066cd92e85474cac1"},
 		{ActionID: "space.canvas.write", ServiceAudience: "data-plane-canvas", Permission: "canvas:write",
 			Class: "workspace_write", HashBasis: "parameters_json", SchemaHash: "sha256:9f0b5e21a35e9daf7b00b5cda023b71b598b169f28c4e112208f73b66a7d19e0"},
+		{ActionID: "space.directory.resolve", ServiceAudience: "control-plane-user-core", Permission: "spaces:directory:run-read",
+			Class: "read_only", HashBasis: "parameters_json", SchemaHash: "sha256:b0d9f062f7def9dd1299885f26df5bdfd1503015df71369f45d11904b209931f"},
 		{ActionID: "space.schedule.follow_up", ServiceAudience: "model-plane-capability-core", Permission: "space-action:execute",
 			Class: "write_approval", HashBasis: "parameters_json", SchemaHash: "sha256:5e33241382f8fd3a93fcc22bb8d47f87beb794e65a4a2bf0d3d9f46ab967b3c2"},
 		{ActionID: "space.thread.pin", ServiceAudience: "model-plane-session-core", Permission: "space-action:execute",

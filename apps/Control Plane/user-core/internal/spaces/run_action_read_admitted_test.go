@@ -23,15 +23,26 @@ func TestRunActionReadAdmitted(t *testing.T) {
 	if RunActionReadAdmitted("space.not.a.golden.row", RoleOwner) {
 		t.Fatal("admitted an action the golden does not name")
 	}
-	// space.directory.resolve follows its golden row: refused while the row is
-	// not vendored, admitted at its own floor once it is.
+	// space.directory.resolve is vendored (A-REC-03-TOOL): a run action at the
+	// viewer floor, admitted for any current member once the allowlist names it,
+	// and refused while it does not.
+	spec, found := runActionSpec("space.directory.resolve")
+	if !found || spec.DecisionType != runActionDecisionKind || spec.MinRole != RoleViewer ||
+		spec.AutonomyRung != "read_only" || spec.Approval != "none" || spec.ServiceAudience != "control-plane-user-core" {
+		t.Fatalf("directory golden row = %+v (found %v)", spec, found)
+	}
+	t.Setenv(spaceSelfAPIActionsEnv, "space.thread.rename")
+	if RunActionReadAdmitted("space.directory.resolve", RoleOwner) {
+		t.Fatal("admitted the directory row the allowlist does not name")
+	}
 	t.Setenv(spaceSelfAPIActionsEnv, "space.directory.resolve")
-	if spec, found := runActionSpec("space.directory.resolve"); found && spec.DecisionType == runActionDecisionKind {
-		if !RunActionReadAdmitted("space.directory.resolve", spec.MinRole) {
-			t.Fatal("refused the vendored directory row at its floor")
+	for _, role := range []string{RoleViewer, RoleEditor, RoleManager, RoleOwner} {
+		if !RunActionReadAdmitted("space.directory.resolve", role) {
+			t.Fatalf("refused the vendored directory row for a %s", role)
 		}
-	} else if RunActionReadAdmitted("space.directory.resolve", RoleOwner) {
-		t.Fatal("admitted the directory row before the golden names it")
+	}
+	if RunActionReadAdmitted("space.directory.resolve", "") {
+		t.Fatal("admitted the directory row for an empty role")
 	}
 	t.Setenv(spaceSelfAPIActionsEnv, "space.schedule.follow_up")
 	if RunActionReadAdmitted("space.schedule.follow_up", RoleOwner) {

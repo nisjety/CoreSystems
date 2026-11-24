@@ -78,6 +78,10 @@ func TestOwnerActionLaneAttestsExactlyItsAttesterTable(t *testing.T) {
 		{"conversation-core may not attest pause_self", pauseSelfCapabilityID, authz.ConversationCoreServiceID, http.StatusForbidden},
 		{"execution-core may not attest pause_self", pauseSelfCapabilityID, authz.ExecutionCoreServiceID, http.StatusForbidden},
 		{"an unrelated service may not attest the owner lane", spaceThreadRenameCapabilityID, "service:unrelated", http.StatusForbidden},
+		// A-REC-03-TOOL: execution-core runs the directory resolver, so it is the row's only attester.
+		{"execution-core attests the directory resolver", spaceDirectoryResolveCapabilityID, authz.ExecutionCoreServiceID, http.StatusOK},
+		{"conversation-core may not attest the directory resolver", spaceDirectoryResolveCapabilityID, authz.ConversationCoreServiceID, http.StatusForbidden},
+		{"wiki-store may not attest the directory resolver", spaceDirectoryResolveCapabilityID, authz.WikiStoreServiceID, http.StatusForbidden},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

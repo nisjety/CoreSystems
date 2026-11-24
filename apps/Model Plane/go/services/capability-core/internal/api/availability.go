@@ -64,6 +64,11 @@ const (
 	spaceCanvasWriteCapabilityID = "cap.tool.space.canvas.write"
 )
 
+// The agent directory resolver capability id (A-REC-03-TOOL, migration 0048). execution-core runs the tool over Control's
+// run-bound people read, so execution-core is its only attester on the owner lane; it attests only after its Session Core
+// probe and while SPACE_DIRECTORY_AGENT_TOOL is on with a complete configuration. The generic and tenant lanes refuse it.
+const spaceDirectoryResolveCapabilityID = "cap.tool.space.directory.resolve"
+
 // ownerActionHealthAttesters is the owner-action lane's attester table. Each owner-action
 // capability names the one service identity allowed to attest its health on that lane. The
 // owner lane refuses every id it does not list, and the generic and tenant lanes refuse
@@ -76,6 +81,7 @@ var ownerActionHealthAttesters = map[string]string{
 	spaceScheduleFollowUpCapabilityID: authz.ExecutionCoreServiceID,
 	spaceCanvasReadCapabilityID:       authz.WikiStoreServiceID,
 	spaceCanvasWriteCapabilityID:      authz.WikiStoreServiceID,
+	spaceDirectoryResolveCapabilityID: authz.ExecutionCoreServiceID,
 }
 
 // isOwnerActionCapability reports whether an id belongs to the owner-action lane.
