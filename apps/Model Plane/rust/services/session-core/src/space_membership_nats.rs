@@ -52,6 +52,10 @@ struct MembershipChangedEvent {
     org_id: String,
     subject_id: String,
     active: bool,
+    /// The subject's current role for an active member; empty for a removal or from an older producer (W3 D1). Recorded
+    /// with the ordering so the retraction sweep can find a demotion whose event it missed.
+    #[serde(default)]
+    role: String,
     /// The Space authority revision the fact was produced at (W3-DEC-ORDER). Absent only from an older producer, whose
     /// facts are applied without ordering, as before.
     #[serde(default)]
@@ -124,6 +128,39 @@ pub(crate) async fn advance_fact_order(
     Ok(advanced.is_some())
 }
 
+/// W3 D1 (E-PRIO-02): record what the fact applied at `space_seq` said, beside its revision: `active`, and the subject's
+/// role when the fact stated one (`None` for a removal or an older producer, stored NULL). Only the row whose stored
+/// revision is `space_seq` is changed, so a newer fact applied in between is never overwritten. Call it in the transaction
+/// that advanced the ordering, under the subject's ordering lock (migration 0139).
+pub(crate) async fn record_fact_state(
+    tx: &mut Transaction<'_, Postgres>,
+    space_ref: &str,
+    subject_id: &str,
+    space_seq: i64,
+    active: bool,
+    role: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE space_membership_fact_order SET active = $3, role = $4 \
+         WHERE space_ref = $1 AND subject_id = $2 AND space_seq = $5",
+    )
+    .bind(space_ref)
+    .bind(subject_id)
+    .bind(active)
+    .bind(role)
+    .bind(space_seq)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// The role a fact states, for [`record_fact_state`]: the trimmed role of an active member, `None` for a removal or a
+/// fact without a role.
+pub(crate) fn stated_role(active: bool, role: &str) -> Option<&str> {
+    let role = role.trim();
+    (active && !role.is_empty()).then_some(role)
+}
+
 /// `active=false` upserts a revocation row (deny resource-scoped run/thread/
 /// memory access to this Space until further notice). `active=true` deletes
 /// any existing revocation for this exact (space_ref, subject_id) — a
@@ -149,6 +186,15 @@ async fn apply_membership_change(
             tx.rollback().await?;
             return Ok(());
         }
+        record_fact_state(
+            &mut tx,
+            &event.space_ref,
+            &event.subject_id,
+            space_seq,
+            event.active,
+            stated_role(event.active, &event.role),
+        )
+        .await?;
     }
     if event.active {
         sqlx::query(
@@ -312,6 +358,7 @@ mod tests {
                 org_id: org_id.clone(),
                 subject_id: subject_id.clone(),
                 active: false,
+                role: String::new(),
                 space_seq: Some(1),
             },
         )
@@ -335,6 +382,7 @@ mod tests {
                 org_id: org_id.clone(),
                 subject_id: subject_id.clone(),
                 active: true,
+                role: String::new(),
                 space_seq: Some(2),
             },
         )
@@ -381,6 +429,7 @@ mod tests {
                 org_id: org_id.clone(),
                 subject_id: subject_id.clone(),
                 active: false,
+                role: String::new(),
                 space_seq: Some(2),
             },
         )
@@ -396,6 +445,7 @@ mod tests {
                 org_id: org_id.clone(),
                 subject_id: subject_id.clone(),
                 active: true,
+                role: String::new(),
                 space_seq: Some(1),
             },
         )
@@ -450,6 +500,7 @@ mod tests {
                 org_id: org_id.clone(),
                 subject_id: subject_id.clone(),
                 active: true,
+                role: String::new(),
                 space_seq: Some(3),
             },
         )
@@ -466,6 +517,7 @@ mod tests {
                 org_id: org_id.clone(),
                 subject_id: subject_id.clone(),
                 active: true,
+                role: String::new(),
                 space_seq: Some(3),
             },
         )
@@ -519,6 +571,7 @@ mod tests {
                 org_id: org_id.clone(),
                 subject_id: subject_id.clone(),
                 active: false,
+                role: String::new(),
                 space_seq: None,
             },
         )

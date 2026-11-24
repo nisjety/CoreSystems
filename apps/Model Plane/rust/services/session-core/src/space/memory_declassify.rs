@@ -486,6 +486,29 @@ pub(crate) async fn revoked_live_shares(
     .await
 }
 
+/// W3 D1 demotion backstop (E-PRIO-02): the live declassified shares whose subject's newest applied membership fact left
+/// them an active member below editor, as `(org, Space, subject, revision of that fact)`. Only shares authorised below
+/// that revision are listed (a share made after a later promotion is not). The state is the one the membership consumer
+/// recorded with the ordering (migration 0139); a row without a recorded role is never listed.
+pub(crate) async fn demoted_live_shares(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<(String, String, String, i64)>, sqlx::Error> {
+    sqlx::query_as(DEMOTED_LIVE_SHARES_SQL)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+}
+
+/// The query of [`demoted_live_shares`]. The role list is [`retraction_required`]'s allow list.
+pub(crate) const DEMOTED_LIVE_SHARES_SQL: &str =
+    "SELECT DISTINCT m.org_id, m.space_ref, m.subject_id, f.space_seq FROM memory_declassifications m \
+     JOIN space_membership_fact_order f ON f.space_ref = m.space_ref AND f.subject_id = m.subject_id \
+     WHERE m.retracted_at IS NULL \
+       AND f.active IS TRUE AND f.role IS NOT NULL AND f.role NOT IN ('editor', 'manager', 'owner') \
+       AND (m.authority_revision IS NULL OR m.authority_revision < f.space_seq) \
+     LIMIT $1";
+
 /// One live share of a subject (W3 D21g): the room row it holds, its Space, the personal row it came from and when
 /// the subject first shared it. Ids and a time only.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]

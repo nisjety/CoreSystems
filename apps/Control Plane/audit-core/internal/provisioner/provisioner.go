@@ -41,6 +41,8 @@ const (
 	ConversationSupportRecurrenceZDRPurgeDelivery     = "_VEREVON.CONTROL.SHARED.DELIVER.application.conversation.support-recurrence-zdr-purge"
 	InteractiveRetentionEnabledSubject                = "controlplane.org.interactive_retention.enabled"
 	SessionGDPRErasureConsumerName                    = "session-core-gdpr-erasure-v1"
+	SessionSpaceMembershipRetractConsumerName         = "session-core-space-membership-retract-v1"
+	SpaceMembershipChangedSubject                     = "controlplane.space.membership_changed"
 	QuarryControlOrgErasureConsumerName               = "quarry-control-org-erasure"
 	QuarryControlOrgErasureDelivery                   = "_VEREVON.CONTROL.SHARED.DELIVER.ingestion.quarry-control.org-erasure"
 	OrgDeletionSubjectWildcard                        = "verevon.org.deletion.>"
@@ -517,6 +519,9 @@ func ProvisionControlSharedRuntime(ctx context.Context, js nats.JetStreamContext
 	if err := ensureFixedConsumer(js, ControlSharedStreamName, sessionGDPRErasureConsumerConfig()); err != nil {
 		return err
 	}
+	if err := ensureFixedConsumer(js, ControlSharedStreamName, sessionSpaceMembershipRetractConsumerConfig()); err != nil {
+		return err
+	}
 	if err := ensureFixedConsumer(js, ControlSharedStreamName, quarryControlOrgErasureConsumerConfig()); err != nil {
 		return err
 	}
@@ -593,6 +598,23 @@ func sessionGDPRErasureConsumerConfig() *nats.ConsumerConfig {
 	return &nats.ConsumerConfig{
 		Durable: SessionGDPRErasureConsumerName, FilterSubject: GDPRErasureRequestedSubject,
 		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
+		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
+	}
+}
+
+// sessionSpaceMembershipRetractConsumerConfig is Model Plane session-core's
+// durable PULL consumer for Space membership facts (build plan W3 D1,
+// E-PRIO-02): it retracts a removed or demoted member's shared room memory, and
+// a durable cursor delivers a fact published while session-core was down. The
+// Durable must match DURABLE_NAME in session-core's
+// space_membership_retract_nats.rs, which binds it only when
+// SESSION_SPACE_RETRACT_DURABLE_CONSUMER is on. DeliverNew: facts older than
+// the consumer are covered by Control's 24 h re-announce and session-core's
+// sweeps, so a first bind never replays the stream's whole history.
+func sessionSpaceMembershipRetractConsumerConfig() *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable: SessionSpaceMembershipRetractConsumerName, FilterSubject: SpaceMembershipChangedSubject,
+		DeliverPolicy: nats.DeliverNewPolicy, AckPolicy: nats.AckExplicitPolicy,
 		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
 	}
 }

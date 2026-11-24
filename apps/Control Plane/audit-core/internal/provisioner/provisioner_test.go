@@ -368,6 +368,24 @@ func TestProvisionControlSharedRuntimeIsIdempotent(t *testing.T) {
 		t.Fatalf("unexpected session-core GDPR pull consumer: %+v", sessionGDPRConsumer.Config)
 	}
 
+	// E-PRIO-02 (D1): session-core's durable Space membership retraction pull consumer.
+	wantedSpaceRetract := sessionSpaceMembershipRetractConsumerConfig()
+	if wantedSpaceRetract.DeliverSubject != "" || wantedSpaceRetract.DeliverGroup != "" ||
+		wantedSpaceRetract.Durable != "session-core-space-membership-retract-v1" {
+		t.Fatalf("session-core Space membership retraction consumer config is not the pull consumer session-core binds: %+v", wantedSpaceRetract)
+	}
+	spaceRetractConsumer, err := js.ConsumerInfo(ControlSharedStreamName, wantedSpaceRetract.Durable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spaceRetractConsumer.Config.DeliverSubject != "" || spaceRetractConsumer.Config.DeliverGroup != "" ||
+		spaceRetractConsumer.Config.FilterSubject != "controlplane.space.membership_changed" ||
+		spaceRetractConsumer.Config.DeliverPolicy != nats.DeliverNewPolicy ||
+		spaceRetractConsumer.Config.AckPolicy != nats.AckExplicitPolicy ||
+		spaceRetractConsumer.Config.MaxDeliver != 20 {
+		t.Fatalf("unexpected session-core Space membership retraction pull consumer: %+v", spaceRetractConsumer.Config)
+	}
+
 	wantedQuarry := quarryControlOrgErasureConsumerConfig()
 	quarryConsumer, err := js.ConsumerInfo(ControlSharedStreamName, wantedQuarry.Durable)
 	if err != nil {

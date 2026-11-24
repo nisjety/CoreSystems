@@ -16,6 +16,15 @@
 //! durable. A demotion older than the re-announce window whose event was missed is not covered (see the depth
 //! file).
 //!
+//! E-PRIO-02 (D1 residual). The membership consumer records each applied fact's `active` and role beside its revision
+//! (`space_membership_fact_order`, migration 0139), and the sweep also retracts the live shares of a subject whose newest
+//! applied fact left them an active member below editor, authorised below that fact. So a demotion this consumer missed
+//! is retracted once the membership consumer has applied it, beyond the re-announce window too. With
+//! `SESSION_SPACE_RETRACT_DURABLE_CONSUMER` on (default off; a delivery mode, never an authorization input) this consumer
+//! binds the pre-provisioned durable pull consumer [`DURABLE_NAME`] on the `CONTROLPLANE` stream (audit-core's
+//! provisioner owns it) instead of the plain subscription, so a fact published while Session Core is down is delivered
+//! when it returns. A fact is acknowledged after its retraction committed, and a failed one is redelivered later.
+//!
 //! Retraction is idempotent: a repeated fact or sweep finds no live row and changes nothing. A failed retraction is
 //! retried here with backoff; the next re-announce or sweep retries it after that. Logs carry ids and counts only.
 //!
@@ -29,15 +38,37 @@
 
 use std::time::Duration;
 
+use async_nats::jetstream::{self, consumer::PullConsumer, AckKind};
 use futures::StreamExt;
 use serde::Deserialize;
 use tracing::{info, warn};
 
-use crate::space::memory_declassify::{retract_removed_subject, retraction_required, revoked_live_shares};
-use crate::space_membership_nats::{advance_fact_order, lock_fact_order, stored_fact_seq};
+use crate::space::memory_declassify::{
+    demoted_live_shares, retract_removed_subject, retraction_required, revoked_live_shares,
+};
+use crate::space_membership_nats::{advance_fact_order, lock_fact_order, record_fact_state, stored_fact_seq};
 use crate::store::Pool;
 
 const SUBJECT: &str = "controlplane.space.membership_changed";
+
+/// The shared stream and the durable pull consumer this consumer binds when [`durable_enabled`] (E-PRIO-02, D1). Both are
+/// provisioned by audit-core (`sessionSpaceMembershipRetractConsumerConfig`); runtime credentials only bind, pull and ack.
+const STREAM_NAME: &str = "CONTROLPLANE";
+const DURABLE_NAME: &str = "session-core-space-membership-retract-v1";
+
+/// How long a fact whose retraction failed waits before the durable consumer redelivers it.
+const REDELIVER_AFTER: Duration = Duration::from_secs(60);
+
+/// Whether the durable consumer is used (`SESSION_SPACE_RETRACT_DURABLE_CONSUMER` = 1, true or on). Off by default, as
+/// every new switch: the plain subscription with the re-announce and the sweeps stays the delivery until the durable
+/// consumer is provisioned and allowed on the shared broker.
+fn durable_enabled() -> bool {
+    durable_switch(std::env::var("SESSION_SPACE_RETRACT_DURABLE_CONSUMER").ok().as_deref())
+}
+
+fn durable_switch(value: Option<&str>) -> bool {
+    matches!(value.map(str::trim), Some("1" | "true" | "on" | "TRUE" | "ON" | "True"))
+}
 
 /// How often the revoked-subject sweep runs.
 const SWEEP_EVERY: Duration = Duration::from_secs(600);
@@ -78,6 +109,9 @@ fn parse_fact(payload: &[u8]) -> Result<MembershipFact, serde_json::Error> {
 pub async fn run(pool: Pool, nats_url: String) -> anyhow::Result<()> {
     info!(%nats_url, subject = SUBJECT, "session-core Space membership retraction consumer connecting");
     let client = crate::nats_connection::connect_shared(&nats_url).await?;
+    if durable_enabled() {
+        return run_durable(pool, client).await;
+    }
     let mut subscription = client.subscribe(SUBJECT).await?;
     info!(subject = SUBJECT, "Space membership retraction consumer subscribed");
     let mut sweep = tokio::time::interval(SWEEP_EVERY);
@@ -85,26 +119,81 @@ pub async fn run(pool: Pool, nats_url: String) -> anyhow::Result<()> {
         tokio::select! {
             message = subscription.next() => {
                 let Some(message) = message else { break };
-                let fact = match parse_fact(&message.payload) {
-                    Ok(fact) => fact,
-                    Err(error) => {
-                        warn!(?error, "Space membership retraction decode failed");
-                        continue;
-                    }
-                };
-                if retraction_required(fact.active, &fact.role) {
-                    retract_with_retry(&pool, &fact).await;
-                }
+                handle_payload(&pool, &message.payload).await;
             }
-            _ = sweep.tick() => sweep_revoked_shares(&pool).await,
+            _ = sweep.tick() => sweep_shares(&pool).await,
         }
     }
     Ok(())
 }
 
+/// The durable delivery (E-PRIO-02, D1): bind the provisioned pull consumer, ack a fact once handled, and ask for a later
+/// redelivery of one whose retraction failed. A payload that does not decode is acknowledged (it can never succeed).
+async fn run_durable(pool: Pool, client: async_nats::Client) -> anyhow::Result<()> {
+    let js = jetstream::new(client);
+    let stream = js.get_stream(STREAM_NAME).await?;
+    let consumer: PullConsumer = stream
+        .get_consumer(DURABLE_NAME)
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    if consumer.cached_info().config.filter_subject != SUBJECT {
+        return Err(anyhow::anyhow!("pre-provisioned Space membership retraction consumer filter mismatch"));
+    }
+    let mut messages = consumer.messages().await?;
+    info!(durable = DURABLE_NAME, "Space membership retraction durable consumer ready");
+    let mut sweep = tokio::time::interval(SWEEP_EVERY);
+    loop {
+        tokio::select! {
+            message = messages.next() => {
+                let Some(message) = message else { break };
+                let message = match message {
+                    Ok(message) => message,
+                    Err(error) => {
+                        warn!(%error, "Space membership retraction receive error");
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        continue;
+                    }
+                };
+                let ack = if handle_payload(&pool, &message.payload).await {
+                    message.ack().await
+                } else {
+                    message.ack_with(AckKind::Nak(Some(REDELIVER_AFTER))).await
+                };
+                if let Err(error) = ack {
+                    warn!(%error, "Space membership retraction ack failed");
+                }
+            }
+            _ = sweep.tick() => sweep_shares(&pool).await,
+        }
+    }
+    Ok(())
+}
+
+/// Decode one fact and retract for it when it obliges a retraction. False only when a required retraction failed after
+/// its retries, so the durable consumer redelivers it; a payload that does not decode is dropped (true).
+async fn handle_payload(pool: &Pool, payload: &[u8]) -> bool {
+    let fact = match parse_fact(payload) {
+        Ok(fact) => fact,
+        Err(error) => {
+            warn!(?error, "Space membership retraction decode failed");
+            return true;
+        }
+    };
+    if retraction_required(fact.active, &fact.role) {
+        return retract_with_retry(pool, &fact).await;
+    }
+    true
+}
+
+/// Both sweeps: removals (the revocation projection) and demotions (the recorded fact state).
+async fn sweep_shares(pool: &Pool) {
+    sweep_revoked_shares(pool).await;
+    sweep_demoted_shares(pool).await;
+}
+
 /// Retract one subject's shares for a fact, retrying with backoff. A removal also writes the revocation row, as the
-/// membership consumer does, inside the same transaction as the retraction.
-async fn retract_with_retry(pool: &Pool, fact: &MembershipFact) {
+/// membership consumer does, inside the same transaction as the retraction. True once a retraction committed.
+async fn retract_with_retry(pool: &Pool, fact: &MembershipFact) -> bool {
     let revoke = !fact.active;
     let reason = if revoke { "removed" } else { "below_editor" };
     let mut delay = Duration::from_secs(1);
@@ -112,7 +201,7 @@ async fn retract_with_retry(pool: &Pool, fact: &MembershipFact) {
         match retract_if_current(pool, fact, revoke).await {
             Ok(deleted) => {
                 record_retraction(deleted, reason, &fact.org_id, &fact.space_ref, &fact.subject_id);
-                return;
+                return true;
             }
             Err(error) => {
                 warn!(
@@ -137,6 +226,7 @@ async fn retract_with_retry(pool: &Pool, fact: &MembershipFact) {
         subject_id = %fact.subject_id,
         "declassified memory retraction gave up; the next re-announce or sweep retries it"
     );
+    false
 }
 
 /// One attempt at a fact's retraction (W3-DEC-ORDER2). The fact is retracted whatever the stored ordering: its shares
@@ -157,7 +247,10 @@ async fn retract_if_current(pool: &Pool, fact: &MembershipFact, revoke: bool) ->
     let revoke_now = revoke && !superseded;
     if revoke_now {
         if let Some(space_seq) = fact.space_seq {
-            advance_fact_order(&mut tx, &fact.org_id, &fact.space_ref, &fact.subject_id, space_seq).await?;
+            if advance_fact_order(&mut tx, &fact.org_id, &fact.space_ref, &fact.subject_id, space_seq).await? {
+                // E-PRIO-02 (D1): the removal is the newest applied fact, so its state is recorded beside it.
+                record_fact_state(&mut tx, &fact.space_ref, &fact.subject_id, space_seq, false, None).await?;
+            }
         }
     }
     let deleted = retract_removed_subject(
@@ -224,6 +317,63 @@ async fn retract_while_revoked(
     }
     let before = stored_fact_seq(&mut tx, space_id, subject_id).await?;
     let deleted = retract_removed_subject(&mut tx, org_id, space_id, subject_id, false, before).await?;
+    tx.commit().await?;
+    Ok(Some(deleted))
+}
+
+/// E-PRIO-02 (D1): retract the live shares of subjects whose newest applied fact left them an active member below
+/// editor (the demotion event may have been missed). Each is re-checked under the subject's ordering lock.
+async fn sweep_demoted_shares(pool: &Pool) {
+    let shares = match demoted_live_shares(pool, SWEEP_LIMIT).await {
+        Ok(shares) => shares,
+        Err(error) => {
+            warn!(?error, "declassified demotion sweep could not read the ledger");
+            return;
+        }
+    };
+    for (org_id, space_id, subject_id, space_seq) in shares {
+        match retract_while_demoted(pool, &org_id, &space_id, &subject_id, space_seq).await {
+            Ok(Some(deleted)) => record_retraction(deleted, "sweep_demoted", &org_id, &space_id, &subject_id),
+            Ok(None) => {}
+            Err(error) => warn!(
+                ?error,
+                org_id = %org_id,
+                space_id = %space_id,
+                subject_id = %subject_id,
+                "declassified demotion sweep retraction failed"
+            ),
+        }
+    }
+}
+
+/// The demotion sweep's attempt: under the subject's ordering lock, retract only while the newest applied fact is still
+/// the demotion the sweep read (same revision, still active below editor). `None` when a newer fact has landed since.
+/// Only shares authorised below that revision are retracted, and the revision is marked, as for a live demotion fact.
+async fn retract_while_demoted(
+    pool: &Pool,
+    org_id: &str,
+    space_id: &str,
+    subject_id: &str,
+    space_seq: i64,
+) -> Result<Option<u64>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    lock_fact_order(&mut tx, org_id, space_id, subject_id).await?;
+    let state: Option<(i64, Option<bool>, Option<String>)> = sqlx::query_as(
+        "SELECT space_seq, active, role FROM space_membership_fact_order WHERE space_ref = $1 AND subject_id = $2",
+    )
+    .bind(space_id)
+    .bind(subject_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let still_demoted = matches!(
+        &state,
+        Some((seq, Some(true), Some(role))) if *seq == space_seq && retraction_required(true, role)
+    );
+    if !still_demoted {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    let deleted = retract_removed_subject(&mut tx, org_id, space_id, subject_id, false, Some(space_seq)).await?;
     tx.commit().await?;
     Ok(Some(deleted))
 }
@@ -296,6 +446,78 @@ mod tests {
         assert!(retraction_required(false, ""));
         assert!(retraction_required(true, "viewer"));
         assert!(!retraction_required(true, "editor"));
+    }
+
+    // ---- E-PRIO-02 (D1 residual): durable switch, recorded fact state, demotion sweep --------------
+
+    #[test]
+    fn the_durable_consumer_is_off_unless_switched_on() {
+        for off in [None, Some(""), Some("0"), Some("false"), Some("off"), Some("yes")] {
+            assert!(!durable_switch(off), "{off:?} keeps the plain subscription");
+        }
+        for on in ["1", "true", "on", " TRUE "] {
+            assert!(durable_switch(Some(on)), "{on} binds the durable consumer");
+        }
+        assert_eq!(STREAM_NAME, "CONTROLPLANE");
+        assert_eq!(DURABLE_NAME, "session-core-space-membership-retract-v1");
+    }
+
+    #[test]
+    fn the_stated_role_is_an_active_members_only() {
+        use crate::space_membership_nats::stated_role;
+        assert_eq!(stated_role(true, " viewer "), Some("viewer"));
+        assert_eq!(stated_role(true, ""), None, "no role stated, nothing recorded");
+        assert_eq!(stated_role(false, "editor"), None, "a removal records no role");
+    }
+
+    #[test]
+    fn the_demotion_sweep_reads_only_recorded_below_editor_states_older_shares() {
+        let sql = crate::space::memory_declassify::DEMOTED_LIVE_SHARES_SQL;
+        assert!(sql.contains("m.retracted_at IS NULL"));
+        assert!(sql.contains("f.active IS TRUE AND f.role IS NOT NULL"));
+        assert!(sql.contains("f.role NOT IN ('editor', 'manager', 'owner')"));
+        assert!(sql.contains("m.authority_revision < f.space_seq"), "a share after the demotion survives");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn a_missed_demotion_is_retracted_by_the_sweep_and_a_later_promotion_stops_it() {
+        let Some(pool) = crate::space::test_support::connect().await else {
+            return;
+        };
+        let org = format!("retract-org-{}", mp_ids::new_ulid());
+        let space = format!("retract-space-{}", mp_ids::new_ulid());
+        let subject = "member-demoted";
+        let source = format!("mem-{}", mp_ids::new_ulid());
+        seed_personal_memory(&pool, &org, subject, &source, "pref").await;
+        let room = share(&pool, &org, subject, &space, &source, 41, 3).await;
+
+        // The membership consumer applied a demotion to viewer at revision 5; this consumer never saw it.
+        let mut tx = pool.begin().await.expect("begin");
+        lock_fact_order(&mut tx, &org, &space, subject).await.expect("lock");
+        assert!(advance_fact_order(&mut tx, &org, &space, subject, 5).await.expect("advance"));
+        record_fact_state(&mut tx, &space, subject, 5, true, Some("viewer")).await.expect("record");
+        tx.commit().await.expect("commit");
+
+        let listed = demoted_live_shares(&pool, 100).await.expect("list demoted");
+        assert!(listed.contains(&(org.clone(), space.clone(), subject.to_owned(), 5)));
+        sweep_demoted_shares(&pool).await;
+        assert!(!room_row_exists(&pool, &room).await, "the demoted member's share is retracted");
+
+        // A share made after a promotion is not swept.
+        let mut tx = pool.begin().await.expect("begin");
+        lock_fact_order(&mut tx, &org, &space, subject).await.expect("lock");
+        assert!(advance_fact_order(&mut tx, &org, &space, subject, 7).await.expect("advance"));
+        record_fact_state(&mut tx, &space, subject, 7, true, Some("editor")).await.expect("record");
+        tx.commit().await.expect("commit");
+        let source2 = format!("mem2-{}", mp_ids::new_ulid());
+        seed_personal_memory(&pool, &org, subject, &source2, "pref2").await;
+        let room2 = share(&pool, &org, subject, &space, &source2, 42, 7).await;
+        sweep_demoted_shares(&pool).await;
+        assert!(room_row_exists(&pool, &room2).await, "an editor's share stays");
+        assert_eq!(retract_while_demoted(&pool, &org, &space, subject, 5).await.expect("stale"), None);
+
+        clean_world(&pool, &org, &space).await;
     }
 
     // ---- DB-tier fixtures -------------------------------------------------------------------------
