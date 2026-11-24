@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 from types import SimpleNamespace
 from uuid import UUID
@@ -96,6 +97,7 @@ def test_space_import_reauthorizes_at_write_time_and_requires_data_plane_attesta
                 "org_id": "org-1", "space_ref": intent.space_ref, "subject_id": intent.subject_id,
                 "action_id": "ingestion.import.write", "service_audience": "data-plane-import",
                 "payload_digest": intent.payload_digest, "permissions": ["documents:write"],
+                "content_digest": seen["reauth_body"].get("content_digest"),
             }}})
         if request.url.path == "/api/data-plane/internal-token":
             return httpx.Response(200, json={"token": "signed-data-plane-token"})
@@ -123,5 +125,77 @@ def test_space_import_reauthorizes_at_write_time_and_requires_data_plane_attesta
     asyncio.run(run())
 
     assert seen["reauth_headers"]["x-service-id"] == "imports-core"
-    assert seen["reauth_body"] == {"intent": intent.model_dump(mode="json")}
+    # DEPTH-WS14-S3-1: the body's digest travels beside the intent, so Control signs it into the decision.
+    assert seen["reauth_body"] == {
+        "intent": intent.model_dump(mode="json"),
+        "content_digest": "sha256:" + hashlib.sha256(b"durable content").hexdigest(),
+    }
     assert seen["document_headers"]["x-space-import-decision"] == "fresh-signed-space-decision"
+
+
+def _space_intent() -> SpaceImportIntent:
+    return SpaceImportIntent.model_validate({
+        "space_ref": "space:org-1:user-1", "subject_id": "user-1",
+        "resource_authorization_ref": "resource:import:1", "recipient_audience_ref": "audience:user-1:1",
+        "privacy_policy_ref": "privacy:org-1:1", "authority_revision": 3, "membership_revision": 3,
+        "privacy_revision": 2, "recipient_audience_revision": 3, "entitlement_revision": 4,
+        "action_schema_hash": "sha256:ingestion-import-v1", "payload_digest": "sha256:payload",
+        "idempotency_key": "import-1", "source_type": "notion", "purpose": "knowledge_import", "lawful_basis": "contract",
+        "privacy_class": "internal", "third_party_allowed": False, "retention_class": "standard",
+        "residency": "eu-north-1", "deletion_scope": "space", "zero_data_retention": False,
+    })
+
+
+def test_the_content_digest_matches_the_documents_api_body_commitment() -> None:
+    # documents-api spaceImportContentDigest: sha256 over the UTF-8 bytes of the posted content string.
+    assert service.space_import_content_digest("") == (
+        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    )
+    text = "Møtenotat — ærlig"
+    assert service.space_import_content_digest(text) == "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_a_decision_without_the_same_content_digest_fails_closed_before_the_write() -> None:
+    intent = _space_intent()
+    for echoed in (None, "sha256:" + "b" * 64):
+        writes: list[str] = []
+
+        def handler(request: httpx.Request, echoed=echoed) -> httpx.Response:
+            if request.url.path == "/api/v1/internal/spaces/import-execution-decision":
+                decision = {
+                    "org_id": "org-1", "space_ref": intent.space_ref, "subject_id": intent.subject_id,
+                    "action_id": "ingestion.import.write", "service_audience": "data-plane-import",
+                    "payload_digest": intent.payload_digest, "permissions": ["documents:write"],
+                }
+                if echoed is not None:
+                    decision["content_digest"] = echoed
+                return httpx.Response(200, json={"data": {"token": "fresh", "decision": decision}})
+            if request.url.path == "/api/data-plane/internal-token":
+                return httpx.Response(200, json={"token": "signed-data-plane-token"})
+            writes.append(request.url.path)
+            return httpx.Response(201, headers={"X-Space-Import-Authority-Accepted": "true"}, json={})
+
+        instance = ImportService()
+        instance._settings = SimpleNamespace(
+            auth_core_url="http://auth-core", ingestion_service_id="imports-core",
+            ingestion_service_api_key="registered-key", document_service_url="http://documents-api",
+            document_service_import_path="/v1/documents/", space_authority_reauthorization_url="http://user-core",
+            space_authority_service_token="space-authority-service-token",
+        )
+        service.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        service._data_plane_tokens.clear()
+        job = ImportJob(id=UUID("00000000-0000-0000-0000-000000000001"), org_id="org-1", user_id="user-1", source_type="notion", status="running", space_import_intent=intent.model_dump(mode="json"))
+
+        async def run() -> None:
+            try:
+                await instance._store_document(job, ImportDocument(text="durable content"), UUID("00000000-0000-0000-0000-000000000002"))
+            finally:
+                await service.http_client.aclose()
+
+        try:
+            asyncio.run(run())
+        except service.SpaceImportAuthorityUnavailable:
+            pass
+        else:
+            raise AssertionError(f"a decision echoing {echoed!r} was accepted")
+        assert writes == [], "no Data write may follow a mismatched decision"

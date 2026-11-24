@@ -24,6 +24,17 @@ from app.space_upload import SPACE_UPLOAD_SOURCE_TYPE, item_error_code
 
 logger = logging.getLogger(__name__)
 
+
+def space_import_content_digest(content: str) -> str:
+    """The body commitment documents-api checks (DEPTH-WS14-S3-1).
+
+    sha256 over the UTF-8 bytes of the posted ``content`` string, as
+    ``sha256:`` and 64 lowercase hex characters: the same function as
+    documents-api ``spaceImportContentDigest``.
+    """
+    return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # Shared HTTP client — initialised in lifespan, avoids per-request TCP handshakes
 # ---------------------------------------------------------------------------
@@ -206,13 +217,20 @@ class ImportService:
             )
             return token.strip()
 
-    async def _fresh_space_import_decision(self, job: ImportJob) -> str | None:
+    async def _fresh_space_import_decision(
+        self, job: ImportJob, content: str | None = None
+    ) -> str | None:
         """Reauthorize a durable Space intent immediately before a Data write.
 
         The job contains only a non-secret immutable intent. Control returns a
         short-lived, target-specific signed decision which is kept in memory
         for this one request and then discarded. The Data Plane must attest it
         actually enforced that decision; otherwise the worker fails closed.
+
+        DEPTH-WS14-S3-1: when the write's body is known, its digest
+        (``space_import_content_digest``) is sent beside the intent and Control
+        signs it into the decision, so documents-api accepts that one body and
+        no other. A decision that comes back without the same digest is refused.
         """
         if job.space_import_intent is None:
             return None
@@ -232,6 +250,7 @@ class ImportService:
         service_token = self._settings.space_authority_service_token.strip()
         if not base_url or not service_token:
             raise SpaceImportAuthorityUnavailable("Space import authority is not configured")
+        content_digest = None if content is None else space_import_content_digest(content)
         try:
             response = await _get_client().post(
                 f"{base_url.rstrip('/')}/api/v1/internal/spaces/import-execution-decision",
@@ -239,7 +258,11 @@ class ImportService:
                     "X-Service-Id": self._settings.ingestion_service_id,
                     "X-Service-Token": service_token,
                 },
-                json={"intent": intent.model_dump(mode="json")},
+                json=(
+                    {"intent": intent.model_dump(mode="json")}
+                    if content_digest is None
+                    else {"intent": intent.model_dump(mode="json"), "content_digest": content_digest}
+                ),
                 timeout=5.0,
             )
             response.raise_for_status()
@@ -259,6 +282,7 @@ class ImportService:
             or decision.get("service_audience") != "data-plane-import"
             or decision.get("payload_digest") != intent.payload_digest
             or "documents:write" not in decision.get("permissions", [])
+            or (content_digest is not None and decision.get("content_digest") != content_digest)
         ):
             raise SpaceImportAuthorityUnavailable("Control returned a mismatched Space import decision")
         return token.strip()
@@ -619,7 +643,7 @@ class ImportService:
         }
         if job.source_type == SPACE_UPLOAD_SOURCE_TYPE:
             payload["metadata"]["upload_id"] = str(job.id)
-        space_decision = await self._fresh_space_import_decision(job)
+        space_decision = await self._fresh_space_import_decision(job, document.text)
         token = await self._data_plane_token(job.org_id)
         headers = {
             "Authorization": f"Bearer {token}",

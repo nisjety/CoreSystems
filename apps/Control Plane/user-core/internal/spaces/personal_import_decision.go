@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -106,7 +107,16 @@ type PersonalImportExecutionIntent struct {
 	PayloadDigest    string
 	IdempotencyKey   string
 	SourceType       string
+	// ContentDigest is optional: the sha256 commitment to the body the worker is
+	// about to write (DEPTH-WS14-S3-1). It is not part of the durable intent; the
+	// worker computes it per write. When present it is copied into the decision
+	// unchanged, and documents-api binds the write to it.
+	ContentDigest string
 }
+
+// importContentDigestPattern is the content_digest shape documents-api checks:
+// "sha256:" and 64 lowercase hex characters.
+var importContentDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 func (i PersonalImportExecutionIntent) Validate() error {
 	for label, value := range map[string]string{
@@ -123,6 +133,9 @@ func (i PersonalImportExecutionIntent) Validate() error {
 	}
 	if !validImportSourceType(i.SourceType) {
 		return fmt.Errorf("personal import execution intent source_type is invalid")
+	}
+	if i.ContentDigest != "" && !importContentDigestPattern.MatchString(i.ContentDigest) {
+		return fmt.Errorf("personal import execution content_digest is invalid")
 	}
 	return nil
 }
@@ -159,5 +172,6 @@ func IssuePersonalImportExecutionDecision(
 		[]string{"documents:write"}, evidence.Privacy.ZeroDataRetention, now,
 	)
 	decision.ImportSourceType = strings.TrimSpace(intent.SourceType)
+	decision.ContentDigest = intent.ContentDigest
 	return decision, nil
 }

@@ -87,6 +87,13 @@ type Decision struct {
 	// ImportSourceType is present only for the import action family. It binds a
 	// durable connector intent without turning Control into a connector owner.
 	ImportSourceType string `json:"import_source_type,omitempty"`
+	// ContentDigest (DEPTH-WS14-S3-1) is present only on an import execution
+	// decision whose caller supplied the body it is about to write: "sha256:" and
+	// 64 lowercase hex over the UTF-8 bytes of the posted document content.
+	// documents-api refuses a write whose body does not match it, so the decision
+	// authorizes that one body. Signed with the rest of the decision; omitted when
+	// empty, so no other decision changes shape.
+	ContentDigest string `json:"content_digest,omitempty"`
 	// HistoryFloorRevision (WS04-S11) is present on a shared thread-read decision
 	// for a since_join room while SPACE_HISTORY_WINDOW_CLAIM is on, and on the
 	// shared decisions that carry a member's floor (see HistoryFloorAt): the first

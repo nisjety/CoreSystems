@@ -1043,6 +1043,10 @@ func (s *Server) issuePersonalImportDecisionFor(c *gin.Context, request personal
 
 type personalImportExecutionDecisionRequest struct {
 	Intent personalImportExecutionIntent `json:"intent"`
+	// ContentDigest (optional, DEPTH-WS14-S3-1) is the sha256 commitment to the
+	// body this one write posts. It sits beside the durable intent, not in it:
+	// the worker computes it per document. Control signs it into the decision.
+	ContentDigest string `json:"content_digest"`
 }
 
 // scheduleFireDecisionRequest is an immutable, non-secret record view from
@@ -1474,7 +1478,7 @@ func (s *Server) issuePersonalImportExecutionDecision(c *gin.Context) {
 		OrgID: request.Intent.OrgID, SpaceRef: request.Intent.SpaceRef,
 		SubjectID: request.Intent.SubjectID, ActionSchemaHash: request.Intent.ActionSchemaHash,
 		PayloadDigest: request.Intent.PayloadDigest, IdempotencyKey: request.Intent.IdempotencyKey,
-		SourceType: request.Intent.SourceType,
+		SourceType: request.Intent.SourceType, ContentDigest: request.ContentDigest,
 	}
 	if err := intent.Validate(); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "valid import execution intent is required"})

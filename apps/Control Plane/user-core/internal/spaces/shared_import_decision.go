@@ -98,5 +98,6 @@ func IssueSharedImportExecutionDecision(
 		[]string{"documents:write"}, evidence.Privacy.ZeroDataRetention, now,
 	)
 	decision.ImportSourceType = strings.TrimSpace(intent.SourceType)
+	decision.ContentDigest = intent.ContentDigest
 	return decision, nil
 }

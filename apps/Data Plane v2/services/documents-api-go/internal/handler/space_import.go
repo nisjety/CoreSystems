@@ -162,10 +162,11 @@ func (d spaceImportDecisionClaims) validate(orgID string, now time.Time) error {
 	if d.ZeroDataRetention {
 		return errSpaceImportDecisionZDR
 	}
-	// The shape is checked, not just presence. The digest still does not cover
-	// the uploaded bytes: Control mints it before they exist, so a true body
-	// binding needs a Control-signed body digest (DEPTH-WS14-S3-1, cross-plane);
-	// documents-api enforces content_digest (matchesContent) once Control mints it.
+	// The shape is checked, not just presence. The payload digest does not cover
+	// the uploaded bytes: Control mints it before they exist. The body binding is
+	// content_digest (DEPTH-WS14-S3-1): Imports Core sends the body's digest at
+	// reauthorization, Control signs it into the execution decision, and
+	// documents-api enforces it (matchesContent).
 	if !spaceImportPayloadDigestPattern.MatchString(d.PayloadDigest) {
 		return fmt.Errorf("Space import decision payload digest is not a sha256 commitment")
 	}
@@ -192,8 +193,10 @@ func spaceImportContentDigest(content string) string {
 }
 
 // matchesContent binds the write to the signed body when the decision carries a
-// content digest. A decision without one is the legacy request-identity-only
-// shape and is accepted as before until Control and Imports Core mint it.
+// content digest. Imports Core asks for one on every write and refuses a
+// decision without it; a decision without one is the legacy request-identity-only
+// shape and is still accepted here, so a documents-api rollout does not refuse
+// writes from an older Imports Core or Control.
 func (d spaceImportDecisionClaims) matchesContent(content string) bool {
 	if d.ContentDigest == "" {
 		return true
