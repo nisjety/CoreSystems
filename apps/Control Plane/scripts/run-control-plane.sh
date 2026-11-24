@@ -485,6 +485,11 @@ required_credentials=(
   # fleet has been carrying.
   EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN
   EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN
+  # The agent directory resolver's run-bound people read (A-REC-03):
+  # execution-core -> user-core, scope spaces:directory:run-read alone. Read by
+  # both ends like the two tokens above. Nothing presents it until
+  # SPACE_DIRECTORY_AGENT_TOOL is on in execution-core.
+  EXECUTION_CORE_CONTROL_RUN_DIRECTORY_TOKEN
   CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN
   # Presented BY conversation-core TO user-core for the two owner-effect
   # checks that fence a governed ticket action (current authority, then the
