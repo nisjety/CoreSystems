@@ -134,3 +134,73 @@ test('C-PRIO-05: the inbox window pages inside the caller\'s org, so newer rows 
     'a page of two is two of the caller\'s rows, not two filtered-out rows of another org',
   );
 });
+
+test('C-PRIO-05 (D18): attentionForGateway counts no item created before its room\'s history window', async (t) => {
+  withServiceKey(t);
+  const FLOOR = 1_000;
+  const item = (spaceRef, id, kind, createdAt) => ({
+    externalOrgId: ORG,
+    recipientAuthId: AUTH,
+    spaceRef,
+    kind,
+    threadId: `thread_${id}`,
+    actorKind: 'user',
+    state: 'open',
+    count: 1,
+    firstEventId: `e_${id}`,
+    lastEventId: `e_${id}`,
+    coalesceKey: `k_${id}`,
+    createdAt,
+    updatedAt: createdAt,
+    expiresAt: Date.now() + 1_000_000,
+  });
+  const { ctx } = makeCtx(
+    memberTables({
+      spaceAttentionItems: [
+        item('room_w', 'old_m', 'mention', FLOOR - 1),
+        item('room_w', 'old_r', 'reply', FLOOR - 500),
+        item('room_w', 'old_d', 'agent_done', FLOOR - 2),
+        item('room_w', 'new_m', 'mention', FLOOR),
+        item('room_w', 'new_r', 'reply', FLOOR + 5),
+        item('room_a', 'a_m', 'mention', 1),
+      ],
+    }),
+  );
+  const ask = (floors) =>
+    attention.attentionForGateway._handler(ctx, { ...base, spaceRefs: ['room_w', 'room_a'], ...(floors ? { floors } : {}) });
+  const counts = (answer, ref) => {
+    const room = answer.rooms.find((row) => row.spaceRef === ref);
+    return [room.mentions, room.replies, room.agentDone];
+  };
+
+  const plain = await ask(undefined);
+  assert.deepEqual(counts(plain, 'room_w'), [2, 2, 1], 'without a window every open item counts');
+
+  const windowed = await ask([{ spaceRef: 'room_w', floorAt: FLOOR }]);
+  assert.deepEqual(counts(windowed, 'room_w'), [1, 1, 0], 'only the items created at or after the floor');
+  assert.deepEqual(counts(windowed, 'room_a'), [1, 0, 0], 'a room without a window is unchanged');
+  assert.equal(windowed.otherOpen, 0);
+
+  // A pre-window row of a room not asked about is still not counted under "other open".
+  const narrow = await attention.attentionForGateway._handler(ctx, {
+    ...base,
+    spaceRefs: ['room_a'],
+    floors: [{ spaceRef: 'room_w', floorAt: FLOOR }],
+  });
+  assert.equal(narrow.otherOpen, 2, 'room_w\'s two in-window rows only');
+
+  await rejectsWith(ask([{ spaceRef: 'room_w', floorAt: Number.NaN }]), 'invalid_floor');
+  await rejectsWith(ask([{ spaceRef: '', floorAt: FLOOR }]), 'invalid_space_ref');
+});
+
+test('C-PRIO-05 (D18): two floors for one room keep the later one', () => {
+  const floors = attention.cleanFloors([
+    { spaceRef: 'room_w', floorAt: 10 },
+    { spaceRef: 'room_w', floorAt: 30 },
+    { spaceRef: 'room_w', floorAt: 20 },
+  ]);
+  assert.equal(floors.get('room_w'), 30);
+  assert.equal(attention.insideFloor({ spaceRef: 'room_w', createdAt: 29 }, floors), false);
+  assert.equal(attention.insideFloor({ spaceRef: 'room_w', createdAt: 30 }, floors), true);
+  assert.equal(attention.insideFloor({ spaceRef: 'room_x', createdAt: 0 }, floors), true);
+});

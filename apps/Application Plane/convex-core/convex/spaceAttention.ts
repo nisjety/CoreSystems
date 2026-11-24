@@ -84,6 +84,30 @@ function cleanId(value: string, code: string): string {
   return id;
 }
 
+/**
+ * D18 (C-PRIO-05): the gateway's per-room history windows as a map. A floor
+ * that is not a finite number is refused (`invalid_floor`), never ignored, so
+ * a malformed window cannot widen what is counted. At most one per ref.
+ */
+export function cleanFloors(values: readonly { spaceRef: string; floorAt: number }[]): Map<string, number> {
+  if (values.length > MAX_ATTENTION_REFS) throw new Error("too_many_refs");
+  const out = new Map<string, number>();
+  for (const { spaceRef, floorAt } of values) {
+    if (typeof floorAt !== "number" || !Number.isFinite(floorAt)) throw new Error("invalid_floor");
+    const ref = cleanRef(spaceRef);
+    // Two floors for one room: the later one hides more.
+    out.set(ref, Math.max(out.get(ref) ?? floorAt, floorAt));
+  }
+  return out;
+}
+
+/** Whether an item is inside its room's window: true without a floor. */
+export function insideFloor(row: { spaceRef: string; createdAt: number }, floors: ReadonlyMap<string, number>): boolean {
+  const floor = floors.get(row.spaceRef);
+  if (floor === undefined) return true;
+  return typeof row.createdAt === "number" && row.createdAt >= floor;
+}
+
 function openLikeStates(): readonly ("open" | "snoozed")[] {
   return ["open", "snoozed"];
 }
@@ -136,12 +160,18 @@ export const attentionForGateway = query({
     externalAuthId: v.string(),
     externalOrgId: v.string(),
     spaceRefs: v.array(v.string()),
+    // D18 (C-PRIO-05): the caller's history window per room, read by the
+    // gateway from Control's verified read decision (`history_floor_at`, ms).
+    // An item created before its room's floor is not counted anywhere. Only
+    // ever a narrowing; absent = no window.
+    floors: v.optional(v.array(v.object({ spaceRef: v.string(), floorAt: v.number() }))),
   },
   handler: async (ctx, args) => {
     assertServiceKey(args.serviceKey);
     await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
     const refs = cleanRefs(args.spaceRefs);
     const wanted = new Set(refs);
+    const floorByRef = cleanFloors(args.floors ?? []);
     const now = Date.now();
 
     const markers = await ctx.db
@@ -178,6 +208,7 @@ export const attentionForGateway = query({
     for (const state of openLikeStates()) {
       for (const row of await ownItems(ctx, args.externalAuthId, args.externalOrgId, state)) {
         if (effectiveItemState(row, now) !== "open") continue;
+        if (!insideFloor(row, floorByRef)) continue;
         if (!wanted.has(row.spaceRef)) {
           otherOpen += 1;
           continue;

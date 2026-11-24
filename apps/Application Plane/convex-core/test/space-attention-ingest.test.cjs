@@ -1230,3 +1230,41 @@ test('outside a DM a member who neither follows nor owns the thread still gets n
   assert.equal(itemsFor(tables, 'carol').length, 0);
   assert.deepEqual(log.scheduled.map((entry) => entry.args.kind), ['reply']);
 });
+
+test('C-PRIO-05: the recipient cap counts one org only, so another org\'s rows are never evicted', async (t) => {
+  withEnv(t, { SPACE_ATTENTION_INGEST: '1' });
+  const done = (externalOrgId, n) => ({
+    externalOrgId,
+    recipientAuthId: 'carol',
+    spaceRef: externalOrgId === ORG ? SPACE : 'space_other',
+    kind: 'reply',
+    threadId: `thread_${externalOrgId}_${n}`,
+    actorKind: 'user',
+    state: 'done',
+    count: 1,
+    firstEventId: `e_${externalOrgId}_${n}`,
+    lastEventId: `e_${externalOrgId}_${n}`,
+    coalesceKey: `reply:t:thread_${externalOrgId}_${n}`,
+    createdAt: n,
+    updatedAt: n,
+    expiresAt: Date.now() + 1_000_000,
+  });
+  // 501 done rows in another org (over the cap there): the cap of THIS org is not reached, so
+  // nothing is evicted. Counted across orgs, one of them would go.
+  const other = Array.from({ length: 501 }, (_, n) => done('org_other', n + 1));
+  const { ctx, tables } = makeCtx(spaceTables(['alice', 'bob', 'carol'], { spaceAttentionItems: other }));
+  await apply(ctx, userMessage({ mentions: ['carol'] }, { event_id: 'evt_cap_1' }));
+  const carol = itemsFor(tables, 'carol');
+  assert.equal(carol.filter((row) => row.externalOrgId === 'org_other').length, 501, 'another org keeps every row');
+  assert.equal(carol.filter((row) => row.externalOrgId === ORG && row.kind === 'mention').length, 1);
+
+  // Over the cap in THIS org (501 rows: the check runs before the insert): the oldest done row
+  // makes room for the new one, and the other org is still untouched.
+  const mine = Array.from({ length: 501 }, (_, n) => done(ORG, n + 1));
+  const full = makeCtx(spaceTables(['alice', 'bob', 'carol'], { spaceAttentionItems: [...mine, ...other] }));
+  await apply(full.ctx, userMessage({ mentions: ['carol'] }, { event_id: 'evt_cap_2' }));
+  const after = itemsFor(full.tables, 'carol');
+  assert.equal(after.filter((row) => row.externalOrgId === ORG).length, 501, 'one evicted, one added');
+  assert.ok(!after.some((row) => row.threadId === `thread_${ORG}_1`), 'the oldest done row of this org went');
+  assert.equal(after.filter((row) => row.externalOrgId === 'org_other').length, 501);
+});

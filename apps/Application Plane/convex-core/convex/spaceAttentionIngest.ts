@@ -186,12 +186,20 @@ export async function takeBudget(ctx: any, recipient: string, now: number): Prom
   return result.allowed;
 }
 
-/** Keep at most {@link MAX_ITEMS_PER_RECIPIENT} rows per recipient; oldest `done` rows go first. */
-async function enforceRecipientCap(ctx: any, recipient: string): Promise<void> {
-  const rows = await ctx.db
-    .query("spaceAttentionItems")
-    .withIndex("by_recipient_state_updated", (q: any) => q.eq("recipientAuthId", recipient))
-    .take(MAX_ITEMS_PER_RECIPIENT + 1);
+/**
+ * Keep at most {@link MAX_ITEMS_PER_RECIPIENT} rows per recipient IN ONE ORG; oldest
+ * `done` rows go first. Org-scoped like the read window (C-PRIO-05), so one org's
+ * events never evict a row the same subject holds in another org.
+ */
+async function enforceRecipientCap(ctx: any, externalOrgId: string, recipient: string): Promise<void> {
+  const rows = (
+    await ctx.db
+      .query("spaceAttentionItems")
+      .withIndex("by_org_recipient_state_updated", (q: any) =>
+        q.eq("externalOrgId", externalOrgId).eq("recipientAuthId", recipient),
+      )
+      .take(MAX_ITEMS_PER_RECIPIENT + 1)
+  ).filter((row: any) => row.externalOrgId === externalOrgId);
   if (rows.length <= MAX_ITEMS_PER_RECIPIENT) return;
   const rank = (row: any) => (row.state === "done" ? 0 : 1);
   const victim = [...rows].sort((a, b) => rank(a) - rank(b) || a.updatedAt - b.updatedAt)[0];
@@ -250,7 +258,7 @@ async function applySignal(
   });
 
   if (decision.item !== "none") {
-    if (decision.item === "create") await enforceRecipientCap(ctx, recipient);
+    if (decision.item === "create") await enforceRecipientCap(ctx, ev.orgId, recipient);
     await writeAttentionItem(ctx, {
       action: decision.item,
       existing,
