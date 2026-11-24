@@ -124,6 +124,8 @@ fn clamp_artifact_limit(limit: u32) -> i64 {
 /// integer. The keyset filter applies after the latest-version pick so a page boundary never
 /// splits an artifact from its newest version. `jsonb_exists(m.metadata, 'artifacts')` is the
 /// literal predicate of the partial index `idx_messages_space_artifacts` (migration 0085).
+/// DEPTH-WS12-S4-2: a deleted (retracted) answer lists no artifacts, as the folded transcript
+/// carries no metadata for it (`FOLD_METADATA_SQL`); a deletion applies whatever the ceiling.
 const LIST_SPACE_ARTIFACTS_SQL: &str = "
 WITH art AS (
     SELECT m.thread_id,
@@ -152,6 +154,7 @@ WITH art AS (
       AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $3)
       AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $3)
       AND ($9::BIGINT IS NULL OR m.recipient_audience_revision IS NULL OR m.recipient_audience_revision >= $9::BIGINT) AND ($10::TIMESTAMPTZ IS NULL OR m.created_at >= $10::TIMESTAMPTZ)
+      AND NOT EXISTS (SELECT 1 FROM message_revisions rd WHERE rd.message_id = m.id AND rd.action = 'deleted')
       AND jsonb_typeof(a.elem) = 'object'
       AND NULLIF(a.elem->>'id', '') IS NOT NULL
       AND a.elem->>'kind' IN ('document', 'code', 'html')

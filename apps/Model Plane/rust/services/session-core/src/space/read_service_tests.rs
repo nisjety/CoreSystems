@@ -73,6 +73,17 @@ fn member() -> VerifiedIdentity {
     VerifiedIdentity::user_for_test("org-1", "user-1")
 }
 
+// ---- revision fold (DEPTH-WS12-S4-2) -------------------------------------------------------
+
+#[test]
+fn a_deleted_answer_lists_no_artifacts() {
+    // A retracted answer carries no metadata in the folded transcript, so its artifacts are not
+    // listed either; a deletion applies whatever the audience ceiling.
+    assert!(LIST_SPACE_ARTIFACTS_SQL.contains(
+        "NOT EXISTS (SELECT 1 FROM message_revisions rd WHERE rd.message_id = m.id AND rd.action = 'deleted')"
+    ));
+}
+
 // ---- cursor and limit ----------------------------------------------------------------------
 
 #[test]

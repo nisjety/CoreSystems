@@ -38,6 +38,10 @@ use crate::run_phase::ERROR_CODE_TRAILER;
 const MESSAGE_REVISED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.MessageRevised";
 /// Flat audit event name of a recorded revision.
 const EVENT_MESSAGE_REVISED: &str = "message_revised";
+/// DEPTH-WS12-S4-1: the live signal of a revision on the Space event log. `$1` org, `$2` Space,
+/// `$3` thread, `$4` the thread's audience stamp. System actor (who revised is not on the stream),
+/// no message id, the closed `fields` word `preview`: ids and closed words only.
+const REVISION_EVENT_SQL: &str = "SELECT space_event_emit($1, $2, 'thread.updated', 'system', NULL, $3, NULL, NULL, $4, 'persistent', '{\"fields\": [\"preview\"]}'::jsonb)";
 
 // ---------------------------------------------------------------------------------------------
 // The fold. Every transcript, context and Dreaming read joins `rv` and selects these.
@@ -286,6 +290,17 @@ impl MessageRevisionService for MessageRevisionGrpc {
     }
 }
 
+/// The locked target read of a revise (DEPTH-WS12-S4-3). `$1` message, `$2` thread, `$3`/`$4` the
+/// caller's signed revision and timestamp floors (NULL admits every row). The audience ceiling is
+/// checked on the returned stamp, as before.
+fn revise_target_sql() -> String {
+    format!(
+        "SELECT m.role, m.content, m.post_kind, m.author_subject_id, m.recipient_audience_revision
+         FROM messages m WHERE m.id = $1 AND m.thread_id = $2 AND {floor} FOR UPDATE",
+        floor = crate::space::audience_window::message_floor_sql(("$3", "$4")),
+    )
+}
+
 #[allow(clippy::result_large_err)]
 fn validate_request(req: &pb::ReviseMessageRequest) -> Result<(), Status> {
     if req.org_id.trim().is_empty() || req.thread_id.trim().is_empty() || req.message_id.trim().is_empty() {
@@ -424,13 +439,14 @@ async fn revise_message(
     // 2. The decision, verified for the CALLER.
     let verified: VerifiedRevise = verify_revise_space_decision(req, &org_id, caller_id)?;
 
-    // 3. The target message, locked. A message newer than the decision's audience is not found.
-    let target: Option<(String, String, String, Option<String>, Option<i64>)> = sqlx::query_as(
-        "SELECT role, content, post_kind, author_subject_id, recipient_audience_revision
-         FROM messages WHERE id = $1 AND thread_id = $2 FOR UPDATE",
-    )
+    // 3. The target message, locked. A message newer than the decision's audience is not found,
+    //    and so is one below the caller's history floors (DEPTH-WS12-S4-3, WS04-S11 and D18): a
+    //    windowed author or moderator never revises, or learns of, a message they cannot read.
+    let target: Option<(String, String, String, Option<String>, Option<i64>)> = sqlx::query_as(&revise_target_sql())
     .bind(&req.message_id)
     .bind(&req.thread_id)
+    .bind(verified.history_floor)
+    .bind(verified.history_floor_at)
     .fetch_optional(&mut *tx)
     .await
     .map_err(internal)?;
@@ -711,6 +727,20 @@ async fn revise_message(
     .await
     .map_err(internal)?;
 
+    // 12. DEPTH-WS12-S4-1: the live room signal, in the same transaction. A content-free
+    //     `thread.updated` row (ids and the closed word `preview`, the folded preview may have
+    //     changed) on the Space event log, so every member's open room re-reads the thread and
+    //     its transcript. The kind, refs key and word are already in space-events.json; the
+    //     function itself honours the event-log switch and never writes for a ZDR class.
+    sqlx::query(REVISION_EVENT_SQL)
+        .bind(&org_id)
+        .bind(&space_id)
+        .bind(&req.thread_id)
+        .bind(thread_revision)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal)?;
+
     tx.commit().await.map_err(internal)?;
     metrics::counter!(
         "mp_session_message_revisions_total",
@@ -737,6 +767,36 @@ mod tests {
     use crate::grpc::thread_revise_payload_digest;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use ed25519_dalek::{Signer as _, SigningKey};
+
+    #[test]
+    fn a_revision_signals_the_room_content_free_in_its_own_transaction() {
+        // DEPTH-WS12-S4-1: the signal is a registered kind with registered refs and a closed word,
+        // and it is written before the commit, so a rolled-back revision signals nothing.
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../../api/contracts/space-events.json")).expect("contract");
+        assert!(contract["kinds"]["thread.updated"]["refs"].as_array().expect("refs").iter().any(|r| r == "fields"));
+        assert!(contract["closed_words"]["thread_updated_fields"].as_array().expect("words").iter().any(|w| w == "preview"));
+        assert!(REVISION_EVENT_SQL.contains("'thread.updated', 'system', NULL, $3, NULL, NULL, $4, 'persistent'"));
+        assert!(!REVISION_EVENT_SQL.contains("content"), "no text rides the signal");
+        let revise = production_fn(production_source(include_str!("revisions.rs")), "
+async fn revise_message(");
+        let emit = revise.find("query(REVISION_EVENT_SQL)").expect("revise_message emits the signal");
+        let commit = revise.find("tx.commit()").expect("the commit");
+        assert!(emit < commit, "the signal is written inside the revision's transaction");
+    }
+
+    #[test]
+    fn the_revise_target_read_applies_both_history_floors() {
+        // DEPTH-WS12-S4-3: the locked target read binds the caller's signed floors as $3/$4 with
+        // the same predicate the transcript reads use, and revise_message uses this read.
+        let sql = revise_target_sql();
+        assert!(sql.contains(&crate::space::audience_window::message_floor_sql(("$3", "$4"))));
+        assert!(sql.contains("m.id = $1 AND m.thread_id = $2"));
+        assert!(sql.trim_end().ends_with("FOR UPDATE"));
+        let revise = production_fn(production_source(include_str!("revisions.rs")), "\nasync fn revise_message(");
+        assert!(revise.contains("query_as(&revise_target_sql())"));
+        assert!(revise.contains(".bind(verified.history_floor)") && revise.contains(".bind(verified.history_floor_at)"));
+    }
 
     /// The file before its test module: the production code the source-order pins read.
     fn production_source(source: &str) -> &str {
@@ -1401,6 +1461,8 @@ mod tests {
             purge: bool,
             moderate: bool,
             moderation_reason: &'a str,
+            /// DEPTH-WS12-S4-3: the caller's signed D18 timestamp floor, absent without a window.
+            floor_at: Option<DateTime<Utc>>,
         }
 
         fn spec(key: &str) -> Spec<'_> {
@@ -1411,6 +1473,7 @@ mod tests {
                 purge: false,
                 moderate: false,
                 moderation_reason: "",
+                floor_at: None,
             }
         }
 
@@ -1441,7 +1504,7 @@ mod tests {
                 permissions.push(rev::PERMISSION_MODERATE);
             }
             let now = Utc::now();
-            let claims = serde_json::json!({
+            let mut claims = serde_json::json!({
                 "decision_ref": req.space_decision_ref,
                 "org_id": ORG,
                 "space_ref": SPACE,
@@ -1473,6 +1536,9 @@ mod tests {
                 "issued_at": now.to_rfc3339(),
                 "expires_at": (now + chrono::Duration::minutes(1)).to_rfc3339(),
             });
+            if let Some(floor_at) = spec.floor_at {
+                claims["history_floor_at"] = serde_json::json!(floor_at.to_rfc3339());
+            }
             let signed = format!(
                 "v2.{}.{}",
                 URL_SAFE_NO_PAD.encode(KEY_ID.as_bytes()),
@@ -2084,6 +2150,45 @@ mod tests {
                 .resolve_message_target(request)
                 .await
                 .map(Response::into_inner)
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+        async fn a_windowed_author_or_moderator_cannot_revise_a_pre_floor_message() {
+            // DEPTH-WS12-S4-3: Control signs the member's D18 floor on model.thread.revise; a target
+            // said before it is `message_not_found`, exactly like a message that does not exist.
+            let Some(room) = Room::new().await else { return };
+            let _keys = StreamKeysEnv::publish();
+            let old = room.message("old", "user", Some(PERSON), "said before the window", 1).await;
+            let theirs = room.message("theirs", "user", Some("user-9"), "someone else, before the window", 1).await;
+            let fresh = room.message("fresh", "user", Some(PERSON), "said inside the window", 1).await;
+            for id in [&old, &theirs] {
+                sqlx::query("UPDATE messages SET created_at = now() - interval '2 days' WHERE id = $1")
+                    .bind(id)
+                    .execute(&room.pool)
+                    .await
+                    .expect("age the message");
+            }
+            let floor_at = Some(Utc::now() - chrono::Duration::days(1));
+
+            let author = Spec { floor_at, ..spec("floor-author") };
+            let req = signed(room.request(&old, rev::ACTION_EDIT, "rewritten"), &author);
+            let status = room.revise(&req, PERSON).await.expect_err("a pre-floor edit");
+            assert_eq!(status.code(), tonic::Code::NotFound, "{NEEDS_DB}");
+            assert_eq!(code_of(&status), Some("message_not_found"));
+
+            let moderator = Spec { floor_at, moderate: true, moderation_reason: "spam", ..spec("floor-moderator") };
+            let req = signed(room.request(&theirs, rev::ACTION_DELETE, ""), &moderator);
+            let status = room.revise(&req, PERSON).await.expect_err("a pre-floor moderator delete");
+            assert_eq!(code_of(&status), Some("message_not_found"));
+            assert!(room.revisions(&old).await.is_empty() && room.revisions(&theirs).await.is_empty(), "nothing was written");
+
+            // A message inside the window is revised as before, under the same floor.
+            let (edited, _) = room.edit(&fresh, "rewritten", &Spec { floor_at, ..spec("floor-fresh") }).await;
+            assert_eq!(edited.revision_state, "edited");
+            // Without a floor the old message is the author's to edit.
+            room.edit(&old, "rewritten", &spec("floor-none")).await;
+            room.finish().await;
         }
 
         #[tokio::test]

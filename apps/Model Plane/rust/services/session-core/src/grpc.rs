@@ -5229,6 +5229,11 @@ pub(crate) struct VerifiedRevise {
     pub(crate) moderate: bool,
     /// The org's retention rule for the original text: `true` purges it, `false` retains it.
     pub(crate) purge_original: bool,
+    /// DEPTH-WS12-S4-3: the caller's WS04-S11 revision floor (behind the same switch as a read)
+    /// and D18 timestamp floor, signed by Control. A revise target below either is
+    /// `message_not_found`: a windowed member never revises what they cannot read.
+    pub(crate) history_floor: Option<i64>,
+    pub(crate) history_floor_at: Option<DateTime<Utc>>,
 }
 
 /// The `sha256:` digest of a revise request's new text; of the empty string for a delete.
@@ -5399,6 +5404,11 @@ fn verify_revise_space_decision_with_key(
     Ok(VerifiedRevise {
         moderate: has(rev::PERMISSION_MODERATE),
         purge_original: purge,
+        history_floor: crate::space::audience_window::history_floor_from_claim(
+            claims.history_floor_revision,
+            crate::space::audience_window::history_floor_enabled(),
+        ),
+        history_floor_at: claims.history_floor_at,
     })
 }
 
@@ -11462,26 +11472,47 @@ impl SessionCore for SessionService {
                     jsonb_build_object('reply_count', reply_stats.reply_count,
                                        'last_author', reply_stats.last_author) AS reply_stats
                  FROM page
+                 -- DEPTH-WS12-S4-2: the title and preview read the folded text (the latest edit inside the
+                 -- reader's audience) and skip a deleted message, as the transcript does (space/revisions.rs
+                 -- fold_join_sql, FOLD_CONTENT_SQL, FOLD_NOT_DELETED_SQL).
                  LEFT JOIN LATERAL (
-                    SELECT content
-                    FROM messages
-                    WHERE thread_id = page.id AND role = 'user' AND on_active_path
-                      AND ($15::TIMESTAMPTZ IS NULL OR created_at >= $15::TIMESTAMPTZ)
+                    SELECT CASE rv.action WHEN 'edited' THEN COALESCE(rv.content, '') ELSE m.content END AS content
+                    FROM messages m
+                    LEFT JOIN LATERAL (
+                        SELECT r.action, r.content
+                        FROM message_revisions r
+                        WHERE r.message_id = m.id
+                          AND (r.action = 'deleted' OR $6::BIGINT IS NULL OR r.recipient_audience_revision <= $6::BIGINT)
+                        ORDER BY r.revision_no DESC
+                        LIMIT 1
+                    ) rv ON TRUE
+                    WHERE m.thread_id = page.id AND m.role = 'user' AND m.on_active_path
+                      AND COALESCE(rv.action, '') <> 'deleted'
+                      AND ($15::TIMESTAMPTZ IS NULL OR m.created_at >= $15::TIMESTAMPTZ)
                       AND ($13::BIGINT IS NULL
-                           OR recipient_audience_revision IS NULL
-                           OR recipient_audience_revision >= $13)
-                    ORDER BY sequence ASC
+                           OR m.recipient_audience_revision IS NULL
+                           OR m.recipient_audience_revision >= $13)
+                    ORDER BY m.sequence ASC
                     LIMIT 1
                  ) first_user ON TRUE
                  LEFT JOIN LATERAL (
-                    SELECT content
-                    FROM messages
-                    WHERE thread_id = page.id AND on_active_path
-                      AND ($15::TIMESTAMPTZ IS NULL OR created_at >= $15::TIMESTAMPTZ)
+                    SELECT CASE rv.action WHEN 'edited' THEN COALESCE(rv.content, '') ELSE m.content END AS content
+                    FROM messages m
+                    LEFT JOIN LATERAL (
+                        SELECT r.action, r.content
+                        FROM message_revisions r
+                        WHERE r.message_id = m.id
+                          AND (r.action = 'deleted' OR $6::BIGINT IS NULL OR r.recipient_audience_revision <= $6::BIGINT)
+                        ORDER BY r.revision_no DESC
+                        LIMIT 1
+                    ) rv ON TRUE
+                    WHERE m.thread_id = page.id AND m.on_active_path
+                      AND COALESCE(rv.action, '') <> 'deleted'
+                      AND ($15::TIMESTAMPTZ IS NULL OR m.created_at >= $15::TIMESTAMPTZ)
                       AND ($13::BIGINT IS NULL
-                           OR recipient_audience_revision IS NULL
-                           OR recipient_audience_revision >= $13)
-                    ORDER BY sequence DESC
+                           OR m.recipient_audience_revision IS NULL
+                           OR m.recipient_audience_revision >= $13)
+                    ORDER BY m.sequence DESC
                     LIMIT 1
                  ) last_message ON TRUE
                  LEFT JOIN LATERAL (
@@ -25322,6 +25353,30 @@ mod tests {
     }
 
     #[test]
+    fn revise_verifier_carries_the_signed_timestamp_floor() {
+        // DEPTH-WS12-S4-3: Control signs the member's D18 floor on model.thread.revise; the
+        // verifier keeps it so the target read hides a pre-floor message.
+        use mp_contracts::message_revision as rev;
+        let signing_key = SigningKey::from_bytes(&[64_u8; 32]);
+        let key = signing_key.verifying_key();
+        let perms = [rev::PERMISSION_REVISE, rev::PERMISSION_PURGE_ORIGINAL];
+        let plain = verify_revise(&revise_request(&signing_key, &perms, |_| {}), &key)
+            .expect("an unwindowed revise verifies");
+        assert_eq!(plain.history_floor_at, None);
+        let floor = DateTime::parse_from_rfc3339("2026-10-01T08:30:00Z")
+            .expect("instant")
+            .with_timezone(&Utc);
+        let windowed = verify_revise(
+            &revise_request(&signing_key, &perms, |claims| {
+                claims["history_floor_at"] = serde_json::json!(floor.to_rfc3339());
+            }),
+            &key,
+        )
+        .expect("a windowed revise verifies");
+        assert_eq!(windowed.history_floor_at, Some(floor));
+    }
+
+    #[test]
     fn revise_verifier_needs_exactly_one_retention_permission() {
         use mp_contracts::message_revision as rev;
         let signing_key = SigningKey::from_bytes(&[63_u8; 32]);
@@ -25331,13 +25386,13 @@ mod tests {
             &key,
         )
         .expect("the purge rule");
-        assert_eq!(purge, super::VerifiedRevise { moderate: false, purge_original: true });
+        assert_eq!((purge.moderate, purge.purge_original), (false, true));
         let retain = verify_revise(
             &revise_request(&signing_key, &[rev::PERMISSION_REVISE, rev::PERMISSION_RETAIN_ORIGINAL], |_| {}),
             &key,
         )
         .expect("the retain rule");
-        assert_eq!(retain, super::VerifiedRevise { moderate: false, purge_original: false });
+        assert_eq!((retain.moderate, retain.purge_original), (false, false));
         let moderator = verify_revise(
             &revise_request(
                 &signing_key,
@@ -25347,7 +25402,7 @@ mod tests {
             &key,
         )
         .expect("a moderator's decision");
-        assert_eq!(moderator, super::VerifiedRevise { moderate: true, purge_original: false });
+        assert_eq!((moderator.moderate, moderator.purge_original), (true, false));
 
         // Neither or both retention permissions is a malformed decision: it fails closed with the
         // revision refusal (not an envelope or signature refusal), whatever else it carries.
@@ -27593,6 +27648,23 @@ mod thread_list_db_tests {
             .await
             .expect("list_threads")
             .into_inner()
+    }
+
+    #[test]
+    fn list_threads_title_and_preview_read_the_folded_text() {
+        // DEPTH-WS12-S4-2: ListThreads' title and preview LATERALs fold the newest revision inside
+        // the reader's ceiling and skip a deleted message, like the transcript reads.
+        let source = include_str!("grpc.rs");
+        let start = source.find("async fn list_threads(").expect("list_threads");
+        let body = &source[start..start + source[start..].find(") reply_stats ON TRUE").expect("reply_stats")];
+        let first = &body[body.find("SELECT CASE rv.action WHEN 'edited'").expect("first_user fold")..body.find(") first_user ON TRUE").expect("first_user")];
+        let last = &body[body.find(") first_user ON TRUE").expect("first_user")..body.find(") last_message ON TRUE").expect("last_message")];
+        for lateral in [first, last] {
+            assert!(lateral.contains("FROM message_revisions r"), "{lateral}");
+            assert!(lateral.contains("r.action = 'deleted' OR $6::BIGINT IS NULL OR r.recipient_audience_revision <= $6::BIGINT"));
+            assert!(lateral.contains("COALESCE(rv.action, '') <> 'deleted'"));
+            assert!(lateral.contains("WHEN 'edited' THEN COALESCE(rv.content, '') ELSE m.content END"));
+        }
     }
 
     #[tokio::test]
