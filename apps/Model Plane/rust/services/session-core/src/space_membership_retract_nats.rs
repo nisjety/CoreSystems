@@ -23,7 +23,15 @@
 //! `SESSION_SPACE_RETRACT_DURABLE_CONSUMER` on (default off; a delivery mode, never an authorization input) this consumer
 //! binds the pre-provisioned durable pull consumer [`DURABLE_NAME`] on the `CONTROLPLANE` stream (audit-core's
 //! provisioner owns it) instead of the plain subscription, so a fact published while Session Core is down is delivered
-//! when it returns. A fact is acknowledged after its retraction committed, and a failed one is redelivered later.
+//! when it returns. A fact is acknowledged after its retraction committed, and a failed one is redelivered later. If the
+//! durable consumer cannot be bound (not provisioned, not permitted, or a filter mismatch) the switch falls back to the
+//! plain subscription and the sweeps, so turning it on early never removes the retraction that runs with it off.
+//!
+//! Limits of the demotion sweep. It sees only demotions the membership consumer applied and recorded. While both
+//! consumers are plain subscriptions, a demotion both missed during an outage beyond the 24-hour re-announce is never
+//! recorded, so never swept (the durable consumer closes that gap once it is on). A fact-order row written before
+//! migration 0139, or by a fact that stated no role, keeps NULL role and active and is never swept: the sweep does not
+//! guess a role (fail-safe). The sweep has no switch of its own: it is retraction-only and goes live with migration 0139.
 //!
 //! Retraction is idempotent: a repeated fact or sweep finds no live row and changes nothing. A failed retraction is
 //! retried here with backoff; the next re-announce or sweep retries it after that. Logs carry ids and counts only.
@@ -110,7 +118,16 @@ pub async fn run(pool: Pool, nats_url: String) -> anyhow::Result<()> {
     info!(%nats_url, subject = SUBJECT, "session-core Space membership retraction consumer connecting");
     let client = crate::nats_connection::connect_shared(&nats_url).await?;
     if durable_enabled() {
-        return run_durable(pool, client).await;
+        // A switch turned on before the durable consumer is provisioned or permitted must not stop retraction: a bind
+        // failure falls back to the plain subscription and the sweeps (the delivery that runs with the switch off).
+        match bind_durable(client.clone()).await {
+            Ok(messages) => return run_durable(pool, messages).await,
+            Err(error) => warn!(
+                %error,
+                durable = DURABLE_NAME,
+                "Space membership retraction durable consumer unavailable; falling back to the plain subscription"
+            ),
+        }
     }
     let mut subscription = client.subscribe(SUBJECT).await?;
     info!(subject = SUBJECT, "Space membership retraction consumer subscribed");
@@ -127,9 +144,9 @@ pub async fn run(pool: Pool, nats_url: String) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The durable delivery (E-PRIO-02, D1): bind the provisioned pull consumer, ack a fact once handled, and ask for a later
-/// redelivery of one whose retraction failed. A payload that does not decode is acknowledged (it can never succeed).
-async fn run_durable(pool: Pool, client: async_nats::Client) -> anyhow::Result<()> {
+/// Bind the pre-provisioned durable pull consumer and open its message stream. An error (stream or consumer absent, not
+/// permitted, or a filter mismatch) makes [`run`] fall back to the plain subscription.
+async fn bind_durable(client: async_nats::Client) -> anyhow::Result<jetstream::consumer::pull::Stream> {
     let js = jetstream::new(client);
     let stream = js.get_stream(STREAM_NAME).await?;
     let consumer: PullConsumer = stream
@@ -139,8 +156,14 @@ async fn run_durable(pool: Pool, client: async_nats::Client) -> anyhow::Result<(
     if consumer.cached_info().config.filter_subject != SUBJECT {
         return Err(anyhow::anyhow!("pre-provisioned Space membership retraction consumer filter mismatch"));
     }
-    let mut messages = consumer.messages().await?;
+    let messages = consumer.messages().await?;
     info!(durable = DURABLE_NAME, "Space membership retraction durable consumer ready");
+    Ok(messages)
+}
+
+/// The durable delivery (E-PRIO-02, D1): bind the provisioned pull consumer, ack a fact once handled, and ask for a later
+/// redelivery of one whose retraction failed. A payload that does not decode is acknowledged (it can never succeed).
+async fn run_durable(pool: Pool, mut messages: jetstream::consumer::pull::Stream) -> anyhow::Result<()> {
     let mut sweep = tokio::time::interval(SWEEP_EVERY);
     loop {
         tokio::select! {
@@ -460,6 +483,17 @@ mod tests {
         }
         assert_eq!(STREAM_NAME, "CONTROLPLANE");
         assert_eq!(DURABLE_NAME, "session-core-space-membership-retract-v1");
+    }
+
+    /// P2-1: with the switch on but the durable consumer absent, binding fails with an error (which `run` logs and answers
+    /// by opening the plain subscription) instead of ending the consumer. Needs a NATS broker with JetStream and no
+    /// provisioned `session-core-space-membership-retract-v1` consumer at `NATS_URL`.
+    #[tokio::test]
+    #[ignore = "needs a NATS broker (NATS_URL)"]
+    async fn binding_an_unprovisioned_durable_consumer_errors_so_run_falls_back() {
+        let url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_owned());
+        let client = async_nats::connect(url).await.expect("broker");
+        assert!(bind_durable(client).await.is_err(), "an absent durable consumer must not bind");
     }
 
     #[test]
