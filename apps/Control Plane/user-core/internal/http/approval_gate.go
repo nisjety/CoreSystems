@@ -62,7 +62,8 @@ var errGateAgentMismatch = errors.New("agent_subject_id does not name the run's 
 // Core, wins: Execution Core does not know it, and a request that names a
 // different agent is refused rather than allowed to borrow that agent's rules.
 // A run with no agent (a direct turn) keeps whatever the request names, which
-// for the view can only add restrictions.
+// for the view can only add restrictions; grant use refuses it instead
+// (grantUseAgentSubject).
 func gateAgentSubject(authority spaces.RunActionAuthority, requested string) (string, error) {
 	requested = strings.TrimSpace(requested)
 	resolved := strings.TrimSpace(authority.AgentSubjectID)
@@ -73,6 +74,20 @@ func gateAgentSubject(authority spaces.RunActionAuthority, requested string) (st
 		return "", errGateAgentMismatch
 	}
 	return resolved, nil
+}
+
+// errGrantUseDirectRun: a run with no agent (a direct turn) has no agent whose
+// standing rules could release a call.
+var errGrantUseDirectRun = errors.New("the run has no agent whose standing rules apply")
+
+// grantUseAgentSubject is the stricter use-path twin of gateAgentSubject: a
+// standing rule may only be used for the run's own resolved agent. A direct run
+// names no agent, so a request that names one cannot borrow that agent's rules.
+func grantUseAgentSubject(authority spaces.RunActionAuthority, requested string) (string, error) {
+	if strings.TrimSpace(authority.AgentSubjectID) == "" {
+		return "", errGrantUseDirectRun
+	}
+	return gateAgentSubject(authority, requested)
 }
 
 // issueToolGateView answers what Execution Core may fold into its gate for one
@@ -167,10 +182,17 @@ func (s *Server) useApprovalGrant(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if _, agentErr := gateAgentSubject(authority, use.AgentSubjectID); agentErr != nil {
+	agentID, agentErr := grantUseAgentSubject(authority, use.AgentSubjectID)
+	if errors.Is(agentErr, errGrantUseDirectRun) {
+		abortTypedError(c, http.StatusNotFound, "no_applicable_grant", "No standing approval rule covers this call", nil)
+		return
+	}
+	if agentErr != nil {
 		abortTypedError(c, http.StatusBadRequest, "invalid_request", agentErr.Error(), nil)
 		return
 	}
+	// The rule is looked up for the run's own agent, never for the name the caller sent.
+	use.AgentSubjectID = agentID
 	evidence, err := s.spaceRepo.ResolveSharedApprovalDecisionEvidence(c.Request.Context(), authority.SpaceRef, authority.OrgID, authority.SubjectID)
 	if errors.Is(err, spaces.ErrNoCurrentMembership) {
 		abortTypedError(c, http.StatusForbidden, "authority_changed", "Current Space authority is required", nil)

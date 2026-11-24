@@ -207,6 +207,35 @@ func TestGateAgentSubjectPrefersTheRunsOwnAgent(t *testing.T) {
 	}
 }
 
+// Grant use takes the run's resolved agent and refuses to use a standing rule
+// on a direct run, whatever agent the request names (C-PRIO-06 hardening).
+func TestGrantUseAgentSubjectNeedsTheRunsOwnAgent(t *testing.T) {
+	woken := spaces.RunActionAuthority{AgentSubjectID: " agent-7 "}
+	if got, err := grantUseAgentSubject(woken, " agent-7"); err != nil || got != "agent-7" {
+		t.Errorf("woken run: got %q, %v; want the trimmed resolved agent", got, err)
+	}
+	if _, err := grantUseAgentSubject(woken, "agent-8"); !errors.Is(err, errGateAgentMismatch) {
+		t.Errorf("another agent: err = %v, want errGateAgentMismatch", err)
+	}
+	for _, requested := range []string{"", "agent-1"} {
+		if _, err := grantUseAgentSubject(spaces.RunActionAuthority{}, requested); !errors.Is(err, errGrantUseDirectRun) {
+			t.Errorf("direct run, requested %q: err = %v, want errGrantUseDirectRun", requested, err)
+		}
+	}
+}
+
+func TestGrantUseOnADirectRunIsNoApplicableGrantBeforeAnyLookup(t *testing.T) {
+	direct := spaces.RunActionAuthority{
+		RunID: "run-1", OrgID: "org-1", SubjectID: "user-1", ThreadID: "thread-1", SpaceRef: "room-1",
+		RecipientAudienceRef: "audience:room-1:1", RecipientAudienceRevision: 1, RecipientAudienceHash: "sha256:a",
+		PrivacyPolicyRef: "privacy:org-1:1", RunContextAuthorizationRef: "control:room-1:thread-create:1",
+		AuthorityRevision: 1, RunStatus: "running",
+	}
+	// No database: reaching the repository would answer 503, so a 404 proves the refusal is first.
+	engine := approvalHarness(t, &spaces.Repository{}, fakeRunAuthority{authority: direct}, executionCoreContext(spaceApprovalGrantUseScope))
+	wantApprovalError(t, doJSON(engine, http.MethodPost, approvalUsePath, validApprovalGateBody()), http.StatusNotFound, "no_applicable_grant")
+}
+
 func TestApprovalGateRefusesAnAgentOtherThanTheRunsBeforeAnyLookup(t *testing.T) {
 	authority := spaces.RunActionAuthority{
 		RunID: "run-1", OrgID: "org-1", SubjectID: "user-1", ThreadID: "thread-1", SpaceRef: "room-1",
