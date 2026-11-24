@@ -9,6 +9,7 @@ import {
   SNOOZE_PRESETS,
   snoozeLabel,
 } from '@/features/attention/lib/attention-grammar'
+import { ThreadFollowControl } from '@/features/attention/components/ThreadFollowControl'
 import type { AttentionItem, AttentionNeedsYou } from '@/shared/api/spaces-attention-items-client'
 import { useI18n } from '@/shared/i18n'
 
@@ -34,10 +35,14 @@ export interface AttentionItemRowProps {
   ) => void
 }
 
-/** One stored inbox row: a sentence, the released title (if any), and Done / Snooze / Reopen. */
+/**
+ * One stored inbox row: a sentence, the released title (if any), and Done / Snooze / Reopen. A row
+ * about a post also opens that post's Follow / Mute choice (C-PRIO-05), read only when opened.
+ */
 export function AttentionItemRow(props: AttentionItemRowProps) {
   const i18n = useI18n()
   const [snoozing, setSnoozing] = createSignal(false)
+  const [following, setFollowing] = createSignal(false)
   const headline = () => headlineText(props.item, i18n.tr)
   const salience = () => itemSalience(props.item.kind)
 
@@ -86,7 +91,20 @@ export function AttentionItemRow(props: AttentionItemRowProps) {
             {i18n.tr('Utsett', 'Snooze')}
           </button>
         </Show>
+        <Show when={props.item.threadId}>
+          <button
+            type="button"
+            class="verevon-attention-action"
+            aria-expanded={following() ? 'true' : 'false'}
+            onClick={() => setFollowing((open) => !open)}
+          >
+            {i18n.tr('Varsler', 'Notifications')}
+          </button>
+        </Show>
       </div>
+      <Show when={following() ? props.item.threadId : null}>
+        {(threadId) => <ThreadFollowControl spaceRef={props.item.spaceRef} threadId={threadId()} attentionOn />}
+      </Show>
       <Show when={snoozing() && props.item.state === 'open'}>
         <div class="verevon-attention-row__snooze" role="group" aria-label={i18n.tr('Utsett til', 'Snooze until')}>
           <For each={SNOOZE_PRESETS}>

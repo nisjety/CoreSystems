@@ -15,6 +15,11 @@ import '@/styles/attention.css'
 export interface ThreadFollowControlProps {
   readonly spaceRef: string
   readonly threadId: string
+  /**
+   * Set where the caller already knows attention is on for this viewer (the Home inbox drew the
+   * row, so the gateway answered). Otherwise the room's `features.attention` decides.
+   */
+  readonly attentionOn?: boolean
 }
 
 /**
@@ -25,8 +30,9 @@ export interface ThreadFollowControlProps {
  */
 export function ThreadFollowControl(props: ThreadFollowControlProps) {
   const i18n = useI18n()
+  const on = () => props.attentionOn === true || spaceRoomFeature('attention')
   const [read, { mutate }] = createResource(
-    () => (spaceRoomFeature('attention') ? `${props.spaceRef}\u0000${props.threadId}` : false),
+    () => (on() ? `${props.spaceRef}\u0000${props.threadId}` : false),
     async (key): Promise<ThreadFollowState | 'unknown'> => {
       const [spaceRef = '', threadId = ''] = key.split('\u0000')
       try {
@@ -58,7 +64,7 @@ export function ThreadFollowControl(props: ThreadFollowControlProps) {
   }
 
   return (
-    <Show when={spaceRoomFeature('attention') && current() !== undefined}>
+    <Show when={on() && current() !== undefined}>
       <div class="verevon-thread-follow" role="group" aria-label={i18n.tr('Varsler for denne tråden', 'Notifications for this thread')}>
         <button
           type="button"

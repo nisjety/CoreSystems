@@ -18,12 +18,16 @@ const inbox = vi.hoisted(() => ({
   listAttentionItems: vi.fn(),
   setAttentionItemState: vi.fn(),
   refreshSpaceAttention: vi.fn(),
+  getThreadFollow: vi.fn(),
+  setThreadFollow: vi.fn(),
 }))
 
 vi.mock('@/shared/api/spaces-attention-items-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/shared/api/spaces-attention-items-client')>()),
   listAttentionItems: inbox.listAttentionItems,
   setAttentionItemState: inbox.setAttentionItemState,
+  getThreadFollow: inbox.getThreadFollow,
+  setThreadFollow: inbox.setThreadFollow,
 }))
 vi.mock('@/features/spaces/lib/space-attention', () => ({
   refreshSpaceAttention: inbox.refreshSpaceAttention,
@@ -86,6 +90,8 @@ beforeEach(() => {
   inbox.listAttentionItems.mockReset()
   inbox.setAttentionItemState.mockReset()
   inbox.refreshSpaceAttention.mockReset()
+  inbox.getThreadFollow.mockReset()
+  inbox.setThreadFollow.mockReset()
 })
 
 afterEach(() => cleanup())
@@ -219,5 +225,35 @@ describe('AttentionPage', () => {
     expect(inbox.listAttentionItems).toHaveBeenLastCalledWith({ state: 'open', cursor: 'cursor-2' })
     expect(screen.getByText('Noen nevnte deg i Room Alpha')).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Vis flere' })).toBeNull()
+  })
+
+  it('follows the post of a row from the inbox, reading the follow only once the choice is opened (C-PRIO-05)', async () => {
+    inbox.listAttentionItems.mockResolvedValue(page({ items: [item({ itemId: 'item-1', kind: 'reply' })] }))
+    inbox.getThreadFollow.mockResolvedValue('none')
+    inbox.setThreadFollow.mockResolvedValue('following')
+
+    renderPage()
+    const row = (await screen.findByText('Nye svar i en tråd du følger i Room Alpha')).closest('li') as HTMLElement
+    expect(inbox.getThreadFollow).not.toHaveBeenCalled()
+
+    const toggle = within(row).getByRole('button', { name: 'Varsler' })
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    fireEvent.click(await within(row).findByRole('button', { name: 'Følg' }))
+
+    const following = await within(row).findByRole('button', { name: 'Følger' })
+    expect(following.getAttribute('aria-pressed')).toBe('true')
+    expect(inbox.getThreadFollow).toHaveBeenCalledWith('room-a', 'thread-1')
+    expect(inbox.setThreadFollow).toHaveBeenCalledWith('room-a', 'thread-1', 'following')
+  })
+
+  it('offers no follow choice on a row that is not about a post', async () => {
+    inbox.listAttentionItems.mockResolvedValue(page({ items: [item({ itemId: 'item-1', kind: 'invite', threadId: null })] }))
+
+    renderPage()
+    const row = (await screen.findByText('Du er invitert til Room Alpha')).closest('li') as HTMLElement
+
+    expect(within(row).queryByRole('button', { name: 'Varsler' })).toBeNull()
+    expect(inbox.getThreadFollow).not.toHaveBeenCalled()
   })
 })
