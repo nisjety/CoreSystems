@@ -81,3 +81,18 @@ test('D22r: the default level is all in a DM and mentions elsewhere; a chosen le
     [['dm_1', 'all', true], ['gdm_1', 'off', false], ['room_1', 'mentions', true], ['nope', 'mentions', true]],
   );
 });
+
+test('setRoomLevelForGateway echoes the level it stored, on the first write and on an update', async (t) => {
+  withServiceKey(t);
+  const { ctx } = makeCtx(
+    memberTables({ spaces: [{ spaceRef: 'dm_1', externalOrgId: ORG, kind: 'dm', lifecycle: 'active' }] }),
+  );
+  const set = (level) => attention.setRoomLevelForGateway._handler(ctx, { ...base, spaceRef: 'dm_1', level });
+  assert.deepEqual(await set('mentions'), { level: 'mentions', levelIsDefault: false, hidePreview: false });
+  assert.deepEqual(await set('off'), { level: 'off', levelIsDefault: false, hidePreview: false }, 'an update returns the new level');
+  assert.deepEqual(await attention.getRoomLevelForGateway._handler(ctx, { ...base, spaceRef: 'dm_1' }), {
+    level: 'off',
+    levelIsDefault: false,
+    hidePreview: false,
+  });
+});

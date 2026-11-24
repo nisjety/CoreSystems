@@ -1128,6 +1128,23 @@ test('D22r: a member silences one DM with level off; a mention still reaches the
   assert.deepEqual(itemsFor(tables, 'carol').map((row) => row.kind), ['mention']);
 });
 
+test('D22r: a member sets one DM to mentions; plain messages stop, a mention still reaches them', async (t) => {
+  withEnv(t, { SPACE_ATTENTION_INGEST: '1', SPACE_ATTENTION_OUT_OF_APP: '1', SPACE_ATTENTION_SUPPRESS_OBSERVED: undefined });
+  const pref = { externalOrgId: ORG, externalAuthId: 'carol', spaceRef: SPACE, level: 'mentions', updatedAt: 1 };
+  const { ctx, tables, log } = makeCtx(dmTables(['alice', 'bob', 'carol'], 'group_dm', { spaceRoomNotifyPrefs: [pref] }));
+  await apply(ctx, userMessage({}, { event_id: 'evt_a' }));
+  assert.equal(itemsFor(tables, 'carol').length, 0, 'no inbox item at mentions');
+  assert.equal(itemsFor(tables, 'bob').length, 1, 'bob (level all by default) gets it');
+  assert.deepEqual(log.scheduled.map((entry) => entry.args.recipientAuthId), ['bob'], 'no out-of-app request for carol');
+  // Carol at mentions still hears replies in a thread she follows.
+  tables.spaceThreadFollows = [...(tables.spaceThreadFollows ?? []), follow('carol', 'following')];
+  await apply(ctx, userMessage({ message_id: 'msg_f' }, { event_id: 'evt_f' }));
+  assert.deepEqual(itemsFor(tables, 'carol').map((row) => row.kind), ['reply'], 'a followed thread passes at mentions');
+  tables.spaceThreadFollows = tables.spaceThreadFollows.filter((row) => row.externalAuthId !== 'carol');
+  await apply(ctx, userMessage({ mentions: ['carol'], message_id: 'msg_2' }, { event_id: 'evt_b' }));
+  assert.deepEqual(itemsFor(tables, 'carol').map((row) => row.kind).sort(), ['mention', 'reply']);
+});
+
 test('D22r: a muted DM thread stays silent for that member', async (t) => {
   withEnv(t, { SPACE_ATTENTION_INGEST: '1' });
   const { ctx, tables } = makeCtx(dmTables(['alice', 'bob', 'carol'], 'group_dm', { spaceThreadFollows: [follow('carol', 'muted')] }));

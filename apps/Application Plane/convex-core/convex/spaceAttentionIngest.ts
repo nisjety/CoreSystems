@@ -237,8 +237,12 @@ async function applySignal(
     level: level ?? (signal.dmRoom ? defaultRoomLevel("dm") : DEFAULT_ROOM_LEVEL),
     threadMuted: follow?.state === "muted",
     dmRoom: signal.dmRoom === true,
-    // A reply recipient is a follower by construction; a muted row is handled above.
-    following: follow ? follow.state === "following" : true,
+    // A reply recipient is a follower by construction (a follow row or the thread
+    // owner); a muted row is handled above. In a DM every member is planned as a
+    // `reply` (D22r), so there only a row or ownership counts as following.
+    following: follow
+      ? follow.state === "following"
+      : !signal.dmRoom || recipient === ev.threadOwnerSubjectId,
     isRunStarter: signal.isRunStarter === true,
     observingAndSuppressed: await isObserving(ctx, ev, recipient, now),
     existing,

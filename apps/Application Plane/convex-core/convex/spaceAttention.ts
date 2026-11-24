@@ -455,6 +455,8 @@ export const setRoomLevelForGateway = mutation({
     if (args.level !== undefined) {
       if (pref) {
         await ctx.db.patch(pref._id, { level: args.level, updatedAt: now });
+        // The response echoes the stored level, not the one read before the patch.
+        pref = { ...pref, level: args.level };
       } else {
         const id = await ctx.db.insert("spaceRoomNotifyPrefs", {
           externalOrgId: args.externalOrgId,

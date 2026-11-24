@@ -275,6 +275,23 @@ test('D22r: a reply in a DM needs no follow row, but level off and a muted threa
   decide('reply', { dmRoom: true, actorAuthId: 'alice' }, { item: 'none', outOfApp: false, reason: 'self' });
 });
 
+test('D22r: a DM at level mentions drops an unfollowed reply but keeps mentions, invites, reminders and approvals', () => {
+  const atMentions = { following: false, dmRoom: true, level: 'mentions' };
+  decide('reply', atMentions, { item: 'none', outOfApp: false, reason: 'level_mentions' });
+  decide('reply', { ...atMentions, memberState: 'available' }, { item: 'none', outOfApp: false, reason: 'level_mentions' });
+  decide('mention', atMentions, { item: 'create', outOfApp: true, reason: 'create' });
+  decide('invite', atMentions, { item: 'create', outOfApp: true, reason: 'create' });
+  decide('reminder', atMentions, { item: 'create', outOfApp: true, reason: 'create' });
+  decide('approval_needed', atMentions, { item: 'none', outOfApp: true, reason: 'out_of_app_only' });
+  // A followed thread in a DM at mentions behaves like a followed thread in any room.
+  decide('reply', { ...atMentions, following: true }, { item: 'create', outOfApp: true, reason: 'create' });
+  // Level all (explicit or the DM default when never chosen) lifts the follow requirement.
+  decide('reply', { ...atMentions, level: 'all' }, { item: 'create', outOfApp: true, reason: 'create' });
+  decide('reply', { following: false, dmRoom: true, level: null }, { item: 'create', outOfApp: true, reason: 'create' });
+  // Outside a DM a null level is the ordinary default (mentions): unfollowed replies drop.
+  decide('reply', { following: false, dmRoom: false, level: null }, { item: 'none', outOfApp: false, reason: 'not_following' });
+});
+
 test('D22r: only a DM reply goes out of the app as dm; every other kind keeps its own name', () => {
   const { courierKindFor } = rules;
   assert.equal(courierKindFor('reply', true), 'dm');

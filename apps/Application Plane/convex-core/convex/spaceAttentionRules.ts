@@ -10,6 +10,7 @@
  * Nothing here reads a title, a name or message text. Inputs are ids, closed
  * words and timestamps; outputs are the same.
  */
+import { isDmKind } from "./spaceParticipants";
 
 export const ATTENTION_KINDS = [
   "mention",
@@ -38,11 +39,11 @@ export const DEFAULT_ROOM_LEVEL: RoomLevel = "mentions";
  * (`off` silences it, a muted thread silences that thread). A DM's default level
  * is therefore `all`; every other room keeps {@link DEFAULT_ROOM_LEVEL}.
  */
-export const DM_SPACE_KINDS = ["dm", "group_dm"] as const;
 export const DM_DEFAULT_ROOM_LEVEL: RoomLevel = "all";
 
+/** The DM kinds have one source: {@link isDmKind} in `spaceParticipants`. */
 export function isDmSpaceKind(kind: unknown): boolean {
-  return typeof kind === "string" && (DM_SPACE_KINDS as readonly string[]).includes(kind);
+  return isDmKind(kind);
 }
 
 /** The level a member has in a room of this kind when they never chose one. */
@@ -153,7 +154,7 @@ const DROP = (reason: string): DeliveryDecision => ({ item: "none", outOfApp: fa
  *  2. recipient must be an active, acknowledged audience member: drop;
  *  3. `mention`, `invite` (and `reminder`) pass every level and mute;
  *  4. level `off` drops everything else; a muted thread drops;
- *  5. `reply` needs a following recipient (not in a DM: D22r); `agent_done` / `agent_failed` go to
+ *  5. `reply` needs a following recipient (not in a DM at level `all`: D22r); `agent_done` / `agent_failed` go to
  *     the run starter only;
  *  6. observed room: no item for `reply` and `agent_done` (mentions are kept);
  *  7. coalesce on (recipient, kind, thread or space): one row; `done` reopens
@@ -178,7 +179,7 @@ export function deliveryDecision(kind: SignalKind, ctx: DeliveryContext): Delive
   if (!ctx.recipientInAudience) return DROP("not_in_audience");
 
   const passesEveryLevel = kind === "mention" || kind === "invite" || isReminder || kind === "approval_needed";
-  const level = ctx.level ?? DEFAULT_ROOM_LEVEL;
+  const level = ctx.level ?? (ctx.dmRoom ? DM_DEFAULT_ROOM_LEVEL : DEFAULT_ROOM_LEVEL);
 
   // 3 and 4
   if (!passesEveryLevel) {
@@ -187,7 +188,13 @@ export function deliveryDecision(kind: SignalKind, ctx: DeliveryContext): Delive
   }
 
   // 5
-  if (kind === "reply" && !ctx.following && !ctx.dmRoom) return DROP("not_following");
+  // D22r: a DM lifts the follow requirement only at level `all` (its default).
+  // At `mentions` a DM behaves like any room: replies only in followed threads,
+  // and mentions, invites, reminders and approvals still pass (step 3).
+  if (kind === "reply" && !ctx.following) {
+    if (!ctx.dmRoom) return DROP("not_following");
+    if (level !== "all") return DROP("level_mentions");
+  }
   if ((kind === "agent_done" || kind === "agent_failed") && !ctx.isRunStarter) {
     return DROP("not_run_starter");
   }
