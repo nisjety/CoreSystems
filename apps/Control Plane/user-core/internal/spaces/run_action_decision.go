@@ -33,6 +33,10 @@ type RunActionAuthority struct {
 	RunContextAuthorizationRef string
 	AuthorityRevision          int64
 	RunStatus                  string
+	// AgentSubjectID is the Space agent a verified wake started the run for
+	// (Session Core runs.agent_subject_id), empty for a direct run. It names the
+	// agent whose tool-policy layer and standing rules apply (DEPTH-WS10-S3-1).
+	AgentSubjectID string
 }
 
 func (a RunActionAuthority) Validate() error {

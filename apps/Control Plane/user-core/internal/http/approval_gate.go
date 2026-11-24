@@ -53,6 +53,28 @@ func (s *Server) resolveApprovalRun(c *gin.Context, runID, orgID string) (spaces
 	return authority, true
 }
 
+// errGateAgentMismatch: the gate named an agent other than the one the run was
+// started for.
+var errGateAgentMismatch = errors.New("agent_subject_id does not name the run's agent")
+
+// gateAgentSubject picks the agent whose policy layer and standing rules apply
+// to a gate call (DEPTH-WS10-S3-1). The run's own agent, resolved from Session
+// Core, wins: Execution Core does not know it, and a request that names a
+// different agent is refused rather than allowed to borrow that agent's rules.
+// A run with no agent (a direct turn) keeps whatever the request names, which
+// for the view can only add restrictions.
+func gateAgentSubject(authority spaces.RunActionAuthority, requested string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	resolved := strings.TrimSpace(authority.AgentSubjectID)
+	if resolved == "" {
+		return requested, nil
+	}
+	if requested != "" && requested != resolved {
+		return "", errGateAgentMismatch
+	}
+	return resolved, nil
+}
+
 // issueToolGateView answers what Execution Core may fold into its gate for one
 // run: the Space ceiling and whether standing rules can apply to this requester
 // right now. It carries no content and is allowed under ZDR (grants are simply
@@ -66,6 +88,11 @@ func (s *Server) issueToolGateView(c *gin.Context) {
 	}
 	authority, ok := s.resolveApprovalRun(c, request.RunID, request.OrgID)
 	if !ok {
+		return
+	}
+	agentID, agentErr := gateAgentSubject(authority, request.AgentSubjectID)
+	if agentErr != nil {
+		abortTypedError(c, http.StatusBadRequest, "invalid_request", agentErr.Error(), nil)
 		return
 	}
 	evidence, err := s.spaceRepo.ResolveSharedApprovalDecisionEvidence(c.Request.Context(), authority.SpaceRef, authority.OrgID, authority.SubjectID)
@@ -82,10 +109,9 @@ func (s *Server) issueToolGateView(c *gin.Context) {
 		writeApprovalError(c, err)
 		return
 	}
-	// The agent layer is selected by the agent Execution Core names; it can only
-	// add restrictions, so naming another agent of this Space reveals no authority.
-	agentID := strings.TrimSpace(request.AgentSubjectID)
-	if len(agentID) > 200 {
+	// The agent layer is the run's own agent (gateAgentSubject); for a run with
+	// no agent it is the one Execution Core names, which can only add restrictions.
+	if len(strings.TrimSpace(request.AgentSubjectID)) > 200 {
 		abortTypedError(c, http.StatusBadRequest, "invalid_request", "agent_subject_id is oversized", nil)
 		return
 	}
@@ -139,6 +165,10 @@ func (s *Server) useApprovalGrant(c *gin.Context) {
 	}
 	authority, ok := s.resolveApprovalRun(c, request.RunID, request.OrgID)
 	if !ok {
+		return
+	}
+	if _, agentErr := gateAgentSubject(authority, use.AgentSubjectID); agentErr != nil {
+		abortTypedError(c, http.StatusBadRequest, "invalid_request", agentErr.Error(), nil)
 		return
 	}
 	evidence, err := s.spaceRepo.ResolveSharedApprovalDecisionEvidence(c.Request.Context(), authority.SpaceRef, authority.OrgID, authority.SubjectID)

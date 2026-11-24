@@ -245,6 +245,8 @@ struct RunActionAuthorityRow {
     privacy_policy_ref: Option<String>,
     thread_resource_authorization_ref: Option<String>,
     authority_revision: Option<i64>,
+    /// `runs.agent_subject_id` (migration 0075): set only by a verified wake decision.
+    agent_subject_id: Option<String>,
 }
 
 /// Durable scheduled-run bindings projected for Control's per-step authority
@@ -382,6 +384,10 @@ fn project_run_action_authority(
         thread_resource_authorization_ref,
         authority_revision,
         run_status: row.run_status,
+        agent_subject_id: row
+            .agent_subject_id
+            .map(|agent| agent.trim().to_owned())
+            .unwrap_or_default(),
     })
 }
 
@@ -1196,7 +1202,7 @@ impl RunService for RunServiceImpl {
                         r.space_id, r.recipient_audience_ref, r.recipient_audience_revision,
                         r.recipient_audience_hash, r.privacy_policy_ref,
                         r.resource_authorization_ref AS thread_resource_authorization_ref,
-                        r.authority_revision
+                        r.authority_revision, r.agent_subject_id
                  FROM runs r
                  JOIN threads t
                    ON t.id = r.thread_id AND t.org_id = r.org_id AND t.user_id = r.user_id
@@ -1403,7 +1409,19 @@ mod tests {
             privacy_policy_ref: Some("privacy_1".to_owned()),
             thread_resource_authorization_ref: Some("thread-resource_1".to_owned()),
             authority_revision: Some(7),
+            agent_subject_id: None,
         }
+    }
+
+    #[test]
+    fn run_action_authority_names_the_wake_agent_and_only_that() {
+        // DEPTH-WS10-S3-1: Control names the agent from the run, never from the gate's request.
+        let direct = project_run_action_authority(valid_run_action_authority_row()).expect("resolvable");
+        assert_eq!(direct.agent_subject_id, "");
+        let mut woken = valid_run_action_authority_row();
+        woken.agent_subject_id = Some(" agent-7 ".to_owned());
+        let woken = project_run_action_authority(woken).expect("resolvable");
+        assert_eq!(woken.agent_subject_id, "agent-7");
     }
 
     #[test]

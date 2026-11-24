@@ -1371,8 +1371,12 @@ type ResolveRunActionAuthorityResponse struct {
 	ThreadResourceAuthorizationRef string `protobuf:"bytes,11,opt,name=thread_resource_authorization_ref,json=threadResourceAuthorizationRef,proto3" json:"thread_resource_authorization_ref,omitempty"`
 	AuthorityRevision              uint64 `protobuf:"varint,12,opt,name=authority_revision,json=authorityRevision,proto3" json:"authority_revision,omitempty"`
 	RunStatus                      string `protobuf:"bytes,13,opt,name=run_status,json=runStatus,proto3" json:"run_status,omitempty"`
-	unknownFields                  protoimpl.UnknownFields
-	sizeCache                      protoimpl.SizeCache
+	// The Space agent a verified wake started the run for (runs.agent_subject_id), empty for a
+	// direct run. Control reads it to name the agent whose tool-policy layer and standing
+	// approval rules apply (DEPTH-WS10-S3-1); it never comes from Execution Core's request.
+	AgentSubjectId string `protobuf:"bytes,14,opt,name=agent_subject_id,json=agentSubjectId,proto3" json:"agent_subject_id,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ResolveRunActionAuthorityResponse) Reset() {
@@ -1492,6 +1496,13 @@ func (x *ResolveRunActionAuthorityResponse) GetAuthorityRevision() uint64 {
 func (x *ResolveRunActionAuthorityResponse) GetRunStatus() string {
 	if x != nil {
 		return x.RunStatus
+	}
+	return ""
+}
+
+func (x *ResolveRunActionAuthorityResponse) GetAgentSubjectId() string {
+	if x != nil {
+		return x.AgentSubjectId
 	}
 	return ""
 }
@@ -2577,7 +2588,7 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"authorized\"P\n" +
 	" ResolveRunActionAuthorityRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x15\n" +
-	"\x06org_id\x18\x02 \x01(\tR\x05orgId\"\xb9\x04\n" +
+	"\x06org_id\x18\x02 \x01(\tR\x05orgId\"\xe3\x04\n" +
 	"!ResolveRunActionAuthorityResponse\x12\x1a\n" +
 	"\bresolved\x18\x01 \x01(\bR\bresolved\x12\x15\n" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x15\n" +
@@ -2594,7 +2605,8 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"!thread_resource_authorization_ref\x18\v \x01(\tR\x1ethreadResourceAuthorizationRef\x12-\n" +
 	"\x12authority_revision\x18\f \x01(\x04R\x11authorityRevision\x12\x1d\n" +
 	"\n" +
-	"run_status\x18\r \x01(\tR\trunStatus\"Y\n" +
+	"run_status\x18\r \x01(\tR\trunStatus\x12(\n" +
+	"\x10agent_subject_id\x18\x0e \x01(\tR\x0eagentSubjectId\"Y\n" +
 	"\x1fResolveApprovalAuthorityRequest\x12\x1f\n" +
 	"\vapproval_id\x18\x01 \x01(\tR\n" +
 	"approvalId\x12\x15\n" +

@@ -332,6 +332,10 @@ message ResolveRunActionAuthorityResponse {
   string thread_resource_authorization_ref = 11;
   uint64 authority_revision = 12;
   string run_status = 13;
+  // The Space agent a verified wake started the run for (runs.agent_subject_id), empty for a
+  // direct run. Control reads it to name the agent whose tool-policy layer and standing
+  // approval rules apply (DEPTH-WS10-S3-1); it never comes from Execution Core's request.
+  string agent_subject_id = 14;
 }
 
 // ResolveApprovalAuthorityRequest names the approval and tenant only; everything else is read

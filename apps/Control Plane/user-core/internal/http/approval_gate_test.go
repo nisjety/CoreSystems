@@ -185,3 +185,43 @@ func TestToolGateViewFailsClosedWhenTheStoreIsUnavailable(t *testing.T) {
 		t.Fatalf("oversized agent id: %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+// DEPTH-WS10-S3-1: Control names the agent from the run, not from Execution
+// Core's request, and refuses a request that names another agent.
+func TestGateAgentSubjectPrefersTheRunsOwnAgent(t *testing.T) {
+	woken := spaces.RunActionAuthority{AgentSubjectID: "agent-7"}
+	for requested, want := range map[string]string{"": "agent-7", "agent-7": "agent-7", " agent-7 ": "agent-7"} {
+		got, err := gateAgentSubject(woken, requested)
+		if err != nil || got != want {
+			t.Errorf("requested %q: got %q, %v; want %q", requested, got, err, want)
+		}
+	}
+	if _, err := gateAgentSubject(woken, "agent-8"); !errors.Is(err, errGateAgentMismatch) {
+		t.Errorf("another agent: err = %v, want errGateAgentMismatch", err)
+	}
+	direct := spaces.RunActionAuthority{}
+	for _, requested := range []string{"", "agent-1"} {
+		if got, err := gateAgentSubject(direct, requested); err != nil || got != requested {
+			t.Errorf("direct run, requested %q: got %q, %v", requested, got, err)
+		}
+	}
+}
+
+func TestApprovalGateRefusesAnAgentOtherThanTheRunsBeforeAnyLookup(t *testing.T) {
+	authority := spaces.RunActionAuthority{
+		RunID: "run-1", OrgID: "org-1", SubjectID: "user-1", ThreadID: "thread-1", SpaceRef: "room-1",
+		RecipientAudienceRef: "audience:room-1:1", RecipientAudienceRevision: 1, RecipientAudienceHash: "sha256:a",
+		PrivacyPolicyRef: "privacy:org-1:1", RunContextAuthorizationRef: "control:room-1:thread-create:1",
+		AuthorityRevision: 1, RunStatus: "running", AgentSubjectID: "agent-9",
+	}
+	for path, scope := range map[string]string{toolGateViewPath: spaceToolGateViewScope, approvalUsePath: spaceApprovalGrantUseScope} {
+		// The repository has no database: reaching it would answer 503, so a 400 proves the
+		// mismatch is refused first.
+		engine := approvalHarness(t, &spaces.Repository{}, fakeRunAuthority{authority: authority}, executionCoreContext(scope))
+		rec := doJSON(engine, http.MethodPost, path, validApprovalGateBody())
+		wantApprovalError(t, rec, http.StatusBadRequest, "invalid_request")
+		if !strings.Contains(rec.Body.String(), "run's agent") {
+			t.Errorf("%s: %s", path, rec.Body.String())
+		}
+	}
+}

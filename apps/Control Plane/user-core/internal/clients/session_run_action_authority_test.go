@@ -51,6 +51,13 @@ func TestRunActionAuthorityMappingRejectsUnresolvedAndPartialResponses(t *testin
 	if err != nil || authority.RunID != "run-1" || authority.RunContextAuthorizationRef != valid.ThreadResourceAuthorizationRef {
 		t.Fatalf("valid authority mapping = %#v, %v", authority, err)
 	}
+	if authority.AgentSubjectID != "" {
+		t.Fatalf("a direct run names no agent, got %q", authority.AgentSubjectID)
+	}
+	valid.AgentSubjectId = " agent-7 "
+	if woken, err := runActionAuthorityFromResponse(valid); err != nil || woken.AgentSubjectID != "agent-7" {
+		t.Fatalf("woken run agent = %q, %v; want agent-7", woken.AgentSubjectID, err)
+	}
 	valid.ThreadResourceAuthorizationRef = ""
 	if _, err := runActionAuthorityFromResponse(valid); err == nil || !strings.Contains(err.Error(), "run_context_authorization_ref") {
 		t.Fatalf("partial Session Core response error = %v; want source reference failure", err)

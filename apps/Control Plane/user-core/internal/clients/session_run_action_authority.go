@@ -189,6 +189,7 @@ func runActionAuthorityFromResponse(response *mpv1.ResolveRunActionAuthorityResp
 		RunContextAuthorizationRef: response.GetThreadResourceAuthorizationRef(),
 		AuthorityRevision:          int64(response.GetAuthorityRevision()),
 		RunStatus:                  response.GetRunStatus(),
+		AgentSubjectID:             strings.TrimSpace(response.GetAgentSubjectId()),
 	}
 	if err := authority.Validate(); err != nil {
 		return spaces.RunActionAuthority{}, fmt.Errorf("invalid Session Core run action authority: %w", err)
