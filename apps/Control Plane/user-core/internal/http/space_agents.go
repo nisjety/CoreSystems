@@ -122,7 +122,7 @@ func (s *Server) getAgentSubject(c *gin.Context) {
 		writeAgentError(c, errors.New("agent registry repository unavailable"))
 		return
 	}
-	view, err := s.spaceRepo.VisibleAgent(c.Request.Context(), c.GetString("org_id"), c.GetString("user_id"),
+	view, entries, err := s.spaceRepo.VisibleAgentAccess(c.Request.Context(), c.GetString("org_id"), c.GetString("user_id"),
 		c.Param("agent_subject_id"))
 	if err != nil {
 		writeAgentError(c, err)
@@ -133,7 +133,22 @@ func (s *Server) getAgentSubject(c *gin.Context) {
 		return
 	}
 	c.Header("Cache-Control", "no-store")
-	c.JSON(http.StatusOK, gin.H{"data": view})
+	c.JSON(http.StatusOK, gin.H{"data": agentSubjectWithAccess(*view, entries)})
+}
+
+// agentSubjectRead is GET /agents/subjects/{id}: the definition plus its access list,
+// which Control owns. The gateway reads the list here, not from the Convex projection
+// (DEPTH-WS17-S5-ACCESS-READ). entries is always an array.
+type agentSubjectRead struct {
+	spaces.AgentView
+	Entries []spaces.AgentAccessEntry `json:"entries"`
+}
+
+func agentSubjectWithAccess(view spaces.AgentView, entries []spaces.AgentAccessEntry) agentSubjectRead {
+	if entries == nil {
+		entries = []spaces.AgentAccessEntry{}
+	}
+	return agentSubjectRead{AgentView: view, Entries: entries}
 }
 
 type updateAgentAccessBody struct {

@@ -177,16 +177,49 @@ func (r *Repository) VisibleAgent(ctx context.Context, orgID, actorID, agentSubj
 	return &views[0], nil
 }
 
+// VisibleAgentAccess returns one visible agent definition together with its access list,
+// read in one transaction so the list matches the revision. It answers (nil, nil, nil)
+// when the actor may not see the definition, like VisibleAgent. Control is the authority
+// for the list; the Convex copy is only a display projection (DEPTH-WS17-S5-ACCESS-READ).
+func (r *Repository) VisibleAgentAccess(ctx context.Context, orgID, actorID, agentSubjectID string) (*AgentView, []AgentAccessEntry, error) {
+	if r == nil || r.db == nil {
+		return nil, nil, AgentError(503, CodeAgentRegistryUnavailable, "agent registry is unavailable", nil)
+	}
+	tx, err := r.db.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, nil, fmt.Errorf("begin agent access read: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	views, err := visibleAgentsIn(ctx, tx, orgID, actorID, strings.TrimSpace(agentSubjectID))
+	if err != nil || len(views) == 0 {
+		return nil, nil, err
+	}
+	entries, err := agentEntries(ctx, tx, strings.TrimSpace(orgID), views[0].AgentSubjectID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &views[0], entries, nil
+}
+
 func (r *Repository) visibleAgents(ctx context.Context, orgID, actorID, onlyAgentID string) ([]AgentView, error) {
 	if r == nil || r.db == nil {
 		return nil, AgentError(503, CodeAgentRegistryUnavailable, "agent registry is unavailable", nil)
 	}
+	return visibleAgentsIn(ctx, r.db.Pool, orgID, actorID, onlyAgentID)
+}
+
+// agentQuerier is what both the pool and a transaction offer for a read.
+type agentQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+func visibleAgentsIn(ctx context.Context, q agentQuerier, orgID, actorID, onlyAgentID string) ([]AgentView, error) {
 	orgID = strings.TrimSpace(orgID)
 	actorID = strings.TrimSpace(actorID)
 	if orgID == "" || actorID == "" {
 		return []AgentView{}, nil
 	}
-	rows, err := r.db.Pool.Query(ctx, `
+	rows, err := q.Query(ctx, `
 		SELECT a.agent_subject_id, COALESCE(a.owner_user_id, ''), a.visibility, a.add_policy, a.lifecycle, a.revision,
 		       COALESCE((SELECT g.role FROM agent_subject_access g
 		                  WHERE g.org_id=a.org_id AND g.agent_subject_id=a.agent_subject_id

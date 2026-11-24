@@ -555,8 +555,9 @@ pub(crate) async fn set_primary_agent_core(
 }
 
 /// `GET /api/v1/agents/{agent_id}/access`: Control decides whether the caller may see the definition and
-/// reports the role, visibility, add policy and revision. The access list is read from the Convex
-/// projection that the PUT writes, because Control exposes no read of it.
+/// reports the role, visibility, add policy, revision and the access list (DEPTH-WS17-S5-ACCESS-READ).
+/// The Convex projection the PUT writes is only a display cache: it supplies the owner label, and an
+/// outage there leaves the label empty instead of failing the read.
 pub(crate) async fn get_agent_access_core(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -589,8 +590,18 @@ pub(crate) async fn get_agent_access_core(
         return (status, Json(view));
     }
     let data = view.get("data").cloned().unwrap_or(Value::Null);
+    // Control's list is the authority; only its principal and role reach the caller.
+    let entries: Vec<Value> = data
+        .get("entries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|entry| json!({ "principal_id": field(entry, "principal_id"), "role": field(entry, "role") }))
+        .collect();
 
-    let Ok(definition) = convex_gateway_call(
+    // Display cache only: the owner label. A missing row or an outage yields no label.
+    let definition = convex_gateway_call(
         state,
         "query",
         "spaceAgents:agentDefinitionForGateway",
@@ -601,20 +612,7 @@ pub(crate) async fn get_agent_access_core(
         }),
     )
     .await
-    else {
-        return registry_unavailable();
-    };
-    if definition.is_null() {
-        return not_found();
-    }
-    let entries: Vec<Value> = definition
-        .get("accessEntries")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .map(|entry| json!({ "principal_id": field(entry, "principalId"), "role": field(entry, "role") }))
-        .collect();
+    .unwrap_or(Value::Null);
 
     ok_data(json!({
         "agent_ref": agent_id,
@@ -1802,5 +1800,74 @@ mod tests {
         assert_eq!(body["data"]["org_admin_editable"], true);
         let (_, Json(member_view)) = get_agent_access_core(&f.state, &user(), "agent-1").await;
         assert_eq!(member_view["data"]["org_admin_editable"], false);
+    }
+
+    /// DEPTH-WS17-S5-ACCESS-READ: the access list comes from Control's read; a stale Convex projection
+    /// does not leak into the answer.
+    #[tokio::test]
+    async fn the_access_list_is_read_from_control_not_the_convex_projection() {
+        let f = fixture().await;
+        answer(
+            &f.user_core,
+            "GET",
+            "/api/v1/internal/agents/subjects/agent-agent-1",
+            control(json!({
+                "agent_subject_id": "agent-agent-1", "owner_user_id": "user-1", "visibility": "owner",
+                "add_policy": "owner_only", "revision": 5, "role": "owner",
+                "entries": [{"principal_id": "user-2", "role": "manager", "extra": "dropped"}],
+            })),
+        )
+        .await;
+        convex(
+            &f,
+            "spaceAgents:agentDefinitionForGateway",
+            convex_value(json!({
+                "agentRef": "agent-1", "ownerLabel": "Owner One",
+                "accessEntries": [{"principalId": "user-stale", "role": "collaborator"}],
+            })),
+        )
+        .await;
+        let (status, Json(body)) = get_agent_access_core(&f.state, &user(), "agent-1").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["entries"], json!([{"principal_id": "user-2", "role": "manager"}]));
+        assert_eq!(body["data"]["revision"], 5);
+        assert_eq!(body["data"]["owner_label"], "Owner One");
+    }
+
+    /// The Convex display cache failing does not fail the read: Control's answer stands, with no label.
+    #[tokio::test]
+    async fn a_convex_outage_leaves_the_access_read_whole_without_an_owner_label() {
+        let f = fixture().await;
+        answer(
+            &f.user_core,
+            "GET",
+            "/api/v1/internal/agents/subjects/agent-agent-1",
+            control(json!({
+                "agent_subject_id": "agent-agent-1", "owner_user_id": "user-1", "visibility": "owner",
+                "add_policy": "owner_only", "revision": 2, "role": "owner", "entries": [],
+            })),
+        )
+        .await;
+        convex(&f, "spaceAgents:agentDefinitionForGateway", ResponseTemplate::new(503)).await;
+        let (status, Json(body)) = get_agent_access_core(&f.state, &user(), "agent-1").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["entries"], json!([]));
+        assert!(body["data"]["owner_label"].is_null());
+    }
+
+    /// Control refusing the read (not visible) is relayed, and Convex is not asked.
+    #[tokio::test]
+    async fn a_control_404_on_the_access_read_is_relayed_without_a_convex_call() {
+        let f = fixture().await;
+        answer(
+            &f.user_core,
+            "GET",
+            "/api/v1/internal/agents/subjects/agent-agent-1",
+            ResponseTemplate::new(404).set_body_json(json!({"error": {"code": "agent_not_found", "message": "agent not found", "details": {}}})),
+        )
+        .await;
+        let (status, Json(body)) = get_agent_access_core(&f.state, &user(), "agent-1").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(convex_ops(&f.convex).await.is_empty(), "no Convex read after a Control refusal");
     }
 }

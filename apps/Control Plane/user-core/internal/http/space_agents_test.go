@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/spaces"
 )
 
 // WS17-S4: the personal agent registry (/api/v1/internal/agents/subjects) and
@@ -209,6 +211,38 @@ func TestUnadmittedListIsAlwaysAJSONArray(t *testing.T) {
 		}
 		if string(encoded) != tc.want {
 			t.Errorf("%s: json = %s, want %s", tc.name, encoded, tc.want)
+		}
+	}
+}
+
+// TestAgentSubjectReadCarriesTheAccessListFlat (DEPTH-WS17-S5-ACCESS-READ): GET
+// /agents/subjects/{id} answers Control's access list beside the flat definition
+// fields, and entries is an array even when the list is empty.
+func TestAgentSubjectReadCarriesTheAccessListFlat(t *testing.T) {
+	view := spaces.AgentView{AgentSubjectID: "agent-sample1", OwnerUserID: "user-1", Visibility: "owner",
+		AddPolicy: "owner_only", Lifecycle: "active", Revision: 3, Role: "owner"}
+	for _, tc := range []struct {
+		name    string
+		entries []spaces.AgentAccessEntry
+		want    string
+	}{
+		{"nil list", nil, `[]`},
+		{"one entry", []spaces.AgentAccessEntry{{PrincipalID: "user-2", Role: "manager"}},
+			`[{"principal_id":"user-2","role":"manager"}]`},
+	} {
+		encoded, err := json.Marshal(agentSubjectWithAccess(view, tc.entries))
+		if err != nil {
+			t.Fatalf("%s: marshal: %v", tc.name, err)
+		}
+		var got map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &got); err != nil {
+			t.Fatalf("%s: unmarshal: %v", tc.name, err)
+		}
+		if string(got["entries"]) != tc.want {
+			t.Errorf("%s: entries = %s, want %s", tc.name, got["entries"], tc.want)
+		}
+		if string(got["revision"]) != "3" || string(got["agent_subject_id"]) != `"agent-sample1"` {
+			t.Errorf("%s: definition fields are not flat: %s", tc.name, encoded)
 		}
 	}
 }
