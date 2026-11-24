@@ -604,6 +604,10 @@ export const updateRoomDetailsForGateway = mutation({
     const space = await getSpaceByRef(ctx, args.spaceRef);
     if (!space || space.externalOrgId !== args.externalOrgId) throw new Error("space_not_found");
     if (space.kind !== "room") throw new Error("space_kind_not_editable");
+    // D22e (W1-Q2, ruled): the organization room follows the organization, so its name and topic are
+    // refused for every caller, owner included. `isOrganizationRoom` is the org-derived marker that
+    // ensureOrganizationRoomForGateway writes when it creates that room.
+    if (space.isOrganizationRoom === true) throw new Error("space_kind_not_editable");
     if (space.lifecycle !== "active") throw new Error("room_not_active");
 
     if (args.name === undefined && args.topic === undefined) {

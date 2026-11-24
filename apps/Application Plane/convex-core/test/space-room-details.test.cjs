@@ -207,6 +207,15 @@ test('updateRoomDetailsForGateway error codes and patch', async (t) => {
     }
   });
 
+  await t.test('space_kind_not_editable for the organization room, name and topic alike (D22e)', async () => {
+    for (const args of [{ name: 'New' }, { topic: 'New' }, { topic: '' }, { name: 'New', topic: 'New' }]) {
+      const { ctx, patches, inserts } = makeCtx({ spaces: [room({ isOrganizationRoom: true })] });
+      await assert.rejects(() => callUpdate(ctx, args), /^Error: space_kind_not_editable$/, JSON.stringify(args));
+      assert.deepEqual(patches, []);
+      assert.deepEqual(inserts, []);
+    }
+  });
+
   await t.test('room_not_active unless the lifecycle is active', async () => {
     for (const lifecycle of ['pending_registration', 'suspended', 'deleting', 'deleted']) {
       const { ctx, patches } = makeCtx({ spaces: [room({ lifecycle })] });
