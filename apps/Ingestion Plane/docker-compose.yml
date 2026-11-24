@@ -641,6 +641,18 @@ services:
       INGESTION_SERVICE_API_KEY: ${IMPORTS_SERVICE_API_KEY:?IMPORTS_SERVICE_API_KEY is required}
       DOCUMENT_PROCESSOR_ORDER: ${DOCUMENT_PROCESSOR_ORDER:-local}
       IMPORTS_SPACE_UPLOAD: ${IMPORTS_SPACE_UPLOAD:-false}
+      # WS14 room files (F-t1-013): a Space-bound import job reacquires a fresh
+      # Control import decision right before each Data write
+      # (POST /api/v1/internal/spaces/import-execution-decision on user-core,
+      # principal imports-core, scope spaces:import:reauthorize). user-core's
+      # HTTP port is 3012, not 8080. The credential SPACE_AUTHORITY_SERVICE_TOKEN
+      # is a secret and comes from ./imports-core/.env (env_file above); it is
+      # deliberately not set here, because an `environment` entry would override
+      # the env_file value. Without it every Space-bound job fails closed with
+      # "Space import authority is not configured"; unscoped imports are
+      # unaffected. user-core must list the same token for principal
+      # imports-core in USER_CORE_SERVICE_CREDENTIALS.
+      SPACE_AUTHORITY_REAUTHORIZATION_URL: ${SPACE_AUTHORITY_REAUTHORIZATION_URL:-http://user-core:3012}
       TIKA_ENABLED: ${TIKA_ENABLED:-false}
       TIKA_URL: ${TIKA_URL:-http://tika:9998}
       TIKA_TIMEOUT_S: ${TIKA_TIMEOUT_S:-20}
@@ -651,7 +663,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
+          # Room-file extraction (PDF/Office text) holds a whole upload and its
+          # extracted text in memory; 256M left no headroom (DEPTH-WS14-FILES).
+          memory: 768M
           cpus: "0.25"
         reservations:
           memory: 64M
