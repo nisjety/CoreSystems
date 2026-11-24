@@ -812,3 +812,29 @@ async fn history_floor_admits_a_room_row_only_by_its_own_source_instant() {
         .await
         .ok();
 }
+
+// ---- E-PRIO-02 (DEPTH-WS17-S3-ARBITER): the batched 0081 backfill runbook ------------------------
+
+/// The off-peak batched pre-run of 0081's label backfill applies exactly 0081's three relabel rules, only to rows still
+/// labelled 'personal' (so the migration's own UPDATEs stay idempotent after it), in committed batches, and lives
+/// outside the top level of migrations/ so sqlx never applies it.
+#[test]
+fn the_batched_0081_runbook_mirrors_the_migration_rules() {
+    let migration = include_str!("../../migrations/0081_agent_memory_audience_labels.sql");
+    let runbook = include_str!("../../migrations/runbook/0081_agent_memory_audience_labels.batched.sql");
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (migration, runbook) = (flat(migration), flat(runbook));
+    for rule in [
+        "AND audience_hash IS NOT NULL AND audience_hash <> '' AND audience_revision IS NOT NULL AND audience_revision > 0",
+        "WHERE sl.link LIKE 'thread:%' AND ct.space_id IS NOT NULL AND ct.space_kind IS DISTINCT FROM 'personal'",
+        "WHERE st.id = m.session_id AND st.space_id IS NOT NULL AND st.space_kind IS DISTINCT FROM 'personal'",
+        "CASE WHEN scope = 'space' THEN scope_id ELSE split_part(scope_id, ':', 1) END <> ''",
+    ] {
+        assert!(migration.contains(rule), "0081 states: {rule}");
+        assert!(runbook.contains(rule), "the runbook keeps 0081's rule: {rule}");
+    }
+    assert_eq!(runbook.matches("origin_kind = 'personal'").count(), 3, "each batch reads only unlabelled rows");
+    assert_eq!(runbook.matches("COMMIT;").count(), 3, "each rule commits per batch");
+    assert!(runbook.contains("FOR UPDATE SKIP LOCKED"));
+    assert!(!runbook.contains("BEGIN;"), "autocommit: the procedure commits its own batches");
+}
