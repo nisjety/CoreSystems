@@ -112,10 +112,10 @@ test.fixme('a flagged output in enforce is held, previewed to the requester only
   }
 })
 
-// FIXME(WS10-S4): standing-rule creation cannot succeed yet. The gateway approval projection lacks
-// agent_subject_id and action_schema_hash, so decide answers grant.status not_recorded
-// (approval_projection_incomplete). Re-enable when S6 ResolveApprovalAuthority or an additive projection lands.
-test.fixme('decide once, standing rule passes, revoke, next call prompts', async ({ browser, baseURL }) => {
+// DEPTH-WS10-S4-1: the approval projection now carries the run's agent_subject_id and the tool's
+// action_schema_hash, so an always decision records its rule. The fixture run must be an agent
+// wake (a direct run names no agent and answers not_recorded).
+test('decide once, standing rule passes, revoke, next call prompts', async ({ browser, baseURL }) => {
   const ref = requireSpaceRef(test)
   requireMembers(test, 'A')
   skipUnlessSpace(test, !APPROVALS_READY, 'E2E_SPACE_APPROVAL_RUNS=1 needs a fixture run of member A paused on an MCP approval')

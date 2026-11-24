@@ -10991,7 +10991,11 @@ async fn pause_for_approval(
             action_digest: gate_action_digest,
             turn_origin: String::new(),
             grant_use_token: String::new(),
-            context_json: crate::space_gate::card_context_json(
+            // For an MCP tool the card also carries its schema commitment, so an "always"
+            // decision can bind its standing rule (DEPTH-WS10-S4-1).
+            context_json: crate::space_gate::card_context_json_for_run(
+                &req.org_id,
+                &req.run_id,
                 tool_name,
                 tool_input,
                 crate::space_gate::resume_class_for(

@@ -1677,6 +1677,9 @@ pub(crate) fn approval_from_row(row: &store::ApprovalRow) -> proto::Approval {
         grant_ref: String::new(),
         turn_origin: String::new(),
         revision: store::approval_revision(&row.metadata).0,
+        // The run's agent is read by `approval_member::attach_addressing`, never stated.
+        agent_subject_id: String::new(),
+        action_schema_hash: crate::space::approvals::card_text(&row.metadata, "action_schema_hash"),
     }
 }
 

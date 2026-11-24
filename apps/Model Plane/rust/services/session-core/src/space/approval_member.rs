@@ -359,26 +359,43 @@ pub(crate) async fn authorize_reroute(
     Ok(addressee)
 }
 
-/// Fill the S6 projection on approvals read from rows: addressee, grant, turn origin. The
-/// requester is set from the row itself in `approval_from_row`. A failed read leaves the
-/// approvals without the projection (they read as requester-addressed), never failing the call.
+type AddressingRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+/// The addressing columns of a set of approvals and their run's agent. The run join is tenant
+/// scoped like the approval read.
+const ADDRESSING_SQL: &str =
+    "SELECT a.id, a.addressee_kind, a.addressee_subject_id, a.grant_ref, a.turn_origin, \
+            r.agent_subject_id \
+       FROM approvals AS a \
+       LEFT JOIN runs AS r ON r.id = a.run_id AND r.org_id = a.org_id \
+      WHERE a.org_id = $1 AND a.id = ANY($2)";
+
+/// Fill the S6 projection on approvals read from rows: addressee, grant, turn origin, and the
+/// run's agent. The requester is set from the row itself in `approval_from_row`. A failed read
+/// leaves the approvals without the projection (they read as requester-addressed), never
+/// failing the call.
 pub(crate) async fn attach_addressing(pool: &Pool, org_id: &str, approvals: &mut [pb::Approval]) {
     if approvals.is_empty() {
         return;
     }
     let ids: Vec<String> = approvals.iter().map(|approval| approval.id.clone()).collect();
-    let rows: Result<Vec<(String, String, Option<String>, Option<String>, Option<String>)>, _> =
-        sqlx::query_as(
-            "SELECT id, addressee_kind, addressee_subject_id, grant_ref, turn_origin \
-             FROM approvals WHERE org_id = $1 AND id = ANY($2)",
-        )
+    // The run's agent (runs.agent_subject_id, set only by a verified wake) rides along so an
+    // "always" decision can name the agent its standing rule binds (DEPTH-WS10-S4-1).
+    let rows: Result<Vec<AddressingRow>, _> = sqlx::query_as(ADDRESSING_SQL)
         .bind(org_id)
         .bind(&ids)
         .fetch_all(pool)
         .await;
     match rows {
         Ok(rows) => {
-            for (id, kind, subject, grant_ref, turn_origin) in rows {
+            for (id, kind, subject, grant_ref, turn_origin, agent) in rows {
                 if let Some(approval) = approvals.iter_mut().find(|approval| approval.id == id) {
                     approval.addressee = Some(pb::Addressee {
                         kind: addressee_kind_from_word(&kind) as i32,
@@ -386,6 +403,7 @@ pub(crate) async fn attach_addressing(pool: &Pool, org_id: &str, approvals: &mut
                     });
                     approval.grant_ref = grant_ref.unwrap_or_default();
                     approval.turn_origin = turn_origin.unwrap_or_default();
+                    approval.agent_subject_id = agent.unwrap_or_default().trim().to_owned();
                 }
             }
         }

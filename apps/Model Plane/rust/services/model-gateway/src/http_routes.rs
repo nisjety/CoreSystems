@@ -11240,6 +11240,11 @@ pub(crate) fn approval_value(approval: &Approval) -> Value {
         })),
         "grant_ref": empty_to_null(&approval.grant_ref),
         "turn_origin": empty_to_null(&approval.turn_origin),
+        // What an "always" decision binds its standing rule to (DEPTH-WS10-S4-1): the run's agent,
+        // read by Session Core from the run, and the tool's schema commitment. Ids and a digest
+        // only; the action key stays hidden.
+        "agent_subject_id": empty_to_null(&approval.agent_subject_id),
+        "action_schema_hash": empty_to_null(&approval.action_schema_hash),
     });
     // EP-10-S4: present only for an approval the person edited before granting, so every other
     // approval projects exactly as before.
@@ -11880,6 +11885,25 @@ mod approval_value_tests {
             !value.to_string().contains("secret-argument-text"),
             "{value}"
         );
+    }
+
+    #[test]
+    fn approval_value_names_the_rule_binding_and_never_the_action_key() {
+        // DEPTH-WS10-S4-1: the agent and the schema commitment let an "always" decision build its
+        // standing rule; the action key and call digest stay hidden.
+        let hash = format!("sha256:{}", "b".repeat(64));
+        let approval = Approval {
+            agent_subject_id: "agent-7".to_owned(),
+            action_schema_hash: hash.clone(),
+            ..approval_with_cause()
+        };
+        let value = approval_value(&approval);
+        assert_eq!(value["agent_subject_id"], "agent-7");
+        assert_eq!(value["action_schema_hash"], json!(hash));
+        let text = value.to_string();
+        assert!(!text.contains("message.send") && !text.contains("digest-of-the-exact-call"), "{value}");
+        let direct = approval_value(&approval_with_cause());
+        assert!(direct["agent_subject_id"].is_null() && direct["action_schema_hash"].is_null());
     }
 
     #[test]

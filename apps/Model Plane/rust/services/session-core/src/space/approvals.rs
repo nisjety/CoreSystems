@@ -30,7 +30,16 @@ pub(crate) const MAX_CONTEXT_BYTES: usize = 4096;
 pub(crate) const MAX_CONTEXT_VALUE_CHARS: usize = 128;
 /// The only keys a creator may state. Everything else is refused, so raw arguments and
 /// credential-shaped keys can never enter a card.
-const ALLOWED_CONTEXT_KEYS: &[&str] = &["tool_key", "action_label", "resume_class"];
+const ALLOWED_CONTEXT_KEYS: &[&str] =
+    &["tool_key", "action_label", "resume_class", "action_schema_hash"];
+
+/// A stated `action_schema_hash` is kept only in its `sha256:<64 lowercase hex>` form: a
+/// commitment to the tool's rule registry digest, never argument text (DEPTH-WS10-S4-1).
+fn schema_commitment(value: &str) -> Option<&str> {
+    let hex = value.strip_prefix("sha256:")?;
+    (hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+        .then_some(value)
+}
 
 /// Resume class stored when the approval carries a continuation descriptor.
 pub(crate) const RESUME_ACTION_CONTINUATION: &str = "action_continuation";
@@ -69,6 +78,17 @@ pub(crate) fn card_from_request(
         if let Some(label) = stated.get("action_label") {
             card.insert("action_label".to_owned(), JsonValue::String(label.clone()));
         }
+    }
+    // Content-free, so a zero-retention caller keeps it too. A malformed value is dropped, not
+    // refused: it only feeds an optional standing rule.
+    if let Some(hash) = stated
+        .get("action_schema_hash")
+        .and_then(|hash| schema_commitment(hash))
+    {
+        card.insert(
+            "action_schema_hash".to_owned(),
+            JsonValue::String(hash.to_owned()),
+        );
     }
     let resume = if descriptor_tool
         .is_some_and(mp_contracts::space_approvals::is_resumable_descriptor_tool)
@@ -364,6 +384,28 @@ mod tests {
                     .expect("a card");
                 assert_eq!(resume_class(&built), RESUME_ACTION_CONTINUATION, "tool {tool}");
             }
+        }
+    }
+
+    #[test]
+    fn the_schema_commitment_is_kept_only_in_its_sha256_form() {
+        // DEPTH-WS10-S4-1: the card carries the tool's schema commitment so an "always" decision
+        // can name it; it is content-free, so zero retention keeps it too.
+        let good = format!("sha256:{}", "a".repeat(64));
+        for zdr in [false, true] {
+            let context = json!({ "tool_key": TOOL, "action_schema_hash": good }).to_string();
+            let built = card(&context, false, zdr).expect("a card");
+            assert_eq!(built["action_schema_hash"], json!(good), "zdr {zdr}");
+        }
+        for bad in [
+            "a".repeat(64),
+            format!("sha256:{}", "A".repeat(64)),
+            format!("sha256:{}", "a".repeat(63)),
+            "sha256:not-hex".to_owned(),
+        ] {
+            let context = json!({ "tool_key": TOOL, "action_schema_hash": bad }).to_string();
+            let built = card(&context, false, false).expect("a card");
+            assert!(built.get("action_schema_hash").is_none(), "{bad}");
         }
     }
 

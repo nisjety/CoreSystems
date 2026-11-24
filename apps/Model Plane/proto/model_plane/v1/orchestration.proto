@@ -546,6 +546,16 @@ message Approval {
   // EP-10 S4: how many times the person edited the approved call before granting it; 0 = never
   // edited. Read from `approval_continuation_descriptors.revision` (at most 3).
   uint32 revision = 25;
+
+  // The Space agent the run was woken for (runs.agent_subject_id), empty for a direct run. Read
+  // from the run, never stated by the creator; an "always" decision names it on the standing rule
+  // (DEPTH-WS10-S4-1).
+  string agent_subject_id = 26;
+
+  // The `sha256:<hex>` commitment to the gated tool's rule registry digest, from the creator's
+  // validated card context; empty when none was stated. Content-free: it names the tool's
+  // schema, never the call's arguments (DEPTH-WS10-S4-1).
+  string action_schema_hash = 27;
 }
 
 // Who recorded an approval decision (build plan WS13 S3). Stored as

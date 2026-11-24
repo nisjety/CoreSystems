@@ -143,12 +143,43 @@ pub(crate) fn action_label(tool_name: &str, tool_input: &str) -> String {
 /// The `CreateApprovalRequest.context_json` of a paused tool call. `resume_class` states what the
 /// pause expects; Session Core overrides it from its own rows.
 pub(crate) fn card_context_json(tool_name: &str, tool_input: &str, resume_class: &str) -> String {
-    json!({
+    card_context_with_schema(tool_name, tool_input, resume_class, None)
+}
+
+/// [`card_context_json`] plus, for a tool a standing rule can cover, the `sha256:` commitment to
+/// its rule registry digest in this run (DEPTH-WS10-S4-1). An "always" decision binds its rule to
+/// that commitment, the same one [`try_standing_rule`] later presents; it names the tool's
+/// schema, never the call's arguments.
+pub(crate) fn card_context_json_for_run(
+    org_id: &str,
+    run_id: &str,
+    tool_name: &str,
+    tool_input: &str,
+    resume_class: &str,
+) -> String {
+    let schema_hash = tool_name
+        .starts_with(STANDING_RULE_TOOL_PREFIX)
+        .then(|| crate::permission::run_view(org_id, run_id, tool_name))
+        .flatten()
+        .and_then(|view| schema_commitment(view.digest()));
+    card_context_with_schema(tool_name, tool_input, resume_class, schema_hash.as_deref())
+}
+
+fn card_context_with_schema(
+    tool_name: &str,
+    tool_input: &str,
+    resume_class: &str,
+    schema_hash: Option<&str>,
+) -> String {
+    let mut context = json!({
         "tool_key": tool_key(tool_name),
         "action_label": action_label(tool_name, tool_input),
         "resume_class": resume_class,
-    })
-    .to_string()
+    });
+    if let (Some(hash), Some(object)) = (schema_hash, context.as_object_mut()) {
+        object.insert("action_schema_hash".to_owned(), json!(hash));
+    }
+    context.to_string()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -851,6 +882,26 @@ mod gate_tests {
             assert_eq!(resume_class_for(tool, true), RESUME_ACTION_CONTINUATION, "{tool}");
         }
         assert_eq!(resume_class_for("shell", true), RESUME_NONE);
+    }
+
+    #[test]
+    fn the_card_carries_the_schema_commitment_only_when_one_is_known() {
+        // DEPTH-WS10-S4-1: content-free, alongside the allowlisted card fields.
+        let hash = format!("sha256:{}", "c".repeat(64));
+        let with: JsonValue =
+            serde_json::from_str(&card_context_with_schema(MCP_TOOL, "{\"q\":\"secret\"}", RESUME_NONE, Some(&hash)))
+                .expect("json");
+        assert_eq!(with["action_schema_hash"], JsonValue::String(hash));
+        assert!(!with.to_string().contains("secret"));
+        let plain: JsonValue =
+            serde_json::from_str(&card_context_json(MCP_TOOL, "{}", RESUME_NONE)).expect("json");
+        assert!(plain.get("action_schema_hash").is_none());
+        // A run with no registered tool view states none, and a non-MCP tool never asks for one.
+        let unknown: JsonValue = serde_json::from_str(&card_context_json_for_run(
+            "org-none", "run-none", MCP_TOOL, "{}", RESUME_NONE,
+        ))
+        .expect("json");
+        assert!(unknown.get("action_schema_hash").is_none());
     }
 
     #[tokio::test]

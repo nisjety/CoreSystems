@@ -1430,9 +1430,17 @@ type Approval struct {
 	TurnOrigin string `protobuf:"bytes,23,opt,name=turn_origin,json=turnOrigin,proto3" json:"turn_origin,omitempty"`
 	// EP-10 S4: how many times the person edited the approved call before granting it; 0 = never
 	// edited. Read from `approval_continuation_descriptors.revision` (at most 3).
-	Revision      uint32 `protobuf:"varint,25,opt,name=revision,proto3" json:"revision,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Revision uint32 `protobuf:"varint,25,opt,name=revision,proto3" json:"revision,omitempty"`
+	// The Space agent the run was woken for (runs.agent_subject_id), empty for a direct run. Read
+	// from the run, never stated by the creator; an "always" decision names it on the standing rule
+	// (DEPTH-WS10-S4-1).
+	AgentSubjectId string `protobuf:"bytes,26,opt,name=agent_subject_id,json=agentSubjectId,proto3" json:"agent_subject_id,omitempty"`
+	// The `sha256:<hex>` commitment to the gated tool's rule registry digest, from the creator's
+	// validated card context; empty when none was stated. Content-free: it names the tool's
+	// schema, never the call's arguments (DEPTH-WS10-S4-1).
+	ActionSchemaHash string `protobuf:"bytes,27,opt,name=action_schema_hash,json=actionSchemaHash,proto3" json:"action_schema_hash,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *Approval) Reset() {
@@ -1631,6 +1639,20 @@ func (x *Approval) GetRevision() uint32 {
 		return x.Revision
 	}
 	return 0
+}
+
+func (x *Approval) GetAgentSubjectId() string {
+	if x != nil {
+		return x.AgentSubjectId
+	}
+	return ""
+}
+
+func (x *Approval) GetActionSchemaHash() string {
+	if x != nil {
+		return x.ActionSchemaHash
+	}
+	return ""
 }
 
 // Why an approval was asked for (build plan WS13 S1). The code is a closed
@@ -11138,7 +11160,7 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\tAddressee\x121\n" +
 	"\x04kind\x18\x01 \x01(\x0e2\x1d.model_plane.v1.AddresseeKindR\x04kind\x12\x1d\n" +
 	"\n" +
-	"subject_id\x18\x02 \x01(\tR\tsubjectId\"\x87\b\n" +
+	"subject_id\x18\x02 \x01(\tR\tsubjectId\"\xdf\b\n" +
 	"\bApproval\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x15\n" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x17\n" +
@@ -11169,7 +11191,9 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\tgrant_ref\x18\x16 \x01(\tR\bgrantRef\x12\x1f\n" +
 	"\vturn_origin\x18\x17 \x01(\tR\n" +
 	"turnOrigin\x12\x1a\n" +
-	"\brevision\x18\x19 \x01(\rR\brevision\"\xe6\x03\n" +
+	"\brevision\x18\x19 \x01(\rR\brevision\x12(\n" +
+	"\x10agent_subject_id\x18\x1a \x01(\tR\x0eagentSubjectId\x12,\n" +
+	"\x12action_schema_hash\x18\x1b \x01(\tR\x10actionSchemaHash\"\xe6\x03\n" +
 	"\rApprovalCause\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x12\n" +
 	"\x04tool\x18\x02 \x01(\tR\x04tool\x12!\n" +

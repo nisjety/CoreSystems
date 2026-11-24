@@ -330,9 +330,10 @@ fn string_field<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
 }
 
 /// The standing-rule body Control needs, built from the approval's own projection. For an MCP tool
-/// the action key is the tool key (Control refuses anything else). The agent and the schema hash
-/// are not on the approval projection yet (WS10-S6 `ResolveApprovalAuthority` carries them), so
-/// an incomplete projection yields `None` and the decision stays a plain `once`.
+/// the action key is the tool key (Control refuses anything else). The agent (the run's own, read
+/// by Session Core) and the schema commitment (from the creator's card) come on the approval
+/// projection (DEPTH-WS10-S4-1). A direct run names no agent and a non-MCP tool states no schema,
+/// so an incomplete projection yields `None` and the decision stays a plain `once`.
 fn rule_body(
     space_ref: &str,
     approval_id: &str,
