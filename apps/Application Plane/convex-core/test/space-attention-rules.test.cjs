@@ -213,6 +213,16 @@ test('roomBadge table', () => {
   assert.deepEqual(badge(-3, 0, 'all', false), { kind: 'none', n: 0 }, 'negative counts clamp to zero');
 });
 
+test('roomBadge: DM messages join n unless the DM is off (D22r)', () => {
+  const dm = (needsYou, mentions, level, unread, dmReplies) =>
+    roomBadge({ needsYou, mentions, level, unread, dmReplies });
+  assert.deepEqual(dm(0, 0, 'all', true, 2), { kind: 'count', n: 2 });
+  assert.deepEqual(dm(1, 1, 'mentions', true, 2), { kind: 'count', n: 4 });
+  assert.deepEqual(dm(0, 0, 'off', true, 5), { kind: 'none', n: 0 });
+  assert.deepEqual(dm(1, 0, 'off', false, 5), { kind: 'count', n: 1 });
+  assert.deepEqual(dm(0, 0, 'all', false, -2), { kind: 'none', n: 0 });
+});
+
 test('checkSnooze accepts now+1 minute through now+30 days only', () => {
   const now = 1_000_000;
   assert.deepEqual(checkSnooze(now + MIN_SNOOZE_MS, now), { ok: true, snoozedUntil: now + MIN_SNOOZE_MS });

@@ -338,14 +338,19 @@ export type BadgeKind = "count" | "dot" | "none";
  * shipped): `n = needs_you + mentions`; `n > 0` gives a count at every level;
  * else level `all` with unread a muted count, `mentions` a dot, `off` nothing.
  * Kept here so the Convex tests pin the same table.
+ *
+ * In a DM (D22r) the open DM message items (`dmReplies`) join `n` unless the
+ * level is `off`, and the gateway draws a DM's unread at `all` strong, not muted.
  */
 export function roomBadge(input: {
   readonly needsYou: number;
   readonly mentions: number;
   readonly level: RoomLevel;
   readonly unread: boolean;
+  readonly dmReplies?: number;
 }): { readonly kind: BadgeKind; readonly n: number } {
-  const n = Math.max(0, input.needsYou) + Math.max(0, input.mentions);
+  const dmReplies = input.level === "off" ? 0 : Math.max(0, input.dmReplies ?? 0);
+  const n = Math.max(0, input.needsYou) + Math.max(0, input.mentions) + dmReplies;
   if (n > 0) return { kind: "count", n };
   if (!input.unread) return { kind: "none", n: 0 };
   if (input.level === "all") return { kind: "count", n: 0 };

@@ -944,10 +944,22 @@ const LEVELS: [&str; 3] = ["all", "mentions", "off"];
 /// What "Mark all read" may resolve. `needs_you` is live-derived and never touched.
 const READ_ALL_KINDS: [&str; 2] = ["mention", "reply"];
 const DEFAULT_LEVEL: &str = "mentions";
+/// D22r (DEC-3D-DM-ATTN): every DM message notifies by default, so a DM or group DM the member
+/// never set a level on reads as `all` (Application's `DM_DEFAULT_ROOM_LEVEL`), also when the
+/// Application aggregate could not be read.
+const DM_DEFAULT_LEVEL: &str = "all";
+
+fn is_dm_kind(kind: Option<&str>) -> bool {
+    matches!(kind, Some("dm" | "group_dm"))
+}
 
 /// The one badge rule. `n = needs_you + mentions`; any `n` is a count at every level. Otherwise
 /// unread decides by level: `all` a muted count, `mentions` a dot, `off` nothing. Unread is never
 /// added to `n`, so one thread cannot count twice.
+///
+/// A DM (D22r) notifies on every message: its open reply items (one per message from another
+/// member, already dropped by Application at level `off`) join `n` like mentions, and its unread
+/// at level `all` is a strong count, never a muted one. Level `off` still silences it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Badge {
     Count(u32),
@@ -966,6 +978,24 @@ fn room_badge(level: &str, needs_you: u32, mentions: u32, unread_threads: u32) -
     }
     match level {
         "all" => Badge::MutedCount(unread_threads),
+        "mentions" => Badge::Dot,
+        _ => Badge::Nothing,
+    }
+}
+
+/// [`room_badge`] for a DM or group DM. `dm_replies` are the open DM message items; they count
+/// only while the level is not `off`.
+fn dm_room_badge(level: &str, needs_you: u32, mentions: u32, dm_replies: u32, unread_threads: u32) -> Badge {
+    let replies = if level == "off" { 0 } else { dm_replies };
+    let n = needs_you.saturating_add(mentions).saturating_add(replies);
+    if n > 0 {
+        return Badge::Count(n);
+    }
+    if unread_threads == 0 {
+        return Badge::Nothing;
+    }
+    match level {
+        "all" => Badge::Count(unread_threads),
         "mentions" => Badge::Dot,
         _ => Badge::Nothing,
     }
@@ -1139,6 +1169,12 @@ async fn get_attention(
         );
     };
     let member_refs = indexed_refs(&index);
+    // Control's kind word decides which rooms are DMs; a ref, a level or a row never does.
+    let dm_refs: HashSet<String> = index
+        .iter()
+        .filter(|entry| is_dm_kind(str_field(entry, "kind")))
+        .filter_map(|entry| str_field(entry, "space_ref").map(str::to_owned))
+        .collect();
     let mut refs: Vec<String> = match requested {
         Some(wanted) => wanted
             .into_iter()
@@ -1224,11 +1260,18 @@ async fn get_attention(
     let mut session_gap = false;
     for space_ref in &refs {
         let row = rows.get(space_ref).copied();
+        let dm = dm_refs.contains(space_ref);
         let level = row
             .and_then(|row| str_field(row, "level"))
             .filter(|level| LEVELS.contains(level))
-            .unwrap_or(DEFAULT_LEVEL);
+            .unwrap_or(if dm { DM_DEFAULT_LEVEL } else { DEFAULT_LEVEL });
         let mentions = row.map_or(0, |row| count_of(row, "mentions"));
+        // A DM's message items notify (D22r): they join the badge, not "other open".
+        let dm_replies = if dm && level != "off" {
+            row.map_or(0, |row| count_of(row, "replies"))
+        } else {
+            0
+        };
         let counted = counts.get(space_ref);
         let mut gaps: Vec<&'static str> = Vec::new();
         if !application_ok {
@@ -1245,17 +1288,23 @@ async fn get_attention(
             session_gap = true;
         }
         let counted = counted.cloned().unwrap_or_default();
-        let badge = room_badge(level, counted.needs_you, mentions, counted.unread_threads);
-        total_badge += u64::from(counted.needs_you) + u64::from(mentions);
+        let badge = if dm {
+            dm_room_badge(level, counted.needs_you, mentions, dm_replies, counted.unread_threads)
+        } else {
+            room_badge(level, counted.needs_you, mentions, counted.unread_threads)
+        };
+        total_badge += u64::from(counted.needs_you) + u64::from(mentions) + u64::from(dm_replies);
         if counted.unread_threads > 0 {
             unread_rooms += 1;
         }
-        // Everything open that is not a mention stays out of the room badge and the total.
+        // Everything open that is not a mention (or a DM message) stays out of the room badge
+        // and the total.
         if let Some(row) = row {
             other_open += ["replies", "invites", "agentDone", "agentFailed", "reminders"]
                 .iter()
                 .map(|key| u64::from(count_of(row, key)))
-                .sum::<u64>();
+                .sum::<u64>()
+                - u64::from(dm_replies);
         }
         rooms.push(json!({
             "space_ref": space_ref,
@@ -1754,6 +1803,18 @@ mod tests {
             .await;
     }
 
+    async fn mount_index_kinds(fx: &Fx, rooms: &[(&str, &str)]) {
+        let spaces: Vec<Value> = rooms
+            .iter()
+            .map(|(space_ref, kind)| json!({"space_ref": space_ref, "kind": kind}))
+            .collect();
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"spaces": spaces}})))
+            .mount(&fx.user_core)
+            .await;
+    }
+
     async fn mount_decisions(fx: &Fx, issued: &[&str]) {
         let results: Vec<Value> = issued
             .iter()
@@ -1860,6 +1921,62 @@ mod tests {
         assert_eq!(badge_json(Badge::MutedCount(3)), json!({"kind": "count", "n": 3, "muted": true}));
         assert_eq!(badge_json(Badge::Dot), json!({"kind": "dot", "n": 0}));
         assert_eq!(badge_json(Badge::Nothing), json!({"kind": "none", "n": 0}));
+    }
+
+    #[test]
+    fn dm_badge_rule_notifies_every_message_unless_off() {
+        // D22r: DM message items join n like mentions; unread at `all` is a strong count
+        assert_eq!(dm_room_badge("all", 0, 0, 2, 5), Badge::Count(2));
+        assert_eq!(dm_room_badge("mentions", 1, 1, 2, 5), Badge::Count(4));
+        assert_eq!(dm_room_badge("all", 0, 0, 0, 3), Badge::Count(3), "never muted in a DM");
+        assert_eq!(dm_room_badge("mentions", 0, 0, 0, 3), Badge::Dot);
+        // `off` silences the DM messages; needs_you and mentions still count
+        assert_eq!(dm_room_badge("off", 0, 0, 7, 3), Badge::Nothing);
+        assert_eq!(dm_room_badge("off", 1, 0, 7, 3), Badge::Count(1));
+        assert_eq!(dm_room_badge("all", 0, 0, 0, 0), Badge::Nothing);
+        assert_eq!(dm_room_badge("all", u32::MAX, 1, 1, 0), Badge::Count(u32::MAX), "saturates");
+        assert!(is_dm_kind(Some("dm")) && is_dm_kind(Some("group_dm")));
+        assert!(!is_dm_kind(Some("room")) && !is_dm_kind(Some("personal")) && !is_dm_kind(None));
+    }
+
+    #[tokio::test]
+    async fn the_aggregate_counts_dm_messages_in_the_badge_and_defaults_a_dm_to_all() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false), "editor").await;
+        mount_index_kinds(&fx, &[("room-a", "room"), ("dm-1", "dm"), ("gdm-1", "group_dm"), ("dm-off", "dm")]).await;
+        mount_decisions(&fx, &["room-a", "dm-1", "gdm-1", "dm-off"]).await;
+        // gdm-1 has no Application row: a DM falls back to `all`, never `mentions`
+        mount_convex(
+            &fx,
+            "/api/query",
+            "spaceAttention:attentionForGateway",
+            value(json!({"rooms": [
+                {"spaceRef": "room-a", "level": "all", "replies": 4},
+                {"spaceRef": "dm-1", "level": "all", "replies": 2, "invites": 1},
+                {"spaceRef": "dm-off", "level": "off", "replies": 3}
+            ], "otherOpen": 1})),
+        )
+        .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/spaces/attention"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": [
+                {"space_id": "room-a", "status": "ok", "unread_threads": 2, "pending": []},
+                {"space_id": "dm-1", "status": "ok", "unread_threads": 1, "pending": []},
+                {"space_id": "gdm-1", "status": "ok", "unread_threads": 1, "pending": []},
+                {"space_id": "dm-off", "status": "ok", "unread_threads": 1, "pending": []}
+            ]})))
+            .mount(&fx.model_gateway)
+            .await;
+        let (status, body) = call(&fx, "GET", "/api/v1/spaces/attention", None).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(room(&body, "room-a")["badge"], json!({"kind": "count", "n": 2, "muted": true}), "a room is unchanged");
+        assert_eq!(room(&body, "dm-1")["badge"], json!({"kind": "count", "n": 2}), "DM messages notify");
+        assert_eq!(room(&body, "gdm-1")["level"], "all");
+        assert_eq!(room(&body, "gdm-1")["badge"], json!({"kind": "count", "n": 1}), "a DM unread is never muted");
+        assert_eq!(room(&body, "dm-off")["badge"], json!({"kind": "none", "n": 0}), "off silences the DM");
+        assert_eq!(body["data"]["totals"]["badge"], 2, "only dm-1's two messages; unread never joins");
+        // otherOpen 1 + room-a replies 4 + dm-1 invite 1 + dm-off replies 3 (silenced, so not notifying)
+        assert_eq!(body["data"]["totals"]["other_open"], 9);
     }
 
     #[tokio::test]
