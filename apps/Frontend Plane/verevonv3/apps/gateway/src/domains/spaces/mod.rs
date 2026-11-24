@@ -3375,6 +3375,18 @@ fn thread_items_match_space(items: &Value, space_ref: &str) -> bool {
     })
 }
 
+/// The rollout flags the sidebar reads from `GET /api/v1/spaces` (`features`):
+/// `dm` gates "New message" and `room_directory` gates "Browse rooms". Presentation
+/// only, never an authorization input; Control and the Application projection
+/// decide what the caller may see or do. Every listing answer carries them, the
+/// Control-outage fallback included, so an outage does not hide either entry.
+fn listing_features(state: &AppState) -> Value {
+    json!({
+        "dm": state.space_features.dm_api,
+        "room_directory": state.space_features.room_directory_api,
+    })
+}
+
 /// Reads Application's lifecycle projection through its service-only Convex
 /// query. The browser's session supplies the user/org; the Application service
 /// key is resolved only inside this BFF and is never returned in the response.
@@ -3444,10 +3456,9 @@ async fn list_personal_spaces(
                 Some(row)
             })
             .collect();
-        // `features.dm` tells the sidebar whether to offer "New message" (presentation only).
         return (
             StatusCode::OK,
-            Json(json!({"data": {"spaces": spaces, "features": {"dm": dm_listed}}})),
+            Json(json!({"data": {"spaces": spaces, "features": listing_features(&state)}})),
         );
     }
 
@@ -3465,12 +3476,20 @@ async fn list_personal_spaces(
             )),
         );
     };
+    // The features block rides the fallback too: it is rollout state, not Control's
+    // answer, so an outage must not hide "New message" or "Browse rooms".
     let Some(space) = space else {
-        return (StatusCode::OK, Json(json!({"data": {"spaces": []}})));
+        return (
+            StatusCode::OK,
+            Json(json!({"data": {"spaces": [], "features": listing_features(&state)}})),
+        );
     };
     (
         StatusCode::OK,
-        Json(json!({"data": {"spaces": [public_space(&space)]}})),
+        Json(json!({"data": {
+            "spaces": [public_space(&space)],
+            "features": listing_features(&state),
+        }})),
     )
 }
 
@@ -7449,6 +7468,128 @@ mod tests {
         let body: Value = serde_json::from_slice(&request.body).unwrap();
         assert_eq!(body["args"]["externalAuthId"], "user-1");
         assert_eq!(body["args"]["externalOrgId"], "org-1");
+    }
+
+    /// DEPTH-WS04-S8-LISTING-FEATURE: `GET /api/v1/spaces` sends `features.room_directory`
+    /// (the sidebar's "Browse rooms" link) and `features.dm` ("New message") on the Control
+    /// index path AND on the Control-outage fallback. The fallback used to send no features,
+    /// so an outage hid both entries. The flags are rollout state, never authority, so they
+    /// are sent whatever Control answers.
+    #[tokio::test]
+    async fn space_listing_sends_the_rollout_features_on_the_index_and_the_outage_fallback() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        fn listing_member() -> AuthenticatedUser {
+            AuthenticatedUser {
+                authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                    organization_id: "org-1".to_owned(),
+                    role: "member".to_owned(),
+                }),
+                ..authenticated_user()
+            }
+        }
+        async fn listing(state: AppState) -> (u16, Value) {
+            let (status, axum::Json(body)) =
+                super::list_personal_spaces(State(state), Extension(listing_member())).await;
+            (status.as_u16(), body)
+        }
+
+        let application = MockServer::start().await;
+        for (path, value) in [
+            (
+                "spaces:getPersonalSpaceForGateway",
+                json!({"spaceRef": "space-personal", "name": "Personal Space",
+                    "kind": "personal", "lifecycle": "active"}),
+            ),
+            ("spaces:spacesForOrgForGateway", json!([])),
+            ("spaceDmHides:hiddenForViewerForGateway", json!([])),
+        ] {
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/api/query"))
+                .and(wm_body_partial_json(json!({"path": path})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": value})))
+                .mount(&application)
+                .await;
+        }
+        let no_personal_space = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(wm_body_partial_json(
+                json!({"path": "spaces:getPersonalSpaceForGateway"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": null})))
+            .mount(&no_personal_space)
+            .await;
+        // Control up answers the caller's index; Control down (503) forces the fallback.
+        let index_up = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"spaces": [
+                {"space_ref": "space-room", "kind": "room", "role": "member", "state": "active"},
+            ]}})))
+            .mount(&index_up)
+            .await;
+        let index_down = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .set_body_json(json!({"error": {"code": "unavailable", "message": "down"}})),
+            )
+            .mount(&index_down)
+            .await;
+
+        let mut on = crate::tests::test_state(false);
+        on.application_convex_url = application.uri();
+        on.application_convex_service_key = "application-test-key".into();
+        on.space_features.dm_api = true;
+        on.space_features.room_directory_api = true;
+        let mut off = on.clone();
+        off.space_features.dm_api = false;
+        off.space_features.room_directory_api = false;
+
+        // Index path: the features follow the flags.
+        on.user_core_url = index_up.uri();
+        let (status, body) = listing(on.clone()).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["spaces"][0]["space_ref"], "space-room");
+        assert_eq!(
+            body["data"]["features"],
+            json!({"dm": true, "room_directory": true})
+        );
+        off.user_core_url = index_up.uri();
+        let (status, body) = listing(off.clone()).await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            body["data"]["features"],
+            json!({"dm": false, "room_directory": false})
+        );
+
+        // Control-outage fallback: the personal Space is listed and the features still ride.
+        on.user_core_url = index_down.uri();
+        let (status, body) = listing(on.clone()).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["spaces"][0]["space_ref"], "space-personal");
+        assert_eq!(
+            body["data"]["features"],
+            json!({"dm": true, "room_directory": true})
+        );
+        off.user_core_url = index_down.uri();
+        let (status, body) = listing(off).await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            body["data"]["features"],
+            json!({"dm": false, "room_directory": false})
+        );
+
+        // No personal Space during an outage: an empty list still carries the features.
+        on.application_convex_url = no_personal_space.uri();
+        let (status, body) = listing(on).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["spaces"], json!([]));
+        assert_eq!(
+            body["data"]["features"],
+            json!({"dm": true, "room_directory": true})
+        );
     }
 
     /// A shared organization room must open like any other Space.
