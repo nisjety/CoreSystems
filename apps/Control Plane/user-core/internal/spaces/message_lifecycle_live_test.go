@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 // WS12-S5 live legs: the shared revise resolver, the operator policy writer and
@@ -182,5 +183,44 @@ func TestMessagePolicyHintsMaskUnderZDRAndForDMModerateLive(t *testing.T) {
 	f.exec(t, `UPDATE space_effect_policies SET zero_data_retention=TRUE WHERE org_id=$1`, f.org)
 	if h := hints(s.owner); h.ReviseEntitled || h.ModerateEntitled || h.OriginalRetention != OriginalRetentionRetain {
 		t.Fatalf("ZDR hints = %+v", h)
+	}
+}
+
+// DEPTH-WS12-S4-3 live leg: the production resolver puts a D18-windowed member's
+// floor into the revise evidence (applyHistoryFloor), and the issued decision signs
+// it, so Session Core can answer message_not_found below it.
+func TestSharedReviseResolverCarriesTheMemberHistoryFloorLive(t *testing.T) {
+	f := newRoomLiveFixture(t)
+	ctx := context.Background()
+	s := f.memberWindowFixture(t, "rvfloor")
+	f.exec(t, `UPDATE space_effect_policies SET message_revise_entitled=TRUE WHERE org_id=$1`, f.org)
+
+	plain, err := f.repo.ResolveSharedThreadReviseDecisionEvidence(ctx, s.ref, f.org, s.editor)
+	if err != nil {
+		t.Fatalf("an editor without a window resolves: %v", err)
+	}
+	if plain.HistoryFloorAt != nil {
+		t.Fatalf("no window, no floor: %v", plain.HistoryFloorAt)
+	}
+
+	cut := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+	if _, err := f.repo.SetMemberHistoryWindow(ctx, MemberHistoryWindowRequest{
+		SpaceRef: s.ref, OrgID: f.org, ActorID: s.manager, SubjectID: s.editor, Mode: "since_date", SinceAt: &cut,
+	}); err != nil {
+		t.Fatalf("set since_date: %v", err)
+	}
+	evidence, err := f.repo.ResolveSharedThreadReviseDecisionEvidence(ctx, s.ref, f.org, s.editor)
+	if err != nil {
+		t.Fatalf("a windowed editor still resolves: %v", err)
+	}
+	if evidence.HistoryFloorAt == nil || !evidence.HistoryFloorAt.Equal(cut) {
+		t.Fatalf("the revise evidence must carry the member's instant %v, got %v", cut, evidence.HistoryFloorAt)
+	}
+	decision, err := IssueThreadReviseDecision(evidence, validReviseRequest(), time.Now().UTC())
+	if err != nil {
+		t.Fatalf("issue the windowed revise: %v", err)
+	}
+	if decision.HistoryFloorAt == nil || !decision.HistoryFloorAt.Equal(cut) {
+		t.Fatalf("the issued revise decision must sign the instant, got %v", decision.HistoryFloorAt)
 	}
 }
