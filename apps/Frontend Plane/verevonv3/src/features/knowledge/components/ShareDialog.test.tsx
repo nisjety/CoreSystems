@@ -64,7 +64,7 @@ describe('ShareDialog', () => {
     render(() => <ShareDialog docId="doc-1" onClose={() => undefined} />)
 
     expect(await screen.findByText('user_2')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Remove user_2' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Fjern user_2' }))
 
     await waitFor(() => expect(screen.queryByText('user_2')).toBeNull())
     expect(screen.queryByRole('alert')).toBeNull()
@@ -90,7 +90,7 @@ describe('ShareDialog', () => {
     render(() => <ShareDialog docId="doc-1" onClose={() => undefined} />)
 
     expect(await screen.findByText('user_2')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Remove user_2' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Fjern user_2' }))
 
     await waitFor(() => expect(screen.queryByText('user_2')).toBeNull())
     expect(screen.queryByRole('alert')).toBeNull()
@@ -112,7 +112,7 @@ describe('ShareDialog', () => {
     render(() => <ShareDialog docId="doc-1" onClose={() => undefined} />)
 
     expect(await screen.findByText('user_2')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Remove user_2' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Fjern user_2' }))
 
     expect((await screen.findByRole('alert')).textContent).toMatch(/delingen kunne ikke fjernes/i)
     expect(screen.getByText('user_2')).toBeTruthy()
@@ -137,12 +137,12 @@ describe('ShareDialog (WS14-S4 rows and refusals)', () => {
     render(() => <ShareDialog docId="doc-1" onClose={() => undefined} />)
 
     expect(await screen.findByText('space:org-1:room-7')).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Remove user_2' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Fjern user_2' })).toBeTruthy()
     // A row without subject_type is a person (older Control responses).
-    expect(screen.getByRole('button', { name: 'Remove user_3' })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: 'Remove space:org-1:room-7' })).toBeNull()
-    expect(screen.getByText('Room')).toBeTruthy()
-    expect(screen.getAllByRole('button', { name: /^Remove / })).toHaveLength(2)
+    expect(screen.getByRole('button', { name: 'Fjern user_3' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Fjern space:org-1:room-7' })).toBeNull()
+    expect(screen.getByText('Rom')).toBeTruthy()
+    expect(screen.getAllByRole('button', { name: /^Fjern / })).toHaveLength(2)
   })
 
   const refusals: Array<[string, number]> = [
@@ -173,10 +173,11 @@ describe('ShareDialog (WS14-S4 rows and refusals)', () => {
           </I18nProvider>
         ))
 
-        const input = (await screen.findByPlaceholderText('user-id or name@company.com')) as HTMLInputElement
+        const placeholder = locale === 'no' ? 'bruker-id eller navn@firma.no' : 'user-id or name@company.com'
+        const input = (await screen.findByPlaceholderText(placeholder)) as HTMLInputElement
         fireEvent.input(input, { target: { value: 'user_9' } })
         // Solid 2 flushes the signal on a microtask: wait for the button to enable.
-        const share = screen.getByRole('button', { name: 'Share' }) as HTMLButtonElement
+        const share = screen.getByRole('button', { name: locale === 'no' ? 'Del' : 'Share' }) as HTMLButtonElement
         await waitFor(() => expect(share.disabled).toBe(false))
         fireEvent.click(share)
 
@@ -185,6 +186,32 @@ describe('ShareDialog (WS14-S4 rows and refusals)', () => {
         expect(alert.textContent).not.toContain('RAW SERVER TEXT')
       })
     }
+  }
+
+  // F-t1-057: the dialog's own copy follows the locale, not only its errors.
+  const dialogCopy = {
+    no: ['Del dokument', 'Del med (bruker-ID eller e-post)', 'Rolle', 'Delt med', 'Kan se', 'Fjern'],
+    en: ['Share document', 'Share with (user id or email)', 'Role', 'Shared with', 'Can view', 'Remove'],
+  } as const
+  for (const locale of ['no', 'en'] as const) {
+    it(`renders the dialog copy in ${locale}`, async () => {
+      window.localStorage.setItem(localeStorageKey, locale)
+      vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(oneGrant)))
+      render(() => (
+        <I18nProvider>
+          <ShareDialog docId="doc-1" onClose={() => undefined} />
+        </I18nProvider>
+      ))
+      expect(await screen.findByText('user_2')).toBeTruthy()
+      expect(screen.getByRole('dialog').getAttribute('aria-label')).toBe(dialogCopy[locale][0])
+      for (const text of dialogCopy[locale].slice(1)) {
+        expect(screen.getAllByText(text).length, text).toBeGreaterThan(0)
+      }
+      const other = locale === 'no' ? dialogCopy.en : dialogCopy.no
+      for (const text of other.slice(1)) {
+        expect(screen.queryAllByText(text), text).toHaveLength(0)
+      }
+    })
   }
 
   it('has copy in both locales for every refusal the share routes can return', () => {

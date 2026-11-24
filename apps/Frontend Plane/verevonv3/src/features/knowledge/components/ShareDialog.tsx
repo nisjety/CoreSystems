@@ -108,27 +108,31 @@ export function ShareDialog(props: {
 
   return (
     <Show when={isGateOpen()} fallback={null}>
-      <div class="knowledge-modal" role="dialog" aria-modal="true" aria-label="Share document">
+      <div class="knowledge-modal" role="dialog" aria-modal="true" aria-label={i18n.tr('Del dokument', 'Share document')}>
         <button
           class="knowledge-modal__scrim"
           type="button"
-          aria-label="Close share dialog"
+          aria-label={i18n.tr('Lukk delingsvinduet', 'Close share dialog')}
           onClick={() => props.onClose()}
         />
         <div class="knowledge-modal__panel">
           <header class="knowledge-modal__header">
             <div>
-              <h2>Share document</h2>
+              <h2>{i18n.tr('Del dokument', 'Share document')}</h2>
               <p>
-                People you share with can <strong>view</strong> this document. Access is enforced
-                everywhere it's read — search, retrieval, and the agent.
+                {i18n.tr('Personer du deler med kan ', 'People you share with can ')}
+                <strong>{i18n.tr('se', 'view')}</strong>
+                {i18n.tr(
+                  ' dette dokumentet. Tilgangen håndheves overalt der det leses — søk, gjenfinning og agenten.',
+                  " this document. Access is enforced everywhere it's read — search, retrieval, and the agent.",
+                )}
               </p>
             </div>
             <button
               class="knowledge-modal__close"
               type="button"
               onClick={() => props.onClose()}
-              aria-label="Close share dialog"
+              aria-label={i18n.tr('Lukk delingsvinduet', 'Close share dialog')}
             >
               Esc
             </button>
@@ -137,16 +141,16 @@ export function ShareDialog(props: {
           <section class="knowledge-modal-card">
             <div class="knowledge-modal-form-grid knowledge-modal-form-grid--url">
               <label class="knowledge-field">
-                <span>Share with (user id or email)</span>
+                <span>{i18n.tr('Del med (bruker-ID eller e-post)', 'Share with (user id or email)')}</span>
                 <VerevonInput
                   value={subject()}
-                  placeholder="user-id or name@company.com"
+                  placeholder={i18n.tr('bruker-id eller navn@firma.no', 'user-id or name@company.com')}
                   onInput={(event) => setSubject(event.currentTarget.value)}
                 />
               </label>
               <label class="knowledge-field">
-                <span>Role</span>
-                <VerevonInput value="Can view" disabled readonly />
+                <span>{i18n.tr('Rolle', 'Role')}</span>
+                <VerevonInput value={i18n.tr('Kan se', 'Can view')} disabled readonly />
               </label>
             </div>
             <Button
@@ -156,7 +160,7 @@ export function ShareDialog(props: {
               disabled={busy() || !subject().trim()}
               onClick={() => void addShare()}
             >
-              Share
+              {i18n.tr('Del', 'Share')}
             </Button>
             <Show when={errorMessage()}>
               <p class="knowledge-share-error" role="alert">
@@ -166,31 +170,31 @@ export function ShareDialog(props: {
           </section>
 
           <section class="knowledge-modal-card">
-            <h3>Shared with</h3>
+            <h3>{i18n.tr('Delt med', 'Shared with')}</h3>
             <Show
               when={(shares()?.grants?.length ?? 0) > 0}
-              fallback={<p class="knowledge-muted-copy">Not shared with anyone yet.</p>}
+              fallback={<p class="knowledge-muted-copy">{i18n.tr('Ikke delt med noen ennå.', 'Not shared with anyone yet.')}</p>}
             >
               <ul class="knowledge-share-list">
                 <For each={shares()?.grants ?? []}>
                   {(grant: DocumentGrant) => (
                     <li class="knowledge-share-row">
                       <span class="knowledge-share-subject">{grant.subject_id}</span>
-                      <span class="knowledge-muted-copy">Can view</span>
+                      <span class="knowledge-muted-copy">{i18n.tr('Kan se', 'Can view')}</span>
                       {/* A room (space) row is written by the room-file attach path
                           and removed with the file; it is not removable here. */}
                       <Show
                         when={(grant.subject_type ?? 'user') === 'user'}
-                        fallback={<span class="knowledge-muted-copy">Room</span>}
+                        fallback={<span class="knowledge-muted-copy">{i18n.tr('Rom', 'Room')}</span>}
                       >
                         <button
                           type="button"
                           class="knowledge-share-remove"
                           disabled={busy()}
                           onClick={() => void removeShare(grant.subject_id)}
-                          aria-label={`Remove ${grant.subject_id}`}
+                          aria-label={i18n.tr(`Fjern ${grant.subject_id}`, `Remove ${grant.subject_id}`)}
                         >
-                          Remove
+                          {i18n.tr('Fjern', 'Remove')}
                         </button>
                       </Show>
                     </li>
