@@ -38,7 +38,8 @@
 //! 503 `space_index_unavailable` / `attention_unavailable`.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use axum::{
     body::Bytes,
@@ -703,6 +704,7 @@ pub(crate) async fn set_item_state_core(
         Ok(org_id) => org_id,
         Err(reply) => return reply,
     };
+    let _forget = forget_aggregate_on_drop(&org_id, user);
     let Ok(body) = serde_json::from_value::<ItemStateBody>(body.clone()) else {
         return invalid_request();
     };
@@ -940,6 +942,105 @@ const AGGREGATE_PER_MINUTE: f64 = if cfg!(test) { 100_000.0 } else { 6.0 };
 /// fallback when it is off). Not an `AppState` field, like the human-post limiter.
 static AGGREGATE_LIMITER: OnceLock<RateLimiter> = OnceLock::new();
 
+/// How long one aggregate answer is reused for the same caller and refs (plan: a 10 s per-user
+/// single-flight). Zero under `cfg!(test)`, where one process and one user share every test, so
+/// each call there is computed; the flight itself is pinned by its own tests below.
+const AGGREGATE_FLIGHT_WINDOW: Duration = if cfg!(test) { Duration::ZERO } else { Duration::from_secs(10) };
+/// Slots kept before stale ones are pruned.
+const MAX_FLIGHT_SLOTS: usize = 4096;
+
+/// The per-user single-flight on the aggregate (C-PRIO-05). Concurrent polls for the same org,
+/// user and `refs` wait for one computation, and a successful answer is reused for the window,
+/// so several tabs or pollers cost one Control and Session Core fan-out. Only a 200 is reused; a
+/// refusal, a 429 or a 503 is never kept. The answer holds ids and counts only (the aggregate
+/// asks for no titles) and lives in process memory for at most the window: no durable state.
+/// A write of the caller's own attention state forgets that caller's answers at once.
+struct AggregateFlights {
+    window: Duration,
+    slots: Mutex<HashMap<String, Arc<tokio::sync::Mutex<Option<(Instant, Value)>>>>>,
+}
+
+impl AggregateFlights {
+    fn new(window: Duration) -> Self {
+        Self { window, slots: Mutex::new(HashMap::new()) }
+    }
+
+    fn user_prefix(org_id: &str, user_id: &str) -> String {
+        format!("{}\u{0}{}\u{0}", org_id.trim(), user_id)
+    }
+
+    fn key(org_id: &str, user_id: &str, refs: Option<&str>) -> String {
+        format!("{}{}", Self::user_prefix(org_id, user_id), refs.unwrap_or("\u{1}"))
+    }
+
+    fn slot(&self, key: &str) -> Arc<tokio::sync::Mutex<Option<(Instant, Value)>>> {
+        let mut slots = self.slots.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slots.len() >= MAX_FLIGHT_SLOTS && !slots.contains_key(key) {
+            let window = self.window;
+            // Keep a slot that is busy (someone holds it) or still fresh.
+            slots.retain(|_, slot| match slot.try_lock() {
+                Ok(entry) => entry.as_ref().is_some_and(|(at, _)| at.elapsed() < window),
+                Err(_) => true,
+            });
+        }
+        Arc::clone(slots.entry(key.to_owned()).or_default())
+    }
+
+    /// Forgets every answer of one caller (after a write of their own attention state).
+    fn forget(&self, org_id: &str, user_id: &str) {
+        let prefix = Self::user_prefix(org_id, user_id);
+        let mut slots = self.slots.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        slots.retain(|key, _| !key.starts_with(&prefix));
+    }
+
+    async fn run<F, Fut>(&self, key: &str, compute: F) -> Reply
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Reply>,
+    {
+        let slot = self.slot(key);
+        let mut entry = slot.lock().await;
+        if let Some((at, body)) = entry.as_ref() {
+            if at.elapsed() < self.window {
+                return (StatusCode::OK, Json(body.clone()));
+            }
+        }
+        let reply = compute().await;
+        *entry = (reply.0 == StatusCode::OK && !self.window.is_zero())
+            .then(|| (Instant::now(), reply.1 .0.clone()));
+        reply
+    }
+}
+
+static AGGREGATE_FLIGHTS: OnceLock<AggregateFlights> = OnceLock::new();
+
+fn aggregate_flights() -> &'static AggregateFlights {
+    AGGREGATE_FLIGHTS.get_or_init(|| AggregateFlights::new(AGGREGATE_FLIGHT_WINDOW))
+}
+
+/// The caller's attention state changed (an item, a level, a marker): their next aggregate poll
+/// is computed afresh rather than served from the single-flight window.
+pub(super) fn attention_aggregate_changed(org_id: &str, user_id: &str) {
+    aggregate_flights().forget(org_id, user_id);
+}
+
+/// Forgets the caller's aggregate answers when dropped, so a write path that returns early or
+/// late still leaves no stale badge behind it.
+struct ForgetAggregateOnDrop {
+    org_id: String,
+    user_id: String,
+}
+
+impl Drop for ForgetAggregateOnDrop {
+    fn drop(&mut self) {
+        attention_aggregate_changed(&self.org_id, &self.user_id);
+    }
+}
+
+fn forget_aggregate_on_drop(org_id: &str, user: &AuthenticatedUser) -> ForgetAggregateOnDrop {
+    ForgetAggregateOnDrop { org_id: org_id.to_owned(), user_id: user.user_id.clone() }
+}
+
 const LEVELS: [&str; 3] = ["all", "mentions", "off"];
 /// What "Mark all read" may resolve. `needs_you` is live-derived and never touched.
 const READ_ALL_KINDS: [&str; 2] = ["mention", "reply"];
@@ -1120,6 +1221,21 @@ async fn get_attention(
         Ok(org_id) => org_id,
         Err(reply) => return reply,
     };
+    // One computation per caller and refs at a time; its answer is reused for the window and
+    // costs no limiter token. Only a computed poll is counted against the six a minute.
+    let key = AggregateFlights::key(&org_id, &user.user_id, params.get("refs").map(String::as_str));
+    aggregate_flights()
+        .run(&key, || compute_attention(state, user, headers, params, org_id))
+        .await
+}
+
+async fn compute_attention(
+    state: AppState,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    params: HashMap<String, String>,
+    org_id: String,
+) -> Reply {
     let limiter = AGGREGATE_LIMITER
         .get_or_init(|| RateLimiter::from_cache_with_rpm(&state.cache, AGGREGATE_PER_MINUTE));
     if let Err(retry_after) = limiter
@@ -1398,6 +1514,7 @@ pub(crate) async fn read_all_core(
         Ok(org_id) => org_id,
         Err(reply) => return reply,
     };
+    let _forget = forget_aggregate_on_drop(&org_id, user);
     let Ok(body) = serde_json::from_value::<ReadAllBody>(body.clone()) else {
         return invalid_request();
     };
@@ -1591,6 +1708,7 @@ pub(crate) async fn put_notify_core(
         Ok(scope) => scope,
         Err(reply) => return reply,
     };
+    let _forget = forget_aggregate_on_drop(&org_id, user);
     let Ok(body) = serde_json::from_value::<NotifyBody>(body.clone()) else {
         return invalid_request();
     };
@@ -1671,6 +1789,7 @@ pub(crate) async fn mark_unread_core(
         Ok(scope) => scope,
         Err(reply) => return reply,
     };
+    let _forget = forget_aggregate_on_drop(&org_id, user);
     let Ok(body) = serde_json::from_value::<UnreadBody>(body.clone()) else {
         return invalid_request();
     };
@@ -2198,6 +2317,88 @@ mod tests {
         assert!(retry_after >= 1);
         assert!(limiter.try_acquire("space-attention:org-1:user-2").await.is_ok(), "own bucket per user");
         assert_eq!(MAX_SPACES, 60);
+    }
+
+    // ---- the single-flight (C-PRIO-05) --------------------------------------------------------------
+
+    fn ok_reply(n: u64) -> Reply {
+        (StatusCode::OK, Json(json!({"data": {"n": n}})))
+    }
+
+    #[tokio::test]
+    async fn the_aggregate_flight_reuses_an_answer_for_its_window_and_counts_one_computation() {
+        let flights = AggregateFlights::new(Duration::from_secs(10));
+        let computed = std::sync::atomic::AtomicU64::new(0);
+        let key = AggregateFlights::key("org-1", "user-1", Some("room-a"));
+        for _ in 0..3 {
+            let reply = flights
+                .run(&key, || async {
+                    ok_reply(computed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1)
+                })
+                .await;
+            assert_eq!(reply.0, StatusCode::OK);
+            assert_eq!(reply.1 .0["data"]["n"], 1, "the first answer is served again");
+        }
+        assert_eq!(computed.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // Another user, and other refs, have their own flight.
+        let other_user = AggregateFlights::key("org-1", "user-2", Some("room-a"));
+        let other_refs = AggregateFlights::key("org-1", "user-1", None);
+        assert_eq!(flights.run(&other_user, || async { ok_reply(7) }).await.1 .0["data"]["n"], 7);
+        assert_eq!(flights.run(&other_refs, || async { ok_reply(8) }).await.1 .0["data"]["n"], 8);
+    }
+
+    #[tokio::test]
+    async fn concurrent_aggregate_polls_wait_for_one_computation() {
+        let flights = Arc::new(AggregateFlights::new(Duration::from_secs(10)));
+        let computed = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let key = AggregateFlights::key("org-1", "user-1", None);
+        let mut tasks = Vec::new();
+        for _ in 0..5 {
+            let (flights, computed, key) = (Arc::clone(&flights), Arc::clone(&computed), key.clone());
+            tasks.push(tokio::spawn(async move {
+                flights
+                    .run(&key, || async {
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                        ok_reply(computed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1)
+                    })
+                    .await
+            }));
+        }
+        for task in tasks {
+            assert_eq!(task.await.expect("joined").1 .0["data"]["n"], 1);
+        }
+        assert_eq!(computed.load(std::sync::atomic::Ordering::SeqCst), 1, "one fan-out for five polls");
+    }
+
+    #[tokio::test]
+    async fn a_refusal_is_never_reused_and_a_write_forgets_only_that_callers_answers() {
+        let flights = AggregateFlights::new(Duration::from_secs(10));
+        let key = AggregateFlights::key("org-1", "user-1", None);
+        let limited = flights
+            .run(&key, || async { (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error": {"code": "rate_limited"}}))) })
+            .await;
+        assert_eq!(limited.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(flights.run(&key, || async { ok_reply(2) }).await.1 .0["data"]["n"], 2, "a 429 is not kept");
+        assert_eq!(flights.run(&key, || async { ok_reply(3) }).await.1 .0["data"]["n"], 2, "the 200 is kept");
+
+        let neighbour = AggregateFlights::key("org-1", "user-10", None);
+        assert_eq!(flights.run(&neighbour, || async { ok_reply(4) }).await.1 .0["data"]["n"], 4);
+        flights.forget("org-1", "user-1");
+        assert_eq!(flights.run(&key, || async { ok_reply(5) }).await.1 .0["data"]["n"], 5, "forgotten after a write");
+        assert_eq!(
+            flights.run(&neighbour, || async { ok_reply(6) }).await.1 .0["data"]["n"],
+            4,
+            "a user whose id shares a prefix keeps their answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_window_computes_every_poll() {
+        let flights = AggregateFlights::new(Duration::ZERO);
+        let key = AggregateFlights::key("org-1", "user-1", None);
+        assert_eq!(flights.run(&key, || async { ok_reply(1) }).await.1 .0["data"]["n"], 1);
+        assert_eq!(flights.run(&key, || async { ok_reply(2) }).await.1 .0["data"]["n"], 2);
+        assert_eq!(AGGREGATE_FLIGHT_WINDOW, Duration::ZERO, "tests compute every poll");
     }
 
     // ---- read-all ----------------------------------------------------------------------------------

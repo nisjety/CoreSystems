@@ -2734,6 +2734,8 @@ async fn mark_space_read_with_reason(
             )),
         );
     };
+    // The caller's marker moved: their next attention poll is computed, not reused (C-PRIO-05).
+    attention::attention_aggregate_changed(&org_id, &user.user_id);
     let value = result.get("value").unwrap_or(&result);
     (
         StatusCode::OK,
