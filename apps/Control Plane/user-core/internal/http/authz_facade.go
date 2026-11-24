@@ -1,6 +1,7 @@
 package http
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -222,15 +223,17 @@ func (s *Server) authzGrant(c *gin.Context) {
 	// body), only user subjects can be written here (a Space subject is written
 	// by file-grant alone), and a role the owning service does not enforce is
 	// refused. The owning service has already proved the actor owns the resource.
+	userGrantCap := 0
 	if c.GetBool(ownerAssertedContextKey) {
 		var refused bool
 		req.Role, req.GrantedBy, refused = s.applyOwnerAssertedGrantRules(c, req.ResourceType, req.SubjectID, req.SubjectType, req.Role)
 		if refused {
 			return
 		}
+		userGrantCap = ownerAssertedUserGrantCap(req.ResourceType)
 	}
 
-	out, err := s.aclRepo.Grant(c.Request.Context(), &users.ResourceGrant{
+	out, err := s.aclRepo.GrantCapped(c.Request.Context(), &users.ResourceGrant{
 		OrgID:        req.OrgID,
 		ResourceType: req.ResourceType,
 		ResourceID:   req.ResourceID,
@@ -238,7 +241,12 @@ func (s *Server) authzGrant(c *gin.Context) {
 		SubjectID:    req.SubjectID,
 		Role:         req.Role,
 		GrantedBy:    strings.TrimSpace(req.GrantedBy),
-	})
+	}, userGrantCap)
+	if errors.Is(err, users.ErrShareLimitReached) {
+		// F-t1-057: counted and refused in the same step as the insert.
+		writeGrantRefusal(c, http.StatusConflict, "share_limit_reached", "the resource has reached its share limit")
+		return
+	}
 	if err != nil {
 		// Grant fails closed on non-grantable types / unsupported subjects /
 		// bad role — surface as 400 so the UI shows a clear message.

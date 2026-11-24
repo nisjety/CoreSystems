@@ -173,3 +173,21 @@ func TestShareRoutesRefuseAVerifiedUserWithoutTheForwardedBearer(t *testing.T) {
 		t.Fatalf("Control was called without the bearer proof: %v", stub.calls)
 	}
 }
+
+// F-t1-057: Control enforces the share cap in the same step as the insert; its
+// 409 share_limit_reached reaches the sharer with the limit, while any other
+// conflict stays "unavailable" (never read as a permission answer).
+func TestShareControlErrorPassesThroughControlsShareLimitRefusal(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeShareControlError(rec, &userauthz.StatusError{Status: http.StatusConflict, Code: "share_limit_reached"}, "grant")
+	body := decodeError(t, rec)
+	details, _ := body["details"].(map[string]any)
+	if rec.Code != http.StatusConflict || body["code"] != "share_limit_reached" || details["max_shares"] != float64(maxSharesPerDocument) {
+		t.Fatalf("share limit: %d %v", rec.Code, body)
+	}
+	rec = httptest.NewRecorder()
+	writeShareControlError(rec, &userauthz.StatusError{Status: http.StatusConflict, Code: "something_else"}, "grant")
+	if rec.Code != http.StatusServiceUnavailable || decodeError(t, rec)["code"] != "sharing_unavailable" {
+		t.Fatalf("other conflict: %d %s", rec.Code, rec.Body.String())
+	}
+}

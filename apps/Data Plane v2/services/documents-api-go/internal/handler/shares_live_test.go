@@ -231,25 +231,31 @@ func TestSharesRefuseEditRoleSelfShareAndBadBodyWithoutCallingControl(t *testing
 	}
 }
 
-func TestSharesUserGrantCapIsEnforcedButReshareOfAnExistingSubjectIsAllowed(t *testing.T) {
+// F-t1-057: Control counts and inserts in one step; documents-api no longer
+// reads the grant list first and passes Control's 409 through with the limit.
+func TestSharesUserGrantCapIsControlsOneStepRefusalPassedThrough(t *testing.T) {
 	s := newShareLive(t, true)
 	id := s.doc("popular", "owner-1", "private")
-	for i := 0; i < maxSharesPerDocument; i++ {
-		s.control.grants = append(s.control.grants, userauthz.Grant{SubjectType: "user", SubjectID: fmt.Sprintf("user-%d", i), Role: "view"})
-	}
-	// Space rows do not count toward the user cap.
-	s.control.grants = append(s.control.grants, userauthz.Grant{SubjectType: "space", SubjectID: testSpace, Role: "view"})
 	owner := s.auth.userToken(testOrg, "owner-1", false)
 	path := "/v1/documents/" + id + "/shares"
 
+	s.control.grantStatus = http.StatusConflict
+	s.control.grantBody = `{"error":"the resource has reached its share limit","code":"share_limit_reached"}`
 	rec := s.call(owner, http.MethodPost, path, `{"subject_id":"brand-new"}`)
 	body := decodeError(t, rec)
 	details, _ := body["details"].(map[string]any)
 	if rec.Code != http.StatusConflict || body["code"] != "share_limit_reached" || details["max_shares"] != float64(maxSharesPerDocument) {
 		t.Fatalf("cap: %d %v", rec.Code, body)
 	}
+	for _, c := range s.control.snapshot() {
+		if c == "list" {
+			t.Fatal("a share write read the grant list before writing (the cap must be Control's single step)")
+		}
+	}
+
+	s.control.grantStatus, s.control.grantBody = http.StatusOK, ""
 	if rec := s.call(owner, http.MethodPost, path, `{"subject_id":"user-7"}`); rec.Code != http.StatusOK {
-		t.Fatalf("re-share of an existing subject at the cap: %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("re-share accepted by Control: %d %s", rec.Code, rec.Body.String())
 	}
 }
 

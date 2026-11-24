@@ -62,9 +62,29 @@ func NewAclRepository(db *database.DB) *AclRepository {
 
 // ─── Generalized resource-grant API (the authz facade primitives) ───────────────
 
+// ErrShareLimitReached means the resource already holds the maximum number of
+// user grants and the subject is not one of them (F-t1-057).
+var ErrShareLimitReached = errors.New("resource has reached its user share limit")
+
 // Grant upserts an explicit grant. It fails closed for resource types that are
 // not user-grantable (team-shared or unknown) and normalizes the role.
 func (r *AclRepository) Grant(ctx context.Context, g *ResourceGrant) (*ResourceGrant, error) {
+	return r.GrantCapped(ctx, g, 0)
+}
+
+// grantCapLockKey is the advisory-lock key text that serializes capped grant
+// writes on one resource. It is shared by every writer that counts user rows.
+func grantCapLockKey(orgID, resourceType, resourceID string) string {
+	return "resource_grants:user_cap:" + orgID + ":" + resourceType + ":" + resourceID
+}
+
+// GrantCapped is Grant with an optional cap on the resource's user grants
+// (maxUserGrants <= 0 means no cap). The count and the insert are one step: a
+// transaction-scoped advisory lock on the resource serializes concurrent capped
+// writers, and the INSERT itself only proceeds when the subject already holds a
+// row (a re-share is an idempotent refresh) or the user-row count is below the
+// cap. At the cap a new subject gets ErrShareLimitReached and nothing is written.
+func (r *AclRepository) GrantCapped(ctx context.Context, g *ResourceGrant, maxUserGrants int) (*ResourceGrant, error) {
 	if err := authztaxonomy.ValidateUserGrant(g.ResourceType); err != nil {
 		return nil, fmt.Errorf("grant rejected: %w", err)
 	}
@@ -88,6 +108,9 @@ func (r *AclRepository) Grant(ctx context.Context, g *ResourceGrant) (*ResourceG
 	// Re-granting the same (subject, resource) is an idempotent upsert: the role
 	// and granter are refreshed and granted_at is bumped to "now" so the share
 	// list reflects the latest action. There is never more than one row per pair.
+	if maxUserGrants > 0 {
+		return r.grantWithinCap(ctx, grantID, g, subjectType, role, maxUserGrants)
+	}
 	row := r.db.Pool.QueryRow(ctx,
 		`INSERT INTO resource_grants
 		    (grant_id, org_id, resource_type, resource_id, subject_type, subject_id, role, granted_by)
@@ -101,6 +124,48 @@ func (r *AclRepository) Grant(ctx context.Context, g *ResourceGrant) (*ResourceG
 	if err := row.Scan(&out.GrantID, &out.OrgID, &out.ResourceType, &out.ResourceID,
 		&out.SubjectType, &out.SubjectID, &out.Role, &out.GrantedBy, &out.GrantedAt); err != nil {
 		return nil, fmt.Errorf("failed to upsert resource grant: %w", err)
+	}
+	return out, nil
+}
+
+// cappedGrantSQL is the count-and-insert step. The SELECT yields the row to
+// insert only when the subject is already granted or the resource's user-row
+// count is below $9; otherwise the INSERT writes nothing and RETURNING is empty.
+const cappedGrantSQL = `INSERT INTO resource_grants
+    (grant_id, org_id, resource_type, resource_id, subject_type, subject_id, role, granted_by)
+ SELECT $1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::text, $8::text
+ WHERE EXISTS (
+         SELECT 1 FROM resource_grants
+         WHERE org_id=$2 AND resource_type=$3 AND resource_id=$4 AND subject_type=$5 AND subject_id=$6)
+    OR (SELECT count(*) FROM resource_grants
+         WHERE org_id=$2 AND resource_type=$3 AND resource_id=$4 AND subject_type='user') < $9::bigint
+ ON CONFLICT (org_id, resource_type, resource_id, subject_type, subject_id)
+ DO UPDATE SET role = EXCLUDED.role, granted_by = EXCLUDED.granted_by, granted_at = NOW()
+ RETURNING grant_id, org_id, resource_type, resource_id, subject_type, subject_id, role, granted_by, granted_at`
+
+func (r *AclRepository) grantWithinCap(ctx context.Context, grantID string, g *ResourceGrant, subjectType, role string, maxUserGrants int) (*ResourceGrant, error) {
+	tx, err := r.db.Pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin capped grant: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		grantCapLockKey(g.OrgID, g.ResourceType, g.ResourceID)); err != nil {
+		return nil, fmt.Errorf("failed to lock resource for capped grant: %w", err)
+	}
+	out := &ResourceGrant{}
+	err = tx.QueryRow(ctx, cappedGrantSQL,
+		grantID, g.OrgID, g.ResourceType, g.ResourceID, subjectType, g.SubjectID, role, g.GrantedBy, maxUserGrants,
+	).Scan(&out.GrantID, &out.OrgID, &out.ResourceType, &out.ResourceID,
+		&out.SubjectType, &out.SubjectID, &out.Role, &out.GrantedBy, &out.GrantedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrShareLimitReached
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to upsert resource grant: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("failed to commit capped grant: %w", err)
 	}
 	return out, nil
 }

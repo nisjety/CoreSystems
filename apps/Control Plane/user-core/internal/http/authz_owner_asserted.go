@@ -184,6 +184,19 @@ func (s *Server) applyOwnerAssertedGrantRules(c *gin.Context, resourceType, subj
 	return normalized, c.GetString("user_id"), false
 }
 
+// ownerAssertedDocumentShareCap is the most user grants one document may hold
+// (F-t1-057). documents-api reports the same number to the sharer.
+const ownerAssertedDocumentShareCap = 200
+
+// ownerAssertedUserGrantCap is the user-grant cap Control enforces, in the same
+// step as the insert, for an owner-asserted grant on resourceType. 0 = no cap.
+func ownerAssertedUserGrantCap(resourceType string) int {
+	if resourceType == "document" {
+		return ownerAssertedDocumentShareCap
+	}
+	return 0
+}
+
 // requireSpaceVisibleDelegation gates GET /authz/space-visible: flag on, the
 // signed delegation names this operation, resource type, tenant and user.
 func (s *Server) requireSpaceVisibleDelegation(c *gin.Context) {

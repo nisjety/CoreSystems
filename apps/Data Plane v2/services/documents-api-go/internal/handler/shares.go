@@ -131,11 +131,18 @@ func (h *DocumentHandler) shareOwner(w http.ResponseWriter, r *http.Request, wri
 	}, true
 }
 
-// writeShareControlError maps a Control failure. A 400 is the actor's mistake
+// writeShareControlError maps a Control failure. Control's 409
+// share_limit_reached (the cap, enforced with the insert) is passed through with
+// the limit in details. A 400 is the actor's mistake
 // and keeps Control's code; a 403 or 404 means the owner-asserted mode is not
 // open (rollout order) and is reported as unavailable, never as permission.
 func writeShareControlError(w http.ResponseWriter, err error, operation string) {
 	var statusErr *userauthz.StatusError
+	if errors.As(err, &statusErr) && statusErr.Status == http.StatusConflict && statusErr.Code == "share_limit_reached" {
+		writeCodedError(w, http.StatusConflict, "share_limit_reached", "this document has reached its share limit",
+			map[string]any{"max_shares": maxSharesPerDocument})
+		return
+	}
 	if errors.As(err, &statusErr) && statusErr.Status == http.StatusBadRequest {
 		code := statusErr.Code
 		if code == "" {
@@ -203,26 +210,9 @@ func (h *DocumentHandler) CreateShare(w http.ResponseWriter, r *http.Request) {
 		writeCodedError(w, http.StatusConflict, "self_share", "a document cannot be shared with its owner", nil)
 		return
 	}
-	existing, err := h.shares.Grants.ListGrants(r.Context(), actor.orgID, actor.userID, actor.authorization, actor.documentID)
-	if err != nil {
-		writeShareControlError(w, err, "list_grants")
-		return
-	}
-	userGrants, already := 0, false
-	for _, g := range existing {
-		if g.SubjectType != "user" {
-			continue
-		}
-		userGrants++
-		if g.SubjectID == subject {
-			already = true
-		}
-	}
-	if !already && userGrants >= maxSharesPerDocument {
-		writeCodedError(w, http.StatusConflict, "share_limit_reached", "this document has reached its share limit",
-			map[string]any{"max_shares": maxSharesPerDocument})
-		return
-	}
+	// F-t1-057: the share cap is counted by Control in the same step as the
+	// insert (a read here first could be overtaken by a concurrent share), and
+	// Control's 409 share_limit_reached is mapped below.
 	grant, err := h.shares.Grants.Grant(r.Context(), actor.orgID, actor.userID, actor.authorization, actor.documentID, subject, role)
 	if err != nil {
 		writeShareControlError(w, err, "grant")
