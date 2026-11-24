@@ -59,6 +59,7 @@ pub mod social_tools;
 pub(crate) mod quarantine;
 pub(crate) mod space_browser;
 pub(crate) mod space_canvas_tools;
+pub(crate) mod space_directory_tool;
 pub(crate) mod space_gate;
 pub(crate) mod space_self_api;
 pub mod state;

@@ -176,7 +176,9 @@ pub(crate) fn offered_under_profile(profile: &str, name: &str) -> bool {
     };
     if crate::space_canvas_tools::is_canvas_action(name) {
         markers.canvas
-    } else if BUILT_ACTIONS.contains(&name) {
+    } else if BUILT_ACTIONS.contains(&name)
+        || crate::space_directory_tool::is_directory_action(name)
+    {
         markers.self_api
     } else {
         false
@@ -231,7 +233,9 @@ pub(crate) fn attested_capability_ids() -> Vec<String> {
 /// are complete (`space_canvas_tools`, WS19-S9). Only the thread rows feed `attested_capability_ids`.
 #[must_use]
 fn built_action(name: &str) -> bool {
-    BUILT_ACTIONS.contains(&name) || crate::space_canvas_tools::is_built_action(name)
+    BUILT_ACTIONS.contains(&name)
+        || crate::space_canvas_tools::is_built_action(name)
+        || crate::space_directory_tool::is_built_action(name)
 }
 
 /// Whether a resolved definition may join the offered set: a built Space row whose description is
