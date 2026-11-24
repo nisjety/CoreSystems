@@ -5,10 +5,11 @@ import { ApiError } from '@/shared/api/http'
 
 const spacesClient = vi.hoisted(() => ({
   searchDirectory: vi.fn(),
+  resolveDirectory: vi.fn(),
 }))
 vi.mock('@/shared/api/spaces-client', () => spacesClient)
 
-const { DirectoryPicker } = await import('./DirectoryPicker')
+const { DirectoryPicker, resolveKindFor } = await import('./DirectoryPicker')
 
 const person = (id: string, name: string) => ({
   kind: 'person' as const,
@@ -54,6 +55,7 @@ const searchCalls = () => spacesClient.searchDirectory.mock.calls as Array<[stri
 beforeEach(() => {
   spacesClient.searchDirectory.mockReset()
   spacesClient.searchDirectory.mockResolvedValue(page([]))
+  spacesClient.resolveDirectory.mockReset()
 })
 
 afterEach(() => cleanup())
@@ -234,5 +236,78 @@ describe('DirectoryPicker (WS04-S9)', () => {
     for (const key of ['a', ' ', 'Backspace', 'ArrowDown', 'Tab', 'Escape']) {
       expect(fireEvent.keyDown(box(), { key }), key).toBe(true)
     }
+  })
+})
+
+// A-REC-03: Enter resolves what was typed when the caller opts in. The answer is presence: it narrows the list and never picks.
+describe('DirectoryPicker resolveOnEnter (A-REC-03)', () => {
+  const pressEnter = () => fireEvent.keyDown(box(), { key: 'Enter' })
+
+  it('maps the listed kinds to the resolver kind', () => {
+    expect(resolveKindFor(['person'])).toBe('person')
+    expect(resolveKindFor(['agent'])).toBe('agent')
+    expect(resolveKindFor(['person', 'agent'])).toBe('any')
+    expect(resolveKindFor(undefined)).toBe('any')
+  })
+
+  it('does not resolve unless the caller opts in', async () => {
+    renderPicker()
+    await waitFor(() => expect(spacesClient.searchDirectory).toHaveBeenCalledTimes(1))
+    type('kari')
+    expect(pressEnter()).toBe(false)
+    expect(spacesClient.resolveDirectory).not.toHaveBeenCalled()
+  })
+
+  it('shows the one exact match and does not pick it', async () => {
+    spacesClient.resolveDirectory.mockResolvedValue({
+      status: 'ok',
+      match: person('sub-kari', 'Kari Nordmann'),
+      presenceOnly: true,
+    })
+    const { onPickPerson } = renderPicker({ resolveOnEnter: true, kinds: ['person'] })
+    await waitFor(() => expect(spacesClient.searchDirectory).toHaveBeenCalledTimes(1))
+    type('kari nordmann')
+    expect(pressEnter()).toBe(false)
+    expect(await screen.findByText('Kari Nordmann')).toBeTruthy()
+    expect(spacesClient.resolveDirectory).toHaveBeenCalledWith({ query: 'kari nordmann', kind: 'person' })
+    expect(onPickPerson).not.toHaveBeenCalled()
+    // The pending debounced search was dropped, so it cannot overwrite the answer.
+    await sleep(350)
+    expect(spacesClient.searchDirectory).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('Kari Nordmann')).toBeTruthy()
+  })
+
+  it('lists the candidates of an ambiguous answer', async () => {
+    spacesClient.resolveDirectory.mockResolvedValue({
+      status: 'ambiguous',
+      candidates: [person('sub-kari', 'Kari A'), agent('agent-k', 'Kari-bot')],
+      presenceOnly: true,
+    })
+    renderPicker({ resolveOnEnter: true })
+    await waitFor(() => expect(spacesClient.searchDirectory).toHaveBeenCalledTimes(1))
+    type('kari')
+    pressEnter()
+    expect(await screen.findByText('Kari A')).toBeTruthy()
+    expect(screen.getByText('Kari-bot')).toBeTruthy()
+    expect(spacesClient.resolveDirectory).toHaveBeenCalledWith({ query: 'kari', kind: 'any' })
+  })
+
+  it('says an outage is a failure, not "no results"', async () => {
+    spacesClient.resolveDirectory.mockResolvedValue({ status: 'none', reason: 'directory_unavailable', presenceOnly: true })
+    renderPicker({ resolveOnEnter: true })
+    await waitFor(() => expect(spacesClient.searchDirectory).toHaveBeenCalledTimes(1))
+    type('kari')
+    pressEnter()
+    expect(await screen.findByRole('alert')).toBeTruthy()
+  })
+
+  it('shows no results for a plain no-match', async () => {
+    spacesClient.resolveDirectory.mockResolvedValue({ status: 'none', reason: 'no_match', presenceOnly: true })
+    renderPicker({ resolveOnEnter: true })
+    await waitFor(() => expect(spacesClient.searchDirectory).toHaveBeenCalledTimes(1))
+    type('zed')
+    pressEnter()
+    await waitFor(() => expect(spacesClient.resolveDirectory).toHaveBeenCalledTimes(1))
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 })

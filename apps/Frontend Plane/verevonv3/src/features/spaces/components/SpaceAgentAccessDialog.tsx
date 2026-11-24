@@ -365,6 +365,7 @@ export function SpaceAgentAccessDialog(props: SpaceAgentAccessDialogProps) {
                 <Show when={editable()}>
                   <DirectoryPicker
                     kinds={['person']}
+                    resolveOnEnter
                     label={i18n.tr('Søk etter en person å gi tilgang', 'Search for a person to give access')}
                     pickLabel={i18n.tr('Gi tilgang', 'Give access')}
                     pickingLabel={i18n.tr('Gir tilgang …', 'Giving access…')}

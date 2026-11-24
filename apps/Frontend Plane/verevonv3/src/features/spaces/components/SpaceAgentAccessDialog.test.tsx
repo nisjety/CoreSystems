@@ -13,6 +13,7 @@ const access = vi.hoisted(() => ({
   getPersonalAgentAccess: vi.fn(),
   updatePersonalAgentAccess: vi.fn(),
   searchDirectory: vi.fn(),
+  resolveDirectory: vi.fn(),
 }))
 vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
@@ -63,6 +64,8 @@ beforeEach(() => {
   access.updatePersonalAgentAccess.mockReset()
   access.searchDirectory.mockReset()
   access.searchDirectory.mockResolvedValue({ results: [], nextCursor: null })
+  access.resolveDirectory.mockReset()
+  access.resolveDirectory.mockResolvedValue({ status: 'none', reason: 'no_match', presenceOnly: true })
 })
 
 afterEach(() => {
@@ -195,6 +198,8 @@ describe('SpaceAgentAccessDialog (WS17-S5)', () => {
       flush()
 
       expect(taken).toBe(true)
+      // A-REC-03: Enter resolves the typed text for a person; it never picks or saves.
+      expect(access.resolveDirectory).toHaveBeenCalledWith({ query: 'ola', kind: 'person' })
       expect(access.updatePersonalAgentAccess).not.toHaveBeenCalled()
       expect(screen.queryByText('Tilgangen er lagret.')).toBeNull()
 

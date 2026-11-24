@@ -2,11 +2,13 @@ import { Loader2 } from '@/shared/icons'
 import { createEffect, createSignal, For, onCleanup, Show } from 'solid-js'
 
 import {
+  resolveDirectory,
   searchDirectory,
   type DirectoryAgent,
   type DirectoryEntry,
   type DirectoryEntryKind,
   type DirectoryPerson,
+  type ResolveDirectoryKind,
 } from '@/shared/api/spaces-client'
 import { translateApiError, useI18n } from '@/shared/i18n'
 
@@ -46,6 +48,18 @@ export interface DirectoryPickerProps {
   readonly onPickPerson: (person: DirectoryPerson) => void
   /** Search box label; defaults to "Search for people and agents". */
   readonly label?: string
+  /**
+   * A-REC-03: Enter resolves what was typed (`POST /api/v1/directory/resolve`) instead of waiting for the search: the list
+   * then shows the one exact match, or up to five candidates, or nothing. It never picks: the person still presses the
+   * row's own pick action. Off by default.
+   */
+  readonly resolveOnEnter?: boolean
+}
+
+/** The resolver kind for the kinds a picker lists: one kind is that kind, anything else is `any`. */
+export function resolveKindFor(kinds: readonly DirectoryEntryKind[] | undefined): ResolveDirectoryKind {
+  if (kinds && kinds.length === 1) return kinds[0] === 'agent' ? 'agent' : 'person'
+  return 'any'
 }
 
 export function DirectoryPicker(props: DirectoryPickerProps) {
@@ -100,6 +114,38 @@ export function DirectoryPicker(props: DirectoryPickerProps) {
     }
   }
 
+  // Enter (with `resolveOnEnter`): one resolver answer replaces the list. A pending search is dropped so it cannot
+  // overwrite the answer; an outage is said as a failure, never as "no results".
+  async function resolveTyped(q: string) {
+    if (debounceTimer) clearTimeout(debounceTimer)
+    const mine = ++seq
+    setLoading(true)
+    setError('')
+    try {
+      const answer = await resolveDirectory({ query: q, kind: resolveKindFor(props.kinds) })
+      if (mine !== seq) return
+      setNextCursor(null)
+      if (answer.status === 'ok') setFound([answer.match])
+      else if (answer.status === 'ambiguous') setFound(answer.candidates)
+      else {
+        setFound([])
+        if (answer.reason === 'directory_unavailable') {
+          setError(i18n.tr('Katalogen svarer ikke. Prøv igjen om litt.', 'The directory is not answering. Try again shortly.'))
+        }
+      }
+    } catch (err) {
+      if (mine !== seq) return
+      setError(
+        translateApiError(err, i18n.tr, {
+          no: 'Oppslaget mislyktes. Prøv igjen om litt.',
+          en: 'The lookup failed. Try again shortly.',
+        }),
+      )
+    } finally {
+      if (mine === seq) setLoading(false)
+    }
+  }
+
   // A new first page whenever the debounced text or the room changes.
   createEffect(
     () => ({ q: searchQuery(), ref: props.excludeMemberOf }),
@@ -127,7 +173,10 @@ export function DirectoryPicker(props: DirectoryPickerProps) {
           // default button, and the access dialog's default button saves the draft it holds. The search itself needs
           // no Enter: it runs on its own once the text has been still for a moment.
           onKeyDown={(event) => {
-            if (event.key === 'Enter') event.preventDefault()
+            if (event.key !== 'Enter') return
+            event.preventDefault()
+            const typed = event.currentTarget.value.trim()
+            if (props.resolveOnEnter && typed) void resolveTyped(typed)
           }}
         />
       </label>
