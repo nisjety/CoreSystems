@@ -148,6 +148,12 @@ mod tests {
 
     /// Every upstream a successful post touches, mocked. Flag on.
     async fn servers() -> Servers {
+        servers_with(false, Value::Null).await
+    }
+
+    /// As `servers`, with the org's ZDR posture and the receipt's `mentions` (omitted when null).
+    /// The roster and the poster's membership are mocked too, for the mention planner.
+    async fn servers_with(zdr: bool, receipt_mentions: Value) -> Servers {
         let auth = MockServer::start().await;
         for slug in ["session-core", "model-plane"] {
             Mock::given(wm_method("GET"))
@@ -162,7 +168,7 @@ mod tests {
         Mock::given(wm_method("GET"))
             .and(wm_path("/api/v1/organizations/org-1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(
-                json!({"data": {"metadata": {"interactiveRetention": {"zdr": false}}}}),
+                json!({"data": {"metadata": {"interactiveRetention": {"zdr": zdr}}}}),
             ))
             .mount(&org)
             .await;
@@ -192,14 +198,33 @@ mod tests {
                 .mount(&user_core)
                 .await;
         }
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/roster"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
+                "members": [{"subject_type": "user", "subject_id": "u-kari", "role": "editor", "status": "active"}],
+                "count": 1,
+            }})))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": "editor"}
+            })))
+            .mount(&user_core)
+            .await;
+        let mut receipt = json!({
+            "thread_id": "thread-1", "message_id": format!("space-post-{SEND_ID}"),
+            "sequence": 4, "deduplicated": false,
+        });
+        if !receipt_mentions.is_null() {
+            receipt["mentions"] = receipt_mentions;
+        }
         let model = MockServer::start().await;
         for route in ["/v1/threads", "/v1/threads/thread-1/messages"] {
             Mock::given(wm_method("POST"))
                 .and(wm_path(route))
-                .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-                    "thread_id": "thread-1", "message_id": format!("space-post-{SEND_ID}"),
-                    "sequence": 4, "deduplicated": false,
-                })))
+                .respond_with(ResponseTemplate::new(201).set_body_json(receipt.clone()))
                 .mount(&model)
                 .await;
         }
@@ -395,6 +420,83 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(body["data"]["result"].get("mentions").is_none(), "{body}");
+    }
+
+    /// Review gap (C-PRIO-03): with the mention switch on, the action plans the mentions through
+    /// the shared planner, forwards ids and closed words only, and its result carries the
+    /// receipt's `mentions:{recorded, rejected}`.
+    #[tokio::test]
+    async fn flag_on_mentions_are_forwarded_and_reported_in_the_action_result() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut servers = servers_with(
+            false,
+            json!([{"subject_id": "u-kari", "kind": "user", "ordinal": 0}]),
+        )
+        .await;
+        servers.state.space_features.mention_records_api = true;
+        let input = json!({
+            "spaceRef": "space-room", "content": "hei @Kari og @Borte", "clientSendId": SEND_ID,
+            "mentions": {"people": [
+                {"subjectId": "u-kari", "label": "Kari"},
+                {"subjectId": "u-borte", "label": "Borte"},
+            ]},
+        });
+        let (status, body) = read(
+            dispatch_spaces_create_post(&servers.state, &user(), &headers(), &input).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["data"]["result"]["mentions"],
+            json!({
+                "recorded": [{"subject_id": "u-kari", "kind": "user", "ordinal": 0}],
+                "rejected": [{"subject_id": "u-borte", "code": "person_not_in_room"}],
+            }),
+            "{body}"
+        );
+        let model = &servers._others[3];
+        let sent: Vec<Value> = model
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| serde_json::from_slice(&r.body).unwrap_or(Value::Null))
+            .collect();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0]["first_message"]["mentions"],
+            json!([{"subject_id": "u-kari", "kind": "user", "source": "typed", "ordinal": 0}]),
+        );
+    }
+
+    /// Review gap (C-PRIO-03, C2): a ZDR org's post with mentions is refused with the typed ZDR
+    /// refusal from the catalogue before the roster is read, any decision is minted or anything
+    /// reaches Session Core.
+    #[tokio::test]
+    async fn a_zdr_post_with_mentions_is_refused_before_roster_control_and_model() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut servers = servers_with(true, Value::Null).await;
+        servers.state.space_features.mention_records_api = true;
+        let mentions = json!({"people": [{"subjectId": "u-kari", "label": "Kari"}]});
+        let create = json!({
+            "spaceRef": "space-room", "content": "hei @Kari", "clientSendId": SEND_ID,
+            "mentions": mentions.clone(),
+        });
+        let reply = json!({
+            "spaceRef": "space-room", "threadId": "thread-1", "content": "hei @Kari",
+            "clientSendId": SEND_ID, "mentions": mentions,
+        });
+        for response in [
+            dispatch_spaces_create_post(&servers.state, &user(), &headers(), &create).await,
+            dispatch_spaces_reply_in_thread(&servers.state, &user(), &headers(), &reply).await,
+        ] {
+            let (status, body) = read(response).await;
+            assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+            assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden", "{body}");
+        }
+        let user_core_calls = servers.user_core.received_requests().await.unwrap_or_default();
+        assert!(user_core_calls.is_empty(), "no roster read and no decision minted");
+        assert!(servers._others[3].received_requests().await.unwrap_or_default().is_empty());
     }
 
     /// A missing or malformed `clientSendId` reaches the shared validator and is refused there.

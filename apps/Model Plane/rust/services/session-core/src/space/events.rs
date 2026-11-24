@@ -1585,6 +1585,65 @@ mod db_tests {
         set_event_log(&pool, log_before).await;
     }
 
+    /// C-PRIO-03 (migration 0135): a post with exactly one human mention gives exactly one outbox row, whose
+    /// payload names that one subject and carries ids and closed words only. This is the SQL half of the proof
+    /// that one mention yields one refs-only attention item (the Convex half is in
+    /// convex-core/test/space-attention-ingest.test.cjs).
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn space_event_attention_one_mention_gives_one_refs_only_outbox_row() {
+        let Some(pool) = connect().await else { return };
+        let (log_before, attention_before) = emit_flags(&pool).await;
+        set_event_log(&pool, true).await;
+        set_attention_emit(&pool, true).await;
+        let (org, space) = ids("onemention");
+        let thread = format!("thread-{space}");
+        let message = format!("m-one-{space}");
+        seed_space_thread(&pool, &org, &space, &thread, "owner-1").await;
+
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content, space_id, recipient_audience_ref, \
+             recipient_audience_revision, recipient_audience_hash, authority_revision, \
+             resource_authorization_ref, author_subject_id) \
+             VALUES ($1, $2, 'user', 'canary body @Kari', $3, 'audience-1', 1, 'sha256:audience-1', 1, \
+             'resource-1', 'member-2')",
+        )
+        .bind(&message)
+        .bind(&thread)
+        .bind(&space)
+        .execute(&mut *tx)
+        .await
+        .expect("insert the post");
+        sqlx::query(
+            "INSERT INTO message_mentions
+             (org_id, message_id, thread_id, space_id, subject_id, subject_kind, ordinal)
+             VALUES ($1, $2, $3, $4, 'u-kari', 'user', 0)",
+        )
+        .bind(&org)
+        .bind(&message)
+        .bind(&thread)
+        .bind(&space)
+        .execute(&mut *tx)
+        .await
+        .expect("insert the one mention");
+        tx.commit().await.expect("commit the post");
+
+        let rows = space_outbox(&pool, &space).await;
+        assert_eq!(rows.len(), 1, "one post, one outbox row");
+        let post = &rows[0].2;
+        assert_eq!(post["event_type"], "SPACE_MESSAGE_APPENDED");
+        assert_eq!(post["payload"]["mentions"], serde_json::json!(["u-kari"]));
+        assert_eq!(post["payload"]["message_id"], message.as_str());
+        assert_eq!(post["zdr"], false);
+        assert!(!post.to_string().contains("canary"), "no message text crosses: {post}");
+
+        drop_outbox(&pool, &org).await;
+        clean_space(&pool, &org, &space).await;
+        set_attention_emit(&pool, attention_before).await;
+        set_event_log(&pool, log_before).await;
+    }
+
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
     async fn space_event_attention_flag_refuses_without_log_enabled() {
