@@ -254,6 +254,11 @@ export default function SpacePage() {
   )
   onCleanup(clearSpaceRoomFeatures)
   const [threadsUnavailable, setThreadsUnavailable] = createSignal(false)
+  // The room whose listing has loaded at least once. Every refetch (the poll, each stream frame) sets the resource's
+  // `loading`, so the conversation panel waits only for a room's FIRST read (and for a re-read after the history floor
+  // moved): hiding the timeline on each refetch remounted it, which reset its narration baseline and lost mention and
+  // first-post narration (B-REC-06).
+  const [threadsListedRef, setThreadsListedRef] = createSignal<string | undefined>(undefined)
   let latestThreadRequest = 0
   // WS15-S8: with `features.timeline_windows` the listing is the windowed timeline store (pages of posts,
   // lazy transcripts). The store is plain state beside the resource; the resource value stays the one
@@ -309,7 +314,10 @@ export default function SpacePage() {
             const projection = store.projection()
             if (projection) {
               noteRoomFresh(ref)
-              if (request === latestThreadRequest) setThreadsUnavailable(false)
+              if (request === latestThreadRequest) {
+                setThreadsUnavailable(false)
+                setThreadsListedRef(ref)
+              }
               return projection
             }
             throw new Error('timeline_without_head')
@@ -323,7 +331,10 @@ export default function SpacePage() {
         }
         const projection = await getSpaceThreads(ref)
         noteRoomFresh(ref)
-        if (request === latestThreadRequest) setThreadsUnavailable(false)
+        if (request === latestThreadRequest) {
+          setThreadsUnavailable(false)
+          setThreadsListedRef(ref)
+        }
         return projection
       } catch {
         if (request === latestThreadRequest) setThreadsUnavailable(true)
@@ -357,6 +368,8 @@ export default function SpacePage() {
       floorSeen = signature
       if (!moved) return
       dropTimelineStore()
+      // The timeline mounts afresh under the new floor, so nothing it held from the old one stays on screen.
+      setThreadsListedRef(undefined)
       void Promise.resolve(refetchThreadsFull()).catch(() => undefined)
     },
   )
@@ -913,7 +926,7 @@ export default function SpacePage() {
                         historyMode={() => current().membership.history_mode}
                         historyWindow={ownHistoryWindow}
                         roomPins={() => (threads.error ? [] : threads()?.pins ?? [])}
-                        loading={() => threads.loading}
+                        loading={() => threadsListedRef() !== spaceRef() && !threadsUnavailable()}
                         unavailable={threadsUnavailable}
                         roster={() => (roster.error ? [] : roster() ?? [])}
                         agents={() => (agents.error ? [] : agents() ?? [])}
@@ -1371,7 +1384,8 @@ function SpaceConversationPanel(props: {
             liveArtifacts={artifactsOn() ? props.liveArtifacts.forThread : undefined}
             roster={props.roster}
             agents={props.agents}
-            onStartConversation={() => focusComposer?.()}
+            // An archived room has no composer, so its intro offers no Start action either (like the header above).
+            onStartConversation={props.archived?.() === true ? undefined : () => focusComposer?.()}
             onCreateAgent={props.onCreateAgent}
             // With human posts on and the pane available, replying happens in the pane (WS01-S7b);
             // otherwise Reply keeps pointing the room composer at the thread, as before.

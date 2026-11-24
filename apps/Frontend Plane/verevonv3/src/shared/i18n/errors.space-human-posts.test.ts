@@ -41,9 +41,9 @@ describe('WS01 human-post error copy', () => {
   })
 
   it('tells the member what happened to the message for the retryable codes', () => {
-    for (const code of ['session_unavailable', 'space_lifecycle_unavailable']) {
-      expect(translateApiError({ code }, en)).toMatch(/kept/i)
-    }
+    expect(translateApiError({ code: 'space_lifecycle_unavailable' }, en)).toMatch(/kept/i)
+    // DEPTH-COPY: session_unavailable also answers reads and agent wakes, so it no longer promises a kept message.
+    expect(translateApiError({ code: 'session_unavailable' }, en)).not.toMatch(/kept/i)
     // W3-FIX-14: the decision copy no longer says the message is kept, because the send's outcome was not yet known.
     expect(translateApiError({ code: 'space_decision_unavailable' }, en)).not.toMatch(/kept/i)
     expect(translateApiError({ code: 'post_not_stored' }, en)).toMatch(/only be sent once/i)

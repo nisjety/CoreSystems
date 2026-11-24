@@ -61,7 +61,6 @@ const NO_SCOPE_STATE: SidebarStoreState = {
   browserOnly: false,
 }
 
-/** Where a row is drawn, which decides what a drop on it or an `Alt+Arrow` does. */
 /**
  * The name of a sidebar group's row menu. The personal group is also named after its room ("Personlig rom"), so its
  * menu says "group" and stays distinct from that room's own menu.
@@ -71,6 +70,7 @@ function groupMenuLabel(id: string, name: string, tr: (no: string, en: string) =
   return tr(`Valg for ${name}`, `Options for ${name}`)
 }
 
+/** Where a row is drawn, which decides what a drop on it or an `Alt+Arrow` does. */
 type RowContext =
   | { kind: 'starred'; refs: readonly string[] }
   | { kind: 'section'; id: string; refs: readonly string[]; manual: boolean }

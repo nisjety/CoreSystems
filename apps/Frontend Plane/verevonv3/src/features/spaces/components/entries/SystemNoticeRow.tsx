@@ -1,6 +1,8 @@
 import { Show } from 'solid-js'
 
 import { useI18n } from '@/shared/i18n'
+import { formatTurnTime } from '@/shared/i18n/format'
+import { useFormat } from '@/shared/preferences/use-format'
 import type { TimelineEntry } from '../../lib/entry-registry'
 import './space-entries.css'
 
@@ -18,6 +20,7 @@ export function SystemNoticeRow(props: {
   readonly subjectName?: string
 }) {
   const i18n = useI18n()
+  const fmt = useFormat()
   const actor = () => props.actorName?.trim() || i18n.tr('Noen', 'Someone')
   const subject = () => props.subjectName?.trim() || i18n.tr('et medlem', 'a member')
   const label = () => {
@@ -56,17 +59,15 @@ export function SystemNoticeRow(props: {
         return i18n.tr('Rommet ble endret', 'The room changed')
     }
   }
-  const time = () => {
-    const ms = Date.parse(props.entry.at)
-    return Number.isFinite(ms) ? new Date(ms) : undefined
-  }
+  // The viewer's Settings time format and zone apply here like on every other Space time (DEPTH-WS16-FORMAT).
+  const time = () => formatTurnTime(props.entry.at, fmt)
   return (
     <div class="verevon-room-system-row" role="note" data-entry-code={props.entry.code}>
       <span class="verevon-room-system-row__text">{label()}</span>
       <Show when={time()}>
         {(at) => (
-          <time class="verevon-room-system-row__time" datetime={at().toISOString()}>
-            {at().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+          <time class="verevon-room-system-row__time" datetime={at().iso} title={at().full}>
+            {at().short}
           </time>
         )}
       </Show>

@@ -76,7 +76,7 @@ describe('WakeStatus (WS08-S6)', () => {
 
   it('a failed wake with a code that retrying can fix gets Retry, which runs that agent again', () => {
     const { sequencer } = renderStatus([wake('agent-ada', 'Ada', 1, 'failed', 'session_unavailable')])
-    expect(line('Ada: Samtaletjenesten er utilgjengelig akkurat nå. Meldingen din er beholdt; prøv igjen om litt.')).toBeTruthy()
+    expect(line('Ada: Samtaletjenesten er utilgjengelig akkurat nå. Prøv igjen om litt.')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Prøv igjen' }))
     expect(sequencer.retry).toHaveBeenCalledWith('msg-1', 'agent-ada')
   })

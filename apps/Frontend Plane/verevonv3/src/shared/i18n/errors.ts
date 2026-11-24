@@ -1315,12 +1315,12 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   // the catalogue modules above.
 
   // WS01 human posts and threads
-  idempotency_key_conflict: { no: 'Dette er allerede sendt med et annet innhold. Skriv det på nytt og send igjen.', en: 'This was already sent with different content. Write it again and send.' },
+  idempotency_key_conflict: { no: 'Dette ble allerede sendt med et annet innhold. Last inn på nytt og prøv igjen.', en: 'This was already sent with different content. Reload and try again.' },
   invalid_client_send_id: { no: 'Meldingen kunne ikke sendes på en trygg måte. Last inn på nytt og prøv igjen.', en: 'The message could not be sent safely. Reload and try again.' },
   invalid_post: { no: 'Meldingen er tom eller for lang. Ingenting ble sendt.', en: 'The message is empty or too long. Nothing was sent.' },
   managed_run_already_started: { no: 'Meldingen var allerede mottatt. Svaret vises i rommet.', en: 'This message was already received. The reply shows in the room.' },
   post_not_stored: { no: 'Samtalen ble opprettet, men meldingen ble ikke lagret. Prøv igjen; den sendes bare én gang.', en: 'The conversation was created but the message was not saved. Try again; it will only be sent once.' },
-  session_unavailable: { no: 'Samtaletjenesten er utilgjengelig akkurat nå. Meldingen din er beholdt; prøv igjen om litt.', en: 'The conversation service is unavailable right now. Your message is kept; try again shortly.' },
+  session_unavailable: { no: 'Samtaletjenesten er utilgjengelig akkurat nå. Prøv igjen om litt.', en: 'The conversation service is unavailable right now. Try again shortly.' },
   space_authority_stale: { no: 'Tilgangen din i rommet ble endret mens du skrev. Prøv igjen; hvis det fortsetter, last inn rommet på nytt.', en: 'Your access to the room changed while you were writing. Try again; if it keeps happening, reload the room.' },
   space_decision_unavailable: { no: 'Kunne ikke bekrefte tilgangen din akkurat nå. Prøv igjen om litt.', en: 'We could not confirm your access right now. Try again shortly.' },
   space_human_posts_disabled: { no: 'Å skrive til rommet uten agent er ikke slått på ennå. Bruk Spør Verevon.', en: 'Posting to the room without the agent is not turned on yet. Use Ask Verevon.' },
@@ -1599,7 +1599,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   invalid_decision: { no: 'Beslutningen ble ikke registrert. Last inn på nytt og prøv igjen.', en: 'The decision was not recorded. Reload and try again.' },
   wiki_proposal_conflict: { no: 'Det finnes allerede en side på denne adressen. Ingenting ble skrevet, og forslaget er nå merket som en konflikt.', en: 'A page already exists at this address. Nothing was written, and the proposal is now marked as a conflict.' },
   legal_hold_not_found: { no: 'Den juridiske tilbakeholdelsen ble ikke funnet.', en: 'The legal hold was not found.' },
-  space_scope_unsupported: { no: 'Den gjeldende policyen for et rom kan ikke vises ennå. Velg en samtale i stedet.', en: 'The effective policy of a room cannot be shown yet. Choose a conversation instead.' },
+  space_scope_unsupported: { no: 'Dette kan ikke vises for et helt rom ennå. Velg en samtale i stedet.', en: 'This cannot be shown for a whole room yet. Choose a conversation instead.' },
   space_thread_not_visible: { no: 'Denne samtalen er ikke tilgjengelig for deg.', en: 'This conversation is not available to you.' },
   space_thread_scope_unavailable: { no: 'Rommet for denne samtalen kunne ikke fastslås. Prøv igjen om litt.', en: 'The room for this conversation could not be determined. Try again shortly.' },
   invalid_agent: { no: 'Agenten er ikke gyldig. Velg en agent i listen og prøv igjen.', en: 'The agent is not valid. Choose an agent from the list and try again.' },
@@ -1692,7 +1692,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   canvas_write_not_authorized: { no: 'Du kan lese lerretet, men ikke endre det her. Ingenting er endret.', en: 'You can read the canvas but cannot change it here. Nothing was changed.' },
   canvas_not_found: { no: 'Rommet har ikke et lerret ennå.', en: 'This room has no canvas yet.' },
   canvas_version_not_found: { no: 'Denne versjonen finnes ikke i lerretet.', en: 'That version is not in this canvas.' },
-  canvas_head_moved: { no: 'Noen andre har lagret en nyere versjon. Last den inn, se over endringene og lagre på nytt.', en: 'Someone else saved a newer version. Load it, review the changes, and save again.' },
+  canvas_head_moved: { no: 'Noen andre har lagret en nyere versjon. Last den inn, se over endringene og prøv igjen.', en: 'Someone else saved a newer version. Load it, review the changes, and try again.' },
   canvas_too_large: { no: 'Teksten er større enn grensen på 64 KiB for lerretet. Ingenting er lagret.', en: 'The text is larger than the 64 KiB canvas limit. Nothing was saved.' },
   canvas_unavailable: { no: 'Lerretet er midlertidig utilgjengelig. Ingenting er endret. Prøv igjen om litt.', en: 'The room canvas is temporarily unavailable. Nothing was changed. Try again shortly.' },
   canvas_rate_limited: { no: 'Du har lagret for ofte på kort tid. Vent litt og prøv igjen.', en: 'You have saved too often in a short time. Wait a moment and try again.' },

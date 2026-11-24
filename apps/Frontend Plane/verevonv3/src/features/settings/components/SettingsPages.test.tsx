@@ -12,6 +12,7 @@ import { routeFromPath } from '@/features/core/lib/shell-data'
 import { VerevonWorkspaceSettingsPage } from '@/features/settings/components/WorkspaceSettingsPage'
 import { workspaceSettingsSections } from '@/features/settings/lib/settings-sections'
 import { clearSession, markSessionOnboardingComplete, setSessionUser } from '@/shared/session/session-store'
+import { ANNOUNCE_POSTS_KEY, readAnnouncePostsPreference } from '@/shared/a11y/announcer'
 
 function renderWithRouter(component: () => JSX.Element, path: string) {
   const TestRouter = createRouter({
@@ -240,6 +241,27 @@ describe('settings profile page', () => {
 
     await waitFor(() => expect(gateway.preferencePatches).toHaveLength(1))
     expect(gateway.preferencePatches[0]).toMatchObject({ compactMode: true, dateFormat: 'YYYY-MM-DD', timeFormat: '12h' })
+  })
+
+  it('keeps the screen reader post announcements per browser: shows the stored choice, writes a pick at once, never PATCHes it (B-REC-06)', async () => {
+    window.localStorage.setItem(ANNOUNCE_POSTS_KEY, 'mentions')
+    try {
+      const gateway = stubAccountGateway({
+        explicit: { language: false, timezone: false, dateFormat: false, timeFormat: false, compactMode: false },
+      })
+      render(() => <AccountSettingsPage />)
+      const select = () => screen.getByRole('combobox', { name: /^skjermleser: nye innlegg$/i }) as HTMLSelectElement
+
+      await waitFor(() => expect(select().value).toBe('mentions'))
+      fireEvent.change(select(), { target: { value: 'off' } })
+      flush()
+      expect(select().value).toBe('off')
+      expect(readAnnouncePostsPreference()).toBe('off')
+      expect(gateway.preferencePatches).toEqual([])
+    } finally {
+      window.localStorage.removeItem(ANNOUNCE_POSTS_KEY)
+      window.sessionStorage.removeItem(ANNOUNCE_POSTS_KEY)
+    }
   })
 
   it('offers only English and Norwegian, and keeps a stored other language visible but disabled', async () => {

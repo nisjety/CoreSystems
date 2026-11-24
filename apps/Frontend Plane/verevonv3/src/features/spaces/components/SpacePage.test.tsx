@@ -1273,6 +1273,33 @@ describe('SpacePage', () => {
     expect(screen.getByText(/Dette er begynnelsen på det delte arkivet for/)).toBeTruthy()
   })
 
+  it('keeps the room timeline mounted while the listing refetches, so its narration baseline survives (B-REC-06)', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+    spacesClient.getSpaceThreads.mockResolvedValue({ ...personalContext, threads: [] })
+    const polls: Array<() => void> = []
+    vi.spyOn(window, 'setInterval').mockImplementation(((handler: TimerHandler, timeout?: number) => {
+      if (timeout === 6_000) polls.push(handler as () => void)
+      return 1 as unknown as number
+    }) as typeof window.setInterval)
+
+    renderSpacePage()
+    const intro = await screen.findByText(/Dette er begynnelsen på det delte arkivet for/)
+    expect(polls.length).toBeGreaterThan(0)
+
+    const refetch = deferred<Awaited<ReturnType<typeof spacesClient.getSpaceThreads>>>()
+    spacesClient.getSpaceThreads.mockReturnValueOnce(refetch.promise)
+    const callsBefore = spacesClient.getSpaceThreads.mock.calls.length
+    for (const poll of polls) poll()
+    await waitFor(() => expect(spacesClient.getSpaceThreads.mock.calls.length).toBeGreaterThan(callsBefore))
+
+    // The first read already landed: a refetch neither shows the loading line nor remounts the timeline.
+    expect(screen.queryByText('Laster samtaler i rommet …')).toBeNull()
+    expect(screen.getByText(/Dette er begynnelsen på det delte arkivet for/)).toBe(intro)
+
+    refetch.resolve({ ...personalContext, threads: [] })
+    await waitFor(() => expect(screen.getByText(/Dette er begynnelsen på det delte arkivet for/)).toBe(intro))
+  })
+
   /**
    * The room's own composer, per `docs/space-defenition.md`'s invocation
    * rule: `@` offers this room's roster, an agent mention rides the existing
