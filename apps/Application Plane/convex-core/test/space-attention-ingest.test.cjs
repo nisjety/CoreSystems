@@ -211,6 +211,53 @@ test('a second message in the same thread coalesces into one row with a higher c
   assert.equal(carol[0].messageId, 'msg_2');
 });
 
+// C-PRIO-03 / DEPTH-WS11-S5-1: the SPACE_MESSAGE_APPENDED payload exactly as session-core
+// migration 0135 builds it (space_message_mentions reads message_mentions: human ids only).
+// One mention yields exactly one attention item for that person, and the item holds refs only.
+test('one mention in the 0135 payload yields exactly one refs-only attention item', async (t) => {
+  withEnv(t, { SPACE_ATTENTION_INGEST: '1', SPACE_ATTENTION_OUT_OF_APP: undefined });
+  const { ctx, tables } = makeCtx(spaceTables(['alice', 'bob', 'carol']));
+  const event = envelope(
+    'SPACE_MESSAGE_APPENDED',
+    {
+      space_ref: SPACE,
+      space_seq: 41,
+      kind: 'message.appended',
+      thread_id: THREAD,
+      message_id: 'msg_1',
+      role: 'user',
+      author_subject_id: 'alice',
+      // The mentioned person also owns the thread: the mention wins, no second (reply) item.
+      thread_owner_subject_id: 'carol',
+      mentions: ['carol'],
+      audience_revision: 3,
+    },
+    { event_id: `space:${ORG}:${SPACE}:1:41`, idempotency_key: `space:${ORG}:${SPACE}:1:41` },
+  );
+  const result = await apply(ctx, event);
+  assert.deepEqual(result, { status: 'applied', items: 1, outOfApp: 0 });
+  const items = tables.spaceAttentionItems ?? [];
+  assert.equal(items.length, 1, 'exactly one item');
+  const [item] = items;
+  assert.equal(item.recipientAuthId, 'carol');
+  assert.equal(item.kind, 'mention');
+  assert.equal(item.count, 1);
+  // Refs only: ids, kinds, counters and times. No text, title, preview or body of the post.
+  const allowed = new Set([
+    '_id', '_creationTime', 'externalOrgId', 'recipientAuthId', 'spaceRef', 'kind', 'threadId', 'messageId',
+    'runId', 'actorKind', 'actorRef', 'state', 'snoozedUntil', 'count', 'firstEventId', 'lastEventId',
+    'coalesceKey', 'createdAt', 'updatedAt', 'expiresAt',
+  ]);
+  for (const key of Object.keys(item)) assert.ok(allowed.has(key), `unexpected key ${key}`);
+  for (const value of Object.values(item)) {
+    if (typeof value === 'string') assert.ok(!value.includes(' '), `free text in an item field: ${value}`);
+  }
+  // A second delivery of the same outbox row (at-least-once publish) adds nothing.
+  assert.deepEqual(await apply(ctx, event), { status: 'duplicate' });
+  assert.equal((tables.spaceAttentionItems ?? []).length, 1);
+  assert.equal(tables.spaceAttentionItems[0].count, 1);
+});
+
 test('a non-member recipient gets no item and no follow row, and a mention reveals nothing', async (t) => {
   withEnv(t, { SPACE_ATTENTION_INGEST: '1' });
   const { ctx, tables } = makeCtx(spaceTables(['alice', 'bob']));
