@@ -447,3 +447,38 @@ describe('buildSidebarModel attention slots (WS16-S10)', () => {
     expect(refsOf(on.hidden)).toEqual(['room-mh']);
   });
 });
+
+describe('buildSidebarModel activity sort (B-REC-05)', () => {
+  it('stores the activity order for a built-in group, and orders the group newest activity first', () => {
+    expect(applySidebarAction(emptySidebarDoc(), { type: 'group.update', groupId: 'channels', sort: 'activity' }).groups).toEqual([
+      { id: 'channels', sort: 'activity' },
+    ]);
+
+    const spaces = [room('room-a', 'Alpha'), room('room-b', 'Beta'), room('room-c', 'Gamma'), room('room-d', 'Delta')];
+    const attention = answers({
+      'room-a': { lastActivityAt: 100 },
+      'room-b': { lastActivityAt: 300 },
+      'room-c': { lastActivityAt: null },
+      'room-d': { lastActivityAt: 300 },
+    });
+    const model = modelOf(spaces, docOf({ groups: [{ id: 'channels', sort: 'activity' }] }), { attention });
+    // Newest first; the two rooms that tie keep the server order; a room with no activity goes last.
+    expect(groupRefs(model, 'channels')).toEqual(['room-b', 'room-d', 'room-a', 'room-c']);
+    expect(model.groups[0]?.sort).toBe('activity');
+  });
+
+  it('keeps the server order for activity when there is no attention answer, so it never guesses', () => {
+    const spaces = [room('room-b', 'Beta'), room('room-a', 'Alpha')];
+    expect(groupRefs(modelOf(spaces, docOf({ groups: [{ id: 'channels', sort: 'activity' }] })), 'channels')).toEqual([
+      'room-b',
+      'room-a',
+    ]);
+  });
+
+  it('sorts a section by activity when the section asks for it, with the rooms that have no activity last', () => {
+    const spaces = [room('room-a', 'Alpha'), room('room-b', 'Beta'), room('room-c', 'Gamma')];
+    const attention = answers({ 'room-a': { lastActivityAt: 50 }, 'room-c': { lastActivityAt: 500 } });
+    const doc = docOf({ sections: [section('s1', 'Work', ['room-a', 'room-b', 'room-c'], 'activity')] });
+    expect(sectionRefs(modelOf(spaces, doc, { attention }), 's1')).toEqual(['room-c', 'room-a', 'room-b']);
+  });
+});

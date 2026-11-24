@@ -192,7 +192,14 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
   const attentionOf = (ref: string) => {
     const room = spaceAttentionRoom(ref)
     return room
-      ? { needsYou: room.needsYou, mentions: room.mentions, unreadThreads: room.unreadThreads, working: room.working, level: room.level }
+      ? {
+          needsYou: room.needsYou,
+          mentions: room.mentions,
+          unreadThreads: room.unreadThreads,
+          working: room.working,
+          level: room.level,
+          lastActivityAt: room.lastActivityAt,
+        }
       : undefined
   }
   const [navEl, setNavEl] = createSignal<HTMLElement>()
@@ -546,12 +553,26 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
     ]
   }
 
+  // The group's order: the default, by name, or by activity (WS11's last activity). Checkbox items, like
+  // the notify levels. Activity is offered only while the attention aggregate answers, because without it
+  // the order would not change; a stored activity choice stays listed, so the person can switch it back.
   function groupMenuItems(id: string, sort: 'name' | 'activity' | null): SpaceMenuItem[] {
-    return [{
-      id: 'sort',
-      label: sort === 'name' ? i18n.tr('Standard rekkefølge', 'Default order') : i18n.tr('Sorter etter navn', 'Sort by name'),
-      onSelect: () => { run([{ type: 'group.update', groupId: id as SidebarGroupId, sort: sort === 'name' ? null : 'name' }]) },
-    }]
+    const options: ReadonlyArray<{ value: 'name' | 'activity' | null; no: string; en: string }> = [
+      { value: null, no: 'Standard rekkefølge', en: 'Default order' },
+      { value: 'name', no: 'Sorter etter navn', en: 'Sort by name' },
+      { value: 'activity', no: 'Sorter etter aktivitet', en: 'Sort by activity' },
+    ]
+    return options
+      .filter((option) => option.value !== 'activity' || attentionLive() || sort === 'activity')
+      .map((option) => ({
+        id: `sort-${option.value ?? 'default'}`,
+        checked: option.value === sort,
+        label: i18n.tr(option.no, option.en),
+        onSelect: () => {
+          if (option.value === sort) return
+          run([{ type: 'group.update', groupId: id as SidebarGroupId, sort: option.value }])
+        },
+      }))
   }
 
   /** A room row: the link, its drag behaviour and its menu. */

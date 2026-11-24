@@ -48,13 +48,14 @@ vi.mock('@/shared/api/spaces-sidebar-client', async (importOriginal) => ({
 // then halts the reactive system for the rest of the file. These tests are about the room list, so
 // the attention store is replaced by one that never answers (the sections that need it stay off).
 // WS11-S4: the one exception is `attention.rooms`, which a test fills to say what the server counted
-// for a room; it is empty in every other test, so those rows draw no badge.
-const attention = vi.hoisted(() => ({ rooms: {} as Record<string, unknown> }))
+// for a room; it is empty in every other test, so those rows draw no badge. `attention.live` says the
+// aggregate has answered (B-REC-05 tests turn it on); it is off in every other test.
+const attention = vi.hoisted(() => ({ rooms: {} as Record<string, unknown>, live: false }))
 vi.mock('@/features/spaces/lib/space-attention', () => ({
   retainSpaceAttention: () => () => undefined,
   refreshSpaceAttention: () => undefined,
   spaceAttentionRoom: (spaceRef: string) => attention.rooms[spaceRef],
-  spaceAttentionTotals: () => undefined,
+  spaceAttentionTotals: () => (attention.live ? { badge: 0, unreadRooms: 0, otherOpen: 0 } : undefined),
   spaceAttentionStale: () => false,
   spaceAttentionAvailable: () => false,
 }))
@@ -82,6 +83,7 @@ function renderSpacesSidebar(path = '/spaces/space%20personal') {
 describe('SpacesExpandedSidebarPanel', () => {
   beforeEach(() => {
     attention.rooms = {}
+    attention.live = false
     resetLiveWorkForTests()
     flush()
     spacesClient.spaceDmEnabled.mockReset().mockReturnValue(false)
@@ -589,6 +591,37 @@ describe('SpacesExpandedSidebarPanel', () => {
         'Flytt til gruppe …',
         'Skjul',
       ])
+    })
+
+    // B-REC-05: a built-in group's menu offers the default, name and activity orders as checkboxes. Activity
+    // is offered only while the attention aggregate answers, and then it orders the group newest first.
+    it('offers activity as a group order only while the attention aggregate answers, and orders the group by it', async () => {
+      const groupDoc = { ...emptySidebarDoc(), groups: [{ id: 'channels' as const, sort: 'name' as const }] }
+      const groupMenu = () => within(menuOf('Valg for Kanaler'))
+      const checked = (name: RegExp) => groupMenu().getByRole('menuitemcheckbox', { name, hidden: true }).getAttribute('aria-checked')
+
+      const withoutAttention = await renderEditableSidebar(groupDoc)
+      expect(checked(/Standard rekkefølge/)).toBe('false')
+      expect(checked(/Sorter etter navn/)).toBe('true')
+      expect(groupMenu().queryByRole('menuitemcheckbox', { name: /Sorter etter aktivitet/, hidden: true })).toBeNull()
+      expect(roomOrder(sectionEl('group-channels'))).toEqual(['space_shared', 'space_ops'])
+      withoutAttention.unmount()
+      cleanup()
+
+      attention.live = true
+      attention.rooms = {
+        space_shared: attentionRoom({ lastActivityAt: 100 }),
+        space_ops: attentionRoom({ lastActivityAt: 900 }),
+      }
+      await renderEditableSidebar(groupDoc)
+      expect(checked(/Sorter etter aktivitet/)).toBe('false')
+      fireEvent.click(groupMenu().getByRole('menuitemcheckbox', { name: /Sorter etter aktivitet/, hidden: true }))
+      flush()
+
+      await waitFor(() => expect(roomOrder(sectionEl('group-channels'))).toEqual(['space_ops', 'space_shared']))
+      await waitFor(() => expect(sidebarClient.putSpaceSidebar).toHaveBeenLastCalledWith(1, expect.objectContaining({
+        groups: [expect.objectContaining({ id: 'channels', sort: 'activity' })],
+      })))
     })
 
     // F-t1-016 / D22r: a DM's mute item says conversation, and unmuting it restores the DM default

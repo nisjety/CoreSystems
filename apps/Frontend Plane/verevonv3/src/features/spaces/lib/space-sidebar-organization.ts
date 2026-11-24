@@ -230,6 +230,8 @@ export type SidebarRoomAttention = {
   readonly unreadThreads: number
   readonly working: number
   readonly level: 'all' | 'mentions' | 'off'
+  /** The room's last activity in epoch milliseconds, or null when the aggregate has none. Drives the `activity` sort. */
+  readonly lastActivityAt?: number | null
 }
 
 export type SidebarModelSection = { readonly section: SidebarSection; readonly rooms: readonly SpaceSummary[] }
@@ -296,6 +298,20 @@ export function buildSidebarModel(input: SidebarModelInput): SidebarModel {
   for (const space of spaces) byRef.set(space.space_ref, space)
   const visible = (space: SpaceSummary) => !query || matches(space, query)
   const collator = (a: SpaceSummary, b: SpaceSummary) => displayName(a).localeCompare(displayName(b), locale)
+  // `activity` is newest first by WS11's last activity, read once per room. A room with no answer goes
+  // after the rest; rooms that tie (or are all unknown) keep the server order, so it never guesses.
+  const activityOf = new Map<string, number | null>()
+  if (attention) {
+    for (const space of spaces) activityOf.set(space.space_ref, attention(space.space_ref)?.lastActivityAt ?? null)
+  }
+  const byActivity = (a: SpaceSummary, b: SpaceSummary) => {
+    const left = activityOf.get(a.space_ref) ?? null
+    const right = activityOf.get(b.space_ref) ?? null
+    if (left === right) return 0
+    if (left === null) return 1
+    if (right === null) return -1
+    return right - left
+  }
 
   const hiddenRefs = new Set(doc.hidden)
 
@@ -341,6 +357,7 @@ export function buildSidebarModel(input: SidebarModelInput): SidebarModel {
       if (visible(space)) rooms.push(space)
     }
     if (section.sort === 'name') rooms.sort(collator)
+    else if (section.sort === 'activity') rooms.sort(byActivity)
     return { section, rooms }
   })
 
@@ -361,8 +378,8 @@ export function buildSidebarModel(input: SidebarModelInput): SidebarModel {
     const state = doc.groups.find((group) => group.id === spec.id)
     const sort = state?.sort ?? null
     if (sort === 'name') rooms.sort(collator)
+    else if (sort === 'activity') rooms.sort(byActivity)
     else if (spec.defaultCompare) rooms.sort(spec.defaultCompare)
-    // `activity` needs WS11's last_activity_at; until then it keeps the server order.
     if (rooms.length === 0) continue
     groups.push({ id: spec.id, rooms, collapsed: state?.collapsed === true, sort })
   }
