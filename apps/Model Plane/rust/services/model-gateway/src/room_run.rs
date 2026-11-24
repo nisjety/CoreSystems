@@ -422,8 +422,8 @@ pub struct RoomStep {
     pub id: String,
     pub class: StepClass,
     pub state: StepState,
-    /// Elapsed milliseconds when the caller knows it. A buffer replay has no timestamps, so a
-    /// projection built from one leaves it empty.
+    /// Elapsed milliseconds when the caller knows it: from the buffer stamp of the call's first running
+    /// frame to its first settled frame. Empty while the step is open, or when a frame carries no stamp.
     pub ms: Option<u64>,
 }
 

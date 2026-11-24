@@ -531,6 +531,14 @@ fn relay_stop_answer(status: StatusCode, response: &Value, run_id: &str) -> Repl
             Json(zdr::zdr_refusal_body(zdr::ZDR_DURABLE_MUTATION_FORBIDDEN)),
         );
     }
+    // A waived credential names one inference route and this stop is not it (D23): the catalogue refusal, not a
+    // retryable outage, so the browser closes Stop instead of offering a retry that is refused the same way.
+    if code == zdr::ZDR_WAIVER_ROUTE_MISMATCH {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(zdr::zdr_refusal_body(zdr::ZDR_WAIVER_ROUTE_MISMATCH)),
+        );
+    }
     if let Some((code, status, message)) = STOP_RELAYED.iter().find(|(known, _, _)| *known == code) {
         return (*status, Json(error(*code, *message)));
     }
@@ -966,6 +974,29 @@ mod tests {
         assert_eq!(status, 503, "{text}");
         assert_eq!(json_of(&body)["error"]["code"], "run_control_unavailable");
         assert!(!text.contains("db_secret_detail") && !text.contains("connection string"), "{text}");
+    }
+
+    /// D23: a waived caller's stop is refused by model-gateway as a route mismatch. The browser gets the catalogue
+    /// refusal in fixed words, not a retryable outage, and none of the upstream text.
+    #[tokio::test]
+    async fn a_waiver_route_mismatch_is_the_catalogue_refusal_not_run_control_unavailable() {
+        let mut fixture = fixture("admin", org_record(false), declined(), granted_stop()).await;
+        fixture.state.space_features.run_manager_stop = true;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/spaces/space-room/runs/run-1/stop"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                "error": {"code": "zdr_waiver_route_mismatch", "message": "upstream words conn-1"}
+            })))
+            .mount(&fixture.model_gateway)
+            .await;
+        let (status, _, body) =
+            call(fixture.state.clone(), "POST", STOP, &[], Some(json!({}))).await;
+        let text = String::from_utf8_lossy(&body).to_string();
+        assert_eq!(status, 403, "{text}");
+        let body = json_of(&body);
+        assert_eq!(body["error"]["code"], "zdr_waiver_route_mismatch");
+        assert_eq!(body["error"]["retryable"], false);
+        assert!(!text.contains("conn-1"), "{text}");
     }
 
     #[tokio::test]

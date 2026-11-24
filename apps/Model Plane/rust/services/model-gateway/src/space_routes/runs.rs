@@ -795,4 +795,23 @@ mod tests {
         assert!(stop_posture_gate(&stop_claims(true)).is_ok());
         assert!(stop_posture_gate(&stop_claims(false)).is_ok());
     }
+
+    /// A waiver names one inference route, and this stop is not it: a waived caller is refused, typed.
+    #[test]
+    fn stop_posture_gate_refuses_a_waived_caller_as_a_route_mismatch() {
+        use axum::response::IntoResponse;
+        let waived = Claims {
+            org_zdr: Some(true),
+            zdr_waiver: Some(crate::auth::ZdrWaiverClaim {
+                version: 1,
+                provider: "azure-openai".to_owned(),
+                connection: "conn-1".to_owned(),
+            }),
+            ..stop_claims(false)
+        };
+        let refusal = stop_posture_gate(&waived).err().expect("a waived caller is refused");
+        let response = refusal.into_response();
+        // zdr_waiver_route_mismatch is a credential refusal: 403 with the catalogue body.
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    }
 }
