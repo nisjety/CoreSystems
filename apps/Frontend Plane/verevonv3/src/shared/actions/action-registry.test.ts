@@ -1415,6 +1415,40 @@ describe('action registry', () => {
     expect(reply?.inputSchema.safeParse({ spaceRef: 'space-room', content: 'hi', clientSendId: send }).success).toBe(false)
   })
 
+  it('lets the human post actions carry structured mentions by subject id, within the gateway caps (DEPTH-WS08-S6-3)', () => {
+    const send = 'send_id_0123456789ab'
+    const people = (n: number) => Array.from({ length: n }, (_, i) => ({ subjectId: `u-${i}`, label: `Person ${i}` }))
+    const agents = (n: number) => Array.from({ length: n }, (_, i) => ({ subjectId: `agent-${i}` }))
+    for (const id of ['spaces.create_post', 'spaces.reply_in_thread'] as const) {
+      const schema = getActionDescriptor(id)!.inputSchema
+      const base = { spaceRef: 'space-room', threadId: 'thread-1', content: '@Kari hei', clientSendId: send }
+      const ok = (mentions: unknown) => schema.safeParse({ ...base, mentions }).success
+      expect(schema.safeParse(base).success, id).toBe(true)
+      expect(ok({ people: [{ subjectId: 'u-kari', label: 'Kari', source: 'typed' }], agents: [{ subjectId: 'agent-1', source: 'locked' }] })).toBe(true)
+      expect(ok({ people: people(20), agents: agents(3) })).toBe(true)
+      expect(ok({ people: people(21) })).toBe(false)
+      expect(ok({ agents: agents(4) })).toBe(false)
+      // Ids only, in the Session Core id shape; no free text the server would have to parse.
+      expect(ok({ people: [{ subjectId: '@Kari', label: 'Kari' }] })).toBe(false)
+      expect(ok({ people: [{ subjectId: 'u-kari', label: 'x'.repeat(121) }] })).toBe(false)
+      expect(ok({ people: [{ subjectId: 'u-kari', label: 'Kari', source: 'guessed' }] })).toBe(false)
+      expect(ok({ people: [{ subjectId: 'u-kari', label: 'Kari', role: 'owner' }] })).toBe(false)
+      expect(ok({ groups: [] })).toBe(false)
+    }
+    const output = getActionDescriptor('spaces.create_post')!.outputSchema
+    const receipt = { space_ref: 's', thread_id: 't', message_id: 'm', sequence: 1, deduplicated: false }
+    expect(output.safeParse(receipt).success).toBe(true)
+    expect(
+      output.safeParse({
+        ...receipt,
+        mentions: {
+          recorded: [{ subject_id: 'agent-1', kind: 'agent', wake: 'refused', reason: 'respond_to_denied', ordinal: 0 }],
+          rejected: [{ subject_id: 'u-9', code: 'person_not_in_room' }],
+        },
+      }).success,
+    ).toBe(true)
+  })
+
   it('registers the Space effect-policy actions as high-risk, approval-gated, control-plane actions the model cannot execute (WS03-S4)', () => {
     for (const id of ['spaces.set_effect_entitlements', 'spaces.apply_effect_preset'] as const) {
       const action = getActionDescriptor(id)

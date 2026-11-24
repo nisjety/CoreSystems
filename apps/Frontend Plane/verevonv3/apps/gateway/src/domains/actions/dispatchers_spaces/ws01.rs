@@ -16,13 +16,44 @@ use super::super::dispatchers::{
     owner_json_response_to_envelope, ticket_bad_request, ticket_string,
 };
 
-/// The untrusted `{content, client_send_id}` body. The post flow validates every field and
-/// rejects anything else, so a missing value is passed on as absent rather than checked here.
+/// The untrusted `{content, client_send_id[, mentions]}` body. The post flow validates every field
+/// and rejects anything else, so a missing value is passed on as absent rather than checked here.
+/// DEPTH-WS08-S6-3: `mentions` is forwarded to the same planning code the REST routes use
+/// (`plan_post_mentions`), so the flag, the caps, the roster checks and the typed
+/// `invalid_mentions` refusal exist once. Absent or null, the body is byte-identical to before.
 fn post_body(input: &Value) -> Value {
-    json!({
+    let mut body = json!({
         "content": input.get("content").cloned().unwrap_or(Value::Null),
         "client_send_id": input.get("clientSendId").cloned().unwrap_or(Value::Null),
-    })
+    });
+    if let Some(mentions) = input.get("mentions").filter(|mentions| !mentions.is_null()) {
+        body["mentions"] = mentions_wire(mentions);
+    }
+    body
+}
+
+/// The action's camelCase `mentions` as the REST wire: each entry's `subjectId` becomes
+/// `subject_id`. Nothing else is touched, so any other key or type still reaches the closed
+/// shape check and is refused there (an entry that names both keys keeps `subjectId` and fails).
+fn mentions_wire(mentions: &Value) -> Value {
+    let mut wire = mentions.clone();
+    let Some(object) = wire.as_object_mut() else {
+        return wire;
+    };
+    for key in ["people", "agents"] {
+        let Some(entries) = object.get_mut(key).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for entry in entries.iter_mut().filter_map(Value::as_object_mut) {
+            if entry.contains_key("subject_id") {
+                continue;
+            }
+            if let Some(id) = entry.remove("subjectId") {
+                entry.insert("subject_id".to_owned(), id);
+            }
+        }
+    }
+    wire
 }
 
 pub(in crate::domains::actions) async fn dispatch_spaces_create_post(
@@ -288,6 +319,82 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0]["post_kind"], "post");
         assert_eq!(calls[0]["idempotency_key"], format!("space-post-{SEND_ID}"));
+    }
+
+    #[test]
+    fn post_body_forwards_mentions_in_the_rest_wire_shape() {
+        let plain = post_body(&json!({"content": "hi", "clientSendId": SEND_ID}));
+        assert!(plain.get("mentions").is_none());
+        let null = post_body(&json!({"content": "hi", "clientSendId": SEND_ID, "mentions": null}));
+        assert!(null.get("mentions").is_none());
+        let body = post_body(&json!({
+            "content": "hi", "clientSendId": SEND_ID,
+            "mentions": {
+                "people": [{"subjectId": "u-kari", "label": "Kari", "source": "typed"}],
+                "agents": [{"subjectId": "agent-1", "source": "locked"}],
+            },
+        }));
+        assert_eq!(
+            body["mentions"],
+            json!({
+                "people": [{"subject_id": "u-kari", "label": "Kari", "source": "typed"}],
+                "agents": [{"subject_id": "agent-1", "source": "locked"}],
+            })
+        );
+        // Anything else passes through untouched, for the closed shape check to refuse.
+        let both = post_body(&json!({
+            "content": "hi", "clientSendId": SEND_ID,
+            "mentions": {"people": [{"subjectId": "a", "subject_id": "b", "label": ""}], "groups": []},
+        }));
+        assert_eq!(
+            both["mentions"],
+            json!({"people": [{"subjectId": "a", "subject_id": "b", "label": ""}], "groups": []})
+        );
+        assert_eq!(mentions_wire(&json!("x")), json!("x"));
+    }
+
+    /// Malformed mentions reach the REST routes' planner and get its typed refusal, before any
+    /// Control decision is minted.
+    #[tokio::test]
+    async fn malformed_mentions_get_the_shared_invalid_mentions_refusal() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut servers = servers().await;
+        servers.state.space_features.mention_records_api = true;
+        let too_many: Vec<Value> = (0..21)
+            .map(|i| json!({"subjectId": format!("u-{i}"), "label": "x"}))
+            .collect();
+        for mentions in [json!({"people": too_many}), json!({"groups": []})] {
+            let input = json!({
+                "spaceRef": "space-room", "threadId": "thread-1", "content": "hello",
+                "clientSendId": SEND_ID, "mentions": mentions,
+            });
+            let (status, body) = read(
+                dispatch_spaces_reply_in_thread(&servers.state, &user(), &headers(), &input).await,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body["error"]["code"], "invalid_mentions", "{body}");
+        }
+        assert!(decision_bodies(&servers).await.is_empty());
+    }
+
+    /// With the mention switch off the mentions are ignored and the post stands, exactly as on
+    /// the REST routes.
+    #[tokio::test]
+    async fn mentions_are_ignored_while_the_mention_switch_is_off() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let servers = servers().await;
+        assert!(!servers.state.space_features.mention_records_api);
+        let input = json!({
+            "spaceRef": "space-room", "content": "hello @Kari", "clientSendId": SEND_ID,
+            "mentions": {"people": [{"subjectId": "u-kari", "label": "Kari"}]},
+        });
+        let (status, body) = read(
+            dispatch_spaces_create_post(&servers.state, &user(), &headers(), &input).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["data"]["result"].get("mentions").is_none(), "{body}");
     }
 
     /// A missing or malformed `clientSendId` reaches the shared validator and is refused there.
