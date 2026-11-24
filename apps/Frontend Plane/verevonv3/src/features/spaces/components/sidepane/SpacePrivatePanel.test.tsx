@@ -15,6 +15,7 @@ vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
 
 const chatClient = vi.hoisted(() => ({
   getChatThreadTranscript: vi.fn(),
+  streamChat: vi.fn(),
 }))
 vi.mock('@/shared/api/chat-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/shared/api/chat-client')>()),
@@ -55,6 +56,7 @@ beforeEach(() => {
   spacesClient.getSpacePrivatePanel.mockReset()
   spacesClient.openSpacePrivatePanel.mockReset()
   chatClient.getChatThreadTranscript.mockReset()
+  chatClient.streamChat.mockReset()
 })
 
 afterEach(() => {
@@ -168,7 +170,7 @@ describe('SpacePrivatePanel (WS17-S6)', () => {
     spacesClient.getSpacePrivatePanel.mockResolvedValue(pointer(THREAD))
     chatClient.getChatThreadTranscript.mockResolvedValue(transcript([]))
     renderPanel()
-    expect(await screen.findByText(/Fortsett i Chat for å skrive til assistenten/)).toBeTruthy()
+    expect(await screen.findByText(/Skriv til assistenten nedenfor, eller fortsett i Chat/)).toBeTruthy()
     expect(document.body.textContent ?? '').not.toContain('under navnet på rommet')
   })
 
@@ -220,5 +222,78 @@ describe('SpacePrivatePanel (WS17-S6)', () => {
     expect(await screen.findByText(ZDR_TEXT)).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Prøv igjen' })).toBeNull()
     expect(openButton()).toBeNull()
+  })
+})
+
+// D21e: the panel's own composer. A turn goes over the private-turn path (the owner's chat stream on the panel thread,
+// conversation scope, no room), so the reply stays private to the member.
+describe('SpacePrivatePanel composer (D21e)', () => {
+  const composerBox = () => screen.queryByLabelText('Melding til assistenten (bare du ser den)') as HTMLTextAreaElement | null
+
+  it('offers no composer before the thread is open, nor under a ZDR refusal', async () => {
+    spacesClient.getSpacePrivatePanel.mockResolvedValue(pointer(null))
+    renderPanel()
+    expect(await screen.findByText('Den private samtalen for dette rommet er ikke åpnet ennå.')).toBeTruthy()
+    expect(composerBox()).toBeNull()
+    cleanup()
+
+    spacesClient.getSpacePrivatePanel.mockRejectedValue(new ApiError('zdr', 412, 'zdr_durable_mutation_forbidden'))
+    renderPanel()
+    expect(await screen.findByText(ZDR_TEXT)).toBeTruthy()
+    expect(composerBox()).toBeNull()
+    expect(chatClient.streamChat).not.toHaveBeenCalled()
+  })
+
+  it('sends on the panel thread with conversation scope and no room, shows the reply, then rereads the thread', async () => {
+    spacesClient.getSpacePrivatePanel.mockResolvedValue(pointer(THREAD))
+    chatClient.getChatThreadTranscript
+      .mockResolvedValueOnce(transcript([]))
+      .mockResolvedValue(transcript([{ role: 'user', content: 'Hva sa vi?' }, { role: 'assistant', content: 'Dette.' }]))
+    let finish: () => void = () => {}
+    chatClient.streamChat.mockImplementation(
+      (_request: unknown, handlers: { onMessage?: (event: { content: string }) => void }) =>
+        new Promise<void>((resolve) => {
+          handlers.onMessage?.({ content: 'Det' })
+          finish = resolve
+        }),
+    )
+    renderPanel()
+    await waitFor(() => expect(composerBox()).toBeTruthy())
+    const box = composerBox() as HTMLTextAreaElement
+    fireEvent.input(box, { target: { value: '  Hva sa vi?  ' } })
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    flush()
+
+    expect(chatClient.streamChat).toHaveBeenCalledTimes(1)
+    const [request] = chatClient.streamChat.mock.calls[0] as [Record<string, unknown>]
+    expect(request).toEqual({ content: 'Hva sa vi?', threadId: THREAD, sourceScope: 'conversation', locale: 'no' })
+    expect(request).not.toHaveProperty('spaceRef')
+    expect(await screen.findByText('Hva sa vi?')).toBeTruthy()
+    expect(await screen.findByText('Det')).toBeTruthy()
+
+    finish()
+    expect(await screen.findByText('Dette.')).toBeTruthy()
+    expect(chatClient.getChatThreadTranscript).toHaveBeenCalledTimes(2)
+    expect(composerBox()?.value).toBe('')
+  })
+
+  it('keeps the text and shows the typed error when the send is refused', async () => {
+    spacesClient.getSpacePrivatePanel.mockResolvedValue(pointer(THREAD))
+    chatClient.getChatThreadTranscript.mockResolvedValue(transcript([]))
+    chatClient.streamChat.mockImplementation(
+      async (_request: unknown, handlers: { onError?: (event: { code: string; message: string }) => void }) => {
+        handlers.onError?.({ code: 'upstream_unavailable', message: 'raw upstream text' })
+      },
+    )
+    renderPanel()
+    await waitFor(() => expect(composerBox()).toBeTruthy())
+    fireEvent.input(composerBox() as HTMLTextAreaElement, { target: { value: 'Hei' } })
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    flush()
+    expect(await screen.findByRole('alert')).toBeTruthy()
+    expect(document.body.textContent ?? '').not.toContain('raw upstream text')
+    await waitFor(() => expect(composerBox()?.value).toBe('Hei'))
   })
 })

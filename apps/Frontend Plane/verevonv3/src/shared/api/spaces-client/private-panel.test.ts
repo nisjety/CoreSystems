@@ -25,6 +25,8 @@ async function loadPanel() {
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
+  window.localStorage.clear()
+  window.sessionStorage.clear()
 })
 
 describe('private panel thread hint (W3-FIX-14)', () => {
@@ -46,24 +48,51 @@ describe('private panel thread hint (W3-FIX-14)', () => {
     stubFetch(200, { data: { space_ref: 'room', thread_id: null, agent_subject_id: null } })
     const pointer = await panel.getSpacePrivatePanel('room')
     expect(pointer.threadId).toBeNull()
-    expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull()
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull()
     expect(panel.isPrivatePanelThread(pointer.threadId)).toBe(false)
   })
 
-  it('reads the ids back from sessionStorage on a fresh module load', async () => {
+  it('reads the ids back from localStorage on a fresh module load', async () => {
     const first = await loadPanel()
     stubFetch(200, { data: { space_ref: 'room', thread_id: 'thr_kept', agent_subject_id: null } })
     await first.getSpacePrivatePanel('room')
-    expect(JSON.parse(window.sessionStorage.getItem(STORAGE_KEY) ?? 'null')).toEqual(['thr_kept'])
+    expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? 'null')).toEqual(['thr_kept'])
     const second = await loadPanel()
     expect(second.isPrivatePanelThread('thr_kept')).toBe(true)
   })
 
+  // E-PRIO-01 (4): "Continue in Chat" opened in a new tab starts with an empty sessionStorage. The scope must hold there.
+  it('keeps the scope in a new tab, which shares localStorage but not sessionStorage', async () => {
+    const roomTab = await loadPanel()
+    stubFetch(200, { data: { space_ref: 'room', thread_id: 'thr_new_tab', agent_subject_id: null } })
+    await roomTab.openSpacePrivatePanel('room')
+    window.sessionStorage.clear()
+    const chatTab = await loadPanel()
+    expect(chatTab.isPrivatePanelThread('thr_new_tab')).toBe(true)
+  })
+
+  it('sees a panel another tab opened after this page loaded', async () => {
+    const chatTab = await loadPanel()
+    expect(chatTab.isPrivatePanelThread('thr_later')).toBe(false)
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(['thr_later']))
+    expect(chatTab.isPrivatePanelThread('thr_later')).toBe(true)
+  })
+
+  it('still reads an id an older build kept in sessionStorage, and keeps the ids of other tabs on a write', async () => {
+    window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(['thr_legacy']))
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(['thr_other_tab']))
+    const panel = await loadPanel()
+    expect(panel.isPrivatePanelThread('thr_legacy')).toBe(true)
+    stubFetch(200, { data: { space_ref: 'room', thread_id: 'thr_mine', agent_subject_id: null } })
+    await panel.getSpacePrivatePanel('room')
+    expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? 'null')).toEqual(['thr_other_tab', 'thr_mine'])
+  })
+
   it('still answers from memory when storage is blocked', async () => {
-    const getItem = vi.spyOn(window.sessionStorage, 'getItem').mockImplementation(() => {
+    const getItem = vi.spyOn(window.localStorage, 'getItem').mockImplementation(() => {
       throw new Error('storage blocked')
     })
-    const setItem = vi.spyOn(window.sessionStorage, 'setItem').mockImplementation(() => {
+    const setItem = vi.spyOn(window.localStorage, 'setItem').mockImplementation(() => {
       throw new Error('storage blocked')
     })
     const panel = await loadPanel()

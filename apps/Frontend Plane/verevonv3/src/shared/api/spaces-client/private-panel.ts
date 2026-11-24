@@ -24,45 +24,71 @@ type PrivatePanelWire = {
 }
 
 /**
- * The owner's private-panel thread ids this tab has been given. Session Core locks each one to conversation scope
+ * The owner's private-panel thread ids this browser has been given. Session Core locks each one to conversation scope
  * (SD-22 v1), so the chat controller sends every turn on one with conversation scope. It is a hint only: the gateway
- * and Session Core decide every call, and a missing id fails closed (the send is refused), never open. The ids are kept
- * in sessionStorage so a reload of this tab keeps them; where storage is blocked they last for this page only.
+ * and Session Core decide every call, and a missing id fails closed (the send is refused), never open. A known id only
+ * ever narrows a turn to conversation scope, so it is safe to share between tabs: the ids are kept in localStorage, so
+ * "Continue in Chat" opened in a new tab, or a later visit, keeps the scope (W3-FIX-14, E-PRIO-01). Ids an older build
+ * kept in this tab's sessionStorage are still read. Where storage is blocked they last for this page only.
  */
 const PRIVATE_PANEL_THREADS_KEY = 'verevon.spaces.privatePanelThreads.v1'
+/** A bound on the kept ids: one per room the person opened a panel in. The oldest go first. */
+const MAX_PRIVATE_PANEL_THREADS = 500
 let privatePanelThreadIds: Set<string> | null = null
+
+function storedIds(storage: () => Storage, into: Set<string>): void {
+  try {
+    const stored: unknown = JSON.parse(storage().getItem(PRIVATE_PANEL_THREADS_KEY) ?? '[]')
+    if (Array.isArray(stored)) {
+      for (const id of stored) {
+        if (typeof id === 'string' && id) into.add(id)
+      }
+    }
+  } catch {
+    // Storage is blocked or holds something else: nothing is read from it.
+  }
+}
+
+function readStoredIds(into: Set<string>): void {
+  storedIds(() => window.localStorage, into)
+  storedIds(() => window.sessionStorage, into)
+}
 
 function privatePanelThreads(): Set<string> {
   if (privatePanelThreadIds) return privatePanelThreadIds
   const ids = new Set<string>()
-  try {
-    const stored: unknown = JSON.parse(window.sessionStorage.getItem(PRIVATE_PANEL_THREADS_KEY) ?? '[]')
-    if (Array.isArray(stored)) {
-      for (const id of stored) {
-        if (typeof id === 'string' && id) ids.add(id)
-      }
-    }
-  } catch {
-    // Storage is blocked or holds something else: this page starts with no ids.
-  }
+  readStoredIds(ids)
   privatePanelThreadIds = ids
   return ids
 }
 
 function rememberPrivatePanelThread(threadId: string): void {
   const ids = privatePanelThreads()
-  if (ids.has(threadId)) return
   ids.add(threadId)
+  // What localStorage holds now: another tab may have added ids since this page read them, and they are kept.
+  const shared = new Set<string>()
+  storedIds(() => window.localStorage, shared)
+  if (shared.has(threadId)) return
+  shared.add(threadId)
+  for (const id of shared) ids.add(id)
+  const kept = Array.from(shared).slice(-MAX_PRIVATE_PANEL_THREADS)
   try {
-    window.sessionStorage.setItem(PRIVATE_PANEL_THREADS_KEY, JSON.stringify(Array.from(ids)))
+    window.localStorage.setItem(PRIVATE_PANEL_THREADS_KEY, JSON.stringify(kept))
   } catch {
     // Storage is full or blocked: the id stays in memory for this page.
   }
 }
 
-/** Whether a thread is this owner's private panel for a room, as a pointer read named it (see the note above). */
+/**
+ * Whether a thread is this owner's private panel for a room, as a pointer read named it (see the note above). An id
+ * this page has not seen is looked up in storage again, so a panel another tab opened after this page loaded counts.
+ */
 export function isPrivatePanelThread(threadId: string | null | undefined): boolean {
-  return typeof threadId === 'string' && privatePanelThreads().has(threadId)
+  if (typeof threadId !== 'string' || !threadId) return false
+  const ids = privatePanelThreads()
+  if (ids.has(threadId)) return true
+  readStoredIds(ids)
+  return ids.has(threadId)
 }
 
 function panelFrom(wire: PrivatePanelWire | null | undefined, spaceRef: string): SpacePrivatePanelPointer {

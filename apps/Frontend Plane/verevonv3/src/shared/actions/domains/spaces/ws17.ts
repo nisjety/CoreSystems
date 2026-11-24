@@ -76,7 +76,9 @@ const spacesWithdrawAgentOutput = z.object({
 // WS17-S6: the owner's private panel. One human-only contract: the gateway get-or-creates the caller's
 // panel pointer for one room (`GET`/`POST /api/v1/spaces/{ref}/private-panel`). The panel is an owner
 // thread with `sourceScope:'conversation'` (SD-22 v1: no memory in or out). Sharing a reply to the room
-// is a human post through `spaces.create_post` (ws01.ts), not an action of this contract.
+// is a human post through `spaces.create_post` (ws01.ts), not an action of this contract. A turn typed in
+// the panel's own composer (D21e) is an ordinary chat turn on that owner thread (`POST /api/v1/chat/stream`,
+// conversation scope, no `space_ref`), like a turn typed in Chat: no action descriptor, and no room write.
 const spacesOpenPrivatePanelInput = z.object({
   spaceRef: z.string().min(1),
 })

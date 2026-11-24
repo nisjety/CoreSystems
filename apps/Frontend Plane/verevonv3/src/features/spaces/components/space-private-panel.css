@@ -108,7 +108,56 @@
   cursor: pointer;
 }
 
+/* D21e: the panel's own composer. Private turns only; nothing typed here reaches the room. */
+.verevon-space-private-panel__composer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.verevon-space-private-panel__composer-label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.verevon-space-private-panel__composer textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--verevon-border, #d9d6cf);
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.verevon-space-private-panel__composer button {
+  align-self: flex-end;
+  padding: 6px 14px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--verevon-accent, #1d1b18);
+  color: var(--verevon-on-accent, #ffffff);
+  font: inherit;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.verevon-space-private-panel__composer button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.verevon-space-private-panel__turn[data-pending='true'] {
+  opacity: 0.75;
+}
+
 .verevon-space-private-panel__share:focus-visible,
+.verevon-space-private-panel__composer button:focus-visible,
+.verevon-space-private-panel__composer textarea:focus-visible,
 .verevon-space-private-panel__actions button:focus-visible,
 .verevon-space-share button:focus-visible,
 .verevon-space-share select:focus-visible,
