@@ -1438,8 +1438,8 @@ async fn retrieve_wiki(
     // GAP-1: pin org from the verified principal — never trust the body org_id.
     pin_request_org(auth.as_ref(), &mut req.org_id)?;
     let space_scope = resolved_space_scope(&pipeline, auth.as_ref(), &headers).await?;
-    // D18: the member's history window, `Open` for the unscoped read.
-    let floor = crate::space_scope::history_floor_of(space_scope.as_ref());
+    // D21b: wiki pages are the room's knowledge, which stays shared under D18, so the member's history
+    // window does not narrow this read (only the conversation and the canvas are windowed).
     let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
     let allowed_workspaces = match space_scope.as_ref() {
         // `wiki_search` treats an empty workspace list as UNCONSTRAINED, so a
@@ -1451,9 +1451,7 @@ async fn retrieve_wiki(
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                AppError::forbidden("Space retrieval binding names no wiki workspace")
-            })?
+            .ok_or_else(|| AppError::forbidden("Space retrieval binding names no wiki workspace"))?
             .to_owned()],
         None => auth
             .as_ref()
@@ -1466,10 +1464,6 @@ async fn retrieve_wiki(
             })
             .unwrap_or_default(),
     };
-    // A window the engine cannot place any page against shows no page (see `HistoryFloor`).
-    if floor.is_closed() {
-        return Ok(Json(serde_json::json!({"pages": [], "count": 0})));
-    }
     let pages = wiki::wiki_search_since(
         &pipeline.pool,
         &req.query,
@@ -1478,7 +1472,7 @@ async fn retrieve_wiki(
         viewer.as_deref(),
         &allowed_workspaces,
         &granted,
-        floor.since(),
+        None,
     )
     .await?;
     Ok(Json(serde_json::json!({
@@ -1667,21 +1661,23 @@ async fn retrieve_pack(
 // `$6` is the member's history window (D18): NULL for no window, otherwise the
 // instant a document must have entered the room at or after (`created_at`). A
 // document before it is absent exactly like one outside the room, so the lookup
-// cannot be used to learn what the window hides. A closed window never reaches
-// the query (see `retrieve_sources`).
+// cannot be used to learn what the window hides. D21b: a room file
+// (`type = 'space_upload'`) is shared under D18 and passes whatever the window;
+// a closed window binds a bound no other document reaches
+// (`HistoryFloor::document_bound`).
 const SOURCES_SQL: &str = "SELECT document_id, title, source, type, status, zdr_classification
      FROM documents
      WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL
        AND ($3::text IS NULL OR owner_id = $3 OR visibility = 'org' OR document_id = ANY($4))
        AND ($5::text IS NULL OR space_ref = $5)
-       AND ($6::timestamptz IS NULL OR created_at >= $6::timestamptz)";
+       AND ($6::timestamptz IS NULL OR type = 'space_upload' OR created_at >= $6::timestamptz)";
 
 const FRESHNESS_SQL: &str = "SELECT document_id, title, updated_at::TEXT, status
      FROM documents
      WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL
        AND ($3::text IS NULL OR owner_id = $3 OR visibility = 'org' OR document_id = ANY($4))
        AND ($5::text IS NULL OR space_ref = $5)
-       AND ($6::timestamptz IS NULL OR created_at >= $6::timestamptz)";
+       AND ($6::timestamptz IS NULL OR type = 'space_upload' OR created_at >= $6::timestamptz)";
 
 #[derive(serde::Deserialize)]
 struct SourcesRequest {
@@ -1703,9 +1699,10 @@ async fn retrieve_sources(
     let space_ref = space_scope
         .as_ref()
         .map(|scope| scope.authority.space_ref.clone());
-    // D18: the member's history window. A closed window answers like an empty room, with no query.
+    // D18: the member's history window. D21b: room files stay shared, so a closed window still answers
+    // for them; `document_bound` keeps the window for every other Space document.
     let floor = crate::space_scope::history_floor_of(space_scope.as_ref());
-    if req.document_ids.is_empty() || floor.is_closed() {
+    if req.document_ids.is_empty() {
         return Ok(Json(serde_json::json!({"sources": []})));
     }
     // Per-user ownership: only return metadata for docs the viewer may see.
@@ -1724,7 +1721,7 @@ async fn retrieve_sources(
         .bind(&viewer)
         .bind(&granted)
         .bind(&space_ref)
-        .bind(floor.since())
+        .bind(floor.document_bound())
         .fetch_all(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -1752,7 +1749,8 @@ async fn retrieve_sources(
 // the provenance a file library needs (uploader, creation time, the filename /
 // type / size / hash / extension / text length the upload stamped). The ORDER
 // BY gains the id as a tiebreaker so the cursor is a total order. `$9` is the
-// member's history window (D18), the same bound the by-id lookups apply.
+// member's history window (D18), the same bound the by-id lookups apply; a room
+// file passes it whatever the window (D21b).
 const SPACE_DOCUMENTS_SQL: &str =
     "SELECT document_id, title, source, type, status, zdr_classification, updated_at::TEXT,
             owner_id, created_at::TEXT,
@@ -1763,29 +1761,30 @@ const SPACE_DOCUMENTS_SQL: &str =
        AND ($3::text IS NULL OR owner_id = $3 OR visibility = 'org' OR document_id = ANY($4))
        AND ($6::text[] IS NULL OR type = ANY($6))
        AND ($7::text IS NULL OR (updated_at, document_id) < ($7::text::timestamptz, $8::text))
-       AND ($9::timestamptz IS NULL OR created_at >= $9::timestamptz)
+       AND ($9::timestamptz IS NULL OR type = 'space_upload' OR created_at >= $9::timestamptz)
      ORDER BY updated_at DESC, document_id DESC
      LIMIT $5";
 
 // WS14-S5: one document's extracted text under the same Space, viewer and grant
 // predicate as the listing. Absent, deleted, out-of-room and not-visible are the
 // same empty result, so a caller learns nothing about which it was. A document
-// that entered the room before the member's history window (`$6`, D18) is one more
-// reason for that same empty result: its text is exactly what the window hides.
+// that is not a room file and entered the room before the member's history window
+// (`$6`, D18) is one more reason for that same empty result: its text is exactly
+// what the window hides. A room file is shared under D18 (D21b) and is read
+// whatever the window.
 const SPACE_DOCUMENT_SQL: &str =
     "SELECT document_id, title, type, status, zdr_classification, metadata->>'filename', content
      FROM documents
      WHERE org_id = $1 AND space_ref = $2 AND document_id = $3 AND deleted_at IS NULL
        AND ($4::text IS NULL OR owner_id = $4 OR visibility = 'org' OR document_id = ANY($5))
-       AND ($6::timestamptz IS NULL OR created_at >= $6::timestamptz)";
+       AND ($6::timestamptz IS NULL OR type = 'space_upload' OR created_at >= $6::timestamptz)";
 
-// `$4` is the member's history window (D18): a page is placed by the instant it was created.
-const SPACE_WIKI_PAGES_SQL: &str =
-    "SELECT page_id, title, path, updated_at::TEXT
+// D21b: wiki pages are the room's knowledge, which stays shared under D18, so the
+// listing carries no history window.
+const SPACE_WIKI_PAGES_SQL: &str = "SELECT page_id, title, path, updated_at::TEXT
      FROM wiki_pages
      WHERE org_id = $1 AND workspace_id = $2 AND deleted_at IS NULL
        AND page_status = 'published'
-       AND ($4::timestamptz IS NULL OR created_at >= $4::timestamptz)
      ORDER BY updated_at DESC
      LIMIT $3";
 
@@ -1918,8 +1917,9 @@ async fn space_knowledge(
             AppError::forbidden("a Space decision is required to list a Space's knowledge")
         })?;
     let org_id = scope.authority.org_id.clone();
-    // D18: the member's history window. The listing shows the documents that entered the room, and the
-    // wiki pages that were created, at or after it. A closed window lists neither and reads nothing.
+    // D18: the member's history window. D21b: room files and wiki pages stay shared, so the window only
+    // narrows the room's other documents (those that entered the room at or after it are listed). A closed
+    // window still lists the room files and every wiki page.
     let floor = scope.authority.history_floor;
     let limit = req
         .limit
@@ -1956,23 +1956,19 @@ async fn space_knowledge(
     // decision rather than any request field, so they run inside an org-scoped
     // transaction. The SQL still binds org_id itself as the backstop.
     let mut tx = pg_org_scope::begin_org_scoped(&pipeline.pool, &org_id).await?;
-    let mut document_rows = if floor.is_closed() {
-        Vec::new()
-    } else {
-        sqlx::query_as::<_, SpaceDocumentRow>(SPACE_DOCUMENTS_SQL)
-            .bind(&org_id)
-            .bind(&scope.authority.space_ref)
-            .bind(&viewer)
-            .bind(&granted)
-            // One extra row tells a full page from a complete room.
-            .bind(limit + 1)
-            .bind(&types)
-            .bind(&cursor_updated_at)
-            .bind(&cursor_document_id)
-            .bind(floor.since())
-            .fetch_all(&mut *tx)
-            .await?
-    };
+    let mut document_rows = sqlx::query_as::<_, SpaceDocumentRow>(SPACE_DOCUMENTS_SQL)
+        .bind(&org_id)
+        .bind(&scope.authority.space_ref)
+        .bind(&viewer)
+        .bind(&granted)
+        // One extra row tells a full page from a complete room.
+        .bind(limit + 1)
+        .bind(&types)
+        .bind(&cursor_updated_at)
+        .bind(&cursor_document_id)
+        .bind(floor.document_bound())
+        .fetch_all(&mut *tx)
+        .await?;
     let has_more = document_rows.len() as i64 > limit;
     document_rows.truncate(limit as usize);
     let next_cursor = if has_more {
@@ -1989,13 +1985,11 @@ async fn space_knowledge(
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let wiki_rows = match wiki_workspace {
-        Some(_) if floor.is_closed() => Vec::new(),
         Some(workspace) => {
             sqlx::query_as::<_, (String, String, String, String)>(SPACE_WIKI_PAGES_SQL)
                 .bind(&org_id)
                 .bind(workspace)
                 .bind(limit)
-                .bind(floor.since())
                 .fetch_all(&mut *tx)
                 .await?
         }
@@ -2100,24 +2094,28 @@ async fn space_document(
     let (viewer, granted) =
         resolve_viewer_grants_in_space(&pipeline, auth.as_ref(), &org_id, Some(&scope)).await;
 
-    // D18: the member's history window. A closed window reads nothing: the answer is the 404 of a missing id.
+    // D18: the member's history window. D21b: a room file is shared and is read whatever the window; any
+    // other Space document outside it answers with the 404 of a missing id.
     let floor = scope.authority.history_floor;
     let mut tx = pg_org_scope::begin_org_scoped(&pipeline.pool, &org_id).await?;
-    let row = if floor.is_closed() {
-        None
-    } else {
-        sqlx::query_as::<_, (String, String, String, String, String, Option<String>, String)>(
-            SPACE_DOCUMENT_SQL,
-        )
+    type SpaceDocumentTextRow = (
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        String,
+    );
+    let row = sqlx::query_as::<_, SpaceDocumentTextRow>(SPACE_DOCUMENT_SQL)
         .bind(&org_id)
         .bind(&scope.authority.space_ref)
         .bind(document_id)
         .bind(&viewer)
         .bind(&granted)
-        .bind(floor.since())
+        .bind(floor.document_bound())
         .fetch_optional(&mut *tx)
-        .await?
-    };
+        .await?;
     tx.commit().await?;
 
     let Some((did, title, dtype, status, zdr, filename, content)) = row else {
@@ -2174,11 +2172,9 @@ async fn retrieve_freshness(
     let space_ref = space_scope
         .as_ref()
         .map(|scope| scope.authority.space_ref.clone());
-    // D18: the same window as `retrieve_sources`, for the same reason: the two must agree about what is in a room.
+    // D18: the same window as `retrieve_sources`, for the same reason: the two must agree about what is in a
+    // room. D21b: room files pass any window, including a closed one.
     let floor = crate::space_scope::history_floor_of(space_scope.as_ref());
-    if floor.is_closed() {
-        return Ok(Json(serde_json::json!({"freshness": []})));
-    }
     let (viewer, granted) =
         resolve_viewer_grants_in_space(&pipeline, auth.as_ref(), &req.org_id, space_scope.as_ref())
             .await;
@@ -2190,7 +2186,7 @@ async fn retrieve_freshness(
         .bind(&viewer)
         .bind(&granted)
         .bind(&space_ref)
-        .bind(floor.since())
+        .bind(floor.document_bound())
         .fetch_all(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -3878,15 +3874,18 @@ mod space_files_tests {
             }
         }
 
-        /// The instant a read of the room is expected to bind; `None` is SQL NULL.
+        /// The instant a read of the room's documents is expected to bind; `None` is SQL NULL. D21b: a closed
+        /// window binds an instant no document reaches, so only the room-file branch of the predicate admits.
         fn instant(self) -> Option<chrono::DateTime<chrono::Utc>> {
+            let parse = |at: &str| {
+                chrono::DateTime::parse_from_rfc3339(at)
+                    .expect("test instant")
+                    .with_timezone(&chrono::Utc)
+            };
             match self {
-                Window::Since(at) => Some(
-                    chrono::DateTime::parse_from_rfc3339(at)
-                        .expect("test instant")
-                        .with_timezone(&chrono::Utc),
-                ),
-                Window::Open | Window::Closed => None,
+                Window::Since(at) => Some(parse(at)),
+                Window::Closed => Some(parse("9999-12-31T23:59:59Z")),
+                Window::Open => None,
             }
         }
     }
@@ -3976,7 +3975,7 @@ mod space_files_tests {
     }
 
     #[tokio::test]
-    async fn the_by_id_lookups_send_the_members_floor_and_a_closed_window_reads_nothing() {
+    async fn the_by_id_lookups_send_the_members_floor_and_keep_room_files_shared() {
         for window in WINDOWS {
             let room = room(window).await;
             retrieve_sources(
@@ -4005,11 +4004,12 @@ mod space_files_tests {
             .unwrap_or_else(|error| panic!("{window:?}: the freshness read runs: {error}"));
 
             for (name, sql) in [("sources", SOURCES_SQL), ("freshness", FRESHNESS_SQL)] {
+                // D21b: every window reads, a closed one too, because room files stay shared.
+                assert!(
+                    sql.contains("type = 'space_upload' OR created_at >= $6"),
+                    "{name}: a room file passes the window"
+                );
                 let runs = room.fake.runs_of(sql);
-                if matches!(window, Window::Closed) {
-                    assert!(runs.is_empty(), "{window:?} {name}: a closed window answers with no read");
-                    continue;
-                }
                 assert_eq!(runs.len(), 1, "{window:?} {name}: {:?}", room.fake.executed());
                 // `$5` is the room of the verified decision and `$6` is the member's window.
                 assert_eq!(runs[0].text(4).as_deref(), Some(SPACE), "{window:?} {name}");
@@ -4019,7 +4019,7 @@ mod space_files_tests {
     }
 
     #[tokio::test]
-    async fn the_room_file_read_sends_the_members_floor_and_a_closed_window_answers_as_a_missing_file() {
+    async fn the_room_file_read_sends_the_members_floor_and_keeps_room_files_readable() {
         for window in WINDOWS {
             let room = room(window).await;
             let response = space_document(
@@ -4037,11 +4037,9 @@ mod space_files_tests {
             // The server has no such row, so every window answers the 404 of a missing file.
             assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND, "{window:?}");
 
+            // D21b: every window reads, a closed one too: a room file is read whatever the window.
+            assert!(SPACE_DOCUMENT_SQL.contains("type = 'space_upload' OR created_at >= $6"));
             let runs = room.fake.runs_of(SPACE_DOCUMENT_SQL);
-            if matches!(window, Window::Closed) {
-                assert!(runs.is_empty(), "a closed window reads nothing: {:?}", room.fake.executed());
-                continue;
-            }
             assert_eq!(runs.len(), 1, "{window:?}: {:?}", room.fake.executed());
             // `$2` is the room, `$3` the file, `$6` the member's window.
             assert_eq!(runs[0].text(1).as_deref(), Some(SPACE), "{window:?}");
@@ -4051,7 +4049,7 @@ mod space_files_tests {
     }
 
     #[tokio::test]
-    async fn the_room_listing_sends_the_members_floor_for_its_files_and_for_its_wiki_pages() {
+    async fn the_room_listing_keeps_room_files_and_wiki_pages_shared_under_every_window() {
         for window in WINDOWS {
             let room = room(window).await;
             space_knowledge(
@@ -4068,23 +4066,19 @@ mod space_files_tests {
             .map_err(|error| error.error.to_string())
             .unwrap_or_else(|error| panic!("{window:?}: the listing runs: {error}"));
 
+            // D21b: every window lists, a closed one too. Room files pass the document predicate whatever the
+            // window, and the wiki listing carries no window at all.
+            assert!(SPACE_DOCUMENTS_SQL.contains("type = 'space_upload' OR created_at >= $9"));
+            assert!(!SPACE_WIKI_PAGES_SQL.contains("created_at"), "the wiki listing is not windowed");
             let files = room.fake.runs_of(SPACE_DOCUMENTS_SQL);
             let pages = room.fake.runs_of(SPACE_WIKI_PAGES_SQL);
-            if matches!(window, Window::Closed) {
-                assert!(
-                    files.is_empty() && pages.is_empty(),
-                    "a closed window lists nothing: {:?}",
-                    room.fake.executed()
-                );
-                continue;
-            }
             assert_eq!(files.len(), 1, "{window:?}: {:?}", room.fake.executed());
             assert_eq!(pages.len(), 1, "{window:?}: {:?}", room.fake.executed());
-            // The files: `$2` is the room and `$9` the window. The wiki pages: `$2` is the workspace and `$4` the window.
+            // The files: `$2` is the room and `$9` the window. The wiki pages: `$2` is the workspace, no window.
             assert_eq!(files[0].text(1).as_deref(), Some(SPACE), "{window:?}");
             assert_eq!(files[0].instant(8), window.instant(), "{window:?}: the window the file listing was sent");
             assert_eq!(pages[0].text(1).as_deref(), Some("ws-1"), "{window:?}");
-            assert_eq!(pages[0].instant(3), window.instant(), "{window:?}: the window the wiki listing was sent");
+            assert_eq!(pages[0].params.len(), 3, "{window:?}: the wiki listing binds no window");
         }
     }
 
@@ -4406,7 +4400,7 @@ mod space_files_tests {
     }
 
     #[tokio::test]
-    async fn the_wiki_retrieval_sends_the_members_floor_and_a_closed_window_returns_no_page() {
+    async fn the_wiki_retrieval_is_shared_knowledge_and_sends_no_window() {
         for window in WINDOWS {
             let room = room(window).await;
             retrieve_wiki(
@@ -4423,14 +4417,11 @@ mod space_files_tests {
             .map_err(|error| error.error.to_string())
             .unwrap_or_else(|error| panic!("{window:?}: the search runs: {error}"));
 
+            // D21b: wiki pages are the room's knowledge, shared under D18: every window searches, and `$7`
+            // (the optional creation bound) is NULL.
             let runs = room.fake.runs_containing("FROM wiki_pages p");
-            if matches!(window, Window::Closed) {
-                assert!(runs.is_empty(), "a closed window searches nothing: {:?}", room.fake.executed());
-                continue;
-            }
             assert_eq!(runs.len(), 1, "{window:?}: {:?}", room.fake.executed());
-            // `$7` is the member's window.
-            assert_eq!(runs[0].instant(6), window.instant(), "{window:?}: the window the search was sent");
+            assert_eq!(runs[0].instant(6), None, "{window:?}: the wiki search carries no window");
         }
     }
 
@@ -4456,10 +4447,7 @@ mod space_files_tests {
             let set = room
                 .fake
                 .runs_containing("SELECT document_id FROM documents WHERE org_id = $1 AND space_ref = $2");
-            if matches!(window, Window::Closed) {
-                assert!(set.is_empty(), "a closed window reads no set: {:?}", room.fake.executed());
-                continue;
-            }
+            // D21b: a closed window still reads the set, because room files stay shared.
             assert_eq!(set.len(), 1, "{window:?}: {:?}", room.fake.executed());
             assert_eq!(set[0].text(1).as_deref(), Some(SPACE), "{window:?}");
             assert_eq!(set[0].instant(3), window.instant(), "{window:?}: the window the document set was read with");

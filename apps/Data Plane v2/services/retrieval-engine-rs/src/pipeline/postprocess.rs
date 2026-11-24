@@ -607,10 +607,12 @@ impl NodePostprocessor for VisibilityGate<'_> {
 /// It only removes, and it fails closed:
 ///
 /// * `Open` is no window and returns the candidates untouched, with no query.
-/// * `Closed` is a window the engine cannot place any row against, so nothing survives.
-/// * `Since` keeps a candidate only when its document is a live `documents` row that entered the room at or
-///   after the floor. A candidate with no such row (a wiki page id, a deleted document) has no reliable
-///   source instant here and is dropped.
+/// * D21b: a candidate whose document is a live room file (`type = 'space_upload'`) always survives,
+///   under any window: room files stay shared under D18.
+/// * `Closed` is a window the engine cannot place any other row against, so nothing else survives.
+/// * `Since` keeps any other candidate only when its document is a live `documents` row that entered the
+///   room at or after the floor. A candidate with no such row (a wiki page id, a deleted document) has no
+///   reliable type or source instant here and is dropped.
 ///
 /// Enforcement: errors propagate. Returning unfiltered candidates because a lookup failed would show a
 /// member what their window hides.
@@ -640,17 +642,24 @@ impl<'a> SpaceHistoryGate<'a> {
     }
 }
 
-/// Keeps the candidates the window admits. `entered` maps a document id to the instant it entered the room;
-/// a candidate with no entry has no reliable source instant and is dropped by a `Since` window. Pure, so the
-/// rule is tested without a database.
+/// One live document as the window gate reads it: its type and the instant it entered the room.
+type EnteredDocument = (String, chrono::DateTime<chrono::Utc>);
+
+/// Keeps the candidates the window admits. `entered` maps a document id to its type and the instant it
+/// entered the room; a room file passes every window (D21b), and a candidate with no entry has no reliable
+/// type or source instant and is dropped by a `Since` or `Closed` window. Pure, so the rule is tested
+/// without a database.
 fn candidates_inside_window(
     nodes: Vec<ScoredCandidate>,
     floor: HistoryFloor,
-    entered: &std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
+    entered: &std::collections::HashMap<String, EnteredDocument>,
 ) -> Vec<ScoredCandidate> {
     nodes
         .into_iter()
-        .filter(|candidate| floor.admits(entered.get(&candidate.document_id).copied()))
+        .filter(|candidate| match entered.get(&candidate.document_id) {
+            Some((document_type, at)) => floor.admits_document(Some(document_type), Some(*at)),
+            None => floor.admits(None),
+        })
         .collect()
 }
 
@@ -665,10 +674,9 @@ impl NodePostprocessor for SpaceHistoryGate<'_> {
         nodes: Vec<ScoredCandidate>,
         _ctx: &mut PostprocessCtx<'_>,
     ) -> anyhow::Result<Vec<ScoredCandidate>> {
-        match self.floor {
-            HistoryFloor::Open => return Ok(nodes),
-            HistoryFloor::Closed => return Ok(Vec::new()),
-            HistoryFloor::Since(_) => {}
+        // D21b: a closed window still reads the candidates' types, because room files survive it.
+        if self.floor == HistoryFloor::Open {
+            return Ok(nodes);
         }
         let doc_ids: Vec<String> = nodes
             .iter()
@@ -682,15 +690,16 @@ impl NodePostprocessor for SpaceHistoryGate<'_> {
         // Org-scoped like every read in this chain: the lookup has no org predicate of its own, and the
         // transaction supplies one, so a candidate that leaked in from another tenant resolves to nothing.
         let mut tx = pg_org_scope::begin_org_scoped(self.pool, self.org_id).await?;
-        let entered: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>> =
-            sqlx::query_as::<_, (String, chrono::DateTime<chrono::Utc>)>(
-                "SELECT document_id, created_at FROM documents
+        let entered: std::collections::HashMap<String, EnteredDocument> =
+            sqlx::query_as::<_, (String, String, chrono::DateTime<chrono::Utc>)>(
+                "SELECT document_id, COALESCE(type, ''), created_at FROM documents
                  WHERE document_id = ANY($1) AND deleted_at IS NULL",
             )
             .bind(&doc_ids)
             .fetch_all(&mut *tx)
             .await?
             .into_iter()
+            .map(|(document_id, document_type, at)| (document_id, (document_type, at)))
             .collect();
         tx.commit().await?;
         let before = nodes.len();
@@ -908,13 +917,14 @@ mod tests {
     #[test]
     fn the_window_keeps_only_candidates_that_entered_the_room_at_or_after_it() {
         let floor = instant("2026-11-18T09:30:00Z");
-        let entered: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>> = [
+        // These are Space documents that are not room files, so the window applies to them.
+        let entered: std::collections::HashMap<String, EnteredDocument> = [
             ("before", floor - chrono::Duration::microseconds(1)),
             ("at", floor),
             ("after", floor + chrono::Duration::hours(2)),
         ]
         .into_iter()
-        .map(|(id, at)| (id.to_string(), at))
+        .map(|(id, at)| (id.to_string(), ("chat_export".to_string(), at)))
         .collect();
         // "unknown" has no row in `documents` (a wiki page id, a deleted document): no reliable instant.
         let nodes = vec![
@@ -937,11 +947,46 @@ mod tests {
         assert!(candidates_inside_window(nodes, HistoryFloor::Closed, &entered).is_empty());
     }
 
-    // `Open` and `Closed` are decided without reading a row, so a pool that is never contacted proves the
-    // gate answers them before it touches the database (a `Since` window needs the lookup).
+    // D21b: room files stay shared under D18. A room file that entered the room before the floor survives
+    // a dated and a closed window, while a pre-floor document of any other type is still hidden.
+    #[test]
+    fn a_room_file_survives_every_window_while_other_pre_floor_documents_stay_hidden() {
+        let floor = instant("2026-11-18T09:30:00Z");
+        let before = floor - chrono::Duration::days(30);
+        let entered: std::collections::HashMap<String, EnteredDocument> = [
+            (
+                "old-file",
+                crate::space_scope::ROOM_FILE_DOCUMENT_TYPE,
+                before,
+            ),
+            ("old-artifact", "chat_export", before),
+            ("new-artifact", "chat_export", floor),
+        ]
+        .into_iter()
+        .map(|(id, kind, at)| (id.to_string(), (kind.to_string(), at)))
+        .collect();
+        let nodes = vec![
+            cand("old-file", 4.0),
+            cand("old-artifact", 3.0),
+            cand("new-artifact", 2.0),
+            cand("unknown", 1.0),
+        ];
+        let since = candidates_inside_window(nodes.clone(), HistoryFloor::Since(floor), &entered);
+        assert_eq!(ids(&since), vec!["old-file", "new-artifact"]);
+        let closed = candidates_inside_window(nodes, HistoryFloor::Closed, &entered);
+        assert_eq!(ids(&closed), vec!["old-file"]);
+    }
+
+    // `Open` is decided without reading a row, so a pool that is never contacted proves the gate answers it
+    // before it touches the database. A `Since` or `Closed` window needs the lookup (D21b: a room file
+    // survives both), so with no candidates it reads nothing, and with candidates on an unreachable pool it
+    // fails closed with an error rather than passing them.
     #[tokio::test]
-    async fn an_open_window_passes_every_candidate_and_a_closed_one_passes_none_without_a_lookup() {
-        let pool = sqlx::PgPool::connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+    async fn an_open_window_passes_and_a_closed_one_fails_closed_without_a_lookup() {
+        // A short acquire timeout: the closed window's lookup must fail against this pool, not wait 30 s.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_secs(2))
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .expect("lazy pool configuration");
         let gate = |floor| SpaceHistoryGate {
             pool: &pool,
@@ -955,9 +1000,16 @@ mod tests {
         assert_eq!(ids(&open), vec!["a", "b"]);
         let closed = gate(HistoryFloor::Closed)
             .postprocess(vec![cand("a", 2.0), cand("b", 1.0)], &mut ctx())
+            .await;
+        assert!(
+            closed.is_err(),
+            "a closed window that cannot read the candidates' types must fail, never pass them"
+        );
+        let closed_empty = gate(HistoryFloor::Closed)
+            .postprocess(Vec::new(), &mut ctx())
             .await
-            .expect("a closed window never reads");
-        assert!(closed.is_empty());
+            .expect("no candidates, no lookup");
+        assert!(closed_empty.is_empty());
         // No candidates under a real window: nothing to look up, so nothing is read either.
         let none = gate(HistoryFloor::Since(instant("2026-11-18T09:30:00Z")))
             .postprocess(Vec::new(), &mut ctx())

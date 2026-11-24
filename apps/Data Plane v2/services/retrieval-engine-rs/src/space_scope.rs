@@ -148,6 +148,32 @@ impl HistoryFloor {
         }
     }
 
+    /// D21b: the instant a Space document that is NOT a room file must have entered the room at or after,
+    /// as the SQL predicate binds it next to the room-file exception
+    /// (`$n IS NULL OR type = 'space_upload' OR created_at >= $n`). Unlike [`Self::since`], a closed
+    /// window has a bound here: one no document reaches, so a closed window still lists the room's files
+    /// and hides everything else, instead of short-circuiting to an empty answer.
+    #[must_use]
+    pub fn document_bound(self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::Open => None,
+            Self::Since(at) => Some(at),
+            Self::Closed => Some(closed_window_bound()),
+        }
+    }
+
+    /// D21b: whether a Space document of this type, which entered the room at this instant, may be shown.
+    /// A room file is shared under D18 and always passes; every other document is judged by the window
+    /// ([`Self::admits`]), fail closed. The Rust copy of the predicate [`Self::document_bound`] binds.
+    #[must_use]
+    pub fn admits_document(
+        self,
+        document_type: Option<&str>,
+        source_at: Option<DateTime<Utc>>,
+    ) -> bool {
+        is_shared_room_file(document_type) || self.admits(source_at)
+    }
+
     /// The part of a retrieval-cache key that names this window, or `None` for no window so that a room
     /// with no window keeps the key it always had. Two members of one room under different windows, or one
     /// member before and after the window moved, never share an answer.
@@ -161,6 +187,26 @@ impl HistoryFloor {
             )),
         }
     }
+}
+
+/// D21b (owner ruling 2026-11-19, `.plan-work/space-build/d18-room-history-spec.md`): room files,
+/// knowledge retrieval and the sandbox workspace stay shared under D18; only the conversation and the
+/// canvas are windowed. A room file is a `documents` row of this type (documents-api WS14-S3, and the only
+/// import source type a shared Space accepts). Wiki pages are the room's knowledge and are never windowed
+/// either. Any other Space document is not clearly a shared surface (it may be a conversation-derived
+/// artifact), so it keeps the member's window, fail closed.
+pub const ROOM_FILE_DOCUMENT_TYPE: &str = "space_upload";
+
+/// Whether a document type is a room file, which the member's window never narrows (D21b).
+#[must_use]
+pub fn is_shared_room_file(document_type: Option<&str>) -> bool {
+    document_type.is_some_and(|value| value == ROOM_FILE_DOCUMENT_TYPE)
+}
+
+/// The bound a closed window binds for a non-room-file document (9999-12-31T23:59:59Z): later than any
+/// `created_at`, so the predicate admits only room files.
+fn closed_window_bound() -> DateTime<Utc> {
+    DateTime::<Utc>::from_timestamp(253_402_300_799, 0).expect("a fixed, valid instant")
 }
 
 /// The window of an optional Space scope: `Open` for the unscoped, legacy org read.
@@ -550,11 +596,12 @@ pub async fn resolve_space_retrieval_scope(
 /// the bound is not an error here: only the vector search cannot work with a
 /// prefix, and it says so at the point where the prefix would be used.
 ///
-/// D18: `floor` is the member's history window. Only documents that entered the room at or after it are
-/// listed (`documents.created_at`; a later update never moves a document back into the window), so the
-/// bound above counts the documents the member may see. A closed window lists none and reads nothing. The
-/// caller then meets the same "no documents imported under Space authority" refusal as for an empty
-/// room, which tells a windowed member nothing about what the window hides.
+/// D18: `floor` is the member's history window. Room files are shared (D21b) and always listed; any other
+/// Space document is listed only when it entered the room at or after the floor (`documents.created_at`; a
+/// later update never moves a document back into the window), so the bound above counts the documents the
+/// member may see. A closed window lists only the room files. A room with none meets the same "no
+/// documents imported under Space authority" refusal as an empty room, which tells a windowed member
+/// nothing about what the window hides.
 pub async fn resolve_space_document_ids(
     pool: &PgPool,
     org_id: &str,
@@ -564,15 +611,14 @@ pub async fn resolve_space_document_ids(
     if org_id.trim().is_empty() || space_ref.trim().is_empty() {
         anyhow::bail!("Space document scope requires an org and a Space reference");
     }
-    if floor.is_closed() {
-        return Ok((Vec::new(), false));
-    }
+    // D21b: room files stay shared, so even a closed window lists them; `document_bound` keeps the
+    // window for every other Space document.
     let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
     let rows = sqlx::query_scalar::<_, String>(SPACE_DOCUMENT_IDS_SQL)
         .bind(org_id)
         .bind(space_ref)
         .bind(MAX_SPACE_DOCUMENTS + 1)
-        .bind(floor.since())
+        .bind(floor.document_bound())
         .fetch_all(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -582,16 +628,18 @@ pub async fn resolve_space_document_ids(
     Ok((rows, truncated))
 }
 
-/// The room's live documents, newest first. `$4` is the member's history floor (D18): NULL for no window,
-/// otherwise the instant a document must have entered the room at or after. `created_at` is that instant:
-/// `space_ref` is written once, on create, from a verified Control import decision.
+/// The room's live documents, newest first. `$4` is the member's history floor (D18,
+/// [`HistoryFloor::document_bound`]): NULL for no window, otherwise the instant a document must have entered
+/// the room at or after. `created_at` is that instant: `space_ref` is written once, on create, from a
+/// verified Control import decision. A room file (`type = 'space_upload'`) is shared under D21b and passes
+/// whatever the window.
 const SPACE_DOCUMENT_IDS_SQL: &str = r#"
         SELECT document_id
         FROM documents
         WHERE org_id = $1
           AND space_ref = $2
           AND deleted_at IS NULL
-          AND ($4::timestamptz IS NULL OR created_at >= $4::timestamptz)
+          AND ($4::timestamptz IS NULL OR type = 'space_upload' OR created_at >= $4::timestamptz)
         ORDER BY updated_at DESC
         LIMIT $3
         "#;
@@ -608,7 +656,7 @@ mod tests {
     use super::{
         history_floor_of, verify_retrieval_space_decision, HistoryFloor,
         ResolvedSpaceRetrievalScope, VerifiedSpaceAuthority, DECISION_VERSION, RETRIEVAL_AUDIENCE,
-        SPACE_DOCUMENT_IDS_SQL,
+        ROOM_FILE_DOCUMENT_TYPE, SPACE_DOCUMENT_IDS_SQL,
     };
     use crate::pipeline::types::RetrievalFiltersInput;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -1066,6 +1114,45 @@ mod tests {
         assert_eq!(HistoryFloor::default(), HistoryFloor::Open);
     }
 
+    // D21b: room files stay shared under D18. A room file passes every window, including a closed one,
+    // and with no instant; any other Space document (it may be conversation-derived) keeps the window.
+    #[test]
+    fn a_room_file_passes_every_window_and_any_other_document_keeps_it() {
+        let floor = at("2026-11-18T09:30:00Z");
+        let before = floor - chrono::Duration::microseconds(1);
+        for window in [
+            HistoryFloor::Open,
+            HistoryFloor::Since(floor),
+            HistoryFloor::Closed,
+        ] {
+            assert!(window.admits_document(Some(ROOM_FILE_DOCUMENT_TYPE), Some(before)));
+            assert!(window.admits_document(Some(ROOM_FILE_DOCUMENT_TYPE), None));
+            assert_eq!(
+                window.admits_document(Some("chat_export"), Some(before)),
+                window.admits(Some(before)),
+                "a non-room-file document is judged by the window under {window:?}"
+            );
+            assert_eq!(window.admits_document(None, None), window.admits(None));
+        }
+        assert!(!HistoryFloor::Since(floor).admits_document(Some("space_upload "), Some(before)));
+        assert!(!HistoryFloor::Closed.admits_document(Some("SPACE_UPLOAD"), Some(floor)));
+    }
+
+    // D21b: the bound the document predicates bind. Open binds none; a dated window binds its instant; a
+    // closed window binds an instant no document reaches, so only the room-file branch of the predicate
+    // can admit a row (it never reads as an open window).
+    #[test]
+    fn the_document_bound_keeps_a_closed_window_closed_for_everything_but_room_files() {
+        let floor = at("2026-11-18T09:30:00Z");
+        assert_eq!(HistoryFloor::Open.document_bound(), None);
+        assert_eq!(HistoryFloor::Since(floor).document_bound(), Some(floor));
+        let closed = HistoryFloor::Closed
+            .document_bound()
+            .expect("a closed window binds a bound");
+        assert!(closed > Utc::now() + chrono::Duration::days(365 * 1000));
+        assert_eq!(closed, at("9999-12-31T23:59:59Z"));
+    }
+
     #[test]
     fn the_window_of_a_scope_is_open_without_a_scope() {
         assert_eq!(history_floor_of(None), HistoryFloor::Open);
@@ -1132,7 +1219,7 @@ mod tests {
             .join(" ");
         for needle in [
             "WHERE org_id = $1 AND space_ref = $2 AND deleted_at IS NULL",
-            "AND ($4::timestamptz IS NULL OR created_at >= $4::timestamptz)",
+            "AND ($4::timestamptz IS NULL OR type = 'space_upload' OR created_at >= $4::timestamptz)",
             "ORDER BY updated_at DESC LIMIT $3",
         ] {
             assert!(

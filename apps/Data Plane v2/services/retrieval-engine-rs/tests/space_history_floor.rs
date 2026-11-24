@@ -1,10 +1,13 @@
-//! D18: a member's history window on every Space-scoped read of the retrieval engine.
+//! D18: a member's history window on every Space-scoped read of the retrieval engine, as narrowed by D21b.
 //!
 //! Control signs `history_floor_at` (and, for a WS04-S11 since_join room, `history_floor_revision`) on the
-//! retrieval decision. The engine hides every row that entered the room before that instant: the room's
-//! document set the dense search is pinned to, the by-id lookups, the room listing, a single room file, the
-//! room wiki and the candidates that survive the arms. A row with no reliable instant is hidden, and a
-//! revision with no instant hides everything, because no Data Plane row carries an audience revision.
+//! retrieval decision. D21b (owner ruling 2026-11-19): room files and knowledge (the room wiki) stay shared
+//! under D18, so the window never hides a room file (`type = 'space_upload'`) or a wiki page. Any other Space
+//! document is not clearly a shared surface (it may be a conversation-derived artifact), so the engine still
+//! hides it when it entered the room before the floor: in the room's document set the dense search is pinned
+//! to, the by-id lookups, the room listing, a single document read and the candidates that survive the arms.
+//! A row with no reliable instant is hidden, and a revision with no instant hides every such document,
+//! because no Data Plane row carries an audience revision.
 //!
 //! The shape checks are hermetic: they read the SQL constants out of `src/api/mod.rs` at compile time (the
 //! convention of `space_files_listing.rs`), so a predicate that is dropped from a read fails here instead of
@@ -63,8 +66,9 @@ fn every_room_read_carries_the_window_as_a_predicate_on_the_instant_a_document_e
         ("SPACE_DOCUMENT_SQL", "$6"),
     ] {
         let sql = squashed(&sql_const(name));
+        // D21b: a room file passes the window; every other document is judged by its creation instant.
         let predicate = format!(
-            "AND ({placeholder}::timestamptz IS NULL OR created_at >= {placeholder}::timestamptz)"
+            "AND ({placeholder}::timestamptz IS NULL OR type = 'space_upload' OR created_at >= {placeholder}::timestamptz)"
         );
         assert!(
             sql.contains(&predicate),
@@ -91,10 +95,11 @@ fn every_room_read_carries_the_window_as_a_predicate_on_the_instant_a_document_e
     assert!(listing.contains("(updated_at, document_id) < ($7::text::timestamptz, $8::text)"));
     assert!(listing.contains("ORDER BY updated_at DESC, document_id DESC LIMIT $5"));
 
+    // D21b: the room wiki is shared knowledge, so its listing carries no window.
     let wiki_listing = squashed(&sql_const("SPACE_WIKI_PAGES_SQL"));
     assert!(
-        wiki_listing.contains("AND ($4::timestamptz IS NULL OR created_at >= $4::timestamptz)"),
-        "the room wiki listing lost the window predicate:\n{wiki_listing}"
+        !wiki_listing.contains("created_at") && !wiki_listing.contains("$4"),
+        "the room wiki listing must not be windowed (D21b):\n{wiki_listing}"
     );
     assert!(wiki_listing.contains("page_status = 'published'"));
     assert!(wiki_listing.contains("ORDER BY updated_at DESC LIMIT $3"));
@@ -139,7 +144,7 @@ fn room_document_ids() -> Reply {
 }
 
 #[tokio::test]
-async fn the_room_document_set_read_binds_the_members_floor_and_a_closed_window_reads_nothing() {
+async fn the_room_document_set_read_binds_the_members_floor_and_a_closed_window_reads_only_room_files() {
     let fake = FakePg::start().await;
     fake.answer(ROOM_DOCUMENT_IDS, room_document_ids());
     let pool = fake.pool();
@@ -162,13 +167,14 @@ async fn the_room_document_set_read_binds_the_members_floor_and_a_closed_window_
     assert_eq!(runs[1].text(0).as_deref(), Some("org"));
     assert_eq!(runs[1].text(1).as_deref(), Some(SPACE));
 
-    // A window the engine cannot place any document against reads nothing, and says so as an empty room.
-    let (ids, truncated) =
-        resolve_space_document_ids(&pool, "org", SPACE, HistoryFloor::from_claims(None, 4).unwrap())
-            .await
-            .expect("a closed window answers");
-    assert!(ids.is_empty() && !truncated);
-    assert_eq!(fake.runs_containing(ROOM_DOCUMENT_IDS).len(), 2, "a closed window ran no read");
+    // D21b: a window the engine cannot place any document against still reads the room, because room files
+    // stay shared; it binds a bound no document reaches, so only the room-file branch admits a row.
+    resolve_space_document_ids(&pool, "org", SPACE, HistoryFloor::from_claims(None, 4).unwrap())
+        .await
+        .expect("a closed window answers");
+    let runs = fake.runs_containing(ROOM_DOCUMENT_IDS);
+    assert_eq!(runs.len(), 3, "a closed window reads the room files");
+    assert_eq!(runs[2].instant(3), Some(at("9999-12-31T23:59:59Z")));
 }
 
 #[tokio::test]
@@ -199,16 +205,17 @@ async fn resolving_a_room_narrows_its_document_set_to_the_floor_of_the_verified_
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].instant(3), Some(floor), "the floor of the authority is the window of the document set");
 
-    // No window binds NULL; a closed window never reads the set.
+    // No window binds NULL; a closed window still reads the set (D21b: its room files stay shared).
     resolve_space_retrieval_scope(&pool, scope_with(HistoryFloor::Open).authority)
         .await
         .expect("an unwindowed room resolves");
     assert_eq!(fake.runs_containing(ROOM_DOCUMENT_IDS)[1].instant(3), None);
-    let closed = resolve_space_retrieval_scope(&pool, scope_with(HistoryFloor::Closed).authority)
+    resolve_space_retrieval_scope(&pool, scope_with(HistoryFloor::Closed).authority)
         .await
         .expect("a closed room resolves");
-    assert!(closed.document_ids.is_empty());
-    assert_eq!(fake.runs_containing(ROOM_DOCUMENT_IDS).len(), 2);
+    let runs = fake.runs_containing(ROOM_DOCUMENT_IDS);
+    assert_eq!(runs.len(), 3);
+    assert_eq!(runs[2].instant(3), Some(at("9999-12-31T23:59:59Z")));
     assert_eq!(fake.runs_containing(BINDING).len(), 3, "each resolution reads its binding");
 }
 
@@ -217,19 +224,25 @@ async fn the_history_gate_of_a_scoped_retrieval_drops_the_candidates_that_entere
     let fake = FakePg::start().await;
     let floor = at(FLOOR);
     fake.answer(
-        "SELECT document_id, created_at FROM documents WHERE document_id = ANY($1)",
+        "SELECT document_id, COALESCE(type, ''), created_at FROM documents WHERE document_id = ANY($1)",
         Reply {
-            columns: vec![("document_id", OID_TEXT), ("created_at", OID_TIMESTAMPTZ)],
+            columns: vec![
+                ("document_id", OID_TEXT),
+                ("type", OID_TEXT),
+                ("created_at", OID_TIMESTAMPTZ),
+            ],
             rows: vec![
-                vec![text("org:old"), timestamptz(floor - chrono::Duration::microseconds(1))],
-                vec![text("org:edge"), timestamptz(floor)],
-                vec![text("org:new"), timestamptz(floor + chrono::Duration::days(2))],
+                // D21b: a room file that entered long before the floor stays shared.
+                vec![text("org:file"), text("space_upload"), timestamptz(floor - chrono::Duration::days(30))],
+                vec![text("org:old"), text("chat_export"), timestamptz(floor - chrono::Duration::microseconds(1))],
+                vec![text("org:edge"), text("chat_export"), timestamptz(floor)],
+                vec![text("org:new"), text("chat_export"), timestamptz(floor + chrono::Duration::days(2))],
             ],
         },
     );
     let pool = fake.pool();
     let candidates = || {
-        ["old", "edge", "new", "gone"]
+        ["file", "old", "edge", "new", "gone"]
             .iter()
             .map(|id| candidate(&format!("org:{id}")))
             .collect::<Vec<_>>()
@@ -248,20 +261,25 @@ async fn the_history_gate_of_a_scoped_retrieval_drops_the_candidates_that_entere
         }
     };
 
-    // The window of the verified scope is the window of the gate: what the database says entered the room before
-    // it is dropped, and so is a candidate the database has no row for.
-    assert_eq!(survivors(Some(scope_with(HistoryFloor::Since(floor)))).await, ["edge", "new"]);
+    // The window of the verified scope is the window of the gate: a non-room-file document the database says
+    // entered the room before it is dropped, and so is a candidate the database has no row for. The room file
+    // survives (D21b).
+    assert_eq!(
+        survivors(Some(scope_with(HistoryFloor::Since(floor)))).await,
+        ["file", "edge", "new"]
+    );
     let lookups = fake.runs_containing("FROM documents WHERE document_id = ANY($1)");
     assert_eq!(lookups.len(), 1);
     // The lookup is org-scoped: the transaction it ran in was opened for the requesting org.
     let scoped = fake.runs_containing("SELECT set_config($1, $2, true)");
     assert_eq!(scoped.last().and_then(|run| run.text(1)).as_deref(), Some("org"));
 
-    // No window passes everything without reading; a closed one passes nothing without reading.
-    assert_eq!(survivors(Some(scope_with(HistoryFloor::Open))).await.len(), 4);
-    assert_eq!(survivors(None).await.len(), 4);
-    assert!(survivors(Some(scope_with(HistoryFloor::Closed))).await.is_empty());
+    // No window passes everything without reading. A closed one reads, and passes only the room file.
+    assert_eq!(survivors(Some(scope_with(HistoryFloor::Open))).await.len(), 5);
+    assert_eq!(survivors(None).await.len(), 5);
     assert_eq!(fake.runs_containing("FROM documents WHERE document_id = ANY($1)").len(), 1);
+    assert_eq!(survivors(Some(scope_with(HistoryFloor::Closed))).await, ["file"]);
+    assert_eq!(fake.runs_containing("FROM documents WHERE document_id = ANY($1)").len(), 2);
 }
 
 #[tokio::test]
@@ -397,6 +415,7 @@ async fn seed_document(
     org: &str,
     id: &str,
     space: &str,
+    document_type: &str,
     created_at: &str,
     updated_at: &str,
     deleted: bool,
@@ -404,7 +423,7 @@ async fn seed_document(
     sqlx::query(
         "INSERT INTO documents (document_id, org_id, source, type, title, content, owner_id, visibility,
                                 space_ref, created_at, updated_at, deleted_at, metadata)
-         VALUES ($1, $2, 'space-upload', 'space_upload', $3, 'room text', 'u1', 'org', $4,
+         VALUES ($1, $2, 'space-upload', $8, $3, 'room text', 'u1', 'org', $4,
                  $5::timestamptz, $6::timestamptz, CASE WHEN $7 THEN NOW() ELSE NULL END,
                  jsonb_build_object('filename', $3::text))",
     )
@@ -415,19 +434,36 @@ async fn seed_document(
     .bind(created_at)
     .bind(updated_at)
     .bind(deleted)
+    .bind(document_type)
     .execute(pool)
     .await
     .expect("seed document");
 }
 
+/// A Space document type that is not a room file, so the window applies to it (D21b).
+const ARTIFACT: &str = "chat_export";
+
 /// The room every database test reads. `old` entered the room before the floor and was edited after it:
-/// the edit must not bring it back into the window.
+/// the edit must not bring it back into the window. `file` is a room file that entered long before the
+/// floor: D21b keeps it shared under every window.
 async fn seed_room(pool: &PgPool, org: &str) {
+    seed_document(
+        pool,
+        org,
+        "file",
+        SPACE,
+        "space_upload",
+        "2026-11-01 00:00:00+00",
+        "2026-11-02 00:00:00+00",
+        false,
+    )
+    .await;
     seed_document(
         pool,
         org,
         "old",
         SPACE,
+        ARTIFACT,
         "2026-11-01 00:00:00+00",
         "2026-11-15 00:00:00+00",
         false,
@@ -438,6 +474,7 @@ async fn seed_room(pool: &PgPool, org: &str) {
         org,
         "edge",
         SPACE,
+        ARTIFACT,
         "2026-11-10 12:00:00+00",
         "2026-11-10 12:00:00+00",
         false,
@@ -448,6 +485,7 @@ async fn seed_room(pool: &PgPool, org: &str) {
         org,
         "new",
         SPACE,
+        ARTIFACT,
         "2026-11-12 00:00:00+00",
         "2026-11-12 00:00:00+00",
         false,
@@ -458,6 +496,7 @@ async fn seed_room(pool: &PgPool, org: &str) {
         org,
         "gone",
         SPACE,
+        ARTIFACT,
         "2026-11-13 00:00:00+00",
         "2026-11-13 00:00:00+00",
         true,
@@ -468,6 +507,7 @@ async fn seed_room(pool: &PgPool, org: &str) {
         org,
         "elsewhere",
         OTHER_SPACE,
+        ARTIFACT,
         "2026-11-13 00:00:00+00",
         "2026-11-13 00:00:00+00",
         false,
@@ -500,28 +540,25 @@ async fn the_room_document_set_is_narrowed_to_the_window_before_any_search_runs(
     };
 
     // No window: the whole live room, newest edit first. The other room and the deleted file are never in it.
-    assert_eq!(list(HistoryFloor::Open).await, ["old", "new", "edge"]);
+    assert_eq!(list(HistoryFloor::Open).await, ["old", "new", "edge", "file"]);
     // A window: only what entered the room at or after the floor. `old` was edited after the floor and is
     // still hidden, because the edit does not remove the text the member must not see. `edge` entered at
     // exactly the floor instant and is shown.
     assert_eq!(
         list(HistoryFloor::from_claims(Some(at(FLOOR)), 0).unwrap()).await,
-        ["new", "edge"]
+        ["new", "edge", "file"]
     );
     // A later floor hides more.
     assert_eq!(
         list(HistoryFloor::from_claims(Some(at("2026-11-12T00:00:00Z")), 0).unwrap()).await,
-        ["new"]
+        ["new", "file"]
     );
-    // A window that is a revision alone shows nothing, and does not read the table to say so.
-    assert!(list(HistoryFloor::from_claims(None, 4).unwrap())
-        .await
-        .is_empty());
-    // A floor after every document leaves an empty set, which the caller refuses like an empty room.
-    assert!(
-        list(HistoryFloor::from_claims(Some(at("2026-12-01T00:00:00Z")), 0).unwrap())
-            .await
-            .is_empty()
+    // A window that is a revision alone shows only the room files (D21b).
+    assert_eq!(list(HistoryFloor::from_claims(None, 4).unwrap()).await, ["file"]);
+    // A floor after every document leaves only the room files.
+    assert_eq!(
+        list(HistoryFloor::from_claims(Some(at("2026-12-01T00:00:00Z")), 0).unwrap()).await,
+        ["file"]
     );
 }
 
@@ -533,7 +570,7 @@ async fn the_by_id_lookups_the_listing_and_the_file_read_hide_what_entered_befor
     setup(&pool, &org).await;
     seed_room(&pool, &org).await;
     let floor = Some(at(FLOOR));
-    let ids: Vec<String> = ["old", "edge", "new", "gone", "elsewhere"]
+    let ids: Vec<String> = ["file", "old", "edge", "new", "gone", "elsewhere"]
         .iter()
         .map(|id| format!("{org}:{id}"))
         .collect();
@@ -583,18 +620,18 @@ async fn the_by_id_lookups_the_listing_and_the_file_read_hide_what_entered_befor
     };
     assert_eq!(
         sources(None).await,
-        ["edge", "new", "old"],
+        ["edge", "file", "new", "old"],
         "no window shows the live room"
     );
     assert_eq!(
         sources(floor).await,
-        ["edge", "new"],
-        "the window hides the document before it"
+        ["edge", "file", "new"],
+        "the window hides the non-room-file document before it, never the room file"
     );
-    assert_eq!(freshness(None).await, ["edge", "new", "old"]);
+    assert_eq!(freshness(None).await, ["edge", "file", "new", "old"]);
     assert_eq!(
         freshness(floor).await,
-        ["edge", "new"],
+        ["edge", "file", "new"],
         "freshness agrees with sources"
     );
 
@@ -637,8 +674,8 @@ async fn the_by_id_lookups_the_listing_and_the_file_read_hide_what_entered_befor
                 .collect::<Vec<_>>()
         }
     };
-    assert_eq!(listed(None).await, ["old", "new", "edge"]);
-    assert_eq!(listed(floor).await, ["new", "edge"]);
+    assert_eq!(listed(None).await, ["old", "new", "edge", "file"]);
+    assert_eq!(listed(floor).await, ["new", "edge", "file"]);
 
     // One room file: a document before the window answers like a missing id.
     type DocRow = (
@@ -678,6 +715,10 @@ async fn the_by_id_lookups_the_listing_and_the_file_read_hide_what_entered_befor
         "a file that entered at the floor instant reads"
     );
     assert!(read("new", floor).await.is_some());
+    assert!(
+        read("file", floor).await.is_some(),
+        "a room file that entered before the floor stays readable (D21b)"
+    );
 }
 
 fn candidate(document_id: &str) -> ScoredCandidate {
@@ -702,7 +743,7 @@ async fn the_history_gate_drops_a_surviving_candidate_whose_document_entered_bef
     setup(&pool, &org).await;
     seed_room(&pool, &org).await;
     let candidates = || {
-        ["old", "edge", "new", "gone", "not-a-document"]
+        ["file", "old", "edge", "new", "gone", "not-a-document"]
             .iter()
             .map(|id| candidate(&format!("{org}:{id}")))
             .collect::<Vec<_>>()
@@ -732,15 +773,16 @@ async fn the_history_gate_drops_a_surviving_candidate_whose_document_entered_bef
     // No window passes everything, including ids that are not documents: it is not this gate's to judge.
     assert_eq!(
         survivors(HistoryFloor::Open).await,
-        ["old", "edge", "new", "gone", "not-a-document"]
+        ["file", "old", "edge", "new", "gone", "not-a-document"]
     );
     // A window keeps a candidate only when its document is live and entered the room at or after the floor.
     // A deleted document and an id with no `documents` row have no reliable instant here, so they are hidden.
     assert_eq!(
         survivors(HistoryFloor::from_claims(Some(at(FLOOR)), 0).unwrap()).await,
-        ["edge", "new"]
+        ["file", "edge", "new"]
     );
-    assert!(survivors(HistoryFloor::Closed).await.is_empty());
+    // D21b: a closed window keeps only the room file.
+    assert_eq!(survivors(HistoryFloor::Closed).await, ["file"]);
 }
 
 #[tokio::test]
