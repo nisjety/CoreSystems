@@ -160,8 +160,22 @@ impl RetrievalSvc {
         token: Option<&str>,
         pipeline_req: &mut PipelineReq,
     ) -> Result<(), Status> {
+        if let Some(scope) = self.resolve_space_decision(ctx, token).await? {
+            pipeline_req.space_scope = Some(scope);
+        }
+        Ok(())
+    }
+
+    /// Verify and resolve a Space decision presented in metadata, after the caller's identity is verified. `None` when
+    /// no decision was presented (the legacy org read). A presented decision that does not verify or resolve is a
+    /// refusal, never a fall-back to the org read (E-PRIO-02, DEPTH-WS17-RETRIEVAL-GUARDS).
+    async fn resolve_space_decision(
+        &self,
+        ctx: &crate::authz::AuthContext,
+        token: Option<&str>,
+    ) -> Result<Option<crate::space_scope::ResolvedSpaceRetrievalScope>, Status> {
         let Some(token) = token else {
-            return Ok(());
+            return Ok(None);
         };
         let subject = ctx.user_id.as_deref().ok_or_else(|| {
             Status::permission_denied("user subject required for Space retrieval")
@@ -176,14 +190,32 @@ impl RetrievalSvc {
             chrono::Utc::now(),
         )
         .map_err(|_| Status::permission_denied("invalid Space retrieval decision"))?;
-        pipeline_req.space_scope = Some(
-            crate::space_scope::resolve_space_retrieval_scope(&self.pipeline.pool, authority)
-                .await
-                .map_err(|_| Status::permission_denied("Space retrieval binding is unavailable"))?,
-        );
-        Ok(())
+        crate::space_scope::resolve_space_retrieval_scope(&self.pipeline.pool, authority)
+            .await
+            .map(Some)
+            .map_err(|_| Status::permission_denied("Space retrieval binding is unavailable"))
     }
 }
+
+/// The Space narrowing of a chunk or pack read (E-PRIO-02): the verified Space's reference and the member's history
+/// bound, as bind values. `(None, None)` without a Space decision, so the read is the caller's org read as before. With
+/// one, only documents in that Space whose entry the member's window admits (a room file always) are read, and the
+/// caller's own ACL still applies: the Space never widens it.
+fn space_read_binds(
+    scope: Option<&crate::space_scope::ResolvedSpaceRetrievalScope>,
+) -> (Option<String>, Option<chrono::DateTime<chrono::Utc>>) {
+    match scope {
+        Some(scope) => (
+            Some(scope.authority.space_ref.clone()),
+            scope.authority.history_floor.document_bound(),
+        ),
+        None => (None, None),
+    }
+}
+
+/// The SQL predicate of [`space_read_binds`] over a `documents d` join, with `$5` the Space and `$6` the bound.
+const SPACE_READ_PREDICATE: &str = "AND ($5::text IS NULL OR d.space_ref = $5) \
+     AND ($6::timestamptz IS NULL OR d.type = 'space_upload' OR d.created_at >= $6::timestamptz)";
 
 // `tonic::Status` is 176 bytes, over clippy's 128-byte `result_large_err`
 // threshold. Every fallible function in this file returns `Result<_, Status>` —
@@ -203,6 +235,18 @@ fn space_decision_from_metadata(metadata: &MetadataMap) -> Result<Option<&str>, 
                 .map_err(|_| Status::invalid_argument("invalid Space retrieval decision metadata"))
         })
         .transpose()
+}
+
+/// E-PRIO-02: refuse a read that takes no Space scope when the caller presented a Space decision. Presence alone counts,
+/// as at the HTTP boundary and in model-gateway: a Space-scoped caller never falls back to an unlabelled org read.
+#[allow(clippy::result_large_err)]
+fn refuse_space_decision(metadata: &MetadataMap) -> Result<(), Status> {
+    if metadata.contains_key("x-space-decision") {
+        return Err(Status::permission_denied(
+            "Space-scoped retrieval is not available for this read",
+        ));
+    }
+    Ok(())
 }
 
 #[tonic::async_trait]
@@ -424,6 +468,9 @@ impl RetrievalService for RetrievalSvc {
         let ctx = self
             .authorize(&request, &request.get_ref().org_id, None)
             .await?;
+        // E-PRIO-02 (DEPTH-WS17-RETRIEVAL-GUARDS): a trace carries no Space label, so a Space-scoped caller is refused,
+        // as the HTTP boundary refuses a Space decision on a route that does not enforce one.
+        refuse_space_decision(request.metadata())?;
         let req = request.into_inner();
 
         let actor = if ctx.scopes.iter().any(|scope| scope == "org:data:read_all") {
@@ -540,6 +587,10 @@ impl RetrievalService for RetrievalSvc {
         let ctx = self
             .authorize(&request, &request.get_ref().org_id, None)
             .await?;
+        // E-PRIO-02: a presented Space decision is verified and narrows the read to that Space.
+        let space_decision = space_decision_from_metadata(request.metadata())?.map(str::to_owned);
+        let scope = self.resolve_space_decision(&ctx, space_decision.as_deref()).await?;
+        let (space_ref, floor) = space_read_binds(scope.as_ref());
         let req = request.into_inner();
         let grants = self.grants(&ctx).await;
 
@@ -553,34 +604,40 @@ impl RetrievalService for RetrievalSvc {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let chunks = if !req.knowledge_ids.is_empty() {
-            sqlx::query_as::<_, (String, String, String, i32, String, String)>(
+            sqlx::query_as::<_, (String, String, String, i32, String, String)>(&format!(
                 "SELECT ku.knowledge_id, ku.document_id, ku.text, ku.chunk_index, ku.content_hash, ku.embedding_status
                  FROM knowledge_units ku
                  JOIN documents d ON d.document_id = ku.document_id
                  WHERE ku.knowledge_id = ANY($1) AND ku.org_id = $2 AND d.deleted_at IS NULL
                    AND (d.owner_id = $3 OR d.visibility = 'org' OR d.document_id = ANY($4))
+                   {SPACE_READ_PREDICATE}
                  ORDER BY ku.chunk_index"
-            )
+            ))
             .bind(&req.knowledge_ids)
             .bind(&ctx.org_id)
             .bind(ctx.user_id.as_deref())
             .bind(&grants)
+            .bind(space_ref.as_deref())
+            .bind(floor)
             .fetch_all(&mut *tx)
             .await
             .map_err(|e| Status::internal(e.to_string()))?
         } else if let Some(doc_id) = &req.document_id {
-            sqlx::query_as::<_, (String, String, String, i32, String, String)>(
+            sqlx::query_as::<_, (String, String, String, i32, String, String)>(&format!(
                 "SELECT ku.knowledge_id, ku.document_id, ku.text, ku.chunk_index, ku.content_hash, ku.embedding_status
                  FROM knowledge_units ku
                  JOIN documents d ON d.document_id = ku.document_id
                  WHERE ku.document_id = $1 AND ku.org_id = $2 AND d.deleted_at IS NULL
                    AND (d.owner_id = $3 OR d.visibility = 'org' OR d.document_id = ANY($4))
+                   {SPACE_READ_PREDICATE}
                  ORDER BY ku.chunk_index"
-            )
+            ))
             .bind(doc_id)
             .bind(&ctx.org_id)
             .bind(ctx.user_id.as_deref())
             .bind(&grants)
+            .bind(space_ref.as_deref())
+            .bind(floor)
             .fetch_all(&mut *tx)
             .await
             .map_err(|e| Status::internal(e.to_string()))?
@@ -621,6 +678,10 @@ impl RetrievalService for RetrievalSvc {
         let ctx = self
             .authorize(&request, &request.get_ref().org_id, None)
             .await?;
+        // E-PRIO-02: a presented Space decision is verified and narrows the pack to that Space.
+        let space_decision = space_decision_from_metadata(request.metadata())?.map(str::to_owned);
+        let scope = self.resolve_space_decision(&ctx, space_decision.as_deref()).await?;
+        let (space_ref, floor) = space_read_binds(scope.as_ref());
         let req = request.into_inner();
         let grants = self.grants(&ctx).await;
 
@@ -630,17 +691,20 @@ impl RetrievalService for RetrievalSvc {
         let mut tx = pg_org_scope::begin_org_scoped(&self.pipeline.pool, &ctx.org_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
-        let rows = sqlx::query_as::<_, (String, String, String, i32)>(
+        let rows = sqlx::query_as::<_, (String, String, String, i32)>(&format!(
             "SELECT ku.knowledge_id, ku.document_id, ku.text, ku.chunk_index
              FROM knowledge_units ku
              JOIN documents d ON d.document_id = ku.document_id
              WHERE ku.knowledge_id = ANY($1) AND ku.org_id = $2 AND d.deleted_at IS NULL
-               AND (d.owner_id = $3 OR d.visibility = 'org' OR d.document_id = ANY($4))",
-        )
+               AND (d.owner_id = $3 OR d.visibility = 'org' OR d.document_id = ANY($4))
+               {SPACE_READ_PREDICATE}",
+        ))
         .bind(&req.knowledge_ids)
         .bind(&ctx.org_id)
         .bind(ctx.user_id.as_deref())
         .bind(&grants)
+        .bind(space_ref.as_deref())
+        .bind(floor)
         .fetch_all(&mut *tx)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -1021,6 +1085,22 @@ mod zdr_boundary_tests {
                  including the absence of one"
             );
         }
+    }
+
+    #[test]
+    fn a_read_without_a_space_scope_refuses_a_presented_space_decision() {
+        let mut metadata = MetadataMap::new();
+        assert!(super::refuse_space_decision(&metadata).is_ok(), "no decision is the org read");
+        metadata.insert("x-space-decision", MetadataValue::from_static(""));
+        let refused = super::refuse_space_decision(&metadata).expect_err("presence alone refuses");
+        assert_eq!(refused.code(), Code::PermissionDenied);
+    }
+
+    #[test]
+    fn chunk_and_pack_reads_narrow_to_the_verified_space_and_window() {
+        assert_eq!(super::space_read_binds(None), (None, None), "no Space decision keeps the org read");
+        assert!(super::SPACE_READ_PREDICATE.contains("d.space_ref = $5"));
+        assert!(super::SPACE_READ_PREDICATE.contains("d.type = 'space_upload' OR d.created_at >= $6"));
     }
 
     #[test]

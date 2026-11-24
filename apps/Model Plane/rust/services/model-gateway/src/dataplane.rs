@@ -860,8 +860,14 @@ pub async fn get_retrieval_trace(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     bearer: VerifiedBearer,
+    headers: HeaderMap,
     Path(trace_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // E-PRIO-02 (DEPTH-WS17-RETRIEVAL-GUARDS): a trace carries no Space label, so a Space-scoped read is refused like
+    // the other unscoped retrieval reads, before any upstream call.
+    if in_space_context(&headers) {
+        return Err(space_scope_unsupported("/v1/retrieval/traces"));
+    }
     let request = user_data_request(
         ret_pb::GetTraceRequest {
             trace_id,
@@ -2019,5 +2025,45 @@ mod zdr_contract_tests {
         let (status, Json(body)) = result.expect_err("the failure reaches the caller");
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(body["error"]["code"].is_null(), "{body}");
+    }
+}
+
+#[cfg(test)]
+mod space_scope_guard_tests {
+    use super::*;
+
+    /// E-PRIO-02 (DEPTH-WS17-RETRIEVAL-GUARDS): every org-wide retrieval read refuses a Space-scoped request before any
+    /// upstream call, the trace read included. A source scan, so a new read without the guard fails here.
+    #[test]
+    fn every_unscoped_retrieval_read_refuses_a_space_context() {
+        let source = include_str!("dataplane.rs");
+        let code = source.split("#[cfg(test)]").next().expect("code");
+        for handler in [
+            "pub async fn retrieve(",
+            "pub async fn get_retrieval_trace(",
+            "pub async fn get_sources(",
+            "pub async fn get_chunks(",
+            "pub async fn pack_context(",
+        ] {
+            let start = code.find(handler).unwrap_or_else(|| panic!("{handler} moved"));
+            let body = &code[start..];
+            let end = body[1..].find("\npub async fn ").map_or(body.len(), |at| at + 1);
+            let body = &body[..end];
+            let guard = body.find("if in_space_context(&headers)").unwrap_or_else(|| panic!("{handler} has no guard"));
+            let upstream = body.find(".clone()\n        .").unwrap_or(body.len());
+            assert!(guard < upstream, "{handler} checks the Space context before its upstream call");
+        }
+    }
+
+    #[test]
+    fn the_refusal_is_typed_and_names_the_route() {
+        let mut headers = HeaderMap::new();
+        assert!(!in_space_context(&headers));
+        headers.insert(SPACE_DECISION_HEADER, axum::http::HeaderValue::from_static(""));
+        assert!(in_space_context(&headers), "presence alone counts");
+        let (status, Json(body)) = space_scope_unsupported("/v1/retrieval/traces");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "space_scope_unsupported");
+        assert_eq!(body["error"]["details"]["route"], "/v1/retrieval/traces");
     }
 }
