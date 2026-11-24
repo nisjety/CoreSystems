@@ -63,7 +63,17 @@ export function ThreadFollowControl(props: ThreadFollowControlProps) {
     }
   }
 
+  // Where the viewer opened this choice on purpose (the inbox), an unreadable state is said in
+  // words rather than leaving an empty region; elsewhere the control simply stays out.
+  const unreadable = () => props.attentionOn === true && read() === 'unknown'
+
   return (
+    <>
+    <Show when={unreadable()}>
+      <p class="verevon-thread-follow__message" role="status">
+        {i18n.tr('Varslene for denne tråden kan ikke leses nå.', "This thread's notifications cannot be read right now.")}
+      </p>
+    </Show>
     <Show when={on() && current() !== undefined}>
       <div class="verevon-thread-follow" role="group" aria-label={i18n.tr('Varsler for denne tråden', 'Notifications for this thread')}>
         <button
@@ -89,5 +99,6 @@ export function ThreadFollowControl(props: ThreadFollowControlProps) {
         </Show>
       </div>
     </Show>
+    </>
   )
 }

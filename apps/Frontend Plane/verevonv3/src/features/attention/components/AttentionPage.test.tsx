@@ -247,6 +247,20 @@ describe('AttentionPage', () => {
     expect(inbox.setThreadFollow).toHaveBeenCalledWith('room-a', 'thread-1', 'following')
   })
 
+  it('says so in words when the follow of an opened row cannot be read, and offers no buttons', async () => {
+    inbox.listAttentionItems.mockResolvedValue(page({ items: [item({ itemId: 'item-1', kind: 'reply' })] }))
+    inbox.getThreadFollow.mockRejectedValue(new Error('unavailable'))
+
+    renderPage()
+    const row = (await screen.findByText('Nye svar i en tråd du følger i Room Alpha')).closest('li') as HTMLElement
+    fireEvent.click(within(row).getByRole('button', { name: 'Varsler' }))
+
+    expect(await within(row).findByText('Varslene for denne tråden kan ikke leses nå.')).toBeTruthy()
+    expect(within(row).queryByRole('button', { name: 'Følg' })).toBeNull()
+    expect(within(row).queryByRole('button', { name: 'Demp' })).toBeNull()
+    expect(inbox.setThreadFollow).not.toHaveBeenCalled()
+  })
+
   it('offers no follow choice on a row that is not about a post', async () => {
     inbox.listAttentionItems.mockResolvedValue(page({ items: [item({ itemId: 'item-1', kind: 'invite', threadId: null })] }))
 
