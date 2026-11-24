@@ -610,9 +610,11 @@ impl NodePostprocessor for VisibilityGate<'_> {
 /// * D21b: a candidate whose document is a live room file (`type = 'space_upload'`) always survives,
 ///   under any window: room files stay shared under D18.
 /// * `Closed` is a window the engine cannot place any other row against, so nothing else survives.
+/// * D21b: a candidate whose id is a published wiki page (`wiki_pages`, the wiki arm's `document_id`) is
+///   room knowledge, which stays shared under D18, so it survives every window too.
 /// * `Since` keeps any other candidate only when its document is a live `documents` row that entered the
-///   room at or after the floor. A candidate with no such row (a wiki page id, a deleted document) has no
-///   reliable type or source instant here and is dropped.
+///   room at or after the floor. A candidate with no such row and no published wiki page (a deleted
+///   document) has no reliable type or source instant here and is dropped.
 ///
 /// Enforcement: errors propagate. Returning unfiltered candidates because a lookup failed would show a
 /// member what their window hides.
@@ -646,19 +648,20 @@ impl<'a> SpaceHistoryGate<'a> {
 type EnteredDocument = (String, chrono::DateTime<chrono::Utc>);
 
 /// Keeps the candidates the window admits. `entered` maps a document id to its type and the instant it
-/// entered the room; a room file passes every window (D21b), and a candidate with no entry has no reliable
-/// type or source instant and is dropped by a `Since` or `Closed` window. Pure, so the rule is tested
-/// without a database.
+/// entered the room; a room file passes every window (D21b), and so does a published wiki page in
+/// `wiki_pages` (room knowledge, D21b). A candidate with neither has no reliable type or source instant and
+/// is dropped by a `Since` or `Closed` window. Pure, so the rule is tested without a database.
 fn candidates_inside_window(
     nodes: Vec<ScoredCandidate>,
     floor: HistoryFloor,
     entered: &std::collections::HashMap<String, EnteredDocument>,
+    wiki_pages: &std::collections::HashSet<String>,
 ) -> Vec<ScoredCandidate> {
     nodes
         .into_iter()
         .filter(|candidate| match entered.get(&candidate.document_id) {
             Some((document_type, at)) => floor.admits_document(Some(document_type), Some(*at)),
-            None => floor.admits(None),
+            None => wiki_pages.contains(&candidate.document_id) || floor.admits(None),
         })
         .collect()
 }
@@ -702,8 +705,41 @@ impl NodePostprocessor for SpaceHistoryGate<'_> {
             .map(|(document_id, document_type, at)| (document_id, (document_type, at)))
             .collect();
         tx.commit().await?;
+        // D21b: a wiki arm candidate carries the wiki page id, which has no `documents` row. A published
+        // wiki page is room knowledge and stays shared, so it is looked up here rather than dropped. Its own
+        // transaction, like the visibility gate's wiki branch: a failed statement aborts a transaction, and
+        // a failure here only removes (the wiki candidates are dropped), so it is tolerated, not fatal.
+        let unplaced: Vec<String> = doc_ids
+            .iter()
+            .filter(|id| !entered.contains_key(*id))
+            .cloned()
+            .collect();
+        let wiki_pages: std::collections::HashSet<String> = if unplaced.is_empty() {
+            std::collections::HashSet::new()
+        } else {
+            match async {
+                let mut tx = pg_org_scope::begin_org_scoped(self.pool, self.org_id).await?;
+                let rows: Vec<(String,)> = sqlx::query_as(
+                    "SELECT page_id FROM wiki_pages
+                     WHERE page_id = ANY($1) AND page_status = 'published'",
+                )
+                .bind(&unplaced)
+                .fetch_all(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok::<_, anyhow::Error>(rows)
+            }
+            .await
+            {
+                Ok(rows) => rows.into_iter().map(|(id,)| id).collect(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "history window wiki lookup failed; wiki candidates dropped");
+                    std::collections::HashSet::new()
+                }
+            }
+        };
         let before = nodes.len();
-        let kept = candidates_inside_window(nodes, self.floor, &entered);
+        let kept = candidates_inside_window(nodes, self.floor, &entered, &wiki_pages);
         // Counts only: which documents, and how many a window hides, is not told to the reader.
         tracing::debug!(before, after = kept.len(), "history window gate applied");
         Ok(kept)
@@ -933,7 +969,12 @@ mod tests {
             cand("after", 3.0),
             cand("unknown", 2.0),
         ];
-        let kept = candidates_inside_window(nodes.clone(), HistoryFloor::Since(floor), &entered);
+        let kept = candidates_inside_window(
+            nodes.clone(),
+            HistoryFloor::Since(floor),
+            &entered,
+            &Default::default(),
+        );
         assert_eq!(
             ids(&kept),
             vec!["at", "after"],
@@ -941,10 +982,21 @@ mod tests {
         );
 
         // No window changes nothing, even for a document with no instant.
-        let open = candidates_inside_window(nodes.clone(), HistoryFloor::Open, &entered);
+        let open = candidates_inside_window(
+            nodes.clone(),
+            HistoryFloor::Open,
+            &entered,
+            &Default::default(),
+        );
         assert_eq!(ids(&open), vec!["before", "at", "after", "unknown"]);
         // A window the engine cannot place a row against shows nothing.
-        assert!(candidates_inside_window(nodes, HistoryFloor::Closed, &entered).is_empty());
+        assert!(candidates_inside_window(
+            nodes,
+            HistoryFloor::Closed,
+            &entered,
+            &Default::default()
+        )
+        .is_empty());
     }
 
     // D21b: room files stay shared under D18. A room file that entered the room before the floor survives
@@ -971,10 +1023,34 @@ mod tests {
             cand("new-artifact", 2.0),
             cand("unknown", 1.0),
         ];
-        let since = candidates_inside_window(nodes.clone(), HistoryFloor::Since(floor), &entered);
+        let no_wiki = std::collections::HashSet::new();
+        let since = candidates_inside_window(
+            nodes.clone(),
+            HistoryFloor::Since(floor),
+            &entered,
+            &no_wiki,
+        );
         assert_eq!(ids(&since), vec!["old-file", "new-artifact"]);
-        let closed = candidates_inside_window(nodes, HistoryFloor::Closed, &entered);
+        let closed = candidates_inside_window(nodes, HistoryFloor::Closed, &entered, &no_wiki);
         assert_eq!(ids(&closed), vec!["old-file"]);
+    }
+
+    // D21b: the wiki arm's candidates carry a wiki page id, which has no `documents` row. A published wiki
+    // page is room knowledge and passes every window; an id that is neither a live document nor a
+    // published wiki page (a deleted document) is still dropped by a real window.
+    #[test]
+    fn a_published_wiki_page_survives_every_window_and_an_unknown_id_does_not() {
+        let floor = instant("2026-11-18T09:30:00Z");
+        let entered: std::collections::HashMap<String, EnteredDocument> =
+            std::collections::HashMap::new();
+        let wiki: std::collections::HashSet<String> = ["wiki-page".to_string()].into();
+        let nodes = vec![cand("wiki-page", 2.0), cand("deleted-doc", 1.0)];
+        for window in [HistoryFloor::Since(floor), HistoryFloor::Closed] {
+            let kept = candidates_inside_window(nodes.clone(), window, &entered, &wiki);
+            assert_eq!(ids(&kept), vec!["wiki-page"], "{window:?}");
+        }
+        let open = candidates_inside_window(nodes, HistoryFloor::Open, &entered, &wiki);
+        assert_eq!(ids(&open), vec!["wiki-page", "deleted-doc"]);
     }
 
     // `Open` is decided without reading a row, so a pool that is never contacted proves the gate answers it
@@ -982,7 +1058,7 @@ mod tests {
     // survives both), so with no candidates it reads nothing, and with candidates on an unreachable pool it
     // fails closed with an error rather than passing them.
     #[tokio::test]
-    async fn an_open_window_passes_and_a_closed_one_fails_closed_without_a_lookup() {
+    async fn an_open_window_skips_the_lookup_and_a_failed_lookup_fails_closed() {
         // A short acquire timeout: the closed window's lookup must fail against this pool, not wait 30 s.
         let pool = sqlx::postgres::PgPoolOptions::new()
             .acquire_timeout(std::time::Duration::from_secs(2))

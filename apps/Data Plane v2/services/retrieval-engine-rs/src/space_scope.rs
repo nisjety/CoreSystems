@@ -1151,6 +1151,24 @@ mod tests {
             .expect("a closed window binds a bound");
         assert!(closed > Utc::now() + chrono::Duration::days(365 * 1000));
         assert_eq!(closed, at("9999-12-31T23:59:59Z"));
+        // The SQL predicate `$n IS NULL OR type = 'space_upload' OR created_at >= $n` under the closed
+        // bound, evaluated as the Rust copy does: only a room file passes, whatever instant it entered at.
+        let passes = |document_type: &str, created_at: DateTime<Utc>| {
+            document_type == ROOM_FILE_DOCUMENT_TYPE || created_at >= closed
+        };
+        for created_at in [floor, Utc::now(), Utc::now() + chrono::Duration::days(3650)] {
+            assert!(passes(ROOM_FILE_DOCUMENT_TYPE, created_at));
+            assert!(!passes("chat_export", created_at));
+            assert_eq!(
+                HistoryFloor::Closed
+                    .admits_document(Some(ROOM_FILE_DOCUMENT_TYPE), Some(created_at)),
+                passes(ROOM_FILE_DOCUMENT_TYPE, created_at)
+            );
+            assert_eq!(
+                HistoryFloor::Closed.admits_document(Some("chat_export"), Some(created_at)),
+                passes("chat_export", created_at)
+            );
+        }
     }
 
     #[test]
