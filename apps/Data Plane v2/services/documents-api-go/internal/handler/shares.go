@@ -103,7 +103,7 @@ func (h *DocumentHandler) shareOwner(w http.ResponseWriter, r *http.Request, wri
 		// Fails closed: a grant is durable state, so a missing or true
 		// retention posture refuses it like any other durable write.
 		if reason := persistentZDRReason(claims, nil); reason != "" {
-			writeError(w, http.StatusForbidden, reason)
+			writeZDRDurableMutationRefusal(w, reason)
 			return nil, false
 		}
 	}

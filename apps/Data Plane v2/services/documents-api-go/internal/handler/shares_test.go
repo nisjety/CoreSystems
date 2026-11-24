@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -110,7 +111,7 @@ func TestShareWritesRefuseVerifiedZDRPosture(t *testing.T) {
 	zdr := auth.userToken(testOrg, "owner-1", true)
 	for _, tc := range shareRoutes[1:] { // add, remove: durable writes
 		rec := shareCall(router, tc.method, tc.path, zdr, tc.body)
-		if rec.Code != http.StatusForbidden {
+		if rec.Code != http.StatusPreconditionFailed || !strings.Contains(rec.Body.String(), `"code":"zdr_durable_mutation_forbidden"`) {
 			t.Errorf("%s with zdr=true: %d %s", tc.name, rec.Code, rec.Body.String())
 		}
 		if len(stub.calls) != 0 {

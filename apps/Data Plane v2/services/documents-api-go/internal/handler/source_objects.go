@@ -28,7 +28,7 @@ func NewSourceObjectHandler(sourceObjects *repo.SourceObjectRepo) *SourceObjectH
 func (h *SourceObjectHandler) Upsert(w http.ResponseWriter, r *http.Request) {
 	orgID := OrgIDFrom(r.Context())
 	if reason := sourceObjectPersistenceZDRReason(verifiedClaims(r)); reason != "" {
-		writeError(w, http.StatusForbidden, reason)
+		writeZDRDurableMutationRefusal(w, reason)
 		return
 	}
 	var input model.UpsertSourceObjectInput

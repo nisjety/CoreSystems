@@ -28,8 +28,11 @@ func TestSourceObjectUpsertRejectsSignedZDRBeforePersistence(t *testing.T) {
 	handler := NewSourceObjectHandler(nil)
 	OrgIDMiddleware(http.HandlerFunc(handler.Upsert)).ServeHTTP(recorder, req)
 
-	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusForbidden)
+	if recorder.Code != http.StatusPreconditionFailed {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusPreconditionFailed)
+	}
+	if !strings.Contains(recorder.Body.String(), `"code":"zdr_durable_mutation_forbidden"`) {
+		t.Fatalf("not the typed ZDR envelope: %s", recorder.Body.String())
 	}
 	if !strings.Contains(recorder.Body.String(), "verified token zdr=true forbids durable source-object persistence") {
 		t.Fatalf("unexpected response body: %s", recorder.Body.String())
