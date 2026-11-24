@@ -230,6 +230,39 @@ fn parse_query(params: &HashMap<String, String>) -> Result<ListQuery, Reply> {
     })
 }
 
+/// The read decisions of one bulk request: per Space the signed `(decision_ref, token)` pair
+/// Session Core verifies, and the member's D18 history window where Control issued one.
+#[derive(Default)]
+struct ReadDecisions {
+    tokens: HashMap<String, (String, String)>,
+    /// `history_floor_at` of the decision Control returned, in epoch milliseconds: the instant
+    /// before which nothing of that Space is the member's to see (C-PRIO-05). Absent = no window.
+    /// Only a narrowing: it hides Application rows and counts, it never admits one.
+    floors: HashMap<String, i64>,
+}
+
+/// The D18 timestamp floor of one decision object, in epoch ms. `Ok(None)` without one; `Err(())`
+/// when the field is present but unreadable, so the caller drops the decision (fail closed toward
+/// hiding: no decision means no counts and restricted titles).
+fn decision_floor_ms(decision: Option<&Value>) -> Result<Option<i64>, ()> {
+    match decision.and_then(|decision| decision.get("history_floor_at")) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(raw)) => chrono::DateTime::parse_from_rfc3339(raw.trim())
+            .map(|at| Some(at.timestamp_millis()))
+            .map_err(|_| ()),
+        Some(_) => Err(()),
+    }
+}
+
+/// Whether an Application row is inside its Space's history window: `true` without a floor, and
+/// `false` for a row whose `createdAt` is before the floor or missing.
+fn inside_floor(row: &Value, floors: &HashMap<String, i64>) -> bool {
+    let Some(floor) = str_field(row, "spaceRef").and_then(|space_ref| floors.get(space_ref)) else {
+        return true;
+    };
+    row.get("createdAt").and_then(Value::as_i64).is_some_and(|at| at >= *floor)
+}
+
 /// One Control `model.thread.read` decision per Space, in a single request. A Space the caller may
 /// not read, or any failure, is simply absent from the answer: its titles then read `restricted`.
 /// `Err(())` is Control being unreachable or answering something unreadable.
@@ -238,9 +271,9 @@ async fn bulk_read_decisions(
     user: &AuthenticatedUser,
     org_id: &str,
     space_refs: &[String],
-) -> Result<HashMap<String, (String, String)>, ()> {
+) -> Result<ReadDecisions, ()> {
     if space_refs.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(ReadDecisions::default());
     }
     let stamp = unix_nanos();
     let items: Vec<Value> = space_refs
@@ -273,7 +306,7 @@ async fn bulk_read_decisions(
     }
     let data = unwrap_data(&response);
     let results = data.get("results").and_then(Value::as_array).ok_or(())?;
-    let mut decisions = HashMap::new();
+    let mut decisions = ReadDecisions::default();
     for result in results {
         if result.get("status").and_then(Value::as_str) != Some("issued") {
             continue;
@@ -285,11 +318,18 @@ async fn bulk_read_decisions(
             .and_then(Value::as_str)
             .unwrap_or_default();
         let token = result.get("token").and_then(Value::as_str).unwrap_or_default();
+        // A window that cannot be read drops the decision rather than showing the whole room.
+        let Ok(floor) = decision_floor_ms(result.get("decision")) else {
+            continue;
+        };
         if !space_ref.is_empty() && !decision_ref.is_empty() && !token.is_empty() {
-            decisions.insert(
+            decisions.tokens.insert(
                 space_ref.to_owned(),
                 (decision_ref.to_owned(), token.to_owned()),
             );
+            if let Some(floor) = floor {
+                decisions.floors.insert(space_ref.to_owned(), floor);
+            }
         }
     }
     Ok(decisions)
@@ -525,9 +565,10 @@ async fn list_items(
     // and are still listed; their titles read `restricted` and there are no live approvals.
     let mut answer = SessionAnswer::default();
     let mut decisions: HashMap<String, (String, String)> = HashMap::new();
+    let mut floors: HashMap<String, i64> = HashMap::new();
     if !zdr && !wanted.is_empty() {
         match bulk_read_decisions(&state, &user, &org_id, &wanted).await {
-            Ok(minted) => decisions = minted,
+            Ok(minted) => (decisions, floors) = (minted.tokens, minted.floors),
             Err(()) => gaps.push("space_decisions"),
         }
         if !decisions.is_empty() {
@@ -537,6 +578,10 @@ async fn list_items(
             }
         }
     }
+    // D18 (C-PRIO-05): a row created before the member's history window of its Space is not
+    // theirs to see, so it is dropped like a row of a Space that left the index. A page may then
+    // be short; the cursor still continues it.
+    let rows: Vec<&Value> = rows.into_iter().filter(|row| inside_floor(row, &floors)).collect();
 
     let names: HashMap<String, String> = organization_space_labels(&state, &user, &org_id)
         .await
@@ -953,8 +998,13 @@ const MAX_FLIGHT_SLOTS: usize = 4096;
 /// user and `refs` wait for one computation, and a successful answer is reused for the window,
 /// so several tabs or pollers cost one Control and Session Core fan-out. Only a 200 is reused; a
 /// refusal, a 429 or a 503 is never kept. The answer holds ids and counts only (the aggregate
-/// asks for no titles) and lives in process memory for at most the window: no durable state.
-/// A write of the caller's own attention state forgets that caller's answers at once.
+/// asks for no titles) and lives in process memory only: no durable state. It is SERVED for at
+/// most the window; an expired body may stay in its slot until the slot is reused or pruned
+/// (above `MAX_FLIGHT_SLOTS`), but it is never served again. A write of the caller's own
+/// attention state (an item, a level, a marker, a decided approval) forgets that caller's
+/// answers at once, in THIS process only: the slots are not shared between gateway replicas, so
+/// with more than one replica a poll that lands on another replica can show the old counts for
+/// up to the window.
 struct AggregateFlights {
     window: Duration,
     slots: Mutex<HashMap<String, Arc<tokio::sync::Mutex<Option<(Instant, Value)>>>>>,
@@ -1026,7 +1076,7 @@ pub(super) fn attention_aggregate_changed(org_id: &str, user_id: &str) {
 
 /// Forgets the caller's aggregate answers when dropped, so a write path that returns early or
 /// late still leaves no stale badge behind it.
-struct ForgetAggregateOnDrop {
+pub(super) struct ForgetAggregateOnDrop {
     org_id: String,
     user_id: String,
 }
@@ -1037,7 +1087,7 @@ impl Drop for ForgetAggregateOnDrop {
     }
 }
 
-fn forget_aggregate_on_drop(org_id: &str, user: &AuthenticatedUser) -> ForgetAggregateOnDrop {
+pub(super) fn forget_aggregate_on_drop(org_id: &str, user: &AuthenticatedUser) -> ForgetAggregateOnDrop {
     ForgetAggregateOnDrop { org_id: org_id.to_owned(), user_id: user.user_id.clone() }
 }
 
@@ -1301,21 +1351,39 @@ async fn compute_attention(
     let truncated = refs.len() > MAX_SPACES;
     refs.truncate(MAX_SPACES);
 
-    // Application: the caller's own marker, level and open mentions.
+    // Control: one read decision per room; a room the caller is not entitled to simply has none.
+    // Asked first so each room's history window (D18) reaches the Application counts.
+    let (decisions, floors, decisions_ok) = if refs.is_empty() {
+        (HashMap::new(), HashMap::new(), true)
+    } else {
+        match bulk_read_decisions(&state, &user, &org_id, &refs).await {
+            Ok(minted) => (minted.tokens, minted.floors, true),
+            Err(()) => (HashMap::new(), HashMap::new(), false),
+        }
+    };
+
+    // Application: the caller's own marker, level and open mentions. A room with a history window
+    // counts only the items created inside it (C-PRIO-05).
     let application = if refs.is_empty() {
         Ok(json!({ "rooms": [], "otherOpen": 0 }))
     } else {
-        convex_gateway_call(
-            &state,
-            "query",
-            "spaceAttention:attentionForGateway",
-            json!({
-                "externalAuthId": user.user_id,
-                "externalOrgId": org_id,
-                "spaceRefs": refs,
-            }),
-        )
-        .await
+        let mut args = json!({
+            "externalAuthId": user.user_id,
+            "externalOrgId": org_id,
+            "spaceRefs": refs,
+        });
+        if !floors.is_empty() {
+            let windows: Vec<Value> = refs
+                .iter()
+                .filter_map(|space_ref| {
+                    floors
+                        .get(space_ref)
+                        .map(|floor| json!({ "spaceRef": space_ref, "floorAt": floor }))
+                })
+                .collect();
+            args["floors"] = json!(windows);
+        }
+        convex_gateway_call(&state, "query", "spaceAttention:attentionForGateway", args).await
     };
     let application_ok = application.is_ok();
     let application = application.unwrap_or_else(|()| json!({ "rooms": [], "otherOpen": 0 }));
@@ -1330,16 +1398,6 @@ async fn compute_attention(
             rows.insert(space_ref.to_owned(), row);
         }
     }
-
-    // Control: one read decision per room; a room the caller is not entitled to simply has none.
-    let (decisions, decisions_ok) = if refs.is_empty() {
-        (HashMap::new(), true)
-    } else {
-        match bulk_read_decisions(&state, &user, &org_id, &refs).await {
-            Ok(decisions) => (decisions, true),
-            Err(()) => (HashMap::new(), false),
-        }
-    };
 
     // Session Core: counts since each room's effective marker (none means nothing is unread).
     let session = if decisions.is_empty() {
@@ -2796,5 +2854,154 @@ mod tests {
             assert_eq!(got["error"]["code"], code, "{body}");
         }
         assert!(convex_calls(&member, "spaceAttention:setThreadFollowForGateway").await.is_empty());
+    }
+
+    // ---- D18 history windows (C-PRIO-05) ---------------------------------------------------------
+
+    /// 2026-11-18T09:30:00Z in epoch milliseconds.
+    const FLOOR_MS: i64 = 1_794_994_200_000;
+
+    /// Decisions as Control issues them; `floor` adds the member's `history_floor_at`.
+    async fn mount_windowed_decisions(fx: &Fx, issued: &[(&str, Option<&str>)]) {
+        let results: Vec<Value> = issued
+            .iter()
+            .map(|(space_ref, floor)| {
+                let mut decision = json!({"decision_ref": format!("d-{space_ref}")});
+                if let Some(floor) = floor {
+                    decision["history_floor_at"] = json!(floor);
+                }
+                json!({"space_ref": space_ref, "status": "issued", "decision": decision,
+                       "token": format!("t-{space_ref}")})
+            })
+            .collect();
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-read-decisions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"results": results}})))
+            .mount(&fx.user_core)
+            .await;
+    }
+
+    #[test]
+    fn a_decision_floor_is_read_as_epoch_ms_and_an_unreadable_one_is_refused() {
+        assert_eq!(decision_floor_ms(None), Ok(None));
+        assert_eq!(decision_floor_ms(Some(&json!({"decision_ref": "d"}))), Ok(None));
+        assert_eq!(decision_floor_ms(Some(&json!({"history_floor_at": null}))), Ok(None));
+        assert_eq!(
+            decision_floor_ms(Some(&json!({"history_floor_at": "2026-11-18T09:30:00Z"}))),
+            Ok(Some(FLOOR_MS))
+        );
+        assert_eq!(
+            decision_floor_ms(Some(&json!({"history_floor_at": "2026-11-18T10:30:00+01:00"}))),
+            Ok(Some(FLOOR_MS))
+        );
+        assert_eq!(decision_floor_ms(Some(&json!({"history_floor_at": "yesterday"}))), Err(()));
+        assert_eq!(decision_floor_ms(Some(&json!({"history_floor_at": 17}))), Err(()));
+    }
+
+    #[test]
+    fn a_row_before_its_rooms_floor_is_outside_and_a_row_without_a_floor_is_inside() {
+        let floors = HashMap::from([("room-w".to_owned(), FLOOR_MS)]);
+        let row = |space: &str, at: Value| json!({"spaceRef": space, "createdAt": at});
+        assert!(inside_floor(&row("room-w", json!(FLOOR_MS)), &floors), "at the floor");
+        assert!(inside_floor(&row("room-w", json!(FLOOR_MS + 1)), &floors));
+        assert!(!inside_floor(&row("room-w", json!(FLOOR_MS - 1)), &floors), "before the floor");
+        assert!(!inside_floor(&row("room-w", Value::Null), &floors), "no time under a floor is hidden");
+        assert!(inside_floor(&row("room-x", json!(1)), &floors), "another room has no floor");
+        assert!(inside_floor(&row("room-w", json!(1)), &HashMap::new()));
+    }
+
+    #[tokio::test]
+    async fn the_aggregate_sends_each_rooms_window_to_application_and_drops_an_unreadable_one() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false), "editor").await;
+        mount_index(&fx, &["room-a", "room-w", "room-bad"]).await;
+        mount_windowed_decisions(
+            &fx,
+            &[("room-a", None), ("room-w", Some("2026-11-18T09:30:00Z")), ("room-bad", Some("soon"))],
+        )
+        .await;
+        mount_convex(&fx, "/api/query", "spaceAttention:attentionForGateway", value(json!({"rooms": [], "otherOpen": 0}))).await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/spaces/attention"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": [
+                {"space_id": "room-a", "status": "ok", "pending": []},
+                {"space_id": "room-w", "status": "ok", "pending": []}
+            ]})))
+            .mount(&fx.model_gateway)
+            .await;
+        let (status, body) = call(&fx, "GET", "/api/v1/spaces/attention", None).await;
+        assert_eq!(status, 200, "{body}");
+        let asked = convex_calls(&fx, "spaceAttention:attentionForGateway").await;
+        assert_eq!(asked.len(), 1);
+        assert_eq!(
+            asked[0]["args"]["floors"],
+            json!([{"spaceRef": "room-w", "floorAt": FLOOR_MS}]),
+            "only the windowed room carries a floor"
+        );
+        // An unreadable window is no decision: no counts and Session Core never hears of the room.
+        assert_eq!(room(&body, "room-bad")["gaps"], json!(["read_decision"]));
+        let sent: Vec<Value> = fx
+            .model_gateway
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter_map(|request| serde_json::from_slice::<Value>(&request.body).ok())
+            .collect();
+        assert!(sent.iter().all(|body| !body.to_string().contains("room-bad")), "{sent:?}");
+    }
+
+    #[tokio::test]
+    async fn the_aggregate_sends_no_floors_when_no_room_has_a_window() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false), "editor").await;
+        mount_index(&fx, &["room-a"]).await;
+        mount_decisions(&fx, &["room-a"]).await;
+        mount_convex(&fx, "/api/query", "spaceAttention:attentionForGateway", value(json!({"rooms": [], "otherOpen": 0}))).await;
+        let (status, _) = call(&fx, "GET", "/api/v1/spaces/attention", None).await;
+        assert_eq!(status, 200);
+        let asked = convex_calls(&fx, "spaceAttention:attentionForGateway").await;
+        assert!(asked[0]["args"].get("floors").is_none(), "{}", asked[0]);
+    }
+
+    #[tokio::test]
+    async fn the_inbox_drops_rows_created_before_the_members_window() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false), "editor").await;
+        mount_index(&fx, &["room-a", "room-w"]).await;
+        mount_windowed_decisions(&fx, &[("room-a", None), ("room-w", Some("2026-11-18T09:30:00Z"))]).await;
+        let row = |id: &str, space: &str, at: i64| {
+            json!({"itemId": id, "kind": "mention", "spaceRef": space, "threadId": format!("th-{id}"),
+                   "actorKind": "user", "state": "open", "count": 1, "createdAt": at, "updatedAt": at})
+        };
+        mount_convex(
+            &fx,
+            "/api/query",
+            "spaceAttention:listItemsForGateway",
+            value(json!({"hidePreview": false, "nextCursor": null, "items": [
+                row("old-a", "room-a", FLOOR_MS - 5_000),
+                row("new-w", "room-w", FLOOR_MS + 5_000),
+                row("old-w", "room-w", FLOOR_MS - 5_000),
+            ]})),
+        )
+        .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/spaces/attention"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": [
+                {"space_id": "room-a", "status": "ok", "pending": [], "headlines": []},
+                {"space_id": "room-w", "status": "ok", "pending": [], "headlines": []}
+            ]})))
+            .mount(&fx.model_gateway)
+            .await;
+        let (status, body) = call(&fx, "GET", "/api/v1/spaces/attention/items", None).await;
+        assert_eq!(status, 200, "{body}");
+        let ids: Vec<&str> = body["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["item_id"].as_str())
+            .collect();
+        // room-a has no window, so its old row stays; room-w's pre-window row is gone.
+        assert_eq!(ids, ["old-a", "new-w"]);
     }
 }

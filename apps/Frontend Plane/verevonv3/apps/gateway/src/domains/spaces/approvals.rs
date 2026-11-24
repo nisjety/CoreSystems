@@ -445,6 +445,9 @@ pub(crate) async fn decide_space_approval(
         Ok(scope) => scope,
         Err(reply) => return reply,
     };
+    // A decided approval leaves the caller's needs-you: their next attention poll is computed
+    // afresh, not served from the single-flight window (C-PRIO-05), whichever way this returns.
+    let _forget_attention = super::attention::forget_aggregate_on_drop(&org_id, user);
     // The decision's reason is free text that the approval keeps: a zero-retention caller is refused
     // here, typed, before any Control or Session Core call. The local checks above answer first, so a
     // bad request keeps its own 400 or 403 whatever the org's posture. The route and the action share
