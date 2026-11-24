@@ -539,6 +539,22 @@ async fn write_canvas(
     step_id: &str,
     arguments: &Arguments,
 ) -> Result<String, String> {
+    write_canvas_with(client, bearer, space_ref, run_id, org_id, step_id, arguments, map_write).await
+}
+
+/// [`write_canvas`] with the reply mapping passed in: the live tool maps a reply for the model, the approved continuation maps it
+/// for the delivery worker. Everything before the reply (the decision, the key, the one transport retry) is the same.
+#[allow(clippy::too_many_arguments)]
+async fn write_canvas_with(
+    client: &CanvasClient,
+    bearer: &str,
+    space_ref: &str,
+    run_id: &str,
+    org_id: &str,
+    step_id: &str,
+    arguments: &Arguments,
+    map: fn(&WikiReply) -> Result<String, String>,
+) -> Result<String, String> {
     let Arguments::Write {
         expected_version_id,
         content,
@@ -576,7 +592,7 @@ async fn write_canvas(
             .header(DECISION_HEADER, &token)
             .json(&body);
         match send(request).await {
-            Ok(reply) => return map_write(&reply),
+            Ok(reply) => return map(&reply),
             Err(()) if attempt == 0 => attempt += 1,
             Err(()) => return Err(CODE_UNKNOWN_OUTCOME.to_owned()),
         }
@@ -660,5 +676,259 @@ pub(crate) async fn execute_if_configured(
             output: String::new(),
             error: Some(code),
         },
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// D22z (WS19-OQ2): the approved continuation of a canvas write.
+//
+// The agent canvas write is an `ask` row. The owner ruled that it resumes as a resumable kind: when a person grants the approval,
+// the approval delivery worker runs the save cold, as the requester, from the frozen continuation descriptor. The descriptor is
+// credential-free, so the worker cannot present the run's delegated user bearer. It presents execution-core's own data-plane
+// service bearer with `wiki.canvas.continue`, which wiki-store admits on the save route only, only behind its continuation switch,
+// and only with an agent run-action decision; the requester is the subject Control signs into that decision (wiki-store
+// `handler/canvas_continuation.go`). Everything else is the live save: a fresh Control decision bound to the digest of the frozen
+// arguments and to the same run-and-step idempotency key, so a worker retry replays the stored version instead of saving twice.
+// The kind is listed in `space_gate::RESUMABLE_KINDS` only together with mp-contracts' `RESUMABLE_DESCRIPTOR_TOOLS`; until then
+// the worker's registry gate refuses it before this code runs.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+/// The data-plane scopes of the continuation bearer: the write scope every canvas save needs and the continuation lane's own.
+const CONTINUATION_SCOPES: [&str; 2] = ["wiki.write", "wiki.canvas.continue"];
+const DATA_PLANE_AUDIENCE: &str = "data-plane";
+/// The continuation's failure word for a save whose expected head moved after the approval was asked: the save did not apply.
+pub(crate) const CODE_HEAD_MOVED: &str = "canvas_head_moved";
+
+/// Whether a frozen descriptor input is a valid canvas write under the closed schema.
+#[must_use]
+pub(crate) fn is_valid_write_input(tool_input: &str) -> bool {
+    matches!(parse_arguments(WRITE_ACTION, tool_input), Ok(Arguments::Write { .. }))
+}
+
+#[derive(Deserialize)]
+struct MintedToken {
+    token: String,
+    #[serde(default)]
+    audience: String,
+}
+
+/// Mints execution-core's data-plane bearer for the tenant org at Auth Core. Any failure is `decision_unavailable`: nothing has
+/// happened yet, so the worker may try again.
+async fn mint_continuation_bearer_at(
+    http: &Client,
+    auth_core: &Url,
+    service_id: &str,
+    credential: &str,
+    org_id: &str,
+) -> Result<String, String> {
+    let url = endpoint(auth_core, "/api/data-plane/internal-token")?;
+    let mut key = reqwest::header::HeaderValue::from_str(credential)
+        .map_err(|_| CODE_DECISION_UNAVAILABLE.to_owned())?;
+    key.set_sensitive(true);
+    let response = http
+        .post(url)
+        .timeout(CONTROL_TIMEOUT)
+        .header("x-service-id", service_id)
+        .header("x-service-api-key", key)
+        .json(&json!({
+            "orgId": org_id,
+            "scopes": CONTINUATION_SCOPES,
+            "reason": "execution-core approved room canvas continuation",
+        }))
+        .send()
+        .await
+        .map_err(|_| CODE_DECISION_UNAVAILABLE.to_owned())?;
+    if !response.status().is_success() {
+        return Err(CODE_DECISION_UNAVAILABLE.to_owned());
+    }
+    let minted = response
+        .json::<MintedToken>()
+        .await
+        .map_err(|_| CODE_DECISION_UNAVAILABLE.to_owned())?;
+    let token = minted.token.trim();
+    if token.is_empty() || token.len() > MAX_TOKEN_BYTES || minted.audience != DATA_PLANE_AUDIENCE {
+        return Err(CODE_DECISION_UNAVAILABLE.to_owned());
+    }
+    Ok(token.to_owned())
+}
+
+/// The continuation bearer from this process's Auth Core configuration (`AUTH_CORE_URL`, `EXECUTION_CORE_SERVICE_ID`,
+/// `EXECUTION_CORE_SERVICE_API_KEY`). Missing configuration is `decision_unavailable`.
+async fn mint_continuation_bearer(client: &CanvasClient, org_id: &str) -> Result<String, String> {
+    let (Some(auth_core), Some(credential)) =
+        (env_value("AUTH_CORE_URL"), env_value("EXECUTION_CORE_SERVICE_API_KEY"))
+    else {
+        return Err(CODE_DECISION_UNAVAILABLE.to_owned());
+    };
+    let service_id =
+        env_value("EXECUTION_CORE_SERVICE_ID").unwrap_or_else(|| "execution-core".to_owned());
+    let auth_core = service_base_url(
+        &auth_core,
+        "Auth Core",
+        env_flag("EXECUTION_CORE_ALLOW_INSECURE_TICKET_LOOPBACK"),
+    )
+    .map_err(|_| CODE_DECISION_UNAVAILABLE.to_owned())?;
+    let credential = bounded_secret(&credential, "execution-core service credential")
+        .map_err(|_| CODE_DECISION_UNAVAILABLE.to_owned())?;
+    mint_continuation_bearer_at(&client.http, &auth_core, &service_id, &credential, org_id).await
+}
+
+/// Maps a save reply for the delivery worker. `Ok` is the receipt: the saved version (also on an idempotent replay) or, when the
+/// content was already the head, the head version. A moved head is `canvas_head_moved`; a refusal is its model-facing code.
+fn map_continuation(reply: &WikiReply) -> Result<String, String> {
+    #[derive(Deserialize)]
+    struct Unchanged {
+        #[serde(default)]
+        head_version_id: String,
+    }
+    if reply.status == StatusCode::CREATED {
+        let envelope: DataEnvelope<WriteData> =
+            serde_json::from_slice(&reply.body).map_err(|_| CODE_UNKNOWN_OUTCOME.to_owned())?;
+        return envelope
+            .data
+            .version
+            .map(|version| version.version_id)
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| CODE_UNKNOWN_OUTCOME.to_owned());
+    }
+    if reply.status == StatusCode::OK {
+        let envelope: DataEnvelope<Unchanged> =
+            serde_json::from_slice(&reply.body).map_err(|_| CODE_UNKNOWN_OUTCOME.to_owned())?;
+        let head = envelope.data.head_version_id;
+        return if head.trim().is_empty() {
+            Err(CODE_UNKNOWN_OUTCOME.to_owned())
+        } else {
+            Ok(head)
+        };
+    }
+    let code = error_code(&reply.body);
+    if reply.status == StatusCode::CONFLICT && code == "canvas_head_moved" {
+        return Err(CODE_HEAD_MOVED.to_owned());
+    }
+    Err(refusal_code(reply.status, &code))
+}
+
+/// Runs an approved canvas write cold for the delivery worker (D22z). `tool_input` is the descriptor's frozen input, and the room is
+/// the Space the descriptor names. `Ok` is the receipt; `Err` is a code `map_continuation` or the adapter names.
+pub(crate) async fn execute_approved_continuation(
+    tool_input: &str,
+    run_id: &str,
+    org_id: &str,
+    step_id: &str,
+    space_ref: &str,
+) -> Result<String, String> {
+    let client = match shared() {
+        Ok(Some(client)) => client,
+        Ok(None) => return Err(CODE_NOT_OFFERED.to_owned()),
+        Err(_) => return Err(CODE_DECISION_UNAVAILABLE.to_owned()),
+    };
+    let arguments = parse_arguments(WRITE_ACTION, tool_input)?;
+    let run_id = bounded_identifier(run_id)?;
+    let org_id = bounded_identifier(org_id)?;
+    let step_id = bounded_identifier(step_id)?;
+    let space_ref = bounded_identifier(space_ref)?;
+    let bearer = mint_continuation_bearer(client, &org_id).await?;
+    write_canvas_with(
+        client,
+        &bearer,
+        &space_ref,
+        &run_id,
+        &org_id,
+        &step_id,
+        &arguments,
+        map_continuation,
+    )
+    .await
+}
+
+#[cfg(test)]
+mod continuation_tests {
+    use super::*;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn reply(status: u16, body: &serde_json::Value) -> WikiReply {
+        WikiReply {
+            status: StatusCode::from_u16(status).expect("status"),
+            body: body.to_string().into_bytes(),
+        }
+    }
+
+    #[test]
+    fn a_frozen_write_input_is_checked_against_the_closed_schema() {
+        assert!(is_valid_write_input(r#"{"expected_version_id":"","content":"room"}"#));
+        assert!(is_valid_write_input(r#"{"expected_version_id":"v-1","content":"x","summary":"s"}"#));
+        // The model cannot name a room, a canvas or any undeclared field, and the content bounds hold.
+        assert!(!is_valid_write_input(r#"{"expected_version_id":"","content":"x","space_ref":"other"}"#));
+        assert!(!is_valid_write_input(r#"{"expected_version_id":"","content":""}"#));
+        assert!(!is_valid_write_input(r#"{"content":"x"}"#));
+        assert!(!is_valid_write_input("not json"));
+    }
+
+    #[test]
+    fn a_continuation_reply_maps_to_a_receipt_or_a_code() {
+        let saved = reply(201, &json!({"data":{"canvas_id":"c-1","version":{"version_id":"v-2","version_no":2},"deduplicated":true}}));
+        assert_eq!(map_continuation(&saved), Ok("v-2".to_owned()));
+        let unchanged = reply(200, &json!({"data":{"canvas_id":"c-1","head_version_id":"v-1","unchanged":true}}));
+        assert_eq!(map_continuation(&unchanged), Ok("v-1".to_owned()));
+        let moved = reply(409, &json!({"error":{"code":"canvas_head_moved","message":"m","details":{"head":null}}}));
+        assert_eq!(map_continuation(&moved), Err(CODE_HEAD_MOVED.to_owned()));
+        let zdr = reply(412, &json!({"error":{"code":"zdr_durable_mutation_forbidden","message":"m"}}));
+        assert_eq!(map_continuation(&zdr), Err(CODE_ZDR.to_owned()));
+        let refused = reply(403, &json!({"error":{"code":"space_decision_mismatch","message":"m"}}));
+        assert_eq!(map_continuation(&refused), Err(CODE_NOT_AUTHORIZED.to_owned()));
+        let no_version = reply(201, &json!({"data":{"canvas_id":"c-1"}}));
+        assert_eq!(map_continuation(&no_version), Err(CODE_UNKNOWN_OUTCOME.to_owned()));
+        let garbage = WikiReply { status: StatusCode::OK, body: b"not json".to_vec() };
+        assert_eq!(map_continuation(&garbage), Err(CODE_UNKNOWN_OUTCOME.to_owned()));
+    }
+
+    #[tokio::test]
+    async fn the_continuation_bearer_is_minted_for_the_tenant_with_the_lane_scopes() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/data-plane/internal-token"))
+            .and(header("x-service-id", "execution-core"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"token":"dp-token","audience":"data-plane","expiresInSeconds":300}),
+            ))
+            .mount(&server)
+            .await;
+        let base = Url::parse(&server.uri()).expect("url");
+        let token =
+            mint_continuation_bearer_at(&Client::new(), &base, "execution-core", &"k".repeat(32), "org-1").await;
+        assert_eq!(token, Ok("dp-token".to_owned()));
+        let requests = server.received_requests().await.expect("requests");
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).expect("json");
+        assert_eq!(body["orgId"], "org-1");
+        assert_eq!(body["scopes"], json!(["wiki.write", "wiki.canvas.continue"]));
+    }
+
+    #[tokio::test]
+    async fn a_refused_or_misaddressed_mint_is_decision_unavailable() {
+        let refused = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/data-plane/internal-token"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&refused)
+            .await;
+        let base = Url::parse(&refused.uri()).expect("url");
+        assert_eq!(
+            mint_continuation_bearer_at(&Client::new(), &base, "execution-core", &"k".repeat(32), "org-1").await,
+            Err(CODE_DECISION_UNAVAILABLE.to_owned())
+        );
+        let wrong = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/data-plane/internal-token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"token":"t","audience":"capability-core"})),
+            )
+            .mount(&wrong)
+            .await;
+        let base = Url::parse(&wrong.uri()).expect("url");
+        assert_eq!(
+            mint_continuation_bearer_at(&Client::new(), &base, "execution-core", &"k".repeat(32), "org-1").await,
+            Err(CODE_DECISION_UNAVAILABLE.to_owned())
+        );
     }
 }

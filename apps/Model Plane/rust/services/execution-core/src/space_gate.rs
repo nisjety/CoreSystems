@@ -35,7 +35,10 @@ pub(crate) const RESUME_NONE: &str = "none";
 //
 // Space adds no kind to this list (plan SD-21): a Space run is never loop-owned, so there is no
 // in-place resume to promise. Adding a kind is its own later change and must pass
-// `NEW_KIND_CHECKLIST`.
+// `NEW_KIND_CHECKLIST`. The owner's D22z ruling (WS19-OQ2) asks for one: `space.canvas.write`. Its
+// worker arm, descriptor checks, cold path (`space_canvas_tools::execute_approved_continuation`)
+// and label are built; it is listed here in the same change that adds it to mp-contracts'
+// `RESUMABLE_DESCRIPTOR_TOOLS`, which the parity test below holds equal to this list.
 // ---------------------------------------------------------------------------------------------
 
 /// One tool the delivery worker can run from a descriptor. The proof fields are read by the
@@ -130,6 +133,7 @@ pub(crate) fn action_label(tool_name: &str, tool_input: &str) -> String {
         }
         SHIPMENT_BOOKING_TOOL => "Book a shipment".to_owned(),
         TICKETS_CREATE_TOOL => "Create a ticket".to_owned(),
+        crate::space_canvas_tools::WRITE_ACTION => "Save the room canvas".to_owned(),
         "shell" => "Run a command in the sandbox".to_owned(),
         "browser_agent" => "Run a browser action".to_owned(),
         other => match safe_identifier(other) {

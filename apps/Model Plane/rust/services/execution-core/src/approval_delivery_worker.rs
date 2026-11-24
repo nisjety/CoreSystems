@@ -122,6 +122,9 @@ const MAX_TOKEN_TTL_SECONDS: u64 = 3600;
 const PROVIDER_ACTION_TOOL_NAME: &str = crate::space_gate::PROVIDER_ACTION_TOOL;
 const SHIPMENT_BOOKING_TOOL_NAME: &str = crate::space_gate::SHIPMENT_BOOKING_TOOL;
 const TICKETS_CREATE_TOOL_NAME: &str = crate::space_gate::TICKETS_CREATE_TOOL;
+/// The room canvas save (D22z). It has an arm here and its own cold path in `space_canvas_tools`, but it runs only once it is
+/// listed in `space_gate::RESUMABLE_KINDS` (with mp-contracts' list); until then the registry gate refuses it.
+const CANVAS_WRITE_TOOL_NAME: &str = crate::space_canvas_tools::WRITE_ACTION;
 
 /// The exact allowlist `session-core`'s `validate_failure_code` enforces.
 /// Any other string is rejected server-side, so these are reproduced here
@@ -364,6 +367,13 @@ struct ContinuationDescriptor {
     space_id: String,
 }
 
+/// A frozen canvas save (D22z): the closed-schema input as JSON text and the Space the run belongs to, which names the room.
+#[derive(Debug)]
+struct CanvasContinuation {
+    input: String,
+    space_id: String,
+}
+
 #[derive(Debug)]
 struct TicketContinuationDescriptor {
     input: Value,
@@ -397,6 +407,7 @@ enum ResumableAction {
     ProviderAction(ProviderActionInput),
     ShipmentBooking(Box<crate::shipping_tools::BookInput>),
     TicketCreate(TicketContinuationDescriptor),
+    CanvasWrite(CanvasContinuation),
 }
 
 /// What the postcondition step needs to know, captured before the execution
@@ -406,6 +417,7 @@ enum ResumableAction {
 enum VerifierTarget {
     ShipmentBooking,
     TicketCreate,
+    CanvasWrite,
     ProviderAction {
         connection_id: String,
         operation: String,
@@ -515,7 +527,54 @@ fn parse_resumable_action_in(
                 })
                 .map_err(|_| FAILURE_INVALID_CONTINUATION)
         }
+        CANVAS_WRITE_TOOL_NAME => {
+            // The room is the run's Space, never an argument; a descriptor without one cannot name a room.
+            let input = serde_json::to_string(&descriptor.input)
+                .map_err(|_| FAILURE_INVALID_CONTINUATION)?;
+            if descriptor.space_id.trim().is_empty()
+                || descriptor.step_id.trim().is_empty()
+                || !crate::space_canvas_tools::is_valid_write_input(&input)
+            {
+                return Err(FAILURE_INVALID_CONTINUATION);
+            }
+            Ok(ResumableAction::CanvasWrite(CanvasContinuation {
+                input,
+                space_id: descriptor.space_id.clone(),
+            }))
+        }
         _ => Err(FAILURE_INVALID_CONTINUATION),
+    }
+}
+
+/// What an approved canvas save came to (D22z). A saved or already-current version is the receipt. A head that moved after the
+/// approval was asked means the save did not apply, and a retry would conflict again. Control or Auth Core being unreachable, or
+/// the canvas rate limit, is worth another pass under the same key. Control refusing the requester now is `authority_changed`.
+fn disposition_for_canvas_continuation(result: Result<String, String>) -> Disposition {
+    use crate::space_self_api::{
+        CODE_DECISION_UNAVAILABLE, CODE_NOT_AUTHORIZED, CODE_NOT_OFFERED, CODE_UNKNOWN_OUTCOME,
+    };
+    match result {
+        Ok(provider_receipt_id) => Disposition::Completed {
+            provider_receipt_id,
+        },
+        Err(code) => match code.as_str() {
+            crate::space_canvas_tools::CODE_HEAD_MOVED => Disposition::FailedTerminal {
+                failure_code: FAILURE_DEFINITELY_NOT_ACCEPTED,
+            },
+            CODE_DECISION_UNAVAILABLE | "limit_reached" => disposition_for_transient_failure(),
+            CODE_UNKNOWN_OUTCOME => Disposition::FailedTerminal {
+                failure_code: FAILURE_UNKNOWN_OUTCOME,
+            },
+            CODE_NOT_AUTHORIZED => Disposition::FailedTerminal {
+                failure_code: FAILURE_AUTHORITY_CHANGED,
+            },
+            CODE_NOT_OFFERED => Disposition::FailedTerminal {
+                failure_code: FAILURE_CONTINUATION_UNAVAILABLE,
+            },
+            _ => Disposition::FailedTerminal {
+                failure_code: FAILURE_INVALID_CONTINUATION,
+            },
+        },
     }
 }
 
@@ -1047,6 +1106,7 @@ async fn process_delivery(
     let verifier_target = match &action {
         ResumableAction::ShipmentBooking(_) => VerifierTarget::ShipmentBooking,
         ResumableAction::TicketCreate(_) => VerifierTarget::TicketCreate,
+        ResumableAction::CanvasWrite(_) => VerifierTarget::CanvasWrite,
         ResumableAction::ProviderAction(input) => VerifierTarget::ProviderAction {
             connection_id: input.connection_id.clone(),
             operation: input.operation.clone(),
@@ -1151,6 +1211,16 @@ async fn process_delivery(
                 Err(_) => disposition_for_transient_failure(),
             }
         }
+        ResumableAction::CanvasWrite(canvas) => disposition_for_canvas_continuation(
+            crate::space_canvas_tools::execute_approved_continuation(
+                &canvas.input,
+                &delivery.run_id,
+                &descriptor.org_id,
+                &descriptor.step_id,
+                &canvas.space_id,
+            )
+            .await,
+        ),
     };
 
     // Postcondition verification (roadmap P1 item 3). A failure to reach the
@@ -1202,7 +1272,7 @@ async fn process_delivery(
                     )
                     .await,
                 ),
-                VerifierTarget::TicketCreate => None,
+                VerifierTarget::TicketCreate | VerifierTarget::CanvasWrite => None,
             };
             if let Some(outcome) = &outcome {
                 info!(
@@ -1644,6 +1714,7 @@ mod tests {
             PROVIDER_ACTION_TOOL_NAME => Some(VALID_DESCRIPTOR),
             SHIPMENT_BOOKING_TOOL_NAME => Some(VALID_SHIPMENT_DESCRIPTOR),
             TICKETS_CREATE_TOOL_NAME => Some(VALID_TICKET_DESCRIPTOR),
+            CANVAS_WRITE_TOOL_NAME => Some(VALID_CANVAS_DESCRIPTOR),
             _ => None,
         }
     }
@@ -1703,6 +1774,82 @@ mod tests {
             Some(FAILURE_INVALID_CONTINUATION)
         );
         assert!(parse_resumable_action(&descriptor).is_ok());
+    }
+
+    const VALID_CANVAS_DESCRIPTOR: &str = r#"{
+        "version": 1,
+        "run_id": "run-1",
+        "org_id": "org-1",
+        "user_id": "user-1",
+        "step_id": "step-1",
+        "action_kind": "tool_call",
+        "tool_name": "space.canvas.write",
+        "input": {"expected_version_id": "v-1", "content": "Room plan", "summary": "agent edit"},
+        "permission_mode": "ask",
+        "action_fingerprint": "abc123",
+        "space_id": "space-1"
+    }"#;
+
+    #[test]
+    fn a_canvas_write_descriptor_has_an_arm_that_binds_the_run_space() {
+        // D22z: the arm exists and accepts a frozen save, but only a registry that lists the kind reaches it.
+        let descriptor = parse_descriptor(VALID_CANVAS_DESCRIPTOR).expect("valid JSON");
+        let action = parse_resumable_action_in(&descriptor, |_| true).expect("the canvas arm accepts the fixture");
+        let ResumableAction::CanvasWrite(canvas) = action else {
+            panic!("expected CanvasWrite, got {action:?}");
+        };
+        assert_eq!(canvas.space_id, "space-1");
+        assert!(crate::space_canvas_tools::is_valid_write_input(&canvas.input));
+        assert_eq!(
+            crate::space_gate::action_label(CANVAS_WRITE_TOOL_NAME, "{}"),
+            "Save the room canvas"
+        );
+        // Not registered yet: the real registry refuses it before the arm.
+        if !crate::space_gate::is_resumable_tool(CANVAS_WRITE_TOOL_NAME) {
+            assert_eq!(
+                parse_resumable_action(&descriptor).err(),
+                Some(FAILURE_INVALID_CONTINUATION)
+            );
+        }
+    }
+
+    #[test]
+    fn a_canvas_write_without_a_space_or_with_a_forged_field_is_invalid() {
+        for raw in [
+            VALID_CANVAS_DESCRIPTOR.replace(r#""space_id": "space-1""#, r#""space_id": """#),
+            VALID_CANVAS_DESCRIPTOR.replace(r#""summary": "agent edit""#, r#""space_ref": "other-room""#),
+            VALID_CANVAS_DESCRIPTOR.replace(r#""content": "Room plan""#, r#""content": """#),
+            VALID_CANVAS_DESCRIPTOR.replace(r#""step_id": "step-1""#, r#""step_id": """#),
+        ] {
+            let descriptor = parse_descriptor(&raw).expect("valid JSON");
+            assert_eq!(
+                parse_resumable_action_in(&descriptor, |_| true).err(),
+                Some(FAILURE_INVALID_CONTINUATION),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_canvas_continuation_outcome_maps_to_its_disposition() {
+        assert_eq!(
+            disposition_for_canvas_continuation(Ok("v-2".to_owned())),
+            Disposition::Completed { provider_receipt_id: "v-2".to_owned() }
+        );
+        let terminal = |code: &str| disposition_for_canvas_continuation(Err(code.to_owned()));
+        assert_eq!(
+            terminal(crate::space_canvas_tools::CODE_HEAD_MOVED),
+            Disposition::FailedTerminal { failure_code: FAILURE_DEFINITELY_NOT_ACCEPTED }
+        );
+        assert_eq!(terminal("unknown_outcome"), Disposition::FailedTerminal { failure_code: FAILURE_UNKNOWN_OUTCOME });
+        assert_eq!(terminal("not_authorized"), Disposition::FailedTerminal { failure_code: FAILURE_AUTHORITY_CHANGED });
+        assert_eq!(terminal("not_offered"), Disposition::FailedTerminal { failure_code: FAILURE_CONTINUATION_UNAVAILABLE });
+        assert_eq!(
+            terminal("zdr_durable_mutation_forbidden"),
+            Disposition::FailedTerminal { failure_code: FAILURE_INVALID_CONTINUATION }
+        );
+        assert_eq!(terminal("decision_unavailable"), disposition_for_transient_failure());
+        assert_eq!(terminal("limit_reached"), disposition_for_transient_failure());
     }
 
     #[test]
