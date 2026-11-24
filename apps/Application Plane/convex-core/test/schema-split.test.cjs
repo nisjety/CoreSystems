@@ -185,6 +185,7 @@ test('WS11-S6: every index the attention ingest and its erasure paths name exist
     ['spaceAttentionItems', 'by_space', 'spaceRef'],
     ['spaceAttentionItems', 'by_expiry', 'expiresAt'],
     ['spaceAttentionItems', 'by_recipient_state_updated', 'recipientAuthId'],
+    ['spaceAttentionItems', 'by_org_recipient_state_updated', 'externalOrgId'],
     ['spaceAttentionItems', 'by_recipient_coalesce', 'recipientAuthId'],
     ['spaceThreadFollows', 'by_thread', 'threadId'],
     ['spaceThreadFollows', 'by_space', 'spaceRef'],

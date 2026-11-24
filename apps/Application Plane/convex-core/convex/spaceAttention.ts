@@ -94,10 +94,12 @@ async function ownItems(
   externalOrgId: string,
   state: "open" | "snoozed" | "done",
 ): Promise<any[]> {
+  // Org-scoped index (C-PRIO-05): another org's rows never fill this window.
+  // The filter stays as a second check on the index predicate.
   const rows = await ctx.db
     .query("spaceAttentionItems")
-    .withIndex("by_recipient_state_updated", (q: any) =>
-      q.eq("recipientAuthId", externalAuthId).eq("state", state),
+    .withIndex("by_org_recipient_state_updated", (q: any) =>
+      q.eq("externalOrgId", externalOrgId).eq("recipientAuthId", externalAuthId).eq("state", state),
     )
     .order("desc")
     .take(MAX_ITEMS_PER_RECIPIENT);
@@ -249,8 +251,11 @@ export const listItemsForGateway = query({
 
     const page = await ctx.db
       .query("spaceAttentionItems")
-      .withIndex("by_recipient_state_updated", (q: any) =>
-        q.eq("recipientAuthId", args.externalAuthId).eq("state", args.state),
+      .withIndex("by_org_recipient_state_updated", (q: any) =>
+        q
+          .eq("externalOrgId", args.externalOrgId)
+          .eq("recipientAuthId", args.externalAuthId)
+          .eq("state", args.state),
       )
       .order("desc")
       .paginate({ numItems: limit, cursor: args.cursor ?? null });

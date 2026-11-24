@@ -415,6 +415,29 @@ test('awaiting_approval makes no inbox item, only the agent activity changes', a
   assert.deepEqual(log.scheduled, []);
 });
 
+test('C-PRIO-05: a woken agent run records its activity and names the agent on the starter item', async (t) => {
+  withEnv(t, { SPACE_ATTENTION_INGEST: '1' });
+  const { ctx, tables } = makeCtx(spaceTables(['alice', 'bob']));
+  await apply(ctx, runEvent('running', { agent_id: 'agent-ctl-1' }, { event_id: 'w1' }));
+  assert.equal(tables.spaceAgentActivity.length, 1);
+  assert.equal(tables.spaceAgentActivity[0].state, 'working');
+  assert.equal(tables.spaceAgentActivity[0].externalOrgId, ORG);
+  await apply(ctx, runEvent('completed', { agent_id: 'agent-ctl-1' }, { event_id: 'w2' }));
+  assert.equal(tables.spaceAgentActivity[0].state, 'idle');
+  const item = tables.spaceAttentionItems.find((row) => row.kind === 'agent_done');
+  assert.equal(item.recipientAuthId, 'alice');
+  assert.equal(item.actorKind, 'agent');
+  assert.equal(item.actorRef, 'agent-ctl-1');
+});
+
+test('C-PRIO-05: a run without agent_id (the producer sends empty) writes no activity and no actor ref', async (t) => {
+  withEnv(t, { SPACE_ATTENTION_INGEST: '1' });
+  const { ctx, tables } = makeCtx(spaceTables(['alice']));
+  await apply(ctx, runEvent('completed', { agent_id: '' }));
+  assert.equal((tables.spaceAgentActivity ?? []).length, 0);
+  assert.equal(tables.spaceAttentionItems[0].actorRef, undefined);
+});
+
 test('agent activity is updated in place on the next run state, never duplicated', async (t) => {
   withEnv(t, { SPACE_ATTENTION_INGEST: '1' });
   const { ctx, tables } = makeCtx(spaceTables(['alice']));

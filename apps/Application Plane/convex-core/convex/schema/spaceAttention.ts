@@ -96,6 +96,9 @@ export const spaceAttentionTables = {
     expiresAt: v.number(),
   })
     .index("by_recipient_state_updated", ["recipientAuthId", "state", "updatedAt"])
+    // The inbox window of one member in one org (C-PRIO-05): the read pages
+    // inside the org instead of filtering another org's rows out after take().
+    .index("by_org_recipient_state_updated", ["externalOrgId", "recipientAuthId", "state", "updatedAt"])
     .index("by_recipient_coalesce", ["recipientAuthId", "coalesceKey"])
     .index("by_space", ["spaceRef"])
     .index("by_thread", ["threadId"])

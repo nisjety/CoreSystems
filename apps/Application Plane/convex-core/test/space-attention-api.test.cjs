@@ -96,3 +96,41 @@ test('setRoomLevelForGateway echoes the level it stored, on the first write and 
     hidePreview: false,
   });
 });
+
+test('C-PRIO-05: the inbox window pages inside the caller\'s org, so newer rows of another org never crowd it out', async (t) => {
+  withServiceKey(t);
+  const item = (externalOrgId, id, updatedAt) => ({
+    externalOrgId,
+    recipientAuthId: AUTH,
+    spaceRef: 'space_1',
+    kind: 'mention',
+    threadId: `thread_${id}`,
+    actorKind: 'user',
+    state: 'open',
+    count: 1,
+    firstEventId: `e_${id}`,
+    lastEventId: `e_${id}`,
+    coalesceKey: `k_${id}`,
+    createdAt: updatedAt,
+    updatedAt,
+    expiresAt: updatedAt + 1_000_000,
+  });
+  // Mine first, then three newer rows of the same subject in another org.
+  const { ctx } = makeCtx(
+    memberTables({
+      spaceAttentionItems: [
+        item(ORG, 'a', 10),
+        item(ORG, 'b', 11),
+        item('org_other', 'x', 20),
+        item('org_other', 'y', 21),
+        item('org_other', 'z', 22),
+      ],
+    }),
+  );
+  const page = await attention.listItemsForGateway._handler(ctx, { ...base, state: 'open', limit: 2 });
+  assert.deepEqual(
+    page.items.map((row) => row.threadId).sort(),
+    ['thread_a', 'thread_b'],
+    'a page of two is two of the caller\'s rows, not two filtered-out rows of another org',
+  );
+});

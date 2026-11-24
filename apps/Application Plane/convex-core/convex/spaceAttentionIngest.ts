@@ -416,7 +416,9 @@ export const ingestSpaceEvent = internalMutation({
           {
             recipient: starter,
             kind,
-            actorAuthId: "",
+            // The agent's Control subject (agent_id = runs.agent_subject_id, set only by a
+            // verified wake; DEPTH-WS11-S5-2) names the actor; empty for any other run.
+            actorAuthId: ev.agentId ?? "",
             actorKind: "agent",
             isRunStarter: true,
             runId: ev.runId,
