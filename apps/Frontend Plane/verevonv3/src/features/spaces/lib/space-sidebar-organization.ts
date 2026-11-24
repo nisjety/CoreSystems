@@ -377,9 +377,12 @@ export function buildSidebarModel(input: SidebarModelInput): SidebarModel {
     const rooms = buckets.get(spec.id) ?? []
     const state = doc.groups.find((group) => group.id === spec.id)
     const sort = state?.sort ?? null
+    // Rooms the activity order cannot tell apart (a tie, no answer, or no attention store at all) keep
+    // the group's own default order (Channels: archived last, organisation room first), not raw server order.
+    const defaultCompare = spec.defaultCompare
     if (sort === 'name') rooms.sort(collator)
-    else if (sort === 'activity') rooms.sort(byActivity)
-    else if (spec.defaultCompare) rooms.sort(spec.defaultCompare)
+    else if (sort === 'activity') rooms.sort(defaultCompare ? (a, b) => byActivity(a, b) || defaultCompare(a, b) : byActivity)
+    else if (defaultCompare) rooms.sort(defaultCompare)
     if (rooms.length === 0) continue
     groups.push({ id: spec.id, rooms, collapsed: state?.collapsed === true, sort })
   }

@@ -475,6 +475,25 @@ describe('buildSidebarModel activity sort (B-REC-05)', () => {
     ]);
   });
 
+  it("falls back to the group's default order for activity ties and when there is no attention answer", () => {
+    const archivedLast: SidebarGroupSpec = {
+      id: 'channels',
+      match: (space) => space.kind === 'channel',
+      defaultCompare: (a, b) => Number(a.name.startsWith('Old')) - Number(b.name.startsWith('Old')),
+    };
+    const spaces = [room('room-o', 'Old'), room('room-a', 'Alpha'), room('room-b', 'Beta')];
+    const doc = docOf({ groups: [{ id: 'channels', sort: 'activity' }] });
+    // No attention store: the default order applies, as it did before the activity sort existed.
+    expect(groupRefs(modelOf(spaces, doc, { groups: [archivedLast] }), 'channels')).toEqual(['room-a', 'room-b', 'room-o']);
+    // Activity decides first; the rooms with no answer then keep the default order among themselves.
+    const attention = answers({ 'room-b': { lastActivityAt: 10 } });
+    expect(groupRefs(modelOf(spaces, doc, { groups: [archivedLast], attention }), 'channels')).toEqual([
+      'room-b',
+      'room-a',
+      'room-o',
+    ]);
+  });
+
   it('sorts a section by activity when the section asks for it, with the rooms that have no activity last', () => {
     const spaces = [room('room-a', 'Alpha'), room('room-b', 'Beta'), room('room-c', 'Gamma')];
     const attention = answers({ 'room-a': { lastActivityAt: 50 }, 'room-c': { lastActivityAt: 500 } });
