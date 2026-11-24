@@ -68,6 +68,19 @@ pub const ADDRESSEE_KINDS: [&str; 4] = [KIND_REQUESTER, KIND_NAMED, KIND_ANY_EDI
 /// Most rows a Space-wide approvals read returns.
 pub const MAX_SPACE_APPROVALS: i64 = 100;
 
+/// The tool names whose granted approval the delivery worker can run cold from a continuation
+/// descriptor (WS10-S9). Session Core reads this list to decide a card's `action_continuation`
+/// class; execution-core's `space_gate::RESUMABLE_KINDS` must name exactly these (a parity test
+/// there fails otherwise). A descriptor for any other tool is `none`: the grant is a once-token.
+pub const RESUMABLE_DESCRIPTOR_TOOLS: [&str; 3] =
+    ["execute_provider_action", "book_shipment", "tickets.create"];
+
+/// True when a continuation descriptor for this tool is an honest action continuation.
+#[must_use]
+pub fn is_resumable_descriptor_tool(tool_name: &str) -> bool {
+    RESUMABLE_DESCRIPTOR_TOOLS.contains(&tool_name)
+}
+
 fn write_field(digest: &mut Sha256, name: &str, value: &str) {
     digest.update(name.as_bytes());
     digest.update([0]);

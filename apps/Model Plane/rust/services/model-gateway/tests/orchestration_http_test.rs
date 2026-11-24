@@ -1253,12 +1253,12 @@ async fn orchestration_run_events_route_relays_sse() {
 }
 
 // ---------------------------------------------------------------------------
-// A first-time "approve" must not 502. `quarantine_granted_approval_continuation`
-// is a deliberate placeholder that always reports the continuation as
-// unavailable for a granted approval (there is no descriptor-backed dispatcher
-// yet) — but the decision itself was already durably recorded by the
-// `DecideApproval` call that precedes it, so that placeholder result must
-// surface as an informational field on a 200, never as a gateway failure.
+// A first-time "approve" must not 502. The decision is durably recorded by the
+// `DecideApproval` call that precedes it; what runs next is Session Core's
+// (the delivery worker for a resumable descriptor, else the agent's once-token),
+// so it surfaces as an informational field on a 200, never as a gateway failure.
+// (The gRPC path's old always-unavailable placeholder was retired with
+// DEPTH-WS10-QUARANTINE.)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

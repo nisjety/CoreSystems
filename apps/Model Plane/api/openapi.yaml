@@ -2136,6 +2136,7 @@ components:
             - auto_posture_provider_write
             - browser_human_assist
             - tainted_egress
+            - policy_unavailable
             - unclassified_gate
         tool:
           type: string

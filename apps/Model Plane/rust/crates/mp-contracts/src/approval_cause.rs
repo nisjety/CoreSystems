@@ -62,13 +62,16 @@ pub enum CauseCode {
     /// An egress call (a web fetch or a provider action) held for a person after a connected-app
     /// read came back flagged by screening (WS23-S3). Only `once` is offered.
     TaintedEgress,
+    /// A Space step whose tool policy could not be read: Control's gate view was configured but
+    /// unavailable, so a risky call asks with standing rules disabled (WS10-S3). Only `once`.
+    PolicyUnavailable,
     /// A gate that did not say why, or a code this reader does not know.
     UnclassifiedGate,
 }
 
 impl CauseCode {
     /// Every code, in the order the golden lists them.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::OwnerEffectReserved,
         Self::ConsentToDisclose,
         Self::RiskyEffectUnderAsk,
@@ -80,6 +83,7 @@ impl CauseCode {
         Self::AutoPostureProviderWrite,
         Self::BrowserHumanAssist,
         Self::TaintedEgress,
+        Self::PolicyUnavailable,
         Self::UnclassifiedGate,
     ];
 
@@ -98,6 +102,7 @@ impl CauseCode {
             Self::AutoPostureProviderWrite => "auto_posture_provider_write",
             Self::BrowserHumanAssist => "browser_human_assist",
             Self::TaintedEgress => "tainted_egress",
+            Self::PolicyUnavailable => "policy_unavailable",
             Self::UnclassifiedGate => "unclassified_gate",
         }
     }
@@ -910,6 +915,7 @@ mod tests {
             CauseCode::BrowserActionRisk,
             CauseCode::HookAsk,
             CauseCode::CapabilityPolicyAsk,
+            CauseCode::PolicyUnavailable,
             CauseCode::UnclassifiedGate,
         ] {
             let cause = for_call_with_class(code, "run_1", "knowledge_search", "{}", "read");

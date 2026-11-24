@@ -1972,16 +1972,14 @@ impl ModelGateway for GatewayService {
         // commit. Without a durable delivery receipt that outcome is still
         // unknown, so fail closed rather than returning a false success.
         approvals::require_fresh_approval_delivery(outcome.transitioned)?;
-        let approval = outcome
-            .response
-            .approval
-            .as_ref()
-            .ok_or_else(|| Status::data_loss("resolved approval is missing"))?;
-        // The grant is durable, but Gateway must not turn it into a generic
-        // `ResumeRun` call. There is no immutable continuation descriptor or
-        // service-only receipt protocol yet, so this deliberately surfaces an
-        // unavailable continuation rather than claiming the agent restarted.
-        approvals::quarantine_granted_approval_continuation(approval)?;
+        if outcome.response.approval.is_none() {
+            return Err(Status::data_loss("resolved approval is missing"));
+        }
+        // The grant is durable and Gateway never turns it into a generic `ResumeRun`. What
+        // happens next is Session Core's: a resumable kind's descriptor is run by the approval
+        // delivery worker, any other grant is the agent's once-token, and the approval card
+        // states which from its derived continuation (WS10-S1, DEPTH-WS10-S9-1). The always-Err
+        // placeholder this path used to return is retired (DEPTH-WS10-QUARANTINE 1).
         Ok(Response::new(outcome.response))
     }
 

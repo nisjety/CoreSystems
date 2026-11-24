@@ -4,9 +4,10 @@
 //!
 //! - The approval *card*: `tool_key`, `action_label` and `resume_class`, validated from the
 //!   creator's `context_json` and stored under `approvals.metadata.card`. The resume class is the
-//!   server's own truth, never the caller's claim: an approval that carries a continuation
-//!   descriptor is `action_continuation`, one that does not can only be `live_poll` (a browser
-//!   action polled inside the running loop) or `none`.
+//!   server's own truth, never the caller's claim: an approval whose continuation descriptor names
+//!   a resumable kind (`mp_contracts::space_approvals::RESUMABLE_DESCRIPTOR_TOOLS`) is
+//!   `action_continuation`; any other approval can only be `live_poll` (a browser action polled
+//!   inside the running loop) or `none` (the grant lets the agent retry the exact action once).
 //! - The *continuation* of a granted approval, derived on every read from the delivery outbox, the
 //!   start receipt and the outcome (migrations 0014, 0018, 0019, 0020). Nothing is stored for it
 //!   and no client can state it, so the card can only claim what the rows prove.
@@ -40,14 +41,21 @@ pub(crate) const RESUME_NONE: &str = "none";
 
 /// Validate the creator's `context_json` and build the `metadata.card` value.
 ///
+/// `descriptor_tool` is `Some(tool_name)` when the approval carries a continuation descriptor
+/// (the empty string when the descriptor names no tool). Only a descriptor for a resumable kind
+/// makes the approval an action continuation (DEPTH-WS10-S9-1): execution-core writes a
+/// descriptor for every non-ZDR gated call, so presence alone would stamp shell and MCP approvals
+/// as continuations, overstate the card and leave their once-token unclaimable.
+///
 /// Returns `Ok(None)` when the creator stated no context and there is no descriptor (the
 /// approval is stored exactly as before and its continuation is derived without a resume class).
 /// A zero-retention caller keeps its `tool_key` and resume class but never an `action_label`.
 pub(crate) fn card_from_request(
     context_json: &str,
-    has_descriptor: bool,
+    descriptor_tool: Option<&str>,
     zdr: bool,
 ) -> Result<Option<JsonValue>, Status> {
+    let has_descriptor = descriptor_tool.is_some();
     let stated = parse_context(context_json)?;
     if stated.is_none() && !has_descriptor {
         return Ok(None);
@@ -62,7 +70,9 @@ pub(crate) fn card_from_request(
             card.insert("action_label".to_owned(), JsonValue::String(label.clone()));
         }
     }
-    let resume = if has_descriptor {
+    let resume = if descriptor_tool
+        .is_some_and(mp_contracts::space_approvals::is_resumable_descriptor_tool)
+    {
         RESUME_ACTION_CONTINUATION
     } else if stated.get("resume_class").map(String::as_str) == Some(RESUME_LIVE_POLL) {
         RESUME_LIVE_POLL
@@ -266,12 +276,17 @@ mod tests {
 
     const TOOL: &str = "mcp__srv__create_note";
 
+    /// A resumable kind's descriptor tool.
+    const RESUMABLE: &str = "execute_provider_action";
+
+    /// `has_descriptor` stands for a descriptor of a resumable kind.
     fn card(context: &str, has_descriptor: bool, zdr: bool) -> Option<JsonValue> {
-        card_from_request(context, has_descriptor, zdr).expect("the context is accepted")
+        card_from_request(context, has_descriptor.then_some(RESUMABLE), zdr)
+            .expect("the context is accepted")
     }
 
     fn refusal(context: &str) -> Status {
-        card_from_request(context, false, false).expect_err("the context is refused")
+        card_from_request(context, None, false).expect_err("the context is refused")
     }
 
     fn resume_class(card: &JsonValue) -> String {
@@ -319,6 +334,36 @@ mod tests {
                 expected,
                 "context {context:?}, descriptor {has_descriptor}"
             );
+        }
+    }
+
+    #[test]
+    fn only_a_resumable_kinds_descriptor_is_an_action_continuation() {
+        // DEPTH-WS10-S9-1: execution-core writes a descriptor for every non-ZDR gated call, so a
+        // shell or MCP approval carries one too. Its card must read `none` (the once-token), not
+        // `action_continuation`, whatever the creator stated.
+        let stated = |class: &str| json!({ "tool_key": TOOL, "resume_class": class }).to_string();
+        for tool in ["shell", "mcp__srv__create_note", "", "Execute_Provider_Action"] {
+            for (context, expected) in [
+                (String::new(), RESUME_NONE),
+                (stated("none"), RESUME_NONE),
+                (stated("action_continuation"), RESUME_NONE),
+                (stated("live_poll"), RESUME_LIVE_POLL),
+            ] {
+                let built = card_from_request(&context, Some(tool), false)
+                    .expect("accepted")
+                    .expect("a descriptor always yields a card");
+                assert_eq!(resume_class(&built), expected, "tool {tool:?}, context {context:?}");
+            }
+        }
+        // The three resumable kinds still read action_continuation, whatever was stated.
+        for tool in mp_contracts::space_approvals::RESUMABLE_DESCRIPTOR_TOOLS {
+            for context in [String::new(), stated("none"), stated("live_poll")] {
+                let built = card_from_request(&context, Some(tool), true)
+                    .expect("accepted")
+                    .expect("a card");
+                assert_eq!(resume_class(&built), RESUME_ACTION_CONTINUATION, "tool {tool}");
+            }
         }
     }
 

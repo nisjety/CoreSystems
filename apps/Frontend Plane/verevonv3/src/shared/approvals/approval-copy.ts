@@ -30,6 +30,7 @@ export const APPROVAL_CAUSE_CODES = [
   'auto_posture_provider_write',
   'browser_human_assist',
   'tainted_egress',
+  'policy_unavailable',
   'unclassified_gate',
 ] as const
 
@@ -298,6 +299,15 @@ const CAUSE_COPY: Record<CauseCode, (i18n: ApprovalCopyI18n, cause: ApprovalCaus
     reason: i18n.tr(
       'Agenten leste innhold fra en tilkoblet tjeneste som ble flagget som mulig risikabelt. Nå vil den sende noe ut, og det gjør den bare hvis du godkjenner.',
       'The agent read content from a connected service that was flagged as possibly risky. It now wants to send something out, and it does so only if you approve.',
+    ),
+  }),
+  // WS10-S3: the Space's tool policy could not be read, so a risky call waits for a person and
+  // no standing rule can pass it. Says why it asks, not that the policy asked.
+  policy_unavailable: (i18n) => ({
+    headline: i18n.tr('Verktøyreglene kunne ikke leses', 'The tool rules could not be read'),
+    reason: i18n.tr(
+      'Rommets verktøyregler var ikke tilgjengelige akkurat nå, så agenten spør deg før den gjør dette.',
+      "The room's tool rules were not available just now, so the agent asks you before it does this.",
     ),
   }),
   unclassified_gate: (i18n) => ({

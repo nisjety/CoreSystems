@@ -59,6 +59,11 @@
       "scope_options": ["once"]
     },
     {
+      "code": "policy_unavailable",
+      "raised_by": "execution-core Space approval gate: Control's tool-policy view was configured but unavailable, so a risky call asks with standing rules disabled",
+      "scope_options": ["once"]
+    },
+    {
       "code": "unclassified_gate",
       "raised_by": "ExecuteStep, pause_for_approval, and every code outside this list; a request that states no cause stores none",
       "scope_options": ["once"]

@@ -94,6 +94,7 @@ fn variant_and_token(code: CauseCode) -> (&'static str, &'static str) {
         }
         CauseCode::BrowserHumanAssist => ("BrowserHumanAssist", "browser_human_assist"),
         CauseCode::TaintedEgress => ("TaintedEgress", "tainted_egress"),
+        CauseCode::PolicyUnavailable => ("PolicyUnavailable", "policy_unavailable"),
         CauseCode::UnclassifiedGate => ("UnclassifiedGate", "unclassified_gate"),
     }
 }

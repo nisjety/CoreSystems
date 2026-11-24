@@ -319,8 +319,8 @@ pub(crate) async fn insert_granted_by_rule(
     let row: Option<(String,)> = sqlx::query_as(
         "INSERT INTO approvals (id, run_id, plan_id, kind, status, requested_by, decided_by, \
          decision_reason, org_id, user_id, idempotency_key, metadata, decided_at, expires_at, \
-         tool_key, action_digest, turn_origin, grant_ref) \
-         VALUES ($1, $2, NULL, $3, 'granted', $4, $5, $6, $7, $8, $9, $10, now(), $11, $12, $13, $14, $15) \
+         tool_key, action_digest, turn_origin, grant_ref, grant_use_token_ref) \
+         VALUES ($1, $2, NULL, $3, 'granted', $4, $5, $6, $7, $8, $9, $10, now(), $11, $12, $13, $14, $15, $16) \
          ON CONFLICT (org_id, user_id, idempotency_key) WHERE idempotency_key <> '' DO NOTHING \
          RETURNING id",
     )
@@ -339,9 +339,28 @@ pub(crate) async fn insert_granted_by_rule(
     .bind(approval.context.action_digest.as_deref())
     .bind(approval.context.turn_origin.as_deref())
     .bind(&approval.claims.rule_id)
+    .bind(approval.claims.token_ref.trim())
     .fetch_optional(pool)
     .await?;
     Ok(row.map(|(id,)| id))
+}
+
+/// The unique index that makes a standing-rule proof single-use (migration 0136).
+const TOKEN_REF_INDEX: &str = "approvals_grant_use_token_ref_key";
+
+/// Whether an insert failed because this proof already passed another step: its `token_ref` is
+/// stored on an earlier approval (migration 0136). A retry of the same step never gets here, the
+/// idempotency arbiter answers it first.
+pub(crate) fn is_grant_proof_replay(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<sqlx::Error>()
+        .and_then(|error| error.as_database_error())
+        .is_some_and(|db| db.is_unique_violation() && db.constraint() == Some(TOKEN_REF_INDEX))
+}
+
+/// The refusal of a proof that was already spent.
+pub(crate) fn grant_proof_replayed() -> Status {
+    Status::permission_denied("approval grant proof was already used")
 }
 
 /// Store the gate context on an approval this request just created (not on one an idempotent
@@ -1002,6 +1021,8 @@ mod tests {
             rule_id: "rule-7".into(),
             run_id: run.clone(),
             org_id: org.clone(),
+            // Unique per run of the test: the index of migration 0136 is global.
+            token_ref: format!("tok-rule-{sfx}"),
             ..claims()
         };
         let context = validate_gate_context("mcp__srv__tool", &call_digest(), "direct", false).expect("context");
@@ -1056,12 +1077,29 @@ mod tests {
         let second_id = format!("appr-rule-again-{sfx}");
         let again = GrantedApproval { id: &second_id, ..approval };
         assert_eq!(insert_granted_by_rule(&pool, &again).await.expect("insert"), None);
+
+        // The same proof on ANOTHER step is a replay (migration 0136): refused, nothing written.
+        let third_id = format!("appr-rule-replay-{sfx}");
+        let replay = GrantedApproval { id: &third_id, idempotency_key: "idem-2", ..approval };
+        let error = insert_granted_by_rule(&pool, &replay).await.expect_err("a spent proof is refused");
+        assert!(is_grant_proof_replay(&error), "{error:#}");
+        // A fresh proof for that step passes.
+        let fresh_claims = GrantUseClaims { token_ref: format!("tok-rule-fresh-{sfx}"), ..claims.clone() };
+        let fresh = GrantedApproval { id: &third_id, idempotency_key: "idem-2", claims: &fresh_claims, ..approval };
+        assert_eq!(insert_granted_by_rule(&pool, &fresh).await.expect("insert").as_deref(), Some(third_id.as_str()));
+        let stored_ref: Option<String> =
+            sqlx::query_scalar("SELECT grant_use_token_ref FROM approvals WHERE id = $1")
+                .bind(&first_id)
+                .fetch_one(&pool)
+                .await
+                .expect("token ref");
+        assert_eq!(stored_ref, Some(format!("tok-rule-{sfx}")));
         let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM approvals WHERE org_id = $1")
             .bind(&org)
             .fetch_one(&pool)
             .await
             .expect("count");
-        assert_eq!(rows, 1);
+        assert_eq!(rows, 2);
         drop_org_rows(&pool, &org).await;
     }
 

@@ -266,31 +266,6 @@ fn authenticated_session_request<T>(value: T, bearer: &str) -> Result<Request<T>
     Ok(request)
 }
 
-/// A durable approval grant is authority to *consider* the exact paused work,
-/// not authority for Gateway to invoke generic `ResumeRun`. The current outbox
-/// intentionally contains identifiers only; it cannot reconstruct the exited
-/// agent loop or direct-step request, and Execution Core has no service-only
-/// continuation receipt endpoint. Keep this boundary explicit until a
-/// descriptor-backed dispatcher exists.
-///
-/// # Errors
-/// Returns `unavailable` for a granted approval, after the durable decision
-/// has been accepted, so callers cannot report a state-only resume as work.
-#[allow(clippy::result_large_err)]
-pub fn quarantine_granted_approval_continuation(approval: &GatewayApproval) -> Result<(), Status> {
-    if approval.status != STATUS_APPROVED {
-        return Ok(());
-    }
-    warn!(
-        approval_id = %approval.approval_id,
-        run_id = %approval.run_id,
-        "approval grant accepted; durable continuation remains quarantined"
-    );
-    Err(Status::unavailable(
-        "approval grant recorded; durable continuation delivery is not available",
-    ))
-}
-
 const STATUS_PENDING: &str = "pending";
 const STATUS_APPROVED: &str = "approved";
 const STATUS_DENIED: &str = "denied";
@@ -1500,27 +1475,6 @@ mod tests {
             to_decide_approval_request(&denied).decision,
             ApprovalState::Denied as i32
         );
-    }
-
-    #[test]
-    fn granted_approval_continuation_is_quarantined_without_a_descriptor() {
-        let approval = GatewayApproval {
-            approval_id: "appr_1".to_owned(),
-            org_id: "org_1".to_owned(),
-            run_id: "run_1".to_owned(),
-            status: STATUS_APPROVED.to_owned(),
-            ..Default::default()
-        };
-
-        let error = quarantine_granted_approval_continuation(&approval)
-            .expect_err("a grant alone cannot authorize generic ResumeRun");
-        assert_eq!(error.code(), tonic::Code::Unavailable);
-
-        let denied = GatewayApproval {
-            status: STATUS_DENIED.to_owned(),
-            ..approval
-        };
-        assert!(quarantine_granted_approval_continuation(&denied).is_ok());
     }
 
     // ---------------------------------------------------------------------

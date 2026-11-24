@@ -263,7 +263,53 @@ async fn enforce(call: &QuarantineCall<'_>, output: &str, provenance: &Provenanc
         }
         Err(status) => {
             tracing::warn!(code = ?status.code(), run_id = call.run_id, approval_id = %approval_id, "Space quarantine: could not hold the content; the result is withheld");
+            // Nothing is held, so the review approval has nothing to release: deny it rather
+            // than leave a person a card whose grant can never hand anything back
+            // (DEPTH-WS10-QUARANTINE 4). Best effort, mirroring the browser gate's cancel path.
+            if let Ok(deny) = crate::runtime_loop::authenticated_session_request(
+                hold_failed_denial(&approval_id, call.org_id),
+                bearer,
+            ) {
+                if let Err(status) = client.decide_approval(deny).await {
+                    tracing::warn!(code = ?status.code(), run_id = call.run_id, approval_id = %approval_id, "Space quarantine: could not deny the review approval of a failed hold");
+                }
+            }
             withhold("hold_failed")
         }
+    }
+}
+
+/// Who records the denial of a review approval whose content could not be held.
+const DECIDED_BY_HOLD_FAILED: &str = "system:quarantine-hold-failed";
+
+/// The denial of a review approval whose hold failed: a system decision, scoped to the org, with
+/// a reason that names no content.
+fn hold_failed_denial(approval_id: &str, org_id: &str) -> pb::DecideApprovalRequest {
+    pb::DecideApprovalRequest {
+        approval_id: approval_id.to_owned(),
+        decision: pb::ApprovalState::Denied as i32,
+        decided_by: DECIDED_BY_HOLD_FAILED.to_owned(),
+        decision_reason: "the flagged content could not be held for review".to_owned(),
+        org_id: org_id.to_owned(),
+        decision_source: pb::ApprovalDecisionSource::System as i32,
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod hold_failure_tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_hold_denies_its_review_approval_as_a_system_decision() {
+        let deny = hold_failed_denial("appr-1", "org-1");
+        assert_eq!(deny.approval_id, "appr-1");
+        assert_eq!(deny.org_id, "org-1", "the denial is tenant-scoped");
+        assert_eq!(deny.decision, pb::ApprovalState::Denied as i32);
+        assert_eq!(deny.decision_source, pb::ApprovalDecisionSource::System as i32);
+        assert!(deny.decided_by.starts_with("system:"));
+        // No member-decide decision, no grant proof, no widened scope.
+        assert!(deny.space_decision_token.is_empty() && deny.grant_use_token.is_empty());
+        assert_eq!(deny.scope, 0);
     }
 }

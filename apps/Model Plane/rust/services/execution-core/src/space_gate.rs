@@ -641,7 +641,11 @@ pub(crate) async fn resolve(call: &GateCall<'_>, prior_ask: Option<CauseCode>) -
         GateLevel::Allow => GateOutcome::Pass,
         GateLevel::Block => GateOutcome::Block(source_slug(&policy_source)),
         GateLevel::Ask => {
-            let cause = prior_ask.unwrap_or(if view.as_ref().is_some_and(|v| v.level_for(&action_key, tool_key).0 == GateLevel::Ask) {
+            // A view that failed asks under its own typed cause, never the posture's: the card
+            // must say the policy could not be read, not that a policy asked.
+            let cause = prior_ask.unwrap_or(if view_failed {
+                CauseCode::PolicyUnavailable
+            } else if view.as_ref().is_some_and(|v| v.level_for(&action_key, tool_key).0 == GateLevel::Ask) {
                 CauseCode::CapabilityPolicyAsk
             } else {
                 call.fallback_cause
@@ -833,6 +837,32 @@ pub(crate) mod tests_support {
 #[cfg(test)]
 mod gate_tests {
     use super::*;
+
+    #[test]
+    fn the_resumable_kinds_match_the_list_session_core_reads() {
+        // DEPTH-WS10-S9-1: Session Core stamps `action_continuation` only for a descriptor whose
+        // tool is in mp-contracts' list, so the two lists must name the same tools.
+        let mut here: Vec<&str> = RESUMABLE_KINDS.iter().map(|kind| kind.tool_name).collect();
+        let mut shared: Vec<&str> = mp_contracts::space_approvals::RESUMABLE_DESCRIPTOR_TOOLS.to_vec();
+        here.sort_unstable();
+        shared.sort_unstable();
+        assert_eq!(here, shared);
+        for tool in shared {
+            assert_eq!(resume_class_for(tool, true), RESUME_ACTION_CONTINUATION, "{tool}");
+        }
+        assert_eq!(resume_class_for("shell", true), RESUME_NONE);
+    }
+
+    #[tokio::test]
+    async fn a_prior_ask_keeps_its_own_cause_when_the_view_is_down() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path(GATE_VIEW_PATH))
+            .respond_with(ResponseTemplate::new(503)).mount(&server).await;
+        tests_support::install(control_for(&server));
+        let outcome = resolve(&call(MCP_TOOL, "{}", None), Some(CauseCode::ProviderWrite)).await;
+        tests_support::uninstall();
+        assert_eq!(outcome, GateOutcome::Pause(CauseCode::ProviderWrite));
+    }
 
     #[test]
     fn fold_takes_the_most_restrictive_level() {
@@ -1242,7 +1272,8 @@ mod gate_tests {
         // Never-auto forced off for the grant half: no channel either, so only the pause is left.
         let outcome = resolve(&call(MCP_TOOL, "{}", None), None).await;
         tests_support::uninstall();
-        assert_eq!(outcome, GateOutcome::Pause(CauseCode::RiskyEffectUnderAsk));
+        // Its own typed cause, not the posture's fallback: the policy could not be read.
+        assert_eq!(outcome, GateOutcome::Pause(CauseCode::PolicyUnavailable));
         assert_eq!(requests_to(&server, GRANT_USE_PATH).await, 0, "grants are disabled while the view is down");
     }
 

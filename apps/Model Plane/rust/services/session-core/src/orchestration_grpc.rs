@@ -4314,10 +4314,16 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             let (mut metadata, cause_code) =
                 new_approval_metadata(&req, approval_write_is_content_free(&caller));
             // The typed card (build plan WS10 S1): checked here, never trusted. The resume class is
-            // the server's own: a descriptor makes it an action continuation, nothing else can.
+            // the server's own: only a descriptor for a resumable kind makes it an action
+            // continuation (DEPTH-WS10-S9-1); nothing the creator states can.
             if let Some(card) = crate::space::approvals::card_from_request(
                 &req.context_json,
-                continuation_descriptor.is_some(),
+                continuation_descriptor.as_ref().map(|descriptor| {
+                    descriptor
+                        .get("tool_name")
+                        .and_then(JsonValue::as_str)
+                        .unwrap_or_default()
+                }),
                 caller.zdr(),
             )? {
                 if let Some(map) = metadata.as_object_mut() {
@@ -4397,7 +4403,13 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                         },
                     )
                     .await
-                    .map_err(|e| Status::internal(e.to_string()))?
+                    .map_err(|e| {
+                        if crate::space::approval_gate::is_grant_proof_replay(&e) {
+                            crate::space::approval_gate::grant_proof_replayed()
+                        } else {
+                            Status::internal(e.to_string())
+                        }
+                    })?
                 }
                 None => store::request_approval(
                 &self.pool,
