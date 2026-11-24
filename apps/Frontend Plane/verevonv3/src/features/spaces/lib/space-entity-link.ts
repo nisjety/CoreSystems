@@ -139,3 +139,18 @@ export function spaceEntryLinksEnabled(): boolean {
   if (import.meta.env.DEV === true && override !== 'false') return true
   return spaceRoomFeatureWithDevOverride('entry_links', override)
 }
+
+/**
+ * The message link a toolbar's Copy link writes, or `undefined` (no Copy link) while
+ * `features.entry_links` is off: the room ignores `m=` then, so the link would open the thread and
+ * not the message. Copying is not a grant; opening the link is re-checked by Control.
+ */
+export function spaceMessageLinkHref(
+  spaceRef: string | undefined,
+  threadId: string | undefined,
+  messageId: string | undefined,
+  entryLinksOn: () => boolean = spaceEntryLinksEnabled,
+): string | undefined {
+  if (!spaceRef || !threadId || !messageId || !entryLinksOn()) return undefined
+  return spaceEntityHref({ kind: 'message', spaceRef, threadId, messageId })
+}

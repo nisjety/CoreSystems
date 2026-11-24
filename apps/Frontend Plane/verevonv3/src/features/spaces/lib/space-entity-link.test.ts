@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { parseSpaceEntityLocation, spaceEntityHref, type SpaceEntityRef } from './space-entity-link'
+import { parseSpaceEntityLocation, spaceEntityHref, spaceMessageLinkHref, type SpaceEntityRef } from './space-entity-link'
 
 // Reads a link back the way the router does: its path and its search string.
 function readHref(href: string) {
@@ -92,5 +92,18 @@ describe('space entity links (WS13-S4a)', () => {
     expect(parseSearch('?thread_id=thr-1&m=bad.id')).toEqual(thread)
     expect(parseSearch('?thread_id=thr-1&m=')).toEqual(thread)
     expect(parseSearch('?thread_id=thr-1&m=msg%0A1')).toEqual(thread)
+  })
+})
+
+describe('spaceMessageLinkHref (DEPTH-WS12-S7-1)', () => {
+  it('gives the canonical message link only while entry links are on', () => {
+    const on = () => true
+    const off = () => false
+    expect(spaceMessageLinkHref('room-a', 'thr-1', 'msg-1', on)).toBe(
+      spaceEntityHref({ kind: 'message', spaceRef: 'room-a', threadId: 'thr-1', messageId: 'msg-1' }),
+    )
+    expect(spaceMessageLinkHref('room-a', 'thr-1', 'msg-1', off)).toBeUndefined()
+    expect(spaceMessageLinkHref('room-a', 'thr-1', undefined, on)).toBeUndefined()
+    expect(spaceMessageLinkHref(undefined, 'thr-1', 'msg-1', on)).toBeUndefined()
   })
 })

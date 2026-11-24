@@ -22,7 +22,7 @@ import type {
 import { SpaceRunWorkSummary } from '../SpaceRunCard'
 import { SpaceMessageEdit } from '../SpaceMessageEdit'
 import { SpaceMessageToolbar } from '../SpaceMessageToolbar'
-import { spaceEntityHref } from '../../lib/space-entity-link'
+import { spaceMessageLinkHref } from '../../lib/space-entity-link'
 import { SpaceReactionBar } from '../SpaceReactionBar'
 import type { SpaceTurnLifecycle } from '../../lib/space-message-lifecycle'
 import { translateApiError, useI18n } from '@/shared/i18n'
@@ -423,9 +423,7 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
                     setEditing(true)
                   }}
                   onDelete={(reason) => { void removeTurn(reason) }}
-                  linkHref={props.spaceRef && props.threadId && turn.messageId
-                    ? spaceEntityHref({ kind: 'message', spaceRef: props.spaceRef, threadId: props.threadId, messageId: turn.messageId })
-                    : undefined}
+                  linkHref={spaceMessageLinkHref(props.spaceRef, props.threadId, turn.messageId)}
                   canReact={props.lifecycle?.canReact(turn) === true}
                   reacted={chips().filter((chip) => chip.reacted).map((chip) => chip.emoji)}
                   onReact={(emoji, present) => { void toggleReaction(emoji, present) }}

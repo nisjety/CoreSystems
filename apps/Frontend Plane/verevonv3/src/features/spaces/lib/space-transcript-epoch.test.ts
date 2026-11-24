@@ -1,7 +1,7 @@
 import { flush } from 'solid-js'
 import { describe, expect, it } from 'vitest'
 
-import { bumpThreadTranscriptEpochs, threadTranscriptEpoch } from './space-transcript-epoch'
+import { bumpThreadTranscriptEpochs, listedTextChanges, threadTranscriptEpoch } from './space-transcript-epoch'
 import { threadRevision } from './space-timeline-store'
 
 describe('space transcript epoch (DEPTH-WS12-S4-1)', () => {
@@ -27,5 +27,21 @@ describe('space transcript epoch (DEPTH-WS12-S4-1)', () => {
     flush()
     expect(threadRevision(thread as never)).not.toBe(before)
     expect(threadRevision(other as never)).toBe(otherBefore)
+  })
+
+  it('poll fallback: names only the threads whose listed title or preview changed', () => {
+    const seen = new Map<string, string>()
+    expect(listedTextChanges(seen, [{ thread_id: 'p1', title: 'Q', preview: 'A' }, { thread_id: 'p2', title: 'R' }])).toEqual([])
+    // An edit of p1's last line folds into its preview; p2 is unchanged; p3 is new, not a change.
+    expect(
+      listedTextChanges(seen, [
+        { thread_id: 'p1', title: 'Q', preview: 'A edited' },
+        { thread_id: 'p2', title: 'R' },
+        { thread_id: 'p3', title: 'S' },
+      ]),
+    ).toEqual(['p1'])
+    // A thread that left the listing is forgotten, so its return is not a change either.
+    expect(listedTextChanges(seen, [{ thread_id: 'p3', title: 'S' }])).toEqual([])
+    expect(listedTextChanges(seen, [{ thread_id: 'p1', title: 'other' }, { thread_id: 'p3', title: 'S' }])).toEqual([])
   })
 })

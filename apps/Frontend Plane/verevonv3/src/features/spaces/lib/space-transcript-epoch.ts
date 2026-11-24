@@ -19,6 +19,31 @@ export function threadTranscriptEpoch(threadId: string): number {
   return epochs().get(threadId) ?? 0
 }
 
+/** What the listing shows of one thread's text: the folded title and preview (DEPTH-WS12-S4-2). */
+type ListedText = { thread_id: string; title?: string; preview?: string }
+
+/**
+ * Poll-mode fallback of the live signal: the threads whose listed title or preview changed since
+ * the previous listing, and nothing on the first listing. Session Core folds a revision into the
+ * title and preview, so an edit or delete of the first or last line shows here even when no
+ * stream frame arrived (stream down or the event log switched off). A revision of a line in the
+ * middle of a post still waits for the stream or a reload: the listing carries no revision mark.
+ * `previous` is updated in place to the current listing.
+ */
+export function listedTextChanges(previous: Map<string, string>, threads: readonly ListedText[]): string[] {
+  const changed: string[] = []
+  const seen = new Set<string>()
+  for (const thread of threads) {
+    const text = `${thread.title ?? ''}\u0000${thread.preview ?? ''}`
+    const before = previous.get(thread.thread_id)
+    if (before !== undefined && before !== text) changed.push(thread.thread_id)
+    previous.set(thread.thread_id, text)
+    seen.add(thread.thread_id)
+  }
+  for (const id of [...previous.keys()]) if (!seen.has(id)) previous.delete(id)
+  return changed
+}
+
 /** Bumps the counter of each named thread once. */
 export function bumpThreadTranscriptEpochs(threadIds: Iterable<string>): void {
   const ids = [...new Set(threadIds)].filter((id) => id.length > 0)

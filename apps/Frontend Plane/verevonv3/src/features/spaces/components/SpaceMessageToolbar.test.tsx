@@ -163,6 +163,22 @@ describe('SpaceMessageToolbar copy link, quick reactions and reason picker (DEPT
     expect(writeText).toHaveBeenCalledWith(new URL(HREF, window.location.origin).href)
   })
 
+  it('a viewer offered a link (entry links on) gets Copy link alone: copying changes nothing', () => {
+    const rules = rulesFor('viewer')
+    render(() => (
+      <SpaceMessageToolbar
+        canEdit={rules.canEdit(othersTurn)}
+        canDelete={rules.canDelete(othersTurn)}
+        linkHref={HREF}
+        onEdit={() => {}}
+        onDelete={() => {}}
+      />
+    ))
+    expect(screen.getByRole('button', { name: 'Kopier lenke' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Rediger' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Slett' })).toBeNull()
+  })
+
   it('a failed copy is reported, not swallowed', async () => {
     const writeText = vi.fn().mockRejectedValue(new Error('denied'))
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })

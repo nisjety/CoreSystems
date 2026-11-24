@@ -123,7 +123,7 @@ import { registerUnsavedWork } from '@/shared/build/unsaved-work'
 import { hereSentence, readPresence, typingSentence } from '../lib/space-presence'
 import { createSpaceStreamController, type SpaceStreamController, type SpaceStreamState } from '../lib/space-stream'
 import { notifySpacesListChanged } from '../lib/space-list-changed'
-import { bumpThreadTranscriptEpochs } from '../lib/space-transcript-epoch'
+import { bumpThreadTranscriptEpochs, listedTextChanges } from '../lib/space-transcript-epoch'
 import { SpaceLiveIndicator } from './SpaceLiveIndicator'
 import { SpaceActivityPanel } from './SpaceActivityPanel'
 import { SpaceKnowledgePanel } from './SpaceKnowledgePanel'
@@ -625,6 +625,23 @@ export default function SpacePage() {
         if (streamController === controller) streamController = undefined
         setStreamState('idle')
       }
+    },
+  )
+
+  // DEPTH-WS12-S4-1 poll fallback: without a live stream, a revision that changes a post's folded
+  // title or preview re-reads that post's transcript (the live path is onThreadsTouched above).
+  const listedText = new Map<string, string>()
+  let listedTextRef: string | undefined
+  createEffect(
+    () => ({ ref: spaceRef(), list: threads.error ? undefined : threads()?.threads, live: streamState() === 'live' }),
+    ({ ref, list, live }) => {
+      if (!ref || !list) return
+      if (listedTextRef !== ref) {
+        listedTextRef = ref
+        listedText.clear()
+      }
+      const changed = listedTextChanges(listedText, list)
+      if (!live) bumpThreadTranscriptEpochs(changed)
     },
   )
 
