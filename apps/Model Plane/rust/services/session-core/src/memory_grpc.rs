@@ -589,11 +589,13 @@ impl MemoryGrpc {
                 "Space membership required for this Space's memory",
             ));
         }
-        let deleted = crate::space::memory_declassify::retract_declassified_row(
+        // D22an: true when this subject's share was taken back; the room row itself stays while another
+        // member's live share still holds it.
+        let taken_back = crate::space::memory_declassify::retract_declassified_row(
             &self.pool, org_id, space_id, memory_id, user_id,
         )
         .await?;
-        if !deleted {
+        if !taken_back {
             return Err(Status::not_found("memory not found"));
         }
         // Ids only: who retracted which room row of which Space.

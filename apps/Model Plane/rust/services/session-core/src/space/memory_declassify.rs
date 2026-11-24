@@ -281,9 +281,12 @@ pub(crate) async fn declassify_into_room(
 }
 
 /// Retract the room copy one subject shared (SD-22: the declassifying owner retracts). The ledger must hold
-/// a live share of that row by this subject; the room row is deleted and every live ledger row of it is
-/// stamped retracted, so no replay brings it back. Returns false when this subject has no live share of the
-/// row, which the caller reports as not found. The source row is never touched.
+/// a live share of that row by this subject. D22an (DEC-WS17-RETRACT-PATHS): the owner path follows the removal
+/// rule of [`retract_removed_subject`]. Only this subject's live shares of the row are stamped retracted, so no
+/// replay of theirs brings it back, and the room row is deleted only when no other member's live share still
+/// holds it (another member who shared the same text keeps the copy). Returns false when this subject has no
+/// live share of the row, which the caller reports as not found; true when their share was taken back, whether
+/// or not the row itself went. The source row is never touched.
 pub(crate) async fn retract_declassified_row(
     pool: &PgPool,
     org_id: &str,
@@ -292,6 +295,14 @@ pub(crate) async fn retract_declassified_row(
     subject_id: &str,
 ) -> Result<bool, Status> {
     let mut tx = pool.begin().await.map_err(internal)?;
+    // Serialise with a share and a membership retraction of this subject in this Space (the same lock).
+    sqlx::query(LOCK_MEMBER_SQL)
+        .bind(org_id)
+        .bind(space_id)
+        .bind(subject_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal)?;
     let shared_by_subject: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM memory_declassifications \
          WHERE org_id = $1 AND space_ref = $2 AND room_memory_id = $3 \
@@ -308,11 +319,11 @@ pub(crate) async fn retract_declassified_row(
         tx.rollback().await.map_err(internal)?;
         return Ok(false);
     }
-    let deleted: Option<String> = sqlx::query_scalar(
-        "DELETE FROM agent_memory \
-         WHERE id = $1 AND org_id = $2 AND scope = 'space' AND scope_id = $3 \
-           AND origin_kind = 'declassified' \
-         RETURNING id",
+    // Lock the room row before the ledger is read again, as the removal path does: another member's share of
+    // the same text holds this row until it commits, so the delete below sees that share's ledger row.
+    sqlx::query(
+        "SELECT id FROM agent_memory WHERE id = $1 AND org_id = $2 AND scope = 'space' AND scope_id = $3 \
+           AND origin_kind = 'declassified' FOR UPDATE",
     )
     .bind(memory_id)
     .bind(org_id)
@@ -322,16 +333,31 @@ pub(crate) async fn retract_declassified_row(
     .map_err(internal)?;
     sqlx::query(
         "UPDATE memory_declassifications SET retracted_at = now() \
-         WHERE org_id = $1 AND space_ref = $2 AND room_memory_id = $3 AND retracted_at IS NULL",
+         WHERE org_id = $1 AND space_ref = $2 AND room_memory_id = $3 AND subject_id = $4 \
+           AND retracted_at IS NULL",
     )
     .bind(org_id)
     .bind(space_id)
     .bind(memory_id)
+    .bind(subject_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(internal)?;
+    sqlx::query(
+        "DELETE FROM agent_memory \
+         WHERE id = $1 AND org_id = $2 AND scope = 'space' AND scope_id = $3 \
+           AND origin_kind = 'declassified' \
+           AND NOT EXISTS (SELECT 1 FROM memory_declassifications \
+                           WHERE org_id = $2 AND space_ref = $3 AND room_memory_id = $1 AND retracted_at IS NULL)",
+    )
+    .bind(memory_id)
+    .bind(org_id)
+    .bind(space_id)
     .execute(&mut *tx)
     .await
     .map_err(internal)?;
     tx.commit().await.map_err(internal)?;
-    Ok(deleted.is_some())
+    Ok(true)
 }
 
 /// W3 D1 and W3-DEC-ORDER2: retract the live declassified shares one subject made in one Space, when Control says the
@@ -882,6 +908,83 @@ mod tests {
             .await
             .expect("room row after both retractions");
         assert_eq!(gone, 0, "the room row is deleted once no live share references it");
+
+        clean_declassify_world(&pool, &org, &space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn owner_retract_keeps_the_room_row_while_another_members_share_holds_it() {
+        // D22an (DEC-WS17-RETRACT-PATHS): the owner path follows the removal rule.
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let org = format!("declassify-org-{}", mp_ids::new_ulid());
+        let space = format!("declassify-space-{}", mp_ids::new_ulid());
+        let subject_a = "owner-7a";
+        let subject_b = "owner-7b";
+        let source_a = format!("mem-a-{}", mp_ids::new_ulid());
+        let source_b = format!("mem-b-{}", mp_ids::new_ulid());
+        seed_personal_memory(&pool, &org, subject_a, &source_a, "pref-a").await;
+        seed_personal_memory(&pool, &org, subject_b, &source_b, "pref-b").await;
+        let text_digest = digest(10);
+        let shared = declassify_into_room(
+            &pool,
+            share(&org, subject_a, &space, &source_a, &text_digest, "decision-7a", "idem-7a", 1),
+        )
+        .await
+        .expect("subject a shares");
+        let also = declassify_into_room(
+            &pool,
+            share(&org, subject_b, &space, &source_b, &text_digest, "decision-7b", "idem-7b", 1),
+        )
+        .await
+        .expect("subject b shares the same text");
+        assert_eq!(shared.memory_id, also.memory_id);
+
+        let room_rows = || async {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM agent_memory WHERE id = $1")
+                .bind(&shared.memory_id)
+                .fetch_one(&pool)
+                .await
+                .expect("room row count")
+        };
+        let live_of = |subject: &'static str| {
+            let pool = pool.clone();
+            let org = org.clone();
+            let room = shared.memory_id.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM memory_declassifications WHERE org_id = $1 AND room_memory_id = $2 \
+                       AND subject_id = $3 AND retracted_at IS NULL",
+                )
+                .bind(&org)
+                .bind(&room)
+                .bind(subject)
+                .fetch_one(&pool)
+                .await
+                .expect("live share count")
+            }
+        };
+
+        assert!(retract_declassified_row(&pool, &org, &space, &shared.memory_id, subject_a)
+            .await
+            .expect("a takes back"));
+        assert_eq!(room_rows().await, 1, "b's live share keeps the room row");
+        assert_eq!(live_of(subject_a).await, 0, "a's share is stamped retracted");
+        assert_eq!(live_of(subject_b).await, 1, "b's share is left live");
+
+        assert!(
+            !retract_declassified_row(&pool, &org, &space, &shared.memory_id, subject_a)
+                .await
+                .expect("a repeats"),
+            "a repeat finds no live share of a and is not found"
+        );
+
+        assert!(retract_declassified_row(&pool, &org, &space, &shared.memory_id, subject_b)
+            .await
+            .expect("b takes back"));
+        assert_eq!(room_rows().await, 0, "the last live share's take-back deletes the room row");
 
         clean_declassify_world(&pool, &org, &space).await;
     }
