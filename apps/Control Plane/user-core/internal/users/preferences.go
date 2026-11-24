@@ -47,6 +47,44 @@ func NormalizeLanguage(lang string) (string, bool) {
 	return lang, true
 }
 
+// legacyCountryCode is the country-code region the legacy default carried ("US"). The legacy language route still
+// accepts it, because older clients read it back and send it again.
+var legacyCountryCode = regexp.MustCompile(`^[A-Z]{2}$`)
+
+// LegacyLanguagePatch validates the fields of a legacy PUT /api/v1/settings/language body and returns the patch to
+// store. It applies the same rules as the preference contract (WS16-S2). A field the body leaves out is empty and is
+// not written: the stored row merges by key, so writing "" would blank a value the body never meant to touch. On a
+// rejected field it returns the error message to send and false.
+func LegacyLanguagePatch(language, region, dateFormat, timeFormat string) (map[string]any, string, bool) {
+	patch := map[string]any{}
+	if language != "" {
+		lang, ok := NormalizeLanguage(language)
+		if !ok {
+			return nil, "language must be a language tag such as nb-NO", false
+		}
+		patch["language"] = lang
+	}
+	if region != "" {
+		if !IsValidTimezone(region) && !legacyCountryCode.MatchString(region) {
+			return nil, "region must be an IANA zone name", false
+		}
+		patch["region"] = region
+	}
+	if dateFormat != "" {
+		if !ValidDateFormats[dateFormat] {
+			return nil, "dateFormat must be MM/DD/YYYY, DD/MM/YYYY or YYYY-MM-DD", false
+		}
+		patch["dateFormat"] = dateFormat
+	}
+	if timeFormat != "" {
+		if !ValidTimeFormats[timeFormat] {
+			return nil, "timeFormat must be 12h or 24h", false
+		}
+		patch["timeFormat"] = timeFormat
+	}
+	return patch, "", true
+}
+
 // ResolveTimezone reads the timezone from the language category map: the
 // "timezone" key first, then the legacy "region" value only when it is a valid
 // IANA zone. It never returns a country code such as "US".

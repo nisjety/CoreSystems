@@ -145,3 +145,46 @@ func TestIsValidTimezoneRejectsNonZones(t *testing.T) {
 		}
 	}
 }
+
+// The legacy language route validates what it stores and never writes a field the body left out.
+func TestLegacyLanguagePatchValidatesAndWritesOnlySetFields(t *testing.T) {
+	patch, msg, ok := LegacyLanguagePatch("nb-NO", "Europe/Oslo", "DD/MM/YYYY", "24h")
+	if !ok || msg != "" {
+		t.Fatalf("valid body rejected: %q", msg)
+	}
+	want := map[string]any{"language": "nb-NO", "region": "Europe/Oslo", "dateFormat": "DD/MM/YYYY", "timeFormat": "24h"}
+	if len(patch) != len(want) {
+		t.Fatalf("patch = %v, want %v", patch, want)
+	}
+	for key, value := range want {
+		if patch[key] != value {
+			t.Fatalf("patch[%s] = %v, want %v", key, patch[key], value)
+		}
+	}
+
+	// A partial body writes only what it sets: no "" for the fields it leaves out.
+	partial, _, _ := LegacyLanguagePatch("en-US", "", "", "")
+	if len(partial) != 1 || partial["language"] != "en-US" {
+		t.Fatalf("partial patch = %v, want only language", partial)
+	}
+
+	// The legacy country-code region is still accepted, as older clients send it back.
+	if _, _, ok := LegacyLanguagePatch("", "NO", "", ""); !ok {
+		t.Fatal("legacy country-code region should be accepted")
+	}
+
+	rejected := []struct {
+		name, language, region, dateFormat, timeFmt string
+	}{
+		{"junk language", "not a language!", "", "", ""},
+		{"region that is neither a zone nor a country code", "", "Mars/Olympus", "", ""},
+		{"date format outside the closed set", "", "", "YYYY/DD/MM", ""},
+		{"time format outside the closed set", "", "", "", "13h"},
+	}
+	for _, tc := range rejected {
+		patch, msg, ok := LegacyLanguagePatch(tc.language, tc.region, tc.dateFormat, tc.timeFmt)
+		if ok || patch != nil || msg == "" {
+			t.Fatalf("%s: accepted (patch=%v msg=%q)", tc.name, patch, msg)
+		}
+	}
+}

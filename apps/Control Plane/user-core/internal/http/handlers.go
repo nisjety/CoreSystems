@@ -1247,14 +1247,20 @@ func (s *Server) getLanguageSettings(c *gin.Context) {
 }
 
 // PUT /api/v1/settings/language
+// The legacy write route. Its fields are validated with the preference contract's rules (WS16-S2), and a field the
+// body leaves out is not written (see users.LegacyLanguagePatch).
 func (s *Server) updateLanguageSettings(c *gin.Context) {
 	userID, ok := requireAuthenticatedUserID(c)
 	if !ok {
 		return
 	}
 	var req LanguageSettings
-	patch, ok := bindSettingsPatch(c, &req)
-	if !ok {
+	if !bindJSONRequest(c, &req, "invalid request body") {
+		return
+	}
+	patch, message, valid := users.LegacyLanguagePatch(req.Language, req.Region, req.DateFormat, req.TimeFormat)
+	if !valid {
+		c.JSON(http.StatusBadRequest, gin.H{"error": message})
 		return
 	}
 	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "language", patch)
