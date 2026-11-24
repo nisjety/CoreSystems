@@ -812,7 +812,7 @@ fn map_details_failure(message: Option<&str>) -> Reply {
             StatusCode::CONFLICT,
             Json(error(
                 "space_kind_not_editable",
-                "Only a named room can be renamed or given a topic.",
+                "The name and topic cannot be changed for this room.",
             )),
         );
     }

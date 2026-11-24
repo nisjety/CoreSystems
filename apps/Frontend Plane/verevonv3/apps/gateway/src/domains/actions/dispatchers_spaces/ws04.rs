@@ -8,8 +8,8 @@ use axum::response::Response;
 use serde_json::{json, Map, Value};
 
 use crate::domains::spaces::room_admin::{
-    change_member_role, feature_disabled, join_room, remove_member, update_room_details,
-    update_room_settings,
+    change_member_role, feature_disabled, join_room, remove_member, set_room_archived,
+    update_room_details, update_room_settings,
 };
 use crate::middleware::AuthenticatedUser;
 use crate::config::AppState;
@@ -140,6 +140,55 @@ pub(in crate::domains::actions) async fn dispatch_spaces_update_room_settings(
     let (status, axum::Json(resp)) =
         update_room_settings(state, user, space_ref, &Value::Object(body)).await;
     owner_json_response_to_envelope("spaces.update_room_settings", user, status, resp)
+}
+
+/// WS04-S7: `spaces.archive_room`. Rides the same gateway function as
+/// `POST /api/v1/spaces/{space_ref}/archive`, so the flag `SPACE_ROOM_ARCHIVE_API`, the member-ops
+/// limiter, Control's role rule and the typed errors exist once. Human-only (never model-executable).
+pub(in crate::domains::actions) async fn dispatch_spaces_archive_room(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+    idempotency_key: &str,
+) -> Response {
+    dispatch_room_archive(state, user, input, idempotency_key, true).await
+}
+
+/// WS04-S7: `spaces.unarchive_room`, the same gateway function as `POST .../unarchive`.
+pub(in crate::domains::actions) async fn dispatch_spaces_unarchive_room(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+    idempotency_key: &str,
+) -> Response {
+    dispatch_room_archive(state, user, input, idempotency_key, false).await
+}
+
+/// Shared body of the two archive actions. Only the key travels from the input side, so a forged
+/// org, role or state in the input never reaches Control.
+async fn dispatch_room_archive(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+    idempotency_key: &str,
+    archive: bool,
+) -> Response {
+    let action_id = if archive { "spaces.archive_room" } else { "spaces.unarchive_room" };
+    let space_ref = ticket_string(input, "spaceRef");
+    if space_ref.is_empty() {
+        return ticket_bad_request(if archive {
+            "spaces.archive_room requires a non-empty 'spaceRef'"
+        } else {
+            "spaces.unarchive_room requires a non-empty 'spaceRef'"
+        });
+    }
+    let mut body = Map::new();
+    if !idempotency_key.trim().is_empty() {
+        body.insert("idempotency_key".to_owned(), json!(idempotency_key.trim()));
+    }
+    let (status, axum::Json(resp)) =
+        set_room_archived(state, user, space_ref, &Value::Object(body), archive).await;
+    owner_json_response_to_envelope(action_id, user, status, resp)
 }
 
 #[cfg(test)]
@@ -386,5 +435,86 @@ mod tests {
         let (status, _) = read(dispatch_spaces_update_room_settings(&state, &user(), &input, "idem-1").await).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(control_bodies(&control, "POST", "/api/v1/internal/spaces/space-room/join").await.is_empty());
+    }
+
+    // ---- WS04-S7.gw: spaces.archive_room and spaces.unarchive_room -------------------------------
+
+    /// `stack(role)` with the archive flag on and Control's two archive answers mounted.
+    async fn archive_stack(role: &str) -> (AppState, MockServer, MockServer) {
+        let (mut state, control, application) = stack(role).await;
+        state.space_features.room_archive_api = true;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/archive"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"state": "archived", "changed": true, "replayed": false,
+                    "archived_at": "2026-10-31T10:00:00Z", "authority_revision": 7}
+            })))
+            .mount(&control)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/unarchive"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"state": "active", "changed": true, "archived_at": null}
+            })))
+            .mount(&control)
+            .await;
+        (state, control, application)
+    }
+
+    #[tokio::test]
+    async fn archive_actions_are_404_feature_disabled_with_the_flag_off_and_call_nothing() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, control, application) = stack("owner").await;
+        let input = json!({"spaceRef": "space-room"});
+        let (status, body) = read(dispatch_spaces_archive_room(&state, &user(), &input, "idem-a-1").await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"]["code"], "feature_disabled");
+        let (status, body) = read(dispatch_spaces_unarchive_room(&state, &user(), &input, "idem-a-2").await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["error"]["code"], "feature_disabled");
+        assert!(control.received_requests().await.unwrap().is_empty());
+        assert!(application.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn archive_actions_refuse_a_missing_space_ref_before_control_is_called() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, control, _application) = archive_stack("owner").await;
+        for input in [json!({}), json!({"spaceRef": "  "}), json!({"spaceRef": 5})] {
+            let (status, body) = read(dispatch_spaces_archive_room(&state, &user(), &input, "idem-a-1").await).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{input}");
+            assert_eq!(body["error"]["code"], "invalid_input");
+            let (status, _) = read(dispatch_spaces_unarchive_room(&state, &user(), &input, "idem-a-1").await).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{input}");
+        }
+        assert!(control.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn archive_and_unarchive_forward_only_the_key_and_wrap_the_owner_envelope() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, control, application) = archive_stack("owner").await;
+        let input = json!({"spaceRef": "space-room", "orgId": "forged", "role": "owner", "state": "active"});
+        let (status, body) = read(dispatch_spaces_archive_room(&state, &user(), &input, " idem-a-1 ").await).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["actionId"], "spaces.archive_room");
+        assert_eq!(body["data"]["status"], "completed");
+        assert_eq!(
+            body["data"]["result"],
+            json!({"state": "archived", "changed": true, "archived_at": "2026-10-31T10:00:00Z"})
+        );
+        let (status, body) =
+            read(dispatch_spaces_unarchive_room(&state, &user(), &json!({"spaceRef": "space-room"}), "  ").await).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["actionId"], "spaces.unarchive_room");
+        assert_eq!(
+            body["data"]["result"],
+            json!({"state": "active", "changed": true, "archived_at": null})
+        );
+        let archive = control_bodies(&control, "POST", "/api/v1/internal/spaces/space-room/archive").await;
+        assert_eq!(archive, vec![json!({"idempotency_key": "idem-a-1"})], "the key is trimmed; nothing else travels");
+        let unarchive = control_bodies(&control, "POST", "/api/v1/internal/spaces/space-room/unarchive").await;
+        assert_eq!(unarchive, vec![json!({})], "a blank key is not sent");
+        assert!(application.received_requests().await.unwrap().is_empty(), "archive is Control's state alone");
     }
 }

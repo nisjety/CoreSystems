@@ -93,8 +93,9 @@ use super::dispatchers_spaces::d18::dispatch_spaces_set_member_history_window;
 use super::dispatchers_spaces::ws01::{dispatch_spaces_create_post, dispatch_spaces_reply_in_thread};
 use super::dispatchers_spaces::ws20::dispatch_spaces_browser_run_start;
 use super::dispatchers_spaces::ws04::{
-    dispatch_spaces_change_member_role, dispatch_spaces_join_room, dispatch_spaces_leave_room,
-    dispatch_spaces_update_room_details, dispatch_spaces_update_room_settings,
+    dispatch_spaces_archive_room, dispatch_spaces_change_member_role, dispatch_spaces_join_room,
+    dispatch_spaces_leave_room, dispatch_spaces_unarchive_room, dispatch_spaces_update_room_details,
+    dispatch_spaces_update_room_settings,
 };
 use super::dispatchers_spaces::ws08::{
     dispatch_spaces_set_agent_pin, dispatch_spaces_set_agent_wake_policy,
@@ -1325,6 +1326,18 @@ pub(super) async fn execute_action(
                     &body.input,
                     &body.idempotency_key,
                 )
+            })
+            .await
+        }
+        "spaces.archive_room" => {
+            boxed_dispatch(|| {
+                dispatch_spaces_archive_room(&state, &user, &body.input, &body.idempotency_key)
+            })
+            .await
+        }
+        "spaces.unarchive_room" => {
+            boxed_dispatch(|| {
+                dispatch_spaces_unarchive_room(&state, &user, &body.input, &body.idempotency_key)
             })
             .await
         }

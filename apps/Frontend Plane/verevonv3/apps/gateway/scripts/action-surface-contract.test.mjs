@@ -212,6 +212,8 @@ for (const [fragment, ids] of [
       'spaces.leave_room',
       'spaces.join_room',
       'spaces.update_room_settings',
+      'spaces.archive_room',
+      'spaces.unarchive_room',
     ],
   ],
   ['ws08.ts', ['spaces.set_agent_wake_policy']],
@@ -279,6 +281,8 @@ test('the WS04 room admin actions are not model executable', () => {
     'spaces.update_room_details',
     'spaces.change_member_role',
     'spaces.leave_room',
+    'spaces.archive_room',
+    'spaces.unarchive_room',
   ]) {
     const row = modelAccessSource.match(new RegExp(`'${actionId.replace('.', '\\.')}':\\s*([^\\n]+)`));
     assert.ok(row, `${actionId} has a model-access row`);
