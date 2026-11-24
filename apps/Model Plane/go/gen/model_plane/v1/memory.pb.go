@@ -2503,6 +2503,199 @@ func (x *RestoreMemoryResponse) GetRestored() bool {
 	return false
 }
 
+// W3 D21g: list the caller's own live declassifications. Ids only.
+type ListMemoryDeclassificationsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Tenant context.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// The caller. Must be the verified person; another user's shares are never listed.
+	UserId string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// Maximum results. The server clamps it to 1..=200 and reads 0 as 100.
+	Limit uint32 `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
+	// Lists one Space's shares only when set. Empty lists every Space.
+	SpaceId       string `protobuf:"bytes,4,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListMemoryDeclassificationsRequest) Reset() {
+	*x = ListMemoryDeclassificationsRequest{}
+	mi := &file_model_plane_v1_memory_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListMemoryDeclassificationsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListMemoryDeclassificationsRequest) ProtoMessage() {}
+
+func (x *ListMemoryDeclassificationsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_memory_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListMemoryDeclassificationsRequest.ProtoReflect.Descriptor instead.
+func (*ListMemoryDeclassificationsRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_memory_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *ListMemoryDeclassificationsRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *ListMemoryDeclassificationsRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *ListMemoryDeclassificationsRequest) GetLimit() uint32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+func (x *ListMemoryDeclassificationsRequest) GetSpaceId() string {
+	if x != nil {
+		return x.SpaceId
+	}
+	return ""
+}
+
+// One live share of the caller: the room row it holds, the Space, the personal row it came from and when it was
+// first shared. A row the caller shared twice (another review, another key) is listed once.
+type MemoryDeclassification struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The room copy (agent_memory scope space, origin declassified) the share holds; the id a take-back names.
+	RoomMemoryId string `protobuf:"bytes,1,opt,name=room_memory_id,json=roomMemoryId,proto3" json:"room_memory_id,omitempty"`
+	// The shared Space the copy lives in.
+	SpaceId string `protobuf:"bytes,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// The caller's personal row the copy was made from. Never changed by a share or a take-back.
+	SourceMemoryId string `protobuf:"bytes,3,opt,name=source_memory_id,json=sourceMemoryId,proto3" json:"source_memory_id,omitempty"`
+	// When the caller first shared this room copy.
+	SharedAt      *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=shared_at,json=sharedAt,proto3" json:"shared_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MemoryDeclassification) Reset() {
+	*x = MemoryDeclassification{}
+	mi := &file_model_plane_v1_memory_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MemoryDeclassification) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MemoryDeclassification) ProtoMessage() {}
+
+func (x *MemoryDeclassification) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_memory_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MemoryDeclassification.ProtoReflect.Descriptor instead.
+func (*MemoryDeclassification) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_memory_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *MemoryDeclassification) GetRoomMemoryId() string {
+	if x != nil {
+		return x.RoomMemoryId
+	}
+	return ""
+}
+
+func (x *MemoryDeclassification) GetSpaceId() string {
+	if x != nil {
+		return x.SpaceId
+	}
+	return ""
+}
+
+func (x *MemoryDeclassification) GetSourceMemoryId() string {
+	if x != nil {
+		return x.SourceMemoryId
+	}
+	return ""
+}
+
+func (x *MemoryDeclassification) GetSharedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.SharedAt
+	}
+	return nil
+}
+
+// The caller's live shares, newest first.
+type ListMemoryDeclassificationsResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// At most the request's clamped limit.
+	Declassifications []*MemoryDeclassification `protobuf:"bytes,1,rep,name=declassifications,proto3" json:"declassifications,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *ListMemoryDeclassificationsResponse) Reset() {
+	*x = ListMemoryDeclassificationsResponse{}
+	mi := &file_model_plane_v1_memory_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListMemoryDeclassificationsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListMemoryDeclassificationsResponse) ProtoMessage() {}
+
+func (x *ListMemoryDeclassificationsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_memory_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListMemoryDeclassificationsResponse.ProtoReflect.Descriptor instead.
+func (*ListMemoryDeclassificationsResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_memory_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *ListMemoryDeclassificationsResponse) GetDeclassifications() []*MemoryDeclassification {
+	if x != nil {
+		return x.Declassifications
+	}
+	return nil
+}
+
 var File_model_plane_v1_memory_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_memory_proto_rawDesc = "" +
@@ -2675,7 +2868,19 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\tmemory_id\x18\x03 \x01(\tR\bmemoryId\x12.\n" +
 	"\x13space_kind_evidence\x18\x04 \x01(\tR\x11spaceKindEvidence\"3\n" +
 	"\x15RestoreMemoryResponse\x12\x1a\n" +
-	"\brestored\x18\x01 \x01(\bR\brestored*s\n" +
+	"\brestored\x18\x01 \x01(\bR\brestored\"\x85\x01\n" +
+	"\"ListMemoryDeclassificationsRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x14\n" +
+	"\x05limit\x18\x03 \x01(\rR\x05limit\x12\x19\n" +
+	"\bspace_id\x18\x04 \x01(\tR\aspaceId\"\xbc\x01\n" +
+	"\x16MemoryDeclassification\x12$\n" +
+	"\x0eroom_memory_id\x18\x01 \x01(\tR\froomMemoryId\x12\x19\n" +
+	"\bspace_id\x18\x02 \x01(\tR\aspaceId\x12(\n" +
+	"\x10source_memory_id\x18\x03 \x01(\tR\x0esourceMemoryId\x127\n" +
+	"\tshared_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\bsharedAt\"{\n" +
+	"#ListMemoryDeclassificationsResponse\x12T\n" +
+	"\x11declassifications\x18\x01 \x03(\v2&.model_plane.v1.MemoryDeclassificationR\x11declassifications*s\n" +
 	"\x10MemoryProvenance\x12!\n" +
 	"\x1dMEMORY_PROVENANCE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18MEMORY_PROVENANCE_STATED\x10\x01\x12\x1e\n" +
@@ -2684,7 +2889,7 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\x18MEMORY_STATE_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fMEMORY_STATE_ON\x10\x01\x12\x17\n" +
 	"\x13MEMORY_STATE_PAUSED\x10\x02\x12\x14\n" +
-	"\x10MEMORY_STATE_OFF\x10\x032\xa8\v\n" +
+	"\x10MEMORY_STATE_OFF\x10\x032\xb1\f\n" +
 	"\rMemoryService\x12Y\n" +
 	"\fSearchMemory\x12#.model_plane.v1.SearchMemoryRequest\x1a$.model_plane.v1.SearchMemoryResponse\x12V\n" +
 	"\vIndexMemory\x12\".model_plane.v1.IndexMemoryRequest\x1a#.model_plane.v1.IndexMemoryResponse\x12S\n" +
@@ -2701,7 +2906,8 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\x10EraseAgentMemory\x12'.model_plane.v1.EraseAgentMemoryRequest\x1a(.model_plane.v1.EraseAgentMemoryResponse\x12e\n" +
 	"\x10CheckMemoryWrite\x12'.model_plane.v1.CheckMemoryWriteRequest\x1a(.model_plane.v1.CheckMemoryWriteResponse\x12e\n" +
 	"\x10DeclassifyMemory\x12'.model_plane.v1.DeclassifyMemoryRequest\x1a(.model_plane.v1.DeclassifyMemoryResponse\x12\\\n" +
-	"\rRestoreMemory\x12$.model_plane.v1.RestoreMemoryRequest\x1a%.model_plane.v1.RestoreMemoryResponseB\xb3\x01\n" +
+	"\rRestoreMemory\x12$.model_plane.v1.RestoreMemoryRequest\x1a%.model_plane.v1.RestoreMemoryResponse\x12\x86\x01\n" +
+	"\x1bListMemoryDeclassifications\x122.model_plane.v1.ListMemoryDeclassificationsRequest\x1a3.model_plane.v1.ListMemoryDeclassificationsResponseB\xb3\x01\n" +
 	"\x12com.model_plane.v1B\vMemoryProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -2717,91 +2923,98 @@ func file_model_plane_v1_memory_proto_rawDescGZIP() []byte {
 }
 
 var file_model_plane_v1_memory_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_model_plane_v1_memory_proto_msgTypes = make([]protoimpl.MessageInfo, 31)
+var file_model_plane_v1_memory_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
 var file_model_plane_v1_memory_proto_goTypes = []any{
-	(MemoryProvenance)(0),             // 0: model_plane.v1.MemoryProvenance
-	(MemoryState)(0),                  // 1: model_plane.v1.MemoryState
-	(*SearchMemoryRequest)(nil),       // 2: model_plane.v1.SearchMemoryRequest
-	(*SearchMemoryResponse)(nil),      // 3: model_plane.v1.SearchMemoryResponse
-	(*MemoryEntry)(nil),               // 4: model_plane.v1.MemoryEntry
-	(*IndexMemoryRequest)(nil),        // 5: model_plane.v1.IndexMemoryRequest
-	(*IndexMemoryResponse)(nil),       // 6: model_plane.v1.IndexMemoryResponse
-	(*MemoryHealthRequest)(nil),       // 7: model_plane.v1.MemoryHealthRequest
-	(*MemoryHealthResponse)(nil),      // 8: model_plane.v1.MemoryHealthResponse
-	(*ListMemoryRequest)(nil),         // 9: model_plane.v1.ListMemoryRequest
-	(*ListMemoryResponse)(nil),        // 10: model_plane.v1.ListMemoryResponse
-	(*DeleteMemoryRequest)(nil),       // 11: model_plane.v1.DeleteMemoryRequest
-	(*DeleteMemoryResponse)(nil),      // 12: model_plane.v1.DeleteMemoryResponse
-	(*GetMemoryControlsRequest)(nil),  // 13: model_plane.v1.GetMemoryControlsRequest
-	(*SetMemoryControlsRequest)(nil),  // 14: model_plane.v1.SetMemoryControlsRequest
-	(*MemoryControls)(nil),            // 15: model_plane.v1.MemoryControls
-	(*GetMemoryControlsResponse)(nil), // 16: model_plane.v1.GetMemoryControlsResponse
-	(*SetMemoryControlsResponse)(nil), // 17: model_plane.v1.SetMemoryControlsResponse
-	(*ResetMemoryRequest)(nil),        // 18: model_plane.v1.ResetMemoryRequest
-	(*ResetMemoryResponse)(nil),       // 19: model_plane.v1.ResetMemoryResponse
-	(*UserProfile)(nil),               // 20: model_plane.v1.UserProfile
-	(*GetUserProfileRequest)(nil),     // 21: model_plane.v1.GetUserProfileRequest
-	(*SetUserProfileRequest)(nil),     // 22: model_plane.v1.SetUserProfileRequest
-	(*RebuildUserProfileRequest)(nil), // 23: model_plane.v1.RebuildUserProfileRequest
-	(*UserProfileResponse)(nil),       // 24: model_plane.v1.UserProfileResponse
-	(*EraseAgentMemoryRequest)(nil),   // 25: model_plane.v1.EraseAgentMemoryRequest
-	(*EraseAgentMemoryResponse)(nil),  // 26: model_plane.v1.EraseAgentMemoryResponse
-	(*CheckMemoryWriteRequest)(nil),   // 27: model_plane.v1.CheckMemoryWriteRequest
-	(*CheckMemoryWriteResponse)(nil),  // 28: model_plane.v1.CheckMemoryWriteResponse
-	(*DeclassifyMemoryRequest)(nil),   // 29: model_plane.v1.DeclassifyMemoryRequest
-	(*DeclassifyMemoryResponse)(nil),  // 30: model_plane.v1.DeclassifyMemoryResponse
-	(*RestoreMemoryRequest)(nil),      // 31: model_plane.v1.RestoreMemoryRequest
-	(*RestoreMemoryResponse)(nil),     // 32: model_plane.v1.RestoreMemoryResponse
-	(*timestamppb.Timestamp)(nil),     // 33: google.protobuf.Timestamp
+	(MemoryProvenance)(0),                       // 0: model_plane.v1.MemoryProvenance
+	(MemoryState)(0),                            // 1: model_plane.v1.MemoryState
+	(*SearchMemoryRequest)(nil),                 // 2: model_plane.v1.SearchMemoryRequest
+	(*SearchMemoryResponse)(nil),                // 3: model_plane.v1.SearchMemoryResponse
+	(*MemoryEntry)(nil),                         // 4: model_plane.v1.MemoryEntry
+	(*IndexMemoryRequest)(nil),                  // 5: model_plane.v1.IndexMemoryRequest
+	(*IndexMemoryResponse)(nil),                 // 6: model_plane.v1.IndexMemoryResponse
+	(*MemoryHealthRequest)(nil),                 // 7: model_plane.v1.MemoryHealthRequest
+	(*MemoryHealthResponse)(nil),                // 8: model_plane.v1.MemoryHealthResponse
+	(*ListMemoryRequest)(nil),                   // 9: model_plane.v1.ListMemoryRequest
+	(*ListMemoryResponse)(nil),                  // 10: model_plane.v1.ListMemoryResponse
+	(*DeleteMemoryRequest)(nil),                 // 11: model_plane.v1.DeleteMemoryRequest
+	(*DeleteMemoryResponse)(nil),                // 12: model_plane.v1.DeleteMemoryResponse
+	(*GetMemoryControlsRequest)(nil),            // 13: model_plane.v1.GetMemoryControlsRequest
+	(*SetMemoryControlsRequest)(nil),            // 14: model_plane.v1.SetMemoryControlsRequest
+	(*MemoryControls)(nil),                      // 15: model_plane.v1.MemoryControls
+	(*GetMemoryControlsResponse)(nil),           // 16: model_plane.v1.GetMemoryControlsResponse
+	(*SetMemoryControlsResponse)(nil),           // 17: model_plane.v1.SetMemoryControlsResponse
+	(*ResetMemoryRequest)(nil),                  // 18: model_plane.v1.ResetMemoryRequest
+	(*ResetMemoryResponse)(nil),                 // 19: model_plane.v1.ResetMemoryResponse
+	(*UserProfile)(nil),                         // 20: model_plane.v1.UserProfile
+	(*GetUserProfileRequest)(nil),               // 21: model_plane.v1.GetUserProfileRequest
+	(*SetUserProfileRequest)(nil),               // 22: model_plane.v1.SetUserProfileRequest
+	(*RebuildUserProfileRequest)(nil),           // 23: model_plane.v1.RebuildUserProfileRequest
+	(*UserProfileResponse)(nil),                 // 24: model_plane.v1.UserProfileResponse
+	(*EraseAgentMemoryRequest)(nil),             // 25: model_plane.v1.EraseAgentMemoryRequest
+	(*EraseAgentMemoryResponse)(nil),            // 26: model_plane.v1.EraseAgentMemoryResponse
+	(*CheckMemoryWriteRequest)(nil),             // 27: model_plane.v1.CheckMemoryWriteRequest
+	(*CheckMemoryWriteResponse)(nil),            // 28: model_plane.v1.CheckMemoryWriteResponse
+	(*DeclassifyMemoryRequest)(nil),             // 29: model_plane.v1.DeclassifyMemoryRequest
+	(*DeclassifyMemoryResponse)(nil),            // 30: model_plane.v1.DeclassifyMemoryResponse
+	(*RestoreMemoryRequest)(nil),                // 31: model_plane.v1.RestoreMemoryRequest
+	(*RestoreMemoryResponse)(nil),               // 32: model_plane.v1.RestoreMemoryResponse
+	(*ListMemoryDeclassificationsRequest)(nil),  // 33: model_plane.v1.ListMemoryDeclassificationsRequest
+	(*MemoryDeclassification)(nil),              // 34: model_plane.v1.MemoryDeclassification
+	(*ListMemoryDeclassificationsResponse)(nil), // 35: model_plane.v1.ListMemoryDeclassificationsResponse
+	(*timestamppb.Timestamp)(nil),               // 36: google.protobuf.Timestamp
 }
 var file_model_plane_v1_memory_proto_depIdxs = []int32{
-	33, // 0: model_plane.v1.SearchMemoryRequest.updated_after:type_name -> google.protobuf.Timestamp
+	36, // 0: model_plane.v1.SearchMemoryRequest.updated_after:type_name -> google.protobuf.Timestamp
 	4,  // 1: model_plane.v1.SearchMemoryResponse.entries:type_name -> model_plane.v1.MemoryEntry
-	33, // 2: model_plane.v1.MemoryEntry.updated_at:type_name -> google.protobuf.Timestamp
+	36, // 2: model_plane.v1.MemoryEntry.updated_at:type_name -> google.protobuf.Timestamp
 	0,  // 3: model_plane.v1.MemoryEntry.provenance:type_name -> model_plane.v1.MemoryProvenance
 	4,  // 4: model_plane.v1.ListMemoryResponse.entries:type_name -> model_plane.v1.MemoryEntry
 	1,  // 5: model_plane.v1.SetMemoryControlsRequest.state:type_name -> model_plane.v1.MemoryState
 	1,  // 6: model_plane.v1.MemoryControls.state:type_name -> model_plane.v1.MemoryState
-	33, // 7: model_plane.v1.MemoryControls.updated_at:type_name -> google.protobuf.Timestamp
+	36, // 7: model_plane.v1.MemoryControls.updated_at:type_name -> google.protobuf.Timestamp
 	15, // 8: model_plane.v1.GetMemoryControlsResponse.controls:type_name -> model_plane.v1.MemoryControls
 	15, // 9: model_plane.v1.SetMemoryControlsResponse.controls:type_name -> model_plane.v1.MemoryControls
-	33, // 10: model_plane.v1.UserProfile.updated_at:type_name -> google.protobuf.Timestamp
+	36, // 10: model_plane.v1.UserProfile.updated_at:type_name -> google.protobuf.Timestamp
 	20, // 11: model_plane.v1.UserProfileResponse.profile:type_name -> model_plane.v1.UserProfile
-	2,  // 12: model_plane.v1.MemoryService.SearchMemory:input_type -> model_plane.v1.SearchMemoryRequest
-	5,  // 13: model_plane.v1.MemoryService.IndexMemory:input_type -> model_plane.v1.IndexMemoryRequest
-	9,  // 14: model_plane.v1.MemoryService.ListMemory:input_type -> model_plane.v1.ListMemoryRequest
-	11, // 15: model_plane.v1.MemoryService.DeleteMemory:input_type -> model_plane.v1.DeleteMemoryRequest
-	7,  // 16: model_plane.v1.MemoryService.Health:input_type -> model_plane.v1.MemoryHealthRequest
-	13, // 17: model_plane.v1.MemoryService.GetMemoryControls:input_type -> model_plane.v1.GetMemoryControlsRequest
-	14, // 18: model_plane.v1.MemoryService.SetMemoryControls:input_type -> model_plane.v1.SetMemoryControlsRequest
-	18, // 19: model_plane.v1.MemoryService.ResetMemory:input_type -> model_plane.v1.ResetMemoryRequest
-	21, // 20: model_plane.v1.MemoryService.GetUserProfile:input_type -> model_plane.v1.GetUserProfileRequest
-	22, // 21: model_plane.v1.MemoryService.SetUserProfile:input_type -> model_plane.v1.SetUserProfileRequest
-	23, // 22: model_plane.v1.MemoryService.RebuildUserProfile:input_type -> model_plane.v1.RebuildUserProfileRequest
-	25, // 23: model_plane.v1.MemoryService.EraseAgentMemory:input_type -> model_plane.v1.EraseAgentMemoryRequest
-	27, // 24: model_plane.v1.MemoryService.CheckMemoryWrite:input_type -> model_plane.v1.CheckMemoryWriteRequest
-	29, // 25: model_plane.v1.MemoryService.DeclassifyMemory:input_type -> model_plane.v1.DeclassifyMemoryRequest
-	31, // 26: model_plane.v1.MemoryService.RestoreMemory:input_type -> model_plane.v1.RestoreMemoryRequest
-	3,  // 27: model_plane.v1.MemoryService.SearchMemory:output_type -> model_plane.v1.SearchMemoryResponse
-	6,  // 28: model_plane.v1.MemoryService.IndexMemory:output_type -> model_plane.v1.IndexMemoryResponse
-	10, // 29: model_plane.v1.MemoryService.ListMemory:output_type -> model_plane.v1.ListMemoryResponse
-	12, // 30: model_plane.v1.MemoryService.DeleteMemory:output_type -> model_plane.v1.DeleteMemoryResponse
-	8,  // 31: model_plane.v1.MemoryService.Health:output_type -> model_plane.v1.MemoryHealthResponse
-	16, // 32: model_plane.v1.MemoryService.GetMemoryControls:output_type -> model_plane.v1.GetMemoryControlsResponse
-	17, // 33: model_plane.v1.MemoryService.SetMemoryControls:output_type -> model_plane.v1.SetMemoryControlsResponse
-	19, // 34: model_plane.v1.MemoryService.ResetMemory:output_type -> model_plane.v1.ResetMemoryResponse
-	24, // 35: model_plane.v1.MemoryService.GetUserProfile:output_type -> model_plane.v1.UserProfileResponse
-	24, // 36: model_plane.v1.MemoryService.SetUserProfile:output_type -> model_plane.v1.UserProfileResponse
-	24, // 37: model_plane.v1.MemoryService.RebuildUserProfile:output_type -> model_plane.v1.UserProfileResponse
-	26, // 38: model_plane.v1.MemoryService.EraseAgentMemory:output_type -> model_plane.v1.EraseAgentMemoryResponse
-	28, // 39: model_plane.v1.MemoryService.CheckMemoryWrite:output_type -> model_plane.v1.CheckMemoryWriteResponse
-	30, // 40: model_plane.v1.MemoryService.DeclassifyMemory:output_type -> model_plane.v1.DeclassifyMemoryResponse
-	32, // 41: model_plane.v1.MemoryService.RestoreMemory:output_type -> model_plane.v1.RestoreMemoryResponse
-	27, // [27:42] is the sub-list for method output_type
-	12, // [12:27] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	36, // 12: model_plane.v1.MemoryDeclassification.shared_at:type_name -> google.protobuf.Timestamp
+	34, // 13: model_plane.v1.ListMemoryDeclassificationsResponse.declassifications:type_name -> model_plane.v1.MemoryDeclassification
+	2,  // 14: model_plane.v1.MemoryService.SearchMemory:input_type -> model_plane.v1.SearchMemoryRequest
+	5,  // 15: model_plane.v1.MemoryService.IndexMemory:input_type -> model_plane.v1.IndexMemoryRequest
+	9,  // 16: model_plane.v1.MemoryService.ListMemory:input_type -> model_plane.v1.ListMemoryRequest
+	11, // 17: model_plane.v1.MemoryService.DeleteMemory:input_type -> model_plane.v1.DeleteMemoryRequest
+	7,  // 18: model_plane.v1.MemoryService.Health:input_type -> model_plane.v1.MemoryHealthRequest
+	13, // 19: model_plane.v1.MemoryService.GetMemoryControls:input_type -> model_plane.v1.GetMemoryControlsRequest
+	14, // 20: model_plane.v1.MemoryService.SetMemoryControls:input_type -> model_plane.v1.SetMemoryControlsRequest
+	18, // 21: model_plane.v1.MemoryService.ResetMemory:input_type -> model_plane.v1.ResetMemoryRequest
+	21, // 22: model_plane.v1.MemoryService.GetUserProfile:input_type -> model_plane.v1.GetUserProfileRequest
+	22, // 23: model_plane.v1.MemoryService.SetUserProfile:input_type -> model_plane.v1.SetUserProfileRequest
+	23, // 24: model_plane.v1.MemoryService.RebuildUserProfile:input_type -> model_plane.v1.RebuildUserProfileRequest
+	25, // 25: model_plane.v1.MemoryService.EraseAgentMemory:input_type -> model_plane.v1.EraseAgentMemoryRequest
+	27, // 26: model_plane.v1.MemoryService.CheckMemoryWrite:input_type -> model_plane.v1.CheckMemoryWriteRequest
+	29, // 27: model_plane.v1.MemoryService.DeclassifyMemory:input_type -> model_plane.v1.DeclassifyMemoryRequest
+	31, // 28: model_plane.v1.MemoryService.RestoreMemory:input_type -> model_plane.v1.RestoreMemoryRequest
+	33, // 29: model_plane.v1.MemoryService.ListMemoryDeclassifications:input_type -> model_plane.v1.ListMemoryDeclassificationsRequest
+	3,  // 30: model_plane.v1.MemoryService.SearchMemory:output_type -> model_plane.v1.SearchMemoryResponse
+	6,  // 31: model_plane.v1.MemoryService.IndexMemory:output_type -> model_plane.v1.IndexMemoryResponse
+	10, // 32: model_plane.v1.MemoryService.ListMemory:output_type -> model_plane.v1.ListMemoryResponse
+	12, // 33: model_plane.v1.MemoryService.DeleteMemory:output_type -> model_plane.v1.DeleteMemoryResponse
+	8,  // 34: model_plane.v1.MemoryService.Health:output_type -> model_plane.v1.MemoryHealthResponse
+	16, // 35: model_plane.v1.MemoryService.GetMemoryControls:output_type -> model_plane.v1.GetMemoryControlsResponse
+	17, // 36: model_plane.v1.MemoryService.SetMemoryControls:output_type -> model_plane.v1.SetMemoryControlsResponse
+	19, // 37: model_plane.v1.MemoryService.ResetMemory:output_type -> model_plane.v1.ResetMemoryResponse
+	24, // 38: model_plane.v1.MemoryService.GetUserProfile:output_type -> model_plane.v1.UserProfileResponse
+	24, // 39: model_plane.v1.MemoryService.SetUserProfile:output_type -> model_plane.v1.UserProfileResponse
+	24, // 40: model_plane.v1.MemoryService.RebuildUserProfile:output_type -> model_plane.v1.UserProfileResponse
+	26, // 41: model_plane.v1.MemoryService.EraseAgentMemory:output_type -> model_plane.v1.EraseAgentMemoryResponse
+	28, // 42: model_plane.v1.MemoryService.CheckMemoryWrite:output_type -> model_plane.v1.CheckMemoryWriteResponse
+	30, // 43: model_plane.v1.MemoryService.DeclassifyMemory:output_type -> model_plane.v1.DeclassifyMemoryResponse
+	32, // 44: model_plane.v1.MemoryService.RestoreMemory:output_type -> model_plane.v1.RestoreMemoryResponse
+	35, // 45: model_plane.v1.MemoryService.ListMemoryDeclassifications:output_type -> model_plane.v1.ListMemoryDeclassificationsResponse
+	30, // [30:46] is the sub-list for method output_type
+	14, // [14:30] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_memory_proto_init() }
@@ -2815,7 +3028,7 @@ func file_model_plane_v1_memory_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_memory_proto_rawDesc), len(file_model_plane_v1_memory_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   31,
+			NumMessages:   34,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

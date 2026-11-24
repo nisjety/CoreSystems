@@ -65,6 +65,8 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(get_user_profile).put(set_user_profile),
         )
         .route("/api/v1/memory/profile/rebuild", post(rebuild_user_profile))
+        // W3 D21g: the caller's own live shares into Space rooms, for the "take back" list.
+        .route("/api/v1/memory/space-shares", get(list_space_shares))
         .route(
             "/api/v1/memory/{id}",
             patch(correct_memory).delete(delete_memory),
@@ -281,6 +283,112 @@ async fn forward_memory(
     )
     .await;
     (status, body).into_response()
+}
+
+/// The `GET /api/v1/memory/space-shares` query (W3 D21g): an optional Space filter. Anything else is a 400, so a
+/// forged user or org never reaches model-gateway (which takes both from the verified session anyway).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpaceSharesQuery {
+    #[serde(default)]
+    space_ref: Option<String>,
+}
+
+/// The longest Space reference the filter accepts, in characters.
+const SPACE_SHARES_MAX_SPACE_REF_CHARS: usize = 200;
+
+/// `GET /api/v1/memory/space-shares` (W3 D21g): the signed-in person's own live shares of personal memory into Space
+/// rooms, newest first, so the memory list can offer "Shared to <room>, take back" after the share dialog has closed.
+/// Owner-only by construction: model-gateway and Session Core take the org and the user from the verified session,
+/// and Session Core lists only that person's ledger rows. Ids and times, never content; the take-back itself is the
+/// `memory.retract_from_space` action. Behind the declassify rollout flag (404 `feature_disabled` when off), which is
+/// never an authorization input. Zero Data Retention does not refuse it: it stores nothing.
+async fn list_space_shares(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    query: Result<Query<SpaceSharesQuery>, axum::extract::rejection::QueryRejection>,
+) -> (StatusCode, Json<Value>) {
+    if !state.space_features.space_memory_declassify_api {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(crate::envelope::error(
+                "feature_disabled",
+                "Sharing memory to a Space is not enabled in this environment.",
+            )),
+        );
+    }
+    let Ok(Query(query)) = query else {
+        return space_shares_invalid();
+    };
+    let space_ref = query.space_ref.unwrap_or_default();
+    if space_ref.trim() != space_ref || space_ref.chars().count() > SPACE_SHARES_MAX_SPACE_REF_CHARS {
+        return space_shares_invalid();
+    }
+    let token = model_token(&state, &user, &headers).await;
+    let session_token = session_token(&state, &user, &headers).await;
+    let url = if space_ref.is_empty() {
+        format!("{}/v1/memories/declassifications", state.model_gateway_url)
+    } else {
+        format!(
+            "{}/v1/memories/declassifications?space_id={}",
+            state.model_gateway_url,
+            urlencoding::encode(&space_ref)
+        )
+    };
+    let (status, Json(body)) = proxy_model_json_with_session(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        session_token.as_deref(),
+        &user,
+    )
+    .await;
+    space_shares_answer(status, &body)
+}
+
+fn space_shares_invalid() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(crate::envelope::error("invalid_request", "The shared memory query is not valid.")),
+    )
+}
+
+/// Shapes model-gateway's answer. A success keeps the four allow-listed fields of each share and nothing else. A 4xx
+/// with a typed error passes through as it is; anything else is a typed 503, so no upstream text crosses.
+fn space_shares_answer(status: StatusCode, body: &Value) -> (StatusCode, Json<Value>) {
+    if status.is_success() {
+        let shares: Vec<Value> = body["shares"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| {
+                        let room_memory_id = row["room_memory_id"].as_str().filter(|id| !id.is_empty())?;
+                        let space_ref = row["space_id"].as_str().filter(|id| !id.is_empty())?;
+                        Some(json!({
+                            "room_memory_id": room_memory_id,
+                            "space_ref": space_ref,
+                            "source_memory_id": row["source_memory_id"].as_str().unwrap_or_default(),
+                            "shared_at": row["shared_at"].as_str(),
+                        }))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        return (StatusCode::OK, Json(json!({"data": {"shares": shares}})));
+    }
+    if status.is_client_error() && body["error"]["code"].is_string() {
+        return (status, Json(body.clone()));
+    }
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(crate::envelope::error(
+            "memory_declassify_unavailable",
+            "Shared memory is temporarily unavailable.",
+        )),
+    )
 }
 
 /// The user's memory state (on / paused / off) and the decision taken from it.
@@ -694,6 +802,79 @@ mod tests {
                 serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null)
             })
             .collect()
+    }
+
+    /// W3 D21g: the take-back list is behind the declassify flag, forwards only an optional Space filter, and keeps
+    /// the four allow-listed fields of each share.
+    #[tokio::test]
+    async fn space_shares_is_flagged_and_forwards_only_the_space_filter() {
+        use axum::extract::Query;
+        let (_auth, model_gateway, mut state) = upstreams(
+            "GET",
+            "/v1/memories/declassifications",
+            200,
+            json!({ "shares": [
+                { "room_memory_id": "room-1", "space_id": "space-a", "source_memory_id": "mem-1",
+                  "shared_at": "2026-11-20T10:00:00.000Z", "content": "never crosses" },
+                { "room_memory_id": "", "space_id": "space-b" }
+            ] }),
+        )
+        .await;
+        state.space_features.space_memory_declassify_api = false;
+        let (status, Json(body)) = super::list_space_shares(
+            State(state.clone()),
+            Extension(member()),
+            axum::http::HeaderMap::new(),
+            Ok(Query(super::SpaceSharesQuery::default())),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "feature_disabled");
+        assert!(forwarded(&model_gateway, "/v1/memories/declassifications").await.is_empty());
+
+        state.space_features.space_memory_declassify_api = true;
+        let (status, Json(body)) = super::list_space_shares(
+            State(state.clone()),
+            Extension(member()),
+            axum::http::HeaderMap::new(),
+            Ok(Query(super::SpaceSharesQuery { space_ref: Some("space-a".to_owned()) })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let shares = body["data"]["shares"].as_array().expect("shares");
+        assert_eq!(shares.len(), 1, "a share without a room id is dropped");
+        assert_eq!(shares[0]["room_memory_id"], "room-1");
+        assert_eq!(shares[0]["space_ref"], "space-a");
+        assert_eq!(shares[0]["source_memory_id"], "mem-1");
+        assert!(shares[0].get("content").is_none(), "only the allow-listed fields cross");
+        let requests = model_gateway.received_requests().await.expect("recorded");
+        let forwarded_query = requests
+            .iter()
+            .find(|request| request.url.path() == "/v1/memories/declassifications")
+            .and_then(|request| request.url.query().map(str::to_owned));
+        assert_eq!(forwarded_query.as_deref(), Some("space_id=space-a"));
+
+        let (status, Json(body)) = super::list_space_shares(
+            State(state),
+            Extension(member()),
+            axum::http::HeaderMap::new(),
+            Ok(Query(super::SpaceSharesQuery { space_ref: Some(" padded".to_owned()) })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_request");
+    }
+
+    #[test]
+    fn space_shares_answer_passes_a_typed_refusal_and_hides_any_other_failure() {
+        let refused = json!({ "error": { "code": "memory_declassify_not_authorized", "message": "no", "details": {} } });
+        let (status, Json(body)) = super::space_shares_answer(StatusCode::FORBIDDEN, &refused);
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, refused);
+        let (status, Json(body)) =
+            super::space_shares_answer(StatusCode::BAD_GATEWAY, &json!({ "error": "raw upstream text" }));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "memory_declassify_unavailable");
     }
 
     #[tokio::test]

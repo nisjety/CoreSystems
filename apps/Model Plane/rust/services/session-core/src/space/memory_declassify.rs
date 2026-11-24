@@ -486,6 +486,61 @@ pub(crate) async fn revoked_live_shares(
     .await
 }
 
+/// One live share of a subject (W3 D21g): the room row it holds, its Space, the personal row it came from and when
+/// the subject first shared it. Ids and a time only.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub(crate) struct LiveShare {
+    pub(crate) room_memory_id: String,
+    pub(crate) space_ref: String,
+    pub(crate) source_memory_id: String,
+    pub(crate) shared_at: DateTime<Utc>,
+}
+
+/// The default and the largest page of [`live_shares_of_subject`].
+pub(crate) const LIVE_SHARES_DEFAULT_LIMIT: i64 = 100;
+pub(crate) const LIVE_SHARES_MAX_LIMIT: i64 = 200;
+
+/// The page size a `ListMemoryDeclassifications` limit asks for: 0 is the default, anything larger than the bound
+/// is the bound.
+pub(crate) fn live_shares_limit(requested: u32) -> i64 {
+    match i64::from(requested) {
+        0 => LIVE_SHARES_DEFAULT_LIMIT,
+        n => n.min(LIVE_SHARES_MAX_LIMIT),
+    }
+}
+
+/// W3 D21g: the subject's own live shares, newest first, for the memory list's take-back entry. Only rows this
+/// subject shared and has not taken back; a room row they shared twice is listed once, at its first share. A Space
+/// the subject holds a revocation in is left out: the membership sweep retracts those shares, and a take-back there is
+/// refused. `space_ref` narrows the list to one Space when set. Reads the ledger only, never the room text.
+pub(crate) async fn live_shares_of_subject(
+    pool: &PgPool,
+    org_id: &str,
+    subject_id: &str,
+    space_ref: Option<&str>,
+    limit: i64,
+) -> Result<Vec<LiveShare>, Status> {
+    sqlx::query_as::<_, LiveShare>(
+        "SELECT m.room_memory_id, m.space_ref, min(m.source_memory_id) AS source_memory_id, \
+                min(m.created_at) AS shared_at \
+         FROM memory_declassifications m \
+         WHERE m.org_id = $1 AND m.subject_id = $2 AND m.retracted_at IS NULL \
+           AND ($3::text IS NULL OR m.space_ref = $3) \
+           AND NOT EXISTS (SELECT 1 FROM space_membership_revocations r \
+                           WHERE r.space_ref = m.space_ref AND r.subject_id = m.subject_id) \
+         GROUP BY m.room_memory_id, m.space_ref \
+         ORDER BY shared_at DESC, m.room_memory_id \
+         LIMIT $4",
+    )
+    .bind(org_id)
+    .bind(subject_id)
+    .bind(space_ref)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(internal)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -985,6 +1040,70 @@ mod tests {
             .await
             .expect("b takes back"));
         assert_eq!(room_rows().await, 0, "the last live share's take-back deletes the room row");
+
+        clean_declassify_world(&pool, &org, &space).await;
+    }
+
+    #[test]
+    fn live_shares_limit_defaults_zero_and_clamps_to_the_bound() {
+        assert_eq!(live_shares_limit(0), LIVE_SHARES_DEFAULT_LIMIT);
+        assert_eq!(live_shares_limit(1), 1);
+        assert_eq!(live_shares_limit(200), 200);
+        assert_eq!(live_shares_limit(201), LIVE_SHARES_MAX_LIMIT);
+        assert_eq!(live_shares_limit(u32::MAX), LIVE_SHARES_MAX_LIMIT);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn live_shares_of_subject_lists_only_the_subjects_own_live_shares() {
+        // W3 D21g: the take-back list reads the caller's own live ledger rows and nothing else.
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let org = format!("declassify-org-{}", mp_ids::new_ulid());
+        let space = format!("declassify-space-{}", mp_ids::new_ulid());
+        let (subject_a, subject_b) = ("owner-8a", "owner-8b");
+        let source_a = format!("mem-a-{}", mp_ids::new_ulid());
+        let source_a2 = format!("mem-a2-{}", mp_ids::new_ulid());
+        let source_b = format!("mem-b-{}", mp_ids::new_ulid());
+        seed_personal_memory(&pool, &org, subject_a, &source_a, "pref-a").await;
+        seed_personal_memory(&pool, &org, subject_a, &source_a2, "pref-a2").await;
+        seed_personal_memory(&pool, &org, subject_b, &source_b, "pref-b").await;
+        let kept = declassify_into_room(
+            &pool,
+            share(&org, subject_a, &space, &source_a, &digest(11), "decision-8a", "idem-8a", 1),
+        )
+        .await
+        .expect("a shares");
+        let taken = declassify_into_room(
+            &pool,
+            share(&org, subject_a, &space, &source_a2, &digest(12), "decision-8a2", "idem-8a2", 1),
+        )
+        .await
+        .expect("a shares a second row");
+        declassify_into_room(
+            &pool,
+            share(&org, subject_b, &space, &source_b, &digest(13), "decision-8b", "idem-8b", 1),
+        )
+        .await
+        .expect("b shares");
+        assert!(retract_declassified_row(&pool, &org, &space, &taken.memory_id, subject_a)
+            .await
+            .expect("a takes the second back"));
+
+        let listed = live_shares_of_subject(&pool, &org, subject_a, None, 100).await.expect("list");
+        assert_eq!(listed.len(), 1, "a taken-back share and b's share are not listed");
+        assert_eq!(listed[0].room_memory_id, kept.memory_id);
+        assert_eq!(listed[0].space_ref, space);
+        assert_eq!(listed[0].source_memory_id, source_a);
+        let other = live_shares_of_subject(&pool, &org, subject_a, Some("another-space"), 100)
+            .await
+            .expect("list another Space");
+        assert!(other.is_empty(), "the Space filter narrows the list");
+        let other_org = live_shares_of_subject(&pool, "another-org", subject_a, None, 100)
+            .await
+            .expect("list another org");
+        assert!(other_org.is_empty(), "another organization's ledger is never read");
 
         clean_declassify_world(&pool, &org, &space).await;
     }

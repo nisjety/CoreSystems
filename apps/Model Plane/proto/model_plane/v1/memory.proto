@@ -98,6 +98,12 @@ service MemoryService {
   // once every thread the row is linked to is verified not to be a shared room. User callers only, for
   // themselves; refused for a ZDR caller (durable_mutation_forbidden) before any other check. Ids only.
   rpc RestoreMemory(RestoreMemoryRequest) returns (RestoreMemoryResponse);
+
+  // W3 D21g: the caller's own live shares into shared Spaces (memory list "Shared to <room>, take back"). Ids and
+  // times only, never content. A person, for themselves only; a service caller is refused. Readable by a ZDR caller,
+  // since it writes nothing and a take-back is allowed under every posture. A Space the caller was removed from is
+  // left out (the membership sweep retracts those shares; a take-back there is refused).
+  rpc ListMemoryDeclassifications(ListMemoryDeclassificationsRequest) returns (ListMemoryDeclassificationsResponse);
 }
 
 message SearchMemoryRequest {
@@ -678,4 +684,41 @@ message RestoreMemoryRequest {
 // The restore's answer. `restored` is true when the row is ordinary personal memory again.
 message RestoreMemoryResponse {
   bool restored = 1;
+}
+
+// W3 D21g: list the caller's own live declassifications. Ids only.
+message ListMemoryDeclassificationsRequest {
+  // Tenant context.
+  string org_id = 1;
+
+  // The caller. Must be the verified person; another user's shares are never listed.
+  string user_id = 2;
+
+  // Maximum results. The server clamps it to 1..=200 and reads 0 as 100.
+  uint32 limit = 3;
+
+  // Lists one Space's shares only when set. Empty lists every Space.
+  string space_id = 4;
+}
+
+// One live share of the caller: the room row it holds, the Space, the personal row it came from and when it was
+// first shared. A row the caller shared twice (another review, another key) is listed once.
+message MemoryDeclassification {
+  // The room copy (agent_memory scope space, origin declassified) the share holds; the id a take-back names.
+  string room_memory_id = 1;
+
+  // The shared Space the copy lives in.
+  string space_id = 2;
+
+  // The caller's personal row the copy was made from. Never changed by a share or a take-back.
+  string source_memory_id = 3;
+
+  // When the caller first shared this room copy.
+  google.protobuf.Timestamp shared_at = 4;
+}
+
+// The caller's live shares, newest first.
+message ListMemoryDeclassificationsResponse {
+  // At most the request's clamped limit.
+  repeated MemoryDeclassification declassifications = 1;
 }

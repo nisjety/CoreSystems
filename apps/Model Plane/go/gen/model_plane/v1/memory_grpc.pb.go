@@ -19,21 +19,22 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	MemoryService_SearchMemory_FullMethodName       = "/model_plane.v1.MemoryService/SearchMemory"
-	MemoryService_IndexMemory_FullMethodName        = "/model_plane.v1.MemoryService/IndexMemory"
-	MemoryService_ListMemory_FullMethodName         = "/model_plane.v1.MemoryService/ListMemory"
-	MemoryService_DeleteMemory_FullMethodName       = "/model_plane.v1.MemoryService/DeleteMemory"
-	MemoryService_Health_FullMethodName             = "/model_plane.v1.MemoryService/Health"
-	MemoryService_GetMemoryControls_FullMethodName  = "/model_plane.v1.MemoryService/GetMemoryControls"
-	MemoryService_SetMemoryControls_FullMethodName  = "/model_plane.v1.MemoryService/SetMemoryControls"
-	MemoryService_ResetMemory_FullMethodName        = "/model_plane.v1.MemoryService/ResetMemory"
-	MemoryService_GetUserProfile_FullMethodName     = "/model_plane.v1.MemoryService/GetUserProfile"
-	MemoryService_SetUserProfile_FullMethodName     = "/model_plane.v1.MemoryService/SetUserProfile"
-	MemoryService_RebuildUserProfile_FullMethodName = "/model_plane.v1.MemoryService/RebuildUserProfile"
-	MemoryService_EraseAgentMemory_FullMethodName   = "/model_plane.v1.MemoryService/EraseAgentMemory"
-	MemoryService_CheckMemoryWrite_FullMethodName   = "/model_plane.v1.MemoryService/CheckMemoryWrite"
-	MemoryService_DeclassifyMemory_FullMethodName   = "/model_plane.v1.MemoryService/DeclassifyMemory"
-	MemoryService_RestoreMemory_FullMethodName      = "/model_plane.v1.MemoryService/RestoreMemory"
+	MemoryService_SearchMemory_FullMethodName                = "/model_plane.v1.MemoryService/SearchMemory"
+	MemoryService_IndexMemory_FullMethodName                 = "/model_plane.v1.MemoryService/IndexMemory"
+	MemoryService_ListMemory_FullMethodName                  = "/model_plane.v1.MemoryService/ListMemory"
+	MemoryService_DeleteMemory_FullMethodName                = "/model_plane.v1.MemoryService/DeleteMemory"
+	MemoryService_Health_FullMethodName                      = "/model_plane.v1.MemoryService/Health"
+	MemoryService_GetMemoryControls_FullMethodName           = "/model_plane.v1.MemoryService/GetMemoryControls"
+	MemoryService_SetMemoryControls_FullMethodName           = "/model_plane.v1.MemoryService/SetMemoryControls"
+	MemoryService_ResetMemory_FullMethodName                 = "/model_plane.v1.MemoryService/ResetMemory"
+	MemoryService_GetUserProfile_FullMethodName              = "/model_plane.v1.MemoryService/GetUserProfile"
+	MemoryService_SetUserProfile_FullMethodName              = "/model_plane.v1.MemoryService/SetUserProfile"
+	MemoryService_RebuildUserProfile_FullMethodName          = "/model_plane.v1.MemoryService/RebuildUserProfile"
+	MemoryService_EraseAgentMemory_FullMethodName            = "/model_plane.v1.MemoryService/EraseAgentMemory"
+	MemoryService_CheckMemoryWrite_FullMethodName            = "/model_plane.v1.MemoryService/CheckMemoryWrite"
+	MemoryService_DeclassifyMemory_FullMethodName            = "/model_plane.v1.MemoryService/DeclassifyMemory"
+	MemoryService_RestoreMemory_FullMethodName               = "/model_plane.v1.MemoryService/RestoreMemory"
+	MemoryService_ListMemoryDeclassifications_FullMethodName = "/model_plane.v1.MemoryService/ListMemoryDeclassifications"
 )
 
 // MemoryServiceClient is the client API for MemoryService service.
@@ -118,6 +119,11 @@ type MemoryServiceClient interface {
 	// once every thread the row is linked to is verified not to be a shared room. User callers only, for
 	// themselves; refused for a ZDR caller (durable_mutation_forbidden) before any other check. Ids only.
 	RestoreMemory(ctx context.Context, in *RestoreMemoryRequest, opts ...grpc.CallOption) (*RestoreMemoryResponse, error)
+	// W3 D21g: the caller's own live shares into shared Spaces (memory list "Shared to <room>, take back"). Ids and
+	// times only, never content. A person, for themselves only; a service caller is refused. Readable by a ZDR caller,
+	// since it writes nothing and a take-back is allowed under every posture. A Space the caller was removed from is
+	// left out (the membership sweep retracts those shares; a take-back there is refused).
+	ListMemoryDeclassifications(ctx context.Context, in *ListMemoryDeclassificationsRequest, opts ...grpc.CallOption) (*ListMemoryDeclassificationsResponse, error)
 }
 
 type memoryServiceClient struct {
@@ -278,6 +284,16 @@ func (c *memoryServiceClient) RestoreMemory(ctx context.Context, in *RestoreMemo
 	return out, nil
 }
 
+func (c *memoryServiceClient) ListMemoryDeclassifications(ctx context.Context, in *ListMemoryDeclassificationsRequest, opts ...grpc.CallOption) (*ListMemoryDeclassificationsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListMemoryDeclassificationsResponse)
+	err := c.cc.Invoke(ctx, MemoryService_ListMemoryDeclassifications_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MemoryServiceServer is the server API for MemoryService service.
 // All implementations must embed UnimplementedMemoryServiceServer
 // for forward compatibility.
@@ -360,6 +376,11 @@ type MemoryServiceServer interface {
 	// once every thread the row is linked to is verified not to be a shared room. User callers only, for
 	// themselves; refused for a ZDR caller (durable_mutation_forbidden) before any other check. Ids only.
 	RestoreMemory(context.Context, *RestoreMemoryRequest) (*RestoreMemoryResponse, error)
+	// W3 D21g: the caller's own live shares into shared Spaces (memory list "Shared to <room>, take back"). Ids and
+	// times only, never content. A person, for themselves only; a service caller is refused. Readable by a ZDR caller,
+	// since it writes nothing and a take-back is allowed under every posture. A Space the caller was removed from is
+	// left out (the membership sweep retracts those shares; a take-back there is refused).
+	ListMemoryDeclassifications(context.Context, *ListMemoryDeclassificationsRequest) (*ListMemoryDeclassificationsResponse, error)
 	mustEmbedUnimplementedMemoryServiceServer()
 }
 
@@ -414,6 +435,9 @@ func (UnimplementedMemoryServiceServer) DeclassifyMemory(context.Context, *Decla
 }
 func (UnimplementedMemoryServiceServer) RestoreMemory(context.Context, *RestoreMemoryRequest) (*RestoreMemoryResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RestoreMemory not implemented")
+}
+func (UnimplementedMemoryServiceServer) ListMemoryDeclassifications(context.Context, *ListMemoryDeclassificationsRequest) (*ListMemoryDeclassificationsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListMemoryDeclassifications not implemented")
 }
 func (UnimplementedMemoryServiceServer) mustEmbedUnimplementedMemoryServiceServer() {}
 func (UnimplementedMemoryServiceServer) testEmbeddedByValue()                       {}
@@ -706,6 +730,24 @@ func _MemoryService_RestoreMemory_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MemoryService_ListMemoryDeclassifications_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListMemoryDeclassificationsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MemoryServiceServer).ListMemoryDeclassifications(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MemoryService_ListMemoryDeclassifications_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MemoryServiceServer).ListMemoryDeclassifications(ctx, req.(*ListMemoryDeclassificationsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MemoryService_ServiceDesc is the grpc.ServiceDesc for MemoryService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -772,6 +814,10 @@ var MemoryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RestoreMemory",
 			Handler:    _MemoryService_RestoreMemory_Handler,
+		},
+		{
+			MethodName: "ListMemoryDeclassifications",
+			Handler:    _MemoryService_ListMemoryDeclassifications_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

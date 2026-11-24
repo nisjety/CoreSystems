@@ -13433,6 +13433,13 @@ impl mpv1::memory_service_server::MemoryService for MockMemory {
         Err(Status::unimplemented("restore_memory not needed in test"))
     }
 
+    async fn list_memory_declassifications(
+        &self,
+        _: TReq<mpv1::ListMemoryDeclassificationsRequest>,
+    ) -> Result<Response<mpv1::ListMemoryDeclassificationsResponse>, Status> {
+        Err(Status::unimplemented("list_memory_declassifications not needed in test"))
+    }
+
     async fn health(
         &self,
         _: TReq<mpv1::MemoryHealthRequest>,

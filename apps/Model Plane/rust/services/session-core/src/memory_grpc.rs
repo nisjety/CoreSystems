@@ -21,7 +21,8 @@ use mp_contracts::model_plane::v1::{
     DeclassifyMemoryResponse, DeleteMemoryRequest, DeleteMemoryResponse,
     EraseAgentMemoryRequest, EraseAgentMemoryResponse, GetMemoryControlsRequest,
     GetMemoryControlsResponse, GetUserProfileRequest, IndexMemoryRequest, IndexMemoryResponse,
-    ListMemoryRequest, ListMemoryResponse, MemoryControls, MemoryEntry, MemoryHealthRequest,
+    ListMemoryDeclassificationsRequest, ListMemoryDeclassificationsResponse, ListMemoryRequest,
+    ListMemoryResponse, MemoryControls, MemoryDeclassification, MemoryEntry, MemoryHealthRequest,
     MemoryHealthResponse, MemoryState, RebuildUserProfileRequest, ResetMemoryRequest,
     ResetMemoryResponse, RestoreMemoryRequest, RestoreMemoryResponse, SearchMemoryRequest,
     SearchMemoryResponse, SetMemoryControlsRequest,
@@ -897,6 +898,24 @@ async fn restore_withheld_row(
     }
     tx.commit().await.map_err(|e| Status::internal(e.to_string()))?;
     Ok(())
+}
+
+/// Who may list declassifications (W3 D21g): a person in their own organization, for themselves. A service caller is
+/// refused even with a user named: the list is the person's own take-back surface, never an org-wide read.
+#[allow(clippy::result_large_err)]
+fn authorize_declassification_list(
+    caller: &VerifiedIdentity,
+    org_id: &str,
+    user_id: &str,
+) -> Result<(), Status> {
+    caller.authorize_org(org_id)?;
+    if caller.is_service() {
+        return Err(Status::permission_denied("shared memory is listed by its owner"));
+    }
+    if user_id.is_empty() {
+        return Err(Status::invalid_argument("user_id is required"));
+    }
+    caller.authorize_user(user_id)
 }
 
 fn timestamp(at: DateTime<Utc>) -> prost_types::Timestamp {
@@ -1778,6 +1797,40 @@ impl MemoryService for MemoryGrpc {
         self.restore_withheld_memory(&caller, &req).await
     }
 
+    /// W3 D21g: the caller's own live shares into shared Spaces, for the memory list's take-back entry. A person, for
+    /// themselves only. Ids and times, never content, so a ZDR caller may read it too (it writes nothing).
+    async fn list_memory_declassifications(
+        &self,
+        request: Request<ListMemoryDeclassificationsRequest>,
+    ) -> Result<Response<ListMemoryDeclassificationsResponse>, Status> {
+        let caller = identity(&request)?;
+        let req = request.into_inner();
+        let (org_id, user_id, space_id) = (req.org_id.trim(), req.user_id.trim(), req.space_id.trim());
+        authorize_declassification_list(&caller, org_id, user_id)?;
+        if space_id.len() > 200 {
+            return Err(Status::invalid_argument("space_id is too long"));
+        }
+        let shares = crate::space::memory_declassify::live_shares_of_subject(
+            &self.pool,
+            org_id,
+            user_id,
+            (!space_id.is_empty()).then_some(space_id),
+            crate::space::memory_declassify::live_shares_limit(req.limit),
+        )
+        .await?;
+        Ok(Response::new(ListMemoryDeclassificationsResponse {
+            declassifications: shares
+                .into_iter()
+                .map(|share| MemoryDeclassification {
+                    room_memory_id: share.room_memory_id,
+                    space_id: share.space_ref,
+                    source_memory_id: share.source_memory_id,
+                    shared_at: Some(timestamp(share.shared_at)),
+                })
+                .collect(),
+        }))
+    }
+
     async fn erase_agent_memory(
         &self,
         request: Request<EraseAgentMemoryRequest>,
@@ -2445,6 +2498,40 @@ mod tests {
             memory_id: memory_id.to_owned(),
             ..Default::default()
         }
+    }
+
+    /// W3 D21g: the take-back list is the person's own. Another user, another org, a service (even naming a user) and a
+    /// blank user are refused before any database read.
+    #[tokio::test]
+    async fn declassification_list_is_the_callers_own_and_refuses_a_service() {
+        let auth = MockServer::start().await;
+        let (service, ownership) = guarded_service(&auth.uri(), "user-a");
+        let list = |org: &str, user: &str| ListMemoryDeclassificationsRequest {
+            org_id: org.to_owned(),
+            user_id: user.to_owned(),
+            ..ListMemoryDeclassificationsRequest::default()
+        };
+        for (req, caller, code, why) in [
+            (list("org-a", "user-b"), VerifiedIdentity::user_for_test("org-a", "user-a"), tonic::Code::PermissionDenied, "another user"),
+            (list("org-b", "user-a"), VerifiedIdentity::user_for_test("org-a", "user-a"), tonic::Code::PermissionDenied, "another org"),
+            (
+                list("org-a", "user-a"),
+                VerifiedIdentity::service_for_test("org-a", &["memory:read"], false),
+                tonic::Code::PermissionDenied,
+                "a service",
+            ),
+            (list("org-a", ""), VerifiedIdentity::user_for_test("org-a", "user-a"), tonic::Code::InvalidArgument, "no user"),
+            (
+                ListMemoryDeclassificationsRequest { space_id: "s".repeat(201), ..list("org-a", "user-a") },
+                VerifiedIdentity::user_for_test("org-a", "user-a"),
+                tonic::Code::InvalidArgument,
+                "an oversized Space id",
+            ),
+        ] {
+            let error = service.list_memory_declassifications(request(req, caller)).await.expect_err(why);
+            assert_eq!(error.code(), code, "{why}");
+        }
+        assert_eq!(ownership.calls.load(Ordering::SeqCst), 0);
     }
 
     /// EP-8 S7: a Space's memory is listed and deleted only under a Control Space memory decision,

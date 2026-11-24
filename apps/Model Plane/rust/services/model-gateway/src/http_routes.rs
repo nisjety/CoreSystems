@@ -426,6 +426,12 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
         // WS17-S7: share one of the caller's personal memories into a Space room under a Control
         // `model.memory.declassify` decision in the body. Static, so it wins over `:memory_id` (DELETE only).
         .route("/v1/memories/declassify", post(declassify_memory_entry))
+        // W3 D21g: the caller's own live shares into Space rooms (ids and times), for the take-back list. Static, so
+        // it wins over `:memory_id`.
+        .route(
+            "/v1/memories/declassifications",
+            get(list_memory_declassifications_entry),
+        )
         .route("/v1/memories/:memory_id/restore", post(restore_memory_entry))
         .route("/v1/memories/:memory_id", delete(delete_memory_entry))
         // Space memory for the Space's owner or admin (EP-8 S7). POST so the Control
@@ -17669,6 +17675,124 @@ async fn declassify_memory_entry(
     })))
 }
 
+/// The `GET /v1/memories/declassifications` query (W3 D21g). Both optional; anything else is refused.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryDeclassificationsQuery {
+    #[serde(default)]
+    space_id: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+/// `GET /v1/memories/declassifications` (W3 D21g): the verified caller's own live shares into Space rooms, newest
+/// first, for the memory list's "take back" entry. The org and the user are the claims', never the query's. Ids and
+/// times only, so Zero Data Retention does not refuse it (the take-back it leads to is a removal). Session Core refuses
+/// a service caller and lists only the person's own ledger rows.
+async fn list_memory_declassifications_entry(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    query: Result<Query<MemoryDeclassificationsQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::ListMemoryDeclassificationsRequest;
+    let Ok(Query(query)) = query else {
+        return Err(declassify_invalid("The shared memory query is not valid."));
+    };
+    let space_id = query.space_id.unwrap_or_default();
+    if space_id.len() > DECLASSIFY_MAX_ID_BYTES || space_id.trim() != space_id {
+        return Err(declassify_invalid("A valid Space reference is required."));
+    }
+    let response = state
+        .memory_client
+        .clone()
+        .list_memory_declassifications(authenticated_session_request(
+            ListMemoryDeclassificationsRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                limit: query.limit.unwrap_or(0),
+                space_id,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|status| declassify_error(&status))?
+        .into_inner();
+    Ok(Json(memory_declassifications_json(&response)))
+}
+
+/// The list's JSON: `{shares: [{room_memory_id, space_id, source_memory_id, shared_at}]}`, `shared_at` RFC 3339.
+fn memory_declassifications_json(
+    response: &mp_contracts::model_plane::v1::ListMemoryDeclassificationsResponse,
+) -> Value {
+    let shares: Vec<Value> = response
+        .declassifications
+        .iter()
+        .map(|share| {
+            let shared_at = share
+                .shared_at
+                .as_ref()
+                .and_then(|at| {
+                    chrono::DateTime::<chrono::Utc>::from_timestamp(at.seconds, u32::try_from(at.nanos).unwrap_or(0))
+                })
+                .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+            json!({
+                "room_memory_id": share.room_memory_id,
+                "space_id": share.space_id,
+                "source_memory_id": share.source_memory_id,
+                "shared_at": shared_at,
+            })
+        })
+        .collect();
+    json!({ "shares": shares })
+}
+
+#[cfg(test)]
+mod memory_declassifications_tests {
+    use super::*;
+    use mp_contracts::model_plane::v1::{ListMemoryDeclassificationsResponse, MemoryDeclassification};
+
+    #[test]
+    fn the_list_carries_ids_and_an_rfc3339_time_only() {
+        let body = memory_declassifications_json(&ListMemoryDeclassificationsResponse {
+            declassifications: vec![
+                MemoryDeclassification {
+                    room_memory_id: "room-1".to_owned(),
+                    space_id: "space-a".to_owned(),
+                    source_memory_id: "mem-1".to_owned(),
+                    shared_at: Some(prost_types::Timestamp { seconds: 1_700_000_000, nanos: 0 }),
+                },
+                MemoryDeclassification {
+                    room_memory_id: "room-2".to_owned(),
+                    space_id: "space-b".to_owned(),
+                    source_memory_id: "mem-2".to_owned(),
+                    shared_at: None,
+                },
+            ],
+        });
+        assert_eq!(body["shares"][0]["room_memory_id"], "room-1");
+        assert_eq!(body["shares"][0]["space_id"], "space-a");
+        assert_eq!(body["shares"][0]["source_memory_id"], "mem-1");
+        assert_eq!(body["shares"][0]["shared_at"], "2023-11-14T22:13:20.000Z");
+        assert!(body["shares"][1]["shared_at"].is_null());
+        assert_eq!(body["shares"][0].as_object().expect("object").len(), 4, "no other field crosses");
+    }
+
+    #[test]
+    fn the_query_refuses_an_unknown_field() {
+        let parse = |uri: &str| {
+            Query::<MemoryDeclassificationsQuery>::try_from_uri(&uri.parse().expect("uri")).map(|Query(q)| q)
+        };
+        assert!(
+            parse("http://mg/v1/memories/declassifications?space_id=s&user_id=someone-else").is_err(),
+            "a user named in the query is refused, never read"
+        );
+        let ok = parse("http://mg/v1/memories/declassifications?space_id=s&limit=5").expect("known fields");
+        assert_eq!(ok.space_id.as_deref(), Some("s"));
+        assert_eq!(ok.limit, Some(5));
+    }
+}
+
 /// A declassify that names an org or a user other than the verified claims': typed, and the same refusal as any other
 /// authority failure, so nothing about the claims or the Space leaks.
 fn declassify_denied() -> HttpJsonError {
@@ -23434,6 +23558,13 @@ mod user_profile_route_tests {
             &self,
             _: TonicRequest<pb::RestoreMemoryRequest>,
         ) -> Result<TonicResponse<pb::RestoreMemoryResponse>, Status> {
+            unused()
+        }
+
+        async fn list_memory_declassifications(
+            &self,
+            _: TonicRequest<pb::ListMemoryDeclassificationsRequest>,
+        ) -> Result<TonicResponse<pb::ListMemoryDeclassificationsResponse>, Status> {
             unused()
         }
 
