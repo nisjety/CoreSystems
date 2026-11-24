@@ -290,3 +290,24 @@ test('planMessageRecipients: an owner who is also a follower or mentioned keeps 
     ['f1', 'own'],
   );
 });
+
+test('planMessageRecipients: in a DM every other room member gets a reply after the usual recipients', () => {
+  const plan = planMessageRecipients({
+    actor: 'a',
+    mentions: ['m'],
+    followers: ['f'],
+    owner: 'own',
+    roomMembers: ['a', 'b', 'f', 'm', 'own', 'z'],
+  });
+  assert.deepEqual(plan, [
+    { recipient: 'm', kind: 'mention' },
+    { recipient: 'f', kind: 'reply' },
+    { recipient: 'own', kind: 'reply' },
+    { recipient: 'b', kind: 'reply' },
+    { recipient: 'z', kind: 'reply' },
+  ]);
+  assert.deepEqual(
+    planMessageRecipients({ actor: 'a', mentions: [], followers: [], owner: '' }),
+    planMessageRecipients({ actor: 'a', mentions: [], followers: [], owner: '', roomMembers: undefined }),
+  );
+});

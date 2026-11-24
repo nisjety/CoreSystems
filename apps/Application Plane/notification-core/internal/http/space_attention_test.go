@@ -89,6 +89,7 @@ func TestSpaceAttentionMayNotifyAnOrgUserWithASpaceType(t *testing.T) {
 	for _, notificationType := range []string{
 		"space.mention", "space.reply", "space.invite", "space.agent_done",
 		"space.agent_failed", "space.approval_needed", "space.agent_awaiting", "space.reminder",
+		"space.dm",
 	} {
 		status, body := postAs(t, "space-attention", testSpaceAttentionSecret, spaceAttentionBody(t, map[string]any{"type": notificationType}))
 		if status != stdhttp.StatusAccepted {
@@ -172,6 +173,7 @@ func TestSpaceTypeAllowlistIsOnlyForSpaceAttention(t *testing.T) {
 	for _, notificationType := range []string{
 		"space.mention", "space.reply", "space.invite", "space.agent_done",
 		"space.agent_failed", "space.approval_needed", "space.agent_awaiting", "space.reminder",
+		"space.dm",
 	} {
 		if !isNotificationTypeAuthorized("space-attention", notificationType) {
 			t.Fatalf("space-attention type %q rejected, want authorized", notificationType)

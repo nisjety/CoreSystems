@@ -36,6 +36,7 @@ import {
   MAX_ITEMS_PER_RECIPIENT,
   coalesceKey,
   checkSnooze,
+  defaultRoomLevel,
   deliveryDecision,
   effectiveItemState,
   envFlagOn,
@@ -51,6 +52,19 @@ const MAX_REF_CHARS = 200;
 const MAX_LIST_LIMIT = 100;
 const DEFAULT_LIST_LIMIT = 50;
 const READ_DRIVEN_KINDS: readonly AttentionKind[] = ["mention", "reply"];
+
+/**
+ * D22r: the level a member has when they never chose one depends on the room
+ * kind (a DM defaults to `all`). Only the kind of a Space in the caller's own
+ * organization is read; anything else answers the ordinary default.
+ */
+async function defaultLevelFor(ctx: any, externalOrgId: string, spaceRef: string): Promise<RoomLevel> {
+  const space = await ctx.db
+    .query("spaces")
+    .withIndex("by_space_ref", (q: any) => q.eq("spaceRef", spaceRef))
+    .first();
+  return defaultRoomLevel(space && space.externalOrgId === externalOrgId ? space.kind : null);
+}
 
 function cleanRef(value: string): string {
   const ref = (value ?? "").trim();
@@ -145,6 +159,10 @@ export const attentionForGateway = query({
       .take(2000);
     const levelByRef = new Map<string, RoomLevel>();
     for (const row of prefs) if (wanted.has(row.spaceRef)) levelByRef.set(row.spaceRef, row.level);
+    const defaultLevelByRef = new Map<string, RoomLevel>();
+    for (const spaceRef of refs) {
+      if (!levelByRef.has(spaceRef)) defaultLevelByRef.set(spaceRef, await defaultLevelFor(ctx, args.externalOrgId, spaceRef));
+    }
 
     const settings = await ctx.db
       .query("spaceNotifyUserSettings")
@@ -188,7 +206,7 @@ export const attentionForGateway = query({
             marker !== undefined &&
             typeof marker.unreadFloor === "number" &&
             Number.isFinite(marker.unreadFloor),
-          level: levelByRef.get(spaceRef) ?? DEFAULT_ROOM_LEVEL,
+          level: levelByRef.get(spaceRef) ?? defaultLevelByRef.get(spaceRef) ?? DEFAULT_ROOM_LEVEL,
           levelIsDefault: !levelByRef.has(spaceRef),
           mentions: open?.mention ?? 0,
           replies: open?.reply ?? 0,
@@ -385,7 +403,7 @@ export const getRoomLevelForGateway = query({
     const pref = await loadPref(ctx, args.externalAuthId, args.externalOrgId, spaceRef);
     const settings = await loadSettings(ctx, args.externalAuthId, args.externalOrgId);
     return {
-      level: (pref?.level as RoomLevel | undefined) ?? DEFAULT_ROOM_LEVEL,
+      level: (pref?.level as RoomLevel | undefined) ?? (await defaultLevelFor(ctx, args.externalOrgId, spaceRef)),
       levelIsDefault: !pref,
       hidePreview: settings?.hidePreview ?? false,
     };
@@ -465,7 +483,7 @@ export const setRoomLevelForGateway = mutation({
     }
 
     return {
-      level: (pref?.level as RoomLevel | undefined) ?? DEFAULT_ROOM_LEVEL,
+      level: (pref?.level as RoomLevel | undefined) ?? (await defaultLevelFor(ctx, args.externalOrgId, spaceRef)),
       levelIsDefault: !pref,
       hidePreview: settings?.hidePreview ?? false,
     };

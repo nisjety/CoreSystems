@@ -44,6 +44,7 @@ test('every attention signal maps to a space.* type and nothing else does', () =
     'agent_done',
     'agent_failed',
     'approval_needed',
+    'dm',
     'invite',
     'mention',
     'reminder',

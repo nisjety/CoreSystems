@@ -33,6 +33,8 @@ export const COURIER_TYPES: Readonly<Record<string, string>> = {
   approval_needed: "space.approval_needed",
   agent_awaiting: "space.agent_awaiting",
   reminder: "space.reminder",
+  // D22r: a DM message, out of the app (in the inbox it is a `reply` item).
+  dm: "space.dm",
 };
 
 export type CourierSignal = {

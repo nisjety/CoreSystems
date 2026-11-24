@@ -68,6 +68,21 @@ Do not enable ZDR content delivery until that downstream contract is established
 Standard mode persists payload/feed content according to the normal product
 contract.
 
+### Space attention workflows (operator step)
+
+The `space-attention` principal (Convex's courier, `spaceAttentionCourier.ts`)
+sends nine types, registered by migrations 015 and 019: `space.mention`,
+`space.reply`, `space.invite`, `space.agent_done`, `space.agent_failed`,
+`space.approval_needed`, `space.agent_awaiting`, `space.reminder` and
+`space.dm` (D22r: every DM message, email on by default). The type is the Novu
+workflow id, so each needs a Novu workflow with exactly that id before
+`NOTIFICATION_DELIVERY_MODE=novu` delivers anything; none is defined in this
+repository. The payload is refs-only (`space_ref`, `actor_kind`,
+`deep_link_path`, and optionally `thread_id`, `message_id`, `run_id`), so a
+template must use fixed copy plus the deep link and never expect a title, name
+or message text. Convex already applies the room level, thread mute, DND, the
+30-per-hour budget, retries and the ZDR check before it calls this service.
+
 Attention notifications (`modelplane.needs_approval`, `modelplane.needs_input`,
 `modelplane.plan_ready`, WS16-S4) and scheduled-run outcome notices
 (`modelplane.scheduled_run_outcome`, WS20-S7) are delivered without a provider.

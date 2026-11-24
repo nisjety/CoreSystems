@@ -55,3 +55,29 @@ test('listItemsForGateway returns the hidePreview setting of the caller, false w
     'a setting in another organization is not this one',
   );
 });
+
+test('D22r: the default level is all in a DM and mentions elsewhere; a chosen level wins; another org\'s Space is not read', async (t) => {
+  withServiceKey(t);
+  const { ctx } = makeCtx(
+    memberTables({
+      spaces: [
+        { spaceRef: 'dm_1', externalOrgId: ORG, kind: 'dm', lifecycle: 'active' },
+        { spaceRef: 'gdm_1', externalOrgId: ORG, kind: 'group_dm', lifecycle: 'active' },
+        { spaceRef: 'room_1', externalOrgId: ORG, kind: 'room', lifecycle: 'active' },
+        { spaceRef: 'dm_other', externalOrgId: 'org_other', kind: 'dm', lifecycle: 'active' },
+      ],
+      spaceRoomNotifyPrefs: [{ externalOrgId: ORG, externalAuthId: AUTH, spaceRef: 'gdm_1', level: 'off', updatedAt: 1 }],
+    }),
+  );
+  const one = (spaceRef) => attention.getRoomLevelForGateway._handler(ctx, { ...base, spaceRef });
+  assert.deepEqual(await one('dm_1'), { level: 'all', levelIsDefault: true, hidePreview: false });
+  assert.deepEqual(await one('gdm_1'), { level: 'off', levelIsDefault: false, hidePreview: false });
+  assert.deepEqual(await one('room_1'), { level: 'mentions', levelIsDefault: true, hidePreview: false });
+  assert.deepEqual(await one('dm_other'), { level: 'mentions', levelIsDefault: true, hidePreview: false });
+
+  const many = await attention.attentionForGateway._handler(ctx, { ...base, spaceRefs: ['dm_1', 'gdm_1', 'room_1', 'nope'] });
+  assert.deepEqual(
+    many.rooms.map((room) => [room.spaceRef, room.level, room.levelIsDefault]),
+    [['dm_1', 'all', true], ['gdm_1', 'off', false], ['room_1', 'mentions', true], ['nope', 'mentions', true]],
+  );
+});

@@ -41,8 +41,11 @@ import {
   OBSERVING_WINDOW_MS,
   coalesceKey,
   consumeBudget,
+  courierKindFor,
+  defaultRoomLevel,
   deliveryDecision,
   envFlagOn,
+  isDmSpaceKind,
   mergeAutoFollow,
   runStateToSignal,
   type AttentionKind,
@@ -86,6 +89,8 @@ interface Signal {
   readonly isRunStarter?: boolean;
   readonly messageId?: string;
   readonly runId?: string;
+  /** D22r: the message was posted in a DM or group DM. */
+  readonly dmRoom?: boolean;
 }
 
 async function loadAudience(ctx: any, orgId: string, spaceRef: string): Promise<Set<string>> {
@@ -229,8 +234,9 @@ async function applySignal(
     recipientAuthId: recipient,
     actorAuthId: signal.actorAuthId,
     recipientInAudience: true,
-    level: level ?? DEFAULT_ROOM_LEVEL,
+    level: level ?? (signal.dmRoom ? defaultRoomLevel("dm") : DEFAULT_ROOM_LEVEL),
     threadMuted: follow?.state === "muted",
+    dmRoom: signal.dmRoom === true,
     // A reply recipient is a follower by construction; a muted row is handled above.
     following: follow ? follow.state === "following" : true,
     isRunStarter: signal.isRunStarter === true,
@@ -268,7 +274,7 @@ async function applySignal(
       externalOrgId: ev.orgId,
       recipientAuthId: recipient,
       spaceRef: ev.spaceRef,
-      kind,
+      kind: courierKindFor(kind, signal.dmRoom === true),
       threadId: ev.threadId,
       messageId: signal.messageId,
       runId: signal.runId,
@@ -346,11 +352,14 @@ export const ingestSpaceEvent = internalMutation({
       // Assistant messages create no item (the run's own signal does).
       if (ev.role !== "user") return await finish({ status: "applied", reason: "assistant_message" });
       const follows = await loadThreadFollows(ctx, ev);
+      // D22r: in a DM every message is for every other member, follow or not.
+      const dmRoom = isDmSpaceKind(space.kind);
       const plan = planMessageRecipients({
         actor: ev.authorSubjectId,
         mentions: ev.mentions,
         followers: follows.filter((row) => row.state === "following").map((row) => row.externalAuthId),
         owner: ev.threadOwnerSubjectId,
+        roomMembers: dmRoom ? [...audience].sort() : undefined,
       });
 
       for (const { recipient, kind } of plan) {
@@ -366,6 +375,7 @@ export const ingestSpaceEvent = internalMutation({
               actorAuthId: ev.authorSubjectId,
               actorKind: "user",
               messageId: ev.messageId,
+              dmRoom,
             },
             now,
           ),

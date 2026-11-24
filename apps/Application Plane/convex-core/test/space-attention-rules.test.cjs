@@ -254,3 +254,32 @@ test('envFlagOn: unset takes the default, empty and off words are off, anything 
   for (const off of ['0', 'false', 'OFF', ' No ']) assert.equal(envFlagOn(off, true), false);
   for (const on of ['1', 'true', 'yes', 'on']) assert.equal(envFlagOn(on), true);
 });
+
+test('D22r: a DM or group DM defaults to level all; every other room keeps the ordinary default', () => {
+  const { DM_DEFAULT_ROOM_LEVEL, defaultRoomLevel, isDmSpaceKind } = rules;
+  assert.equal(DM_DEFAULT_ROOM_LEVEL, 'all');
+  assert.equal(defaultRoomLevel('dm'), 'all');
+  assert.equal(defaultRoomLevel('group_dm'), 'all');
+  for (const kind of ['room', 'project', 'case', 'personal', '', null, undefined, 7]) {
+    assert.equal(defaultRoomLevel(kind), DEFAULT_ROOM_LEVEL, String(kind));
+    assert.equal(isDmSpaceKind(kind), false, String(kind));
+  }
+});
+
+test('D22r: a reply in a DM needs no follow row, but level off and a muted thread still silence it', () => {
+  decide('reply', { following: false, dmRoom: true }, { item: 'create', outOfApp: true, reason: 'create' });
+  decide('reply', { following: false, dmRoom: false }, { item: 'none', outOfApp: false, reason: 'not_following' });
+  decide('reply', { dmRoom: true, level: 'off' }, { item: 'none', outOfApp: false, reason: 'level_off' });
+  decide('reply', { dmRoom: true, threadMuted: true }, { item: 'none', outOfApp: false, reason: 'thread_muted' });
+  decide('reply', { dmRoom: true, memberState: 'dnd' }, { item: 'create', outOfApp: false, reason: 'create' });
+  decide('reply', { dmRoom: true, actorAuthId: 'alice' }, { item: 'none', outOfApp: false, reason: 'self' });
+});
+
+test('D22r: only a DM reply goes out of the app as dm; every other kind keeps its own name', () => {
+  const { courierKindFor } = rules;
+  assert.equal(courierKindFor('reply', true), 'dm');
+  assert.equal(courierKindFor('reply', false), 'reply');
+  for (const kind of ['mention', 'invite', 'agent_done', 'agent_failed', 'reminder', 'approval_needed', 'agent_awaiting']) {
+    assert.equal(courierKindFor(kind, true), kind);
+  }
+});

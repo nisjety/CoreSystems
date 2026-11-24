@@ -40,7 +40,10 @@ export interface ParsedSpaceEvent {
   readonly runId?: string;
   readonly state?: string;
   readonly starterSubjectId: string;
-  /** Not carried by Session Core today; read when a later version adds it. */
+  /**
+   * The Control agent subject of a wake run (session-core migration 0135:
+   * runs.agent_subject_id); empty, so absent here, for any other run.
+   */
   readonly agentId?: string;
   /** Literal `false`: the parser refuses every other value. The courier checks it again before any send. */
   readonly zdr: false;
@@ -181,13 +184,16 @@ export type RecipientKind = "mention" | "reply";
  * Who a user message is for, before the delivery rules: mentioned people get a
  * `mention` (which wins over `reply`), thread followers and the thread owner
  * get a `reply`; the actor is never a recipient and nobody appears twice.
- * Order is stable: mentions first, then followers, then the owner.
+ * Order is stable: mentions first, then followers, then the owner, then (in a
+ * DM or group DM only, D22r) every other member of the room as a `reply`.
  */
 export function planMessageRecipients(input: {
   readonly actor: string;
   readonly mentions: readonly string[];
   readonly followers: readonly string[];
   readonly owner: string;
+  /** DM rooms only: the room's audience, so every message reaches every member. */
+  readonly roomMembers?: readonly string[];
 }): { readonly recipient: string; readonly kind: RecipientKind }[] {
   const out: { recipient: string; kind: RecipientKind }[] = [];
   const seen = new Set<string>();
@@ -199,5 +205,6 @@ export function planMessageRecipients(input: {
   for (const id of input.mentions) add(id, "mention");
   for (const id of input.followers) add(id, "reply");
   add(input.owner, "reply");
+  for (const id of input.roomMembers ?? []) add(id, "reply");
   return out;
 }

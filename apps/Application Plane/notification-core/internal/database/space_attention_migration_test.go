@@ -162,3 +162,54 @@ func TestSpaceAttentionMigrationIsPickedUpAsAnUpMigrationAndTheDownIsNeverRun(t 
 		t.Fatal("a down migration is in the forward migration list")
 	}
 }
+
+// D22r (DEC-3D-DM-ATTN): migration 019 registers space.dm. Every DM message
+// notifies by default, so email is on; Convex holds the in-app copy, so in_app
+// stays off like every other space.* type.
+func TestSpaceDMMigrationRegistersEmailOnInAppOff(t *testing.T) {
+	sql := readSpaceAttentionMigration(t, "019_register_space_dm_notification.up.sql")
+	rows := parseSpaceAttentionRows(t, sql)
+	if len(rows) != 2 {
+		t.Fatalf("seeded rows = %d, want 2 (space.dm x in_app + email)", len(rows))
+	}
+	for _, row := range rows {
+		if row.eventType != "space.dm" {
+			t.Fatalf("seeded type = %q, want space.dm", row.eventType)
+		}
+		switch row.channel {
+		case "in_app":
+			if row.enabled || row.defaultOn {
+				t.Fatalf("space.dm in_app enabled=%v default=%v, want both false", row.enabled, row.defaultOn)
+			}
+		case "email":
+			if !row.enabled || !row.defaultOn {
+				t.Fatalf("space.dm email enabled=%v default=%v, want both true", row.enabled, row.defaultOn)
+			}
+		}
+	}
+	if !strings.Contains(sql, "ON CONFLICT (org_id, event_type, channel) DO NOTHING") {
+		t.Fatal("migration 019 is not idempotent")
+	}
+	for _, forbidden := range []string{"UPDATE ", "DELETE ", "DROP ", "ALTER ", "TRUNCATE"} {
+		if strings.Contains(sql, forbidden) {
+			t.Fatalf("up migration contains %q", forbidden)
+		}
+	}
+	down := readSpaceAttentionMigration(t, "019_register_space_dm_notification.down.sql")
+	if !strings.Contains(down, "org_id = '_default'") || !strings.Contains(down, "event_type = 'space.dm'") {
+		t.Fatalf("down migration must remove only the _default space.dm rows: %s", down)
+	}
+	files, err := migrationFileNames("../../migrations")
+	if err != nil {
+		t.Fatalf("migrationFileNames() error = %v", err)
+	}
+	var found bool
+	for _, file := range files {
+		if file.name == "019_register_space_dm_notification.up.sql" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("migration 019 up is not in the migration list")
+	}
+}

@@ -276,6 +276,8 @@ func isNotificationTypeAuthorized(serviceID, notificationType string) bool {
 			"space.approval_needed": {},
 			"space.agent_awaiting":  {},
 			"space.reminder":        {},
+			// D22r: a DM message (every DM message notifies by default).
+			"space.dm": {},
 		},
 	}
 	_, ok := allowed[serviceID][notificationType]

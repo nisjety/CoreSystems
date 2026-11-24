@@ -32,6 +32,33 @@ export const ROOM_LEVELS: readonly RoomLevel[] = ["all", "mentions", "off"];
 /** PD-WS11: the default room level when a member never chose one. */
 export const DEFAULT_ROOM_LEVEL: RoomLevel = "mentions";
 
+/**
+ * D22r (DEC-3D-DM-ATTN): in a DM or group DM every message notifies every other
+ * member by default, and each member can change that per DM with the room level
+ * (`off` silences it, a muted thread silences that thread). A DM's default level
+ * is therefore `all`; every other room keeps {@link DEFAULT_ROOM_LEVEL}.
+ */
+export const DM_SPACE_KINDS = ["dm", "group_dm"] as const;
+export const DM_DEFAULT_ROOM_LEVEL: RoomLevel = "all";
+
+export function isDmSpaceKind(kind: unknown): boolean {
+  return typeof kind === "string" && (DM_SPACE_KINDS as readonly string[]).includes(kind);
+}
+
+/** The level a member has in a room of this kind when they never chose one. */
+export function defaultRoomLevel(spaceKind: unknown): RoomLevel {
+  return isDmSpaceKind(spaceKind) ? DM_DEFAULT_ROOM_LEVEL : DEFAULT_ROOM_LEVEL;
+}
+
+/**
+ * The out-of-app signal for an in-app kind. A DM message is a `reply` item in
+ * the inbox and a `dm` request out of the app (notification-core type
+ * `space.dm`, its own email default and preference).
+ */
+export function courierKindFor(kind: SignalKind, dmRoom: boolean): string {
+  return dmRoom && kind === "reply" ? "dm" : kind;
+}
+
 export type MemberState = "available" | "away" | "dnd" | "offline";
 
 /** Out-of-app budget: 30 requests per recipient per hour. */
@@ -95,6 +122,8 @@ export interface DeliveryContext {
   readonly level?: RoomLevel | null;
   readonly threadMuted?: boolean;
   readonly following?: boolean;
+  /** D22r: the Space is a DM or group DM, so a `reply` needs no follow row. */
+  readonly dmRoom?: boolean;
   /** For `agent_done` / `agent_failed`: the recipient started the run. */
   readonly isRunStarter?: boolean;
   /** Presence within {@link OBSERVING_WINDOW_MS} AND the suppress flag on. */
@@ -124,7 +153,7 @@ const DROP = (reason: string): DeliveryDecision => ({ item: "none", outOfApp: fa
  *  2. recipient must be an active, acknowledged audience member: drop;
  *  3. `mention`, `invite` (and `reminder`) pass every level and mute;
  *  4. level `off` drops everything else; a muted thread drops;
- *  5. `reply` needs a following recipient; `agent_done` / `agent_failed` go to
+ *  5. `reply` needs a following recipient (not in a DM: D22r); `agent_done` / `agent_failed` go to
  *     the run starter only;
  *  6. observed room: no item for `reply` and `agent_done` (mentions are kept);
  *  7. coalesce on (recipient, kind, thread or space): one row; `done` reopens
@@ -158,7 +187,7 @@ export function deliveryDecision(kind: SignalKind, ctx: DeliveryContext): Delive
   }
 
   // 5
-  if (kind === "reply" && !ctx.following) return DROP("not_following");
+  if (kind === "reply" && !ctx.following && !ctx.dmRoom) return DROP("not_following");
   if ((kind === "agent_done" || kind === "agent_failed") && !ctx.isRunStarter) {
     return DROP("not_run_starter");
   }

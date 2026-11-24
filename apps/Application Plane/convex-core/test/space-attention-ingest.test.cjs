@@ -1096,3 +1096,50 @@ test('a prompt answer clears the timeout', async (t) => {
   assert.equal(calls[0].init.signal.aborted, false, 'a settled request is never aborted afterwards');
   assert.equal(log.scheduled.length, 0);
 });
+
+function dmTables(audience, kind = 'group_dm', extra = {}) {
+  const tables = spaceTables(audience, extra);
+  tables.spaces = [{ spaceRef: SPACE, externalOrgId: ORG, lifecycle: 'active', kind }];
+  return tables;
+}
+
+test('D22r: every DM message reaches every other member, and goes out of the app as space.dm', async (t) => {
+  withEnv(t, { SPACE_ATTENTION_INGEST: '1', SPACE_ATTENTION_OUT_OF_APP: '1', SPACE_ATTENTION_SUPPRESS_OBSERVED: undefined });
+  const { ctx, tables, log } = makeCtx(dmTables(['alice', 'bob', 'carol']));
+  const result = await apply(ctx, userMessage());
+  assert.deepEqual(result, { status: 'applied', items: 2, outOfApp: 2 });
+  assert.equal(itemsFor(tables, 'bob')[0].kind, 'reply');
+  assert.equal(itemsFor(tables, 'carol')[0].kind, 'reply', 'carol neither follows nor owns the thread');
+  assert.equal(itemsFor(tables, 'alice').length, 0, 'the author is never a recipient');
+  assert.deepEqual(
+    log.scheduled.map((entry) => [entry.args.recipientAuthId, entry.args.kind]).sort(),
+    [['bob', 'dm'], ['carol', 'dm']],
+  );
+});
+
+test('D22r: a member silences one DM with level off; a mention still reaches them', async (t) => {
+  withEnv(t, { SPACE_ATTENTION_INGEST: '1', SPACE_ATTENTION_OUT_OF_APP: undefined });
+  const off = { externalOrgId: ORG, externalAuthId: 'carol', spaceRef: SPACE, level: 'off', updatedAt: 1 };
+  const { ctx, tables } = makeCtx(dmTables(['alice', 'bob', 'carol'], 'dm', { spaceRoomNotifyPrefs: [off] }));
+  await apply(ctx, userMessage({}, { event_id: 'evt_a' }));
+  assert.equal(itemsFor(tables, 'carol').length, 0);
+  assert.equal(itemsFor(tables, 'bob').length, 1);
+  await apply(ctx, userMessage({ mentions: ['carol'], message_id: 'msg_2' }, { event_id: 'evt_b' }));
+  assert.deepEqual(itemsFor(tables, 'carol').map((row) => row.kind), ['mention']);
+});
+
+test('D22r: a muted DM thread stays silent for that member', async (t) => {
+  withEnv(t, { SPACE_ATTENTION_INGEST: '1' });
+  const { ctx, tables } = makeCtx(dmTables(['alice', 'bob', 'carol'], 'group_dm', { spaceThreadFollows: [follow('carol', 'muted')] }));
+  await apply(ctx, userMessage());
+  assert.equal(itemsFor(tables, 'carol').length, 0);
+  assert.equal(itemsFor(tables, 'bob').length, 1);
+});
+
+test('outside a DM a member who neither follows nor owns the thread still gets nothing', async (t) => {
+  withEnv(t, { SPACE_ATTENTION_INGEST: '1', SPACE_ATTENTION_OUT_OF_APP: '1' });
+  const { ctx, tables, log } = makeCtx(dmTables(['alice', 'bob', 'carol'], 'room'));
+  await apply(ctx, userMessage());
+  assert.equal(itemsFor(tables, 'carol').length, 0);
+  assert.deepEqual(log.scheduled.map((entry) => entry.args.kind), ['reply']);
+});
