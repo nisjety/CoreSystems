@@ -28,9 +28,11 @@ import (
 //
 // The answer is presence, never authority: ids, names and emails of
 // organization members, each with in_room (whether the person is in the run's
-// own room). It never names another room. Nothing is persisted, the response is
-// no-store, and zero_data_retention tells execution-core to hand the model ids
-// only. A Control or Session Core outage is a typed 503, never an empty list.
+// own room). It never names another room. Nothing is persisted and the response
+// is no-store. Under zero data retention Control drops names and emails itself
+// (names_withheld) and the entries are ids plus in_room only. A membership or
+// policy refusal is a typed 403; a Control or Session Core outage is a typed
+// 503, never an empty list.
 const (
 	runDirectoryReadScope   = "spaces:directory:run-read"
 	runDirectoryActionID    = "space.directory.resolve"
@@ -48,6 +50,34 @@ type runDirectoryMembership struct {
 // runDirectoryMembershipFunc reads the current membership of subjectID in
 // spaceRef. spaces.ErrNoCurrentMembership means the subject is not a member.
 type runDirectoryMembershipFunc func(ctx context.Context, spaceRef, orgID, subjectID string) (runDirectoryMembership, error)
+
+// runDirectoryAuthorityReader is the slice of the Space repository the read
+// needs: membership only (no write entitlement, no agent-action role floor, no
+// ZDR refusal, since a directory read persists nothing) plus the org's privacy
+// posture. The role floor is the golden row's min_role, checked by
+// runDirectoryAdmitted.
+type runDirectoryAuthorityReader interface {
+	ResolveCurrentUserMembership(ctx context.Context, spaceRef, orgID, subjectID string) (*spaces.CurrentMembership, error)
+	ResolveOrgEffectPolicy(ctx context.Context, orgID string) (spaces.EffectPolicy, error)
+}
+
+// readRunDirectoryMembership reads the subject's membership, then the org's
+// privacy posture. A missing membership is spaces.ErrNoCurrentMembership and a
+// missing policy row is spaces.ErrNoOrgEffectPolicy; both are refusals.
+func readRunDirectoryMembership(ctx context.Context, reader runDirectoryAuthorityReader, spaceRef, orgID, subjectID string) (runDirectoryMembership, error) {
+	membership, err := reader.ResolveCurrentUserMembership(ctx, spaceRef, orgID, subjectID)
+	if err != nil {
+		return runDirectoryMembership{}, err
+	}
+	if membership == nil {
+		return runDirectoryMembership{}, spaces.ErrNoCurrentMembership
+	}
+	policy, err := reader.ResolveOrgEffectPolicy(ctx, orgID)
+	if err != nil {
+		return runDirectoryMembership{}, err
+	}
+	return runDirectoryMembership{Role: membership.Role, ZeroDataRetention: policy.ZeroDataRetention}, nil
+}
 
 // runDirectoryAdmitted is the registry and allowlist check; tests replace it
 // while the golden row is not vendored yet.
@@ -91,14 +121,26 @@ func (s *Server) runDirectoryMembershipOf(ctx context.Context, spaceRef, orgID, 
 	if s.spaceRepo == nil {
 		return runDirectoryMembership{}, errors.New("space repository is unavailable")
 	}
-	evidence, err := s.spaceRepo.ResolveAgentActionDecisionEvidence(ctx, spaceRef, orgID, subjectID)
-	if err != nil {
-		return runDirectoryMembership{}, err
+	return readRunDirectoryMembership(ctx, s.spaceRepo, spaceRef, orgID, subjectID)
+}
+
+// runDirectoryRefused writes the typed refusal of a membership or privacy read
+// and reports whether it did. Anything else is an outage for the caller.
+func runDirectoryRefused(c *gin.Context, err error) bool {
+	if denial, ok := spaces.AsDenial(err); ok {
+		abortTypedError(c, denial.Status(), string(denial.Code), "the run may not read the directory", denial.Details())
+		return true
 	}
-	return runDirectoryMembership{
-		Role:              evidence.Membership.Role,
-		ZeroDataRetention: evidence.Privacy.ZeroDataRetention,
-	}, nil
+	switch {
+	case errors.Is(err, spaces.ErrNoCurrentMembership):
+		abortTypedError(c, http.StatusForbidden, "not_authorized", "the run may not read the directory", nil)
+	case errors.Is(err, spaces.ErrNoOrgEffectPolicy):
+		abortTypedError(c, http.StatusForbidden, string(spaces.DenialPolicyNotProvisioned),
+			"this organization has no Space policy yet", nil)
+	default:
+		return false
+	}
+	return true
 }
 
 func runDirectoryInvalid(c *gin.Context, field, reason string) {
@@ -151,12 +193,11 @@ func (s *Server) runDirectoryPeople(c *gin.Context) {
 		return
 	}
 	membership, err := s.runDirectoryMembershipOf(c.Request.Context(), authority.SpaceRef, authority.OrgID, authority.SubjectID)
-	if errors.Is(err, spaces.ErrNoCurrentMembership) {
-		abortTypedError(c, http.StatusForbidden, "not_authorized", "the run may not read the directory", nil)
-		return
-	}
 	if err != nil {
-		runDirectoryUnavailable(c)
+		if !runDirectoryRefused(c, err) {
+			log.Error().Err(err).Msg("run directory membership read failed")
+			runDirectoryUnavailable(c)
+		}
 		return
 	}
 	if !runDirectoryAdmitted(runDirectoryActionID, membership.Role) {
@@ -189,17 +230,19 @@ func (s *Server) runDirectoryPeople(c *gin.Context) {
 		if strings.TrimSpace(person.SubjectID) == "" {
 			continue
 		}
-		people = append(people, runDirectoryPerson{
-			SubjectID:   person.SubjectID,
-			DisplayName: person.DisplayName,
-			Email:       person.Email,
-			InRoom:      !notInRoom[person.SubjectID],
-		})
+		entry := runDirectoryPerson{SubjectID: person.SubjectID, InRoom: !notInRoom[person.SubjectID]}
+		// Under ZDR Control itself sends ids only: every entry matched the query
+		// here, so the caller needs no name or email to rank it.
+		if !membership.ZeroDataRetention {
+			entry.DisplayName, entry.Email = person.DisplayName, person.Email
+		}
+		people = append(people, entry)
 	}
 	c.Header("Cache-Control", "no-store")
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{
 		"people":              people,
 		"zero_data_retention": membership.ZeroDataRetention,
+		"names_withheld":      membership.ZeroDataRetention,
 	}})
 }
 

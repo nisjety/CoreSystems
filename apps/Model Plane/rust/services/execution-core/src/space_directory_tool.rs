@@ -20,7 +20,10 @@
 //!
 //! The agent half reads Application's agent registry. execution-core has no Application client yet, so the agent source is
 //! unavailable in this build: `kind:"agent"` answers `none`/`directory_unavailable`, and `kind:"any"` marks its answer
-//! `incomplete` (an outage is never "no such agent").
+//! `incomplete` (an outage is never "no such agent"). An omitted `kind` is therefore `person`.
+//!
+//! Under zero data retention Control itself withholds names and emails (`names_withheld`). Every entry Control returns matched
+//! the query on Control's side, so an entry with neither name nor email ranks as a prefix match here.
 //!
 //! The row is offered only when the golden registry names it (`space_self_api::is_space_action`) and the run's profile carries
 //! the self-API marker; until then no run is offered the tool and the dispatcher never reaches this module.
@@ -64,7 +67,7 @@ mention, message or act for anyone. in_this_room says whether the match is in th
 Under zero data retention only ids are returned.";
 
 /// The closed argument schema for the golden row: `query` and an optional `kind`, nothing else (argument order `query`, `kind`).
-pub(crate) const PARAMETERS_JSON: &str = r#"{"type":"object","properties":{"query":{"type":"string","minLength":1,"maxLength":100,"description":"A full name, a unique name prefix, or an exact email."},"kind":{"type":"string","enum":["person","agent","any"],"description":"What to look for. Defaults to any."}},"required":["query"],"additionalProperties":false}"#;
+pub(crate) const PARAMETERS_JSON: &str = r#"{"type":"object","properties":{"query":{"type":"string","minLength":1,"maxLength":100,"description":"A full name, a unique name prefix, or an exact email."},"kind":{"type":"string","enum":["person","agent","any"],"description":"What to look for. Defaults to person."}},"required":["query"],"additionalProperties":false}"#;
 
 /// What the model asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,8 +110,9 @@ pub(crate) fn parse_arguments(input: &str) -> Result<Arguments, String> {
         return Err(CODE_INVALID_ARGUMENTS.to_owned());
     }
     let kind = match parsed.kind.as_deref().map(str::trim) {
-        None | Some("" | "any") => Kind::Any,
-        Some("person") => Kind::Person,
+        // The default is `person` while the agent source is unavailable, so an omitted kind can still answer "no such person".
+        None | Some("" | "person") => Kind::Person,
+        Some("any") => Kind::Any,
         Some("agent") => Kind::Agent,
         Some(_) => return Err(CODE_INVALID_ARGUMENTS.to_owned()),
     };
@@ -141,16 +145,20 @@ struct Candidate {
     json: Value,
     name: String,
     email: String,
+    /// Control withheld the name and email (zero data retention); Control matched the entry against the query itself.
+    withheld: bool,
 }
 
 impl Candidate {
     fn exact(&self, needle: &str) -> bool {
-        self.name.to_lowercase() == needle
-            || (!self.email.is_empty() && self.email.to_lowercase() == needle)
+        !self.withheld
+            && (self.name.to_lowercase() == needle
+                || (!self.email.is_empty() && self.email.to_lowercase() == needle))
     }
 
     fn prefix(&self, needle: &str) -> bool {
-        self.name.to_lowercase().starts_with(needle)
+        self.withheld
+            || self.name.to_lowercase().starts_with(needle)
             || (!self.email.is_empty() && self.email.to_lowercase().starts_with(needle))
     }
 }
@@ -206,6 +214,8 @@ pub(crate) fn resolve(
                         json: person_json(person, ids_only),
                         name: person.display_name.clone(),
                         email: person.email.clone(),
+                        withheld: person.display_name.trim().is_empty()
+                            && person.email.trim().is_empty(),
                     }),
             ),
             None => incomplete = true,
@@ -221,6 +231,7 @@ pub(crate) fn resolve(
                         json: agent_json(agent, ids_only),
                         name: agent.display_name.clone(),
                         email: String::new(),
+                        withheld: false,
                     }),
             ),
             None => incomplete = true,
@@ -283,18 +294,29 @@ pub(crate) fn enabled() -> bool {
 
 impl DirectoryClient {
     fn from_env() -> Result<Option<Self>, String> {
-        if !enabled() {
-            return Ok(None);
-        }
-        let (Some(control), Some(token)) = (
+        Self::from_parts(
+            enabled(),
             env_value("CONTROL_PLANE_USER_CORE_URL"),
             env_value(TOKEN_ENV),
-        ) else {
+            env_flag("EXECUTION_CORE_ALLOW_INSECURE_TICKET_LOOPBACK"),
+        )
+    }
+
+    /// Builds the client from explicit inputs. Switched off it is `None` whatever else is configured.
+    fn from_parts(
+        switched_on: bool,
+        control: Option<String>,
+        token: Option<String>,
+        allow_insecure: bool,
+    ) -> Result<Option<Self>, String> {
+        if !switched_on {
+            return Ok(None);
+        }
+        let (Some(control), Some(token)) = (control, token) else {
             return Err(format!(
                 "{SWITCH_ENV} requires CONTROL_PLANE_USER_CORE_URL and {TOKEN_ENV} together"
             ));
         };
-        let allow_insecure = env_flag("EXECUTION_CORE_ALLOW_INSECURE_TICKET_LOOPBACK");
         let control_base_url = service_base_url(&control, "Control Plane", allow_insecure)?;
         let token = bounded_secret(&token, "Control run directory service token")?;
         let http = Client::builder()
@@ -340,6 +362,8 @@ struct ControlPeople {
     people: Vec<PersonEntry>,
     #[serde(default)]
     zero_data_retention: bool,
+    #[serde(default)]
+    names_withheld: bool,
 }
 
 #[derive(Deserialize)]
@@ -355,7 +379,7 @@ struct ErrorBody {
 /// What Control's run directory read produced.
 #[derive(Debug, PartialEq, Eq)]
 enum PeopleRead {
-    /// The people and whether Control reports the room as zero-retention.
+    /// The people and whether Control reports the room as zero-retention (or withheld the names).
     Read(Vec<PersonEntry>, bool),
     /// Control could not be read: an outage is never an empty list.
     Unavailable,
@@ -366,7 +390,10 @@ fn map_control_reply(status: StatusCode, body: &[u8]) -> Result<PeopleRead, Stri
     if status.is_success() {
         return Ok(serde_json::from_slice::<ControlEnvelope>(body)
             .map(|envelope| {
-                PeopleRead::Read(envelope.data.people, envelope.data.zero_data_retention)
+                PeopleRead::Read(
+                    envelope.data.people,
+                    envelope.data.zero_data_retention || envelope.data.names_withheld,
+                )
             })
             .unwrap_or(PeopleRead::Unavailable));
     }
@@ -410,21 +437,46 @@ async fn read_people(
         return Ok(PeopleRead::Unavailable);
     };
     let status = response.status();
-    let Ok(body) = response.bytes().await else {
+    let Some(body) = read_capped(response, MAX_REPLY_BYTES).await else {
         return Ok(PeopleRead::Unavailable);
     };
-    if body.len() > MAX_REPLY_BYTES {
-        return Ok(PeopleRead::Unavailable);
-    }
     map_control_reply(status, &body)
+}
+
+/// Reads a reply body chunk by chunk and gives up as soon as it would pass `cap`, so an oversized reply is never buffered whole.
+async fn read_capped(mut response: reqwest::Response, cap: usize) -> Option<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > cap as u64)
+    {
+        return None;
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if body.len() + chunk.len() > cap {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Some(body)
+}
+
+/// The tool is a room tool: a run that carries no Space is not offered it, whatever the offer said.
+fn require_space_run(request_space_id: &str) -> Result<(), String> {
+    if request_space_id.trim().is_empty() {
+        return Err(CODE_NOT_OFFERED.to_owned());
+    }
+    Ok(())
 }
 
 async fn execute(
     tool_input: &str,
     run_id: &str,
     org_id: &str,
+    request_space_id: &str,
     retention_bound: bool,
 ) -> Result<String, String> {
+    require_space_run(request_space_id)?;
     let client = match shared() {
         Ok(Some(client)) => client,
         Ok(None) | Err(_) => return Err(CODE_NOT_OFFERED.to_owned()),
@@ -447,14 +499,24 @@ async fn execute(
     Ok(resolve(&arguments, people.as_deref(), agents, ids_only).to_string())
 }
 
-/// Executes one `space.directory.resolve` call for the run. `retention_bound` is a zero-retention or waived run.
+/// Executes one `space.directory.resolve` call for the run. `request_space_id` is the run's room (empty for a run outside a
+/// Space, which is refused). `retention_bound` is a zero-retention or waived run.
 pub(crate) async fn execute_if_configured(
     tool_input: &str,
     run_id: &str,
     org_id: &str,
+    request_space_id: &str,
     retention_bound: bool,
 ) -> ToolExecution {
-    match execute(tool_input, run_id, org_id, retention_bound).await {
+    match execute(
+        tool_input,
+        run_id,
+        org_id,
+        request_space_id,
+        retention_bound,
+    )
+    .await
+    {
         Ok(output) => ToolExecution {
             output,
             error: None,
@@ -622,14 +684,78 @@ mod tests {
 
     #[test]
     fn no_answer_names_a_room() {
-        let agents = vec![agent("agent-1", "Helper", true)];
+        // Even a Control reply that carried room fields never passes them on: only the closed person fields are read.
+        let reply = br#"{"data":{"people":[
+            {"subject_id":"u-ada","display_name":"Ada Lovelace","email":"ada@example.test","in_room":false,
+             "space_ref":"room-secret-9","room_name":"Board room","installed_in":["room-secret-9"]}
+        ],"zero_data_retention":false}}"#;
+        let Ok(PeopleRead::Read(people, ids_only)) = map_control_reply(StatusCode::OK, reply)
+        else {
+            panic!("the reply did not parse");
+        };
+        let agents = vec![agent("agent-1", "Ada Helper", true)];
         for kind in [Kind::Person, Kind::Agent, Kind::Any] {
-            let text = resolve(&args("a", kind), Some(&people()), Some(&agents), false).to_string();
-            assert!(
-                !text.contains("space_ref") && !text.contains("installed_in"),
-                "{text}"
-            );
+            let text =
+                resolve(&args("ada", kind), Some(&people), Some(&agents), ids_only).to_string();
+            for leaked in ["space_ref", "room-secret-9", "Board room", "installed_in"] {
+                assert!(!text.contains(leaked), "{leaked} leaked: {text}");
+            }
         }
+        let text = resolve(
+            &args("ada lovelace", Kind::Person),
+            Some(&people),
+            None,
+            false,
+        )
+        .to_string();
+        assert!(text.contains("u-ada"), "{text}");
+    }
+
+    #[test]
+    fn withheld_names_resolve_on_controls_match_and_never_leak() {
+        // Under ZDR Control sends ids only; every entry matched the query on Control's side.
+        let reply = br#"{"data":{"people":[{"subject_id":"u-ada","in_room":true}],"zero_data_retention":true,"names_withheld":true}}"#;
+        let Ok(PeopleRead::Read(one, ids_only)) = map_control_reply(StatusCode::OK, reply) else {
+            panic!("the reply did not parse");
+        };
+        assert!(ids_only);
+        let answer = resolve(&args("Ada", Kind::Person), Some(&one), None, ids_only);
+        assert_eq!(answer["status"], "ok");
+        assert_eq!(answer["match"]["subject_id"], "u-ada");
+        assert_eq!(answer["match"]["in_this_room"], true);
+        assert!(answer["match"].get("display_name").is_none());
+        let two = vec![person("u-1", "", "", true), person("u-2", "", "", false)];
+        let answer = resolve(&args("kim", Kind::Person), Some(&two), None, true);
+        assert_eq!(answer["status"], "ambiguous");
+        let answer = resolve(&args("kim", Kind::Person), Some(&[]), None, true);
+        assert_eq!(answer["reason"], REASON_NO_MATCH);
+        // names_withheld alone (without the ZDR bit) still means ids only.
+        let reply = br#"{"data":{"people":[],"names_withheld":true}}"#;
+        assert_eq!(
+            map_control_reply(StatusCode::OK, reply),
+            Ok(PeopleRead::Read(Vec::new(), true))
+        );
+    }
+
+    #[test]
+    fn the_default_kind_can_answer_no_such_person() {
+        let Ok(arguments) = parse_arguments(r#"{"query":"zed"}"#) else {
+            panic!("arguments");
+        };
+        let answer = resolve(&arguments, Some(&people()), None, false);
+        assert_eq!(answer["status"], "none");
+        assert_eq!(answer["reason"], REASON_NO_MATCH);
+        assert!(answer.get("incomplete").is_none());
+        // kind:"any" with no agent source is still never "no such person".
+        let answer = resolve(&args("zed", Kind::Any), Some(&people()), None, false);
+        assert_eq!(answer["reason"], REASON_UNAVAILABLE);
+    }
+
+    #[test]
+    fn a_run_outside_a_space_is_not_offered_the_tool() {
+        assert_eq!(require_space_run(""), Err(CODE_NOT_OFFERED.to_owned()));
+        assert_eq!(require_space_run("  "), Err(CODE_NOT_OFFERED.to_owned()));
+        assert_eq!(require_space_run("room-1"), Ok(()));
     }
 
     #[test]
@@ -640,6 +766,10 @@ mod tests {
         );
         assert_eq!(
             parse_arguments(r#"{"query":"Ada"}"#),
+            Ok(args("Ada", Kind::Person))
+        );
+        assert_eq!(
+            parse_arguments(r#"{"query":"Ada","kind":"any"}"#),
             Ok(args("Ada", Kind::Any))
         );
         for bad in [
@@ -728,11 +858,28 @@ mod tests {
 
     #[test]
     fn switched_off_the_tool_is_not_offered_and_not_built() {
-        if enabled() {
-            return;
+        let control = || Some("https://control.example.test".to_owned());
+        let token = || Some("t".repeat(40));
+        // Off, no client is built whatever is configured; on, a missing half of the configuration is an error, never a client.
+        assert!(matches!(
+            DirectoryClient::from_parts(false, control(), token(), false),
+            Ok(None)
+        ));
+        assert!(matches!(
+            DirectoryClient::from_parts(false, None, None, false),
+            Ok(None)
+        ));
+        assert!(DirectoryClient::from_parts(true, control(), None, false).is_err());
+        assert!(DirectoryClient::from_parts(true, None, token(), false).is_err());
+        assert!(matches!(
+            DirectoryClient::from_parts(true, control(), token(), false),
+            Ok(Some(_))
+        ));
+        if !enabled() {
+            assert!(!is_built_action(ACTION));
         }
-        assert!(!is_built_action(ACTION));
         assert!(is_directory_action(ACTION));
         assert!(!is_directory_action("space.canvas.read"));
+        assert!(!is_built_action("space.canvas.read"));
     }
 }

@@ -1884,6 +1884,7 @@ async fn execute_step_inner(
             tool_input,
             run_id,
             org_id,
+            request_space_id,
             zdr || waived,
         )
         .await

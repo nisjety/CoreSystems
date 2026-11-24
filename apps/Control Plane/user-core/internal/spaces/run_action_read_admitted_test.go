@@ -19,8 +19,19 @@ func TestRunActionReadAdmitted(t *testing.T) {
 	if RunActionReadAdmitted("space.thread.rename", "") {
 		t.Fatal("admitted an empty role")
 	}
-	if RunActionReadAdmitted("space.directory.resolve", RoleOwner) {
+	t.Setenv(spaceSelfAPIActionsEnv, "space.thread.rename,space.not.a.golden.row")
+	if RunActionReadAdmitted("space.not.a.golden.row", RoleOwner) {
 		t.Fatal("admitted an action the golden does not name")
+	}
+	// space.directory.resolve follows its golden row: refused while the row is
+	// not vendored, admitted at its own floor once it is.
+	t.Setenv(spaceSelfAPIActionsEnv, "space.directory.resolve")
+	if spec, found := runActionSpec("space.directory.resolve"); found && spec.DecisionType == runActionDecisionKind {
+		if !RunActionReadAdmitted("space.directory.resolve", spec.MinRole) {
+			t.Fatal("refused the vendored directory row at its floor")
+		}
+	} else if RunActionReadAdmitted("space.directory.resolve", RoleOwner) {
+		t.Fatal("admitted the directory row before the golden names it")
 	}
 	t.Setenv(spaceSelfAPIActionsEnv, "space.schedule.follow_up")
 	if RunActionReadAdmitted("space.schedule.follow_up", RoleOwner) {

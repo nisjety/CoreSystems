@@ -226,6 +226,95 @@ func TestRunDirectoryReportsZeroDataRetention(t *testing.T) {
 	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &body) != nil || !body.Data.ZeroDataRetention {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
+	// Control drops names and emails itself under ZDR; ids and in_room stay.
+	for _, leaked := range []string{"Ada", "Adam", "example.test"} {
+		if strings.Contains(w.Body.String(), leaked) {
+			t.Fatalf("%q leaked under ZDR: %s", leaked, w.Body.String())
+		}
+	}
+	if len(body.Data.People) != 2 || body.Data.People[0].SubjectID != "u-ada" || !body.Data.People[0].InRoom ||
+		!strings.Contains(w.Body.String(), `"names_withheld":true`) {
+		t.Fatalf("people %s", w.Body.String())
+	}
+}
+
+// fakeRunDirectoryReader stands in for the Space repository on the real
+// membership path (readRunDirectoryMembership), so its errors are the ones the
+// repository returns.
+type fakeRunDirectoryReader struct {
+	membership *spaces.CurrentMembership
+	memberErr  error
+	policy     spaces.EffectPolicy
+	policyErr  error
+	policyOrg  string
+}
+
+func (f *fakeRunDirectoryReader) ResolveCurrentUserMembership(_ context.Context, _, _, _ string) (*spaces.CurrentMembership, error) {
+	return f.membership, f.memberErr
+}
+
+func (f *fakeRunDirectoryReader) ResolveOrgEffectPolicy(_ context.Context, orgID string) (spaces.EffectPolicy, error) {
+	f.policyOrg = orgID
+	return f.policy, f.policyErr
+}
+
+// useRunDirectoryReader routes the fixture through readRunDirectoryMembership.
+func useRunDirectoryReader(fx *runDirectoryFixture, reader *fakeRunDirectoryReader) {
+	fx.server.runDirectoryMembership = func(ctx context.Context, spaceRef, orgID, subjectID string) (runDirectoryMembership, error) {
+		return readRunDirectoryMembership(ctx, reader, spaceRef, orgID, subjectID)
+	}
+}
+
+// A viewer of a ZDR room without the agent-action entitlement reads the
+// directory: the read needs membership only, and ZDR gives ids, not a refusal.
+func TestRunDirectoryMembershipPathAdmitsAViewerOfAZeroRetentionRoom(t *testing.T) {
+	fx := newRunDirectoryFixture(t)
+	reader := &fakeRunDirectoryReader{
+		membership: &spaces.CurrentMembership{SpaceRef: "room-1", OrgID: "org-bound", SubjectID: "subject-1", Role: spaces.RoleViewer},
+		policy:     spaces.EffectPolicy{ZeroDataRetention: true},
+	}
+	useRunDirectoryReader(fx, reader)
+	w := runDirectoryCall(fx.server, executionCoreDirectoryCaller(), runDirectoryValidBody)
+	var body runDirectoryBody
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &body) != nil || !body.Data.ZeroDataRetention {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	if reader.policyOrg != "org-bound" || strings.Contains(w.Body.String(), "example.test") {
+		t.Fatalf("policy org %q, body %s", reader.policyOrg, w.Body.String())
+	}
+}
+
+// Typed refusals from the repository keep their own status and code; only an
+// untyped failure is an outage.
+func TestRunDirectoryMembershipPathMapsRefusals(t *testing.T) {
+	viewer := &spaces.CurrentMembership{SpaceRef: "room-1", OrgID: "org-bound", SubjectID: "subject-1", Role: spaces.RoleViewer}
+	cases := []struct {
+		name   string
+		reader *fakeRunDirectoryReader
+		status int
+		code   string
+	}{
+		{"not a member", &fakeRunDirectoryReader{memberErr: spaces.ErrNoCurrentMembership}, http.StatusForbidden, "not_authorized"},
+		{"wrapped not a member", &fakeRunDirectoryReader{memberErr: errors.Join(errors.New("ctx"), spaces.ErrNoCurrentMembership)}, http.StatusForbidden, "not_authorized"},
+		{"nil membership", &fakeRunDirectoryReader{}, http.StatusForbidden, "not_authorized"},
+		{"role denial", &fakeRunDirectoryReader{memberErr: &spaces.Denial{Code: spaces.DenialRoleBelowFloor, RequiredRoles: []string{"editor"}}}, http.StatusForbidden, "space_role_below_floor"},
+		{"entitlement denial", &fakeRunDirectoryReader{memberErr: &spaces.Denial{Code: spaces.DenialEntitlementOff, Entitlement: "agent_action"}}, http.StatusForbidden, "space_entitlement_off"},
+		{"authority unavailable denial", &fakeRunDirectoryReader{memberErr: spaces.AuthorityUnavailableDenial("down")}, http.StatusServiceUnavailable, "space_authority_unavailable"},
+		{"no policy row", &fakeRunDirectoryReader{membership: viewer, policyErr: spaces.ErrNoOrgEffectPolicy}, http.StatusForbidden, "space_policy_not_provisioned"},
+		{"membership outage", &fakeRunDirectoryReader{memberErr: errors.New("db down")}, http.StatusServiceUnavailable, "directory_unavailable"},
+		{"policy outage", &fakeRunDirectoryReader{membership: viewer, policyErr: errors.New("db down")}, http.StatusServiceUnavailable, "directory_unavailable"},
+	}
+	for _, tc := range cases {
+		fx := newRunDirectoryFixture(t)
+		useRunDirectoryReader(fx, tc.reader)
+		w := runDirectoryCall(fx.server, executionCoreDirectoryCaller(), runDirectoryValidBody)
+		if w.Code != tc.status || directoryErrorCode(t, w) != tc.code {
+			t.Errorf("%s: %d %s", tc.name, w.Code, w.Body.String())
+		}
+		if len(fx.people.queries) != 0 {
+			t.Errorf("%s: searched the directory after a refusal", tc.name)
+		}
+	}
 }
 
 func TestRunDirectoryFailsClosed(t *testing.T) {
@@ -271,12 +360,13 @@ func TestRunDirectoryUnwiredIsUnavailable(t *testing.T) {
 	}
 }
 
-// Until the golden row is vendored, the real registry check refuses the action at every role.
-func TestRunDirectoryRealAdmissionNeedsTheGoldenRow(t *testing.T) {
-	t.Setenv("CONTROL_SPACE_SELF_API_ACTIONS", "space.directory.resolve")
+// The real registry check never admits the action while the operator allowlist
+// leaves it out, whether or not the golden row is vendored yet.
+func TestRunDirectoryRealAdmissionNeedsTheAllowlist(t *testing.T) {
+	t.Setenv("CONTROL_SPACE_SELF_API_ACTIONS", "space.thread.rename")
 	for _, role := range []string{spaces.RoleViewer, spaces.RoleOwner} {
 		if spaces.RunActionReadAdmitted("space.directory.resolve", role) {
-			t.Fatalf("admitted without a golden row at %s", role)
+			t.Fatalf("admitted without the allowlist at %s", role)
 		}
 	}
 }
