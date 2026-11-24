@@ -80,6 +80,17 @@ describe('SpaceRemindersList (WS11-S11)', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
+  it('draws nothing, and no load error, for a session with no active organization (403 active_membership_required)', async () => {
+    spacesClient.listPendingSpaceReminders.mockRejectedValue(
+      new ApiError('No active organization.', 403, 'active_membership_required'),
+    )
+    const view = render(() => <SpaceRemindersList />)
+    await settle()
+    expect(spacesClient.listPendingSpaceReminders).toHaveBeenCalledTimes(1)
+    expect(view.container.innerHTML).toBe('')
+    expect(screen.queryByText('Påminnelsene kunne ikke hentes.')).toBeNull()
+  })
+
   it('Cancel cancels that reminder, reads the list again and says so', async () => {
     spacesClient.listPendingSpaceReminders
       .mockResolvedValueOnce([row('rem-1', 'msg-9', NOW + HOUR)])

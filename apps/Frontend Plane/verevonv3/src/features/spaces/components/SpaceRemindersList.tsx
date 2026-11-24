@@ -33,7 +33,9 @@ export function SpaceRemindersList() {
       setRows(await listPendingSpaceReminders())
       setLoadError('')
     } catch (err) {
-      if (hasErrorCode(err, 'space_reminders_disabled')) {
+      // Flag off, or a session with no active organization (403 `active_membership_required`): there
+      // are no Space reminders to show, so nothing is drawn rather than a load error.
+      if (hasErrorCode(err, 'space_reminders_disabled') || hasErrorCode(err, 'active_membership_required')) {
         setAvailable(false)
       } else {
         setLoadError(

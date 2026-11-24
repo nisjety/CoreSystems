@@ -70,6 +70,9 @@ const create = { ...base, spaceRef: 'space_1', threadId: 'thread_1', messageId: 
 function world(extra = {}) {
   return memberTables({
     spaces: [{ spaceRef: 'space_1', externalOrgId: ORG, lifecycle: 'active' }],
+    spaceRecipientAudiences: [
+      { spaceRef: 'space_1', state: 'active', controlState: 'acknowledged', externalOrgId: ORG, recipientExternalAuthIds: [AUTH] },
+    ],
     spaceReminders: [],
     ...extra,
   });
@@ -185,6 +188,35 @@ test('list returns only the caller\'s pending reminders, soonest first', async (
   const list = await listPendingRemindersForGateway._handler(ctx, base);
   assert.deepEqual(list.map((entry) => entry.threadId), ['thread_2', 'thread_1']);
   assert.deepEqual(Object.keys(list[0]).sort(), ['createdAt', 'messageId', 'remindAt', 'reminderId', 'spaceRef', 'state', 'threadId']);
+});
+
+test('list leaves out reminders in rooms the caller is no longer in (or whose audience is not acknowledged)', async (t) => {
+  withServiceKey(t);
+  const soon = Date.now() + 10 * DAY;
+  const { ctx } = makeCtx(
+    world({
+      spaces: [
+        { spaceRef: 'space_1', externalOrgId: ORG, lifecycle: 'active' },
+        { spaceRef: 'space_left', externalOrgId: ORG, lifecycle: 'active' },
+        { spaceRef: 'space_pending', externalOrgId: ORG, lifecycle: 'active' },
+        { spaceRef: 'space_none', externalOrgId: ORG, lifecycle: 'active' },
+      ],
+      spaceRecipientAudiences: [
+        { spaceRef: 'space_1', state: 'active', controlState: 'acknowledged', externalOrgId: ORG, recipientExternalAuthIds: [AUTH] },
+        { spaceRef: 'space_left', state: 'active', controlState: 'acknowledged', externalOrgId: ORG, recipientExternalAuthIds: ['bob'] },
+        { spaceRef: 'space_pending', state: 'active', controlState: 'pending', externalOrgId: ORG, recipientExternalAuthIds: [AUTH] },
+      ],
+      spaceReminders: [
+        pendingRow(1, { remindAt: soon }),
+        pendingRow(2, { remindAt: soon + 1, spaceRef: 'space_left' }),
+        pendingRow(3, { remindAt: soon + 2, spaceRef: 'space_pending' }),
+        pendingRow(4, { remindAt: soon + 3, spaceRef: 'space_none' }),
+        pendingRow(5, { remindAt: soon + 4 }),
+      ],
+    }),
+  );
+  const list = await listPendingRemindersForGateway._handler(ctx, base);
+  assert.deepEqual(list.map((entry) => entry.threadId), ['thread_1', 'thread_5']);
 });
 
 test('cancel marks the caller\'s pending reminder cancelled, and cancelling again is still cancelled:true', async (t) => {

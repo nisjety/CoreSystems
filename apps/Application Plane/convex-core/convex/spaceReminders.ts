@@ -85,6 +85,23 @@ async function pendingOf(ctx: any, externalAuthId: string, externalOrgId: string
 }
 
 /**
+ * Whether the member is in the room's active, Control-acknowledged recipient audience: the same test
+ * `fireReminder` applies before it delivers. A member who has left the room fails it.
+ */
+async function inRoomAudience(ctx: any, spaceRef: string, externalOrgId: string, externalAuthId: string): Promise<boolean> {
+  const audience = await ctx.db
+    .query("spaceRecipientAudiences")
+    .withIndex("by_space_and_state", (q: any) => q.eq("spaceRef", spaceRef).eq("state", "active"))
+    .first();
+  return (
+    !!audience &&
+    audience.controlState === "acknowledged" &&
+    audience.externalOrgId === externalOrgId &&
+    (audience.recipientExternalAuthIds as string[]).includes(externalAuthId)
+  );
+}
+
+/**
  * Create a reminder for the caller. Idempotent: a pending reminder with the
  * same Space, thread, message and time is returned instead of a second row.
  */
@@ -151,7 +168,7 @@ export const createReminderForGateway = mutation({
   },
 });
 
-/** The caller's own pending reminders, soonest first (at most 50). */
+/** The caller's own pending reminders in rooms they are still in, soonest first (at most 50). */
 export const listPendingRemindersForGateway = query({
   args: {
     serviceKey: v.string(),
@@ -162,7 +179,17 @@ export const listPendingRemindersForGateway = query({
     assertServiceKey(args.serviceKey);
     await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
     const rows = await pendingOf(ctx, args.externalAuthId, args.externalOrgId);
-    return rows.sort((a, b) => a.remindAt - b.remindAt).slice(0, MAX_PENDING_REMINDERS).map(view);
+    // A reminder in a room the caller has since left is not listed: it would link to a room the caller
+    // cannot read, and `fireReminder` skips it when due. One audience read per distinct room.
+    const audience = new Map<string, boolean>();
+    for (const spaceRef of new Set(rows.map((row: any) => row.spaceRef as string))) {
+      audience.set(spaceRef, await inRoomAudience(ctx, spaceRef, args.externalOrgId, args.externalAuthId));
+    }
+    return rows
+      .filter((row: any) => audience.get(row.spaceRef) === true)
+      .sort((a, b) => a.remindAt - b.remindAt)
+      .slice(0, MAX_PENDING_REMINDERS)
+      .map(view);
   },
 });
 
@@ -225,16 +252,9 @@ export const fireReminder = internalMutation({
     } catch {
       return await skip("not_in_org");
     }
-    const audience = await ctx.db
-      .query("spaceRecipientAudiences")
-      .withIndex("by_space_and_state", (q: any) => q.eq("spaceRef", row.spaceRef).eq("state", "active"))
-      .first();
-    const inAudience =
-      !!audience &&
-      audience.controlState === "acknowledged" &&
-      audience.externalOrgId === row.externalOrgId &&
-      (audience.recipientExternalAuthIds as string[]).includes(row.externalAuthId);
-    if (!inAudience) return await skip("not_in_audience");
+    if (!(await inRoomAudience(ctx, row.spaceRef, row.externalOrgId, row.externalAuthId))) {
+      return await skip("not_in_audience");
+    }
 
     const eventId = reminderEventId(row._id as string);
     const prefs = await ctx.db

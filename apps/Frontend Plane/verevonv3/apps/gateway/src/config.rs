@@ -537,7 +537,7 @@ pub(crate) struct SpaceFeatureFlags {
     /// `SPACE_ATTENTION_UI` (WS11-S7): reported as `features.attention` so the SPA shows the `/attention`
     /// inbox and the thread follow control. A rollout control only.
     pub(crate) attention_ui: bool,
-    /// `SPACE_STATUS_API` (WS11-S10, `space_status_api`): the org-scoped status routes (`GET|PUT
+    /// `SPACE_STATUS_API` (WS11-S10, `space_status_api`): the org-scoped status routes (`GET|PUT|DELETE
     /// /api/v1/spaces/status`) and the `status` / `activity` annotations on a room's roster and agent
     /// list. Off answers 404 `space_status_disabled` on the status routes and leaves the roster and
     /// agent responses unannotated. A rollout control, never an authorization input.
