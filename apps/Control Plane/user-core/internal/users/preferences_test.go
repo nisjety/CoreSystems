@@ -188,3 +188,14 @@ func TestLegacyLanguagePatchValidatesAndWritesOnlySetFields(t *testing.T) {
 		}
 	}
 }
+
+// "auto" is the stored default the legacy GET returns, so sending it back on the legacy PUT must be accepted.
+func TestLegacyLanguagePatchAcceptsAuto(t *testing.T) {
+	patch, msg, ok := LegacyLanguagePatch("", "", PreferenceAuto, PreferenceAuto)
+	if !ok || msg != "" {
+		t.Fatalf("auto rejected: %q", msg)
+	}
+	if patch["dateFormat"] != PreferenceAuto || patch["timeFormat"] != PreferenceAuto || len(patch) != 2 {
+		t.Fatalf("patch = %v, want both formats stored as auto", patch)
+	}
+}

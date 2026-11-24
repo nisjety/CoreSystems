@@ -70,15 +70,17 @@ func LegacyLanguagePatch(language, region, dateFormat, timeFormat string) (map[s
 		}
 		patch["region"] = region
 	}
+	// "auto" (follow the locale) is accepted like the preference PATCH accepts it: the legacy GET returns the stored
+	// value, so a client that reads the default back and sends it again must not get a 400.
 	if dateFormat != "" {
-		if !ValidDateFormats[dateFormat] {
-			return nil, "dateFormat must be MM/DD/YYYY, DD/MM/YYYY or YYYY-MM-DD", false
+		if dateFormat != PreferenceAuto && !ValidDateFormats[dateFormat] {
+			return nil, "dateFormat must be MM/DD/YYYY, DD/MM/YYYY, YYYY-MM-DD or auto", false
 		}
 		patch["dateFormat"] = dateFormat
 	}
 	if timeFormat != "" {
-		if !ValidTimeFormats[timeFormat] {
-			return nil, "timeFormat must be 12h or 24h", false
+		if timeFormat != PreferenceAuto && !ValidTimeFormats[timeFormat] {
+			return nil, "timeFormat must be 12h, 24h or auto", false
 		}
 		patch["timeFormat"] = timeFormat
 	}
