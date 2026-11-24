@@ -3,6 +3,7 @@
 // Wire (gateway: apps/gateway/src/domains/spaces/status.rs; flag `space_status_api`):
 //   GET /api/v1/spaces/status                         -> { data: { state, text, expires_at } }  (all null when none set)
 //   PUT /api/v1/spaces/status {state, text?, expires_at?} -> { data: { state, text, expires_at } }
+//   DELETE /api/v1/spaces/status                      -> { data: { state: null, text: null, expires_at: null } }  (clears it; idempotent)
 //   GET /api/v1/spaces/{ref}/roster   user members carry `status` ({state, text, expires_at} | null)
 //   GET /api/v1/spaces/{ref}/agents   agents carry `activity` ('working' | 'waiting' | 'idle')
 //
@@ -76,5 +77,14 @@ export async function setOwnSpaceStatus(input: SetSpaceStatusInput): Promise<Spa
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
+  return spaceStatusFrom(response)
+}
+
+/**
+ * Clears the caller's own status: the row is removed, so no state, text or expiry remains and the
+ * answer is null. Idempotent, and allowed under Zero Data Retention (it only deletes).
+ */
+export async function clearOwnSpaceStatus(): Promise<SpaceMemberStatus | null> {
+  const response = await requestJson<unknown>('/api/v1/spaces/status', { method: 'DELETE' })
   return spaceStatusFrom(response)
 }

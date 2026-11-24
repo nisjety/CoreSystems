@@ -7,6 +7,7 @@ import { PasskeySecuritySection } from '@/features/settings/components/PasskeySe
 import { PersonalAgentsSection } from '@/features/settings/components/PersonalAgentsSection'
 import { PrivacyDataSection } from '@/features/settings/components/PrivacyDataSection'
 import { SpaceNotificationPreferences } from '@/features/settings/components/SpaceNotificationPreferences'
+import { SpaceRemindersList } from '@/features/spaces/components/SpaceRemindersList'
 import { SpaceStatusMenu } from '@/features/spaces/components/SpaceStatusMenu'
 import { TwoFactorEnrollmentSection } from '@/features/settings/components/TwoFactorEnrollmentSection'
 import {
@@ -293,6 +294,7 @@ export default function AccountSettingsPage() {
       <AvailabilitySection form={form} onField={updateField} />
       <NotificationChannelsSection />
       <SpaceStatusMenu />
+      <SpaceRemindersList />
       <SpaceNotificationPreferences />
       <ConnectedAccountsSection profile={profile} />
       <ChatGptSubscriptionSection />

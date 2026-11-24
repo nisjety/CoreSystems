@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { getOwnSpaceStatus, setOwnSpaceStatus, spaceStatusFrom } from './status'
+import { clearOwnSpaceStatus, getOwnSpaceStatus, setOwnSpaceStatus, spaceStatusFrom } from './status'
 
 type FetchCall = { url: string; init: RequestInit | undefined }
 
@@ -89,5 +89,21 @@ describe('getOwnSpaceStatus (WS11-S10)', () => {
 
     stubFetch(200, { data: { state: 'offline', text: null, expires_at: 1760000000000 } })
     expect(await getOwnSpaceStatus()).toEqual({ state: 'offline', text: null, expiresAt: 1760000000000 })
+  })
+})
+
+describe('clearOwnSpaceStatus (WS11-S10)', () => {
+  it('DELETEs the own status with no body and reads the cleared answer as null', async () => {
+    const calls = stubFetch(200, { data: { state: null, text: null, expires_at: null } })
+    expect(await clearOwnSpaceStatus()).toBeNull()
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.url.endsWith('/api/v1/spaces/status')).toBe(true)
+    expect(calls[0]?.init?.method).toBe('DELETE')
+    expect(calls[0]?.init?.body).toBeUndefined()
+  })
+
+  it('lets a failure reach the caller, so a failed clear is never shown as cleared', async () => {
+    stubFetch(503, { error: { code: 'status_unavailable', message: 'Unavailable.', details: {} } })
+    await expect(clearOwnSpaceStatus()).rejects.toMatchObject({ status: 503, code: 'status_unavailable' })
   })
 })

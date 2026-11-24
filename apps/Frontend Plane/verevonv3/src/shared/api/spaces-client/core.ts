@@ -117,6 +117,10 @@ export type SpaceContext = {
      * (rollout only; Control decides every write). Absent means off, which is NOT the same as "on".
      */
     member_history_windows?: boolean
+    /** WS11-S10: the org-scoped status menu and the member chips are offered (rollout only; the gateway answers 404 when off). */
+    status?: boolean
+    /** WS11-S11: "Remind me" on a post or a thread and the reminders list are offered (rollout only; the gateway answers 404 when off). */
+    reminders?: boolean
   }
   /**
    * WS12-S7: what the organisation's message policy lets this member do, as hints for which controls

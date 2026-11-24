@@ -1,7 +1,8 @@
 //! Org-scoped member status and agent availability chips: the BFF half of WS11-S10.
 //!
 //! * `GET /api/v1/spaces/status` reads the caller's own status in their organization;
-//!   `PUT /api/v1/spaces/status {state, text?, expires_at?}` replaces it. A status is one
+//!   `PUT /api/v1/spaces/status {state, text?, expires_at?}` replaces it; `DELETE` clears it
+//!   (idempotent, and allowed under Zero Data Retention because it keeps no content). A status is one
 //!   Application row keyed by (organization, subject), so a text written in one organization is
 //!   never visible in another (the Control profile `metadata.status` is global and is untouched).
 //! * [`annotate_roster`] adds `status` to every `user` member of `GET /api/v1/spaces/{ref}/roster`
@@ -30,7 +31,7 @@
 use axum::{
     extract::{rejection::JsonRejection, Extension, State},
     http::{HeaderMap, StatusCode},
-    routing::get,
+    routing::{delete, get},
     Json, Router,
 };
 use serde::Deserialize;
@@ -57,7 +58,10 @@ const MAX_ACTIVITY_AGENTS: usize = 100;
 /// Registered through `module_routes()` behind `require_session`. A static segment: matchit ranks
 /// it above `{space_ref}`, so a room can never shadow it.
 pub(super) fn routes() -> Router<AppState> {
-    Router::new().route("/api/v1/spaces/status", get(get_status).put(put_status))
+    Router::new().route(
+        "/api/v1/spaces/status",
+        get(get_status).put(put_status).delete(clear_status),
+    )
 }
 
 fn refuse(status: StatusCode, code: &'static str, message: &'static str) -> Reply {
@@ -227,6 +231,36 @@ pub(crate) async fn put_status_core(
     {
         Ok(value) => (StatusCode::OK, Json(json!({"data": status_json(&value)}))),
         Err(Some(message)) if message.contains("invalid_status") => invalid_status(),
+        Err(_) => unavailable(),
+    }
+}
+
+/// `DELETE /api/v1/spaces/status`: removes the caller's own status in this organization (WS11-S10,
+/// the clear route of the status menu). Idempotent: an absent row is cleared too. Clearing keeps no
+/// content and only deletes, so it is allowed under Zero Data Retention; no org posture lookup and no
+/// durable-write refusal apply. Answers the cleared shape a GET answers for no status: every field null.
+async fn clear_status(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Reply {
+    let org_id = match gate(&state, &user).await {
+        Ok(org_id) => org_id,
+        Err(reply) => return reply,
+    };
+    match convex_mutation_message(
+        &state,
+        "spaceMemberStatus:clearStatusForGateway",
+        json!({
+            "externalAuthId": user.user_id,
+            "externalOrgId": org_id,
+        }),
+    )
+    .await
+    {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(json!({"data": {"state": null, "text": null, "expires_at": null}})),
+        ),
         Err(_) => unavailable(),
     }
 }
@@ -837,5 +871,79 @@ mod tests {
         annotate_agents(&quiet.state, &user(), "org-1", "space-room", &mut none).await;
         assert!(none.is_empty());
         assert_eq!(convex_request_count(&quiet).await, 0);
+    }
+
+    // ---- DELETE (the clear route) ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn delete_status_clears_the_own_row_under_zdr_too_and_reads_the_cleared_shape() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        // A Zero Data Retention organization: clearing keeps no content, so it is still allowed.
+        let fx = fx(Some(true)).await;
+        let clear = "spaceMemberStatus:clearStatusForGateway";
+        mount_convex(&fx, "/api/mutation", clear, value(json!({"cleared": true}))).await;
+        let (status, body) = call(&fx, "DELETE", None, false).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body,
+            json!({"data": {"state": null, "text": null, "expires_at": null}})
+        );
+        let calls = convex_calls(&fx, clear).await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["args"]["externalAuthId"], "user-1");
+        assert_eq!(calls[0]["args"]["externalOrgId"], "org-1");
+        assert!(
+            calls[0]["args"].get("text").is_none(),
+            "a clear sends no text"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_status_is_idempotent_when_there_is_nothing_to_clear() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false)).await;
+        let clear = "spaceMemberStatus:clearStatusForGateway";
+        mount_convex(
+            &fx,
+            "/api/mutation",
+            clear,
+            value(json!({"cleared": false})),
+        )
+        .await;
+        let (status, body) = call(&fx, "DELETE", None, false).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"]["state"], Value::Null);
+        assert_eq!(convex_calls(&fx, clear).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_status_is_404_when_the_flag_is_off_and_reaches_no_application_function() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = fx(Some(false)).await;
+        fx.state.space_features.status_api = false;
+        let (status, body) = call(&fx, "DELETE", None, false).await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "space_status_disabled");
+        assert_eq!(convex_request_count(&fx).await, 0);
+    }
+
+    #[tokio::test]
+    async fn delete_status_is_503_when_application_fails_and_never_a_cleared_answer() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx(Some(false)).await;
+        mount_convex(
+            &fx,
+            "/api/mutation",
+            "spaceMemberStatus:clearStatusForGateway",
+            convex_error("temporarily unavailable"),
+        )
+        .await;
+        let (status, body) = call(&fx, "DELETE", None, false).await;
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(body["error"]["code"], "status_unavailable");
+        assert!(
+            body.get("data").is_none(),
+            "a failed clear must not read as cleared"
+        );
     }
 }

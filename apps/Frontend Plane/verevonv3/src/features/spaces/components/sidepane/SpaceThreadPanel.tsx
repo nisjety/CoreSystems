@@ -21,9 +21,11 @@ import { ThreadFollowControl } from '@/features/attention/components/ThreadFollo
 import { ownWindowSignature } from '../../lib/space-history-window'
 import { SpaceHistoryWindowNote } from '../SpaceHistoryWindowNote'
 import { SpaceRestrictedNotice } from '../SpaceRestrictedNotice'
+import { SpaceRemindMenu } from '../SpaceRemindMenu'
 import { SpaceTurnList, normalizeTranscriptTurns, resolveAuthorName } from './SpaceTurnList'
 import { createSpaceTurnLifecycle } from '../../lib/space-message-lifecycle'
 import { threadTranscriptEpoch } from '../../lib/space-transcript-epoch'
+import { spaceRoomFeature } from '../../lib/space-room-features'
 import type { TranscriptTurn } from './SpaceTurnList'
 
 /**
@@ -255,6 +257,10 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
       </Show>
       <Show when={current()?.state === 'ok'}>
         <ThreadFollowControl spaceRef={props.spaceRef} threadId={props.threadId} />
+        {/* WS11-S11: "Remind me" on this thread, drawn only while the room's reminders flag is on. */}
+        <Show when={spaceRoomFeature('reminders')}>
+          <SpaceRemindMenu spaceRef={props.spaceRef} threadId={props.threadId} />
+        </Show>
         <SpaceHistoryWindowNote window={() => props.historyWindow?.()} />
       </Show>
       <Switch

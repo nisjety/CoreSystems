@@ -2,6 +2,7 @@ import { createSignal, For, onSettled, Show } from 'solid-js'
 
 import { hasErrorCode } from '@/shared/api/http'
 import {
+  clearOwnSpaceStatus,
   getOwnSpaceStatus,
   setOwnSpaceStatus,
   SPACE_STATUS_STATES,
@@ -108,8 +109,27 @@ export function SpaceStatusMenu() {
     void save({ state: state(), text: text(), expiresInMs: chosen?.ms ?? null })
   }
 
-  // The server has no clear call: "available" with no text and no expiry is the cleared state.
-  const clear = () => void save({ state: 'available', text: '', expiresInMs: null })
+  // Clear removes the row through the clear route (DELETE): no state, text or expiry remains, and it is
+  // allowed under Zero Data Retention because it keeps nothing. A failure leaves the status as it was.
+  const clear = async () => {
+    if (busy()) return
+    setBusy(true)
+    setError('')
+    setMessage('')
+    try {
+      adopt(await clearOwnSpaceStatus())
+      setMessage(i18n.tr('Statusen er fjernet.', 'Status cleared.'))
+    } catch (err) {
+      setError(
+        translateApiError(err, i18n.tr, {
+          no: 'Statusen kunne ikke fjernes. Ingenting er endret.',
+          en: 'The status could not be cleared. Nothing was changed.',
+        }),
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
 
   return (
     <Show when={available() && loaded()}>
@@ -201,7 +221,7 @@ export function SpaceStatusMenu() {
             type="button"
             class="verevon-space-secondary-action"
             disabled={busy() || current() === null}
-            onClick={clear}
+            onClick={() => void clear()}
           >
             {i18n.tr('Fjern status', 'Clear status')}
           </button>

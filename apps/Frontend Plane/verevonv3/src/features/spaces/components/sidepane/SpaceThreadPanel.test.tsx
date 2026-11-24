@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { __resetRetentionForTests, applyServerRetention } from '@/features/chat/lib/chat-retention'
 import { ApiError } from '@/shared/api/http'
 
+import { clearSpaceRoomFeatures, publishSpaceRoomFeatures } from '../../lib/space-room-features'
+
 const spacesClient = vi.hoisted(() => ({
   searchSpaceMessages: vi.fn(() => new Promise(() => {})),
   getSpaceThreadTranscript: vi.fn(),
@@ -41,6 +43,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   __resetRetentionForTests()
+  clearSpaceRoomFeatures()
 })
 
 describe('SpaceThreadPanel (WS01-S7a)', () => {
@@ -411,5 +414,21 @@ describe('SpaceThreadPanel reaches a message named by ?m= (WS13-S4a)', () => {
     await screen.findByText('Svar med status')
     expect(document.querySelector('[data-entry-status]')).toBeNull()
     expect(scrollIntoView).not.toHaveBeenCalled()
+  })
+})
+
+describe('SpaceThreadPanel: the thread reminder control (WS11-S11)', () => {
+  it('draws Remind me under an available thread only while the room reports features.reminders on', async () => {
+    spacesClient.getSpaceThreadTranscript.mockResolvedValue({
+      turns: [{ role: 'user', content: 'Husk levering', authorSubjectId: 'user-1' }],
+    })
+    renderPanel()
+    expect(await screen.findByText('Husk levering')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Påminn meg' })).toBeNull()
+
+    publishSpaceRoomFeatures({ reminders: true })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Påminn meg' })).toBeTruthy())
+    // The menu is drawn; nothing is read for it until it is opened.
+    expect(spacesClient.getSpaceThreadTranscript).toHaveBeenCalledTimes(1)
   })
 })

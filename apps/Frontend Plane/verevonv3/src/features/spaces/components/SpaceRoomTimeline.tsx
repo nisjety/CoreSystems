@@ -13,6 +13,7 @@ import {
 import { AgentAvatar } from './AgentAvatar'
 import { SpaceApprovalPanel } from './SpaceApprovalPanel'
 import { SpaceRunCard } from './SpaceRunCard'
+import { SpaceRemindMenu } from './SpaceRemindMenu'
 import { spaceRunStore, trackLiveRuns } from '../lib/space-run-store'
 import { agentAvatarColor, agentForName } from '../lib/agent-avatar'
 import { agentCardModel, memberCardModel } from '../lib/agent-activity'
@@ -34,7 +35,7 @@ import { SpaceHistoryWindowNote } from './SpaceHistoryWindowNote'
 import { ownWindowHidden } from '../lib/space-history-window'
 import { SpacePendingNewPost, SpacePendingReplies, SpacePendingTurn } from './SpacePendingPost'
 import type { SpaceJournalEntry } from '../lib/space-send-journal'
-import { spaceRoomFeatureWithDevOverride } from '../lib/space-room-features'
+import { spaceRoomFeature, spaceRoomFeatureWithDevOverride } from '../lib/space-room-features'
 import { threadPinnedByAgent, threadRenamedByAgent } from '../lib/space-self-api'
 import { postPosition } from '../lib/timeline-anchor'
 import { startAnchoring } from '../lib/timeline-anchor-dom'
@@ -1298,6 +1299,11 @@ function SpaceRoomPost(props: {
           >
             {i18n.tr('Merk som ulest', 'Mark unread')}
           </button>
+        </Show>
+        {/* WS11-S11: "Remind me" on this post, drawn only while the room's reminders flag is on (the
+            menu itself reads nothing until it is opened). Personal: the post is not changed. */}
+        <Show when={spaceRoomFeature('reminders')}>
+          <SpaceRemindMenu spaceRef={props.spaceRef} threadId={props.thread.thread_id} />
         </Show>
         <Show when={isAuthor()}>
           <button

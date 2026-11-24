@@ -7,6 +7,7 @@ import { ApiError } from '@/shared/api/http'
 const spacesClient = vi.hoisted(() => ({
   getOwnSpaceStatus: vi.fn(),
   setOwnSpaceStatus: vi.fn(),
+  clearOwnSpaceStatus: vi.fn(),
 }))
 vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
@@ -30,6 +31,7 @@ beforeEach(() => {
   vi.setSystemTime(NOW)
   spacesClient.getOwnSpaceStatus.mockReset()
   spacesClient.setOwnSpaceStatus.mockReset()
+  spacesClient.clearOwnSpaceStatus.mockReset()
 })
 
 afterEach(() => {
@@ -84,16 +86,32 @@ describe('SpaceStatusMenu (WS11-S10)', () => {
     expect(window.localStorage.length).toBe(0)
   })
 
-  it('Clear sends the available state with no text and no expiry', async () => {
+  it('Clear removes the status through the clear route and saves nothing', async () => {
     spacesClient.getOwnSpaceStatus.mockResolvedValue({ state: 'dnd', text: 'På møte', expiresAt: NOW + HOUR })
-    spacesClient.setOwnSpaceStatus.mockResolvedValue(null)
+    spacesClient.clearOwnSpaceStatus.mockResolvedValue(null)
     render(() => <SpaceStatusMenu />)
     await settle()
     // The saved text is in the box, so a Clear that echoed the box would send it.
     expect((screen.getByLabelText('Tekst (valgfri)') as HTMLInputElement).value).toBe('På møte')
     fireEvent.click(screen.getByRole('button', { name: 'Fjern status' }))
     flush()
-    await waitFor(() => expect(spacesClient.setOwnSpaceStatus).toHaveBeenCalledTimes(1))
-    expect(spacesClient.setOwnSpaceStatus).toHaveBeenCalledWith({ state: 'available', text: '', expiresAt: undefined })
+    await waitFor(() => expect(spacesClient.clearOwnSpaceStatus).toHaveBeenCalledTimes(1))
+    expect(spacesClient.setOwnSpaceStatus).not.toHaveBeenCalled()
+    expect(await screen.findByText('Statusen er fjernet.')).toBeTruthy()
+    flush()
+    expect((screen.getByLabelText('Tekst (valgfri)') as HTMLInputElement).value).toBe('')
+    expect(screen.queryByText(/Nå:/)).toBeNull()
+  })
+
+  it('Clear keeps the status and says so when the clear fails', async () => {
+    spacesClient.getOwnSpaceStatus.mockResolvedValue({ state: 'away', text: null, expiresAt: null })
+    spacesClient.clearOwnSpaceStatus.mockRejectedValue(new ApiError('Unavailable.', 503, 'status_unavailable'))
+    render(() => <SpaceStatusMenu />)
+    await settle()
+    fireEvent.click(screen.getByRole('button', { name: 'Fjern status' }))
+    flush()
+    expect(await screen.findByRole('alert')).toBeTruthy()
+    expect(screen.queryByText('Statusen er fjernet.')).toBeNull()
+    expect(screen.getByText(/Nå:/)).toBeTruthy()
   })
 })
