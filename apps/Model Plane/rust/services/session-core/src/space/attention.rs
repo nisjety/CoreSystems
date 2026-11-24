@@ -37,6 +37,7 @@ use crate::grpc::{
     compact_thread_text, record_metrics, verify_thread_read_space_decision, THREAD_TITLE_MAX_CHARS,
 };
 use crate::run_phase::{ERROR_CODE_TRAILER, RUN_PHASE_SQL};
+use crate::space::audience_window::message_floor_sql;
 
 const MAX_ID_BYTES: usize = 128;
 /// Spaces of one call queried at once.
@@ -126,25 +127,33 @@ pub(crate) fn is_unread(
 const THREAD_SCOPE: &str = "t.org_id = $1 AND t.space_id = $2 AND t.archived_at IS NULL
       AND (t.recipient_audience_revision IS NULL OR t.recipient_audience_revision <= $3)";
 
-/// The newest user or assistant message of a thread the ceiling lets the caller see, on the
-/// active path, not deleted. Parameter: $3 ceiling.
-const LATEST_VISIBLE_MESSAGE: &str = "SELECT m.created_at, m.author_subject_id
+/// The newest user or assistant message of a thread the ceiling and the member's history window
+/// (D18; C-PRIO-05) let the caller see, on the active path, not deleted. Parameters: $3 ceiling,
+/// and `floors` (the revision floor and the timestamp floor placeholders; both NULL = no window).
+fn latest_visible_message(floors: (&str, &str)) -> String {
+    let floor = message_floor_sql(floors);
+    format!(
+        "SELECT m.created_at, m.author_subject_id
         FROM messages m
        WHERE m.thread_id = t.id AND m.role IN ('user', 'assistant') AND m.on_active_path
          AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $3)
+         AND {floor}
          AND NOT EXISTS (SELECT 1 FROM message_revisions r WHERE r.message_id = m.id AND r.action = 'deleted')
        ORDER BY m.sequence DESC
-       LIMIT 1";
+       LIMIT 1"
+    )
+}
 
 /// Unread candidates. Parameters: $1 org, $2 Space, $3 ceiling, $4 marker time, $5 viewer,
-/// $6 `true` = last-author rule, `false` = legacy owner rule, $7 row cap. Threads are
-/// pre-filtered by `last_activity_at` so the lateral probe runs only for threads that moved
-/// after the marker.
+/// $6 `true` = last-author rule, `false` = legacy owner rule, $7 row cap, $8 revision floor,
+/// $9 timestamp floor. Threads are pre-filtered by `last_activity_at` so the lateral probe runs
+/// only for threads that moved after the marker. A pre-floor message never makes a thread unread.
 fn unread_sql() -> String {
+    let latest = latest_visible_message(("$8", "$9"));
     format!(
         "SELECT t.id
            FROM threads t
-           JOIN LATERAL ({LATEST_VISIBLE_MESSAGE}) lm ON TRUE
+           JOIN LATERAL ({latest}) lm ON TRUE
           WHERE {THREAD_SCOPE}
             AND t.last_activity_at > $4::TIMESTAMPTZ
             AND lm.created_at > $4::TIMESTAMPTZ
@@ -155,8 +164,10 @@ fn unread_sql() -> String {
     )
 }
 
-/// The room's latest visible activity. Parameters: $1 org, $2 Space, $3 ceiling, $4 probe size.
+/// The room's latest visible activity. Parameters: $1 org, $2 Space, $3 ceiling, $4 probe size,
+/// $5 revision floor, $6 timestamp floor.
 fn latest_activity_sql() -> String {
+    let latest = latest_visible_message(("$5", "$6"));
     format!(
         "SELECT max(lm.created_at)
            FROM (SELECT t.id
@@ -164,13 +175,14 @@ fn latest_activity_sql() -> String {
                   WHERE {THREAD_SCOPE} AND t.last_message_seq IS NOT NULL
                   ORDER BY t.last_message_seq DESC
                   LIMIT $4) t
-           JOIN LATERAL ({LATEST_VISIBLE_MESSAGE}) lm ON TRUE"
+           JOIN LATERAL ({latest}) lm ON TRUE"
     )
 }
 
 /// Root runs of the Space that are live right now. Parameters: $1 org, $2 Space, $3 ceiling,
-/// $4 window minutes. Persistent runs only: a zero-retention or waived run leaves no attention
-/// trace.
+/// $4 window minutes, $5 timestamp floor (D18: a run started before the member's window is not
+/// counted; NULL = no window). Persistent runs only: a zero-retention or waived run leaves no
+/// attention trace.
 fn working_sql() -> String {
     format!(
         "SELECT count(*)
@@ -180,6 +192,7 @@ fn working_sql() -> String {
             AND r.retention_class = 'persistent'
             AND ({RUN_PHASE_SQL}) IN ('queued', 'running', 'awaiting_approval')
             AND r.updated_at > now() - make_interval(mins => $4)
+            AND ($5::TIMESTAMPTZ IS NULL OR r.created_at >= $5::TIMESTAMPTZ)
             AND {THREAD_SCOPE}"
     )
 }
@@ -209,17 +222,23 @@ fn pending_sql() -> String {
 /// Display titles of the requested threads that pass the ceiling and hold no `zdr_waived` run.
 /// Same derivation as the thread list: the presentation title, else the first user message,
 /// else the session key. Parameters: $1 org, $2 Space, $3 ceiling, $4 thread ids,
-/// $5 title source length.
+/// $5 title source length, $6 revision floor, $7 timestamp floor. Under a history window (D18)
+/// the stored presentation title is not used (it may restate pre-floor turns; the thread list
+/// does the same), and the first user message is the first one inside the window.
 fn headlines_sql() -> String {
+    let floor = message_floor_sql(("$6", "$7"));
     format!(
         "SELECT t.id, t.session_key,
-                COALESCE(t.presentation_title, first_user.content) AS title
+                COALESCE(CASE WHEN $6::BIGINT IS NOT NULL OR $7::TIMESTAMPTZ IS NOT NULL THEN NULL
+                              ELSE t.presentation_title END,
+                         first_user.content) AS title
            FROM threads t
            LEFT JOIN LATERAL (
                 SELECT left(m.content, $5) AS content
                   FROM messages m
                  WHERE m.thread_id = t.id AND m.role = 'user' AND m.on_active_path
                    AND (m.recipient_audience_revision IS NULL OR m.recipient_audience_revision <= $3)
+                   AND {floor}
                    AND NOT EXISTS (SELECT 1 FROM message_revisions r WHERE r.message_id = m.id)
                  ORDER BY m.sequence ASC
                  LIMIT 1
@@ -233,9 +252,20 @@ fn headlines_sql() -> String {
 // Handler.
 // ---------------------------------------------------------------------------------------------
 
-/// One Space whose decision verified: the ceiling every query below restates.
+/// One Space whose decision verified: the ceiling every query below restates, and the member's
+/// history window (D18): the revision floor and the timestamp floor, both `None` without one.
 struct Reach {
     ceiling: i64,
+    floor: Option<i64>,
+    floor_at: Option<DateTime<Utc>>,
+}
+
+impl Reach {
+    fn from_read(read: crate::grpc::VerifiedSpaceRead) -> Self {
+        let ceiling = read.recipient_audience_revision;
+        let window = crate::space::audience_window::audience_window(Some(read));
+        Self { ceiling, floor: window.floor, floor_at: window.floor_at }
+    }
 }
 
 fn result_with(space_id: &str, status: pb::AttentionStatus) -> pb::SpaceAttentionResult {
@@ -283,6 +313,8 @@ impl SpaceAttentionGrpc {
                 .bind(user_id)
                 .bind(rule == Rule::LastAuthor)
                 .bind(cap + 1)
+                .bind(reach.floor)
+                .bind(reach.floor_at)
                 .fetch_all(&mut *tx)
                 .await?;
             result.unread_capped = ids.len() > UNREAD_CAP;
@@ -294,6 +326,8 @@ impl SpaceAttentionGrpc {
             .bind(&query.space_id)
             .bind(reach.ceiling)
             .bind(LATEST_ACTIVITY_PROBE)
+            .bind(reach.floor)
+            .bind(reach.floor_at)
             .fetch_one(&mut *tx)
             .await?;
         result.latest_activity_ms = latest.map_or(0, |at| at.timestamp_millis());
@@ -303,6 +337,7 @@ impl SpaceAttentionGrpc {
             .bind(&query.space_id)
             .bind(reach.ceiling)
             .bind(WORKING_WINDOW_MINUTES)
+            .bind(reach.floor_at)
             .fetch_one(&mut *tx)
             .await?;
         result.working_runs = u32::try_from(working.max(0)).unwrap_or(u32::MAX);
@@ -333,6 +368,8 @@ impl SpaceAttentionGrpc {
                 .bind(reach.ceiling)
                 .bind(&query.headline_thread_ids)
                 .bind(TITLE_SOURCE_CHARS)
+                .bind(reach.floor)
+                .bind(reach.floor_at)
                 .fetch_all(&mut *tx)
                 .await?;
             let mut rows = rows;
@@ -451,16 +488,10 @@ impl SpaceAttentionGrpc {
                     &user_id,
                     &query.space_id,
                 ) {
-                    // D18: a member with a history window (a floor of either form) reads a room the
-                    // attention queries do not window yet (their titles, first messages and latest
-                    // authors would reach pre-floor content). Hold the attention back: no query runs.
-                    Ok(Some(read))
-                        if crate::space::audience_window::audience_window(Some(read))
-                            .has_floor() =>
-                    {
-                        None
-                    }
-                    Ok(Some(read)) => Some(Reach { ceiling: read.recipient_audience_revision }),
+                    // D18 (C-PRIO-05): a member with a history window gets attention inside it:
+                    // every query restates both floors, so no pre-floor message, title, author or
+                    // run is counted or named.
+                    Ok(Some(read)) => Some(Reach::from_read(read)),
                     Ok(None) | Err(_) => None,
                 }
             };
@@ -712,6 +743,83 @@ mod tests {
         ] {
             assert!(sql.contains(required), "{required}: {sql}");
         }
+    }
+
+    // ---- D18 history windows (C-PRIO-05) --------------------------------------------------------
+
+    #[test]
+    fn every_message_read_restates_both_history_floors() {
+        // Unread and latest activity probe the latest message through the floors; the floors are
+        // the trailing parameters of each query.
+        for (name, sql, rev, at) in [
+            ("unread", squash(&unread_sql()), "$8", "$9"),
+            ("latest_activity", squash(&latest_activity_sql()), "$5", "$6"),
+            ("headlines", squash(&headlines_sql()), "$6", "$7"),
+        ] {
+            assert!(
+                sql.contains(&format!(
+                    "({rev}::BIGINT IS NULL OR m.recipient_audience_revision IS NULL OR m.recipient_audience_revision >= {rev}::BIGINT)"
+                )),
+                "{name}: revision floor: {sql}"
+            );
+            assert!(
+                sql.contains(&format!("({at}::TIMESTAMPTZ IS NULL OR m.created_at >= {at}::TIMESTAMPTZ)")),
+                "{name}: timestamp floor: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_windowed_headline_never_uses_the_stored_presentation_title() {
+        let sql = squash(&headlines_sql());
+        assert!(
+            sql.contains(
+                "COALESCE(CASE WHEN $6::BIGINT IS NOT NULL OR $7::TIMESTAMPTZ IS NOT NULL THEN NULL \
+                 ELSE t.presentation_title END, first_user.content)"
+            ),
+            "{sql}"
+        );
+        assert!(!sql.contains("COALESCE(t.presentation_title"), "{sql}");
+    }
+
+    #[test]
+    fn a_run_started_before_the_window_is_not_counted_as_working() {
+        let sql = squash(&working_sql());
+        assert!(sql.contains("($5::TIMESTAMPTZ IS NULL OR r.created_at >= $5::TIMESTAMPTZ)"), "{sql}");
+    }
+
+    #[test]
+    fn a_windowed_decision_reaches_the_queries_with_its_floor_instead_of_being_denied() {
+        let _keys = StreamKeysEnv::publish();
+        let floor = "2026-11-18T09:30:00Z";
+        let token = mint(
+            "model-plane",
+            &["thread:read"],
+            false,
+            |claims| {
+                stamp(claims, ORG, VIEWER, "space-w", 6);
+                claims["history_floor_at"] = json!(floor);
+            },
+            false,
+        );
+        let read = verify_thread_read_space_decision(&token, DECISION_REF, ORG, VIEWER, "space-w")
+            .expect("a windowed member's decision verifies")
+            .expect("a decision was offered");
+        let reach = Reach::from_read(read);
+        assert_eq!(reach.ceiling, 6);
+        assert_eq!(
+            reach.floor_at,
+            Some(DateTime::parse_from_rfc3339(floor).expect("floor").with_timezone(&Utc))
+        );
+        assert_eq!(reach.floor, None, "no revision claim, so no revision floor");
+
+        // A member without a window binds NULL floors: the queries admit every row they did before.
+        let plain = Reach::from_read(
+            verify_thread_read_space_decision(&read_token(ORG, VIEWER, "space-p", 4), DECISION_REF, ORG, VIEWER, "space-p")
+                .expect("verifies")
+                .expect("offered"),
+        );
+        assert_eq!((plain.ceiling, plain.floor, plain.floor_at), (4, None, None));
     }
 
     // ---- the handler's gates, answered before any row is read ---------------------------------

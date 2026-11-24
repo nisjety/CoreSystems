@@ -70,6 +70,9 @@ impl AudienceWindow {
 
     /// Whether this read hides any row by a floor (either form). A read with a floor shows no
     /// presentation fallback that could carry pre-floor content (a stored title or preview).
+    /// The attention read (C-PRIO-05) states this rule in SQL on the bound floors, so the only
+    /// callers today are the tests that pin it.
+    #[allow(dead_code)]
     pub(crate) fn has_floor(&self) -> bool {
         self.floor.is_some() || self.floor_at.is_some()
     }
