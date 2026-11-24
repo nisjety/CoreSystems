@@ -192,5 +192,12 @@ func (r *Repository) ResolveSharedThreadReviseDecisionEvidence(ctx context.Conte
 	if err := evidence.ValidateForSharedThreadRevise(); err != nil {
 		return PersonalThreadDecisionEvidence{}, fmt.Errorf("invalid shared Space message revise authority: %w", err)
 	}
+	// DEPTH-WS12-S4-3: a windowed member (WS04-S11 revision floor, D18 timestamp floor)
+	// may revise only what they can read. The floor rides the signed decision and
+	// Session Core answers message_not_found for a target below it. A resolution
+	// error refuses the decision (fail closed), never full history.
+	if err := r.applyHistoryFloor(ctx, &evidence); err != nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("resolve shared Space message revise history floor: %w", err)
+	}
 	return evidence, nil
 }

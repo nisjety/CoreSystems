@@ -248,3 +248,34 @@ func TestValidOriginalRetentionIsAClosedSet(t *testing.T) {
 		t.Fatal("a policy needs a closed rule")
 	}
 }
+
+// DEPTH-WS12-S4-3: the member's history floors ride the revise decision, signed
+// and outside the payload digest, so Session Core can refuse a pre-floor target.
+func TestThreadReviseDecisionCarriesTheMemberHistoryFloor(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	plain, err := IssueThreadReviseDecision(validSharedReviseEvidence(), validReviseRequest(), now)
+	if err != nil {
+		t.Fatalf("issue without floor: %v", err)
+	}
+	if plain.HistoryFloorAt != nil || plain.HistoryFloorRevision != 0 {
+		t.Fatalf("a member without a window carries no floor, got at=%v rev=%d", plain.HistoryFloorAt, plain.HistoryFloorRevision)
+	}
+
+	floorAt := time.Date(2026, 10, 1, 8, 30, 0, 0, time.FixedZone("CET", 3600))
+	evidence := validSharedReviseEvidence()
+	evidence.HistoryFloorAt = &floorAt
+	evidence.HistoryFloorRevision = 3
+	windowed, err := IssueThreadReviseDecision(evidence, validReviseRequest(), now)
+	if err != nil {
+		t.Fatalf("issue with floor: %v", err)
+	}
+	if windowed.HistoryFloorAt == nil || !windowed.HistoryFloorAt.Equal(floorAt) || windowed.HistoryFloorAt.Location() != time.UTC {
+		t.Fatalf("history_floor_at = %v, want %v in UTC", windowed.HistoryFloorAt, floorAt.UTC())
+	}
+	if windowed.HistoryFloorRevision != 3 {
+		t.Fatalf("history_floor_revision = %d, want 3", windowed.HistoryFloorRevision)
+	}
+	if windowed.PayloadDigest != plain.PayloadDigest {
+		t.Fatalf("the floor must stay outside the payload digest")
+	}
+}

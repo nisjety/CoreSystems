@@ -209,9 +209,11 @@ func IssueThreadReviseDecision(evidence PersonalThreadDecisionEvidence, request 
 	if err := request.Validate(); err != nil || now.IsZero() {
 		return Decision{}, fmt.Errorf("thread revise decision request is invalid")
 	}
-	return newEvidenceDecision(
+	// DEPTH-WS12-S4-3: the member's history floor rides the decision, so Session Core
+	// refuses a revise target the member cannot read. Additive, in no payload digest.
+	return carryHistoryFloor(newEvidenceDecision(
 		evidence, request.DecisionRef, threadReviseAudience, threadReviseAction, threadReviseSchema,
 		ThreadRevisePayloadDigest(evidence, request), request.IdempotencyKey, request.Nonce,
 		threadRevisePermissions(evidence), evidence.Privacy.ZeroDataRetention, now,
-	), nil
+	), evidence), nil
 }

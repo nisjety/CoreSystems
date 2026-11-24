@@ -100,7 +100,8 @@ type Decision struct {
 	// member's behalf, and only when the member has such a row: a shared thread read,
 	// a shared retrieval, a personal-memory turn, a memory declassify or retract, a
 	// space-memory manage, a run wake, a watch create or observe, a canvas read or
-	// create, and a canvas run action read. A canvas save or restore under a floor is
+	// create, a canvas run action read, and a message revise (DEPTH-WS12-S4-3: the
+	// target must lie at or above the floor). A canvas save or restore under a floor is
 	// refused, not issued. It is signed with the rest of the decision, in no payload
 	// digest. A consumer that does not know it shows full history (presentation rule,
 	// never authority); a consumer that knows it must hide every row older than it.
