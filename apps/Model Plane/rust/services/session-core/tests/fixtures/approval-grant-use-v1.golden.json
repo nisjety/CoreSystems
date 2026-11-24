@@ -1,0 +1,26 @@
+{
+  "comment": "WS10-S3 shared Control/Session Core vector for the approval-grant-use-v1 envelope. Session Core must verify this exact token with the matching Ed25519 public key and recover these exact claims; a companion Rust fixture (e.g. apps/Model Plane/rust/services/session-core/tests/fixtures/approval-grant-use-v1.golden.json) is owed by the session-core area, not Control, and should sha-pin this file so both sides move together. Change the token only on an intended wire change, on both sides.",
+  "signing_key": {
+    "id": "control-test",
+    "seed_hex": "3031323334353637383961626364656630313233343536373839616263646566",
+    "public_key_hex": "23bc54912c1e6e92c4a86825c867e27ffdc555bffbd4244f17a26abfffee965d"
+  },
+  "input": {
+    "token_ref": "token-ref-1",
+    "rule_id": "rule-1",
+    "run_id": "run-1",
+    "nonce": "nonce-1",
+    "org_id": "org-1",
+    "space_ref": "space-room-1",
+    "subject_id": "user-1",
+    "agent_subject_id": "agent-1",
+    "tool_key": "mcp__github__list_issues",
+    "action_key": "mcp__github__list_issues",
+    "action_schema_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "authority_revision": 7,
+    "issued_at": "2026-11-02T09:00:00Z"
+  },
+  "expected": {
+    "token": "approval-grant-use-v1.Y29udHJvbC10ZXN0.eyJ0b2tlbl9yZWYiOiJ0b2tlbi1yZWYtMSIsInJ1bGVfaWQiOiJydWxlLTEiLCJzY29wZSI6ImFsd2F5cyIsInJ1bl9pZCI6InJ1bi0xIiwib3JnX2lkIjoib3JnLTEiLCJzcGFjZV9yZWYiOiJzcGFjZS1yb29tLTEiLCJzdWJqZWN0X2lkIjoidXNlci0xIiwiYWdlbnRfc3ViamVjdF9pZCI6ImFnZW50LTEiLCJ0b29sX2tleSI6Im1jcF9fZ2l0aHViX19saXN0X2lzc3VlcyIsImFjdGlvbl9rZXkiOiJtY3BfX2dpdGh1Yl9fbGlzdF9pc3N1ZXMiLCJhY3Rpb25fc2NoZW1hX2hhc2giOiJzaGEyNTY6YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImF1dGhvcml0eV9yZXZpc2lvbiI6NywiYXVkaWVuY2UiOiJtb2RlbC1wbGFuZSIsImlzc3VlZF9hdCI6IjIwMjYtMTEtMDJUMDk6MDA6MDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMTEtMDJUMDk6MDI6MDBaIiwibm9uY2UiOiJub25jZS0xIn0.6cJ3FpQOpqtcKwLv0QK_zxKQtx2qN_V7YMMm-dWwOgF2Hdhj5-LMxjuh5zw6GaCxErt2Z5kyCo35dCxH0wIHAw"
+  }
+}

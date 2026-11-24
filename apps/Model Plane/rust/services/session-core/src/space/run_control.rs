@@ -328,6 +328,76 @@ mod tests {
         .expect("a well-formed run-control decision verifies");
     }
 
+    // C-PRIO-06: the shared Control vector (user-core internal/spaces/testdata, same bytes here).
+    const RUN_CONTROL_V1_GOLDEN: &str = include_str!("../../tests/fixtures/run-control-v1.golden.json");
+    // sha256 of the golden with CRLF folded to LF; must equal the sha256 of Control's copy.
+    const RUN_CONTROL_V1_GOLDEN_SHA256: &str =
+        "218139740f7869e4eb69060761c71f843307bc7c56b08d6b4a2622d3add182b4";
+
+    /// The Rust side of Control's run-control golden: the digest recomputed here from the golden
+    /// input is Control's, and a decision carrying exactly that input verifies through the
+    /// production check (which recomputes the digest itself), so both sides agree on the wire.
+    #[test]
+    fn room_stop_run_control_digest_matches_control_golden() {
+        let normalized = RUN_CONTROL_V1_GOLDEN.replace("\r\n", "\n");
+        assert_eq!(
+            format!("{:x}", Sha256::digest(normalized.as_bytes())),
+            RUN_CONTROL_V1_GOLDEN_SHA256,
+            "the Rust copy of run-control-v1.golden.json drifted from Control's; update both together"
+        );
+        let golden: Value = serde_json::from_str(&normalized).expect("golden parses");
+        let (input, expected) = (&golden["input"], &golden["expected"]);
+        assert_eq!(expected["action"], crate::grpc::CONTROL_RUN_CONTROL_ACTION);
+        assert_eq!(expected["schema"], crate::grpc::CONTROL_RUN_CONTROL_SCHEMA);
+        assert_eq!(expected["audience"], crate::grpc::CONTROL_SPACE_DECISION_AUDIENCE);
+        assert_eq!(expected["permissions"], json!([crate::grpc::RUN_CONTROL_PERMISSION]));
+        assert_eq!(input["operation"], crate::grpc::RUN_CONTROL_OPERATION_CANCEL);
+        let text = |key: &str| input[key].as_str().expect("golden text").to_owned();
+        // The golden names the request fields; the claims carry them under Control's claim names.
+        let set = |claims: &mut Value| {
+            claims["decision_ref"] = json!(text("space_decision_ref"));
+            claims["recipient_audience_ref"] = json!(text("recipient_audience_ref"));
+            claims["recipient_audience_hash"] = json!(text("recipient_audience_hash"));
+            claims["privacy_policy_ref"] = json!(text("privacy_policy_ref"));
+            claims["resource_authorization_ref"] = json!(text("resource_authorization_ref"));
+            claims["authority_revision"] = input["authority_revision"].clone();
+            claims["recipient_audience_revision"] = input["recipient_audience_revision"].clone();
+        };
+        let mut claims = json!({
+            "org_id": text("org_id"),
+            "subject_id": text("user_id"),
+            "space_ref": text("space_id"),
+            "idempotency_key": text("idempotency_key"),
+        });
+        set(&mut claims);
+        assert_eq!(
+            run_control_digest(&claims, &text("run_id"), &text("operation")),
+            expected["digest"].as_str().expect("digest"),
+            "the digest contract differs from Control's golden"
+        );
+
+        let _keys = StreamKeysEnv::publish();
+        let token = control_token(
+            &text("org_id"),
+            &text("user_id"),
+            &text("space_id"),
+            &text("idempotency_key"),
+            (&text("run_id"), &text("operation")),
+            set,
+        );
+        crate::grpc::verify_run_control_space_decision(
+            &token,
+            &text("space_decision_ref"),
+            &text("org_id"),
+            &text("user_id"),
+            &text("space_id"),
+            &text("run_id"),
+            &text("idempotency_key"),
+            Utc::now(),
+        )
+        .expect("a decision over the golden input verifies through the production digest");
+    }
+
     /// The reason on the receipt is a short closed token, never free text, so a person's words
     /// never reach a durable event; the receipt's `acting_as` word is the one the plan names.
     #[test]

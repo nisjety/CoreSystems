@@ -426,3 +426,95 @@ async fn run_phase_pg_concurrent_starts_yield_exactly_one_run() {
     assert_eq!(runs, 1);
     clean_space(&pool, &org, &space).await;
 }
+
+/// DEPTH-WS10-S1-1, as text: migration 0137 emits the derived approval phase through the one
+/// chokepoint, with closed words only, and only for a live run.
+#[test]
+fn approval_phase_events_use_the_chokepoint_and_the_live_predicate() {
+    let migration = include_str!("../migrations/0137_space_run_approval_phase_events.sql");
+    for required in [
+        "PERFORM space_event_emit(",
+        "'run.state_changed'",
+        "v_state := 'awaiting_approval';",
+        "v_state := 'running';",
+        "v_run.status <> 'queued'",
+        "o.state IN ('open', 'processing')",
+        "o.deadline_at > now()",
+        "v_run.retention_class = 'zdr'",
+        "AFTER INSERT ON approvals",
+        "AFTER UPDATE OF status ON approvals",
+        "VALUES ('approvals_phase', SQLSTATE)",
+    ] {
+        assert!(migration.contains(required), "migration 0137 must contain {required}");
+    }
+    // The same unexpired-requested predicate the derived phase reads.
+    assert!(RUN_PHASE_SQL.contains("rp_a.status = 'requested'"));
+    assert!(migration.contains("a.status = 'requested'"));
+    assert!(migration.contains("(a.expires_at IS NULL OR a.expires_at > now())"));
+    let revert = include_str!("../migrations/revert/0137_space_run_approval_phase_events.down.sql");
+    assert!(revert.contains("DROP FUNCTION IF EXISTS space_event_from_approvals_phase()"));
+}
+
+async fn run_states(pool: &PgPool, org: &str, space: &str, run_id: &str) -> Vec<(String, String)> {
+    sqlx::query_as(
+        "SELECT refs ->> 'state', coalesce(refs ->> 'prev', '') FROM space_event_log \
+          WHERE org_id = $1 AND space_ref = $2 AND run_id = $3 AND kind = 'run.state_changed' \
+          ORDER BY seq",
+    )
+    .bind(org)
+    .bind(space)
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+    .expect("run events")
+}
+
+#[tokio::test]
+#[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+async fn run_phase_pg_an_approval_opening_and_closing_emits_the_phase() {
+    let _switch = GuardSwitch::hold();
+    let Some((pool, org, space, thread)) = seeded("approval-event").await else { return };
+    crate::space::test_support::set_event_log(&pool, true).await;
+    let run = start(&pool, &org, &thread, "k-approval-event").await.expect("the run starts");
+    let request = |id: String| {
+        let (pool, run_id, org) = (pool.clone(), run.run_id.clone(), org.clone());
+        async move {
+            sqlx::query(
+                "INSERT INTO approvals (id, run_id, kind, status, org_id, user_id, expires_at)
+                 VALUES ($1, $2, 'plan', 'requested', $3, $4, now() + interval '10 minutes')",
+            )
+            .bind(&id)
+            .bind(&run_id)
+            .bind(&org)
+            .bind(OWNER)
+            .execute(&pool)
+            .await
+            .expect("the approval is requested");
+            id
+        }
+    };
+    let first = request(mp_ids::new_ulid()).await;
+    // A second approval while the run already waits moves nothing.
+    let second = request(mp_ids::new_ulid()).await;
+    for (id, decided) in [(&first, "granted"), (&second, "denied")] {
+        sqlx::query("UPDATE approvals SET status = $2 WHERE id = $1")
+            .bind(id)
+            .bind(decided)
+            .execute(&pool)
+            .await
+            .expect("decide");
+    }
+    let states = run_states(&pool, &org, &space, &run.run_id).await;
+    let tail: Vec<(&str, &str)> = states.iter().map(|(s, p)| (s.as_str(), p.as_str())).skip(1).collect();
+    assert_eq!(
+        tail,
+        vec![("awaiting_approval", "running"), ("running", "awaiting_approval")],
+        "{NEEDS_DB}: one event when the wait starts, one when the last approval is decided"
+    );
+    sqlx::query("DELETE FROM approvals WHERE run_id = $1")
+        .bind(&run.run_id)
+        .execute(&pool)
+        .await
+        .expect("the approval rows are removed before their run");
+    clean_space(&pool, &org, &space).await;
+}

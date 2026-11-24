@@ -228,7 +228,7 @@ pub(crate) async fn sweep_once(pool: &PgPool, retention_days: i64) -> Result<u64
 }
 
 /// Every source word a trigger writes to `space_event_errors`: migrations 0072 (the log), 0080 and 0135 (the
-/// attention outbox). The gauge reports each one on every pass, zero included (see `report_errors`).
+/// attention outbox), 0137 (the approval phase). The gauge reports each one on every pass, zero included (see `report_errors`).
 pub(crate) const SPACE_EVENT_ERROR_SOURCES: &[&str] = &[
     "messages_insert",
     "threads_insert",
@@ -237,6 +237,7 @@ pub(crate) const SPACE_EVENT_ERROR_SOURCES: &[&str] = &[
     "threads_delete",
     "runs_insert",
     "runs_update",
+    "approvals_phase",
     "attention_ref",
     "attention_event_id",
     "attention_outbox",

@@ -346,6 +346,16 @@ async fn main() -> Result<()> {
             async move { space::events::run_retention_sweeper(pool).await }
         },
     ));
+    // WS10-S8: held quarantine content is blanked past its expiry even when nobody claims or
+    // holds again in that Space (DEPTH-WS10-QUARANTINE 3).
+    let quarantine_purge_pool = pool.clone();
+    let quarantine_purge_handle = tokio::spawn(supervise_background(
+        "session-core quarantine expiry purge",
+        move || {
+            let pool = quarantine_purge_pool.clone();
+            async move { space::quarantine::run_expiry_purge(pool).await }
+        },
+    ));
 
     // WS10.S6: the run-trace consumer (durable `session-core-trace`) is off unless
     // SESSION_CORE_TRACE_CONSUMER is 1/true/on, so a deployment that has not provisioned the
@@ -422,6 +432,7 @@ async fn main() -> Result<()> {
         result = research_expiry_handle => result??,
         result = space_listener_handle => result??,
         result = space_sweeper_handle => result??,
+        result = quarantine_purge_handle => result??,
         result = trace_handle => result??,
         result = trace_sweeper_handle => result??,
         result = snapshot_sweep_handle => result??,

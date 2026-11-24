@@ -13,7 +13,8 @@
 //! - [`preview`]: an inert plain-text excerpt (at most 1 KiB) for the person deciding, and no one
 //!   else. Never markup, never links, control and bidi characters removed.
 //! - Deny, timeout, release and expiry blank the ciphertext (`PURGE_FOR_APPROVAL_SQL` runs inside
-//!   the decide transaction; [`purge_expired`] runs before every claim and hold).
+//!   the decide transaction; [`purge_expired`] runs before every claim and hold, and on a timer
+//!   in [`run_expiry_purge`]).
 //!
 //! Nothing here is authority: the approval decides, and the claim only checks that the approval
 //! the person granted is the one the retry names.
@@ -69,6 +70,23 @@ pub(crate) async fn purge_expired(pool: &Pool) -> Result<(), Status> {
     .await
     .map(|_| ())
     .map_err(internal)
+}
+
+/// How often the background purge blanks expired holds.
+pub(crate) const PURGE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Blank expired holds on a timer (DEPTH-WS10-QUARANTINE 3). [`purge_expired`] also runs before
+/// every claim and hold, but a Space nobody touches again would keep its ciphertext past expiry
+/// without this. Always on: it only deletes content that is already past its own expiry. A failed
+/// pass is logged and retried on the next tick.
+pub(crate) async fn run_expiry_purge(pool: Pool) -> anyhow::Result<()> {
+    tracing::info!(interval_secs = PURGE_INTERVAL.as_secs(), "quarantine expiry purge started");
+    loop {
+        if let Err(status) = purge_expired(&pool).await {
+            tracing::warn!(code = ?status.code(), "quarantine expiry purge failed; retrying next tick");
+        }
+        tokio::time::sleep(PURGE_INTERVAL).await;
+    }
 }
 
 /// Everything a hold needs; the caller has already been authenticated and bound to the run.

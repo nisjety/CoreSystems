@@ -651,6 +651,76 @@ mod tests {
         format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()))
     }
 
+    // C-PRIO-06: the shared Control vector (user-core internal/spaces/testdata, same bytes here).
+    const GRANT_USE_V1_GOLDEN: &str =
+        include_str!("../../tests/fixtures/approval-grant-use-v1.golden.json");
+    // sha256 of the golden with CRLF folded to LF; must equal the sha256 of Control's copy.
+    const GRANT_USE_V1_GOLDEN_SHA256: &str =
+        "100c4a81560e0fc0017f88481ebc9803d22c97df32b7a5b0d776324a37a17849";
+
+    fn hex32(text: &str) -> [u8; 32] {
+        let bytes: Vec<u8> = (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("hex"))
+            .collect();
+        bytes.try_into().expect("32 bytes")
+    }
+
+    #[test]
+    fn control_grant_use_golden_verifies_and_recovers_its_claims() {
+        use sha2::{Digest, Sha256};
+        let normalized = GRANT_USE_V1_GOLDEN.replace("\r\n", "\n");
+        assert_eq!(
+            format!("{:x}", Sha256::digest(normalized.as_bytes())),
+            GRANT_USE_V1_GOLDEN_SHA256,
+            "the Rust copy of approval-grant-use-v1.golden.json drifted from Control's; update both together"
+        );
+        let golden: JsonValue = serde_json::from_str(&normalized).expect("golden parses");
+        let key = &golden["signing_key"];
+        let signing = SigningKey::from_bytes(&hex32(key["seed_hex"].as_str().expect("seed")));
+        assert_eq!(
+            signing.verifying_key().to_bytes(),
+            hex32(key["public_key_hex"].as_str().expect("public key")),
+            "the golden's public key is the seed's"
+        );
+        let key_id = key["id"].as_str().expect("key id").to_owned();
+        let keys = BTreeMap::from([(key_id, signing.verifying_key())]);
+        let token = golden["expected"]["token"].as_str().expect("token");
+        let claims = open(token, keys).expect("Control's golden token verifies with its key");
+
+        let input = &golden["input"];
+        let text = |name: &str| input[name].as_str().expect("golden text").to_owned();
+        assert_eq!(claims.token_ref, text("token_ref"));
+        assert_eq!(claims.rule_id, text("rule_id"));
+        assert_eq!(claims.run_id, text("run_id"));
+        assert_eq!(claims.nonce, text("nonce"));
+        assert_eq!(claims.org_id, text("org_id"));
+        assert_eq!(claims.space_ref, text("space_ref"));
+        assert_eq!(claims.subject_id, text("subject_id"));
+        assert_eq!(claims.agent_subject_id, text("agent_subject_id"));
+        assert_eq!(claims.tool_key, text("tool_key"));
+        assert_eq!(claims.action_key, text("action_key"));
+        assert_eq!(claims.action_schema_hash, text("action_schema_hash"));
+        assert_eq!(claims.authority_revision, input["authority_revision"].as_i64().expect("revision"));
+        assert_eq!(claims.issued_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true), text("issued_at"));
+        assert_eq!(claims.scope, APPROVAL_GRANT_USE_SCOPE);
+        assert_eq!(claims.audience, APPROVAL_GRANT_USE_AUDIENCE);
+        // Inside its two-minute life the claims bind exactly the call they name.
+        let now = claims.issued_at + Duration::seconds(30);
+        check_claims(
+            &claims,
+            &text("org_id"),
+            &text("subject_id"),
+            &text("run_id"),
+            &text("space_ref"),
+            &text("tool_key"),
+            now,
+        )
+        .expect("the golden claims pass for their own call");
+        assert!(check_claims(&claims, "org-1", "user-1", "run-1", "space-room-1", "mcp__github__list_issues", claims.expires_at)
+            .is_err(), "and not after expiry");
+    }
+
     fn open(token: &str, keys: BTreeMap<String, VerifyingKey>) -> Result<GrantUseClaims, Status> {
         open_signed_claims(token, || Ok(keys))
     }

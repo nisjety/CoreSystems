@@ -1,0 +1,25 @@
+{
+  "comment": "Shared Control/Session Core vector for the model.run.control payload digest (WS09-S7, verified by WS09-S8). Field order of the digest: org_id, user_id, space_id, space_decision_ref, recipient_audience_ref, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, run_id, operation, action_schema_hash, idempotency_key (each name NUL u64-BE-length value), then authority_revision and recipient_audience_revision (name NUL u64-BE). Header model.run.control NUL v1 NUL. Change the digest only on an intended wire change, on both sides.",
+  "input": {
+    "org_id": "org-1",
+    "user_id": "user-3",
+    "space_id": "space-room-1",
+    "space_decision_ref": "decision-1",
+    "recipient_audience_ref": "audience:space-room-1:4",
+    "recipient_audience_hash": "sha256:audience-hash",
+    "privacy_policy_ref": "privacy:org-1:5",
+    "resource_authorization_ref": "control:space-room-1:run-control:7",
+    "run_id": "run-1",
+    "operation": "cancel",
+    "idempotency_key": "control-1",
+    "authority_revision": 7,
+    "recipient_audience_revision": 4
+  },
+  "expected": {
+    "action": "model.run.control",
+    "schema": "sha256:run-control-v1",
+    "audience": "model-plane",
+    "permissions": ["run:cancel"],
+    "digest": "sha256:7ae902000485a94568660c0b2cc6a139df8b7ad59c2b94430275ce3644916942"
+  }
+}
