@@ -1103,6 +1103,45 @@ mod zdr_boundary_tests {
         assert!(super::SPACE_READ_PREDICATE.contains("d.type = 'space_upload' OR d.created_at >= $6"));
     }
 
+    /// P3-7: a presented, verified Space decision narrows a chunk or pack read to that Space's reference, and binds the
+    /// member's D18 window (none when open, the instant for a window, an unreachable bound when closed).
+    #[test]
+    fn a_verified_space_decision_binds_its_space_and_the_members_window() {
+        use crate::space_scope::{HistoryFloor, ResolvedSpaceRetrievalScope, VerifiedSpaceAuthority};
+        let scope_with = |history_floor: HistoryFloor| ResolvedSpaceRetrievalScope {
+            authority: VerifiedSpaceAuthority {
+                authority_revision: 4,
+                decision_ref: "decision_1".into(),
+                history_floor,
+                org_id: "org_1".into(),
+                privacy_policy_ref: "privacy_3".into(),
+                recipient_audience_hash: "audience_hash_2".into(),
+                recipient_audience_ref: "audience_2".into(),
+                recipient_audience_revision: 3,
+                resource_authorization_ref: "resource_auth_8".into(),
+                space_ref: "space_1".into(),
+            },
+            collection_id: None,
+            document_ids: Vec::new(),
+            document_ids_truncated: false,
+            owner_resource_ref: "owner_1".into(),
+            workspace_id: Some("workspace_1".into()),
+        };
+
+        let open = scope_with(HistoryFloor::Open);
+        assert_eq!(super::space_read_binds(Some(&open)), (Some("space_1".to_owned()), None));
+
+        let at = chrono::DateTime::<chrono::Utc>::from_timestamp(1_790_000_000, 0).expect("instant");
+        let windowed = scope_with(HistoryFloor::Since(at));
+        assert_eq!(super::space_read_binds(Some(&windowed)), (Some("space_1".to_owned()), Some(at)));
+
+        let closed = scope_with(HistoryFloor::Closed);
+        let (space_ref, bound) = super::space_read_binds(Some(&closed));
+        assert_eq!(space_ref.as_deref(), Some("space_1"));
+        assert_eq!(bound, HistoryFloor::Closed.document_bound(), "a closed window still binds a bound");
+        assert!(bound.is_some(), "a closed window must not read as an open one");
+    }
+
     #[test]
     fn grpc_space_decision_is_an_explicit_metadata_authority() {
         let mut metadata = MetadataMap::new();
