@@ -7,6 +7,7 @@ import { createSessionHandler, postMessageHandler } from "./ingest";
 import { upsertControlSessionHandler } from "./controlSessions";
 import { authorizeInternalRequest } from "./internalAuth";
 import { authorizeReconciliationRequest } from "./reconciliationAuth";
+import { agentDirectory } from "./spaceAgentDirectory";
 
 /**
  * Health check endpoint
@@ -222,6 +223,13 @@ http.route({
   path: "/api/operator/reconcile-memberships",
   method: "POST",
   handler: reconcileMemberships,
+});
+
+// A-REC-03: execution-core's agent directory lookup (its own bearer key; see spaceAgentDirectory.ts).
+http.route({
+  path: "/api/internal/space-agent-directory",
+  method: "POST",
+  handler: agentDirectory,
 });
 
 export default http;

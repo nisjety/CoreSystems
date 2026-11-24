@@ -18,9 +18,12 @@
 //! Zero Data Retention: a resolve persists nothing, so it is not refused. A zero-retention or waived run (or a room Control reports
 //! as zero-retention) gets ids only: no name, email or description reaches the model.
 //!
-//! The agent half reads Application's agent registry. execution-core has no Application client yet, so the agent source is
-//! unavailable in this build: `kind:"agent"` answers `none`/`directory_unavailable`, and `kind:"any"` marks its answer
-//! `incomplete` (an outage is never "no such agent"). An omitted `kind` is therefore `person`.
+//! The agent half reads Application's agent registry: convex-core's `POST /api/internal/space-agent-directory`
+//! (`SPACE_DIRECTORY_AGENT_SOURCE_URL`, bearer `EXECUTION_CORE_APPLICATION_AGENT_DIRECTORY_TOKEN`, which convex-core checks
+//! as `CONVEX_AGENT_DIRECTORY_KEY`). It lists the run organization's active, organization-visible agents by name prefix,
+//! each with `in_room` for the run's room only. While that source is not configured, or cannot be read, `kind:"agent"`
+//! answers `none`/`directory_unavailable` and `kind:"any"` marks its answer `incomplete` (an outage is never "no such
+//! agent"). An omitted `kind` is `person`.
 //!
 //! Under zero data retention Control itself withholds names and emails (`names_withheld`). Every entry Control returns matched
 //! the query on Control's side, so an entry with neither name nor email ranks as a prefix match here.
@@ -48,6 +51,11 @@ pub(crate) const SWITCH_ENV: &str = "SPACE_DIRECTORY_AGENT_TOOL";
 /// The service token execution-core presents to Control's run directory read.
 const TOKEN_ENV: &str = "EXECUTION_CORE_CONTROL_RUN_DIRECTORY_TOKEN";
 const CONTROL_PATH: &str = "/api/v1/internal/spaces/run-directory/people";
+/// Application's agent registry (convex-core's HTTP site). Optional: unset, the agent source is unavailable.
+const AGENT_URL_ENV: &str = "SPACE_DIRECTORY_AGENT_SOURCE_URL";
+/// The bearer key execution-core presents to convex-core's agent directory route.
+const AGENT_TOKEN_ENV: &str = "EXECUTION_CORE_APPLICATION_AGENT_DIRECTORY_TOKEN";
+const AGENT_PATH: &str = "/api/internal/space-agent-directory";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_REPLY_BYTES: usize = 256 << 10;
@@ -58,6 +66,10 @@ pub(crate) const MAX_CANDIDATES: usize = 5;
 pub(crate) const REASON_UNAVAILABLE: &str = "directory_unavailable";
 /// The model-facing reason when the directory was read and nothing matched.
 pub(crate) const REASON_NO_MATCH: &str = "no_match";
+/// The reason of an `ok` or `ambiguous` answer whose matches equal the query (full name or email).
+pub(crate) const REASON_EXACT: &str = "exact_match";
+/// The reason of an `ok` or `ambiguous` answer whose matches only start with the query.
+pub(crate) const REASON_PREFIX: &str = "prefix_match";
 
 /// The model-facing description of the tool, for the golden row.
 pub(crate) const DESCRIPTION: &str = "Look up a person or an agent in your organization by full name, a unique name prefix or an exact email. \
@@ -238,10 +250,13 @@ pub(crate) fn resolve(
         }
     }
     let exact: Vec<&Candidate> = candidates.iter().filter(|c| c.exact(&needle)).collect();
-    let best = if exact.is_empty() {
-        candidates.iter().filter(|c| c.prefix(&needle)).collect()
+    let (best, tier): (Vec<&Candidate>, &str) = if exact.is_empty() {
+        (
+            candidates.iter().filter(|c| c.prefix(&needle)).collect(),
+            REASON_PREFIX,
+        )
     } else {
-        exact
+        (exact, REASON_EXACT)
     };
     let mut answer = match best.as_slice() {
         [] => {
@@ -252,10 +267,14 @@ pub(crate) fn resolve(
             };
             return json!({ "status": "none", "reason": reason, "presence_only": true });
         }
-        [one] => json!({ "status": "ok", "match": one.json, "presence_only": true }),
+        [one] => {
+            json!({ "status": "ok", "reason": tier, "match": one.json, "presence_only": true })
+        }
         many => json!({
             "status": "ambiguous",
+            "reason": tier,
             "candidates": many.iter().take(MAX_CANDIDATES).map(|c| c.json.clone()).collect::<Vec<_>>(),
+            "truncated": many.len() > MAX_CANDIDATES,
             "presence_only": true,
         }),
     };
@@ -272,7 +291,14 @@ pub(crate) fn resolve(
 struct DirectoryClient {
     control_base_url: Url,
     token: String,
+    /// Application's agent registry, when configured.
+    agent_source: Option<AgentSource>,
     http: Client,
+}
+
+struct AgentSource {
+    base_url: Url,
+    token: String,
 }
 
 static SHARED: OnceLock<Result<Option<DirectoryClient>, String>> = OnceLock::new();
@@ -298,15 +324,18 @@ impl DirectoryClient {
             enabled(),
             env_value("CONTROL_PLANE_USER_CORE_URL"),
             env_value(TOKEN_ENV),
+            (env_value(AGENT_URL_ENV), env_value(AGENT_TOKEN_ENV)),
             env_flag("EXECUTION_CORE_ALLOW_INSECURE_TICKET_LOOPBACK"),
         )
     }
 
-    /// Builds the client from explicit inputs. Switched off it is `None` whatever else is configured.
+    /// Builds the client from explicit inputs. Switched off it is `None` whatever else is configured. The agent source is
+    /// optional, but half of it (a URL without its token, or the reverse) is a configuration error, never a client.
     fn from_parts(
         switched_on: bool,
         control: Option<String>,
         token: Option<String>,
+        agent: (Option<String>, Option<String>),
         allow_insecure: bool,
     ) -> Result<Option<Self>, String> {
         if !switched_on {
@@ -319,6 +348,18 @@ impl DirectoryClient {
         };
         let control_base_url = service_base_url(&control, "Control Plane", allow_insecure)?;
         let token = bounded_secret(&token, "Control run directory service token")?;
+        let agent_source = match agent {
+            (None, None) => None,
+            (Some(url), Some(agent_token)) => Some(AgentSource {
+                base_url: service_base_url(&url, "Application Plane", allow_insecure)?,
+                token: bounded_secret(&agent_token, "Application agent directory token")?,
+            }),
+            _ => {
+                return Err(format!(
+                    "{AGENT_URL_ENV} and {AGENT_TOKEN_ENV} must be set together"
+                ))
+            }
+        };
         let http = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(CONNECT_TIMEOUT)
@@ -327,9 +368,15 @@ impl DirectoryClient {
         Ok(Some(Self {
             control_base_url,
             token,
+            agent_source,
             http,
         }))
     }
+}
+
+/// Whether a directory client state builds the row: a complete client, never a switched-off or misconfigured one.
+fn built_from(name: &str, state: Result<Option<&DirectoryClient>, String>) -> bool {
+    is_directory_action(name) && matches!(state, Ok(Some(_)))
 }
 
 /// Whether a name is the directory row.
@@ -341,7 +388,7 @@ pub(crate) fn is_directory_action(name: &str) -> bool {
 /// Whether the view may admit the directory row: the switch is on and the configuration is complete.
 #[must_use]
 pub(crate) fn is_built_action(name: &str) -> bool {
-    is_directory_action(name) && matches!(shared(), Ok(Some(_)))
+    built_from(name, shared())
 }
 
 #[derive(Serialize)]
@@ -443,6 +490,83 @@ async fn read_people(
     map_control_reply(status, &body)
 }
 
+#[derive(Serialize)]
+struct AgentRequest<'a> {
+    org_id: &'a str,
+    space_ref: &'a str,
+    query: &'a str,
+}
+
+#[derive(Deserialize)]
+struct AgentEnvelope {
+    data: AgentList,
+}
+
+#[derive(Deserialize)]
+struct AgentList {
+    agents: Vec<AgentWire>,
+}
+
+/// One agent as convex-core returns it. Only these closed fields are read; anything else in a reply is dropped.
+#[derive(Deserialize)]
+struct AgentWire {
+    agent_ref: String,
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    in_room: bool,
+}
+
+/// Maps one agent registry reply. Anything but a well-formed success is `None` (the source is unavailable): a refused
+/// key or an outage is never "no such agent", and it never refuses the people half of the answer.
+fn map_agent_reply(status: StatusCode, body: &[u8]) -> Option<Vec<AgentEntry>> {
+    if !status.is_success() {
+        return None;
+    }
+    let envelope: AgentEnvelope = serde_json::from_slice(body).ok()?;
+    Some(
+        envelope
+            .data
+            .agents
+            .into_iter()
+            .map(|agent| AgentEntry {
+                agent_ref: agent.agent_ref,
+                display_name: agent.display_name,
+                description: agent.description,
+                in_room: agent.in_room,
+            })
+            .collect(),
+    )
+}
+
+async fn read_agents(
+    client: &DirectoryClient,
+    org_id: &str,
+    space_ref: &str,
+    query: &str,
+) -> Option<Vec<AgentEntry>> {
+    let source = client.agent_source.as_ref()?;
+    let url = endpoint(&source.base_url, AGENT_PATH).ok()?;
+    let response = client
+        .http
+        .post(url)
+        .timeout(CONTROL_TIMEOUT)
+        .bearer_auth(&source.token)
+        .json(&AgentRequest {
+            org_id,
+            space_ref,
+            query,
+        })
+        .send()
+        .await
+        .ok()?;
+    let status = response.status();
+    let body = read_capped(response, MAX_REPLY_BYTES).await?;
+    map_agent_reply(status, &body)
+}
+
 /// Reads a reply body chunk by chunk and gives up as soon as it would pass `cap`, so an oversized reply is never buffered whole.
 async fn read_capped(mut response: reqwest::Response, cap: usize) -> Option<Vec<u8>> {
     if response
@@ -483,20 +607,26 @@ async fn execute(
     };
     let arguments = parse_arguments(tool_input)?;
     let mut ids_only = retention_bound;
-    let people = if arguments.kind.people() {
-        match read_people(client, run_id, org_id, &arguments.query).await? {
-            PeopleRead::Read(people, zdr) => {
-                ids_only |= zdr;
-                Some(people)
-            }
-            PeopleRead::Unavailable => None,
+    // Control's run-bound read is the gate for every kind: it checks the run, the subject's membership of the run's room and
+    // the admission, so an agent-only lookup is refused exactly as a person lookup is. Its people are used only when asked for.
+    let control = read_people(client, run_id, org_id, &arguments.query).await?;
+    let people = match control {
+        PeopleRead::Read(people, zdr) => {
+            ids_only |= zdr;
+            Some(people)
         }
+        PeopleRead::Unavailable => None,
+    };
+    let control_read = people.is_some();
+    let people = people.filter(|_| arguments.kind.people());
+    // The organization and the room are the run's, never the model's. Without a Control answer the agent source is not read:
+    // an unverified run never reaches Application.
+    let agents = if arguments.kind.agents() && control_read {
+        read_agents(client, org_id, request_space_id.trim(), &arguments.query).await
     } else {
         None
     };
-    // No Application agent registry client in this build: the agent source is unavailable (see the module note).
-    let agents: Option<&[AgentEntry]> = None;
-    Ok(resolve(&arguments, people.as_deref(), agents, ids_only).to_string())
+    Ok(resolve(&arguments, people.as_deref(), agents.as_deref(), ids_only).to_string())
 }
 
 /// Executes one `space.directory.resolve` call for the run. `request_space_id` is the run's room (empty for a run outside a
@@ -857,27 +987,158 @@ mod tests {
     }
 
     #[test]
+    fn every_answer_carries_a_reason() {
+        let all = people();
+        let answer = resolve(&args("ada lovelace", Kind::Person), Some(&all), None, false);
+        assert_eq!(
+            (answer["status"].as_str(), answer["reason"].as_str()),
+            (Some("ok"), Some(REASON_EXACT))
+        );
+        let answer = resolve(&args("bo", Kind::Person), Some(&all), None, false);
+        assert_eq!(
+            (answer["status"].as_str(), answer["reason"].as_str()),
+            (Some("ok"), Some(REASON_PREFIX))
+        );
+        let answer = resolve(&args("ada", Kind::Person), Some(&all), None, false);
+        assert_eq!(
+            (answer["status"].as_str(), answer["reason"].as_str()),
+            (Some("ambiguous"), Some(REASON_PREFIX))
+        );
+        assert_eq!(answer["truncated"], false);
+        let twins = vec![
+            person("u-1", "Kim", "", true),
+            person("u-2", "Kim", "", false),
+        ];
+        let answer = resolve(&args("kim", Kind::Person), Some(&twins), None, false);
+        assert_eq!(
+            (answer["status"].as_str(), answer["reason"].as_str()),
+            (Some("ambiguous"), Some(REASON_EXACT))
+        );
+        let many: Vec<PersonEntry> = (0..8)
+            .map(|i| person(&format!("u-{i}"), &format!("Kim {i}"), "", false))
+            .collect();
+        assert_eq!(
+            resolve(&args("kim", Kind::Person), Some(&many), None, false)["truncated"],
+            true
+        );
+        for answer in [
+            resolve(&args("zed", Kind::Person), Some(&all), None, false),
+            resolve(&args("zed", Kind::Agent), Some(&all), None, false),
+        ] {
+            assert!(answer["reason"].is_string(), "{answer}");
+        }
+    }
+
+    #[test]
+    fn agent_registry_replies_map_to_entries_or_unavailable() {
+        let reply = br#"{"data":{"agents":[
+            {"agent_ref":"agent-1","display_name":"Triage","description":"Sorts tickets","in_room":true,
+             "space_ref":"room-secret-9","system_prompt":"secret prompt"}
+        ]}}"#;
+        let agents = map_agent_reply(StatusCode::OK, reply).expect("a well-formed reply");
+        assert_eq!(
+            agents,
+            vec![AgentEntry {
+                agent_ref: "agent-1".to_owned(),
+                display_name: "Triage".to_owned(),
+                description: "Sorts tickets".to_owned(),
+                in_room: true,
+            }]
+        );
+        let text = resolve(&args("triage", Kind::Agent), None, Some(&agents), false).to_string();
+        for leaked in ["room-secret-9", "secret prompt", "space_ref"] {
+            assert!(!text.contains(leaked), "{leaked} leaked: {text}");
+        }
+        assert_eq!(
+            map_agent_reply(StatusCode::OK, br#"{"data":{"agents":[]}}"#),
+            Some(Vec::new())
+        );
+        // A refused key, an outage or a malformed body is the source being unavailable, never an empty registry.
+        for (status, body) in [
+            (
+                StatusCode::UNAUTHORIZED,
+                &br#"{"error":{"code":"not_authorized","message":"m","details":{}}}"#[..],
+            ),
+            (StatusCode::SERVICE_UNAVAILABLE, &b""[..]),
+            (StatusCode::OK, &b"{}"[..]),
+            (StatusCode::OK, &br#"{"data":{}}"#[..]),
+        ] {
+            assert_eq!(map_agent_reply(status, body), None, "{status}");
+        }
+        let answer = resolve(&args("triage", Kind::Agent), None, None, false);
+        assert_eq!(answer["reason"], REASON_UNAVAILABLE);
+    }
+
+    #[test]
     fn switched_off_the_tool_is_not_offered_and_not_built() {
         let control = || Some("https://control.example.test".to_owned());
         let token = || Some("t".repeat(40));
+        let agent_url = || Some("https://convex.example.test".to_owned());
+        let agent_token = || Some("a".repeat(40));
+        let none = || (None, None);
         // Off, no client is built whatever is configured; on, a missing half of the configuration is an error, never a client.
+        let off = DirectoryClient::from_parts(
+            false,
+            control(),
+            token(),
+            (agent_url(), agent_token()),
+            false,
+        );
+        assert!(matches!(off, Ok(None)));
+        assert!(!built_from(
+            ACTION,
+            off.as_ref().map(Option::as_ref).map_err(Clone::clone)
+        ));
         assert!(matches!(
-            DirectoryClient::from_parts(false, control(), token(), false),
+            DirectoryClient::from_parts(false, None, None, none(), false),
             Ok(None)
         ));
-        assert!(matches!(
-            DirectoryClient::from_parts(false, None, None, false),
-            Ok(None)
-        ));
-        assert!(DirectoryClient::from_parts(true, control(), None, false).is_err());
-        assert!(DirectoryClient::from_parts(true, None, token(), false).is_err());
-        assert!(matches!(
-            DirectoryClient::from_parts(true, control(), token(), false),
-            Ok(Some(_))
-        ));
-        if !enabled() {
-            assert!(!is_built_action(ACTION));
-        }
+        assert!(DirectoryClient::from_parts(true, control(), None, none(), false).is_err());
+        assert!(DirectoryClient::from_parts(true, None, token(), none(), false).is_err());
+        // Half an agent source is an error too.
+        assert!(
+            DirectoryClient::from_parts(true, control(), token(), (agent_url(), None), false)
+                .is_err()
+        );
+        assert!(DirectoryClient::from_parts(
+            true,
+            control(),
+            token(),
+            (None, agent_token()),
+            false
+        )
+        .is_err());
+        let misconfigured: Result<Option<&DirectoryClient>, String> = Err("half".to_owned());
+        assert!(!built_from(ACTION, misconfigured));
+        // On and complete, without or with the agent source, the row is built.
+        let people_only = DirectoryClient::from_parts(true, control(), token(), none(), false)
+            .expect("a complete configuration")
+            .expect("a client");
+        assert!(people_only.agent_source.is_none());
+        assert!(built_from(ACTION, Ok(Some(&people_only))));
+        assert!(!built_from("space.canvas.read", Ok(Some(&people_only))));
+        let both = DirectoryClient::from_parts(
+            true,
+            control(),
+            token(),
+            (agent_url(), agent_token()),
+            false,
+        )
+        .expect("a complete configuration")
+        .expect("a client");
+        assert!(both.agent_source.is_some());
+        assert!(built_from(ACTION, Ok(Some(&both))));
+        // An insecure agent source is refused like an insecure Control URL.
+        assert!(DirectoryClient::from_parts(
+            true,
+            control(),
+            token(),
+            (Some("http://convex.example.test".to_owned()), agent_token()),
+            false
+        )
+        .is_err());
+        // The process-level wrapper agrees with the state it reads.
+        assert_eq!(is_built_action(ACTION), built_from(ACTION, shared()));
         assert!(is_directory_action(ACTION));
         assert!(!is_directory_action("space.canvas.read"));
         assert!(!is_built_action("space.canvas.read"));

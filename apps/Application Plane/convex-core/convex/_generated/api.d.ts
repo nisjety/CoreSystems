@@ -53,6 +53,7 @@ import type * as schema_spaceReactions from "../schema/spaceReactions.js";
 import type * as schema_spaceRoomNotices from "../schema/spaceRoomNotices.js";
 import type * as schema_spaces from "../schema/spaces.js";
 import type * as searches from "../searches.js";
+import type * as spaceAgentDirectory from "../spaceAgentDirectory.js";
 import type * as spaceAgents from "../spaceAgents.js";
 import type * as spaceAttention from "../spaceAttention.js";
 import type * as spaceAttentionCourier from "../spaceAttentionCourier.js";
@@ -140,6 +141,7 @@ declare const fullApi: ApiFromModules<{
   "schema/spaceRoomNotices": typeof schema_spaceRoomNotices;
   "schema/spaces": typeof schema_spaces;
   searches: typeof searches;
+  spaceAgentDirectory: typeof spaceAgentDirectory;
   spaceAgents: typeof spaceAgents;
   spaceAttention: typeof spaceAttention;
   spaceAttentionCourier: typeof spaceAttentionCourier;

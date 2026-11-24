@@ -242,9 +242,18 @@ fn attested_capability_ids_with(directory_built: bool) -> Vec<String> {
 /// are complete (`space_canvas_tools`, WS19-S9). Only the thread rows feed `attested_capability_ids`.
 #[must_use]
 fn built_action(name: &str) -> bool {
+    built_action_with(
+        name,
+        crate::space_directory_tool::is_built_action(crate::space_directory_tool::ACTION),
+    )
+}
+
+/// `built_action` with the directory row's switch-and-configuration state passed in, so a test can prove both states without
+/// touching the process env.
+fn built_action_with(name: &str, directory_built: bool) -> bool {
     BUILT_ACTIONS.contains(&name)
         || crate::space_canvas_tools::is_built_action(name)
-        || crate::space_directory_tool::is_built_action(name)
+        || (directory_built && crate::space_directory_tool::is_directory_action(name))
 }
 
 /// Whether a resolved definition may join the offered set: a built Space row whose description is
@@ -316,6 +325,25 @@ fn admit_view_with_switch(
     view_v2: bool,
     resumable_switch: bool,
 ) -> Result<Vec<ToolDefinition>, Status> {
+    admit_view_with(
+        run_id,
+        view_run_id,
+        actions,
+        view_v2,
+        resumable_switch,
+        &built_action,
+    )
+}
+
+/// `admit_view_with_switch` with the built-row predicate passed in (A-REC-03-TOOL tests the directory row both ways).
+fn admit_view_with(
+    run_id: &str,
+    view_run_id: &str,
+    actions: &[ViewTool],
+    view_v2: bool,
+    resumable_switch: bool,
+    built: &dyn Fn(&str) -> bool,
+) -> Result<Vec<ToolDefinition>, Status> {
     if view_run_id != run_id || actions.len() > MAX_VIEW_ACTIONS {
         return Err(Status::permission_denied(
             "model action view response is not run-bound",
@@ -369,7 +397,7 @@ fn admit_view_with_switch(
             if !view_v2 {
                 continue;
             }
-            if !built_action(&row.action_id) || row.phase != OFFERED_PHASE {
+            if !built(&row.action_id) || row.phase != OFFERED_PHASE {
                 tracing::info!(
                     action = %row.action_id,
                     "space action is registered but not executed by this build, or not at phase 1; not offered"
@@ -1238,23 +1266,39 @@ mod tests {
 
     #[test]
     fn the_directory_row_follows_its_own_switch_in_the_view_and_the_attested_set() {
-        // Switched off (the default), the view drops the row and the owner lane attests only the thread rows.
-        if !crate::space_directory_tool::enabled() {
-            let tool = ViewTool {
-                description: crate::space_directory_tool::DESCRIPTION.to_owned(),
-                ..view_tool(DIRECTORY, "allow")
-            };
-            let offered = admit_view_with_switch("run-1", "run-1", &[tool], true, false)
-                .expect("a well-formed view is admitted");
-            assert!(
-                offered.is_empty(),
-                "the switched-off directory row was offered"
-            );
-            assert_eq!(
-                attested_capability_ids(),
-                attested_capability_ids_with(false)
-            );
-        }
+        // Both states are proven with the state passed in, so the test never depends on the process env.
+        let tool = ViewTool {
+            description: crate::space_directory_tool::DESCRIPTION.to_owned(),
+            ..view_tool(DIRECTORY, "allow")
+        };
+        let switched_off = |name: &str| built_action_with(name, false);
+        let offered = admit_view_with(
+            "run-1",
+            "run-1",
+            std::slice::from_ref(&tool),
+            true,
+            false,
+            &switched_off,
+        )
+        .expect("a well-formed view is admitted");
+        assert!(
+            offered.is_empty(),
+            "the switched-off directory row was offered"
+        );
+        let switched_on = |name: &str| built_action_with(name, true);
+        let offered = admit_view_with("run-1", "run-1", &[tool], true, false, &switched_on)
+            .expect("a well-formed view is admitted");
+        assert_eq!(
+            offered.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            [DIRECTORY],
+            "the switched-on directory row was not offered"
+        );
+        assert!(!built_action_with("space.canvas.unknown", true));
+        // The process-level wrappers agree with the state the tool module reports.
+        let built_here =
+            crate::space_directory_tool::is_built_action(crate::space_directory_tool::ACTION);
+        assert_eq!(built_action(DIRECTORY), built_here);
+        assert_eq!(attested_capability_ids(), attested_capability_ids_with(built_here));
         let directory_cap = "cap.tool.space.directory.resolve".to_owned();
         assert!(!attested_capability_ids_with(false).contains(&directory_cap));
         let built = attested_capability_ids_with(true);
