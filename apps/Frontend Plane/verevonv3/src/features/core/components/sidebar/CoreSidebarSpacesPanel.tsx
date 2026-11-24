@@ -62,6 +62,15 @@ const NO_SCOPE_STATE: SidebarStoreState = {
 }
 
 /** Where a row is drawn, which decides what a drop on it or an `Alt+Arrow` does. */
+/**
+ * The name of a sidebar group's row menu. The personal group is also named after its room ("Personlig rom"), so its
+ * menu says "group" and stays distinct from that room's own menu.
+ */
+function groupMenuLabel(id: string, name: string, tr: (no: string, en: string) => string): string {
+  if (id === 'personal') return tr(`Valg for gruppen ${name}`, `Options for the ${name} group`)
+  return tr(`Valg for ${name}`, `Options for ${name}`)
+}
+
 type RowContext =
   | { kind: 'starred'; refs: readonly string[] }
   | { kind: 'section'; id: string; refs: readonly string[]; manual: boolean }
@@ -657,7 +666,10 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
         </Show>
         <Show when={spacesLoadFailed()}>
           <p class="core-sidebar-empty verevon-sidebar-row-normal" role="alert">
-            {i18n.tr('Rom kunne ikke lastes. Prøv igjen fra Rom-siden.', 'Spaces could not be loaded. Try again from the Spaces page.')}
+            {i18n.tr('Rom kunne ikke lastes.', 'Spaces could not be loaded.')}{' '}
+            <button type="button" onClick={() => void refetchSpaces()}>
+              {i18n.tr('Prøv igjen', 'Try again')}
+            </button>
           </p>
         </Show>
 
@@ -750,7 +762,7 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
                   onDrop={(event) => dropOn(event, { kind: 'group' })}
                   menu={
                     <SpaceRoomMenu
-                      label={i18n.tr(`Valg for ${def()?.label(i18n.tr) ?? group.id}`, `Options for ${def()?.label(i18n.tr) ?? group.id}`)}
+                      label={groupMenuLabel(group.id, def()?.label(i18n.tr) ?? group.id, i18n.tr)}
                       disabled={!sidebar().canEdit}
                       items={groupMenuItems(group.id, group.sort)}
                     />

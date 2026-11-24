@@ -215,7 +215,29 @@ describe('startPreferencesBootstrap', () => {
     })
     expect(applied).toEqual([])
     expect(gateway.patches).toEqual([])
-    expect(window.localStorage.getItem(LOCALE_SYNCED_KEY)).toBeNull()
+    // The boot still closes the adopt-once window, so a later boot cannot push the cached default over fr-FR.
+    expect(window.localStorage.getItem(LOCALE_SYNCED_KEY)).toBe('1')
+  })
+
+  it('closes the adopt-once window on a first boot with nothing to adopt, so a later boot does not push the default over a language chosen elsewhere', async () => {
+    // First visit: nothing cached and no explicit server language. The i18n provider then caches the default.
+    const gateway = stubGateway({ language: 'nb-NO', explicit: NOT_EXPLICIT })
+    const first = await loadStore()
+    const firstBoot = bootDeps('no')
+    const stopFirst = first.startPreferencesBootstrap(firstBoot.deps)
+    await vi.waitFor(() => expect(window.localStorage.getItem(LOCALE_SYNCED_KEY)).toBe('1'))
+    stopFirst()
+    expect(gateway.patches).toEqual([])
+
+    // Later the person chooses English on another device; this browser boots again with the default it cached.
+    window.localStorage.setItem('verevon.locale', 'no')
+    gateway.server = serverCopy('en-US')
+    const second = await loadStore()
+    const secondBoot = bootDeps('no')
+    stops.push(second.startPreferencesBootstrap(secondBoot.deps))
+
+    await vi.waitFor(() => expect(secondBoot.applied).toEqual(['en']))
+    expect(gateway.patches).toEqual([])
   })
 
   it('waits 500 ms after the last language toggle and writes only the latest locale', async () => {
@@ -248,7 +270,8 @@ describe('startPreferencesBootstrap', () => {
     await vi.advanceTimersByTimeAsync(LOCALE_WRITE_DEBOUNCE_MS)
     expect(gateway.patches).toEqual([{ language: 'en-US' }])
     expect(window.localStorage.getItem(LOCALE_DIRTY_KEY)).not.toBeNull()
-    expect(window.localStorage.getItem(LOCALE_SYNCED_KEY)).toBeNull()
+    // The first boot already closed the adopt-once window; a failed write only leaves the dirty flag behind.
+    expect(window.localStorage.getItem(LOCALE_SYNCED_KEY)).toBe('1')
   })
 
   it('retries a dirty local value at the next boot, ahead of the server copy', async () => {

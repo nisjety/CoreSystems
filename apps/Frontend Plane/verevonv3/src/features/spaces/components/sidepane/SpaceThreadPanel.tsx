@@ -15,6 +15,7 @@ import type {
   SpaceThread,
 } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
+import { useFormat } from '@/shared/preferences/use-format'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { ThreadFollowControl } from '@/features/attention/components/ThreadFollowControl'
 import { ownWindowSignature } from '../../lib/space-history-window'
@@ -98,6 +99,7 @@ const HIGHLIGHT_MS = 3000
 
 export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
   const i18n = useI18n()
+  const fmt = useFormat()
   // Shared reads off: the same answer the timeline gives, so no transcript is asked for and none is drawn.
   const sharedRead = () => props.sharedReadAvailable?.() !== false
   const [read, { refetch, mutate }] = createResource(
@@ -246,7 +248,7 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
               </span>
             </Show>
             <Show when={when()}>
-              {(at) => <time>{formatWhen(at(), { locale: i18n.locale() })}</time>}
+              {(at) => <time>{formatWhen(at(), fmt)}</time>}
             </Show>
           </p>
         )}

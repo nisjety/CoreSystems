@@ -3,6 +3,7 @@ import { Show } from 'solid-js'
 
 import type { SpaceOwnHistoryWindow } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
+import { useFormat } from '@/shared/preferences/use-format'
 
 import { ownWindowDetail, ownWindowHidden } from '../lib/space-history-window'
 import './space-history-window.css'
@@ -18,6 +19,7 @@ import './space-history-window.css'
  */
 export function SpaceHistoryWindowNote(props: { readonly window: () => SpaceOwnHistoryWindow | undefined }) {
   const i18n = useI18n()
+  const fmt = useFormat()
   return (
     <Show when={ownWindowHidden(props.window()) ? props.window() : undefined}>
       {(own) => (
@@ -26,7 +28,7 @@ export function SpaceHistoryWindowNote(props: { readonly window: () => SpaceOwnH
           <span class="verevon-space-history-window__title">
             {i18n.tr('Tidligere meldinger er skjult', 'Earlier messages are hidden')}
           </span>
-          <Show when={ownWindowDetail(own(), i18n)}>
+          <Show when={ownWindowDetail(own(), i18n, fmt)}>
             {(detail) => <span class="verevon-space-history-window__detail">{detail()}</span>}
           </Show>
         </p>

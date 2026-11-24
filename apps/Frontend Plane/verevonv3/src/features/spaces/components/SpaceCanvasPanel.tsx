@@ -16,6 +16,7 @@ import {
   type SpaceRosterMember,
 } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
+import { useFormat } from '@/shared/preferences/use-format'
 import { canvasErrorMessage } from '@/shared/i18n/errors'
 
 import {
@@ -150,6 +151,7 @@ type ConflictBannerProps = {
  */
 function CanvasConflictBanner(props: ConflictBannerProps) {
   const i18n = useI18n()
+  const fmt = useFormat()
   const tr = i18n.tr
   const [reviewing, setReviewing] = createSignal(false)
   return (
@@ -168,7 +170,7 @@ function CanvasConflictBanner(props: ConflictBannerProps) {
               {canvasVersionMeta(
                 latest().head,
                 props.roster(),
-                formatWhenWithTime(latest().head.createdAt, { locale: i18n.locale() }),
+                formatWhenWithTime(latest().head.createdAt, fmt),
                 tr,
               )}
             </p>
@@ -197,6 +199,7 @@ function CanvasConflictBanner(props: ConflictBannerProps) {
 
 export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
   const i18n = useI18n()
+  const fmt = useFormat()
   const tr = i18n.tr
   const active = useActiveSpaceTab()
   const isActive = createMemo(() => (active() as string) === CANVAS_TAB_ID)
@@ -695,7 +698,7 @@ export function SpaceCanvasPanel(props: SpaceCanvasPanelProps) {
                 {canvasVersionMeta(
                   view().head,
                   props.roster?.() ?? [],
-                  formatWhenWithTime(view().head.createdAt, { locale: i18n.locale() }),
+                  formatWhenWithTime(view().head.createdAt, fmt),
                   tr,
                 )}
               </p>

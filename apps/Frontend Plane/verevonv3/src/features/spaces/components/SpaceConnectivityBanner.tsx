@@ -1,6 +1,7 @@
 import { onSettled, Show } from 'solid-js'
 
 import { useI18n } from '@/shared/i18n'
+import { useFormat } from '@/shared/preferences/use-format'
 import {
   roomLastFreshAt,
   spaceConnectivity,
@@ -25,13 +26,14 @@ import './space-connectivity.css'
  */
 export function SpaceConnectivityBanner(props: { readonly spaceRef?: string }) {
   const i18n = useI18n()
+  const fmt = useFormat()
   if (!spaceConnectivityBannerEnabled()) return null
   // Started once settled, not in the component body: the watcher's first sync may write a signal.
   // The returned stop function is the cleanup.
   onSettled(() => watchBrowserConnectivity())
   const lastFresh = () => {
     const at = props.spaceRef ? roomLastFreshAt(props.spaceRef) : undefined
-    return at === undefined ? undefined : formatTurnTime(new Date(at).toISOString(), { locale: i18n.locale() })
+    return at === undefined ? undefined : formatTurnTime(new Date(at).toISOString(), fmt)
   }
 
   return (

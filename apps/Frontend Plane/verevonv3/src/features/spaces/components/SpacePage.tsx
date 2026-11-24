@@ -36,6 +36,7 @@ import {
   type SpaceThread,
 } from '@/shared/api/spaces-client'
 import { translateApiError, useI18n } from '@/shared/i18n'
+import { useFormat } from '@/shared/preferences/use-format'
 import { spaceDisplayName } from '../lib/space-name'
 import {
   ACTIVE_RUN_STATUSES,
@@ -2399,6 +2400,7 @@ function SpacePulse(props: {
   readonly onOpenThread?: (threadId: string) => void
 }) {
   const i18n = useI18n()
+  const fmt = useFormat()
   const attention = () => props.threads().filter((thread) => thread.latest_run_status === AWAITING_APPROVAL_RUN_STATUS).length
   // What the room did last, from the listing the page already holds (no request of its own). The live
   // card carries the conversation that is working, so it is not listed twice.
@@ -2486,7 +2488,7 @@ function SpacePulse(props: {
                   <>
                     <span class="verevon-space-pulse-recent__title">{threadTitle(item.thread, i18n.tr)}</span>
                     <span class="verevon-space-pulse-recent__meta">
-                      {[threadStatus(item.thread, i18n.tr), formatRelativeWhen(item.at, undefined, { locale: i18n.locale() })].filter(Boolean).join(' · ')}
+                      {[threadStatus(item.thread, i18n.tr), formatRelativeWhen(item.at, undefined, fmt)].filter(Boolean).join(' · ')}
                     </span>
                   </>
                 )

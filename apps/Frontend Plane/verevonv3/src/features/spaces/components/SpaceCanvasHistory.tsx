@@ -8,6 +8,7 @@ import {
   type SpaceRosterMember,
 } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
+import { useFormat } from '@/shared/preferences/use-format'
 import { canvasErrorMessage } from '@/shared/i18n/errors'
 
 import {
@@ -50,6 +51,7 @@ type LoadStatus = 'loading' | 'ready' | 'error'
 
 export function SpaceCanvasHistory(props: SpaceCanvasHistoryProps) {
   const i18n = useI18n()
+  const fmt = useFormat()
   const tr = i18n.tr
   const [versions, setVersions] = createSignal<readonly SpaceCanvasVersion[]>([])
   const [nextCursor, setNextCursor] = createSignal<string | null>(null)
@@ -203,8 +205,8 @@ export function SpaceCanvasHistory(props: SpaceCanvasHistoryProps) {
           <p class="verevon-space-canvas__hint" role="note">
             {windowed().startsAt
               ? tr(
-                  `Du ser versjoner fra ${formatWhenWithTime(windowed().startsAt as string, { locale: i18n.locale() })}, slik historikken i rommet er delt med deg.`,
-                  `You see versions from ${formatWhenWithTime(windowed().startsAt as string, { locale: i18n.locale() })}, as the room's history is shared with you.`,
+                  `Du ser versjoner fra ${formatWhenWithTime(windowed().startsAt as string, fmt)}, slik historikken i rommet er delt med deg.`,
+                  `You see versions from ${formatWhenWithTime(windowed().startsAt as string, fmt)}, as the room's history is shared with you.`,
                 )
               : tr(
                   'Du ser bare versjonene som historikken i rommet er delt med deg for.',
@@ -233,7 +235,7 @@ export function SpaceCanvasHistory(props: SpaceCanvasHistoryProps) {
                 {canvasVersionMeta(
                   version,
                   props.roster?.() ?? [],
-                  formatWhenWithTime(version.createdAt, { locale: i18n.locale() }),
+                  formatWhenWithTime(version.createdAt, fmt),
                   tr,
                 )}
                 {version.versionId === props.headVersionId ? ` · ${tr('nåværende', 'current')}` : ''}

@@ -14,6 +14,7 @@ import {
   type SpaceFileText,
 } from '@/shared/api/space-files-client'
 import { useI18n } from '@/shared/i18n'
+import { useFormat } from '@/shared/preferences/use-format'
 import { translateApiError } from '@/shared/i18n/errors'
 import {
   canAddRoomFiles,
@@ -77,6 +78,7 @@ const PREVIEW_CHARS = 100_000
 
 export function SpaceFilesPanel(props: SpaceFilesPanelProps) {
   const i18n = useI18n()
+  const fmt = useFormat()
   const active = useActiveSpaceTab()
   const isActive = createMemo(() => (active() as string) === FILES_TAB_ID)
   const limits = createMemo(() => roomFilesLimits(props.limits?.()))
@@ -493,7 +495,7 @@ export function SpaceFilesPanel(props: SpaceFilesPanelProps) {
                           <span>{i18n.tr('Lagt til av deg', 'Added by you')}</span>
                         </Show>
                         <Show when={file.uploaded_at}>
-                          {(when) => <span>{formatWhenWithTime(when(), { locale: i18n.locale() })}</span>}
+                          {(when) => <span>{formatWhenWithTime(when(), fmt)}</span>}
                         </Show>
                       </span>
                     </span>

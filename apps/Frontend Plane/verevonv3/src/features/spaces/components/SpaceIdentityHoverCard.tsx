@@ -3,6 +3,7 @@ import { createSignal, onCleanup, Show } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 
 import { useI18n } from '@/shared/i18n'
+import { useFormat } from '@/shared/preferences/use-format'
 import { Bot } from '@/shared/icons'
 import { formatWhen } from '../lib/space-thread-presentation'
 import type { AgentLead, IdentityCardModel } from '../lib/agent-activity'
@@ -124,6 +125,7 @@ export function SpaceIdentityHoverCard(props: SpaceIdentityHoverCardProps) {
 
 function CardBody(props: { readonly model: IdentityCardModel }) {
   const i18n = useI18n()
+  const fmt = useFormat()
   const model = () => props.model
   const roleLabel = (role: string) => {
     const label = ROLE_LABELS[role]
@@ -166,7 +168,7 @@ function CardBody(props: { readonly model: IdentityCardModel }) {
           <Show when={(model() as { lastPostAt?: string }).lastPostAt}>
             {(at) => (
               <p class="verevon-identity-card__lead">
-                {i18n.tr('Siste innlegg ', 'Last post ')}{formatWhen(at(), { locale: i18n.locale() })}
+                {i18n.tr('Siste innlegg ', 'Last post ')}{formatWhen(at(), fmt)}
               </p>
             )}
           </Show>
@@ -183,6 +185,7 @@ function CardBody(props: { readonly model: IdentityCardModel }) {
 
 function LeadLine(props: { readonly lead: AgentLead; readonly ownerName?: string }) {
   const i18n = useI18n()
+  const fmt = useFormat()
   return (
     <>
       <Show when={props.lead.kind === 'blocking'}>
@@ -207,7 +210,7 @@ function LeadLine(props: { readonly lead: AgentLead; readonly ownerName?: string
           <span class="verevon-identity-card__label">{i18n.tr('Siste svar', 'Last reply')}</span>
           {(props.lead as { text: string }).text}
           <Show when={(props.lead as { at?: string }).at}>
-            {(at) => <span class="verevon-identity-card__when"> · {formatWhen(at(), { locale: i18n.locale() })}</span>}
+            {(at) => <span class="verevon-identity-card__when"> · {formatWhen(at(), fmt)}</span>}
           </Show>
         </p>
       </Show>

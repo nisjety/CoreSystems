@@ -19,6 +19,7 @@ import { formatWhenWithTime } from '@/features/spaces/lib/space-thread-presentat
 import { ApiError } from '@/shared/api/api-error'
 import { stopSpaceRun } from '@/shared/api/spaces-client/run-stop'
 import { useI18n } from '@/shared/i18n'
+import { useFormat } from '@/shared/preferences/use-format'
 import './space-run.css'
 
 /**
@@ -175,6 +176,7 @@ function RunStopButton(props: { readonly object: string; readonly state: RunStop
 
 export function SpaceActivityFeed(props: SpaceActivityFeedProps) {
   const i18n = useI18n()
+  const fmt = useFormat()
   const items = createMemo(() => props.items ?? buildSpaceActivity(props.threads, i18n.tr))
   const stops = createRunStops()
 
@@ -216,7 +218,7 @@ export function SpaceActivityFeed(props: SpaceActivityFeedProps) {
                 </span>
               </Dynamic>
               <Show when={item.at}>
-                {(at) => <span class="verevon-activity-when">{formatWhenWithTime(at(), { locale: i18n.locale() })}</span>}
+                {(at) => <span class="verevon-activity-when">{formatWhenWithTime(at(), fmt)}</span>}
               </Show>
               {/* Progressive disclosure without a second component: the
                   sentence stays one line and the evidence a supervisor asks

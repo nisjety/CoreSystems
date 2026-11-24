@@ -1,10 +1,12 @@
 import type { SpaceThread } from '@/shared/api/spaces-client'
 import { isQueuedRunStatus, isStoppedRunStatus, legacyStateFromRunStatus } from '@/shared/chat/thread-status'
-import { formatDay, formatMoment, isValidTimeZone, type SpaceFormatter } from '@/shared/i18n/format'
+import { formatDay, formatMoment, type SpaceFormatter } from '@/shared/i18n/format'
 import { localeIntl } from '@/shared/i18n/locales'
 import { COPY, say, type Tr } from './space-copy'
 
 export type { SpaceFormatter } from '@/shared/i18n/format'
+// formatTurnTime lives in the shared format helper now; re-exported so the Space call sites keep one import path.
+export { formatTurnTime } from '@/shared/i18n/format'
 
 /** The formatter every date helper below uses when a caller passes none: Norwegian, no preferences. */
 const NORWEGIAN: SpaceFormatter = { locale: 'no' }
@@ -102,35 +104,6 @@ export function formatRelativeWhen(
  */
 export function formatWhenWithTime(value?: string, fmt: SpaceFormatter = NORWEGIAN): string {
   return formatMoment(value, fmt.locale, fmt.prefs)
-}
-
-/** The explicit time format and zone of a viewer, as `Intl` options (nothing when none was chosen). */
-function turnTimeOptions(fmt: SpaceFormatter): { hour12?: boolean; timeZone?: string } {
-  const zone = fmt.prefs?.timeZone?.trim()
-  const timeZone = zone && isValidTimeZone(zone) ? zone : undefined
-  return {
-    ...(fmt.prefs?.timeFormat ? { hour12: fmt.prefs.timeFormat === '12h' } : {}),
-    ...(timeZone ? { timeZone } : {}),
-  }
-}
-
-/**
- * A turn's time, for the header beside the author: "14:32" in the reader's local time, with the full
- * date and time for the tooltip and the machine-readable `datetime`. Undefined when the server sent no
- * time (or one that is not a time): a row then renders without one rather than with an invented one.
- */
-export function formatTurnTime(
-  value: string | undefined,
-  fmt: SpaceFormatter = NORWEGIAN,
-): { iso: string; short: string; full: string } | undefined {
-  if (!value) return undefined
-  const at = new Date(value)
-  if (!Number.isFinite(at.getTime())) return undefined
-  return {
-    iso: at.toISOString(),
-    short: at.toLocaleTimeString(localeIntl(fmt.locale), { hour: '2-digit', minute: '2-digit', ...turnTimeOptions(fmt) }),
-    full: at.toLocaleString(localeIntl(fmt.locale), { dateStyle: 'long', timeStyle: 'short', ...turnTimeOptions(fmt) }),
-  }
 }
 
 /** Consecutive turns by the same author within this window share one avatar and name (Slack's grouping). */

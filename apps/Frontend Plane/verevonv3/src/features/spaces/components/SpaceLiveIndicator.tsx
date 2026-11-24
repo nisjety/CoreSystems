@@ -1,6 +1,7 @@
 import { createEffect, createSignal, Show } from 'solid-js'
 
 import { useI18n } from '@/shared/i18n'
+import { useFormat } from '@/shared/preferences/use-format'
 import { roomLastFreshAt, spaceConnectivityBannerEnabled } from '../lib/space-connectivity'
 import type { SpaceStreamState } from '../lib/space-stream'
 import { formatTurnTime } from '../lib/space-thread-presentation'
@@ -23,11 +24,12 @@ import './space-live-indicator.css'
  */
 export function SpaceLiveIndicator(props: { state: () => SpaceStreamState; spaceRef?: string }) {
   const i18n = useI18n()
+  const fmt = useFormat()
   const [announcement, setAnnouncement] = createSignal('')
   let previous: SpaceStreamState = 'idle'
   const lastFresh = () => {
     const at = props.spaceRef && spaceConnectivityBannerEnabled() ? roomLastFreshAt(props.spaceRef) : undefined
-    return at === undefined ? undefined : formatTurnTime(new Date(at).toISOString(), { locale: i18n.locale() })
+    return at === undefined ? undefined : formatTurnTime(new Date(at).toISOString(), fmt)
   }
 
   createEffect(

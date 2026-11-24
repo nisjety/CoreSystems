@@ -1,5 +1,6 @@
 import { cleanup, render, screen } from '@solidjs/testing-library'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { clearPreferences, receivePreferences } from '@/shared/preferences/preferences-store'
 
 // U3: the timeline reads like Slack and Teams. A time beside each author, same-author turns collapsed
 // under one header, one "new messages" divider above the first new post, and a typed 403 said in the
@@ -322,5 +323,46 @@ describe('SpaceRoomTimeline reading: one colour per person', () => {
       memberTint('u2'),
       '',
     ])
+  })
+})
+
+// WS16-S3: the viewer's own date and time formats reach the room timeline. The day label and the turn time both
+// come from useFormat(), so a reader who chose DD/MM/YYYY and a 24-hour clock sees them in the room.
+describe('SpaceRoomTimeline reading: the viewer’s date and time formats', () => {
+  const dated = { ...post, updated_at: '2026-09-06T12:00:00Z' }
+  const chosen = {
+    language: 'nb-NO',
+    timezone: 'Europe/Oslo',
+    dateFormat: 'DD/MM/YYYY',
+    timeFormat: '24h',
+    explicit: { language: true, timezone: true, dateFormat: true, timeFormat: true, compactMode: false },
+  }
+
+  afterEach(() => clearPreferences())
+
+  it('writes the turn time in the chosen clock and zone', async () => {
+    receivePreferences(chosen as never)
+    transcript([{ role: 'user', content: 'Ny klokke', authorSubjectId: 'u1', createdAt: '2026-09-06T12:05:00Z' }])
+    renderRoom([dated])
+    await screen.findByText('Ny klokke')
+    const header = document.querySelector('.verevon-room-turn__header') as HTMLElement
+    expect(header.querySelector('time')?.textContent).toBe('14:05')
+  })
+
+  it('writes the day label of a post in the chosen numeric pattern', async () => {
+    receivePreferences(chosen as never)
+    transcript([{ role: 'user', content: 'Gammel dato', authorSubjectId: 'u1' }])
+    renderRoom([dated])
+    await screen.findByText('Gammel dato')
+    const header = document.querySelector('.verevon-room-turn__header') as HTMLElement
+    expect(header.querySelector('.verevon-room-turn__time')?.textContent).toBe('06/09/2026')
+  })
+
+  it('keeps the Norwegian day label when the viewer has chosen no format', async () => {
+    transcript([{ role: 'user', content: 'Standard dato', authorSubjectId: 'u1' }])
+    renderRoom([dated])
+    await screen.findByText('Standard dato')
+    const header = document.querySelector('.verevon-room-turn__header') as HTMLElement
+    expect(header.querySelector('.verevon-room-turn__time')?.textContent).toMatch(/6\. sep/)
   })
 })

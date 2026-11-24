@@ -26,7 +26,35 @@ describe('narrateNewPosts (WS16-S4)', () => {
 
   it('says nothing on a first listing, which is a baseline and not news', () => {
     expect(narrateNewPosts(undefined, [first, ola], viewer, noTr, context)).toEqual([]);
-    expect(narrateNewPosts([], [first, ola], viewer, noTr, context)).toEqual([]);
+  });
+
+  it('narrates the first post of a room that was empty when it was read', () => {
+    const out = narrateNewPosts([], [first, ola], viewer, noTr, context);
+    expect(out.map((item) => item.message)).toEqual(['Nytt innlegg fra Ola: Budget']);
+  });
+
+  it('narrates a post that names the viewer as a mention, said on its own and outside the room summary', () => {
+    const mention = thread({ thread_id: 'thr_c', title: 'Plan', owner_subject_id: 'sub_ola', preview: 'Hei @Kari, se på dette?' });
+    const labelled = { ...context, viewerLabel: 'Kari' };
+    const out = narrateNewPosts([first], [first, mention], viewer, noTr, labelled);
+    expect(out.map((item) => item.message)).toEqual(['Ola nevnte deg i Plan']);
+    expect(out[0]?.options).toMatchObject({ politeness: 'polite', key: 'mention:thr_c:0', kind: 'mention' });
+    expect(out[0]?.options.group).toBeUndefined();
+    expect(narrateNewPosts([first], [first, mention], viewer, en, labelled)[0]?.message).toBe('Ola mentioned you in Plan');
+  });
+
+  it('narrates a reply that names the viewer as a mention', () => {
+    const replied = thread({ ...first, reply_count: 2, last_author_subject_id: 'sub_ola', preview: 'Svar til @Kari' });
+    const out = narrateNewPosts([first], [replied], viewer, noTr, { ...context, viewerLabel: 'Kari' });
+    expect(out.map((item) => item.message)).toEqual(['Ola nevnte deg i Plan']);
+    expect(out[0]?.options).toMatchObject({ key: 'mention:thr_a:2', kind: 'mention' });
+  });
+
+  it('needs the viewer label, and reads the newest message rather than the title', () => {
+    const mention = thread({ thread_id: 'thr_c', title: 'Plan', owner_subject_id: 'sub_ola', preview: 'Hei @Kari' });
+    expect(narrateNewPosts([first], [first, mention], viewer, noTr, context)[0]?.options.kind).toBe('post');
+    const titled = thread({ thread_id: 'thr_d', title: 'Plan for @Kari', owner_subject_id: 'sub_ola', preview: 'Ny versjon er lagt ut' });
+    expect(narrateNewPosts([first], [first, titled], viewer, noTr, { ...context, viewerLabel: 'Kari' })[0]?.options.kind).toBe('post');
   });
 
   it('never narrates a post the viewer wrote', () => {

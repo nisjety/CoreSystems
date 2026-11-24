@@ -5,7 +5,8 @@
 // into the instant Control takes, a window into words, and a refusal into a sentence.
 import type { SpaceMemberHistoryWindow, SpaceOwnHistoryWindow } from '@/shared/api/spaces-client/member-history-window'
 import { translateApiError } from '@/shared/i18n/errors'
-import { localeIntl, type Locale } from '@/shared/i18n/locales'
+import { formatFullDate, type FormatPrefs, type SpaceFormatter } from '@/shared/i18n/format'
+import type { Locale } from '@/shared/i18n/locales'
 
 /**
  * What these helpers need of the reader's language: the chooser, and the locale a date is written in. The page's
@@ -73,19 +74,21 @@ export function localDayValue(instant: string | null | undefined): string {
 }
 
 /** An instant as a date for the reader ("12. nov. 2026" / "Nov 12, 2026"); empty for anything that is not an instant. */
-export function formatHistoryDate(instant: string | null | undefined, locale: Locale): string {
+export function formatHistoryDate(instant: string | null | undefined, locale: Locale, prefs?: FormatPrefs): string {
   if (!instant) return ''
-  const at = new Date(instant)
-  if (!Number.isFinite(at.getTime())) return ''
-  return at.toLocaleDateString(localeIntl(locale), { day: 'numeric', month: 'short', year: 'numeric' })
+  return formatFullDate(instant, locale, prefs)
 }
 
 /** One member's window in words, for the admin's current-value line. A mode this build does not know says so. */
-export function memberWindowLabel(window: SpaceMemberHistoryWindow, i18n: HistoryI18n): string {
+export function memberWindowLabel(
+  window: SpaceMemberHistoryWindow,
+  i18n: HistoryI18n,
+  fmt: SpaceFormatter = { locale: i18n.locale() },
+): string {
   if (window.mode === 'full') return i18n.tr('All historikk', 'Full history')
   if (window.mode === 'since_join') return i18n.tr('Siden de ble med', 'Since they joined')
   if (window.mode === 'since_date') {
-    const date = formatHistoryDate(window.sinceAt, i18n.locale())
+    const date = formatHistoryDate(window.sinceAt, fmt.locale, fmt.prefs)
     return date ? i18n.tr(`Fra ${date}`, `From ${date}`) : i18n.tr('Fra en dato', 'From a date')
   }
   return i18n.tr('Ukjent innstilling', 'Unknown setting')
@@ -100,9 +103,13 @@ export function ownWindowHidden(window: SpaceOwnHistoryWindow | undefined): bool
  * What the caller can still read, for the marker's second half: from the chosen date, or from the join.
  * Nothing for any other window, so the marker never says more than Control did.
  */
-export function ownWindowDetail(window: SpaceOwnHistoryWindow, i18n: HistoryI18n): string | undefined {
+export function ownWindowDetail(
+  window: SpaceOwnHistoryWindow,
+  i18n: HistoryI18n,
+  fmt: SpaceFormatter = { locale: i18n.locale() },
+): string | undefined {
   if (window.mode === 'since_date') {
-    const date = formatHistoryDate(window.sinceAt, i18n.locale())
+    const date = formatHistoryDate(window.sinceAt, fmt.locale, fmt.prefs)
     return date ? i18n.tr(`Du ser meldinger fra ${date}.`, `You see messages from ${date}.`) : undefined
   }
   if (window.mode === 'since_join') return i18n.tr('Du ser meldinger fra du ble med.', 'You see messages from when you joined.')

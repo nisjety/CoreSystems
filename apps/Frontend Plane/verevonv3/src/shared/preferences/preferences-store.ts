@@ -183,8 +183,11 @@ export function startPreferencesBootstrap(deps: PreferencesControllerDeps): () =
       prefs,
     })
     if (decision.kind === 'push-local') void pushLocale(decision.locale)
-    else if (decision.kind === 'apply-server') {
-      deps.applyServerLocale(decision.locale)
+    else {
+      if (decision.kind === 'apply-server') deps.applyServerLocale(decision.locale)
+      // The adopt-once window closes on this boot whatever the server said. The locale this browser cached on
+      // its first visit is the i18n default, not a choice, so it must never be pushed over a language the
+      // person chose on another device later.
       writeFlag(LOCALE_SYNCED_KEY, true)
     }
   }

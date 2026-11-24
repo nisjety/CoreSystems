@@ -332,10 +332,9 @@ export type ChatInvokeRequest = {
    * exchanges this selection for a Control-signed, effect-bound decision. */
   spaceRef?: string
   /**
-   * The viewer's interface language (WS16-S6), a plain framing hint for the model on a Space turn.
-   * Request-scoped: the gateway maps `no` to `nb-NO` and `en` to `en-US` (anything else is dropped,
-   * and the field is removed while its flag is off) and model-gateway never stores it. It decides
-   * nothing about access.
+   * The viewer's interface language for this turn. It travels as `ui_locale` (EP-8-S1), the prompt's language
+   * line, and is never sent as its own `locale` field: the WS16-S6 path (`locale` on the wire, `locale_hint.rs`)
+   * had no caller and is retired. It decides nothing about access.
    */
   locale?: 'no' | 'en'
   /**
@@ -2370,8 +2369,6 @@ export function buildChatWireBody(input: ChatInvokeRequest): Record<string, unkn
     thread_id: threadId,
     session_key: request.sessionKey?.trim() || threadId,
     space_ref: request.spaceRef?.trim() || undefined,
-    // Narrowed inline like `retrievalScope` above: only the two known codes ever reach the wire.
-    locale: request.locale === 'no' || request.locale === 'en' ? request.locale : undefined,
     // The browser's own clock and app language, on every turn (EP-8-S1). The gateway keeps each one only in its
     // closed form and reads it for the prompt alone; nothing stores it. `ui_locale` is the turn's language, else
     // the stored app setting, and absent when neither is set.

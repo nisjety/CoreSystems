@@ -9,6 +9,7 @@ import {
   type SpaceThreadTurn,
 } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
+import { useFormat } from '@/shared/preferences/use-format'
 import { mergeRoomArtifactEntries, type RoomArtifactEntry } from '../lib/room-artifact-entries'
 import { roomItems } from '../lib/room-artifact-items'
 import type { RoomLiveArtifacts } from '../lib/room-live-artifacts'
@@ -54,6 +55,7 @@ const ARTIFACTS_TAB_ID = 'artefakter'
 
 export function SpaceArtifactsTab(props: SpaceArtifactsTabProps) {
   const i18n = useI18n()
+  const fmt = useFormat()
   const active = useActiveSpaceTab()
   const isActive = createMemo(() => (active() as string) === ARTIFACTS_TAB_ID)
 
@@ -338,7 +340,7 @@ export function SpaceArtifactsTab(props: SpaceArtifactsTabProps) {
                         <Show when={entry.sizeChars > 0}>
                           <span>{i18n.tr(`${entry.sizeChars} tegn`, `${entry.sizeChars} chars`)}</span>
                         </Show>
-                        <Show when={entry.createdAt}>{(when) => <span>{formatWhenWithTime(when(), { locale: i18n.locale() })}</span>}</Show>
+                        <Show when={entry.createdAt}>{(when) => <span>{formatWhenWithTime(when(), fmt)}</span>}</Show>
                         <Show when={entry.live}>
                           <span class="verevon-space-artifacts__live">{i18n.tr('Ny', 'New')}</span>
                         </Show>

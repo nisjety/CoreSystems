@@ -96,3 +96,45 @@ export function formatMoment(value: string | undefined, locale: Locale, prefs?: 
     return value
   }
 }
+
+/** A full calendar date for a day label, such as a history window's start: "12. nov. 2026", "Nov 12, 2026", or the chosen numeric pattern. */
+export function formatFullDate(value: string, locale: Locale, prefs?: FormatPrefs): string {
+  try {
+    const at = parse(value)
+    if (!at) return ''
+    if (prefs?.dateFormat) return numericDate(at, prefs.dateFormat, prefs)
+    return at.toLocaleDateString(localeIntl(locale), { day: 'numeric', month: 'short', year: 'numeric', ...zoneOption(prefs) })
+  } catch {
+    return ''
+  }
+}
+
+/** The explicit time format and zone of a viewer, as `Intl` options (nothing when none was chosen). */
+function turnTimeOptions(prefs?: FormatPrefs): { hour12?: boolean; timeZone?: string } {
+  const zone = prefs?.timeZone?.trim()
+  const timeZone = zone && isValidTimeZone(zone) ? zone : undefined
+  return {
+    ...(prefs?.timeFormat ? { hour12: prefs.timeFormat === '12h' } : {}),
+    ...(timeZone ? { timeZone } : {}),
+  }
+}
+
+/**
+ * A turn's time, for the header beside the author: "14:32" in the reader's local time, with the full
+ * date and time for the tooltip and the machine-readable `datetime`. Undefined when the server sent no
+ * time (or one that is not a time): a row then renders without one rather than with an invented one.
+ * Moved here from the Space presentation module (WS16-S1/S3); the default is Norwegian with no preferences.
+ */
+export function formatTurnTime(
+  value: string | undefined,
+  fmt: SpaceFormatter = { locale: 'no' },
+): { iso: string; short: string; full: string } | undefined {
+  if (!value) return undefined
+  const at = new Date(value)
+  if (!Number.isFinite(at.getTime())) return undefined
+  return {
+    iso: at.toISOString(),
+    short: at.toLocaleTimeString(localeIntl(fmt.locale), { hour: '2-digit', minute: '2-digit', ...turnTimeOptions(fmt.prefs) }),
+    full: at.toLocaleString(localeIntl(fmt.locale), { dateStyle: 'long', timeStyle: 'short', ...turnTimeOptions(fmt.prefs) }),
+  }
+}

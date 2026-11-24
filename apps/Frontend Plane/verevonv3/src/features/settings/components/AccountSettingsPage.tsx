@@ -27,7 +27,9 @@ import {
   type UserPreferences,
   type UserProfile,
 } from '@/shared/api/settings-client'
+import { readAnnouncePostsPreference, writeAnnouncePostsPreference, type AnnouncePostsPreference } from '@/shared/a11y/announcer'
 import { getPersonalAgentsFeature } from '@/shared/api/spaces-client'
+import { isValidTimeZone } from '@/shared/i18n/format'
 import { useI18n, translateApiError } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { languageFromLocale, localeFromLanguage } from '@/shared/preferences/locale-map'
@@ -97,6 +99,15 @@ function splitDisplayName(name: string): { firstName: string; lastName: string }
   }
 }
 
+/**
+ * The directory's time zone, when it is an IANA zone the preferences save accepts. A provider's own name
+ * ("W. Europe Standard Time") is not, and would make the whole Save fail, so it is not used as the fallback.
+ */
+function directoryZone(zone: string | undefined): string | undefined {
+  const trimmed = zone?.trim()
+  return trimmed && isValidTimeZone(trimmed) ? trimmed : undefined
+}
+
 function formFrom(profile: UserProfile, preferences: UserPreferences, currentLanguage: string): FormState {
   const displayName = profile.displayName || profile.name || profile.email.split('@')[0] || ''
   const nameParts = splitDisplayName(displayName)
@@ -108,7 +119,7 @@ function formFrom(profile: UserProfile, preferences: UserPreferences, currentLan
     department: profile.department,
     phoneNumber: profile.phoneNumber,
     officeLocation: profile.officeLocation,
-    timezone: preferences.timezone || profile.timezone || emptyForm.timezone,
+    timezone: preferences.timezone || directoryZone(profile.timezone) || emptyForm.timezone,
     // An unset server language must not show (and then save) the compatibility default
     // 'en-US' over a Norwegian UI: follow the language the person is using now.
     language: preferences.explicit
@@ -518,8 +529,36 @@ function PreferencesSection(props: {
             { value: 'dark', label: i18n.tr('Mørk', 'Dark') },
           ]}
         />
+        <AnnouncePostsField />
       </div>
     </section>
+  )
+}
+
+/**
+ * WS16-S4: how much of a room's conversation the screen reader announces. It is per viewer and per browser
+ * (client storage, never sent to Control), so it sits beside the saved form and takes effect as it is changed.
+ */
+function AnnouncePostsField() {
+  const i18n = useI18n()
+  const [value, setValue] = createSignal<AnnouncePostsPreference>(readAnnouncePostsPreference())
+  return (
+    <SettingsSelect
+      id="announce-posts"
+      label={i18n.tr('Skjermleser: nye innlegg', 'Screen reader: new posts')}
+      value={value()}
+      onChange={(event) => {
+        const picked = event.currentTarget.value
+        const next: AnnouncePostsPreference = picked === 'mentions' || picked === 'off' ? picked : 'all'
+        writeAnnouncePostsPreference(next)
+        setValue(next)
+      }}
+      options={[
+        { value: 'all', label: i18n.tr('Alle innlegg', 'All posts') },
+        { value: 'mentions', label: i18n.tr('Bare når jeg nevnes', 'Only when I am mentioned') },
+        { value: 'off', label: i18n.tr('Av', 'Off') },
+      ]}
+    />
   )
 }
 

@@ -26,6 +26,7 @@ import { spaceMessageLinkHref } from '../../lib/space-entity-link'
 import { SpaceReactionBar } from '../SpaceReactionBar'
 import type { SpaceTurnLifecycle } from '../../lib/space-message-lifecycle'
 import { translateApiError, useI18n } from '@/shared/i18n'
+import { useFormat } from '@/shared/preferences/use-format'
 import { AgentAvatar } from '../AgentAvatar'
 import { SpaceIdentityHoverCard } from '../SpaceIdentityHoverCard'
 import { agentAvatarColor, agentForName, memberTint } from '../../lib/agent-avatar'
@@ -255,6 +256,7 @@ export interface SpaceTurnListProps {
 
 export function SpaceTurnList(props: SpaceTurnListProps) {
   const i18n = useI18n()
+  const fmt = useFormat()
   // Every name that can be mentioned in this room (people and agents), and the reader's own.
   const mentionNames = () => [
     ...props.roster().map((member) => member.display_name),
@@ -321,7 +323,7 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
           !(index() === 1 && props.earlierTurns?.() !== undefined)
           && continuesTurnGroup(visibleTurns()[index() - 1], turn, props.agentName)
         // WS16-S1: the reader's locale, so an English reader sees the turn's time in English.
-        const time = () => formatTurnTime(turn.createdAt, { locale: i18n.locale() })
+        const time = () => formatTurnTime(turn.createdAt, fmt)
         // WS12-S7: per-row edit state. A refetch after a change builds new turn objects, which
         // closes the editor and clears any error.
         const [editing, setEditing] = createSignal(false)
@@ -534,7 +536,7 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
                 <span
                   class="verevon-room-turn__edited"
                   data-revision-state="edited"
-                  title={formatTurnTime(turn.revisedAt, { locale: i18n.locale() })?.full}
+                  title={formatTurnTime(turn.revisedAt, fmt)?.full}
                 >
                   {i18n.tr('(redigert)', '(edited)')}
                 </span>
@@ -608,7 +610,8 @@ export function PostTurnHeader(props: {
   readonly status?: PostStatus
 }) {
   const i18n = useI18n()
-  const at = () => formatTurnTime(props.time, { locale: i18n.locale() })
+  const fmt = useFormat()
+  const at = () => formatTurnTime(props.time, fmt)
   return (
     <div class="verevon-room-turn__header">
       <strong class="verevon-room-turn__author">

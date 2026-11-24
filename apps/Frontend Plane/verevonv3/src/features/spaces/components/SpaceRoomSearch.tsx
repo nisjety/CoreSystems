@@ -4,6 +4,7 @@ import { registerCommands, setMessageSearchOpener } from '@/features/command/com
 import { Search, X } from '@/shared/icons'
 import type { SpaceRosterMember, SpaceSearchHit } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
+import { useFormat } from '@/shared/preferences/use-format'
 
 import { formatRelativeWhen } from '../lib/space-thread-presentation'
 import { normalizeSnippet } from '../lib/space-search-snippet'
@@ -56,6 +57,7 @@ function shortcutLabel(): string {
  */
 export function SpaceRoomSearch(props: SpaceRoomSearchProps) {
   const i18n = useI18n()
+  const fmt = useFormat()
   const tr = i18n.tr
   const baseId = `space-search-${++instanceCounter}`
   const listId = `${baseId}-list`
@@ -443,7 +445,7 @@ export function SpaceRoomSearch(props: SpaceRoomSearchProps) {
                   >
                     <span class="verevon-space-search__meta">
                       <span class="verevon-space-search__author">{authorOf(hit)}</span>
-                      <Show when={formatRelativeWhen(hit.createdAt, undefined, { locale: i18n.locale() })}>
+                      <Show when={formatRelativeWhen(hit.createdAt, undefined, fmt)}>
                         {(when) => <time class="verevon-space-search__time" datetime={hit.createdAt}>{when()}</time>}
                       </Show>
                       <Show when={hit.threadTitle}>

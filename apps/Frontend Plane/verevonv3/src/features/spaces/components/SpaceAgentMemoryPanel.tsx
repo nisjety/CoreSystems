@@ -8,6 +8,7 @@ import {
 } from '@/shared/api/spaces-client'
 import { isZdrCode } from '@/shared/api/zdr-refusals'
 import { translateApiError, useI18n } from '@/shared/i18n'
+import { useFormat } from '@/shared/preferences/use-format'
 import { formatWhenWithTime } from '../lib/space-thread-presentation'
 import { SpaceConfirmButton } from './SpaceConfirmButton'
 import './space-agent-memory.css'
@@ -37,6 +38,7 @@ type PanelStatus = 'idle' | 'loading' | 'ready' | 'restricted' | 'disabled' | 'r
  */
 export function SpaceAgentMemoryPanel(props: SpaceAgentMemoryPanelProps) {
   const i18n = useI18n()
+  const fmt = useFormat()
   const [open, setOpen] = createSignal(false)
   const [status, setStatus] = createSignal<PanelStatus>('idle')
   const [rows, setRows] = createSignal<readonly SpaceAgentMemoryRow[]>([])
@@ -204,7 +206,7 @@ export function SpaceAgentMemoryPanel(props: SpaceAgentMemoryPanelProps) {
                           {(at) => (
                             <>
                               <span>{i18n.tr('Lagret', 'Saved')}</span>{' '}
-                              <time datetime={at()}>{formatWhenWithTime(at(), { locale: i18n.locale() })}</time>
+                              <time datetime={at()}>{formatWhenWithTime(at(), fmt)}</time>
                             </>
                           )}
                         </Show>

@@ -10,6 +10,7 @@ import {
   type SpaceRosterMember,
 } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
+import { useFormat } from '@/shared/preferences/use-format'
 
 import {
   isMemberWindowConflict,
@@ -48,6 +49,7 @@ let controlCount = 0
  */
 export function SpaceMemberHistoryControl(props: SpaceMemberHistoryControlProps) {
   const i18n = useI18n()
+  const fmt = useFormat()
   const id = `space-member-history-${(controlCount += 1)}`
   const name = () => props.member.display_name?.trim() || props.member.subject_id
 
@@ -217,8 +219,8 @@ export function SpaceMemberHistoryControl(props: SpaceMemberHistoryControlProps)
                   </legend>
                   <p class="verevon-space-member-history__note">
                     {i18n.tr(
-                      `Nå: ${memberWindowLabel(held(), i18n)} (${sourceLabel(held())})`,
-                      `Now: ${memberWindowLabel(held(), i18n)} (${sourceLabel(held())})`,
+                      `Nå: ${memberWindowLabel(held(), i18n, fmt)} (${sourceLabel(held())})`,
+                      `Now: ${memberWindowLabel(held(), i18n, fmt)} (${sourceLabel(held())})`,
                     )}
                   </p>
 

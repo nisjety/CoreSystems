@@ -57,6 +57,7 @@ import { firstUnreadIndex, markUnreadBeforeMs } from '../lib/space-unread'
 import type { SpaceAgent, SpaceAgentWork, SpaceMessagePolicyHints, SpaceOwnHistoryWindow, SpaceRoomPin, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
 import { createSpaceTurnLifecycle } from '../lib/space-message-lifecycle'
 import { translateApiError, useI18n } from '@/shared/i18n'
+import { useFormat } from '@/shared/preferences/use-format'
 import { announce } from '@/shared/a11y/announcer'
 import { narrateNewPosts, narrateRunChange } from '@/features/spaces/lib/space-narration'
 import { createResource } from '@/shared/lib/create-resource-compat'
@@ -256,7 +257,9 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
 
   // ── Screen-reader narration (WS16-S4) ────────────────────────────────────────────────────────────
   // The poll replaces the thread listing; the difference between two listings is what changed under a
-  // reader who cannot see it. A listing for another room, or the first one, is a baseline, not news.
+  // reader who cannot see it. A listing for another room, or the first one, is a baseline, not news. An
+  // empty room read as empty is a real previous listing, so its first post is news; an empty read that
+  // follows posts already seen is a blip and keeps the last full listing as the baseline.
   let narratedRef: string | undefined
   let narratedThreads: readonly SpaceThread[] | undefined
   let narratedEpoch = 0
@@ -265,19 +268,23 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
     // posts the reader paged to, not news.
     () => ({ ref: props.spaceRef, threads: props.threads(), epoch: props.timeline?.windowVersion() ?? 0 }),
     ({ ref, threads, epoch }) => {
-      const prev = narratedRef === ref && narratedEpoch === epoch ? narratedThreads : undefined
+      const sameRoom = narratedRef === ref && narratedEpoch === epoch
+      const prev = sameRoom ? narratedThreads : undefined
+      if (sameRoom && prev && prev.length > 0 && threads.length === 0) return
       narratedRef = ref
       narratedEpoch = epoch
       narratedThreads = threads
       if (!prev) return
       const roster = props.roster()
+      const viewerSubjectId = props.viewerSubjectId?.()
       const context = {
         roomName: props.spaceName,
-        nameOf: (subjectId: string | undefined) =>
-          resolveAuthorName(subjectId, roster, props.viewerSubjectId?.(), i18n.tr),
+        nameOf: (subjectId: string | undefined) => resolveAuthorName(subjectId, roster, viewerSubjectId, i18n.tr),
+        // The viewer's own display name: the label a mention of them is typed with.
+        viewerLabel: viewerSubjectId ? roster.find((member) => member.subject_id === viewerSubjectId)?.display_name : undefined,
       }
       const items = [
-        ...narrateNewPosts(prev, threads, props.viewerSubjectId?.(), i18n.tr, context),
+        ...narrateNewPosts(prev, threads, viewerSubjectId, i18n.tr, context),
         ...narrateRunChange(prev, threads, i18n.tr),
       ]
       for (const item of items) announce(item.message, item.options)
@@ -640,6 +647,7 @@ function SpaceRoomPost(props: {
   readonly watch?: PostWatcher['observe']
 }) {
   const i18n = useI18n()
+  const fmt = useFormat()
   const [legacyTranscript, { refetch: refetchLegacyTranscript }] = createResource(
     // The revision suffix keeps a settled reply visible: refetching the thread
     // list bumps updated_at, which re-keys this source and refetches the
@@ -950,7 +958,7 @@ function SpaceRoomPost(props: {
   const headMeta = (): PostHeadMeta => {
     const at = when()
     return {
-      ...(at ? { dateLabel: formatWhen(at, { locale: i18n.locale() }) } : {}),
+      ...(at ? { dateLabel: formatWhen(at, fmt) } : {}),
       ...(isWorking() ? {} : { status: statusNow() }),
     }
   }
@@ -1172,7 +1180,7 @@ function SpaceRoomPost(props: {
               </span>
             )}
           </Show>
-          <Show when={formatRelativeWhen(when(), undefined, { locale: i18n.locale() })}>
+          <Show when={formatRelativeWhen(when(), undefined, fmt)}>
             {(ago) => <span class="verevon-room-post__summary-when" aria-hidden="true">{ago()}</span>}
           </Show>
         </button>

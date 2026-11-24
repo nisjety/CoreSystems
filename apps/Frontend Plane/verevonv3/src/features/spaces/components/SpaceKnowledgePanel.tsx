@@ -4,6 +4,7 @@ import { For, Show } from 'solid-js'
 import { isSpaceDenial, presentSpaceDenialText } from '@/shared/api/space-denials'
 import { getSpaceKnowledge, type SpaceKnowledge } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
+import { useFormat } from '@/shared/preferences/use-format'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { formatWhenWithTime } from '../lib/space-thread-presentation'
 
@@ -87,6 +88,7 @@ function gapReason(
 
 export function SpaceKnowledgePanel(props: SpaceKnowledgePanelProps) {
   const i18n = useI18n()
+  const fmt = useFormat()
   const [knowledge] = createResource(() => props.spaceRef, getSpaceKnowledge)
 
   const resolved = (): SpaceKnowledge | undefined =>
@@ -173,7 +175,7 @@ export function SpaceKnowledgePanel(props: SpaceKnowledgePanelProps) {
                     <p class="verevon-space-knowledge__meta">
                       <Show when={document.source}>{(source) => <span>{source()}</span>}</Show>
                       <Show when={document.updated_at}>
-                        {(updated) => <span>{formatWhenWithTime(updated(), { locale: i18n.locale() })}</span>}
+                        {(updated) => <span>{formatWhenWithTime(updated(), fmt)}</span>}
                       </Show>
                       {/* A document still being processed cannot ground an
                           answer yet, and a reader who cannot tell will wonder
@@ -225,7 +227,7 @@ export function SpaceKnowledgePanel(props: SpaceKnowledgePanelProps) {
                     <p class="verevon-space-knowledge__meta">
                       <Show when={page.path}>{(path) => <span>{path()}</span>}</Show>
                       <Show when={page.updated_at}>
-                        {(updated) => <span>{formatWhenWithTime(updated(), { locale: i18n.locale() })}</span>}
+                        {(updated) => <span>{formatWhenWithTime(updated(), fmt)}</span>}
                       </Show>
                     </p>
                   </div>
