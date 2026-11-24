@@ -11,6 +11,7 @@ import type {
   SpaceTranscriptDenial,
 } from '@/shared/api/spaces-client'
 import { normalizeTranscriptTurns } from '../components/sidepane/SpaceTurnList'
+import { threadTranscriptEpoch } from './space-transcript-epoch'
 import type { TranscriptTurn } from '../components/sidepane/SpaceTurnList'
 import { AWAITING_APPROVAL_RUN_STATUS, LIVE_RUN_STATUSES } from './space-thread-presentation'
 
@@ -70,9 +71,12 @@ type Page = {
   newestCursor: string | null
 }
 
-/** The revision a transcript was read for. A change means the post has new turns or a new run state. */
+/**
+ * The revision a transcript was read for. A change means the post has new turns, a new run state,
+ * or (DEPTH-WS12-S4-1) a revised message the room stream signalled.
+ */
 export function threadRevision(thread: SpaceThread): string {
-  return `${thread.updated_at ?? thread.latest_run_updated_at ?? ''}|${thread.last_message_seq ?? ''}`
+  return `${thread.updated_at ?? thread.latest_run_updated_at ?? ''}|${thread.last_message_seq ?? ''}|${threadTranscriptEpoch(thread.thread_id)}`
 }
 
 function orderKey(thread: SpaceThread): [number, string] {

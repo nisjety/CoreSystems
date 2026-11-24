@@ -439,6 +439,25 @@ describe('coalescing frames into one re-read', () => {
     expect(onChange).toHaveBeenCalledTimes(1)
   })
 
+  it('hands the threads a revision touched to onThreadsTouched once, with the coalesced refetch (DEPTH-WS12-S4-1)', async () => {
+    const touched = vi.fn<(ids: readonly string[]) => void>()
+    make({ onThreadsTouched: touched }).start()
+    connectedFrame(calls[0], { resumed: true })
+    spaceEvent(calls[0], 1, { kind: 'thread.updated', refs: { thread_id: 't-1', fields: ['preview'] } })
+    spaceEvent(calls[0], 2, { kind: 'thread.updated', refs: { thread_id: 't-1', fields: ['preview'] } })
+    // A title or pin change is not a revised message; a new message keys the transcript already.
+    spaceEvent(calls[0], 3, { kind: 'thread.updated', refs: { thread_id: 't-2', fields: ['title'] } })
+    spaceEvent(calls[0], 4, { kind: 'message.appended', refs: { thread_id: 't-3' } })
+    expect(touched).not.toHaveBeenCalled()
+    await advance(REFETCH_DEBOUNCE_MS)
+    expect(touched).toHaveBeenCalledTimes(1)
+    expect(touched).toHaveBeenCalledWith(['t-1'])
+    expect(onChange).toHaveBeenCalledTimes(1)
+    spaceEvent(calls[0], 5, { kind: 'message.appended', refs: { thread_id: 't-1' } })
+    await advance(10_000)
+    expect(touched).toHaveBeenCalledTimes(1)
+  })
+
   it('adds up to the jitter on top of the debounce', async () => {
     make({ random: () => 0.5 }).start()
     connectedFrame(calls[0], { resumed: true })

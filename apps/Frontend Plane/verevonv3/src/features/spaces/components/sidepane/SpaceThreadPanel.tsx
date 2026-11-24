@@ -22,6 +22,7 @@ import { SpaceHistoryWindowNote } from '../SpaceHistoryWindowNote'
 import { SpaceRestrictedNotice } from '../SpaceRestrictedNotice'
 import { SpaceTurnList, normalizeTranscriptTurns, resolveAuthorName } from './SpaceTurnList'
 import { createSpaceTurnLifecycle } from '../../lib/space-message-lifecycle'
+import { threadTranscriptEpoch } from '../../lib/space-transcript-epoch'
 import type { TranscriptTurn } from './SpaceTurnList'
 
 /**
@@ -106,7 +107,8 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
     () => {
       if (!sharedRead()) return undefined
       const thread = props.thread()
-      return `${props.spaceRef}\u0000${props.threadId}\u0000${thread?.updated_at ?? thread?.latest_run_updated_at ?? ''}`
+      // DEPTH-WS12-S4-1: an edit or delete the room stream signalled re-keys it too.
+      return `${props.spaceRef}\u0000${props.threadId}\u0000${thread?.updated_at ?? thread?.latest_run_updated_at ?? ''}\u0000${threadTranscriptEpoch(props.threadId)}`
     },
     async (key): Promise<PanelRead> => {
       const [spaceRef = '', threadId = ''] = key.split('\u0000')
@@ -313,6 +315,8 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
                 viewerSubjectId={props.viewerSubjectId}
                 agentName={props.agentName}
                 agents={props.agents}
+                spaceRef={props.spaceRef}
+                threadId={props.threadId}
                 lifecycle={lifecycle}
                 editMaxChars={props.postMaxChars?.()}
               />

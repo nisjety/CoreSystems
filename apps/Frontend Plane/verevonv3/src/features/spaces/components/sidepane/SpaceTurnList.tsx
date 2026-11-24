@@ -13,6 +13,7 @@ import { SpaceArtifactChip } from '../SpaceArtifactChip'
 import { spaceReactionsFrom, spaceRunWorkFrom } from '@/shared/api/spaces-client'
 import type {
   SpaceAgent,
+  SpaceModerationReason,
   SpaceReactionChip,
   SpaceRosterMember,
   SpaceRunWork,
@@ -21,6 +22,7 @@ import type {
 import { SpaceRunWorkSummary } from '../SpaceRunCard'
 import { SpaceMessageEdit } from '../SpaceMessageEdit'
 import { SpaceMessageToolbar } from '../SpaceMessageToolbar'
+import { spaceEntityHref } from '../../lib/space-entity-link'
 import { SpaceReactionBar } from '../SpaceReactionBar'
 import type { SpaceTurnLifecycle } from '../../lib/space-message-lifecycle'
 import { translateApiError, useI18n } from '@/shared/i18n'
@@ -226,6 +228,8 @@ export interface SpaceTurnListProps {
    */
   readonly threads?: () => readonly SpaceThread[]
   readonly threadId?: string
+  /** The Space the rows belong to; with `threadId` it gives each message a Copy link (DEPTH-WS12-S7-1). */
+  readonly spaceRef?: string
   /**
    * When provided, an assistant turn's artifacts render as chips under it and
    * pressing one calls this with the artifact id. Absent (the side pane), the
@@ -347,13 +351,13 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
             setReactBusy(false)
           }
         }
-        const removeTurn = async () => {
+        const removeTurn = async (reason?: SpaceModerationReason) => {
           const lifecycle = props.lifecycle
           if (!lifecycle || busy()) return
           setBusy(true)
           setLifecycleError(undefined)
           try {
-            await lifecycle.remove(turn)
+            await lifecycle.remove(turn, reason)
           } catch (error) {
             setLifecycleError(
               translateApiError(error, i18n.tr, {
@@ -418,7 +422,13 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
                     setLifecycleError(undefined)
                     setEditing(true)
                   }}
-                  onDelete={() => { void removeTurn() }}
+                  onDelete={(reason) => { void removeTurn(reason) }}
+                  linkHref={props.spaceRef && props.threadId && turn.messageId
+                    ? spaceEntityHref({ kind: 'message', spaceRef: props.spaceRef, threadId: props.threadId, messageId: turn.messageId })
+                    : undefined}
+                  canReact={props.lifecycle?.canReact(turn) === true}
+                  reacted={chips().filter((chip) => chip.reacted).map((chip) => chip.emoji)}
+                  onReact={(emoji, present) => { void toggleReaction(emoji, present) }}
                 />
               </Show>
               <Show when={!grouped()}>

@@ -1,5 +1,5 @@
-import { expect, test, type BrowserContext, type Route } from '@playwright/test'
-import { memberContext, requireMembers } from './space-fixtures'
+import { expect, test, type BrowserContext, type Locator, type Page, type Route } from '@playwright/test'
+import { memberContext, requireMembers, requireSpaceRef } from './space-fixtures'
 
 /**
  * F-t1-016 (WS12): direct messages and group DMs in the Spaces sidebar. Member A's seeded storage
@@ -194,6 +194,130 @@ test('muting a DM sends level off and unmuting restores all, not the room defaul
     await (await openMuteItem()).click()
     await expect.poll(() => served.notifyBodies().length).toBe(2)
     expect(served.notifyBodies()[1]).toEqual({ spaceRef: DM.space_ref, body: { level: 'all' } })
+  } finally {
+    await a.close()
+  }
+})
+
+// ---------------------------------------------------------------------------------------------
+// F-t1-017 (WS12-S4..S8): the message lifecycle on the seeded Space (scripts/space-e2e-seed.sh:
+// A owns E2E_SPACE_REF, B is an editor), with the message revise and reactions features on. Real
+// routes, no mocks, and no model run: every message here is a person's own post. A missing fixture
+// skips these on a laptop and fails them under E2E_REQUIRE_SPACE=1.
+//
+// What they pin:
+//  - Edit replaces the text for everyone, marked edited; B's open room re-reads it live from the
+//    content-free `thread.updated` signal (DEPTH-WS12-S4-1), with no reload;
+//  - Delete leaves the tombstone for everyone, and the text is gone;
+//  - the toolbar's quick reaction and Copy link (DEPTH-WS12-S7-1).
+// ---------------------------------------------------------------------------------------------
+
+const LOAD_WAIT = 30_000
+const roomUrl = (ref: string) => `/spaces/${encodeURIComponent(ref)}#chat`
+const composer = (page: Page) => page.getByRole('textbox').first()
+const sendButton = (page: Page) => page.getByRole('button', { name: /^(Send|Send til rommet)$/ })
+
+async function post(page: Page, text: string): Promise<Locator> {
+  await composer(page).fill(text)
+  await sendButton(page).click()
+  const row = page.locator('.verevon-room-turn', { hasText: text }).first()
+  await expect(row).toBeVisible({ timeout: LOAD_WAIT })
+  // The settled row carries the stored message id; only then does it offer the toolbar.
+  await expect(row).toHaveAttribute('data-message-id', /.+/, { timeout: LOAD_WAIT })
+  return row
+}
+
+/** The row's toolbar, shown on hover (a touch screen draws it always). */
+async function toolbarOf(row: Locator): Promise<Locator> {
+  await row.hover()
+  const toolbar = row.getByRole('toolbar', { name: /^(Meldingshandlinger|Message actions)$/ })
+  await expect(toolbar).toBeVisible()
+  return toolbar
+}
+
+test('an edit reaches the author and another member live, marked edited', async ({ browser, baseURL }) => {
+  const ref = requireSpaceRef(test)
+  requireMembers(test, 'A', 'B')
+  const a = await memberContext(browser, baseURL, 'A')
+  const b = await memberContext(browser, baseURL, 'B')
+  try {
+    const marker = `edit-${Date.now().toString(36)}`
+    const pageA = await a.newPage()
+    const pageB = await b.newPage()
+    await pageA.goto(roomUrl(ref))
+    const row = await post(pageA, `Original ${marker}`)
+
+    await pageB.goto(roomUrl(ref))
+    await expect(pageB.getByText(`Original ${marker}`)).toBeVisible({ timeout: LOAD_WAIT })
+
+    await (await toolbarOf(row)).getByRole('button', { name: /^(Rediger|Edit)$/ }).click()
+    const editor = pageA.getByRole('textbox', { name: /^(Rediger melding|Edit message)$/ })
+    await editor.fill(`Rettet ${marker}`)
+    await pageA.getByRole('button', { name: /^(Lagre|Save)$/ }).click()
+
+    await expect(pageA.getByText(`Rettet ${marker}`)).toBeVisible({ timeout: LOAD_WAIT })
+    await expect(pageA.locator('.verevon-room-turn', { hasText: `Rettet ${marker}` }).getByText(/^\((redigert|edited)\)$/)).toBeVisible()
+    // B never reloads: the stream's thread.updated signal re-reads the transcript.
+    await expect(pageB.getByText(`Rettet ${marker}`)).toBeVisible({ timeout: LOAD_WAIT })
+    await expect(pageB.getByText(`Original ${marker}`)).toHaveCount(0)
+  } finally {
+    await a.close()
+    await b.close()
+  }
+})
+
+test('a delete leaves the tombstone for every member and the text is gone', async ({ browser, baseURL }) => {
+  const ref = requireSpaceRef(test)
+  requireMembers(test, 'A', 'B')
+  const a = await memberContext(browser, baseURL, 'A')
+  const b = await memberContext(browser, baseURL, 'B')
+  try {
+    const marker = `delete-${Date.now().toString(36)}`
+    const pageA = await a.newPage()
+    const pageB = await b.newPage()
+    await pageA.goto(roomUrl(ref))
+    const row = await post(pageA, `Slettes ${marker}`)
+    const messageId = await row.getAttribute('data-message-id')
+    await pageB.goto(roomUrl(ref))
+    await expect(pageB.getByText(`Slettes ${marker}`)).toBeVisible({ timeout: LOAD_WAIT })
+
+    await (await toolbarOf(row)).getByRole('button', { name: /^(Slett|Delete)$/ }).click()
+    await pageA.getByRole('button', { name: /^(Bekreft sletting av meldingen|Confirm deleting the message)$/ }).click()
+
+    const tombstone = /^(Meldingen er slettet\.|This message was deleted\.)/
+    await expect(pageA.locator(`.verevon-room-turn[data-message-id="${messageId}"]`).getByText(tombstone)).toBeVisible({ timeout: LOAD_WAIT })
+    await expect(pageA.getByText(`Slettes ${marker}`)).toHaveCount(0)
+    await expect(pageB.locator(`.verevon-room-turn[data-message-id="${messageId}"]`).getByText(tombstone)).toBeVisible({ timeout: LOAD_WAIT })
+    await expect(pageB.getByText(`Slettes ${marker}`)).toHaveCount(0)
+  } finally {
+    await a.close()
+    await b.close()
+  }
+})
+
+test('the toolbar reacts with one press and copies the canonical message link', async ({ browser, baseURL }) => {
+  const ref = requireSpaceRef(test)
+  requireMembers(test, 'A')
+  const a = await memberContext(browser, baseURL, 'A')
+  try {
+    await a.grantPermissions(['clipboard-read', 'clipboard-write'])
+    const marker = `toolbar-${Date.now().toString(36)}`
+    const page = await a.newPage()
+    await page.goto(roomUrl(ref))
+    const row = await post(page, `Verktøylinje ${marker}`)
+    const messageId = (await row.getAttribute('data-message-id')) ?? ''
+
+    const toolbar = await toolbarOf(row)
+    await toolbar.getByRole('button', { name: /^(Reager med|React with) \u{1F44D}$/u }).click()
+    await expect(row.locator('.verevon-reaction-chip[aria-pressed="true"]', { hasText: '\u{1F44D}' })).toBeVisible({ timeout: LOAD_WAIT })
+
+    await (await toolbarOf(row)).getByRole('button', { name: /^(Kopier lenke|Copy link)$/ }).click()
+    await expect(page.getByText(/^(Lenken er kopiert\.|Link copied\.)$/)).toBeVisible()
+    const copied = await page.evaluate(() => navigator.clipboard.readText())
+    const link = new URL(copied)
+    expect(link.pathname).toBe(`/spaces/${encodeURIComponent(ref)}`)
+    expect(link.searchParams.get('m')).toBe(messageId)
+    expect(link.searchParams.get('thread_id')).toBeTruthy()
   } finally {
     await a.close()
   }

@@ -40,6 +40,7 @@ import { postPosition } from '../lib/timeline-anchor'
 import { startAnchoring } from '../lib/timeline-anchor-dom'
 import type { SpaceTimelineStore } from '../lib/space-timeline-store'
 import { threadRevision } from '../lib/space-timeline-store'
+import { threadTranscriptEpoch } from '../lib/space-transcript-epoch'
 import { createVisibilityWatcher } from '../lib/post-visibility'
 import type { PostWatcher } from '../lib/post-visibility'
 import './space-timeline.css'
@@ -646,7 +647,7 @@ function SpaceRoomPost(props: {
     // ids may themselves contain any printable character, including spaces.
     // `undefined` (shared read unavailable) makes no request at all.
     () => props.transcriptEnabled() && !props.timeline
-      ? `${props.spaceRef}\u0000${props.thread.thread_id}\u0000${props.thread.updated_at ?? props.thread.latest_run_updated_at ?? ''}`
+      ? `${props.spaceRef}\u0000${props.thread.thread_id}\u0000${props.thread.updated_at ?? props.thread.latest_run_updated_at ?? ''}\u0000${threadTranscriptEpoch(props.thread.thread_id)}`
       : undefined,
     async (key) => {
       const [spaceRef = '', threadId = ''] = key.split('\u0000')
@@ -1116,6 +1117,7 @@ function SpaceRoomPost(props: {
           agents={props.agents}
           threads={props.threads}
           threadId={props.thread.thread_id}
+          spaceRef={props.spaceRef}
           onOpenArtifact={props.artifactsOn() ? setOpenArtifactId : undefined}
           headMeta={headMeta}
           earlierTurns={earlierTurns}
@@ -1163,7 +1165,10 @@ function SpaceRoomPost(props: {
             {(reply) => (
               <span class="verevon-room-post__summary-last" aria-hidden="true">
                 <strong>{replyAuthorName(reply())}</strong>{' '}
-                {stripMarkdownPreview(reply().content)}
+                {/* DEPTH-WS12-S7-1: a deleted last reply says so instead of drawing a blank line. */}
+                {reply().revisionState === 'deleted'
+                  ? i18n.tr('Meldingen er slettet.', 'This message was deleted.')
+                  : stripMarkdownPreview(reply().content)}
               </span>
             )}
           </Show>

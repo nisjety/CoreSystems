@@ -148,3 +148,126 @@ describe('SpaceMessageToolbar follows the lifecycle rules (WS12-S7)', () => {
     expect(screen.queryByRole('toolbar')).toBeNull()
   })
 })
+
+describe('SpaceMessageToolbar copy link, quick reactions and reason picker (DEPTH-WS12-S7-1)', () => {
+  const HREF = '/spaces/space-1?thread_id=thread-1&m=m-1#chat'
+
+  it('Copy link writes the absolute canonical message link and says so', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    render(() => (
+      <SpaceMessageToolbar canEdit={false} canDelete={false} linkHref={HREF} onEdit={() => {}} onDelete={() => {}} />
+    ))
+    fireEvent.click(screen.getByRole('button', { name: 'Kopier lenke' }))
+    expect(await screen.findByText('Lenken er kopiert.')).toBeTruthy()
+    expect(writeText).toHaveBeenCalledWith(new URL(HREF, window.location.origin).href)
+  })
+
+  it('a failed copy is reported, not swallowed', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('denied'))
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    render(() => (
+      <SpaceMessageToolbar canEdit={false} canDelete={false} linkHref={HREF} onEdit={() => {}} onDelete={() => {}} />
+    ))
+    fireEvent.click(screen.getByRole('button', { name: 'Kopier lenke' }))
+    expect(await screen.findByText('Kunne ikke kopiere lenken.')).toBeTruthy()
+  })
+
+  it('quick reactions add an unused emoji and remove one the viewer already used', () => {
+    const onReact = vi.fn()
+    render(() => (
+      <SpaceMessageToolbar
+        canEdit={false}
+        canDelete={false}
+        canReact
+        reacted={['\u{1F44D}']}
+        onReact={onReact}
+        onEdit={() => {}}
+        onDelete={() => {}}
+      />
+    ))
+    const toolbar = screen.getByRole('toolbar')
+    const thumbs = within(toolbar).getByRole('button', { name: 'Fjern reaksjonen \u{1F44D}' })
+    expect(thumbs.getAttribute('aria-pressed')).toBe('true')
+    fireEvent.click(thumbs)
+    expect(onReact).toHaveBeenLastCalledWith('\u{1F44D}', false)
+    fireEvent.click(within(toolbar).getByRole('button', { name: 'Reager med \u{2764}\u{FE0F}' }))
+    expect(onReact).toHaveBeenLastCalledWith('\u{2764}\u{FE0F}', true)
+  })
+
+  it('offers no quick reactions when the viewer may not react', () => {
+    render(() => (
+      <SpaceMessageToolbar canEdit canDelete={false} canReact={false} onReact={() => {}} onEdit={() => {}} onDelete={() => {}} />
+    ))
+    expect(screen.queryByRole('button', { name: /Reager med/ })).toBeNull()
+  })
+
+  it('a moderator picks the reason, and the confirmed delete carries it', async () => {
+    const onDelete = vi.fn()
+    render(() => (
+      <SpaceMessageToolbar canEdit={false} canDelete moderating onEdit={() => {}} onDelete={onDelete} />
+    ))
+    const picker = screen.getByRole('combobox', { name: 'Årsak til fjerning' }) as HTMLSelectElement
+    expect(picker.value).toBe('other')
+    fireEvent.change(picker, { target: { value: 'spam' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Slett' }))
+    fireEvent.click(await screen.findByRole('button', { name: CONFIRM_DELETE }))
+    expect(onDelete).toHaveBeenCalledWith('spam')
+  })
+
+  it('the author deleting their own message sends no reason and sees no picker', async () => {
+    const onDelete = vi.fn()
+    render(() => <SpaceMessageToolbar canEdit canDelete onEdit={() => {}} onDelete={onDelete} />)
+    expect(screen.queryByRole('combobox')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Slett' }))
+    fireEvent.click(await screen.findByRole('button', { name: CONFIRM_DELETE }))
+    expect(onDelete).toHaveBeenCalledWith(undefined)
+  })
+
+  it('has one Tab stop and moves with the arrow keys, Home and End', async () => {
+    render(() => (
+      <SpaceMessageToolbar canEdit canDelete linkHref={HREF} onEdit={() => {}} onDelete={() => {}} />
+    ))
+    // The single Tab stop is set once the controls are in place (a microtask after render).
+    await Promise.resolve()
+    const copy = screen.getByRole('button', { name: 'Kopier lenke' })
+    const edit = screen.getByRole('button', { name: 'Rediger' })
+    const del = screen.getByRole('button', { name: 'Slett' })
+    expect([copy.tabIndex, edit.tabIndex, del.tabIndex]).toEqual([0, -1, -1])
+    copy.focus()
+    fireEvent.keyDown(copy, { key: 'ArrowRight' })
+    expect(document.activeElement).toBe(edit)
+    expect([copy.tabIndex, edit.tabIndex]).toEqual([-1, 0])
+    fireEvent.keyDown(edit, { key: 'End' })
+    expect(document.activeElement).toBe(del)
+    fireEvent.keyDown(del, { key: 'ArrowRight' })
+    expect(document.activeElement).toBe(copy)
+    fireEvent.keyDown(copy, { key: 'ArrowLeft' })
+    expect(document.activeElement).toBe(del)
+    fireEvent.keyDown(del, { key: 'Home' })
+    expect(document.activeElement).toBe(copy)
+  })
+})
+
+describe('createSpaceTurnLifecycle remove carries the moderation reason (DEPTH-WS12-S7-1)', () => {
+  it("sends the picked reason for someone else's message and none for the author's own", async () => {
+    const calls: string[] = []
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      calls.push(String(input))
+      return new Response(
+        JSON.stringify({ data: { message_id: 'm', revision_state: 'deleted', revision_no: 1, revised_at: null, deduplicated: false } }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const rules = rulesFor('manager', true)
+      await rules.remove(othersTurn, 'harassment')
+      await rules.remove(ownTurn)
+      expect(calls[0]).toContain('moderation_reason=harassment')
+      expect(calls[1]).not.toContain('moderation_reason')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})

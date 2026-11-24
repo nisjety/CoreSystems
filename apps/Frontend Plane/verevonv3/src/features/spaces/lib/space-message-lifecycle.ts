@@ -11,7 +11,7 @@ import {
   newMessageRevisionKey,
   setSpaceReaction,
 } from '@/shared/api/spaces-client'
-import type { SpaceMessagePolicyHints, SpaceReactionChip } from '@/shared/api/spaces-client'
+import type { SpaceMessagePolicyHints, SpaceModerationReason, SpaceReactionChip } from '@/shared/api/spaces-client'
 import { roleRank } from './space-roles'
 
 /** The slice of a turn the rules read. */
@@ -28,7 +28,8 @@ export interface SpaceTurnLifecycle {
   readonly canDelete: (turn: LifecycleTurn) => boolean
   /** Saves new text. Rejects with the ApiError, which the editor words with `translateApiError`. */
   readonly edit: (turn: LifecycleTurn, content: string) => Promise<void>
-  readonly remove: (turn: LifecycleTurn) => Promise<void>
+  /** `reason` is the moderator's pick from the closed set; it is sent only for someone else's message. */
+  readonly remove: (turn: LifecycleTurn, reason?: SpaceModerationReason) => Promise<void>
   /** WS12-S8: a reaction control is offered on this turn (a hint; the server decides). */
   readonly canReact: (turn: LifecycleTurn) => boolean
   /** Adds or removes the viewer's emoji; resolves to the message's chips afterwards. Rejects with the ApiError. */
@@ -115,12 +116,13 @@ export function createSpaceTurnLifecycle(input: SpaceTurnLifecycleInput): SpaceT
       })
       input.onChanged()
     },
-    async remove(turn) {
+    async remove(turn, reason) {
       if (!turn.messageId) throw new Error('message_id_missing')
       await deleteSpaceMessage(input.spaceRef(), input.threadId(), turn.messageId, {
         idempotencyKey: keyFor(turn.messageId, 'delete', ''),
-        // A moderator removing someone else's message says why in the closed set; the author does not.
-        ...(!own(turn) && turn.role === 'user' ? { moderationReason: 'other' as const } : {}),
+        // A moderator removing someone else's message says why in the closed set (the toolbar's
+        // picker, 'other' when none was given); the author does not.
+        ...(!own(turn) && turn.role === 'user' ? { moderationReason: reason ?? ('other' as const) } : {}),
       })
       input.onChanged()
     },

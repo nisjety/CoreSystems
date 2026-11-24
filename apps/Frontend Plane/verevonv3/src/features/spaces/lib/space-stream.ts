@@ -25,6 +25,12 @@ export type SpaceStreamOptions = {
    * stamps the room as heard from at that moment; a closing or error frame does not count.
    */
   onFrame?: () => void
+  /**
+   * DEPTH-WS12-S4-1: the threads whose text changed without a new message (an edit or a delete:
+   * a `thread.updated` frame carrying the closed word `preview`). Handed over with the coalesced
+   * refetch, once per thread, so the page re-reads exactly those transcripts.
+   */
+  onThreadsTouched?: (threadIds: readonly string[]) => void
   /** Injectable for tests. */
   random?: () => number
   now?: () => number
@@ -102,6 +108,7 @@ export function createSpaceStreamController(options: SpaceStreamOptions): SpaceS
   let lastRefetchAt = 0
   let refetchPending = false
   let suspended = false
+  const touchedThreads = new Set<string>()
 
   const isVisible = () => typeof document === 'undefined' || document.visibilityState === 'visible'
 
@@ -133,6 +140,11 @@ export function createSpaceStreamController(options: SpaceStreamOptions): SpaceS
     if (!isVisible()) return // flushed when the tab returns
     refetchPending = false
     lastRefetchAt = now()
+    if (touchedThreads.size > 0) {
+      const ids = [...touchedThreads]
+      touchedThreads.clear()
+      options.onThreadsTouched?.(ids)
+    }
     options.onChange()
   }
 
@@ -235,6 +247,11 @@ export function createSpaceStreamController(options: SpaceStreamOptions): SpaceS
         options.onFrame?.()
         // A `hidden` stub keeps the sequence contiguous and tells us nothing
         // we may see; everything else (including run state) is one refetch.
+        if (data.kind === 'thread.updated') {
+          const refs = asRecord(data.refs)
+          const fields = Array.isArray(refs?.fields) ? refs.fields : []
+          if (typeof refs?.thread_id === 'string' && fields.includes('preview')) touchedThreads.add(refs.thread_id)
+        }
         if (data.kind !== 'hidden') scheduleRefetch()
         return
       }

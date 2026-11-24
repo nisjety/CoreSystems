@@ -66,6 +66,39 @@
   cursor: default;
 }
 
+/* DEPTH-WS12-S7-1: quick reactions, the moderator's reason picker and the Copy link notice. */
+.verevon-message-toolbar__button--emoji {
+  padding: 0 6px;
+  font-size: 14px;
+}
+
+.verevon-message-toolbar__button--emoji[aria-pressed='true'] {
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-text);
+}
+
+.verevon-message-toolbar__reason {
+  min-height: 28px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 6px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text);
+  font-size: 12px;
+}
+
+.verevon-message-toolbar__reason:focus-visible {
+  outline: 2px solid var(--verevon-accent-ink);
+  outline-offset: 1px;
+}
+
+.verevon-message-toolbar__status {
+  align-self: center;
+  padding: 0 6px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .verevon-room-turn__edited {
   margin-left: 6px;
   color: var(--verevon-text-muted);

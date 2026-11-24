@@ -123,6 +123,7 @@ import { registerUnsavedWork } from '@/shared/build/unsaved-work'
 import { hereSentence, readPresence, typingSentence } from '../lib/space-presence'
 import { createSpaceStreamController, type SpaceStreamController, type SpaceStreamState } from '../lib/space-stream'
 import { notifySpacesListChanged } from '../lib/space-list-changed'
+import { bumpThreadTranscriptEpochs } from '../lib/space-transcript-epoch'
 import { SpaceLiveIndicator } from './SpaceLiveIndicator'
 import { SpaceActivityPanel } from './SpaceActivityPanel'
 import { SpaceKnowledgePanel } from './SpaceKnowledgePanel'
@@ -614,6 +615,8 @@ export default function SpacePage() {
         },
         // Every frame that proves the server answers stamps the room, so the live indicator can say how fresh it is.
         onFrame: () => noteRoomFresh(ref),
+        // DEPTH-WS12-S4-1: an edit or delete elsewhere re-reads exactly the touched transcripts.
+        onThreadsTouched: bumpThreadTranscriptEpochs,
       })
       streamController = controller
       controller.start()
