@@ -96,6 +96,17 @@ pub(crate) fn message_floor_sql((floor_rev, floor_at): (&str, &str)) -> String {
     )
 }
 
+/// The floors on one run row `r` (C-PRIO-05): the revision floor on the run's audience stamp and the D18
+/// timestamp floor on its start. `(floor_rev, floor_at)` are the placeholders the query binds the two floors to.
+/// Unlike a message, a run with no audience stamp is HIDDEN under a revision floor (a new path fails closed
+/// toward hiding, d18-room-history-spec). The row must be aliased `r`. With no floor bound it admits every run.
+pub(crate) fn run_floor_sql((floor_rev, floor_at): (&str, &str)) -> String {
+    format!(
+        "({floor_rev}::BIGINT IS NULL OR r.recipient_audience_revision >= {floor_rev}::BIGINT)
+         AND ({floor_at}::TIMESTAMPTZ IS NULL OR r.created_at >= {floor_at}::TIMESTAMPTZ)"
+    )
+}
+
 /// D18: whether an instant (a run's start, an approval's request, an event's time) is inside a
 /// member's timestamp floor. `true` with no floor. This is the Rust copy of the `>= floor` predicate
 /// the SQL applies; reads that hold the instant check it again on the rows they return, so a

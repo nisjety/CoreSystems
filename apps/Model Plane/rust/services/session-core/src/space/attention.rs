@@ -37,7 +37,7 @@ use crate::grpc::{
     compact_thread_text, record_metrics, verify_thread_read_space_decision, THREAD_TITLE_MAX_CHARS,
 };
 use crate::run_phase::{ERROR_CODE_TRAILER, RUN_PHASE_SQL};
-use crate::space::audience_window::message_floor_sql;
+use crate::space::audience_window::{floor_admits_at, message_floor_sql, run_floor_sql};
 
 const MAX_ID_BYTES: usize = 128;
 /// Spaces of one call queried at once.
@@ -180,10 +180,11 @@ fn latest_activity_sql() -> String {
 }
 
 /// Root runs of the Space that are live right now. Parameters: $1 org, $2 Space, $3 ceiling,
-/// $4 window minutes, $5 timestamp floor (D18: a run started before the member's window is not
-/// counted; NULL = no window). Persistent runs only: a zero-retention or waived run leaves no
-/// attention trace.
+/// $4 window minutes, $5 revision floor, $6 timestamp floor (D18: a run started before the
+/// member's window, or stamped below its revision floor, is not counted; NULL = no window).
+/// Persistent runs only: a zero-retention or waived run leaves no attention trace.
 fn working_sql() -> String {
+    let floor = run_floor_sql(("$5", "$6"));
     format!(
         "SELECT count(*)
            FROM runs r
@@ -192,7 +193,7 @@ fn working_sql() -> String {
             AND r.retention_class = 'persistent'
             AND ({RUN_PHASE_SQL}) IN ('queued', 'running', 'awaiting_approval')
             AND r.updated_at > now() - make_interval(mins => $4)
-            AND ($5::TIMESTAMPTZ IS NULL OR r.created_at >= $5::TIMESTAMPTZ)
+            AND {floor}
             AND {THREAD_SCOPE}"
     )
 }
@@ -201,8 +202,12 @@ fn working_sql() -> String {
 /// WS10-S6: the requester for a requester-addressed approval, the named member for a named one.
 /// An `any_editor` or `any_manager` approval is not listed: Session Core cannot see the viewer's
 /// role, so those wait for the role-aware read. Parameters: $1 org, $2 Space, $3 ceiling,
-/// $4 viewer, $5 row cap.
+/// $4 viewer, $5 row cap, $6 revision floor, $7 timestamp floor. Under a history window (D18,
+/// C-PRIO-05) an approval requested before the floor, or on a run started before it or stamped
+/// below the revision floor, is not listed. The floors apply before the cap, so old pre-floor
+/// approvals cannot push a post-floor one out.
 fn pending_sql() -> String {
+    let floor = run_floor_sql(("$6", "$7"));
     format!(
         "SELECT a.id, a.run_id, r.thread_id, a.requested_at, a.kind
            FROM approvals a
@@ -213,6 +218,8 @@ fn pending_sql() -> String {
                  OR (a.addressee_kind = 'named' AND a.addressee_subject_id = $4))
             AND r.space_id = $2
             AND (a.expires_at IS NULL OR a.expires_at > now())
+            AND ($7::TIMESTAMPTZ IS NULL OR a.requested_at >= $7::TIMESTAMPTZ)
+            AND {floor}
             AND {THREAD_SCOPE}
           ORDER BY a.requested_at ASC, a.id ASC
           LIMIT $5"
@@ -337,6 +344,7 @@ impl SpaceAttentionGrpc {
             .bind(&query.space_id)
             .bind(reach.ceiling)
             .bind(WORKING_WINDOW_MINUTES)
+            .bind(reach.floor)
             .bind(reach.floor_at)
             .fetch_one(&mut *tx)
             .await?;
@@ -348,10 +356,15 @@ impl SpaceAttentionGrpc {
             .bind(reach.ceiling)
             .bind(user_id)
             .bind(i64::try_from(MAX_PENDING).unwrap_or(20))
+            .bind(reach.floor)
+            .bind(reach.floor_at)
             .fetch_all(&mut *tx)
             .await?;
         result.pending = pending
             .into_iter()
+            // The SQL already applies the timestamp floor; checked again so a drifted predicate
+            // still cannot list a pre-floor approval.
+            .filter(|(_, _, _, requested_at, _)| floor_admits_at(*requested_at, reach.floor_at))
             .map(|(approval_id, run_id, thread_id, requested_at, kind)| pb::PendingApproval {
                 approval_id,
                 run_id,
@@ -489,8 +502,8 @@ impl SpaceAttentionGrpc {
                     &query.space_id,
                 ) {
                     // D18 (C-PRIO-05): a member with a history window gets attention inside it:
-                    // every query restates both floors, so no pre-floor message, title, author or
-                    // run is counted or named.
+                    // every query restates both floors (messages, runs and approvals), so no
+                    // pre-floor message, title, author, run or approval is counted or named.
                     Ok(Some(read)) => Some(Reach::from_read(read)),
                     Ok(None) | Err(_) => None,
                 }
@@ -783,9 +796,50 @@ mod tests {
     }
 
     #[test]
-    fn a_run_started_before_the_window_is_not_counted_as_working() {
+    fn a_run_started_before_the_window_or_below_its_revision_floor_is_not_counted_as_working() {
         let sql = squash(&working_sql());
-        assert!(sql.contains("($5::TIMESTAMPTZ IS NULL OR r.created_at >= $5::TIMESTAMPTZ)"), "{sql}");
+        assert!(sql.contains("($6::TIMESTAMPTZ IS NULL OR r.created_at >= $6::TIMESTAMPTZ)"), "{sql}");
+        assert!(
+            sql.contains("($5::BIGINT IS NULL OR r.recipient_audience_revision >= $5::BIGINT)"),
+            "the revision floor (a since_join room) applies to runs too: {sql}"
+        );
+        // Fail closed toward hiding: unlike a message, an unstamped run is not let through a floor.
+        assert!(!sql.contains("r.recipient_audience_revision IS NULL"), "{sql}");
+    }
+
+    #[test]
+    fn a_pending_approval_before_the_window_or_on_a_pre_window_run_is_not_listed() {
+        let sql = squash(&pending_sql());
+        for required in [
+            "($7::TIMESTAMPTZ IS NULL OR a.requested_at >= $7::TIMESTAMPTZ)",
+            "($7::TIMESTAMPTZ IS NULL OR r.created_at >= $7::TIMESTAMPTZ)",
+            "($6::BIGINT IS NULL OR r.recipient_audience_revision >= $6::BIGINT)",
+        ] {
+            assert!(sql.contains(required), "{required}: {sql}");
+        }
+        // The floors filter BEFORE the cap, so old pre-window approvals cannot fill it.
+        let floor_at = sql.find("a.requested_at >= $7").expect("floor");
+        let limit = sql.find("LIMIT $5").expect("cap");
+        assert!(floor_at < limit, "{sql}");
+    }
+
+    #[test]
+    fn the_run_floor_admits_every_run_without_a_window_and_hides_an_unstamped_one_under_one() {
+        let sql = squash(&crate::space::audience_window::run_floor_sql(("$1", "$2")));
+        assert_eq!(
+            sql,
+            "($1::BIGINT IS NULL OR r.recipient_audience_revision >= $1::BIGINT) \
+             AND ($2::TIMESTAMPTZ IS NULL OR r.created_at >= $2::TIMESTAMPTZ)"
+        );
+    }
+
+    #[test]
+    fn the_rust_check_on_pending_drops_a_pre_window_approval_even_if_the_sql_drifted() {
+        let floor = DateTime::parse_from_rfc3339("2026-11-18T09:30:00Z").expect("floor").with_timezone(&Utc);
+        let before = floor - chrono::Duration::seconds(1);
+        assert!(!floor_admits_at(before, Some(floor)));
+        assert!(floor_admits_at(floor, Some(floor)));
+        assert!(floor_admits_at(before, None), "no window, nothing hidden");
     }
 
     #[test]
@@ -1585,6 +1639,63 @@ mod tests {
         assert_eq!(working(CEILING).await, 3);
         assert_eq!(working(5).await, 4);
         clean(&pool, &org, &[space.as_str(), elsewhere.as_str()]).await;
+    }
+
+    /// C-PRIO-05 (D18): a member with a history window counts no run started before it and is
+    /// listed no approval requested before it or waiting on a run started before it.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs)"]
+    async fn a_windowed_member_sees_no_pre_window_run_or_approval() {
+        let Some(pool) = connect().await else { return };
+        let _keys = StreamKeysEnv::publish();
+        let (org, space) = ids("window");
+        let now = now_ms();
+        let id = |name: &str| format!("{name}-{space}");
+        let thread = id("thread");
+        thread_at(&pool, &org, &space, &thread, "owner-1", 1, ago(now, 10)).await;
+        let (old_run, new_run) = (id("run-old"), id("run-new"));
+        seed_space_run(&pool, &org, &space, &thread, &old_run, "queued", "persistent").await;
+        seed_space_run(&pool, &org, &space, &thread, &new_run, "queued", "persistent").await;
+        // The old run started two hours ago but still moves, so without a window it is working.
+        sqlx::query("UPDATE runs SET created_at = $2, updated_at = now() WHERE id = $1")
+            .bind(&old_run)
+            .bind(ago(now, 7200))
+            .execute(&pool)
+            .await
+            .expect("age the run's start");
+        let (a_before, a_old_run, a_inside) = (id("a-before"), id("a-old-run"), id("a-inside"));
+        approval(&pool, &org, requested(&a_before, &new_run, VIEWER, ago(now, 7000))).await;
+        approval(&pool, &org, requested(&a_old_run, &old_run, VIEWER, ago(now, 90))).await;
+        approval(&pool, &org, requested(&a_inside, &new_run, VIEWER, ago(now, 60))).await;
+
+        let floor = ago(now, 3600);
+        let windowed = query(
+            &space,
+            mint(
+                "model-plane",
+                &["thread:read"],
+                false,
+                |claims| {
+                    stamp(claims, &org, VIEWER, &space, CEILING);
+                    claims["history_floor_at"] = json!(floor.to_rfc3339());
+                },
+                false,
+            ),
+        );
+        let pending_ids = |result: &pb::SpaceAttentionResult| {
+            result.pending.iter().map(|approval| approval.approval_id.clone()).collect::<Vec<_>>()
+        };
+
+        let whole = attend(&pool, &org, VIEWER, pb::UnreadRule::LastAuthor, vec![ask_for(&org, VIEWER, &space, CEILING, 0)]).await;
+        assert_eq!(whole[0].status, pb::AttentionStatus::Ok as i32);
+        assert_eq!(whole[0].working_runs, 2, "without a window both runs work");
+        assert_eq!(pending_ids(&whole[0]), [a_before.clone(), a_old_run.clone(), a_inside.clone()]);
+
+        let inside = attend(&pool, &org, VIEWER, pb::UnreadRule::LastAuthor, vec![windowed]).await;
+        assert_eq!(inside[0].status, pb::AttentionStatus::Ok as i32, "a window narrows, it never denies");
+        assert_eq!(inside[0].working_runs, 1, "the run started before the window is not counted");
+        assert_eq!(pending_ids(&inside[0]), [a_inside.clone()]);
+        clean(&pool, &org, &[space.as_str()]).await;
     }
 
     #[tokio::test]
