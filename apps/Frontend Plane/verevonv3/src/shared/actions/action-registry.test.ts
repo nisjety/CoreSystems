@@ -1538,6 +1538,15 @@ describe('action registry', () => {
     expect(isModelExecutableAction('spaces.join_room')).toBe(false)
     expect(isModelExecutableAction('spaces.update_room_settings')).toBe(false)
     expect(settings?.inputSchema.safeParse({ spaceRef: 'space-1', visibility: 'org_public' }).success).toBe(true)
+    // WS04-S7: archiving and restoring a room are human-only, and take the room alone.
+    const archive = getActionDescriptor('spaces.archive_room')
+    const unarchive = getActionDescriptor('spaces.unarchive_room')
+    expect(archive?.ownerPlane).toBe('control')
+    expect(unarchive?.ownerPlane).toBe('control')
+    expect(isModelExecutableAction('spaces.archive_room')).toBe(false)
+    expect(isModelExecutableAction('spaces.unarchive_room')).toBe(false)
+    expect(archive?.inputSchema.safeParse({ spaceRef: 'space-1' }).success).toBe(true)
+    expect(unarchive?.inputSchema.safeParse({}).success).toBe(false)
     // A self-join receives a viewer or an editor, never a manager or an owner.
     expect(settings?.inputSchema.safeParse({ spaceRef: 'space-1', joinRole: 'editor' }).success).toBe(true)
     expect(settings?.inputSchema.safeParse({ spaceRef: 'space-1', joinRole: 'manager' }).success).toBe(false)
@@ -1900,7 +1909,8 @@ describe('action registry', () => {
     // WS18-S5 +1 (spaces.set_agent_self_api), W3-DEC-ORGAGENT +3 (spaces.suspend_org_agent, spaces.reactivate_org_agent,
     // spaces.retire_org_agent), WS19-S4 +2 (spaces.save_canvas, spaces.restore_canvas_version), WS20-S5 +1 (spaces.browser_run.start).
     // +1 after D18 registered spaces.set_member_history_window, the room admin's per-member history window (398 + 1 = 399).
-    expect(ids).toHaveLength(399)
+    // +2 after WS04-S7 registered spaces.archive_room and spaces.unarchive_room, the room archive pair (399 + 2 = 401).
+    expect(ids).toHaveLength(401)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

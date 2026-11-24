@@ -7,12 +7,18 @@ import type { SpaceRosterMember } from '@/shared/api/spaces-client'
 const spacesClient = vi.hoisted(() => ({
   searchSpaceMessages: vi.fn(() => new Promise(() => {})),
   updateSpaceRoomDetails: vi.fn(),
-  archiveSpaceRoom: vi.fn(),
-  unarchiveSpaceRoom: vi.fn(),
 }))
 vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
   ...spacesClient,
+}))
+
+// WS04-S7: archive and restore go through the action registry, so the writes are read at this seam.
+const roomArchive = vi.hoisted(() => ({
+  setSpaceRoomArchived: vi.fn(),
+}))
+vi.mock('../lib/space-room-archive', () => ({
+  setSpaceRoomArchived: roomArchive.setSpaceRoomArchived,
 }))
 
 const { SpaceRoomHeader, headerPeople, memberTint, HEADER_AVATAR_LIMIT } = await import('./SpaceRoomHeader')
@@ -54,6 +60,8 @@ function renderHeader(overrides: Overrides = {}) {
     <SpaceRoomHeader
       spaceRef="room_1"
       name="Innkjøp"
+      orgId="org_1"
+      actorId="user_1"
       topic={'topic' in overrides ? overrides.topic : 'Ukentlig oppfølging av innkjøp'}
       kind={overrides.kind ?? 'room'}
       lifecycle="active"
@@ -81,10 +89,11 @@ const openDetails = () => {
 
 beforeEach(() => {
   spacesClient.updateSpaceRoomDetails.mockReset()
-  spacesClient.archiveSpaceRoom.mockReset()
-  spacesClient.unarchiveSpaceRoom.mockReset()
-  spacesClient.archiveSpaceRoom.mockResolvedValue({ state: 'archived', changed: true, archivedAt: '2026-10-31T09:30:00Z' })
-  spacesClient.unarchiveSpaceRoom.mockResolvedValue({ state: 'active', changed: true, archivedAt: null })
+  roomArchive.setSpaceRoomArchived.mockReset()
+  roomArchive.setSpaceRoomArchived.mockImplementation(async (_spaceRef: string, _actor: unknown, archive: boolean) =>
+    archive
+      ? { state: 'archived', changed: true, archivedAt: '2026-10-31T09:30:00Z' }
+      : { state: 'active', changed: true, archivedAt: null })
 })
 
 afterEach(() => cleanup())
@@ -210,6 +219,13 @@ describe('SpaceRoomHeader (U4)', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
   })
 
+  it('the organization room shows no topic in the header or the panel, even a stored one (D22e)', () => {
+    renderHeader({ isOrganizationRoom: true })
+    expect(document.querySelector('.verevon-space-header__topic')).toBeNull()
+    openDetails()
+    expect(document.querySelector('.verevon-space-details__topic')).toBeNull()
+  })
+
   it('an empty topic draws no topic paragraph in the header or the panel', () => {
     renderHeader({ topic: '   ' })
     expect(document.querySelector('.verevon-space-header__topic')).toBeNull()
@@ -225,11 +241,13 @@ describe('SpaceRoomHeader archive (U4)', () => {
     openDetails()
     fireEvent.click(screen.getByRole('button', { name: 'Arkiver rommet' }))
     flush()
-    expect(spacesClient.archiveSpaceRoom).not.toHaveBeenCalled()
+    expect(roomArchive.setSpaceRoomArchived).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: 'Bekreft arkivering av rommet' }))
-    await waitFor(() => expect(spacesClient.archiveSpaceRoom).toHaveBeenCalledTimes(1))
-    expect(spacesClient.archiveSpaceRoom.mock.calls[0]?.[0]).toBe('room_1')
-    expect(spacesClient.archiveSpaceRoom.mock.calls[0]?.[1]).toMatchObject({ idempotencyKey: expect.stringMatching(/^space-archive:/) })
+    await waitFor(() => expect(roomArchive.setSpaceRoomArchived).toHaveBeenCalledTimes(1))
+    expect(roomArchive.setSpaceRoomArchived.mock.calls[0]?.[0]).toBe('room_1')
+    expect(roomArchive.setSpaceRoomArchived.mock.calls[0]?.[1]).toEqual({ type: 'human', userId: 'user_1', orgId: 'org_1' })
+    expect(roomArchive.setSpaceRoomArchived.mock.calls[0]?.[2]).toBe(true)
+    expect(roomArchive.setSpaceRoomArchived.mock.calls[0]?.[3]).toMatchObject({ idempotencyKey: expect.stringMatching(/^space-archive:/) })
     await waitFor(() => expect(onArchiveChanged).toHaveBeenCalledTimes(1))
   })
 
@@ -262,14 +280,15 @@ describe('SpaceRoomHeader archive (U4)', () => {
     expect(within(dialog).queryByRole('button', { name: 'Arkiver rommet' })).toBeNull()
     expect(within(dialog).queryByRole('button', { name: 'Rediger navn og emne' })).toBeNull()
     fireEvent.click(within(dialog).getByRole('button', { name: 'Fjern arkivering' }))
-    await waitFor(() => expect(spacesClient.unarchiveSpaceRoom).toHaveBeenCalledTimes(1))
-    expect(spacesClient.unarchiveSpaceRoom.mock.calls[0]?.[1]).toMatchObject({ idempotencyKey: expect.stringMatching(/^space-unarchive:/) })
+    await waitFor(() => expect(roomArchive.setSpaceRoomArchived).toHaveBeenCalledTimes(1))
+    expect(roomArchive.setSpaceRoomArchived.mock.calls[0]?.[2]).toBe(false)
+    expect(roomArchive.setSpaceRoomArchived.mock.calls[0]?.[3]).toMatchObject({ idempotencyKey: expect.stringMatching(/^space-unarchive:/) })
     await waitFor(() => expect(onArchiveChanged).toHaveBeenCalledTimes(1))
   })
 
   it('says why when the server refuses, and does not report a change', async () => {
     const onArchiveChanged = vi.fn()
-    spacesClient.archiveSpaceRoom.mockRejectedValue(
+    roomArchive.setSpaceRoomArchived.mockRejectedValue(
       Object.assign(new Error('rate'), { status: 429, code: 'rate_limited', details: { retry_after_seconds: 12 } }),
     )
     renderHeader({ onArchiveChanged })

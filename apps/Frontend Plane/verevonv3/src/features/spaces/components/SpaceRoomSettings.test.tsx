@@ -24,6 +24,7 @@ type Overrides = Partial<{
   name: string
   topic: string | null | undefined
   onSaved: (details: unknown) => void
+  isOrganizationRoom: boolean
 }>
 
 // No I18nProvider wraps these renders, so the copy is the Norwegian default, as in the page tests.
@@ -37,6 +38,7 @@ function renderSettings(overrides: Overrides = {}) {
       kind={overrides.kind ?? 'room'}
       lifecycle={overrides.lifecycle ?? 'active'}
       enabled={overrides.enabled ?? true}
+      isOrganizationRoom={overrides.isOrganizationRoom ?? false}
       onSaved={overrides.onSaved as never}
     />
   ))
@@ -105,6 +107,12 @@ describe('SpaceRoomSettings visibility (WS04-S2)', () => {
   it('is absent with the flag off', () => {
     renderSettings({ enabled: false })
     expect(editButton()).toBeNull()
+  })
+
+  it('is absent for the organization room: its name and topic follow the organization (D22e)', () => {
+    renderSettings({ isOrganizationRoom: true })
+    expect(editButton()).toBeNull()
+    expect(document.querySelector('.verevon-space-room-settings')).toBeNull()
   })
 
   it('opens with the stored name and topic, and an empty topic when there is none', () => {
@@ -269,7 +277,7 @@ describe('SpaceRoomSettings refusals (WS04-S2)', () => {
     const cases: Array<[number, string, string]> = [
       [403, 'room_role_forbidden', 'Rollen din i dette rommet tillater ikke dette.'],
       [409, 'room_not_active', 'Rommet er ikke aktivt, så navn og emne kan ikke endres.'],
-      [409, 'space_kind_not_editable', 'Navn og emne kan bare endres på et vanlig rom, ikke på et personlig rom.'],
+      [409, 'space_kind_not_editable', 'Navn og emne kan ikke endres for dette rommet.'],
       [503, 'room_details_unavailable', 'Navnet og emnet kunne ikke lagres. Ingenting er endret. Prøv igjen om litt.'],
       [404, 'feature_disabled', 'Denne funksjonen er ikke slått på for deg ennå.'],
     ]

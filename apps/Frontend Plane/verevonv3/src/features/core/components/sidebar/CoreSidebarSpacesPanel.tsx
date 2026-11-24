@@ -20,6 +20,7 @@ import { createResource } from '@/shared/lib/create-resource-compat'
 import { getSession } from '@/shared/session/session-store'
 import { narrateSidebarMove } from '@/features/spaces/lib/space-narration'
 import { spaceDisplayName } from '@/features/spaces/lib/space-name'
+import { onSpacesListChanged } from '@/features/spaces/lib/space-list-changed'
 import { buildSidebarModel, type SidebarModelSection } from '@/features/spaces/lib/space-sidebar-organization'
 import {
   createSpaceSidebarStore,
@@ -88,6 +89,8 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
       return []
     }
   })
+  // DEPTH-WS04-S2-1: a room renamed or retitled on its page is read again here, not left under its old name.
+  onCleanup(onSpacesListChanged(() => void refetchSpaces()))
   const [creatingRoom, setCreatingRoom] = createSignal(false)
   const [createRoomError, setCreateRoomError] = createSignal('')
   const [roomFormOpen, setRoomFormOpen] = createSignal(false)

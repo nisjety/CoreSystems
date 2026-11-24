@@ -10,6 +10,7 @@ import { createResource } from '@/shared/lib/create-resource-compat'
 import { Loader2 } from '@/shared/icons'
 import { useI18n } from '@/shared/i18n'
 import { Redirect } from '@/shared/ui/Redirect'
+import { onSpacesListChanged } from '../lib/space-list-changed'
 
 /**
  * Entry point for `/spaces`, so the sidebar has something to link to.
@@ -57,6 +58,8 @@ const REGISTRATION_POLL_INTERVAL_MS = 2_500
 export default function SpacesIndexPage() {
   const i18n = useI18n()
   const [spaces, { refetch }] = createResource(listSpaces)
+  // DEPTH-WS04-S2-1: a room renamed on its page is read again here, not left under its old name.
+  onCleanup(onSpacesListChanged(() => void refetch()))
   const [creating, setCreating] = createSignal(false)
   const [createError, setCreateError] = createSignal('')
   const [provisioning, setProvisioning] = createSignal<OrgRoomProvisioning>('idle')

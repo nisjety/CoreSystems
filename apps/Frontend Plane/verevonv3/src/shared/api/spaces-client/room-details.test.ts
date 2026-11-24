@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiError } from '../http'
-import { archiveSpaceRoom, unarchiveSpaceRoom, updateSpaceRoomDetails } from './room-details'
+import { archiveSpaceRoom, spaceRoomArchiveFrom, unarchiveSpaceRoom, updateSpaceRoomDetails } from './room-details'
 
 type FetchCall = { url: string; init: RequestInit }
 
@@ -132,5 +132,34 @@ describe('archiveSpaceRoom and unarchiveSpaceRoom', () => {
     const error = await archiveSpaceRoom('room').catch((caught: unknown) => caught)
     expect(error).toBeInstanceOf(ApiError)
     expect((error as ApiError).details).toMatchObject({ retry_after_seconds: 12 })
+  })
+})
+
+describe('spaceRoomArchiveFrom (WS04-S7 action result)', () => {
+  it('reads the gateway data of spaces.archive_room and spaces.unarchive_room', () => {
+    expect(spaceRoomArchiveFrom({ state: 'archived', changed: true, archived_at: '2026-10-31T09:30:00Z' })).toEqual({
+      state: 'archived',
+      changed: true,
+      archivedAt: '2026-10-31T09:30:00Z',
+    })
+    expect(spaceRoomArchiveFrom({ state: 'active', changed: false, archived_at: null })).toEqual({
+      state: 'active',
+      changed: false,
+      archivedAt: null,
+    })
+  })
+
+  it('fails closed on anything outside the contract: no state is shown that was not read', () => {
+    for (const value of [
+      null,
+      'archived',
+      [],
+      { changed: true, archived_at: null },
+      { state: 'deleted', changed: true, archived_at: null },
+      { state: 'archived', changed: 'yes', archived_at: null },
+      { state: 'archived', changed: true, archived_at: 7 },
+    ]) {
+      expect(() => spaceRoomArchiveFrom(value), JSON.stringify(value)).toThrow('invalid_room_archive_response')
+    }
   })
 })

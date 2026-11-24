@@ -82,3 +82,28 @@ export function archiveSpaceRoom(spaceRef: string, options: { readonly idempoten
 export function unarchiveSpaceRoom(spaceRef: string, options: { readonly idempotencyKey?: string } = {}) {
   return postRoomArchive(spaceRef, 'unarchive', options.idempotencyKey)
 }
+
+const INVALID_ROOM_ARCHIVE_REPLY = 'invalid_room_archive_response'
+
+/**
+ * WS04-S7: reads the result of `spaces.archive_room` and `spaces.unarchive_room`, which is the gateway's `data`:
+ * `{state, changed, archived_at}`. Anything outside that shape throws, so the caller shows its error and does not
+ * claim a state it did not read.
+ */
+export function spaceRoomArchiveFrom(value: unknown): SpaceRoomArchiveResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(INVALID_ROOM_ARCHIVE_REPLY)
+  const row = value as Record<string, unknown>
+  const rawState = row.state
+  const state = rawState === 'archived' || rawState === 'active' ? rawState : null
+  const changed = row.changed
+  const archivedAt = row.archived_at
+  if (state === null || typeof changed !== 'boolean') throw new Error(INVALID_ROOM_ARCHIVE_REPLY)
+  if (archivedAt !== null && archivedAt !== undefined && typeof archivedAt !== 'string') {
+    throw new Error(INVALID_ROOM_ARCHIVE_REPLY)
+  }
+  return {
+    state,
+    changed,
+    archivedAt: typeof archivedAt === 'string' && archivedAt !== '' ? archivedAt : null,
+  }
+}

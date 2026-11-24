@@ -58,6 +58,9 @@ export interface SpaceRoomHeaderProps {
   readonly onOpenMembers: () => void
   readonly onSaved?: (details: SpaceRoomDetails) => void
   readonly onArchiveChanged?: () => void
+  /** The session's organization and person, for the archive action (WS04-S7). */
+  readonly orgId?: string
+  readonly actorId?: string
 }
 
 /**
@@ -73,7 +76,8 @@ export function SpaceRoomHeader(props: SpaceRoomHeaderProps) {
   let trigger: HTMLButtonElement | undefined
 
   const people = () => headerPeople(props.roster ?? [])
-  const topic = () => props.topic?.trim() ?? ''
+  // D22e: the organization room's name and topic follow the organization, so the header shows no topic for it.
+  const topic = () => (props.isOrganizationRoom === true ? '' : (props.topic?.trim() ?? ''))
   const canArchive = () =>
     canArchiveRoom({
       role: props.role,
@@ -232,6 +236,8 @@ export function SpaceRoomHeader(props: SpaceRoomHeaderProps) {
               <Show when={canArchive()}>
                 <SpaceRoomArchiveControl
                   spaceRef={props.spaceRef}
+                  orgId={props.orgId}
+                  actorId={props.actorId}
                   archived={props.archived}
                   onChanged={props.onArchiveChanged}
                 />

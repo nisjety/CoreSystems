@@ -3,12 +3,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const spacesClient = vi.hoisted(() => ({
   searchSpaceMessages: vi.fn(() => new Promise(() => {})),
-  archiveSpaceRoom: vi.fn(),
-  unarchiveSpaceRoom: vi.fn(),
 }))
 vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
   ...spacesClient,
+}))
+
+// WS04-S7: archive and restore go through the action registry, so the writes are read at this seam.
+const roomArchive = vi.hoisted(() => ({
+  setSpaceRoomArchived: vi.fn(),
+}))
+vi.mock('../lib/space-room-archive', () => ({
+  setSpaceRoomArchived: roomArchive.setSpaceRoomArchived,
 }))
 
 const { SpaceArchivedBanner, SpaceArchivedNotice, archiveErrorCopy, canArchiveRoom } = await import('./SpaceRoomArchive')
@@ -17,9 +23,8 @@ const { SpaceArchivedBanner, SpaceArchivedNotice, archiveErrorCopy, canArchiveRo
 const tr = (no: string) => no
 
 beforeEach(() => {
-  spacesClient.archiveSpaceRoom.mockReset()
-  spacesClient.unarchiveSpaceRoom.mockReset()
-  spacesClient.unarchiveSpaceRoom.mockResolvedValue({ state: 'active', changed: true, archivedAt: null })
+  roomArchive.setSpaceRoomArchived.mockReset()
+  roomArchive.setSpaceRoomArchived.mockResolvedValue({ state: 'active', changed: true, archivedAt: null })
 })
 
 afterEach(() => cleanup())
@@ -70,29 +75,40 @@ describe('archiveErrorCopy', () => {
 
 describe('SpaceArchivedBanner', () => {
   it('says the room is archived and that reads still work', () => {
-    render(() => <SpaceArchivedBanner spaceRef="room_1" canUnarchive={false} />)
+    render(() => <SpaceArchivedBanner spaceRef="room_1" orgId="org_1" actorId="user_1" canUnarchive={false} />)
     expect(screen.getByRole('status').textContent).toContain('Rommet er arkivert')
     expect(screen.getByRole('status').textContent).toContain('Du kan lese alt')
   })
 
   it('offers Unarchive only to someone who may, and reports the change', async () => {
     const onChanged = vi.fn()
-    render(() => <SpaceArchivedBanner spaceRef="room_1" canUnarchive onChanged={onChanged} />)
+    render(() => <SpaceArchivedBanner spaceRef="room_1" orgId="org_1" actorId="user_1" canUnarchive onChanged={onChanged} />)
     fireEvent.click(screen.getByRole('button', { name: 'Fjern arkivering' }))
-    await waitFor(() => expect(spacesClient.unarchiveSpaceRoom).toHaveBeenCalledTimes(1))
-    expect(spacesClient.unarchiveSpaceRoom.mock.calls[0]?.[0]).toBe('room_1')
+    await waitFor(() => expect(roomArchive.setSpaceRoomArchived).toHaveBeenCalledTimes(1))
+    const [spaceRef, actor, archive, options] = roomArchive.setSpaceRoomArchived.mock.calls[0] ?? []
+    expect(spaceRef).toBe('room_1')
+    expect(actor).toEqual({ type: 'human', userId: 'user_1', orgId: 'org_1' })
+    expect(archive).toBe(false)
+    expect(options).toMatchObject({ idempotencyKey: expect.stringMatching(/^space-unarchive:/) })
     await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1))
   })
 
   it('has no button for a member who may not unarchive', () => {
-    render(() => <SpaceArchivedBanner spaceRef="room_1" canUnarchive={false} />)
+    render(() => <SpaceArchivedBanner spaceRef="room_1" orgId="org_1" actorId="user_1" canUnarchive={false} />)
     expect(screen.queryByRole('button')).toBeNull()
   })
 
+  it('sends nothing without the session organization and person', async () => {
+    render(() => <SpaceArchivedBanner spaceRef="room_1" canUnarchive />)
+    fireEvent.click(screen.getByRole('button', { name: 'Fjern arkivering' }))
+    expect((await screen.findByRole('alert')).textContent).toContain('Ingenting er endret')
+    expect(roomArchive.setSpaceRoomArchived).not.toHaveBeenCalled()
+  })
+
   it('shows the refusal and leaves the banner up', async () => {
-    spacesClient.unarchiveSpaceRoom.mockRejectedValue(Object.assign(new Error('x'), { status: 403, code: 'room_role_forbidden' }))
+    roomArchive.setSpaceRoomArchived.mockRejectedValue(Object.assign(new Error('x'), { status: 403, code: 'room_role_forbidden' }))
     const onChanged = vi.fn()
-    render(() => <SpaceArchivedBanner spaceRef="room_1" canUnarchive onChanged={onChanged} />)
+    render(() => <SpaceArchivedBanner spaceRef="room_1" orgId="org_1" actorId="user_1" canUnarchive onChanged={onChanged} />)
     fireEvent.click(screen.getByRole('button', { name: 'Fjern arkivering' }))
     expect((await screen.findByRole('alert')).textContent).toContain('Rollen din')
     expect(onChanged).not.toHaveBeenCalled()
@@ -100,12 +116,12 @@ describe('SpaceArchivedBanner', () => {
 
   it('does not fire a second call while the first is in flight', async () => {
     let finish!: (value: unknown) => void
-    spacesClient.unarchiveSpaceRoom.mockReturnValue(new Promise((resolve) => { finish = resolve }))
-    render(() => <SpaceArchivedBanner spaceRef="room_1" canUnarchive />)
+    roomArchive.setSpaceRoomArchived.mockReturnValue(new Promise((resolve) => { finish = resolve }))
+    render(() => <SpaceArchivedBanner spaceRef="room_1" orgId="org_1" actorId="user_1" canUnarchive />)
     const button = screen.getByRole('button', { name: 'Fjern arkivering' })
     fireEvent.click(button)
     fireEvent.click(button)
-    expect(spacesClient.unarchiveSpaceRoom).toHaveBeenCalledTimes(1)
+    expect(roomArchive.setSpaceRoomArchived).toHaveBeenCalledTimes(1)
     finish({ state: 'active', changed: true, archivedAt: null })
   })
 })

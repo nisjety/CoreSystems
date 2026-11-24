@@ -1,9 +1,9 @@
 import { createSignal, Show } from 'solid-js'
 
 import { Lock } from '@/shared/icons'
-import { archiveSpaceRoom, unarchiveSpaceRoom } from '@/shared/api/spaces-client'
 import { translateApiError, useI18n } from '@/shared/i18n'
 
+import { setSpaceRoomArchived } from '../lib/space-room-archive'
 import { SpaceConfirmButton } from './SpaceConfirmButton'
 
 /**
@@ -69,8 +69,16 @@ export function archiveErrorCopy(
     : { no: 'Arkiveringen kunne ikke fjernes. Ingenting er endret.', en: 'The room could not be unarchived. Nothing was changed.' })
 }
 
-/** One archive or unarchive call with its busy and error state, shared by the details panel and the banner. */
-function createArchiveAction(props: { readonly spaceRef: string; readonly onChanged?: () => void }) {
+/**
+ * One archive or unarchive call with its busy and error state, shared by the details panel and the banner. The call
+ * goes through the action registry (`spaces.archive_room` / `spaces.unarchive_room`) as the session's person.
+ */
+function createArchiveAction(props: {
+  readonly spaceRef: string
+  readonly orgId?: string
+  readonly actorId?: string
+  readonly onChanged?: () => void
+}) {
   const i18n = useI18n()
   const [busy, setBusy] = createSignal(false)
   const [error, setError] = createSignal('')
@@ -87,8 +95,14 @@ function createArchiveAction(props: { readonly spaceRef: string; readonly onChan
       // A fresh key per click: a retry after a failure is a new intent, and the key only has to
       // make one click safe against a duplicated request.
       const options = { idempotencyKey: `space-${action}:${crypto.randomUUID()}` }
-      if (action === 'archive') await archiveSpaceRoom(props.spaceRef, options)
-      else await unarchiveSpaceRoom(props.spaceRef, options)
+      // Nothing is sent without the session's organization and person: the gateway would refuse it anyway.
+      if (!props.orgId || !props.actorId) throw new Error('missing_session')
+      await setSpaceRoomArchived(
+        props.spaceRef,
+        { type: 'human', userId: props.actorId, orgId: props.orgId },
+        action === 'archive',
+        options,
+      )
       props.onChanged?.()
     } catch (err) {
       setError(archiveErrorCopy(err, i18n.tr, action))
@@ -103,6 +117,9 @@ function createArchiveAction(props: { readonly spaceRef: string; readonly onChan
 
 export interface SpaceRoomArchiveControlProps {
   readonly spaceRef: string
+  /** The session's organization and person, the actor the action registry checks. */
+  readonly orgId?: string
+  readonly actorId?: string
   readonly archived: boolean
   /** Called after the server accepted the change, so the page can re-read the room. */
   readonly onChanged?: () => void
@@ -153,6 +170,9 @@ export function SpaceRoomArchiveControl(props: SpaceRoomArchiveControlProps) {
 
 export interface SpaceArchivedBannerProps {
   readonly spaceRef: string
+  /** The session's organization and person, the actor the action registry checks. */
+  readonly orgId?: string
+  readonly actorId?: string
   /** Owner or manager of a room that can be archived: only they are offered the way back. */
   readonly canUnarchive: boolean
   readonly onChanged?: () => void

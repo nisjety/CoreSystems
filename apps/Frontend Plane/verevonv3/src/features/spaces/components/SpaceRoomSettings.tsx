@@ -40,7 +40,7 @@ export interface SpaceRoomSettingsProps {
   readonly onSaved?: (details: SpaceRoomDetails) => void
   /** WS04-S8: the room's `features.room_directory`. Absent or off, the visibility block does not render. */
   readonly directoryEnabled?: boolean
-  /** The organization room follows the organization and is never opened or closed here. */
+  /** The organization room follows the organization: it is never opened, closed or renamed here (D22e). */
   readonly isOrganizationRoom?: boolean
   /** Control's current visibility and self-join role. Absent on an older Control: shown as unknown. */
   readonly visibility?: string | null
@@ -64,11 +64,14 @@ export function SpaceRoomSettings(props: SpaceRoomSettingsProps) {
   const [busy, setBusy] = createSignal(false)
   const [error, setError] = createSignal('')
 
+  // D22e (W1-Q2, ruled): the organization room's name and topic follow the organization, so no one is offered them
+  // there. Application refuses the write as well (space_kind_not_editable).
   const visible = () =>
     props.enabled
     && props.archived !== true
     && props.kind === 'room'
     && props.lifecycle === 'active'
+    && props.isOrganizationRoom !== true
     && canEditRoomDetails(props.role)
 
   function begin() {

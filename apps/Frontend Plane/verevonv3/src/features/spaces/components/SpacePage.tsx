@@ -122,6 +122,7 @@ import { ApiError } from '@/shared/api/api-error'
 import { registerUnsavedWork } from '@/shared/build/unsaved-work'
 import { hereSentence, readPresence, typingSentence } from '../lib/space-presence'
 import { createSpaceStreamController, type SpaceStreamController, type SpaceStreamState } from '../lib/space-stream'
+import { notifySpacesListChanged } from '../lib/space-list-changed'
 import { SpaceLiveIndicator } from './SpaceLiveIndicator'
 import { SpaceActivityPanel } from './SpaceActivityPanel'
 import { SpaceKnowledgePanel } from './SpaceKnowledgePanel'
@@ -810,15 +811,21 @@ export default function SpacePage() {
                     window.location.hash = 'medlemmer'
                   }}
                   onSaved={() => {
+                    // DEPTH-WS04-S2-1: the sidebar and the Spaces index show the new name without a reload.
+                    notifySpacesListChanged()
                     void refetchContext()
                   }}
                   onArchiveChanged={refreshAfterArchiveChange}
+                  orgId={current().membership.org_id}
+                  actorId={current().membership.subject_id}
                 />
                 </Show>
 
                 <Show when={roomIsArchived(current())}>
                   <SpaceArchivedBanner
                     spaceRef={current().space.space_ref}
+                    orgId={current().membership.org_id}
+                    actorId={current().membership.subject_id}
                     canUnarchive={roomCanArchive(current())}
                     onChanged={refreshAfterArchiveChange}
                   />

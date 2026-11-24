@@ -1409,7 +1409,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   room_details_invalid: { no: 'Navnet eller emnet er ikke gyldig. Ingenting er endret.', en: 'The room name or topic is not valid. Nothing was changed.' },
   room_details_unavailable: { no: 'Navnet og emnet kunne ikke lagres. Ingenting er endret. Prøv igjen om litt.', en: 'The name and topic could not be saved. Nothing was changed. Try again shortly.' },
   room_not_active: { no: 'Rommet er ikke aktivt, så navn og emne kan ikke endres.', en: 'The room is not active, so its name and topic cannot be changed.' },
-  space_kind_not_editable: { no: 'Navn og emne kan bare endres på et vanlig rom, ikke på et personlig rom.', en: 'The name and topic can only be changed on a regular room, not a personal Space.' },
+  space_kind_not_editable: { no: 'Navn og emne kan ikke endres for dette rommet.', en: 'The name and topic cannot be changed for this room.' },
   room_elevated_role_requires_owner: { no: 'Bare en eier kan gi, endre eller fjerne rollen leder eller eier.', en: 'Only an owner can grant, change or remove a manager or owner.' },
   room_member_changed: { no: 'Medlemmet ble endret av noen andre. Listen er lastet på nytt; prøv igjen.', en: 'That member was changed by someone else. The list was reloaded; try again.' },
   room_not_found: { no: 'Fant ikke rommet, eller du har ikke tilgang til det.', en: 'The room was not found, or you do not have access to it.' },

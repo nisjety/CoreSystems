@@ -46,11 +46,17 @@ const spacesClient = vi.hoisted(() => ({
   updateSpaceThreadPresentation: vi.fn(),
   createSpacePost: vi.fn(),
   replyInSpaceThread: vi.fn(),
-  archiveSpaceRoom: vi.fn(),
-  unarchiveSpaceRoom: vi.fn(),
   // WS17-S6: the private panel reads its pointer through these when `?panel=private` opens it.
   getSpacePrivatePanel: vi.fn(),
   openSpacePrivatePanel: vi.fn(),
+}))
+
+// WS04-S7: archive and restore go through the action registry, so the writes are read at this seam.
+const roomArchive = vi.hoisted(() => ({
+  setSpaceRoomArchived: vi.fn(),
+}))
+vi.mock('../lib/space-room-archive', () => ({
+  setSpaceRoomArchived: roomArchive.setSpaceRoomArchived,
 }))
 
 vi.mock('@/shared/api/space-approvals-client', async (importOriginal) => ({
@@ -83,8 +89,6 @@ vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
   // WS01-S6 human posts the composer imports.
   createSpacePost: spacesClient.createSpacePost,
   replyInSpaceThread: spacesClient.replyInSpaceThread,
-  archiveSpaceRoom: spacesClient.archiveSpaceRoom,
-  unarchiveSpaceRoom: spacesClient.unarchiveSpaceRoom,
   getSpacePrivatePanel: spacesClient.getSpacePrivatePanel,
   openSpacePrivatePanel: spacesClient.openSpacePrivatePanel,
   SPACE_POST_MAX_CHARS_DEFAULT: 8000,
@@ -305,10 +309,11 @@ describe('SpacePage', () => {
     spacesClient.updateSpaceThreadPresentation.mockResolvedValue({ thread_id: 't' })
     spacesClient.createSpacePost.mockReset()
     spacesClient.replyInSpaceThread.mockReset()
-    spacesClient.archiveSpaceRoom.mockReset()
-    spacesClient.archiveSpaceRoom.mockResolvedValue({ state: 'archived', changed: true, archivedAt: '2026-10-31T09:30:00Z' })
-    spacesClient.unarchiveSpaceRoom.mockReset()
-    spacesClient.unarchiveSpaceRoom.mockResolvedValue({ state: 'active', changed: true, archivedAt: null })
+    roomArchive.setSpaceRoomArchived.mockReset()
+    roomArchive.setSpaceRoomArchived.mockImplementation(async (_spaceRef: string, _actor: unknown, archive: boolean) =>
+      archive
+        ? { state: 'archived', changed: true, archivedAt: '2026-10-31T09:30:00Z' }
+        : { state: 'active', changed: true, archivedAt: null })
     browserRuns.readSpaceBrowserTimeline.mockReset()
     browserRuns.readSpaceBrowserTimeline.mockImplementation(() => new Promise(() => {}))
     browserRuns.listSpaceBrowserRuns.mockReset()
@@ -2352,8 +2357,10 @@ describe('SpacePage', () => {
       spacesClient.getSpaceContext.mockResolvedValue(roomCtx({ archived: false }))
       const banner = (await screen.findByText('Rommet er arkivert')).closest('.verevon-space-archived-banner') as HTMLElement
       fireEvent.click(within(banner).getByRole('button', { name: 'Fjern arkivering' }))
-      await waitFor(() => expect(spacesClient.unarchiveSpaceRoom).toHaveBeenCalledTimes(1))
-      expect(spacesClient.unarchiveSpaceRoom.mock.calls[0]?.[0]).toBe('space_room_1')
+      await waitFor(() => expect(roomArchive.setSpaceRoomArchived).toHaveBeenCalledTimes(1))
+      expect(roomArchive.setSpaceRoomArchived.mock.calls[0]?.[0]).toBe('space_room_1')
+      expect(roomArchive.setSpaceRoomArchived.mock.calls[0]?.[1]).toEqual({ type: 'human', userId: 'user_1', orgId: 'org_1' })
+      expect(roomArchive.setSpaceRoomArchived.mock.calls[0]?.[2]).toBe(false)
       await waitFor(() => expect(spacesClient.getSpaceContext.mock.calls.length).toBeGreaterThan(reads))
       await waitFor(() => expect(document.querySelector('.verevon-space-archived-banner')).toBeNull())
       expect(await screen.findByPlaceholderText(/Skriv (i|til) rommet/)).toBeTruthy()
@@ -2378,8 +2385,9 @@ describe('SpacePage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Arkiver rommet' }))
       flush()
       fireEvent.click(screen.getByRole('button', { name: 'Bekreft arkivering av rommet' }))
-      await waitFor(() => expect(spacesClient.archiveSpaceRoom).toHaveBeenCalledTimes(1))
-      expect(spacesClient.archiveSpaceRoom.mock.calls[0]?.[0]).toBe('space_room_1')
+      await waitFor(() => expect(roomArchive.setSpaceRoomArchived).toHaveBeenCalledTimes(1))
+      expect(roomArchive.setSpaceRoomArchived.mock.calls[0]?.[0]).toBe('space_room_1')
+      expect(roomArchive.setSpaceRoomArchived.mock.calls[0]?.[2]).toBe(true)
     })
 
     it('the organization room offers no archive', async () => {

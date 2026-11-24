@@ -93,6 +93,20 @@ const spaceUpdateRoomSettingsOutput = z.object({
   changed: z.boolean(),
 })
 
+// WS04-S7: archive and restore. Control (user-core `internal/spaces`) owns the archive state and the role rule, and
+// refuses the organization room and personal Spaces; the gateway proxies Control's decision
+// (domains/spaces/room_admin.rs `set_room_archived`, dispatchers_spaces/ws04.rs). An archived room stays readable and
+// takes no new writes. Neither id is model-executable (model-access.ts closes both): closing a room is a person's call.
+const spaceRoomArchiveInput = z.object({
+  spaceRef: z.string().min(1),
+})
+
+const spaceRoomArchiveOutput = z.object({
+  state: z.enum(['archived', 'active']),
+  changed: z.boolean(),
+  archived_at: z.string().nullable(),
+})
+
 export const ws04SpaceActions = [
   {
     id: 'spaces.update_room_details',
@@ -153,5 +167,29 @@ export const ws04SpaceActions = [
     reversible: true,
     inputSchema: spaceUpdateRoomSettingsInput,
     outputSchema: spaceUpdateRoomSettingsOutput,
+  },
+  {
+    id: 'spaces.archive_room',
+    label: 'Archive Space room',
+    description:
+      'Archive a named room: it stays readable, but nobody can write to it until it is unarchived. Only a room owner or manager may; the organization room and personal Spaces are refused.',
+    ownerPlane: 'control',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: spaceRoomArchiveInput,
+    outputSchema: spaceRoomArchiveOutput,
+  },
+  {
+    id: 'spaces.unarchive_room',
+    label: 'Unarchive Space room',
+    description:
+      'Bring an archived room back so that people can write to it again. Only a room owner or manager may.',
+    ownerPlane: 'control',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: spaceRoomArchiveInput,
+    outputSchema: spaceRoomArchiveOutput,
   },
 ] as const satisfies readonly ActionDescriptor[]
