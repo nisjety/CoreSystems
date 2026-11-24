@@ -543,12 +543,13 @@ async fn label_sql_and_room_recall_agree_with_memory_visible_on_a_seeded_table()
         assert_eq!(seen, expected, "a contained reader's own thread rows, labels_on {labels_on}");
     }
 
-    // The room branch of recall: the Space's labelled rows at the thread's audience.
+    // The room branch of recall: the Space's labelled rows at the thread's audience. Without a full memory gate the
+    // thread's own rows stay out.
     let target = crate::dreaming::SpaceRecallTarget {
         space_id: space.clone(),
         audience_hash: hash.clone(),
     };
-    let recalled = crate::dreaming::recall_space_memory(&pool, &org, &reader_thread, &target, "", 50)
+    let recalled = crate::dreaming::recall_space_memory(&pool, &org, &reader_thread, &target, "", 50, false)
         .await
         .expect("room recall");
     let seen = ids(recalled.rows.iter().map(|row| row.id.clone()).collect());
@@ -560,6 +561,30 @@ async fn label_sql_and_room_recall_agree_with_memory_visible_on_a_seeded_table()
             .collect(),
     );
     assert_eq!(seen, expected, "the room branch of recall and the resolver must name the same rows");
+
+    // D22al (Rule R): with a full memory gate the room recall also names the thread's own session-bound rows, exactly
+    // as the resolver admits them (`room_unverified` never).
+    let recalled = crate::dreaming::recall_space_memory(&pool, &org, &reader_thread, &target, "", 50, true)
+        .await
+        .expect("room recall with the thread's own rows");
+    let seen = ids(recalled.rows.iter().map(|row| row.id.clone()).collect());
+    let expected = ids(
+        rows.iter()
+            .filter(|row| {
+                row.session_id.as_deref() == Some(reader_thread.as_str())
+                    || (row.scope == "space" && row.session_id.is_none())
+            })
+            .filter(|row| memory_visible(row.label(), &contained, &reader_thread, true))
+            .map(|row| row.id.clone())
+            .collect(),
+    );
+    assert_eq!(seen, expected, "Rule R: the room's rows and the thread's own rows, as the resolver names them");
+    for row in &recalled.rows {
+        let own = rows
+            .iter()
+            .any(|seeded| seeded.id == row.id && seeded.session_id.as_deref() == Some(reader_thread.as_str()));
+        assert_eq!(recalled.thread_row_scopes.contains_key(&row.id), own, "only the thread's own rows carry their scope");
+    }
     sqlx::query("DELETE FROM agent_memory WHERE org_id = $1")
         .bind(&org)
         .execute(&pool)

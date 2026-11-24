@@ -1555,7 +1555,16 @@ pub(crate) async fn load_agent_memory_context_rows(
         space_id.as_deref(),
         audience_hash.as_deref(),
     ) {
-        let recall = recall_space_memory(pool, &org_id, thread_id, &target, "", limit).await?;
+        let recall = recall_space_memory(
+            pool,
+            &org_id,
+            thread_id,
+            &target,
+            "",
+            limit,
+            access == MemoryAccess::Full,
+        )
+        .await?;
         return Ok(recall
             .rows
             .into_iter()
@@ -2530,21 +2539,31 @@ pub(crate) struct SpaceRecall {
     pub(crate) rows: Vec<MemorySearchRow>,
     pub(crate) withheld: u32,
     pub(crate) waived: bool,
+    /// D22al (Rule R): the stored scope of each recalled row that is bound to the reading thread itself (its own
+    /// session rows), by row id. A row not named here is a labelled room row of the Space.
+    pub(crate) thread_row_scopes: std::collections::HashMap<String, String>,
 }
 
-/// The rows a shared room may recall: its own Space, current, accepted, and learned in front of the
-/// audience the thread has now. No user, org, thread or other Space row can match (D4).
-const SPACE_RECALL_SQL: &str = "SELECT id, kind, key, content, confidence, updated_at, source_links \
+/// The rows a shared room may recall (Rule R, D22al): the labelled room rows of its own Space, current, accepted, and
+/// learned in front of the audience the thread has now, plus, when `$6` (a full memory gate), the reading thread's own
+/// session-bound rows (`session_id = $5`), as `memory_scope::memory_visible` admits them. No user, org, global, other
+/// thread or other Space row can match (D4), and a `room_unverified` row never does.
+const SPACE_RECALL_SQL: &str = "SELECT id, scope, kind, key, content, confidence, updated_at, source_links, \
+            (session_id IS NOT DISTINCT FROM $5) AS own_thread \
      FROM agent_memory \
      WHERE org_id = $1 \
-       AND scope = 'space' \
-       AND scope_id = $2 \
        AND review_state = 'accepted' \
        AND is_latest = true \
        AND (expires_at IS NULL OR expires_at > now()) \
-       AND origin_kind IN ('room', 'declassified') \
-       AND $3 <> '' \
-       AND audience_hash = $3 \
+       AND origin_kind <> 'room_unverified' \
+       AND ( \
+            (scope = 'space' \
+             AND scope_id = $2 \
+             AND origin_kind IN ('room', 'declassified') \
+             AND $3 <> '' \
+             AND audience_hash = $3) \
+            OR ($6 AND $5 <> '' AND session_id = $5) \
+       ) \
      ORDER BY confidence DESC, updated_at DESC \
      LIMIT $4";
 
@@ -2562,7 +2581,8 @@ const SPACE_WITHHELD_SQL: &str = "SELECT COUNT(*) \
 
 /// Recall for a shared-room thread with Space memory on (EP-8 S7). A thread with a waived run
 /// recalls nothing (D11), the same test the Space writers apply. `query` only ranks; an empty one
-/// keeps the stored order.
+/// keeps the stored order. D22al (Rule R): with `include_thread_rows` (the caller's memory gate is full), the
+/// thread's own session-bound rows are recalled beside the room rows.
 pub(crate) async fn recall_space_memory(
     pool: &PgPool,
     org_id: &str,
@@ -2570,6 +2590,7 @@ pub(crate) async fn recall_space_memory(
     target: &SpaceRecallTarget,
     query: &str,
     limit: i64,
+    include_thread_rows: bool,
 ) -> Result<SpaceRecall, sqlx::Error> {
     let waived: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM runs WHERE thread_id = $1 AND retention_class = 'zdr_waived')",
@@ -2582,13 +2603,17 @@ pub(crate) async fn recall_space_memory(
         return Ok(SpaceRecall { waived: true, ..SpaceRecall::default() });
     }
     let limit = limit.clamp(1, 50);
-    let rows = sqlx::query_as::<_, (String, String, String, String, f64, DateTime<Utc>, Vec<String>)>(
-        SPACE_RECALL_SQL,
-    )
+    #[allow(clippy::type_complexity)]
+    let rows = sqlx::query_as::<
+        _,
+        (String, String, String, String, String, f64, DateTime<Utc>, Vec<String>, bool),
+    >(SPACE_RECALL_SQL)
     .bind(org_id)
     .bind(&target.space_id)
     .bind(&target.audience_hash)
     .bind(limit)
+    .bind(thread_id)
+    .bind(include_thread_rows)
     .fetch_all(pool)
     .await?;
     let withheld: i64 = sqlx::query_scalar(SPACE_WITHHELD_SQL)
@@ -2598,17 +2623,27 @@ pub(crate) async fn recall_space_memory(
         .fetch_one(pool)
         .await?;
     let query = query.trim().to_ascii_lowercase();
+    let mut thread_row_scopes = std::collections::HashMap::new();
     let mut scored: Vec<MemorySearchRow> = rows
         .into_iter()
-        .map(|(id, kind, key, content, confidence, updated_at, source_links)| {
+        .map(|(id, scope, kind, key, content, confidence, updated_at, source_links, own_thread)| {
             let exact_match = !query.is_empty()
                 && (content.to_ascii_lowercase().contains(&query)
                     || key.to_ascii_lowercase().contains(&query));
             let exact_bonus = if query.is_empty() || exact_match { 0.15 } else { 0.0 };
+            // A room row of the Space keeps the Space topic; a thread's own row keeps its stored scope.
+            let room_row = scope == "space" && !own_thread;
+            if !room_row {
+                thread_row_scopes.insert(id.clone(), scope.clone());
+            }
             MemorySearchRow {
                 id,
-                thread_id: space_row_thread(&source_links).unwrap_or_else(|| thread_id.to_owned()),
-                topic: memory_topic("space", &kind).to_owned(),
+                thread_id: if room_row {
+                    space_row_thread(&source_links).unwrap_or_else(|| thread_id.to_owned())
+                } else {
+                    thread_id.to_owned()
+                },
+                topic: memory_topic(if room_row { "space" } else { scope.as_str() }, &kind).to_owned(),
                 provenance: MemoryProvenance::classify(&source_links),
                 origin_space_ref: String::new(),
                 withheld_reason: String::new(),
@@ -2630,6 +2665,7 @@ pub(crate) async fn recall_space_memory(
         rows: scored,
         withheld: u32::try_from(withheld).unwrap_or(u32::MAX),
         waived: false,
+        thread_row_scopes,
     })
 }
 
@@ -4096,14 +4132,20 @@ mod space_recall_tests {
 
     #[test]
     fn space_recall_sql_reads_only_the_space_scope_of_one_space() {
+        assert!(SPACE_WITHHELD_SQL.contains("AND scope = 'space'"));
+        assert!(SPACE_RECALL_SQL.contains("(scope = 'space'"));
         for sql in [SPACE_RECALL_SQL, SPACE_WITHHELD_SQL] {
-            assert!(sql.contains("AND scope = 'space'"));
             assert!(sql.contains("AND scope_id = $2"));
             assert!(sql.contains("AND is_latest = true"));
-            for other in ["'user'", "'org'", "'thread'", "'global'", "session_id", "owner"] {
+            for other in ["'user'", "'org'", "'thread'", "'global'", "owner"] {
                 assert!(!sql.contains(other), "{other} must not reach a Space reader");
             }
         }
+        assert!(!SPACE_WITHHELD_SQL.contains("session_id"), "the withheld count is the room's rows only");
+        // D22al (Rule R): the only other rows a room reads are the thread's own, behind the full-gate switch ($6).
+        assert!(SPACE_RECALL_SQL.contains("OR ($6 AND $5 <> '' AND session_id = $5)"));
+        assert_eq!(SPACE_RECALL_SQL.matches("session_id").count(), 2, "the own-thread flag and the own-thread rows");
+        assert!(SPACE_RECALL_SQL.contains("AND origin_kind <> 'room_unverified'"));
         assert!(SPACE_RECALL_SQL.contains("AND audience_hash = $3"));
         assert!(SPACE_WITHHELD_SQL.contains("audience_hash IS DISTINCT FROM $3"));
     }
@@ -4153,7 +4195,7 @@ mod space_recall_tests {
     }
 
     async fn recall(seeded: &Seeded, hash: &str) -> SpaceRecall {
-        recall_space_memory(&seeded.pool, &seeded.org, &seeded.thread, &target(seeded, hash), "", 20)
+        recall_space_memory(&seeded.pool, &seeded.org, &seeded.thread, &target(seeded, hash), "", 20, true)
             .await
             .expect("recall")
     }

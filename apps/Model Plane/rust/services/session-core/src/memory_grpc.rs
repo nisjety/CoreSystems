@@ -138,7 +138,9 @@ impl MemoryGrpc {
     }
 
     /// Recall for a shared-room thread with Space memory on (EP-8 S7): the room's rows said in front
-    /// of its current audience, the count withheld for audience, and nothing on a waived thread.
+    /// of its current audience, the count withheld for audience, and nothing on a waived thread. D22al (Rule R): with
+    /// `include_thread_rows` (a full memory gate) the thread's own session-bound rows come back too, under their own
+    /// scope.
     async fn search_space_memory(
         &self,
         org_id: &str,
@@ -146,6 +148,7 @@ impl MemoryGrpc {
         target: &crate::dreaming::SpaceRecallTarget,
         query: &str,
         limit: u32,
+        include_thread_rows: bool,
     ) -> Result<Response<SearchMemoryResponse>, Status> {
         let recall = crate::dreaming::recall_space_memory(
             &self.pool,
@@ -154,6 +157,7 @@ impl MemoryGrpc {
             target,
             query,
             i64::from(limit),
+            include_thread_rows,
         )
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -163,25 +167,33 @@ impl MemoryGrpc {
             return Ok(Response::new(response));
         }
         response.withheld = recall.withheld;
+        let thread_row_scopes = recall.thread_row_scopes;
         response.entries = recall
             .rows
             .into_iter()
             .take(usize::try_from(limit).unwrap_or(usize::MAX))
-            .map(|row| MemoryEntry {
-                memory_id: row.id,
-                thread_id: row.thread_id,
-                topic: row.topic,
-                content: row.content,
-                score: row.score,
-                updated_at: Some(timestamp(row.updated_at)),
-                // The room's row, no person's.
-                user_id: String::new(),
-                provenance: memory_provenance(row.provenance) as i32,
-                origin_space_ref: String::new(),
-                withheld_reason: String::new(),
-                scope: crate::space_memory::SPACE_SCOPE.to_owned(),
-                scope_id: target.space_id.clone(),
-                source_label: String::new(),
+            .map(|row| {
+                // A room row is labelled with its Space; a thread's own row with its stored scope and the thread.
+                let (scope, scope_id) = match thread_row_scopes.get(&row.id) {
+                    Some(scope) => (scope.clone(), thread_id.to_owned()),
+                    None => (crate::space_memory::SPACE_SCOPE.to_owned(), target.space_id.clone()),
+                };
+                MemoryEntry {
+                    memory_id: row.id,
+                    thread_id: row.thread_id,
+                    topic: row.topic,
+                    content: row.content,
+                    score: row.score,
+                    updated_at: Some(timestamp(row.updated_at)),
+                    // The room's row or the thread's own, no person's.
+                    user_id: String::new(),
+                    provenance: memory_provenance(row.provenance) as i32,
+                    origin_space_ref: String::new(),
+                    withheld_reason: String::new(),
+                    scope,
+                    scope_id,
+                    source_label: String::new(),
+                }
             })
             .collect();
         Ok(Response::new(response))
@@ -1252,7 +1264,14 @@ impl MemoryService for MemoryGrpc {
                 let target = crate::dreaming::space_recall_target(true, true, Some(&space_ref), Some(&audience_hash));
                 if let Some(target) = target {
                     return self
-                        .search_space_memory(req.org_id.trim(), req.thread_id.trim(), &target, &req.query, limit)
+                        .search_space_memory(
+                            req.org_id.trim(),
+                            req.thread_id.trim(),
+                            &target,
+                            &req.query,
+                            limit,
+                            decision.access == MemoryAccess::Full,
+                        )
                         .await;
                 }
             }
