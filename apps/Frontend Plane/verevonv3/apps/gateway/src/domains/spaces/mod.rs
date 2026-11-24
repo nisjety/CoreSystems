@@ -7581,6 +7581,29 @@ mod tests {
             json!({"dm": false, "room_directory": false})
         );
 
+        // Mixed flags: each feature follows its OWN flag, on both paths. A listing that wired
+        // `room_directory` to the DM flag (or the reverse) passes the all-on/all-off cases above.
+        for index in [index_up.uri(), index_down.uri()] {
+            let mut dm_only = on.clone();
+            dm_only.user_core_url = index.clone();
+            dm_only.space_features.room_directory_api = false;
+            let (status, body) = listing(dm_only).await;
+            assert_eq!(status, 200);
+            assert_eq!(
+                body["data"]["features"],
+                json!({"dm": true, "room_directory": false})
+            );
+            let mut directory_only = on.clone();
+            directory_only.user_core_url = index;
+            directory_only.space_features.dm_api = false;
+            let (status, body) = listing(directory_only).await;
+            assert_eq!(status, 200);
+            assert_eq!(
+                body["data"]["features"],
+                json!({"dm": false, "room_directory": true})
+            );
+        }
+
         // No personal Space during an outage: an empty list still carries the features.
         on.application_convex_url = no_personal_space.uri();
         let (status, body) = listing(on).await;
