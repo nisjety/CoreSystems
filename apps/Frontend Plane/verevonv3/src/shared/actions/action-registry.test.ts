@@ -11,6 +11,7 @@ import { spaceActions } from '@/shared/actions/domains/spaces'
 import { chatProjectSchema } from '@/shared/actions/chat-project'
 import { MODEL_ACCESS } from '@/shared/actions/model-access'
 import { isModelExecutableAction } from '@/shared/actions/model-eligibility'
+import { emptySidebarDoc } from '@/shared/actions/space-sidebar'
 import { buildModelContextPack } from '@/shared/context-packs/context-pack'
 
 describe('action registry', () => {
@@ -1482,7 +1483,12 @@ describe('action registry', () => {
     expect(action?.requiresApproval).toBe(false)
     expect(action?.reversible).toBe(true)
     expect(isModelExecutableAction('spaces.update_sidebar')).toBe(false)
-    expect(action?.inputSchema.safeParse({ baseRevision: 0, doc: { starred: [] } }).success).toBe(true)
+    expect(action?.inputSchema.safeParse({ baseRevision: 0, doc: emptySidebarDoc() }).success).toBe(true)
+    // The document is the strict sidebar schema (WS16-S9), not an open object.
+    expect(action?.inputSchema.safeParse({ baseRevision: 0, doc: { starred: [] } }).success).toBe(false)
+    expect(action?.inputSchema.safeParse({ baseRevision: 0, doc: { ...emptySidebarDoc(), extra: true } }).success).toBe(false)
+    expect(action?.outputSchema.safeParse({ revision: 1, doc: emptySidebarDoc() }).success).toBe(true)
+    expect(action?.outputSchema.safeParse({ revision: 1, doc: { starred: [] } }).success).toBe(false)
     expect(action?.inputSchema.safeParse({ baseRevision: -1, doc: {} }).success).toBe(false)
     expect(action?.inputSchema.safeParse({ baseRevision: 1.5, doc: {} }).success).toBe(false)
     expect(action?.inputSchema.safeParse({ baseRevision: 0 }).success).toBe(false)

@@ -4126,6 +4126,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "spaces.archive_room",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:dab63756f66479b7e71a6194b084b904df7ce57b35cda1469ce7add61b598019",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "spaces.bind_space_agent",
       "registry": true,
       "access": "none",
@@ -4200,7 +4213,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:4070c2c97e11d31e83fe220ef1c0e4f6824637a8564cbd5a6e38ce2e47fbce6d",
+      "schemaHash": "sha256:351bfc72b9624f37cf9e3e2dfc0e71aa577c0240b9570d5ebfc0d52d5b820c6a",
       "zdr_allowed": false
     },
     {
@@ -4473,7 +4486,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:fcce555c4ef3be648698014f3d8051ebb30d9809975fcd746807f8e9ee3ba7f9",
+      "schemaHash": "sha256:b0b75ab61047ea47a20436db7190246b7641627a58f11ec8c9d5acf2fa779cd8",
       "zdr_allowed": false
     },
     {
@@ -4737,6 +4750,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "spaces.unarchive_room",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:03e1516d649a1b201894751bef2ea9c3805b3e55f17e499122f786935a9a4bff",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "spaces.update_room_details",
       "registry": true,
       "access": "none",
@@ -4772,7 +4798,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:f720225b84f0700a32be0c39340ca7c14fca5d2f51090dffca6bd2fba223c9dd",
+      "schemaHash": "sha256:bcaa76d3f48967fd4688f29650c04438ac91fd1a9cf17f9a68fbfd99aa1bcf56",
       "zdr_allowed": false
     },
     {

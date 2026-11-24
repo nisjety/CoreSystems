@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { ActionDescriptor } from '@/shared/actions/types'
+import { sidebarDocSchema } from '@/shared/actions/space-sidebar'
 
 // WS16-S8: the personal Spaces sidebar layout. Application (convex-core `spaceSidebar`) stores
 // one small document of references per member, compare-and-set on a revision; the gateway
@@ -9,20 +10,20 @@ import type { ActionDescriptor } from '@/shared/actions/types'
 // `zdr_durable_mutation_forbidden`; the client then keeps the layout in this browser only.
 //
 // The document's own caps (starred 100, hidden 500, sections 30, 200 refs each, names 40
-// characters, 32 KiB) are enforced in Application; the full zod document schema and the
-// hash-pinned limits golden arrive with WS16-S9. Until then the gateway passes the object through
-// and a bad one answers 400 `invalid_sidebar_doc` with the reason.
+// characters, 32 KiB) are enforced in Application. The document is the strict zod schema the SPA
+// parses with (`sidebarDocSchema`, WS16-S9), and the caps are pinned by space-sidebar-limits.json.
+// The gateway passes the object through and a bad one answers 400 `invalid_sidebar_doc` with the reason.
 
 const spaceUpdateSidebarInput = z.object({
   // The revision the client last saw; 0 creates the first one. A stale one answers 409
   // `space_sidebar_conflict` carrying the stored revision and document to rebase on.
   baseRevision: z.number().int().min(0),
-  doc: z.record(z.string(), z.unknown()),
+  doc: sidebarDocSchema,
 })
 
 const spaceUpdateSidebarOutput = z.object({
   revision: z.number().int().min(1),
-  doc: z.record(z.string(), z.unknown()),
+  doc: sidebarDocSchema,
 })
 
 export const ws16SpaceActions = [
