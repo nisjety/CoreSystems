@@ -53,7 +53,7 @@ export function MemorySpaceShares(props: MemorySpaceSharesProps) {
   const [names] = createResource(() => roomNames())
   const [busyId, setBusyId] = createSignal<string | null>(null)
   const [failure, setFailure] = createSignal<string | null>(null)
-  // One request id per room copy, so a retry of the same take-back is answered once.
+  // One request id per room copy while its take-back is unsettled, so a retry after a failure is answered once.
   const requestIds = new Map<string, string>()
 
   const rows = createMemo<SpaceMemoryShare[]>(() => (shares.error ? [] : (shares() ?? [])))
@@ -79,10 +79,17 @@ export function MemorySpaceShares(props: MemorySpaceSharesProps) {
         spaceRef: share.spaceRef,
         clientRequestId,
       })
-      if (!result.deleted) setFailure(i18n.tr(TAKE_BACK_FALLBACK.no, TAKE_BACK_FALLBACK.en))
+      if (result.deleted) {
+        // Settled: a later take-back of the same room copy is a new request, never a replay of this one.
+        requestIds.delete(share.roomMemoryId)
+      } else {
+        setFailure(i18n.tr(TAKE_BACK_FALLBACK.no, TAKE_BACK_FALLBACK.en))
+      }
     } catch (error) {
       // A copy already gone from the room is the outcome asked for.
-      if (!hasErrorCode(error, 'memory_not_found')) {
+      if (hasErrorCode(error, 'memory_not_found')) {
+        requestIds.delete(share.roomMemoryId)
+      } else {
         setFailure(memoryRoomErrorMessage(error, i18n.tr, 'take_back', TAKE_BACK_FALLBACK))
       }
     } finally {
@@ -111,8 +118,8 @@ export function MemorySpaceShares(props: MemorySpaceSharesProps) {
               <p id="memory-space-shares-title">{i18n.tr('Delt i rom', 'Shared to rooms')}</p>
               <span>
                 {i18n.tr(
-                  'Kopier av minnene dine som du har delt i rom. Ta en tilbake for å fjerne den fra rommet; ditt eget minne beholdes.',
-                  'Copies of your memories you shared to rooms. Take one back to remove it from the room; your own memory is kept.',
+                  'Kopier av minnene dine som du har delt i rom. Ta en tilbake for å trekke tilbake delingen din; ditt eget minne beholdes. Har et annet medlem også delt samme tekst, beholder rommet kopien.',
+                  'Copies of your memories you shared to rooms. Take one back to withdraw your share; your own memory is kept. If another member also shared the same text, the room keeps its copy.',
                 )}
               </span>
             </div>

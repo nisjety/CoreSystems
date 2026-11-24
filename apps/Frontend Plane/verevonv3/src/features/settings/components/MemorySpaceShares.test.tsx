@@ -113,6 +113,31 @@ describe('MemorySpaceShares', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
+  it('reuses the request id for a retry after a failure and starts a new one once a take-back settled', async () => {
+    stubBackend(() => jsonResponse({ data: { shares: [SHARE] } }))
+    const { ApiError } = await import('@/shared/api/api-error')
+    vi.mocked(executeAction)
+      .mockRejectedValueOnce(new ApiError('down', 503, 'upstream_unavailable'))
+      .mockResolvedValue(TAKEN_BACK)
+
+    render(() => <MemorySpaceShares version={0} />)
+    const keys: unknown[] = []
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      fireEvent.click(await screen.findByRole('button', { name: 'Ta tilbake fra Design' }))
+      flush()
+      await waitFor(() => expect(executeAction).toHaveBeenCalledTimes(attempt))
+      await waitFor(() =>
+        expect(
+          (screen.getByRole('button', { name: 'Ta tilbake fra Design' }) as HTMLButtonElement).disabled,
+        ).toBe(false),
+      )
+      keys.push((vi.mocked(executeAction).mock.calls[attempt - 1]?.[3] as { idempotencyKey?: string })?.idempotencyKey)
+    }
+    expect(keys[0]).toEqual(expect.any(String))
+    expect(keys[1]).toBe(keys[0])
+    expect(keys[2]).not.toBe(keys[1])
+  })
+
   it('shows nothing while sharing is off', async () => {
     const fetchMock = stubBackend(() =>
       jsonResponse({ error: { code: 'feature_disabled', message: 'off', details: {} } }, 404),
