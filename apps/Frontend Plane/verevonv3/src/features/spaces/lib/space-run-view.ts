@@ -105,6 +105,15 @@ function upsertStep(
   return { steps: next.slice(overflow), stepsDropped: view.stepsDropped + overflow }
 }
 
+/**
+ * The phase after a frame that shows the run is moving again. The stream sends the phase only in a snapshot, so a run
+ * that was waiting for approval when the reader attached would otherwise keep saying so after the approval was
+ * granted: a new step or new text means the run is working, so `awaiting_approval` gives way to `running`.
+ */
+function phaseAfterProgress(view: SpaceRunView): string {
+  return view.phase === 'awaiting_approval' ? 'running' : view.phase
+}
+
 export function applyRoomRunFrame(view: SpaceRunView, frame: RoomRunFrame): SpaceRunView {
   // Once finished, only a fresh snapshot (a new attach to a finished run) may change anything.
   if (view.finished && frame.type !== 'snapshot') return view
@@ -146,13 +155,25 @@ export function applyRoomRunFrame(view: SpaceRunView, frame: RoomRunFrame): Spac
       const tail = frame.delta.slice(view.text.length - frame.offset)
       return {
         ...view,
+        phase: phaseAfterProgress(view),
         text: { ...view.text, value: view.text.value + tail, length: end, progressChars: Math.max(view.text.progressChars, end) },
       }
     }
     case 'text_progress':
-      return { ...view, text: { ...view.text, progressChars: Math.max(view.text.progressChars, frame.chars) } }
-    case 'step':
-      return { ...view, ...upsertStep(view, frame.step) }
+      if (frame.chars <= view.text.progressChars) return view
+      return {
+        ...view,
+        phase: phaseAfterProgress(view),
+        text: { ...view.text, progressChars: frame.chars },
+      }
+    case 'step': {
+      const next = upsertStep(view, frame.step)
+      if (next.steps === view.steps) return view
+      // A new step, or one that settled, is progress; a repeat of a step in the state already held is not.
+      const held = view.steps.find((entry) => entry.id === frame.step.id)
+      const progressed = !held || held.state !== frame.step.state
+      return { ...view, ...next, phase: progressed ? phaseAfterProgress(view) : view.phase }
+    }
     case 'steer':
       return { ...view, steer: Math.max(view.steer, frame.count) }
     case 'plan':

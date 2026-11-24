@@ -283,22 +283,19 @@ describe('Stop on a live run (WS20, WS09-S8)', () => {
     expect((stopButton() as HTMLButtonElement).disabled).toBe(true)
   })
 
-  it('says when the organisation has not turned on stopping other members\' runs, and a retry names the same attempt', async () => {
-    runStop.stopSpaceRun
-      .mockRejectedValueOnce(new ApiError('Forbidden', 403, 'space_run_control_not_authorized'))
-      .mockResolvedValueOnce({ runId: RUN_ID, status: 'cancelled', cancelled: true, receiptId: 'rcpt_1' })
+  it('says when the organisation has not turned on stopping other members\' runs, and closes Stop since a retry is refused the same way', async () => {
+    runStop.stopSpaceRun.mockRejectedValue(new ApiError('Forbidden', 403, 'space_run_control_not_authorized'))
     mountCard(OTHER, listRun, true)
     await settle()
 
     fireEvent.click(stopButton() as HTMLElement)
     await settle()
     expect(screen.getByRole('alert').textContent).toContain('Organisasjonen din har ikke slått på stopping')
+    expect((stopButton() as HTMLButtonElement).disabled).toBe(true)
 
     fireEvent.click(stopButton() as HTMLElement)
     await settle()
-    expect(runStop.stopSpaceRun).toHaveBeenCalledTimes(2)
-    expect(runStop.stopSpaceRun.mock.calls[1]?.[2]).toBe(runStop.stopSpaceRun.mock.calls[0]?.[2])
-    expect(screen.getByText('Stopp sendt …')).toBeTruthy()
+    expect(runStop.stopSpaceRun).toHaveBeenCalledTimes(1)
   })
 
   it('says it could not stop the run when the call fails for any other reason', async () => {
@@ -402,7 +399,7 @@ describe("the starter's own Stop (D21h)", () => {
     fireEvent.click(stopButton() as HTMLElement)
     await settle()
     expect(screen.getByRole('alert').textContent).toContain('Bare den som startet kjøringen')
-    expect((stopButton() as HTMLButtonElement).disabled).toBe(false)
+    expect((stopButton() as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('says a zero-retention stop is not available yet', async () => {

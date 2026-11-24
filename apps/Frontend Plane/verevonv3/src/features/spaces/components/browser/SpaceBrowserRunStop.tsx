@@ -48,8 +48,12 @@ export function SpaceBrowserRunStop(props: SpaceBrowserRunStopProps) {
     },
   )
 
+  // Stop stays open only before an attempt and after a failure a retry can fix. A refusal (the organisation, not the
+  // starter, the retention posture) is answered the same way on every retry, so it closes the control.
+  const canPress = () => state() === 'idle' || state() === 'failed'
+
   const requestStop = async () => {
-    if (state() === 'pending' || state() === 'sent') return
+    if (!canPress()) return
     setState('pending')
     try {
       if (props.asStarter === true) {
@@ -62,7 +66,12 @@ export function SpaceBrowserRunStop(props: SpaceBrowserRunStopProps) {
       const code = error instanceof ApiError ? error.code : ''
       if (code === 'space_run_control_not_authorized') setState('forbidden')
       else if (code === 'browser_run_not_yours' || code === 'space_browser_stop_not_authorized') setState('not_starter')
-      else if (code === 'zdr_feature_not_supported') setState('zdr')
+      else if (
+        code === 'zdr_feature_not_supported'
+        || code === 'zdr_durable_mutation_forbidden'
+        || code === 'zdr_waiver_route_mismatch'
+      )
+        setState('zdr')
       else setState('failed')
     }
   }
@@ -72,7 +81,7 @@ export function SpaceBrowserRunStop(props: SpaceBrowserRunStopProps) {
       <button
         type="button"
         class="verevon-space-browser-stop__button"
-        disabled={state() === 'pending' || state() === 'sent'}
+        disabled={!canPress()}
         onClick={() => {
           void requestStop()
         }}

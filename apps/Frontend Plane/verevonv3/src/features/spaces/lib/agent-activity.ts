@@ -11,8 +11,9 @@ import { AWAITING_APPROVAL_RUN_STATUS, LIVE_RUN_STATUSES } from './space-thread-
  *   2. working   a run is queued or running,
  *   3. last      the first 120 plain characters of the agent's latest loaded turn.
  *
- * Until the server derives `awaiting_approval` into the thread projection (WS09/
- * WS10) line 1 simply never appears. Attribution is by display name because a
+ * Session Core derives `awaiting_approval` into the thread projection (WS10-S1,
+ * a run with a requested, unexpired approval), so line 1 appears when the
+ * thread reads that status. Attribution is by display name because a
  * turn carries no agent id: an agent we cannot pin down gets no lead line, and
  * a thread is attributed to an agent only when it is the room's single active
  * agent or the thread's last loaded assistant turn names it. The card never

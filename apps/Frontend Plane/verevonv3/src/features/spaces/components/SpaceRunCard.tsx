@@ -89,7 +89,13 @@ export function SpaceRunCard(props: SpaceRunCardProps) {
   const asWork = (): Pick<SpaceRunWork, 'steps' | 'steer'> => ({
     steps: steps()
       .filter((step) => step.state !== 'running')
-      .map((step) => ({ id: step.id, class: step.class, state: step.state as 'ok' | 'error' | 'denied' })),
+      .map((step) => ({
+        id: step.id,
+        class: step.class,
+        state: step.state as 'ok' | 'error' | 'denied',
+        // The server-stamped step time (WS09-S3) is kept, so the ended disclosure can sum it.
+        ...(step.ms !== undefined ? { ms: step.ms } : {}),
+      })),
     steer: props.view.steer,
   })
 
@@ -166,6 +172,14 @@ export function SpaceRunCard(props: SpaceRunCardProps) {
                 {i18n.tr(
                   'Med nulllagring av data kan kjøringen ikke stoppes herfra ennå. Ingenting er endret.',
                   'With zero data retention the run cannot be stopped from here yet. Nothing was changed.',
+                )}
+              </span>
+            </Show>
+            <Show when={stopState() === 'unavailable'}>
+              <span role="alert">
+                {i18n.tr(
+                  'Kjøringen kan ikke stoppes herfra. Ingenting er endret.',
+                  'This run cannot be stopped from here. Nothing was changed.',
                 )}
               </span>
             </Show>

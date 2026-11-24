@@ -156,6 +156,11 @@ function RunStopButton(props: { readonly object: string; readonly state: RunStop
           )}
         </span>
       </Show>
+      <Show when={props.state === 'unavailable'}>
+        <span role="alert">
+          {i18n.tr('Kjøringen kan ikke stoppes herfra. Ingenting er endret.', 'This run cannot be stopped from here. Nothing was changed.')}
+        </span>
+      </Show>
       <Show when={props.state === 'timeout'}>
         <span role="alert">
           {i18n.tr('Stoppen er ikke bekreftet ennå. Prøv igjen.', 'The stop is not confirmed yet. Try again.')}

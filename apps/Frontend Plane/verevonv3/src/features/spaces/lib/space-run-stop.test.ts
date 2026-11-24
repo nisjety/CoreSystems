@@ -19,6 +19,7 @@ describe('runStopCanBePressed (WS09-S8)', () => {
   it('stays closed after a refusal that a retry cannot change', () => {
     expect(runStopCanBePressed('forbidden')).toBe(false)
     expect(runStopCanBePressed('zdr')).toBe(false)
+    expect(runStopCanBePressed('unavailable')).toBe(false)
   })
 })
 
@@ -26,6 +27,12 @@ describe('runStopStateForCode (WS09-S8)', () => {
   it('maps the two refusals a retry cannot fix to their own states', () => {
     expect(runStopStateForCode('space_run_control_not_authorized')).toBe('forbidden')
     expect(runStopStateForCode('zdr_durable_mutation_forbidden')).toBe('zdr')
+  })
+
+  it('closes Stop for a waived credential, a run that is gone and a stop that is not enabled', () => {
+    expect(runStopStateForCode('zdr_waiver_route_mismatch')).toBe('zdr')
+    expect(runStopStateForCode('run_not_found')).toBe('unavailable')
+    expect(runStopStateForCode('feature_unavailable')).toBe('unavailable')
   })
 
   it('reads any other answer as a failure that can be retried', () => {

@@ -156,6 +156,43 @@ describe('applyRoomRunFrame: steps (WS09-S5)', () => {
   })
 })
 
+describe('applyRoomRunFrame: a run that waited for approval moves again (WS10-S1)', () => {
+  const waiting = () =>
+    liveView({ phase: 'awaiting_approval', steps: [{ id: 's1', class: 'effect', state: 'running' }] })
+
+  it('keeps awaiting_approval from the snapshot until the run shows progress', () => {
+    expect(waiting().phase).toBe('awaiting_approval')
+  })
+
+  it('reads a repeat of the open step in the same state as no progress', () => {
+    expect(applyRoomRunFrame(waiting(), step('s1', 'running', 'effect')).phase).toBe('awaiting_approval')
+  })
+
+  it('gives way to running when the waiting step settles', () => {
+    expect(applyRoomRunFrame(waiting(), step('s1', 'ok', 'effect')).phase).toBe('running')
+  })
+
+  it('gives way to running when a new step starts', () => {
+    expect(applyRoomRunFrame(waiting(), step('s2', 'running', 'web')).phase).toBe('running')
+  })
+
+  it('gives way to running when new text arrives, but not on a repeat of held text', () => {
+    const view = liveView({ phase: 'awaiting_approval', text: { offset: 0, value: 'hi', truncated: false, visible: true } })
+    expect(applyRoomRunFrame(view, text(0, 'hi'))).toBe(view)
+    expect(applyRoomRunFrame(view, text(2, ' there')).phase).toBe('running')
+  })
+
+  it('gives way to running when the hidden text grows', () => {
+    const view = liveView({ phase: 'awaiting_approval', text: { offset: 0, value: '', truncated: false, visible: false } })
+    expect(applyRoomRunFrame(view, { type: 'text_progress', chars: 0 })).toBe(view)
+    expect(applyRoomRunFrame(view, { type: 'text_progress', chars: 12 }).phase).toBe('running')
+  })
+
+  it('leaves any other phase alone', () => {
+    expect(applyRoomRunFrame(liveView(), step('s2', 'running')).phase).toBe('running')
+  })
+})
+
 describe('applyRoomRunFrame: the end of a run (WS09-S5)', () => {
   it('is final: every later frame hands back the same view', () => {
     const done = fold(liveView(), [{ type: 'finished', outcome: 'completed', reason: null }])

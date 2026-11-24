@@ -210,6 +210,24 @@ describe('SpaceRunCard: stop states, awaiting approval and the step count (WS09-
     expect(stop.stopSpaceRun).toHaveBeenCalledTimes(1)
   })
 
+  it('closes Stop for a waived credential, since a retry is refused the same way', async () => {
+    stop.stopSpaceRun.mockRejectedValue(new ApiError('refused', 403, 'zdr_waiver_route_mismatch'))
+    const { container } = renderCard(running(), { stop: target })
+    ;(stopButton(container) as HTMLButtonElement).click()
+    expect((await screen.findByRole('alert')).textContent).toBe(
+      'Med nulllagring av data kan kjøringen ikke stoppes herfra ennå. Ingenting er endret.',
+    )
+    expect(stopButton(container)?.disabled).toBe(true)
+  })
+
+  it('closes Stop when the run is gone, and says nothing was changed', async () => {
+    stop.stopSpaceRun.mockRejectedValue(new ApiError('gone', 404, 'run_not_found'))
+    const { container } = renderCard(running(), { stop: target })
+    ;(stopButton(container) as HTMLButtonElement).click()
+    expect((await screen.findByRole('alert')).textContent).toBe('Kjøringen kan ikke stoppes herfra. Ingenting er endret.')
+    expect(stopButton(container)?.disabled).toBe(true)
+  })
+
   it('says a stop that gets no answer in time is not confirmed yet, and lets the reader send it again with the same key', async () => {
     vi.useFakeTimers()
     try {
@@ -249,6 +267,26 @@ describe('SpaceRunCard: stop states, awaiting approval and the step count (WS09-
       view({ steps: [step('s1', 'web', 'ok')], stepsDropped: 2, finished: { outcome: 'completed', reason: null } }),
     )
     expect(container.querySelector('details.verevon-run-work > summary')?.textContent).toBe('Brukte 3 verktøy')
+  })
+
+  it('sums the step times the server stamped into the ended disclosure of the live card (WS09-S3)', () => {
+    const { container } = renderCard(
+      view({
+        steps: [
+          { id: 's1', class: 'web', state: 'ok', ms: 4200 },
+          { id: 's2', class: 'code', state: 'ok', ms: 7800 },
+        ],
+        finished: { outcome: 'completed', reason: null },
+      }),
+    )
+    expect(container.querySelector('details.verevon-run-work > summary')?.textContent).toBe('Brukte 2 verktøy på 12 s')
+  })
+
+  it('leaves the time out of the ended disclosure when no step carries one', () => {
+    const { container } = renderCard(
+      view({ steps: [step('s1', 'web', 'ok')], finished: { outcome: 'completed', reason: null } }),
+    )
+    expect(container.querySelector('details.verevon-run-work > summary')?.textContent).toBe('Brukte 1 verktøy')
   })
 })
 
