@@ -518,3 +518,111 @@ async fn run_phase_pg_an_approval_opening_and_closing_emits_the_phase() {
         .expect("the approval rows are removed before their run");
     clean_space(&pool, &org, &space).await;
 }
+
+/// The text of `CREATE OR REPLACE FUNCTION <name>` up to its closing `$$;`.
+fn sql_function(sql: &str, name: &str) -> String {
+    let start = sql.find(&format!("CREATE OR REPLACE FUNCTION {name}")).expect("the function is defined");
+    let len = sql[start..].find("\n$$;").expect("the function body is closed");
+    sql[start..start + len].replace("\r\n", "\n")
+}
+
+/// DEPTH-WS10-S1-1 residual, as text: migration 0138 reports an approval that lapses by expiry
+/// through the same chokepoint and predicates, once, and its revert restores the 0137 trigger.
+#[test]
+fn approval_lapse_events_use_the_chokepoint_and_are_reported_once() {
+    let migration = include_str!("../migrations/0138_space_approval_phase_lapses.sql");
+    let lapse = sql_function(migration, "space_event_emit_lapsed_approval_phases()");
+    for required in [
+        "PERFORM space_event_emit(",
+        "'run.state_changed'",
+        "'state', 'running'",
+        "'prev', 'awaiting_approval'",
+        "v_run.status <> 'queued'",
+        "o.state IN ('open', 'processing')",
+        "o.deadline_at > now()",
+        "v_run.retention_class = 'zdr'",
+        "(a.expires_at IS NULL OR a.expires_at > now())",
+        "a.expires_at > now() - interval '15 minutes'",
+        "SELECT s.enabled FROM space_event_settings",
+        "ON CONFLICT (approval_id) DO NOTHING",
+        "VALUES ('approvals_phase', SQLSTATE)",
+    ] {
+        assert!(lapse.contains(required), "the lapse emitter must contain {required}");
+    }
+    // The phase trigger is 0137's, plus one guard: a lapse already reported emits nothing more.
+    let original = include_str!("../migrations/0137_space_run_approval_phase_events.sql");
+    let trigger = "space_event_from_approvals_phase()";
+    let replaced = sql_function(migration, trigger);
+    assert!(replaced.contains("FROM space_approval_phase_lapses AS l WHERE l.approval_id = OLD.id"));
+    let guard_free: String = replaced
+        .replace(
+            "            -- Only the decision that ends the wait moves it back, and not when the lapse sweep\n            -- already reported this approval's expiry (0138).\n",
+            "            -- Only the decision that ends the wait moves it back.\n",
+        )
+        .replace(
+            "               OR EXISTS (\n                   SELECT 1 FROM space_approval_phase_lapses AS l WHERE l.approval_id = OLD.id\n               )\n",
+            "",
+        );
+    assert_eq!(guard_free, sql_function(original, trigger), "0138 changes the 0137 trigger by the lapse guard only");
+    let revert = include_str!("../migrations/revert/0138_space_approval_phase_lapses.down.sql");
+    assert_eq!(sql_function(revert, trigger), sql_function(original, trigger), "the revert restores the 0137 trigger");
+    assert!(revert.contains("DROP FUNCTION IF EXISTS space_event_emit_lapsed_approval_phases()"));
+    assert!(revert.contains("DROP TABLE IF EXISTS space_approval_phase_lapses"));
+    // The source word is one the gauge already reports.
+    assert!(crate::space::events::SPACE_EVENT_ERROR_SOURCES.contains(&"approvals_phase"));
+}
+
+#[tokio::test]
+#[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+async fn run_phase_pg_an_approval_that_lapses_moves_the_run_back_once() {
+    let _switch = GuardSwitch::hold();
+    let Some((pool, org, space, thread)) = seeded("approval-lapse").await else { return };
+    crate::space::test_support::set_event_log(&pool, true).await;
+    let run = start(&pool, &org, &thread, "k-approval-lapse").await.expect("the run starts");
+    let approval = mp_ids::new_ulid();
+    sqlx::query(
+        "INSERT INTO approvals (id, run_id, kind, status, org_id, user_id, expires_at)
+         VALUES ($1, $2, 'plan', 'requested', $3, $4, now() + interval '10 minutes')",
+    )
+    .bind(&approval)
+    .bind(&run.run_id)
+    .bind(&org)
+    .bind(OWNER)
+    .execute(&pool)
+    .await
+    .expect("the approval is requested");
+    // The approval lapses: its expiry passes, nobody writes its status.
+    sqlx::query("UPDATE approvals SET expires_at = now() - interval '1 minute' WHERE id = $1")
+        .bind(&approval)
+        .execute(&pool)
+        .await
+        .expect("lapse");
+    let lapse = || async {
+        sqlx::query_scalar::<_, i32>("SELECT space_event_emit_lapsed_approval_phases()")
+            .fetch_one(&pool)
+            .await
+            .expect("the lapse pass runs")
+    };
+    assert_eq!(lapse().await, 1, "{NEEDS_DB}: the lapse is reported");
+    assert_eq!(lapse().await, 0, "{NEEDS_DB}: and only once");
+    // A late status write of the lapsed approval emits nothing more.
+    sqlx::query("UPDATE approvals SET status = 'timed_out' WHERE id = $1")
+        .bind(&approval)
+        .execute(&pool)
+        .await
+        .expect("time out");
+    let states = run_states(&pool, &org, &space, &run.run_id).await;
+    let tail: Vec<(&str, &str)> = states.iter().map(|(s, p)| (s.as_str(), p.as_str())).skip(1).collect();
+    assert_eq!(
+        tail,
+        vec![("awaiting_approval", "running"), ("running", "awaiting_approval")],
+        "{NEEDS_DB}: the wait starts once and ends once, at the lapse"
+    );
+    for cleanup in [
+        "DELETE FROM space_approval_phase_lapses WHERE run_id = $1",
+        "DELETE FROM approvals WHERE run_id = $1",
+    ] {
+        sqlx::query(cleanup).bind(&run.run_id).execute(&pool).await.expect("cleanup");
+    }
+    clean_space(&pool, &org, &space).await;
+}

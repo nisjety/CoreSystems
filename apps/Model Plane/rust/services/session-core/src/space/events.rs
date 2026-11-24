@@ -228,7 +228,7 @@ pub(crate) async fn sweep_once(pool: &PgPool, retention_days: i64) -> Result<u64
 }
 
 /// Every source word a trigger writes to `space_event_errors`: migrations 0072 (the log), 0080 and 0135 (the
-/// attention outbox), 0137 (the approval phase). The gauge reports each one on every pass, zero included (see `report_errors`).
+/// attention outbox), 0137 and 0138 (the approval phase and its lapse). The gauge reports each one on every pass, zero included (see `report_errors`).
 pub(crate) const SPACE_EVENT_ERROR_SOURCES: &[&str] = &[
     "messages_insert",
     "threads_insert",
@@ -284,6 +284,28 @@ pub(crate) async fn run_retention_sweeper(pool: PgPool) -> Result<()> {
             warn!(%error, "space event error report failed");
         }
         tokio::time::sleep(SWEEP_INTERVAL).await;
+    }
+}
+
+/// How often an approval that lapsed by expiry is reported as the end of its run's wait.
+pub(crate) const APPROVAL_LAPSE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Every minute: emit `running` for a live Space run whose last requested approval lapsed by
+/// expiry without a decision (migration 0138, DEPTH-WS10-S1-1 residual), so the stream does not
+/// leave it on `awaiting_approval` while `run_phase_sql` reads `running`. The SQL does nothing
+/// while the event log is off. A failed pass is logged and retried on the next tick.
+pub(crate) async fn run_approval_lapse_emitter(pool: PgPool) -> Result<()> {
+    info!(interval_secs = APPROVAL_LAPSE_INTERVAL.as_secs(), "Space approval lapse emitter started");
+    loop {
+        match sqlx::query_scalar::<_, i32>("SELECT space_event_emit_lapsed_approval_phases()")
+            .fetch_one(&pool)
+            .await
+        {
+            Ok(emitted) if emitted > 0 => info!(emitted, "lapsed approvals moved their runs back to running"),
+            Ok(_) => {}
+            Err(error) => warn!(%error, "Space approval lapse pass failed; retrying next tick"),
+        }
+        tokio::time::sleep(APPROVAL_LAPSE_INTERVAL).await;
     }
 }
 
@@ -756,11 +778,8 @@ mod tests {
     /// The text of `CREATE OR REPLACE FUNCTION <name>` up to its closing `$$;`, line endings normalised.
     fn function_body(sql: &str, name: &str) -> String {
         let start = sql.find(&format!("CREATE OR REPLACE FUNCTION {name}")).expect("the function is defined");
-        let len = sql[start..].find("
-$$;").expect("the function body is closed");
-        sql[start..start + len].replace("
-", "
-")
+        let len = sql[start..].find("\n$$;").expect("the function body is closed");
+        sql[start..start + len].replace("\r\n", "\n")
     }
 
     /// The gauge reports every source a trigger writes, so an alert on the attention source cannot miss a writer.

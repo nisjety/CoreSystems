@@ -317,8 +317,41 @@ fn pin_approval_decision_identity(
     request: &mut proto::DecideApprovalRequest,
 ) -> Result<(), Status> {
     caller.authorize_org(&request.org_id)?;
+    if is_system_denial(request) {
+        // A runtime-ended wait keeps the server-known system name it asked for, so the stored
+        // decision never names the run owner as the person who denied it (DEPTH-WS10-QUARANTINE 4).
+        return Ok(());
+    }
     caller.principal_id().clone_into(&mut request.decided_by);
     Ok(())
+}
+
+/// The system deciders a runtime may record a denial under. Each one only ends a wait the
+/// caller could end anyway (its own approval, denied once); any other name is pinned to the
+/// caller as before.
+const SYSTEM_APPROVAL_DECIDERS: &[&str] = &[
+    // The browser gate's run was cancelled while it waited (execution-core browser_events.rs).
+    "system:user-cancelled",
+    // A quarantine hold failed, so the review approval has nothing to release
+    // (execution-core quarantine.rs).
+    "system:quarantine-hold-failed",
+];
+
+/// Whether a decision is a system denial that keeps its named decider: source `system`, state
+/// `denied`, a known system name, a `once` scope, and no member-decide, grant-use, rule or edit
+/// fields. Anything else is a person's decision and is attributed to the caller.
+fn is_system_denial(request: &proto::DecideApprovalRequest) -> bool {
+    request.decision_source == proto::ApprovalDecisionSource::System as i32
+        && request.decision == proto::ApprovalState::Denied as i32
+        && SYSTEM_APPROVAL_DECIDERS.contains(&request.decided_by.as_str())
+        && (request.scope == proto::ApprovalScope::Unspecified as i32
+            || request.scope == proto::ApprovalScope::Once as i32)
+        && request.space_id.is_empty()
+        && request.space_decision_ref.is_empty()
+        && request.space_decision_token.is_empty()
+        && request.grant_use_token.is_empty()
+        && !request.rule_proposed
+        && request.edit.is_none()
 }
 
 /// Whether a decision request repeats the one already recorded. A retry must also name the
@@ -6078,6 +6111,43 @@ mod tests {
         pin_approval_decision_identity(&caller, &mut decision).expect("same tenant");
         assert_eq!(decision.decided_by, "user-1");
 
+        // A runtime's system denial keeps its system name (DEPTH-WS10-QUARANTINE 4): a failed
+        // quarantine hold must not be stored as the run owner's own denial.
+        let system_denial = || proto::DecideApprovalRequest {
+            org_id: "org-1".to_owned(),
+            decided_by: "system:quarantine-hold-failed".to_owned(),
+            decision: proto::ApprovalState::Denied as i32,
+            decision_source: proto::ApprovalDecisionSource::System as i32,
+            ..Default::default()
+        };
+        let mut kept = system_denial();
+        pin_approval_decision_identity(&caller, &mut kept).expect("same tenant");
+        assert_eq!(kept.decided_by, "system:quarantine-hold-failed");
+        let mut cancelled = system_denial();
+        cancelled.decided_by = "system:user-cancelled".to_owned();
+        pin_approval_decision_identity(&caller, &mut cancelled).expect("same tenant");
+        assert_eq!(cancelled.decided_by, "system:user-cancelled");
+        // Anything that is not a plain system denial under a known name is the caller's.
+        let pinned: Vec<Box<dyn Fn(&mut proto::DecideApprovalRequest)>> = vec![
+            Box::new(|r| r.decided_by = "system:anything-else".to_owned()),
+            Box::new(|r| r.decision = proto::ApprovalState::Granted as i32),
+            Box::new(|r| r.decision_source = proto::ApprovalDecisionSource::User as i32),
+            Box::new(|r| r.scope = proto::ApprovalScope::Thread as i32),
+            Box::new(|r| r.space_decision_token = "tok".to_owned()),
+            Box::new(|r| r.grant_use_token = "tok".to_owned()),
+            Box::new(|r| r.rule_proposed = true),
+            Box::new(|r| r.edit = Some(proto::ApprovalEdit::default())),
+        ];
+        for mutate in pinned {
+            let mut request = system_denial();
+            mutate(&mut request);
+            pin_approval_decision_identity(&caller, &mut request).expect("same tenant");
+            assert_eq!(request.decided_by, "user-1");
+        }
+        let mut cross_tenant = system_denial();
+        cross_tenant.org_id = "org-2".to_owned();
+        assert!(pin_approval_decision_identity(&caller, &mut cross_tenant).is_err());
+
         create.org_id = "org-2".to_owned();
         assert_eq!(
             pin_create_approval_identity(&caller, &mut create)
@@ -6616,6 +6686,21 @@ mod tests {
         assert!(!is_idempotent_approval_retry(
             &row, "granted", "user-2", "approved", "once"
         ));
+    }
+
+    /// DEPTH-WS10-QUARANTINE (5): the stored quarantine kind and the wire kind map both ways, so a
+    /// held review reaches the gateway as UNTRUSTED_CONTENT and a create with it stores the word
+    /// the hold, claim and grant-claim queries filter on.
+    #[test]
+    fn the_untrusted_content_kind_round_trips_between_store_and_wire() {
+        let wire = proto::ApprovalKind::UntrustedContent as i32;
+        assert_eq!(crate::space::quarantine::KIND, "untrusted_content");
+        assert_eq!(approval_kind_from_str(crate::space::quarantine::KIND), wire);
+        assert_eq!(approval_kind_to_str(wire), Some(crate::space::quarantine::KIND));
+        for kind in ["plan", "tool_call", "permission", "destructive", "cost", "untrusted_content"] {
+            assert_eq!(approval_kind_to_str(approval_kind_from_str(kind)), Some(kind), "{kind}");
+        }
+        assert_eq!(approval_kind_to_str(approval_kind_from_str("quarantine")), None, "no alias word");
     }
 
     #[test]

@@ -1509,6 +1509,17 @@ mod tests {
         }
     }
 
+    /// DEPTH-WS10-QUARANTINE (5): the quarantine review's kind crosses the wire as the
+    /// `untrusted_content` word the SPA copy keys on, never as `custom`.
+    #[test]
+    fn untrusted_content_kind_crosses_the_wire_by_name() {
+        let mut held = durable_pending("appr_q", "orgA", "run_1");
+        held.kind = ApprovalKind::UntrustedContent as i32;
+        assert_eq!(gateway_approval_from_proto(&held).kind, "untrusted_content");
+        held.kind = 99;
+        assert_eq!(gateway_approval_from_proto(&held).kind, "custom", "an unknown number is not a review");
+    }
+
     /// (2) proto `Approval` → `GatewayApproval` mapping, incl. status vocab.
     #[test]
     fn proto_to_gateway_maps_fields_and_status_vocab() {
