@@ -40,8 +40,13 @@ const (
 )
 
 // DecisionAuditConfig is the rollout switch pair. Both are rollout controls,
-// never authorization inputs: a Space decision is issued or refused the same
-// way whatever they say.
+// never authorization inputs: they never grant a decision, and never change
+// whether Control's authority checks issue or refuse one. One availability
+// effect is deliberate (B-REC-03): with the producer on and "issued" listed, an
+// effect-bound decision whose issued row cannot be written to user_audit_outbox
+// is withheld behind a typed 503 (space_decision_audit_unavailable), so an
+// outbox outage then blocks effect-bound Space actions. With "issued" off no
+// answer is held or changed.
 //
 //   - SPACE_AUDIT_DECISION_EVENTS: strict literal "true" turns the producer on.
 //   - SPACE_AUDIT_DECISION_KINDS: comma list of "denied" and "issued". Unset or

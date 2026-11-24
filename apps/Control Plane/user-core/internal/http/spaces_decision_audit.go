@@ -37,6 +37,10 @@ import (
 // when the row cannot be built or written the caller gets a typed 503
 // (space_decision_audit_unavailable) instead of the decision and token, so no
 // effect can be authorized by a decision the org audit trail does not hold.
+// A handler whose answer does not carry the decision object (sandbox-capability
+// answers data.decision as the token string) hands the decision over the gin
+// context (handOffIssuedDecisionForAudit); an effect-bound 200 with no
+// attributable decision is withheld behind the same 503.
 // The request body is read for four identifiers (org, subject, Space, action)
 // and restored. The token, payload digest, nonce and recipient references are
 // never read into the event.
@@ -214,18 +218,55 @@ type decisionAuditResponse struct {
 	Error        json.RawMessage `json:"error"`
 	// Issued body: {"data":{"decision":{...}}}.
 	Data *struct {
-		Decision *struct {
-			DecisionRef       string    `json:"decision_ref"`
-			OrgID             string    `json:"org_id"`
-			SpaceRef          string    `json:"space_ref"`
-			SubjectID         string    `json:"subject_id"`
-			ServiceAudience   string    `json:"service_audience"`
-			ActionID          string    `json:"action_id"`
-			AuthorityRevision int64     `json:"authority_revision"`
-			ExpiresAt         time.Time `json:"expires_at"`
-			ZeroDataRetention bool      `json:"zero_data_retention"`
-		} `json:"decision"`
+		Decision *decisionAuditIssuedView `json:"decision"`
 	} `json:"data"`
+}
+
+// decisionAuditIssuedView is the allowlisted view of an issued decision.
+type decisionAuditIssuedView struct {
+	DecisionRef       string    `json:"decision_ref"`
+	OrgID             string    `json:"org_id"`
+	SpaceRef          string    `json:"space_ref"`
+	SubjectID         string    `json:"subject_id"`
+	ServiceAudience   string    `json:"service_audience"`
+	ActionID          string    `json:"action_id"`
+	AuthorityRevision int64     `json:"authority_revision"`
+	ExpiresAt         time.Time `json:"expires_at"`
+	ZeroDataRetention bool      `json:"zero_data_retention"`
+}
+
+// spaceDecisionAuditIssuedKey is the gin context key a handler whose answer
+// does not carry the decision object (sandbox-capability answers
+// data.decision as the token string) uses to hand the issued decision to the
+// audit middleware.
+const spaceDecisionAuditIssuedKey = "space_decision_audit_issued"
+
+// handOffIssuedDecisionForAudit hands the issued decision to the audit
+// middleware without changing the answer's shape.
+func handOffIssuedDecisionForAudit(c *gin.Context, decision any) {
+	c.Set(spaceDecisionAuditIssuedKey, decision)
+}
+
+// issuedDecisionForAudit finds the decision an effect-bound 200 issued: the
+// handed-off one first, else data.decision in the held body. ok=false means a
+// 200 the middleware cannot attribute to a decision.
+func issuedDecisionForAudit(c *gin.Context, body []byte) (*decisionAuditIssuedView, bool) {
+	if handed, exists := c.Get(spaceDecisionAuditIssuedKey); exists && handed != nil {
+		raw, err := json.Marshal(handed)
+		if err != nil {
+			return nil, false
+		}
+		var view decisionAuditIssuedView
+		if json.Unmarshal(raw, &view) != nil {
+			return nil, false
+		}
+		return &view, true
+	}
+	var answer decisionAuditResponse
+	if json.Unmarshal(body, &answer) != nil || answer.Data == nil || answer.Data.Decision == nil {
+		return nil, false
+	}
+	return answer.Data.Decision, true
 }
 
 // refusalCode is the typed code of a refusal in either body shape.
@@ -262,7 +303,10 @@ type decisionAuditBatchResponse struct {
 
 // decisionAuditActorRole is who the issuer call speaks for. The gateway's
 // verified delegation speaks for a user; any other service principal for
-// itself; a bearer caller is a user. It is an audit label, never authority.
+// itself; a bearer caller is a user (unreachable on the internal issuer group
+// today, whose service-principal guard rejects bearer callers first; kept so the
+// label stays right if a bearer route is ever audited). It is an audit label,
+// never authority.
 func decisionAuditActorRole(c *gin.Context) string {
 	switch c.GetString("auth_method") {
 	case "service_principal":
@@ -319,7 +363,13 @@ func (s *Server) spaceDecisionAuditMiddleware() gin.HandlerFunc {
 		writer := &decisionAuditWriter{ResponseWriter: c.Writer, limit: limit}
 		c.Writer = writer
 		c.Next()
-		if c.IsAborted() || writer.truncated {
+		if c.IsAborted() {
+			return
+		}
+		if writer.truncated {
+			if isAuditedRefusal(c.Writer.Status()) || row.Batch {
+				log.Printf("user-core space decision audit: %s answer on %s over %d bytes; not audited", row.Name, route, limit)
+			}
 			return
 		}
 		now := time.Now().UTC()
@@ -357,13 +407,15 @@ func holdAndAuditEffectBound(c *gin.Context, sink decisionAuditSink, route strin
 		}
 		return
 	}
-	var answer decisionAuditResponse
-	if json.Unmarshal(hold.buf.Bytes(), &answer) != nil || answer.Data == nil || answer.Data.Decision == nil {
-		// A 200 that carries no decision issued nothing to audit.
-		hold.release()
+	d, ok := issuedDecisionForAudit(c, hold.buf.Bytes())
+	if !ok {
+		// Every effect-bound issuer answers 200 only with a decision. A 200 the
+		// middleware cannot attribute to one may still carry a token, so it is
+		// withheld rather than released unaudited.
+		log.Printf("user-core space decision audit: %s 200 on %s carries no auditable decision; withheld (fail closed)", row.Name, route)
+		hold.refuse()
 		return
 	}
-	d := answer.Data.Decision
 	eventID, subject, payload, err := spaces.BuildIssuedDecisionAudit(spaces.IssuedDecisionAudit{
 		Route: route, Kind: row.Name, DecisionRef: d.DecisionRef,
 		OrgID:     firstNonEmpty(d.OrgID, c.GetString("org_id")),
@@ -402,8 +454,18 @@ func (k decisionAuditSink) enqueueBatchDenials(c *gin.Context, route string, row
 	if json.Unmarshal(body, &answer) != nil || answer.Data == nil {
 		return
 	}
+	// One deadline covers the whole batch: a stalled outbox costs the caller at
+	// most decisionAuditWriteTimeout, not one timeout per denied row. Rows still
+	// unwritten when it expires fail fast and are counted in one log line.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), decisionAuditWriteTimeout)
+	defer cancel()
+	lost := 0
 	for _, result := range answer.Data.Results {
 		if result.Status != "denied" {
+			continue
+		}
+		if ctx.Err() != nil {
+			lost++
 			continue
 		}
 		eventID, subject, payload, err := spaces.BuildDeniedDecisionAudit(spaces.DeniedDecisionAudit{
@@ -411,18 +473,28 @@ func (k decisionAuditSink) enqueueBatchDenials(c *gin.Context, route string, row
 			SpaceRef: result.SpaceRef, Status: http.StatusOK, Reason: result.Reason,
 			ActorRole: actorRole, BatchRow: true, OccurredAt: now,
 		})
-		k.enqueue(c, eventID, subject, payload, err)
+		if !k.enqueueWithin(ctx, eventID, subject, payload, err) {
+			lost++
+		}
+	}
+	if lost > 0 {
+		log.Printf("user-core space decision audit: %d batch denial rows on %s not recorded", lost, route)
 	}
 }
 
 // enqueue writes one row and reports whether it is in the outbox.
 func (k decisionAuditSink) enqueue(c *gin.Context, eventID, subject string, payload []byte, buildErr error) bool {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), decisionAuditWriteTimeout)
+	defer cancel()
+	return k.enqueueWithin(ctx, eventID, subject, payload, buildErr)
+}
+
+// enqueueWithin writes one row under the caller's deadline.
+func (k decisionAuditSink) enqueueWithin(ctx context.Context, eventID, subject string, payload []byte, buildErr error) bool {
 	if buildErr != nil {
 		log.Printf("user-core space decision audit: not recorded: %v", buildErr)
 		return false
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), decisionAuditWriteTimeout)
-	defer cancel()
 	if err := k.outbox.EnqueueAudit(ctx, eventID, subject, payload); err != nil {
 		log.Printf("user-core space decision audit: enqueue %s failed: %v", eventID, err)
 		return false

@@ -1243,6 +1243,9 @@ func (s *Server) issueSpaceCapabilityDecision(c *gin.Context) {
 		Persistence: intent.Persistence, Processes: intent.Processes,
 		Backup: intent.Backup, Egress: intent.Egress, CredentialMode: intent.CredentialMode,
 	}
+	// data.decision is the token string here, so the decision object reaches the
+	// B-REC-03 audit hold over the context.
+	handOffIssuedDecisionForAudit(c, decision)
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": token, "claims": claims}})
 }
 
@@ -1285,6 +1288,7 @@ func (s *Server) issueTieredSpaceCapabilityDecision(c *gin.Context, evidence spa
 		Backup: intent.Backup, Egress: intent.Egress, CredentialMode: intent.CredentialMode,
 		EgressAllowlist: grant.Allowlist,
 	}
+	handOffIssuedDecisionForAudit(c, decision)
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": token, "claims": claims, "egress_grant": grant}})
 }
 

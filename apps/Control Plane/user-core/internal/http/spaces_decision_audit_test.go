@@ -6,9 +6,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -110,6 +112,18 @@ func newAuditHarness(t *testing.T, cfg spaces.DecisionAuditConfig, wireOutbox bo
 		group.POST(path, probe)
 	}
 	group.GET("/thread-decision", probe)
+	// The sandbox-capability shape: data.decision is the token string and the
+	// decision object travels to the audit hold over the context.
+	group.POST("/sandbox-capability-decision", func(c *gin.Context) {
+		_, _ = io.ReadAll(c.Request.Body)
+		if c.GetHeader("X-Probe-NoHandOff") != "1" {
+			handOffIssuedDecisionForAudit(c, spaces.Decision{
+				DecisionRef: "dec-sbx", OrgID: "org-1", SpaceRef: "space-1", SubjectID: "user-1",
+				ServiceAudience: "sandbox-manager", ActionID: "space.sandbox.lease", AuthorityRevision: 2,
+			})
+		}
+		c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": "tok-secret-sandbox", "claims": gin.H{"backend_id": "b-1"}}})
+	})
 	return h
 }
 
@@ -400,7 +414,8 @@ func TestAuditMiddlewareOutboxFailureFailsAnEffectBoundIssueClosed(t *testing.T)
 }
 
 // B-REC-03: a decision whose row cannot even be built (no decision_ref) fails
-// closed too; a 200 that carries no decision is released untouched.
+// closed too, and so does any effect-bound 200 the middleware cannot attribute
+// to a decision (no decision object, a non-object decision, a raw body).
 func TestAuditMiddlewareUnbuildableIssuedRowFailsClosed(t *testing.T) {
 	h := newAuditHarness(t, enabledBoth, true)
 	noRef := `{"data":{"decision":{"org_id":"org-1","space_ref":"space-1"},"token":"tok-secret-value"}}`
@@ -408,10 +423,19 @@ func TestAuditMiddlewareUnbuildableIssuedRowFailsClosed(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable || strings.Contains(rec.Body.String(), "tok-secret-value") {
 		t.Fatalf("unbuildable issued row must fail closed: %d %s", rec.Code, rec.Body.String())
 	}
-	other := `{"data":{"status":"ok"}}`
-	rec = h.post("/run-control-decision", auditRequestBody, map[string]string{"X-Probe-Body": other})
-	if rec.Code != http.StatusOK || rec.Body.String() != other {
-		t.Fatalf("a 200 without a decision must pass: %d %s", rec.Code, rec.Body.String())
+	for _, body := range []string{
+		`{"data":{"status":"ok"}}`,
+		`{"data":{"decision":"tok-secret-value"}}`,
+		`tok-secret-value`,
+		``,
+	} {
+		rec = h.post("/run-control-decision", auditRequestBody, map[string]string{"X-Probe-Body": body})
+		if rec.Code != http.StatusServiceUnavailable || strings.Contains(rec.Body.String(), "tok-secret-value") {
+			t.Fatalf("an unattributable effect-bound 200 %q must be withheld: %d %s", body, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"code":"space_decision_audit_unavailable"`) {
+			t.Fatalf("refusal must be the typed envelope: %s", rec.Body.String())
+		}
 	}
 	if h.recorder.count() != 0 {
 		t.Fatalf("rows = %+v", h.recorder.rows)
@@ -456,5 +480,98 @@ func TestAuditMiddlewareAddsNoRoutes(t *testing.T) {
 		if b[route] != n {
 			t.Errorf("%s: %d vs %d", route, n, b[route])
 		}
+	}
+}
+
+// B-REC-03 review: sandbox-capability answers data.decision as the token
+// string. The handed-off decision is audited, the answer keeps its shape, and
+// an outbox failure withholds the token behind the typed 503.
+func TestAuditMiddlewareSandboxCapabilityTokenStringIsHeldAndAudited(t *testing.T) {
+	h := newAuditHarness(t, enabledBoth, true)
+	rec := h.post("/sandbox-capability-decision", `{"intent":{"org_id":"org-1","space_ref":"space-1"}}`, nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"decision":"tok-secret-sandbox"`) {
+		t.Fatalf("issued answer must be released with its shape: %d %s", rec.Code, rec.Body.String())
+	}
+	if h.recorder.count() != 1 {
+		t.Fatalf("rows = %+v", h.recorder.rows)
+	}
+	row := h.recorder.rows[0]
+	if row.eventID != "space-decision:dec-sbx" || row.subject != spaces.AuditSubjectSpaceDecisionIssued {
+		t.Fatalf("row = %+v", row)
+	}
+	if strings.Contains(row.payload, "tok-secret") || !strings.Contains(row.payload, `"decision_kind":"sandbox_capability"`) ||
+		!strings.Contains(row.payload, `"service_audience":"sandbox-manager"`) {
+		t.Fatalf("payload = %s", row.payload)
+	}
+
+	h.recorder.rows = nil
+	h.recorder.err = errors.New("outbox down")
+	rec = h.post("/sandbox-capability-decision", `{}`, nil)
+	if rec.Code != http.StatusServiceUnavailable || strings.Contains(rec.Body.String(), "tok-secret") ||
+		!strings.Contains(rec.Body.String(), `"code":"space_decision_audit_unavailable"`) {
+		t.Fatalf("an unaudited sandbox issue must fail closed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Without the hand-off the token-string body is unattributable: withheld.
+	h.recorder.err = nil
+	rec = h.post("/sandbox-capability-decision", `{}`, map[string]string{"X-Probe-NoHandOff": "1"})
+	if rec.Code != http.StatusServiceUnavailable || strings.Contains(rec.Body.String(), "tok-secret") {
+		t.Fatalf("a sandbox 200 with no handed-off decision must be withheld: %d %s", rec.Code, rec.Body.String())
+	}
+	if h.recorder.count() != 0 {
+		t.Fatalf("rows = %+v", h.recorder.rows)
+	}
+}
+
+// stallingRecorder blocks every write until its deadline expires.
+type stallingRecorder struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (r *stallingRecorder) EnqueueAudit(ctx context.Context, _, _ string, _ []byte) error {
+	r.mu.Lock()
+	r.calls++
+	r.mu.Unlock()
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// B-REC-03 review: a stalled outbox costs a batch answer one write deadline,
+// not one per denied row.
+func TestAuditMiddlewareBatchDenialsShareOneDeadline(t *testing.T) {
+	h := newAuditHarness(t, enabledDeniedOnly, true)
+	stall := &stallingRecorder{}
+	server := NewServer(nil, nil, nil, nil, "0")
+	server.SetSpaceDecisionAudit(enabledDeniedOnly, stall)
+	h.engine = gin.New()
+	group := h.engine.Group("/api/v1/internal/spaces")
+	group.Use(func(c *gin.Context) {
+		c.Set("org_id", "org-d")
+		c.Set("user_id", "user-d")
+		c.Next()
+	})
+	group.Use(server.spaceDecisionAuditMiddleware())
+	var rows []string
+	for i := 0; i < 60; i++ {
+		rows = append(rows, `{"space_ref":"space-`+strconv.Itoa(i)+`","status":"denied","reason":"not_member"}`)
+	}
+	batch := `{"data":{"results":[` + strings.Join(rows, ",") + `]}}`
+	group.POST("/thread-read-decisions", func(c *gin.Context) {
+		c.Data(http.StatusOK, "application/json", []byte(batch))
+	})
+	started := time.Now()
+	rec := h.post("/thread-read-decisions", `{"items":[]}`, nil)
+	elapsed := time.Since(started)
+	if rec.Code != http.StatusOK || rec.Body.String() != batch {
+		t.Fatalf("batch answer must be unchanged: %d", rec.Code)
+	}
+	if elapsed > decisionAuditWriteTimeout+2*time.Second {
+		t.Fatalf("a stalled outbox held the batch for %s", elapsed)
+	}
+	stall.mu.Lock()
+	defer stall.mu.Unlock()
+	if stall.calls != 1 {
+		t.Fatalf("writes after the shared deadline expired = %d, want 1", stall.calls)
 	}
 }
