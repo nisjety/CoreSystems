@@ -76,9 +76,10 @@ fn member() -> VerifiedIdentity {
 // ---- revision fold (DEPTH-WS12-S4-2) -------------------------------------------------------
 
 #[test]
-fn a_deleted_answer_lists_no_artifacts() {
+fn the_artifact_query_excludes_deleted_answers_whatever_the_ceiling() {
+    // SQL-shape guard only; db_tests::space_room_read_a_deleted_answer_lists_no_artifacts runs it.
     // A retracted answer carries no metadata in the folded transcript, so its artifacts are not
-    // listed either; a deletion applies whatever the audience ceiling.
+    // listed either; a deletion applies whatever the audience ceiling (no ceiling term here).
     assert!(LIST_SPACE_ARTIFACTS_SQL.contains(
         "NOT EXISTS (SELECT 1 FROM message_revisions rd WHERE rd.message_id = m.id AND rd.action = 'deleted')"
     ));
@@ -550,5 +551,46 @@ mod db_tests {
         pool.execute(up).await.expect("re-apply");
         pool.execute(up).await.expect("re-apply again");
         assert!(valid(pool.clone()).await);
+    }
+
+    /// A revision of `message` written directly, stamped at audience `revision`.
+    async fn put_revision(pool: &PgPool, org: &str, space: &str, thread: &str, message: &str, action: &str, revision: i64) {
+        sqlx::query(
+            "INSERT INTO message_revisions (revision_id, org_id, thread_id, message_id, revision_no, action, \
+             actor_subject_id, actor_class, content, content_digest, prev_content_digest, original_retention, \
+             idempotency_hash, space_id, recipient_audience_revision, authority_revision, resource_authorization_ref) \
+             VALUES ($1, $2, $3, $4, 1, $5, 'owner-1', 'author', NULL, 'sha256:new', 'sha256:old', 'retain', $1, $6, $7, 1, 'resource-1')",
+        )
+        .bind(format!("rev-{message}"))
+        .bind(org)
+        .bind(thread)
+        .bind(message)
+        .bind(action)
+        .bind(space)
+        .bind(revision)
+        .execute(pool)
+        .await
+        .expect("seed a revision");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs DB harness (DATABASE_URL to a disposable *test* Postgres)"]
+    async fn space_room_read_a_deleted_answer_lists_no_artifacts() {
+        // DEPTH-WS12-S4-2: a retracted answer lists no artifacts, even when the deletion was made
+        // under an audience newer than the reader's ceiling; an edited answer keeps its artifacts.
+        let Some(pool) = connect().await else { return };
+        let _keys = StreamKeysEnv::publish();
+        let (org, space) = ids("deleted");
+        let thread = format!("thread-{space}");
+        seed_space_thread(&pool, &org, &space, &thread, "owner-1").await;
+        let (gone, edited) = (format!("gone-{space}"), format!("edited-{space}"));
+        seed(&pool, &space, &thread, &gone, 1, 200, json!({"artifacts": [artifact("gone", "document", 1, "g")]})).await;
+        seed(&pool, &space, &thread, &edited, 1, 100, json!({"artifacts": [artifact("kept", "code", 1, "k")]})).await;
+        put_revision(&pool, &org, &space, &thread, &gone, "deleted", 9).await;
+        put_revision(&pool, &org, &space, &thread, &edited, "edited", 1).await;
+        let page = list(&pool, &org, &space, 4, 0, "").await;
+        let listed: Vec<&str> = page.artifacts.iter().map(|a| a.artifact_id.as_str()).collect();
+        assert_eq!(listed, ["kept"], "{NEEDS_DB}");
+        clean_space(&pool, &org, &space).await;
     }
 }

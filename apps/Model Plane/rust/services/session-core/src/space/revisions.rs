@@ -39,9 +39,22 @@ const MESSAGE_REVISED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.Messa
 /// Flat audit event name of a recorded revision.
 const EVENT_MESSAGE_REVISED: &str = "message_revised";
 /// DEPTH-WS12-S4-1: the live signal of a revision on the Space event log. `$1` org, `$2` Space,
-/// `$3` thread, `$4` the thread's audience stamp. System actor (who revised is not on the stream),
-/// no message id, the closed `fields` word `preview`: ids and closed words only.
-const REVISION_EVENT_SQL: &str = "SELECT space_event_emit($1, $2, 'thread.updated', 'system', NULL, $3, NULL, NULL, $4, 'persistent', '{\"fields\": [\"preview\"]}'::jsonb)";
+/// `$3` thread, `$4` the thread's audience stamp, `$5` the retention class from
+/// [`revision_event_retention_class`]. System actor (who revised is not on the stream), no message
+/// id, the closed `fields` word `preview`: ids and closed words only.
+const REVISION_EVENT_SQL: &str = "SELECT space_event_emit($1, $2, 'thread.updated', 'system', NULL, $3, NULL, NULL, $4, $5, '{\"fields\": [\"preview\"]}'::jsonb)";
+
+/// The event-log retention class of a revision signal, from the decision's signed ZDR state.
+/// `space_event_emit` writes only `persistent` (and `zdr_waived`) rows, so a ZDR decision's
+/// class `zdr` writes nothing: ZDR fails closed even where observe mode let the revise through.
+#[must_use]
+pub(crate) fn revision_event_retention_class(zero_data_retention: bool) -> &'static str {
+    if zero_data_retention {
+        "zdr"
+    } else {
+        "persistent"
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 // The fold. Every transcript, context and Dreaming read joins `rv` and selects these.
@@ -731,12 +744,14 @@ async fn revise_message(
     //     `thread.updated` row (ids and the closed word `preview`, the folded preview may have
     //     changed) on the Space event log, so every member's open room re-reads the thread and
     //     its transcript. The kind, refs key and word are already in space-events.json; the
-    //     function itself honours the event-log switch and never writes for a ZDR class.
+    //     function itself honours the event-log switch and never writes for a ZDR class, which
+    //     is derived from the verified decision's signed `zero_data_retention`.
     sqlx::query(REVISION_EVENT_SQL)
         .bind(&org_id)
         .bind(&space_id)
         .bind(&req.thread_id)
         .bind(thread_revision)
+        .bind(revision_event_retention_class(verified.zero_data_retention))
         .execute(&mut *tx)
         .await
         .map_err(internal)?;
@@ -776,13 +791,50 @@ mod tests {
             serde_json::from_str(include_str!("../../../../../api/contracts/space-events.json")).expect("contract");
         assert!(contract["kinds"]["thread.updated"]["refs"].as_array().expect("refs").iter().any(|r| r == "fields"));
         assert!(contract["closed_words"]["thread_updated_fields"].as_array().expect("words").iter().any(|w| w == "preview"));
-        assert!(REVISION_EVENT_SQL.contains("'thread.updated', 'system', NULL, $3, NULL, NULL, $4, 'persistent'"));
+        assert!(REVISION_EVENT_SQL.contains("'thread.updated', 'system', NULL, $3, NULL, NULL, $4, $5,"));
         assert!(!REVISION_EVENT_SQL.contains("content"), "no text rides the signal");
         let revise = production_fn(production_source(include_str!("revisions.rs")), "
 async fn revise_message(");
         let emit = revise.find("query(REVISION_EVENT_SQL)").expect("revise_message emits the signal");
         let commit = revise.find("tx.commit()").expect("the commit");
         assert!(emit < commit, "the signal is written inside the revision's transaction");
+    }
+
+    #[test]
+    fn the_derivation_readers_fold_revisions_or_hold_no_message_text() {
+        // DEPTH-WS12-S4-2 audit of the compaction, memory_index and dream_runs readers:
+        // * compaction (compaction.rs COMPACT_SQL) reads only run events and writes a step
+        //   watermark; it never reads `messages`, so no revision can leak through it.
+        let compaction = include_str!("../compaction.rs");
+        assert!(!compaction.contains("FROM messages"), "compaction reads no message text");
+        assert!(compaction.contains("jsonb_build_object('max_step', c.max_step)"));
+        // * memory_index holds Data Plane retrieval evidence, written by the context read, never a
+        //   message's text; no writer inserts from `messages`.
+        let grpc = include_str!("../grpc.rs");
+        for (at, _) in grpc.match_indices("INSERT INTO memory_index") {
+            let statement = &grpc[at..at + grpc[at..].find(';').unwrap_or(grpc.len() - at)];
+            assert!(!statement.contains("FROM messages"), "memory_index is not filled from messages: {statement}");
+        }
+        // * dream_runs is an ids-only ledger; both Dreaming loaders splice the fold and skip a
+        //   deleted message, so an edit is mined as edited and a delete is never mined.
+        let dreaming = production_source(include_str!("../dreaming.rs"));
+        assert!(dreaming.contains("(id, org_id, thread_id, trigger, status, memories_found, memories_saved, completed_at, metadata)"));
+        assert!(dreaming.contains("serde_json::json!({ \"message_id\": message_id })"));
+        assert_eq!(dreaming.matches("fold_join = crate::space::revisions::fold_join_sql(\"NULL::BIGINT\")").count(), 2);
+        assert_eq!(dreaming.matches("not_deleted = crate::space::revisions::FOLD_NOT_DELETED_SQL").count(), 2);
+        assert_eq!(dreaming.matches("fold_content = crate::space::revisions::FOLD_CONTENT_SQL").count(), 2);
+    }
+
+    #[test]
+    fn a_zdr_revise_writes_no_revision_signal() {
+        // The class follows the decision's signed ZDR state, and space_event_emit (migration
+        // 0072) only writes the persistent and waived classes, so a ZDR class writes no row.
+        assert_eq!(revision_event_retention_class(false), "persistent");
+        assert_eq!(revision_event_retention_class(true), "zdr");
+        let emit_fn = include_str!("../../migrations/0072_space_event_log.sql");
+        assert!(emit_fn.contains("p_retention_class NOT IN ('persistent', 'zdr_waived') THEN\n        RETURN NULL;"));
+        let revise = production_fn(production_source(include_str!("revisions.rs")), "\nasync fn revise_message(");
+        assert!(revise.contains(".bind(revision_event_retention_class(verified.zero_data_retention))"));
     }
 
     #[test]

@@ -5234,6 +5234,8 @@ pub(crate) struct VerifiedRevise {
     /// `message_not_found`: a windowed member never revises what they cannot read.
     pub(crate) history_floor: Option<i64>,
     pub(crate) history_floor_at: Option<DateTime<Utc>>,
+    /// The decision's signed `zero_data_retention`: a ZDR revise writes no live event-log row.
+    pub(crate) zero_data_retention: bool,
 }
 
 /// The `sha256:` digest of a revise request's new text; of the empty string for a delete.
@@ -5409,6 +5411,7 @@ fn verify_revise_space_decision_with_key(
             crate::space::audience_window::history_floor_enabled(),
         ),
         history_floor_at: claims.history_floor_at,
+        zero_data_retention: claims.zero_data_retention,
     })
 }
 
@@ -11410,7 +11413,7 @@ impl SessionCore for SessionService {
                 // {reply_count, last_author}: one JSON column so the row stays a flat struct.
                 reply_stats: Option<serde_json::Value>,
             }
-            let mut rows: Vec<ThreadListRow> = sqlx::query_as(
+            let mut rows: Vec<ThreadListRow> = sqlx::query_as(&format!(
                 concat!("WITH page AS (
                     SELECT t.id, t.session_key, t.created_at, t.presentation_title,
                            t.presentation_preview, t.pinned_at, t.last_activity_at, t.space_id,
@@ -11474,20 +11477,17 @@ impl SessionCore for SessionService {
                  FROM page
                  -- DEPTH-WS12-S4-2: the title and preview read the folded text (the latest edit inside the
                  -- reader's audience) and skip a deleted message, as the transcript does (space/revisions.rs
-                 -- fold_join_sql, FOLD_CONTENT_SQL, FOLD_NOT_DELETED_SQL).
+                 -- fold_join_sql, FOLD_CONTENT_SQL, FOLD_NOT_DELETED_SQL), and apply the same message-level
+                 -- audience ceiling ($6) and history floors ($13, $15) as reply_stats and the transcript.
                  LEFT JOIN LATERAL (
-                    SELECT CASE rv.action WHEN 'edited' THEN COALESCE(rv.content, '') ELSE m.content END AS content
+                    SELECT {fold_content} AS content
                     FROM messages m
-                    LEFT JOIN LATERAL (
-                        SELECT r.action, r.content
-                        FROM message_revisions r
-                        WHERE r.message_id = m.id
-                          AND (r.action = 'deleted' OR $6::BIGINT IS NULL OR r.recipient_audience_revision <= $6::BIGINT)
-                        ORDER BY r.revision_no DESC
-                        LIMIT 1
-                    ) rv ON TRUE
+                    {fold_join}
                     WHERE m.thread_id = page.id AND m.role = 'user' AND m.on_active_path
-                      AND COALESCE(rv.action, '') <> 'deleted'
+                      AND {fold_not_deleted}
+                      AND ($6::BIGINT IS NULL
+                           OR m.recipient_audience_revision IS NULL
+                           OR m.recipient_audience_revision <= $6)
                       AND ($15::TIMESTAMPTZ IS NULL OR m.created_at >= $15::TIMESTAMPTZ)
                       AND ($13::BIGINT IS NULL
                            OR m.recipient_audience_revision IS NULL
@@ -11496,18 +11496,14 @@ impl SessionCore for SessionService {
                     LIMIT 1
                  ) first_user ON TRUE
                  LEFT JOIN LATERAL (
-                    SELECT CASE rv.action WHEN 'edited' THEN COALESCE(rv.content, '') ELSE m.content END AS content
+                    SELECT {fold_content} AS content
                     FROM messages m
-                    LEFT JOIN LATERAL (
-                        SELECT r.action, r.content
-                        FROM message_revisions r
-                        WHERE r.message_id = m.id
-                          AND (r.action = 'deleted' OR $6::BIGINT IS NULL OR r.recipient_audience_revision <= $6::BIGINT)
-                        ORDER BY r.revision_no DESC
-                        LIMIT 1
-                    ) rv ON TRUE
+                    {fold_join}
                     WHERE m.thread_id = page.id AND m.on_active_path
-                      AND COALESCE(rv.action, '') <> 'deleted'
+                      AND {fold_not_deleted}
+                      AND ($6::BIGINT IS NULL
+                           OR m.recipient_audience_revision IS NULL
+                           OR m.recipient_audience_revision <= $6)
                       AND ($15::TIMESTAMPTZ IS NULL OR m.created_at >= $15::TIMESTAMPTZ)
                       AND ($13::BIGINT IS NULL
                            OR m.recipient_audience_revision IS NULL
@@ -11550,7 +11546,10 @@ impl SessionCore for SessionService {
                       AND ($15::TIMESTAMPTZ IS NULL OR m.created_at >= $15::TIMESTAMPTZ)
                  ) reply_stats ON TRUE
                  ORDER BY (page.pinned_at IS NOT NULL) DESC, page.last_activity_at DESC, page.id DESC"),
-            )
+                fold_content = crate::space::revisions::FOLD_CONTENT_SQL,
+                fold_not_deleted = crate::space::revisions::FOLD_NOT_DELETED_SQL,
+                fold_join = crate::space::revisions::fold_join_sql("$6::BIGINT"),
+            ))
             .bind(&req.org_id)
             .bind(&req.user_id)
             .bind(limit + 1)
@@ -27650,21 +27649,64 @@ mod thread_list_db_tests {
             .into_inner()
     }
 
-    #[test]
-    fn list_threads_title_and_preview_read_the_folded_text() {
-        // DEPTH-WS12-S4-2: ListThreads' title and preview LATERALs fold the newest revision inside
-        // the reader's ceiling and skip a deleted message, like the transcript reads.
-        let source = include_str!("grpc.rs");
-        let start = source.find("async fn list_threads(").expect("list_threads");
-        let body = &source[start..start + source[start..].find(") reply_stats ON TRUE").expect("reply_stats")];
-        let first = &body[body.find("SELECT CASE rv.action WHEN 'edited'").expect("first_user fold")..body.find(") first_user ON TRUE").expect("first_user")];
-        let last = &body[body.find(") first_user ON TRUE").expect("first_user")..body.find(") last_message ON TRUE").expect("last_message")];
-        for lateral in [first, last] {
-            assert!(lateral.contains("FROM message_revisions r"), "{lateral}");
-            assert!(lateral.contains("r.action = 'deleted' OR $6::BIGINT IS NULL OR r.recipient_audience_revision <= $6::BIGINT"));
-            assert!(lateral.contains("COALESCE(rv.action, '') <> 'deleted'"));
-            assert!(lateral.contains("WHEN 'edited' THEN COALESCE(rv.content, '') ELSE m.content END"));
+    /// A revision row written directly (DEPTH-WS12-S4-2 fold fixtures).
+    async fn put_revision(pool: &PgPool, org: &str, thread: &str, message: &str, action: &str, content: Option<&str>) {
+        sqlx::query(
+            "INSERT INTO message_revisions (revision_id, org_id, thread_id, message_id, revision_no, action, \
+             actor_subject_id, actor_class, content, content_digest, prev_content_digest, original_retention, \
+             idempotency_hash, space_id, recipient_audience_revision, authority_revision, resource_authorization_ref) \
+             VALUES ($1, $2, $3, $4, 1, $5, 'owner-1', 'author', $6, 'sha256:new', 'sha256:old', 'retain', $1, 'space-1', 1, 1, 'resource-1')",
+        )
+        .bind(format!("rev-{message}"))
+        .bind(org)
+        .bind(thread)
+        .bind(message)
+        .bind(action)
+        .bind(content)
+        .execute(pool)
+        .await
+        .expect("seed a revision");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn list_threads_title_and_preview_read_the_folded_text() {
+        // DEPTH-WS12-S4-2: ListThreads' title and preview fold the newest revision and skip a
+        // deleted message, like the transcript reads: the edit replaces the first user line, and
+        // the deleted answer never surfaces as the preview.
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("fold-list-{suffix}");
+        let user = "fold-user";
+        let thread = format!("fold-thread-{suffix}");
+        seed_thread(&pool, &org, user, &thread, 1, false, false).await;
+        let question = format!("fold-q-{suffix}");
+        let answer = format!("fold-a-{suffix}");
+        for (id, role, content) in [(&question, "user", "old question"), (&answer, "assistant", "doomed answer")] {
+            sqlx::query("INSERT INTO messages (id, thread_id, role, content) VALUES ($1, $2, $3, $4)")
+                .bind(id)
+                .bind(&thread)
+                .bind(role)
+                .bind(content)
+                .execute(&pool)
+                .await
+                .expect("seed a message");
         }
+        put_revision(&pool, &org, &thread, &question, "edited", Some("new question")).await;
+        put_revision(&pool, &org, &thread, &answer, "deleted", None).await;
+
+        let svc = service(pool.clone());
+        let page = list(
+            &svc,
+            &org,
+            user,
+            pb::ListThreadsRequest { thread_id: thread.clone(), ..Default::default() },
+        )
+        .await;
+        let summary = page.threads.iter().find(|t| t.thread_id == thread).expect("the thread is listed");
+        assert_eq!(summary.title, "new question", "the title reads the edit");
+        assert_eq!(summary.preview, "new question", "a deleted answer is not the preview");
+        sqlx::query("DELETE FROM threads WHERE id = $1").bind(&thread).execute(&pool).await.ok();
     }
 
     #[tokio::test]
