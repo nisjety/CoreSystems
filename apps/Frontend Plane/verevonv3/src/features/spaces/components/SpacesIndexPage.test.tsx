@@ -1,7 +1,19 @@
-import { describe, expect, it } from 'vitest'
+import { cleanup, render, screen } from '@solidjs/testing-library'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { pickDefaultSpace } from './SpacesIndexPage'
 import type { SpaceSummary } from '@/shared/api/spaces-client'
+
+const client = vi.hoisted(() => ({
+  listSpaces: vi.fn(),
+  createPersonalSpace: vi.fn(),
+  ensureOrganizationRoom: vi.fn(),
+  spaceRoomDirectoryListed: vi.fn(),
+}))
+
+vi.mock('@/shared/api/spaces-client', () => client)
+
+const { default: SpacesIndexPage } = await import('./SpacesIndexPage')
 
 const space = (over: Partial<SpaceSummary> = {}): SpaceSummary => ({
   space_ref: 'space_1',
@@ -83,5 +95,33 @@ describe('pickDefaultSpace', () => {
     // Distinct from a failed read: the page provisions the organization room
     // and reports that state, instead of navigating somewhere.
     expect(pickDefaultSpace([])).toBeUndefined()
+  })
+})
+
+describe('SpacesIndexPage room directory link (A-REC-02)', () => {
+  beforeEach(() => {
+    client.listSpaces.mockReset()
+    client.listSpaces.mockResolvedValue([])
+    client.createPersonalSpace.mockReset()
+    client.ensureOrganizationRoom.mockReset()
+    // Provisioning stays in flight, so the page holds its preparing state and the test reads it deterministically.
+    client.ensureOrganizationRoom.mockReturnValue(new Promise(() => {}))
+    client.spaceRoomDirectoryListed.mockReset()
+  })
+
+  afterEach(() => cleanup())
+
+  it('offers Browse rooms while no Space is listed when the listing says the directory is on', async () => {
+    client.spaceRoomDirectoryListed.mockReturnValue(true)
+    render(() => <SpacesIndexPage />)
+    const link = await screen.findByRole('link', { name: 'Finn rom' })
+    expect(link.getAttribute('href')).toBe('/spaces/directory')
+  })
+
+  it('does not offer it when the listing leaves the directory off', async () => {
+    client.spaceRoomDirectoryListed.mockReturnValue(false)
+    render(() => <SpacesIndexPage />)
+    await screen.findByText('Gjør klar organisasjonens rom')
+    expect(screen.queryByRole('link', { name: 'Finn rom' })).toBeNull()
   })
 })

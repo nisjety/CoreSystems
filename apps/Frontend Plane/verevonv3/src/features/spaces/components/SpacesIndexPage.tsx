@@ -4,6 +4,7 @@ import {
   createPersonalSpace,
   ensureOrganizationRoom,
   listSpaces,
+  spaceRoomDirectoryListed,
   type SpaceSummary,
 } from '@/shared/api/spaces-client'
 import { createResource } from '@/shared/lib/create-resource-compat'
@@ -232,6 +233,14 @@ export default function SpacesIndexPage() {
                           )}
                     </p>
                   </div>
+                </Show>
+                {/* A-REC-02: while no Space is listed, the room directory is a way to find
+                    one. Offered only when the listing says `features.room_directory`; the
+                    flag is presentation only, and the directory route decides for itself. */}
+                <Show when={spaceRoomDirectoryListed()}>
+                  <p>
+                    <a href="/spaces/directory">{i18n.tr('Finn rom', 'Browse rooms')}</a>
+                  </p>
                 </Show>
               </div>
             }
