@@ -50,10 +50,15 @@ function Mark(props: { badge: AttentionBadge; strong: boolean; stale: boolean; l
  * A room row's badge, from the server's `badge` for that room (never recomputed). Rendered only for
  * a room the open page is NOT already narrating: the open room's own live work stays on its row.
  * `strong` is the styling difference between "something needs you" and "a quiet unread count".
+ *
+ * D22r (F-t1-016): in a DM or group DM every message is for the reader, so at the DM's level `all`
+ * (its default) an unread count is drawn strong and named as direct messages, not as a quiet count.
+ * At `mentions` or `off` a DM reads like any room. The count itself is still the server's.
  */
-export function SpaceRoomAttentionBadge(props: { spaceRef: string }) {
+export function SpaceRoomAttentionBadge(props: { spaceRef: string; dm?: boolean }) {
   const i18n = useI18n()
   const room = () => spaceAttentionRoom(props.spaceRef)
+  const dmAll = () => props.dm === true && room()?.level === 'all'
   const label = () => {
     const current = room()
     if (!current) return ''
@@ -62,6 +67,12 @@ export function SpaceRoomAttentionBadge(props: { spaceRef: string }) {
     if (current.mentions + current.needsYou > 0) {
       return i18n.tr(`${current.badge.n} trenger deg`, `${current.badge.n} need you`) + stale
     }
+    if (dmAll()) {
+      return i18n.tr(
+        `${current.badge.n} uleste i direktemeldingen`,
+        current.badge.n === 1 ? '1 unread in this direct message' : `${current.badge.n} unread in this direct message`,
+      ) + stale
+    }
     return i18n.tr(`${current.badge.n} uleste`, `${current.badge.n} unread`) + stale
   }
   return (
@@ -69,7 +80,7 @@ export function SpaceRoomAttentionBadge(props: { spaceRef: string }) {
       {(current) => (
         <Mark
           badge={current().badge}
-          strong={current().mentions + current().needsYou > 0}
+          strong={current().mentions + current().needsYou > 0 || (dmAll() && current().badge.kind === 'count')}
           stale={spaceAttentionStale()}
           label={label()}
         />

@@ -591,6 +591,35 @@ describe('SpacesExpandedSidebarPanel', () => {
       ])
     })
 
+    // F-t1-016 / D22r: a DM's mute item says conversation, and unmuting it restores the DM default
+    // level `all` (every DM message notifies), not the room default `mentions`.
+    it('names the DM mute item as a conversation and unmutes a DM back to all messages', async () => {
+      const dmRoom = { space_ref: 'space_dm', name: 'Direct message', kind: 'dm', lifecycle: 'active', participants: [{ subject_id: 'u-2', display_name: 'Annika' }] }
+      spacesClient.listSpaces.mockReset().mockResolvedValue([personalSpace, sharedRoom, dmRoom])
+      attention.rooms = { space_dm: attentionRoom({ level: 'off' }), space_shared: attentionRoom({ level: 'off' }) }
+      const bodies: Array<{ url: string; body: unknown }> = []
+      vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+        bodies.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : null })
+        return new Response(JSON.stringify({ data: { level: 'all', hide_preview: false } }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }))
+      await renderEditableSidebar()
+
+      const dm = within(rowMenu('space_dm'))
+      const dmMute = dm.getByRole('menuitemcheckbox', { name: /Demp samtale/, hidden: true })
+      expect(dmMute.getAttribute('aria-checked')).toBe('true')
+      expect(within(rowMenu('space_shared')).getByRole('menuitemcheckbox', { name: /Demp rom/, hidden: true })).toBeTruthy()
+
+      fireEvent.click(dmMute)
+      flush()
+      await waitFor(() => expect(bodies.some((call) => call.url.includes('/spaces/space_dm/notify'))).toBe(true))
+      expect(bodies.find((call) => call.url.includes('/spaces/space_dm/notify'))?.body).toEqual({ level: 'all' })
+
+      fireEvent.click(within(rowMenu('space_shared')).getByRole('menuitemcheckbox', { name: /Demp rom/, hidden: true }))
+      flush()
+      await waitFor(() => expect(bodies.some((call) => call.url.includes('/spaces/space_shared/notify'))).toBe(true))
+      expect(bodies.find((call) => call.url.includes('/spaces/space_shared/notify'))?.body).toEqual({ level: 'mentions' })
+    })
+
     // WS16-S9: Starred, then the custom sections, then the built-in groups; a group with no room is not drawn.
     it('draws the grouped layout: Starred, then the built-in groups in their order', async () => {
       await renderEditableSidebar({ ...emptySidebarDoc(), starred: ['space_ops'] })

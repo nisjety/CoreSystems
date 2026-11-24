@@ -431,20 +431,22 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
   // ZDR). Offered only once the attention aggregate has answered for this room, so a gateway with the
   // surface off shows no dead items; the checkmark is the level the server last reported.
   // WS16-S10: Mute is WS11's notify level `off`, not a sidebar preference (there is exactly one mute
-  // store and it is not agent pause). Unmute restores the default level, `mentions`. Offered only
-  // once the aggregate has answered for the room, like the level items.
+  // store and it is not agent pause). Unmute restores the kind's default level: `mentions` for a
+  // room, `all` for a DM or group DM (D22r, F-t1-016: every DM message notifies unless muted).
+  // Offered only once the aggregate has answered for the room, like the level items.
   function muteItems(space: SpaceSummary): SpaceMenuItem[] {
     const current = spaceAttentionRoom(space.space_ref)?.level
     if (!current) return []
     const muted = current === 'off'
-    const next: SpaceNotifyLevel = muted ? 'mentions' : 'off'
+    const dm = isDmKind(space.kind)
+    const next: SpaceNotifyLevel = muted ? (dm ? 'all' : 'mentions') : 'off'
     const spoken = muted
       ? i18n.tr(`${roomLabel(space)} er ikke lenger dempet.`, `${roomLabel(space)} unmuted.`)
       : i18n.tr(`${roomLabel(space)} er dempet.`, `${roomLabel(space)} muted.`)
     return [{
       id: 'mute',
       checked: muted,
-      label: i18n.tr('Demp rom', 'Mute room'),
+      label: dm ? i18n.tr('Demp samtale', 'Mute conversation') : i18n.tr('Demp rom', 'Mute room'),
       onSelect: () => {
         void setSpaceNotifyLevel(space.space_ref, next)
           .then(() => {
@@ -1048,7 +1050,7 @@ function SpaceLink(props: { space: SpaceSummary; active: boolean; muted?: boolea
         />
       </Show>
       <Show when={showAttention()}>
-        <SpaceRoomAttentionBadge spaceRef={props.space.space_ref} />
+        <SpaceRoomAttentionBadge spaceRef={props.space.space_ref} dm={isDmKind(props.space.kind)} />
       </Show>
     </a>
   )

@@ -89,6 +89,31 @@ describe('SpaceRoomAttentionBadge', () => {
     expect(badge.getAttribute('data-strong')).toBeNull()
   })
 
+  // F-t1-016 / D22r: every DM message is for the reader, so a DM's unread count at level `all` is strong
+  // and named as a direct message; at `mentions` a DM reads like any room.
+  it('draws a DM unread count at level all as a strong direct-message count', () => {
+    attention.room = roomWith({ unreadThreads: 2, level: 'all', badge: { kind: 'count', n: 2, muted: true } })
+    render(() => (
+      <I18nProvider>
+        <SpaceRoomAttentionBadge spaceRef="room-a" dm />
+      </I18nProvider>
+    ))
+    const badge = screen.getByRole('img', { name: /2 (uleste i direktemeldingen|unread in this direct message)/ })
+    expect(badge.getAttribute('data-strong')).toBe('true')
+    expect(badge.textContent).toBe('2')
+  })
+
+  it('draws a DM at level mentions like any room', () => {
+    attention.room = roomWith({ unreadThreads: 1, level: 'mentions', badge: { kind: 'dot', n: 0 } })
+    render(() => (
+      <I18nProvider>
+        <SpaceRoomAttentionBadge spaceRef="room-a" dm />
+      </I18nProvider>
+    ))
+    const badge = screen.getByRole('img', { name: /(Ny aktivitet|New activity)/ })
+    expect(badge.getAttribute('data-strong')).toBeNull()
+  })
+
   it('shows a dot for new activity at the mentions level, with no number', () => {
     attention.room = roomWith({ unreadThreads: 1, badge: { kind: 'dot', n: 0 } })
     render(() => (
