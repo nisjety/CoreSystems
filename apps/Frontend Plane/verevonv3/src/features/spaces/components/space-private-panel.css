@@ -47,9 +47,11 @@
   font-size: 0.875rem;
 }
 
+/* D21e: secondary, under the composer; writing happens in the pane. */
 .verevon-space-private-panel__continue {
   margin: 0;
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
+  opacity: 0.8;
 }
 
 .verevon-space-private-panel__error {
@@ -149,6 +151,18 @@
 .verevon-space-private-panel__composer button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.verevon-space-private-panel__composer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.verevon-space-private-panel__composer .verevon-space-private-panel__stop {
+  border-color: var(--verevon-border, #d9d6cf);
+  background: transparent;
+  color: inherit;
 }
 
 .verevon-space-private-panel__turn[data-pending='true'] {

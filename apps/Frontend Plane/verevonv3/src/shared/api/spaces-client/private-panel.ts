@@ -91,6 +91,18 @@ export function isPrivatePanelThread(threadId: string | null | undefined): boole
   return ids.has(threadId)
 }
 
+/** Forget the kept panel ids, in memory and in both storages: called when the person signs out or another signs in. */
+export function clearPrivatePanelThreads(): void {
+  privatePanelThreadIds = null
+  for (const storage of [() => window.localStorage, () => window.sessionStorage]) {
+    try {
+      storage().removeItem(PRIVATE_PANEL_THREADS_KEY)
+    } catch {
+      // Storage is blocked: nothing was kept there.
+    }
+  }
+}
+
 function panelFrom(wire: PrivatePanelWire | null | undefined, spaceRef: string): SpacePrivatePanelPointer {
   const threadId = typeof wire?.thread_id === 'string' && wire.thread_id.trim() ? wire.thread_id.trim() : null
   const agentSubjectId =

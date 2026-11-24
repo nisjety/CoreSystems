@@ -88,6 +88,20 @@ describe('private panel thread hint (W3-FIX-14)', () => {
     expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? 'null')).toEqual(['thr_other_tab', 'thr_mine'])
   })
 
+  it('forgets every kept id, in memory and in both storages, on clearPrivatePanelThreads (sign-out)', async () => {
+    window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(['thr_old_tab']))
+    const panel = await loadPanel()
+    stubFetch(200, { data: { space_ref: 'room', thread_id: 'thr_kept', agent_subject_id: null } })
+    await panel.getSpacePrivatePanel('room')
+    expect(panel.isPrivatePanelThread('thr_kept')).toBe(true)
+
+    panel.clearPrivatePanelThreads()
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull()
+    expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull()
+    expect(panel.isPrivatePanelThread('thr_kept')).toBe(false)
+    expect(panel.isPrivatePanelThread('thr_old_tab')).toBe(false)
+  })
+
   it('still answers from memory when storage is blocked', async () => {
     const getItem = vi.spyOn(window.localStorage, 'getItem').mockImplementation(() => {
       throw new Error('storage blocked')

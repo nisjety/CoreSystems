@@ -267,7 +267,13 @@ describe('SpacePrivatePanel composer (D21e)', () => {
 
     expect(chatClient.streamChat).toHaveBeenCalledTimes(1)
     const [request] = chatClient.streamChat.mock.calls[0] as [Record<string, unknown>]
-    expect(request).toEqual({ content: 'Hva sa vi?', threadId: THREAD, sourceScope: 'conversation', locale: 'no' })
+    expect(request).toEqual({
+      content: 'Hva sa vi?',
+      threadId: THREAD,
+      sourceScope: 'conversation',
+      locale: 'no',
+      clientMessageId: expect.stringMatching(/^msg-/),
+    })
     expect(request).not.toHaveProperty('spaceRef')
     expect(await screen.findByText('Hva sa vi?')).toBeTruthy()
     expect(await screen.findByText('Det')).toBeTruthy()
@@ -292,8 +298,114 @@ describe('SpacePrivatePanel composer (D21e)', () => {
     flush()
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
     flush()
-    expect(await screen.findByRole('alert')).toBeTruthy()
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toBe('Tjenesten er utilgjengelig akkurat nå. Prøv igjen om litt.')
     expect(document.body.textContent ?? '').not.toContain('raw upstream text')
     await waitFor(() => expect(composerBox()?.value).toBe('Hei'))
+  })
+
+  it('a retry of a refused send reuses its client message id, and a new text gets a new one', async () => {
+    spacesClient.getSpacePrivatePanel.mockResolvedValue(pointer(THREAD))
+    chatClient.getChatThreadTranscript.mockResolvedValue(transcript([]))
+    chatClient.streamChat.mockImplementation(
+      async (_request: unknown, handlers: { onError?: (event: { code: string; message: string }) => void }) => {
+        handlers.onError?.({ code: 'upstream_unavailable', message: 'x' })
+      },
+    )
+    renderPanel()
+    await waitFor(() => expect(composerBox()).toBeTruthy())
+    const sendText = async (text: string, calls: number) => {
+      fireEvent.input(composerBox() as HTMLTextAreaElement, { target: { value: text } })
+      flush()
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+      flush()
+      await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalledTimes(calls))
+      await screen.findByRole('alert')
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'Stopp' })).toBeNull())
+    }
+    const idOf = (call: number) => (chatClient.streamChat.mock.calls[call] as [{ clientMessageId?: string }])[0].clientMessageId
+    await sendText('Hei', 1)
+    await sendText('Hei', 2)
+    await sendText('Noe annet', 3)
+    expect(idOf(0)).toMatch(/^msg-/)
+    expect(idOf(1)).toBe(idOf(0))
+    expect(idOf(2)).not.toBe(idOf(0))
+  })
+
+  it('Stop cancels the streaming reply, keeps focus in the box, and rereads the thread without an error', async () => {
+    spacesClient.getSpacePrivatePanel.mockResolvedValue(pointer(THREAD))
+    chatClient.getChatThreadTranscript
+      .mockResolvedValueOnce(transcript([]))
+      .mockResolvedValue(transcript([{ role: 'user', content: 'Lang sak' }]))
+    let signal: AbortSignal | undefined
+    chatClient.streamChat.mockImplementation(
+      (_request: unknown, handlers: { onMessage?: (event: { content: string }) => void }, abort: AbortSignal) =>
+        new Promise<void>((_resolve, reject) => {
+          signal = abort
+          handlers.onMessage?.({ content: 'Halvveis' })
+          abort.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+        }),
+    )
+    renderPanel()
+    await waitFor(() => expect(composerBox()).toBeTruthy())
+    const box = composerBox() as HTMLTextAreaElement
+    box.focus()
+    fireEvent.input(box, { target: { value: 'Lang sak' } })
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    flush()
+    expect(await screen.findByText('Halvveis')).toBeTruthy()
+    expect(box.disabled).toBe(false)
+    expect(box.readOnly).toBe(true)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stopp' }))
+    flush()
+    expect(signal?.aborted).toBe(true)
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Stopp' })).toBeNull())
+    await waitFor(() => expect(screen.queryByText('Halvveis')).toBeNull())
+    expect(screen.getByText('Lang sak')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(box.value).toBe('')
+    expect(document.activeElement).toBe(box)
+  })
+
+  it('keeps the sent turn on screen while the thread is reread, with no loading line', async () => {
+    spacesClient.getSpacePrivatePanel.mockResolvedValue(pointer(THREAD))
+    let releaseReread: () => void = () => {}
+    chatClient.getChatThreadTranscript.mockResolvedValueOnce(transcript([])).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseReread = () => resolve(transcript([{ role: 'user', content: 'Hei' }, { role: 'assistant', content: 'Svar' }]))
+        }),
+    )
+    chatClient.streamChat.mockImplementation(
+      async (_request: unknown, handlers: { onMessage?: (event: { content: string }) => void }) => {
+        handlers.onMessage?.({ content: 'Svar' })
+      },
+    )
+    renderPanel()
+    await waitFor(() => expect(composerBox()).toBeTruthy())
+    fireEvent.input(composerBox() as HTMLTextAreaElement, { target: { value: 'Hei' } })
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    flush()
+    await waitFor(() => expect(chatClient.getChatThreadTranscript).toHaveBeenCalledTimes(2))
+    expect(screen.queryByText('Laster samtalen …')).toBeNull()
+    expect(screen.getByText('Hei')).toBeTruthy()
+    expect(screen.getByText('Svar')).toBeTruthy()
+
+    releaseReread()
+    await waitFor(() => expect(document.querySelector('[data-pending="true"]')).toBeNull())
+    expect(screen.getAllByText('Svar')).toHaveLength(1)
+  })
+
+  it('places Continue in Chat after the composer, as the secondary way out', async () => {
+    spacesClient.getSpacePrivatePanel.mockResolvedValue(pointer(THREAD))
+    chatClient.getChatThreadTranscript.mockResolvedValue(transcript([]))
+    renderPanel()
+    const link = await screen.findByRole('link', { name: 'Fortsett i Chat' })
+    await waitFor(() => expect(composerBox()).toBeTruthy())
+    const box = composerBox() as HTMLTextAreaElement
+    expect(box.compareDocumentPosition(link) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 })

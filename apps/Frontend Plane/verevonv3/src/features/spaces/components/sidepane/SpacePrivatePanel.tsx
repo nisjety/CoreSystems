@@ -3,6 +3,7 @@ import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 import { Lock } from '@/shared/icons'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { chatThreadHref } from '@/features/chat/lib/chat-thread-deep-link'
+import { createId } from '@/features/chat/components/chat-normalizers'
 import { getChatThreadTranscript, streamChat, type ChatErrorEvent } from '@/shared/api/chat-client'
 import { hasErrorCode } from '@/shared/api/api-error'
 import { getSpacePrivatePanel, openSpacePrivatePanel } from '@/shared/api/spaces-client'
@@ -20,8 +21,9 @@ import '../space-private-panel.css'
  * The pane has its own composer (D21e): a turn written here goes over the ordinary private-turn path, the owner's chat
  * stream on the panel's own thread with conversation scope (SD-22 v1), and carries no room. The reply lands in that
  * thread only, so it stays private to the member; the room sees it only if the person shares it. Under Zero Data
- * Retention the pointer is refused first, so there is no thread and no composer. "Continue in Chat" stays as the way to
- * the full chat: the thread carries no title, so a person could not find it in the chat history by name.
+ * Retention the pointer is refused first, so there is no thread and no composer. A send carries a client message id, so a
+ * retry of a refused send is the same send, and Stop cancels a streaming reply. "Continue in Chat" is a secondary link
+ * under the composer, the way to the full chat: the thread carries no title, so a person could not find it by name.
  *
  * `features.private_panel` decides whether the room offers the pane at all; the gateway decides what
  * the pointer and the thread may show. Presentation only.
@@ -70,7 +72,19 @@ export function SpacePrivatePanel(props: SpacePrivatePanelProps) {
   const [replyText, setReplyText] = createSignal('')
   const [sendFailure, setSendFailure] = createSignal<unknown>(null)
   let sendController: AbortController | null = null
+  // Stop (the person) and unmount (the pane closed) both abort; only a stop settles the pane afterwards.
+  let stopRequested = false
+  // A refused send keeps its text and its id: sending the same text again reuses the id, so the gateway reads the repeat
+  // as the same send (`idempotency_key`) and the private user turn is stored once, not twice.
+  let retryable: { readonly content: string; readonly clientMessageId: string } | null = null
+  let composerInput: HTMLTextAreaElement | undefined
   onCleanup(() => sendController?.abort())
+
+  function stop(): void {
+    if (!sendController) return
+    stopRequested = true
+    sendController.abort()
+  }
 
   // ZDR: a durable thread is refused for these callers with the typed catalogue text (412), before any
   // other call. The panel then offers nothing to open.
@@ -98,6 +112,9 @@ export function SpacePrivatePanel(props: SpacePrivatePanelProps) {
   async function send(threadId: string): Promise<void> {
     const content = draft().trim()
     if (!content || pendingText() !== null || zdrRefused()) return
+    const clientMessageId = retryable?.content === content ? retryable.clientMessageId : createId('msg')
+    retryable = null
+    stopRequested = false
     setSendFailure(null)
     setPendingText(content)
     setReplyText('')
@@ -107,7 +124,13 @@ export function SpacePrivatePanel(props: SpacePrivatePanelProps) {
     let failed: unknown = null
     try {
       await streamChat(
-        { content, threadId, sourceScope: 'conversation', locale: i18n.locale() === 'en' ? 'en' : 'no' },
+        {
+          content,
+          threadId,
+          sourceScope: 'conversation',
+          locale: i18n.locale() === 'en' ? 'en' : 'no',
+          clientMessageId,
+        },
         {
           onMessage: (event) => {
             if (typeof event.content === 'string') setReplyText((previous) => previous + event.content)
@@ -124,14 +147,23 @@ export function SpacePrivatePanel(props: SpacePrivatePanelProps) {
     } finally {
       if (sendController === controller) sendController = null
     }
-    if (controller.signal.aborted) return
-    if (failed) {
+    // Unmounted: nothing to settle. A stop is not a failure, and the text is not restored: the server may already hold
+    // the turn, so the reread transcript shows what was kept.
+    if (controller.signal.aborted && !stopRequested) return
+    if (failed && !controller.signal.aborted) {
       setSendFailure(failed)
       setDraft(content)
+      retryable = { content, clientMessageId }
+    }
+    // The sent turn and the reply stay on screen until the reread transcript carries them, so they never blink out.
+    try {
+      await refetchTranscript()
+    } catch {
+      // The transcript's own error state shows the failure.
     }
     setPendingText(null)
     setReplyText('')
-    void refetchTranscript()
+    composerInput?.focus()
   }
 
   const sendFailureMessage = () => {
@@ -166,16 +198,6 @@ export function SpacePrivatePanel(props: SpacePrivatePanelProps) {
           </span>
         </p>
       </header>
-
-      <Show when={!pointer.error ? pointer()?.threadId : undefined}>
-        {(threadId) => (
-          <p class="verevon-space-private-panel__continue">
-            <a link href={chatThreadHref(threadId())}>
-              {i18n.tr('Fortsett i Chat', 'Continue in Chat')}
-            </a>
-          </p>
-        )}
-      </Show>
 
       <Show when={!pointer.loading} fallback={
         <p class="verevon-space-private-panel__status" role="status">
@@ -230,7 +252,8 @@ export function SpacePrivatePanel(props: SpacePrivatePanelProps) {
                 </button>
               </div>
             }>
-              <Show when={!transcript.loading} fallback={
+              {/* Only the first read shows the loading line; a reread keeps the turns already shown. */}
+              <Show when={!transcript.loading || transcript() !== undefined} fallback={
                 <p class="verevon-space-private-panel__status" role="status">
                   {i18n.tr('Laster samtalen …', 'Loading the conversation …')}
                 </p>
@@ -298,9 +321,12 @@ export function SpacePrivatePanel(props: SpacePrivatePanelProps) {
                   </label>
                   <textarea
                     id="space-private-panel-input"
+                    ref={composerInput}
                     rows={3}
                     value={draft()}
-                    disabled={pendingText() !== null}
+                    // Read-only, not disabled, while a reply streams: a disabled box would drop the keyboard focus.
+                    readonly={pendingText() !== null}
+                    aria-busy={pendingText() !== null ? 'true' : 'false'}
                     onInput={(event) => setDraft(event.currentTarget.value)}
                     onKeyDown={(event) => {
                       if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
@@ -314,14 +340,32 @@ export function SpacePrivatePanel(props: SpacePrivatePanelProps) {
                       <p class="verevon-space-private-panel__error" role="alert">{message()}</p>
                     )}
                   </Show>
-                  <button type="submit" disabled={pendingText() !== null || !draft().trim()}>
-                    {pendingText() !== null ? i18n.tr('Sender …', 'Sending …') : i18n.tr('Send', 'Send')}
-                  </button>
+                  <div class="verevon-space-private-panel__composer-actions">
+                    <Show when={pendingText() !== null}>
+                      <button type="button" class="verevon-space-private-panel__stop" onClick={() => stop()}>
+                        {i18n.tr('Stopp', 'Stop')}
+                      </button>
+                    </Show>
+                    <button type="submit" disabled={pendingText() !== null || !draft().trim()}>
+                      {pendingText() !== null ? i18n.tr('Sender …', 'Sending …') : i18n.tr('Send', 'Send')}
+                    </button>
+                  </div>
                 </form>
               )}
             </Show>
           </Show>
         </Show>
+      </Show>
+
+      {/* Secondary: the composer above is the way to write here; Chat is the way to the full conversation. */}
+      <Show when={!pointer.error ? pointer()?.threadId : undefined}>
+        {(threadId) => (
+          <p class="verevon-space-private-panel__continue">
+            <a link href={chatThreadHref(threadId())}>
+              {i18n.tr('Fortsett i Chat', 'Continue in Chat')}
+            </a>
+          </p>
+        )}
       </Show>
 
       <Show when={openFailureMessage()}>

@@ -6,7 +6,7 @@ import (
 )
 
 // E-PRIO-01: a blank agent id names no agent. Without the early return the
-// visibility query's `$3 = ''` arm matched every visible agent, so the caller got
+// visibility query's empty-id arm matched every visible agent, so the caller got
 // the first one (and, for the access read, its access list) instead of a 404.
 // The repository here has no database: the blank id must answer before any query.
 func TestVisibleAgentReadsTreatABlankIDAsNotFound(t *testing.T) {
