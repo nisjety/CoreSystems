@@ -443,6 +443,14 @@ mod tests {
     async fn archive_stack(role: &str) -> (AppState, MockServer, MockServer) {
         let (mut state, control, application) = stack(role).await;
         state.space_features.room_archive_api = true;
+        // Application's org Space list: `space-room` is a named room, not the organization room.
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef": "space-room", "kind": "room", "lifecycle": "active", "isOrganizationRoom": false}
+            ]})))
+            .mount(&application)
+            .await;
         Mock::given(wm_method("POST"))
             .and(wm_path("/api/v1/internal/spaces/space-room/archive"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -515,6 +523,27 @@ mod tests {
         assert_eq!(archive, vec![json!({"idempotency_key": "idem-a-1"})], "the key is trimmed; nothing else travels");
         let unarchive = control_bodies(&control, "POST", "/api/v1/internal/spaces/space-room/unarchive").await;
         assert_eq!(unarchive, vec![json!({})], "a blank key is not sent");
-        assert!(application.received_requests().await.unwrap().is_empty(), "archive is Control's state alone");
+        let application_paths: Vec<String> =
+            application.received_requests().await.unwrap().iter().map(|r| r.url.path().to_owned()).collect();
+        assert_eq!(application_paths, vec!["/api/query"], "archive reads the org-room marker once and writes nothing");
+    }
+
+    #[tokio::test]
+    async fn archiving_the_organization_room_is_refused_with_its_typed_code_and_control_is_not_called() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (mut state, control, application) = stack("owner").await;
+        state.space_features.room_archive_api = true;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef": "space-room", "kind": "room", "lifecycle": "active", "isOrganizationRoom": true}
+            ]})))
+            .mount(&application)
+            .await;
+        let input = json!({"spaceRef": "space-room"});
+        let (status, body) = read(dispatch_spaces_archive_room(&state, &user(), &input, "idem-a-9").await).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "room_not_archivable");
+        assert!(control_bodies(&control, "POST", "/api/v1/internal/spaces/space-room/archive").await.is_empty());
     }
 }

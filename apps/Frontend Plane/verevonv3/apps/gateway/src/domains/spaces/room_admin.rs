@@ -609,8 +609,58 @@ fn archive_url(state: &AppState, space_ref: &str, archive: bool) -> String {
     )
 }
 
+/// Refuses to archive the organization room before Control is asked.
+///
+/// Control refuses it too (`room_not_archivable`), but only once its row carries
+/// `roster_mode='org_derived'`, which the organization-room roster sync writes and which never
+/// arrives while `SPACE_ORG_ROOM_RECONCILE` is off. Application's `isOrganizationRoom` marker is
+/// set when the room is created, so this check holds whatever that rollout switch says. It reads
+/// a display projection and stores nothing; it can only refuse, never grant. An unreadable answer
+/// fails closed as a 503 that says nothing changed. Restore is never refused here, so a room
+/// archived before this check existed can still be brought back.
+async fn refuse_organization_room(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+) -> Result<(), Reply> {
+    let unavailable = || {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "room_admin_unavailable",
+                "The room could not be changed. Nothing was changed.",
+            )),
+        )
+    };
+    let spaces = convex_gateway_call(
+        state,
+        "query",
+        "spaces:spacesForOrgForGateway",
+        json!({ "externalAuthId": user.user_id, "externalOrgId": org_id }),
+    )
+    .await
+    .map_err(|_| unavailable())?;
+    let spaces = spaces.as_array().ok_or_else(unavailable)?;
+    let is_organization_room = spaces.iter().any(|space| {
+        space.get("spaceRef").and_then(Value::as_str) == Some(space_ref)
+            && space.get("isOrganizationRoom").and_then(Value::as_bool) == Some(true)
+    });
+    if is_organization_room {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(error(
+                "room_not_archivable",
+                "The organization room cannot be archived.",
+            )),
+        ));
+    }
+    Ok(())
+}
+
 /// Archives (`archive`) or restores a named room on Control. Control applies the role rule
-/// (manager or owner), refuses the organization room (`room_not_archivable`) and a personal Space,
+/// (manager or owner), refuses the organization room (`room_not_archivable`, which this gateway
+/// also refuses first on Application's marker, see `refuse_organization_room`) and a personal Space,
 /// and answers `{data:{state,changed,replayed,archived_at,authority_revision}}`; the browser gets
 /// `{data:{state,changed,archived_at}}`. Org and actor come from the session, never the body. The
 /// call is idempotent set-to-state, so a repeat answers `changed:false`. Nothing here reads or
@@ -640,6 +690,11 @@ pub(crate) async fn set_room_archived(
     }
     if let Err(reply) = member_ops_allowed(state, &org_id, user).await {
         return reply;
+    }
+    if archive {
+        if let Err(reply) = refuse_organization_room(state, user, &org_id, &space_ref).await {
+            return reply;
+        }
     }
     let (status, Json(control)) = proxy_json(
         state,
@@ -2142,9 +2197,111 @@ mod tests {
     const CONTROL_UNARCHIVE: &str = "/api/v1/internal/spaces/space-room/unarchive";
 
     async fn fx_archive(role: &str) -> Fx {
+        fx_archive_with_rooms(role, false).await
+    }
+
+    /// `fx(role)` with the archive flag on and Application's org Space list mounted: `space-room`
+    /// is a named room, or the organization room when `organization_room` is set.
+    async fn fx_archive_with_rooms(role: &str, organization_room: bool) -> Fx {
         let mut fx = fx(role).await;
         fx.state.space_features.room_archive_api = true;
+        let room = json!({"spaceRef": "space-room", "name": "Leveranse", "kind": "room",
+            "lifecycle": "active", "isOrganizationRoom": organization_room});
+        mount_convex(
+            &fx,
+            "/api/query",
+            ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef": "space-other", "kind": "room", "lifecycle": "active", "isOrganizationRoom": true},
+                room
+            ]})),
+        )
+        .await;
         fx
+    }
+
+    /// Application paths the archive route asked, which must be the org Space list query only.
+    async fn archive_convex_paths(fx: &Fx) -> Vec<(String, String)> {
+        convex_requests(fx)
+            .await
+            .iter()
+            .map(|request| {
+                (
+                    request["_route"].as_str().unwrap_or_default().to_owned(),
+                    request["path"].as_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_organization_room_is_refused_before_control_whatever_its_roster_mode() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for role in ["owner", "manager"] {
+            let fx = fx_archive_with_rooms(role, true).await;
+            // Control would accept: its row is still 'managed' while the roster sync is off.
+            mount_control(
+                &fx,
+                "POST",
+                CONTROL_ARCHIVE,
+                control_ok(json!({"state": "archived", "changed": true, "archived_at": "2026-10-31T10:00:00Z"})),
+            )
+            .await;
+            let (status, body) = call(&fx, "POST", &format!("{ROOM}/archive"), None, &[]).await;
+            assert_eq!(status, 409, "{role}: {body}");
+            assert_eq!(body["error"]["code"], "room_not_archivable", "{role}");
+            assert!(control_calls(&fx).await.is_empty(), "{role}: Control is never asked");
+            let paths = archive_convex_paths(&fx).await;
+            assert_eq!(
+                paths,
+                vec![("/api/query".to_owned(), "spaces:spacesForOrgForGateway".to_owned())],
+                "{role}"
+            );
+            let sent = &convex_requests(&fx).await[0];
+            assert_eq!(sent["args"]["externalAuthId"], "user-1");
+            assert_eq!(sent["args"]["externalOrgId"], "org-1");
+        }
+    }
+
+    #[tokio::test]
+    async fn restoring_the_organization_room_is_never_refused_by_the_marker() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fx_archive_with_rooms("owner", true).await;
+        mount_control(
+            &fx,
+            "POST",
+            CONTROL_UNARCHIVE,
+            control_ok(json!({"state": "active", "changed": true, "archived_at": null})),
+        )
+        .await;
+        let (status, body) = call(&fx, "POST", &format!("{ROOM}/unarchive"), None, &[]).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(convex_requests(&fx).await.is_empty(), "restore reads no marker");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_org_space_list_fails_closed_before_control() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let templates = [
+            ResponseTemplate::new(500).set_body_json(json!({})),
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"not": "a list"}})),
+            ResponseTemplate::new(200).set_body_json(json!({"status": "error", "errorMessage": "boom"})),
+        ];
+        for template in templates {
+            let mut fx = fx("owner").await;
+            fx.state.space_features.room_archive_api = true;
+            mount_convex(&fx, "/api/query", template).await;
+            mount_control(
+                &fx,
+                "POST",
+                CONTROL_ARCHIVE,
+                control_ok(json!({"state": "archived", "changed": true, "archived_at": "2026-10-31T10:00:00Z"})),
+            )
+            .await;
+            let (status, body) = call(&fx, "POST", &format!("{ROOM}/archive"), None, &[]).await;
+            assert_eq!(status, 503, "{body}");
+            assert_eq!(body["error"]["code"], "room_admin_unavailable");
+            assert!(control_calls(&fx).await.is_empty());
+        }
     }
 
     #[tokio::test]
@@ -2216,7 +2373,12 @@ mod tests {
             unarchive_request.headers.get("x-org-id").and_then(|v| v.to_str().ok()),
             Some("org-1")
         );
-        assert!(convex_requests(&fx).await.is_empty(), "archive is Control's state alone");
+        // Archive reads the organization-room marker once; restore reads nothing. No write.
+        assert_eq!(
+            archive_convex_paths(&fx).await,
+            vec![("/api/query".to_owned(), "spaces:spacesForOrgForGateway".to_owned())],
+            "archive is Control's state alone"
+        );
     }
 
     #[tokio::test]
