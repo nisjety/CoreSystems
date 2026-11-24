@@ -163,6 +163,9 @@ func TestControlComposeScanReadsLiteralAndInterpolatedSwitches(t *testing.T) {
 		{"PPROF_ENABLED", false, "false", true},
 		{"SPACE_POLICY_ADMIN_WRITES", true, "false", true},
 		{"AUDIT_CHAIN_PRUNE_DRYRUN", true, "0", true},
+		// D18/D21o: both history-window switches default on in the dev compose; production pins them off in its own overlay.
+		{"SPACE_MEMBER_HISTORY_WINDOWS", true, "true", true},
+		{"SPACE_CANVAS_HISTORY_WINDOW", true, "true", true},
 		{"GIN_MODE", false, "release", false},
 	}
 	for _, c := range cases {
