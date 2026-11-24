@@ -271,3 +271,15 @@ func runActionRegistryIDs() []string {
 	sort.Strings(ids)
 	return ids
 }
+
+// RunActionReadAdmitted reports whether a read-only run action (A-REC-03,
+// space.directory.resolve) may run for a member of the given Space role: the
+// golden names the row as a run action, the operator allowlist names it, and
+// the role meets the row's floor. A read issues no signed decision, so this is
+// the whole registry check its Control route makes. A malformed copy, an absent
+// row or an empty allowlist answers false.
+func RunActionReadAdmitted(actionID, role string) bool {
+	spec, found := runActionSpec(actionID)
+	return found && spec.DecisionType == runActionDecisionKind && runActionAllowlisted(spec.ActionID) &&
+		RoleRank(role) >= RoleRank(spec.MinRole) && RoleRank(role) > 0
+}

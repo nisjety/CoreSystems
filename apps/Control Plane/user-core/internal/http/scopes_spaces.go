@@ -94,6 +94,8 @@ func coreSpaceScope(method, path string) (string, bool) {
 		return "spaces:agent-action:view", true
 	case path == "/api/v1/internal/spaces/run-action-decision":
 		return "spaces:agent-action:reauthorize", true
+	case path == "/api/v1/internal/spaces/run-directory/people":
+		return runDirectoryReadScope, true
 	case path == "/api/v1/internal/spaces/run-action-authority-check":
 		return "spaces:agent-action:current-authority", true
 	case strings.HasPrefix(path, "/api/v1/internal/spaces/owner-effect-reservations"):

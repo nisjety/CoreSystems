@@ -36,6 +36,9 @@ type Server struct {
 	spaceDecisionAudit     decisionAuditSink
 	spaceOrgPolicy         spaceOrgPolicyConfig // org-admin Space policy (WS03-S3)
 	peopleDirectory        peopleDirectory      // people search (WS04-S3)
+	// runDirectoryMembership (A-REC-03) reads the run subject's current Space
+	// membership for the agent directory read; nil uses spaceRepo.
+	runDirectoryMembership runDirectoryMembershipFunc
 	mailTaskService        *mailtask.Service
 	mailTaskUserLookup     MailTaskUserLookup
 	mailTaskEffectPolicy   MailTaskEffectPolicyResolver
