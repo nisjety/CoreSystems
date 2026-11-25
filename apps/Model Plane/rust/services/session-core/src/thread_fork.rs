@@ -8,8 +8,9 @@
 //! `MESSAGE_APPENDED`, and Dreaming never extracts from a copied turn, because the source already
 //! produced what it says.
 //!
-//! Refused: a Space thread (its audience is not the owner's to copy), a thread that holds a waived
-//! run (DEC-32: waived content is not copied into a new durable store), a thread whose own receipt
+//! Refused: a Space thread (its audience is not the owner's to copy), a thread that holds a
+//! zero-retention or waived run (DEC-32: a waived run counts as ZDR, so neither is copied into a
+//! new durable store), a thread whose own receipt
 //! names zero retention or a waiver (Z-17, thread half, while `SESSION_THREAD_RECEIPT_ENFORCE` is
 //! on: its messages are that content with or without a run), a point off the active path, and a
 //! path longer than [`MAX_FORK_TURNS`]. A zero-retention credential is refused by the
@@ -30,6 +31,7 @@ use tracing::info;
 use crate::auth::{authorize_operation, identity, VerifiedIdentity};
 use crate::grpc::record_metrics;
 use crate::retention_receipt::{thread_receipt_enforce_enabled, RunRetention};
+use crate::thread_reference::holds_retention_run_for_thread;
 
 /// The environment switch for forking. Default off, read by the strict parser the other switches
 /// share, so only the literal `true` turns it on.
@@ -45,6 +47,39 @@ const THREAD_FORKED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.ThreadF
 /// Read where it is used, as the message tree's switch is: the RPC holds no switch of its own.
 pub(crate) fn thread_fork_enabled() -> bool {
     mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
+}
+
+/// Serialises the tests that set [`ENABLED_ENV`] or need it off, so one test's `true` cannot reach another
+/// test that expects the switch off. Every such test takes it first.
+#[cfg(test)]
+pub(crate) static FORK_SWITCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Erase one thread the way `DeleteThread` does, for the tests: its owner row is locked, its rows go through
+/// [`crate::grpc::delete_thread_rows`], and then the thread row itself, all in one transaction.
+#[cfg(test)]
+pub(crate) async fn erase_thread_as_delete_thread_does(
+    pool: &PgPool,
+    org_id: &str,
+    thread_id: &str,
+) {
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM threads WHERE id = $1 FOR UPDATE")
+        .bind(thread_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    crate::grpc::delete_thread_rows(&mut tx, thread_id)
+        .await
+        .expect("the thread's rows are erased");
+    let deleted = sqlx::query("DELETE FROM threads WHERE id = $1 AND org_id = $2")
+        .bind(thread_id)
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap()
+        .rows_affected();
+    assert_eq!(deleted, 1, "the thread row is deleted");
+    tx.commit().await.unwrap();
 }
 
 /// The fork RPC. It holds the pool and nothing else; the rules are in this module.
@@ -202,24 +237,22 @@ async fn lock_source(
     })
 }
 
-/// Whether the thread may not be copied. It holds a run whose content was waived from retention
-/// (DEC-32), or, while `SESSION_THREAD_RECEIPT_ENFORCE` is on, its own receipt names zero retention
-/// or a waiver (Z-17, thread half). Such a thread holds messages whether or not a run came from them,
-/// so the run half alone would let its owner's persistent credential copy them into a persistent
-/// thread. With the switch off no receipt is stamped or read, and the answer is the run half alone.
+/// Whether the thread may not be copied. It holds a run kept under zero retention or a waiver (DEC-32,
+/// the predicate the reference read and the thread listing use: a waived run counts as ZDR), or, while
+/// `SESSION_THREAD_RECEIPT_ENFORCE` is on, its own receipt names zero retention or a waiver (Z-17, thread
+/// half). Such a thread holds messages whether or not a run came from them, so the run half alone would
+/// let its owner's persistent credential copy them into a persistent thread. The run half never reads the
+/// receipt switch, so it refuses with the switch off too. With the switch off no receipt is stamped or
+/// read, and the answer is the run half alone.
 async fn thread_is_waived(
     tx: &mut Transaction<'_, Postgres>,
     thread_id: &str,
 ) -> Result<bool, Status> {
-    let waived_run: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM runs WHERE thread_id = $1 AND retention_class = 'zdr_waived')",
-    )
-    .bind(thread_id)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(internal)?;
-    if waived_run || !thread_receipt_enforce_enabled() {
-        return Ok(waived_run);
+    let held_run = holds_retention_run_for_thread(&mut **tx, thread_id)
+        .await
+        .map_err(internal)?;
+    if held_run || !thread_receipt_enforce_enabled() {
+        return Ok(held_run);
     }
     sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM threads WHERE id = $1 AND retention_class IN ('zdr', 'zdr_waived'))",
@@ -682,6 +715,50 @@ mod tests {
         assert_eq!(zdr.code(), tonic::Code::FailedPrecondition);
     }
 
+    /// DEC-32, run half: a thread that holds a zero-retention run is refused as one that holds a waived run is.
+    /// The run half never reads `SESSION_THREAD_RECEIPT_ENFORCE`, so the refusal holds with the switch off (its
+    /// default) and on. A thread that holds only a persistent run still forks. The test does not set the switch:
+    /// both outcomes hold whichever way it is set.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn fork_refuses_a_thread_holding_a_zdr_run_and_still_forks_a_persistent_one() {
+        async fn seed_run(pool: &PgPool, thread: &str, retention_class: &str) {
+            sqlx::query(
+                "INSERT INTO runs (id, thread_id, goal, org_id, user_id, status, metadata, retention_class)
+                 VALUES ($1, $2, 'g', $3, $4, 'completed', '{}'::jsonb, $5)",
+            )
+            .bind(new_ulid())
+            .bind(thread)
+            .bind(ORG)
+            .bind(OWNER)
+            .bind(retention_class)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+
+        let pool = connect().await;
+        let owner = VerifiedIdentity::user_for_test(ORG, OWNER);
+
+        let zdr = new_ulid();
+        seed_thread(&pool, &zdr).await;
+        let zdr_answer = append(&pool, &zdr, "assistant", "answer").await;
+        seed_run(&pool, &zdr, "zdr").await;
+        let refused = copy_thread(&pool, &owner, fork_request(&zdr, &zdr_answer))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(refused.message(), "fork_source_not_forkable");
+
+        let persistent = new_ulid();
+        seed_thread(&pool, &persistent).await;
+        let persistent_answer = append(&pool, &persistent, "assistant", "answer").await;
+        seed_run(&pool, &persistent, "persistent").await;
+        copy_thread(&pool, &owner, fork_request(&persistent, &persistent_answer))
+            .await
+            .expect("a thread holding only a persistent run still forks");
+    }
+
     /// Z-17, thread half: a thread stamped with a zero-retention or waived receipt at `CreateThread` is not
     /// forkable while `SESSION_THREAD_RECEIPT_ENFORCE` is on, though it holds no waived run. A persistent
     /// thread still forks. With the switch off the receipt is not read, so the waived thread forks as it
@@ -762,6 +839,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
     async fn fork_is_refused_while_the_switch_is_off() {
+        let _switch = FORK_SWITCH_LOCK.lock().await;
         let pool = connect().await;
         let source = new_ulid();
         seed_thread(&pool, &source).await;
@@ -779,5 +857,90 @@ mod tests {
             .unwrap_err();
         assert_eq!(refused.code(), tonic::Code::Unavailable);
         assert_eq!(refused.message(), "thread_fork_disabled");
+    }
+
+    /// The lineage is a soft pointer: no foreign key, no cascade. Deleting a source leaves its fork whole, with
+    /// its turns and its `THREAD_FORKED` event, and the fork still names the source it was copied from. Deleting
+    /// a fork leaves its source whole. Both deletions go through the erase `DeleteThread` runs.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn deleting_source_leaves_fork_and_deleting_fork_leaves_source() {
+        let pool = connect().await;
+        let owner = VerifiedIdentity::user_for_test(ORG, OWNER);
+
+        // The source is deleted: the fork stays, and still names the missing source.
+        let source = new_ulid();
+        seed_thread(&pool, &source).await;
+        append(&pool, &source, "user", "question").await;
+        let answer = append(&pool, &source, "assistant", "answer").await;
+        let fork = copy_thread(&pool, &owner, fork_request(&source, &answer))
+            .await
+            .unwrap()
+            .new_thread_id;
+        erase_thread_as_delete_thread_does(&pool, ORG, &source).await;
+
+        let lineage: Option<String> =
+            sqlx::query_scalar("SELECT forked_from_thread_id FROM threads WHERE id = $1")
+                .bind(&fork)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            lineage,
+            Some(source.clone()),
+            "the fork still names the source"
+        );
+        let fork_turns: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE thread_id = $1")
+                .bind(&fork)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(fork_turns, 2, "the fork keeps its copied turns");
+        let fork_event: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events WHERE run_id = $1 AND event_type = 'THREAD_FORKED'",
+        )
+        .bind(&fork)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(fork_event, 1, "the fork keeps its THREAD_FORKED event");
+        let source_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM threads WHERE id = $1")
+            .bind(&source)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(source_rows, 0, "the source is gone");
+
+        // The fork is deleted: the source keeps every turn, and nothing names the fork.
+        let source = new_ulid();
+        seed_thread(&pool, &source).await;
+        append(&pool, &source, "user", "question").await;
+        let answer = append(&pool, &source, "assistant", "answer").await;
+        let fork = copy_thread(&pool, &owner, fork_request(&source, &answer))
+            .await
+            .unwrap()
+            .new_thread_id;
+        erase_thread_as_delete_thread_does(&pool, ORG, &fork).await;
+
+        let source_turns: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE thread_id = $1")
+                .bind(&source)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(source_turns, 2, "the source keeps every turn");
+        let source_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM threads WHERE id = $1")
+            .bind(&source)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(source_rows, 1, "the source row stays");
+        let fork_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM threads WHERE id = $1")
+            .bind(&fork)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(fork_rows, 0, "the fork is gone");
     }
 }

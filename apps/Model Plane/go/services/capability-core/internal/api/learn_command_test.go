@@ -67,17 +67,33 @@ func (f learnControls) GetMemoryControls(_ context.Context, _ *mpv1.GetMemoryCon
 	return &mpv1.GetMemoryControlsResponse{Controls: &mpv1.MemoryControls{LearningAllowed: f.allowed, Reason: f.reason}}, nil
 }
 
-// learnOwners answers ResolveThreadOwner.
+// learnOwners answers ResolveThreadOwner. An owned thread carries the posture session-core states with the
+// answer: its origin word (empty from a session-core that predates the field), whether it lives in a Space,
+// and whether it holds a zero-retention or waived run.
 type learnOwners struct {
-	owned bool
-	err   error
+	owned          bool
+	origin         string
+	inSpace        bool
+	retainsNothing bool
+	err            error
 }
+
+// chatConversation is the owner of a conversation the person had in chat, outside a Space, keeping its retention.
+var chatConversation = learnOwners{owned: true, origin: "chat"}
 
 func (f learnOwners) ResolveThreadOwner(_ context.Context, _ *mpv1.ResolveThreadOwnerRequest, _ ...grpc.CallOption) (*mpv1.ResolveThreadOwnerResponse, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
-	return &mpv1.ResolveThreadOwnerResponse{Authorized: f.owned}, nil
+	if !f.owned {
+		return &mpv1.ResolveThreadOwnerResponse{Authorized: false}, nil
+	}
+	return &mpv1.ResolveThreadOwnerResponse{
+		Authorized:           true,
+		ThreadOrigin:         f.origin,
+		ThreadInSpace:        f.inSpace,
+		ThreadRetainsNothing: f.retainsNothing,
+	}, nil
 }
 
 // learnCounter is an in-memory review budget.
@@ -122,7 +138,7 @@ func newLearnFixture(controls learnControls, owners learnOwners, userCap int) le
 }
 
 func allowedLearnFixture() learnFixture {
-	return newLearnFixture(learnControls{allowed: true, reason: "on"}, learnOwners{owned: true}, 5)
+	return newLearnFixture(learnControls{allowed: true, reason: "on"}, chatConversation, 5)
 }
 
 func learnPrincipal() authctx.Principal {
@@ -217,7 +233,7 @@ func TestLearnSkipsTheMinimumUserTurns(t *testing.T) {
 }
 
 func TestLearnRefusedWhenOrgReviewDisabled(t *testing.T) {
-	fixture := newLearnFixture(learnControls{reason: "org_disabled"}, learnOwners{owned: true}, 5)
+	fixture := newLearnFixture(learnControls{reason: "org_disabled"}, chatConversation, 5)
 	response := postLearn(t, fixture.handler, learnPrincipal(), learnBodyJSON)
 	if response.Code != http.StatusForbidden || errorCode(t, response) != "learn_org_review_disabled" {
 		t.Fatalf("status=%d body=%s, want 403 learn_org_review_disabled", response.Code, response.Body.String())
@@ -228,7 +244,7 @@ func TestLearnRefusedWhenOrgReviewDisabled(t *testing.T) {
 }
 
 func TestLearnRefusedForMemoryPaused(t *testing.T) {
-	fixture := newLearnFixture(learnControls{reason: "user_paused"}, learnOwners{owned: true}, 5)
+	fixture := newLearnFixture(learnControls{reason: "user_paused"}, chatConversation, 5)
 	response := postLearn(t, fixture.handler, learnPrincipal(), learnBodyJSON)
 	if response.Code != http.StatusConflict || errorCode(t, response) != "learn_memory_paused" {
 		t.Fatalf("status=%d body=%s, want 409 learn_memory_paused", response.Code, response.Body.String())
@@ -241,7 +257,7 @@ func TestLearnRefusedForMemoryPaused(t *testing.T) {
 // A ZDR organization (and through it every waived run) is refused with the catalogue code and
 // the learn_command feature before any read or model call.
 func TestLearnRefusedUnderZeroDataRetention(t *testing.T) {
-	fixture := newLearnFixture(learnControls{reason: "zdr"}, learnOwners{owned: true}, 5)
+	fixture := newLearnFixture(learnControls{reason: "zdr"}, chatConversation, 5)
 	response := postLearn(t, fixture.handler, learnPrincipal(), learnBodyJSON)
 	if response.Code != http.StatusPreconditionFailed || errorCode(t, response) != "zdr_feature_not_supported" {
 		t.Fatalf("status=%d body=%s, want 412 zdr_feature_not_supported", response.Code, response.Body.String())
@@ -282,8 +298,68 @@ func TestLearnRefusedForThreadNotOwned(t *testing.T) {
 	}
 }
 
+// A chat conversation outside a Space is read and reviewed: the eligible outcome of the ownership answer.
+func TestLearnReadsAChatConversationOutsideASpace(t *testing.T) {
+	fixture := newLearnFixture(learnControls{allowed: true, reason: "on"}, learnOwners{owned: true, origin: "chat"}, 5)
+	if response := postLearn(t, fixture.handler, learnPrincipal(), learnBodyJSON); response.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s, want 202 for a chat conversation", response.Code, response.Body.String())
+	}
+	if fixture.sessions.reads == 0 || len(fixture.inference.requests) != 1 {
+		t.Fatalf("transcript reads=%d model calls=%d, want the read and one review", fixture.sessions.reads, len(fixture.inference.requests))
+	}
+}
+
+// Session-core states the origin and the Space with the ownership answer. A thread /learn does not learn from is
+// refused with the typed code before any transcript read or model call, including a session-core answer that
+// names no origin at all (an answer from before the field), which fails closed.
+func TestLearnRefusesAThreadThatIsNotAChatConversationBeforeAnyRead(t *testing.T) {
+	cases := map[string]learnOwners{
+		"a Space thread":                       {owned: true, origin: "space", inSpace: true},
+		"a chat origin that names a Space":     {owned: true, origin: "chat", inSpace: true},
+		"an agent run thread":                  {owned: true, origin: "agent_run"},
+		"a mail task thread":                   {owned: true, origin: "mail_task"},
+		"a support thread":                     {owned: true, origin: "support"},
+		"a system thread":                      {owned: true, origin: "system"},
+		"a session-core answer with no origin": {owned: true},
+	}
+	for name, owners := range cases {
+		t.Run(name, func(t *testing.T) {
+			fixture := newLearnFixture(learnControls{allowed: true, reason: "on"}, owners, 5)
+			response := postLearn(t, fixture.handler, learnPrincipal(), learnBodyJSON)
+			if response.Code != http.StatusUnprocessableEntity || errorCode(t, response) != "learn_thread_not_eligible" {
+				t.Fatalf("status=%d body=%s, want 422 learn_thread_not_eligible", response.Code, response.Body.String())
+			}
+			if fixture.sessions.reads != 0 || len(fixture.inference.requests) != 0 {
+				t.Fatal("a thread /learn does not learn from must have nothing read and no model call")
+			}
+		})
+	}
+}
+
+// A thread holding a zero-retention or waived run keeps nothing. It is refused with the catalogue refusal for the
+// learn_command feature before any transcript read or model call. A thread that is also not a chat conversation is
+// refused as not eligible first, the order session-core's thread reference read uses.
+func TestLearnRefusesAThreadThatKeepsNothingBeforeAnyRead(t *testing.T) {
+	fixture := newLearnFixture(learnControls{allowed: true, reason: "on"}, learnOwners{owned: true, origin: "chat", retainsNothing: true}, 5)
+	response := postLearn(t, fixture.handler, learnPrincipal(), learnBodyJSON)
+	if response.Code != http.StatusPreconditionFailed || errorCode(t, response) != "zdr_feature_not_supported" {
+		t.Fatalf("status=%d body=%s, want 412 zdr_feature_not_supported", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"feature":"learn_command"`) {
+		t.Fatalf("body = %s, want feature learn_command", response.Body.String())
+	}
+	if fixture.sessions.reads != 0 || len(fixture.inference.requests) != 0 {
+		t.Fatal("a thread that keeps nothing must have nothing read and no model call")
+	}
+
+	spaceAndRetaining := newLearnFixture(learnControls{allowed: true, reason: "on"}, learnOwners{owned: true, origin: "space", inSpace: true, retainsNothing: true}, 5)
+	if response := postLearn(t, spaceAndRetaining.handler, learnPrincipal(), learnBodyJSON); response.Code != http.StatusUnprocessableEntity || errorCode(t, response) != "learn_thread_not_eligible" {
+		t.Fatalf("a Space thread that keeps nothing: status=%d body=%s, want 422 learn_thread_not_eligible first", response.Code, response.Body.String())
+	}
+}
+
 func TestLearnRespectsDailyCap(t *testing.T) {
-	fixture := newLearnFixture(learnControls{allowed: true, reason: "on"}, learnOwners{owned: true}, 1)
+	fixture := newLearnFixture(learnControls{allowed: true, reason: "on"}, chatConversation, 1)
 	if response := postLearn(t, fixture.handler, learnPrincipal(), learnBodyJSON); response.Code != http.StatusAccepted {
 		t.Fatalf("first /learn status=%d, want 202", response.Code)
 	}
@@ -348,7 +424,7 @@ func TestLearnRefusedForConversationScopedThread(t *testing.T) {
 	learner := sessionreview.NewLearner(sessions, &learnInference{reply: learnReply}, "",
 		sessionreview.WithMemoryControls(learnControls{allowed: true, reason: "on"}),
 		sessionreview.WithCostControls(sessionreview.CostControls{MaxTranscriptChars: 60000, MaxPerUserPerDay: 5, MaxPerOrgPerDay: 5, Budget: &learnCounter{}}))
-	handler := &LearnCommandHandler{enabled: true, owners: learnOwners{owned: true}, learner: sessionreviewLearner{learner: learner}, spawn: func(run func()) { run() }}
+	handler := &LearnCommandHandler{enabled: true, owners: chatConversation, learner: sessionreviewLearner{learner: learner}, spawn: func(run func()) { run() }}
 	response := postLearn(t, handler, learnPrincipal(), learnBodyJSON)
 	if response.Code != http.StatusUnprocessableEntity || errorCode(t, response) != "learn_thread_conversation_scope" {
 		t.Fatalf("status=%d body=%s, want 422 learn_thread_conversation_scope", response.Code, response.Body.String())

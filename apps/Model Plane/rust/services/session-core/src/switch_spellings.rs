@@ -35,6 +35,7 @@ pub const EXACT_SWITCHES: &[(&str, &str)] = &[
     (crate::orchestration_grpc::PROOF_WALKTHROUGH_ENV, "true"),
     (crate::routing_policy_grpc::CANDIDATES_ENV, "true"),
     (crate::routing_policy_grpc::ORG_OVERLAY_ENV, "true"),
+    (crate::thread_retention_read::SWITCH_ENV, "true"),
 ];
 
 /// The switches in [`EXACT_SWITCHES`] whose value, as `lookup` returns it, is a spelling the

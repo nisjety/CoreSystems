@@ -59,20 +59,44 @@
 //!   asked of a [`WorkspaceEraser`]. Both are best effort and counted, the way the
 //!   user delete counts them: an outage there must not undo a delete Postgres made.
 //! - Per org, at most [`DEFAULT_DAILY_CAP`] threads are deleted in any 24 hours,
-//!   counted from the recorded runs, so a misconfigured window cannot wipe an org
-//!   in one pass. `SESSION_RETENTION_SWEEP_DAILY_CAP` can lower the cap, never raise
-//!   it. Threads past the cap stay as `would_delete` for a later pass.
+//!   counted from the deletion ledger (below), so a misconfigured window cannot
+//!   wipe an org in one pass. `SESSION_RETENTION_SWEEP_DAILY_CAP` can lower the
+//!   cap, never raise it. Threads past the cap stay as `would_delete` for a later
+//!   pass.
 //!
 //! A pass that stops after it deleted something still records its row with what it
-//! did (the run table admits an error only with zero counts); the reason is in the
-//! audit event as `stopped`.
+//! did (the run table admits a policy error only with zero counts); the reason is in
+//! the audit event as `stopped`.
+//!
+//! # The deletion ledger (F-f10-10)
+//!
+//! Each thread's delete transaction also writes one `retention_sweep_deletions` row
+//! (run id, org id and time; no thread id) before it commits, under the run id the
+//! pass allocated when it started. The run row and its audit event are still written
+//! once, at the end of the org's pass, so a crash, a restart or a failed record
+//! between the two used to leave committed deletes with no run row and outside the
+//! daily cap. Now:
+//!
+//! - The daily cap counts the org's ledger rows of the last 24 hours, plus the
+//!   `deleted` of the enforce runs recorded before the ledger existed (runs with no
+//!   ledger row), so it never counts less than it did.
+//! - Each pass first records, under the sweep lock, every run id with ledger rows
+//!   and no run row whose last delete is older than [`INTERRUPTED_AFTER_MINUTES`], as
+//!   an `enforce` row with `error_code = 'interrupted'` and the ledger count as
+//!   `deleted` ([`reconcile_interrupted`]), so every delete has an audit event.
+//! - Ledger rows older than [`LEDGER_KEEP_HOURS`] whose run row exists are pruned
+//!   ([`prune_ledger`]); a row whose run is not recorded yet is never pruned.
 //!
 //! # What the delete does not reach
 //!
-//! - Sandbox workspaces: sandbox-manager's `DeleteThreadWorkspace` accepts a user
-//!   principal only, so the production eraser ([`UnavailableWorkspaceEraser`])
-//!   counts every deleted thread's workspace as unconfirmed until sandbox-manager
-//!   offers a service erase for this sweeper.
+//! - Sandbox workspaces: after the commit, the thread's workspace is erased through
+//!   sandbox-manager's service erase (`EraseThreadWorkspaceForRetention`, F-f10-08) by
+//!   `sandbox_workspace_eraser::GrpcWorkspaceEraser`, but only while
+//!   `SESSION_RETENTION_WORKSPACE_ERASE` is the literal `true` and the sandbox-manager
+//!   address and session-core's service credential are configured. Otherwise the eraser
+//!   is [`UnavailableWorkspaceEraser`], which counts every deleted thread's workspace as
+//!   unconfirmed. `DeleteThreadWorkspace` accepts a user principal only and is never
+//!   called from here.
 //! - Data Plane v2: no chat-derived content reaches it bound to a thread. Chat
 //!   attachments travel inline with the turn and are not stored as documents;
 //!   documents a person creates (`/v1/documents`) or promotes from a workspace
@@ -111,8 +135,9 @@ pub(crate) const DEFAULT_DAILY_CAP: i64 = 10_000;
 /// that deleted nothing records the closed `error_code` instead.
 pub(crate) const STOPPED_DELETE_FAILED: &str = "delete_failed";
 
-/// Why a deleted thread's workspace erasure is not confirmed: no service path to
-/// sandbox-manager's `DeleteThreadWorkspace` exists.
+/// Why a deleted thread's workspace erasure is not confirmed: the eraser is not configured,
+/// or sandbox-manager did not confirm the erase (refused, unreachable, or past its deadline).
+/// Every such answer is this one closed word.
 pub(crate) const WORKSPACE_ERASURE_UNAVAILABLE: &str = "workspace_erasure_unavailable";
 
 /// Six hours: four passes a day is enough for a window measured in days.
@@ -148,6 +173,17 @@ pub(crate) const EVENT_RETENTION_SWEEP: &str = "retention_sweep";
 pub(crate) const ERROR_POLICY_UNAVAILABLE: &str = "policy_unavailable";
 pub(crate) const ERROR_POLICY_WINDOW_INVALID: &str = "policy_window_invalid";
 pub(crate) const ERROR_POLICY_CHANGED: &str = "policy_changed";
+/// A pass that deleted and then never recorded its row (crash, restart, failed
+/// record), recorded later from its ledger rows. The one error with deletes.
+pub(crate) const ERROR_INTERRUPTED: &str = "interrupted";
+
+/// How long a run's last ledger row must be quiet before a pass records the run as
+/// interrupted, so a pass still deleting on a replica that lost its lock is not
+/// recorded under it.
+pub(crate) const INTERRUPTED_AFTER_MINUTES: i32 = 15;
+/// Ledger rows of a recorded run are kept this long: past the 24-hour cap window
+/// with a day of margin.
+pub(crate) const LEDGER_KEEP_HOURS: i32 = 48;
 
 /// Every session-core table with a `thread_id` column (integration round B, C-B9).
 /// The delete mode (EP-9 C3) must erase each of these with its thread, and the dry
@@ -351,6 +387,8 @@ pub(crate) struct Candidate {
     pub(crate) thread_id: String,
     /// Every run of the thread was zero-retention, so it holds no content.
     pub(crate) zdr_only: bool,
+    /// The thread's owner, read with the page: the owner its workspace erase names (F-f10-09).
+    pub(crate) user_id: String,
 }
 
 /// The counts of one pass over one org.
@@ -409,16 +447,18 @@ pub(crate) enum WorkspaceErasure {
 }
 
 /// Erases one deleted thread's sandbox workspace. Called after the thread's delete
-/// committed; it never fails the delete.
+/// committed; it never fails the delete. `owner_id` is the thread's owner, read from the
+/// thread row before the delete (F-f10-09).
 pub(crate) trait WorkspaceEraser: Send + Sync {
     fn erase<'a>(
         &'a self,
         org_id: &'a str,
         thread_id: &'a str,
+        owner_id: &'a str,
     ) -> Pin<Box<dyn Future<Output = WorkspaceErasure> + Send + 'a>>;
 }
 
-/// The production eraser until sandbox-manager accepts a service erase: it reaches
+/// The eraser when the production one is not configured (see the module docs): it reaches
 /// nothing and says so, so a pass never claims a workspace it did not erase.
 pub(crate) struct UnavailableWorkspaceEraser;
 
@@ -427,6 +467,7 @@ impl WorkspaceEraser for UnavailableWorkspaceEraser {
         &'a self,
         _org_id: &'a str,
         _thread_id: &'a str,
+        _owner_id: &'a str,
     ) -> Pin<Box<dyn Future<Output = WorkspaceErasure> + Send + 'a>> {
         Box::pin(std::future::ready(WorkspaceErasure::Unconfirmed(WORKSPACE_ERASURE_UNAVAILABLE)))
     }
@@ -456,7 +497,10 @@ pub(crate) struct SweepRun {
 /// Splits one page by the check answer: what is zero-retention, what is held, what
 /// would be deleted. Pure. A held id the page did not name is ignored, so org-core
 /// cannot add a thread to the counts.
-pub(crate) fn split_page<'a>(page: &'a [Candidate], answer: &PolicyAnswer) -> (i64, i64, Vec<&'a str>) {
+pub(crate) fn split_page<'a>(
+    page: &'a [Candidate],
+    answer: &PolicyAnswer,
+) -> (i64, i64, Vec<&'a Candidate>) {
     let mut skipped_zdr = 0;
     let mut held = 0;
     let mut would_delete = Vec::new();
@@ -466,22 +510,25 @@ pub(crate) fn split_page<'a>(page: &'a [Candidate], answer: &PolicyAnswer) -> (i
         } else if answer.org_held || answer.held_thread_ids.contains(&candidate.thread_id) {
             held += 1;
         } else {
-            would_delete.push(candidate.thread_id.as_str());
+            would_delete.push(candidate);
         }
     }
     (skipped_zdr, held, would_delete)
 }
 
-/// Splits one delete batch by the hold re-check: how many are held now, and the ids
+/// Splits one delete batch by the hold re-check: how many are held now, and the threads
 /// still free to delete. Pure, and like [`split_page`] it only ever narrows.
-pub(crate) fn split_batch<'a>(batch: &[&'a str], answer: &PolicyAnswer) -> (i64, Vec<&'a str>) {
+pub(crate) fn split_batch<'a>(
+    batch: &[&'a Candidate],
+    answer: &PolicyAnswer,
+) -> (i64, Vec<&'a Candidate>) {
     if answer.org_held {
         return (i64::try_from(batch.len()).unwrap_or(i64::MAX), Vec::new());
     }
-    let free: Vec<&str> = batch
+    let free: Vec<&Candidate> = batch
         .iter()
         .copied()
-        .filter(|thread_id| !answer.held_thread_ids.contains(*thread_id))
+        .filter(|candidate| !answer.held_thread_ids.contains(&candidate.thread_id))
         .collect();
     (i64::try_from(batch.len() - free.len()).unwrap_or(i64::MAX), free)
 }
@@ -496,7 +543,7 @@ pub(crate) fn window_in_bounds(days: i64) -> bool {
     (MIN_WINDOW_DAYS..=MAX_WINDOW_DAYS).contains(&days)
 }
 
-/// One page of candidates after `cursor`, in id order. Last activity is the later of
+/// One page of candidates after `cursor`, in id order, each with its owner. Last activity is the later of
 /// the thread's own activity time and the latest change of any of its runs; a thread
 /// with a run that has not ended is never a candidate.
 async fn candidate_page(
@@ -505,11 +552,12 @@ async fn candidate_page(
     cutoff: DateTime<Utc>,
     cursor: &str,
 ) -> Result<Vec<Candidate>, sqlx::Error> {
-    let rows: Vec<(String, bool)> = sqlx::query_as(
+    let rows: Vec<(String, bool, String)> = sqlx::query_as(
         "SELECT t.id,
                 (EXISTS (SELECT 1 FROM runs r WHERE r.thread_id = t.id)
                  AND NOT EXISTS (SELECT 1 FROM runs r
-                                  WHERE r.thread_id = t.id AND r.retention_class <> 'zdr')) AS zdr_only
+                                  WHERE r.thread_id = t.id AND r.retention_class <> 'zdr')) AS zdr_only,
+                t.user_id
            FROM threads t
           WHERE t.org_id = $1
             AND t.space_id IS NULL
@@ -533,7 +581,11 @@ async fn candidate_page(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(thread_id, zdr_only)| Candidate { thread_id, zdr_only })
+        .map(|(thread_id, zdr_only, user_id)| Candidate {
+            thread_id,
+            zdr_only,
+            user_id,
+        })
         .collect())
 }
 
@@ -557,12 +609,21 @@ async fn count_bound_rows(
     Ok(())
 }
 
-/// Threads this org lost to enforce passes in the last 24 hours.
+/// Threads this org lost to enforce passes in the last 24 hours: its ledger rows, which
+/// every delete writes in its own transaction whether or not the pass was recorded,
+/// plus the `deleted` of enforce runs recorded before the ledger existed (a run with
+/// no ledger row). A run with ledger rows is counted by them alone, so nothing is
+/// counted twice, and the sum is never below what the run rows alone said.
 async fn deleted_in_last_day(pool: &PgPool, org_id: &str) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT COALESCE(sum(deleted), 0)::bigint
-           FROM retention_sweep_runs
-          WHERE org_id = $1 AND mode = 'enforce' AND started_at > now() - interval '24 hours'",
+        "SELECT (SELECT count(*)
+                   FROM retention_sweep_deletions
+                  WHERE org_id = $1 AND deleted_at > now() - interval '24 hours')
+              + (SELECT COALESCE(sum(r.deleted), 0)
+                   FROM retention_sweep_runs r
+                  WHERE r.org_id = $1 AND r.mode = 'enforce'
+                    AND r.started_at > now() - interval '24 hours'
+                    AND NOT EXISTS (SELECT 1 FROM retention_sweep_deletions d WHERE d.run_id = r.id))::bigint",
     )
     .bind(org_id)
     .fetch_one(pool)
@@ -597,12 +658,18 @@ async fn delete_residual_rows(
 /// thread is no longer an idle personal thread of this org (activity since the page
 /// was read, a run opened, or it is gone): nothing is deleted. The re-check holds the
 /// thread row lock, which an append or a new run waits on, so neither can land
-/// between the re-check and the delete.
+/// between the re-check and the delete. The delete writes its ledger row under
+/// `run_id` in the same transaction, so it counts against the daily cap and leaves a
+/// trace for [`reconcile_interrupted`] even if the pass never records its row. The
+/// re-check also holds `owner_id`: the owner the workspace erase names is the owner of the
+/// row this transaction deleted (F-f10-09).
 async fn delete_thread(
     pool: &PgPool,
     erasure: &Erasure<'_>,
+    run_id: &str,
     org_id: &str,
     thread_id: &str,
+    owner_id: &str,
     cutoff: DateTime<Utc>,
 ) -> Result<Option<(SemanticErasure, WorkspaceErasure)>, sqlx::Error> {
     let mut tx = pool.begin().await?;
@@ -620,11 +687,13 @@ async fn delete_thread(
             AND NOT EXISTS (SELECT 1 FROM runs r
                              WHERE r.thread_id = t.id
                                AND r.status NOT IN ('completed', 'failed', 'cancelled'))
+            AND t.user_id = $4
             FOR UPDATE OF t",
     )
     .bind(thread_id)
     .bind(org_id)
     .bind(cutoff)
+    .bind(owner_id)
     .fetch_optional(&mut *tx)
     .await?;
     if still_idle.is_none() {
@@ -643,6 +712,12 @@ async fn delete_thread(
     if deleted != 1 {
         return Ok(None);
     }
+    // Ids and the time only: the ledger never names the thread.
+    sqlx::query("INSERT INTO retention_sweep_deletions (run_id, org_id) VALUES ($1, $2)")
+        .bind(run_id)
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
 
     // The sweeper holds no owner credential, so the Control grants of the erased snapshots stay; each
@@ -656,7 +731,7 @@ async fn delete_thread(
     // delete Postgres already made, and the erased memory ids exist nowhere else now.
     let semantic =
         crate::memory_erasure::erase_semantic_copies(erasure.letta, org_id, &erased.memories).await;
-    let workspace = erasure.workspaces.erase(org_id, thread_id).await;
+    let workspace = erasure.workspaces.erase(org_id, thread_id, owner_id).await;
     Ok(Some((semantic, workspace)))
 }
 
@@ -680,9 +755,10 @@ async fn delete_page(
     run: &mut SweepRun,
     cap_left: &mut i64,
     cutoff: DateTime<Utc>,
-    would_delete: &[&str],
+    would_delete: &[&Candidate],
 ) -> BatchEnd {
     let org_id = run.org_id.clone();
+    let run_id = run.id.clone();
     for batch in would_delete.chunks(DELETE_BATCH) {
         let batch_len = i64::try_from(batch.len()).unwrap_or(i64::MAX);
         let (held, free) = if *cap_left <= 0 {
@@ -690,7 +766,10 @@ async fn delete_page(
             run.counts.cap_reached = true;
             (0, batch.to_vec())
         } else {
-            let asked: Vec<String> = batch.iter().map(|id| (*id).to_owned()).collect();
+            let asked: Vec<String> = batch
+                .iter()
+                .map(|candidate| candidate.thread_id.clone())
+                .collect();
             let answer = match client.check(&org_id, &asked).await {
                 Ok(Some(answer)) if same_policy(&answer, policy) => answer,
                 Ok(Some(_)) => return BatchEnd::Stop(ERROR_POLICY_CHANGED, None),
@@ -698,7 +777,11 @@ async fn delete_page(
             };
             split_batch(batch, &answer)
         };
-        if let Err(error) = count_bound_rows(pool, &free, &mut run.counts.rows_by_table).await {
+        let free_ids: Vec<&str> = free
+            .iter()
+            .map(|candidate| candidate.thread_id.as_str())
+            .collect();
+        if let Err(error) = count_bound_rows(pool, &free_ids, &mut run.counts.rows_by_table).await {
             return BatchEnd::Stop(STOPPED_DELETE_FAILED, Some(error));
         }
         // The batch is settled from here on: held, would delete, and of those some
@@ -707,12 +790,22 @@ async fn delete_page(
         run.counts.candidates += batch_len;
         run.counts.held += held;
         run.counts.would_delete += i64::try_from(free.len()).unwrap_or(i64::MAX);
-        for thread_id in free {
+        for candidate in free {
             if *cap_left <= 0 {
                 run.counts.cap_reached = true;
                 break;
             }
-            match delete_thread(pool, erasure, &org_id, thread_id, cutoff).await {
+            let delete = delete_thread(
+                pool,
+                erasure,
+                &run_id,
+                &org_id,
+                &candidate.thread_id,
+                &candidate.user_id,
+                cutoff,
+            )
+            .await;
+            match delete {
                 Ok(Some((semantic, workspace))) => {
                     run.counts.deleted += 1;
                     *cap_left -= 1;
@@ -820,7 +913,11 @@ pub(crate) async fn sweep_org(
             run.counts.skipped_zdr += skipped_zdr;
             run.counts.held += held;
             run.counts.would_delete += i64::try_from(would_delete.len()).unwrap_or(i64::MAX);
-            count_bound_rows(pool, &would_delete, &mut run.counts.rows_by_table).await?;
+            let ids: Vec<&str> = would_delete
+                .iter()
+                .map(|candidate| candidate.thread_id.as_str())
+                .collect();
+            count_bound_rows(pool, &ids, &mut run.counts.rows_by_table).await?;
             if page_len < CHECK_PAGE {
                 break;
             }
@@ -851,8 +948,8 @@ pub(crate) async fn sweep_org(
 
 /// Ends a pass that cannot go on. Before any delete the row reports nothing it could
 /// not stand behind (zero counts and the closed `error_code`). After a delete the
-/// counts are what happened and must be recorded, and the run table admits an error
-/// only with zero counts, so the reason goes to the audit event as `stopped`.
+/// counts are what happened and must be recorded, and the run table admits a policy
+/// error only with zero counts, so the reason goes to the audit event as `stopped`.
 fn fail_or_stop(run: SweepRun, reason: &'static str) -> Option<SweepRun> {
     if run.counts.deleted == 0 {
         Some(fail(run, reason))
@@ -951,10 +1048,106 @@ pub(crate) async fn record(pool: &PgPool, run: &SweepRun) -> Result<(), sqlx::Er
     tx.commit().await
 }
 
+/// The `interrupted` row of a run whose deletes the ledger holds but whose pass never
+/// recorded it: enforce, no policy, zero counts except `deleted`, and the first and
+/// last delete as its start and end. Pure.
+pub(crate) fn interrupted_run(
+    run_id: String,
+    org_id: String,
+    deleted: i64,
+    first_delete: DateTime<Utc>,
+    last_delete: DateTime<Utc>,
+) -> SweepRun {
+    SweepRun {
+        id: run_id,
+        org_id,
+        mode: RECORDED_ENFORCE,
+        policy_revision: 0,
+        window_days: None,
+        started_at: first_delete,
+        finished_at: last_delete.max(first_delete),
+        counts: SweepCounts {
+            deleted,
+            ..SweepCounts::default()
+        },
+        error_code: Some(ERROR_INTERRUPTED),
+    }
+}
+
+/// Records every run whose ledger rows have no run row and whose last delete is older
+/// than [`INTERRUPTED_AFTER_MINUTES`] as `interrupted` (see the module docs), each with
+/// its audit event through [`record`]. Runs under the sweep lock. Returns how many
+/// rows it wrote; a run whose record fails is logged and left for the next pass, and
+/// its ledger rows keep counting against the cap meanwhile.
+pub(crate) async fn reconcile_interrupted(pool: &PgPool) -> Result<usize, sqlx::Error> {
+    let orphans: Vec<(String, String, i64, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT d.run_id, d.org_id, count(*)::bigint, min(d.deleted_at), max(d.deleted_at)
+           FROM retention_sweep_deletions d
+          WHERE NOT EXISTS (SELECT 1 FROM retention_sweep_runs r WHERE r.id = d.run_id)
+          GROUP BY d.run_id, d.org_id
+         HAVING max(d.deleted_at) < now() - make_interval(mins => $1)
+          ORDER BY min(d.deleted_at)",
+    )
+    .bind(INTERRUPTED_AFTER_MINUTES)
+    .fetch_all(pool)
+    .await?;
+    let mut written = 0usize;
+    for (run_id, org_id, deleted, first_delete, last_delete) in orphans {
+        let run = interrupted_run(run_id, org_id, deleted, first_delete, last_delete);
+        match record(pool, &run).await {
+            Ok(()) => {
+                written += 1;
+                warn!(org_id = %run.org_id, run_id = %run.id, deleted,
+                    "retention sweep recorded an interrupted pass from its deletion ledger");
+                metrics::counter!("mp_session_retention_sweep_runs_total", "outcome" => "interrupted").increment(1);
+            }
+            Err(error) => {
+                error!(org_id = %run.org_id, run_id = %run.id, deleted, %error,
+                    "retention sweep could not record an interrupted pass; retried next pass");
+            }
+        }
+    }
+    Ok(written)
+}
+
+/// Deletes the ledger rows older than [`LEDGER_KEEP_HOURS`] whose run row exists. A
+/// row whose run is not recorded is kept, whatever its age, until
+/// [`reconcile_interrupted`] has recorded it. Returns how many rows went.
+pub(crate) async fn prune_ledger(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query(
+        "DELETE FROM retention_sweep_deletions d
+          WHERE d.deleted_at < now() - make_interval(hours => $1)
+            AND EXISTS (SELECT 1 FROM retention_sweep_runs r WHERE r.id = d.run_id)",
+    )
+    .bind(LEDGER_KEEP_HOURS)
+    .execute(pool)
+    .await?
+    .rows_affected())
+}
+
+/// The ledger upkeep that opens every pass: record the interrupted runs, then prune.
+/// Neither failure stops the pass: the cap reads the ledger itself, so a pass that
+/// could not reconcile still deletes no more than it may.
+async fn upkeep_ledger(pool: &PgPool) -> usize {
+    let written = match reconcile_interrupted(pool).await {
+        Ok(written) => written,
+        Err(error) => {
+            warn!(%error, "retention sweep could not read its deletion ledger; interrupted passes wait for the next pass");
+            0
+        }
+    };
+    if let Err(error) = prune_ledger(pool).await {
+        warn!(%error, "retention sweep could not prune its deletion ledger");
+    }
+    written
+}
+
 /// One pass over every org that owns personal threads here, deleting when given an
 /// `erasure`. Returns how many rows it wrote, or `None` when another replica holds
 /// the sweep. The advisory lock also keeps two replicas from reading the same daily
-/// cap and deleting twice its worth.
+/// cap and deleting twice its worth. Under the lock, the pass first records the
+/// interrupted runs its ledger holds and prunes it ([`upkeep_ledger`]); those rows
+/// count among the rows written.
 pub(crate) async fn sweep_once(
     pool: &PgPool,
     client: &CheckClient,
@@ -968,7 +1161,10 @@ pub(crate) async fn sweep_once(
     if !locked {
         return Ok(None);
     }
-    let result = sweep_orgs(pool, client, erasure).await;
+    let reconciled = upkeep_ledger(pool).await;
+    let result = sweep_orgs(pool, client, erasure)
+        .await
+        .map(|written| written + reconciled);
     let unlocked = sqlx::query("SELECT pg_advisory_unlock($1)")
         .bind(SWEEP_LOCK_KEY)
         .execute(&mut *lock)
@@ -992,10 +1188,12 @@ async fn sweep_orgs(pool: &PgPool, client: &CheckClient, erasure: Option<&Erasur
             continue;
         };
         if let Err(error) = record(pool, &run).await {
-            // The deletes committed thread by thread; only their record is missing.
+            // The deletes committed thread by thread, each with its ledger row; only
+            // their record is missing. The ledger keeps them inside the daily cap, and
+            // a later pass records the run as interrupted.
             if run.counts.deleted > 0 {
                 error!(%org_id, run_id = %run.id, deleted = run.counts.deleted, %error,
-                    "retention sweep deleted threads but could not record the pass");
+                    "retention sweep deleted threads but could not record the pass; a later pass records it as interrupted");
             }
             return Err(error.into());
         }
@@ -1040,10 +1238,21 @@ pub(crate) async fn run(pool: PgPool, mode: Mode) -> Result<()> {
         },
         Mode::Off | Mode::DryRun => None,
     };
-    let workspaces = UnavailableWorkspaceEraser;
+    // F-f10-09: a delete pass erases each workspace through sandbox-manager's service erase only
+    // when SESSION_RETENTION_WORKSPACE_ERASE is the literal true and the eraser is configured;
+    // otherwise the unavailable eraser, which claims nothing. A dry pass never erases.
+    let sandbox_workspaces = match mode {
+        Mode::Enforce => crate::sandbox_workspace_eraser::GrpcWorkspaceEraser::from_lookup(&lookup),
+        Mode::Off | Mode::DryRun => None,
+    };
+    let unavailable_workspaces = UnavailableWorkspaceEraser;
+    let workspaces: &dyn WorkspaceEraser = match sandbox_workspaces.as_ref() {
+        Some(eraser) => eraser,
+        None => &unavailable_workspaces,
+    };
     let erasure = letta.as_ref().map(|letta| Erasure {
         letta: letta.as_ref(),
-        workspaces: &workspaces,
+        workspaces,
         daily_cap: daily_cap_from(std::env::var(DAILY_CAP_ENV).ok().as_deref()),
     });
     let interval = interval_from(std::env::var(INTERVAL_SECS_ENV).ok().as_deref());
@@ -1051,6 +1260,7 @@ pub(crate) async fn run(pool: PgPool, mode: Mode) -> Result<()> {
         interval_secs = interval.as_secs(),
         delete = erasure.is_some(),
         daily_cap = erasure.as_ref().map(|erasure| erasure.daily_cap),
+        workspace_erase = sandbox_workspaces.is_some(),
         "retention sweeper started"
     );
     loop {
@@ -1101,6 +1311,7 @@ mod tests {
         Candidate {
             thread_id: id.to_owned(),
             zdr_only,
+            user_id: "u1".to_owned(),
         }
     }
 
@@ -1211,7 +1422,8 @@ mod tests {
         let page = [candidate("t1", false), candidate("t2", false), candidate("t3", true)];
         let (zdr, held, would) = split_page(&page, &answer(false, &["t2", "not-asked"]));
         assert_eq!((zdr, held), (1, 1));
-        assert_eq!(would, vec!["t1"]);
+        let ids: Vec<&str> = would.iter().map(|candidate| candidate.thread_id.as_str()).collect();
+        assert_eq!(ids, vec!["t1"]);
         // An org hold keeps every thread that holds content.
         let (zdr, held, would) = split_page(&page, &answer(true, &[]));
         assert_eq!((zdr, held), (1, 2));
@@ -1220,10 +1432,16 @@ mod tests {
 
     #[test]
     fn retention_sweep_batch_recheck_only_narrows() {
-        let batch = ["t1", "t2", "t3"];
+        let page = [
+            candidate("t1", false),
+            candidate("t2", false),
+            candidate("t3", false),
+        ];
+        let batch: Vec<&Candidate> = page.iter().collect();
         let (held, free) = split_batch(&batch, &answer(false, &["t2", "not-asked"]));
         assert_eq!(held, 1);
-        assert_eq!(free, vec!["t1", "t3"]);
+        let ids: Vec<&str> = free.iter().map(|candidate| candidate.thread_id.as_str()).collect();
+        assert_eq!(ids, vec!["t1", "t3"]);
         // A hold placed on the org since the page was read keeps the whole batch.
         let (held, free) = split_batch(&batch, &answer(true, &[]));
         assert_eq!(held, 3);
@@ -1240,9 +1458,94 @@ mod tests {
         assert_eq!(daily_cap_from(Some("1000000")), 10_000);
     }
 
+    #[test]
+    fn retention_sweep_interrupted_row_carries_only_the_ledger_count() {
+        let first = Utc::now() - chrono::Duration::hours(2);
+        let last = first + chrono::Duration::minutes(3);
+        let run = interrupted_run("rsw_1".to_owned(), "org-a".to_owned(), 4, first, last);
+        assert_eq!(run.mode, "enforce");
+        assert_eq!(run.error_code, Some(ERROR_INTERRUPTED));
+        assert_eq!((run.policy_revision, run.window_days), (0, None));
+        assert_eq!((run.started_at, run.finished_at), (first, last));
+        assert_eq!(
+            run.counts,
+            SweepCounts {
+                deleted: 4,
+                ..SweepCounts::default()
+            },
+            "every count but the ledger's deletes is zero, so held + skipped_zdr + would_delete = candidates"
+        );
+        let body = build_sweep_audit_body(&run);
+        assert_eq!(body["event_id"], "retention_sweep:session-core:rsw_1");
+        assert_eq!(body["outcome"], "failed");
+        assert_eq!(body["details"]["error_code"], "interrupted");
+        assert_eq!(body["details"]["deleted"], 4);
+        assert_eq!(body["details"]["candidates"], 0);
+        assert!(
+            !body.to_string().contains("thread"),
+            "the event names no thread: {body}"
+        );
+    }
+
+    /// The function body that starts at `signature`, up to the next top-level item.
+    fn body_of<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source.find(signature).expect("signature");
+        let rest = &source[start..];
+        let end = rest[1..].find("\n}\n").map_or(rest.len(), |at| at + 3);
+        &rest[..end]
+    }
+
+    #[test]
+    fn retention_sweep_ledger_row_is_written_inside_each_delete_transaction() {
+        let source = include_str!("retention_sweeper.rs");
+        let body = body_of(source, "async fn delete_thread(");
+        let delete = body
+            .find("DELETE FROM threads WHERE id = $1")
+            .expect("thread delete");
+        let ledger = body
+            .find("INSERT INTO retention_sweep_deletions (run_id, org_id) VALUES ($1, $2)")
+            .expect("ledger insert");
+        let commit = body.find("tx.commit().await").expect("commit");
+        assert!(
+            delete < ledger && ledger < commit,
+            "the ledger row must commit with the delete"
+        );
+        assert!(
+            body[ledger..commit].contains(".execute(&mut *tx)"),
+            "the ledger insert runs on the delete transaction"
+        );
+        assert!(
+            !body[ledger..commit].contains("bind(thread_id)"),
+            "the ledger never names the thread"
+        );
+    }
+
+    #[test]
+    fn retention_sweep_error_vocabulary_matches_the_migration() {
+        let migration = include_str!("../migrations/0137_retention_sweep_deletions.sql");
+        for code in [
+            ERROR_POLICY_UNAVAILABLE,
+            ERROR_POLICY_WINDOW_INVALID,
+            ERROR_POLICY_CHANGED,
+            ERROR_INTERRUPTED,
+        ] {
+            assert!(
+                migration.contains(&format!("'{code}'")),
+                "{code} missing from the widened CHECK"
+            );
+        }
+        assert!(
+            !migration.contains("thread_id"),
+            "the ledger holds no thread id"
+        );
+        let revert = include_str!("../migrations/revert/0137_retention_sweep_deletions.down.sql");
+        assert!(revert.contains("DROP TABLE IF EXISTS retention_sweep_deletions"));
+        assert!(revert.contains("SET error_code = NULL WHERE error_code = 'interrupted'"));
+    }
+
     #[tokio::test]
     async fn retention_sweep_production_workspace_eraser_claims_nothing() {
-        let outcome = UnavailableWorkspaceEraser.erase("org-a", "t1").await;
+        let outcome = UnavailableWorkspaceEraser.erase("org-a", "t1", "u1").await;
         assert_eq!(outcome, WorkspaceErasure::Unconfirmed(WORKSPACE_ERASURE_UNAVAILABLE));
     }
 
@@ -1743,11 +2046,11 @@ mod tests {
             assert!(stale.is_empty(), "THREAD_BOUND_TABLES names tables without thread_id: {stale:?}");
         }
 
-        /// A workspace eraser that records each call and whether, seen from another
-        /// connection, the thread was already gone: true only after the commit.
+        /// A workspace eraser that records each call's thread, owner and whether, seen from
+        /// another connection, the thread was already gone: true only after the commit.
         struct RecordingEraser {
             pool: PgPool,
-            calls: std::sync::Mutex<Vec<(String, bool)>>,
+            calls: std::sync::Mutex<Vec<(String, String, bool)>>,
         }
 
         impl RecordingEraser {
@@ -1758,7 +2061,7 @@ mod tests {
                 }
             }
 
-            fn calls(&self) -> Vec<(String, bool)> {
+            fn calls(&self) -> Vec<(String, String, bool)> {
                 self.calls.lock().expect("calls").clone()
             }
         }
@@ -1768,6 +2071,7 @@ mod tests {
                 &'a self,
                 _org_id: &'a str,
                 thread_id: &'a str,
+                owner_id: &'a str,
             ) -> Pin<Box<dyn Future<Output = WorkspaceErasure> + Send + 'a>> {
                 Box::pin(async move {
                     let left: i64 = sqlx::query_scalar("SELECT count(*) FROM threads WHERE id = $1")
@@ -1775,7 +2079,10 @@ mod tests {
                         .fetch_one(&self.pool)
                         .await
                         .expect("count thread");
-                    self.calls.lock().expect("calls").push((thread_id.to_owned(), left == 0));
+                    self.calls
+                        .lock()
+                        .expect("calls")
+                        .push((thread_id.to_owned(), owner_id.to_owned(), left == 0));
                     WorkspaceErasure::Erased
                 })
             }
@@ -1884,7 +2191,7 @@ mod tests {
 
             // Propagation ran after the commit: the eraser saw the thread gone, and the
             // erased memory reached the semantic step (unconfirmed with no letta here).
-            assert_eq!(eraser.calls(), vec![(old.clone(), true)]);
+            assert_eq!(eraser.calls(), vec![(old.clone(), "u1".to_owned(), true)]);
             assert_eq!(run.counts.workspace_confirmed, 1);
             assert_eq!((run.counts.semantic_confirmed, run.counts.semantic_unconfirmed), (0, 1));
             assert_eq!(run.counts.semantic_degradation, Some(crate::memory_grpc::LETTA_NOT_CONFIGURED));
@@ -1897,6 +2204,11 @@ mod tests {
                     .await
                     .expect("row");
             assert_eq!(row, ("enforce".to_owned(), 1, 1));
+            assert_eq!(
+                ledger_rows(&pool, &run.id).await,
+                1,
+                "the delete wrote one ledger row"
+            );
         }
 
         #[tokio::test]
@@ -1940,7 +2252,7 @@ mod tests {
             assert!(thread_exists(&pool, &held).await);
             assert!(thread_exists(&pool, &late).await, "a hold placed after the page read is honoured");
             assert!(!thread_exists(&pool, &free).await);
-            assert_eq!(eraser.calls(), vec![(free, true)]);
+            assert_eq!(eraser.calls(), vec![(free, "u1".to_owned(), true)]);
         }
 
         #[tokio::test]
@@ -1964,7 +2276,8 @@ mod tests {
             assert!(first.counts.cap_reached);
             record(&pool, &first).await.expect("record");
 
-            // The recorded deletes count against the same 24 hours.
+            // The deletes' ledger rows count against the same 24 hours, once (the run row
+            // saying 2 is not added to them).
             let second = sweep_org(&pool, &client, &org.id, Some(&enforce(&eraser, 2)))
                 .await
                 .expect("pass")
@@ -2036,12 +2349,297 @@ mod tests {
             .await
             .expect("open run");
             let eraser = RecordingEraser::new(&pool);
-            let outcome = delete_thread(&pool, &enforce(&eraser, DEFAULT_DAILY_CAP), &org.id, &thread_id, cutoff)
-                .await
-                .expect("delete");
+            let run_id = format!("rsw_{}", mp_ids::new_ulid());
+            let outcome = delete_thread(
+                &pool,
+                &enforce(&eraser, DEFAULT_DAILY_CAP),
+                &run_id,
+                &org.id,
+                &thread_id,
+                "u1",
+                cutoff,
+            )
+            .await
+            .expect("delete");
             assert!(outcome.is_none());
             assert!(thread_exists(&pool, &thread_id).await);
             assert!(eraser.calls().is_empty());
+            assert_eq!(
+                ledger_rows(&pool, &run_id).await,
+                0,
+                "a kept thread writes no ledger row"
+            );
+        }
+
+        /// A refused workspace erase is counted and never undoes a delete: the pass deletes both
+        /// threads, records each refusal as unconfirmed, and sends each erase the owner the row held
+        /// (F-f10-09).
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn retention_sweep_sandbox_refusal_is_counted_and_the_pass_completes() {
+            let Some(pool) = scratch_pool().await else {
+                return;
+            };
+            let org = Org::new();
+            seed_thread(&pool, &org, "a", 40 * DAY, "persistent").await;
+            seed_thread(&pool, &org, "b", 40 * DAY, "persistent").await;
+            let server = org_core(&org, false, &[]).await;
+            let auth = crate::sandbox_workspace_eraser::test_support::mint_erase_token(&org.id).await;
+            let sandbox = crate::sandbox_workspace_eraser::test_support::FakeSandboxManager {
+                refusal: Some(tonic::Code::FailedPrecondition),
+                ..Default::default()
+            };
+            let seen = sandbox.seen.clone();
+            let address = crate::sandbox_workspace_eraser::test_support::serve(sandbox).await;
+            let eraser =
+                crate::sandbox_workspace_eraser::test_support::eraser_for(&auth.uri(), address);
+            let erasure = Erasure {
+                letta: None,
+                workspaces: &eraser,
+                daily_cap: DEFAULT_DAILY_CAP,
+            };
+            let run = sweep_org(&pool, &client_for(&server.uri()), &org.id, Some(&erasure))
+                .await
+                .expect("pass")
+                .expect("a row");
+            assert_eq!(run.counts.deleted, 2, "a refused erase never undoes a delete");
+            assert_eq!(run.counts.workspace_unconfirmed, 2);
+            assert_eq!(run.counts.workspace_confirmed, 0);
+            assert_eq!(run.counts.workspace_degradation, Some(WORKSPACE_ERASURE_UNAVAILABLE));
+            assert_eq!(org_count(&pool, "threads", &org).await, 0);
+            record(&pool, &run).await.expect("record");
+
+            let seen = seen.lock().expect("seen").clone();
+            assert_eq!(seen.len(), 2, "one erase per deleted thread");
+            assert!(seen
+                .iter()
+                .all(|erase| erase.org_id == org.id && erase.owner_id == "u1"));
+        }
+
+        async fn ledger_rows(pool: &PgPool, run_id: &str) -> i64 {
+            sqlx::query_scalar("SELECT count(*) FROM retention_sweep_deletions WHERE run_id = $1")
+                .bind(run_id)
+                .fetch_one(pool)
+                .await
+                .expect("count ledger")
+        }
+
+        async fn run_rows(pool: &PgPool, run_id: &str) -> (i64, i64) {
+            let runs: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM retention_sweep_runs WHERE id = $1")
+                    .bind(run_id)
+                    .fetch_one(pool)
+                    .await
+                    .expect("count runs");
+            let events: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM session_audit_outbox WHERE event_id = $1")
+                    .bind(format!("retention_sweep:session-core:{run_id}"))
+                    .fetch_one(pool)
+                    .await
+                    .expect("count events");
+            (runs, events)
+        }
+
+        /// Moves a run's ledger rows `minutes` into the past, as if the pass had died then.
+        async fn age_ledger(pool: &PgPool, run_id: &str, minutes: i32) {
+            sqlx::query(
+                "UPDATE retention_sweep_deletions
+                    SET deleted_at = deleted_at - make_interval(mins => $2)
+                  WHERE run_id = $1",
+            )
+            .bind(run_id)
+            .bind(minutes)
+            .execute(pool)
+            .await
+            .expect("age ledger");
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn retention_sweep_crashed_pass_is_capped_and_recorded_interrupted_once() {
+            let Some(pool) = scratch_pool().await else {
+                return;
+            };
+            let org = Org::new();
+            for name in ["a", "b", "c"] {
+                seed_thread(&pool, &org, name, 40 * DAY, "persistent").await;
+            }
+            let server = org_core(&org, false, &[]).await;
+            let client = client_for(&server.uri());
+            let eraser = RecordingEraser::new(&pool);
+
+            // The pass deletes two threads and dies before record(): no run row, two ledger rows.
+            let crashed = sweep_org(&pool, &client, &org.id, Some(&enforce(&eraser, 2)))
+                .await
+                .expect("pass")
+                .expect("a row");
+            assert_eq!(crashed.counts.deleted, 2);
+            assert_eq!(
+                ledger_rows(&pool, &crashed.id).await,
+                2,
+                "each delete wrote its ledger row"
+            );
+            assert_eq!(run_rows(&pool, &crashed.id).await, (0, 0));
+
+            // The unrecorded deletes still count against the same 24 hours.
+            assert_eq!(deleted_in_last_day(&pool, &org.id).await.expect("cap"), 2);
+            let next = sweep_org(&pool, &client, &org.id, Some(&enforce(&eraser, 2)))
+                .await
+                .expect("pass")
+                .expect("a row");
+            assert_eq!((next.counts.would_delete, next.counts.deleted), (1, 0));
+            assert!(next.counts.cap_reached);
+            assert_eq!(org_count(&pool, "threads", &org).await, 1);
+
+            // A run whose last delete is recent may still be running elsewhere: not recorded yet.
+            reconcile_interrupted(&pool).await.expect("reconcile");
+            assert_eq!(run_rows(&pool, &crashed.id).await, (0, 0));
+
+            // Quiet past the threshold: recorded once, as interrupted, with its audit event.
+            age_ledger(&pool, &crashed.id, INTERRUPTED_AFTER_MINUTES + 5).await;
+            reconcile_interrupted(&pool).await.expect("reconcile");
+            assert_eq!(run_rows(&pool, &crashed.id).await, (1, 1));
+            let row: (String, i64, i64, i64, i64, i64, Option<i32>, Option<String>) = sqlx::query_as(
+                "SELECT mode, candidates, held, would_delete, deleted, policy_revision, window_days, error_code
+                   FROM retention_sweep_runs WHERE id = $1",
+            )
+            .bind(&crashed.id)
+            .fetch_one(&pool)
+            .await
+            .expect("row");
+            assert_eq!(
+                row,
+                (
+                    "enforce".to_owned(),
+                    0,
+                    0,
+                    0,
+                    2,
+                    0,
+                    None,
+                    Some("interrupted".to_owned())
+                )
+            );
+            let payload: serde_json::Value =
+                sqlx::query_scalar("SELECT payload FROM session_audit_outbox WHERE event_id = $1")
+                    .bind(format!("retention_sweep:session-core:{}", crashed.id))
+                    .fetch_one(&pool)
+                    .await
+                    .expect("audit row");
+            assert_eq!(payload["org_id"], org.id.as_str());
+            assert_eq!(payload["outcome"], "failed");
+            assert_eq!(payload["details"]["error_code"], "interrupted");
+            assert_eq!(payload["details"]["deleted"], 2);
+
+            // A second reconcile writes nothing more, and the cap still counts the two, once.
+            reconcile_interrupted(&pool).await.expect("reconcile");
+            assert_eq!(run_rows(&pool, &crashed.id).await, (1, 1));
+            assert_eq!(deleted_in_last_day(&pool, &org.id).await.expect("cap"), 2);
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn retention_sweep_cap_counts_pre_ledger_runs_and_nothing_twice() {
+            let Some(pool) = scratch_pool().await else {
+                return;
+            };
+            let org = Org::new();
+            // A run recorded before the ledger existed: deletes in its row, no ledger row.
+            let legacy = format!("rsw_{}", mp_ids::new_ulid());
+            sqlx::query(
+                "INSERT INTO retention_sweep_runs
+                     (id, org_id, mode, policy_revision, window_days, started_at, finished_at,
+                      candidates, would_delete, deleted)
+                 VALUES ($1, $2, 'enforce', 7, 30, now() - interval '1 hour', now() - interval '1 hour', 1, 1, 1)",
+            )
+            .bind(&legacy)
+            .bind(&org.id)
+            .execute(&pool)
+            .await
+            .expect("legacy run");
+            for name in ["a", "b", "c"] {
+                seed_thread(&pool, &org, name, 40 * DAY, "persistent").await;
+            }
+            let server = org_core(&org, false, &[]).await;
+            let eraser = RecordingEraser::new(&pool);
+            let run = sweep_org(
+                &pool,
+                &client_for(&server.uri()),
+                &org.id,
+                Some(&enforce(&eraser, 3)),
+            )
+            .await
+            .expect("pass")
+            .expect("a row");
+            assert_eq!(
+                run.counts.deleted, 2,
+                "the pre-ledger delete still counts against the cap"
+            );
+            record(&pool, &run).await.expect("record");
+            // Two ledger rows and a run row saying 2 count as 2, plus the legacy 1.
+            assert_eq!(deleted_in_last_day(&pool, &org.id).await.expect("cap"), 3);
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn retention_sweep_prune_drops_only_old_ledger_rows_of_recorded_runs() {
+            let Some(pool) = scratch_pool().await else {
+                return;
+            };
+            let org = Org::new();
+            let recorded = format!("rsw_{}", mp_ids::new_ulid());
+            let unrecorded = format!("rsw_{}", mp_ids::new_ulid());
+            let recent = format!("rsw_{}", mp_ids::new_ulid());
+            let hours = LEDGER_KEEP_HOURS + 1;
+            for (run_id, age) in [(&recorded, hours), (&unrecorded, hours), (&recent, 1)] {
+                sqlx::query(
+                    "INSERT INTO retention_sweep_deletions (run_id, org_id, deleted_at)
+                     VALUES ($1, $2, now() - make_interval(hours => $3))",
+                )
+                .bind(run_id)
+                .bind(&org.id)
+                .bind(age)
+                .execute(&pool)
+                .await
+                .expect("ledger row");
+            }
+            for run_id in [&recorded, &recent] {
+                let at: DateTime<Utc> = sqlx::query_scalar(
+                    "SELECT min(deleted_at) FROM retention_sweep_deletions WHERE run_id = $1",
+                )
+                .bind(run_id)
+                .fetch_one(&pool)
+                .await
+                .expect("time");
+                record(
+                    &pool,
+                    &interrupted_run(run_id.clone(), org.id.clone(), 1, at, at),
+                )
+                .await
+                .expect("record");
+            }
+            prune_ledger(&pool).await.expect("prune");
+            assert_eq!(
+                ledger_rows(&pool, &recorded).await,
+                0,
+                "an old row of a recorded run goes"
+            );
+            assert_eq!(
+                ledger_rows(&pool, &unrecorded).await,
+                1,
+                "a row whose run is not recorded stays"
+            );
+            assert_eq!(
+                ledger_rows(&pool, &recent).await,
+                1,
+                "a row inside the keep window stays"
+            );
+
+            // The reconcile records the old orphan; only then may the prune take it.
+            reconcile_interrupted(&pool).await.expect("reconcile");
+            assert_eq!(run_rows(&pool, &unrecorded).await, (1, 1));
+            prune_ledger(&pool).await.expect("prune");
+            assert_eq!(ledger_rows(&pool, &unrecorded).await, 0);
         }
     }
 }

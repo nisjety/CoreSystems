@@ -1889,7 +1889,8 @@ var ManagedRunLifecycle_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	SessionRetentionService_CountWaivedRuns_FullMethodName = "/model_plane.v1.SessionRetentionService/CountWaivedRuns"
+	SessionRetentionService_CountWaivedRuns_FullMethodName    = "/model_plane.v1.SessionRetentionService/CountWaivedRuns"
+	SessionRetentionService_GetThreadRetention_FullMethodName = "/model_plane.v1.SessionRetentionService/GetThreadRetention"
 )
 
 // SessionRetentionServiceClient is the client API for SessionRetentionService service.
@@ -1905,6 +1906,13 @@ type SessionRetentionServiceClient interface {
 	// the most recent one. Refused to user credentials and to any service that
 	// lacks session:retention:read, and never answers for another org.
 	CountWaivedRuns(ctx context.Context, in *CountWaivedRunsRequest, opts ...grpc.CallOption) (*CountWaivedRunsResponse, error)
+	// Whether one thread of the org keeps nothing, for org-core's legal-hold placement: true when it has at
+	// least one run, every run is zero-retention (`zdr`), and it holds no content row. A waived run keeps its
+	// content, so a thread holding one answers false. Read-only, and it answers two booleans only, never a run
+	// id, count or content. Refused to user credentials, to a zero-retention credential, and to any service
+	// other than Control's org-core, which must also hold session:retention:read. Unavailable while
+	// SESSION_THREAD_RETENTION_READ is not `true`.
+	GetThreadRetention(ctx context.Context, in *GetThreadRetentionRequest, opts ...grpc.CallOption) (*GetThreadRetentionResponse, error)
 }
 
 type sessionRetentionServiceClient struct {
@@ -1925,6 +1933,16 @@ func (c *sessionRetentionServiceClient) CountWaivedRuns(ctx context.Context, in 
 	return out, nil
 }
 
+func (c *sessionRetentionServiceClient) GetThreadRetention(ctx context.Context, in *GetThreadRetentionRequest, opts ...grpc.CallOption) (*GetThreadRetentionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetThreadRetentionResponse)
+	err := c.cc.Invoke(ctx, SessionRetentionService_GetThreadRetention_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SessionRetentionServiceServer is the server API for SessionRetentionService service.
 // All implementations must embed UnimplementedSessionRetentionServiceServer
 // for forward compatibility.
@@ -1938,6 +1956,13 @@ type SessionRetentionServiceServer interface {
 	// the most recent one. Refused to user credentials and to any service that
 	// lacks session:retention:read, and never answers for another org.
 	CountWaivedRuns(context.Context, *CountWaivedRunsRequest) (*CountWaivedRunsResponse, error)
+	// Whether one thread of the org keeps nothing, for org-core's legal-hold placement: true when it has at
+	// least one run, every run is zero-retention (`zdr`), and it holds no content row. A waived run keeps its
+	// content, so a thread holding one answers false. Read-only, and it answers two booleans only, never a run
+	// id, count or content. Refused to user credentials, to a zero-retention credential, and to any service
+	// other than Control's org-core, which must also hold session:retention:read. Unavailable while
+	// SESSION_THREAD_RETENTION_READ is not `true`.
+	GetThreadRetention(context.Context, *GetThreadRetentionRequest) (*GetThreadRetentionResponse, error)
 	mustEmbedUnimplementedSessionRetentionServiceServer()
 }
 
@@ -1950,6 +1975,9 @@ type UnimplementedSessionRetentionServiceServer struct{}
 
 func (UnimplementedSessionRetentionServiceServer) CountWaivedRuns(context.Context, *CountWaivedRunsRequest) (*CountWaivedRunsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CountWaivedRuns not implemented")
+}
+func (UnimplementedSessionRetentionServiceServer) GetThreadRetention(context.Context, *GetThreadRetentionRequest) (*GetThreadRetentionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetThreadRetention not implemented")
 }
 func (UnimplementedSessionRetentionServiceServer) mustEmbedUnimplementedSessionRetentionServiceServer() {
 }
@@ -1991,6 +2019,24 @@ func _SessionRetentionService_CountWaivedRuns_Handler(srv interface{}, ctx conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SessionRetentionService_GetThreadRetention_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetThreadRetentionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionRetentionServiceServer).GetThreadRetention(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionRetentionService_GetThreadRetention_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionRetentionServiceServer).GetThreadRetention(ctx, req.(*GetThreadRetentionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SessionRetentionService_ServiceDesc is the grpc.ServiceDesc for SessionRetentionService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2001,6 +2047,10 @@ var SessionRetentionService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CountWaivedRuns",
 			Handler:    _SessionRetentionService_CountWaivedRuns_Handler,
+		},
+		{
+			MethodName: "GetThreadRetention",
+			Handler:    _SessionRetentionService_GetThreadRetention_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

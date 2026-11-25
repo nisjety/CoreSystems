@@ -34,6 +34,10 @@ const learnZDRFeature = "learn_command"
 // label, as mp-contracts' Refusal::message writes it.
 const learnZDRMessage = "This is not supported with zero data retention yet: learning from this conversation. The request was refused before any model call."
 
+// learnChatThreadOrigin is the threads.origin word of a conversation the person had in chat. It is the
+// one origin /learn reads, the word session-core's thread reference read holds as CHAT_ORIGIN.
+const learnChatThreadOrigin = "chat"
+
 const (
 	// maxLearnBodyBytes bounds the body before it is read: a thread id and a 500-character note.
 	maxLearnBodyBytes = 8 << 10
@@ -176,6 +180,21 @@ func (h *LearnCommandHandler) learn(w http.ResponseWriter, r *http.Request) {
 		writeTypedError(w, http.StatusNotFound, "learn_thread_not_found", "no such conversation")
 		return
 	}
+	// The thread's posture comes with the ownership answer, so a refusal is decided before any read. Only a
+	// chat conversation outside a Space is learned from. A session-core that does not state an origin (an
+	// answer from before the field) is not eligible, so an unknown thread is never read.
+	if owned.GetThreadOrigin() != learnChatThreadOrigin || owned.GetThreadInSpace() {
+		slog.Info("learn refused", "thread_id", threadID, "reason", "thread_not_eligible")
+		writeLearnSkip(w, "thread_not_eligible")
+		return
+	}
+	// A thread holding a zero-retention or waived run keeps nothing, so it gets the catalogue refusal, not a
+	// review: the same refusal as the learner's own retention gate, decided here before any transcript read.
+	if owned.GetThreadRetainsNothing() {
+		slog.Info("learn refused", "thread_id", threadID, "reason", "retention_posture")
+		writeLearnSkip(w, "retention_posture")
+		return
+	}
 	job, skip, err := h.learner.Prepare(ctx, sessionreview.LearnRequest{
 		OrgID: principal.OrganizationID, UserID: principal.ActorID, ThreadID: threadID, Note: note,
 	})
@@ -235,6 +254,9 @@ func writeLearnSkip(w http.ResponseWriter, skip learning.SkipReason) {
 		writeTypedError(w, http.StatusUnauthorized, "unauthenticated", "authentication required")
 	case "thread_unknown":
 		writeTypedError(w, http.StatusBadRequest, "invalid_thread_id", "thread_id is required")
+	case "thread_not_eligible":
+		// A Space thread, a thread of another origin, or a thread whose origin session-core did not state (fail closed).
+		writeTypedError(w, http.StatusUnprocessableEntity, "learn_thread_not_eligible", "only a conversation you had in chat, outside a Space, can be learned from")
 	case learning.SkipConversationScope:
 		writeTypedError(w, http.StatusUnprocessableEntity, "learn_thread_conversation_scope", "this conversation is kept out of learning")
 	case learning.SkipEmptyTranscript:

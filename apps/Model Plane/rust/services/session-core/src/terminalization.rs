@@ -57,7 +57,7 @@ const PARK_RECOVERY_ENV: &str = "SESSION_CORE_PARK_RECOVERY_ENABLED";
 const CRASH_PARK_ENV: &str = "SESSION_CORE_CRASH_PARK_ENABLED";
 /// Build plan WS20 S1. Off by default; off keeps the receipt-only scheduled path. See
 /// [`scheduled_result_persist_enabled`].
-const SCHEDULED_RESULT_PERSIST_ENV: &str = "SESSION_CORE_SCHEDULED_RESULT_PERSIST";
+pub(crate) const SCHEDULED_RESULT_PERSIST_ENV: &str = "SESSION_CORE_SCHEDULED_RESULT_PERSIST";
 
 /// The only run-start values that may cross the durable boundary. For a ZDR
 /// caller every requester-controlled content field is replaced before SQL or
@@ -619,6 +619,7 @@ async fn insert_managed_run_started(
     source: pb::ManagedRunSource,
     retention: &RunRetention,
     wake: Option<&VerifiedWake>,
+    api_key: Option<crate::run_origin_stamp::ApiKeyStamp<'_>>,
     now: DateTime<Utc>,
 ) -> Result<(), Status> {
     let zdr = retention.class == RetentionClass::Zdr;
@@ -637,11 +638,23 @@ async fn insert_managed_run_started(
         ),
     )
     .await?;
-    let mut origin_metadata = match inherited_origin {
-        Some(origin) => {
-            serde_json::json!({ mp_contracts::run_origin::ORIGIN_METADATA_KEY: origin.as_str() })
+    // F-f10-22: a run an API key owns is stamped `api` at birth, naming the key and its owner: the
+    // stamp StartRun gives a key's run. A key-owned run without its key's stamp is refused, so it is
+    // never recorded as a person's or a service's.
+    let mut origin_metadata = if crate::auth::is_api_key_owner(&request.user_id) {
+        if api_key.is_none() {
+            return Err(Status::permission_denied(
+                "an API key run needs its key's stamp",
+            ));
         }
-        None => serde_json::json!({}),
+        crate::run_origin_stamp::origin_at_birth(&request.user_id, inherited_origin, api_key)
+    } else {
+        match inherited_origin {
+            Some(origin) => {
+                serde_json::json!({ mp_contracts::run_origin::ORIGIN_METADATA_KEY: origin.as_str() })
+            }
+            None => serde_json::json!({}),
+        }
     };
     // EP-6 S9: the agent version the run runs under, ids and a digest only, merged into the run's
     // metadata by this same insert (no migration). `persisted` carries it for a non-ZDR run only.
@@ -705,6 +718,18 @@ async fn insert_managed_run_started(
     .await
     .map_err(database_error)?
     .ok_or_else(|| Status::not_found("thread not found for managed run creation"))?;
+    // F-f10-22: an API key starts no run in a Space. The refusal leaves nothing behind: the insert
+    // above is in this transaction, which is rolled back when this returns.
+    if crate::auth::is_api_key_owner(&request.user_id)
+        && inherited_space_context
+            .0
+            .as_deref()
+            .is_some_and(|space| !space.trim().is_empty())
+    {
+        return Err(Status::permission_denied(
+            "an API key may not start a run in a Space",
+        ));
+    }
 
     let mut run_started_payload = persisted.run_started_payload.clone();
     let payload = run_started_payload
@@ -835,19 +860,21 @@ pub(crate) async fn start_managed_run_with_retention_inner(
     request: pb::StartManagedRunRequest,
     retention: RunRetention,
 ) -> Result<ManagedRunStart, Status> {
-    start_managed_run_with_wake_inner(pool, request, retention, None).await
+    start_managed_run_with_wake_inner(pool, request, retention, None, None).await
 }
 
 /// [`start_managed_run_with_retention_inner`] for a wake (WS08-S2): `wake` is the already
 /// verified decision and stored-fact check of `StartManagedRun.wake`. The run row carries its
 /// `turn_origin`, `trigger_message_id` and `agent_subject_id`, and a reused start key must name
-/// the same pair. `None` is every other start, unchanged.
+/// the same pair. `None` is every other start, unchanged. `api_key` is the caller's key stamp
+/// (F-f10-22): `Some` only for an `api_key` caller, whose run it stamps `api`.
 #[allow(clippy::result_large_err)]
 pub(crate) async fn start_managed_run_with_wake_inner(
     pool: &PgPool,
     request: pb::StartManagedRunRequest,
     retention: RunRetention,
     wake: Option<&VerifiedWake>,
+    api_key: Option<crate::run_origin_stamp::ApiKeyStamp<'_>>,
 ) -> Result<ManagedRunStart, Status> {
     let zdr = retention.class == RetentionClass::Zdr;
     if zdr && wake.is_some() {
@@ -955,6 +982,7 @@ pub(crate) async fn start_managed_run_with_wake_inner(
         source,
         &retention,
         wake,
+        api_key,
         now,
     )
     .await?;
@@ -1222,7 +1250,7 @@ async fn insert_managed_run_terminal_event(
         .ok_or_else(|| Status::already_exists("run terminal outcome is already assigned"))
 }
 
-async fn transition_managed_run_terminal(
+pub(crate) async fn transition_managed_run_terminal(
     transaction: &mut Transaction<'_, Postgres>,
     run_id: &str,
     outcome: ManagedOutcome<'_>,
@@ -1268,7 +1296,7 @@ async fn transition_managed_run_terminal(
     // transaction that ends the run (build plan WS20 S1). Off: fires keep the
     // status the sweeper wrote.
     if scheduled_result_persist_enabled() {
-        settle_scheduled_fire(transaction, run_id, plan_status, now).await?;
+        settle_scheduled_fire(transaction, run_id, plan_status, now, None).await?;
     }
     Ok(())
 }
@@ -1276,13 +1304,23 @@ async fn transition_managed_run_terminal(
 /// Link a scheduled run's fire row to the run and set its terminal status. The
 /// key is the run's own immutable schedule metadata, so only the fire that
 /// started this run is touched, and only while it has not settled yet.
-async fn settle_scheduled_fire(
+///
+/// A fire this call settles is a finished fire, so with the goal ledger on, a goal-bound schedule's
+/// unattended goal turn is written here in the same transaction (EP-7 S6, F-f09-12). It carries no
+/// tokens: the terminal run never answered, so no usage was metered for it. The turn is keyed by the
+/// run, so a fire the scheduled result already ledgered is not counted twice, and a replay settles
+/// nothing and writes nothing. A schedule without a goal writes nothing. `stopped_by` names the room member
+/// who stopped the run through the room route, or is `None` when none did (P2-sc-13-rel1). The turn is ledgered
+/// either way, and it counts toward the owner's goal caps and pauses the owner's schedule unless a room member
+/// other than the goal's owner stopped the run (`grpc::fire_stop_counts`).
+pub(crate) async fn settle_scheduled_fire(
     transaction: &mut Transaction<'_, Postgres>,
     run_id: &str,
     status: &str,
     now: DateTime<Utc>,
+    stopped_by: Option<&str>,
 ) -> Result<(), Status> {
-    sqlx::query(
+    let settled = sqlx::query(
         "UPDATE cron_fires AS cf
             SET status = $2, completed_at = $3, run_id = r.id, thread_id = r.thread_id
            FROM runs r
@@ -1297,8 +1335,35 @@ async fn settle_scheduled_fire(
     .bind(now)
     .execute(&mut **transaction)
     .await
+    .map_err(database_error)?
+    .rows_affected();
+    if settled != 1 || !crate::thread_goals::thread_goals_enabled() {
+        return Ok(());
+    }
+    let (schedule_id, org_id, thread_id): (Option<String>, String, String) = sqlx::query_as(
+        "SELECT r.metadata->>'schedule_id', r.org_id, r.thread_id FROM runs r WHERE r.id = $1",
+    )
+    .bind(run_id)
+    .fetch_one(&mut **transaction)
+    .await
     .map_err(database_error)?;
-    Ok(())
+    let Some(schedule_id) = schedule_id else {
+        return Ok(());
+    };
+    crate::grpc::record_unattended_goal_turn(
+        transaction,
+        &crate::grpc::UnattendedFire {
+            schedule_id: &schedule_id,
+            org_id: &org_id,
+            run_id,
+            scheduled_thread_id: &thread_id,
+            outcome: crate::grpc::unattended_turn_outcome(status),
+            input_tokens: 0,
+            output_tokens: 0,
+            stopped_by,
+        },
+    )
+    .await
 }
 
 /// Whether a scheduled run's answer is persisted into its thread and its fire

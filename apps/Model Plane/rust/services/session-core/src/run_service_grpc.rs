@@ -112,6 +112,25 @@ trait ThreadOwnerLookup: Send + Sync {
         org_id: &str,
         user_id: &str,
     ) -> Result<bool, Status>;
+
+    /// The posture of a thread the caller owns, or `None` when the caller does not own it. It is read only
+    /// after `owner_matches` says yes, so a non-owner's answer carries nothing about the thread.
+    async fn owner_posture(
+        &self,
+        thread_id: &str,
+        org_id: &str,
+        user_id: &str,
+    ) -> Result<Option<ThreadPosture>, Status>;
+}
+
+/// What `resolve_thread_owner` states about an owned thread beyond ownership: its origin word, whether it
+/// lives in a Space, and whether it holds a run kept under zero retention or a waived one. These are the facts
+/// the model-gateway's thread reference check refuses on, so /learn can refuse the same threads itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ThreadPosture {
+    origin: String,
+    in_space: bool,
+    retains_nothing: bool,
 }
 
 struct PgThreadOwnerLookup {
@@ -145,6 +164,47 @@ impl ThreadOwnerLookup for PgThreadOwnerLookup {
             Status::unavailable("thread ownership unavailable")
         })?;
         Ok(authorized)
+    }
+
+    async fn owner_posture(
+        &self,
+        thread_id: &str,
+        org_id: &str,
+        user_id: &str,
+    ) -> Result<Option<ThreadPosture>, Status> {
+        // The same ownership and Space-revocation predicate as owner_matches, read from the thread's own row.
+        let row: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT t.origin, t.space_id FROM threads t WHERE t.id = $1 AND t.org_id = $2 AND t.user_id = $3 \
+             AND NOT EXISTS(SELECT 1 FROM space_membership_revocations rev \
+                             WHERE rev.space_ref = t.space_id AND rev.subject_id = t.user_id)",
+        )
+        .bind(thread_id)
+        .bind(org_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "durable thread posture lookup failed");
+            Status::unavailable("thread ownership unavailable")
+        })?;
+        let Some((origin, space_id)) = row else {
+            return Ok(None);
+        };
+        // The one copy of the retention predicate, the same one the thread reference read refuses on.
+        let retains_nothing =
+            crate::thread_reference::holds_retention_run_for_thread(&self.pool, thread_id)
+                .await
+                .map_err(|error| {
+                    tracing::error!(%error, "durable thread retention lookup failed");
+                    Status::unavailable("thread ownership unavailable")
+                })?;
+        Ok(Some(ThreadPosture {
+            origin,
+            in_space: space_id
+                .as_deref()
+                .is_some_and(|space| !space.trim().is_empty()),
+            retains_nothing,
+        }))
     }
 }
 
@@ -618,8 +678,9 @@ fn cancelled_payload(
 
 /// The terminalization both cancel paths share (the run owner's `CancelRun` and the room manager's
 /// `CancelRunAsRoomManager`): flip a non-terminal run to `cancelled`, drop its loop fold and write
-/// the `RUN_CANCELLED` receipt in one transaction. The caller has already authorized the cancel.
-/// An already-terminal run answers `cancelled: false` with the existing receipt.
+/// the `RUN_CANCELLED` receipt in one transaction. A scheduled run's fire settles as `cancelled` in that
+/// transaction too, with its goal turn when the goal ledger is on (F-f09-12). The caller has already
+/// authorized the cancel. An already-terminal run answers `cancelled: false` with the existing receipt.
 pub(crate) async fn cancel_run_terminalize(
     pool: &PgPool,
     run_id: &str,
@@ -662,6 +723,7 @@ pub(crate) async fn cancel_run_terminalize(
         .begin()
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
+    let now = Utc::now();
 
     // The status transition and receipt are one transaction. A caller
     // can never observe a cancelled run without the event that proves
@@ -705,8 +767,25 @@ pub(crate) async fn cancel_run_terminalize(
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
+    // A cancelled scheduled run is a finished fire. Its fire settles as `cancelled`, and with the goal ledger on its
+    // goal turn is ledgered as unknown with no tokens, in this transaction (F-f09-12). A run no schedule started
+    // settles nothing. With the persistence switch off nothing here runs, so the cancel is unchanged. A stop through
+    // the room route names the stopper: its goal turn counts only when the stopper is the goal's owner, and any other
+    // member's stop is ledgered uncounted (P2-sc-13-rel1, see `grpc::fire_stop_counts`). A stop with no `acting` is
+    // the CancelRun route, the orchestrator's stop of its own fire, and counts.
+    if crate::terminalization::scheduled_result_persist_enabled() {
+        let stopped_by = acting.map(|_| cancelled_by);
+        crate::terminalization::settle_scheduled_fire(
+            &mut tx,
+            &run_id,
+            "cancelled",
+            now,
+            stopped_by,
+        )
+        .await?;
+    }
+
     let receipt_id = new_ulid();
-    let now = Utc::now();
     let idempotency_key = format!("run_cancelled:{run_id}");
     sqlx::query(
         "INSERT INTO events
@@ -1240,11 +1319,31 @@ impl RunService for RunServiceImpl {
             if !caller.is_service() {
                 caller.authorize_user(&req.user_id)?;
             }
-            let authorized = self
+            let owned = self
                 .thread_owner_lookup
                 .owner_matches(req.thread_id.trim(), req.org_id.trim(), req.user_id.trim())
                 .await?;
-            Ok(Response::new(pb::ResolveThreadOwnerResponse { authorized }))
+            // The posture is read for the owner only. A thread that stops being theirs between the two reads is
+            // answered as not authorized, so a non-owner's answer names no origin, Space or retention.
+            let posture = if owned {
+                self.thread_owner_lookup
+                    .owner_posture(req.thread_id.trim(), req.org_id.trim(), req.user_id.trim())
+                    .await?
+            } else {
+                None
+            };
+            Ok(Response::new(match posture {
+                Some(posture) => pb::ResolveThreadOwnerResponse {
+                    authorized: true,
+                    thread_origin: posture.origin,
+                    thread_in_space: posture.in_space,
+                    thread_retains_nothing: posture.retains_nothing,
+                },
+                None => pb::ResolveThreadOwnerResponse {
+                    authorized: false,
+                    ..Default::default()
+                },
+            }))
         }
         .await;
         record_metrics("resolve_thread_owner", started, result.is_ok());
@@ -2980,6 +3079,9 @@ mod tests {
     struct FakeThreadOwnerLookup {
         calls: AtomicUsize,
         result: Result<bool, ()>,
+        /// What `owner_posture` answers for the owner. `None` stands for a thread that stopped being theirs.
+        posture: Option<ThreadPosture>,
+        posture_calls: AtomicUsize,
     }
 
     #[tonic::async_trait]
@@ -2993,6 +3095,16 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.result
                 .map_err(|()| Status::unavailable("thread ownership unavailable"))
+        }
+
+        async fn owner_posture(
+            &self,
+            _thread_id: &str,
+            _org_id: &str,
+            _user_id: &str,
+        ) -> Result<Option<ThreadPosture>, Status> {
+            self.posture_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.posture.clone())
         }
     }
 
@@ -3008,8 +3120,24 @@ mod tests {
         }
     }
 
+    /// A plain chat thread with no Space and no retention run: the posture the owner tests start from.
+    fn chat_posture() -> ThreadPosture {
+        ThreadPosture {
+            origin: crate::thread_reference::CHAT_ORIGIN.to_owned(),
+            in_space: false,
+            retains_nothing: false,
+        }
+    }
+
     fn service_with_thread_owner_result(
         result: Result<bool, ()>,
+    ) -> (RunServiceImpl, Arc<FakeThreadOwnerLookup>) {
+        service_with_thread_owner_posture(result, Some(chat_posture()))
+    }
+
+    fn service_with_thread_owner_posture(
+        result: Result<bool, ()>,
+        posture: Option<ThreadPosture>,
     ) -> (RunServiceImpl, Arc<FakeThreadOwnerLookup>) {
         // A lazily-connected pool never actually dials out: the fake lookup
         // never touches `self.pool`, so no real database is required. Mirrors
@@ -3020,6 +3148,8 @@ mod tests {
         let lookup = Arc::new(FakeThreadOwnerLookup {
             calls: AtomicUsize::new(0),
             result,
+            posture,
+            posture_calls: AtomicUsize::new(0),
         });
         (
             RunServiceImpl::new_with_thread_owner_lookup_for_test(pool, lookup.clone()),
@@ -3061,6 +3191,81 @@ mod tests {
             .into_inner();
         assert!(!response.authorized);
         assert_eq!(lookup.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Resolves the owner's thread as `user-a` in `org-a`, through the service the posture tests share.
+    async fn resolve_owned_thread(service: &RunServiceImpl) -> pb::ResolveThreadOwnerResponse {
+        service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-1", "org-a", "user-a"),
+                VerifiedIdentity::user_for_test("org-a", "user-a"),
+            ))
+            .await
+            .expect("the owner resolves")
+            .into_inner()
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_states_a_chat_thread_to_its_owner() {
+        let (service, lookup) = service_with_thread_owner_result(Ok(true));
+        let response = resolve_owned_thread(&service).await;
+        assert!(response.authorized);
+        assert_eq!(response.thread_origin, crate::thread_reference::CHAT_ORIGIN);
+        assert!(!response.thread_in_space);
+        assert!(!response.thread_retains_nothing);
+        assert_eq!(lookup.posture_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_states_a_space_thread_to_its_owner() {
+        let space = ThreadPosture {
+            origin: "space".to_owned(),
+            in_space: true,
+            retains_nothing: false,
+        };
+        let (service, _lookup) = service_with_thread_owner_posture(Ok(true), Some(space));
+        let response = resolve_owned_thread(&service).await;
+        assert!(response.authorized);
+        assert_eq!(response.thread_origin, "space");
+        assert!(response.thread_in_space);
+        assert!(!response.thread_retains_nothing);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_states_a_thread_holding_a_waived_run_to_its_owner() {
+        let waived = ThreadPosture {
+            retains_nothing: true,
+            ..chat_posture()
+        };
+        let (service, _lookup) = service_with_thread_owner_posture(Ok(true), Some(waived));
+        let response = resolve_owned_thread(&service).await;
+        assert!(response.authorized);
+        assert_eq!(response.thread_origin, crate::thread_reference::CHAT_ORIGIN);
+        assert!(!response.thread_in_space);
+        assert!(response.thread_retains_nothing);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_gives_a_non_owner_no_posture() {
+        let (service, lookup) = service_with_thread_owner_result(Ok(false));
+        let response = resolve_owned_thread(&service).await;
+        assert!(!response.authorized);
+        assert_eq!(response.thread_origin, "");
+        assert!(!response.thread_in_space);
+        assert!(!response.thread_retains_nothing);
+        assert_eq!(
+            lookup.posture_calls.load(Ordering::SeqCst),
+            0,
+            "a non-owner's thread posture is never read"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_lost_thread_between_reads_is_not_authorized() {
+        let (service, _lookup) = service_with_thread_owner_posture(Ok(true), None);
+        let response = resolve_owned_thread(&service).await;
+        assert!(!response.authorized);
+        assert_eq!(response.thread_origin, "");
     }
 
     #[tokio::test]
@@ -3505,6 +3710,108 @@ mod tests {
             .bind(&space_ref)
             .execute(&pool)
             .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn pg_thread_owner_posture_names_origin_space_and_retention_to_the_owner_only() {
+        let Some(pool) = migrated_test_pool().await else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let sfx = mp_ids::new_ulid();
+        let (org_id, user_id) = (format!("posture-org-{sfx}"), format!("posture-user-{sfx}"));
+        let (chat_thread, space_thread, waived_thread) = (
+            format!("posture-chat-{sfx}"),
+            format!("posture-space-{sfx}"),
+            format!("posture-waived-{sfx}"),
+        );
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)",
+        )
+        .bind(&chat_thread)
+        .bind(&org_id)
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .expect("seed chat thread");
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)",
+        )
+        .bind(&waived_thread)
+        .bind(&org_id)
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .expect("seed thread that will hold a waived run");
+        sqlx::query(
+            "INSERT INTO runs (id, thread_id, goal, org_id, user_id, retention_class, waiver_ack_id, waiver_connection_id) \
+             VALUES ($1, $2, 'g', $3, $4, 'zdr_waived', 'posture-ack', 'posture-connection')",
+        )
+        .bind(format!("posture-run-{sfx}"))
+        .bind(&waived_thread)
+        .bind(&org_id)
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .expect("seed waived run");
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, space_id, space_decision_ref, \
+             recipient_audience_ref, privacy_policy_ref, resource_authorization_ref, authority_revision, \
+             recipient_audience_revision, recipient_audience_hash, origin) \
+             VALUES ($1, $1, $2, $3, $4, 'decision-1', 'audience-1', 'policy-1', 'resource-1', 1, 1, 'audience-hash-1', 'space')",
+        )
+        .bind(&space_thread)
+        .bind(&org_id)
+        .bind(&user_id)
+        .bind(format!("posture-space-ref-{sfx}"))
+        .execute(&pool)
+        .await
+        .expect("seed space thread");
+
+        let lookup = PgThreadOwnerLookup { pool: pool.clone() };
+        let chat = lookup
+            .owner_posture(&chat_thread, &org_id, &user_id)
+            .await
+            .expect("posture query succeeds")
+            .expect("the owner of a chat thread has a posture");
+        assert_eq!(
+            chat,
+            ThreadPosture {
+                origin: crate::thread_reference::CHAT_ORIGIN.to_owned(),
+                in_space: false,
+                retains_nothing: false,
+            }
+        );
+
+        let space = lookup
+            .owner_posture(&space_thread, &org_id, &user_id)
+            .await
+            .expect("posture query succeeds")
+            .expect("the owner of a Space thread has a posture");
+        assert_eq!(space.origin, "space");
+        assert!(space.in_space);
+        assert!(!space.retains_nothing);
+
+        let waived = lookup
+            .owner_posture(&waived_thread, &org_id, &user_id)
+            .await
+            .expect("posture query succeeds")
+            .expect("the owner of a waived-run thread has a posture");
+        assert!(!waived.in_space);
+        assert!(
+            waived.retains_nothing,
+            "a thread holding a waived run keeps nothing"
+        );
+
+        assert!(
+            lookup
+                .owner_posture(&chat_thread, &org_id, "posture-someone-else")
+                .await
+                .expect("posture query succeeds")
+                .is_none(),
+            "a non-owner has no posture"
+        );
     }
 
     // -- D12: a Space-scoped system thread is not org-readable --------------

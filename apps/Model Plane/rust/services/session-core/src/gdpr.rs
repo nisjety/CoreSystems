@@ -210,6 +210,10 @@ pub struct PurgeSummary {
     pub finetune_jobs: u64,
     pub dream_runs: u64,
     pub session_audit_outbox: u64,
+    /// Sandbox workspaces of the threads this purge deleted (P2-sc-16-rel1), erased after the commit. Zero
+    /// while `SESSION_DELETE_WORKSPACE_ERASE` is off. Not counted in [`PurgeSummary::total`]; an erase that
+    /// was not confirmed makes [`PurgeSummary::erasure_is_complete`] false.
+    pub workspaces: crate::sandbox_workspace_eraser::WorkspaceTally,
 }
 
 impl PurgeSummary {
@@ -222,7 +226,7 @@ impl PurgeSummary {
     /// unaccounted for. False means the proof is partial and the
     /// `semantic_memory.degradation_reason` says why.
     pub fn erasure_is_complete(&self) -> bool {
-        self.semantic_memory.is_complete()
+        self.semantic_memory.is_complete() && self.workspaces.unconfirmed == 0
     }
 
     pub fn total(&self) -> u64 {
@@ -504,8 +508,15 @@ impl ErasureHoldGate {
     }
 }
 
-/// The process gate, read once.
+/// The process gate, read once. A test that drives an erase against a held thread installs its own gate on its
+/// thread first (see `test_gate`, compiled for tests only); production never does, so this is the process gate there.
 pub(crate) fn erasure_hold_gate() -> &'static ErasureHoldGate {
+    #[cfg(test)]
+    {
+        if let Some(gate) = test_gate::current() {
+            return gate;
+        }
+    }
     static GATE: OnceLock<ErasureHoldGate> = OnceLock::new();
     GATE.get_or_init(|| {
         let gate = ErasureHoldGate::from_lookup(|name| std::env::var(name).ok());
@@ -516,6 +527,125 @@ pub(crate) fn erasure_hold_gate() -> &'static ErasureHoldGate {
         }
         gate
     })
+}
+
+/// A test's own hold gate, installed on the thread the test runs on (F-f10-07). The erase handlers read the gate
+/// through [`erasure_hold_gate`], so a test drives them against a wiremock org-core without touching the process
+/// gate or any other test. The erase future must be polled on the installing thread: use `#[tokio::test]`'s default
+/// current-thread runtime. The guard puts back the gate that was installed before it when it drops.
+#[cfg(test)]
+pub(crate) mod test_gate {
+    use super::ErasureHoldGate;
+    use std::cell::Cell;
+
+    thread_local! {
+        static INSTALLED: Cell<Option<&'static ErasureHoldGate>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn current() -> Option<&'static ErasureHoldGate> {
+        INSTALLED.with(Cell::get)
+    }
+
+    /// Installs `gate` on this thread until the returned guard drops.
+    #[must_use = "the gate is removed as soon as the guard drops"]
+    pub(crate) fn install(gate: ErasureHoldGate) -> Guard {
+        let leaked: &'static ErasureHoldGate = Box::leak(Box::new(gate));
+        let previous = INSTALLED.with(|slot| slot.replace(Some(leaked)));
+        Guard { previous }
+    }
+
+    /// Restores the gate that was installed before this one, when it drops.
+    pub(crate) struct Guard {
+        previous: Option<&'static ErasureHoldGate>,
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            INSTALLED.with(|slot| slot.set(self.previous));
+        }
+    }
+}
+
+/// Records one erasure a legal hold refused (F-f10-07, decision D-C1): one `session_audit_outbox` row, so the
+/// attempt is audited. The caller returns its refusal unchanged afterwards.
+///
+/// The row goes on a plain pool connection, never inside the transaction being refused, so a refused erase's
+/// rollback cannot take it with it. Only a refusal the hold made is recorded: an unanswered check decided
+/// nothing, so `Unavailable` writes no row. A failed insert is logged with a closed word and changes nothing
+/// about the refusal. Its row names the organisation, the actor, the operation, the scope, the count of held
+/// threads and `denied`, never a thread id, content or the hold reference.
+pub(crate) async fn record_refused_erasure(
+    pool: &Pool,
+    org_id: &str,
+    actor_id: &str,
+    op: &str,
+    refusal: &ErasureHoldError,
+) {
+    let Some((scope, held_threads)) = refusal_scope(refusal) else {
+        return;
+    };
+    let bucket =
+        chrono::Utc::now().timestamp() / crate::audit_publisher::ERASURE_REFUSED_BUCKET_SECONDS;
+    if insert_refused_erasure(pool, org_id, actor_id, op, scope, held_threads, bucket)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            op,
+            reason = "audit_insert_failed",
+            "refused erasure was not audited"
+        );
+    }
+}
+
+/// The scope word and the held-thread count one refusal names in its audit row. `None` for a refusal the hold did
+/// not make: an unanswered check decided nothing, so there is nothing to record.
+fn refusal_scope(refusal: &ErasureHoldError) -> Option<(&'static str, usize)> {
+    match refusal {
+        ErasureHoldError::OrgHeld => Some(("org", 0)),
+        ErasureHoldError::ThreadsHeld(count) => Some(("threads", *count)),
+        ErasureHoldError::Unavailable(_) => None,
+    }
+}
+
+/// The one insert behind a refused erasure, with the same statement shape as the retention sweep's row. The
+/// `ON CONFLICT` makes a retry within the same bucket a no-op, since `event_id` is the table's key. Returns
+/// whether this call wrote the row.
+pub(crate) async fn insert_refused_erasure(
+    pool: &Pool,
+    org_id: &str,
+    actor_id: &str,
+    op: &str,
+    scope: &str,
+    held_threads: usize,
+    bucket: i64,
+) -> Result<bool, sqlx::Error> {
+    let subject = crate::audit_publisher::audit_subject_for_event(
+        crate::audit_publisher::EVENT_ERASURE_REFUSED,
+    )
+    .ok_or_else(|| {
+        sqlx::Error::Protocol("refused erasure event is not a subject token".to_owned())
+    })?;
+    let event_id = crate::audit_publisher::erasure_refused_event_id(org_id, op, actor_id, bucket);
+    let body = crate::audit_publisher::build_erasure_refused_body(
+        &event_id,
+        org_id,
+        actor_id,
+        op,
+        scope,
+        held_threads,
+    );
+    let written = sqlx::query(
+        "INSERT INTO session_audit_outbox (event_id, subject, payload) VALUES ($1, $2, $3)
+         ON CONFLICT (event_id) DO NOTHING",
+    )
+    .bind(&event_id)
+    .bind(&subject)
+    .bind(&body)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(written == 1)
 }
 
 /// The switch for erasing thread-bound memory in a user erasure (OD-59), off by default.
@@ -561,8 +691,13 @@ pub async fn purge_organization_data(
     letta: Option<&crate::letta_adapter::LettaMemoryAdapter>,
 ) -> anyhow::Result<PurgeSummary> {
     // EP-9 C4: a held organisation is not purged. Asked before the transaction opens, so a
-    // refusal touches nothing and the consumer's redelivery retries it after the release.
-    erasure_hold_gate().ensure_not_held(org_id, &[]).await?;
+    // refusal touches nothing and the consumer's redelivery retries it after the release. The
+    // refusal is audited (F-f10-07) before it is returned, with its own error as the root, which the
+    // consumer reads to choose the hold delay.
+    if let Err(refusal) = erasure_hold_gate().ensure_not_held(org_id, &[]).await {
+        record_refused_erasure(pool, org_id, "system", "org_erase", &refusal).await;
+        return Err(refusal.into());
+    }
 
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
     let mut summary = PurgeSummary::default();
@@ -811,11 +946,25 @@ pub async fn purge_organization_data(
         .await?
         .rows_affected();
 
-    summary.threads = sqlx::query("DELETE FROM threads WHERE org_id = $1")
-        .bind(org_id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
+    // The organisation's threads. With the delete switch on (P2-sc-16-rel1) the statement returns the rows it
+    // deletes, so each sandbox workspace is erased by the owner its own row names, after the commit. Off, it is
+    // the statement it always was and nothing is read back.
+    let erase_workspaces = crate::sandbox_workspace_eraser::delete_switch_on();
+    let mut deleted_threads: Vec<(String, String)> = Vec::new();
+    summary.threads = if erase_workspaces {
+        deleted_threads =
+            sqlx::query_as("DELETE FROM threads WHERE org_id = $1 RETURNING id, user_id")
+                .bind(org_id)
+                .fetch_all(&mut *tx)
+                .await?;
+        u64::try_from(deleted_threads.len()).unwrap_or(u64::MAX)
+    } else {
+        sqlx::query("DELETE FROM threads WHERE org_id = $1")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+    };
 
     // Research run records (Q4 E4.6, 062b): the org's rows. They have no foreign key, but they must go after the
     // threads: a begin locks its thread's row (FOR KEY SHARE) before it inserts a run, and the thread delete above
@@ -958,6 +1107,19 @@ pub async fn purge_organization_data(
         .await?
         .rows_affected();
 
+    // The retention sweeper's deletion ledger (run id, org id and time; no thread id). A row
+    // whose run is not recorded yet stays until the sweeper records that run as interrupted,
+    // so a delete is never left without its audit event; the sweeper prunes it after that.
+    // Not counted in the summary (the erasure proof counts content tables).
+    sqlx::query(
+        "DELETE FROM retention_sweep_deletions d
+          WHERE d.org_id = $1
+            AND EXISTS (SELECT 1 FROM retention_sweep_runs r WHERE r.id = d.run_id)",
+    )
+    .bind(org_id)
+    .execute(&mut *tx)
+    .await?;
+
     // Not-yet-delivered audit-outbox rows carry `org_id` inside the JSONB
     // payload, not as a column (see `audit_publisher::build_tool_action_body`).
     summary.session_audit_outbox =
@@ -982,7 +1144,7 @@ pub async fn purge_organization_data(
     // summary imply the vector-store copies went with them.
     summary.semantic_memory =
         crate::memory_erasure::erase_semantic_copies(letta, org_id, &erased_memories).await;
-    if !summary.erasure_is_complete() {
+    if !summary.semantic_memory.is_complete() {
         tracing::warn!(
             org_id,
             considered = summary.semantic_memory.considered(),
@@ -997,6 +1159,13 @@ pub async fn purge_organization_data(
         )
         .increment(summary.semantic_memory.unconfirmed);
     }
+
+    // The sandbox workspaces of the threads this purge deleted (P2-sc-16-rel1), erased last: after the commit and
+    // after the semantic copies above, which exist nowhere else. A request dropped during this erase then skips
+    // none of them. Never failing the purge. Off, `deleted_threads` is empty and nothing is erased.
+    summary.workspaces =
+        crate::sandbox_workspace_eraser::erase_after_delete("org_purge", org_id, &deleted_threads)
+            .await;
     Ok(summary)
 }
 
@@ -1457,6 +1626,9 @@ pub struct UserErasureSummary {
     pub skill_revisions: u64,
     /// The immutable versions of the person's own user-scope skills (`agent_skill_versions`, F-f01-16).
     pub agent_skill_versions: u64,
+    /// The `skill_bundles` rows of the person's skills, deleted with them and their files through the
+    /// cascade (P2-go-09-rel1). Zero with `SKILL_BUNDLE_SCOPE_RULES` off.
+    pub skill_bundles: u64,
     /// Semantic-tier outcome for the copies of those rows, and of any copy the listing found that no
     /// durable row still holds.
     pub semantic_memory: crate::memory_erasure::SemanticErasure,
@@ -1619,12 +1791,33 @@ pub async fn erase_user_personal_data(
     erase_user_personal_data_for(pool, org_id, user_id, UserErasureKind::Erase, &checked, letta).await
 }
 
-/// The counts of one person's skill erasure (F-f01-16).
+/// The switch for removing a person's skill bundles with their skills (P2-go-09-rel1). It is the switch
+/// capability-core reads for its bundle rules, so a skill delete and a person's erasure remove a skill's
+/// bundles under one switch. Only the exact literal `true` turns it on.
+pub(crate) const SKILL_BUNDLE_SCOPE_RULES_ENV: &str = "SKILL_BUNDLE_SCOPE_RULES";
+
+/// Whether `value` of [`SKILL_BUNDLE_SCOPE_RULES_ENV`] turns the switch on: only the exact literal `true`.
+fn skill_bundle_scope_rules_switch(value: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(value)
+}
+
+/// Whether a person's erasure also removes the bundles of the skills it deletes (P2-go-09-rel1). Read once
+/// per process from [`SKILL_BUNDLE_SCOPE_RULES_ENV`]. Off, a person's erasure never touches the bundle
+/// tables, and a bundle stays until the organization purge, as before.
+fn skill_bundle_scope_rules_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        skill_bundle_scope_rules_switch(std::env::var(SKILL_BUNDLE_SCOPE_RULES_ENV).ok().as_deref())
+    })
+}
+
+/// The counts of one person's skill erasure (F-f01-16, P2-go-09-rel1).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct UserSkillErasure {
     agent_skills: u64,
     skill_revisions: u64,
     agent_skill_versions: u64,
+    skill_bundles: u64,
 }
 
 /// Erases one person's own skills inside the erasing transaction (F-f01-16): their user-scope skill rows,
@@ -1634,7 +1827,10 @@ struct UserSkillErasure {
 /// a skill writes a `deleted` revision that holds its text (`agent_skills_revision_trg`), and that revision
 /// must go too. Only the person's own rows are matched. An org-scope skill's owner is empty, and the rows are
 /// bound to the person's user scope and owner, so no org row is named. The setting is put back at once.
-/// Counts only; nothing is logged.
+///
+/// With `remove_bundles` (`SKILL_BUNDLE_SCOPE_RULES` on, P2-go-09-rel1) the bundles of the skills just
+/// deleted go in the same transaction, after the skills and before the revisions (see
+/// [`erase_skill_bundles_in_tx`]). Off, the bundle tables are not touched. Counts only; nothing is logged.
 ///
 /// # Errors
 ///
@@ -1643,6 +1839,7 @@ async fn erase_user_skills_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     org_id: &str,
     user_id: &str,
+    remove_bundles: bool,
 ) -> anyhow::Result<UserSkillErasure> {
     // An empty owner is the owner of every org skill, so an empty person names no skill of their own.
     if user_id.trim().is_empty() {
@@ -1662,14 +1859,21 @@ async fn erase_user_skills_in_tx(
     sqlx::query("SELECT set_config('mp.version_erasure', '', true)")
         .execute(&mut **tx)
         .await?;
-    let agent_skills = sqlx::query(
-        "DELETE FROM agent_skills WHERE org_id = $1 AND scope = 'user' AND owner_user_id = $2",
+    // The skills go first and return their ids, so their bundles can be named once they are gone. Their row
+    // locks come before the bundle lock, the order capability-core's own skill delete takes them in.
+    let skill_ids: Vec<String> = sqlx::query_scalar(
+        "DELETE FROM agent_skills WHERE org_id = $1 AND scope = 'user' AND owner_user_id = $2 RETURNING id",
     )
     .bind(org_id)
     .bind(user_id)
-    .execute(&mut **tx)
-    .await?
-    .rows_affected();
+    .fetch_all(&mut **tx)
+    .await?;
+    let agent_skills = skill_ids.len() as u64;
+    let skill_bundles = if remove_bundles {
+        erase_skill_bundles_in_tx(tx, org_id, &skill_ids).await?
+    } else {
+        0
+    };
     let skill_revisions =
         sqlx::query("DELETE FROM skill_revisions WHERE org_id = $1 AND owner_user_id = $2")
             .bind(org_id)
@@ -1681,7 +1885,61 @@ async fn erase_user_skills_in_tx(
         agent_skills,
         skill_revisions,
         agent_skill_versions,
+        skill_bundles,
     })
+}
+
+/// Removes the bundles of the given skills inside the erasing transaction (P2-go-09-rel1): their
+/// `skill_bundles` rows, whatever their state (live, draft or kept for a version), with their files through
+/// the cascade, then the blobs of the organization that no bundle file names any more. Returns the number of
+/// bundle rows removed. A database where capability-core's migration 0021 is not applied holds no bundle, so
+/// nothing runs there. The organization's bundle lock is taken first, the lock capability-core takes for every
+/// bundle write, so the blob collection cannot race an upload that is about to name a digest.
+///
+/// # Errors
+///
+/// Returns an error if a statement fails; the caller's transaction is then rolled back.
+async fn erase_skill_bundles_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    skill_ids: &[String],
+) -> anyhow::Result<u64> {
+    if skill_ids.is_empty() {
+        return Ok(0);
+    }
+    // Migration 0021 creates the three bundle tables together, so checking one is enough. A missing table
+    // holds no rows, and the check runs inside this transaction, as the saved-procedure block does.
+    let present: bool =
+        sqlx::query_scalar("SELECT to_regclass('public.skill_bundles') IS NOT NULL")
+            .fetch_one(&mut **tx)
+            .await?;
+    if !present {
+        return Ok(0);
+    }
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('skill_bundles:' || $1::text, 0))")
+        .bind(org_id)
+        .execute(&mut **tx)
+        .await?;
+    let removed =
+        sqlx::query("DELETE FROM skill_bundles WHERE org_id = $1 AND skill_id = ANY($2::text[])")
+            .bind(org_id)
+            .bind(skill_ids.to_vec())
+            .execute(&mut **tx)
+            .await?
+            .rows_affected();
+    if removed > 0 {
+        // The same collection capability-core runs after a bundle delete (its `gcBlobsSQL`).
+        sqlx::query(
+            "DELETE FROM skill_bundle_blobs b \
+             WHERE b.org_id = $1 AND NOT EXISTS ( \
+                 SELECT 1 FROM skill_bundle_files f JOIN skill_bundles sb ON sb.id = f.bundle_id \
+                 WHERE sb.org_id = b.org_id AND f.sha256 = b.sha256)",
+        )
+        .bind(org_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(removed)
 }
 
 /// [`erase_user_personal_data`] for either per-user event kind. `user_anonymize` removes the same two
@@ -1781,7 +2039,9 @@ pub async fn erase_user_personal_data_for(
             .rows_affected();
     // Personal skills (F-f01-16): the person's own user-scope skills, their versions and the revisions that
     // hold their text, in this transaction. Both erasure kinds remove them, and the hold gate ran above.
-    let skills = erase_user_skills_in_tx(&mut tx, org_id, user_id).await?;
+    let skills =
+        erase_user_skills_in_tx(&mut tx, org_id, user_id, skill_bundle_scope_rules_enabled())
+            .await?;
     // The audit record of this erasure: counts only, never the erased text or an id list. Written in
     // the erasing transaction, so a rolled-back erasure leaves no row claiming it happened.
     if thread_memory_erasure_enabled() {
@@ -1921,6 +2181,7 @@ pub async fn erase_user_personal_data_for(
         agent_skills: skills.agent_skills,
         skill_revisions: skills.skill_revisions,
         agent_skill_versions: skills.agent_skill_versions,
+        skill_bundles: skills.skill_bundles,
         semantic_memory: semantic,
         listing_degradation,
     };
@@ -2124,6 +2385,31 @@ mod tests {
         purge_organization_data(&pool, &other_org, None).await.expect("cleanup");
     }
 
+    /// A workspace the sandbox did not confirm erased makes the purge partial, and no workspace is ever a row
+    /// in `total()`. Only the unconfirmed count moves completeness.
+    #[test]
+    fn an_unconfirmed_workspace_erase_makes_the_purge_partial_and_is_not_a_row() {
+        use crate::sandbox_workspace_eraser::WorkspaceTally;
+        let confirmed = PurgeSummary {
+            workspaces: WorkspaceTally {
+                confirmed: 2,
+                unconfirmed: 0,
+            },
+            ..PurgeSummary::default()
+        };
+        assert_eq!(confirmed.total(), 0);
+        assert!(confirmed.erasure_is_complete());
+        let unconfirmed = PurgeSummary {
+            workspaces: WorkspaceTally {
+                confirmed: 2,
+                unconfirmed: 1,
+            },
+            ..PurgeSummary::default()
+        };
+        assert_eq!(unconfirmed.total(), 0);
+        assert!(!unconfirmed.erasure_is_complete());
+    }
+
     #[test]
     fn purge_summary_total_sums_every_field() {
         let summary = PurgeSummary {
@@ -2172,6 +2458,11 @@ mod tests {
             finetune_jobs: 1,
             dream_runs: 1,
             session_audit_outbox: 1,
+            // Not a row: a workspace the sandbox confirmed erased changes neither total() nor completeness.
+            workspaces: crate::sandbox_workspace_eraser::WorkspaceTally {
+                confirmed: 3,
+                unconfirmed: 0,
+            },
             // Deliberately non-zero: `total()` counts Postgres rows deleted,
             // and the semantic tier is a different store. If someone folds
             // this into total() the assertion below breaks, which is the point
@@ -2208,7 +2499,9 @@ mod tests {
         // the caller-supplied org_id — every statement binds `$1`.
         // The test module below formats table names into its own coverage checks (the held-scope
         // test), so only the code above it is scanned.
-        let production = &source[..source.find("#[cfg(test)]").expect("the test module")];
+        let production = &source[..source
+            .find("#[cfg(test)]\nmod tests {")
+            .expect("the test module")];
         assert!(
             !production.contains("format!(\"DELETE"),
             "a DELETE must never be built with format!/string interpolation"
@@ -2731,6 +3024,130 @@ mod tests {
         server.verify().await;
     }
 
+    /// F-f10-07: a refusal the hold made names its scope and count; an unanswered check names nothing, so it
+    /// writes no row.
+    #[test]
+    fn a_held_refusal_names_its_scope_and_an_unanswered_one_names_nothing() {
+        assert_eq!(refusal_scope(&ErasureHoldError::OrgHeld), Some(("org", 0)));
+        assert_eq!(
+            refusal_scope(&ErasureHoldError::ThreadsHeld(2)),
+            Some(("threads", 2))
+        );
+        assert_eq!(
+            refusal_scope(&ErasureHoldError::Unavailable("down".to_owned())),
+            None
+        );
+    }
+
+    /// F-f10-07: the org purge records its refusal before it opens its transaction, so the audit row exists
+    /// whatever the transaction does afterwards.
+    #[test]
+    fn org_purge_records_a_refusal_before_its_transaction() {
+        let source = include_str!("gdpr.rs");
+        let production = &source[..source
+            .find("#[cfg(test)]\nmod tests {")
+            .expect("the test module")];
+        let purge = &production[production
+            .find("pub async fn purge_organization_data(")
+            .expect("the purge")..];
+        let recorded = purge
+            .find("record_refused_erasure(pool, org_id, \"system\", \"org_erase\", &refusal)")
+            .expect("the purge records its refusal");
+        let begin = purge
+            .find("let mut tx: Transaction<'_, Postgres> = pool.begin()")
+            .expect("the purge transaction");
+        assert!(
+            recorded < begin,
+            "the refusal is recorded before the purge transaction opens"
+        );
+    }
+
+    /// F-f10-07: a refusal the hold made writes one content-free row, and the row names no thread, message or hold
+    /// reference. A retry within one bucket writes nothing more, and an unanswered check writes no row at all. The
+    /// erases themselves, each refused through its handler and deleting nothing, are driven in `grpc::tests`.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn refused_erasure_rows_name_only_the_hold_and_are_written_once_per_bucket() {
+        use crate::space::test_support;
+        let Some(pool) = test_support::connect().await else {
+            return;
+        };
+        let server = wiremock::MockServer::start().await;
+        let gate = hold_gate(&server.uri());
+        let nonce = mp_ids::new_ulid();
+        let org = format!("gdpr-refused-org-{nonce}");
+        let thread = format!("gdpr-refused-thread-{nonce}");
+        let message = format!("gdpr-refused-msg-{nonce}");
+        mount_org_check(&server, &org, check_answer(false, &[thread.as_str()])).await;
+
+        let refusal = gate
+            .ensure_not_held(&org, std::slice::from_ref(&thread))
+            .await
+            .expect_err("the hold refuses the thread");
+        assert_eq!(refusal, ErasureHoldError::ThreadsHeld(1));
+        record_refused_erasure(&pool, &org, "owner-1", "thread_delete", &refusal).await;
+
+        let audited = |org: String| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT payload::text FROM session_audit_outbox
+                     WHERE payload ->> 'org_id' = $1 AND payload ->> 'event' = 'erasure_refused'",
+                )
+                .bind(org)
+                .fetch_all(&pool)
+                .await
+                .expect("read the audit rows")
+            }
+        };
+        let rows = audited(org.clone()).await;
+        assert_eq!(rows.len(), 1, "one refused erase, one row");
+        assert!(
+            !rows[0].contains(thread.as_str()) && !rows[0].contains(message.as_str()),
+            "the row names no thread or message: {}",
+            rows[0]
+        );
+        let body: serde_json::Value = serde_json::from_str(&rows[0]).expect("the row is JSON");
+        assert_eq!(body["user_id"], "owner-1");
+        assert_eq!(body["outcome"], "denied");
+        assert_eq!(body["details"]["op"], "thread_delete");
+        assert_eq!(body["details"]["scope"], "threads");
+        assert_eq!(body["details"]["held_threads"], 1);
+
+        // An unanswered check decided nothing, so it writes nothing.
+        record_refused_erasure(
+            &pool,
+            &org,
+            "owner-1",
+            "thread_delete",
+            &ErasureHoldError::Unavailable("check answered 503".to_owned()),
+        )
+        .await;
+        assert_eq!(
+            audited(org.clone()).await.len(),
+            1,
+            "an unanswered check writes no row"
+        );
+
+        // A retry within one bucket is the same row: the second insert is a no-op.
+        let (op, scope, bucket) = ("bulk_delete", "threads", 1_000_000_i64);
+        let first = insert_refused_erasure(&pool, &org, "owner-2", op, scope, 2, bucket)
+            .await
+            .expect("the first insert answers");
+        assert!(first, "the first insert writes the row");
+        let retry = insert_refused_erasure(&pool, &org, "owner-2", op, scope, 2, bucket)
+            .await
+            .expect("the retry answers");
+        assert!(!retry, "a retry in the same bucket writes nothing");
+        assert_eq!(audited(org.clone()).await.len(), 2);
+
+        sqlx::query("DELETE FROM session_audit_outbox WHERE payload ->> 'org_id' = $1")
+            .bind(&org)
+            .execute(&pool)
+            .await
+            .expect("clean the audit rows");
+    }
+
     /// C-B9 and EP-12 S14: the held scope names thread goals, artifact revisions and share
     /// snapshots, and both erase paths still remove them, so the list and the deletes cannot
     /// drift apart unnoticed.
@@ -2767,7 +3184,9 @@ mod tests {
     #[test]
     fn user_erasure_asks_holds_before_any_delete() {
         let source = include_str!("gdpr.rs");
-        let production = &source[..source.find("#[cfg(test)]").expect("the test module")];
+        let production = &source[..source
+            .find("#[cfg(test)]\nmod tests {")
+            .expect("the test module")];
         let handler = include_str!("gdpr_nats.rs");
         let pos = |text: &str, needle: &str| {
             text.find(needle)
@@ -2923,7 +3342,9 @@ mod tests {
     #[test]
     fn user_space_erasure_asks_cited_threads_before_any_delete() {
         let source = include_str!("gdpr.rs");
-        let production = &source[..source.find("#[cfg(test)]").expect("the test module")];
+        let production = &source[..source
+            .find("#[cfg(test)]\nmod tests {")
+            .expect("the test module")];
         let gated = function_body(
             production,
             "async fn erase_user_space_memory_sources_gated(",

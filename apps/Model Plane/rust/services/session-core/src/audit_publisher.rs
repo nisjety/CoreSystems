@@ -74,6 +74,17 @@ pub const EVENT_SPACE_MEMORY_DELETED: &str = "space_memory_deleted";
 pub const SUBJECT_MODEL_SPACE_MEMORY_DELETED: &str =
     "verevon.audit.v2.model.session-core.space_memory_deleted";
 
+/// Audit event name of an erasure a legal hold refused (F-f10-07, decision D-C1): a thread delete, a bulk
+/// thread delete or an organisation purge that the hold stopped before it deleted anything. Content-free: the
+/// organisation, the actor, the operation word, the scope word, a count of held threads and the word
+/// `denied`. Never a thread id, content or the hold reference. Written only for a refusal the hold made, and
+/// only while `ERASURE_HOLD_CHECK` is on.
+pub const EVENT_ERASURE_REFUSED: &str = "erasure_refused";
+
+/// Length of one refused-erasure bucket, in seconds. A client that retries a refused erasure writes one row
+/// per bucket, not one per attempt, because the row's event id is the same for every attempt in the bucket.
+pub const ERASURE_REFUSED_BUCKET_SECONDS: i64 = 300;
+
 /// Subject family carrying Session Core's flat audit-core bodies.
 const AUDIT_SUBJECT_PREFIX: &str = "verevon.audit.v2.model.session-core.";
 
@@ -692,6 +703,46 @@ pub(crate) const SPACE_MEMORY_DELETE_AUDIT_ENV: &str = "SESSION_CORE_SPACE_MEMOR
 #[must_use]
 pub fn space_memory_delete_audit_enabled() -> bool {
     flag_on(std::env::var(SPACE_MEMORY_DELETE_AUDIT_ENV).ok().as_deref())
+}
+
+/// The audit event id of one refused erasure in one bucket (F-f10-07). The same organisation, operation and
+/// actor in the same bucket name the same id, so the outbox row for them is written once.
+#[must_use]
+pub fn erasure_refused_event_id(org_id: &str, op: &str, actor_id: &str, bucket: i64) -> String {
+    let digest = blake3::hash(format!("erasure\0{org_id}\0{op}\0{actor_id}\0{bucket}").as_bytes());
+    format!("erasure-refused:session-core:{digest}")
+}
+
+/// Build the FLAT audit body of one refused erasure (see [`build_approval_decision_body`] for the shape
+/// audit-core decodes). The ids are the organisation and the actor, and nothing else: `op` and `scope` are
+/// closed words and `held_threads` is a count. No thread id, content or hold reference is ever named. An empty
+/// actor is attributed to `system`, as the organisation purge has no person behind it.
+#[must_use]
+pub fn build_erasure_refused_body(
+    event_id: &str,
+    org_id: &str,
+    actor_id: &str,
+    op: &str,
+    scope: &str,
+    held_threads: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "event_id": event_id,
+        "occurred_at": chrono::Utc::now().to_rfc3339(),
+        "org_id": org_id,
+        "user_id": if actor_id.is_empty() { "system" } else { actor_id },
+        "plane": "model",
+        "producer": "session-core",
+        "event": EVENT_ERASURE_REFUSED,
+        "subject": org_id,
+        "resource_id": org_id,
+        "outcome": "denied",
+        "details": {
+            "op": op,
+            "scope": scope,
+            "held_threads": held_threads,
+        },
+    })
 }
 
 /// The strict reading of an audit switch: only the exact literal `true`, with no trimming and no
@@ -2654,5 +2705,103 @@ mod tests {
         assert_eq!(body["details"]["data_category"], "customer_private");
         assert_eq!(body["details"]["zdr"], true);
         assert!(body["occurred_at"].is_string());
+    }
+}
+
+/// F-f10-07: the content-free audit row of a refused erasure.
+#[cfg(test)]
+mod erasure_refused_audit_tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn the_refused_erasure_body_names_only_the_organisation_and_the_actor_as_ids() {
+        let event_id = erasure_refused_event_id("org-a", "thread_delete", "user-a", 42);
+        let body =
+            build_erasure_refused_body(&event_id, "org-a", "user-a", "thread_delete", "threads", 1);
+        assert_eq!(body["event"], EVENT_ERASURE_REFUSED);
+        assert_eq!(body["event_id"], event_id.as_str());
+        assert_eq!(body["producer"], "session-core");
+        assert_eq!(body["plane"], "model");
+        assert_eq!(body["org_id"], "org-a");
+        assert_eq!(body["user_id"], "user-a");
+        assert_eq!(body["subject"], "org-a");
+        assert_eq!(body["resource_id"], "org-a");
+        assert_eq!(body["outcome"], "denied");
+        assert_eq!(
+            body["details"],
+            json!({"op": "thread_delete", "scope": "threads", "held_threads": 1})
+        );
+        let keys: BTreeSet<&str> = body
+            .as_object()
+            .expect("the body is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            BTreeSet::from([
+                "details",
+                "event",
+                "event_id",
+                "occurred_at",
+                "org_id",
+                "outcome",
+                "plane",
+                "producer",
+                "resource_id",
+                "subject",
+                "user_id",
+            ])
+        );
+        assert!(body["occurred_at"].is_string());
+    }
+
+    #[test]
+    fn an_organisation_purge_with_no_person_is_attributed_to_the_system() {
+        let body = build_erasure_refused_body("e", "org-a", "", "org_erase", "org", 0);
+        assert_eq!(body["user_id"], "system");
+        assert_eq!(body["details"]["op"], "org_erase");
+        assert_eq!(body["details"]["scope"], "org");
+        assert_eq!(body["details"]["held_threads"], 0);
+    }
+
+    #[test]
+    fn the_refused_erasure_event_id_is_stable_within_a_bucket_and_fits_the_outbox_key() {
+        let first = erasure_refused_event_id("org-a", "bulk_delete", "user-a", 7);
+        let same = erasure_refused_event_id("org-a", "bulk_delete", "user-a", 7);
+        let next_bucket = erasure_refused_event_id("org-a", "bulk_delete", "user-a", 8);
+        let other_op = erasure_refused_event_id("org-a", "thread_delete", "user-a", 7);
+        let other_actor = erasure_refused_event_id("org-a", "bulk_delete", "user-b", 7);
+        let other_org = erasure_refused_event_id("org-b", "bulk_delete", "user-a", 7);
+        assert_eq!(first, same);
+        for distinct in [next_bucket, other_op, other_actor, other_org] {
+            assert_ne!(first, distinct);
+        }
+        assert!(
+            first.len() <= 128,
+            "session_audit_outbox.event_id is at most 128 characters"
+        );
+    }
+
+    #[test]
+    fn a_refused_erasure_row_passes_the_publisher_authority_check_on_the_flat_audit_family() {
+        const SUBJECT: &str = "verevon.audit.v2.model.session-core.erasure_refused";
+        assert_eq!(
+            audit_subject_for_event(EVENT_ERASURE_REFUSED).as_deref(),
+            Some(SUBJECT)
+        );
+        assert_eq!(classify_outbox_subject(SUBJECT), Some(OutboxRoute::Audit));
+        let event_id = erasure_refused_event_id("org-a", "org_erase", "system", 3);
+        let body = build_erasure_refused_body(&event_id, "org-a", "", "org_erase", "org", 0);
+        assert_eq!(
+            check_outbox_authority(OutboxRoute::Audit, &event_id, &body),
+            Ok(())
+        );
+        assert_eq!(
+            resolve_wire_subject(OutboxRoute::Audit, SUBJECT, &body),
+            Ok(SUBJECT.to_owned())
+        );
     }
 }

@@ -244,6 +244,14 @@ service SessionRetentionService {
   // the most recent one. Refused to user credentials and to any service that
   // lacks session:retention:read, and never answers for another org.
   rpc CountWaivedRuns(CountWaivedRunsRequest) returns (CountWaivedRunsResponse);
+
+  // Whether one thread of the org keeps nothing, for org-core's legal-hold placement: true when it has at
+  // least one run, every run is zero-retention (`zdr`), and it holds no content row. A waived run keeps its
+  // content, so a thread holding one answers false. Read-only, and it answers two booleans only, never a run
+  // id, count or content. Refused to user credentials, to a zero-retention credential, and to any service
+  // other than Control's org-core, which must also hold session:retention:read. Unavailable while
+  // SESSION_THREAD_RETENTION_READ is not `true`.
+  rpc GetThreadRetention(GetThreadRetentionRequest) returns (GetThreadRetentionResponse);
 }
 
 // ThreadAutonomy: the autonomy grant a plan approval made, read back by the
@@ -1757,6 +1765,9 @@ message ThreadSummary {
   // UpdateThreadPresentation. Empty for a zero-retention caller, which has no memory mode to show, and
   // from a Session Core that predates the column.
   string memory_mode = 31;
+
+  // How many live threads were forked from this one. 0 when thread forking is off or the thread has no forks.
+  int32 fork_count = 32;
 }
 
 message ListThreadsResponse {
@@ -2058,6 +2069,27 @@ message WaivedRunCount {
 
   // When the most recent of those runs started.
   google.protobuf.Timestamp last_used_at = 4;
+}
+
+// --- SessionRetentionService.GetThreadRetention (F-f10-02) ---
+
+// The thread whose retention is read.
+message GetThreadRetentionRequest {
+  // Required. The org the thread must belong to. It must be the caller's own org.
+  string org_id = 1;
+  // Required. The thread to read. A thread the org does not hold answers found = false.
+  string thread_id = 2;
+}
+
+// Whether a thread retains anything. Two booleans only: no run id, count, message or goal content.
+message GetThreadRetentionResponse {
+  // True when the org holds a thread with this id. False when it holds no such thread; the caller then
+  // places its legal hold as it does today.
+  bool found = 1;
+  // True when the thread has at least one run, every run is zero-retention (`zdr`), and it holds no content
+  // row, so a legal hold would keep nothing. A waived run keeps its content, so a thread holding one is false.
+  // Meaningful only when `found` is true.
+  bool nothing_retained = 2;
 }
 
 // --- ThreadAutonomy.GetThreadGrant (build plan WS04 S4) ---

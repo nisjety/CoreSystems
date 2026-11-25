@@ -264,6 +264,7 @@ async fn zdr_caller_gets_typed_refusal_and_no_rows() {
         start_request(ORG, CALLER, "", "zdr-wake-2"),
         RunRetention::zdr(),
         Some(&wake),
+        None,
     )
     .await
     .expect_err("the backstop refuses too");
@@ -434,6 +435,7 @@ impl World {
             start_request(&self.org, owner, thread, start_key),
             RunRetention::persistent(),
             wake,
+            None,
         )
         .await
     }

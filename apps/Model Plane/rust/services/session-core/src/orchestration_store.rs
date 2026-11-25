@@ -1150,6 +1150,21 @@ pub struct ApprovalDecisionWrite {
     /// has no delivery record by design: a missing `delivery_id` is not a missing durable
     /// state for it.
     pub loop_owned: bool,
+    /// What the transaction did about the decision's `RUN_APPROVAL_DECIDED` run event (F-f10-34).
+    pub run_event: RunEventWrite,
+}
+
+/// What a decision's transaction did about its `RUN_APPROVAL_DECIDED` run event (F-f10-34).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunEventWrite {
+    /// The record did not ask for one (the switch is off), or the decision changed nothing.
+    NotRequested,
+    /// The row was written in the decision's transaction.
+    Enqueued,
+    /// The row was already there: the same decision was recorded before.
+    Replayed,
+    /// The run is zero-retention or waived, or its class is unknown, so no row was written.
+    SkippedZdr,
 }
 
 /// Decide an approval (granted/denied/expired). Stamps `decided_at = now()`.
@@ -1185,10 +1200,14 @@ pub struct DecisionRecord<'a> {
     /// token. Stated by the model-gateway edge for a grant only; the caller sets it false otherwise, and
     /// session-core never reads a claim itself. Provenance only.
     pub step_up_verified: bool,
+    /// F-f10-34: also write one content-free `RUN_APPROVAL_DECIDED` run event in this transaction, for a persistent
+    /// run. Read by the caller from `SESSION_CORE_APPROVAL_EVENTS_ENABLED` (default off), never here.
+    pub run_events: bool,
 }
 
 /// The record of a caller that states no source: `unattributed`, one call only, not audited.
 const UNATTRIBUTED_DECISION: DecisionRecord<'static> = DecisionRecord {
+    run_events: false,
     source: "unattributed",
     scope: "once",
     audit: false,
@@ -1493,7 +1512,8 @@ async fn decide_approval_inner(
 
     // The run's retention class is read once for both audit rows: the authz row marks a ZDR run,
     // and the approval row is not written for one at all (DEC-32).
-    let retention: Option<String> = if updated && (record.audit || record.authz_audit) {
+    let wants_retention = record.audit || record.authz_audit || record.run_events;
+    let retention: Option<String> = if updated && wants_retention {
         sqlx::query_scalar(APPROVAL_RUN_RETENTION_SQL)
             .bind(id)
             .bind(org_id)
@@ -1572,11 +1592,54 @@ async fn decide_approval_inner(
             .await?;
     }
 
+    // F-f10-34: the decision's run event, in this transaction after the rows above, so it exists exactly when the
+    // decision committed. A replay changes nothing and writes nothing. A zero-retention or waived run writes none, and
+    // the skip is reported so the caller counts it. The words are read back from the record just written, the same
+    // reader the decision record and the SSE projection use.
+    let run_event = if !(updated && record.run_events) {
+        RunEventWrite::NotRequested
+    } else if !crate::approval_events::enqueue_permitted(retention.as_deref()) {
+        RunEventWrite::SkippedZdr
+    } else {
+        let (_, run_id, owner_user_id, metadata): (String, String, String, JsonValue) =
+            sqlx::query_as(APPROVAL_AUDIT_CONTEXT_SQL)
+                .bind(id)
+                .bind(org_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        let stored = stored_decision(&metadata);
+        let outcome = crate::approval_events::outcome_word(status)
+            .ok_or_else(|| anyhow::anyhow!("a decision status has no run event outcome"))?;
+        let inserted = crate::approval_events::write_run_approval_decided(
+            &mut transaction,
+            &crate::approval_events::DecidedApproval {
+                org_id,
+                owner_user_id: &owner_user_id,
+                run_id: &run_id,
+                approval_id: id,
+                outcome,
+                scope: &stored.scope,
+                decision_source: &stored.source,
+                cause_code: &stored.cause_code,
+                rule_id: &stored.rule_id,
+                step_up_verified: stored.step_up_verified,
+            },
+            Utc::now(),
+        )
+        .await?;
+        if inserted {
+            RunEventWrite::Enqueued
+        } else {
+            RunEventWrite::Replayed
+        }
+    };
+
     transaction.commit().await?;
     Ok(ApprovalDecisionWrite {
         updated,
         delivery_id,
         loop_owned,
+        run_event,
     })
 }
 
@@ -3019,6 +3082,33 @@ fn cause_text(metadata: &JsonValue, key: &str) -> String {
         .to_owned()
 }
 
+/// The decision a decided approval's stored record names (WS13 S3, F-f10-34): the cause and rule it was decided under, and
+/// the scope, source and step-up the decider chose. The decision record the SSE projection reads back and the run event
+/// both read through this one function, so they cannot disagree about a decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredDecision {
+    pub cause_code: String,
+    pub rule_id: String,
+    /// The scope the decision recorded. A row decided before the record existed was decided under `once`.
+    pub scope: String,
+    /// The source the decision recorded, or empty when none was recorded.
+    pub source: String,
+    pub step_up_verified: bool,
+}
+
+/// Reads the decision words of an approval's stored metadata. Pure.
+#[must_use]
+pub fn stored_decision(metadata: &JsonValue) -> StoredDecision {
+    let decision = &metadata["decision"];
+    StoredDecision {
+        cause_code: cause_text(metadata, "code"),
+        rule_id: cause_text(metadata, "rule_id"),
+        scope: decision["scope"].as_str().unwrap_or("once").to_owned(),
+        source: decision["source"].as_str().unwrap_or_default().to_owned(),
+        step_up_verified: decision["step_up_verified"].as_bool().unwrap_or(false),
+    }
+}
+
 /// Enqueue the approval-requested signal for a freshly created approval (E3.2-d). One row per
 /// approval: a replayed request names the same event id and is ignored.
 ///
@@ -4223,6 +4313,41 @@ pub async fn answer_run_question(
     skip: bool,
     answered_message_id: &str,
 ) -> Result<AnsweredRunQuestion> {
+    let mut tx = pool.begin().await?;
+    let outcome = answer_run_question_in_tx(
+        &mut tx,
+        question_id,
+        org_id,
+        user_id,
+        answers,
+        digest,
+        skip,
+        answered_message_id,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(outcome)
+}
+
+/// [`answer_run_question`] inside the caller's transaction (O-15). The answer and the message that carries
+/// it commit together or not at all: the caller appends that message in the same transaction, and a refusal
+/// there drops this compare-and-set with it.
+///
+/// # Errors
+///
+/// Returns an error if a statement fails, or if the question is still waiting after the compare-and-set
+/// missed (a state that cannot be reached by these statements alone).
+#[allow(clippy::too_many_arguments)]
+pub async fn answer_run_question_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    question_id: &str,
+    org_id: &str,
+    user_id: &str,
+    answers: &JsonValue,
+    digest: &str,
+    skip: bool,
+    answered_message_id: &str,
+) -> Result<AnsweredRunQuestion> {
     let won = sqlx::query_as::<_, RunQuestionRow>(&format!(
         "UPDATE run_questions \
             SET state = CASE WHEN $4 THEN 'skipped' ELSE 'answered' END, \
@@ -4238,7 +4363,7 @@ pub async fn answer_run_question(
     .bind(answers)
     .bind(digest)
     .bind(answered_message_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await?;
     if let Some(row) = won {
         info!(question_id = %row.id, state = %row.state, "run question answered");
@@ -4254,9 +4379,18 @@ pub async fn answer_run_question(
     .bind(question_id)
     .bind(org_id)
     .bind(user_id)
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
-    let Some(row) = get_run_question(pool, question_id, org_id, user_id).await? else {
+    let Some(row) = sqlx::query_as::<_, RunQuestionRow>(&format!(
+        "SELECT {RUN_QUESTION_COLUMNS} FROM run_questions \
+         WHERE id = $1 AND org_id = $2 AND user_id = $3"
+    ))
+    .bind(question_id)
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    else {
         return Ok(AnsweredRunQuestion::NotFound);
     };
     match classify_unanswerable(&row.state, row.answers_digest.as_deref(), digest) {
@@ -4265,6 +4399,64 @@ pub async fn answer_run_question(
         Some(Unanswerable::Conflict) => Ok(AnsweredRunQuestion::AlreadyAnswered),
         None => bail!("run question {question_id} is still waiting after a missed answer"),
     }
+}
+
+/// What kind of thread an answer's message would be appended to (O-15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnedThreadKind {
+    /// The thread belongs to a Space.
+    pub is_space: bool,
+    /// The thread's source scope is locked to the conversation (`threads.source_scope = 'conversation'`).
+    pub conversation_only: bool,
+}
+
+/// The kind of the owner's thread `thread_id` in `org_id`: whether it is a Space thread and whether its source
+/// scope is conversation-only, or `None` when the thread is not the owner's. The row is locked for the
+/// transaction, so the answer and its message read one thread.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn owned_thread_kind(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    thread_id: &str,
+    org_id: &str,
+    user_id: &str,
+) -> Result<Option<OwnedThreadKind>> {
+    let row: Option<(Option<String>, String)> = sqlx::query_as(
+        "SELECT space_id, source_scope FROM threads \
+         WHERE id = $1 AND org_id = $2 AND user_id = $3 FOR UPDATE",
+    )
+    .bind(thread_id)
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.map(|(space_id, source_scope)| OwnedThreadKind {
+        is_space: space_id.is_some(),
+        conversation_only: source_scope == "conversation",
+    }))
+}
+
+/// Whether a message of a thread other than `thread_id` already holds `client_message_id`. An answer that
+/// named it would link the question to a message its own thread does not hold, so the link is refused.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn client_message_held_elsewhere(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_message_id: &str,
+    thread_id: &str,
+) -> Result<bool> {
+    let (held,): (bool,) = sqlx::query_as(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE client_message_id = $1 AND thread_id <> $2)",
+    )
+    .bind(client_message_id)
+    .bind(thread_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(held)
 }
 
 /// One of the owner's questions by id. Another user's question, and one in another org, are
@@ -4491,7 +4683,7 @@ mod run_question_tests {
     fn run_question_the_answer_statement_keeps_the_compare_and_set_predicate() {
         let source = include_str!("orchestration_store.rs").replace("\r\n", "\n");
         let body = &source[source
-            .find("pub async fn answer_run_question(")
+            .find("pub async fn answer_run_question_in_tx(")
             .expect("the answer function is present")..];
         let body = &body[..body.find("\n}\n").expect("end of the function")];
         assert!(body.contains("AND state = 'requested' AND expires_at > now()"));
@@ -4585,6 +4777,7 @@ mod tests {
     #[test]
     fn a_decision_names_a_rule_proposal_only_when_one_was_made() {
         let plain = DecisionRecord {
+            run_events: false,
             source: "user",
             scope: "thread",
             audit: false,
@@ -4598,6 +4791,7 @@ mod tests {
             serde_json::json!({ "source": "user", "scope": "thread", "step_up_verified": false })
         );
         let proposed = DecisionRecord {
+            run_events: false,
             rule_proposed: true,
             ..plain
         };
@@ -4608,6 +4802,7 @@ mod tests {
     #[test]
     fn a_decision_records_step_up_only_as_the_caller_stated_it() {
         let verified = DecisionRecord {
+            run_events: false,
             source: "user",
             scope: "once",
             audit: false,
@@ -4618,6 +4813,7 @@ mod tests {
         };
         assert_eq!(decision_json(&verified)["step_up_verified"], true);
         let unverified = DecisionRecord {
+            run_events: false,
             step_up_verified: false,
             ..verified
         };
@@ -5078,6 +5274,7 @@ mod approval_decision_db_tests {
         };
         let (id, org, user) = requested_approval(&pool, "one-tx").await;
         let record = DecisionRecord {
+            run_events: false,
             source: "user",
             scope: "once",
             audit: true,
@@ -5119,6 +5316,133 @@ mod approval_decision_db_tests {
         assert!(payload.get("decision_reason").is_none());
     }
 
+    /// F-f10-34: a decision on a persistent run writes one `RUN_APPROVAL_DECIDED` row in the decision's transaction, and a
+    /// replay writes nothing. A zero-retention run writes no row, and the skip is reported for the caller to count.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_approval_decided_is_written_once_for_a_persistent_run_only() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let record = DecisionRecord {
+            run_events: true,
+            source: "user",
+            scope: "once",
+            audit: false,
+            grant_ttl_secs: 3600,
+            rule_proposed: false,
+            authz_audit: false,
+            step_up_verified: false,
+        };
+
+        let (id, org, user) = requested_approval_in_class(&pool, "run-event", "persistent").await;
+        let run_id: String = sqlx::query_scalar("SELECT run_id FROM approvals WHERE id = $1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("the approval's run");
+        let write = decide_approval_recorded(
+            &pool,
+            &id,
+            &org,
+            Some(user.as_str()),
+            "granted",
+            &user,
+            "ok",
+            &record,
+        )
+        .await
+        .expect("decide");
+        assert!(write.updated);
+        assert_eq!(write.run_event, RunEventWrite::Enqueued);
+        let event_id = crate::approval_events::decided_event_id(&run_id, &id, "approved");
+        let payload: serde_json::Value =
+            sqlx::query_scalar("SELECT payload FROM session_audit_outbox WHERE event_id = $1")
+                .bind(&event_id)
+                .fetch_one(&pool)
+                .await
+                .expect("one run event row");
+        assert_eq!(payload["event_type"], "RUN_APPROVAL_DECIDED");
+        assert_eq!(payload["zdr"], false);
+        assert_eq!(payload["payload"]["outcome"], "approved");
+        assert_eq!(payload["payload"]["decision_source"], "user");
+        assert_eq!(payload["payload"]["approval_id"], id.as_str());
+
+        // A replay changes nothing, so it writes no second row.
+        let replay = decide_approval_recorded(
+            &pool,
+            &id,
+            &org,
+            Some(user.as_str()),
+            "granted",
+            &user,
+            "ok",
+            &record,
+        )
+        .await
+        .expect("replay");
+        assert!(!replay.updated);
+        assert_eq!(replay.run_event, RunEventWrite::NotRequested);
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM session_audit_outbox WHERE event_id = $1")
+                .bind(&event_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count the run event rows");
+        assert_eq!(rows, 1, "still one row");
+
+        // The row is event metadata of the run, so erasing the thread removes it with the run.
+        let thread_id: String = sqlx::query_scalar("SELECT thread_id FROM runs WHERE id = $1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("the run's thread");
+        let mut tx = pool.begin().await.expect("begin the erase");
+        crate::grpc::delete_thread_rows(&mut tx, &thread_id)
+            .await
+            .expect("erase the thread");
+        tx.commit().await.expect("commit the erase");
+        let left: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM session_audit_outbox WHERE payload -> 'payload' ->> 'run_id' = $1",
+        )
+        .bind(&run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count the run's rows after the erase");
+        assert_eq!(left, 0, "a thread erase removes the run's decision events");
+
+        // A zero-retention run writes no row, and the decision reports the skip.
+        let (zdr_id, zdr_org, zdr_user) =
+            requested_approval_in_class(&pool, "run-event-zdr", "zdr").await;
+        let zdr_run: String = sqlx::query_scalar("SELECT run_id FROM approvals WHERE id = $1")
+            .bind(&zdr_id)
+            .fetch_one(&pool)
+            .await
+            .expect("the zdr approval's run");
+        let skipped = decide_approval_recorded(
+            &pool,
+            &zdr_id,
+            &zdr_org,
+            Some(zdr_user.as_str()),
+            "granted",
+            &zdr_user,
+            "ok",
+            &record,
+        )
+        .await
+        .expect("decide a zdr run");
+        assert!(skipped.updated);
+        assert_eq!(skipped.run_event, RunEventWrite::SkippedZdr);
+        let zdr_event = crate::approval_events::decided_event_id(&zdr_run, &zdr_id, "approved");
+        let none: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM session_audit_outbox WHERE event_id = $1")
+                .bind(&zdr_event)
+                .fetch_one(&pool)
+                .await
+                .expect("count the zdr run event rows");
+        assert_eq!(none, 0, "a zero-retention decision writes no run event");
+    }
+
     async fn authz_payload(pool: &Pool, approval_id: &str, decision: &str) -> Option<serde_json::Value> {
         sqlx::query_scalar("SELECT payload FROM session_audit_outbox WHERE event_id = $1")
             .bind(crate::audit_publisher::authz_decision_event_id(approval_id, decision))
@@ -5142,6 +5466,7 @@ mod approval_decision_db_tests {
             .await
             .expect("stamp host class");
         let record = DecisionRecord {
+            run_events: false,
             source: "user",
             scope: "once",
             audit: false,
@@ -5201,6 +5526,7 @@ mod approval_decision_db_tests {
         // Switch off: nothing is written.
         let (id, org, user) = requested_approval(&pool, "authz-off").await;
         let off = DecisionRecord {
+            run_events: false,
             source: "user",
             scope: "once",
             audit: false,
@@ -5222,6 +5548,7 @@ mod approval_decision_db_tests {
             .await
             .expect("stamp host class");
         let on = DecisionRecord {
+            run_events: false,
             source: "user",
             scope: "once",
             audit: false,
@@ -5290,6 +5617,7 @@ mod approval_decision_db_tests {
         };
         let (id, org, user) = requested_approval(&pool, "replay").await;
         let record = DecisionRecord {
+            run_events: false,
             source: "user",
             scope: "once",
             audit: true,
@@ -5324,6 +5652,7 @@ mod approval_decision_db_tests {
         };
         let (id, org, user) = requested_approval(&pool, "switch-off").await;
         let record = DecisionRecord {
+            run_events: false,
             source: "posture_auto",
             scope: "once",
             audit: false,
@@ -7407,6 +7736,7 @@ mod approval_scope_grant_db_tests {
 
     async fn decide(pool: &Pool, p: &Pending, scope: &str) -> Result<ApprovalDecisionWrite> {
         let record = DecisionRecord {
+            run_events: false,
             source: "user",
             scope,
             audit: true,
@@ -7848,6 +8178,7 @@ mod approval_scope_grant_db_tests {
         .await
         .expect("bind the registry capability");
         let record = DecisionRecord {
+            run_events: false,
             source: "user",
             scope: "thread",
             audit: false,
@@ -7906,6 +8237,7 @@ mod approval_scope_grant_db_tests {
         )
         .await;
         let record = DecisionRecord {
+            run_events: false,
             source: "user",
             scope: "thread",
             audit: false,
@@ -8451,6 +8783,7 @@ mod approval_edit_db_tests {
     }
 
     const RECORD: DecisionRecord<'static> = DecisionRecord {
+        run_events: false,
         source: "user",
         scope: "once",
         audit: false,

@@ -391,8 +391,9 @@ pub const FEATURES: &[Feature] = &[
         key: "thread_goal",
         label: "persistent goals",
     },
-    // EP-9 C1: org-core refuses a thread legal hold on a ZDR or waived thread with
-    // legal_hold_nothing_retained: nothing is retained, so there is nothing to hold.
+    // EP-9 C1: org-core refuses a thread legal hold on a thread that keeps nothing (only ZDR runs, no content row)
+    // with legal_hold_nothing_retained: nothing is retained, so there is nothing to hold. A waived run keeps its
+    // content (ZDR.md section 5.5), so a thread holding one is held, never refused.
     Feature {
         key: "legal_hold",
         label: "a legal hold on a thread",

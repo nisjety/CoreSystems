@@ -74,8 +74,9 @@ service RunService {
   // capability-core's memory scope='session' rows: session and thread are
   // the same underlying resource in this codebase (see agent_memory's writer
   // in dreaming.rs, which stores a thread_id under scope='thread'), so
-  // scope='session' calls this RPC with the same thread_id too. Returns only
-  // a boolean to avoid disclosing another tenant's thread metadata.
+  // scope='session' calls this RPC with the same thread_id too. The answer is
+  // a boolean to avoid disclosing another tenant's thread metadata; the thread
+  // posture fields are set only for an authorized owner.
   rpc ResolveThreadOwner(ResolveThreadOwnerRequest) returns (ResolveThreadOwnerResponse);
 
   // ResolveRunActionAuthority returns the non-secret, immutable run/thread
@@ -300,6 +301,13 @@ message ResolveThreadOwnerRequest {
 
 message ResolveThreadOwnerResponse {
   bool authorized = 1;
+  // The thread's origin word as threads.origin stores it (chat, space, agent_run, support, system or
+  // mail_task). Empty unless authorized is true, and empty from a session-core that predates this field.
+  string thread_origin = 2;
+  // Whether the thread lives in a Space: its space_id is set and not blank.
+  bool thread_in_space = 3;
+  // Whether the thread holds any run kept under zero data retention or a waived one (DEC-32).
+  bool thread_retains_nothing = 4;
 }
 
 // ResolveRunActionAuthorityRequest is intentionally limited to the run and

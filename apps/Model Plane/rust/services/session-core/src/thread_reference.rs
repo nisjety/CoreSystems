@@ -40,8 +40,8 @@ pub(crate) const MAX_FIRST_LINE_CHARS: usize = 160;
 /// Characters of a turn read from the database for an outline. The first line is found in them;
 /// a turn whose first 2,000 characters hold no line break shows them cut to the line cap.
 const OUTLINE_READ_CHARS: i32 = 2_000;
-/// The only origin a referenced thread may have.
-const CHAT_ORIGIN: &str = "chat";
+/// The only origin a referenced thread may have. `resolve_thread_owner` states the same word for /learn.
+pub(crate) const CHAT_ORIGIN: &str = "chat";
 
 /// The thread reference RPC. It holds the pool and nothing else; the rules are in this module.
 pub struct ThreadReferenceGrpc {
