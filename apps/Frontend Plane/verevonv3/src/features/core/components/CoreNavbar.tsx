@@ -179,8 +179,8 @@ export function CoreNavbar(props: {
 
   // DEPTH-WS13-S6-1: the gateway's `features.command_palette` is the production switch for the palette, its hotkeys
   // (Ctrl/Cmd+F among them) and the platform slash commands. Read once when the shell mounts. An unknown answer (the
-  // read failed, or an older gateway names no such key) leaves the build default in place. The offline surfaces make
-  // no backend call.
+  // read failed, or an older gateway names no such key) leaves the switch as it was: the build default, or the last
+  // known answer if one already landed. The offline surfaces (props.offline) make no backend call.
   createEffect(
     () => undefined,
     () => {

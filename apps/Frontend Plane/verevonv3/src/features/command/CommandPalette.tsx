@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from 'solid-js'
 import { Search } from '@/shared/icons'
 import { selectChatThread } from '@/features/chat/lib/chat-thread-history'
 import { searchNavbar, type NavbarSearchResult } from '@/shared/api/navbar-client'
@@ -89,7 +89,8 @@ export function CommandPalette(props: {
   // Reads the palette indexes once on open, each through its own plane's gate. A failed read is an empty group.
   void loadRooms().then(setRooms)
   void loadAgents().then(setAgents)
-  const roomRef = props.context.spaceRef
+  // A one-off read on open, like the two above: the room the palette opened in, not a tracked dependency.
+  const roomRef = untrack(() => props.context.spaceRef)
   if (roomRef) void loadPeople(roomRef).then(setPeople)
 
   // Knowledge search (Data Plane): debounced, abortable, never stored.

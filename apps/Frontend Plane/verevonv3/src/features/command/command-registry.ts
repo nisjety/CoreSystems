@@ -139,9 +139,12 @@ export function __resetCommandsForTests(): void {
  * Rollout switch for the palette (`space_command_palette_ui`). Presentation
  * only, never an authorization input. The gateway's `GET /api/v1/spaces/features`
  * carries `command_palette` (WS13-S3); the shell reads it once at boot and passes
- * it here (DEPTH-WS13-S6-1). Until that answer lands the build flag
+ * it here (DEPTH-WS13-S6-1). Until a known answer lands the build flag
  * `VITE_SPACE_COMMAND_PALETTE_UI` decides: '1' on, '0' off, unset means on in
- * dev and off in production.
+ * dev and off in production. The answer is module state, so once a known
+ * answer has landed it stays: a later read that fails or names no key (for
+ * example after the shell remounts) keeps the last known answer, not the
+ * build default.
  *
  * The value is a plain variable, so a read straight after a write is current
  * (Solid applies signal writes at flush). The version signal tells the readers

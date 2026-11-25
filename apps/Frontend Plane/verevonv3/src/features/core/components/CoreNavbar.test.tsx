@@ -8,6 +8,7 @@ import { flush } from 'solid-js'
 import { I18nProvider } from '@/shared/i18n'
 import { CoreNavbar, shouldDeferGlobalSlashSearch } from './CoreNavbar'
 import { commandPaletteEnabled, registerCommands, setCommandPaletteFeature } from '@/features/command/command-registry'
+import { getCommandPaletteFeature } from '@/shared/api/spaces-client/entries'
 
 afterEach(() => {
   cleanup()
@@ -154,10 +155,29 @@ describe('CoreNavbar command palette switch (DEPTH-WS13-S6-1)', () => {
     renderNavbar()
     const featuresCall = () => fetchMock.mock.calls.findIndex(([url]) => String(url).endsWith('/api/v1/spaces/features'))
     await waitFor(() => expect(featuresCall()).toBeGreaterThanOrEqual(0))
-    // Wait for the read itself to settle, then let its continuation run, instead of a fixed delay.
-    await fetchMock.mock.results[featuresCall()]?.value
+    // A second read through the same client and the same failing fetch, started after the shell's. Both chains
+    // have the same depth, so by the time this one settles the shell's read has settled and its continuation has
+    // run. That makes the check below independent of how many ticks the read takes.
+    await expect(getCommandPaletteFeature()).resolves.toBeUndefined()
     await new Promise((resolve) => setTimeout(resolve, 0))
     flush()
+    expect(commandPaletteEnabled()).toBe(false)
+  })
+
+  it('makes no features read on an offline surface and leaves the switch alone', async () => {
+    setCommandPaletteFeature(false)
+    const fetchMock = stubShell(featuresAnswer({ command_palette: true }))
+    const TestRouter = createRouter({ routes: [{ path: '/*all', component: () => (
+      <CoreNavbar activeRoute="/dashboard" offline workspace={{ initial: 'A', name: 'Acme', plan: 'Expert' }} />
+    ) }] })
+    render(() => <I18nProvider><TestRouter /></I18nProvider>)
+    // Settle anything the mount started; an online shell has read the features by this point.
+    await getCommandPaletteFeature()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    flush()
+    const shellFeatureReads = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/api/v1/spaces/features'))
+    // Exactly one read: the settle call above. The offline shell made none.
+    expect(shellFeatureReads).toHaveLength(1)
     expect(commandPaletteEnabled()).toBe(false)
   })
 
