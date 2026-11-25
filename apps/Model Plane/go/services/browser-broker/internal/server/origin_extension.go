@@ -94,7 +94,7 @@ func (s *Server) acquireOriginExtension(ctx context.Context, req *AcquireGrantRe
 		keyOutcome(ctx, "extension_denied")
 		return nil, keyRefusal(codes.PermissionDenied, reasonOriginExtensionDenied, grant.ErrExtensionDenied.Error())
 	}
-	kept, siteDropped, err := s.applyExtensionSitePolicy(ctx, principal, kept)
+	kept, siteDropped, err := s.applyExtensionSitePolicy(ctx, principal, req.GetSpaceId(), kept)
 	if err != nil {
 		return nil, err
 	}
@@ -146,13 +146,13 @@ func (s *Server) extensionLive(g *grant.Grant) error {
 // just answered the question. "Deny", a host org-core did not answer for and a
 // "read" host (an extension adds no access level of its own, so a read-only
 // verdict cannot be honoured on an act-capable parent) are dropped.
-func (s *Server) applyExtensionSitePolicy(ctx context.Context, principal authctx.Principal, domains []string) ([]string, []string, error) {
+func (s *Server) applyExtensionSitePolicy(ctx context.Context, principal authctx.Principal, spaceID string, domains []string) ([]string, []string, error) {
 	mode := s.options.SitePolicy
 	if mode == sitepolicy.ModeOff || mode == "" {
 		return domains, nil, nil
 	}
 	shadow := mode == sitepolicy.ModeShadow
-	resolution, err := s.resolveSites(ctx, principal, domains)
+	resolution, err := s.resolveSites(ctx, principal, spaceID, domains)
 	if err != nil {
 		recordSiteVerdict(ctx, "policy_unavailable")
 		if shadow {

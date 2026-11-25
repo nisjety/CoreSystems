@@ -297,12 +297,13 @@ func TestDiscardDraftLeavesLiveText(t *testing.T) {
 }
 
 // Off, a skill delete leaves its bundles as before; with retention on they go in the same
-// transaction (register D2-382).
+// transaction (register D2-382). Retention is effective only with SKILL_VERSIONS_API on too (F-f10-15).
 func TestSkillDeleteRemovesBundlesOnlyWithRetention(t *testing.T) {
 	for _, on := range []bool{false, true} {
 		withDrafts(t, false)
 		if on {
 			t.Setenv(skillbundle.RetentionEnv, "true")
+			t.Setenv(skillVersionsAPIEnv, "true")
 		}
 		database := &recordingDatabase{}
 		response := serveSkill(t, database, writeToken, http.MethodDelete, "/api/v1/skills/sk-1", "")

@@ -99,9 +99,13 @@ func executed(execs []string, fragment string) bool {
 
 func TestRetentionFromLookupIsStrict(t *testing.T) {
 	for value, want := range map[string]bool{"true": true, "": false, "1": false, "TRUE": false, "yes": false} {
+		// SKILL_VERSIONS_API is on here, so only the retention spelling decides (store_test.go covers the coupling).
 		got := RetentionFromLookup(func(name string) string {
-			if name == RetentionEnv {
+			switch name {
+			case RetentionEnv:
 				return value
+			case skillVersionsAPIEnv:
+				return "true"
 			}
 			return ""
 		})

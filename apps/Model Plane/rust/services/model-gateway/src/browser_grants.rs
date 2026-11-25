@@ -356,6 +356,9 @@ const BROKER_REASON_KEY_REVOKED: &str = "API_KEY_REVOKED";
 const BROKER_REASON_KEY_HOST_CEILING: &str = "API_KEY_HOST_CEILING";
 const BROKER_REASON_KEY_BUDGET_CEILING: &str = "API_KEY_BUDGET_CEILING";
 const BROKER_REASON_SITE_DENIED: &str = "BROWSER_SITE_DENIED";
+/// Every requested host is an ask: the member can allow it, but a key grant has no consent step
+/// yet, so it is refused exactly as a denial is (the same detail, the same status).
+const BROKER_REASON_SITE_ASK: &str = "BROWSER_SITE_ASK";
 const ERROR_INFO_TYPE_URL: &str = "type.googleapis.com/google.rpc.ErrorInfo";
 
 /// `MODEL_GATEWAY_BROWSER_KEY_GRANTS`: only the exact literal `true` turns the key-grant routes
@@ -550,7 +553,10 @@ fn key_issue_status_to_http(status: &tonic::Status) -> ApiError {
             "api_key_budget_ceiling",
             "the budget is over the api key's budget ceiling",
         ),
-        (tonic::Code::PermissionDenied, Some(BROKER_REASON_SITE_DENIED)) => key_error(
+        (
+            tonic::Code::PermissionDenied,
+            Some(BROKER_REASON_SITE_DENIED | BROKER_REASON_SITE_ASK),
+        ) => key_error(
             StatusCode::FORBIDDEN,
             "browser_grant_forbidden",
             "browser_site_denied",
@@ -1740,6 +1746,7 @@ mod tests {
             (tonic::Code::PermissionDenied, Some("API_KEY_HOST_CEILING"), StatusCode::FORBIDDEN, "api_key_host_ceiling", "api_key_host_ceiling"),
             (tonic::Code::PermissionDenied, Some("API_KEY_BUDGET_CEILING"), StatusCode::FORBIDDEN, "api_key_budget_ceiling", "api_key_budget_ceiling"),
             (tonic::Code::PermissionDenied, Some("BROWSER_SITE_DENIED"), StatusCode::FORBIDDEN, "browser_grant_forbidden", "browser_site_denied"),
+            (tonic::Code::PermissionDenied, Some("BROWSER_SITE_ASK"), StatusCode::FORBIDDEN, "browser_grant_forbidden", "browser_site_denied"),
             (tonic::Code::PermissionDenied, None, StatusCode::FORBIDDEN, "browser_grant_forbidden", "browser_grant_forbidden"),
             (tonic::Code::PermissionDenied, Some("SOMETHING_NEW"), StatusCode::FORBIDDEN, "browser_grant_forbidden", "browser_grant_forbidden"),
             (tonic::Code::InvalidArgument, None, StatusCode::BAD_REQUEST, "invalid_request", "browser_host_not_grantable"),

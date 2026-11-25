@@ -101,6 +101,29 @@ describe('parseAttentionFrame', () => {
     expect(frame).toMatchObject({ kind: 'changed', item: { threadId: 'thread-3' } })
     expect(frame && 'item' in frame ? frame.item.state : 'missing').toBeUndefined()
   })
+
+  it('keeps a crash-parked reason (O-02) on a changed frame and drops a reason outside the closed set', () => {
+    const parked = parseAttentionFrame({
+      event: 'attention_changed',
+      id: 'e:9',
+      data: JSON.stringify({
+        item: { thread_id: 'thread-6', state: 'needs_input', reason: 'parked', unseen: false, run_id: 'run-6' },
+        counts,
+      }),
+    })
+    const unknown = parseAttentionFrame({
+      event: 'attention_changed',
+      id: 'e:10',
+      data: JSON.stringify({ item: { thread_id: 'thread-7', state: 'needs_input', reason: 'paused-elsewhere' }, counts }),
+    })
+
+    expect(parked).toMatchObject({
+      kind: 'changed',
+      item: { threadId: 'thread-6', state: 'needs_input', reason: 'parked', runId: 'run-6' },
+    })
+    expect(unknown).toMatchObject({ kind: 'changed', item: { threadId: 'thread-7', state: 'needs_input' } })
+    expect(unknown && 'item' in unknown ? unknown.item.reason : 'missing').toBeUndefined()
+  })
 })
 
 describe('AttentionFrameGate', () => {

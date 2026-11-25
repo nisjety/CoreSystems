@@ -258,6 +258,7 @@ async fn decide_with(
     scope: &str,
 ) -> Result<ApprovalDecisionWrite> {
     let record = DecisionRecord {
+        run_events: false,
         source: "user",
         scope,
         audit: false,

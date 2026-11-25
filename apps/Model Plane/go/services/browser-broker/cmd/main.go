@@ -138,6 +138,7 @@ func main() {
 	}
 	options.DurableReadOnly = durableReadOnlyReady(ctx, durable, options.DurableReadOnly)
 	slog.Info("browser site policy", "mode", string(options.SitePolicy))
+	slog.Info("browser space floor", "enabled", options.SpaceFloor)
 
 	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(authz.UnaryInterceptor(verifier)))
 	brokerServer := bbserver.NewServerWithConfig(grants, cfg).WithOptions(options)
@@ -223,6 +224,7 @@ const (
 	envSitePolicy          = "BROWSER_BROKER_SITE_POLICY"
 	envAssistantTaskGrants = "BROWSER_BROKER_ASSISTANT_TASK_GRANTS_ENABLED"
 	envDurableReadOnly     = "BROWSER_BROKER_DURABLE_READ_ONLY_ENABLED"
+	envSpaceFloor          = "BROWSER_SPACE_FLOOR_ENABLED"
 	envGrantMaxTTL         = "BROWSER_GRANT_MAX_TTL"
 	envOrgCoreURL          = "ORG_CORE_URL"
 	envOrgCoreToken        = "BROWSER_BROKER_ORG_CORE_TOKEN"
@@ -233,12 +235,13 @@ const (
 // policy is on, the org-core client. Enforce and shadow both refuse to start
 // without the client: a broker that cannot ask org-core must not run as if it had.
 func serverOptionsFromEnv(getenv func(string) string) (bbserver.Options, error) {
-	// The assistant task grants and durable read-only switches read the exact
+	// The assistant task grants, durable read-only and Space floor switches read the exact
 	// literal "true" only: no trimming, no case folding, and no "1" or "on".
 	options := bbserver.Options{
 		SitePolicy:                 sitepolicy.ParseMode(getenv(envSitePolicy)),
 		AssistantTaskGrantsEnabled: getenv(envAssistantTaskGrants) == "true",
 		DurableReadOnly:            getenv(envDurableReadOnly) == "true",
+		SpaceFloor:                 getenv(envSpaceFloor) == "true",
 	}
 	maxTTL, err := grantMaxTTLFromEnv(getenv)
 	if err != nil {

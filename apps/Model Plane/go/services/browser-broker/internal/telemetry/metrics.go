@@ -29,7 +29,7 @@ var (
 	// only: never an org, owner or domain.
 	GrantsDeniedTotal metric.Int64Counter
 	// SitePolicyVerdictsTotal counts org-core site verdicts at mint, labelled by
-	// outcome (allowed, narrowed, denied, shadow_would_deny, policy_unavailable).
+	// outcome (allowed, narrowed, denied, asked, shadow_would_deny, policy_unavailable, space_floor).
 	SitePolicyVerdictsTotal metric.Int64Counter
 )
 

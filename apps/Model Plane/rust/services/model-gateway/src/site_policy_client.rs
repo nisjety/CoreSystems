@@ -10,6 +10,8 @@
 //! was. Under `shadow` the same refusals are logged and nothing is refused. Under `enforce` a host whose answer cannot
 //! be read is refused, and so is a URL with no host the rules can name, so an outage of org-core narrows the web tools
 //! and never widens them. A check sends org-core canonical hosts only: no path, no query and no content.
+//! A check made for a Space (F-f03-03) names that Space to org-core only while `BROWSER_SPACE_FLOOR_ENABLED` is the
+//! literal `true`, and its answer is held apart from the organisation's own. Off, a Space is never named.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::OnceLock;
@@ -51,6 +53,29 @@ pub fn policy_mode() -> WebDomainPolicyMode {
     })
 }
 
+/// The environment name of the Space floor switch (F-f03-03). browser-broker and execution-core read the same name.
+pub const SPACE_FLOOR_ENV: &str = "BROWSER_SPACE_FLOOR_ENABLED";
+
+/// The Space floor switch, read once so it cannot change under a request. Only the literal `true` turns it on. On, a
+/// check made for a Space names that Space to org-core; off, every check is the organisation's own, as it was before.
+#[must_use]
+pub fn space_floor_enabled() -> bool {
+    #[cfg(test)]
+    {
+        if let Some(on) = test_seam::space_floor() {
+            return on;
+        }
+    }
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| space_floor_enabled_from(std::env::var(SPACE_FLOOR_ENV).ok().as_deref()))
+}
+
+/// The switch's value: the exact literal `true` is on, and anything else (blank, `1`, `on`, `TRUE`, a padded `true`) is off.
+#[must_use]
+pub fn space_floor_enabled_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
 /// A test seam for the switch. The process's switch is read once, so a test cannot set it through the environment
 /// without changing every other test in the binary. A test names the mode its own thread sees instead, and the guard
 /// restores what the thread saw before.
@@ -62,6 +87,7 @@ pub(crate) mod test_seam {
 
     thread_local! {
         static MODE: Cell<Option<WebDomainPolicyMode>> = const { Cell::new(None) };
+        static SPACE_FLOOR: Cell<Option<bool>> = const { Cell::new(None) };
     }
 
     /// The mode this thread's calls see, when a test has named one.
@@ -80,6 +106,25 @@ pub(crate) mod test_seam {
     impl Drop for Guard {
         fn drop(&mut self) {
             MODE.with(|cell| cell.set(self.0));
+        }
+    }
+
+    /// The Space floor this thread's calls see, when a test has named one.
+    pub(crate) fn space_floor() -> Option<bool> {
+        SPACE_FLOOR.with(Cell::get)
+    }
+
+    /// Makes the Space floor `on` for this thread's calls until the guard is dropped.
+    pub(crate) fn set_space_floor(on: bool) -> SpaceFloorGuard {
+        SpaceFloorGuard(SPACE_FLOOR.with(|cell| cell.replace(Some(on))))
+    }
+
+    /// Restores the Space floor this thread saw before [`set_space_floor`] named one.
+    pub(crate) struct SpaceFloorGuard(Option<bool>);
+
+    impl Drop for SpaceFloorGuard {
+        fn drop(&mut self) {
+            SPACE_FLOOR.with(|cell| cell.set(self.0));
         }
     }
 }
@@ -147,13 +192,14 @@ impl SiteVerdicts {
     }
 }
 
-/// The resolve client: one HTTP client and the answers this process holds, keyed by organisation and canonical host.
-/// A refresh replaces an entry whole. The revision rides on each verdict rather than in the key, because a revision
-/// is known only from an answer, so it cannot be part of the key that finds one.
+/// The resolve client: one HTTP client and the answers this process holds, keyed by organisation, Space and canonical
+/// host (the empty Space is the organisation's own answer). A refresh replaces an entry whole. The revision rides on each
+/// verdict rather than in the key, because a revision is known only from an answer, so it cannot be part of the key that
+/// finds one.
 #[derive(Debug)]
 pub struct SiteChecker {
     http: reqwest::Client,
-    entries: DashMap<(String, String), Entry>,
+    entries: DashMap<(String, String, String), Entry>,
 }
 
 impl Default for SiteChecker {
@@ -174,9 +220,21 @@ impl SiteChecker {
         self.verdicts_at(owner, org_id, hosts, Instant::now()).await
     }
 
-    /// The verdicts for `hosts` as of `now`: each host from the cache while its answer is fresh, and the rest asked of
-    /// org-core in batches of [`MAX_RESOLVE_HOSTS`]. A host org-core cannot answer for has no verdict. An unreadable
-    /// answer is not cached, so the next call asks again.
+    /// The verdicts for `hosts` in `space_id` as of now (F-f03-03). An empty `space_id` gives the organisation's own
+    /// verdicts, as [`SiteChecker::verdicts`] does.
+    pub async fn verdicts_in_space(
+        &self,
+        owner: &SiteOwner<'_>,
+        org_id: &str,
+        space_id: &str,
+        hosts: &[String],
+    ) -> SiteVerdicts {
+        self.verdicts_in_space_at(owner, org_id, space_id, hosts, Instant::now())
+            .await
+    }
+
+    /// The verdicts for `hosts` as of `now`: the organisation's own, as [`SiteChecker::verdicts_in_space`] gives them for
+    /// no Space.
     pub async fn verdicts_at(
         &self,
         owner: &SiteOwner<'_>,
@@ -184,11 +242,33 @@ impl SiteChecker {
         hosts: &[String],
         now: Instant,
     ) -> SiteVerdicts {
+        self.verdicts_in_space_at(owner, org_id, "", hosts, now)
+            .await
+    }
+
+    /// [`SiteChecker::verdicts_at`] for one Space. The switch decides whether the Space is used at all: off, the call is the
+    /// organisation's own, with its own cache entries, exactly as before the Space floor. A blank Space is no Space. Each
+    /// host is read from the cache while its answer is fresh, and the rest are asked of org-core in batches of
+    /// [`MAX_RESOLVE_HOSTS`]. A host org-core cannot answer for has no verdict. An unreadable answer is not cached, so the
+    /// next call asks again.
+    async fn verdicts_in_space_at(
+        &self,
+        owner: &SiteOwner<'_>,
+        org_id: &str,
+        space_id: &str,
+        hosts: &[String],
+        now: Instant,
+    ) -> SiteVerdicts {
+        let space = if space_floor_enabled() {
+            space_id.trim()
+        } else {
+            ""
+        };
         let distinct: BTreeSet<&str> = hosts.iter().map(String::as_str).collect();
         let mut by_host = HashMap::new();
         let mut missing: Vec<&str> = Vec::new();
         for host in distinct {
-            match self.fresh(org_id, host, now) {
+            match self.fresh(org_id, space, host, now) {
                 Some(verdict) => {
                     by_host.insert(host.to_owned(), verdict);
                 }
@@ -197,12 +277,12 @@ impl SiteChecker {
         }
         for batch in missing.chunks(MAX_RESOLVE_HOSTS) {
             let batch: Vec<String> = batch.iter().map(|host| (*host).to_owned()).collect();
-            match self.resolve(owner, org_id, &batch).await {
+            match self.resolve(owner, org_id, space, &batch).await {
                 Ok(resolution) => {
                     for host in batch {
                         let verdict = verdict_for(&host, &resolution);
                         self.entries.insert(
-                            (org_id.to_owned(), host.clone()),
+                            (org_id.to_owned(), space.to_owned(), host.clone()),
                             Entry {
                                 verdict,
                                 fetched: now,
@@ -219,18 +299,22 @@ impl SiteChecker {
         SiteVerdicts { by_host }
     }
 
-    /// The held verdict for a host while its answer is within [`POLICY_TTL`].
-    fn fresh(&self, org_id: &str, host: &str, now: Instant) -> Option<HostVerdict> {
-        let entry = self.entries.get(&(org_id.to_owned(), host.to_owned()))?;
+    /// The held verdict for a host in a Space while its answer is within [`POLICY_TTL`].
+    fn fresh(&self, org_id: &str, space: &str, host: &str, now: Instant) -> Option<HostVerdict> {
+        let entry = self
+            .entries
+            .get(&(org_id.to_owned(), space.to_owned(), host.to_owned()))?;
         (now.saturating_duration_since(entry.fetched) <= POLICY_TTL).then_some(entry.verdict)
     }
 
     /// One resolve call for at most [`MAX_RESOLVE_HOSTS`] canonical hosts. Any failure is an error, and the caller
-    /// treats every host it named as unreadable.
+    /// treats every host it named as unreadable. The Space is named in the query only when it is non-empty; the caller
+    /// has already left it empty while the switch is off (F-f03-03).
     async fn resolve(
         &self,
         owner: &SiteOwner<'_>,
         org_id: &str,
+        space_id: &str,
         hosts: &[String],
     ) -> Result<SiteResolution, String> {
         if !routable_org_id(org_id) {
@@ -240,7 +324,11 @@ impl SiteChecker {
         if base.is_empty() || owner.service_token.trim().is_empty() {
             return Err("org-core is not configured for this service".to_owned());
         }
-        let query: Vec<(&str, &str)> = hosts.iter().map(|host| ("host", host.as_str())).collect();
+        let mut query: Vec<(&str, &str)> =
+            hosts.iter().map(|host| ("host", host.as_str())).collect();
+        if !space_id.is_empty() {
+            query.push(("space_id", space_id));
+        }
         let response = self
             .http
             .get(format!("{base}/internal/orgs/{org_id}/browser-sites/resolve"))
@@ -329,7 +417,8 @@ fn refusal_for(url: &str, verdicts: &SiteVerdicts) -> Option<SiteRefusal> {
 
 /// The refusal a web call meets under the switch, when one of its URLs is one the org's rules stop. `None` means the
 /// call may proceed. Under `off` nothing is read. Under `shadow` the refusal is logged and `None` is returned. Under
-/// `enforce` the refusal's typed message is returned for the model.
+/// `enforce` the refusal's typed message is returned for the model. This is the organisation's own answer, for a call made
+/// in no Space: [`fetch_refusal_in_space`] is the check for a call made in one.
 pub async fn fetch_refusal(
     mode: WebDomainPolicyMode,
     checker: &SiteChecker,
@@ -338,11 +427,27 @@ pub async fn fetch_refusal(
     urls: &[&str],
     tool: &str,
 ) -> Option<String> {
+    fetch_refusal_in_space(mode, checker, owner, org_id, "", urls, tool).await
+}
+
+/// [`fetch_refusal`] for a web call made in `space_id` (F-f03-03). A Space is named to org-core only while the Space floor
+/// switch is on; an empty one is the organisation's own answer.
+pub async fn fetch_refusal_in_space(
+    mode: WebDomainPolicyMode,
+    checker: &SiteChecker,
+    owner: &SiteOwner<'_>,
+    org_id: &str,
+    space_id: &str,
+    urls: &[&str],
+    tool: &str,
+) -> Option<String> {
     if mode == WebDomainPolicyMode::Off {
         return None;
     }
     let hosts: Vec<String> = urls.iter().filter_map(|url| host_of_url(url)).collect();
-    let verdicts = checker.verdicts(owner, org_id, &hosts).await;
+    let verdicts = checker
+        .verdicts_in_space(owner, org_id, space_id, &hosts)
+        .await;
     let refusal = urls.iter().find_map(|url| refusal_for(url, &verdicts))?;
     tracing::info!(
         %org_id,
@@ -370,11 +475,13 @@ pub async fn fetch_refusal(
 /// the requested URL's host in its place, with the same fail-closed reads. Under `enforce` a host the rules deny, an
 /// answer that cannot be read, or a `requested` URL with no host refuses the page. Under `shadow` the same judgement is
 /// made and logged, and nothing is refused.
-pub async fn final_url_refusal(
+#[allow(clippy::too_many_arguments)]
+pub async fn final_url_refusal_in_space(
     mode: WebDomainPolicyMode,
     checker: &SiteChecker,
     owner: &SiteOwner<'_>,
     org_id: &str,
+    space_id: &str,
     requested: &str,
     final_url: &str,
     tool: &str,
@@ -392,7 +499,9 @@ pub async fn final_url_refusal(
         return None;
     }
     let hosts: Vec<String> = judged_host.into_iter().collect();
-    let verdicts = checker.verdicts(owner, org_id, &hosts).await;
+    let verdicts = checker
+        .verdicts_in_space(owner, org_id, space_id, &hosts)
+        .await;
     let refusal = refusal_for(judged, &verdicts)?;
     tracing::info!(
         %org_id,
@@ -409,14 +518,30 @@ pub async fn final_url_refusal(
     }
 }
 
-/// Drops from the search replies every hit on a host the org's rules do not allow, and returns how many it dropped.
-/// Under `shadow` it counts them and drops none. Under `off` nothing is read. A hit with no host the rules can name
-/// counts as refused, so an unreadable hit does not reach the model under enforcement.
+/// The refusal a fetch meets when the page it read ended on a host the org's rules do not allow, for a call made in no
+/// Space: the organisation's own answer. [`final_url_refusal_in_space`] is the check for a call made in one (F-f03-03).
+pub async fn final_url_refusal(
+    mode: WebDomainPolicyMode,
+    checker: &SiteChecker,
+    owner: &SiteOwner<'_>,
+    org_id: &str,
+    requested: &str,
+    final_url: &str,
+    tool: &str,
+) -> Option<String> {
+    final_url_refusal_in_space(mode, checker, owner, org_id, "", requested, final_url, tool).await
+}
+
+/// Drops from the search replies every hit on a host the org's rules do not allow, for a search made in `space_id`, and
+/// returns how many it dropped. An empty `space_id` is the organisation's own answer (F-f03-03). Under `shadow` it counts
+/// them and drops none. Under `off` nothing is read. A hit with no host the rules can name counts as refused, so an
+/// unreadable hit does not reach the model under enforcement.
 pub async fn drop_denied_replies(
     mode: WebDomainPolicyMode,
     checker: &SiteChecker,
     owner: &SiteOwner<'_>,
     org_id: &str,
+    space_id: &str,
     replies: &mut [SearchReply],
 ) -> usize {
     if mode == WebDomainPolicyMode::Off {
@@ -427,7 +552,9 @@ pub async fn drop_denied_replies(
         .flat_map(|reply| reply.results.iter())
         .filter_map(|hit| host_of_url(&hit.url))
         .collect();
-    let verdicts = checker.verdicts(owner, org_id, &hosts).await;
+    let verdicts = checker
+        .verdicts_in_space(owner, org_id, space_id, &hosts)
+        .await;
     let enforced = mode == WebDomainPolicyMode::Enforce;
     let mut refused = 0;
     for reply in replies.iter_mut() {
@@ -960,12 +1087,12 @@ mod tests {
         let checker = SiteChecker::default();
 
         let mut shadow = [reply()];
-        let counted = drop_denied_replies(WebDomainPolicyMode::Shadow, &checker, &owner(&base), ORG, &mut shadow).await;
+        let counted = drop_denied_replies(WebDomainPolicyMode::Shadow, &checker, &owner(&base), ORG, "", &mut shadow).await;
         assert_eq!(counted, 2, "shadow counts the blocked host and the host-less hit");
         assert_eq!(shadow[0].results.len(), 3, "shadow drops nothing");
 
         let mut enforced = [reply()];
-        let dropped = drop_denied_replies(WebDomainPolicyMode::Enforce, &checker, &owner(&base), ORG, &mut enforced).await;
+        let dropped = drop_denied_replies(WebDomainPolicyMode::Enforce, &checker, &owner(&base), ORG, "", &mut enforced).await;
         assert_eq!(dropped, 2);
         let urls: Vec<&str> = enforced[0].results.iter().map(|hit| hit.url.as_str()).collect();
         assert_eq!(urls, ["https://example.com/b"], "only the allowed host's hit remains");
@@ -981,7 +1108,7 @@ mod tests {
             rerank: None,
             provider: "brave".to_owned(),
         }];
-        let dropped = drop_denied_replies(WebDomainPolicyMode::Off, &SiteChecker::default(), &owner(&base), ORG, &mut replies).await;
+        let dropped = drop_denied_replies(WebDomainPolicyMode::Off, &SiteChecker::default(), &owner(&base), ORG, "", &mut replies).await;
         assert_eq!(dropped, 0);
         assert_eq!(replies[0].results.len(), 1);
         assert_eq!(requests(&server).await, 0);
@@ -1052,5 +1179,286 @@ mod tests {
             .await
             .expect_err("a different token is not the credential org-core holds");
         assert!(error.contains("HTTP 404"), "{error}");
+    }
+
+    /// The answer org-core gives in these tests, which reads the `space_id` a call names as org-core does: `space-a`
+    /// allows every host of the call, and every other call (the organisation's own, or `space-b`) denies every host.
+    struct AnswerBySpace;
+
+    impl wiremock::Respond for AnswerBySpace {
+        fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+            let space = request
+                .url
+                .query_pairs()
+                .find(|(key, _)| key == "space_id")
+                .map(|(_, value)| value.into_owned());
+            let (effective, cap, source) = if space.as_deref() == Some("space-a") {
+                ("ask", "act", "default")
+            } else {
+                ("deny", "none", "org_block")
+            };
+            let decisions: Vec<serde_json::Value> = request
+                .url
+                .query_pairs()
+                .filter(|(key, _)| key == "host")
+                .map(|(_, host)| {
+                    json!({"host": host, "effective": effective, "cap": cap, "source": source})
+                })
+                .collect();
+            ResponseTemplate::new(200).set_body_json(
+                json!({"organization_id": ORG, "revision": 4, "decisions": decisions}),
+            )
+        }
+    }
+
+    async fn mount_answer_by_space(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path(RESOLVE_PATH))
+            .and(header("x-service-id", "model-gateway"))
+            .and(header("x-service-token", "test-token"))
+            .respond_with(AnswerBySpace)
+            .mount(server)
+            .await;
+    }
+
+    /// The `space_id` each resolve call the server received named, `None` for a call that named none.
+    async fn space_ids_named(server: &MockServer) -> Vec<Option<String>> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|request| {
+                request
+                    .url
+                    .query_pairs()
+                    .find(|(key, _)| key == "space_id")
+                    .map(|(_, value)| value.into_owned())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_space_floor_switch_reads_only_the_literal_true() {
+        assert!(space_floor_enabled_from(Some("true")));
+        for value in [
+            None,
+            Some(""),
+            Some("TRUE"),
+            Some("1"),
+            Some("on"),
+            Some(" true"),
+        ] {
+            assert!(
+                !space_floor_enabled_from(value),
+                "{value:?} must not turn the Space floor on"
+            );
+        }
+    }
+
+    /// F-f03-03: a Space is named to org-core only while the switch is on. Off, the call is the organisation's own, with
+    /// the organisation's own entry, and the Space is not on the wire.
+    #[tokio::test]
+    async fn a_space_is_named_to_org_core_only_under_the_switch() {
+        let server = MockServer::start().await;
+        mount_answer_by_space(&server).await;
+        let base = server.uri();
+        let hosts = vec!["example.com".to_owned()];
+        let checker = SiteChecker::default();
+
+        let on = {
+            let _floor = test_seam::set_space_floor(true);
+            checker
+                .verdicts_in_space(&owner(&base), ORG, "space-a", &hosts)
+                .await
+        };
+        assert!(on.allows_host("example.com"), "the Space allows the host");
+        assert_eq!(
+            space_ids_named(&server).await,
+            vec![Some("space-a".to_owned())]
+        );
+
+        let off = {
+            let _floor = test_seam::set_space_floor(false);
+            checker
+                .verdicts_in_space(&owner(&base), ORG, "space-a", &hosts)
+                .await
+        };
+        assert!(
+            !off.allows_host("example.com"),
+            "switched off, the organisation's own answer denies the host"
+        );
+        assert_eq!(
+            space_ids_named(&server).await,
+            vec![Some("space-a".to_owned()), None],
+            "off names no Space"
+        );
+    }
+
+    /// F-f03-03: an allow held for one Space never answers another Space's call or the organisation's own call for the
+    /// same host, and each Space keeps its own entry.
+    #[tokio::test]
+    async fn an_allow_held_for_one_space_is_not_another_answer() {
+        let server = MockServer::start().await;
+        mount_answer_by_space(&server).await;
+        let base = server.uri();
+        let hosts = vec!["example.com".to_owned()];
+        let checker = SiteChecker::default();
+        let _floor = test_seam::set_space_floor(true);
+
+        // (space, allowed, org-core calls made so far)
+        let steps = [
+            ("space-a", true, 1),
+            ("", false, 2),
+            ("space-a", true, 2),
+            ("space-b", false, 3),
+            ("", false, 3),
+        ];
+        for (space, allowed, calls) in steps {
+            let verdicts = checker
+                .verdicts_in_space(&owner(&base), ORG, space, &hosts)
+                .await;
+            assert_eq!(
+                verdicts.allows_host("example.com"),
+                allowed,
+                "space {space:?}"
+            );
+            assert_eq!(
+                requests(&server).await,
+                calls,
+                "space {space:?}: org-core calls"
+            );
+        }
+    }
+
+    /// F-f03-03 at the policy's surface: the Space functions name the Space to org-core only under the switch, a blank
+    /// Space is the organisation's own answer, and the final-URL and search checks judge the Space the same way.
+    #[tokio::test]
+    async fn the_space_functions_name_a_space_only_under_the_switch() {
+        let server = MockServer::start().await;
+        mount_answer_by_space(&server).await;
+        let base = server.uri();
+        let checker = SiteChecker::default();
+        let url = ["https://example.com/a"];
+        let hit_reply = || SearchReply {
+            results: vec![hit("https://example.com/b")],
+            rerank: None,
+            provider: "brave".to_owned(),
+        };
+
+        {
+            let _floor = test_seam::set_space_floor(true);
+            let allowed = fetch_refusal_in_space(
+                WebDomainPolicyMode::Enforce,
+                &checker,
+                &owner(&base),
+                ORG,
+                "space-a",
+                &url,
+                "fetch_url",
+            )
+            .await;
+            assert_eq!(allowed, None, "the Space allows the host");
+            let denied = fetch_refusal_in_space(
+                WebDomainPolicyMode::Enforce,
+                &checker,
+                &owner(&base),
+                ORG,
+                "space-b",
+                &url,
+                "fetch_url",
+            )
+            .await;
+            assert!(denied.is_some(), "the Space denies the host");
+            let blank = fetch_refusal_in_space(
+                WebDomainPolicyMode::Enforce,
+                &checker,
+                &owner(&base),
+                ORG,
+                "   ",
+                &url,
+                "fetch_url",
+            )
+            .await;
+            assert!(
+                blank.is_some(),
+                "a blank Space is the organisation's own answer, which denies the host"
+            );
+            let final_allowed = final_url_refusal_in_space(
+                WebDomainPolicyMode::Enforce,
+                &checker,
+                &owner(&base),
+                ORG,
+                "space-a",
+                "https://example.org/start",
+                "https://example.com/landing",
+                "web_fetch",
+            )
+            .await;
+            assert_eq!(final_allowed, None, "the Space allows the final host");
+            let final_denied = final_url_refusal_in_space(
+                WebDomainPolicyMode::Enforce,
+                &checker,
+                &owner(&base),
+                ORG,
+                "space-b",
+                "https://example.org/start",
+                "https://example.com/landing",
+                "web_fetch",
+            )
+            .await;
+            assert!(final_denied.is_some(), "the Space denies the final host");
+            let mut kept = [hit_reply()];
+            let kept_count = drop_denied_replies(
+                WebDomainPolicyMode::Enforce,
+                &checker,
+                &owner(&base),
+                ORG,
+                "space-a",
+                &mut kept,
+            )
+            .await;
+            assert_eq!(kept_count, 0, "the Space keeps the allowed host's hit");
+            let mut dropped = [hit_reply()];
+            let dropped_count = drop_denied_replies(
+                WebDomainPolicyMode::Enforce,
+                &checker,
+                &owner(&base),
+                ORG,
+                "space-b",
+                &mut dropped,
+            )
+            .await;
+            assert_eq!(dropped_count, 1, "the Space drops the denied host's hit");
+        }
+
+        {
+            // Switched off, the Space is not named, so this host is asked of org-core as the organisation's own.
+            let _floor = test_seam::set_space_floor(false);
+            let off = fetch_refusal_in_space(
+                WebDomainPolicyMode::Enforce,
+                &checker,
+                &owner(&base),
+                ORG,
+                "space-a",
+                &["https://example.net/a"],
+                "fetch_url",
+            )
+            .await;
+            assert!(
+                off.is_some(),
+                "switched off, the organisation's own answer denies the host"
+            );
+        }
+        assert_eq!(
+            space_ids_named(&server).await,
+            vec![
+                Some("space-a".to_owned()),
+                Some("space-b".to_owned()),
+                None,
+                None
+            ],
+            "only the Space calls under the switch name their Space"
+        );
     }
 }

@@ -118,7 +118,7 @@ func (s *Server) acquireKeyGrant(ctx context.Context, req *AcquireGrantRequest, 
 		return nil, status.Error(codes.FailedPrecondition,
 			"a read-only browser grant must be Zero Data Retention until the durable store persists it")
 	}
-	domains, denied, err := s.applySitePolicy(ctx, principal, domains, readOnly)
+	domains, denied, err := s.applySitePolicy(ctx, principal, req.GetSpaceId(), domains, readOnly)
 	if err != nil {
 		return nil, err
 	}

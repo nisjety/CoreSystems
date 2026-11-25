@@ -25,6 +25,7 @@ use model_gateway::{
     http_routes::build_router,
     latency_levers::LatencyLevers,
     review_proposal_rule::{ReviewProposalRule, PROPOSAL_RULE, PROPOSAL_RULE_ID},
+    session_flow::{prepare_idempotent_agent_run, SessionRun},
     state::{AppState, DynPublisher},
 };
 use mp_contracts::model_plane::v1 as mpv1;
@@ -190,6 +191,9 @@ struct MockSessionHandles {
     /// Refuse `StartManagedRun` as Session Core does when the Space thread already has a live
     /// root run: `Aborted` with `x-mp-error-code: thread_run_active` (WS09-S1).
     refuse_start_thread_run_active: Arc<AtomicBool>,
+    /// Session Core's managed-start dedupe (F-f08-13): when on, a start whose start key an earlier start carried
+    /// answers `already_started` for that run. Off, every start is new, as it always was.
+    dedupe_managed_starts: Arc<AtomicBool>,
 }
 
 struct MockSessionCore {
@@ -235,6 +239,7 @@ impl MockSessionCore {
             append_script: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             append_request_captures: Arc::new(Mutex::new(Vec::new())),
             refuse_start_thread_run_active: Arc::new(AtomicBool::new(false)),
+            dedupe_managed_starts: Arc::new(AtomicBool::new(false)),
         };
         (
             Self {
@@ -770,6 +775,16 @@ impl ManagedRunLifecycle for MockManagedRunLifecycle {
             request.thread_id.clone()
         };
         let run_id = format!("managed-run-for-{thread_id}");
+        // Session Core's managed-start dedupe (F-f08-13): a start whose key an earlier start carried is that run.
+        let already_started = self.handles.dedupe_managed_starts.load(Ordering::SeqCst)
+            && !request.start_key.is_empty()
+            && self
+                .handles
+                .managed_start_captures
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|earlier| earlier.start_key == request.start_key);
         self.handles.run_completed.store(false, Ordering::SeqCst);
         self.handles
             .managed_start_captures
@@ -780,7 +795,7 @@ impl ManagedRunLifecycle for MockManagedRunLifecycle {
             run_id,
             created_at: None,
             terminal_step_id: managed_terminal_step(source).to_owned(),
-            already_started: false,
+            already_started,
             thread_id,
         }))
     }
@@ -1428,6 +1443,149 @@ fn assert_direct_terminal_for_prepared_run(
             "{assertion_message}: direct inference must not heartbeat another producer's run"
         );
     }
+}
+
+/// A state whose session and managed-run clients are the mock's, with every other downstream offline.
+fn agent_session_state(session: SessionMockClients) -> AppState {
+    let mut state = offline_downstreams::offline_state();
+    state.session_client = session.session;
+    state.managed_run_client = session.lifecycle;
+    state
+}
+
+/// One keyed Agent API start: the start key names the run, as `agent_api_run` derives it from the caller's key and
+/// body (F-f08-13). The caller is a non-ZDR key, so the start is never zero-retention.
+async fn keyed_agent_start(
+    state: &AppState,
+    requested_thread: Option<&str>,
+    goal: &str,
+    start_key: &str,
+) -> anyhow::Result<SessionRun> {
+    prepare_idempotent_agent_run(
+        state,
+        requested_thread,
+        "org-1",
+        "user-1",
+        goal,
+        "model-gateway",
+        "execute",
+        start_key,
+        ManagedRunSource::GatewayDirect,
+        "session-token",
+    )
+    .await
+}
+
+/// The user prompts one mock thread holds, as Session Core recorded them.
+fn user_prompts_on(handles: &MockSessionHandles, thread_id: &str) -> usize {
+    handles
+        .append_captures
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(role, thread)| role == "user" && thread == thread_id)
+        .count()
+}
+
+/// F-f08-13: a keyed Agent API start is named by its key. A replay answers the first run and its thread and writes no
+/// second prompt, and a replay without a named thread finds the thread the first start made.
+#[tokio::test]
+async fn a_keyed_agent_start_replayed_writes_one_prompt_and_answers_the_first_run() {
+    let (mock, handles) = MockSessionCore::new();
+    handles.dedupe_managed_starts.store(true, Ordering::SeqCst);
+    let state = agent_session_state(spawn_session_mock(mock).await);
+
+    let first = keyed_agent_start(&state, None, "summarise the report", "start-key-1")
+        .await
+        .expect("the first start");
+    let replay = keyed_agent_start(&state, None, "summarise the report", "start-key-1")
+        .await
+        .expect("the replay");
+
+    assert!(!first.already_started, "the first start begins the run");
+    assert!(
+        replay.already_started,
+        "a repeat of the start key is already started"
+    );
+    assert_eq!(replay.run_id, first.run_id);
+    assert_eq!(
+        replay.thread_id, first.thread_id,
+        "the replay finds the thread the first start made"
+    );
+    assert_eq!(
+        user_prompts_on(&handles, &first.thread_id),
+        1,
+        "the replay writes no second prompt"
+    );
+    assert_eq!(
+        managed_start_count(&handles),
+        2,
+        "both starts reached Session Core"
+    );
+}
+
+/// F-f08-13: a keyed start on a named thread replays the same way: the replay answers the first run and the prompt is
+/// written once.
+#[tokio::test]
+async fn a_keyed_agent_start_on_a_named_thread_replayed_writes_its_prompt_once() {
+    let (mock, handles) = MockSessionCore::new();
+    handles.dedupe_managed_starts.store(true, Ordering::SeqCst);
+    let state = agent_session_state(spawn_session_mock(mock).await);
+
+    let first = keyed_agent_start(
+        &state,
+        Some("thread-named"),
+        "summarise the report",
+        "start-key-2",
+    )
+    .await
+    .expect("the first start");
+    let replay = keyed_agent_start(
+        &state,
+        Some("thread-named"),
+        "summarise the report",
+        "start-key-2",
+    )
+    .await
+    .expect("the replay");
+
+    assert_eq!(first.thread_id, "thread-named");
+    assert!(replay.already_started);
+    assert_eq!(replay.run_id, first.run_id);
+    assert_eq!(
+        user_prompts_on(&handles, "thread-named"),
+        1,
+        "the replay writes no second prompt"
+    );
+}
+
+/// F-f08-13: a different body is a different start, so it is a second run; a replay of the first body still answers
+/// the first run.
+#[tokio::test]
+async fn a_keyed_agent_start_with_a_different_body_is_a_second_run() {
+    let (mock, handles) = MockSessionCore::new();
+    handles.dedupe_managed_starts.store(true, Ordering::SeqCst);
+    let state = agent_session_state(spawn_session_mock(mock).await);
+
+    // `agent_api_run` derives a different start key from a different body (`idempotent_request_id`).
+    let first = keyed_agent_start(&state, None, "summarise the report", "start-key-a")
+        .await
+        .expect("the first start");
+    let second = keyed_agent_start(&state, None, "another question", "start-key-b")
+        .await
+        .expect("the second start");
+    assert!(!second.already_started, "a different body starts a run");
+    assert_ne!(second.run_id, first.run_id);
+    assert_eq!(user_prompts_on(&handles, &second.thread_id), 1);
+
+    let replay = keyed_agent_start(&state, None, "summarise the report", "start-key-a")
+        .await
+        .expect("the replay");
+    assert!(replay.already_started);
+    assert_eq!(
+        replay.run_id, first.run_id,
+        "the first body still answers its own run"
+    );
 }
 
 fn sse_frames(body: &str) -> Vec<(Option<u64>, String, serde_json::Value)> {

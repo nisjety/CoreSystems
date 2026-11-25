@@ -57,6 +57,7 @@ fn the_gateway_may_publish_and_subscribe_every_run_control_subject() {
         RunControlSubject::request("req-1", RunControlOp::Cancel),
         RunControlSubject::request("req-1", RunControlOp::Queue),
         RunControlSubject::request("req-1", RunControlOp::Probe),
+        RunControlSubject::request("req-1", RunControlOp::Retract),
         RunControlSubject::request_any_op("req-1"),
         RunControlSubject::run_cancel("run_9"),
     ];

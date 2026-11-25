@@ -356,11 +356,45 @@ pub(crate) struct SettledGoalTurn {
     pub(crate) turn_no: u32,
 }
 
+/// What a dispatch task settles a claimed goal turn with once its run answers (F-f09-10): a cheap
+/// clone of the ledger's client, the turn's own session bearer and its ids. Its settle is the
+/// ledger's settle, made from the task, through the same request builder.
+#[derive(Clone)]
+pub(crate) struct GoalSettleHandle {
+    client: ThreadGoalServiceClient<Channel>,
+    bearer: VerifiedSessionBearer,
+    org_id: String,
+    goal_id: String,
+    turn_no: u32,
+    run_id: String,
+}
+
+impl GoalSettleHandle {
+    /// Settle the turn and answer the settled goal, as [`GoalTurnLedger::settle`] does. Session Core
+    /// answers a settled turn as it stands, so the ledger's own settle that follows reads it.
+    pub(crate) async fn settle(&self, settlement: &TurnSettlement) -> Option<SettledGoalTurn> {
+        let request = settle_request(
+            &self.goal_id,
+            &self.org_id,
+            self.turn_no,
+            &self.run_id,
+            settlement,
+        );
+        let goal = send_settle(self.client.clone(), &self.bearer, request).await?;
+        Some(SettledGoalTurn {
+            goal,
+            turn_no: self.turn_no,
+        })
+    }
+}
+
 /// One claimed goal turn. Settled explicitly from the run's answer; any other exit of the stream
 /// (a refused start, a Stop, a follow deadline, a dispatch error) drops it, and the drop settles
 /// the turn without usage: `cancelled` before a run was bound (no turn counted), the outcome set
 /// by [`Self::end_as`] or `unknown` after. The settle on drop is best effort; a lost one is
-/// settled `lease_expired` by the goal's next claim.
+/// settled `lease_expired` by the goal's next claim. A turn whose run a dispatch task still follows
+/// is settled by that task when the answer comes (F-f09-10): the drop waits for the task to end and
+/// settles only what the task left unsettled.
 pub(crate) struct GoalTurnLedger {
     client: ThreadGoalServiceClient<Channel>,
     bearer: VerifiedSessionBearer,
@@ -372,6 +406,8 @@ pub(crate) struct GoalTurnLedger {
     /// The outcome a settle on drop names.
     end: &'static str,
     settled: bool,
+    /// Set by [`Self::settle_after_dispatch`]: the dispatch task's word on whether it settled the turn.
+    dispatch_done: Option<tokio::sync::oneshot::Receiver<bool>>,
 }
 
 impl GoalTurnLedger {
@@ -409,6 +445,7 @@ impl GoalTurnLedger {
             allowance: GoalAllowance::of_claim(&claimed),
             end: "cancelled",
             settled: false,
+            dispatch_done: None,
         })
     }
 
@@ -454,6 +491,30 @@ impl GoalTurnLedger {
         self.end = outcome;
     }
 
+    /// The handle a dispatch task settles this turn with (F-f09-10). Taken after [`Self::bind`], so
+    /// the handle names the run.
+    pub(crate) fn detached(&self) -> GoalSettleHandle {
+        GoalSettleHandle {
+            client: self.client.clone(),
+            bearer: self.bearer.clone(),
+            org_id: self.org_id.clone(),
+            goal_id: self.goal_id.clone(),
+            turn_no: self.turn_no,
+            run_id: self.run_id.clone(),
+        }
+    }
+
+    /// Leave the turn's settle to the dispatch task that follows its run (F-f09-10). The task sends
+    /// `true` once it has settled the turn from the run's answer, and drops its sender when it ends.
+    /// The drop then settles the turn only when the task did not, so a follower that gave up cannot
+    /// settle the turn `unknown` ahead of the run's own answer.
+    pub(crate) fn settle_after_dispatch(
+        &mut self,
+        dispatch_done: tokio::sync::oneshot::Receiver<bool>,
+    ) {
+        self.dispatch_done = Some(dispatch_done);
+    }
+
     /// Settle the turn from its run's answer and return the settled goal with its turn number; `None`
     /// when the settle failed (logged). The caller answers the goal's `goal_progress` frame and judges
     /// the turn from it.
@@ -468,22 +529,13 @@ impl GoalTurnLedger {
     }
 
     fn request(&self, settlement: &TurnSettlement) -> SettleGoalTurnRequest {
-        SettleGoalTurnRequest {
-            goal_id: self.goal_id.clone(),
-            org_id: self.org_id.clone(),
-            turn_no: self.turn_no,
-            run_id: self.run_id.clone(),
-            outcome: settlement.outcome.to_owned(),
-            metered_input_tokens: settlement.tokens.input,
-            metered_output_tokens: settlement.tokens.output,
-            cost_usd_micros: settlement
-                .cost_usd_micros
-                .map_or(-1, |micros| i64::try_from(micros).unwrap_or(i64::MAX)),
-            cost_basis: settlement.cost_basis.to_owned(),
-            // The completion judge (EP-7 S3) settles its own tokens; this turn's run spent none.
-            judge_tokens: 0,
-            usage_source: settlement.usage_source.to_owned(),
-        }
+        settle_request(
+            &self.goal_id,
+            &self.org_id,
+            self.turn_no,
+            &self.run_id,
+            settlement,
+        )
     }
 }
 
@@ -499,9 +551,45 @@ impl Drop for GoalTurnLedger {
         };
         let client = self.client.clone();
         let bearer = self.bearer.clone();
+        let dispatch_done = self.dispatch_done.take();
         runtime.spawn(async move {
+            if let Some(dispatch_done) = dispatch_done {
+                // The dispatch task settled the turn from the run's answer, so nothing is left to
+                // settle. Any other end (no answer, an abort, a task that ended unsettled) settles
+                // here, as it did before the task carried the settle.
+                if dispatch_done.await.unwrap_or(false) {
+                    return;
+                }
+            }
             send_settle(client, &bearer, request).await;
         });
+    }
+}
+
+/// The `SettleGoalTurn` request of one turn: the builder the ledger and its dispatch handle share,
+/// so both settle the same request.
+fn settle_request(
+    goal_id: &str,
+    org_id: &str,
+    turn_no: u32,
+    run_id: &str,
+    settlement: &TurnSettlement,
+) -> SettleGoalTurnRequest {
+    SettleGoalTurnRequest {
+        goal_id: goal_id.to_owned(),
+        org_id: org_id.to_owned(),
+        turn_no,
+        run_id: run_id.to_owned(),
+        outcome: settlement.outcome.to_owned(),
+        metered_input_tokens: settlement.tokens.input,
+        metered_output_tokens: settlement.tokens.output,
+        cost_usd_micros: settlement
+            .cost_usd_micros
+            .map_or(-1, |micros| i64::try_from(micros).unwrap_or(i64::MAX)),
+        cost_basis: settlement.cost_basis.to_owned(),
+        // The completion judge (EP-7 S3) settles its own tokens; this turn's run spent none.
+        judge_tokens: 0,
+        usage_source: settlement.usage_source.to_owned(),
     }
 }
 
@@ -534,6 +622,23 @@ pub(crate) const SEGMENT_TOPUP_ENV: &str = "MODEL_GATEWAY_GOAL_SEGMENT_TOPUP";
 #[must_use]
 pub(crate) fn segment_topup_enabled() -> bool {
     mp_contracts::loop_fold::switch_from(std::env::var(SEGMENT_TOPUP_ENV).ok().as_deref())
+}
+
+/// The switch that lets a goal turn's dispatch task settle it from the run's answer (F-f09-10).
+pub(crate) const SETTLE_IN_DISPATCH_ENV: &str = "MODEL_GATEWAY_GOAL_SETTLE_IN_DISPATCH";
+
+/// Whether the dispatch task settles a claimed goal turn as soon as its run answers (F-f09-10),
+/// read at each launch. Only the literal `true`. Off, no handle is made and the follower settles the
+/// turn exactly as it did before.
+#[must_use]
+pub(crate) fn settle_in_dispatch_enabled() -> bool {
+    settle_in_dispatch_from(std::env::var(SETTLE_IN_DISPATCH_ENV).ok().as_deref())
+}
+
+/// The reading of [`SETTLE_IN_DISPATCH_ENV`]'s raw value.
+#[must_use]
+pub(crate) fn settle_in_dispatch_from(raw: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(raw)
 }
 
 /// How long a top-up may delay the end of a continuation's stream; a slower one is a warning and the
@@ -1128,6 +1233,169 @@ pub(crate) async fn judge_goal_turn(
     Some(recorded)
 }
 
+/// An in-process `ThreadGoalService` for the ledger's and the dispatch task's tests. It records every
+/// settle it is sent and counts a turn by its first settle, answering a settled turn as it stands, as
+/// Session Core does. The other RPCs refuse: no test here reaches them.
+#[cfg(test)]
+pub(crate) mod fake_service {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use mp_contracts::model_plane::v1::{
+        thread_goal_service_client::ThreadGoalServiceClient,
+        thread_goal_service_server::{ThreadGoalService, ThreadGoalServiceServer},
+        BindGoalTurnRunRequest, BindGoalTurnRunResponse, ClaimGoalTurnRequest,
+        ClaimGoalTurnResponse, GetGoalTurnForJudgeRequest, GetGoalTurnForJudgeResponse,
+        GetThreadGoalRequest, ListRunToolCallsForJudgeRequest, ListRunToolCallsForJudgeResponse,
+        RecordGoalVerdictRequest, SetThreadGoalRequest, SettleGoalTurnRequest, ThreadGoal,
+        ThreadGoalResponse, TopUpGoalTurnRequest, UpdateThreadGoalRequest,
+    };
+    use tonic::transport::{Channel, Server};
+    use tonic::{Request, Response, Status};
+
+    /// The settles a fake has received: all of them in arrival order, and the one that counted the turn.
+    #[derive(Default)]
+    pub(crate) struct Settles {
+        pub(crate) all: Vec<SettleGoalTurnRequest>,
+        pub(crate) counted: Option<SettleGoalTurnRequest>,
+    }
+
+    #[derive(Clone, Default)]
+    pub(crate) struct FakeGoalService(pub(crate) Arc<Mutex<Settles>>);
+
+    fn refused(rpc: &str) -> Status {
+        Status::unimplemented(format!("the fake goal service does not serve {rpc}"))
+    }
+
+    #[tonic::async_trait]
+    impl ThreadGoalService for FakeGoalService {
+        async fn set_thread_goal(
+            &self,
+            _: Request<SetThreadGoalRequest>,
+        ) -> Result<Response<ThreadGoalResponse>, Status> {
+            Err(refused("SetThreadGoal"))
+        }
+
+        async fn get_thread_goal(
+            &self,
+            _: Request<GetThreadGoalRequest>,
+        ) -> Result<Response<ThreadGoalResponse>, Status> {
+            Err(refused("GetThreadGoal"))
+        }
+
+        async fn update_thread_goal(
+            &self,
+            _: Request<UpdateThreadGoalRequest>,
+        ) -> Result<Response<ThreadGoalResponse>, Status> {
+            Err(refused("UpdateThreadGoal"))
+        }
+
+        async fn claim_goal_turn(
+            &self,
+            _: Request<ClaimGoalTurnRequest>,
+        ) -> Result<Response<ClaimGoalTurnResponse>, Status> {
+            Ok(Response::new(ClaimGoalTurnResponse {
+                turn_no: 1,
+                ..Default::default()
+            }))
+        }
+
+        async fn bind_goal_turn_run(
+            &self,
+            _: Request<BindGoalTurnRunRequest>,
+        ) -> Result<Response<BindGoalTurnRunResponse>, Status> {
+            Ok(Response::new(BindGoalTurnRunResponse {}))
+        }
+
+        async fn settle_goal_turn(
+            &self,
+            request: Request<SettleGoalTurnRequest>,
+        ) -> Result<Response<ThreadGoalResponse>, Status> {
+            let request = request.into_inner();
+            let mut settles = self.0.lock().expect("the record");
+            if settles.counted.is_none() {
+                settles.counted = Some(request.clone());
+            }
+            settles.all.push(request);
+            Ok(Response::new(ThreadGoalResponse {
+                goal: Some(ThreadGoal::default()),
+                found: true,
+            }))
+        }
+
+        async fn top_up_goal_turn(
+            &self,
+            _: Request<TopUpGoalTurnRequest>,
+        ) -> Result<Response<ThreadGoalResponse>, Status> {
+            Err(refused("TopUpGoalTurn"))
+        }
+
+        async fn record_goal_verdict(
+            &self,
+            _: Request<RecordGoalVerdictRequest>,
+        ) -> Result<Response<ThreadGoalResponse>, Status> {
+            Err(refused("RecordGoalVerdict"))
+        }
+
+        async fn get_goal_turn_for_judge(
+            &self,
+            _: Request<GetGoalTurnForJudgeRequest>,
+        ) -> Result<Response<GetGoalTurnForJudgeResponse>, Status> {
+            Err(refused("GetGoalTurnForJudge"))
+        }
+
+        async fn list_run_tool_calls_for_judge(
+            &self,
+            _: Request<ListRunToolCallsForJudgeRequest>,
+        ) -> Result<Response<ListRunToolCallsForJudgeResponse>, Status> {
+            Err(refused("ListRunToolCallsForJudge"))
+        }
+    }
+
+    /// A client to a fresh fake on a loopback port, and the fake's record.
+    pub(crate) async fn client() -> (ThreadGoalServiceClient<Channel>, FakeGoalService) {
+        let service = FakeGoalService::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port");
+        let address = listener.local_addr().expect("the port");
+        let served = service.clone();
+        tokio::spawn(async move {
+            let _ = Server::builder()
+                .add_service(ThreadGoalServiceServer::new(served))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await;
+        });
+        let client = ThreadGoalServiceClient::connect(format!("http://{address}"))
+            .await
+            .expect("the fake answers");
+        (client, service)
+    }
+
+    /// The settles received once `count` of them have arrived, within a few seconds.
+    pub(crate) async fn settles_reaching(
+        service: &FakeGoalService,
+        count: usize,
+    ) -> Vec<SettleGoalTurnRequest> {
+        for _ in 0..500 {
+            let all = service.0.lock().expect("the record").all.clone();
+            if all.len() >= count {
+                return all;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the fake received fewer than {count} settles");
+    }
+
+    /// The settles received so far, after a short pause for any still on the way.
+    pub(crate) async fn settles_after_a_pause(
+        service: &FakeGoalService,
+    ) -> Vec<SettleGoalTurnRequest> {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        service.0.lock().expect("the record").all.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1520,5 +1788,184 @@ mod tests {
             .top_up("run-1", "01JREQUEST", &nothing)
             .await
             .is_none());
+    }
+
+    use super::fake_service::{settles_after_a_pause, settles_reaching};
+
+    /// A claimed turn with its run bound, through the fake's claim and bind.
+    async fn bound_turn(client: ThreadGoalServiceClient<Channel>) -> GoalTurnLedger {
+        let bearer =
+            crate::auth::VerifiedSessionBearer::for_test("fixture-token-aaaaaaaaaaaaaaaaaaaa");
+        let mut ledger = GoalTurnLedger::claim(client, &bearer, "org-1", "goal-1")
+            .await
+            .expect("the fake admits the claim");
+        ledger.bind("run-1", false).await;
+        ledger
+    }
+
+    /// The settlement of a run that ended with `usage`, on the default (metered) route.
+    fn answered(outcome: &'static str, usage: &RunUsage) -> TurnSettlement {
+        TurnSettlement::of_run(outcome, Some(usage), None, None, CostBasis::Metered, "", "")
+    }
+
+    #[test]
+    fn the_settle_in_dispatch_switch_reads_only_the_literal_true() {
+        assert_eq!(
+            SETTLE_IN_DISPATCH_ENV,
+            "MODEL_GATEWAY_GOAL_SETTLE_IN_DISPATCH"
+        );
+        for off in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some("on"),
+            Some(" true "),
+        ] {
+            assert!(!settle_in_dispatch_from(off), "{off:?}");
+        }
+        assert!(settle_in_dispatch_from(Some("true")));
+    }
+
+    #[tokio::test]
+    async fn a_dispatch_handle_settles_the_bound_run_through_the_ledgers_request() {
+        let (client, service) = fake_service::client().await;
+        let mut ledger = bound_turn(client).await;
+        let (answer, dispatch_done) = tokio::sync::oneshot::channel::<bool>();
+        ledger.settle_after_dispatch(dispatch_done);
+        let handle = ledger.detached();
+        let settled = handle
+            .settle(&answered("completed", &metered_usage(7, 3)))
+            .await
+            .expect("the fake answers the settle");
+        assert_eq!(settled.turn_no, 1);
+        let sent = settles_reaching(&service, 1).await;
+        assert_eq!(sent[0].goal_id, "goal-1");
+        assert_eq!(sent[0].org_id, "org-1");
+        assert_eq!(sent[0].turn_no, 1);
+        assert_eq!(sent[0].run_id, "run-1", "the handle names the bound run");
+        assert_eq!(sent[0].outcome, "completed");
+        assert_eq!(sent[0].metered_input_tokens, 7);
+        assert_eq!(sent[0].metered_output_tokens, 3);
+        assert_eq!(sent[0].usage_source, "run_response");
+        // The task reports that it settled the turn, so the ledger's drop sends nothing more.
+        answer.send(true).expect("the drop is waiting");
+        drop(ledger);
+        assert_eq!(settles_after_a_pause(&service).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_follower_dropped_before_the_answer_leaves_the_settle_to_the_dispatch_task() {
+        let (client, service) = fake_service::client().await;
+        let mut ledger = bound_turn(client).await;
+        let (answer, dispatch_done) = tokio::sync::oneshot::channel::<bool>();
+        ledger.settle_after_dispatch(dispatch_done);
+        let handle = ledger.detached();
+        // The follower gives up before the run answers: its drop must not settle the turn `unknown`.
+        drop(ledger);
+        assert!(
+            settles_after_a_pause(&service).await.is_empty(),
+            "the drop waits for the dispatch task"
+        );
+        // The run answers: the task settles with the run's usage, then reports that it did.
+        assert!(handle
+            .settle(&answered("completed", &metered_usage(7, 3)))
+            .await
+            .is_some());
+        answer.send(true).expect("the drop is waiting");
+        let sent = settles_after_a_pause(&service).await;
+        assert_eq!(sent.len(), 1, "one settle, the task's");
+        assert_eq!(sent[0].outcome, "completed");
+        assert_eq!(sent[0].usage_source, "run_response");
+        assert_eq!(sent[0].metered_input_tokens, 7);
+        let counted = service
+            .0
+            .lock()
+            .expect("the record")
+            .counted
+            .clone()
+            .expect("the turn was counted");
+        assert_eq!(counted.outcome, "completed");
+    }
+
+    #[tokio::test]
+    async fn a_settle_by_the_task_and_then_by_the_follower_counts_the_turn_once() {
+        let (client, service) = fake_service::client().await;
+        let ledger = bound_turn(client).await;
+        let handle = ledger.detached();
+        assert!(handle
+            .settle(&answered("completed", &metered_usage(7, 3)))
+            .await
+            .is_some());
+        // The follower's own settle, from its stream, is answered with the settled goal too.
+        let read = ledger
+            .settle(&TurnSettlement::of_run(
+                "completed",
+                None,
+                None,
+                None,
+                CostBasis::Metered,
+                "",
+                "",
+            ))
+            .await;
+        assert!(read.is_some(), "the settled goal is still answered");
+        let sent = service.0.lock().expect("the record").all.clone();
+        assert_eq!(sent.len(), 2, "both settles reached session-core");
+        let counted = service
+            .0
+            .lock()
+            .expect("the record")
+            .counted
+            .clone()
+            .expect("the turn was counted");
+        assert_eq!(
+            counted.usage_source, "run_response",
+            "the task's settle counted the turn"
+        );
+        assert_eq!(counted.metered_input_tokens, 7);
+    }
+
+    #[tokio::test]
+    async fn a_task_that_leaves_the_turn_unsettled_hands_it_back_to_the_drop() {
+        let (client, service) = fake_service::client().await;
+        let mut ledger = bound_turn(client).await;
+        let (answer, dispatch_done) = tokio::sync::oneshot::channel::<bool>();
+        ledger.settle_after_dispatch(dispatch_done);
+        drop(ledger);
+        // A task that settled nothing (a pause, a failed settle, no usage) reports `false`.
+        answer.send(false).expect("the drop is waiting");
+        let sent = settles_reaching(&service, 1).await;
+        assert_eq!(sent[0].outcome, "unknown");
+        assert_eq!(sent[0].usage_source, "none");
+        assert_eq!(sent[0].run_id, "run-1");
+    }
+
+    #[tokio::test]
+    async fn a_stopped_turn_settles_cancelled_when_its_dispatch_task_is_aborted() {
+        let (client, service) = fake_service::client().await;
+        let mut ledger = bound_turn(client).await;
+        let (answer, dispatch_done) = tokio::sync::oneshot::channel::<bool>();
+        ledger.settle_after_dispatch(dispatch_done);
+        ledger.end_as("cancelled");
+        // An aborted task never reports: its sender drops unsent.
+        drop(answer);
+        drop(ledger);
+        let sent = settles_reaching(&service, 1).await;
+        assert_eq!(sent[0].outcome, "cancelled");
+        assert_eq!(sent[0].usage_source, "none");
+    }
+
+    #[tokio::test]
+    async fn a_turn_with_no_dispatch_task_settles_unknown_when_dropped() {
+        let (client, service) = fake_service::client().await;
+        let ledger = bound_turn(client).await;
+        drop(ledger);
+        let sent = settles_reaching(&service, 1).await;
+        assert_eq!(
+            sent[0].outcome, "unknown",
+            "with the switch off the drop settles as it always did"
+        );
+        assert_eq!(sent[0].usage_source, "none");
     }
 }

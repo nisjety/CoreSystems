@@ -90,6 +90,15 @@ export const MODE_LOCKDOWN_COPY: ErrorCopy = {
 }
 
 /**
+ * A run a crash stopped (O-02): its loop is gone and it waits for its owner, who may continue it or leave it. The
+ * attention list names the run once its notice is due. The words say what happened and carry none of the run's content.
+ */
+export const CRASH_PARK_NOTICE_COPY: ErrorCopy = {
+  no: 'Kjøringen stoppet uventet og venter; fortsett den eller la den ligge',
+  en: 'The run stopped unexpectedly and is waiting; continue it or leave it',
+}
+
+/**
  * An unexpected failure inside the service (`internal`), as the chat stream words it (chat-normalizers.ts). It is not an
  * ERROR_COPY entry on purpose: over HTTP a 5xx is answered by its status class, so each caller keeps its own sentence, which
  * names what failed (the Quarry INTERNAL passthrough is pinned the same way in gateway-error-codes.test.ts). Whether anything

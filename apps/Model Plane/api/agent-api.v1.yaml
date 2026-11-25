@@ -41,6 +41,19 @@ paths:
         model call.
       x-gateway-path: /v1/agent/runs
       x-scope: agent:runs
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: |
+            A key the caller chooses for this start. The same key on the same body starts nothing
+            new: the answer is the run that start began. The same key on a different body is a
+            different start. Where the service does not honour the key, it is ignored.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+            pattern: '^[!-~]+$'
       requestBody:
         required: true
         content:

@@ -64,6 +64,9 @@ const DEFAULT_SERVICE_ID: &str = "verevon-gateway";
 const API_KEY_HEADER: &str = "x-api-key";
 pub(crate) const ORG_HEADER: &str = "x-agent-org-id";
 const LAST_EVENT_ID_HEADER: &str = "last-event-id";
+/// The one caller header a start forwards besides the bearers (F-f08-13): the caller's idempotency key, which the
+/// gateway hashes into the start's identity. Lower case, as `HeaderMap` looks names up.
+const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 /// The closed scope auth-core grants the three Agent API audiences.
 const AGENT_SCOPE: &str = "agent:runs";
 const GATEWAY_PREFIX: &str = "/v1/agent";
@@ -72,6 +75,8 @@ const MAX_API_KEY_CHARS: usize = 512;
 const MAX_ID_CHARS: usize = 128;
 const MAX_CURSOR_CHARS: usize = 512;
 const MAX_LAST_EVENT_ID_CHARS: usize = 256;
+/// The longest `Idempotency-Key` a start forwards (`agent-api-v1.json` `startRun.headers`).
+const MAX_IDEMPOTENCY_KEY_CHARS: usize = 128;
 const MAX_TOKEN_CHARS: usize = 8192;
 const MAX_RELAYED_DETAIL_CHARS: usize = 256;
 const PAGE_LIMIT_MAX: u32 = 100;
@@ -654,6 +659,9 @@ pub(crate) struct AgentApi {
     http: reqwest::Client,
     streaming_http: reqwest::Client,
     limiter: RateLimiter,
+    /// `GATEWAY_AGENT_API_IDEMPOTENCY` (F-f08-13), read once from `AppState`: a start reads and forwards its
+    /// Idempotency-Key only while it is on.
+    idempotency: bool,
 }
 
 /// The exchanged bearers of one request: the only authority forwarded upstream.
@@ -765,6 +773,26 @@ fn read_last_event_id(headers: &HeaderMap) -> Result<Option<String>, Response> {
     }
 }
 
+/// The one `Idempotency-Key` a start carries, when it carries one (F-f08-13). Absent is fine. A repeated, empty,
+/// over-long or non-visible-ASCII value is `invalid_request` naming the header, and it is read before any key is
+/// exchanged, so a malformed start spends no credential.
+fn read_idempotency_key(headers: &HeaderMap) -> Result<Option<String>, Response> {
+    let mut values = headers.get_all(IDEMPOTENCY_KEY_HEADER).iter();
+    let Some(first) = values.next() else {
+        return Ok(None);
+    };
+    match first.to_str() {
+        Ok(key)
+            if values.next().is_none()
+                && (1..=MAX_IDEMPOTENCY_KEY_CHARS).contains(&key.len())
+                && key.bytes().all(|byte| byte.is_ascii_graphic()) =>
+        {
+            Ok(Some(key.to_owned()))
+        }
+        _ => Err(invalid_request("Idempotency-Key")),
+    }
+}
+
 fn sse_transport_error_event() -> Bytes {
     Bytes::from_static(
         b"event: error\ndata: {\"error\":{\"code\":\"upstream_unavailable\",\"message\":\"The service is temporarily unavailable. Try again shortly.\",\"details\":{}}}\n\n",
@@ -779,6 +807,7 @@ impl AgentApi {
             http: state.client.clone(),
             streaming_http: state.streaming_client.clone(),
             limiter: RateLimiter::from_cache_with_rpm(&state.cache, rpm_per_key),
+            idempotency: state.space_features.agent_api_idempotency,
         }
     }
 
@@ -867,12 +896,33 @@ impl AgentApi {
         bearers: &Bearers,
         not_found: &'static str,
     ) -> Response {
+        self.forward_json_with_key(holder, method, path, query, body, bearers, not_found, None)
+            .await
+    }
+
+    /// [`forward_json`], also naming the caller's idempotency key upstream (F-f08-13). The key is the one header a
+    /// start forwards besides the bearers: no other caller header crosses.
+    #[allow(clippy::too_many_arguments)] // one forwarded request, every part named
+    async fn forward_json_with_key(
+        &self,
+        holder: &KeyHolder,
+        method: Method,
+        path: &str,
+        query: &str,
+        body: Option<Value>,
+        bearers: &Bearers,
+        not_found: &'static str,
+        idempotency_key: Option<&str>,
+    ) -> Response {
         let mut target = format!("{}{GATEWAY_PREFIX}{path}", self.model_gateway_url);
         if !query.is_empty() {
             target.push('?');
             target.push_str(query);
         }
         let mut request = bearers.apply(self.http.request(method, &target));
+        if let Some(key) = idempotency_key {
+            request = request.header(IDEMPOTENCY_KEY_HEADER, key);
+        }
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -966,6 +1016,16 @@ async fn start_run(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    // F-f08-13: while the switch is on, a malformed Idempotency-Key is refused before any key is exchanged. Off, the
+    // header is neither read nor forwarded, so the start is what it was.
+    let idempotency_key = if api.idempotency {
+        match read_idempotency_key(&headers) {
+            Ok(key) => key,
+            Err(response) => return response,
+        }
+    } else {
+        None
+    };
     let holder = match api.admit(&headers).await {
         Ok(holder) => holder,
         Err(response) => return response,
@@ -978,7 +1038,7 @@ async fn start_run(
         Ok(bearers) => bearers,
         Err(response) => return response,
     };
-    api.forward_json(
+    api.forward_json_with_key(
         &holder,
         Method::POST,
         "/runs",
@@ -986,6 +1046,7 @@ async fn start_run(
         Some(body),
         &bearers,
         "thread_not_found",
+        idempotency_key.as_deref(),
     )
     .await
 }
@@ -1170,11 +1231,19 @@ mod tests {
     }
 
     fn api_for(auth: &MockServer, model_gateway: &MockServer, rpm: f64) -> Arc<AgentApi> {
-        Arc::new(AgentApi::new(
-            &state_for(auth, model_gateway),
-            Some(credential()),
-            rpm,
-        ))
+        api_for_idempotency(auth, model_gateway, rpm, true)
+    }
+
+    /// The ingress with its `GATEWAY_AGENT_API_IDEMPOTENCY` switch set as given (F-f08-13).
+    fn api_for_idempotency(
+        auth: &MockServer,
+        model_gateway: &MockServer,
+        rpm: f64,
+        idempotency: bool,
+    ) -> Arc<AgentApi> {
+        let mut state = state_for(auth, model_gateway);
+        state.space_features.agent_api_idempotency = idempotency;
+        Arc::new(AgentApi::new(&state, Some(credential()), rpm))
     }
 
     fn app(api: Arc<AgentApi>) -> Router {
@@ -1455,6 +1524,152 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::ACCEPTED);
         assert_eq!(body["data"]["status"], "queued");
+    }
+
+    /// F-f08-13: a start forwards its one valid Idempotency-Key under the same name and no other caller header; a
+    /// start without a key forwards none.
+    #[tokio::test]
+    async fn start_forwards_one_idempotency_key_and_no_other_caller_header() {
+        let auth = MockServer::start().await;
+        let model_gateway = MockServer::start().await;
+        mount_exchange(&auth, "model-gateway", "mg-token", 120, 1).await;
+        mount_exchange(&auth, "session-core", "session-token", 120, 1).await;
+        mount_exchange(&auth, "inference-core", "inference-token", 120, 1).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs"))
+            .and(header("idempotency-key", "retry-1"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(json!({
+                "data": { "run_id": "run-9", "thread_id": "thread-9", "status": "queued" }
+            })))
+            .expect(1)
+            .mount(&model_gateway)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(json!({
+                "data": { "run_id": "run-10", "thread_id": "thread-10", "status": "queued" }
+            })))
+            .expect(1)
+            .mount(&model_gateway)
+            .await;
+
+        let router = app(api_for(&auth, &model_gateway, 60.0));
+        let (status, _) = send(
+            router.clone(),
+            keyed("POST", "/api/agent/v1/runs", KEY)
+                .header("content-type", "application/json")
+                .header("idempotency-key", "retry-1")
+                .header("x-user-id", "user-forged")
+                .header("x-browser-authorization", "Bearer forged-browser")
+                .body(Body::from(r#"{"input":"Summarise the report"}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let (status, _) = send(
+            router,
+            keyed("POST", "/api/agent/v1/runs", KEY)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"input":"Summarise the report"}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        let forwarded = model_gateway.received_requests().await.expect("recorded");
+        assert_eq!(forwarded.len(), 2);
+        let keyed_start = &forwarded[0].headers;
+        assert_eq!(keyed_start.get("idempotency-key").unwrap(), "retry-1");
+        for absent in ["x-user-id", "x-browser-authorization"] {
+            assert!(keyed_start.get(absent).is_none(), "{absent} was forwarded");
+        }
+        assert!(
+            forwarded[1].headers.get("idempotency-key").is_none(),
+            "a start without a key forwards none"
+        );
+    }
+
+    /// F-f08-13: with `GATEWAY_AGENT_API_IDEMPOTENCY` off the ingress neither reads nor forwards the Idempotency-Key, so a
+    /// malformed key is not refused and a valid key is not sent upstream: the start is what it was.
+    #[tokio::test]
+    async fn with_the_idempotency_switch_off_the_key_is_neither_read_nor_forwarded() {
+        let auth = MockServer::start().await;
+        let model_gateway = MockServer::start().await;
+        mount_exchange(&auth, "model-gateway", "mg-token", 120, 1).await;
+        mount_exchange(&auth, "session-core", "session-token", 120, 1).await;
+        mount_exchange(&auth, "inference-core", "inference-token", 120, 1).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(json!({
+                "data": { "run_id": "run-11", "thread_id": "thread-11", "status": "queued" }
+            })))
+            .expect(2)
+            .mount(&model_gateway)
+            .await;
+
+        let router = app(api_for_idempotency(&auth, &model_gateway, 60.0, false));
+        for key in ["a b", "retry-1"] {
+            let (status, body) = send(
+                router.clone(),
+                keyed("POST", "/api/agent/v1/runs", KEY)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", key)
+                    .body(Body::from(r#"{"input":"Summarise the report"}"#))
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{key}: {body}");
+        }
+        let forwarded = model_gateway.received_requests().await.expect("recorded");
+        assert_eq!(forwarded.len(), 2);
+        assert!(
+            forwarded
+                .iter()
+                .all(|request| request.headers.get("idempotency-key").is_none()),
+            "off: no Idempotency-Key is forwarded"
+        );
+    }
+
+    /// F-f08-13: a malformed Idempotency-Key (empty, over-long, not visible ASCII, or repeated) is `invalid_request`
+    /// naming the header, and it is refused before any key is exchanged.
+    #[tokio::test]
+    async fn start_refuses_a_malformed_idempotency_key_before_any_key_is_exchanged() {
+        let auth = MockServer::start().await;
+        let model_gateway = MockServer::start().await;
+        let router = app(api_for(&auth, &model_gateway, 60.0));
+        let too_long = "k".repeat(129);
+        for keys in [
+            vec![""],
+            vec!["a b"],
+            vec![too_long.as_str()],
+            vec!["k-1", "k-2"],
+        ] {
+            let mut request =
+                keyed("POST", "/api/agent/v1/runs", KEY).header("content-type", "application/json");
+            for key in &keys {
+                request = request.header("idempotency-key", *key);
+            }
+            let (status, body) = send(
+                router.clone(),
+                request.body(Body::from(r#"{"input":"hi"}"#)).unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{keys:?}: {body}");
+            assert_eq!(body["error"]["code"], "invalid_request", "{keys:?}: {body}");
+            assert_eq!(
+                body["error"]["details"]["field"], "Idempotency-Key",
+                "{keys:?}: {body}"
+            );
+        }
+        assert!(
+            auth.received_requests().await.expect("recorded").is_empty(),
+            "no key was exchanged"
+        );
+        assert!(model_gateway
+            .received_requests()
+            .await
+            .expect("recorded")
+            .is_empty());
     }
 
     #[tokio::test]

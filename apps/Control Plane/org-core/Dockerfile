@@ -14,6 +14,16 @@ WORKDIR /build
 ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
 ENV GOSUMDB=sum.golang.org
 
+# go.mod carries `replace github.com/triodelab/model-plane/gen/go => "../../Model Plane/go/gen"`. A replace is
+# resolved on the FILESYSTEM, not through the module proxy, so the sibling module must be in the build before
+# `go mod download` reads go.mod. Control's compose supplies it as the named context `model-plane-go-gen`
+# (additional_contexts). WORKDIR is /build, so the relative path resolves to /Model Plane/go/gen.
+COPY --from=model-plane-go-gen [".", "/Model Plane/go/gen/"]
+# go.mod also replaces github.com/triodelab/model-plane/pkg/servicetoken => "../../Model Plane/go/pkg/servicetoken",
+# which is the same kind of sibling module. Control's compose supplies it as the named context
+# `model-plane-servicetoken` (additional_contexts), and it resolves from /build to /Model Plane/go/pkg/servicetoken.
+COPY --from=model-plane-servicetoken [".", "/Model Plane/go/pkg/servicetoken/"]
+
 # Copy both go.mod AND go.sum — layer only invalidated when deps change
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \

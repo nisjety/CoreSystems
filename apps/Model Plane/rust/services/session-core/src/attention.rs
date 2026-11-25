@@ -232,13 +232,22 @@ pub(crate) fn derive(facts: &ThreadFacts<'_>, pending: &Pending) -> Derived {
         since: Some(at),
     });
     // A crash-parked run that has waited its notice time waits on its owner to continue it (O-02). It
-    // reads as the notice names it, so the list and the event agree. The run's own WORKING state loses
-    // to it, because the run is not working: its loop is gone and only the owner can continue it.
-    let parked = pending.crash_park.map(|since| Derived {
-        state: AttentionState::NeedsInput,
-        reason: AttentionReason::Parked,
-        since: Some(since),
-    });
+    // reads as the notice names it, so the list and the event agree: the notice's query applies the same
+    // owner-row rule in SQL (DUE_CRASH_PARK_PREDICATE), so a park held here is neither listed nor announced.
+    // The run's own WORKING state loses to it, because the run is not working: its loop is gone and only the
+    // owner can continue it. The park speaks only while no pending approval, plan or question waits on the
+    // owner: each of those is the row the owner must answer, and it reads as itself whatever its age.
+    let waits_on_owner = approvals.clone().next().is_some()
+        || !pending.proposed_plans.is_empty()
+        || !pending.questions.is_empty();
+    let parked = pending
+        .crash_park
+        .filter(|_| !waits_on_owner)
+        .map(|since| Derived {
+            state: AttentionState::NeedsInput,
+            reason: AttentionReason::Parked,
+            since: Some(since),
+        });
     let run = run_state(facts.latest_run_status).map(|state| Derived {
         state,
         reason: AttentionReason::Unspecified,
@@ -248,10 +257,7 @@ pub(crate) fn derive(facts: &ThreadFacts<'_>, pending: &Pending) -> Derived {
     // no run is working, since a working run means someone already acted. It then stands in for the
     // latest run: a met goal only over a completed run (a later failed run stays FAILED), a goal
     // stopped by a cap or a blocked verdict over any finished run. A due crash park is a row that waits.
-    let has_live_pending = approvals.clone().next().is_some()
-        || !pending.proposed_plans.is_empty()
-        || !pending.questions.is_empty()
-        || pending.crash_park.is_some();
+    let has_live_pending = waits_on_owner || pending.crash_park.is_some();
     let goal = pending
         .goal
         .as_ref()
@@ -959,6 +965,37 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_question_or_plan_outranks_a_due_crash_park_whatever_its_age() {
+        // The park is older than the row, and the row still speaks: it is what the owner must answer.
+        let question = Pending {
+            questions: vec![at(200)],
+            crash_park: Some(at(10)),
+            ..Pending::default()
+        };
+        let derived = derive(&running_facts("running"), &question);
+        assert_eq!(derived.state, AttentionState::NeedsInput);
+        assert_eq!(derived.reason, AttentionReason::Input);
+        assert_eq!(derived.since, Some(at(200)));
+        let plan = Pending {
+            proposed_plans: vec![at(200)],
+            crash_park: Some(at(10)),
+            ..Pending::default()
+        };
+        let derived = derive(&running_facts("running"), &plan);
+        assert_eq!(derived.state, AttentionState::PlanReady);
+        assert_eq!(derived.reason, AttentionReason::Plan);
+    }
+
+    #[test]
+    fn a_park_that_has_not_waited_its_notice_time_is_not_named() {
+        // The notice time is applied by the query that fills `crash_park`. A park still inside it leaves the field
+        // empty, and the run then reads exactly as it did before the notice existed.
+        let derived = derive(&running_facts("running"), &Pending::default());
+        assert_eq!(derived.state, AttentionState::Working);
+        assert_eq!(derived.reason, AttentionReason::Unspecified);
+    }
+
+    #[test]
     fn the_list_reads_the_same_predicate_the_notice_reads() {
         // The list and the notice name the same parks by construction: both splice in the one predicate, and both
         // take the query's placeholders from the same positions. A second copy of the predicate would drift.
@@ -1337,7 +1374,8 @@ mod db_tests {
     }
 
     /// The list reads a crash park only where the notice announces it (O-02): a thread whose origin the list covers,
-    /// and whose latest run is the parked one. A Support thread's park, and a park a newer run has overtaken, are not named.
+    /// and whose latest run is the parked one. A Support thread's park, a park a newer run has overtaken, and a
+    /// zero-retention run's park are not named.
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a scratch Postgres"]
     async fn a_crash_park_is_read_only_where_the_notice_announces_it() {
@@ -1383,11 +1421,32 @@ mod db_tests {
             .execute(&pool)
             .await
             .expect("the newer run is the thread's latest");
+        // Not named: a zero-retention run's park. Its fold is never kept for such a run, and the read names a persistent
+        // run only. The class is set on the insert, because the retention receipt is immutable once written.
+        let (zdr_thread, zdr_run) = (format!("thr_zdr_{suffix}"), format!("run_zdr_{suffix}"));
+        seed_thread(&pool, &org, user, &zdr_thread).await;
+        sqlx::query(
+            "INSERT INTO runs (id, thread_id, goal, org_id, user_id, status, retention_class)
+             VALUES ($1, $2, 'g', $3, $4, 'running', 'zdr')",
+        )
+        .bind(&zdr_run)
+        .bind(&zdr_thread)
+        .bind(&org)
+        .bind(user)
+        .execute(&pool)
+        .await
+        .expect("seed a zero-retention run");
+        plant_crash_park(&pool, &zdr_run, 5.0 * 3600.0).await;
 
         let named = fetch_crash_parks(
             &pool,
             &org,
-            &[chat_thread.clone(), support_thread, overtaken_thread],
+            &[
+                chat_thread.clone(),
+                support_thread,
+                overtaken_thread,
+                zdr_thread,
+            ],
             14_400,
             86_400,
         )
@@ -1395,5 +1454,90 @@ mod db_tests {
         .expect("the list's crash-park read");
         let threads: Vec<&str> = named.iter().map(|(thread, _)| thread.as_str()).collect();
         assert_eq!(threads, [chat_thread.as_str()]);
+    }
+
+    /// The list holds a due crash park while its thread has a row to answer (O-02), as the notice does: an open question
+    /// or a proposed plan hides the park, and it is named again once that row is answered or superseded.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_crash_park_is_not_read_while_an_owner_row_waits_on_its_thread() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let suffix = new_ulid();
+        let (org, user) = (format!("attn-{suffix}"), "attn-user");
+        let (thread, run) = (format!("thr_{suffix}"), format!("run_{suffix}"));
+        seed_thread(&pool, &org, user, &thread).await;
+        seed_run(&pool, &org, user, &thread, &run, "running").await;
+        plant_crash_park(&pool, &run, 5.0 * 3600.0).await;
+        let (question, plan) = (format!("q_{run}"), format!("pln_{run}"));
+
+        async fn named(pool: &PgPool, org: &str, thread: &str) -> usize {
+            fetch_crash_parks(pool, org, &[thread.to_owned()], 14_400, 86_400)
+                .await
+                .expect("the list's crash-park read")
+                .len()
+        }
+
+        assert_eq!(
+            named(&pool, &org, &thread).await,
+            1,
+            "a due park with nothing to answer is named"
+        );
+        sqlx::query(
+            "INSERT INTO run_questions (id, run_id, thread_id, org_id, user_id, spec, expires_at)
+             SELECT $2, id, thread_id, org_id, user_id, '{}'::jsonb, now() + interval '1 hour'
+               FROM runs WHERE id = $1",
+        )
+        .bind(&run)
+        .bind(&question)
+        .execute(&pool)
+        .await
+        .expect("a question waits on the thread");
+        assert_eq!(
+            named(&pool, &org, &thread).await,
+            0,
+            "an open question hides the park"
+        );
+        sqlx::query(
+            "UPDATE run_questions
+                SET state = 'answered', answered_at = now(), answers = '[]'::jsonb,
+                    answers_digest = repeat('a', 64)
+              WHERE id = $1",
+        )
+        .bind(&question)
+        .execute(&pool)
+        .await
+        .expect("the question is answered");
+        assert_eq!(
+            named(&pool, &org, &thread).await,
+            1,
+            "the park is named again once the question is answered"
+        );
+
+        sqlx::query(
+            "INSERT INTO plans (id, thread_id, run_id, status, org_id, user_id)
+             SELECT $2, thread_id, id, 'proposed', org_id, user_id FROM runs WHERE id = $1",
+        )
+        .bind(&run)
+        .bind(&plan)
+        .execute(&pool)
+        .await
+        .expect("a plan is proposed on the thread");
+        assert_eq!(
+            named(&pool, &org, &thread).await,
+            0,
+            "a proposed plan hides the park"
+        );
+        sqlx::query("UPDATE plans SET status = 'superseded' WHERE id = $1")
+            .bind(&plan)
+            .execute(&pool)
+            .await
+            .expect("the plan is superseded");
+        assert_eq!(
+            named(&pool, &org, &thread).await,
+            1,
+            "the park is named again once the plan is superseded"
+        );
     }
 }

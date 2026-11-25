@@ -444,6 +444,12 @@ pub(crate) struct Snapshot<'a> {
     /// The turn's connector selection (`connector_scope_of(req)`); written as
     /// `EXT_CONNECTOR_SCOPE` only when non-empty.
     pub connector_scope: &'a [String],
+    /// The documents the person attached to the Do turn (`RunAgentRequest.context_document_ids`, F-f09-05);
+    /// written as `EXT_CONTEXT_DOCUMENT_IDS` only when non-empty, so a resume narrows as the paused run did.
+    pub context_document_ids: &'a [String],
+    /// The skills the person attached to the Do turn (`RunAgentRequest.context_skill_ids`, F-f09-05);
+    /// written as `EXT_CONTEXT_SKILL_IDS` only when non-empty.
+    pub context_skill_ids: &'a [String],
     /// The tool definitions offered to the model, for a fold a question resume must
     /// rebuild the offer from (the input pause); `None` everywhere else. Written as
     /// `EXT_OFFERED_TOOLS` only when `Some`.
@@ -506,6 +512,29 @@ pub(crate) fn build_fold(
                     .collect(),
             ),
         );
+    }
+    // The attached documents and skills (F-f09-05): ids only, and only when there are some, so a fold of a
+    // turn that attached none is the bytes it was. A continuation reads them back (`CarriedRefs::from_fold`).
+    for (key, ids) in [
+        (
+            mp_contracts::loop_fold::EXT_CONTEXT_DOCUMENT_IDS,
+            snapshot.context_document_ids,
+        ),
+        (
+            mp_contracts::loop_fold::EXT_CONTEXT_SKILL_IDS,
+            snapshot.context_skill_ids,
+        ),
+    ] {
+        if !ids.is_empty() {
+            extensions.insert(
+                key.to_owned(),
+                serde_json::Value::Array(
+                    ids.iter()
+                        .map(|id| serde_json::Value::String(id.clone()))
+                        .collect(),
+                ),
+            );
+        }
     }
     if let Some(tools) = snapshot.offered_tools {
         // Definitions only (code-owned schemas): no user content.
@@ -1882,6 +1911,8 @@ mod tests {
             effect_ledger: true,
             connector_taint: false,
             connector_scope: &[],
+            context_document_ids: &[],
+            context_skill_ids: &[],
             offered_tools: None,
         };
 
@@ -1969,6 +2000,8 @@ mod tests {
         // Distinct values for every field, so a field wired to the wrong local (or to
         // none) is visible.
         let retrievals = BTreeSet::from(["z-signature".to_owned(), "a-signature".to_owned()]);
+        let documents = vec!["doc-7".to_owned()];
+        let skills = vec!["skill.seven".to_owned()];
         let messages = vec![
             chat("system", "the preamble"),
             pb::ChatMessage {
@@ -1995,12 +2028,24 @@ mod tests {
                 effect_ledger: true,
                 connector_taint: false,
                 connector_scope: &[],
+                context_document_ids: &documents,
+                context_skill_ids: &skills,
                 offered_tools: None,
             },
             None,
             None,
         );
         assert_eq!(fold.v, FOLD_VERSION);
+        assert_eq!(
+            lf::context_ids_in(&fold, mp_contracts::loop_fold::EXT_CONTEXT_DOCUMENT_IDS),
+            Some(documents.clone()),
+            "the attached documents are saved"
+        );
+        assert_eq!(
+            lf::context_ids_in(&fold, mp_contracts::loop_fold::EXT_CONTEXT_SKILL_IDS),
+            Some(skills.clone()),
+            "the attached skills are saved"
+        );
         assert_eq!(fold.run_id, "run-7");
         assert_eq!(fold.segment_no, 3);
         assert_eq!(fold.rounds_executed, 5);
@@ -2039,6 +2084,8 @@ mod tests {
                     effect_ledger: true,
                     connector_taint: false,
                     connector_scope: &[],
+                    context_document_ids: &[],
+                    context_skill_ids: &[],
                     offered_tools: None,
                 }
             },
@@ -2179,6 +2226,8 @@ mod tests {
                 effect_ledger: true,
                 connector_taint: false,
                 connector_scope: &[],
+                context_document_ids: &[],
+                context_skill_ids: &[],
                 offered_tools: None,
             },
             None,
@@ -2211,6 +2260,8 @@ mod tests {
                 effect_ledger: true,
                 connector_taint: taint,
                 connector_scope: scope,
+                context_document_ids: &[],
+                context_skill_ids: &[],
                 offered_tools: offered,
             },
             None,
@@ -2236,6 +2287,63 @@ mod tests {
         let ids = vec!["conn_1".to_owned(), "conn-2".to_owned()];
         let scoped = connector_fold(false, &ids, None);
         assert_eq!(lf::connector_scope_in(&scoped), Some(ids));
+    }
+
+    /// A fold of a turn that attached `documents` and `skills` (F-f09-05), everything else as `connector_fold`.
+    fn attached_fold(documents: &[String], skills: &[String]) -> LoopFoldV1 {
+        let retrievals = BTreeSet::new();
+        let messages = vec![chat("system", "preamble"), chat("user", "the goal")];
+        build_fold(
+            &Snapshot {
+                run_id: "run-1",
+                segment_no: 1,
+                rounds_executed: 1,
+                delegated_rounds: 0,
+                step_seq: 1,
+                children_started: 0,
+                grounded: false,
+                compaction_triggered: false,
+                attempted_retrievals: &retrievals,
+                messages: &messages,
+                authority: authority(),
+                prompt_digest: "d",
+                effect_ledger: true,
+                connector_taint: false,
+                connector_scope: &[],
+                context_document_ids: documents,
+                context_skill_ids: skills,
+                offered_tools: None,
+            },
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn a_fold_records_the_attached_ids_only_when_there_are_some() {
+        let none = attached_fold(&[], &[]);
+        for key in [
+            mp_contracts::loop_fold::EXT_CONTEXT_DOCUMENT_IDS,
+            mp_contracts::loop_fold::EXT_CONTEXT_SKILL_IDS,
+        ] {
+            assert!(!none.extensions.contains_key(key), "{key}");
+        }
+        assert_eq!(
+            lf::context_ids_in(&none, mp_contracts::loop_fold::EXT_CONTEXT_DOCUMENT_IDS),
+            Some(Vec::new()),
+            "a fold of a turn that attached none reads as no narrowing"
+        );
+        let documents = vec!["doc-1".to_owned()];
+        let skills = vec!["skill.a".to_owned()];
+        let carried = attached_fold(&documents, &skills);
+        assert_eq!(
+            lf::context_ids_in(&carried, mp_contracts::loop_fold::EXT_CONTEXT_DOCUMENT_IDS),
+            Some(documents)
+        );
+        assert_eq!(
+            lf::context_ids_in(&carried, mp_contracts::loop_fold::EXT_CONTEXT_SKILL_IDS),
+            Some(skills)
+        );
     }
 
     #[test]

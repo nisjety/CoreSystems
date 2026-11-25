@@ -805,6 +805,9 @@ func (s *Server) reconcileOrganizationDeletion(c *gin.Context) {
 		c.Request.Context(), orgID, req.Revision,
 	)
 	if err != nil {
+		if s.refuseHeldReconcile(c, orgID, err) {
+			return
+		}
 		if errors.Is(err, org.ErrProjectionConflict) ||
 			errors.Is(err, org.ErrOrganizationDeleted) {
 			c.JSON(http.StatusConflict, gin.H{"error": "organization deletion conflicts with local lifecycle state"})
@@ -816,6 +819,31 @@ func (s *Server) reconcileOrganizationDeletion(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"ok": true, "applied": applied, "receipt": json.RawMessage(receipt),
 	})
+}
+
+// refuseHeldReconcile answers a reconcile erasure that the legal-hold gate refused and
+// reports whether err was one (F-f10-06, D-C1). A held organisation is 409
+// erasure_blocked_legal_hold and its refusal is audited; holds that cannot be read are
+// 503 erasure_hold_check_unavailable and audit nothing, as the erasure routes do. Nothing
+// was erased either way, and the tombstone stays incomplete, so the outbox's retry of the
+// same revision resumes the erasure once the holds are released.
+func (s *Server) refuseHeldReconcile(c *gin.Context, orgID string, err error) bool {
+	var held *org.ErasureHeldError
+	switch {
+	case errors.As(err, &held):
+		log.Printf("org-core: reconcile deletion of org=%s refused: %d org and %d thread legal holds active", orgID, held.OrgHolds, held.ThreadHolds)
+		s.orgService.RecordHeldReconcileRefusal(c.Request.Context(), orgID, held)
+		writeRetentionError(c, http.StatusConflict, codeErasureBlockedLegalHold,
+			"A legal hold covers this organization, so nothing was erased. The hold must be released first.",
+			gin.H{"org_holds": held.OrgHolds, "thread_holds": held.ThreadHolds, "held_content": heldErasureContent, "retryable": false})
+		return true
+	case errors.Is(err, org.ErrErasureHoldCheckUnavailable):
+		log.Printf("org-core: reconcile deletion of org=%s refused: legal holds unreadable", orgID)
+		writeRetentionError(c, http.StatusServiceUnavailable, codeErasureHoldCheckUnavailable,
+			"Legal holds could not be checked, so nothing was erased. Try again shortly.", gin.H{"retryable": true})
+		return true
+	}
+	return false
 }
 
 type loginRequest struct {

@@ -4,7 +4,7 @@
 
 ## What the run decides
 
-`MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER` moves the per-turn blocks out of the cached prefix. It changes the prompt only on a turn pinned to an OpenAI-API chat-completions provider (`CacheRoute::of_turn` in `apps/Model Plane/rust/services/model-gateway/src/prompt_context.rs`). The A/B therefore pins `provider` to `openai` or `azure-openai` on every request. The question is whether the flag raises the prefix hit rate on that traffic without moving eval pass rate. The owner decides, and the decision goes in `apps/Model Plane/docs/decisions/ledger.md`.
+`MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER` moves the per-turn blocks out of the cached prefix. It changes the prompt only on a turn pinned to an OpenAI-API chat-completions provider (`CacheRoute::of_turn` in `apps/Model Plane/rust/services/model-gateway/src/prompt_context.rs`), and on a Claude API turn once `MODEL_GATEWAY_CACHE_ANTHROPIC_STABLE_ORDER` is the literal `true` as well. The OpenAI A/B below pins `provider` to `openai` or `azure-openai` on every request; the Claude arm has its own section, [Anthropic arm](#anthropic-arm-claude-api-routes). The question is whether the flag raises the prefix hit rate on that traffic without moving eval pass rate. The owner decides, and the decision goes in `apps/Model Plane/docs/decisions/ledger.md`.
 
 ## Before the run
 
@@ -54,6 +54,46 @@ Keep everything else identical between the arms: model, provider, thread script,
     python -m eval_lab.stable_prefix_ab compare --evidence-root <root>
 
 Paste the output under Result without editing the numbers.
+
+## Anthropic arm: Claude API routes
+
+This arm answers D1-444: does the stable order make Claude's prompt cache read the standing blocks, or does every turn pay the cache-write premium and never read? The measurement that started it (2026-10-27, `claude-sonnet-5-5`) found `cache_read_tokens` at 0 on every turn, with cost-core reason `prefix_changed`. The code change is `CacheRoute::Anthropic` in `prompt_context.rs`: a Claude model on a non-subscription turn gets the stable order alone, and only when both switches are on. The compaction budget and the context dedup stay off for Claude.
+
+**Owner order (DEC-F01-06): a dark switch, turned on only after this arm.** Nothing here turns the switches on.
+
+### Before the run
+
+- Deploy order: set `INFERENCE_ANTHROPIC_TIERED_SYSTEM=true` on inference-core first and recreate it. Without it inference-core does not turn the tier plan into cache blocks, so the arm measures nothing. Then set the two gateway switches below.
+- The driver accepts only the two OpenAI-API providers today (`PINNED_PROVIDERS` in `apps/Model Plane/python/eval-lab-py/src/eval_lab/stable_prefix_ab.py`). Add `anthropic` to it, and pass a Claude model, before this arm runs. Run `plan --provider anthropic --model <claude-model>` first and confirm `route_found: true`.
+- The same environment rules as the OpenAI arm apply: set `INTERNAL_API_KEY` and `EVAL_COST_TOKEN` in the shell, and use absolute paths for `--evidence-root`.
+
+### Procedure
+
+Both gateway switches are needed for the route to change: `MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER` and `MODEL_GATEWAY_CACHE_ANTHROPIC_STABLE_ORDER`, each the literal `true`.
+
+**Arm off.** Leave both unset (or set to anything other than `true`), recreate model-gateway with `bash "apps/Model Plane/scripts/compose.sh" up -d --no-deps model-gateway`, and confirm both values in the container. Then drive, capture and run the eval suite exactly as in Step 1 of the OpenAI procedure, with `--arm off --provider anthropic --model <claude-model>`.
+
+**Arm on.** Set both switches to `true`, recreate model-gateway, and confirm both values. Drive and capture with `--arm on` under a new evidence root (a drive refuses a folder that already holds one). Run the eval suite three times into `<root>/on/eval/rerun-N`, as in the OpenAI arm.
+
+Keep everything else identical between the arms: model, thread script, rerun count.
+
+### What to read
+
+From cost-core's analytics for each arm's window:
+
+- `cache_read_tokens`: the per-turn reads. On the on arm they should appear on the turns after the first in a thread.
+- Cache-creation tokens (the write premium): on the on arm they should concentrate in the first turn of a thread, and in the turn after the standing text changes.
+- `cache_breakdown`: the miss reasons. On the on arm `prefix_changed` should no longer name every turn.
+
+### Decision rule
+
+Ship only if the write premium is paid once per standing prefix, meaning creation falls on the first turn of a thread and on a real change to the standing blocks, and later turns read that prefix. If creation recurs on every turn, keep both switches off. The eval pass rate must not move between the arms, judged as in the OpenAI arm.
+
+Record the decision in `apps/Model Plane/docs/decisions/ledger.md`, newest first, and tick one under Owner decision as for the OpenAI arm. This arm's result answers D1-444 in the depth register.
+
+### Rollback
+
+Unset `MODEL_GATEWAY_CACHE_ANTHROPIC_STABLE_ORDER` (or set anything other than the literal `true`), recreate model-gateway, and confirm the container value. The stable order stays as it was on the OpenAI routes. No prompt block text changes in either case.
 
 ## How to read the table
 

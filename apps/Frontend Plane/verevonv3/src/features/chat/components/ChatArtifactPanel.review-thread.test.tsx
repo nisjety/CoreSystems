@@ -35,6 +35,7 @@ const CAPABILITIES: ComposerCapabilities = {
   artifactPromote: false,
   deepResearchKnowledge: false,
   wideResearch: false,
+  chatProjects: false,
 }
 
 const CARD: ReviewCard = {

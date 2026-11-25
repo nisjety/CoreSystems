@@ -155,6 +155,58 @@ pub fn run_control_request(op: &'static str, outcome: RunControlOutcome) {
     .increment(1);
 }
 
+/// What one idempotency claim decided. A closed set, so the `outcome` label of
+/// `gateway_idempotency_claims_total` cannot grow with request data. Each claim has exactly one
+/// outcome: a claim that a full registry admitted by evicting its oldest completed entry counts as
+/// [`IdempotencyClaimOutcome::EvictedDone`], and not as `Proceed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdempotencyClaimOutcome {
+    /// The key was free and the registry admitted it.
+    Proceed,
+    /// A fresh completed answer exists for the key and is replayed.
+    Cached,
+    /// Another request holds the key as in flight.
+    InFlight,
+    /// The public key is empty or too large.
+    InvalidKey,
+    /// The registry is full of live claims, so the send is refused.
+    CapacityExceeded,
+    /// The registry was full and admitted the claim by evicting its oldest completed answer.
+    EvictedDone,
+}
+
+impl IdempotencyClaimOutcome {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Proceed => "proceed",
+            Self::Cached => "cached",
+            Self::InFlight => "in_flight",
+            Self::InvalidKey => "invalid_key",
+            Self::CapacityExceeded => "capacity_exceeded",
+            Self::EvictedDone => "evicted_done",
+        }
+    }
+}
+
+/// Count one idempotency claim by its outcome. Counts only: no key, org or user reaches a label.
+pub fn idempotency_claim(outcome: IdempotencyClaimOutcome) {
+    counter!(
+        "gateway_idempotency_claims_total",
+        "outcome" => outcome.as_str()
+    )
+    .increment(1);
+}
+
+/// Set `gateway_idempotency_entries{state}`: the keys this replica's registry holds as in flight
+/// (`pending`) and as completed answers (`done`). Counts only.
+pub fn idempotency_entries(pending: usize, done: usize) {
+    gauge!("gateway_idempotency_entries", "state" => "pending")
+        .set(f64::from(u32::try_from(pending).unwrap_or(u32::MAX)));
+    gauge!("gateway_idempotency_entries", "state" => "done")
+        .set(f64::from(u32::try_from(done).unwrap_or(u32::MAX)));
+}
+
 /// Handler that renders the Prometheus metrics scrape endpoint.
 pub async fn metrics_handler(
     axum::extract::State(handle): axum::extract::State<PrometheusHandle>,
@@ -194,5 +246,30 @@ mod tests {
             assert_eq!(rendered_gauge(&handle), 0.0);
             assert_eq!(ACTIVE_STREAMS_MIRROR.load(Ordering::SeqCst), mirror);
         });
+    }
+
+    /// The outcome labels are the closed set the dashboards read; a rename is a visible change.
+    #[test]
+    fn idempotency_outcome_labels_are_the_closed_set() {
+        let labels = [
+            IdempotencyClaimOutcome::Proceed,
+            IdempotencyClaimOutcome::Cached,
+            IdempotencyClaimOutcome::InFlight,
+            IdempotencyClaimOutcome::InvalidKey,
+            IdempotencyClaimOutcome::CapacityExceeded,
+            IdempotencyClaimOutcome::EvictedDone,
+        ]
+        .map(IdempotencyClaimOutcome::as_str);
+        assert_eq!(
+            labels,
+            [
+                "proceed",
+                "cached",
+                "in_flight",
+                "invalid_key",
+                "capacity_exceeded",
+                "evicted_done"
+            ]
+        );
     }
 }

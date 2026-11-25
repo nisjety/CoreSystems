@@ -59,6 +59,7 @@ const PROMOTE_ON: ComposerCapabilities = {
   artifactPromote: true,
   deepResearchKnowledge: false,
   wideResearch: false,
+  chatProjects: false,
 }
 
 beforeEach(() => {

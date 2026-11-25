@@ -1253,10 +1253,16 @@ export function DashboardComposer(props: {
 		setInternalAgentMode(value);
 		props.onAgentModeChange?.(value);
 	};
+	// The picker is offered only with an org cap and never on a temporary (zero-retention) chat: the server
+	// answers agent_modes false for a ZDR caller and refuses a read_only (plan-gated) turn under ZDR.
+	const agentModeOffered = () =>
+		props.agentModeCap !== undefined && !(props.temporaryChat || props.temporaryChatLocked);
 	const agentModeNotAdmitted = () => {
 		const mode = agentMode();
+		if (mode === undefined) return false;
+		if (!agentModeOffered()) return true;
 		const cap = props.agentModeCap;
-		return mode !== undefined && cap !== undefined && !agentModesWithinCap(cap).includes(mode);
+		return cap !== undefined && !agentModesWithinCap(cap).includes(mode);
 	};
 	createEffect(() => agentModeNotAdmitted(), (notAdmitted) => { if (notAdmitted) setAgentMode(undefined); });
 	const browseWeb = () =>
@@ -3373,7 +3379,7 @@ export function DashboardComposer(props: {
 
 		// The mode chosen for this send, read before the tier lookup may wait. Not sent in a conversation-only
 		// turn, which runs no agent.
-		const submittedAgentMode = conversationOnly() ? undefined : agentMode();
+		const submittedAgentMode = conversationOnly() || !agentModeOffered() ? undefined : agentMode();
 		// The Fast chip's choice, read before the tier lookup may wait. Carried only while the chip is shown and on.
 		const submittedSpeed = speedChipShown() && speedPriority() ? ("priority" as const) : undefined;
 
@@ -4167,7 +4173,7 @@ export function DashboardComposer(props: {
 							</div>
 						</Show>
 					</Show>
-					<Show when={props.agentModeCap}>
+					<Show when={agentModeOffered() ? props.agentModeCap : undefined}>
 						{(cap) => (
 							<label
 								class="dashboard-composer-agent-mode"

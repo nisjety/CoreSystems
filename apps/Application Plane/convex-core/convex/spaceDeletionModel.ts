@@ -7,7 +7,7 @@
  * on, a permanent refusal (400, 401, 403, 412) parks it as `failed_permanent`; with it off
  * that refusal retries as before. Any throw after the claim releases it for retry, and parks
  * it as `failed_permanent` once its claim count reaches the bound in `spaces.ts`: deletion
- * deliveries have no sweep to pick up an abandoned claim.
+ * deliveries are re-driven after a crash only by the delivery lease sweep, behind SPACE_DELIVERY_LEASE_SWEEP (`spaces.ts`).
  */
 import { v } from "convex/values";
 import { internalAction } from "./_generated/server";

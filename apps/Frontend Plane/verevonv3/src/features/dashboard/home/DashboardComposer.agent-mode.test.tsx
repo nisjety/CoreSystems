@@ -35,9 +35,19 @@ const submitted: Array<Record<string, unknown>> = []
 
 const model = (id: string): ModelInfo => ({ id, name: id, provider: 'openai', modality: 'chat' })
 
-function ParentComposer(props: { cap?: AgentModeId; initial?: AgentModeId }) {
+type ComposerProps = {
+  cap?: AgentModeId
+  initial?: AgentModeId
+  temporary?: boolean
+  temporaryLocked?: boolean
+  onTemporarySetter?: (set: (value: boolean) => void) => void
+}
+
+function ParentComposer(props: ComposerProps) {
   const [message, setMessage] = createSignal('')
   const [mode, setMode] = createSignal<AgentModeId | undefined>(props.initial)
+  const [temporary, setTemporary] = createSignal(props.temporary ?? false)
+  props.onTemporarySetter?.((value) => setTemporary(value))
   return (
     <DashboardComposer
       appearance="chat"
@@ -46,6 +56,8 @@ function ParentComposer(props: { cap?: AgentModeId; initial?: AgentModeId }) {
       agentModeCap={props.cap}
       agentMode={mode()}
       onAgentModeChange={setMode}
+      temporaryChat={temporary()}
+      temporaryChatLocked={props.temporaryLocked}
       onSubmit={(payload) => {
         submitted.push(payload as unknown as Record<string, unknown>)
       }}
@@ -53,7 +65,7 @@ function ParentComposer(props: { cap?: AgentModeId; initial?: AgentModeId }) {
   )
 }
 
-function renderComposer(props: { cap?: AgentModeId; initial?: AgentModeId }) {
+function renderComposer(props: ComposerProps) {
   mockListModels.mockResolvedValue([model('gpt-mini')])
   const TestRouter = createRouter({
     routes: [{ path: '/*all', component: () => <I18nProvider><ParentComposer {...props} /></I18nProvider> }],
@@ -130,5 +142,41 @@ describe('the composer agent-mode picker', () => {
 
     await send('Hei')
     expect('agentMode' in (submitted[0] ?? {})).toBe(false)
+  })
+
+  it('is not offered on a temporary (zero-retention) chat, even with a cap', async () => {
+    renderComposer({ cap: 'read_only', temporary: true })
+    await waitFor(() => expect(mockListModels).toHaveBeenCalled())
+    flush()
+    expect(picker()).toBeNull()
+  })
+
+  it('is not offered on a thread that is locked temporary, even with a cap', async () => {
+    renderComposer({ cap: 'read_only', temporaryLocked: true })
+    await waitFor(() => expect(mockListModels).toHaveBeenCalled())
+    flush()
+    expect(picker()).toBeNull()
+  })
+
+  it('drops a chosen mode when the chat turns temporary, and does not send it', async () => {
+    let setTemporary: ((value: boolean) => void) | undefined
+    renderComposer({ cap: 'read_only', onTemporarySetter: (set) => { setTemporary = set } })
+    await waitFor(() => expect(picker()).not.toBeNull())
+    fireEvent.change(picker() as HTMLSelectElement, { target: { value: 'lockdown' } })
+    flush()
+    expect((picker() as HTMLSelectElement).value).toBe('lockdown')
+
+    setTemporary?.(true)
+    flush()
+    await waitFor(() => expect(picker()).toBeNull())
+
+    await send('Hei')
+    expect('agentMode' in (submitted[0] ?? {})).toBe(false)
+
+    // The choice was dropped, not hidden: back on a retained chat the picker starts from the cap again.
+    setTemporary?.(false)
+    flush()
+    await waitFor(() => expect(picker()).not.toBeNull())
+    expect((picker() as HTMLSelectElement).value).toBe('read_only')
   })
 })

@@ -3,6 +3,7 @@ import { normalizeConnectorScope } from '@/shared/actions/chat-connector-scope'
 import { isEffortLevel, type EffortLevel, type EffortProfile } from '@/shared/api/chat-client'
 import { normalizePrivacyTier, type PrivacyTier } from '@/shared/api/privacy-tier'
 import { removeClientValue } from '@/shared/session/client-storage'
+import { byoGatewaySwitchOn } from './space-side-features'
 
 const pendingLaunchKey = 'verevon.chat.pendingLaunch'
 // Bounds the text envelope in sessionStorage (message, metadata, extracted
@@ -271,6 +272,9 @@ function normalizeLaunch(launch: PendingChatLaunch): PendingChatLaunch {
     model: launch.model,
     provider: normalizeOptionalString(launch.provider),
     startNewThread: launch.startNewThread === true,
+    // The customer gateway the person chose travels with the launch, as the subscription does (R-spa-05). Only with the BYO gateway
+    // switch on: off, no gateway is offered, so a launch keeps none and reads as it did before.
+    ...(byoGatewaySwitchOn() ? { modelConnectionId: normalizeOptionalString(launch.modelConnectionId) } : {}),
     subscriptionConnectionId: normalizeOptionalString(launch.subscriptionConnectionId),
     supportHandoff: normalizePendingSupportHandoff(launch.supportHandoff),
     text: launch.text,

@@ -415,13 +415,20 @@ impl RoutingPolicy {
 
 /// Whether a model takes a call with no reasoning in it: it has no effort control,
 /// or it accepts the `minimal` level (EP-13 D7). A small-budget side task needs one.
+///
+/// A Codex subscription row takes one whatever it lists. The wide switch lists its levels only
+/// so the composer can offer them (F-f01-21), and a listing must not move a small-budget role
+/// off the row: the row keeps the answer the empty listing gave while the switch is off.
 pub(super) fn accepts_no_reasoning(model: &ModelInfo) -> bool {
-    model.effort_levels.is_empty() || model.effort_levels.contains(&Level::Minimal)
+    model.effort_levels.is_empty()
+        || model.effort_levels.contains(&Level::Minimal)
+        || model.provider == mp_contracts::agentic_subscription::PROVIDER_ID
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::catalogue_overlay::OrgOverlay;
     use crate::provider::intent::{choose, BudgetPosture};
 
     #[test]
@@ -661,6 +668,69 @@ mod tests {
             Err(vec![RoleError::UnknownEffort {
                 purpose: RolePurpose::Title,
                 effort: "extreme".to_owned(),
+            }])
+        );
+    }
+
+    #[test]
+    fn a_codex_row_takes_a_no_reasoning_call_whether_or_not_its_wide_ladder_is_listed() {
+        // The wide switch lists a Codex row's levels so the composer can offer them (F-f01-21).
+        // It must not change which models a small-budget role may name: the row takes the call
+        // with its list empty (switch off) and with the wide ladder listed (switch on), for the
+        // organisation's candidates too.
+        let codex = |levels: Vec<Level>| ModelInfo {
+            id: "gpt-5.5".to_owned(),
+            provider: mp_contracts::agentic_subscription::PROVIDER_ID.to_owned(),
+            modality: "chat".to_owned(),
+            effort_levels: levels,
+            ..Default::default()
+        };
+        let off = codex(Vec::new());
+        let on = codex(vec![Level::Low, Level::Medium, Level::High, Level::XHigh]);
+        assert!(accepts_no_reasoning(&off));
+        assert!(accepts_no_reasoning(&on));
+        for purpose in [
+            RolePurpose::Title,
+            RolePurpose::FollowUps,
+            RolePurpose::VerificationJudge,
+        ] {
+            let policy = table_with(purpose, &["gpt-5.5"], None);
+            for row in [&off, &on] {
+                let verdict = policy.validate_roles(std::slice::from_ref(row));
+                assert_eq!(verdict, Ok(()), "{purpose}");
+            }
+        }
+        let organisation = OrgOverlay {
+            roles: BTreeMap::from([(
+                RolePurpose::VerificationJudge.as_str().to_owned(),
+                vec!["gpt-5.5".to_owned()],
+            )]),
+            ..OrgOverlay::default()
+        };
+        assert_eq!(
+            organisation.role_candidates(RolePurpose::VerificationJudge, std::slice::from_ref(&on)),
+            ["gpt-5.5"]
+        );
+    }
+
+    #[test]
+    fn a_reasoning_only_row_from_another_provider_stays_refused_on_the_wide_ladder() {
+        // The exemption is the Codex row's alone: another row that lists a ladder with no minimal
+        // level still reasons, so a small-budget purpose still refuses it.
+        let other = ModelInfo {
+            id: "gpt-5.5".to_owned(),
+            provider: "openai".to_owned(),
+            modality: "chat".to_owned(),
+            effort_levels: vec![Level::Low, Level::Medium, Level::High, Level::XHigh],
+            ..Default::default()
+        };
+        assert!(!accepts_no_reasoning(&other));
+        assert_eq!(
+            table_with(RolePurpose::Title, &["gpt-5.5"], None)
+                .validate_roles(std::slice::from_ref(&other)),
+            Err(vec![RoleError::ReasoningOnly {
+                purpose: RolePurpose::Title,
+                model: "gpt-5.5".to_owned(),
             }])
         );
     }

@@ -1008,10 +1008,11 @@ pub(crate) struct CrashParkNotice {
     pub(crate) source_id: String,
 }
 
-/// The event id of a crash park's notice. It names the run only, so a run's park is announced once: a second
-/// replica, a later pass or a redelivery that finds the same run writes nothing.
-pub(crate) fn crash_park_notice_event_id(run_id: &str) -> String {
-    format!("crash-park-notice:{run_id}")
+/// The event id of a crash park's notice. It names the run and the park's reference (the park's own `pause_ref`), so a
+/// park is announced once: a second replica, a later pass or a redelivery that finds the same park writes nothing. A
+/// later park of the same run carries its own reference, so it is announced too.
+pub(crate) fn crash_park_notice_event_id(run_id: &str, park_ref: &str) -> String {
+    format!("crash-park-notice:{run_id}:{park_ref}")
 }
 
 /// Build the `RUN_ATTENTION` envelope of a crash park's notice (O-02). Its state and reason are the ones the
@@ -1021,7 +1022,7 @@ pub(crate) fn build_crash_park_notice_envelope(
     notice: &CrashParkNotice,
     ts: DateTime<Utc>,
 ) -> Envelope {
-    let event_id = crash_park_notice_event_id(&notice.run_id);
+    let event_id = crash_park_notice_event_id(&notice.run_id, &notice.source_id);
     Envelope {
         event_id: event_id.clone(),
         event_type: RUN_ATTENTION_EVENT_TYPE.to_owned(),
@@ -1092,14 +1093,28 @@ mod crash_park_notice_tests {
     }
 
     #[test]
-    fn the_notice_is_keyed_by_its_run_so_a_park_is_announced_once() {
+    fn the_notice_is_keyed_by_its_run_and_park_so_each_park_is_announced_once() {
         assert_eq!(
-            crash_park_notice_event_id("run-1"),
-            "crash-park-notice:run-1"
+            crash_park_notice_event_id("run-1", "park-ref-1"),
+            "crash-park-notice:run-1:park-ref-1"
         );
         let envelope = build_crash_park_notice_envelope(&notice(), ts());
-        assert_eq!(envelope.event_id, "crash-park-notice:run-1");
-        assert_eq!(envelope.idempotency_key, "crash-park-notice:run-1");
+        assert_eq!(envelope.event_id, "crash-park-notice:run-1:park-ref-1");
+        assert_eq!(
+            envelope.idempotency_key,
+            "crash-park-notice:run-1:park-ref-1"
+        );
+        // A second sweep of the same park writes the same row, and a later park of the run writes its own.
+        assert_eq!(
+            build_crash_park_notice_envelope(&notice(), ts()).event_id,
+            envelope.event_id
+        );
+        let mut later = notice();
+        later.source_id = "park-ref-2".to_owned();
+        assert_ne!(
+            build_crash_park_notice_envelope(&later, ts()).event_id,
+            envelope.event_id
+        );
         assert_eq!(envelope.event_type, RUN_ATTENTION_EVENT_TYPE);
         assert!(
             !envelope.zdr,

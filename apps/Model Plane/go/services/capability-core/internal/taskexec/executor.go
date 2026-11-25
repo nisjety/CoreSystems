@@ -51,6 +51,20 @@ type Dispatcher interface {
 	Dispatch(ctx context.Context, task TaskRef) error
 }
 
+// contractAuditFlusher is a Dispatcher that holds schedule contract audit rows to write again (K3-4). The
+// executor offers it a flush on every claim tick.
+type contractAuditFlusher interface {
+	FlushContractAudit(ctx context.Context)
+}
+
+// flushContractAudit offers the dispatcher, when it holds any, a flush of its queued audit rows. A dispatcher
+// without such a queue is left alone.
+func (e *Executor) flushContractAudit(ctx context.Context) {
+	if flusher, ok := e.dispatcher.(contractAuditFlusher); ok {
+		flusher.FlushContractAudit(ctx)
+	}
+}
+
 // NatsDispatcher publishes a task-dispatch event (mp.v1.capability.task.dispatched)
 // for a downstream Model-Plane runner to execute and complete.
 //
@@ -151,6 +165,7 @@ func (e *Executor) sweepAndLog(ctx context.Context) {
 // replicas (FOR UPDATE SKIP LOCKED); dispatch happens after the claim commits so
 // a slow runner does not hold the row lock.
 func (e *Executor) RunOnce(ctx context.Context) (int, error) {
+	e.flushContractAudit(ctx)
 	now := time.Now().UTC()
 	tx, err := e.pool.Begin(ctx)
 	if err != nil {

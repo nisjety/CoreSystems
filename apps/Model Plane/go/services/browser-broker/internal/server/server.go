@@ -44,6 +44,11 @@ type Options struct {
 	// mint (WS21-S4). Off makes no call.
 	SitePolicy   sitepolicy.Mode
 	SiteResolver sitepolicy.Resolver
+	// SpaceFloor is BROWSER_SPACE_FLOOR_ENABLED (F-f03-03). On, a grant that names a Space is issued, and the site
+	// policy read it makes carries the Space. Off, every Space grant is refused before any grant state is written
+	// (space_floor_unavailable). A Space grant is refused while the site policy is off too, because the floor is read
+	// through that policy.
+	SpaceFloor bool
 	// AssistantTaskGrantsEnabled lets a submitted task use the default ask
 	// decision within the organisation's act ceiling, for one exact host.
 	AssistantTaskGrantsEnabled bool
@@ -124,12 +129,12 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	if (req.GetMailConnectionId() != "" || req.GetGrantOrigin() != "") && (!fillOtp || req.GetGrantKind() != "") {
 		return nil, status.Error(codes.InvalidArgument, grant.ErrFillOtpBindingUnexpected.Error())
 	}
-	// F-f02-19: a Space grant needs the Space browser floor, which the broker does not
-	// read yet (F-f02-20 wires it through org-core). Issuing one now would silently
-	// drop that floor, so any non-empty space_id is refused for every caller, API keys
-	// included, before any grant state is written. The raw value is tested, not a
-	// trimmed one: a whitespace-only space_id is refused too.
-	if req.GetSpaceId() != "" {
+	// F-f02-19 / F-f03-03: a Space grant is refused before any grant state is written, unless the Space floor
+	// serves it (spaceFloorServes). Issuing one without the floor would silently drop the Space's rules, so an
+	// org-wide answer never stands in for a Space run. The raw value is tested, not a trimmed one: a
+	// whitespace-only space_id is refused too.
+	if req.GetSpaceId() != "" && !s.spaceFloorServes(principal, req) {
+		recordSiteVerdict(ctx, "space_floor")
 		telemetry.GrantsDeniedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "space_floor_unavailable")))
 		return nil, keyRefusal(codes.FailedPrecondition, reasonSpaceFloorUnavailable, "browser grants for a Space are not available yet")
 	}
@@ -231,9 +236,9 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 		}
 		if scopeURL == grant.AssistantTaskScopeURL {
 			ttl = min(ttl, assistantTaskGrantTTL)
-			err = s.checkAssistantTaskSitePolicy(ctx, principal, allowedDomains)
+			err = s.checkAssistantTaskSitePolicy(ctx, principal, req.GetSpaceId(), allowedDomains)
 		} else {
-			allowedDomains, deniedDomains, err = s.applySitePolicy(ctx, principal, allowedDomains, readOnly)
+			allowedDomains, deniedDomains, err = s.applySitePolicy(ctx, principal, req.GetSpaceId(), allowedDomains, readOnly)
 		}
 		if err != nil {
 			return nil, err
@@ -614,6 +619,12 @@ const maxDeniedDomainsReported = 9
 // siteDeniedReason is the ErrorInfo reason of a refusal by the site policy.
 const siteDeniedReason = "BROWSER_SITE_DENIED"
 
+// siteAskReason is the ErrorInfo reason of a refusal where every requested host is
+// an ask: the member can allow each one, so none was denied. The refusal names
+// those hosts under ask_domains and grants nothing; the consent that lets the
+// member allow them is a later unit.
+const siteAskReason = "BROWSER_SITE_ASK"
+
 // requestTTL resolves a caller's requested lifetime. Zero is the configured
 // default; a value under the minimum is refused, and one above the cap is
 // clamped to it.
@@ -636,14 +647,15 @@ func (s *Server) requestTTL(seconds int32) (time.Duration, error) {
 // hosts it dropped. Off makes no call. Shadow counts the verdict and grants as
 // asked. Enforce grants only what is allowed, and refuses the mint when nothing
 // is left or org-core cannot be read: a broker must not mint from a policy it
-// cannot see.
-func (s *Server) applySitePolicy(ctx context.Context, principal authctx.Principal, domains []string, readOnly bool) ([]string, []string, error) {
+// cannot see. When every host it would drop is an ask, the refusal is
+// BROWSER_SITE_ASK rather than a denial, because the member can allow those hosts.
+func (s *Server) applySitePolicy(ctx context.Context, principal authctx.Principal, spaceID string, domains []string, readOnly bool) ([]string, []string, error) {
 	mode := s.options.SitePolicy
 	if mode == sitepolicy.ModeOff || mode == "" {
 		return domains, nil, nil
 	}
 	shadow := mode == sitepolicy.ModeShadow
-	resolution, err := s.resolveSites(ctx, principal, domains)
+	resolution, err := s.resolveSites(ctx, principal, spaceID, domains)
 	if err != nil {
 		recordSiteVerdict(ctx, "policy_unavailable")
 		if shadow {
@@ -652,49 +664,108 @@ func (s *Server) applySitePolicy(ctx context.Context, principal authctx.Principa
 		telemetry.GrantsDeniedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "site_policy_unavailable")))
 		return nil, nil, status.Error(codes.Unavailable, sitepolicy.ErrUnavailable.Error())
 	}
-	allowed, denied := splitByPolicy(domains, resolution, readOnly)
+	allowed, asked, denied := splitByPolicy(domains, resolution, readOnly)
 	switch {
-	case len(denied) == 0:
+	case len(denied) == 0 && len(asked) == 0:
 		recordSiteVerdict(ctx, "allowed")
 		return domains, nil, nil
 	case shadow:
 		recordSiteVerdict(ctx, "shadow_would_deny")
 		return domains, nil, nil
+	case len(allowed) == 0 && len(denied) == 0:
+		recordSiteVerdict(ctx, "asked")
+		telemetry.GrantsDeniedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "site_policy_ask")))
+		return nil, nil, siteAskError(asked)
 	case len(allowed) == 0:
 		recordSiteVerdict(ctx, "denied")
 		telemetry.GrantsDeniedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "site_policy")))
-		return nil, nil, siteDeniedError(denied)
+		return nil, nil, siteDeniedRefusal(denied, asked)
 	default:
 		recordSiteVerdict(ctx, "narrowed")
-		return allowed, reportedDenied(denied), nil
+		// The narrowed grant names every host it dropped, ask hosts included, in
+		// AcquireGrantResponse.denied_domains (field 51), which already exists: the
+		// ask split is not a proto field.
+		return allowed, reportedDenied(droppedHosts(domains, allowed)), nil
 	}
 }
 
-func (s *Server) resolveSites(ctx context.Context, principal authctx.Principal, domains []string) (sitepolicy.Resolution, error) {
+// resolveSites asks org-core for the site decision of domains for the caller, and for
+// the Space when spaceID is non-empty. The Space comes from the mint request, which
+// spaceFloorServes admits only on the paths that read it. The grant record does not
+// store a Space yet (D2-299), so there is no grant-record Space to read instead.
+func (s *Server) resolveSites(ctx context.Context, principal authctx.Principal, spaceID string, domains []string) (sitepolicy.Resolution, error) {
 	if s.options.SiteResolver == nil {
 		return sitepolicy.Resolution{}, sitepolicy.ErrUnavailable
 	}
-	return s.options.SiteResolver.Resolve(ctx, principal.OrganizationID, authz.OwnerFilter(principal), domains)
+	return s.options.SiteResolver.Resolve(ctx, principal.OrganizationID, authz.OwnerFilter(principal), spaceID, domains)
 }
 
-// splitByPolicy keeps the hosts org-core allows at the requested level. A read
-// grant takes read and act hosts (the grant is then read-only); an act grant
-// takes act hosts only. Ask and deny are dropped: an ask host has no member
-// choice yet, and the member must be asked before anything runs. A host that
-// org-core did not answer for is dropped too.
-func splitByPolicy(domains []string, resolution sitepolicy.Resolution, readOnly bool) (allowed, denied []string) {
+// spaceFloorServes reports whether a mint that names a Space may be issued (F-f03-03). It needs the switch on, and a
+// site policy that is read: with it off no decision is asked, so the floor would not be read. The Space id must be
+// canonical (a padded or whitespace-only value is refused). The request must take a path that reads the site policy
+// with the Space: an ordinary or assistant-task grant, an origin extension, or an api-key grant. A sensitive approval
+// reads no site policy of its own, and a human-browse grant reads none either, so both are refused.
+func (s *Server) spaceFloorServes(principal authctx.Principal, req *AcquireGrantRequest) bool {
+	spaceID := req.GetSpaceId()
+	if !s.options.SpaceFloor || spaceID != strings.TrimSpace(spaceID) {
+		return false
+	}
+	if s.options.SitePolicy == sitepolicy.ModeOff || s.options.SitePolicy == "" {
+		return false
+	}
+	if len(req.GetAllowedActions()) != 0 {
+		return false
+	}
+	if principal.PrincipalType == authz.PrincipalAPIKey {
+		return true
+	}
+	switch req.GetGrantKind() {
+	case "", grantKindAssistantTask, grantKindOriginExtension:
+		return true
+	default:
+		return false
+	}
+}
+
+// splitByPolicy sorts the hosts by what org-core allows at the requested level.
+// allowed keeps the hosts the grant may take: act hosts, and read hosts when the
+// grant is read-only (the grant is then read-only too). asked keeps the ask hosts
+// at either level: the member can allow them, so they are not a denial, and the
+// member must be asked before anything runs. denied keeps everything else: deny,
+// a host org-core did not answer for, and a read host of an act grant. Each
+// slice keeps the order of domains.
+func splitByPolicy(domains []string, resolution sitepolicy.Resolution, readOnly bool) (allowed, asked, denied []string) {
 	effective := make(map[string]string, len(resolution.Decisions))
 	for _, decision := range resolution.Decisions {
 		effective[decision.Host] = decision.Effective
 	}
 	for _, host := range domains {
-		if permitsLevel(effective[host], readOnly) {
+		switch {
+		case permitsLevel(effective[host], readOnly):
 			allowed = append(allowed, host)
-		} else {
+		case effective[host] == sitepolicy.EffectiveAsk:
+			asked = append(asked, host)
+		default:
 			denied = append(denied, host)
 		}
 	}
-	return allowed, denied
+	return allowed, asked, denied
+}
+
+// droppedHosts returns the hosts of domains that are not in allowed, in the order
+// of domains. It is what a narrowed grant names as the hosts it dropped.
+func droppedHosts(domains, allowed []string) []string {
+	kept := make(map[string]bool, len(allowed))
+	for _, host := range allowed {
+		kept[host] = true
+	}
+	var dropped []string
+	for _, host := range domains {
+		if !kept[host] {
+			dropped = append(dropped, host)
+		}
+	}
+	return dropped
 }
 
 func permitsLevel(effective string, readOnly bool) bool {
@@ -719,11 +790,35 @@ func reportedDenied(denied []string) []string {
 // The denied hosts ride in the error details, not the message, so a log line
 // that carries the message carries no host.
 func siteDeniedError(denied []string) error {
-	st := status.New(codes.PermissionDenied, "browser site policy denies every requested domain")
-	withDetails, err := st.WithDetails(&errdetails.ErrorInfo{
-		Reason:   siteDeniedReason,
-		Metadata: map[string]string{"denied_domains": strings.Join(reportedDenied(denied), ",")},
+	return siteDeniedRefusal(denied, nil)
+}
+
+// siteDeniedRefusal refuses a mint the site policy allows for none of its hosts,
+// with BROWSER_SITE_DENIED. asked names the ask hosts of a mixed refusal, so a
+// caller can tell that the member could allow some of the hosts; a pure denial
+// carries no ask_domains. Hosts ride in the details, never in the message.
+func siteDeniedRefusal(denied, asked []string) error {
+	metadata := map[string]string{"denied_domains": strings.Join(reportedDenied(denied), ",")}
+	if len(asked) > 0 {
+		metadata["ask_domains"] = strings.Join(reportedDenied(asked), ",")
+	}
+	return siteRefusal(siteDeniedReason, "browser site policy denies every requested domain", metadata)
+}
+
+// siteAskError refuses a mint where every requested host is an ask: the member can
+// allow them. The hosts ride in ask_domains, bounded like denied_domains, and the
+// mint grants nothing. Hosts never reach the message.
+func siteAskError(asked []string) error {
+	return siteRefusal(siteAskReason, "browser site policy needs the member to decide for every requested domain", map[string]string{
+		"ask_domains": strings.Join(reportedDenied(asked), ","),
 	})
+}
+
+// siteRefusal is a PermissionDenied status that carries one ErrorInfo reason and
+// its metadata. If the details cannot be encoded the bare status is returned.
+func siteRefusal(reason, message string, metadata map[string]string) error {
+	st := status.New(codes.PermissionDenied, message)
+	withDetails, err := st.WithDetails(&errdetails.ErrorInfo{Reason: reason, Metadata: metadata})
 	if err != nil {
 		return st.Err()
 	}

@@ -39,6 +39,7 @@ use futures::future::BoxFuture;
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 
+use crate::gateway_metrics::{self, IdempotencyClaimOutcome};
 use crate::stream_buffer::StreamBufferStore;
 
 /// Separator between the identity components of a claim key. ASCII unit
@@ -77,6 +78,24 @@ const MAX_ENTRIES: usize = 1_024;
 /// A completed response is caller-derived/provider-derived data. Refuse to
 /// retain a large response for replay; the original request still succeeds.
 const MAX_CACHED_VALUE_BYTES: usize = 64 * 1024;
+
+/// The switch that lets a full registry admit a claim by evicting its oldest completed answer,
+/// instead of refusing the send. Default off, and only the exact literal `true` turns it on. It is
+/// read once, when [`IdempotencyRegistry::new`] builds the registry. Pending claims are never evicted.
+pub const EVICT_DONE_ENV: &str = "MODEL_GATEWAY_IDEMPOTENCY_EVICT_DONE";
+
+/// The strict parser of [`EVICT_DONE_ENV`].
+#[must_use]
+pub fn evict_done_enabled_from(value: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(value)
+}
+
+/// Whether the eviction switch is on, read from the environment. [`IdempotencyRegistry::new`] reads
+/// it once, when it builds the registry.
+#[must_use]
+pub fn evict_done_enabled() -> bool {
+    evict_done_enabled_from(std::env::var(EVICT_DONE_ENV).ok().as_deref())
+}
 
 /// The cacheable shape of a completed `/v1/invoke` response.
 #[derive(Debug, Clone, PartialEq)]
@@ -132,6 +151,8 @@ struct RegistryLimits {
     max_key_bytes: usize,
     max_entries: usize,
     max_cached_value_bytes: usize,
+    /// Whether a full registry may evict its oldest `Done` entry to admit a claim. Off refuses.
+    evict_done: bool,
 }
 
 struct RegistryState {
@@ -155,6 +176,7 @@ impl IdempotencyRegistry {
             max_key_bytes: MAX_KEY_BYTES,
             max_entries: MAX_ENTRIES,
             max_cached_value_bytes: MAX_CACHED_VALUE_BYTES,
+            evict_done: evict_done_enabled(),
         })
     }
 
@@ -169,6 +191,7 @@ impl IdempotencyRegistry {
         // Bound the *client* portion: the public 256-byte contract must not
         // shrink because a long org/user prefix was prepended.
         if client_key.trim().is_empty() || client_key.len() > self.state.limits.max_key_bytes {
+            gateway_metrics::idempotency_claim(IdempotencyClaimOutcome::InvalidKey);
             return Claim::Rejected(ClaimRejection::InvalidKey);
         }
         let key = &scoped_idempotency_key(org_id, user_id, client_key);
@@ -179,21 +202,37 @@ impl IdempotencyRegistry {
             .lock()
             .expect("idempotency registry admission lock poisoned");
         self.purge_expired(now);
+        let claim = self.admit(key, now);
+        refresh_entry_gauges(&self.state.inner);
+        claim
+    }
+
+    /// The admission decision for `key`, taken under the admission lock after the expired entries
+    /// are purged. Records the outcome of every decision it makes.
+    fn admit(&self, key: &str, now: Instant) -> Claim {
         if let Some(entry) = self.state.inner.get(key) {
             match entry.value() {
                 Entry::Done { value, at } if now.duration_since(*at) < DONE_TTL => {
+                    gateway_metrics::idempotency_claim(IdempotencyClaimOutcome::Cached);
                     return Claim::Cached(value.clone());
                 }
                 Entry::Pending { since } if now.duration_since(*since) < PENDING_TTL => {
+                    gateway_metrics::idempotency_claim(IdempotencyClaimOutcome::InFlight);
                     return Claim::InFlight;
                 }
                 // Stale (expired Done or abandoned Pending) — fall through and reclaim.
                 _ => {}
             }
         }
-        if self.state.inner.len() >= self.state.limits.max_entries {
+        let outcome = if self.state.inner.len() < self.state.limits.max_entries {
+            IdempotencyClaimOutcome::Proceed
+        } else if self.state.limits.evict_done && self.evict_oldest_done() {
+            IdempotencyClaimOutcome::EvictedDone
+        } else {
+            gateway_metrics::idempotency_claim(IdempotencyClaimOutcome::CapacityExceeded);
             return Claim::Rejected(ClaimRejection::CapacityExceeded);
-        }
+        };
+        gateway_metrics::idempotency_claim(outcome);
         self.state
             .inner
             .insert(key.to_owned(), Entry::Pending { since: now });
@@ -203,6 +242,23 @@ impl IdempotencyRegistry {
             committed: false,
             shared: None,
         })
+    }
+
+    /// Removes the completed entry that was stored longest ago and reports whether there was one.
+    /// Pending claims are never evicted: a request in flight keeps its key. Runs under the admission
+    /// lock, the only place that removes a live entry for capacity.
+    fn evict_oldest_done(&self) -> bool {
+        let oldest = self
+            .state
+            .inner
+            .iter()
+            .filter_map(|entry| match entry.value() {
+                Entry::Done { at, .. } => Some((entry.key().clone(), *at)),
+                Entry::Pending { .. } => None,
+            })
+            .min_by_key(|(_, at)| *at)
+            .map(|(key, _)| key);
+        oldest.is_some_and(|key| self.state.inner.remove(&key).is_some())
     }
 
     /// Number of currently-tracked keys (Pending + cached Done).
@@ -271,6 +327,7 @@ impl CommitGuard {
                 .inner
                 .remove_if(&self.key, |_, entry| matches!(entry, Entry::Pending { .. }));
         }
+        refresh_entry_gauges(&self.state.inner);
         self.committed = true;
     }
 }
@@ -297,6 +354,7 @@ impl Drop for CommitGuard {
             self.state
                 .inner
                 .remove_if(&self.key, |_, e| matches!(e, Entry::Pending { .. }));
+            refresh_entry_gauges(&self.state.inner);
         }
     }
 }
@@ -787,9 +845,24 @@ fn cached_value_bytes(value: &CachedInvoke) -> usize {
         .saturating_add(std::mem::size_of::<CachedInvokeUsage>())
 }
 
+/// Sets `gateway_idempotency_entries` from one pass over the map, counting entries and never their
+/// keys. Called under the admission lock after each change, so the gauges describe the registry as
+/// the admission decisions saw it. At most [`MAX_ENTRIES`] entries, so the pass stays short.
+fn refresh_entry_gauges(inner: &DashMap<String, Entry>) {
+    let (mut pending, mut done) = (0_usize, 0_usize);
+    for entry in inner.iter() {
+        match entry.value() {
+            Entry::Pending { .. } => pending += 1,
+            Entry::Done { .. } => done += 1,
+        }
+    }
+    gateway_metrics::idempotency_entries(pending, done);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 
     const ORG: &str = "org_A";
     const USER: &str = "user_1";
@@ -866,6 +939,7 @@ mod tests {
             max_key_bytes: 4,
             max_entries: 2,
             max_cached_value_bytes: 64,
+            evict_done: false,
         });
         assert!(matches!(
             reg.claim(ORG, USER, "abcde"),
@@ -880,6 +954,7 @@ mod tests {
             max_key_bytes: 64,
             max_entries: 2,
             max_cached_value_bytes: 64,
+            evict_done: false,
         });
         let Claim::Proceed(first) = reg.claim(ORG, USER, "first") else {
             panic!("first claim must proceed");
@@ -904,6 +979,7 @@ mod tests {
             max_key_bytes: 64,
             max_entries: 2,
             max_cached_value_bytes: 8,
+            evict_done: false,
         });
         let Claim::Proceed(guard) = reg.claim(ORG, USER, "key") else {
             panic!("first claim must proceed");
@@ -972,6 +1048,7 @@ mod tests {
             max_key_bytes: 8,
             max_entries: 4,
             max_cached_value_bytes: 64,
+            evict_done: false,
         });
         // A long org/user prefix must not consume the caller's key budget.
         assert!(
@@ -981,6 +1058,178 @@ mod tests {
             ),
             "the prefix is server-side overhead, not part of the public limit"
         );
+    }
+
+    // -- Eviction of completed answers (MODEL_GATEWAY_IDEMPOTENCY_EVICT_DONE) and the counters --
+
+    /// A registry of two entries, with the eviction switch set as the test asks. The completed
+    /// value cap is roomy enough for `sample`, which these tests commit.
+    fn small_registry(evict_done: bool) -> IdempotencyRegistry {
+        IdempotencyRegistry::with_limits(RegistryLimits {
+            max_key_bytes: 64,
+            max_entries: 2,
+            max_cached_value_bytes: 1024,
+            evict_done,
+        })
+    }
+
+    /// Stores a completed answer for `client_key` as if it finished at `at`, so a test sets the
+    /// order its completed entries were stored in without sleeping.
+    fn complete_at(reg: &IdempotencyRegistry, client_key: &str, at: Instant) {
+        reg.state.inner.insert(
+            scoped_idempotency_key(ORG, USER, client_key),
+            Entry::Done {
+                value: sample(client_key),
+                at,
+            },
+        );
+    }
+
+    fn holds(reg: &IdempotencyRegistry, client_key: &str) -> bool {
+        reg.state
+            .inner
+            .contains_key(&scoped_idempotency_key(ORG, USER, client_key))
+    }
+
+    #[test]
+    fn the_evict_done_switch_is_on_for_true_and_nothing_else() {
+        assert!(evict_done_enabled_from(Some("true")));
+        for off in [
+            None,
+            Some(""),
+            Some(" true "),
+            Some("TRUE"),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+        ] {
+            assert!(!evict_done_enabled_from(off), "{off:?}");
+        }
+    }
+
+    #[test]
+    fn a_full_registry_evicts_its_oldest_completed_answer_when_the_switch_is_on() {
+        let reg = small_registry(true);
+        let base = Instant::now();
+        complete_at(&reg, "older", base);
+        complete_at(&reg, "newer", base + Duration::from_secs(1));
+        let Claim::Proceed(_third) = reg.claim(ORG, USER, "third") else {
+            panic!("a full registry with a completed answer admits the claim");
+        };
+        assert!(
+            !holds(&reg, "older"),
+            "the oldest completed answer is the one evicted"
+        );
+        assert!(holds(&reg, "newer"), "a newer completed answer is kept");
+        assert!(holds(&reg, "third"), "the admitted claim is pending");
+        assert_eq!(reg.tracked(), 2);
+    }
+
+    #[test]
+    fn a_full_registry_refuses_as_before_when_the_switch_is_off() {
+        let reg = small_registry(false);
+        let base = Instant::now();
+        complete_at(&reg, "older", base);
+        complete_at(&reg, "newer", base + Duration::from_secs(1));
+        assert!(matches!(
+            reg.claim(ORG, USER, "third"),
+            Claim::Rejected(ClaimRejection::CapacityExceeded)
+        ));
+        assert!(
+            holds(&reg, "older") && holds(&reg, "newer"),
+            "nothing is evicted"
+        );
+        assert_eq!(reg.tracked(), 2);
+    }
+
+    #[test]
+    fn a_pending_claim_is_never_evicted_even_with_the_switch_on() {
+        let reg = small_registry(true);
+        let Claim::Proceed(_live) = reg.claim(ORG, USER, "live") else {
+            panic!("the first claim proceeds");
+        };
+        complete_at(&reg, "done", Instant::now());
+        let Claim::Proceed(_third) = reg.claim(ORG, USER, "third") else {
+            panic!("the completed answer is evicted to admit the third claim");
+        };
+        assert!(!holds(&reg, "done"));
+        assert!(holds(&reg, "live"), "a request in flight keeps its key");
+        assert!(
+            matches!(
+                reg.claim(ORG, USER, "fourth"),
+                Claim::Rejected(ClaimRejection::CapacityExceeded)
+            ),
+            "with only pending claims left, the switch on still refuses"
+        );
+        assert!(holds(&reg, "live") && holds(&reg, "third"));
+        assert!(matches!(reg.claim(ORG, USER, "live"), Claim::InFlight));
+    }
+
+    /// The value of one labelled series in the scrape the recorder renders, or 0 until it is set.
+    fn series(handle: &PrometheusHandle, labelled: &str) -> f64 {
+        handle
+            .render()
+            .lines()
+            .find_map(|line| line.strip_prefix(labelled)?.strip_prefix(' '))
+            .map_or(0.0, |value| {
+                value.parse().expect("a series renders a number")
+            })
+    }
+
+    #[test]
+    fn the_claim_counters_and_entry_gauges_follow_each_decision() {
+        const PENDING: &str = r#"gateway_idempotency_entries{state="pending"}"#;
+        const DONE: &str = r#"gateway_idempotency_entries{state="done"}"#;
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let reg = small_registry(true);
+            let Claim::Proceed(a) = reg.claim(ORG, USER, "a") else {
+                panic!("a proceeds");
+            };
+            assert_eq!(series(&handle, PENDING), 1.0);
+            a.commit(sample("req-a"));
+            assert_eq!(series(&handle, PENDING), 0.0);
+            assert_eq!(series(&handle, DONE), 1.0);
+
+            let Claim::Proceed(_b) = reg.claim(ORG, USER, "b") else {
+                panic!("b proceeds");
+            };
+            assert!(matches!(reg.claim(ORG, USER, "b"), Claim::InFlight));
+            // Full: one completed answer (a) and one pending claim (b). "c" evicts a.
+            let Claim::Proceed(c) = reg.claim(ORG, USER, "c") else {
+                panic!("c evicts the completed answer to proceed");
+            };
+            assert!(matches!(
+                reg.claim(ORG, USER, "d"),
+                Claim::Rejected(ClaimRejection::CapacityExceeded)
+            ));
+            assert!(matches!(
+                reg.claim(ORG, USER, "  "),
+                Claim::Rejected(ClaimRejection::InvalidKey)
+            ));
+            assert_eq!(series(&handle, PENDING), 2.0);
+            assert_eq!(series(&handle, DONE), 0.0);
+            c.commit(sample("req-c"));
+            assert!(matches!(reg.claim(ORG, USER, "c"), Claim::Cached(_)));
+            assert_eq!(series(&handle, PENDING), 1.0);
+            assert_eq!(series(&handle, DONE), 1.0);
+
+            // Seven claims: two admitted (a, b), one in flight (b again), one evicting (c), one
+            // refused for capacity (d), one invalid (the blank key), one replayed (c).
+            let claims = |outcome: &str| {
+                series(
+                    &handle,
+                    &format!(r#"gateway_idempotency_claims_total{{outcome="{outcome}"}}"#),
+                )
+            };
+            assert_eq!(claims("proceed"), 2.0);
+            assert_eq!(claims("in_flight"), 1.0);
+            assert_eq!(claims("evicted_done"), 1.0);
+            assert_eq!(claims("capacity_exceeded"), 1.0);
+            assert_eq!(claims("invalid_key"), 1.0);
+            assert_eq!(claims("cached"), 1.0);
+        });
     }
 
     // -- The shared claim ----------------------------------------------------------------

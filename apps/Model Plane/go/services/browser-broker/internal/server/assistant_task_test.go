@@ -12,10 +12,10 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-type assistantTaskSites func(context.Context, string, string, []string) (sitepolicy.Resolution, error)
+type assistantTaskSites func(context.Context, string, string, string, []string) (sitepolicy.Resolution, error)
 
-func (resolve assistantTaskSites) Resolve(ctx context.Context, org, user string, hosts []string) (sitepolicy.Resolution, error) {
-	return resolve(ctx, org, user, hosts)
+func (resolve assistantTaskSites) Resolve(ctx context.Context, org, user, space string, hosts []string) (sitepolicy.Resolution, error) {
+	return resolve(ctx, org, user, space, hosts)
 }
 
 func TestAssistantTaskHonorsSiteCeilingAndKeepsExactScope(t *testing.T) {
@@ -34,7 +34,7 @@ func TestAssistantTaskHonorsSiteCeilingAndKeepsExactScope(t *testing.T) {
 		{"org denied", "deny", "none", "org_block", codes.PermissionDenied},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			resolver := assistantTaskSites(func(_ context.Context, org, user string, hosts []string) (sitepolicy.Resolution, error) {
+			resolver := assistantTaskSites(func(_ context.Context, org, user, _ string, hosts []string) (sitepolicy.Resolution, error) {
 				if org != "org1" || user != "user1" || len(hosts) != 1 || hosts[0] != host {
 					t.Fatalf("unexpected policy query: %q %q %v", org, user, hosts)
 				}

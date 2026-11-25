@@ -44,6 +44,12 @@ func verifiedIsAdmin(request *http.Request) bool {
 	if !ok {
 		return false
 	}
+	return PrincipalIsAdmin(principal)
+}
+
+// PrincipalIsAdmin is the admin rule of verifiedIsAdmin applied to a principal already verified in
+// context. The gRPC server reads admin status through it, so both entry points agree on it.
+func PrincipalIsAdmin(principal authctx.Principal) bool {
 	for _, scope := range principal.Scopes {
 		if scope == "admin" || scope == "org:admin" || strings.HasSuffix(scope, ":admin") {
 			return true

@@ -69,9 +69,10 @@ type Resolution struct {
 }
 
 // Resolver answers the site decision for hosts for one member. An empty userID
-// asks for the admin's answer alone.
+// asks for the admin's answer alone. An empty spaceID asks for the org-wide answer;
+// a non-empty one asks for the answer the Space floor gives that Space (F-f10-31).
 type Resolver interface {
-	Resolve(ctx context.Context, orgID, userID string, hosts []string) (Resolution, error)
+	Resolve(ctx context.Context, orgID, userID, spaceID string, hosts []string) (Resolution, error)
 }
 
 const (
@@ -101,8 +102,12 @@ type Client struct {
 	cache map[cacheKey]cacheEntry
 }
 
+// cacheKey keys an answer by everything it depends on. The Space is part of it: once the
+// Space floor can deny a host for one Space and allow it for another, an allow held for
+// Space A must not answer Space B's call for the same org, user and host. The empty Space
+// is the org-wide answer, and it shares its entries exactly as it did before the Space.
 type cacheKey struct {
-	orgID, userID, host string
+	orgID, userID, space, host string
 }
 
 type cacheEntry struct {
@@ -139,20 +144,21 @@ func newClient(baseURL, serviceID, token string, timeout time.Duration, now func
 }
 
 // Resolve answers hosts from the cache when every host has a live allowed
-// answer, and otherwise asks org-core for all of them.
-func (c *Client) Resolve(ctx context.Context, orgID, userID string, hosts []string) (Resolution, error) {
-	if cached, ok := c.cached(orgID, userID, hosts); ok {
+// answer, and otherwise asks org-core for all of them. The answer is cached per
+// Space as well as per org, user and host.
+func (c *Client) Resolve(ctx context.Context, orgID, userID, spaceID string, hosts []string) (Resolution, error) {
+	if cached, ok := c.cached(orgID, userID, spaceID, hosts); ok {
 		return cached, nil
 	}
-	fresh, err := c.fetch(ctx, orgID, userID, hosts)
+	fresh, err := c.fetch(ctx, orgID, userID, spaceID, hosts)
 	if err != nil {
 		return Resolution{}, err
 	}
-	c.remember(orgID, userID, fresh)
+	c.remember(orgID, userID, spaceID, fresh)
 	return fresh, nil
 }
 
-func (c *Client) cached(orgID, userID string, hosts []string) (Resolution, bool) {
+func (c *Client) cached(orgID, userID, spaceID string, hosts []string) (Resolution, bool) {
 	if len(hosts) == 0 {
 		return Resolution{}, false
 	}
@@ -161,7 +167,7 @@ func (c *Client) cached(orgID, userID string, hosts []string) (Resolution, bool)
 	now := c.now()
 	out := Resolution{Decisions: make([]Decision, 0, len(hosts))}
 	for _, host := range hosts {
-		entry, ok := c.cache[cacheKey{orgID, userID, host}]
+		entry, ok := c.cache[cacheKey{orgID, userID, spaceID, host}]
 		if !ok || !entry.expires.After(now) {
 			return Resolution{}, false
 		}
@@ -170,7 +176,7 @@ func (c *Client) cached(orgID, userID string, hosts []string) (Resolution, bool)
 	return out, true
 }
 
-func (c *Client) remember(orgID, userID string, resolution Resolution) {
+func (c *Client) remember(orgID, userID, spaceID string, resolution Resolution) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now()
@@ -181,20 +187,25 @@ func (c *Client) remember(orgID, userID string, resolution Resolution) {
 		if decision.Effective != EffectiveRead && decision.Effective != EffectiveAct {
 			continue
 		}
-		c.cache[cacheKey{orgID, userID, decision.Host}] = cacheEntry{
+		c.cache[cacheKey{orgID, userID, spaceID, decision.Host}] = cacheEntry{
 			effective: decision.Effective,
 			expires:   now.Add(positiveTTL),
 		}
 	}
 }
 
-func (c *Client) fetch(ctx context.Context, orgID, userID string, hosts []string) (Resolution, error) {
+func (c *Client) fetch(ctx context.Context, orgID, userID, spaceID string, hosts []string) (Resolution, error) {
 	query := url.Values{}
 	for _, host := range hosts {
 		query.Add("host", host)
 	}
 	if userID != "" {
 		query.Set("user_id", userID)
+	}
+	// The Space is named only when the caller has one; org-core answers the org-wide
+	// decision for a call that names none, as it did before the Space floor.
+	if spaceID != "" {
+		query.Set("space_id", spaceID)
 	}
 	target := c.baseURL + "/internal/orgs/" + url.PathEscape(orgID) + "/browser-sites/resolve?" + query.Encode()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)

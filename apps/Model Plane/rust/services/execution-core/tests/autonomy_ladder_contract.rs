@@ -267,10 +267,12 @@ fn a_retention_bound_run_still_learns_the_built_in_classes() {
 #[test]
 fn an_mcp_call_is_refused_under_retention_before_any_network_call() {
     let text = source("src/runtime_loop/mod.rs");
-    let body = function_body(&text, "async fn execute_mcp(");
+    // The calls live in `execute_mcp_in_mode` (P2-ec-02-rel1): `execute_mcp` only reads the mode
+    // from the environment and forwards every argument to it.
+    let body = function_body(&text, "async fn execute_mcp_in_mode(");
     let refusal = body
         .find("retention_waived")
-        .expect("execute_mcp lost its retention check");
+        .expect("execute_mcp_in_mode lost its retention check");
     for reached_later in [
         "parse_mcp_tool_name(",
         "McpGatewayClient::from_env(",
@@ -278,7 +280,7 @@ fn an_mcp_call_is_refused_under_retention_before_any_network_call() {
     ] {
         let at = body
             .find(reached_later)
-            .unwrap_or_else(|| panic!("execute_mcp no longer calls `{reached_later}`"));
+            .unwrap_or_else(|| panic!("execute_mcp_in_mode no longer calls `{reached_later}`"));
         assert!(
             refusal < at,
             "the retention refusal must come before `{reached_later}`: {body}"

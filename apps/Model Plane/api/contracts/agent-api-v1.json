@@ -26,6 +26,7 @@
     "thread_id_max_chars": 128,
     "model_max_chars": 128,
     "run_id_max_chars": 128,
+    "idempotency_key_max_chars": 128,
     "metadata_max_pairs": 16,
     "metadata_key_max_chars": 64,
     "metadata_value_max_chars": 512,
@@ -86,7 +87,7 @@
       "content_type": "application/json",
       "body_fields": ["input", "thread_id", "model", "metadata"],
       "query_fields": [],
-      "headers": [],
+      "headers": ["Idempotency-Key"],
       "errors": [
         "invalid_request",
         "api_key_invalid",

@@ -945,6 +945,125 @@ pub(crate) async fn prepare_managed_run_with_token(
     .await
 }
 
+/// The switch that cancels a keyed start's fresh run when the request future that started it is dropped before its
+/// prompt is appended (P2-mg-11-rel1: a client disconnect, a shutdown). Strict: only the literal `true` turns it on.
+/// Off, a dropped start leaves its run queued, as it always did, until Session Core's recovery ends it.
+const KEYED_START_CANCEL_ON_DROP_ENV: &str = "MODEL_GATEWAY_KEYED_START_CANCEL_ON_DROP";
+
+/// Bounds the detached cancel of a dropped start. Nothing else waits on it, so a stalled Session Core must not hold it.
+const DROPPED_START_CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Whether a dropped keyed start cancels its fresh run, read at each call.
+fn keyed_start_cancel_on_drop_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(
+        std::env::var(KEYED_START_CANCEL_ON_DROP_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Cancels a fresh keyed run whose prompt append was still pending when the future awaiting it was dropped. A dropped
+/// future runs none of its own cleanup, so without this the run stays queued and undispatched, and every replay of its
+/// key answers that status and dispatches nothing. Armed for the append, and only while its switch is on. It stays armed
+/// through a refused append's explicit cancel, and is disarmed once a saved append or that cancel has returned, so a
+/// start that finished never cancels.
+struct UndispatchedRunGuard {
+    pending: Option<PendingCancel>,
+}
+
+/// What a dropped start cancels: its run, the reason, and the bearer the start was made under.
+struct PendingCancel {
+    state: AppState,
+    run_id: String,
+    reason: &'static str,
+    bearer: Option<String>,
+}
+
+impl UndispatchedRunGuard {
+    fn arm(state: &AppState, run_id: &str, reason: &'static str, bearer: Option<&str>) -> Self {
+        let pending = keyed_start_cancel_on_drop_enabled().then(|| PendingCancel {
+            state: state.clone(),
+            run_id: run_id.to_owned(),
+            reason,
+            bearer: bearer.map(str::to_owned),
+        });
+        Self { pending }
+    }
+
+    fn disarm(&mut self) {
+        self.pending = None;
+    }
+}
+
+impl Drop for UndispatchedRunGuard {
+    fn drop(&mut self) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(run_id = %pending.run_id, "dropped keyed start could not cancel its run: no runtime");
+            return;
+        };
+        // Detached: the future that owed this cancel has gone, so nothing else ends a stalled call. The timeout bounds it.
+        runtime.spawn(async move {
+            match tokio::time::timeout(
+                DROPPED_START_CANCEL_TIMEOUT,
+                cancel_run_with_bearer(
+                    &pending.state,
+                    &pending.run_id,
+                    pending.reason,
+                    pending.bearer.as_deref(),
+                ),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(cancel_error)) => {
+                    tracing::warn!(%cancel_error, run_id = %pending.run_id, "dropped keyed start's run could not be cancelled");
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(run_id = %pending.run_id, "dropped keyed start's run cancel timed out");
+                }
+            }
+        });
+    }
+}
+
+/// Appends the prompt to a run that the calling start has just made. The append runs under an
+/// [`UndispatchedRunGuard`], so a request dropped while it is pending cancels the run too. A refused append cancels the
+/// run before the error is returned, as it always has, and logs `refused_message` when that cancel fails. The guard stays
+/// armed through that cancel, so a drop during it re-issues the cancel. That is harmless: Session Core answers
+/// `cancelled=false` for a terminal run.
+async fn append_prompt_to_fresh_run<Append>(
+    state: &AppState,
+    run_id: &str,
+    bearer: Option<&str>,
+    failure_reason: &'static str,
+    refused_message: &'static str,
+    append: Append,
+) -> Result<(), tonic::Status>
+where
+    Append: std::future::Future<Output = Result<AppendReceipt, tonic::Status>>,
+{
+    let mut undispatched = UndispatchedRunGuard::arm(state, run_id, failure_reason, bearer);
+    match append.await {
+        Ok(_) => {
+            undispatched.disarm();
+            Ok(())
+        }
+        Err(error) => {
+            // Best effort: the run exists but will never be dispatched.
+            if let Err(cancel_error) =
+                cancel_run_with_bearer(state, run_id, failure_reason, bearer).await
+            {
+                tracing::warn!(%cancel_error, run_id = %run_id, "{refused_message}");
+            }
+            undispatched.disarm();
+            Err(error)
+        }
+    }
+}
+
 /// Start, or replay, a standalone browser-agent managed run under a client
 /// idempotency key (`POST /v1/browser/runs` with `Idempotency-Key`).
 ///
@@ -962,7 +1081,9 @@ pub(crate) async fn prepare_managed_run_with_token(
 /// A new run whose prompt cannot be appended is cancelled before the error is
 /// returned, so a later replay of the same key finds a terminal run (the
 /// caller's liveness check refuses it) rather than a live run that was never
-/// dispatched.
+/// dispatched. A request dropped while its append is still pending (a client
+/// disconnect, a shutdown) cancels the run the same way while
+/// `MODEL_GATEWAY_KEYED_START_CANCEL_ON_DROP` is `true` (P2-mg-11-rel1).
 ///
 /// # Errors
 /// Returns an error when Session Core rejects or cannot complete any step. An
@@ -1014,31 +1135,25 @@ pub(crate) async fn prepare_idempotent_browser_run(
     }
 
     if !response.already_started {
-        if let Err(error) = append_user_message(
-            &mut session_client,
-            &thread_id,
-            goal,
+        append_prompt_to_fresh_run(
+            state,
+            &response.run_id,
             bearer_str,
-            None,
-            false,
-            None,
-            None,
+            "browser_run_start_failed",
+            "undispatched browser run could not be cancelled",
+            Box::pin(append_user_message(
+                &mut session_client,
+                &thread_id,
+                goal,
+                bearer_str,
+                None,
+                false,
+                None,
+                None,
+            )),
         )
         .await
-        {
-            // Best effort: the run exists but will never be dispatched.
-            if let Err(cancel_error) = cancel_run_with_bearer(
-                state,
-                &response.run_id,
-                "browser_run_start_failed",
-                bearer_str,
-            )
-            .await
-            {
-                tracing::warn!(%cancel_error, run_id = %response.run_id, "undispatched browser run could not be cancelled");
-            }
-            return Err(error).context("session-core append_message(user) failed");
-        }
+        .context("session-core append_message(user) failed")?;
     }
 
     Ok(SessionRun {
@@ -1047,6 +1162,109 @@ pub(crate) async fn prepare_idempotent_browser_run(
         org_id: org_id.to_owned(),
         already_started: response.already_started,
         terminal_source: ManagedRunSource::GatewayBrowser,
+    })
+}
+
+/// Start, or replay, an Agent API run under the caller's `Idempotency-Key` (F-f08-13).
+///
+/// `start_key` is derived from the request id that the key and body name (see `agent_api_run`), so a repeat of
+/// the same start carries the same key. The order differs from `prepare_managed_run_with_token` for that reason,
+/// as `prepare_idempotent_browser_run` does: the thread is the one the caller named, or the one this start key
+/// owns (`CreateThread` is idempotent on `(org, user, session_key)`, so a replay without a thread finds the
+/// thread the first start made); the managed run is started first; and the prompt is appended only when the
+/// run is new. A replay answers the original run and thread and writes no second prompt.
+///
+/// A new run whose prompt cannot be appended is cancelled before the error is returned, so a later replay of
+/// the same key finds a terminal run rather than a live run that was never dispatched. A request dropped while its
+/// append is still pending cancels the run the same way while `MODEL_GATEWAY_KEYED_START_CANCEL_ON_DROP` is `true`
+/// (P2-mg-11-rel1). The caller is never zero-retention here: `agent_api_run` refuses a ZDR key before any start.
+///
+/// # Errors
+/// Returns an error when Session Core rejects or cannot complete any step. A `tonic::Status` stays
+/// downcastable, so the Agent API can name it.
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare_idempotent_agent_run(
+    state: &AppState,
+    requested_thread_id: Option<&str>,
+    org_id: &str,
+    user_id: &str,
+    goal: &str,
+    agent_id: &str,
+    mode: &str,
+    start_key: &str,
+    source: ManagedRunSource,
+    bearer: &str,
+) -> Result<SessionRun> {
+    let bearer_str = Some(bearer);
+    let mut session_client = state.session_client.clone();
+    let thread_id = match non_empty(requested_thread_id) {
+        Some(thread_id) => thread_id.to_owned(),
+        None => {
+            create_thread(
+                &mut session_client,
+                Some(start_key),
+                org_id,
+                user_id,
+                bearer_str,
+                None,
+            )
+            .await?
+        }
+    };
+
+    let mut lifecycle = state.managed_run_client.clone();
+    let response = lifecycle
+        .start_managed_run(authenticated_request(
+            StartManagedRunRequest {
+                thread_id: thread_id.clone(),
+                parent_run_id: String::new(),
+                agent_id: agent_id.to_owned(),
+                goal: managed_goal(goal),
+                mode: mode.to_owned(),
+                org_id: org_id.to_owned(),
+                user_id: user_id.to_owned(),
+                start_key: start_key.to_owned(),
+                terminal_source: source as i32,
+                wake: None,
+                agent_version_pin: None,
+            },
+            bearer_str,
+        )?)
+        .await
+        .context("session-core start_managed_run failed")?
+        .into_inner();
+    if response.thread_id.trim().is_empty() || response.thread_id != thread_id {
+        anyhow::bail!("session-core managed start returned a different durable thread");
+    }
+
+    if !response.already_started {
+        append_prompt_to_fresh_run(
+            state,
+            &response.run_id,
+            bearer_str,
+            "agent_run_start_failed",
+            "undispatched agent run could not be cancelled",
+            Box::pin(append_user_message(
+                &mut session_client,
+                &thread_id,
+                goal,
+                bearer_str,
+                None,
+                false,
+                None,
+                None,
+            )),
+        )
+        .await
+        .context("session-core append_message(user) failed")?;
+    }
+
+    Ok(SessionRun {
+        thread_id: response.thread_id,
+        run_id: response.run_id,
+        org_id: org_id.to_owned(),
+        already_started: response.already_started,
+        terminal_source: source,
     })
 }
 
@@ -3626,6 +3844,494 @@ mod tests {
             starts[0].terminal_source,
             ManagedRunSource::GatewayDirect as i32
         );
+    }
+
+    /// P2-mg-11-rel1: a keyed start whose request future is dropped between its managed start and its prompt append.
+    mod dropped_keyed_start {
+        use super::{managed_lifecycle_client, CapturingManagedLifecycle};
+        use crate::session_flow::{
+            append_prompt_to_fresh_run, prepare_idempotent_agent_run, AppendReceipt,
+            KEYED_START_CANCEL_ON_DROP_ENV,
+        };
+        use crate::state::AppState;
+        use mp_contracts::model_plane::v1::{
+            run_service_client::RunServiceClient,
+            run_service_server::{RunService, RunServiceServer},
+            session_core_client::SessionCoreClient,
+            AuthorizeRoomRunAttachRequest, AuthorizeRoomRunAttachResponse,
+            CancelRunAsRoomManagerRequest, CancelRunAsRoomManagerResponse, CancelRunRequest,
+            CancelRunResponse, GetRunRequest, GetScheduledStepContextRequest, ListRunsRequest,
+            ListRunsResponse, ListSystemRunsRequest, ManagedRunSource,
+            ResolveApprovalAuthorityRequest, ResolveApprovalAuthorityResponse,
+            ResolveRunActionAuthorityRequest, ResolveRunActionAuthorityResponse,
+            ResolveRunOwnerRequest, ResolveRunOwnerResponse, ResolveScheduledStepAuthorityRequest,
+            ResolveScheduledStepAuthorityResponse, ResolveThreadOwnerRequest,
+            ResolveThreadOwnerResponse, RunDetail, ScheduledStepContext,
+        };
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+        use tokio::net::TcpListener;
+        use tokio_stream::wrappers::TcpListenerStream;
+        use tonic::transport::{Channel, Endpoint, Server};
+        use tonic::{Request, Response, Status};
+
+        /// A `CancelRun` the gateway sent, and the bearer it arrived under.
+        #[derive(Clone)]
+        struct RecordedCancel {
+            request: CancelRunRequest,
+            authorization: Option<String>,
+        }
+
+        /// The run service double. It records each `CancelRun` the gateway sends, and serves no other run RPC. With
+        /// `refuse_cancels` set, it records each cancel and then refuses it, as a failing Session Core would.
+        #[derive(Clone, Default)]
+        struct CancelRecorder {
+            cancels: Arc<Mutex<Vec<RecordedCancel>>>,
+            refuse_cancels: bool,
+        }
+
+        #[allow(clippy::result_large_err)]
+        fn not_served<T>(rpc: &str) -> Result<Response<T>, Status> {
+            Err(Status::unimplemented(format!(
+                "{rpc} is not served by this double"
+            )))
+        }
+
+        #[tonic::async_trait]
+        impl RunService for CancelRecorder {
+            async fn get_run(
+                &self,
+                _: Request<GetRunRequest>,
+            ) -> Result<Response<RunDetail>, Status> {
+                not_served("get_run")
+            }
+
+            async fn get_scheduled_step_context(
+                &self,
+                _: Request<GetScheduledStepContextRequest>,
+            ) -> Result<Response<ScheduledStepContext>, Status> {
+                not_served("get_scheduled_step_context")
+            }
+
+            async fn list_runs(
+                &self,
+                _: Request<ListRunsRequest>,
+            ) -> Result<Response<ListRunsResponse>, Status> {
+                not_served("list_runs")
+            }
+
+            async fn cancel_run(
+                &self,
+                request: Request<CancelRunRequest>,
+            ) -> Result<Response<CancelRunResponse>, Status> {
+                let authorization = request
+                    .metadata()
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                self.cancels.lock().expect("cancels").push(RecordedCancel {
+                    request: request.into_inner(),
+                    authorization,
+                });
+                if self.refuse_cancels {
+                    return Err(Status::unavailable("cancel refused by this double"));
+                }
+                Ok(Response::new(CancelRunResponse {
+                    cancelled: true,
+                    receipt_id: String::new(),
+                }))
+            }
+
+            async fn list_system_runs(
+                &self,
+                _: Request<ListSystemRunsRequest>,
+            ) -> Result<Response<ListRunsResponse>, Status> {
+                not_served("list_system_runs")
+            }
+
+            async fn resolve_run_owner(
+                &self,
+                _: Request<ResolveRunOwnerRequest>,
+            ) -> Result<Response<ResolveRunOwnerResponse>, Status> {
+                not_served("resolve_run_owner")
+            }
+
+            async fn resolve_thread_owner(
+                &self,
+                _: Request<ResolveThreadOwnerRequest>,
+            ) -> Result<Response<ResolveThreadOwnerResponse>, Status> {
+                not_served("resolve_thread_owner")
+            }
+
+            async fn resolve_run_action_authority(
+                &self,
+                _: Request<ResolveRunActionAuthorityRequest>,
+            ) -> Result<Response<ResolveRunActionAuthorityResponse>, Status> {
+                not_served("resolve_run_action_authority")
+            }
+
+            async fn resolve_approval_authority(
+                &self,
+                _: Request<ResolveApprovalAuthorityRequest>,
+            ) -> Result<Response<ResolveApprovalAuthorityResponse>, Status> {
+                not_served("resolve_approval_authority")
+            }
+
+            async fn resolve_scheduled_step_authority(
+                &self,
+                _: Request<ResolveScheduledStepAuthorityRequest>,
+            ) -> Result<Response<ResolveScheduledStepAuthorityResponse>, Status> {
+                not_served("resolve_scheduled_step_authority")
+            }
+
+            async fn authorize_room_run_attach(
+                &self,
+                _: Request<AuthorizeRoomRunAttachRequest>,
+            ) -> Result<Response<AuthorizeRoomRunAttachResponse>, Status> {
+                not_served("authorize_room_run_attach")
+            }
+
+            async fn cancel_run_as_room_manager(
+                &self,
+                _: Request<CancelRunAsRoomManagerRequest>,
+            ) -> Result<Response<CancelRunAsRoomManagerResponse>, Status> {
+                not_served("cancel_run_as_room_manager")
+            }
+        }
+
+        async fn run_service_client(runs: CancelRecorder) -> RunServiceClient<Channel> {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind run service double");
+            let address = listener.local_addr().expect("run service double address");
+            tokio::spawn(async move {
+                Server::builder()
+                    .add_service(RunServiceServer::new(runs))
+                    .serve_with_incoming(TcpListenerStream::new(listener))
+                    .await
+                    .expect("run service double");
+            });
+            let channel = Endpoint::from_shared(format!("http://{address}"))
+                .expect("run service double endpoint")
+                .connect()
+                .await
+                .expect("connect run service double");
+            RunServiceClient::new(channel)
+        }
+
+        /// A Session Core double that accepts connections and never answers, so a call to it waits until its caller
+        /// gives up. The count of accepted connections shows that a call has been made.
+        async fn unanswering_session_client(
+            accepted: Arc<AtomicUsize>,
+        ) -> SessionCoreClient<Channel> {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind unanswering session core");
+            let address = listener
+                .local_addr()
+                .expect("unanswering session core address");
+            tokio::spawn(async move {
+                let mut held = Vec::new();
+                while let Ok((stream, _)) = listener.accept().await {
+                    accepted.fetch_add(1, Ordering::SeqCst);
+                    held.push(stream);
+                }
+            });
+            // Lazy, so the first call dials it: the prompt append, after the managed start has answered.
+            let channel = Endpoint::from_shared(format!("http://{address}"))
+                .expect("unanswering session core endpoint")
+                .connect_lazy();
+            SessionCoreClient::new(channel)
+        }
+
+        /// Sets the switch for one test, and removes it when the test ends, so a failed assertion cannot leave it set.
+        struct SwitchSet;
+
+        impl SwitchSet {
+            fn set(value: Option<&str>) -> Self {
+                match value {
+                    Some(value) => std::env::set_var(KEYED_START_CANCEL_ON_DROP_ENV, value),
+                    None => std::env::remove_var(KEYED_START_CANCEL_ON_DROP_ENV),
+                }
+                Self
+            }
+        }
+
+        impl Drop for SwitchSet {
+            fn drop(&mut self) {
+                std::env::remove_var(KEYED_START_CANCEL_ON_DROP_ENV);
+            }
+        }
+
+        /// Collects the fields of every WARN event written on this thread, as name and value pairs.
+        #[derive(Clone, Default)]
+        struct WarnLines(Arc<Mutex<Vec<Vec<(String, String)>>>>);
+
+        struct WarnFields<'a>(&'a mut Vec<(String, String)>);
+
+        impl tracing::field::Visit for WarnFields<'_> {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0.push((field.name().to_owned(), value.to_owned()));
+            }
+
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.push((field.name().to_owned(), format!("{value:?}")));
+            }
+        }
+
+        impl tracing::Subscriber for WarnLines {
+            fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+                metadata.is_event() && *metadata.level() == tracing::Level::WARN
+            }
+
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+            fn event(&self, event: &tracing::Event<'_>) {
+                let mut fields = Vec::new();
+                event.record(&mut WarnFields(&mut fields));
+                self.0.lock().expect("log capture lock").push(fields);
+            }
+
+            fn enter(&self, _: &tracing::span::Id) {}
+
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+
+        /// Polls `ready` until it holds, and fails the test after five seconds.
+        async fn wait_until(mut ready: impl FnMut() -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !ready() {
+                assert!(
+                    Instant::now() < deadline,
+                    "the condition was not met in time"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        /// Starts a keyed run through `prepare_idempotent_agent_run` and drops that start while its prompt append is in
+        /// flight, the window a client disconnect or a shutdown can hit. Returns the cancels the run service received.
+        async fn drop_a_keyed_start_mid_append() -> Arc<Mutex<Vec<RecordedCancel>>> {
+            let accepted = Arc::new(AtomicUsize::new(0));
+            let runs = CancelRecorder::default();
+            let cancels = Arc::clone(&runs.cancels);
+            let mut state = AppState::new();
+            state.managed_run_client = managed_lifecycle_client(CapturingManagedLifecycle {
+                starts: Arc::new(Mutex::new(Vec::new())),
+            })
+            .await;
+            state.session_client = unanswering_session_client(Arc::clone(&accepted)).await;
+            state.run_client = run_service_client(runs).await;
+            let start = tokio::spawn(async move {
+                Box::pin(prepare_idempotent_agent_run(
+                    &state,
+                    Some("metadata-only-thread"),
+                    "org-1",
+                    "user-1",
+                    "a goal",
+                    "model-gateway",
+                    "execute",
+                    "start-key-1",
+                    ManagedRunSource::GatewayDirect,
+                    "delegated-user-session-token",
+                ))
+                .await
+            });
+            wait_until(|| accepted.load(Ordering::SeqCst) == 1).await;
+            start.abort();
+            assert!(
+                start.await.is_err_and(|error| error.is_cancelled()),
+                "the start was dropped while its append was pending"
+            );
+            cancels
+        }
+
+        /// With the switch on, the dropped start cancels the one run it made, so a replay of its key finds a terminal
+        /// run instead of a queued one that nothing will dispatch.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_keyed_start_dropped_mid_append_cancels_the_run_it_made() {
+            let _switch = SwitchSet::set(Some("true"));
+            let cancels = drop_a_keyed_start_mid_append().await;
+            wait_until(|| !cancels.lock().expect("cancels").is_empty()).await;
+            let recorded = cancels.lock().expect("cancels").clone();
+            assert_eq!(recorded.len(), 1, "the dropped start cancels its run once");
+            assert_eq!(recorded[0].request.run_id, "managed-run-1");
+            assert_eq!(recorded[0].request.reason, "agent_run_start_failed");
+            assert_eq!(
+                recorded[0].authorization.as_deref(),
+                Some("Bearer delegated-user-session-token"),
+                "the cancel carries the start's own bearer"
+            );
+        }
+
+        /// The switch is strict and off by default: a value other than the literal `true` leaves a dropped start as it was.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_keyed_start_dropped_mid_append_cancels_nothing_while_the_switch_is_off() {
+            for value in [None, Some("1"), Some("TRUE")] {
+                let _switch = SwitchSet::set(value);
+                let cancels = drop_a_keyed_start_mid_append().await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                assert!(
+                    cancels.lock().expect("cancels").is_empty(),
+                    "switch value {value:?} cancels nothing"
+                );
+            }
+        }
+
+        /// With the switch on, a refused append cancels its run, and a saved append cancels nothing. The guard stays armed
+        /// through the explicit cancel, so a drop during that cancel re-issues it, which is harmless: Session Core answers
+        /// `cancelled=false` for a terminal run.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_refused_append_cancels_its_run_once_and_a_saved_one_cancels_nothing() {
+            let _switch = SwitchSet::set(Some("true"));
+            let runs = CancelRecorder::default();
+            let cancels = Arc::clone(&runs.cancels);
+            let mut state = AppState::new();
+            state.run_client = run_service_client(runs).await;
+            let refused = append_prompt_to_fresh_run(
+                &state,
+                "run-refused",
+                Some("delegated-user-session-token"),
+                "agent_run_start_failed",
+                "undispatched agent run could not be cancelled",
+                std::future::ready(Err(Status::unavailable("append refused"))),
+            )
+            .await;
+            assert_eq!(
+                refused.expect_err("a refused append").code(),
+                tonic::Code::Unavailable
+            );
+            let saved = append_prompt_to_fresh_run(
+                &state,
+                "run-saved",
+                Some("delegated-user-session-token"),
+                "agent_run_start_failed",
+                "undispatched agent run could not be cancelled",
+                std::future::ready(Ok(AppendReceipt::default())),
+            )
+            .await;
+            assert!(saved.is_ok(), "a saved append is not an error");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let recorded = cancels.lock().expect("cancels").clone();
+            assert_eq!(recorded.len(), 1, "only the refused append cancels, once");
+            assert_eq!(recorded[0].request.run_id, "run-refused");
+        }
+
+        /// The browser start's drop path cancels under the browser reason, with the bearer that start was made under.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_dropped_browser_start_cancels_under_its_own_reason_and_bearer() {
+            let _switch = SwitchSet::set(Some("true"));
+            let runs = CancelRecorder::default();
+            let cancels = Arc::clone(&runs.cancels);
+            let mut state = AppState::new();
+            state.run_client = run_service_client(runs).await;
+            // An append that stays pending and records that it was polled, so the drop lands inside the guard.
+            let polled = Arc::new(AtomicBool::new(false));
+            let pending_append = {
+                let polled = Arc::clone(&polled);
+                std::future::poll_fn(move |_| {
+                    polled.store(true, Ordering::SeqCst);
+                    std::task::Poll::<Result<AppendReceipt, Status>>::Pending
+                })
+            };
+            let start = tokio::spawn(async move {
+                append_prompt_to_fresh_run(
+                    &state,
+                    "run-browser-dropped",
+                    Some("browser-start-bearer"),
+                    "browser_run_start_failed",
+                    "undispatched browser run could not be cancelled",
+                    pending_append,
+                )
+                .await
+            });
+            wait_until(|| polled.load(Ordering::SeqCst)).await;
+            start.abort();
+            assert!(
+                start.await.is_err_and(|error| error.is_cancelled()),
+                "the append was dropped while it was pending"
+            );
+            wait_until(|| !cancels.lock().expect("cancels").is_empty()).await;
+            let recorded = cancels.lock().expect("cancels").clone();
+            assert_eq!(
+                recorded.len(),
+                1,
+                "the dropped browser start cancels its run once"
+            );
+            assert_eq!(recorded[0].request.run_id, "run-browser-dropped");
+            assert_eq!(recorded[0].request.reason, "browser_run_start_failed");
+            assert_eq!(
+                recorded[0].authorization.as_deref(),
+                Some("Bearer browser-start-bearer"),
+                "the cancel carries the browser start's own bearer"
+            );
+        }
+
+        /// A refused append whose cancel also fails logs its path's message. With the switch off, that line keeps the
+        /// fields it always had: no `failure_reason` is added.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_refused_append_whose_cancel_fails_logs_the_message_it_always_did() {
+            let _switch = SwitchSet::set(None);
+            let runs = CancelRecorder {
+                refuse_cancels: true,
+                ..CancelRecorder::default()
+            };
+            let mut state = AppState::new();
+            state.run_client = run_service_client(runs).await;
+            let lines = WarnLines::default();
+            let _subscriber = tracing::subscriber::set_default(lines.clone());
+            // A call site first hit with no subscriber caches "never" interest; rebuild it so this subscriber is asked.
+            tracing::callsite::rebuild_interest_cache();
+            let refused = append_prompt_to_fresh_run(
+                &state,
+                "run-refused-logged",
+                Some("browser-start-bearer"),
+                "browser_run_start_failed",
+                "undispatched browser run could not be cancelled",
+                std::future::ready(Err(Status::unavailable("append refused"))),
+            )
+            .await;
+            assert_eq!(
+                refused.expect_err("a refused append").code(),
+                tonic::Code::Unavailable
+            );
+            let logged = lines.0.lock().expect("log capture lock").clone();
+            let warnings: Vec<_> = logged
+                .iter()
+                .filter(|fields| {
+                    fields.iter().any(|(name, value)| {
+                        name == "message" && value.contains("could not be cancelled")
+                    })
+                })
+                .collect();
+            assert_eq!(
+                warnings.len(),
+                1,
+                "one refused cancel warns once: {logged:?}"
+            );
+            assert!(
+                warnings[0].iter().any(|(name, value)| {
+                    name == "message" && value == "undispatched browser run could not be cancelled"
+                }),
+                "{warnings:?}"
+            );
+            assert!(
+                warnings[0].iter().all(|(name, _)| name != "failure_reason"),
+                "{warnings:?}"
+            );
+        }
     }
 
     #[test]

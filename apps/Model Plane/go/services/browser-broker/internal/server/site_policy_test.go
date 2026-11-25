@@ -20,11 +20,14 @@ type fakeSites struct {
 	err       error
 	calls     int
 	lastUser  string
+	// lastSpace is the Space the last call named ("" for the org-wide call).
+	lastSpace string
 }
 
-func (f *fakeSites) Resolve(_ context.Context, _, userID string, hosts []string) (sitepolicy.Resolution, error) {
+func (f *fakeSites) Resolve(_ context.Context, _, userID, spaceID string, hosts []string) (sitepolicy.Resolution, error) {
 	f.calls++
 	f.lastUser = userID
+	f.lastSpace = spaceID
 	if f.err != nil {
 		return sitepolicy.Resolution{}, f.err
 	}
@@ -102,7 +105,8 @@ func TestSitePolicyEnforceKeepsActHostsAndNamesTheDropped(t *testing.T) {
 }
 
 func TestSitePolicyEnforceRefusesWhenNothingIsAllowed(t *testing.T) {
-	// Ask is the default for a host with no live choice: enforce refuses it.
+	// Ask is the default for a host with no live choice: enforce refuses it as an
+	// ask, the member can still allow it, so it is not named as denied.
 	sites := &fakeSites{}
 	srv := policyServer(grant.NewMemoryRepository(), userPrincipal(false), sitepolicy.ModeEnforce, sites)
 	_, err := issue(srv, &AcquireGrantRequest{AllowedDomains: []string{"example.com"}})
@@ -115,8 +119,8 @@ func TestSitePolicyEnforceRefusesWhenNothingIsAllowed(t *testing.T) {
 			info = typed
 		}
 	}
-	if info == nil || info.GetReason() != siteDeniedReason || info.GetMetadata()["denied_domains"] != "example.com" {
-		t.Fatalf("details = %v, want reason %s naming example.com", status.Convert(err).Details(), siteDeniedReason)
+	if info == nil || info.GetReason() != siteAskReason || info.GetMetadata()["ask_domains"] != "example.com" {
+		t.Fatalf("details = %v, want reason %s naming example.com as ask", status.Convert(err).Details(), siteAskReason)
 	}
 }
 

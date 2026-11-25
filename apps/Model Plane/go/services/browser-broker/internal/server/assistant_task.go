@@ -36,8 +36,8 @@ func (s *Server) validateAssistantTaskGrant(req *AcquireGrantRequest, principal 
 
 // A submitted task can supply consent for the default ask case. Org-core must
 // still affirm the act ceiling, and an explicit member or org decision wins.
-func (s *Server) checkAssistantTaskSitePolicy(ctx context.Context, principal authctx.Principal, domains []string) error {
-	resolution, err := s.resolveSites(ctx, principal, domains)
+func (s *Server) checkAssistantTaskSitePolicy(ctx context.Context, principal authctx.Principal, spaceID string, domains []string) error {
+	resolution, err := s.resolveSites(ctx, principal, spaceID, domains)
 	if err != nil {
 		recordSiteVerdict(ctx, "policy_unavailable")
 		return status.Error(codes.Unavailable, sitepolicy.ErrUnavailable.Error())
