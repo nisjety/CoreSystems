@@ -59,6 +59,10 @@ const QUERY_CANCELED: &str = "57014";
 /// The predicate on `to_tsvector('simple', left(m.content, 65536))` and the role filter
 /// match migration 0055's index expression, so the planner can use it. `ts_headline` runs
 /// on the page only, after the limit.
+///
+/// WS12-S4: a message any revision touched is never a candidate, so neither its stored original nor
+/// an edit of it is found (`space::history` excludes the same rows; fold-aware indexing is a later
+/// decision). Deletions and edits are retained in `messages.content` under the retain rule.
 pub(crate) const SEARCH_SQL: &str = "
 WITH candidates AS (
     SELECT m.id AS message_id, m.thread_id, m.role, m.content, m.created_at,
@@ -70,6 +74,7 @@ WITH candidates AS (
     JOIN threads t ON t.id = m.thread_id
     WHERE m.role IN ('user', 'assistant')
       AND m.on_active_path
+      AND NOT EXISTS (SELECT 1 FROM message_revisions r WHERE r.message_id = m.id)
       AND (m.copied_from_message_id IS NULL OR NULLIF($7, '') IS NOT NULL)
       AND (NOT $9::BOOLEAN OR m.post_kind = 'turn')
       AND to_tsvector('simple', left(m.content, 65536)) @@ to_tsquery('simple', $3)
@@ -478,6 +483,15 @@ mod tests {
         assert!(SEARCH_SQL
             .contains("to_tsvector('simple', left(m.content, 65536)) @@ to_tsquery('simple', $3)"));
         assert!(SEARCH_SQL.contains("m.role IN ('user', 'assistant')"));
+    }
+
+    #[test]
+    fn the_search_never_indexes_a_message_a_revision_touched() {
+        // WS12-S4: the stored text of an edited or deleted message is its original, so the search
+        // candidates leave every revised message out, deletions and edits alike.
+        assert!(SEARCH_SQL.contains("NOT EXISTS (SELECT 1 FROM message_revisions r WHERE r.message_id = m.id)"));
+        let candidates = SEARCH_SQL.split("),\nranked AS").next().expect("the candidates CTE");
+        assert!(candidates.contains("message_revisions"), "the revision exclusion sits in the candidate filter");
     }
 
     #[test]
