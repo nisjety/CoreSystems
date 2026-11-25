@@ -13,6 +13,8 @@ import { normalizeApproval, type Approval } from './orchestration-client'
 //     404 feature_disabled with the gateway flag off (the picker then offers `once` only), and
 //     Control's typed refusals (approval_scope_not_permitted, approval_grants_not_entitled,
 //     zdr_durable_mutation_forbidden, approval_grant_not_found, space_not_found).
+//     The policy answer carries `approval_grant_entitled` when Control states it; `false` hides
+//     `always` before anyone tries it.
 // The action contracts are `spaces.decide_approval` and `spaces.revoke_approval_grant`
 // (shared/actions/domains/spaces/ws10.ts). A role check in the UI is presentation: servers decide.
 
@@ -24,6 +26,11 @@ export type SpaceApprovalPolicy = {
   readonly defaultAddresseeKind: string
   readonly quarantineMode: string
   readonly revision: number
+  /**
+   * Whether the organization is entitled to standing rules, when Control states it. `false` hides
+   * `always`; absent (not stated) leaves that to the server's refusal, as before.
+   */
+  readonly approvalGrantEntitled?: boolean
 }
 
 /** One standing approval rule. Ids, keys and dates only: never content. */
@@ -101,9 +108,10 @@ export function newApprovalIdempotencyKey(): string {
 /**
  * The scopes the picker may offer for one approval, from what the server states and nothing
  * more. `once` is always offered. `always` needs the Space ceiling to allow it, a role that may
- * manage standing rules, and an MCP tool (Control refuses a standing rule for anything else, so
- * offering it would be a button that cannot work). `thread` is never offered: it has no store
- * yet and the gateway refuses it.
+ * manage standing rules, an MCP tool (Control refuses a standing rule for anything else, so
+ * offering it would be a button that cannot work), and an organization that is not stated as
+ * unentitled to standing rules. `thread` is never offered: it has no store yet and the gateway
+ * refuses it.
  */
 export function offerableScopes(input: {
   readonly policy: SpaceApprovalPolicy | undefined
@@ -114,7 +122,10 @@ export function offerableScopes(input: {
   const ceiling = input.policy ? SCOPE_ORDER.indexOf(input.policy.maxGrantScope) : 0
   const mayManage = input.viewerRole === 'manager' || input.viewerRole === 'owner'
   const mcp = (input.toolKey ?? '').startsWith('mcp__')
-  if (ceiling >= SCOPE_ORDER.indexOf('always') && mayManage && mcp) offered.push('always')
+  const entitled = input.policy?.approvalGrantEntitled !== false
+  if (ceiling >= SCOPE_ORDER.indexOf('always') && mayManage && mcp && entitled) {
+    offered.push('always')
+  }
   return offered
 }
 
@@ -165,19 +176,22 @@ export async function readSpaceApprovalPolicy(
   signal?: AbortSignal,
 ): Promise<SpaceApprovalPolicy | undefined> {
   try {
-    const payload = await requestJson<{ policy?: Record<string, unknown> | null }>(
-      `/api/v1/spaces/${encodeURIComponent(spaceRef)}/approval-policy`,
-      { signal },
-    )
+    const payload = await requestJson<{
+      policy?: Record<string, unknown> | null
+      approval_grant_entitled?: unknown
+    }>(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/approval-policy`, { signal })
     const policy = payload.policy
     if (!policy) return undefined
     const max = policy.max_grant_scope
+    const entitled = payload.approval_grant_entitled
     return {
       maxGrantScope: max === 'always' || max === 'thread' ? max : 'once',
       defaultAddresseeKind:
         typeof policy.default_addressee_kind === 'string' ? policy.default_addressee_kind : '',
       quarantineMode: typeof policy.quarantine_mode === 'string' ? policy.quarantine_mode : '',
       revision: typeof policy.revision === 'number' ? policy.revision : 0,
+      // Only a stated boolean is kept; absent stays absent so the picker does not guess.
+      ...(typeof entitled === 'boolean' ? { approvalGrantEntitled: entitled } : {}),
     }
   } catch {
     // Flag off or not readable: the picker offers `once` only, which is always true.

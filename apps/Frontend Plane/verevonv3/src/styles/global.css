@@ -47067,6 +47067,86 @@ so it
   color: var(--verevon-sidebar-text);
 }
 
+/* The scope picker under an approval (WS10-S4): a plain radio group, drawn only when there is a real
+   choice. The fieldset's own box is reset so it sits in the card like the rest of the card does. */
+.verevon-room-approval__scope {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.verevon-room-approval__scope legend {
+  margin: 0 0 2px;
+  padding: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.verevon-room-approval__scope-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--verevon-text);
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.verevon-room-approval__scope-option input {
+  flex: none;
+  margin: 2px 0 0;
+  accent-color: var(--verevon-accent-ink);
+}
+
+.verevon-room-approval__scope-option input:focus-visible {
+  outline: 2px solid var(--verevon-accent-ink);
+  outline-offset: 2px;
+}
+
+.verevon-room-approval__scope:disabled .verevon-room-approval__scope-option {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.dark .verevon-room-approval__scope legend {
+  color: rgb(255 255 255 / 72%);
+}
+
+.dark .verevon-room-approval__scope-option {
+  color: var(--verevon-sidebar-text);
+}
+
+/* The standing-approvals list in the Agent tab (WS10-S4), for managers and owners only. It sits under
+   the agent card with the same quiet heading the other sections there use, and reuses the approval
+   list rows for each rule. */
+.verevon-space-standing-approvals {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+  border-top: 1px solid var(--verevon-border);
+  padding-top: 12px;
+}
+
+.verevon-space-standing-approvals h3 {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.verevon-space-standing-approvals .verevon-room-approval__detail {
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+
 .verevon-space-room-mentions {
   position: absolute;
   bottom: 100%;

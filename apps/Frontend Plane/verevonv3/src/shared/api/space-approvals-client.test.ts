@@ -70,6 +70,20 @@ describe('offerableScopes', () => {
     const offered = offerableScopes({ policy: policy('always'), viewerRole: 'owner', toolKey: mcp })
     expect(offered).not.toContain('thread')
   })
+
+  it('hides always when Control states the organization is not entitled to standing rules', () => {
+    const unentitled = { ...policy('always'), approvalGrantEntitled: false }
+    expect(offerableScopes({ policy: unentitled, viewerRole: 'owner', toolKey: mcp })).toEqual(['once'])
+  })
+
+  it('offers always when the entitlement is stated on, or not stated at all', () => {
+    const entitled = { ...policy('always'), approvalGrantEntitled: true }
+    expect(offerableScopes({ policy: entitled, viewerRole: 'manager', toolKey: mcp })).toEqual(['once', 'always'])
+    expect(offerableScopes({ policy: policy('always'), viewerRole: 'manager', toolKey: mcp })).toEqual([
+      'once',
+      'always',
+    ])
+  })
 })
 
 describe('newApprovalIdempotencyKey', () => {
@@ -224,6 +238,19 @@ describe('readSpaceApprovalPolicy', () => {
     expect((await readSpaceApprovalPolicy('space-1'))?.maxGrantScope).toBe('once')
     vi.stubGlobal('fetch', vi.fn(async () => ok({ policy: null })))
     expect(await readSpaceApprovalPolicy('space-1')).toBeUndefined()
+  })
+
+  it('surfaces the entitlement only when Control states it as a boolean', async () => {
+    const withFlag = (value: unknown) =>
+      vi.fn(async () => ok({ policy: { max_grant_scope: 'always' }, approval_grant_entitled: value }))
+    vi.stubGlobal('fetch', withFlag(false))
+    expect((await readSpaceApprovalPolicy('space-1'))?.approvalGrantEntitled).toBe(false)
+    vi.stubGlobal('fetch', withFlag(true))
+    expect((await readSpaceApprovalPolicy('space-1'))?.approvalGrantEntitled).toBe(true)
+    vi.stubGlobal('fetch', withFlag('no'))
+    expect((await readSpaceApprovalPolicy('space-1'))?.approvalGrantEntitled).toBeUndefined()
+    vi.stubGlobal('fetch', vi.fn(async () => ok({ policy: { max_grant_scope: 'always' } })))
+    expect((await readSpaceApprovalPolicy('space-1'))?.approvalGrantEntitled).toBeUndefined()
   })
 
   it('returns undefined on any error, so the picker offers once only', async () => {

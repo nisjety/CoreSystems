@@ -13,7 +13,13 @@
 //! * `GET /api/v1/spaces/{space_ref}/approval-grants` and `DELETE .../{grant_id}`: Control's list
 //!   and revoke, relayed under the caller's delegation. Control decides who may.
 //! * `GET /api/v1/spaces/{space_ref}/approval-policy`: Control's Space ceiling
-//!   (`max_grant_scope`), which the scope picker reads to offer only what is allowed.
+//!   (`max_grant_scope`), which the scope picker reads to offer only what is allowed, and the
+//!   org's standing-rule entitlement (`approval_grant_entitled`) when Control states it. The picker
+//!   hides `always` on an explicit `false` instead of learning the refusal from a decision.
+//!
+//! The decide, grant and policy routes share one per-user ceiling of 30 calls a minute (typed 429
+//! `rate_limited` with `details.retry_after_seconds`), the room member-ops pattern. It is checked
+//! after the local request checks and the Space scope, and before any upstream call.
 //!
 //! Authority never comes from the body: the actor and organization are the session's, the
 //! browser-supplied proofs (`grant_use_token`, `space_approval_decision_token`) are refused as
@@ -22,6 +28,8 @@
 //! answers 404 `feature_disabled`), a rollout control and never an authorization input. Rules,
 //! keys and levels hold no message content; Zero Data Retention is refused by Control (412
 //! `zdr_durable_mutation_forbidden`) and by the model path, not by this module.
+
+use std::sync::OnceLock;
 
 use axum::{
     extract::{Extension, Path, State},
@@ -38,6 +46,7 @@ use crate::{
     contracts::ActionActor,
     envelope::{error, error_with_details, unwrap_data},
     middleware::AuthenticatedUser,
+    rate_limit::RateLimiter,
     upstream::proxy_json,
 };
 
@@ -48,6 +57,15 @@ const REASON_MAX_CHARS: usize = 500;
 const KEY_MIN_CHARS: usize = 8;
 const KEY_MAX_CHARS: usize = 200;
 const MAX_RELAYED_MESSAGE_CHARS: usize = 300;
+/// Approval calls per user per minute across the decide, standing-rule and policy routes (the room
+/// member-ops ceiling of 30 a minute). A test run shares one process-wide limiter and one user, so
+/// the ceiling is lifted there; the limiter itself is tested directly with its own small bucket.
+const APPROVAL_OPS_PER_MINUTE: f64 = if cfg!(test) { 100_000.0 } else { 30.0 };
+
+/// Process-wide limiter, built on first use from the gateway's Dragonfly connection (in-process
+/// fallback when the cache is off). Not an `AppState` field, like the member-ops limiter, so no test
+/// state literal changes.
+static APPROVAL_OPS_LIMITER: OnceLock<RateLimiter> = OnceLock::new();
 
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
@@ -127,6 +145,39 @@ fn control_url(state: &AppState, space_ref: &str, tail: &str) -> String {
         urlencoding::encode(space_ref),
         tail
     )
+}
+
+/// One approval-call token for the caller, or the typed 429. The Retry-After seconds travel in
+/// `details.retry_after_seconds` because these functions answer a bare `(status, json)`.
+async fn approval_ops_allowed(
+    state: &AppState,
+    org_id: &str,
+    user: &AuthenticatedUser,
+) -> Result<(), Reply> {
+    let limiter = APPROVAL_OPS_LIMITER
+        .get_or_init(|| RateLimiter::from_cache_with_rpm(&state.cache, APPROVAL_OPS_PER_MINUTE));
+    check_approval_ops(limiter, org_id, &user.user_id).await
+}
+
+async fn check_approval_ops(
+    limiter: &RateLimiter,
+    org_id: &str,
+    user_id: &str,
+) -> Result<(), Reply> {
+    match limiter
+        .try_acquire(&format!("space-approval-ops:{}:{user_id}", org_id.trim()))
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(retry_after) => Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(error_with_details(
+                "rate_limited",
+                "Too many approval requests. Retry shortly.",
+                json!({ "retry_after_seconds": retry_after.max(1) }),
+            )),
+        )),
+    }
 }
 
 /// The organization and trimmed Space ref, or the typed refusal every Space route gives.
@@ -449,6 +500,9 @@ pub(crate) async fn decide_space_approval(
     // A decided approval leaves the caller's needs-you: their next attention poll is computed
     // afresh, not served from the single-flight window (C-PRIO-05), whichever way this returns.
     let _forget_attention = super::attention::forget_aggregate_on_drop(&org_id, user);
+    if let Err(reply) = approval_ops_allowed(state, &org_id, user).await {
+        return reply;
+    }
     // The decision's reason is free text that the approval keeps: a zero-retention caller is refused
     // here, typed, before any Control or Session Core call. The local checks above answer first, so a
     // bad request keeps its own 400 or 403 whatever the org's posture. The route and the action share
@@ -536,6 +590,9 @@ pub(crate) async fn list_approval_grants(
         Ok(scope) => scope,
         Err(reply) => return reply,
     };
+    if let Err(reply) = approval_ops_allowed(state, &org_id, user).await {
+        return reply;
+    }
     let (status, Json(control)) = proxy_json(
         state,
         Method::GET,
@@ -579,6 +636,9 @@ pub(crate) async fn revoke_approval_grant(
         Ok(scope) => scope,
         Err(reply) => return reply,
     };
+    if let Err(reply) = approval_ops_allowed(state, &org_id, user).await {
+        return reply;
+    }
     let tail = format!("approval-grants/{}", urlencoding::encode(grant_id));
     let (status, Json(control)) = proxy_json(
         state,
@@ -610,6 +670,9 @@ async fn get_approval_policy_route(
         Ok(scope) => scope,
         Err(reply) => return reply,
     };
+    if let Err(reply) = approval_ops_allowed(&state, &org_id, &user).await {
+        return reply;
+    }
     let (status, Json(control)) = proxy_json(
         &state,
         Method::GET,
@@ -625,15 +688,22 @@ async fn get_approval_policy_route(
     }
     let data = unwrap_data(&control);
     let policy = data.get("policy").cloned().unwrap_or(Value::Null);
-    (StatusCode::OK, Json(json!({ "data": { "policy": policy } })))
+    let mut out = Map::new();
+    out.insert("policy".to_owned(), policy);
+    // Control's entitlement is relayed only as the boolean it states; anything else, or nothing, is
+    // left out, so the picker never offers `always` on a guess.
+    if let Some(entitled) = data.get("approval_grant_entitled").and_then(Value::as_bool) {
+        out.insert("approval_grant_entitled".to_owned(), json!(entitled));
+    }
+    (StatusCode::OK, Json(json!({ "data": Value::Object(out) })))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        decide_space_approval, get_approval_policy_route, list_approval_grants, map_decide_failure,
-        parse_decision, relay_control_error, revoke_approval_grant, rule_body, typed_control_error,
-        Scope,
+        check_approval_ops, decide_space_approval, get_approval_policy_route, list_approval_grants,
+        map_decide_failure, parse_decision, relay_control_error, revoke_approval_grant, rule_body,
+        typed_control_error, Scope,
     };
     use crate::config::AppState;
     use crate::middleware::{AuthenticatedUser, AuthorizedMembership};
@@ -1471,6 +1541,86 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"]["code"], "approval_authority_unavailable");
+    }
+
+    // ----- rate ceiling and entitlement relay ------------------------------------------------
+
+    #[tokio::test]
+    async fn the_approval_ops_ceiling_is_per_user_and_per_org_and_answers_a_typed_429() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let state = AppState::for_tests();
+        let limiter = crate::rate_limit::RateLimiter::from_cache_with_rpm(&state.cache, 2.0);
+        check_approval_ops(&limiter, "org-1", "user-1")
+            .await
+            .expect("first call in the minute");
+        check_approval_ops(&limiter, "org-1", "user-1")
+            .await
+            .expect("second call in the minute");
+        let (status, Json(body)) = check_approval_ops(&limiter, "org-1", "user-1")
+            .await
+            .expect_err("the third call in the minute is refused");
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["error"]["code"], "rate_limited");
+        let retry_after = body["error"]["details"]["retry_after_seconds"].as_u64();
+        assert!(retry_after.is_some_and(|seconds| seconds >= 1));
+        // Another user, and the same user in another organization, have their own bucket.
+        check_approval_ops(&limiter, "org-1", "user-2")
+            .await
+            .expect("another user");
+        check_approval_ops(&limiter, "org-2", "user-1")
+            .await
+            .expect("another organization");
+    }
+
+    #[tokio::test]
+    async fn the_policy_relays_the_entitlement_only_when_control_states_it_as_a_boolean() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        let policy_path = format!("/api/v1/internal/spaces/{SPACE}/approval-policy");
+        Mock::given(wm_method("GET"))
+            .and(wm_path(policy_path.clone()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "policy": { "max_grant_scope": "always" },
+                    "approval_grant_entitled": false
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        let state = state_with(&server, true);
+        let (status, Json(body)) = get_approval_policy_route(
+            State(state.clone()),
+            Extension(member()),
+            Path(SPACE.to_owned()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["approval_grant_entitled"], json!(false));
+        assert_eq!(body["data"]["policy"]["max_grant_scope"], "always");
+
+        // A value that is not a boolean, and an answer that says nothing, are not relayed.
+        let not_a_boolean = json!({
+            "data": { "policy": { "max_grant_scope": "always" }, "approval_grant_entitled": "no" }
+        });
+        let silent = json!({ "data": { "policy": { "max_grant_scope": "always" } } });
+        for control_body in [not_a_boolean, silent] {
+            server.reset().await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path(policy_path.clone()))
+                .respond_with(ResponseTemplate::new(200).set_body_json(control_body))
+                .mount(&server)
+                .await;
+            let (status, Json(body)) = get_approval_policy_route(
+                State(state.clone()),
+                Extension(member()),
+                Path(SPACE.to_owned()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(body["data"].get("approval_grant_entitled").is_none());
+            assert_eq!(body["data"]["policy"]["max_grant_scope"], "always");
+        }
     }
 }
 
