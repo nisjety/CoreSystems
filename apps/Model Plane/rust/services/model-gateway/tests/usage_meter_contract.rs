@@ -946,7 +946,10 @@ async fn chat_envelopes_carry_run_id() {
     assert!(keys[2].ends_with("-USAGE_ENVELOPE-r3"), "{keys:?}");
     assert!(keys[3].ends_with("-USAGE_ENVELOPE"), "{keys:?}");
     let run_id = rows[3].payload["run_id"].as_str().expect("the answer's row names its run");
-    assert!(!run_id.is_empty());
+    assert!(
+        run_id.starts_with("managed-run-for-"),
+        "the answer's row names the run the managed start issued: {run_id}"
+    );
     for row in &rows {
         assert_eq!(row.payload["run_id"], run_id, "every row of the turn names its run");
     }
@@ -957,6 +960,71 @@ async fn chat_envelopes_carry_run_id() {
     assert_eq!(rows.len(), 1, "with the switch off, only the answer is published: {rows:?}");
     assert!(rows[0].payload.get("run_id").is_none(), "no run is named with the switch off");
     clear_auth_env();
+}
+
+/// The unary `/v1/invoke` call is a direct run too (P2-mg-07-rel1). Under the turn-usage switch its
+/// usage row names that run; with the switch off it names none.
+#[tokio::test]
+#[serial_test::serial]
+async fn unary_invoke_envelope_names_its_run_only_under_the_turn_switch() {
+    std::env::set_var("MODEL_GATEWAY_TURN_USAGE_COMPLETE", "true");
+    let gateway = start_gateway(Vec::new()).await;
+    invoke_once(&gateway, INVOKE_BODY).await;
+    let rows = usage_rows(&gateway);
+    std::env::remove_var("MODEL_GATEWAY_TURN_USAGE_COMPLETE");
+    assert_eq!(rows.len(), 1, "one usage row per invoke: {rows:?}");
+    let run_id = rows[0].payload["run_id"]
+        .as_str()
+        .expect("the invoke's row names its run");
+    assert!(
+        run_id.starts_with("managed-run-for-"),
+        "the row names the run the managed start issued: {run_id}"
+    );
+
+    let gateway = start_gateway(Vec::new()).await;
+    invoke_once(&gateway, INVOKE_BODY).await;
+    let rows = usage_rows(&gateway);
+    assert_eq!(rows.len(), 1, "one usage row per invoke: {rows:?}");
+    assert!(
+        rows[0].payload.get("run_id").is_none(),
+        "no run is named with the switch off: {rows:?}"
+    );
+    clear_auth_env();
+}
+
+/// The body the unary invoke test sends.
+const INVOKE_BODY: &str = r#"{"content":"hei","model":"m"}"#;
+
+/// Posts one unary turn to `/v1/invoke` and checks that it answers with JSON.
+async fn invoke_once(gateway: &Gateway, body: &str) {
+    let bearers = &gateway.bearers;
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .header(
+            "x-data-plane-authorization",
+            format!("Bearer {}", bearers.data_plane),
+        )
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", bearers.session),
+        )
+        .header(
+            "x-inference-authorization",
+            format!("Bearer {}", bearers.inference),
+        )
+        .header(
+            "x-execution-authorization",
+            format!("Bearer {}", bearers.execution),
+        )
+        .body(Body::from(body.to_owned()))
+        .unwrap();
+    let response = gateway.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice::<serde_json::Value>(&bytes).expect("the unary answer is JSON");
 }
 
 /// The chat body every turn of these tests sends.

@@ -577,6 +577,113 @@ pub(crate) fn with_carried_state(
     }
 }
 
+/// Adds the documents and skills a Do turn attached to a pause's snapshot (`context_document_ids`,
+/// `context_skill_ids`, F-f09-05), omitted when empty so a descriptor written for a turn that attached
+/// none is the one it was. Neither is covered by the authority digest. A continuation narrows to exactly
+/// these, never to what its request states ([`CarriedRefs`]).
+pub(crate) fn with_carried_refs(
+    snapshot: &mut serde_json::Value,
+    documents: &[String],
+    skills: &[String],
+) {
+    for (key, ids) in [
+        (mp_contracts::loop_fold::EXT_CONTEXT_DOCUMENT_IDS, documents),
+        (mp_contracts::loop_fold::EXT_CONTEXT_SKILL_IDS, skills),
+    ] {
+        if !ids.is_empty() {
+            snapshot[key] = serde_json::Value::Array(
+                ids.iter()
+                    .map(|id| serde_json::Value::String(id.clone()))
+                    .collect(),
+            );
+        }
+    }
+}
+
+/// The documents and skills a Do run attached (F-f09-05), as its pause kept them, for the continuation
+/// that resumes it. Empty is no narrowing: the request as it was. A recorded list that is malformed sets
+/// `unreadable`, and the continuation is then refused rather than run without its narrowing, since an
+/// empty list would search the whole organisation.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CarriedRefs {
+    /// The documents every `knowledge_search` of the resumed run is narrowed to.
+    pub documents: Vec<String>,
+    /// The skills the resumed run puts first, as the paused run did.
+    pub skills: Vec<String>,
+    /// A recorded list was malformed.
+    pub unreadable: bool,
+}
+
+impl CarriedRefs {
+    /// What a claimed fold recorded. An absent key is no narrowing; a malformed one is `unreadable`.
+    pub(crate) fn from_fold(fold: &LoopFoldV1) -> Self {
+        let documents = mp_contracts::loop_fold::context_ids_in(
+            fold,
+            mp_contracts::loop_fold::EXT_CONTEXT_DOCUMENT_IDS,
+        );
+        let skills = mp_contracts::loop_fold::context_ids_in(
+            fold,
+            mp_contracts::loop_fold::EXT_CONTEXT_SKILL_IDS,
+        );
+        Self {
+            unreadable: documents.is_none() || skills.is_none(),
+            documents: documents.unwrap_or_default(),
+            skills: skills.unwrap_or_default(),
+        }
+    }
+
+    /// What a retained descriptor handed back. Session-core has already refused a malformed list.
+    pub(crate) fn from_descriptor(documents: &[String], skills: &[String]) -> Self {
+        Self {
+            documents: documents.to_vec(),
+            skills: skills.to_vec(),
+            unreadable: false,
+        }
+    }
+
+    /// The fold's state and the descriptor's, combined. The two come from the same pause and the same
+    /// admitted request, so they agree; where one names ids the other does not, the named ones are kept,
+    /// and an empty list is never preferred to a named one, so nothing widens.
+    pub(crate) fn combined(self, descriptor: Self) -> Self {
+        Self {
+            documents: if self.documents.is_empty() {
+                descriptor.documents
+            } else {
+                self.documents
+            },
+            skills: if self.skills.is_empty() {
+                descriptor.skills
+            } else {
+                self.skills
+            },
+            unreadable: self.unreadable || descriptor.unreadable,
+        }
+    }
+}
+
+/// Applies a continuation's carried documents and skills to its request (F-f09-05). A continuation's
+/// request states none (the gateway sends the turn's references on a run's first dispatch only), and
+/// whatever it does state never reaches the resumed run: the resumed run narrows to what the pause
+/// carried, and an empty carried list is no narrowing, exactly as the paused run was. A record that was
+/// malformed stops the resume, so the run never continues without its narrowing.
+///
+/// # Errors
+///
+/// `context_refs_unreadable` when the carried record was malformed.
+pub(crate) fn apply_carried_refs(
+    req: &mut pb::RunAgentRequest,
+    refs: &CarriedRefs,
+) -> Result<(), tonic::Status> {
+    if refs.unreadable {
+        return Err(tonic::Status::failed_precondition(
+            "context_refs_unreadable",
+        ));
+    }
+    req.context_document_ids.clone_from(&refs.documents);
+    req.context_skill_ids.clone_from(&refs.skills);
+    Ok(())
+}
+
 /// The authority a consume handed back, as the loop's own type, so its digest
 /// can be recomputed and compared with the one the snapshot carried.
 pub(crate) fn authority_from_proto(snapshot: &pb::ApprovedAuthority) -> Authority {
@@ -590,6 +697,13 @@ pub(crate) fn authority_from_proto(snapshot: &pb::ApprovedAuthority) -> Authorit
         tool_names: snapshot.tool_names.clone(),
         max_rounds: snapshot.max_rounds,
     }
+}
+
+/// The documents and skills a retained approval holds for the paused Do turn (F-f09-05), read from the snapshot the
+/// consume handed back: the `refs` of the continuation's [`Consumed`]. Session-core has already refused a malformed
+/// list, so this is never `unreadable`.
+pub(crate) fn consumed_refs(snapshot: &pb::ApprovedAuthority) -> CarriedRefs {
+    CarriedRefs::from_descriptor(&snapshot.context_document_ids, &snapshot.context_skill_ids)
 }
 
 /// Why a continuation was refused before it ran anything. Closed tokens only:
@@ -785,6 +899,8 @@ pub(crate) struct SkippedAuthority {
     pub(crate) mode: String,
     /// The authority the segment runs under; applied to the request before the loop reads it.
     pub(crate) effective: Authority,
+    /// The documents and skills the pause retained for the Do turn (F-f09-05), read from the retained snapshot.
+    pub(crate) refs: CarriedRefs,
 }
 
 /// The authority a skipped site's continuation runs under: what the paused run retained
@@ -856,6 +972,10 @@ pub(crate) fn skipped_authority(
         tools,
         mode,
         effective,
+        refs: CarriedRefs::from_descriptor(
+            &retained.context_document_ids,
+            &retained.context_skill_ids,
+        ),
     })
 }
 
@@ -1333,6 +1453,9 @@ pub(crate) struct Consumed {
     /// The connection ids the paused turn selected, from the retained descriptor (empty when it
     /// selected none or the descriptor predates the key).
     pub connector_scope: Vec<String>,
+    /// The documents and skills the paused Do turn attached, from the retained descriptor (F-f09-05).
+    /// Empty when the turn attached none or the descriptor predates the keys.
+    pub refs: CarriedRefs,
 }
 
 impl Consumed {
@@ -1487,6 +1610,8 @@ pub(crate) struct Restored {
     pub taint: mp_contracts::loop_fold::TaintRead,
     /// The connector selection the claimed fold recorded; `None` when it recorded none.
     pub connector_scope: Option<Vec<String>>,
+    /// The documents and skills the claimed fold recorded for the paused Do turn (F-f09-05).
+    pub refs: CarriedRefs,
     /// The paused `ask_user` call an in-place question continuation answered, by its index in
     /// `response` ([`Restored::seed_answer`]). Its result is the owner's answer given in an earlier
     /// turn, not a question this loop put, so the seeded round must not end the turn on it again.
@@ -1903,17 +2028,21 @@ pub(crate) fn question_resume_target(
     })
 }
 
-/// Whether the in-place question resume may take `target` (EP-4 S7). A server's form
-/// (`mcp_elicitation`) is refused [`Refusal::QuestionResumeUnavailable`] until the resume that
-/// answers the held MCP call exists (W3-EP-4-S7-b): the in-place resume seeds the owner's answer as
-/// the paused call's result FOR THE MODEL, which would never reach the server that asked. The check
-/// runs before any claim, spend or seed, so the answer is left unspent. Pure.
+/// Whether the in-place question resume may take `target` with the MCP form switch
+/// (`MCP_DO_ELICITATION`) at `forms_on` (EP-4 S7, W3-EP-4-S7-b). A server's form
+/// (`mcp_elicitation`) is answered to the call it held only while the switch is on; with it off the
+/// resume is refused [`Refusal::QuestionResumeUnavailable`] exactly as before the held-call resume
+/// existed, so a form stored while the switch was on is never answered after it is turned off. The
+/// check runs before any claim, spend, send or cancel, so the answer is left unspent. Pure.
 ///
 /// # Errors
 ///
-/// [`Refusal::QuestionResumeUnavailable`] for a server's form.
-pub(crate) fn question_resume_in_place_allowed(target: &QuestionTarget) -> Result<(), Refusal> {
-    if target.origin == mp_contracts::user_question::ORIGIN_MCP_ELICITATION {
+/// [`Refusal::QuestionResumeUnavailable`] for a server's form while the switch is off.
+pub(crate) fn question_resume_in_place_allowed(
+    target: &QuestionTarget,
+    forms_on: bool,
+) -> Result<(), Refusal> {
+    if target.origin == mp_contracts::user_question::ORIGIN_MCP_ELICITATION && !forms_on {
         return Err(Refusal::QuestionResumeUnavailable);
     }
     Ok(())
@@ -2400,6 +2529,52 @@ impl Restored {
         }
         seeded
     }
+
+    /// Seed the paused MCP call of an answered server's form (W3-EP-4-S7-b): its slot at `pending`
+    /// becomes `Resolved` with the call's screened output, or with the error the call did not complete
+    /// with. It is the same placeholder [`Self::seed_answer`] replaces, and `false`, with nothing
+    /// changed, when the slot is not that placeholder. The call is not an `ask_user` call, so it is
+    /// not recorded as the answered call (only an `ask_user` call is one).
+    pub(crate) fn seed_held_call(
+        &mut self,
+        pending: usize,
+        result: Result<String, String>,
+    ) -> bool {
+        match self.slots.get_mut(pending) {
+            Some(SeedSlot::Resolved { output, error, .. })
+                if error.as_deref() == Some(ANSWER_NOT_APPLIED) =>
+            {
+                match result {
+                    Ok(text) => {
+                        *output = text;
+                        *error = None;
+                    }
+                    Err(text) => {
+                        output.clear();
+                        *error = Some(text);
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Whether a restored round already holds external content the model will read (WS11.S7): a call of
+/// the paused round that COMPLETED before the pause (`Resolved` with no error) and whose tool returns
+/// web, browser or third-party-MCP content. `run_rounds` seeds such a sibling as already resolved and
+/// never notes its result, and the transcript rebuild leaves out the open round, so the question
+/// continuation latches the run's guard from this instead. A failed call read nothing, and the paused
+/// call's placeholder still carries [`ANSWER_NOT_APPLIED`] until it is seeded, so neither counts. Pure.
+pub(crate) fn restored_reads_external_content(slots: &[SeedSlot]) -> bool {
+    slots.iter().any(|slot| {
+        matches!(
+            slot,
+            SeedSlot::Resolved { name, error: None, .. }
+                if crate::external_content::is_external_content_tool(name)
+        )
+    })
 }
 
 /// How effectful a class is, for taking the more effectful of two.
@@ -2554,6 +2729,7 @@ fn rebuild_round(
         edit,
         taint: mp_contracts::loop_fold::connector_taint_in(fold),
         connector_scope: mp_contracts::loop_fold::connector_scope_in(fold),
+        refs: CarriedRefs::from_fold(fold),
         answered_call: None,
     }
 }
@@ -2996,6 +3172,177 @@ mod tests {
     }
 
     // ---- the authority a continuation runs under ----
+
+    /// F-f09-05 (rel1): a Do turn's attached documents and skills survive a pause. The pause keeps them in
+    /// its fold and in its retained snapshot; the continuation narrows to exactly those, whatever its
+    /// request states, and a malformed record stops it.
+    #[test]
+    fn a_continuation_narrows_to_what_its_pause_carried_and_never_to_the_request() {
+        let mut req = neutral_request();
+        req.context_document_ids = vec!["doc-widen".to_owned()];
+        req.context_skill_ids = vec!["skill.widen".to_owned()];
+        let carried = CarriedRefs::from_descriptor(&["doc-1".to_owned()], &["skill.a".to_owned()]);
+        apply_carried_refs(&mut req, &carried).expect("a readable record applies");
+        assert_eq!(req.context_document_ids, vec!["doc-1"]);
+        assert_eq!(req.context_skill_ids, vec!["skill.a"]);
+        // A pause that attached none keeps the run as it was: no narrowing, and the request's ids do not stay.
+        apply_carried_refs(&mut req, &CarriedRefs::default()).expect("nothing to narrow");
+        assert!(req.context_document_ids.is_empty() && req.context_skill_ids.is_empty());
+        // A malformed record refuses the resume rather than running it without its narrowing.
+        let unreadable = CarriedRefs {
+            unreadable: true,
+            ..CarriedRefs::default()
+        };
+        let refusal = apply_carried_refs(&mut req, &unreadable).expect_err("refused");
+        assert_eq!(refusal.message(), "context_refs_unreadable");
+    }
+
+    #[test]
+    fn a_claimed_fold_carries_the_ids_it_recorded_and_refuses_a_malformed_list() {
+        let mut fold = pause_fold();
+        assert_eq!(
+            CarriedRefs::from_fold(&fold),
+            CarriedRefs::default(),
+            "a fold that recorded no ids carries no narrowing"
+        );
+        fold.extensions.insert(
+            mp_contracts::loop_fold::EXT_CONTEXT_DOCUMENT_IDS.to_owned(),
+            serde_json::json!(["doc-1"]),
+        );
+        fold.extensions.insert(
+            mp_contracts::loop_fold::EXT_CONTEXT_SKILL_IDS.to_owned(),
+            serde_json::json!(["skill.a"]),
+        );
+        let read = CarriedRefs::from_fold(&fold);
+        assert_eq!(read.documents, vec!["doc-1"]);
+        assert_eq!(read.skills, vec!["skill.a"]);
+        assert!(!read.unreadable);
+        fold.extensions.insert(
+            mp_contracts::loop_fold::EXT_CONTEXT_DOCUMENT_IDS.to_owned(),
+            serde_json::json!("doc-1"),
+        );
+        assert!(
+            CarriedRefs::from_fold(&fold).unreadable,
+            "a malformed list is refused, never read as none"
+        );
+    }
+
+    #[test]
+    fn the_fold_and_the_descriptor_combine_to_the_named_ids_and_never_to_none() {
+        let named = CarriedRefs::from_descriptor(&["doc-1".to_owned()], &["skill.a".to_owned()]);
+        let none = CarriedRefs::default();
+        assert_eq!(none.clone().combined(named.clone()), named);
+        assert_eq!(named.clone().combined(none.clone()), named);
+        assert_eq!(named.clone().combined(named.clone()), named);
+        let refused = CarriedRefs {
+            unreadable: true,
+            ..CarriedRefs::default()
+        };
+        assert!(
+            none.combined(refused).unreadable,
+            "a refused record stays refused"
+        );
+    }
+
+    #[test]
+    fn a_descriptor_records_the_attached_ids_only_when_the_turn_attached_some() {
+        let mut bare = serde_json::json!({"tools": []});
+        with_carried_refs(&mut bare, &[], &[]);
+        assert_eq!(
+            bare,
+            serde_json::json!({"tools": []}),
+            "a turn with none writes nothing"
+        );
+        let mut attached = serde_json::json!({"tools": []});
+        with_carried_refs(
+            &mut attached,
+            &["doc-1".to_owned()],
+            &["skill.a".to_owned()],
+        );
+        assert_eq!(
+            attached["context_document_ids"],
+            serde_json::json!(["doc-1"])
+        );
+        assert_eq!(
+            attached["context_skill_ids"],
+            serde_json::json!(["skill.a"])
+        );
+    }
+
+    /// The snapshot an approval retains for a paused run, as the consume hands it back: the pause's own authority
+    /// and offered tools under a digest that verifies, and the documents and skills the paused Do turn attached.
+    fn retained_snapshot(documents: &[&str], skills: &[&str]) -> pb::ApprovedAuthority {
+        let authority = pause_authority();
+        pb::ApprovedAuthority {
+            mode: authority.mode.clone(),
+            plan_mode: authority.plan_mode,
+            autonomy_rung: authority.autonomy_rung.clone(),
+            space_id: authority.space_id.clone(),
+            min_privacy_tier: authority.min_privacy_tier,
+            provider_hint: authority.provider_hint.clone(),
+            max_rounds: authority.max_rounds,
+            tool_names: authority.tool_names.clone(),
+            tools: tool_defs()
+                .into_iter()
+                .map(|tool| pb::ApprovedTool {
+                    name: tool.name,
+                    description: tool.description,
+                    parameters_json: tool.parameters_json,
+                })
+                .collect(),
+            digest: authority.digest(),
+            coordinator_tools: Vec::new(),
+            connector_scope: Vec::new(),
+            connector_taint: None,
+            context_document_ids: documents.iter().map(|id| (*id).to_owned()).collect(),
+            context_skill_ids: skills.iter().map(|id| (*id).to_owned()).collect(),
+        }
+    }
+
+    /// F-f09-05 (rel1): an approval's retained snapshot hands its continuation the documents and skills its paused
+    /// Do turn attached, and none when the turn attached none. The fixture verifies, as the consume requires.
+    #[test]
+    fn a_retained_approval_hands_its_continuation_the_ids_its_pause_attached() {
+        let snapshot = retained_snapshot(&["doc-1"], &["skill.a"]);
+        assert_eq!(
+            authority_from_proto(&snapshot).digest(),
+            snapshot.digest,
+            "the retained authority verifies"
+        );
+        assert_eq!(
+            consumed_refs(&snapshot),
+            CarriedRefs::from_descriptor(&["doc-1".to_owned()], &["skill.a".to_owned()])
+        );
+        assert_eq!(
+            consumed_refs(&retained_snapshot(&[], &[])),
+            CarriedRefs::default(),
+            "a turn that attached none narrows nothing"
+        );
+    }
+
+    /// F-f09-05 (rel1): a skipped site continues with the documents its denied pause retained. They are read from the
+    /// retained snapshot, never from the `/continue` request, which may state other ids. A snapshot that does not
+    /// verify yields no authority at all, so nothing is narrowed from it.
+    #[test]
+    fn a_skipped_site_continues_with_the_documents_its_denied_pause_retained() {
+        let snapshot = retained_snapshot(&["doc-1"], &["skill.a"]);
+        let mut req = neutral_request();
+        req.context_document_ids = vec!["doc-widen".to_owned()];
+        req.context_skill_ids = vec!["skill.widen".to_owned()];
+        let skipped = skipped_authority(&snapshot, &req, "ask", &tool_defs())
+            .expect("a retained authority that verifies");
+        assert_eq!(
+            skipped.refs,
+            CarriedRefs::from_descriptor(&["doc-1".to_owned()], &["skill.a".to_owned()])
+        );
+        assert!(!skipped.refs.unreadable);
+        let mut forged = snapshot;
+        forged.digest = "not-the-digest".to_owned();
+        assert!(
+            skipped_authority(&forged, &req, "ask", &tool_defs()).is_none(),
+            "a snapshot whose digest does not verify is refused"
+        );
+    }
 
     fn paused_authority() -> Authority {
         Authority {
@@ -3561,6 +3908,7 @@ mod tests {
             original_action_fingerprint: String::new(),
             connector_taint: None,
             connector_scope: Vec::new(),
+            refs: CarriedRefs::default(),
         }
     }
 
@@ -3960,26 +4308,83 @@ mod tests {
         assert_eq!(question_resume_target(&[], "q_answered", RUN), Err(Refusal::QuestionNotFound));
     }
 
-    /// EP-4 S7: the in-place resume takes a model question and refuses a server's form, whatever the
-    /// form's state, until W3-EP-4-S7-b answers the held call.
+    /// EP-4 S7 / W3-EP-4-S7-b: the in-place resume always takes a model question; a server's form only
+    /// while `MCP_DO_ELICITATION` is on. With the switch off it is refused exactly as before the held-call
+    /// resume existed, whatever the form's state.
     #[test]
-    fn question_resume_in_place_refuses_a_server_form_only() {
+    fn question_resume_in_place_refuses_a_server_form_only_while_the_switch_is_off() {
         let target = |origin: &str| QuestionTarget {
             origin: origin.to_owned(),
             ..input_target()
         };
-        assert_eq!(question_resume_in_place_allowed(&target("model")), Ok(()));
+        let form = target(mp_contracts::user_question::ORIGIN_MCP_ELICITATION);
+        for forms_on in [false, true] {
+            assert_eq!(
+                question_resume_in_place_allowed(&target("model"), forms_on),
+                Ok(())
+            );
+            assert_eq!(
+                question_resume_in_place_allowed(&target(""), forms_on),
+                Ok(()),
+                "an empty origin is a model question"
+            );
+        }
         assert_eq!(
-            question_resume_in_place_allowed(&target("")),
-            Ok(()),
-            "an empty origin is a model question"
-        );
-        assert_eq!(
-            question_resume_in_place_allowed(&target(
-                mp_contracts::user_question::ORIGIN_MCP_ELICITATION
-            )),
+            question_resume_in_place_allowed(&form, false),
             Err(Refusal::QuestionResumeUnavailable)
         );
+        let skipped = QuestionTarget {
+            state: pb::QuestionState::Skipped,
+            ..form.clone()
+        };
+        assert_eq!(
+            question_resume_in_place_allowed(&skipped, false),
+            Err(Refusal::QuestionResumeUnavailable)
+        );
+        assert_eq!(question_resume_in_place_allowed(&form, true), Ok(()));
+    }
+
+    /// WS11.S7: only a sibling that COMPLETED and returns external content counts as content the resumed
+    /// model reads; a failed external call, a completed internal call and the paused call's placeholder do not.
+    #[test]
+    fn restored_reads_external_content_counts_only_a_completed_external_sibling() {
+        let slot = |name: &str, error: Option<&str>| SeedSlot::Resolved {
+            step_id: "tool_1_a".to_owned(),
+            name: name.to_owned(),
+            output: "out".to_owned(),
+            error: error.map(str::to_owned),
+            passed_prepass: true,
+        };
+        assert!(restored_reads_external_content(&[slot("web_fetch", None)]));
+        assert!(restored_reads_external_content(&[slot(
+            "mcp__notion__search",
+            None
+        )]));
+        assert!(!restored_reads_external_content(&[slot(
+            "web_fetch",
+            Some("fetch failed")
+        )]));
+        assert!(!restored_reads_external_content(&[slot(
+            "recall_memory",
+            None
+        )]));
+        assert!(!restored_reads_external_content(&[slot(
+            "mcp__notion__search",
+            Some(ANSWER_NOT_APPLIED)
+        )]));
+        assert!(!restored_reads_external_content(&[
+            SeedSlot::Redispatch {
+                step_id: "s1.tool_1_b".to_owned()
+            },
+            SeedSlot::Release {
+                step_id: "s1.tool_1_c".to_owned()
+            },
+        ]));
+        assert!(!restored_reads_external_content(&[]));
+        assert!(restored_reads_external_content(&[
+            slot("recall_memory", None),
+            slot("web_fetch", None),
+        ]));
     }
 
     #[test]

@@ -16,9 +16,15 @@
 //!   outside a Space. Its range is checked against the head, and held for the run, by `selection_guard`
 //!   once the turn's heads are seeded (EP-3 S6).
 //!
-//! A Do turn takes `document`, `skill` and `space` only. A ZDR turn with any reference is refused
-//! with the catalogue's `context_references` feature (`zdr_features` refuses it too, so the answer
-//! is the same whichever check a turn reaches first).
+//! A Do turn takes `space` always, and `document` and `skill` only while
+//! `MODEL_GATEWAY_DO_CONTEXT_REFS_CARRY` is the literal `true` (F-f09-05; it counts only with the main
+//! switch below on too, [`do_carry_from`]): the run then carries them
+//! as `RunAgentRequest.context_document_ids` / `context_skill_ids` ([`do_run_refs`]), and
+//! execution-core narrows every `knowledge_search` of the run and puts the skills first. With that
+//! switch off a Do turn's document or skill is refused, typed (`kind_not_in_do_mode`), never taken
+//! and silently dropped. `thread` and `artifact_selection` are refused on a Do turn either way. A ZDR
+//! turn with any reference is refused with the catalogue's `context_references` feature
+//! (`zdr_features` refuses it too, so the answer is the same whichever check a turn reaches first).
 //!
 //! Off by default: `MODEL_GATEWAY_CONTEXT_REFS_ENABLED` must be the literal `true`. With it off the
 //! field is never read and a non-ZDR turn is the one it was before the field existed.
@@ -49,6 +55,54 @@ pub fn parse_enabled(raw: Option<&str>) -> bool {
 #[must_use]
 pub fn enabled() -> bool {
     parse_enabled(std::env::var(ENABLED_ENV).ok().as_deref())
+}
+
+/// The Do-turn carry switch (F-f09-05). Only the literal `true` lets a Do turn take its attached
+/// documents and skills and carry them to the run; off, they are refused typed on a Do turn.
+pub const DO_CARRY_ENV: &str = "MODEL_GATEWAY_DO_CONTEXT_REFS_CARRY";
+
+/// Whether a Do turn carries its references, from the main switch and the carry switch's raw value.
+/// The carry is part of the feature: with [`ENABLED_ENV`] off it is off whatever the carry value is,
+/// so a deploy with only the carry switch on sends every Do run as it was.
+#[must_use]
+pub fn do_carry_from(enabled: bool, raw: Option<&str>) -> bool {
+    enabled && parse_enabled(raw)
+}
+
+/// The Do-turn carry switch as this process reads it: on only with both switches the literal `true`.
+#[must_use]
+pub fn do_carry_enabled() -> bool {
+    do_carry_from(enabled(), std::env::var(DO_CARRY_ENV).ok().as_deref())
+}
+
+/// What a Do run carries of its turn's references (F-f09-05): ids only, for
+/// `RunAgentRequest.context_document_ids` and `context_skill_ids`. Empty is the request as it was.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DoRunRefs {
+    /// The documents the run's `knowledge_search` is narrowed to, as [`resolve`] admitted them.
+    pub document_ids: Vec<String>,
+    /// The turn's explicit skill picks, then its referenced skills ([`merged_skill_ids`]).
+    pub skill_ids: Vec<String>,
+}
+
+/// The references a Do run carries. Empty with the carry switch off, so the request is the bytes
+/// it was; on, the admitted documents and the merged skill ids. A ZDR turn never reaches here with
+/// references: [`resolve`] refused it first.
+#[must_use]
+pub fn do_run_refs(
+    carry: bool,
+    requested_skill_ids: &[String],
+    resolved: Option<&ResolvedContextRefs>,
+) -> DoRunRefs {
+    if !carry {
+        return DoRunRefs::default();
+    }
+    DoRunRefs {
+        document_ids: resolved
+            .map(|resolved| resolved.document_ids.clone())
+            .unwrap_or_default(),
+        skill_ids: merged_skill_ids(requested_skill_ids, resolved),
+    }
 }
 
 /// The catalogue feature a chat model lists while the switch is on (`features` on `GET /v1/models`).
@@ -90,6 +144,9 @@ pub struct TurnFacts<'a> {
     pub thread_references: bool,
     /// A Do (`agentic`) turn.
     pub agentic: bool,
+    /// The Do-turn carry switch ([`DO_CARRY_ENV`]): a Do turn takes documents and skills only
+    /// while it is on. Not read for any other turn.
+    pub do_refs_carry: bool,
     /// Organisation knowledge is searched and skills are matched on this turn (it is neither
     /// conversation-only nor web-only, the two filters under which the turn reads neither).
     pub knowledge: bool,
@@ -248,7 +305,27 @@ pub fn resolve(
             ContextRefKind::Thread | ContextRefKind::ArtifactSelection if facts.agentic => {
                 return Err(ContextRefRefusal::typed(
                     UNSUPPORTED_CODE,
-                    "Do mode can use attached documents, skills and the current Space only. Remove the other references, or ask in chat.",
+                    if facts.do_refs_carry {
+                        "Do mode can use attached documents, skills and the current Space only. Remove the other references, or ask in chat."
+                    } else {
+                        "Do mode can use the current Space only. Remove the other references, or ask in chat."
+                    },
+                    "kind_not_in_do_mode",
+                ));
+            }
+            // F-f09-05: a Do run carries documents and skills only under the carry switch. Off, they are refused here,
+            // visibly, rather than taken and dropped by a run that never reads them.
+            ContextRefKind::Document if facts.agentic && !facts.do_refs_carry => {
+                return Err(ContextRefRefusal::typed(
+                    UNSUPPORTED_CODE,
+                    "Do mode cannot use attached documents yet. Remove them, or ask in chat.",
+                    "kind_not_in_do_mode",
+                ));
+            }
+            ContextRefKind::Skill if facts.agentic && !facts.do_refs_carry => {
+                return Err(ContextRefRefusal::typed(
+                    UNSUPPORTED_CODE,
+                    "Do mode cannot use attached skills yet. Remove them, or ask in chat.",
                     "kind_not_in_do_mode",
                 ));
             }
@@ -655,14 +732,153 @@ mod tests {
             }
             other => panic!("expected the Do-mode refusal, got {other:?}"),
         }
-        // Documents, skills and the turn's own Space are taken on a Do turn.
-        let own = TurnFacts { space_id: Some("space-a"), ..agentic };
+        // With the carry switch on, documents, skills and the turn's own Space are taken on a Do turn.
+        let own = TurnFacts {
+            space_id: Some("space-a"),
+            do_refs_carry: true,
+            ..agentic
+        };
         let raw = json!([
             {"kind": "document", "id": "doc-1"},
             {"kind": "skill", "id": "skill.a"},
             {"kind": "space", "id": "space-a"},
         ]);
         assert!(resolve(true, Some(&raw), &own).expect("admitted").is_some());
+    }
+
+    #[test]
+    fn the_carry_switch_reads_only_the_literal_true() {
+        assert_eq!(DO_CARRY_ENV, "MODEL_GATEWAY_DO_CONTEXT_REFS_CARRY");
+        assert!(parse_enabled(Some("true")));
+        for value in [None, Some(""), Some("1"), Some("TRUE"), Some(" true")] {
+            assert!(!parse_enabled(value), "{value:?}");
+            assert!(!do_carry_from(true, value), "{value:?}");
+        }
+        assert!(do_carry_from(true, Some("true")));
+    }
+
+    /// F-f09-05: the carry is part of the feature. With MODEL_GATEWAY_CONTEXT_REFS_ENABLED off it is off whatever
+    /// the carry switch says, so a Do turn with explicit picks carries nothing and its run is sent as it was.
+    #[test]
+    fn the_carry_is_off_whenever_the_main_switch_is_off() {
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some(" true"),
+            Some("true"),
+        ] {
+            assert!(!do_carry_from(false, value), "{value:?}");
+        }
+        let picked = vec!["skill.p".to_owned()];
+        // Main switch off: `resolve` returns no references, and the carry is off even with the carry value `true`.
+        let agentic = TurnFacts {
+            agentic: true,
+            do_refs_carry: true,
+            ..facts()
+        };
+        let raw = json!([{"kind": "document", "id": "doc-1"}]);
+        assert_eq!(resolve(false, Some(&raw), &agentic), Ok(None));
+        assert_eq!(
+            do_run_refs(do_carry_from(false, Some("true")), &picked, None),
+            DoRunRefs::default(),
+            "explicit picks are not carried with the main switch off"
+        );
+    }
+
+    /// F-f09-05, switch off: a Do turn's document or skill is refused typed, never taken and dropped; the turn's own
+    /// Space is still taken; an Ask turn still takes documents.
+    #[test]
+    fn do_turn_refuses_documents_and_skills_typed_while_the_carry_switch_is_off() {
+        let agentic = TurnFacts {
+            agentic: true,
+            ..facts()
+        };
+        for (kind, id, message) in [
+            (
+                "document",
+                "doc-1",
+                "Do mode cannot use attached documents yet. Remove them, or ask in chat.",
+            ),
+            (
+                "skill",
+                "skill.a",
+                "Do mode cannot use attached skills yet. Remove them, or ask in chat.",
+            ),
+        ] {
+            match resolve(true, Some(&one(kind, id)), &agentic) {
+                Err(ContextRefRefusal::Typed {
+                    code,
+                    reason,
+                    message: said,
+                }) => {
+                    assert_eq!(code, UNSUPPORTED_CODE);
+                    assert_eq!(reason, "kind_not_in_do_mode");
+                    assert_eq!(said, message);
+                }
+                other => panic!("expected the Do-mode refusal for {kind}, got {other:?}"),
+            }
+        }
+        // The thread's own Space is taken on a Do turn with the switch off.
+        let own = TurnFacts {
+            space_id: Some("space-a"),
+            ..agentic
+        };
+        let resolved = resolve(true, Some(&one("space", "space-a")), &own)
+            .expect("admitted")
+            .expect("references");
+        assert_eq!(resolved.refs.len(), 1);
+        // A ZDR Do turn is refused for ZDR first, before the kind is read.
+        let zdr = TurnFacts {
+            zdr: true,
+            ..agentic
+        };
+        assert_eq!(
+            resolve(true, Some(&one("document", "doc-1")), &zdr),
+            Err(ContextRefRefusal::Zdr)
+        );
+        // An Ask turn takes documents whatever the carry switch says.
+        let ask = resolve(true, Some(&one("document", "doc-1")), &facts())
+            .expect("admitted")
+            .expect("references");
+        assert_eq!(ask.document_ids, vec!["doc-1"]);
+    }
+
+    /// F-f09-05: the run carries nothing with the switch off, and the admitted documents and merged skills with it on.
+    #[test]
+    fn a_do_run_carries_the_admitted_ids_only_while_the_carry_switch_is_on() {
+        let agentic = TurnFacts {
+            agentic: true,
+            do_refs_carry: true,
+            ..facts()
+        };
+        let raw = json!([
+            {"kind": "document", "id": "doc-1"},
+            {"kind": "skill", "id": "skill.a"},
+        ]);
+        let resolved = resolve(true, Some(&raw), &agentic).expect("admitted");
+        let picked = vec!["skill.p".to_owned()];
+        assert_eq!(
+            do_run_refs(false, &picked, resolved.as_ref()),
+            DoRunRefs::default()
+        );
+        let carried = do_run_refs(true, &picked, resolved.as_ref());
+        assert_eq!(carried.document_ids, vec!["doc-1"]);
+        assert_eq!(carried.skill_ids, vec!["skill.p", "skill.a"]);
+        assert_eq!(
+            do_run_refs(true, &[], None),
+            DoRunRefs::default(),
+            "a turn with nothing attached carries nothing"
+        );
+        // No references but explicit picks, both switches on: the picks alone are carried.
+        assert_eq!(
+            do_run_refs(do_carry_from(true, Some("true")), &picked, None),
+            DoRunRefs {
+                document_ids: Vec::new(),
+                skill_ids: vec!["skill.p".to_owned()],
+            }
+        );
     }
 
     #[test]

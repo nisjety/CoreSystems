@@ -351,6 +351,22 @@ pub fn refuse_zdr_feature_for(key: &'static str, zdr_or_waived: bool) -> Option<
     refuse_zdr_feature_when(typed_refusals_enabled(), key, zdr_or_waived)
 }
 
+/// Whether a feature's zero-retention rule holds on a turn, over an explicit switch value. A zero-retention turn
+/// holds it whatever the switch says, as it always has. A waived turn counts as ZDR for these features (DEC-32,
+/// ZDR.md 5.5), so it holds the rule only while the typed-refusal switch is on; with the switch off it reads as it
+/// did before. `waived` may also be passed true for a zero-retention turn (the Data Plane mode is present on both);
+/// the rule holds for it either way.
+#[must_use]
+pub fn zdr_rule_applies_when(enabled: bool, zdr: bool, waived: bool) -> bool {
+    zdr || (enabled && waived)
+}
+
+/// [`zdr_rule_applies_when`] with the typed-refusal switch as this process reads it (`ZDR_TYPED_REFUSALS_ENABLED`).
+#[must_use]
+pub fn zdr_rule_applies(zdr: bool, waived: bool) -> bool {
+    zdr_rule_applies_when(typed_refusals_enabled(), zdr, waived)
+}
+
 fn is_credential_refusal(refusal: &Refusal) -> bool {
     matches!(
         refusal.code(),
@@ -710,6 +726,29 @@ pub(crate) mod tests {
         };
         assert_eq!(zdr.data_plane_mode().as_deref(), Some("ephemeral"));
         assert_eq!(waived.data_plane_mode().as_deref(), Some("reject"));
+    }
+
+    /// P2-mg-10-rel1: a waived turn holds the zero-retention rule for a feature only while the typed-refusal switch is on.
+    /// A zero-retention turn holds it whatever the switch says, and a persistent turn never holds it.
+    #[test]
+    fn a_waived_turn_holds_the_zdr_rule_for_a_feature_only_while_the_switch_is_on() {
+        // (switch, zdr, waived) and whether the rule holds: a waived turn only with the switch on, and a
+        // zero-retention turn (its Data Plane mode is present too) whatever the switch says.
+        for (enabled, zdr, waived, holds) in [
+            (true, false, true, true),
+            (false, false, true, false),
+            (true, true, false, true),
+            (false, true, false, true),
+            (false, true, true, true),
+            (true, false, false, false),
+            (false, false, false, false),
+        ] {
+            assert_eq!(
+                zdr_rule_applies_when(enabled, zdr, waived),
+                holds,
+                "switch {enabled}, zdr {zdr}, waived {waived}"
+            );
+        }
     }
 
     #[test]

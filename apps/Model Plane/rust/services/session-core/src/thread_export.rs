@@ -405,6 +405,10 @@ fn exported_message(
     }
 }
 
+/// One run's summary as the export carries it. The token counts are zero, and the model is empty, when
+/// the session does not know them: Session Core holds no usage, and no writer stamps the model into a
+/// run's metadata, so zero here means unknown, not a count. The gateway replaces them with the cost-core
+/// ledger's figures when its usage switch is on (F-f10-13). Nothing is written back to the run.
 fn exported_run(row: RunRow) -> pb::ExportedRun {
     pb::ExportedRun {
         run_id: row.id,

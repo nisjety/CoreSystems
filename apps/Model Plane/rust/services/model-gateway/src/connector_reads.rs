@@ -100,8 +100,9 @@ impl ConnectorTurn {
     }
 }
 
-/// Whether the Ask loop offers the read on this turn. It needs the switch, a turn that is neither
-/// zero-retention nor in a Space, and a selection of connected accounts on a turn that reads every source.
+/// Whether the Ask loop offers the read on this turn. It needs the switch, a turn the zero-retention rule does not
+/// apply to (`zdr`, see `zdr_posture::zdr_rule_applies`: a waived turn is excluded while the typed-refusal switch is
+/// on), a turn that is not in a Space, and a selection of connected accounts on a turn that reads every source.
 /// The read is offered only because the person chose an account for this turn (DEC-26), never by default.
 #[must_use]
 pub fn offered(enabled: bool, zdr: bool, space_scoped: bool, turn: Option<&ConnectorTurn>) -> bool {
@@ -794,6 +795,25 @@ pub(super) fn settle(
     sources
 }
 
+/// Whether a connected-account read holds the Ask loop's web and network tools for the rest of the turn (F-f04-16).
+///
+/// The read counts when it came back flagged or degraded by screening. A connected account's content is the person's
+/// own, but a message or a shared file can carry text an outsider wrote, and such text may try to send data out
+/// through a web tool. The Do loop holds its egress the same way (`tainted_egress_held`). Only a connected-account
+/// read counts here: a result from any other tool never arms the hold, whatever its screening.
+#[must_use]
+pub fn taints_turn(outcome: &ToolOutcome) -> bool {
+    let connected = outcome.name == provider_reads::READ_TOOL_NAME
+        || outcome.name == custom_rest::READ_TOOL_NAME
+        || outcome.provenance.trust == crate::moderation::TrustClass::ConnectorContent;
+    connected
+        && matches!(
+            outcome.provenance.screening.posture,
+            crate::moderation::ScreeningPosture::Flagged
+                | crate::moderation::ScreeningPosture::Degraded
+        )
+}
+
 /// The connected-account sources a read's items make. Each names its item, carries the provider's own link
 /// when that link is on a provider host, and carries metadata only: a sender, a time, a type. A body is never
 /// a source, because sources are kept with the thread. A profile is not a source, and nor is a refusal.
@@ -1235,6 +1255,28 @@ mod tests {
         // A source-filtered turn never reaches the loop with a selection, because the route refuses it.
         // The offer holds for that turn all the same.
         assert!(!offered(true, false, false, Some(&turn(&["conn_1"], false))));
+    }
+
+    /// P2-mg-10-rel1: a waived turn is offered no connected-account read while the typed-refusal switch is on, and
+    /// reads as before with it off. A zero-retention turn is never offered one.
+    #[test]
+    fn a_waived_turn_is_not_offered_the_read_while_the_typed_switch_is_on() {
+        use crate::zdr_posture::zdr_rule_applies_when;
+        let selected = turn(&["conn_1"], true);
+        let offer_on = |switch: bool, zdr: bool, waived: bool| {
+            offered(
+                true,
+                zdr_rule_applies_when(switch, zdr, waived),
+                false,
+                Some(&selected),
+            )
+        };
+        assert!(!offer_on(true, false, true), "a waived turn, switch on");
+        assert!(
+            offer_on(false, false, true),
+            "a waived turn, switch off: as before"
+        );
+        assert!(!offer_on(false, true, false), "a zero-retention turn");
     }
 
     fn listed(enforced: bool, decisions: &[(&str, &str)]) -> Value {
@@ -1731,5 +1773,79 @@ mod tests {
                 assert_eq!(research_withholds(&provenance), withheld, "{posture:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod taints_turn_tests {
+    use super::*;
+    use crate::moderation::{ScreeningOutcome, ScreeningPosture, ToolProvenance, TrustClass};
+
+    fn outcome(name: &str, trust: TrustClass, posture: ScreeningPosture) -> ToolOutcome {
+        ToolOutcome {
+            call_id: "call-1".to_owned(),
+            name: name.to_owned(),
+            output: String::new(),
+            error: None,
+            provenance: ToolProvenance {
+                trust,
+                screening: ScreeningOutcome {
+                    posture,
+                    content_hash: String::new(),
+                    rule_ids: Vec::new(),
+                },
+            },
+        }
+    }
+
+    /// F-f04-16: a connected-account read that screening flagged or could not finish holds the Ask loop's web tools.
+    /// A clean read, and a read whose screening did not apply, does not.
+    #[test]
+    fn a_flagged_or_degraded_connector_read_taints_the_turn_and_nothing_else_does() {
+        for name in [provider_reads::READ_TOOL_NAME, custom_rest::READ_TOOL_NAME] {
+            assert!(
+                taints_turn(&outcome(
+                    name,
+                    TrustClass::ConnectorContent,
+                    ScreeningPosture::Flagged
+                )),
+                "{name} flagged"
+            );
+            assert!(
+                taints_turn(&outcome(
+                    name,
+                    TrustClass::ConnectorContent,
+                    ScreeningPosture::Degraded
+                )),
+                "{name} degraded"
+            );
+            for posture in [
+                ScreeningPosture::Clean,
+                ScreeningPosture::PolicyDisabled,
+                ScreeningPosture::NotApplicable,
+            ] {
+                assert!(
+                    !taints_turn(&outcome(name, TrustClass::ConnectorContent, posture)),
+                    "{name} {posture:?}"
+                );
+            }
+        }
+        // Any tool whose class is a connected account counts, whatever its name.
+        assert!(taints_turn(&outcome(
+            "execute_provider_action",
+            TrustClass::ConnectorContent,
+            ScreeningPosture::Flagged
+        )));
+        // Only a connected account counts: a flagged web or internal result arms nothing here.
+        assert!(!taints_turn(&outcome(
+            "web_search",
+            TrustClass::ExternalWeb,
+            ScreeningPosture::Flagged
+        )));
+        assert!(!taints_turn(&outcome(
+            "knowledge_search",
+            TrustClass::OrgInternal,
+            ScreeningPosture::Flagged
+        )));
     }
 }

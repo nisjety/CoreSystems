@@ -754,6 +754,7 @@ fn proxy_routes() -> Router<AppState> {
         .route("/v1/processes", get(list_processes))
         .route("/v1/processes/:id/output", get(read_process_output))
         .route("/v1/cron", get(list_cron_proxy).post(create_cron_proxy))
+        .route("/v1/cron/delegable-tools", get(list_delegable_tools_proxy))
         .route(
             "/v1/cron/:id",
             get(get_cron_proxy)
@@ -2146,7 +2147,21 @@ struct AnswerQuestionBody {
     answers: Vec<AnswerQuestionItemBody>,
     #[serde(default)]
     skip: bool,
+    /// The message that carries the answer (F-f07-01b). Read only while
+    /// `MODEL_GATEWAY_QUESTION_ANSWER_MESSAGE_LINK` is on, and never for a skip; off, it is ignored
+    /// as it always was. Kept as a JSON value so that a body naming it in any shape is read as before.
+    #[serde(default)]
+    answered_message_id: Option<Value>,
+    /// The text of that message, the answer's summary (O-15). Read only together with a valid
+    /// `answered_message_id`; Session Core appends the message under that id in the same transaction as
+    /// the answer. A JSON value, as the id is, so a body naming it in any shape is refused, not misread.
+    #[serde(default)]
+    answer_summary: Option<Value>,
 }
+
+/// The most characters an answer's summary may carry, as Session Core checks it (O-15). It is this route's own
+/// bound, not the bound of a normal send, which is 100 KiB of UTF-8 (`normalize.rs` `MAX_CONTENT_BYTES`).
+const ANSWER_SUMMARY_MAX_CHARS: usize = 32_000;
 
 /// Answer, or skip, one of the caller's questions once (build plan WS14 S3). An answer is
 /// information, never an authority grant: this route cannot decide an approval and shares no state
@@ -2159,16 +2174,80 @@ async fn answer_run_question(
     Json(body): Json<AnswerQuestionBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
     require_non_zdr_durable_mutation(&claims)?;
-    let question =
-        record_question_answer(&state, &claims, &bearer, question_id, body.answers, body.skip)
-            .await?;
+    let link = answered_message_link_of(&body)?;
+    let question = record_question_answer_linked(
+        &state,
+        &claims,
+        &bearer,
+        question_id,
+        body.answers,
+        body.skip,
+        link,
+    )
+    .await?;
     Ok(Json(json!({ "question": run_question_value(&question) })))
+}
+
+/// The switch that links an answer to the message that carries it (F-f07-01b, owner decision
+/// D-f06-D). Strict: only the literal `true` turns it on. Off, an answer is recorded with no message,
+/// as it always was. It links only while `MODEL_GATEWAY_SEND_RECEIPTS` is on: the send that follows the answer
+/// stores its message under the same id only when a receipt stores it (see [`answered_message_link_of`]).
+/// O-15 keeps this one switch: the answer appends its message atomically under the id, and no second switch is added.
+pub const QUESTION_ANSWER_MESSAGE_LINK_ENV: &str = "MODEL_GATEWAY_QUESTION_ANSWER_MESSAGE_LINK";
+
+/// Whether an answer is linked to the message that carries it (F-f07-01b), read at each call.
+#[must_use]
+pub fn question_answer_message_link_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(
+        std::env::var(QUESTION_ANSWER_MESSAGE_LINK_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// The message an answer names and the text it is stored as (F-f07-01b, O-15), or `None` for no link: the
+/// switch is off, the answer is a skip (a skip never carries a message), the caller names none, or send
+/// receipts are off. The link needs receipts because the send that follows stores its message under the
+/// same id only where receipts store it (see `session_flow::send_receipt_id`), and that send is what
+/// dedupes onto the message the answer appended. A named message must have the shape of a client message id,
+/// and it needs its summary, non-empty and within [`ANSWER_SUMMARY_MAX_CHARS`]. Anything else is refused as a
+/// typed `invalid_answer` before Session Core is asked, and neither value is ever echoed.
+fn answered_message_link_of(
+    body: &AnswerQuestionBody,
+) -> Result<Option<(String, String)>, HttpJsonError> {
+    if body.skip
+        || !question_answer_message_link_enabled()
+        || !crate::queued_input::send_receipts_enabled()
+    {
+        return Ok(None);
+    }
+    let invalid = |field: &str, reason: &str| {
+        question_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_answer",
+            json!({ "field": field, "reason": reason }),
+        )
+    };
+    let message_id = match &body.answered_message_id {
+        None => return Ok(None),
+        Some(Value::String(id)) if crate::queued_input::valid_client_message_id(id) => id.clone(),
+        Some(_) => return Err(invalid("answered_message_id", "not a valid message id")),
+    };
+    match &body.answer_summary {
+        Some(Value::String(text))
+            if !text.trim().is_empty()
+                && text.trim().chars().count() <= ANSWER_SUMMARY_MAX_CHARS =>
+        {
+            Ok(Some((message_id, text.trim().to_owned())))
+        }
+        _ => Err(invalid("answer_summary", "not a message text")),
+    }
 }
 
 /// Record the owner's answer to, or skip of, one question through Session Core's `AnswerRunQuestion`
 /// (build plan WS14 S3, S5), and return the question as it now stands. The one writer of an answer:
 /// the answer route and the question form of `/continue` both call it, so the org is always the
-/// verified credential's, the answer is never attributed to a message from here, and every
+/// verified credential's, the answer names a message only on the answer route (F-f07-01b), and every
 /// Session Core refusal takes the same typed map (`question_not_found` 404, `question_expired` 410,
 /// `question_already_answered` 409, `invalid_answer` 422). The caller has already refused a ZDR or
 /// waived credential. The answers are never logged.
@@ -2180,6 +2259,24 @@ pub(crate) async fn record_question_answer(
     answers: Vec<AnswerQuestionItemBody>,
     skip: bool,
 ) -> Result<RunQuestion, HttpJsonError> {
+    // The question form of `/continue` delivers its answer through the run, never as a message, so it
+    // links none.
+    record_question_answer_linked(state, claims, bearer, question_id, answers, skip, None).await
+}
+
+/// [`record_question_answer`] for the answer route, which may also name the message that carries the
+/// answer (F-f07-01b, O-15). `link` is the message id and its summary, or `None` for no link; the route has
+/// validated a named one. Session Core appends the summary under the id in the same transaction as the answer.
+pub(crate) async fn record_question_answer_linked(
+    state: &AppState,
+    claims: &Claims,
+    bearer: &VerifiedModelBearer,
+    question_id: String,
+    answers: Vec<AnswerQuestionItemBody>,
+    skip: bool,
+    link: Option<(String, String)>,
+) -> Result<RunQuestion, HttpJsonError> {
+    let (answered_message_id, answer_summary) = link.unwrap_or_default();
     let response = state
         .orchestration_client
         .clone()
@@ -2196,9 +2293,8 @@ pub(crate) async fn record_question_answer(
                     })
                     .collect(),
                 skip,
-                // The message that carries an answer is recorded by the server when the answer
-                // arrives on a turn; this route never takes it from the caller.
-                answered_message_id: String::new(),
+                answered_message_id,
+                answer_summary,
             },
             bearer,
         )?)
@@ -9963,6 +10059,22 @@ fn cron_list_path(org_id: &str, space_ref: &str, creator: Option<&str>) -> Strin
     }
     path
 }
+
+/// The upstream path of the delegable tool list (F-f02-14). No query and no body are forwarded: capability-core
+/// reads the org from the verified bearer.
+const DELEGABLE_TOOLS_PATH: &str = "cron/delegable-tools";
+
+/// The tools a schedule's stored consent may name (F-f02-14), as capability-core answers them for the caller's org.
+/// Names only, and a name is not a grant. A read, forwarded as the verified caller like the schedule list, so it
+/// carries no ZDR refusal and nothing is stored or logged here.
+async fn list_delegable_tools_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, DELEGABLE_TOOLS_PATH, "GET", None).await
+}
+
 async fn create_cron_proxy(
     State(s): State<AppState>,
     Extension(c): Extension<Claims>,
@@ -16101,6 +16213,10 @@ struct ThreadSummaryResponse {
     /// The thread this one was forked from; omitted for a thread that was not forked.
     #[serde(skip_serializing_if = "String::is_empty")]
     forked_from_thread_id: String,
+    /// How many live threads were forked from this one (Session Core's count); omitted when zero, so a
+    /// thread without forks, and every listing with the fork switch off, keeps its shape.
+    #[serde(skip_serializing_if = "is_zero_i32")]
+    fork_count: i32,
     /// Set when the owner archived the thread; omitted for an active thread.
     #[serde(skip_serializing_if = "String::is_empty")]
     archived_at: String,
@@ -16150,6 +16266,10 @@ fn is_zero_u64(value: &u64) -> bool {
 }
 
 fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+fn is_zero_i32(value: &i32) -> bool {
     *value == 0
 }
 
@@ -16420,6 +16540,7 @@ async fn list_threads(
             pinned: thread.pinned,
             space_id: thread.space_id,
             forked_from_thread_id: thread.forked_from_thread_id,
+            fork_count: thread.fork_count,
             latest_run_id: thread.latest_run_id,
             latest_run_status: thread.latest_run_status,
             latest_run_updated_at: thread
@@ -19801,7 +19922,7 @@ async fn invoke(
     );
 
     // Emit usage envelope
-    let usage_envelope = Envelope {
+    let mut usage_envelope = Envelope {
         event_id: new_ulid(),
         event_type: "USAGE_ENVELOPE".to_owned(),
         schema_version: 1,
@@ -19837,6 +19958,12 @@ async fn invoke(
         zdr: effective_zdr,
         ..Default::default()
     };
+
+    // The direct run this call is, named under the turn-usage switch as the chat rows name theirs, so
+    // cost-core's run endpoint sums it (P2-mg-07-rel1). A ZDR call's row names no run.
+    if !effective_zdr && crate::grpc::usage_envelope_names_run() {
+        usage_envelope.payload["run_id"] = json!(session_run.run_id);
+    }
 
     if let Err(e) = state
         .publisher
@@ -21095,6 +21222,7 @@ mod run_owner_publish_tests {
                     authorized: request.thread_id.starts_with("thread-owned")
                         && request.org_id == "org-owner"
                         && request.user_id == "user-owner",
+                    ..Default::default()
                 },
             ))
         }
@@ -25996,6 +26124,7 @@ mod thread_memory_mode_tests {
             persona_enabled: true,
             memory_mode,
             forked_from_thread_id: String::new(),
+            fork_count: 0,
             archived_at: String::new(),
             starred: false,
             unread: false,
@@ -26093,6 +26222,18 @@ mod thread_memory_mode_tests {
         assert!(hidden.get("memory_mode").is_none(), "{hidden}");
     }
 
+    /// The fork count rides on a listed thread only when it is not zero, so a thread with no forks, and every
+    /// listing with the fork switch off (Session Core answers 0), keeps the shape it had.
+    #[test]
+    fn the_listing_names_a_fork_count_only_when_the_thread_has_forks() {
+        let none = serde_json::to_value(listed(String::new())).expect("serialises");
+        assert!(none.get("fork_count").is_none(), "{none}");
+        let mut forked = listed(String::new());
+        forked.fork_count = 2;
+        let json = serde_json::to_value(forked).expect("serialises");
+        assert_eq!(json["fork_count"], 2);
+    }
+
     #[test]
     fn a_zero_retention_refusal_of_a_memory_mode_write_is_returned_unchanged() {
         let refusal = mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN;
@@ -26141,6 +26282,7 @@ mod space_post_wire_tests {
     fn summary(reply_count: u32, last_author: &str) -> ThreadSummaryResponse {
         ThreadSummaryResponse {
             attention_state: None, attention_since: None, attention_unseen: None, forked_from_thread_id: String::new(),
+            fork_count: 0,
             memory_mode: String::new(),
             thread_id: "t-1".to_owned(),
             session_key: "k".to_owned(),

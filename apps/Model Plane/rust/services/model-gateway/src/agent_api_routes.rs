@@ -415,7 +415,7 @@ fn page_body(
 /// The public run: the fields of `agent-api-v1.json`'s `Run`, taken from the projection the chat
 /// routes serve (`run_detail_value`), and of its metadata only `origin` and `api_key_id`. Every
 /// other key the run read model carries stays inside the platform.
-fn run_value(run: &RunDetail) -> Value {
+pub(crate) fn run_value(run: &RunDetail) -> Value {
     const RUN_FIELDS: &[&str] = &[
         "run_id",
         "thread_id",
@@ -445,8 +445,9 @@ fn run_value(run: &RunDetail) -> Value {
     Value::Object(public)
 }
 
-/// The run read under the key's own bearer.
-async fn fetch_run(
+/// The run read under the key's own bearer. A keyed start's replay reads its run here too, so it
+/// answers the run's own status (F-f08-13).
+pub(crate) async fn fetch_run(
     state: &AppState,
     bearer: &VerifiedApiKeySessionBearer,
     run_id: &str,

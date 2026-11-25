@@ -4395,12 +4395,13 @@ async fn dispatch_tool_with_cost(
                 }
             }
             // The org's domain rules drop a hit on a host the org does not allow, before any hit is recorded or shown (EP-9
-            // W3). Under `off` nothing is read and nothing is dropped.
+            // W3), judged for the Space the search runs in (F-f03-03). Under `off` nothing is read and nothing is dropped.
             crate::site_policy_client::drop_denied_replies(
                 crate::site_policy_client::policy_mode(),
                 crate::site_policy_client::shared_checker(),
                 &crate::site_policy_client::SiteOwner::of(state),
                 org_id,
+                space_id,
                 &mut replies,
             )
             .await;
@@ -4555,11 +4556,12 @@ async fn dispatch_tool_with_cost(
             };
             // The org's domain rules come before the fetch: a host the org does not allow is refused by name, and no page
             // is read (EP-9 W3). Under `off` nothing is read.
-            if let Some(refusal) = crate::site_policy_client::fetch_refusal(
+            if let Some(refusal) = crate::site_policy_client::fetch_refusal_in_space(
                 crate::site_policy_client::policy_mode(),
                 crate::site_policy_client::shared_checker(),
                 &crate::site_policy_client::SiteOwner::of(state),
                 org_id,
+                space_id,
                 &[url.as_str()],
                 &call.name,
             )
@@ -4577,11 +4579,12 @@ async fn dispatch_tool_with_cost(
                     // The page may have ended on another host than the one asked for (a redirect, or the browser
                     // driver's escalation). The org's rules apply to where it ended too, and the body is dropped
                     // unread, unscreened and unparked when that host is not allowed (EP-9 W3).
-                    if let Some(refusal) = crate::site_policy_client::final_url_refusal(
+                    if let Some(refusal) = crate::site_policy_client::final_url_refusal_in_space(
                         crate::site_policy_client::policy_mode(),
                         crate::site_policy_client::shared_checker(),
                         &crate::site_policy_client::SiteOwner::of(state),
                         org_id,
+                        space_id,
                         &url,
                         &r.final_url,
                         &call.name,
@@ -4700,11 +4703,12 @@ async fn dispatch_tool_with_cost(
             // The org's domain rules come before any page is read, for every URL the call names (EP-9 W3).
             let refusal = {
                 let urls: Vec<&str> = args.urls.iter().map(String::as_str).collect();
-                crate::site_policy_client::fetch_refusal(
+                crate::site_policy_client::fetch_refusal_in_space(
                     crate::site_policy_client::policy_mode(),
                     crate::site_policy_client::shared_checker(),
                     &crate::site_policy_client::SiteOwner::of(state),
                     org_id,
+                    space_id,
                     &urls,
                     &call.name,
                 )
@@ -4735,6 +4739,8 @@ async fn dispatch_tool_with_cost(
                 inference_bearer: inference_bearer.to_owned(),
                 transport: "tool_loop",
                 site_policy_tool: Some("extract_structured"),
+                // The page's final URL is judged for this turn's Space before any inference call (F-f03-03).
+                space_id: space_id.to_owned(),
             };
             let outcomes = crate::web_extraction::extract(state, &spec).await;
             // A page that ended on a host the org's rules refuse was dropped by the extraction BEFORE any inference
@@ -4757,11 +4763,12 @@ async fn dispatch_tool_with_cost(
             // redirected onto a blocked host never has its extraction handed to the model (EP-9 W3). The whole result
             // is dropped on the first refusal: no extracted data, title or quote is returned.
             for outcome in &outcomes {
-                if let Some(refusal) = crate::site_policy_client::final_url_refusal(
+                if let Some(refusal) = crate::site_policy_client::final_url_refusal_in_space(
                     crate::site_policy_client::policy_mode(),
                     crate::site_policy_client::shared_checker(),
                     &crate::site_policy_client::SiteOwner::of(state),
                     org_id,
+                    space_id,
                     &outcome.result.url,
                     &outcome.result.final_url,
                     &call.name,
@@ -5208,7 +5215,7 @@ async fn dispatch_tool_with_cost(
             connector_reads::custom_rest_read_outcome(
                 state,
                 connector,
-                zdr,
+                crate::zdr_posture::zdr_rule_applies(zdr, data_plane_mode.is_some()),
                 !space_id.is_empty(),
                 ingestion_bearer,
                 capability_bearer,
@@ -5224,7 +5231,7 @@ async fn dispatch_tool_with_cost(
             connector_reads::read_outcome(
                 state,
                 connector,
-                zdr,
+                crate::zdr_posture::zdr_rule_applies(zdr, data_plane_mode.is_some()),
                 !space_id.is_empty(),
                 ingestion_bearer,
                 capability_bearer,
@@ -6546,10 +6553,8 @@ pub(crate) async fn dispatch_web_tool_audited(
         org_id,
         user_id,
         thread_id,
-        // Web tools only, per this function's doc: neither web_search nor
-        // fetch_url is code_interpreter/browser_agent, the only tools that
-        // read ExecuteStepRequest.space_id, so this path has no use for a
-        // real value.
+        // The Space is not carried on this path yet, so deep research's web reads are judged for the organisation
+        // only (F-f03-03). The tool loop and the forced search judge their web reads for the turn's Space.
         "",
         // Web tools only on these paths, and `reattach_context` is not one of
         // them — there is no prompt to exclude from a recovery that cannot
@@ -6737,6 +6742,89 @@ fn tools_for_custom_rest(mut tools: Vec<ToolDefinition>, offered: bool) -> Vec<T
         tools.push(connector_reads::custom_rest_tool_definition());
     }
     tools
+}
+
+/// The switch that holds the Ask loop's web and network tools once a connected-account read came back flagged or
+/// degraded (F-f04-16). Read once per turn. Only the literal `true` turns it on, and it matters only where the
+/// connected-account read is offered (`CONNECTOR_ASK_READS_ENABLED`).
+pub const ASK_READ_TAINT_HOLD_ENV: &str = "MODEL_GATEWAY_ASK_READ_TAINT_HOLD";
+
+/// What a call to a held tool is answered with (F-f04-16). Typed, so the model can tell it from a lookup that failed.
+const TAINTED_EGRESS_REFUSAL: &str =
+    "tainted_egress: this tool is not available after a flagged connector read";
+
+/// Whether the Ask loop's connected-account taint hold is switched on for this turn.
+fn ask_read_taint_hold_enabled() -> bool {
+    ask_read_taint_hold_from(std::env::var(ASK_READ_TAINT_HOLD_ENV).ok().as_deref())
+}
+
+/// The hold's switch, read exactly: only the literal `true` is on.
+fn ask_read_taint_hold_from(raw: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(raw)
+}
+
+/// Whether a tool sends what the model gives it outside the org's own systems: a web search or fetch, a page
+/// extraction that fetches the URLs the model names, or any MCP tool, which is a third-party server (F-f04-16).
+/// `code_interpreter` is not among them: its sandbox has no network access (its class is `SandboxCompute`), so a
+/// flagged read cannot leave the turn through it.
+fn is_egress_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "web_search" | "web_fetch" | "fetch_url" | "extract_structured"
+    ) || crate::moderation::TrustClass::classify(name)
+        == crate::moderation::TrustClass::ThirdPartyMcp
+}
+
+/// The tool definitions a round offers once the egress hold is armed: every [`is_egress_tool`] is taken out (F-f04-16).
+/// Pure, so the rule is pinned without a loop.
+fn withdraw_egress_tools(mut tools: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
+    tools.retain(|tool| !is_egress_tool(&tool.name));
+    tools
+}
+
+/// The Ask loop's egress hold for one turn (F-f04-16). Once a connected-account read comes back flagged or degraded,
+/// the web and network tools are withdrawn for the rest of the turn: they are not offered again, and a call to one is
+/// refused without being made. The hold is memory for this turn only and stores nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EgressHold {
+    /// Whether `MODEL_GATEWAY_ASK_READ_TAINT_HOLD` is on for this turn. Off, the hold never arms.
+    enabled: bool,
+    /// Set by the first flagged or degraded connected-account read of the turn, and never cleared within it.
+    tainted: bool,
+}
+
+impl EgressHold {
+    const fn for_turn(enabled: bool) -> Self {
+        Self {
+            enabled,
+            tainted: false,
+        }
+    }
+
+    /// Arms the hold on a flagged or degraded connected-account read. Returns true only on the call that arms it,
+    /// so the caller announces the hold once.
+    fn observe(&mut self, outcome: &ToolOutcome) -> bool {
+        if !self.enabled || self.tainted || !connector_reads::taints_turn(outcome) {
+            return false;
+        }
+        self.tainted = true;
+        true
+    }
+
+    /// A round's offered tools, with the held ones taken out once the hold is armed.
+    fn withdraw(self, tools: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
+        if self.tainted {
+            withdraw_egress_tools(tools)
+        } else {
+            tools
+        }
+    }
+
+    /// The typed refusal for a call the hold withholds, or `None` for any other call.
+    fn refusal(self, call: &ToolCall) -> Option<ToolOutcome> {
+        (self.tainted && is_egress_tool(&call.name))
+            .then(|| err_outcome(call, TAINTED_EGRESS_REFUSAL))
+    }
 }
 
 /// The page reader's place in a turn's tool set. Offered only beside `fetch_url`, so a turn that was
@@ -7845,8 +7933,13 @@ pub async fn run_forced_web_search(
     org_id: &str,
     user_id: &str,
     thread_id: &str,
+    // The turn's Space, empty outside one (F-f03-03). See `run_forced_web_search_for_model`.
+    space_id: &str,
+    // The turn's delegated inference bearer and its classifier budget (F-f04-11). See `run_forced_web_search_for_model`.
+    inference_bearer: &str,
     session_bearer: &str,
     capability_bearer: Option<&str>,
+    classifier_budget: &crate::semantic_screening::ClassifierBudget,
     zdr: bool,
     data_plane_mode: Option<String>,
     base_messages: Vec<ChatMessage>,
@@ -7860,8 +7953,11 @@ pub async fn run_forced_web_search(
         org_id,
         user_id,
         thread_id,
+        space_id,
+        inference_bearer,
         session_bearer,
         capability_bearer,
+        classifier_budget,
         zdr,
         data_plane_mode,
         // No requested model reaches this entry point, and an unknown tier is a
@@ -7894,8 +7990,17 @@ pub async fn run_forced_web_search_for_model(
     org_id: &str,
     user_id: &str,
     thread_id: &str,
+    // The turn's Space, empty outside one. The forced search's dispatch and its grounding reads are judged for it, so a
+    // Space whose floor denies a host keeps the forced search off that host as it keeps the tool loop off it (F-f03-03).
+    space_id: &str,
+    // The turn's delegated inference bearer. The forced search's result goes through the inline injection pass on it,
+    // when `CONTENT_SAFETY_SEMANTIC_INLINE` is on (F-f04-11). With the switch off the bearer is not used.
+    inference_bearer: &str,
     session_bearer: &str,
     capability_bearer: Option<&str>,
+    // The turn's classifier budget, shared with the tool loop that follows, so the forced search's inline call counts
+    // against the same cap (F-f04-11).
+    classifier_budget: &crate::semantic_screening::ClassifierBudget,
     zdr: bool,
     data_plane_mode: Option<String>,
     requested_model: &str,
@@ -7917,8 +8022,11 @@ pub async fn run_forced_web_search_for_model(
             org_id,
             user_id,
             thread_id,
+            space_id,
+            inference_bearer,
             session_bearer,
             capability_bearer,
+            classifier_budget,
             zdr,
             data_plane_mode,
             requested_model,
@@ -7930,6 +8038,20 @@ pub async fn run_forced_web_search_for_model(
     .await
 }
 
+/// The bearer a forced web search screens its result with (F-f04-11).
+///
+/// The inline injection pass is the reason the forced search takes the turn's delegated bearer. Without one the framed
+/// path runs the deterministic scan alone. With one, that path also starts the sampled shadow pass, which is new work
+/// for this search, so the bearer is held back unless `CONTENT_SAFETY_SEMANTIC_INLINE` is on. Switch off, the forced
+/// search reads and screens exactly as it did before.
+fn forced_search_screening_bearer(inline_on: bool, inference_bearer: &str) -> &str {
+    if inline_on {
+        inference_bearer
+    } else {
+        ""
+    }
+}
+
 /// The body of [`run_forced_web_search_for_model`], run inside its attribution scope. The parameters are the same.
 #[allow(clippy::too_many_arguments)]
 async fn run_forced_web_search_for_model_inner(
@@ -7939,8 +8061,11 @@ async fn run_forced_web_search_for_model_inner(
     org_id: &str,
     user_id: &str,
     thread_id: &str,
+    space_id: &str,
+    inference_bearer: &str,
     session_bearer: &str,
     capability_bearer: Option<&str>,
+    classifier_budget: &crate::semantic_screening::ClassifierBudget,
     zdr: bool,
     data_plane_mode: Option<String>,
     requested_model: &str,
@@ -7976,6 +8101,10 @@ async fn run_forced_web_search_for_model_inner(
         name: "web_search".to_owned(),
         arguments_json: args.to_string(),
     };
+    let screening_bearer = forced_search_screening_bearer(
+        crate::semantic_screening::inline_enabled(),
+        inference_bearer,
+    );
     let mut outcome = dispatch_audited_tool(
         state,
         request_id,
@@ -7983,10 +8112,9 @@ async fn run_forced_web_search_for_model_inner(
         org_id,
         user_id,
         thread_id,
-        // web_search only, never code_interpreter/browser_agent (the only
-        // tools that read ExecuteStepRequest.space_id) — see
-        // dispatch_web_tool_audited's identical reasoning above.
-        "",
+        // The turn's Space, which the forced search's dispatch judges each hit for (F-f03-03). web_search is the only
+        // tool a forced search dispatches, so no other tool reads it here.
+        space_id,
         // Web tools only on these paths, and `reattach_context` is not one of
         // them — there is no prompt to exclude from a recovery that cannot
         // happen here.
@@ -7997,7 +8125,8 @@ async fn run_forced_web_search_for_model_inner(
         "",
         None,
         None,
-        "",
+        // The turn's delegated bearer for the inline injection pass alone (F-f04-11); empty while that pass is off.
+        screening_bearer,
         session_bearer,
         capability_bearer,
         zdr,
@@ -8022,9 +8151,8 @@ async fn run_forced_web_search_for_model_inner(
         &crate::turn_attachments::ValidatedAttachments::none(),
         // A forced web search mounts no skill bundle.
         &[],
-        // No inline pass here: the forced search passes an empty inference bearer, and
-        // `assess_external_payload` runs the inline pass only with one.
-        None,
+        // The turn's classifier budget, which the inline pass spends from as the tool loop does (F-f04-11).
+        Some(classifier_budget),
         // A forced web search reads no connected account.
         None,
         // The forced search announces no retry: WS15 S3 wires the chat tool loop only.
@@ -8044,6 +8172,8 @@ async fn run_forced_web_search_for_model_inner(
         state,
         &search_query,
         org_id,
+        // The grounding reads are judged for the turn's Space, as the dispatch above is (F-f03-03).
+        space_id,
         zdr,
         grounding::Tier::for_model(requested_model),
         &mut outcome,
@@ -8969,6 +9099,7 @@ async fn gate_and_ground_web_search_outcome(
     state: &AppState,
     question: &str,
     org_id: &str,
+    space_id: &str,
     zdr: bool,
     tier: grounding::Tier,
     outcome: &mut ToolOutcome,
@@ -8999,6 +9130,7 @@ async fn gate_and_ground_web_search_outcome(
     let grounded = grounding::ground_pages(question, &pages, budget, |url| {
         let quarry = state.quarry.clone();
         let org_id = org_id.to_owned();
+        let space_id = space_id.to_owned();
         let tool = tool.clone();
         async move {
             // `scrape_readable`, not `scrape`, for the same reason `fetch_url`
@@ -9013,11 +9145,12 @@ async fn gate_and_ground_web_search_outcome(
                     // escalation, can land the page on one. That page is an unread page here: neither its text nor its
                     // structured facts become a passage, and the hit keeps its engine snippet, labelled as one. Under
                     // `off` nothing is refused and the page is read as it always was.
-                    if let Some(refusal) = crate::site_policy_client::final_url_refusal(
+                    if let Some(refusal) = crate::site_policy_client::final_url_refusal_in_space(
                         crate::site_policy_client::policy_mode(),
                         crate::site_policy_client::shared_checker(),
                         &owner,
                         &org_id,
+                        &space_id,
                         &url,
                         &page.final_url,
                         &tool,
@@ -9297,6 +9430,8 @@ pub async fn run_tool_rounds_for_model(
         images,
         prompt_tiers,
         "",
+        // No caller of this entry point shares a classifier budget: the loop takes its own, as it always has.
+        None,
     )
     .await
 }
@@ -9381,6 +9516,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     // The speed tier every model call of the turn carries (`InferRequest.speed_tier`): `priority`, or `""`
     // for no choice. The caller decides it once for the turn (`sse::invoke_stream_sse`); the rounds carry it.
     speed_tier: &str,
+    // The turn's inline injection pass budget when the caller already holds one (a forced search before the loop shares
+    // it, F-f04-11). `None` leaves the loop to take its own, as it always has.
+    classifier_budget: Option<&crate::semantic_screening::ClassifierBudget>,
 ) -> Result<ToolRounds, &'static str> {
     // The Office files this turn has delivered or held back under the verifier's switch (WS19-S3). Owned here, so
     // every exit of the tool loop meets the one place that delivers the files still held (F-f05-24).
@@ -9426,6 +9564,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             prompt_tiers,
             speed_tier,
             &mut office_delivery,
+            classifier_budget,
         ),
     )
     .await;
@@ -9512,6 +9651,7 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
     prompt_tiers: Option<PromptTierPlan>,
     speed_tier: &str,
     office_delivery: &mut OfficeDelivery,
+    classifier_budget: Option<&crate::semantic_screening::ClassifierBudget>,
 ) -> Result<ToolRounds, &'static str> {
     // Resolved ONCE for the whole turn rather than per call: the entitlement is a
     // property of the turn, and a value re-derived per round is a value that can
@@ -9549,25 +9689,30 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
     // The connected-account read is offered on a turn the person selected accounts for (WS23-S5). The
     // selection rides on the live sink, as the turn's clock does, so a caller without a sink offers nothing.
     let connector_turn = sink.and_then(crate::sse_events::RichEventSink::connector_turn);
+    // A waived turn is held to the zero-retention rule for the connected-account reads while the typed-refusal switch
+    // is on (P2-mg-10-rel1): its selection is refused before the turn starts (`sse.rs`), and neither read is offered
+    // on it here. `data_plane_mode` is present on a zero-retention or waived turn, as the other gates of this loop read it.
+    let connector_zdr = crate::zdr_posture::zdr_rule_applies(zdr, data_plane_mode.is_some());
     // The turn's web-search provenance record, read from the sink as the connected-account selection is. Every
     // answered search records on it, so the one line after the tool phase names them all.
     let search_provenance = sink.and_then(crate::sse_events::RichEventSink::search_provenance);
     // The org's connected-app policy may hold the read back to Do mode (EP-10-S7). It is read only on a turn
     // that already offers the read, so every other turn makes no extra call.
-    let connector_offered = connector_reads::offered(
-        connector_reads::enabled(),
-        zdr,
-        !space_id.is_empty(),
-        connector_turn,
-    ) && connector_reads::read_policy(state, org_id, user_id, capability_bearer)
-        .await
-        .admits_ask_loop();
+    let connector_offered =
+        connector_reads::offered(
+            connector_reads::enabled(),
+            connector_zdr,
+            !space_id.is_empty(),
+            connector_turn,
+        ) && connector_reads::read_policy(state, org_id, user_id, capability_bearer)
+            .await
+            .admits_ask_loop();
     let tools = tools_for_connector_scope(tools, connector_offered);
     // The custom REST read (W4-CC-7) is offered on the turns the connected-account read is offered on, and only while its
     // switch is on and capability-core admits it. The switch is read first, so a turn with it off makes no call.
     let custom_rest_turn = connector_reads::offered(
         mp_contracts::custom_rest::enabled(),
-        zdr,
+        connector_zdr,
         !space_id.is_empty(),
         connector_turn,
     );
@@ -9776,10 +9921,16 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
     // source or a scoped revision's document (`sole_artifact_prefetch`).
     let mut sole_artifact_prefetched = false;
     // The inline injection pass's call budget for the whole turn (WS26-S6). It sits
-    // above the rounds, so the cap holds across every round, not per round.
-    let classifier_budget = crate::semantic_screening::ClassifierBudget::new(
+    // above the rounds, so the cap holds across every round, not per round. A caller that
+    // already spent from this turn's budget, a forced search before the loop (F-f04-11), passes
+    // its own, and the loop shares it.
+    let own_classifier_budget = crate::semantic_screening::ClassifierBudget::new(
         crate::semantic_screening::semantic_max_calls_per_run(),
     );
+    let classifier_budget = classifier_budget.unwrap_or(&own_classifier_budget);
+    // The Ask loop's egress hold for this turn (F-f04-16), read once. It arms only on a flagged or degraded
+    // connected-account read, so with its switch off the turn is what it was.
+    let mut egress_hold = EgressHold::for_turn(ask_read_taint_hold_enabled());
     // Rounds that reached the model, for the turn's timing spans.
     let mut rounds_started: u32 = 0;
 
@@ -9896,6 +10047,12 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
                 content: "No artifact exists in this conversation yet, so artifact read/update cannot run. Explain the missing input rather than claiming to have read or changed one.".to_owned(),
                 ..Default::default()
             });
+            break;
+        }
+        // Once a connected-account read was flagged, the web and network tools are not offered again this turn (F-f04-16).
+        // A round left with nothing to offer ends the phase, as a round with no artifact tools does.
+        let mut round_tools = egress_hold.withdraw(round_tools);
+        if round_tools.is_empty() {
             break;
         }
         // A recognised dated-post revision may be answered with that post's
@@ -10510,7 +10667,10 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
         // The turn's batched-search refs, shared the same way.
         let turn_refs_ref = turn_refs.as_ref();
         // The same, for the turn's classifier budget: each per-call future copies the reference.
-        let classifier_budget_ref = &classifier_budget;
+        let classifier_budget_ref = classifier_budget;
+        // The egress hold as this round's calls start (F-f04-16). A flag that one of this round's reads sets lands after
+        // the calls have started, so it holds from the next round on.
+        let egress_hold_at_dispatch = egress_hold;
         // The same, for the turn's skill mounts: each per-call future copies the reference.
         let skill_mounts_ref = &skill_mounts;
         // A retry is announced only on a live stream, and only while the lifecycle switch is on
@@ -10518,6 +10678,11 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
         let retry_sink = sink.filter(|_| mp_contracts::lifecycle_notice::enabled());
         let dispatched = futures::future::join_all(prepared.into_iter().map(
             |(call, is_duplicate, is_truncated)| async move {
+                // A call to a tool the egress hold withdrew is refused before anything is made, and the refusal is typed
+                // (F-f04-16). The model may propose such a call; it never lifts the hold.
+                if let Some(refused) = egress_hold_at_dispatch.refusal(call) {
+                    return Ok(refused);
+                }
                 if !offered_tools.iter().any(|tool| tool.name == call.name) {
                     return Ok(err_outcome(call, "Tool is not available for this turn's source scope.".to_owned()));
                 }
@@ -10598,6 +10763,27 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
         let mut new_documents_accepted = 0usize;
         for result in dispatched {
             let mut outcome = result?;
+            // A flagged or degraded connected-account read holds the web and network tools for the rest of the turn
+            // (F-f04-16). The hold is announced once, by a content-free step that names the read's tool and the closed cause.
+            if egress_hold.observe(&outcome) {
+                tracing::info!(
+                    %request_id,
+                    tool = %outcome.name,
+                    cause = "tainted_egress",
+                    "ask loop: a connected-account read was flagged; web and network tools withdrawn for the rest of the turn"
+                );
+                events
+                    .push(ChatEvent::StepUpdate {
+                        id: format!("{}:tainted-egress", outcome.call_id),
+                        title: "Web tools withdrawn".to_owned(),
+                        detail: format!(
+                            "tainted_egress: {} was flagged, so web and network tools are not available for the rest of this turn",
+                            outcome.name
+                        ),
+                        status: "done".to_owned(),
+                    })
+                    .await;
+            }
             if outcome.name == "count_words" { count_calls += 1; }
             // One connected-app suggestion per turn (EP-10 S8), decided before its result is shown.
             let answered_call = resp.tool_calls.iter().find(|call| call.id == outcome.call_id);
@@ -10663,6 +10849,7 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
                     state,
                     &searched,
                     org_id,
+                    space_id,
                     zdr,
                     grounding::Tier::for_model(requested_model),
                     &mut outcome,
@@ -16745,6 +16932,16 @@ mod tests {
         org_id: &str,
         hit_url: &str,
     ) -> (WebSearchGate, ToolOutcome) {
+        ground_hit_in_space(state, org_id, "", hit_url).await
+    }
+
+    /// [`ground_hit`] for a search made in `space_id` (F-f03-03).
+    async fn ground_hit_in_space(
+        state: &crate::state::AppState,
+        org_id: &str,
+        space_id: &str,
+        hit_url: &str,
+    ) -> (WebSearchGate, ToolOutcome) {
         let mut outcome = web_search_outcome(&[(
             hit_url,
             "Strømpris i Norge",
@@ -16754,12 +16951,172 @@ mod tests {
             state,
             GROUNDING_QUESTION,
             org_id,
+            space_id,
             false,
             grounding::Tier::Balance,
             &mut outcome,
         )
         .await;
         (gate, outcome)
+    }
+
+    /// The org-core answer the Space tests give: `other.rel1.example` is allowed for the organisation and denied for
+    /// `space-b`, and every other host is allowed. It reads the `space_id` a call names, as org-core does.
+    struct OtherDeniedInSpaceB;
+
+    impl wiremock::Respond for OtherDeniedInSpaceB {
+        fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            let space = request
+                .url
+                .query_pairs()
+                .find(|(key, _)| key == "space_id")
+                .map(|(_, value)| value.into_owned());
+            let decisions: Vec<serde_json::Value> = request
+                .url
+                .query_pairs()
+                .filter(|(key, _)| key == "host")
+                .map(|(_, host)| {
+                    if space.as_deref() == Some("space-b") && host == "other.rel1.example" {
+                        serde_json::json!({"host": host, "effective": "deny", "cap": "none", "source": "org_block"})
+                    } else {
+                        serde_json::json!({"host": host, "effective": "ask", "cap": "act", "source": "default"})
+                    }
+                })
+                .collect();
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"revision": 1, "decisions": decisions}))
+        }
+    }
+
+    /// C-09 with F-f03-03, grounding path: a page that ended on a host the org allows but the Space floor denies is not
+    /// quoted in that Space. With the switch off the Space is not named, the organisation's own answer allows the host,
+    /// and the page is read.
+    #[tokio::test]
+    async fn a_page_that_ended_on_a_host_the_space_floor_denies_is_not_quoted_in_that_space() {
+        let _mode = crate::site_policy_client::test_seam::set(
+            mp_contracts::site_policy::WebDomainPolicyMode::Enforce,
+        );
+        let org_core = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/internal/orgs/org_f0303_ground/browser-sites/resolve",
+            ))
+            .respond_with(OtherDeniedInSpaceB)
+            .mount(&org_core)
+            .await;
+        let quarry = wiremock::MockServer::start().await;
+        grounding_scrape_with_url(
+            &quarry,
+            serde_json::json!({
+                "requested": "https://allowed.rel1.example/strompris",
+                "final_url": "https://other.rel1.example/landing"
+            }),
+            2,
+        )
+        .await;
+        let state = grounding_state(&org_core, &quarry);
+
+        {
+            let _floor = crate::site_policy_client::test_seam::set_space_floor(true);
+            let (gate, outcome) = ground_hit_in_space(
+                &state,
+                "org_f0303_ground",
+                "space-b",
+                "https://allowed.rel1.example/strompris",
+            )
+            .await;
+            let output = outcome.output.as_str();
+            let line = hit_line(output);
+            assert_eq!(gate.kept, 1, "{output}");
+            assert!(
+                !output.contains("REL1-MARKER-7f3a"),
+                "the page the Space denies reached the model: {output}"
+            );
+            assert!(line.contains("org_site_blocked"), "{line}");
+        }
+        {
+            let _floor = crate::site_policy_client::test_seam::set_space_floor(false);
+            let (_gate, outcome) = ground_hit_in_space(
+                &state,
+                "org_f0303_ground",
+                "space-b",
+                "https://allowed.rel1.example/strompris",
+            )
+            .await;
+            let line = hit_line(outcome.output.as_str());
+            assert!(line.contains("[PAGE READ]"), "{line}");
+            assert!(!line.contains("org_site_blocked"), "{line}");
+        }
+    }
+
+    /// F-f03-03, the forced path's wiring: the forced search's audited dispatch and its grounding reads take the Space the
+    /// turn runs in, each forced entry point hands that Space on, and the two calls in `sse.rs` pass the turn's Space. The
+    /// end-to-end forced run needs a session-core double this module does not have, so the argument lists are read from
+    /// the source: the arguments of a call, in order, with comments and the closing paren left out.
+    #[test]
+    fn the_forced_search_hands_its_space_to_its_dispatch_its_grounding_and_its_entry_points() {
+        // The argument names of the first call of `callee` after `from`, in the order the call makes them.
+        fn arguments_of(source: &str, from: &str, callee: &str) -> Vec<String> {
+            let start = source
+                .find(from)
+                .unwrap_or_else(|| panic!("`{from}` is in the source"));
+            let call = start
+                + source[start..]
+                    .find(callee)
+                    .unwrap_or_else(|| panic!("`{callee}` is called after `{from}`"));
+            source[call + callee.len()..]
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with("//"))
+                .take_while(|line| !line.starts_with(')'))
+                .map(|line| line.trim_end_matches(',').to_owned())
+                .collect()
+        }
+        let source = include_str!("tool_loop.rs");
+        let inner = "async fn run_forced_web_search_for_model_inner(";
+        // The audited dispatch takes the Space as its seventh argument, after the thread.
+        assert_eq!(
+            arguments_of(source, inner, "dispatch_audited_tool(")[6],
+            "space_id",
+            "the forced search's dispatch judges its hits for the turn's Space"
+        );
+        // The grounding gate takes the Space as its fourth argument, after the question and the organisation.
+        assert_eq!(
+            arguments_of(source, inner, "gate_and_ground_web_search_outcome(")[3],
+            "space_id",
+            "the forced search's grounding reads are judged for the turn's Space"
+        );
+        assert_eq!(
+            arguments_of(
+                source,
+                "pub async fn run_forced_web_search_for_model(",
+                "run_forced_web_search_for_model_inner("
+            )[6],
+            "space_id",
+            "the model entry point hands its Space to the inner search"
+        );
+        assert_eq!(
+            arguments_of(
+                source,
+                "pub async fn run_forced_web_search(",
+                "run_forced_web_search_for_model("
+            )[6],
+            "space_id",
+            "the plain entry point hands its Space to the model entry point"
+        );
+        // The two forced searches in the chat turn are handed the turn's Space as well.
+        let sse = include_str!("sse.rs").replace("\r\n", "\n");
+        let invoke = "pub async fn invoke_stream_sse(";
+        for callee in [
+            "crate::tool_loop::run_forced_web_search_for_model(",
+            "crate::tool_loop::run_forced_web_search(",
+        ] {
+            assert_eq!(
+                arguments_of(&sse, invoke, callee)[6],
+                "forced_space_id",
+                "{callee} is handed the turn's Space"
+            );
+        }
     }
 
     /// The line of the output that lists the kept hit, which carries the hit's own label. The assertions read the label
@@ -20823,6 +21180,228 @@ mod skill_mount_tests {
         assert!(skill_bundle_mounts_enabled_from(Some("true")));
         for raw in [None, Some(""), Some("True"), Some(" true"), Some("1"), Some("yes")] {
             assert!(!skill_bundle_mounts_enabled_from(raw), "{raw:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod forced_search_and_egress_hold_tests {
+    use super::*;
+    use crate::moderation::{ScreeningOutcome, ScreeningPosture, ToolProvenance, TrustClass};
+    use mp_contracts::provider_reads::READ_TOOL_NAME;
+
+    const HELD: &str = "tainted_egress: this tool is not available after a flagged connector read";
+
+    /// A tool result of `name`, from `trust`, that screening put in `posture`.
+    fn outcome(name: &str, trust: TrustClass, posture: ScreeningPosture) -> ToolOutcome {
+        ToolOutcome {
+            call_id: format!("{name}-call"),
+            name: name.to_owned(),
+            output: "the result".to_owned(),
+            error: None,
+            provenance: ToolProvenance {
+                trust,
+                screening: ScreeningOutcome {
+                    posture,
+                    content_hash: String::new(),
+                    rule_ids: Vec::new(),
+                },
+            },
+        }
+    }
+
+    /// A connected-account read, as the Ask loop returns one.
+    fn read(posture: ScreeningPosture) -> ToolOutcome {
+        outcome(READ_TOOL_NAME, TrustClass::ConnectorContent, posture)
+    }
+
+    fn definition(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_owned(),
+            description: String::new(),
+            parameters_json: "{}".to_owned(),
+        }
+    }
+
+    fn call(name: &str) -> ToolCall {
+        ToolCall {
+            id: format!("{name}-call"),
+            name: name.to_owned(),
+            arguments_json: "{}".to_owned(),
+        }
+    }
+
+    /// The tools one Ask loop round offers: the web and network tools, a connected-account read, a sandbox that has
+    /// no network, an MCP tool, and the turn's own tools.
+    fn round() -> Vec<ToolDefinition> {
+        [
+            "web_search",
+            "web_fetch",
+            "fetch_url",
+            "extract_structured",
+            "mcp__srv__lookup",
+            "code_interpreter",
+            READ_TOOL_NAME,
+            "create_artifact",
+            "knowledge_search",
+        ]
+        .into_iter()
+        .map(definition)
+        .collect()
+    }
+
+    fn names(tools: &[ToolDefinition]) -> Vec<&str> {
+        tools.iter().map(|tool| tool.name.as_str()).collect()
+    }
+
+    const WITHHELD: [&str; 5] = [
+        "web_search",
+        "web_fetch",
+        "fetch_url",
+        "extract_structured",
+        "mcp__srv__lookup",
+    ];
+
+    /// F-f04-11: the forced search gets the turn's bearer for its inline pass only while that pass is switched on.
+    #[test]
+    fn the_forced_search_screens_on_the_turns_bearer_only_while_the_inline_pass_is_on() {
+        assert_eq!(
+            forced_search_screening_bearer(true, "delegated-bearer"),
+            "delegated-bearer"
+        );
+        assert_eq!(
+            forced_search_screening_bearer(false, "delegated-bearer"),
+            "",
+            "switch off: the forced search screens as it did before, with no bearer"
+        );
+        assert_eq!(forced_search_screening_bearer(true, ""), "");
+    }
+
+    /// F-f04-16: a flagged connected-account read withdraws the web tools from the next round, and announces it once.
+    #[test]
+    fn a_flagged_connector_read_withdraws_web_search_for_the_next_round() {
+        let mut hold = EgressHold::for_turn(true);
+        assert!(
+            hold.observe(&read(ScreeningPosture::Flagged)),
+            "the read arms the hold"
+        );
+        assert!(
+            !hold.observe(&read(ScreeningPosture::Flagged)),
+            "a second flag does not announce the hold again"
+        );
+        let offered = hold.withdraw(round());
+        for name in WITHHELD {
+            assert!(!names(&offered).contains(&name), "{name} is withdrawn");
+        }
+        for kept in [
+            "code_interpreter",
+            READ_TOOL_NAME,
+            "create_artifact",
+            "knowledge_search",
+        ] {
+            assert!(names(&offered).contains(&kept), "{kept} stays offered");
+        }
+    }
+
+    /// F-f04-16: a degraded connected-account read holds the same tools as a flagged one.
+    #[test]
+    fn a_degraded_connector_read_withdraws_the_web_tools_too() {
+        let mut hold = EgressHold::for_turn(true);
+        assert!(hold.observe(&read(ScreeningPosture::Degraded)));
+        let offered = hold.withdraw(round());
+        for name in WITHHELD {
+            assert!(!names(&offered).contains(&name), "{name} is withdrawn");
+        }
+    }
+
+    /// F-f04-16: a clean connected-account read, and every posture that is not a finding, leaves the round as it was.
+    #[test]
+    fn a_clean_connector_read_withdraws_nothing() {
+        for posture in [
+            ScreeningPosture::Clean,
+            ScreeningPosture::PolicyDisabled,
+            ScreeningPosture::NotApplicable,
+        ] {
+            let mut hold = EgressHold::for_turn(true);
+            assert!(
+                !hold.observe(&read(posture)),
+                "{posture:?} does not arm the hold"
+            );
+            assert_eq!(
+                names(&hold.withdraw(round())),
+                names(&round()),
+                "{posture:?}"
+            );
+            assert!(hold.refusal(&call("web_search")).is_none(), "{posture:?}");
+        }
+    }
+
+    /// F-f04-16: only a connected-account read arms the hold. A flagged web or knowledge result does not, because
+    /// those are screened on their own terms.
+    #[test]
+    fn a_flagged_result_of_another_tool_arms_nothing() {
+        let mut hold = EgressHold::for_turn(true);
+        assert!(!hold.observe(&outcome(
+            "web_search",
+            TrustClass::ExternalWeb,
+            ScreeningPosture::Flagged
+        )));
+        assert!(!hold.observe(&outcome(
+            "knowledge_search",
+            TrustClass::OrgInternal,
+            ScreeningPosture::Flagged
+        )));
+        assert_eq!(names(&hold.withdraw(round())), names(&round()));
+    }
+
+    /// F-f04-16: a call to a withdrawn tool is refused with the typed text, and nothing is made of it. A connector read
+    /// and the sandbox are not refused.
+    #[test]
+    fn a_call_to_a_withdrawn_tool_is_refused_with_the_typed_text() {
+        let mut hold = EgressHold::for_turn(true);
+        assert!(
+            EgressHold::for_turn(true)
+                .refusal(&call("web_search"))
+                .is_none(),
+            "before a flag nothing is refused"
+        );
+        hold.observe(&read(ScreeningPosture::Flagged));
+        for name in WITHHELD {
+            let refused = hold
+                .refusal(&call(name))
+                .unwrap_or_else(|| panic!("{name} is refused"));
+            assert_eq!(refused.error.as_deref(), Some(HELD), "{name}");
+            assert!(refused.output.is_empty(), "{name}: no output");
+            assert_eq!(refused.name, name);
+            assert_eq!(refused.call_id, format!("{name}-call"));
+        }
+        assert!(hold.refusal(&call("code_interpreter")).is_none());
+        assert!(hold.refusal(&call(READ_TOOL_NAME)).is_none());
+        assert!(hold.refusal(&call("create_artifact")).is_none());
+    }
+
+    /// F-f04-16: with the switch off the hold never arms, so a flagged read changes nothing this turn.
+    #[test]
+    fn the_hold_is_inert_while_its_switch_is_off() {
+        let mut hold = EgressHold::for_turn(false);
+        assert!(!hold.observe(&read(ScreeningPosture::Flagged)));
+        assert_eq!(names(&hold.withdraw(round())), names(&round()));
+        assert!(hold.refusal(&call("web_search")).is_none());
+    }
+
+    /// F-f04-16: the switch is read as the literal `true`, and nothing else turns the hold on.
+    #[test]
+    fn the_hold_switch_is_read_strictly() {
+        assert!(ask_read_taint_hold_from(Some("true")));
+        for raw in [
+            None,
+            Some(""),
+            Some("True"),
+            Some(" true"),
+            Some("1"),
+            Some("yes"),
+        ] {
+            assert!(!ask_read_taint_hold_from(raw), "{raw:?}");
         }
     }
 }

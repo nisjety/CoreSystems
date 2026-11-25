@@ -276,7 +276,8 @@ mod undelivered_done_tests {
         let close_streaming = ["queued_inputs.close_retractions", "(&req_id);"].concat();
         let close_fallback = ["state.queued_inputs.close_retractions", "(request_id);"].concat();
         let save = ["session_flow::complete_direct_inference_run_with_message", "("].concat();
-        let answer_request = ["let mut grpc_req = Infer", "Request {"].concat();
+        // The brace is written as an escape so this module's braces balance for the source scans (zdr_posture).
+        let answer_request = ["let mut grpc_req = Infer", "Request \u{7b}"].concat();
         let liveness = ["let run_live = crate::session_flow::heartbeat_direct_inference_run", "("].concat();
         let work_summary = ["let work_summary = crate::space_sse::room_work_summary", "("].concat();
 
@@ -2731,6 +2732,30 @@ mod agent_route_tests {
         }
     }
 
+    /// P2-mg-10-rel1: a waived turn's selection is refused as a zero-retention turn's is while the typed-refusal switch
+    /// is on, and reads as before with it off. A persistent turn is never refused for the rule.
+    #[test]
+    fn a_waived_turn_selects_no_connected_account_only_while_the_typed_switch_is_on() {
+        use super::{connector_selection, ConnectorSelectionRefusal as Refused};
+        use crate::zdr_posture::zdr_rule_applies_when;
+        let selected = vec!["conn_1".to_owned()];
+        let waived_on = zdr_rule_applies_when(true, false, true);
+        let waived_off = zdr_rule_applies_when(false, false, true);
+        let persistent = zdr_rule_applies_when(true, false, false);
+        assert_eq!(
+            connector_selection(Some(&selected), waived_on, false, true),
+            Err(Refused::ZeroRetention)
+        );
+        assert_eq!(
+            connector_selection(Some(&selected), waived_off, false, true),
+            Ok(selected.clone())
+        );
+        assert_eq!(
+            connector_selection(Some(&selected), persistent, false, true),
+            Ok(selected.clone())
+        );
+    }
+
     /// The selection reaches the run request only when one was made, and names the same connections.
     #[test]
     fn a_selection_reaches_the_run_request_only_when_made() {
@@ -3365,10 +3390,14 @@ pub async fn invoke_stream_sse(
         }
     }
     // The connected accounts the person selected (build plan WS23 S4), checked before any run or model
-    // call. An empty selection selects nothing and is never refused.
+    // call. An empty selection selects nothing and is never refused. A waived turn is held to the zero-retention
+    // refusal here while the typed-refusal switch is on (P2-mg-10-rel1): a connected-account read counts as ZDR on
+    // it (DEC-32, ZDR.md 5.5), so its selection is refused the way a zero-retention turn's is.
+    let connector_zdr =
+        crate::zdr_posture::zdr_rule_applies(turn_posture.zdr(), turn_posture.is_waived());
     let connector_ids = match connector_selection(
         req.connector_scope.as_deref(),
-        turn_posture.zdr(),
+        connector_zdr,
         req.space_context
             .as_ref()
             .or(req.space_append_context.as_ref())
@@ -3409,6 +3438,8 @@ pub async fn invoke_stream_sse(
     };
     // Typed context references (Wave 3 EP-3 S5), checked before any run or model call. With the switch off the
     // field is never read, so the turn is the one it was before.
+    // The Do-turn carry switch (F-f09-05), read once: it decides both what a Do turn admits and what its run carries.
+    let do_context_refs_carry = crate::context_refs::do_carry_enabled();
     let context_refs = match crate::context_refs::resolve(
         crate::context_refs::enabled(),
         req.context_refs.as_ref(),
@@ -3417,6 +3448,7 @@ pub async fn invoke_stream_sse(
             waived: turn_posture.is_waived(),
             thread_references: crate::thread_reference_tools::enabled(),
             agentic: features.iter().any(|feature| feature == "agentic"),
+            do_refs_carry: do_context_refs_carry,
             knowledge: !conversation_only && retrieval_scope != crate::normalize::RetrievalScope::WebOnly,
             selection_edit: crate::selection_guard::enabled_for(state.artifact_revisions_mode),
             space_id: req
@@ -3967,7 +3999,10 @@ pub async fn invoke_stream_sse(
                             .await
                     {
                         timing.hand_off("idempotent_attach");
-                        return attach_to_original(&state, &org_id, &user_id, &original).await;
+                        return attach_to_original(
+                            &state, &store, &org_id, &user_id, key, &original,
+                        )
+                        .await;
                     }
                 }
                 return error_stream(
@@ -4007,7 +4042,10 @@ pub async fn invoke_stream_sse(
                         // ends is decided by the shared record alone.
                         drop(guard);
                         timing.hand_off("idempotent_attach");
-                        return attach_to_original(&state, &org_id, &user_id, &original).await;
+                        return attach_to_original(
+                            &state, &store, &org_id, &user_id, key, &original,
+                        )
+                        .await;
                     }
                 }
                 Some(guard)
@@ -4671,6 +4709,14 @@ pub async fn invoke_stream_sse(
             org_limits.max_tokens,
             goal_run_tokens,
         );
+        // The documents and skills this Do turn attached (F-f09-05), ids only: empty unless both
+        // MODEL_GATEWAY_CONTEXT_REFS_ENABLED and MODEL_GATEWAY_DO_CONTEXT_REFS_CARRY are on (carry off refused
+        // them above; main switch off never read them), so the run is sent as it was.
+        let do_context_refs = crate::context_refs::do_run_refs(
+            do_context_refs_carry,
+            &req.skill_ids,
+            context_refs.as_ref(),
+        );
         return agentic_run_stream(
             state.clone(),
             session_run,
@@ -4752,6 +4798,8 @@ pub async fn invoke_stream_sse(
             run_tool_allowlist,
             // The turn's coordinator flag (`InvokeRequest.coordinator`); the dispatch decides whether it is sent.
             req.coordinator,
+            // The attached documents and skills this Do run carries (F-f09-05), stated above.
+            do_context_refs,
             // The run token cap of this Do run (F-f04-08), stated above.
             max_run_tokens,
         );
@@ -5552,9 +5600,7 @@ pub async fn invoke_stream_sse(
     // messages. Their plan goes to the calls below on a non-ZDR turn only, and the composed head is
     // kept so each later call can check that the plan still describes the messages it sends.
     let (mut messages, standing) = prompt.render_planned(cache_options.prompt_order());
-    let prompt_tiers = standing
-        .filter(|_| !effective_zdr)
-        .and_then(crate::prompt_context::wire_plan);
+    let prompt_tiers = crate::prompt_context::turn_plan(standing, effective_zdr);
     let composed_head: Vec<ChatMessage> = match &prompt_tiers {
         Some(plan) => messages
             .iter()
@@ -5867,6 +5913,7 @@ pub async fn invoke_stream_sse(
             retrieval_scope.is_auto() && !conversation_only,
         ))
         .with_usage_progress(usage_progress_switch())
+        .with_usage_mixed_basis(usage_mixed_basis_switch())
         .with_run_ceiling(run_ceiling)
         // The turn's web-search provenance (EP-9 W1): every answered search records here, and the one frame after
         // the tool phase names them all. Attached only while the line is switched on.
@@ -6271,6 +6318,20 @@ pub async fn invoke_stream_sse(
         // and the model decides whether the answer needs fresh data.
         // Every provider call of the tool phase that the turn's usage counts.
         let mut tool_usage: Vec<crate::usage_meter::CallUsage> = Vec::new();
+        // The turn's inline injection pass budget (WS26-S6), created once for the whole turn. The forced search below
+        // and the tool loop after it draw on this one cap, so the two never spend more than one run's allowance between
+        // them (F-f04-11). The tool loop takes it, and creates its own only when it is given none.
+        let classifier_budget = crate::semantic_screening::ClassifierBudget::new(
+            crate::semantic_screening::semantic_max_calls_per_run(),
+        );
+        // The turn's Space, which both forced web searches below are judged for (F-f03-03): the Space the tool loop reads,
+        // from the first message's context or the later one's. Empty outside a Space.
+        let forced_space_id = req
+            .space_context
+            .as_ref()
+            .or(req.space_append_context.as_ref())
+            .map(|context| context.space_id.as_str())
+            .unwrap_or_default();
         if web_search_signal
             && !deep_research_ran
             && tool_defs.iter().any(|tool| tool.name == "web_search")
@@ -6284,10 +6345,16 @@ pub async fn invoke_stream_sse(
                 &org_clone,
                 &user_clone,
                 &thread_scope,
+                forced_space_id,
+                // The turn's delegated inference bearer, which the forced search's inline injection pass runs on when the
+                // switch is on (F-f04-11). With the switch off the forced search screens exactly as it did before.
+                inference_bearer.as_str(),
                 session_bearer.as_str(),
                 capability_bearer
                     .as_ref()
                     .map(VerifiedCapabilityBearer::as_str),
+                // The turn's shared classifier budget.
+                &classifier_budget,
                 effective_zdr,
                 // The turn's own retention mode: a waived turn's derived content-safety pass stays off.
                 data_plane_mode.clone(),
@@ -6421,6 +6488,8 @@ pub async fn invoke_stream_sse(
                 &image_parts,
                 rounds_tiers,
                 turn_speed_tier,
+                // The turn's classifier budget, shared with the forced web search above (F-f04-11).
+                Some(&classifier_budget),
             )
             .await;
             seq = sink.sync_cursor(seq).await;
@@ -7615,10 +7684,14 @@ pub async fn invoke_stream_sse(
                                 &org_clone,
                                 &user_clone,
                                 &thread_scope,
+                                forced_space_id,
+                                // The verification search runs on the turn's delegated bearer and shares its budget (F-f04-11).
+                                inference_bearer.as_str(),
                                 session_bearer.as_str(),
                                 capability_bearer
                                     .as_ref()
                                     .map(VerifiedCapabilityBearer::as_str),
+                                &classifier_budget,
                                 effective_zdr,
                                 data_plane_mode.clone(),
                                 Vec::new(),
@@ -8414,6 +8487,7 @@ pub async fn invoke_stream_sse(
                                 ceiling: sink.run_ceiling_at_turn_end(&turn, turn_metered),
                                 routing: answer_routing,
                                 routing_decision: answer_routing_decision.clone(),
+                                cost_mixed: sink.streams_usage_mixed_basis() && turn.mixed,
                             },
                         )
                         .await;
@@ -8425,6 +8499,7 @@ pub async fn invoke_stream_sse(
                         output_tokens: saturating_u32(turn.output),
                         cost_usd,
                         cost_basis: turn.basis,
+                        cost_mixed: sink.streams_usage_mixed_basis() && turn.mixed,
                         latency_ms,
                         confidence,
                         served_by,
@@ -11736,6 +11811,7 @@ async fn run_infer_fallback(
                         ceiling: sink.run_ceiling_at_turn_end(&turn, turn_metered),
                         routing: crate::tool_loop::route_shift(resp.route_note.as_ref()),
                         routing_decision: answer_routing_decision.clone(),
+                        cost_mixed: sink.streams_usage_mixed_basis() && turn.mixed,
                     },
                 )
                 .await;
@@ -11748,6 +11824,7 @@ async fn run_infer_fallback(
                 output_tokens: saturating_u32(turn.output),
                 cost_usd,
                 cost_basis: turn.basis,
+                cost_mixed: sink.streams_usage_mixed_basis() && turn.mixed,
                 latency_ms,
                 confidence,
                 // From the unary response this fallback answered with, under
@@ -12100,25 +12177,79 @@ pub async fn invoke_resume_sse(
     .await
 }
 
+/// How long a duplicate send waits for its original's stream to become attachable. The original takes
+/// its claim before it registers its cancel handle and buffers its first frame, so a duplicate that
+/// lands in that gap finds nothing to resume yet. The wait is bounded, and it never starts a run.
+const ATTACH_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// The gap between two attach attempts while the original is still starting.
+const ATTACH_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// A duplicate send whose idempotency key another request already holds: serve that request's
 /// buffered stream from its first frame, so both clients see the same frames and no second run
-/// starts. When the original is no longer resumable (its buffer was evicted, or Redis lost it)
-/// the duplicate gets an error that names the original request id and starts nothing.
+/// starts. While the original is still starting, the duplicate retries for up to [`ATTACH_WAIT`],
+/// and it stops at once when the shared claim is no longer the original's own pending one. When the
+/// original is not resumable (its buffer was evicted, Redis lost it, or its claim is gone) the
+/// duplicate gets an error that names the original request id and starts nothing.
 async fn attach_to_original(
     state: &AppState,
+    store: &std::sync::Arc<dyn crate::idempotency_registry::SharedClaimStore>,
     org_id: &str,
     user_id: &str,
+    client_key: &str,
     original: &crate::idempotency_registry::SharedClaimValue,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
-    match resume_stream_for(state, org_id, user_id, &original.request_id, None).await {
-        Ok(stream) => stream,
-        Err(_) => error_stream(
-            &original.request_id,
-            "duplicate_in_flight",
-            "the original request for this idempotency_key is no longer resumable",
-            false,
-        ),
+    let deadline = tokio::time::Instant::now() + ATTACH_WAIT;
+    let mut waited = false;
+    loop {
+        match resume_stream_for(state, org_id, user_id, &original.request_id, None).await {
+            Ok(stream) => {
+                let outcome = if waited {
+                    "attached_after_wait"
+                } else {
+                    "attached_first"
+                };
+                metrics::counter!("gateway_idempotency_attach_total", "outcome" => outcome)
+                    .increment(1);
+                return stream;
+            }
+            // Only "not found" can change while the original is still starting. Any other answer is final.
+            Err((status, _)) if status == StatusCode::NOT_FOUND => {}
+            Err(_) => break,
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline
+            || !original_still_running(store, org_id, user_id, client_key, original).await
+        {
+            break;
+        }
+        waited = true;
+        tokio::time::sleep(ATTACH_POLL.min(deadline - now)).await;
     }
+    metrics::counter!("gateway_idempotency_attach_total", "outcome" => "gave_up").increment(1);
+    error_stream(
+        &original.request_id,
+        "duplicate_in_flight",
+        "the original request for this idempotency_key is no longer resumable",
+        false,
+    )
+}
+
+/// Whether the original's shared claim is still its own and still Pending, so its stream can yet
+/// appear. A claim that is gone, has passed to another request, or has settled as Done (its buffer
+/// already held the answer) will not bring a missing buffer back. An unanswering store reads as gone.
+async fn original_still_running(
+    store: &std::sync::Arc<dyn crate::idempotency_registry::SharedClaimStore>,
+    org_id: &str,
+    user_id: &str,
+    client_key: &str,
+    original: &crate::idempotency_registry::SharedClaimValue,
+) -> bool {
+    crate::idempotency_registry::lookup_shared(store, org_id, user_id, client_key)
+        .await
+        .is_some_and(|held| {
+            held.request_id == original.request_id
+                && held.state == crate::idempotency_registry::SharedClaimState::Pending
+        })
 }
 
 /// The replay-and-tail of a buffered chat stream for one verified caller, shared by the resume
@@ -13872,6 +14003,8 @@ fn zdr_answer_stream(
         output_tokens: answer.output_tokens,
         cost_usd,
         cost_basis,
+        // A ZDR stream carries one basis and never mixes them, so it never states the key.
+        cost_mixed: false,
         latency_ms,
         confidence: None,
         served_by: crate::sse_events::ServedBy::stamped(
@@ -15024,6 +15157,9 @@ fn spawn_run_dispatch(
     // What the run's rounds cost, published by the task itself the moment the executor
     // answers (build plan WS02 S3), so a follower that has given up cannot lose it.
     usage_ledger: AgentUsageLedger,
+    // The claimed goal turn's settle, which the task makes the moment the executor answers (F-f09-10). `None` for
+    // every turn that claims no goal and with MODEL_GATEWAY_GOAL_SETTLE_IN_DISPATCH off.
+    goal_settle: Option<GoalSettleContext>,
     // The thread's grant as Session Core holds it (build plan WS04 S4), read once for this
     // run start; `None` with the durable grant switch off, and the in-memory store decides.
     durable_grant: Option<&crate::session_flow::ThreadGrant>,
@@ -15039,6 +15175,9 @@ fn spawn_run_dispatch(
     agent_tool_allowlist: Option<mp_contracts::model_plane::v1::AgentToolAllowlist>,
     // Coordinator mode (`coordinator_forwarded`): sent as `RunAgentRequest.coordinator`, `false` for every other dispatch.
     coordinator: bool,
+    // The attached documents and skills of a Do turn (F-f09-05, `context_refs::do_run_refs`): empty with
+    // MODEL_GATEWAY_DO_CONTEXT_REFS_CARRY off and for every continuation.
+    context_refs: crate::context_refs::DoRunRefs,
     // The run token cap (F-f04-08): the metered tokens the run may spend across its rounds, `budget::run_token_cap`.
     // `None` with MODEL_GATEWAY_DO_RUN_CAP off, which sends the wire's 0, no cap.
     max_run_tokens: Option<u64>,
@@ -15179,6 +15318,11 @@ fn spawn_run_dispatch(
     if let Some(cap) = max_run_tokens {
         tracing::info!(run_id = %run.run_id, max_run_tokens = cap, "RunAgent token cap stated");
     }
+    // The documents and skills the person attached to this Do turn (F-f09-05), ids only and already admitted by
+    // `context_refs::resolve`: execution-core narrows the run's knowledge search to the documents and puts the skills
+    // first. Empty with MODEL_GATEWAY_DO_CONTEXT_REFS_CARRY off, so the request is the bytes it was. Nothing is logged.
+    run_agent_req.context_document_ids = context_refs.document_ids;
+    run_agent_req.context_skill_ids = context_refs.skill_ids;
     // The org's `ext.skills` this run is held to, from the same read the Ask loop's skills use, so the two loops cannot
     // disagree. Empty with SKILL_EXT_POLICY_ENFORCED off, so the request is the bytes it was. The word is a policy
     // setting, never skill text, and it is set for a zero-retention or waived run and a continuation as well.
@@ -15216,6 +15360,12 @@ fn spawn_run_dispatch(
         // (this request id) reports its own tally once.
         if let Some(usage) = result.as_ref().ok().and_then(|r| r.usage.as_ref()) {
             usage_ledger.publish(usage).await;
+        }
+        // A claimed goal turn is settled from the answer here, not from the follower's stream (F-f09-10), so a
+        // follower that has given up cannot lose the run's debit. Only a terminal answer settles; the rest are
+        // left as they were, and a dropped `goal_settle` tells the turn's ledger the task settled nothing.
+        if let (Some(settle), Ok(response)) = (goal_settle, result.as_ref()) {
+            settle_goal_turn_at_dispatch(settle, response).await;
         }
         result
     }))
@@ -15482,6 +15632,10 @@ fn build_run_agent_request(
         // The run token cap is stated by the caller (`spawn_run_dispatch`, F-f04-08) under MODEL_GATEWAY_DO_RUN_CAP;
         // none here, so every other request is the bytes it was.
         max_run_tokens: 0,
+        // A Do turn's attached documents and skills are set by the caller (`spawn_run_dispatch`, F-f09-05) under
+        // MODEL_GATEWAY_DO_CONTEXT_REFS_CARRY; none here, so every other request is the bytes it was.
+        context_document_ids: Vec::new(),
+        context_skill_ids: Vec::new(),
     }
 }
 
@@ -16054,6 +16208,10 @@ fn agentic_run_stream(
     // Whether the turn asked for coordinator mode (`InvokeRequest.coordinator`). `false` for a continuation. The
     // dispatch sends it only as `coordinator_forwarded` allows.
     coordinator_requested: bool,
+    // The attached documents and skills of a Do turn (F-f09-05, `context_refs::do_run_refs`), ids only. Empty with
+    // MODEL_GATEWAY_DO_CONTEXT_REFS_CARRY off and for a continuation, which states none: the executor narrows the
+    // resumed run to the ids its pause kept (F-f09-05), never to these.
+    context_refs: crate::context_refs::DoRunRefs,
     // The run token cap of this run (F-f04-08), stated by the caller: the invoke path from the request, the org
     // and a goal turn's allowance; a continuation from the org alone. `None` with MODEL_GATEWAY_DO_RUN_CAP off.
     max_run_tokens: Option<u64>,
@@ -16236,6 +16394,24 @@ fn agentic_run_stream(
             ),
             resume.is_some(),
         );
+        // A claimed goal turn is handed to its dispatch task (F-f09-10): the task settles it from the run's answer
+        // the moment the executor gives it. Taken after the bind, so the handle names the run. Off with
+        // MODEL_GATEWAY_GOAL_SETTLE_IN_DISPATCH, and for every turn that claims no goal, there is no handoff and the
+        // follower settles the turn as it always has.
+        let goal_settle = goal_turn
+            .as_mut()
+            .filter(|_| crate::thread_goal::settle_in_dispatch_enabled())
+            .map(|ledger| {
+                let (settled_by_dispatch, dispatch_done) = tokio::sync::oneshot::channel();
+                ledger.settle_after_dispatch(dispatch_done);
+                GoalSettleContext {
+                    handle: ledger.detached(),
+                    model: model.clone(),
+                    route: route.clone(),
+                    pricing: state.pricing.clone(),
+                    settled_by_dispatch,
+                }
+            });
         // Construct the authenticated request before reporting the run as
         // started. A deterministic local credential/metadata failure is a
         // confirmed pre-dispatch rejection, not an ambiguous remote outage.
@@ -16281,12 +16457,14 @@ fn agentic_run_stream(
                 min_privacy_tier: min_privacy_tier_wire,
                 start,
             },
+            goal_settle,
             durable_grant.as_ref(),
             run_effort,
             max_questions,
             wide_research,
             agent_tool_allowlist,
             coordinator,
+            context_refs,
             max_run_tokens,
         ) {
             Ok(dispatch) => dispatch,
@@ -16405,7 +16583,11 @@ fn agentic_run_stream(
         // when the progress switch is on and the run may state a cost. A ZDR or waived run
         // states none.
         let mut agent_usage = if usage_progress_switch() && !zdr && retention_class.is_none() {
-            Some(AgentRunUsage::start(&state.pricing, &model, &route).await)
+            Some(
+                AgentRunUsage::start(&state.pricing, &model, &route)
+                    .await
+                    .with_usage_mixed_basis(usage_mixed_basis_switch()),
+            )
         } else {
             None
         };
@@ -17270,18 +17452,20 @@ fn agentic_run_stream(
         let run_usage = response.usage.clone().unwrap_or_default();
         // The legs priced under the meter's snapshot, so the final frame agrees with the progress
         // frames. The rounds whose price is unknown are counted, not the calls.
-        let (cost_usd, cost_basis, cost_by_category, unpriced_calls) = match agent_usage.as_ref() {
-            Some(meter) => {
-                let (total, unpriced_rounds) = meter.total(&run_usage);
-                (
-                    frame_cost_usd(&total),
-                    total.basis,
-                    total.by_category,
-                    unpriced_rounds,
-                )
-            }
-            None => (None, None, None, run_usage.inference_rounds),
-        };
+        let (cost_usd, cost_basis, cost_by_category, unpriced_calls, cost_mixed) =
+            match agent_usage.as_ref() {
+                Some(meter) => {
+                    let (total, unpriced_rounds) = meter.total(&run_usage);
+                    (
+                        frame_cost_usd(&total),
+                        total.basis,
+                        total.by_category,
+                        unpriced_rounds,
+                        total.mixed && meter.mixed_basis,
+                    )
+                }
+                None => (None, None, None, run_usage.inference_rounds, false),
+            };
         let usage_event = crate::sse_events::ChatEvent::Usage {
             cache_read_tokens: saturating_u32(run_usage.cache_read_input_tokens),
             cache_write_tokens: saturating_u32(run_usage.cache_creation_input_tokens),
@@ -17289,6 +17473,7 @@ fn agentic_run_stream(
             output_tokens: saturating_u32(run_usage.output_tokens),
             cost_usd,
             cost_basis,
+            cost_mixed,
             // Every round of the run is a call; `unpriced_calls` counts the rounds whose price
             // is unknown.
             calls: run_usage.inference_rounds,
@@ -17466,6 +17651,20 @@ fn usage_progress_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
 /// it through here, so the handler itself reads no environment.
 fn usage_progress_switch() -> bool {
     usage_progress_enabled(&|key| std::env::var(key).ok())
+}
+
+/// Switch for the `cost_mixed` key (F-f04-05): a usage or usage_progress frame whose total mixes calls of
+/// more than one basis says so. Only the literal `true` enables it. The handler reads it once per turn,
+/// beside the progress switch, and the sink and the agentic run carry the answer.
+pub(crate) const USAGE_MIXED_BASIS_ENV: &str = "MODEL_GATEWAY_USAGE_MIXED_BASIS";
+
+fn usage_mixed_basis_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
+    lookup(USAGE_MIXED_BASIS_ENV).as_deref() == Some("true")
+}
+
+/// The switch as this process's environment states it.
+fn usage_mixed_basis_switch() -> bool {
+    usage_mixed_basis_enabled(&|key| std::env::var(key).ok())
 }
 
 /// Switch for a chat answer's routing decision (W5-073-b): the Verevon mode, complexity and reason its route
@@ -17725,6 +17924,69 @@ fn agent_usage_legs(
     legs
 }
 
+/// What the dispatch task of a claimed goal turn settles it with once its run answers (F-f09-10): the
+/// turn's handle, the route and model the run is priced under, the catalogue it is priced from, and
+/// the word the turn's ledger waits for. The task holds it, so the settle needs no stream.
+struct GoalSettleContext {
+    handle: crate::thread_goal::GoalSettleHandle,
+    model: String,
+    route: AgentRoute,
+    pricing: crate::pricing::PricingCache,
+    /// Sent `true` once the task has settled the turn; dropped unsent when it settles nothing.
+    settled_by_dispatch: tokio::sync::oneshot::Sender<bool>,
+}
+
+/// The outcome a dispatch task settles its goal turn with (F-f09-10), or `None` for an answer the
+/// follower settles. A pause (`awaiting_approval`, `awaiting_input`) or a park is not the run's end: the
+/// turn stays open for the follower, and the continuation's segments are debited on their own
+/// (F-f09-11). Every other status ends the run.
+fn dispatch_settle_outcome(status: &str) -> Option<&'static str> {
+    match classify_agentic_run_outcome(status) {
+        outcome @ (AgenticRunOutcome::Completed
+        | AgenticRunOutcome::Failed
+        | AgenticRunOutcome::Unknown) => Some(crate::thread_goal::settle_outcome(outcome)),
+        AgenticRunOutcome::AwaitingApproval
+        | AgenticRunOutcome::AwaitingInput
+        | AgenticRunOutcome::Parked => None,
+    }
+}
+
+/// Settle a claimed goal turn from its dispatch task's answer the moment the executor gives it
+/// (F-f09-10), then tell the turn's ledger that the task did. The run's usage is priced as the follower
+/// prices a run whose usage arrived. An answer with no usage is left to the follower, which may hold the
+/// round tally the stream counted (register D2-005). The follower's own settle reads the turn as it stands.
+async fn settle_goal_turn_at_dispatch(settle: GoalSettleContext, response: &RunAgentResponse) {
+    let (Some(usage), Some(outcome)) = (
+        response.usage.as_ref(),
+        dispatch_settle_outcome(&response.status),
+    ) else {
+        return;
+    };
+    let cost_usd = frame_cost_usd(
+        &AgentRunUsage::start(&settle.pricing, &settle.model, &settle.route)
+            .await
+            .total(usage)
+            .0,
+    );
+    let settlement = crate::thread_goal::TurnSettlement::of_run(
+        outcome,
+        Some(usage),
+        None,
+        cost_usd,
+        crate::pricing::CostBasis::of_route(
+            &settle.route.provider_hint,
+            &settle.route.subscription_connection_id,
+        ),
+        &settle.route.provider_hint,
+        &settle.route.subscription_connection_id,
+    );
+    let settled = settle.handle.settle(&settlement).await.is_some();
+    tracing::info!(outcome, settled, "goal turn settled at dispatch");
+    if settled {
+        let _ = settle.settled_by_dispatch.send(true);
+    }
+}
+
 /// What the dispatch task needs to put its run's usage on the ledger itself.
 ///
 /// The task publishes, not the stream that follows it: the follower gives up at
@@ -17850,6 +18112,8 @@ struct AgentRunUsage {
     meter: crate::usage_meter::UsageMeter,
     /// The largest totals reported so far, so a late or reordered report adds nothing.
     reported: RunTokens,
+    /// Whether the run's frames state `cost_mixed` on a total that mixes bases (the mixed-basis switch).
+    mixed_basis: bool,
 }
 
 impl AgentRunUsage {
@@ -17866,7 +18130,14 @@ impl AgentRunUsage {
             route: route.clone(),
             meter: crate::usage_meter::UsageMeter::default(),
             reported: RunTokens::default(),
+            mixed_basis: false,
         }
+    }
+
+    /// State `cost_mixed` on the run's frames whose total mixes bases, when `enabled`.
+    fn with_usage_mixed_basis(mut self, enabled: bool) -> Self {
+        self.mixed_basis = enabled;
+        self
     }
 
     /// One provider call of the run: `tokens` served by `model` through `provider`.
@@ -17913,9 +18184,11 @@ impl AgentRunUsage {
         let priced = self
             .rates
             .priced_at_tier(call.basis, &call.model, call.legs(), call.priority);
+        let snapshot = self.meter.record(&call, &priced);
         crate::sse_events::ChatEvent::UsageProgress {
             phase: crate::usage_meter::CallPhase::AgentRound,
-            snapshot: self.meter.record(&call, &priced),
+            cost_mixed: self.mixed_basis && snapshot.mixed,
+            snapshot,
             ceiling: None,
             routing: None,
             routing_decision: None,
@@ -18612,10 +18885,10 @@ mod tests {
         classify_agentic_run_outcome, dispatch_never_reached_execution_core,
         format_approved_plan_block, frame_cost_usd, is_confirmed_agent_dispatch_rejection,
         latest_proposed_plan, orchestration_event_to_lifecycle, orchestration_event_to_step_update,
-        sanitize_follow_up_suggestions,
-        sanitize_thread_title, stream_ended_with_no_content, turn_call_rows, turn_usage,
-        turn_usage_complete_enabled, usage_progress_enabled, AgenticRunOutcome, PlanState,
-        LOOP_DETECTED_CODE, LOOP_STOPPED_MESSAGE,
+        sanitize_follow_up_suggestions, sanitize_thread_title, stream_ended_with_no_content,
+        turn_call_rows, turn_usage, turn_usage_complete_enabled, usage_mixed_basis_enabled,
+        usage_progress_enabled, AgenticRunOutcome, PlanState, LOOP_DETECTED_CODE,
+        LOOP_STOPPED_MESSAGE,
     };
     use crate::http_routes::InvokeRequest;
     use crate::state::AppState;
@@ -19916,6 +20189,45 @@ mod tests {
         }
     }
 
+    /// A Do run whose rounds span two bases states `cost_mixed` on the progress frame of the round that mixed
+    /// them, and only under the mixed-basis switch. The frame names no single basis either way (F-f04-05).
+    #[tokio::test]
+    async fn a_do_run_that_mixes_bases_states_cost_mixed_only_under_its_switch() {
+        let server = wiremock::MockServer::start().await;
+        let pricing = run_usage_pricing(&server).await;
+
+        let mut switched =
+            super::AgentRunUsage::start(&pricing, "mock", &super::AgentRoute::default())
+                .await
+                .with_usage_mixed_basis(true);
+        let metered = switched
+            .record_round(&round_report(1, 1_000, 100, "mock", ""))
+            .payload("req-do-mixed");
+        assert!(
+            metered.get("cost_mixed").is_none(),
+            "one basis is not mixed: {metered}"
+        );
+        let mixed = switched
+            .record_round(&round_report(2, 1_500, 150, "mock", "codex-subscription"))
+            .payload("req-do-mixed");
+        assert_eq!(mixed["cost_mixed"], true, "{mixed}");
+        assert!(
+            mixed.get("cost_basis").is_none(),
+            "a mixed total names no basis: {mixed}"
+        );
+
+        let mut unswitched =
+            super::AgentRunUsage::start(&pricing, "mock", &super::AgentRoute::default()).await;
+        unswitched.record_round(&round_report(1, 1_000, 100, "mock", ""));
+        let plain = unswitched
+            .record_round(&round_report(2, 1_500, 150, "mock", "codex-subscription"))
+            .payload("req-do-mixed");
+        assert!(
+            plain.get("cost_mixed").is_none(),
+            "the switch is off: {plain}"
+        );
+    }
+
     /// A Do run that changes model mid-run is priced round by round: each increment at the rates
     /// of the model that served it (build plan WS27 S9).
     #[tokio::test]
@@ -20246,6 +20558,28 @@ mod tests {
         };
         assert!(with(Some("true")));
         for off in [None, Some(""), Some("1"), Some("TRUE"), Some(" true"), Some("false")] {
+            assert!(!with(off), "{off:?} must not enable it");
+        }
+    }
+
+    #[test]
+    fn the_usage_mixed_basis_switch_is_on_only_for_the_literal_true() {
+        let with = |value: Option<&str>| {
+            let value = value.map(str::to_owned);
+            usage_mixed_basis_enabled(&|key| {
+                assert_eq!(key, "MODEL_GATEWAY_USAGE_MIXED_BASIS");
+                value.clone()
+            })
+        };
+        assert!(with(Some("true")));
+        for off in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some(" true"),
+            Some("false"),
+        ] {
             assert!(!with(off), "{off:?} must not enable it");
         }
     }
@@ -24073,6 +24407,7 @@ async fn continue_skipped_site(
         None,
         None,
         false,
+        crate::context_refs::DoRunRefs::default(),
         max_run_tokens,
     ))
 }
@@ -24578,6 +24913,7 @@ async fn continue_question_form(
         None,
         None,
         false,
+        crate::context_refs::DoRunRefs::default(),
         max_run_tokens,
     ))
 }
@@ -24889,6 +25225,9 @@ pub(crate) async fn continue_run(
             None,
             // Nor coordinator mode: its tools are the snapshot the pause retained, so there is no offer to narrow.
             false,
+            // Nor attached documents or skills: the executor narrows the resumed run to the ids its pause kept, which
+            // it reads from the pause itself (F-f09-05).
+            crate::context_refs::DoRunRefs::default(),
             // The org's ceiling is all the run token cap a continuation states (F-f04-08), read above.
             max_run_tokens,
         )
@@ -27238,6 +27577,7 @@ mod continue_run_tests {
             None,
             None,
             false,
+            crate::context_refs::DoRunRefs::default(),
             None,
         );
         let frames = frames_of_stream(stream).await;
@@ -27986,6 +28326,85 @@ mod continue_run_tests {
             code.matches("GoalTopUp::new(").count(),
             1,
             "one top-up call site, the dispatch"
+        );
+    }
+
+    /// F-f09-10: a claimed goal turn is settled by its dispatch task once the executor answers. The task settles
+    /// after it has published the run's usage, and only from an answer that came back (`Ok`): a failed invocation
+    /// is left to the ledger's drop. The follower keeps its own settle after it. A deadline never aborts the task
+    /// (the follow drops its handle), so the task outlives the follower; Stop aborts it, and an aborted task never
+    /// reaches the settle.
+    #[test]
+    fn the_dispatch_task_settles_a_goal_turn_from_its_answer_after_the_usage() {
+        let close = format!("\n{}\n", '\u{7d}');
+        let dispatch = without_comments(&item_text("fn spawn_run_dispatch(", &close));
+        let task_at = position(&dispatch, "tokio::spawn(async move ");
+        let task = &dispatch[task_at..];
+        assert_eq!(task.matches(".run_agent(").count(), 1, "{task}");
+        assert_eq!(task.matches("usage_ledger.publish(").count(), 1, "{task}");
+        assert_eq!(
+            task.matches("settle_goal_turn_at_dispatch(").count(),
+            1,
+            "{task}"
+        );
+        let ran = position(task, ".run_agent(");
+        let published = position(task, "usage_ledger.publish(usage).await;");
+        let settled = position(
+            task,
+            "settle_goal_turn_at_dispatch(settle, response).await;",
+        );
+        assert!(
+            ran < published && published < settled,
+            "run, then publish the usage, then settle: {task}"
+        );
+        // The settle is the first statement of the Ok arm, so an answer that never came back settles nothing.
+        let arm = position(
+            task,
+            "if let (Some(settle), Ok(response)) = (goal_settle, result.as_ref())",
+        );
+        assert_eq!(
+            squash(&task[arm..settled]),
+            "if let (Some(settle), Ok(response)) = (goal_settle, result.as_ref()) \u{7b}"
+        );
+        // The task hands back the run's own result after the settle, unchanged.
+        assert!(
+            task[settled..].contains("\n        result\n    \u{7d}))"),
+            "{task}"
+        );
+    }
+
+    /// F-f09-10: the stream hands a claimed goal turn to its dispatch task only behind the switch, through one filter
+    /// that makes the handle, and the follower keeps its own idempotent settle after the run's answer.
+    #[test]
+    fn the_stream_hands_a_goal_turn_to_its_dispatch_task_only_behind_the_switch() {
+        let stream = stream_code();
+        assert_eq!(
+            stream.matches("settle_in_dispatch_enabled()").count(),
+            1,
+            "{stream}"
+        );
+        let gate = position(
+            &stream,
+            ".filter(|_| crate::thread_goal::settle_in_dispatch_enabled())",
+        );
+        assert_eq!(
+            stream.matches("settle_after_dispatch(").count(),
+            1,
+            "{stream}"
+        );
+        let handed = position(&stream, "ledger.settle_after_dispatch(dispatch_done);");
+        assert!(gate < handed, "the switch gates the handoff: {stream}");
+        // The handle goes to the dispatch as its `goal_settle` argument, once.
+        assert_eq!(
+            stream.matches("\n            goal_settle,\n").count(),
+            1,
+            "{stream}"
+        );
+        // The follower's own settle stays in the stream, once.
+        assert_eq!(
+            stream.matches("ledger.settle(&settlement)").count(),
+            1,
+            "{stream}"
         );
     }
 
@@ -28776,6 +29195,7 @@ mod continue_run_tests {
             None,
             None,
             false,
+            crate::context_refs::DoRunRefs::default(),
             None,
         );
         let frames = frames_of_stream(stream).await;
@@ -29611,6 +30031,7 @@ mod execute_turn_tests {
         let snapshot = crate::usage_meter::UsageMeter::default().snapshot();
         let routed = crate::sse_events::ChatEvent::UsageProgress {
             phase: ToolRound,
+            cost_mixed: false,
             snapshot,
             ceiling: None,
             routing: Some("tier_shifted"),
@@ -29619,6 +30040,7 @@ mod execute_turn_tests {
         assert_eq!(routed.payload("req-route")["routing"], "tier_shifted");
         let unrouted = crate::sse_events::ChatEvent::UsageProgress {
             phase: ToolRound,
+            cost_mixed: false,
             snapshot,
             ceiling: None,
             routing: None,
@@ -29930,8 +30352,13 @@ mod lifecycle_tests {
 #[cfg(test)]
 mod shared_idempotency_tests {
     use super::*;
-    use crate::idempotency_registry::{SharedClaimState, SharedClaimValue};
+    use crate::idempotency_registry::{
+        SharedClaimOutcome, SharedClaimState, SharedClaimStore, SharedClaimValue, SharedRenewal,
+    };
     use axum::response::IntoResponse;
+    use futures::future::BoxFuture;
+    use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+    use std::time::Duration;
 
     fn original(request_id: &str) -> SharedClaimValue {
         SharedClaimValue {
@@ -29940,6 +30367,79 @@ mod shared_idempotency_tests {
             thread_id: Some("thr-1".to_owned()),
             state: SharedClaimState::Pending,
         }
+    }
+
+    /// A shared store holding at most one claim, under one key. A test takes the claim away through
+    /// [`HeldClaim::release`]; a waiting duplicate reads it through `get`, the only method it calls.
+    #[derive(Default)]
+    struct HeldClaim(std::sync::Mutex<Option<(String, SharedClaimValue)>>);
+
+    impl HeldClaim {
+        fn release(&self) {
+            *self.0.lock().unwrap() = None;
+        }
+    }
+
+    impl SharedClaimStore for HeldClaim {
+        fn claim<'a>(
+            &'a self,
+            _key: &'a str,
+            _value: &'a SharedClaimValue,
+        ) -> BoxFuture<'a, SharedClaimOutcome> {
+            Box::pin(async { SharedClaimOutcome::Unavailable })
+        }
+        fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Option<SharedClaimValue>> {
+            Box::pin(async move {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .filter(|(held, _)| held.as_str() == key)
+                    .map(|(_, value)| value.clone())
+            })
+        }
+        fn settle<'a>(
+            &'a self,
+            _key: &'a str,
+            _request_id: &'a str,
+            _done: Option<&'a SharedClaimValue>,
+        ) -> BoxFuture<'a, ()> {
+            Box::pin(async {})
+        }
+        fn renew<'a>(
+            &'a self,
+            _key: &'a str,
+            _request_id: &'a str,
+        ) -> BoxFuture<'a, SharedRenewal> {
+            Box::pin(async { SharedRenewal::Unavailable })
+        }
+    }
+
+    /// The count of one `gateway_idempotency_attach_total` outcome in the scrape a local recorder renders.
+    fn attach_count(handle: &PrometheusHandle, outcome: &str) -> f64 {
+        let series = format!(r#"gateway_idempotency_attach_total{{outcome="{outcome}"}} "#);
+        handle
+            .render()
+            .lines()
+            .find_map(|line| line.strip_prefix(series.as_str()))
+            .map_or(0.0, |value| {
+                value.parse().expect("a counter renders a number")
+            })
+    }
+
+    /// A store holding `claim` under `key`, and the handle the test takes it away through.
+    fn holding(
+        key: &str,
+        claim: Option<SharedClaimValue>,
+    ) -> (
+        std::sync::Arc<HeldClaim>,
+        std::sync::Arc<dyn SharedClaimStore>,
+    ) {
+        let held = std::sync::Arc::new(HeldClaim(std::sync::Mutex::new(
+            claim.map(|value| (key.to_owned(), value)),
+        )));
+        let store: std::sync::Arc<dyn SharedClaimStore> = held.clone();
+        (held, store)
     }
 
     async fn body_of(stream: Sse<ReceiverStream<Result<Event, Infallible>>>) -> String {
@@ -29951,6 +30451,9 @@ mod shared_idempotency_tests {
 
     #[tokio::test]
     async fn a_duplicate_attaches_to_the_originals_buffered_frames() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _local = metrics::set_default_local_recorder(&recorder);
         let state = AppState::new();
         let key = crate::stream_buffer::scoped_stream_key("org-1", "user-1", "req-A");
         state
@@ -29969,18 +30472,42 @@ mod shared_idempotency_tests {
                 },
             )
             .await;
-        let body = body_of(attach_to_original(&state, "org-1", "user-1", &original("req-A")).await)
-            .await;
+        let (_held, store) = holding("send-1", None);
+        let body = body_of(
+            attach_to_original(
+                &state,
+                &store,
+                "org-1",
+                "user-1",
+                "send-1",
+                &original("req-A"),
+            )
+            .await,
+        )
+        .await;
         assert!(body.contains(r#"{"delta":"hello"}"#), "{body}");
         assert!(body.contains("event: done"), "{body}");
         assert!(body.contains("req-A"), "the frames are the original's: {body}");
+        assert_eq!(attach_count(&handle, "attached_first"), 1.0);
     }
 
     #[tokio::test]
     async fn an_evicted_original_answers_an_error_naming_it_and_starts_nothing() {
         let state = AppState::new();
-        let body = body_of(attach_to_original(&state, "org-1", "user-1", &original("req-gone")).await)
-            .await;
+        // No claim is held any more, so there is nothing to wait for.
+        let (_held, store) = holding("send-1", None);
+        let body = body_of(
+            attach_to_original(
+                &state,
+                &store,
+                "org-1",
+                "user-1",
+                "send-1",
+                &original("req-gone"),
+            )
+            .await,
+        )
+        .await;
         assert!(body.contains("event: error"), "{body}");
         assert!(body.contains("req-gone"), "the error names the original: {body}");
         assert!(body.contains("duplicate_in_flight"), "{body}");
@@ -30006,8 +30533,28 @@ mod shared_idempotency_tests {
                 },
             )
             .await;
-        let body = body_of(attach_to_original(&state, "org-2", "user-1", &original("req-A")).await)
-            .await;
+        // The original's claim is held for org-1 only: org-2 derives another key and finds nothing.
+        let (_held, store) = holding(
+            &crate::idempotency_registry::shared_claim_key("org-1", "user-1", "send-1"),
+            Some(original("req-A")),
+        );
+        let started = tokio::time::Instant::now();
+        let body = body_of(
+            attach_to_original(
+                &state,
+                &store,
+                "org-2",
+                "user-1",
+                "send-1",
+                &original("req-A"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            started.elapsed() < ATTACH_POLL,
+            "a foreign caller does not wait for the original"
+        );
         assert!(!body.contains("secret"), "{body}");
         assert!(body.contains("event: error"), "{body}");
     }
@@ -30017,6 +30564,142 @@ mod shared_idempotency_tests {
         let state = AppState::new();
         let refused = resume_stream_for(&state, "org-1", "user-1", "req-none", None).await;
         assert_eq!(refused.err().map(|(status, _)| status), Some(StatusCode::NOT_FOUND));
+    }
+
+    /// The claim key a duplicate of `send-1` looks up for `org-1` and `user-1`.
+    fn claim_key() -> String {
+        crate::idempotency_registry::shared_claim_key("org-1", "user-1", "send-1")
+    }
+
+    /// The original starts late: its claim is held, and its buffer appears 300 ms after the duplicate's
+    /// first attempt. The duplicate attaches on a retry, inside the wait.
+    #[tokio::test(start_paused = true)]
+    async fn a_duplicate_attaches_once_the_original_starts_within_the_wait() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let state = AppState::new();
+        let (_held, store) = holding(&claim_key(), Some(original("req-A")));
+        let req_a = original("req-A");
+        let started = tokio::time::Instant::now();
+        let attached = attach_to_original(&state, &store, "org-1", "user-1", "send-1", &req_a);
+        let buffer_appears = async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let key = crate::stream_buffer::scoped_stream_key("org-1", "user-1", "req-A");
+            state
+                .stream_buffers
+                .append(&key, 1, "chunk", r#"{"delta":"late"}"#)
+                .await;
+            state
+                .stream_buffers
+                .finish(
+                    &key,
+                    crate::stream_buffer::StreamDone {
+                        seq: 2,
+                        model_used: "m".into(),
+                        input_tokens: 1,
+                        output_tokens: 1,
+                    },
+                )
+                .await;
+        };
+        let (stream, ()) = tokio::join!(attached, buffer_appears);
+        let body = body_of(stream).await;
+        assert!(body.contains(r#"{"delta":"late"}"#), "{body}");
+        assert!(body.contains("event: done"), "{body}");
+        assert!(
+            started.elapsed() < ATTACH_WAIT,
+            "it attached inside the wait"
+        );
+        assert_eq!(attach_count(&handle, "attached_after_wait"), 1.0);
+        assert_eq!(attach_count(&handle, "attached_first"), 0.0);
+    }
+
+    /// The claim goes while the duplicate waits: the next attempt sees it gone and answers the error
+    /// at once, well inside the bound.
+    #[tokio::test(start_paused = true)]
+    async fn a_duplicate_stops_waiting_at_once_when_the_claim_is_gone() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let state = AppState::new();
+        let (held, store) = holding(&claim_key(), Some(original("req-A")));
+        let req_a = original("req-A");
+        let started = tokio::time::Instant::now();
+        let attached = attach_to_original(&state, &store, "org-1", "user-1", "send-1", &req_a);
+        let claim_taken = async {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            held.release();
+        };
+        let (stream, ()) = tokio::join!(attached, claim_taken);
+        let body = body_of(stream).await;
+        assert!(body.contains("event: error"), "{body}");
+        assert!(
+            body.contains("req-A"),
+            "the error names the original: {body}"
+        );
+        assert_eq!(attach_count(&handle, "gave_up"), 1.0);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the duplicate did not wait out the bound: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Nothing ever appears and the claim stays: the duplicate gives up when the bound runs out, and
+    /// starts nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_duplicate_gives_up_once_the_wait_runs_out() {
+        let state = AppState::new();
+        let (_held, store) = holding(&claim_key(), Some(original("req-A")));
+        let started = tokio::time::Instant::now();
+        let body = body_of(
+            attach_to_original(
+                &state,
+                &store,
+                "org-1",
+                "user-1",
+                "send-1",
+                &original("req-A"),
+            )
+            .await,
+        )
+        .await;
+        let waited = started.elapsed();
+        assert!(body.contains("event: error"), "{body}");
+        assert!(body.contains("duplicate_in_flight"), "{body}");
+        assert!(body.contains("req-A"), "{body}");
+        assert!(
+            waited >= ATTACH_WAIT && waited < ATTACH_WAIT + ATTACH_POLL,
+            "the wait is bounded by ATTACH_WAIT, polled every ATTACH_POLL: {waited:?}"
+        );
+    }
+
+    /// Another request has taken the key since the original's claim was read: the claim is no longer the
+    /// original's, so the duplicate does not wait for a stream that will never be the original's.
+    #[tokio::test(start_paused = true)]
+    async fn a_claim_taken_by_another_request_ends_the_wait() {
+        let state = AppState::new();
+        let (_held, store) = holding(&claim_key(), Some(original("req-B")));
+        let started = tokio::time::Instant::now();
+        let body = body_of(
+            attach_to_original(
+                &state,
+                &store,
+                "org-1",
+                "user-1",
+                "send-1",
+                &original("req-A"),
+            )
+            .await,
+        )
+        .await;
+        assert!(body.contains("event: error"), "{body}");
+        assert!(
+            started.elapsed() < ATTACH_POLL,
+            "no wait for a claim that is not the original's: {:?}",
+            started.elapsed()
+        );
     }
 }
 
@@ -30437,6 +31120,120 @@ mod do_attachment_tests {
             Vec::new(),
         );
         assert_eq!(request.ext_skills, "");
+    }
+
+    /// F-f09-05: the builder states no attached documents or skills, so a request is the bytes it was; the dispatch
+    /// assigns what the caller stated (`context_refs::do_run_refs`, empty with the carry switch off and for a
+    /// continuation) before the request is authenticated and sent, and the Do turn states it from the switch it read
+    /// once for its admission.
+    #[test]
+    fn a_do_run_carries_the_attached_ids_only_from_the_carry_switch() {
+        let run = crate::session_flow::SessionRun {
+            thread_id: "thread-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            already_started: false,
+            terminal_source: mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent,
+        };
+        let request = build_run_agent_request(
+            &run,
+            "org-1",
+            "user-1",
+            "gpt-5.6-terra",
+            "do the thing",
+            &[],
+            false,
+            0,
+            "ask",
+            false,
+            0,
+            "",
+            None,
+            &AgentRoute::default(),
+            crate::run_budget::RunBudget::default(),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(request.context_document_ids.is_empty() && request.context_skill_ids.is_empty());
+        // The carried ids are on the wire; with none the request encodes to the bytes it was.
+        let carried = crate::context_refs::do_run_refs(
+            true,
+            &["skill.p".to_owned()],
+            Some(&crate::context_refs::ResolvedContextRefs {
+                document_ids: vec!["doc-1".to_owned()],
+                skill_ids: vec!["skill.a".to_owned()],
+                ..Default::default()
+            }),
+        );
+        let mut with = request.clone();
+        with.context_document_ids = carried.document_ids;
+        with.context_skill_ids = carried.skill_ids;
+        assert_eq!(with.context_document_ids, vec!["doc-1"]);
+        assert_eq!(with.context_skill_ids, vec!["skill.p", "skill.a"]);
+        let mut cleared = with;
+        cleared.context_document_ids.clear();
+        cleared.context_skill_ids.clear();
+        assert_eq!(
+            prost::Message::encode_to_vec(&cleared),
+            prost::Message::encode_to_vec(&request)
+        );
+
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        let production = source
+            .split("\n#[cfg(test)]\nmod continue_run_tests {")
+            .next()
+            .expect("the test modules are in this file");
+        // The item ends at the first column-0 closing brace, spelled as a char so this module's braces stay balanced
+        // for the source scans that strip test items (`zdr_posture::tests::strip_test_items`).
+        let item_end = format!("\n{}\n", '\u{7d}');
+        let body_of = |header: &str| -> &str {
+            let from = production
+                .find(header)
+                .unwrap_or_else(|| panic!("`{header}` is in sse.rs"));
+            let rest = &production[from..];
+            &rest[..rest.find(item_end.as_str()).expect("the item ends")]
+        };
+        let dispatch = body_of("fn spawn_run_dispatch(");
+        for assign in [
+            "run_agent_req.context_document_ids = context_refs.document_ids;",
+            "run_agent_req.context_skill_ids = context_refs.skill_ids;",
+        ] {
+            assert_eq!(dispatch.matches(assign).count(), 1, "{dispatch}");
+            let assigned = dispatch.find(assign).expect("assigned");
+            let authenticated = dispatch
+                .find("authenticated_run_agent_request(")
+                .expect("authenticated");
+            assert!(
+                assigned < authenticated,
+                "assigned before the request is authenticated"
+            );
+        }
+        let invoke = body_of("pub async fn invoke_stream_sse(");
+        assert_eq!(
+            invoke
+                .matches("crate::context_refs::do_carry_enabled()")
+                .count(),
+            1,
+            "read once"
+        );
+        assert!(
+            invoke.contains("do_refs_carry: do_context_refs_carry,"),
+            "the admission reads it"
+        );
+        let stated = invoke
+            .find("crate::context_refs::do_run_refs(")
+            .expect("the Do run states its references");
+        let args: String = invoke[stated..].chars().take(200).collect();
+        assert!(
+            args.contains("do_context_refs_carry,") && args.contains("context_refs.as_ref()"),
+            "{args}"
+        );
+        let dispatched = invoke
+            .find("return agentic_run_stream(")
+            .expect("the Do run is dispatched");
+        assert!(stated < dispatched && invoke[dispatched..].contains("do_context_refs,"));
     }
 }
 
@@ -31099,5 +31896,135 @@ mod question_form_tests {
             assert!(frame.get("approval_spent").is_none(), "{frame}");
             assert!(!text.contains("approval_spent"), "{text}");
         }
+    }
+}
+
+/// The goal turn's settle from its dispatch task (F-f09-10), against the in-process goal service.
+#[cfg(test)]
+mod goal_dispatch_settle_tests {
+    use super::*;
+    use crate::thread_goal::fake_service::{self, FakeGoalService};
+    use mp_contracts::model_plane::v1::RunUsage;
+
+    fn metered_usage(input: u64, output: u64) -> RunUsage {
+        RunUsage {
+            provider_used: "openai".to_owned(),
+            input_tokens: input,
+            output_tokens: output,
+            ..Default::default()
+        }
+    }
+
+    fn answer(status: &str, usage: Option<RunUsage>) -> RunAgentResponse {
+        RunAgentResponse {
+            status: status.to_owned(),
+            usage,
+            ..Default::default()
+        }
+    }
+
+    /// A claimed turn with its run bound and its settle handed to a dispatch task, as the stream hands
+    /// it: the ledger the follower holds, the task's context, and the fake's record.
+    async fn handed_off() -> (
+        crate::thread_goal::GoalTurnLedger,
+        GoalSettleContext,
+        FakeGoalService,
+    ) {
+        let (client, service) = fake_service::client().await;
+        let bearer =
+            crate::auth::VerifiedSessionBearer::for_test("fixture-token-aaaaaaaaaaaaaaaaaaaa");
+        let mut ledger =
+            crate::thread_goal::GoalTurnLedger::claim(client, &bearer, "org-1", "goal-1")
+                .await
+                .expect("the fake admits the claim");
+        ledger.bind("run-1", false).await;
+        let (settled_by_dispatch, dispatch_done) = tokio::sync::oneshot::channel();
+        ledger.settle_after_dispatch(dispatch_done);
+        let context = GoalSettleContext {
+            handle: ledger.detached(),
+            model: "model-x".to_owned(),
+            route: AgentRoute::default(),
+            pricing: crate::pricing::PricingCache::new(None, reqwest::Client::new()),
+            settled_by_dispatch,
+        };
+        (ledger, context, service)
+    }
+
+    #[test]
+    fn the_dispatch_settles_every_end_of_a_run_and_no_pause() {
+        assert_eq!(dispatch_settle_outcome("completed"), Some("completed"));
+        assert_eq!(dispatch_settle_outcome("failed"), Some("failed"));
+        assert_eq!(
+            dispatch_settle_outcome("a-status-nobody-knows"),
+            Some("unknown")
+        );
+        for pause in ["awaiting_approval", "awaiting_input", "parked"] {
+            assert_eq!(
+                dispatch_settle_outcome(pause),
+                None,
+                "{pause} is not the run's end"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_follower_dropped_before_the_answer_still_settles_once_with_the_usage() {
+        let (ledger, context, service) = handed_off().await;
+        // The follower gives up before the run answers: its drop must not settle the turn `unknown`.
+        drop(ledger);
+        assert!(
+            fake_service::settles_after_a_pause(&service)
+                .await
+                .is_empty(),
+            "the drop waits for the dispatch task"
+        );
+        settle_goal_turn_at_dispatch(context, &answer("completed", Some(metered_usage(7, 3))))
+            .await;
+        let sent = fake_service::settles_after_a_pause(&service).await;
+        assert_eq!(
+            sent.len(),
+            1,
+            "one settle, the task's, with the run's usage"
+        );
+        assert_eq!(sent[0].outcome, "completed");
+        assert_eq!(sent[0].usage_source, "run_response");
+        assert_eq!(sent[0].metered_input_tokens, 7);
+        assert_eq!(sent[0].metered_output_tokens, 3);
+        assert_eq!(sent[0].run_id, "run-1");
+    }
+
+    #[tokio::test]
+    async fn a_paused_or_parked_answer_is_not_settled_by_the_task() {
+        for status in ["awaiting_approval", "awaiting_input", "parked"] {
+            let (ledger, context, service) = handed_off().await;
+            settle_goal_turn_at_dispatch(context, &answer(status, Some(metered_usage(7, 3)))).await;
+            assert!(
+                fake_service::settles_after_a_pause(&service)
+                    .await
+                    .is_empty(),
+                "{status}: the task leaves the pause to the follower"
+            );
+            // With the follower gone, the drop settles the turn as it did before the handoff.
+            drop(ledger);
+            let sent = fake_service::settles_reaching(&service, 1).await;
+            assert_eq!(sent[0].outcome, "unknown", "{status}");
+            assert_eq!(sent[0].usage_source, "none", "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_without_usage_is_left_to_the_follower() {
+        let (ledger, context, service) = handed_off().await;
+        settle_goal_turn_at_dispatch(context, &answer("failed", None)).await;
+        assert!(
+            fake_service::settles_after_a_pause(&service)
+                .await
+                .is_empty(),
+            "the follower may hold the round tally"
+        );
+        drop(ledger);
+        let sent = fake_service::settles_reaching(&service, 1).await;
+        assert_eq!(sent[0].outcome, "unknown");
+        assert_eq!(sent[0].usage_source, "none");
     }
 }

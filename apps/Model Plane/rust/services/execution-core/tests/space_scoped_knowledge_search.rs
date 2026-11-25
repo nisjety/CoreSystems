@@ -121,6 +121,7 @@ async fn a_space_decision_rides_only_on_the_search_it_scopes() {
             0,
             "user-token",
             Some("decision-1"),
+            &[],
         )
         .await
         .expect("the stub answers the scoped search");
@@ -135,6 +136,7 @@ async fn a_space_decision_rides_only_on_the_search_it_scopes() {
             0,
             "user-token",
             None,
+            &[],
         )
         .await
         .expect("the stub answers the organisation's own search");
@@ -150,6 +152,7 @@ async fn a_space_decision_rides_only_on_the_search_it_scopes() {
                 0,
                 "user-token",
                 Some("bad\ndecision"),
+                &[],
             )
             .await
             .is_err(),

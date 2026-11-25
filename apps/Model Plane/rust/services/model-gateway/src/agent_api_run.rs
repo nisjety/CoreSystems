@@ -24,7 +24,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use axum::{body::Bytes, extract::State, http::StatusCode, Extension, Json};
+use axum::{
+    body::Bytes,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    Extension, Json,
+};
 use mp_contracts::model_plane::v1::{
     ChatMessage, InferPurpose, InferRequest, InferResponse, ListConversationRequest,
     ManagedRunSource,
@@ -32,11 +37,12 @@ use mp_contracts::model_plane::v1::{
 use mp_contracts::zdr_refusal::Refusal;
 use mp_ids::new_ulid;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use crate::agent_api_routes::{
-    admit, api_key_invalid, envelope, internal_error, invalid_request, is_id, upstream_error,
-    Missing,
+    admit, api_key_invalid, envelope, fetch_run, internal_error, invalid_request, is_id, run_value,
+    upstream_error, Missing,
 };
 use crate::auth::{
     Claims, VerifiedApiKeyCostBearer, VerifiedApiKeyInferenceBearer, VerifiedApiKeySessionBearer,
@@ -104,6 +110,29 @@ const CANCEL_POLL: Duration = Duration::from_millis(250);
 /// person's direct turn.
 const START_KEY_SOURCE: &str = "agent-api-direct";
 
+/// The switch that makes a start honour the caller's `Idempotency-Key` (F-f08-13): the same key on the same
+/// body answers the run the first start began, and starts nothing. Strict: only the literal `true` turns it
+/// on. Off, the header is ignored and every start is a new run, as it always was.
+pub const AGENT_API_IDEMPOTENCY_ENV: &str = "MODEL_GATEWAY_AGENT_API_IDEMPOTENCY";
+
+/// The longest `Idempotency-Key` a start accepts (`agent-api-v1.json` `startRun.headers`).
+const IDEMPOTENCY_KEY_MAX_CHARS: usize = 128;
+
+/// The header a start reads its idempotency key from. Lower case, as `HeaderMap` looks names up.
+const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
+
+/// The strict parser of [`AGENT_API_IDEMPOTENCY_ENV`] (F-f08-13): the exact literal `true`, and nothing else.
+#[must_use]
+pub fn idempotency_enabled_from(value: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(value)
+}
+
+/// Whether a start honours `Idempotency-Key`, read at each call (F-f08-13).
+#[must_use]
+pub fn idempotency_enabled() -> bool {
+    idempotency_enabled_from(std::env::var(AGENT_API_IDEMPOTENCY_ENV).ok().as_deref())
+}
+
 /// The transport the usage envelope names, so a key's spend is told apart on the ledger.
 const USAGE_TRANSPORT: &str = "agent_api";
 
@@ -120,6 +149,7 @@ pub(crate) async fn start_run(
     session_bearer: Option<Extension<VerifiedApiKeySessionBearer>>,
     inference_bearer: Option<Extension<VerifiedApiKeyInferenceBearer>>,
     cost_bearer: Option<Extension<VerifiedApiKeyCostBearer>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<(StatusCode, Json<Value>), HttpJsonError> {
     // Key, scope, posture (a ZDR key is refused here, D6) and the session bearer, before anything.
@@ -129,6 +159,9 @@ pub(crate) async fn start_run(
         .ok_or_else(api_key_invalid)?;
     let request = StartRequest::parse(&body)?;
     let key_id = claims.api_key_id().ok_or_else(api_key_invalid)?;
+    // F-f08-13: a malformed Idempotency-Key is refused before any slot or upstream is used, and it is read only
+    // while its switch is on; off, the header is ignored as it always was.
+    let idempotency_key = idempotency_key_while_enabled(idempotency_enabled(), &headers)?;
     let permit = LIVE_RUNS
         .try_acquire(live_run_key(&claims.org_id, key_id), LIVE_RUNS_PER_KEY)
         .ok_or_else(rate_limited)?;
@@ -156,7 +189,10 @@ pub(crate) async fn start_run(
         None => Vec::new(),
     };
 
-    let request_id = new_ulid();
+    // With a valid Idempotency-Key the request id is a function of the caller's key and body, so a repeat of the
+    // same start names the same managed start: Session Core answers `already_started` and nothing runs twice.
+    let keyed = idempotency_key.is_some();
+    let request_id = start_request_id(&claims.org_id, key_id, idempotency_key.as_deref(), &request);
     let start_key = state.managed_start_keys.derive(
         &claims.org_id,
         &claims.sub,
@@ -164,26 +200,48 @@ pub(crate) async fn start_run(
         &request_id,
         START_KEY_SOURCE,
     );
-    let run = session_flow::prepare_managed_run_with_token(
-        &state,
-        request.thread_id.as_deref(),
-        None,
-        &claims.org_id,
-        &claims.sub,
-        &request.input,
-        "model-gateway",
-        "execute",
-        &start_key,
-        ManagedRunSource::GatewayDirect,
-        false,
-        session_bearer.as_session_bearer().as_str(),
-    )
-    .await
-    .map_err(|error| start_error(&error, request.thread_id.is_some()))?;
-    let accepted = accepted_body(&run);
-    // The start key is fresh per request, so a replayed start is never this request's to answer:
-    // its first request already dispatched it.
-    if !run.already_started {
+    // A keyed start starts its run before it appends the prompt, so a replay writes nothing (F-f08-13). An unkeyed
+    // start keeps the order it always had.
+    let start = if keyed {
+        session_flow::prepare_idempotent_agent_run(
+            &state,
+            request.thread_id.as_deref(),
+            &claims.org_id,
+            &claims.sub,
+            &request.input,
+            "model-gateway",
+            "execute",
+            &start_key,
+            ManagedRunSource::GatewayDirect,
+            session_bearer.as_session_bearer().as_str(),
+        )
+        .await
+    } else {
+        session_flow::prepare_managed_run_with_token(
+            &state,
+            request.thread_id.as_deref(),
+            None,
+            &claims.org_id,
+            &claims.sub,
+            &request.input,
+            "model-gateway",
+            "execute",
+            &start_key,
+            ManagedRunSource::GatewayDirect,
+            false,
+            session_bearer.as_session_bearer().as_str(),
+        )
+        .await
+    };
+    let run = start.map_err(|error| start_error(&error, request.thread_id.is_some()))?;
+    // A replayed start answers its run as it stands now, read under the key's own bearer; a failed read is the typed
+    // upstream error, never an invented status (F-f08-13).
+    let replay_status = replay_status_of(&state, &session_bearer, &run).await?;
+    let StartOutcome { dispatch, accepted } = start_outcome(&run, replay_status);
+    // A replayed start is never this request's to answer: its first request already dispatched it. An unkeyed start's
+    // key is fresh, so it is never a replay; a keyed one answers `already_started` for a repeat of the same start.
+    // A replay drops its live-run permit here, with nothing spawned.
+    if dispatch {
         let turn = AskTurn {
             request: ask_request(
                 &request_id,
@@ -205,6 +263,90 @@ pub(crate) async fn start_run(
         tokio::spawn(run_ask_turn(state, turn, permit));
     }
     Ok((StatusCode::ACCEPTED, Json(accepted)))
+}
+
+/// The one `Idempotency-Key` a start carries, when it carries one (F-f08-13). Absent is fine. A repeated,
+/// empty, over-long or non-visible-ASCII value is `invalid_request` naming the header, never its value.
+fn idempotency_key_of(headers: &HeaderMap) -> Result<Option<String>, HttpJsonError> {
+    let mut values = headers.get_all(IDEMPOTENCY_KEY_HEADER).iter();
+    let Some(first) = values.next() else {
+        return Ok(None);
+    };
+    match first.to_str() {
+        Ok(key)
+            if values.next().is_none()
+                && (1..=IDEMPOTENCY_KEY_MAX_CHARS).contains(&key.len())
+                && key.bytes().all(|byte| byte.is_ascii_graphic()) =>
+        {
+            Ok(Some(key.to_owned()))
+        }
+        _ => Err(invalid_request("Idempotency-Key")),
+    }
+}
+
+/// The Idempotency-Key a start honours (F-f08-13): the header's one value while its switch is on, and nothing while it is
+/// off, so an off switch ignores the header whatever it holds, as it always has. While the switch is on a malformed
+/// header is `invalid_request` before any slot or upstream is used.
+fn idempotency_key_while_enabled(
+    enabled: bool,
+    headers: &HeaderMap,
+) -> Result<Option<String>, HttpJsonError> {
+    if enabled {
+        idempotency_key_of(headers)
+    } else {
+        Ok(None)
+    }
+}
+
+/// The request id a start names its managed run by (F-f08-13). With a valid Idempotency-Key it is a function of the
+/// key and body ([`idempotent_request_id`]); without one it is fresh, so every unkeyed start is its own run.
+fn start_request_id(
+    org_id: &str,
+    key_id: &str,
+    idempotency_key: Option<&str>,
+    request: &StartRequest,
+) -> String {
+    match idempotency_key {
+        Some(key) => idempotent_request_id(org_id, key_id, key, request),
+        None => new_ulid(),
+    }
+}
+
+/// The request id of an idempotent start (F-f08-13): `idem-` and the first 26 lowercase hex characters of a
+/// SHA-256 over the org, the API key, the caller's `Idempotency-Key`, the digest of the input, the thread and
+/// the model, each separated by a NUL. The same key on the same body is the same id; a different body is a
+/// different start. The raw key and input are only hashed here: they are never stored, logged or sent on.
+fn idempotent_request_id(
+    org_id: &str,
+    key_id: &str,
+    idempotency_key: &str,
+    request: &StartRequest,
+) -> String {
+    let input_digest = Sha256::digest(request.input.as_bytes());
+    let thread_id = request.thread_id.as_deref().unwrap_or_default();
+    let model = request.model.as_deref().unwrap_or_default();
+    let parts: [&[u8]; 6] = [
+        org_id.as_bytes(),
+        key_id.as_bytes(),
+        idempotency_key.as_bytes(),
+        input_digest.as_slice(),
+        thread_id.as_bytes(),
+        model.as_bytes(),
+    ];
+    let mut hasher = Sha256::new();
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            hasher.update(b"\0");
+        }
+        hasher.update(part);
+    }
+    let digest = hasher.finalize();
+    let hex: String = digest
+        .iter()
+        .take(13)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("idem-{hex}")
 }
 
 /// Stop this replica's live Ask turn for `run_id` after the key's durable cancel, so the model
@@ -424,20 +566,7 @@ async fn run_ask_turn(state: AppState, turn: AskTurn, _permit: LiveRunPermit) {
                 code = %refusal["error"],
                 "agent api run refused by the budget check"
             );
-            // The receipt vocabulary is Session Core's closed list; any other reason is recorded
-            // as `inference_failed`, and the typed refusal is in this log.
-            let reason = if status == StatusCode::PAYMENT_REQUIRED {
-                "budget_exceeded"
-            } else {
-                "budget_unavailable"
-            };
-            fail_run(
-                &state,
-                &run,
-                &session_bearer,
-                DirectInferenceTerminal::Failed(reason),
-            )
-            .await;
+            fail_run(&state, &run, &session_bearer, budget_terminal(status)).await;
             return;
         }
     }
@@ -525,9 +654,13 @@ async fn run_ask_turn(state: AppState, turn: AskTurn, _permit: LiveRunPermit) {
 
 /// O-18: the key turn's budget check. The org's ceilings are read as every other transport reads
 /// them (org-core, fails open: an unreadable ceiling is no ceiling), then `check_budget_for_key`
-/// asks cost-core about `apikey:<key_id>`: the gateway's own cost-core credential first, the key's
-/// own bearer only as the fallback. No gateway cost-core credential exists yet (F-f10-23b), so
-/// today the key's bearer is the only path; an org with a ceiling and no usable path fails closed.
+/// asks cost-core about `apikey:<key_id>` and, on the gateway's own credential, about the whole
+/// org: the gateway's own `cost:budget:check` credential (F-f10-23b, minted per org and reused
+/// until shortly before it expires; only the bearer is reused, never a verdict). With that
+/// credential configured it is the only path: a mint that fails is a closed check (503), never a
+/// skipped one, and the key's own bearer is never sent. The key's own bearer decides only when no
+/// service credential is configured at all (O-18). An org with no ceiling is not checked, so
+/// nothing is minted for it; an org with a ceiling and no usable path fails closed.
 async fn check_turn_budget(
     state: &AppState,
     org_id: &str,
@@ -542,17 +675,45 @@ async fn check_turn_budget(
         &state.org_core_service_token,
     )
     .await;
+    if !crate::budget::org_has_ceiling(&limits) {
+        return Ok(());
+    }
+    let service_bearer = match crate::cost_budget_auth::shared() {
+        Some(provider) => match provider.budget_check_token(org_id).await {
+            Ok(bearer) => Some(bearer),
+            Err(error) => {
+                warn!(%error, "the gateway's cost-core budget credential could not be minted");
+                None
+            }
+        },
+        None => None,
+    };
     crate::budget::check_budget_for_key(
         &state.http_client,
         org_id,
         key_id,
         crate::budget::KeyBudgetCredentials {
-            service_bearer: None,
+            service_bearer: service_bearer.as_deref(),
             key_bearer: cost_bearer.map(VerifiedApiKeyCostBearer::as_str),
+            // `check_budget_for_key` sets `service_configured` from the environment.
+            ..Default::default()
         },
         limits,
     )
     .await
+}
+
+/// The Failed receipt for a key turn the budget check refused, before any model call: over budget
+/// (`402`) is `budget_exceeded`, anything else (`503`, the check could not decide) is
+/// `budget_unavailable`. Session Core's receipt vocabulary is a closed list without a budget code,
+/// so `direct_terminal_outcome` records both as `inference_failed`; the typed refusal is in the
+/// gateway's log. The receipt carries no content.
+fn budget_terminal(status: StatusCode) -> DirectInferenceTerminal {
+    if status == StatusCode::PAYMENT_REQUIRED {
+        DirectInferenceTerminal::Failed("budget_exceeded")
+    } else {
+        DirectInferenceTerminal::Failed("budget_unavailable")
+    }
 }
 
 /// Resolves once the key's cancel of the run reached this replica.
@@ -630,15 +791,52 @@ fn inference_request<T>(value: T, bearer: &VerifiedApiKeyInferenceBearer) -> ton
     request
 }
 
-/// `202`'s body: the run is queued until the detached turn starts the model call.
-fn accepted_body(run: &SessionRun) -> Value {
+/// `202`'s body: the run, its thread and its status.
+fn accepted_body(run: &SessionRun, status: Value) -> Value {
     json!({
         "data": {
             "run_id": run.run_id,
             "thread_id": run.thread_id,
-            "status": "queued",
+            "status": status,
         }
     })
+}
+
+/// What a start answers, and whether this request dispatches the run's turn (F-f08-13).
+#[derive(Debug, PartialEq)]
+struct StartOutcome {
+    dispatch: bool,
+    accepted: Value,
+}
+
+/// A new start dispatches its turn and is `queued` until the detached turn starts the model call. A replay
+/// (`already_started`: a keyed start's repeat) dispatches nothing and answers the status its run read gave, the
+/// same value `GET /v1/agent/runs/:run_id` answers.
+fn start_outcome(run: &SessionRun, replay_status: Option<Value>) -> StartOutcome {
+    if run.already_started {
+        StartOutcome {
+            dispatch: false,
+            accepted: accepted_body(run, replay_status.unwrap_or(Value::Null)),
+        }
+    } else {
+        StartOutcome {
+            dispatch: true,
+            accepted: accepted_body(run, json!("queued")),
+        }
+    }
+}
+
+/// A replay's status, read from Session Core under the key's own bearer (F-f08-13). A new start reads nothing.
+async fn replay_status_of(
+    state: &AppState,
+    bearer: &VerifiedApiKeySessionBearer,
+    run: &SessionRun,
+) -> Result<Option<Value>, HttpJsonError> {
+    if !run.already_started {
+        return Ok(None);
+    }
+    let detail = fetch_run(state, bearer, &run.run_id).await?;
+    Ok(Some(run_value(&detail)["status"].clone()))
 }
 
 /// A failed start in the Agent API's vocabulary: Session Core's status when the chain carries
@@ -1119,7 +1317,7 @@ mod tests {
             terminal_source: ManagedRunSource::GatewayDirect,
         };
         assert_eq!(
-            accepted_body(&run),
+            start_outcome(&run, None).accepted,
             json!({ "data": { "run_id": "run-1", "thread_id": "thread-1", "status": "queued" } })
         );
         let golden = contract();
@@ -1129,7 +1327,7 @@ mod tests {
             .iter()
             .map(|field| field.as_str().unwrap())
             .collect();
-        let body = accepted_body(&run);
+        let body = start_outcome(&run, None).accepted;
         let mut keys: Vec<&str> = body["data"]
             .as_object()
             .unwrap()
@@ -1140,6 +1338,331 @@ mod tests {
         let mut expected = accepted.clone();
         expected.sort_unstable();
         assert_eq!(keys, expected, "the contract's StartRunAccepted fields");
+    }
+
+    /// F-f10-23b: a key turn the budget check refused ends with a typed budget receipt, not a model
+    /// failure: over budget is `budget_exceeded`, a check that could not decide is
+    /// `budget_unavailable`.
+    #[test]
+    fn a_budget_refusal_ends_the_run_with_a_budget_receipt() {
+        assert_eq!(
+            budget_terminal(StatusCode::PAYMENT_REQUIRED),
+            DirectInferenceTerminal::Failed("budget_exceeded")
+        );
+        for status in [StatusCode::SERVICE_UNAVAILABLE, StatusCode::BAD_GATEWAY] {
+            assert_eq!(
+                budget_terminal(status),
+                DirectInferenceTerminal::Failed("budget_unavailable"),
+                "{status}"
+            );
+        }
+    }
+
+    fn session_run(already_started: bool) -> SessionRun {
+        SessionRun {
+            thread_id: "thread-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            org_id: "org-a".to_owned(),
+            already_started,
+            terminal_source: ManagedRunSource::GatewayDirect,
+        }
+    }
+
+    /// F-f08-13: a keyed start's replay (`already_started`) dispatches no turn and answers 202 with the first run's
+    /// id, thread and the status its run read gave; a new keyed start dispatches and is `queued`; an unkeyed start
+    /// (never a replay) is exactly what it always was.
+    #[test]
+    fn a_replay_dispatches_nothing_and_answers_the_runs_read_status() {
+        for status in ["running", "cancelled", "completed", "failed"] {
+            assert_eq!(
+                start_outcome(&session_run(true), Some(json!(status))),
+                StartOutcome {
+                    dispatch: false,
+                    accepted: json!({
+                        "data": { "run_id": "run-1", "thread_id": "thread-1", "status": status }
+                    }),
+                },
+                "{status}"
+            );
+        }
+        let fresh = StartOutcome {
+            dispatch: true,
+            accepted: json!({
+                "data": { "run_id": "run-1", "thread_id": "thread-1", "status": "queued" }
+            }),
+        };
+        // A new keyed start and an unkeyed start are both `already_started: false`, and both read nothing.
+        assert_eq!(start_outcome(&session_run(false), None), fresh);
+        // A new start's answer is never taken from a read, even if one were passed.
+        assert_eq!(
+            start_outcome(&session_run(false), Some(json!("cancelled"))),
+            fresh
+        );
+    }
+
+    /// F-f08-13: only a replay reads its run, and a read that fails is the typed upstream error, never an invented
+    /// status. The test state's clients reach nothing, so any read would fail `upstream_unavailable`.
+    #[tokio::test]
+    async fn a_replay_reads_its_run_and_a_failed_read_is_the_typed_upstream_error() {
+        use mp_contracts::model_plane::v1::run_service_client::RunServiceClient;
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1")
+            .connect_timeout(Duration::from_secs(2))
+            .connect_lazy();
+        let mut state = AppState::new();
+        state.run_client = RunServiceClient::new(channel);
+        let bearer = VerifiedApiKeySessionBearer::for_test("key-session-token");
+        assert_eq!(
+            replay_status_of(&state, &bearer, &session_run(false))
+                .await
+                .expect("a new start reads nothing"),
+            None
+        );
+        let error = replay_status_of(&state, &bearer, &session_run(true))
+            .await
+            .expect_err("a replay reads its run, and the read fails here");
+        assert_typed(
+            &error,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "upstream_unavailable",
+        );
+    }
+
+    /// F-f08-13: the Idempotency-Key is read only as one visible-ASCII value of at most 128 characters; absent is
+    /// fine, and anything else is `invalid_request` naming the header.
+    #[test]
+    fn an_idempotency_key_is_one_visible_ascii_value_of_at_most_128_characters() {
+        use axum::http::HeaderValue;
+        let mut headers = HeaderMap::new();
+        assert!(idempotency_key_of(&headers)
+            .expect("absent is fine")
+            .is_none());
+        headers.insert(IDEMPOTENCY_KEY_HEADER, HeaderValue::from_static("key-1"));
+        assert_eq!(
+            idempotency_key_of(&headers).expect("one value"),
+            Some("key-1".to_owned())
+        );
+        let longest = "k".repeat(IDEMPOTENCY_KEY_MAX_CHARS);
+        headers.insert(
+            IDEMPOTENCY_KEY_HEADER,
+            HeaderValue::from_str(&longest).expect("ascii"),
+        );
+        assert_eq!(
+            idempotency_key_of(&headers).expect("128 characters"),
+            Some(longest)
+        );
+        for bad in ["", "a b", "a\tb"] {
+            headers.insert(
+                IDEMPOTENCY_KEY_HEADER,
+                HeaderValue::from_str(bad).expect("header value"),
+            );
+            let refusal = idempotency_key_of(&headers).expect_err("not a visible-ASCII key");
+            assert_typed(&refusal, StatusCode::BAD_REQUEST, "invalid_request");
+            assert_eq!(refusal.1["error"]["details"]["field"], "Idempotency-Key");
+        }
+        headers.insert(
+            IDEMPOTENCY_KEY_HEADER,
+            HeaderValue::from_str(&"k".repeat(IDEMPOTENCY_KEY_MAX_CHARS + 1)).expect("ascii"),
+        );
+        assert!(idempotency_key_of(&headers).is_err(), "129 characters");
+        let mut repeated = HeaderMap::new();
+        repeated.append(IDEMPOTENCY_KEY_HEADER, HeaderValue::from_static("k-1"));
+        repeated.append(IDEMPOTENCY_KEY_HEADER, HeaderValue::from_static("k-2"));
+        assert!(
+            idempotency_key_of(&repeated).is_err(),
+            "a repeated key is refused"
+        );
+    }
+
+    /// F-f08-13: the same key on the same body is the same request id, so the same managed start; a different
+    /// key, body, thread or model is a different start. The id is `idem-` and 26 lowercase hex characters, and
+    /// neither the raw key nor the input appears in it.
+    #[test]
+    fn the_idempotent_request_id_names_one_start_per_key_and_body() {
+        let start = |input: &str, thread: Option<&str>, model: Option<&str>| StartRequest {
+            input: input.to_owned(),
+            thread_id: thread.map(str::to_owned),
+            model: model.map(str::to_owned),
+        };
+        let base = start("summarise the report", None, None);
+        let id = idempotent_request_id("org-a", "key-a", "retry-1", &base);
+        assert_eq!(
+            id,
+            idempotent_request_id(
+                "org-a",
+                "key-a",
+                "retry-1",
+                &start("summarise the report", None, None)
+            ),
+            "a repeat of the same start is the same id"
+        );
+        let hex = id.strip_prefix("idem-").expect("the idem- prefix");
+        assert_eq!(hex.len(), 26);
+        assert!(hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        assert!(!id.contains("retry-1") && !id.contains("summarise"), "{id}");
+        for other in [
+            idempotent_request_id("org-b", "key-a", "retry-1", &base),
+            idempotent_request_id("org-a", "key-b", "retry-1", &base),
+            idempotent_request_id("org-a", "key-a", "retry-2", &base),
+            idempotent_request_id(
+                "org-a",
+                "key-a",
+                "retry-1",
+                &start("another question", None, None),
+            ),
+            idempotent_request_id(
+                "org-a",
+                "key-a",
+                "retry-1",
+                &start("summarise the report", Some("thread-1"), None),
+            ),
+            idempotent_request_id(
+                "org-a",
+                "key-a",
+                "retry-1",
+                &start("summarise the report", None, Some("model-x")),
+            ),
+        ] {
+            assert_ne!(other, id);
+        }
+    }
+
+    /// F-f08-13: the switch decides whether the header is read at all. Off, a key and a malformed header are both
+    /// ignored and the start is unkeyed; on, a valid key is honoured and a malformed one is refused.
+    #[test]
+    fn the_idempotency_key_is_read_only_while_its_switch_is_on() {
+        use axum::http::HeaderValue;
+        let mut headers = HeaderMap::new();
+        headers.insert(IDEMPOTENCY_KEY_HEADER, HeaderValue::from_static("retry-1"));
+        assert_eq!(
+            idempotency_key_while_enabled(true, &headers).expect("a valid key, on"),
+            Some("retry-1".to_owned())
+        );
+        assert_eq!(
+            idempotency_key_while_enabled(false, &headers).expect("off: ignored"),
+            None
+        );
+        headers.insert(IDEMPOTENCY_KEY_HEADER, HeaderValue::from_static("a b"));
+        assert!(
+            idempotency_key_while_enabled(true, &headers).is_err(),
+            "on: a malformed key is refused"
+        );
+        assert_eq!(
+            idempotency_key_while_enabled(false, &headers)
+                .expect("off: a malformed key is ignored"),
+            None
+        );
+    }
+
+    /// F-f08-13: a keyed start is named by its key and body, so a repeat of it is the same request id and a different
+    /// body is a different start; an unkeyed start is fresh each time and never named by a key.
+    #[test]
+    fn a_start_is_named_by_its_key_and_body_and_an_unkeyed_start_is_fresh() {
+        let start = |input: &str| StartRequest {
+            input: input.to_owned(),
+            thread_id: None,
+            model: None,
+        };
+        let keyed = start_request_id("org-a", "key-a", Some("retry-1"), &start("summarise"));
+        assert_eq!(
+            keyed,
+            start_request_id("org-a", "key-a", Some("retry-1"), &start("summarise")),
+            "a repeat of the same keyed start"
+        );
+        assert_ne!(
+            keyed,
+            start_request_id(
+                "org-a",
+                "key-a",
+                Some("retry-1"),
+                &start("another question")
+            ),
+            "a different body is a different start"
+        );
+        let unkeyed = start_request_id("org-a", "key-a", None, &start("summarise"));
+        assert_ne!(
+            unkeyed,
+            start_request_id("org-a", "key-a", None, &start("summarise")),
+            "with no key, each start is its own run"
+        );
+        assert!(
+            !unkeyed.starts_with("idem-"),
+            "an unkeyed start is never named by a key"
+        );
+    }
+
+    #[test]
+    fn the_idempotency_switch_is_on_only_for_the_literal_true() {
+        assert!(idempotency_enabled_from(Some("true")));
+        for off in [
+            None,
+            Some(""),
+            Some("TRUE"),
+            Some(" true"),
+            Some("1"),
+            Some("yes"),
+            Some("false"),
+        ] {
+            assert!(!idempotency_enabled_from(off), "{off:?}");
+        }
+    }
+
+    /// F-f08-13: a malformed Idempotency-Key is refused before any upstream call only while its switch is on. With
+    /// the switch off the header is ignored, so the start goes on to its upstream as it always did.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_malformed_idempotency_key_is_refused_only_while_its_switch_is_on() {
+        async fn post_with_key(key: &str) -> (StatusCode, Value) {
+            let response = app(key_claims(false), true)
+                .oneshot(
+                    HttpRequest::builder()
+                        .method("POST")
+                        .uri("/v1/agent/runs")
+                        .header("content-type", "application/json")
+                        .header(IDEMPOTENCY_KEY_HEADER, key)
+                        .body(Body::from(json!({ "input": "hi" }).to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            )
+        }
+
+        std::env::set_var(crate::agent_api_routes::ENABLED_ENV, "true");
+        std::env::set_var(AGENT_API_IDEMPOTENCY_ENV, "true");
+        for bad in ["a b", &"k".repeat(IDEMPOTENCY_KEY_MAX_CHARS + 1)] {
+            let (status, body) = post_with_key(bad).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body["error"]["code"], "invalid_request", "{body}");
+            assert_eq!(
+                body["error"]["details"]["field"], "Idempotency-Key",
+                "{body}"
+            );
+        }
+        let (status, body) = post_with_key("retry-1").await;
+        assert_ne!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a valid key is not refused: {body}"
+        );
+
+        std::env::set_var(AGENT_API_IDEMPOTENCY_ENV, "false");
+        let (status, body) = post_with_key("a b").await;
+        std::env::remove_var(AGENT_API_IDEMPOTENCY_ENV);
+        std::env::remove_var(crate::agent_api_routes::ENABLED_ENV);
+        assert_ne!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "off, the header is ignored: {body}"
+        );
     }
 
     #[test]

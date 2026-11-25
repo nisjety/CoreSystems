@@ -31,6 +31,7 @@ pub mod context_reattach;
 pub mod context_refs;
 pub mod conversation_delegation;
 pub mod coordinator;
+mod cost_budget_auth;
 pub mod council_routes;
 pub mod dataplane;
 pub mod deck_templates;

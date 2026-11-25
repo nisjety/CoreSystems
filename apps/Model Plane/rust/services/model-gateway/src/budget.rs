@@ -34,6 +34,11 @@ pub(crate) const BUDGET_WINDOW_PER_CAP_ENV: &str = "MODEL_GATEWAY_BUDGET_WINDOW_
 /// own switch is on, so the two can be turned on in either order.
 pub(crate) const DO_RUN_CAP_ENV: &str = "MODEL_GATEWAY_DO_RUN_CAP";
 
+/// The cost-core base URL the gateway calls: `COST_CORE_URL`, or the local default.
+pub(crate) fn cost_core_base_url() -> String {
+    std::env::var(COST_CORE_BASE_URL_VAR).unwrap_or_else(|_| DEFAULT_COST_CORE_URL.to_owned())
+}
+
 #[derive(Debug, Serialize)]
 struct BudgetCheckRequest {
     org_id: String,
@@ -117,8 +122,7 @@ pub async fn check_budget(
         return Ok(());
     }
 
-    let base_url =
-        std::env::var(COST_CORE_BASE_URL_VAR).unwrap_or_else(|_| DEFAULT_COST_CORE_URL.to_owned());
+    let base_url = cost_core_base_url();
     let windows = budget_windows(
         budget_window_enabled(&|key| std::env::var(key).ok()),
         budget_window_per_cap_enabled(&|key| std::env::var(key).ok()),
@@ -351,16 +355,46 @@ pub fn key_budget_bearer_enabled() -> bool {
         && lookup(COST_CORE_ACCEPT_API_KEY_ENV).as_deref() == Some("true")
 }
 
+/// Whether the org has any spend ceiling a key turn is checked against. Without one the key-turn
+/// check makes no call (metering only), so no cost-core credential is needed either.
+#[must_use]
+pub(crate) fn org_has_ceiling(org_limits: &crate::org_quota::OrgQuotaLimits) -> bool {
+    org_limits.max_cost_usd.is_some() || org_limits.max_tokens.is_some()
+}
+
+/// The gateway's service key variable, which `cost_budget_auth::from_env` also reads.
+pub(crate) const SERVICE_API_KEY_ENV: &str = "MODEL_GATEWAY_SERVICE_API_KEY";
+
+/// Whether the gateway has a cost-core service credential configured: `MODEL_GATEWAY_SERVICE_API_KEY`
+/// is set and not blank, the same test `cost_budget_auth::from_env` applies. A half-configured
+/// credential (for example one without `AUTH_CORE_URL`) still counts as configured, so its missing
+/// bearer fails closed.
+#[must_use]
+pub(crate) fn service_credential_configured(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
+    lookup(SERVICE_API_KEY_ENV).is_some_and(|value| !value.trim().is_empty())
+}
+
 /// The cost-core credentials a key turn can be checked with, in the order they are tried.
+///
+/// With `service_configured` set, the service path is the only path: a service bearer that was not
+/// minted fails the turn closed, and the key's own bearer is never sent (P2-mg-08-rel1). The key's
+/// own bearer decides only when no service credential is configured at all (O-18).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct KeyBudgetCredentials<'a> {
     /// The gateway's own `aud=cost-core` service credential (`cost:budget:check`, F-f10-23a/b).
-    /// Tried first. `None` while that credential is not provisioned.
+    /// Tried first. `None` means no bearer was minted: it is absent, blank, or the mint was refused.
+    /// Once one is minted, its answer is final: a refusal or no answer decides the turn, and the
+    /// key's bearer is not tried.
     pub service_bearer: Option<&'a str>,
-    /// The key's own `aud=cost-core` bearer. The fallback, only when the service path is
-    /// unavailable, and present only when `COST_CORE_ACCEPT_API_KEY` is on (see
-    /// [`key_budget_bearer_enabled`]).
+    /// The key's own `aud=cost-core` bearer. Used only when no service credential is configured
+    /// (`service_configured` is `false`), and present only when `COST_CORE_ACCEPT_API_KEY` is on
+    /// (see [`key_budget_bearer_enabled`]). It sees only the key's own rows, so it never answers
+    /// for the org.
     pub key_bearer: Option<&'a str>,
+    /// Whether the gateway has a cost-core service credential configured. Defaults to `false`: none
+    /// is configured, so the key's own bearer may decide. [`check_budget_for_key`] also sets it when
+    /// `MODEL_GATEWAY_SERVICE_API_KEY` is set and not blank, so a caller can raise it, never lower it.
+    pub service_configured: bool,
 }
 
 /// What one credential path said.
@@ -376,17 +410,31 @@ enum PathVerdict {
 /// Check an Agent API key turn against the org's ceilings (O-18).
 ///
 /// The ceilings are the org's (`org_limits`); a key turn carries no request cap. The scope is the
-/// key's own spend: `user_id` is always `apikey:<key_id>`, whichever credential asks, so both
-/// paths read the same ledger rows and agree. The service credential is tried first; the key's own
-/// bearer only when the service path decided nothing. A refusal from either is the typed
-/// `402 budget_exceeded`. Neither path answering fails closed (`503 budget_unavailable`) for an org
-/// with a ceiling; an org with no ceiling is never checked, so it fails open (metering only), as
-/// [`check_budget`] does for users. The check carries ids, a principal string and caps, no
-/// content, so it needs no ZDR branch; a ZDR key is refused before this is reached.
+/// key's own spend: `user_id` is always `apikey:<key_id>`, whichever credential asks. The service
+/// credential is tried first. Once it is minted, its answer decides: cost-core accepted it, so the
+/// same credential also asks the org-wide question (`user_id` empty, F-f10-23b), which is required.
+/// A refusal from either question is the typed `402 budget_exceeded`. A question that gets no
+/// answer (401, 403, a server error, an unreadable body or a timeout) fails closed with
+/// `503 budget_unavailable`, and the key's own bearer is not tried after a minted service
+/// credential (P2-mg-08-rel1): that bearer sees only the key's rows, so its allowed answer would
+/// admit an org over its org-wide ceiling.
+///
+/// A configured service credential (`credentials.service_configured`, or
+/// `MODEL_GATEWAY_SERVICE_API_KEY` set and not blank) makes the service path the only path. When
+/// its bearer was not minted, because it is absent, blank, or the mint was refused, the turn fails
+/// closed with `503` and no request is made: the key's own bearer is never sent in that state
+/// (P2-mg-08-rel1). Only when no service credential is configured does the key's own bearer decide
+/// (O-18), and then it answers the key's own question alone. An org with no ceiling is never
+/// checked, so it fails open (metering only), as [`check_budget`] does for users. The check carries
+/// ids, a principal string and caps, no content, so it needs no ZDR branch; a ZDR key is refused
+/// before this is reached.
 ///
 /// # Errors
 ///
-/// `402` over budget, `503` when no credential path could decide for an org with a ceiling.
+/// `402` over budget; `503` when the check cannot be decided for an org with a ceiling: a minted
+/// service bearer got no answer on either question, a configured service credential was not
+/// minted, or no service credential is configured and the key's own bearer is absent or got no
+/// answer.
 pub async fn check_budget_for_key(
     http_client: &reqwest::Client,
     org_id: &str,
@@ -398,11 +446,17 @@ pub async fn check_budget_for_key(
     let tokens = org_limits
         .max_tokens
         .map(|tokens| u32::try_from(tokens).unwrap_or(u32::MAX));
-    if org_limits.max_cost_usd.is_none() && tokens.is_none() {
+    if !org_has_ceiling(&org_limits) {
         return Ok(());
     }
-    let base_url =
-        std::env::var(COST_CORE_BASE_URL_VAR).unwrap_or_else(|_| DEFAULT_COST_CORE_URL.to_owned());
+    // P2-mg-08-rel1: a configured service key makes the service path the only path, even when the
+    // caller did not say so. A caller can raise `service_configured`, never lower it.
+    let credentials = KeyBudgetCredentials {
+        service_configured: credentials.service_configured
+            || service_credential_configured(&|key| std::env::var(key).ok()),
+        ..credentials
+    };
+    let base_url = cost_core_base_url();
     let windows = budget_windows(
         budget_window_enabled(&|key| std::env::var(key).ok()),
         budget_window_per_cap_enabled(&|key| std::env::var(key).ok()),
@@ -424,6 +478,10 @@ pub async fn check_budget_for_key(
     .await
 }
 
+/// The key-turn decision, with the cost-core address and the windows passed in so the tests can point
+/// it at a mock. The order is fixed: a minted service bearer decides first, and its answer is final;
+/// a configured service credential with no usable bearer fails closed with no request; only with no
+/// service credential configured does the key's own bearer decide.
 #[allow(clippy::too_many_arguments)]
 async fn check_budget_for_key_at(
     http_client: &reqwest::Client,
@@ -444,25 +502,63 @@ async fn check_budget_for_key_at(
         ));
     }
     let url = format!("{}/api/v1/budget/check", base_url.trim_end_matches('/'));
-    let body = BudgetCheckRequest {
+    let scoped = |user_id: String| BudgetCheckRequest {
         org_id: org_id.to_owned(),
-        user_id: format!("apikey:{key_id}"),
+        user_id,
         max_cost_usd,
         max_tokens,
-        since: windows.since,
-        since_cost: windows.since_cost,
-        since_tokens: windows.since_tokens,
+        since: windows.since.clone(),
+        since_cost: windows.since_cost.clone(),
+        since_tokens: windows.since_tokens.clone(),
     };
-    let mut verdict = PathVerdict::Unavailable;
-    for bearer in [credentials.service_bearer, credentials.key_bearer] {
-        let Some(bearer) = usable_bearer(bearer) else {
-            continue;
-        };
-        verdict = send_key_check(http_client, &url, bearer, &body).await;
-        if !matches!(verdict, PathVerdict::Unavailable) {
-            break;
+    let body = scoped(format!("apikey:{key_id}"));
+    // F-f10-23b: the gateway's own credential asks about the key first and then, because an org-wide
+    // ceiling is the one that matters for a key, about the whole org (`user_id` empty). Only this
+    // path can ask the org-wide question: cost-core forces a key bearer to the key's own rows.
+    if let Some(service_bearer) = usable_bearer(credentials.service_bearer) {
+        match send_key_check(http_client, &url, service_bearer, &body).await {
+            PathVerdict::Refused(refusal) => return Err(refusal),
+            PathVerdict::Allowed => {
+                // cost-core accepted the service credential, so an org-wide answer that does not
+                // come is an outage, not a missing path: fail closed, never fall back to a check
+                // that cannot see the org's spend.
+                let org_wide = scoped(String::new());
+                return match send_key_check(http_client, &url, service_bearer, &org_wide).await {
+                    PathVerdict::Allowed => Ok(()),
+                    PathVerdict::Refused(refusal) => Err(refusal),
+                    PathVerdict::Unavailable => {
+                        tracing::warn!(%org_id, "org-wide key turn budget check unanswered; blocking");
+                        Err(dependency_unavailable("budget authority is unavailable"))
+                    }
+                };
+            }
+            // P2-mg-08-rel1: a minted service credential that cost-core did not answer is an outage,
+            // not a missing path. The key's own bearer never takes over here: it sees only the key's
+            // rows, so an allowed answer from it would admit an org over its org-wide ceiling.
+            PathVerdict::Unavailable => {
+                tracing::warn!(
+                    %org_id,
+                    "service-credential key turn budget check unanswered; blocking"
+                );
+                return Err(dependency_unavailable("budget authority is unavailable"));
+            }
         }
     }
+    // P2-mg-08-rel1: a configured service credential whose bearer was not minted is an outage, not
+    // a missing path. The key's own bearer never decides in that state, so no request is made.
+    if credentials.service_configured && usable_bearer(credentials.service_bearer).is_none() {
+        tracing::warn!(
+            %org_id,
+            "the configured service credential was not minted; blocking the key turn budget check"
+        );
+        return Err(dependency_unavailable("budget authority is unavailable"));
+    }
+    // No service credential is configured (O-18): the key's own bearer is the only path left, and it
+    // answers the key's own question alone.
+    let verdict = match usable_bearer(credentials.key_bearer) {
+        Some(key_bearer) => send_key_check(http_client, &url, key_bearer, &body).await,
+        None => PathVerdict::Unavailable,
+    };
     match verdict {
         PathVerdict::Allowed => Ok(()),
         PathVerdict::Refused(refusal) => Err(refusal),
@@ -532,12 +628,84 @@ async fn send_key_check(
     }
 }
 
+/// The most ledger entries one run's list asks cost-core for: its own list maximum. A list that comes
+/// back this full may have been cut short, so the thread export does not total it.
+pub(crate) const RUN_ENTRIES_LIMIT: usize = 1000;
+
+/// One ledger entry of a run, as cost-core lists it: the fields the thread export reads. The rest of
+/// the entry is ignored.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct RunLedgerEntry {
+    #[serde(default)]
+    pub(crate) model: String,
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
+    pub(crate) created_at: DateTime<Utc>,
+}
+
+/// cost-core's answer to a run's entries list.
+#[derive(Debug, Deserialize)]
+struct RunEntriesResponse {
+    entries: Vec<RunLedgerEntry>,
+}
+
+/// Lists one run's ledger entries as the viewer. The viewer's own `aud=cost-core` bearer is sent the
+/// way the budget check sends it, under the same two second bound. cost-core pins a user token to its
+/// own rows, so the list is the viewer's usage of that run and nothing else.
+///
+/// `None` when cost-core gives no list: no usable bearer, a refusal (an auth failure included), a
+/// timeout, an unreachable service or a body that is not the list. The run id travels as a query
+/// parameter, and the log names neither it nor the URL.
+pub(crate) async fn list_run_entries(
+    http_client: &reqwest::Client,
+    base_url: &str,
+    bearer: &str,
+    run_id: &str,
+) -> Option<Vec<RunLedgerEntry>> {
+    let bearer = usable_bearer(Some(bearer))?;
+    let run_id = run_id.trim();
+    if run_id.is_empty() {
+        return None;
+    }
+    let url = format!("{}/api/v1/cost/entries", base_url.trim_end_matches('/'));
+    let limit = RUN_ENTRIES_LIMIT.to_string();
+    let response = http_client
+        .get(&url)
+        .bearer_auth(bearer)
+        .query(&[("run_id", run_id), ("limit", limit.as_str())])
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await;
+    match response {
+        Ok(response) if response.status().is_success() => {
+            match response.json::<RunEntriesResponse>().await {
+                Ok(list) => Some(list.entries),
+                Err(_) => {
+                    tracing::warn!("cost-core returned an invalid run entries response");
+                    None
+                }
+            }
+        }
+        Ok(response) => {
+            tracing::warn!(status = %response.status(), "cost-core did not list a run's entries");
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                timeout = error.is_timeout(),
+                "cost-core unreachable for a run's entries"
+            );
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
     use wiremock::{
-        matchers::{body_json, header, method, path},
+        matchers::{body_json, header, method, path, query_param},
         Mock, MockServer, ResponseTemplate,
     };
 
@@ -810,6 +978,15 @@ mod tests {
         assert!(!agent_api_budget_check_enabled(&|_| None));
     }
 
+    fn org_wide_body(cost: f64, tokens: u32) -> serde_json::Value {
+        serde_json::json!({
+            "org_id": "org-a",
+            "user_id": "",
+            "max_cost_usd": cost,
+            "max_tokens": tokens,
+        })
+    }
+
     #[tokio::test]
     async fn a_key_turn_is_checked_for_its_own_principal_with_the_service_credential_first() {
         let server = MockServer::start().await;
@@ -817,6 +994,14 @@ mod tests {
             .and(path("/api/v1/budget/check"))
             .and(header("authorization", "Bearer service-credential"))
             .and(body_json(key_body(10.0, 1_000)))
+            .respond_with(allowed())
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/budget/check"))
+            .and(header("authorization", "Bearer service-credential"))
+            .and(body_json(org_wide_body(10.0, 1_000)))
             .respond_with(allowed())
             .expect(1)
             .mount(&server)
@@ -834,27 +1019,45 @@ mod tests {
             KeyBudgetCredentials {
                 service_bearer: Some("service-credential"),
                 key_bearer: Some("key-credential"),
+                service_configured: true,
             },
         )
         .await
         .expect("within budget on the service path; the key bearer is never used");
     }
 
+    /// P2-mg-08-rel1: once the gateway's own credential is minted, a key-scope question it gets no
+    /// answer to (401, 403, a server error, an unreadable body or a timeout) fails closed, and the
+    /// key's own bearer is never sent. That bearer sees only the key's rows, so its allowed answer
+    /// would admit an org over its org-wide ceiling, which the service credential was minted to check.
     #[tokio::test]
-    async fn the_key_bearer_is_the_fallback_only_when_the_service_path_decided_nothing() {
-        for service in [
+    async fn a_minted_service_bearer_without_an_answer_fails_closed() {
+        let slow = || allowed().set_delay(std::time::Duration::from_secs(5));
+        for key in [
             ResponseTemplate::new(401),
             ResponseTemplate::new(403),
+            ResponseTemplate::new(500),
             ResponseTemplate::new(503),
             ResponseTemplate::new(200).set_body_string("not json"),
+            slow(),
         ] {
+            // The org-wide question would be allowed, so only the missing key-scope answer can fail it.
+            let server = cost_core(key, allowed(), 0).await;
+            let (status, Json(body)) = key_check(&server, BOTH)
+                .await
+                .expect_err("no answer on the service path: fail closed");
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(body["error"], "budget_unavailable");
+        }
+    }
+
+    /// The key's own bearer decides only when no service credential is configured (O-18): then it is
+    /// the only path, and it answers the key's own question alone.
+    #[tokio::test]
+    async fn the_key_bearer_is_the_fallback_only_when_no_service_credential_is_configured() {
+        // Not provisioned, a blank one, and one with whitespace in it: none is a minted bearer.
+        for service in [None, Some("   "), Some("bad credential")] {
             let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(header("authorization", "Bearer service-credential"))
-                .respond_with(service)
-                .expect(1)
-                .mount(&server)
-                .await;
             Mock::given(method("POST"))
                 .and(path("/api/v1/budget/check"))
                 .and(header("authorization", "Bearer key-credential"))
@@ -866,31 +1069,59 @@ mod tests {
             key_check(
                 &server,
                 KeyBudgetCredentials {
-                    service_bearer: Some("service-credential"),
+                    service_bearer: service,
                     key_bearer: Some("key-credential"),
+                    service_configured: false,
                 },
             )
             .await
-            .expect("the key's own bearer decides when the service path did not");
+            .expect("allowed on the key path alone");
         }
+    }
 
-        // No service credential provisioned: the key path is the only one.
+    /// P2-mg-08-rel1: a configured service credential whose bearer was not minted (absent, blank, or
+    /// with whitespace in it) fails closed without any request, and the key's own bearer is never
+    /// sent, though it is present and usable. That is the state after the mint is refused, for
+    /// example when Auth Core does not grant the gateway the cost-core audience, so the key's own
+    /// answer must not stand in for the org-wide one.
+    #[tokio::test]
+    async fn a_configured_service_credential_that_is_not_minted_fails_closed() {
+        // Any request at all is a failure: the service path is closed, and so is the key's bearer.
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(header("authorization", "Bearer key-credential"))
+        Mock::given(wiremock::matchers::any())
             .respond_with(allowed())
-            .expect(1)
+            .expect(0)
             .mount(&server)
             .await;
-        key_check(
-            &server,
-            KeyBudgetCredentials {
-                service_bearer: None,
-                key_bearer: Some("key-credential"),
-            },
-        )
-        .await
-        .expect("allowed on the key path alone");
+        for service in [None, Some("   "), Some("bad credential")] {
+            let (status, Json(body)) = key_check(
+                &server,
+                KeyBudgetCredentials {
+                    service_bearer: service,
+                    key_bearer: Some("key-credential"),
+                    service_configured: true,
+                },
+            )
+            .await
+            .expect_err("a configured service credential that was not minted fails closed");
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{service:?}");
+            assert_eq!(body["error"], "budget_unavailable", "{service:?}");
+        }
+    }
+
+    #[test]
+    fn the_service_credential_is_configured_only_when_its_key_is_set_and_not_blank() {
+        let set = "fixture-key-aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert!(service_credential_configured(&|key| {
+            (key == SERVICE_API_KEY_ENV).then(|| set.to_owned())
+        }));
+        for value in ["", "   ", "\t"] {
+            assert!(
+                !service_credential_configured(&|_| Some(value.to_owned())),
+                "{value:?}"
+            );
+        }
+        assert!(!service_credential_configured(&|_| None));
     }
 
     #[tokio::test]
@@ -914,6 +1145,7 @@ mod tests {
             KeyBudgetCredentials {
                 service_bearer: Some("service-credential"),
                 key_bearer: Some("key-credential"),
+                service_configured: true,
             },
         )
         .await
@@ -935,6 +1167,7 @@ mod tests {
             KeyBudgetCredentials {
                 service_bearer: None,
                 key_bearer: Some("key-credential"),
+                service_configured: false,
             },
         )
         .await
@@ -960,6 +1193,7 @@ mod tests {
             KeyBudgetCredentials {
                 service_bearer: Some("   "),
                 key_bearer: Some("bad credential"),
+                service_configured: true,
             },
         ] {
             let (status, Json(body)) = key_check(&server, credentials)
@@ -969,22 +1203,22 @@ mod tests {
             assert_eq!(body["error"], "budget_unavailable");
         }
 
-        // Both paths refused by cost-core's auth.
+        // The minted service credential refused by cost-core's auth: no fallback, so the key's bearer
+        // is never sent and the check fails closed.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
+            .and(header("authorization", "Bearer service-credential"))
             .respond_with(ResponseTemplate::new(403))
-            .expect(2)
+            .expect(1)
             .mount(&server)
             .await;
-        let (status, _) = key_check(
-            &server,
-            KeyBudgetCredentials {
-                service_bearer: Some("service-credential"),
-                key_bearer: Some("key-credential"),
-            },
-        )
-        .await
-        .expect_err("fails closed");
+        Mock::given(method("POST"))
+            .and(header("authorization", "Bearer key-credential"))
+            .respond_with(allowed())
+            .expect(0)
+            .mount(&server)
+            .await;
+        let (status, _) = key_check(&server, BOTH).await.expect_err("fails closed");
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 
         // Unreachable cost-core.
@@ -996,6 +1230,7 @@ mod tests {
             KeyBudgetCredentials {
                 service_bearer: None,
                 key_bearer: Some("key-credential"),
+                service_configured: false,
             },
             Some(10.0),
             None,
@@ -1019,6 +1254,163 @@ mod tests {
         )
         .await
         .expect("no ceiling, nothing to enforce: metering only");
+        assert!(!org_has_ceiling(
+            &crate::org_quota::OrgQuotaLimits::default()
+        ));
+        assert!(org_has_ceiling(&crate::org_quota::OrgQuotaLimits {
+            max_tokens: Some(1),
+            ..Default::default()
+        }));
+    }
+
+    // F-f10-23b: the gateway's own `cost:budget:check` credential, key scope then org-wide.
+
+    /// cost-core answers the key-scope question with `key`, the org-wide one with `org`, and any
+    /// request carrying the key's own bearer is counted (`key_bearer_calls`).
+    async fn cost_core(
+        key: ResponseTemplate,
+        org: ResponseTemplate,
+        key_bearer_calls: u64,
+    ) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/budget/check"))
+            .and(header("authorization", "Bearer service-credential"))
+            .and(body_json(key_body(10.0, 1_000)))
+            .respond_with(key)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/budget/check"))
+            .and(header("authorization", "Bearer service-credential"))
+            .and(body_json(org_wide_body(10.0, 1_000)))
+            .respond_with(org)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(header("authorization", "Bearer key-credential"))
+            .respond_with(allowed())
+            .expect(key_bearer_calls)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    const BOTH: KeyBudgetCredentials<'static> = KeyBudgetCredentials {
+        service_bearer: Some("service-credential"),
+        key_bearer: Some("key-credential"),
+        service_configured: true,
+    };
+
+    #[tokio::test]
+    async fn an_org_wide_refusal_is_final_and_the_key_bearer_is_never_sent() {
+        let server = cost_core(allowed(), over_budget(), 0).await;
+        let (status, Json(body)) = key_check(&server, BOTH).await.expect_err("org over budget");
+        assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(body["error"], "budget_exceeded");
+    }
+
+    #[tokio::test]
+    async fn an_org_wide_answer_that_does_not_come_fails_closed_without_the_key_bearer() {
+        // 401 (an auth refusal), a server error and an unreadable body all fail closed once the
+        // service credential was accepted: the key's bearer cannot see the org's spend.
+        for org in [
+            ResponseTemplate::new(401),
+            ResponseTemplate::new(503),
+            ResponseTemplate::new(200).set_body_string("not json"),
+        ] {
+            let server = cost_core(allowed(), org, 0).await;
+            let (status, Json(body)) = key_check(&server, BOTH).await.expect_err("fails closed");
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(body["error"], "budget_unavailable");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_service_credential_cost_core_refuses_fails_closed_with_no_key_bearer() {
+        let server = cost_core(ResponseTemplate::new(401), allowed(), 0).await;
+        let (status, _) = key_check(
+            &server,
+            KeyBudgetCredentials {
+                service_bearer: Some("service-credential"),
+                key_bearer: None,
+                service_configured: true,
+            },
+        )
+        .await
+        .expect_err("401 decides nothing: fail closed");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn a_cost_core_that_does_not_answer_in_time_fails_closed() {
+        let slow = || allowed().set_delay(std::time::Duration::from_secs(5));
+        // Slow on the key-scope question, and slow on the org-wide question after an allowed key. The
+        // key's own bearer is present, and expects no call: a timed-out answer is no answer, not a path.
+        for (key, org) in [(slow(), allowed()), (allowed(), slow())] {
+            let server = cost_core(key, org, 0).await;
+            let (status, Json(body)) = key_check(
+                &server,
+                KeyBudgetCredentials {
+                    service_bearer: Some("service-credential"),
+                    key_bearer: Some("key-credential"),
+                    service_configured: true,
+                },
+            )
+            .await
+            .expect_err("timed out");
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(body["error"], "budget_unavailable");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_minted_service_bearer_is_reused_and_is_the_only_bearer_cost_core_sees() {
+        use crate::cost_budget_auth::CostBudgetTokenProvider;
+        let auth = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/cost-core/internal-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "service-credential",
+                "expiresInSeconds": 300,
+                "audience": "cost-core"
+            })))
+            .expect(1)
+            .mount(&auth)
+            .await;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/budget/check"))
+            .and(header("authorization", "Bearer service-credential"))
+            .respond_with(allowed())
+            .expect(4)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(header("authorization", "Bearer key-credential"))
+            .respond_with(allowed())
+            .expect(0)
+            .mount(&server)
+            .await;
+        let provider = CostBudgetTokenProvider::new_for_test(
+            auth.uri(),
+            "model-gateway",
+            "fixture-key-aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        // Two turns: each asks cost-core again (no verdict is cached), the bearer is minted once.
+        for _ in 0..2 {
+            let bearer = provider.budget_check_token("org-a").await.expect("minted");
+            key_check(
+                &server,
+                KeyBudgetCredentials {
+                    service_bearer: Some(&bearer),
+                    key_bearer: Some("key-credential"),
+                    service_configured: true,
+                },
+            )
+            .await
+            .expect("within budget for the key and the org");
+        }
     }
 
     #[tokio::test]
@@ -1038,6 +1430,7 @@ mod tests {
                 KeyBudgetCredentials {
                     service_bearer: Some("service-credential"),
                     key_bearer: None,
+                    service_configured: true,
                 },
                 Some(10.0),
                 None,
@@ -1234,5 +1627,108 @@ mod tests {
         assert_eq!(run_token_cap(true, None, None, Some(120)), Some(120));
         // A goal allowance of zero is never the wire's 0 (no cap): it is held at one token.
         assert_eq!(run_token_cap(true, Some(800), Some(500), Some(0)), Some(1));
+    }
+
+    #[tokio::test]
+    async fn a_run_is_listed_as_the_viewer_for_that_run_up_to_the_list_maximum() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/cost/entries"))
+            .and(query_param("run_id", "run-1"))
+            .and(query_param("limit", "1000"))
+            .and(header("authorization", "Bearer fixture-cost-bearer"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [{
+                    "org_id": "org-a",
+                    "user_id": "user-a",
+                    "run_id": "run-1",
+                    "model": "model-a",
+                    "input_tokens": 10,
+                    "output_tokens": 4,
+                    "cost_usd": 0.01,
+                    "created_at": "2026-11-20T10:00:00.123456789Z",
+                    "cost_basis": "metered"
+                }],
+                "count": 1
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let entries = list_run_entries(
+            &reqwest::Client::new(),
+            &server.uri(),
+            "fixture-cost-bearer",
+            "run-1",
+        )
+        .await
+        .expect("cost-core lists the run");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].model, "model-a");
+        assert_eq!((entries[0].input_tokens, entries[0].output_tokens), (10, 4));
+    }
+
+    #[tokio::test]
+    async fn a_refused_garbled_or_late_run_list_is_no_list() {
+        let server = MockServer::start().await;
+        for (run_id, response) in [
+            ("missing", ResponseTemplate::new(404)),
+            ("refused", ResponseTemplate::new(401)),
+            (
+                "garbled",
+                ResponseTemplate::new(200).set_body_string("not a list"),
+            ),
+            (
+                "late",
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "entries": [], "count": 0 }))
+                    .set_delay(std::time::Duration::from_secs(3)),
+            ),
+        ] {
+            Mock::given(method("GET"))
+                .and(path("/api/v1/cost/entries"))
+                .and(query_param("run_id", run_id))
+                .respond_with(response)
+                .mount(&server)
+                .await;
+        }
+
+        let client = reqwest::Client::new();
+        for run_id in ["missing", "refused", "garbled", "late"] {
+            assert!(
+                list_run_entries(&client, &server.uri(), "fixture-cost-bearer", run_id)
+                    .await
+                    .is_none(),
+                "{run_id} keeps no list"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn no_run_list_is_asked_without_a_usable_bearer_or_a_run() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/cost/entries"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "entries": [] })),
+            )
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        assert!(list_run_entries(&client, &server.uri(), "", "run-1")
+            .await
+            .is_none());
+        assert!(
+            list_run_entries(&client, &server.uri(), "bad token", "run-1")
+                .await
+                .is_none()
+        );
+        assert!(
+            list_run_entries(&client, &server.uri(), "fixture-cost-bearer", "  ")
+                .await
+                .is_none()
+        );
     }
 }

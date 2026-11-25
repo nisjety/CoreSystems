@@ -544,6 +544,7 @@ async fn screen_verdict<C: crate::semantic_screening::InjectionClassifier + ?Siz
         return screen_verdict_response(
             trust,
             defense.mode,
+            defense.fail_mode,
             &deterministic,
             false,
             SEMANTIC_NOT_RUN,
@@ -566,16 +567,19 @@ async fn screen_verdict<C: crate::semantic_screening::InjectionClassifier + ?Siz
     screen_verdict_response(
         screen.trust,
         screen.mode,
+        defense.fail_mode,
         &screen.screening,
         screen.withhold,
         screen.outcome.label(),
     )
 }
 
-/// The wire shape of one verdict: the posture, the hash and the rule ids, never the content.
+/// The wire shape of one verdict: the posture, the hash and the rule ids, never the content. It names the
+/// org's fail mode in force, so the caller knows what a failed ask of this org reads as (F-f04-13).
 fn screen_verdict_response(
     trust: crate::moderation::TrustClass,
     mode: crate::moderation::ScreeningMode,
+    fail_mode: crate::moderation::FailMode,
     screening: &crate::moderation::ScreeningOutcome,
     withhold: bool,
     semantic_outcome: &str,
@@ -593,6 +597,15 @@ fn screen_verdict_response(
             .map(|id| (*id).to_owned())
             .collect(),
         mode: mode.as_wire().to_owned(),
+        fail_mode: fail_mode_wire(fail_mode).to_owned(),
+    }
+}
+
+/// The wire word of an org's fail mode: `open` or `degraded`, exactly as `injection_defense` words it.
+fn fail_mode_wire(fail_mode: crate::moderation::FailMode) -> &'static str {
+    match fail_mode {
+        crate::moderation::FailMode::Open => "open",
+        crate::moderation::FailMode::Degraded => "degraded",
     }
 }
 
@@ -795,8 +808,9 @@ async fn publish_usage_envelope(
     zdr: bool,
     min_privacy_tier: i32,
     cost_basis: crate::pricing::CostBasis,
+    run_id: Option<&str>,
 ) {
-    publish_usage_envelope_via(
+    publish_usage_envelope_for_run(
         state,
         request_id,
         org_id,
@@ -807,6 +821,7 @@ async fn publish_usage_envelope(
         min_privacy_tier,
         cost_basis,
         "grpc",
+        run_id,
     )
     .await;
 }
@@ -826,10 +841,54 @@ pub(crate) async fn publish_usage_envelope_via(
     cost_basis: crate::pricing::CostBasis,
     transport: &str,
 ) {
+    publish_usage_envelope_for_run(
+        state,
+        request_id,
+        org_id,
+        infer,
+        latency_ms,
+        user_id,
+        zdr,
+        min_privacy_tier,
+        cost_basis,
+        transport,
+        None,
+    )
+    .await;
+}
+
+/// Whether a usage envelope names its run: the turn-usage switch that the chat rows read,
+/// `MODEL_GATEWAY_TURN_USAGE_COMPLETE` (see `sse.rs`). It is read as the strict literal `true`, per
+/// call, so a restart is not needed to turn it off.
+pub(crate) fn usage_envelope_names_run() -> bool {
+    std::env::var(crate::sse::TURN_USAGE_COMPLETE_ENV)
+        .ok()
+        .as_deref()
+        == Some("true")
+}
+
+/// [`publish_usage_envelope_via`] naming the run the call belongs to, when the caller has one
+/// (P2-mg-07-rel1). The envelope names the run only while [`usage_envelope_names_run`] holds. With
+/// the switch off the row is the one an older gateway wrote, so the run endpoint sums nothing new
+/// for this call. A ZDR call publishes nothing, as before.
+#[allow(clippy::too_many_arguments)] // provenance and cost basis ride beside the usage counters
+pub(crate) async fn publish_usage_envelope_for_run(
+    state: &AppState,
+    request_id: &str,
+    org_id: &str,
+    infer: &InferResponse,
+    latency_ms: u64,
+    user_id: &str,
+    zdr: bool,
+    min_privacy_tier: i32,
+    cost_basis: crate::pricing::CostBasis,
+    transport: &str,
+    run_id: Option<&str>,
+) {
     if zdr {
         return;
     }
-    let usage_envelope = Envelope {
+    let mut usage_envelope = Envelope {
         event_id: new_ulid(),
         event_type: "USAGE_ENVELOPE".to_owned(),
         schema_version: 1,
@@ -869,6 +928,11 @@ pub(crate) async fn publish_usage_envelope_via(
         ..Default::default()
     };
 
+    // The run the call belongs to, named only under the turn-usage switch
+    // (see `usage_envelope_names_run`).
+    if let Some(run_id) = run_id.filter(|_| usage_envelope_names_run()) {
+        usage_envelope.payload["run_id"] = serde_json::json!(run_id);
+    }
     if let Err(error) = state
         .publisher
         .publish(&subjects::usage_subject(org_id), &usage_envelope)
@@ -1193,6 +1257,7 @@ impl ModelGateway for GatewayService {
             req.min_privacy_tier,
             crate::pricing::CostBasis::of_route(&req.provider, &req.subscription_connection_id)
                 .served_by(&infer.provider_used),
+            Some(session_run.run_id.as_str()),
         )
         .await;
 
@@ -6272,6 +6337,52 @@ mod tests {
         assert_direct_managed_terminal(&lifecycle, TerminalOutcome::Completed, "");
     }
 
+    /// The gRPC invoke is a direct run, and its usage row names that run (P2-mg-07-rel1). Under the
+    /// turn-usage switch the row carries the run the terminal receipt closed; with the switch off it
+    /// names none.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn invoke_usage_envelope_names_its_run_only_under_the_turn_switch() {
+        fn usage_rows(publisher: &DynPublisher) -> Vec<Envelope> {
+            let DynPublisher::InMemory(publisher) = publisher else {
+                panic!("the test harness publishes in memory");
+            };
+            publisher
+                .drain()
+                .into_iter()
+                .map(|(_, envelope)| envelope)
+                .filter(|envelope| envelope.event_type == "USAGE_ENVELOPE")
+                .collect()
+        }
+
+        std::env::set_var("MODEL_GATEWAY_TURN_USAGE_COMPLETE", "true");
+        let (service, publisher, lifecycle) = test_service_with_lifecycle(MockInferenceOk).await;
+        service
+            .invoke(authenticated(make_request("hello")))
+            .await
+            .expect("invoke ok");
+        std::env::remove_var("MODEL_GATEWAY_TURN_USAGE_COMPLETE");
+        let rows = usage_rows(publisher.as_ref());
+        let run_id = {
+            let receipts = lifecycle.terminal_outcomes.lock().unwrap();
+            receipts[0].1.run_id.clone()
+        };
+        assert_eq!(rows.len(), 1, "one usage row per invoke: {rows:?}");
+        assert_eq!(rows[0].payload["run_id"], run_id.as_str());
+
+        let (service, publisher, _lifecycle) = test_service_with_lifecycle(MockInferenceOk).await;
+        service
+            .invoke(authenticated(make_request("hello")))
+            .await
+            .expect("invoke ok");
+        let rows = usage_rows(publisher.as_ref());
+        assert_eq!(rows.len(), 1, "one usage row per invoke: {rows:?}");
+        assert!(
+            rows[0].payload.get("run_id").is_none(),
+            "no run is named with the switch off: {rows:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_model_the_policy_refuses_is_refused_before_any_run_exists_on_both_invoke_rpcs() {
         let (service, publisher, lifecycle) = test_service_with_lifecycle(MockInferenceOk).await;
@@ -6666,6 +6777,58 @@ mod screen_content_tests {
         assert_eq!(response.posture, "flagged");
         assert_eq!(response.semantic_outcome, "not-run");
         assert!(!response.withhold);
+    }
+
+    /// F-f04-13: the verdict names the org's fail mode in force, whichever inline reading is on, so the Do loop
+    /// knows what a failed ask of this org reads as.
+    #[tokio::test]
+    async fn the_verdict_names_the_org_fail_mode() {
+        let semaphore = tokio::sync::Semaphore::new(4);
+        for (fail_mode, wire) in [(FailMode::Open, "open"), (FailMode::Degraded, "degraded")] {
+            let defense = InjectionDefense {
+                enabled: true,
+                mode: ScreeningMode::Frame,
+                fail_mode,
+            };
+            let response = screen_verdict(
+                PAGE,
+                "web_fetch",
+                scanned(PAGE),
+                defense,
+                false,
+                None::<(&CountingClassifier, usize)>,
+                &semaphore,
+            )
+            .await;
+            assert_eq!(response.fail_mode, wire, "{fail_mode:?}");
+        }
+    }
+
+    /// F-f04-13: a ZDR verdict under enforce withholds a flagged web result with no classifier call, and names the
+    /// fail mode it was made under.
+    #[tokio::test]
+    async fn a_zdr_verdict_under_enforce_withholds_and_names_the_fail_mode() {
+        let classifier = CountingClassifier::answering(r#"{"flagged":false}"#);
+        let semaphore = tokio::sync::Semaphore::new(4);
+        let defense = InjectionDefense {
+            enabled: true,
+            mode: ScreeningMode::Enforce,
+            fail_mode: FailMode::Degraded,
+        };
+        let response = screen_verdict(
+            FLAGGED_PAGE,
+            "web_fetch",
+            scanned(FLAGGED_PAGE),
+            defense,
+            true,
+            Some((&classifier, 1)),
+            &semaphore,
+        )
+        .await;
+        assert_eq!(classifier.calls(), 0);
+        assert!(response.withhold);
+        assert_eq!(response.fail_mode, "degraded");
+        assert_eq!(response.mode, "enforce");
     }
 
     #[tokio::test]

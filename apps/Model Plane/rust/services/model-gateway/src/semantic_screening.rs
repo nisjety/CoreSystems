@@ -2101,6 +2101,67 @@ mod tests {
         );
     }
 
+    /// F-f04-11: a turn's forced web search and its tool loop draw on one budget. The forced search's result is one
+    /// inline call, and the loop's results spend what is left of the same cap.
+    #[tokio::test]
+    async fn a_forced_search_result_and_the_loop_share_one_classifier_budget() {
+        let budget = ClassifierBudget::new(2);
+        let classifier = FakeClassifier::ok(&injection_json(true));
+        // The forced search's own result: clean on the deterministic scan, flagged by the classifier.
+        let forced = inline(
+            "the forced search's hits, summarised",
+            TrustClass::ExternalWeb,
+            clean(),
+            false,
+            ScreeningMode::Tighten,
+            FailMode::Open,
+            &budget,
+            &classifier,
+        )
+        .await;
+        assert!(matches!(forced.outcome, InjectionOutcome::Completed(_)));
+        assert_eq!(forced.screening.posture, ScreeningPosture::Flagged);
+        assert_eq!(
+            classifier.call_count(),
+            1,
+            "the forced search's result reaches the classifier once"
+        );
+
+        // The loop's first result takes the second call of the cap; its second finds the cap spent.
+        let first_loop = inline(
+            "a result the tool loop read",
+            TrustClass::ExternalWeb,
+            clean(),
+            false,
+            ScreeningMode::Tighten,
+            FailMode::Open,
+            &budget,
+            &classifier,
+        )
+        .await;
+        assert!(matches!(first_loop.outcome, InjectionOutcome::Completed(_)));
+        let second_loop = inline(
+            "a second result the tool loop read",
+            TrustClass::ExternalWeb,
+            clean(),
+            false,
+            ScreeningMode::Tighten,
+            FailMode::Open,
+            &budget,
+            &classifier,
+        )
+        .await;
+        assert_eq!(
+            second_loop.outcome,
+            InjectionOutcome::Skipped(InjectionSkipReason::Capped)
+        );
+        assert_eq!(
+            classifier.call_count(),
+            2,
+            "the capped result never reaches the classifier"
+        );
+    }
+
     #[tokio::test]
     async fn partial_coverage_is_not_a_clean_claim() {
         let recording = RecordingClassifier::default();

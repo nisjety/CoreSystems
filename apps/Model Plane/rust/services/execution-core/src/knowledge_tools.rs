@@ -22,7 +22,7 @@
 #![allow(clippy::missing_errors_doc, clippy::doc_markdown)]
 
 use mp_contracts::dataplane::retrieval_v2::{
-    retrieval_service_client::RetrievalServiceClient, RetrieveRequest, RetrieveResponse,
+    retrieval_service_client::RetrievalServiceClient, Filters, RetrieveRequest, RetrieveResponse,
 };
 use serde::Serialize;
 use std::time::Duration;
@@ -170,6 +170,10 @@ impl KnowledgeClient {
         // The Control decision a Space-scoped run searches under (WS18-S5). `None` is the
         // organisation's own search, exactly as before.
         space_decision: Option<&str>,
+        // The documents the person attached to the run's Do turn (F-f09-05,
+        // `RunAgentRequest.context_document_ids`). Empty is the search as it was; see
+        // [`narrow_to_documents`].
+        document_ids: &[String],
     ) -> Result<String, String> {
         let top_k = top_k.clamp(1, MAX_TOP_K);
         let mut request = build_request(
@@ -182,6 +186,7 @@ impl KnowledgeClient {
             min_privacy_tier,
             bearer,
         )?;
+        narrow_to_documents(request.get_mut(), document_ids);
         if let Some(decision) = space_decision {
             let decision = MetadataValue::try_from(decision)
                 .map_err(|_| "knowledge retrieval decision is malformed".to_owned())?;
@@ -198,6 +203,23 @@ impl KnowledgeClient {
             .into_inner();
         Ok(format_candidates(query, &response))
     }
+}
+
+/// Narrows one `Retrieve` to the documents the person attached to the run's Do turn (F-f09-05).
+///
+/// The ids come from the run's own request (`RunAgentRequest.context_document_ids`, admitted by
+/// the gateway), never from the model's tool input, so a model cannot widen or replace them. They
+/// are set as `filters.document_ids`; a Space run's decision header still applies on top, so both
+/// narrow and neither replaces the other, and the Data Plane applies the person's own access to
+/// each document. Empty leaves the request untouched, exactly the one sent before the field existed.
+pub(crate) fn narrow_to_documents(request: &mut RetrieveRequest, document_ids: &[String]) {
+    if document_ids.is_empty() {
+        return;
+    }
+    request
+        .filters
+        .get_or_insert_with(Filters::default)
+        .document_ids = document_ids.to_vec();
 }
 
 fn build_request(
@@ -664,6 +686,7 @@ pub(crate) mod tests {
                 0,
                 "signed-token",
                 None,
+                &[],
             )
             .await
             .expect("the stub answers");
@@ -678,6 +701,7 @@ pub(crate) mod tests {
                 0,
                 "signed-token",
                 None,
+                &[],
             )
             .await
             .expect("the stub answers");
@@ -711,6 +735,7 @@ pub(crate) mod tests {
                 0,
                 "signed-token",
                 Some("decision-1"),
+                &[],
             )
             .await
             .expect("the stub answers");
@@ -725,6 +750,7 @@ pub(crate) mod tests {
                 0,
                 "signed-token",
                 None,
+                &[],
             )
             .await
             .expect("the stub answers");
@@ -740,6 +766,7 @@ pub(crate) mod tests {
                     0,
                     "signed-token",
                     Some("bad\ndecision"),
+                    &[],
                 )
                 .await
                 .is_err(),
@@ -749,6 +776,95 @@ pub(crate) mod tests {
         assert_eq!(seen.len(), 2, "the refused decision sent no Retrieve");
         assert_eq!(seen[0].space_decision.as_deref(), Some("decision-1"));
         assert_eq!(seen[1].space_decision, None);
+    }
+
+    /// F-f09-05: a Do turn's attached documents narrow the search as `filters.document_ids`, beside a Space
+    /// decision (both apply, neither replaces the other); a search with none is the request it was, with no filters.
+    #[tokio::test]
+    async fn attached_documents_narrow_the_retrieve_and_none_leave_it_unchanged() {
+        let (endpoint, seen) = spawn_stub(Answer::Success).await;
+        let client = KnowledgeClient {
+            client: RetrievalServiceClient::new(
+                Endpoint::from_shared(endpoint)
+                    .expect("stub endpoint")
+                    .connect_lazy(),
+            ),
+        };
+        let documents = vec!["doc-1".to_owned(), "doc-2".to_owned()];
+        for (decision, ids) in [
+            (None, documents.as_slice()),
+            (Some("decision-1"), documents.as_slice()),
+            (None, &[][..]),
+        ] {
+            client
+                .search(
+                    "org-a",
+                    "user-a",
+                    "query",
+                    5,
+                    false,
+                    false,
+                    0,
+                    "signed-token",
+                    decision,
+                    ids,
+                )
+                .await
+                .expect("the stub answers");
+        }
+        let seen = seen.lock().expect("seen lock").clone();
+        assert_eq!(seen.len(), 3, "one Retrieve per search");
+        let narrowed = seen[0].filters.as_ref().expect("narrowed");
+        assert_eq!(narrowed.document_ids, documents);
+        assert!(narrowed.workspace_ids.is_empty() && narrowed.sources.is_empty());
+        assert_eq!(seen[0].space_decision, None);
+        assert_eq!(
+            seen[1]
+                .filters
+                .as_ref()
+                .map(|filters| filters.document_ids.clone()),
+            Some(documents.clone()),
+            "a Space run keeps the documents"
+        );
+        assert_eq!(
+            seen[1].space_decision.as_deref(),
+            Some("decision-1"),
+            "and its Space narrowing"
+        );
+        assert_eq!(
+            seen[2].filters, None,
+            "no documents, no filters: the request it was"
+        );
+    }
+
+    #[test]
+    fn narrowing_to_no_documents_leaves_the_request_byte_identical() {
+        let built = || {
+            build_request(
+                "org-a",
+                "user-a",
+                "query",
+                5,
+                false,
+                false,
+                0,
+                "signed-token",
+            )
+            .expect("build authenticated request")
+            .into_inner()
+        };
+        let mut untouched = built();
+        narrow_to_documents(&mut untouched, &[]);
+        assert_eq!(
+            prost::Message::encode_to_vec(&untouched),
+            prost::Message::encode_to_vec(&built())
+        );
+        let mut narrowed = built();
+        narrow_to_documents(&mut narrowed, &["doc-1".to_owned()]);
+        assert_eq!(
+            narrowed.filters.map(|filters| filters.document_ids),
+            Some(vec!["doc-1".to_owned()])
+        );
     }
 
     /// The header reads absent, empty and decided runs apart: absent is the organisation's own
@@ -861,6 +977,8 @@ pub(crate) mod tests {
         zdr_mode: Option<String>,
         /// The `x-space-decision` the request carried, if it scoped the search to a Space.
         space_decision: Option<String>,
+        /// The `filters` the request carried (F-f09-05: a Do turn's attached documents).
+        filters: Option<Filters>,
     }
 
     struct StubRetrieval {
@@ -894,6 +1012,7 @@ pub(crate) mod tests {
                     .get(SPACE_DECISION_HEADER)
                     .and_then(|value| value.to_str().ok())
                     .map(str::to_owned),
+                filters: request.get_ref().filters.clone(),
             });
             match self.answer {
                 Answer::Unauthenticated => {

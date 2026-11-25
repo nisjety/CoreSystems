@@ -755,6 +755,8 @@ pub async fn execute_step(
         false,
         // ... and has no run that could wait for the answer to a server's form.
         false,
+        // ... and no run, so no attached documents narrow its search (F-f09-05).
+        &[],
     )
     .await
 }
@@ -843,6 +845,8 @@ pub(crate) async fn execute_step_with_browser_grant(
         side_call,
         // The single-step RPC has no run that could wait for the answer to a server's form.
         false,
+        // The single-step RPC carries no Do turn, so no attached documents narrow it (F-f09-05).
+        &[],
     )
     .await
 }
@@ -922,6 +926,9 @@ pub(crate) async fn execute_step_with_subagent(
         None,
         // ... and none of its MCP calls may carry a server's form.
         false,
+        &[],
+        // ... and names no Space.
+        "",
     )
     .await
 }
@@ -981,6 +988,13 @@ pub(crate) async fn execute_step_with_result_handles(
     // Whether this call's MCP server may ask the run's owner a form (EP-4 S7): true only for an agent
     // loop whose run `mcp_gateway::allow_elicitation` admitted. Every other caller passes false.
     allow_elicitation: bool,
+    // The documents the person attached to the run's Do turn (F-f09-05, `RunAgentRequest.context_document_ids`):
+    // every `knowledge_search` of the run is narrowed to them. The agent loop passes its run's (a delegated child
+    // shares its parent's request); a caller with no run passes none.
+    knowledge_documents: &[String],
+    // The run's Space, `RunAgentRequest.space_id`; empty outside a Space. The agent loop passes its run's, so the web
+    // tools name it to org-core for their site-policy check (F-f03-03). A caller with no run passes none.
+    request_space_id: &str,
 ) -> StepOutcome {
     execute_step_inner(
         tool_name,
@@ -1012,10 +1026,12 @@ pub(crate) async fn execute_step_with_result_handles(
         connector_scope,
         space_retrieval,
         browser,
-        // The agent loop refuses the listing on its own `space_id` before it dispatches.
-        "",
+        // The agent loop refuses the owner listing on its own `space_id` before it dispatches, so a Space-scoped
+        // listing never reaches this call.
+        request_space_id,
         false,
         allow_elicitation,
+        knowledge_documents,
     )
     .await
 }
@@ -1078,6 +1094,36 @@ fn owner_listing_space<'a>(
     )
 }
 
+/// The screening and provenance of one tool result, judged on its COMPLETE output before anything
+/// downstream summarizes or caps it: the local scan ([`crate::provenance::assess`]), the gateway's verdict
+/// for an external result ([`crate::provenance::screening_client::screen_result`]) and the audit line
+/// ([`crate::provenance::audit`]). The generic dispatch (`execute_step_inner`) and a server's form that
+/// an owner answered, whose held call the resume applies rather than dispatches
+/// (`agent::answer_held_form`, W3-EP-4-S7-b), both call it, so a result reads the same verdict and taint
+/// whichever way it arrived.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the screening inputs are the result and its run identity, passed as the generic dispatch passes them"
+)]
+pub(crate) async fn screen_tool_result(
+    transport: Option<&dyn crate::provenance::screening_client::ScreenTransport>,
+    tool_name: &str,
+    output: String,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    zdr: bool,
+    waived: bool,
+) -> crate::provenance::screening_client::Screened {
+    let local = crate::provenance::assess(tool_name, &output);
+    let screened = crate::provenance::screening_client::screen_result(
+        transport, tool_name, output, local, org_id, user_id, run_id, zdr, waived,
+    )
+    .await;
+    crate::provenance::audit(tool_name, org_id, run_id, zdr, &screened.provenance);
+    screened
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn execute_step_inner(
     tool_name: &str,
@@ -1133,9 +1179,10 @@ async fn execute_step_inner(
     space_retrieval: crate::knowledge_tools::SpaceRetrieval<'_>,
     // The run's browser page dispatch (WS21-S5a); see `execute_step_with_result_handles`.
     browser: Option<&browser_session::BrowserDispatch<'_>>,
-    // The Space the single-step RPC's request names (`ExecuteStepRequest.space_id`); empty for every
-    // other caller. A step can be Space-scoped without a sandbox context (no sandbox bearer is
-    // demanded for `knowledge_list_documents`), so the owner listing reads it too (D2-769).
+    // The Space the step's request names: `ExecuteStepRequest.space_id` for the single-step RPC, the run's
+    // `RunAgentRequest.space_id` for the agent loop; empty for every other caller. A step can be Space-scoped
+    // without a sandbox context (no sandbox bearer is demanded for `knowledge_list_documents`), so the owner
+    // listing reads it too (D2-769). The web tools name it to org-core for their site-policy check (F-f03-03).
     request_space_id: &str,
     // `ExecuteStepRequest.side_call`: an MCP-app call made outside the run loop. Only the single-step
     // RPC sets it, after it checked the name and the posture; this is the same check again.
@@ -1143,6 +1190,8 @@ async fn execute_step_inner(
     // Whether this call's MCP server may ask the run's owner a form (EP-4 S7); see
     // `execute_step_with_result_handles`. Read by the MCP arm only, and never for a side call.
     allow_elicitation: bool,
+    // The documents the person attached to the run's Do turn (F-f09-05); see `execute_knowledge_search`.
+    knowledge_documents: &[String],
 ) -> StepOutcome {
     if side_call && !side_call_admissible(tool_name, permission_mode) {
         return StepOutcome::failed("side_call_invalid: only an mcp__ tool under permission_mode ask");
@@ -1774,6 +1823,7 @@ async fn execute_step_inner(
                 skill_tree
                     .as_deref()
                     .map(crate::skill_mounts::SkillTree::path),
+                crate::auth::bearer_expiry_guard_enabled(),
             )
             .await
         } else {
@@ -1830,15 +1880,15 @@ async fn execute_step_inner(
     } else if matches!(tool_name, WEB_SEARCH_TOOL | QUARRY_MCP_WEB_SEARCH_TOOL) {
         let attribution =
             crate::web_tools::Attribution::for_step_if_enabled(run_id, step_id, zdr || waived);
-        execute_web_search(tool_input, org_id, zdr, attribution).await
+        execute_web_search(tool_input, org_id, request_space_id, zdr, attribution).await
     } else if matches!(tool_name, WEB_FETCH_TOOL | QUARRY_MCP_WEB_READ_TOOL) {
         let attribution =
             crate::web_tools::Attribution::for_step_if_enabled(run_id, step_id, zdr || waived);
-        execute_web_fetch(tool_input, org_id, zdr, attribution).await
+        execute_web_fetch(tool_input, org_id, request_space_id, zdr, attribution).await
     } else if crate::web_tools::is_crawl_tool(tool_name) {
         let attribution =
             crate::web_tools::Attribution::for_step_if_enabled(run_id, step_id, zdr || waived);
-        execute_web_crawl_tool(tool_name, tool_input, org_id, attribution).await
+        execute_web_crawl_tool(tool_name, tool_input, org_id, request_space_id, attribution).await
     } else if tool_name == crate::runtime_loop::owner_reads::TOOL_NAME {
         // The run's Space, as the pre-gate above read it (D2-769). The agent loop refuses on its own
         // `space_id` before it dispatches; this covers every other caller.
@@ -1861,6 +1911,7 @@ async fn execute_step_inner(
             min_privacy_tier,
             data_plane_bearer,
             space_retrieval,
+            knowledge_documents,
         )
         .await
     } else if tool_name == SAVE_MEMORY_TOOL {
@@ -2114,12 +2165,10 @@ async fn execute_step_inner(
     // The gateway's verdict on an external result is asked for here too, before the text is
     // rendered, parked or measured, so a withheld result never reaches the model (WS26-S7).
     let compaction_triggered = output.len() > 2048;
-    let local = crate::provenance::assess(tool_name, &output);
-    let mut screened = crate::provenance::screening_client::screen_result(
+    let mut screened = screen_tool_result(
         crate::provenance::screening_client::production(),
         tool_name,
         output,
-        local,
         org_id,
         user_id,
         run_id,
@@ -2127,7 +2176,6 @@ async fn execute_step_inner(
         waived,
     )
     .await;
-    crate::provenance::audit(tool_name, org_id, run_id, zdr, &screened.provenance);
     // Build plan WS10 S8: a flagged external result of a Space run may be held for a person's
     // review (the model gets a placeholder with no content) or, when a person released this exact
     // call, handed over once. `off`, and every non-Space step, renders exactly as before.
@@ -2487,9 +2535,31 @@ async fn execute_thread_code_interpreter(
     tool_input: &str,
     ro_inputs: Option<std::sync::Arc<crate::run_inputs::InputSet>>,
     skills: Option<&Path>,
+    // The bearer expiry guard (F-f05-15), `auth::bearer_expiry_guard_enabled()` at the call site.
+    bearer_guard: bool,
 ) -> tool_bridge::ToolExecution {
+    // A sandbox bearer about to expire is never sent to sandbox-manager. The call keeps no thread workspace,
+    // and its program runs as an ephemeral one would; the result says the thread's files were not saved.
+    // The bearer is asked again once the thread's lock is held, because the wait for that lock can outlast
+    // the margin, and again before the save, because the program can (P2-ec-10-rel1).
+    if crate::sandbox_lease::workspace_sync::thread_bearer_expiring(
+        bearer_guard,
+        thread.bearer,
+        crate::run_budget::now_epoch_secs(),
+    ) {
+        return run_without_thread_workspace(tool_input, run_id, step_id, ro_inputs, skills).await;
+    }
     let lock = state.thread_lock(org_id, thread.thread_id);
-    let _exclusive = lock.write().await;
+    let exclusive = lock.write().await;
+    if crate::sandbox_lease::workspace_sync::thread_bearer_expiring(
+        bearer_guard,
+        thread.bearer,
+        crate::run_budget::now_epoch_secs(),
+    ) {
+        // The program keeps no workspace, so the thread's other calls are not held behind it.
+        drop(exclusive);
+        return run_without_thread_workspace(tool_input, run_id, step_id, ro_inputs, skills).await;
+    }
     let lease = match crate::sandbox_lease::ensure_thread_lease(
         thread.sandbox_manager_client,
         thread.bearer,
@@ -2530,11 +2600,54 @@ async fn execute_thread_code_interpreter(
         &crate::egress_proxy::CallEgress::off(),
     )
     .await;
-    let report = match workspace.commit().await {
+    // The program may have run past the margin: the save is then refused before the bearer is sent (F-f05-15).
+    let report = match workspace
+        .commit_unless_expiring(bearer_guard, crate::run_budget::now_epoch_secs())
+        .await
+    {
         Ok(report) => report.to_json(),
         Err(failure) => failure.to_json(),
     };
     crate::sandbox_lease::workspace_sync::attach_workspace(execution, report)
+}
+
+/// The thread-scope call a bearer about to expire turns into (F-f05-15). The program runs as a per-call
+/// workspace would, with no thread lease, no hydrate and no save, and the result carries a refused workspace
+/// part. Nothing is sent to sandbox-manager.
+async fn run_without_thread_workspace(
+    tool_input: &str,
+    run_id: &str,
+    step_id: &str,
+    ro_inputs: Option<std::sync::Arc<crate::run_inputs::InputSet>>,
+    skills: Option<&Path>,
+) -> tool_bridge::ToolExecution {
+    tracing::warn!(
+        run_id = %run_id,
+        reason = "bearer_expiring",
+        "thread workspace skipped: the sandbox bearer is about to expire"
+    );
+    let execution = execute_code_interpreter(
+        tool_input,
+        run_id,
+        step_id,
+        None,
+        ro_inputs,
+        skills,
+        None,
+        &crate::egress_proxy::CallEgress::off(),
+    )
+    .await;
+    crate::sandbox_lease::workspace_sync::attach_workspace(execution, skipped_thread_workspace())
+}
+
+/// The workspace part of a result whose thread files were not saved because the sandbox bearer was about to
+/// expire. [`Failure::to_json`] carries the state and the cause, which is what the model reads.
+fn skipped_thread_workspace() -> serde_json::Value {
+    crate::sandbox_lease::workspace_sync::Failure {
+        cause: crate::sandbox_lease::workspace_sync::Cause::Unavailable,
+        message: "the thread workspace was skipped: its credential is about to expire".to_owned(),
+    }
+    .to_json()
 }
 
 /// The S4.2 `process_*` family ([`crate::process_tools`]). Space-scoped by
@@ -2786,6 +2899,7 @@ async fn execute_web_crawl_tool(
     tool_name: &str,
     tool_input: &str,
     org_id: &str,
+    space_id: &str,
     attribution: crate::web_tools::Attribution,
 ) -> tool_bridge::ToolExecution {
     use crate::web_tools::{
@@ -2843,6 +2957,7 @@ async fn execute_web_crawl_tool(
                     input.limit.unwrap_or(crate::web_tools::DEFAULT_MAP_LIMIT),
                     input.include_subdomains,
                     org_id,
+                    space_id,
                 )
                 .await
         }
@@ -2863,7 +2978,7 @@ async fn execute_web_crawl_tool(
             ) {
                 Ok(scope) => {
                     client
-                        .plan_crawl(input.url.trim(), &input.goal, &scope, org_id)
+                        .plan_crawl(input.url.trim(), &input.goal, &scope, org_id, space_id)
                         .await
                 }
                 Err(error) => Err(error),
@@ -2882,6 +2997,7 @@ async fn execute_web_crawl_tool(
                     input.max_depth,
                     input.ingest,
                     org_id,
+                    space_id,
                 )
                 .await
         }
@@ -2889,7 +3005,11 @@ async fn execute_web_crawl_tool(
         BATCH_TOOL if input.urls.len() > MAX_BATCH_URLS => Err(format!(
             "knowledge.batch takes at most {MAX_BATCH_URLS} urls per call"
         )),
-        BATCH_TOOL => client.start_batch(&input.urls, input.ingest, org_id).await,
+        BATCH_TOOL => {
+            client
+                .start_batch(&input.urls, input.ingest, org_id, space_id)
+                .await
+        }
         other => Err(format!("{other} is not a crawl tool")),
     };
     match result {
@@ -2904,6 +3024,7 @@ async fn execute_web_crawl_tool(
 async fn execute_web_search(
     tool_input: &str,
     org_id: &str,
+    space_id: &str,
     zdr: bool,
     attribution: crate::web_tools::Attribution,
 ) -> tool_bridge::ToolExecution {
@@ -2934,6 +3055,7 @@ async fn execute_web_search(
             &input.query,
             input.limit.unwrap_or(MAX_WEB_SEARCH_RESULTS).clamp(1, MAX_WEB_SEARCH_RESULTS),
             org_id,
+            space_id,
             zdr,
         )
         .await
@@ -3317,6 +3439,7 @@ async fn cancel_unasked_form(
 async fn execute_web_fetch(
     tool_input: &str,
     org_id: &str,
+    space_id: &str,
     zdr: bool,
     attribution: crate::web_tools::Attribution,
 ) -> tool_bridge::ToolExecution {
@@ -3335,7 +3458,7 @@ async fn execute_web_fetch(
         }
         Err(error) => return tool_error(format!("web_fetch unavailable: {error}")),
     };
-    match client.fetch(&input.url, org_id, zdr).await {
+    match client.fetch(&input.url, org_id, space_id, zdr).await {
         Ok(output) => tool_bridge::ToolExecution {
             output,
             error: None,
@@ -3424,6 +3547,11 @@ async fn execute_knowledge_search(
     // refused here, before any call, so it can never fall through to the
     // organisation-wide search below.
     space_retrieval: crate::knowledge_tools::SpaceRetrieval<'_>,
+    // The documents the person attached to the run's Do turn (F-f09-05,
+    // `RunAgentRequest.context_document_ids`): every search of the run is narrowed to them, on top
+    // of the Space decision above, never instead of it. They come from the run's request, never from
+    // the tool input, so the model cannot widen them. Empty is the search as it was.
+    knowledge_documents: &[String],
 ) -> tool_bridge::ToolExecution {
     let input = match parse_knowledge_input(tool_input) {
         Ok(i) => i,
@@ -3464,6 +3592,7 @@ async fn execute_knowledge_search(
             min_privacy_tier,
             data_plane_bearer,
             space_decision,
+            knowledge_documents,
         )
         .await
     {
@@ -3526,6 +3655,8 @@ mod knowledge_route_tests {
             0,
             Some("user-token"),
             crate::knowledge_tools::SpaceRetrieval::Withheld,
+            // Attached documents never lift the Space refusal (F-f09-05).
+            &["doc-1".to_owned()],
         )
         .await;
         assert!(out.output.is_empty(), "no result is produced: {}", out.output);
@@ -4480,6 +4611,7 @@ mod connector_tool_tests {
                     "",
                     false,
                     false,
+                    &[],
                 )
                 .await;
                 assert_eq!(out.status, "failed", "{tool} zdr={zdr} waived={waived}");
@@ -4576,6 +4708,7 @@ mod connector_tool_tests {
             None, None, None, false, false, 0, None, None, None, &NoPolicy, None, None, None, None,
             None, None, true, &selected, crate::knowledge_tools::SpaceRetrieval::Organisation, None,
             "", false, false,
+            &[],
         )
         .await;
         assert_eq!(out.status, "failed");
@@ -8436,6 +8569,8 @@ mod held_result_tests {
             crate::knowledge_tools::SpaceRetrieval::Organisation,
             None,
             false,
+            &[],
+            "",
         )
         .await
     }
@@ -8615,5 +8750,196 @@ mod held_result_tests {
             "only a knowledge_search is grounded, whatever its text says"
         );
         assert_eq!(web.output, web_envelope);
+    }
+}
+
+/// F-f05-15: a thread-scope call whose sandbox bearer is about to expire keeps no thread workspace. The guard
+/// is passed in, so both states run here; the switch itself is read once per process.
+#[cfg(test)]
+mod bearer_expiry_guard_tests {
+    use super::*;
+    use crate::sandbox_lease::workspace_sync::ThreadScope;
+    use crate::sandbox_manager_client::SandboxManagerClient;
+    use crate::state::StateStore;
+    use serde_json::{json, Value};
+    use tonic::transport::Endpoint;
+
+    /// The workspace part a skipped call reports.
+    fn skipped_part() -> Value {
+        json!({ "scope": "thread", "state": "refused", "cause": "unavailable" })
+    }
+
+    /// A sandbox-manager client on an endpoint nothing listens on: a call that reaches it fails at once.
+    fn unreachable_sandbox_manager() -> SandboxManagerClient {
+        SandboxManagerClient::new(Endpoint::from_static("http://127.0.0.1:1").connect_lazy())
+    }
+
+    #[test]
+    fn a_skipped_thread_workspace_reports_refused_and_unavailable() {
+        assert_eq!(skipped_thread_workspace(), skipped_part());
+    }
+
+    #[tokio::test]
+    async fn an_expiring_thread_bearer_with_the_guard_off_takes_the_lease_path_as_before() {
+        let state = StateStore::new();
+        let client = unreachable_sandbox_manager();
+        let bearer = crate::run_budget::unsigned_test_token_expiring_at(
+            crate::run_budget::now_epoch_secs() + 5,
+        );
+        let thread = ThreadScope {
+            thread_id: "thread-guard-off",
+            bearer: bearer.as_str(),
+            backend_id: "backend-1",
+            sandbox_manager_client: &client,
+            cas_client: None,
+        };
+        let execution = execute_thread_code_interpreter(
+            thread,
+            &state,
+            false,
+            "org-1",
+            "run-guard-off",
+            "step-1",
+            "{}",
+            None,
+            None,
+            false,
+        )
+        .await;
+        assert!(
+            execution.error.is_some(),
+            "the lease is requested, and the unreachable sandbox-manager fails it"
+        );
+        assert!(execution.output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_expiring_thread_bearer_runs_the_program_without_a_thread_workspace() {
+        if !crate::sandbox::is_supported() {
+            eprintln!("skipping: the OS sandbox is unavailable on this host");
+            return;
+        }
+        let state = StateStore::new();
+        let client = unreachable_sandbox_manager();
+        let bearer = crate::run_budget::unsigned_test_token_expiring_at(
+            crate::run_budget::now_epoch_secs() + 5,
+        );
+        let thread = ThreadScope {
+            thread_id: "thread-guard-on",
+            bearer: bearer.as_str(),
+            backend_id: "backend-1",
+            sandbox_manager_client: &client,
+            cas_client: None,
+        };
+        let input = json!({ "language": "python", "code": "print(1)" }).to_string();
+        let execution = execute_thread_code_interpreter(
+            thread,
+            &state,
+            false,
+            "org-1",
+            "run-guard-on",
+            "step-1",
+            &input,
+            None,
+            None,
+            true,
+        )
+        .await;
+        assert!(execution.error.is_none(), "{:?}", execution.error);
+        let result: Value = serde_json::from_str(&execution.output).expect("the result is JSON");
+        assert_eq!(result["exit_code"].as_i64(), Some(0));
+        assert_eq!(result["workspace"], skipped_part());
+        assert!(
+            state
+                .thread_lease("run-guard-on", "thread-guard-on")
+                .is_none(),
+            "no thread lease was taken"
+        );
+    }
+
+    /// Sandbox-manager on a local port that counts each connection it is given and closes it at once: a call that
+    /// reaches it fails, and the count says whether it was reached.
+    async fn counting_sandbox_manager() -> (
+        SandboxManagerClient,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a local port");
+        let address = listener.local_addr().expect("local address");
+        let connections = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&connections);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        let endpoint =
+            Endpoint::from_shared(format!("http://{address}")).expect("a valid endpoint");
+        (
+            SandboxManagerClient::new(endpoint.connect_lazy()),
+            connections,
+        )
+    }
+
+    /// F-f05-15 (P2-ec-10-rel1): the bearer was outside the margin at entry, but the call waited for the thread's lock
+    /// until it was inside. The lease and the hydrate would send it, so none is sent: the program runs with no thread
+    /// workspace and sandbox-manager is never reached.
+    #[tokio::test]
+    async fn a_bearer_that_expires_while_the_thread_lock_is_awaited_sends_nothing() {
+        let state = StateStore::new();
+        let (client, connections) = counting_sandbox_manager().await;
+        // 22 s of life at entry is outside the 20 s margin. The test holds the lock for 2 s, which leaves the
+        // bearer inside the margin by the time the call gets the lock.
+        let bearer = crate::run_budget::unsigned_test_token_expiring_at(
+            crate::run_budget::now_epoch_secs() + 22,
+        );
+        let thread = ThreadScope {
+            thread_id: "thread-guard-lock",
+            bearer: bearer.as_str(),
+            backend_id: "backend-1",
+            sandbox_manager_client: &client,
+            cas_client: None,
+        };
+        let input = json!({ "language": "python", "code": "print(1)" }).to_string();
+        let lock = state.thread_lock("org-1", "thread-guard-lock");
+        let held = lock.write().await;
+        let release = async {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            drop(held);
+        };
+        let (execution, ()) = tokio::join!(
+            execute_thread_code_interpreter(
+                thread,
+                &state,
+                false,
+                "org-1",
+                "run-guard-lock",
+                "step-1",
+                &input,
+                None,
+                None,
+                true,
+            ),
+            release
+        );
+
+        assert_eq!(
+            connections.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no connection reached sandbox-manager"
+        );
+        assert!(
+            state
+                .thread_lease("run-guard-lock", "thread-guard-lock")
+                .is_none(),
+            "no thread lease was taken"
+        );
+        // Where the OS sandbox runs the program, its result says the thread's files were not saved.
+        if let Ok(result) = serde_json::from_str::<Value>(&execution.output) {
+            assert_eq!(result["workspace"], skipped_part());
+        }
     }
 }

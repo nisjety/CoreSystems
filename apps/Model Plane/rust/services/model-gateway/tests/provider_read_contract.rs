@@ -95,3 +95,53 @@ fn the_ask_loop_reaches_the_read_only_through_the_gate() {
         "the dispatch arm goes through the read's own refusals"
     );
 }
+
+/// P2-mg-10-rel1: the connected-account reads hold the turn's zero-retention rule, which a waived turn meets while the
+/// typed-refusal switch is on. The selection is refused by it (`sse.rs`), and the Ask loop gives the same rule to its
+/// offers and to both dispatch arms, so a turn the selection missed is still not offered or served a read.
+#[test]
+fn the_connected_account_reads_hold_the_turns_zdr_rule_for_a_waived_turn() {
+    let sse = include_str!("../src/sse.rs").replace("\r\n", "\n");
+    assert!(
+        sse.contains("zdr_rule_applies(turn_posture.zdr(), turn_posture.is_waived())"),
+        "the selection is checked with the turn's zero-retention rule"
+    );
+    assert!(
+        sse.contains(
+            "connector_selection(\n        req.connector_scope.as_deref(),\n        connector_zdr,"
+        ),
+        "the selection the rule decides is the one the stream refuses"
+    );
+
+    let text = include_str!("../src/tool_loop.rs").replace("\r\n", "\n");
+    let rounds = function_body(
+        &text,
+        "async fn run_tool_rounds_for_model_with_attachments_inner(",
+    );
+    assert!(
+        rounds.contains("let connector_zdr = crate::zdr_posture::zdr_rule_applies(zdr, data_plane_mode.is_some());"),
+        "the Ask loop derives the rule from the turn's zero-retention flag and its Data Plane mode"
+    );
+    assert!(
+        rounds.contains("connector_reads::offered(\n            connector_reads::enabled(),\n            connector_zdr,"),
+        "the connected-account read is offered on the rule, not on zero retention alone"
+    );
+    assert!(
+        rounds.contains("connector_reads::offered(\n        mp_contracts::custom_rest::enabled(),\n        connector_zdr,"),
+        "the custom REST read is offered on the rule too"
+    );
+
+    let arm = function_body(&text, "async fn dispatch_tool_with_cost(");
+    assert!(
+        arm.contains(
+            "connector_reads::read_outcome(\n                state,\n                connector,\n                crate::zdr_posture::zdr_rule_applies(zdr, data_plane_mode.is_some()),"
+        ),
+        "the read's dispatch arm is given the rule"
+    );
+    assert!(
+        arm.contains(
+            "connector_reads::custom_rest_read_outcome(\n                state,\n                connector,\n                crate::zdr_posture::zdr_rule_applies(zdr, data_plane_mode.is_some()),"
+        ),
+        "the custom REST dispatch arm is given the rule"
+    );
+}

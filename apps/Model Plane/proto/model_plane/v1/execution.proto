@@ -342,8 +342,23 @@ message RunAgentRequest {
   // allowance when that is smaller, only while MODEL_GATEWAY_DO_RUN_CAP is the literal `true`. Execution-core ends the
   // run at the next round boundary once the cap is spent, and only while its own EXECUTION_RUN_TOKEN_CAP is on; an
   // executor that predates the field skips it as an unknown field. Cost is not sent: execution-core cannot price a
-  // round. Field 29 is the next free number on this message.
+  // round.
   uint64 max_run_tokens = 29;
+
+  // The documents the person attached to this Do turn (additive, F-f09-05): opaque document ids, admitted by the
+  // gateway (never on a zero-retention turn) and sent only while MODEL_GATEWAY_DO_CONTEXT_REFS_CARRY is the literal
+  // `true`. Empty = unchanged, exactly as before the field existed. Execution-core narrows every `knowledge_search` of
+  // the run to them (`Filters.document_ids`), together with the run's Space narrowing, never instead of it; a
+  // model-supplied id never widens it. The Data Plane applies the person's own access to each document. Ids only, no
+  // content, and nothing is logged. A continuation's request carries none: execution-core narrows the resumed run to
+  // the ids its pause kept (the approval's retained snapshot or the claimed fold), never to these.
+  repeated string context_document_ids = 30;
+
+  // The skills the person attached to this Do turn, after the turn's explicit picks (additive, F-f09-05): opaque skill
+  // ids, sent under the same switch as `context_document_ids`. Empty = unchanged. Execution-core puts the listed
+  // skills first among the ones it injects, and only skills its own skill listing already shows, still filtered by
+  // the run's `ext_skills`. Field 32 is the next free number on this message.
+  repeated string context_skill_ids = 31;
 }
 
 // WideResearchRequest is what a person asked a wide-research run to cover (Wave 3 EP-2 S8/S9). It only

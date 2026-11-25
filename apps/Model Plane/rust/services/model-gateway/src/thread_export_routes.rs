@@ -14,11 +14,20 @@
 //! envelope `{error:{code,message,details}}` with `details` an object, except a ZDR refusal, which
 //! keeps the catalogue body (with its `feature`) as every ZDR refusal on this gateway does.
 //!
+//! The run summaries take their token totals and model from the cost-core usage ledger when
+//! `MODEL_GATEWAY_THREAD_EXPORT_USAGE` is the literal `true` (F-f10-13). The gateway reads each run's
+//! entries as the viewer, with the viewer's own `aud=cost-core` bearer, for the newest fifty runs, and
+//! never for a zero-retention or waived viewer. Session Core holds no usage, so its zero and empty
+//! values are unknown: with the switch off the copy is as it was, and with it on an unknown value is
+//! `null`, or no `model` key, never zero.
+//!
 //! `POST /v1/threads/import` (EP-12 S15, decision D11) takes such a JSON file back as the request
 //! body and asks Session Core's `ImportThread` to make a new thread of it, owned by the caller. The
 //! file is untrusted input; Session Core parses it strictly and stores every turn as quoted text.
 //! The body is held to [`IMPORT_BODY_LIMIT_BYTES`], Session Core's own file cap. The route shares
 //! the export's switch and answers `{data:{thread_id, imported_messages, dropped}}` with 201.
+
+use std::collections::HashMap;
 
 use axum::{
     body::Bytes,
@@ -28,6 +37,7 @@ use axum::{
     Extension, Json,
 };
 use chrono::Utc;
+use futures::future::join_all;
 use mp_contracts::model_plane::v1::{
     ExportProfile, ExportThreadRequest, ExportThreadResponse, ExportedMessage, ExportedRun,
     ImportThreadRequest,
@@ -36,7 +46,8 @@ use mp_contracts::zdr_refusal::Refusal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use crate::auth::{Claims, VerifiedSessionBearer};
+use crate::auth::{Claims, VerifiedCostBearer, VerifiedSessionBearer};
+use crate::budget::{cost_core_base_url, list_run_entries, RunLedgerEntry, RUN_ENTRIES_LIMIT};
 use crate::http_routes::{authenticated_session_request, timestamp_to_rfc3339, HttpJsonError};
 use crate::state::AppState;
 
@@ -80,6 +91,22 @@ const IMPORT_DISABLED: &str = "thread_import_disabled";
 #[must_use]
 pub fn enabled() -> bool {
     mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
+}
+
+/// The switch for the run usage join (F-f10-13). It sits on top of [`ENABLED_ENV`]: only the literal
+/// `true` turns it on, read at each call. Off, the copy is as it was before the join existed.
+pub const USAGE_ENV: &str = "MODEL_GATEWAY_THREAD_EXPORT_USAGE";
+
+/// Whether the run usage join is on in this process.
+#[must_use]
+pub fn usage_enabled() -> bool {
+    usage_enabled_with(&|key| std::env::var(key).ok())
+}
+
+/// The usage switch's answer, with the environment passed in so the rule is testable without it.
+#[must_use]
+pub fn usage_enabled_with(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
+    mp_contracts::loop_fold::switch_from(lookup(USAGE_ENV).as_deref())
 }
 
 /// The routes, merged into the authed router beside the thread goal.
@@ -166,11 +193,13 @@ pub(crate) struct ExportQuery {
 }
 
 /// `GET /v1/threads/:thread_id/export`. The switch and the ZDR gate come first, then the query,
-/// then Session Core's read; the render comes after the read, so a refused export never renders.
+/// then Session Core's read; the render comes after the read, so a refused export never renders. With
+/// the usage switch on, the ledger's usage is read between the read and the render, as the viewer.
 pub(crate) async fn get_thread_export(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     bearer: VerifiedSessionBearer,
+    cost_bearer: Option<VerifiedCostBearer>,
     Path(thread_id): Path<String>,
     Query(query): Query<ExportQuery>,
 ) -> Result<Response, HttpJsonError> {
@@ -191,10 +220,28 @@ pub(crate) async fn get_thread_export(
         .await
         .map_err(|error| export_error(&error))?
         .into_inner();
+    let ledger = if usage_enabled() {
+        let run_ids: Vec<String> = export.runs.iter().map(|run| run.run_id.clone()).collect();
+        Some(
+            ledger_usages(
+                &state.http_client,
+                &cost_core_base_url(),
+                cost_bearer.as_ref().map(VerifiedCostBearer::as_str),
+                &claims,
+                &run_ids,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    let source = ledger
+        .as_ref()
+        .map_or(UsageSource::Session, UsageSource::Ledger);
     let exported_at = Utc::now().to_rfc3339();
     let body = match format {
-        Format::Json => render_json(&export, profile, &exported_at)?,
-        Format::Markdown => render_markdown(&export, profile, &exported_at)?,
+        Format::Json => render_json(&export, profile, &exported_at, source)?,
+        Format::Markdown => render_markdown(&export, profile, &exported_at, source)?,
     };
     Ok(attachment(format, &export.thread_id, body))
 }
@@ -517,9 +564,12 @@ struct RunJson {
     id: String,
     status: String,
     origin: String,
-    model: String,
-    input_tokens: u64,
-    output_tokens: u64,
+    /// Left out while the model is unknown, so that no empty name stands in for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    /// `null` while unknown: a zero is a count, so it never stands in for an unknown total.
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
     created_at: String,
 }
 
@@ -528,6 +578,7 @@ fn render_json(
     export: &ExportThreadResponse,
     profile: Profile,
     exported_at: &str,
+    source: UsageSource<'_>,
 ) -> Result<String, HttpJsonError> {
     let document = ExportDocument {
         format: FORMAT_ID,
@@ -544,7 +595,11 @@ fn render_json(
             .iter()
             .map(message_json)
             .collect::<Result<Vec<_>, _>>()?,
-        runs: export.runs.iter().map(run_json).collect(),
+        runs: export
+            .runs
+            .iter()
+            .map(|run| run_json(run, source))
+            .collect(),
         truncated: export.truncated,
     };
     serde_json::to_string_pretty(&document).map_err(|_| render_failed())
@@ -562,16 +617,164 @@ fn message_json(message: &ExportedMessage) -> Result<MessageJson, HttpJsonError>
     })
 }
 
-fn run_json(run: &ExportedRun) -> RunJson {
+fn run_json(run: &ExportedRun, source: UsageSource<'_>) -> RunJson {
+    let (model, input_tokens, output_tokens) = run_usage(run, source);
     RunJson {
         id: run.run_id.clone(),
         status: run.status.clone(),
         origin: run.origin.clone(),
-        model: run.model.clone(),
-        input_tokens: run.input_tokens,
-        output_tokens: run.output_tokens,
+        model,
+        input_tokens,
+        output_tokens,
         created_at: timestamp_to_rfc3339(run.created_at.clone()),
     }
+}
+
+/// Where a copy's run summaries take their usage from. `Session` is the switch off: the session's own
+/// summary, which holds zero and an empty model when it does not know them, exactly as the copy has
+/// always written them. `Ledger` is the switch on: the usage the ledger answered for, by run id. A run
+/// the ledger did not answer for is unknown, and an unknown value is written as `null` or left out.
+#[derive(Clone, Copy)]
+enum UsageSource<'a> {
+    Session,
+    Ledger(&'a HashMap<String, LedgerUsage>),
+}
+
+/// The model, input tokens and output tokens a run carries under `source`. `None` is unknown.
+fn run_usage(
+    run: &ExportedRun,
+    source: UsageSource<'_>,
+) -> (Option<String>, Option<u64>, Option<u64>) {
+    match source {
+        UsageSource::Session => (
+            Some(run.model.clone()),
+            Some(run.input_tokens),
+            Some(run.output_tokens),
+        ),
+        UsageSource::Ledger(usages) => {
+            usages.get(&run.run_id).map_or((None, None, None), |usage| {
+                (
+                    usage.model.clone(),
+                    Some(usage.input_tokens),
+                    Some(usage.output_tokens),
+                )
+            })
+        }
+    }
+}
+
+/// What the ledger holds for one run, summed over its entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LedgerUsage {
+    input_tokens: u64,
+    output_tokens: u64,
+    /// The model most of the run's entries name. Absent when no entry names one.
+    model: Option<String>,
+}
+
+/// The most runs the usage join looks up: the newest of the export's runs, which come oldest first.
+/// Each lookup is one cost-core call, so the bound keeps the export's wait bounded. A run past it is
+/// unknown.
+const USAGE_LOOKUP_RUNS: usize = 50;
+
+/// The lookups in flight at once.
+const USAGE_LOOKUP_CONCURRENCY: usize = 8;
+
+/// The usage the ledger holds for the export's runs, read as the viewer. The newest
+/// [`USAGE_LOOKUP_RUNS`] runs are looked up, [`USAGE_LOOKUP_CONCURRENCY`] at a time. A run the ledger
+/// has no entries for, that cost-core does not answer for, or that it answers for with a list too long
+/// to be whole, is absent from the result. A viewer without a verified cost-core bearer, and a viewer
+/// who may not take a copy off the platform, is not looked up at all: the result is empty.
+async fn ledger_usages(
+    http_client: &reqwest::Client,
+    base_url: &str,
+    viewer_bearer: Option<&str>,
+    claims: &Claims,
+    run_ids: &[String],
+) -> HashMap<String, LedgerUsage> {
+    let mut usages = HashMap::new();
+    let Some(bearer) = viewer_bearer else {
+        return usages;
+    };
+    if !usage_lookup_allowed(claims) {
+        return usages;
+    }
+    let newest = &run_ids[run_ids.len().saturating_sub(USAGE_LOOKUP_RUNS)..];
+    for wave in newest.chunks(USAGE_LOOKUP_CONCURRENCY) {
+        let calls = wave
+            .iter()
+            .map(|run_id| lookup_run_usage(http_client, base_url, bearer, run_id));
+        let answers = join_all(calls).await;
+        for (run_id, usage) in wave.iter().zip(answers) {
+            if let Some(usage) = usage {
+                usages.insert(run_id.clone(), usage);
+            }
+        }
+    }
+    usages
+}
+
+/// One run's usage as the ledger holds it, or `None` when cost-core gives no list for it.
+async fn lookup_run_usage(
+    http_client: &reqwest::Client,
+    base_url: &str,
+    bearer: &str,
+    run_id: &str,
+) -> Option<LedgerUsage> {
+    let entries = list_run_entries(http_client, base_url, bearer, run_id).await?;
+    ledger_usage(&entries)
+}
+
+/// Whether the viewer's runs may be read from the ledger at all. A zero-retention or waived viewer's
+/// runs are never looked up: the export refuses such a viewer, and the lookup keeps to the same rule.
+fn usage_lookup_allowed(claims: &Claims) -> bool {
+    matches!(
+        crate::zdr_posture::zdr_or_refuse(claims, &crate::zdr_posture::Route::plain(false)),
+        Ok(false)
+    )
+}
+
+/// One run's usage from its ledger entries: the token totals, and the model most of its entries name.
+/// `None` when the ledger has no entry for the run, and when the list is as long as cost-core answers
+/// with: its older entries may have been cut off, and a short total is not reported as the whole.
+fn ledger_usage(entries: &[RunLedgerEntry]) -> Option<LedgerUsage> {
+    if entries.is_empty() || entries.len() >= RUN_ENTRIES_LIMIT {
+        return None;
+    }
+    let mut oldest_first: Vec<&RunLedgerEntry> = entries.iter().collect();
+    oldest_first.sort_by_key(|entry| entry.created_at);
+    let input_tokens = oldest_first
+        .iter()
+        .fold(0_u64, |sum, entry| sum.saturating_add(entry.input_tokens));
+    let output_tokens = oldest_first
+        .iter()
+        .fold(0_u64, |sum, entry| sum.saturating_add(entry.output_tokens));
+    Some(LedgerUsage {
+        input_tokens,
+        output_tokens,
+        model: modal_model(&oldest_first),
+    })
+}
+
+/// The model the most entries name, blank names left out. A tie goes to the model whose first entry
+/// was recorded first. `oldest_first` is in the order the entries were recorded.
+fn modal_model(oldest_first: &[&RunLedgerEntry]) -> Option<String> {
+    // Each model with its count and the position of its first entry.
+    let mut tally: Vec<(&str, usize, usize)> = Vec::new();
+    for (position, entry) in oldest_first.iter().enumerate() {
+        let model = entry.model.trim();
+        if model.is_empty() {
+            continue;
+        }
+        match tally.iter_mut().find(|(name, _, _)| *name == model) {
+            Some((_, count, _)) => *count += 1,
+            None => tally.push((model, 1, position)),
+        }
+    }
+    tally
+        .into_iter()
+        .max_by(|a, b| a.1.cmp(&b.1).then(b.2.cmp(&a.2)))
+        .map(|(name, _, _)| name.to_owned())
 }
 
 /// A field the copy carries as JSON text. Empty means the turn has none.
@@ -605,6 +808,7 @@ fn render_markdown(
     export: &ExportThreadResponse,
     profile: Profile,
     exported_at: &str,
+    source: UsageSource<'_>,
 ) -> Result<String, HttpJsonError> {
     let heading = or_fallback(one_line(&export.title), "Untitled conversation");
     let thread = one_line(&export.thread_id);
@@ -641,12 +845,13 @@ fn render_markdown(
         out.push_str("| --- | --- | --- | --- | --- |\n");
         for run in &export.runs {
             let started = timestamp_to_rfc3339(run.created_at.clone());
+            let (model, _, _) = run_usage(run, source);
             out.push_str(&format!(
                 "| {} | {} | {} | {} | {} |\n",
                 cell(&run.run_id),
                 cell(&run.status),
                 cell(&run.origin),
-                cell(&run.model),
+                cell(model.as_deref().unwrap_or_default()),
                 cell(&started),
             ));
         }
@@ -801,8 +1006,13 @@ mod tests {
             r#"[{"id":"a1","kind":"document","title":"Plan","content":"Text","version":1}]"#
                 .to_owned();
         answer.metadata_json = r#"{"tool_steps":[]}"#.to_owned();
-        let body = render_json(&thread_copy(vec![answer]), Profile::Full, AT)
-            .expect("the copy renders");
+        let body = render_json(
+            &thread_copy(vec![answer]),
+            Profile::Full,
+            AT,
+            UsageSource::Session,
+        )
+        .expect("the copy renders");
         let positions: Vec<usize> = [
             "\"format\"",
             "\"version\"",
@@ -833,7 +1043,8 @@ mod tests {
     fn markdown_escapes_user_text() {
         let mut copy = thread_copy(vec![turn("user", "<script>alert(1)</script>")]);
         copy.title = "<img src=x onerror=alert(1)>".to_owned();
-        let text = render_markdown(&copy, Profile::Full, AT).expect("the copy renders");
+        let text = render_markdown(&copy, Profile::Full, AT, UsageSource::Session)
+            .expect("the copy renders");
         assert!(!text.contains("<script"), "{text}");
         assert!(!text.contains("<img"), "{text}");
         assert!(text.contains("&lt;script>alert(1)&lt;/script>"), "{text}");
@@ -1002,7 +1213,8 @@ mod tests {
     #[test]
     fn redacted_footer_names_what_is_dropped() {
         let copy = thread_copy(vec![turn("user", "hi")]);
-        let text = render_markdown(&copy, Profile::Redacted, AT).expect("the copy renders");
+        let text = render_markdown(&copy, Profile::Redacted, AT, UsageSource::Session)
+            .expect("the copy renders");
         assert!(text.contains("## Not included"), "{text}");
         assert!(text.contains("Binaries"), "{text}");
         assert!(text.contains("Other branches"), "{text}");
@@ -1014,9 +1226,11 @@ mod tests {
     fn truncated_export_says_so() {
         let mut copy = thread_copy(Vec::new());
         copy.truncated = true;
-        let text = render_markdown(&copy, Profile::Full, AT).expect("the copy renders");
+        let text = render_markdown(&copy, Profile::Full, AT, UsageSource::Session)
+            .expect("the copy renders");
         assert!(text.contains("**Truncated.**"), "{text}");
-        let body = render_json(&copy, Profile::Full, AT).expect("the copy renders");
+        let body =
+            render_json(&copy, Profile::Full, AT, UsageSource::Session).expect("the copy renders");
         let document: Value = serde_json::from_str(&body).expect("the copy is JSON");
         assert_eq!(document["truncated"], true);
     }
@@ -1033,7 +1247,8 @@ mod tests {
             output_tokens: 0,
             created_at: None,
         }];
-        let text = render_markdown(&copy, Profile::Full, AT).expect("the copy renders");
+        let text = render_markdown(&copy, Profile::Full, AT, UsageSource::Session)
+            .expect("the copy renders");
         assert!(text.contains("| run-1 | completed | chat | a\\|b |"), "{text}");
     }
 
@@ -1064,5 +1279,324 @@ mod tests {
         assert_eq!(status_code, StatusCode::BAD_GATEWAY);
         assert_eq!(body["error"]["code"], "thread_export_failed");
         assert!(array_field("{}").is_err(), "an object is not an array");
+    }
+
+    /// A persistent user whose one connection is waived for a turn: a route mismatch on the plain route.
+    fn waived_claims() -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a",
+            "iss": "auth-core",
+            "exp": 4_102_444_800_i64,
+            "org_id": "org-a",
+            "user_id": "user-a",
+            "zdr": false,
+            "org_zdr": true,
+            "zdr_waiver": {
+                "version": 1,
+                "provider": mp_contracts::agentic_subscription::PROVIDER_ID,
+                "connection": "conn-1",
+            },
+            "scopes": ["session:read"],
+        }))
+        .expect("a waived user token decodes")
+    }
+
+    fn run(run_id: &str, model: &str) -> ExportedRun {
+        ExportedRun {
+            run_id: run_id.to_owned(),
+            status: "completed".to_owned(),
+            origin: "chat".to_owned(),
+            model: model.to_owned(),
+            input_tokens: 0,
+            output_tokens: 0,
+            created_at: None,
+        }
+    }
+
+    fn entry(model: &str, input: u64, output: u64, at: &str) -> RunLedgerEntry {
+        RunLedgerEntry {
+            model: model.to_owned(),
+            input_tokens: input,
+            output_tokens: output,
+            created_at: chrono::DateTime::parse_from_rfc3339(at)
+                .expect("a timestamp")
+                .with_timezone(&Utc),
+        }
+    }
+
+    #[test]
+    fn ledger_entries_sum_their_tokens_and_name_the_model_most_of_them_use() {
+        let usage = ledger_usage(&[
+            entry("model-a", 10, 4, "2026-11-20T10:00:00Z"),
+            entry("model-b", 1, 1, "2026-11-20T10:01:00Z"),
+            entry("model-a", 7, 3, "2026-11-20T10:02:00Z"),
+            entry("", 2, 2, "2026-11-20T10:03:00Z"),
+        ])
+        .expect("the ledger knows the run");
+        assert_eq!(
+            usage,
+            LedgerUsage {
+                input_tokens: 20,
+                output_tokens: 10,
+                model: Some("model-a".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn a_model_tie_goes_to_the_model_recorded_first_and_blank_names_do_not_count() {
+        // Listed out of order: the order comes from created_at, not from the list.
+        let usage = ledger_usage(&[
+            entry("model-a", 1, 1, "2026-11-20T10:02:00Z"),
+            entry("model-b", 1, 1, "2026-11-20T10:01:00Z"),
+            entry("model-a", 1, 1, "2026-11-20T10:03:00Z"),
+            entry("model-b", 1, 1, "2026-11-20T10:04:00Z"),
+            entry("  ", 1, 1, "2026-11-20T09:00:00Z"),
+        ])
+        .expect("the ledger knows the run");
+        assert_eq!(usage.model.as_deref(), Some("model-b"));
+        assert_eq!((usage.input_tokens, usage.output_tokens), (5, 5));
+    }
+
+    #[test]
+    fn a_run_with_only_blank_models_has_its_totals_and_no_model() {
+        let usage = ledger_usage(&[entry("", 3, 2, "2026-11-20T10:00:00Z")]).expect("known");
+        assert_eq!(
+            usage,
+            LedgerUsage {
+                input_tokens: 3,
+                output_tokens: 2,
+                model: None,
+            }
+        );
+    }
+
+    #[test]
+    fn no_entries_and_a_list_as_long_as_cost_core_answers_are_unknown() {
+        assert!(ledger_usage(&[]).is_none());
+        let full: Vec<RunLedgerEntry> = (0..RUN_ENTRIES_LIMIT)
+            .map(|_| entry("model-a", 1, 1, "2026-11-20T10:00:00Z"))
+            .collect();
+        assert!(
+            ledger_usage(&full).is_none(),
+            "a list that may be cut short is not totalled"
+        );
+        assert!(ledger_usage(&full[..RUN_ENTRIES_LIMIT - 1]).is_some());
+    }
+
+    #[test]
+    fn with_the_switch_off_a_run_is_written_as_the_session_wrote_it() {
+        let mut copy = thread_copy(Vec::new());
+        copy.runs = vec![run("run-1", "")];
+        let body =
+            render_json(&copy, Profile::Full, AT, UsageSource::Session).expect("the copy renders");
+        assert!(
+            body.contains(
+                "      \"model\": \"\",\n      \"input_tokens\": 0,\n      \"output_tokens\": 0,\n"
+            ),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn with_the_switch_on_an_unknown_run_is_null_or_absent_and_never_zero() {
+        let mut copy = thread_copy(Vec::new());
+        copy.runs = vec![run("run-1", "session-model")];
+        let usages = HashMap::new();
+        let body = render_json(&copy, Profile::Full, AT, UsageSource::Ledger(&usages))
+            .expect("the copy renders");
+        let document: Value = serde_json::from_str(&body).expect("the copy is JSON");
+        assert!(document["runs"][0].get("model").is_none(), "{body}");
+        assert!(document["runs"][0]["input_tokens"].is_null(), "{body}");
+        assert!(document["runs"][0]["output_tokens"].is_null(), "{body}");
+    }
+
+    #[test]
+    fn with_the_switch_on_a_known_run_carries_the_ledgers_totals_and_model() {
+        let mut copy = thread_copy(Vec::new());
+        copy.runs = vec![run("run-1", ""), run("run-2", "")];
+        let usages = HashMap::from([(
+            "run-1".to_owned(),
+            LedgerUsage {
+                input_tokens: 18,
+                output_tokens: 8,
+                model: Some("model-a".to_owned()),
+            },
+        )]);
+        let body = render_json(&copy, Profile::Full, AT, UsageSource::Ledger(&usages))
+            .expect("the copy renders");
+        let document: Value = serde_json::from_str(&body).expect("the copy is JSON");
+        assert_eq!(document["runs"][0]["model"], "model-a");
+        assert_eq!(document["runs"][0]["input_tokens"], 18);
+        assert_eq!(document["runs"][0]["output_tokens"], 8);
+        assert!(document["runs"][1].get("model").is_none(), "{body}");
+        assert!(document["runs"][1]["input_tokens"].is_null(), "{body}");
+    }
+
+    #[test]
+    fn the_markdown_model_cell_is_the_ledgers_model_or_empty_when_unknown() {
+        let mut copy = thread_copy(Vec::new());
+        copy.runs = vec![run("run-1", ""), run("run-2", "")];
+        let usages = HashMap::from([(
+            "run-1".to_owned(),
+            LedgerUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                model: Some("model-a".to_owned()),
+            },
+        )]);
+        let text = render_markdown(&copy, Profile::Full, AT, UsageSource::Ledger(&usages))
+            .expect("the copy renders");
+        assert!(
+            text.contains("| run-1 | completed | chat | model-a |"),
+            "{text}"
+        );
+        assert!(text.contains("| run-2 | completed | chat |  |"), "{text}");
+    }
+
+    #[test]
+    fn the_usage_switch_reads_its_own_name_as_the_strict_literal() {
+        let set =
+            |value: &'static str| move |key: &str| (key == USAGE_ENV).then(|| value.to_owned());
+        assert!(usage_enabled_with(&set("true")));
+        for value in ["TRUE", " true", "1", "on", ""] {
+            assert!(!usage_enabled_with(&set(value)), "{value:?}");
+        }
+        assert!(!usage_enabled_with(&|_| None));
+    }
+
+    #[tokio::test]
+    async fn the_export_reads_each_run_from_the_ledger_as_the_viewer() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/cost/entries"))
+            .and(wiremock::matchers::query_param("run_id", "run-sum"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer fixture-cost-bearer",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+                "entries": [
+                    { "run_id": "run-sum", "model": "model-a", "input_tokens": 10, "output_tokens": 4, "created_at": "2026-11-20T10:00:00Z" },
+                    { "run_id": "run-sum", "model": "model-a", "input_tokens": 7, "output_tokens": 3, "created_at": "2026-11-20T10:01:00Z" },
+                    { "run_id": "run-sum", "model": "model-b", "input_tokens": 1, "output_tokens": 1, "created_at": "2026-11-20T10:02:00Z" }
+                ],
+                "count": 3
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        for (run_id, response) in [
+            (
+                "run-empty",
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(json!({ "entries": [], "count": 0 })),
+            ),
+            ("run-refused", wiremock::ResponseTemplate::new(404)),
+        ] {
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path("/api/v1/cost/entries"))
+                .and(wiremock::matchers::query_param("run_id", run_id))
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+
+        let run_ids = vec![
+            "run-sum".to_owned(),
+            "run-empty".to_owned(),
+            "run-refused".to_owned(),
+        ];
+        let usages = ledger_usages(
+            &reqwest::Client::new(),
+            &server.uri(),
+            Some("fixture-cost-bearer"),
+            &claims(false),
+            &run_ids,
+        )
+        .await;
+        assert_eq!(usages.len(), 1, "{usages:?}");
+        assert_eq!(
+            usages["run-sum"],
+            LedgerUsage {
+                input_tokens: 18,
+                output_tokens: 8,
+                model: Some("model-a".to_owned()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_retention_waived_or_unbound_viewer_makes_no_lookup() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/cost/entries"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(json!({ "entries": [], "count": 0 })),
+            )
+            .expect(0)
+            .mount(&server)
+            .await;
+        let run_ids = vec!["run-1".to_owned()];
+        let client = reqwest::Client::new();
+        for viewer in [claims(true), waived_claims()] {
+            assert!(!usage_lookup_allowed(&viewer));
+            let usages = ledger_usages(
+                &client,
+                &server.uri(),
+                Some("fixture-cost-bearer"),
+                &viewer,
+                &run_ids,
+            )
+            .await;
+            assert!(usages.is_empty());
+        }
+        assert!(usage_lookup_allowed(&claims(false)));
+        let usages = ledger_usages(&client, &server.uri(), None, &claims(false), &run_ids).await;
+        assert!(usages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn only_the_newest_runs_are_looked_up() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/cost/entries"))
+            .respond_with(wiremock::ResponseTemplate::new(404))
+            .expect(USAGE_LOOKUP_RUNS as u64)
+            .mount(&server)
+            .await;
+        let run_ids: Vec<String> = (0..USAGE_LOOKUP_RUNS + 10)
+            .map(|n| format!("run-{n}"))
+            .collect();
+        let usages = ledger_usages(
+            &reqwest::Client::new(),
+            &server.uri(),
+            Some("fixture-cost-bearer"),
+            &claims(false),
+            &run_ids,
+        )
+        .await;
+        assert!(usages.is_empty());
+        let mut asked: Vec<usize> = Vec::new();
+        for request in server
+            .received_requests()
+            .await
+            .expect("requests are recorded")
+        {
+            for (key, value) in request.url.query_pairs() {
+                if key == "run_id" {
+                    asked.push(
+                        value
+                            .trim_start_matches("run-")
+                            .parse()
+                            .expect("a run number"),
+                    );
+                }
+            }
+        }
+        asked.sort_unstable();
+        assert_eq!(asked, (10..USAGE_LOOKUP_RUNS + 10).collect::<Vec<_>>());
     }
 }
