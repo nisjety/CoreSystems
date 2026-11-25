@@ -395,6 +395,9 @@ pub enum ChatEvent {
         /// is 0.0 and the tokens are usage, not spend. `None` where this
         /// layer establishes no cost at all; the key is then omitted.
         cost_basis: Option<crate::pricing::CostBasis>,
+        /// The total mixes calls of more than one basis (see [`crate::usage_meter::Snapshot::mixed`]) and the
+        /// mixed-basis switch is on. `cost_basis` is then absent, and the key `cost_mixed` says why.
+        cost_mixed: bool,
         latency_ms: u64,
         confidence: Option<f64>,
         /// Which provider served the answer, under what declared residency and
@@ -582,6 +585,9 @@ pub enum ChatEvent {
         phase: crate::usage_meter::CallPhase,
         /// The turn so far, the call included.
         snapshot: crate::usage_meter::Snapshot,
+        /// The turn's total mixes calls of more than one basis and the mixed-basis switch is on, so the frame
+        /// states `cost_mixed`. `snapshot.basis` is `None` then, and the key says why.
+        cost_mixed: bool,
         /// The turn's run ceiling, on the frames that carry one (WS27-S6). `None` leaves the frame
         /// as it was before the ceiling existed.
         ceiling: Option<crate::sse_events::run_ceiling::CeilingProgress>,
@@ -1008,6 +1014,7 @@ impl ChatEvent {
                 output_tokens,
                 cost_usd,
                 cost_basis,
+                cost_mixed,
                 latency_ms,
                 confidence,
                 served_by,
@@ -1034,6 +1041,10 @@ impl ChatEvent {
                 // Optional: a client that predates it sees the same payload.
                 if let Some(basis) = cost_basis {
                     usage["cost_basis"] = json!(basis.as_str());
+                }
+                // Stated only where the total mixes calls of more than one basis, under the mixed-basis switch.
+                if *cost_mixed {
+                    usage["cost_mixed"] = json!(true);
                 }
                 // Always stated, so a total is never read as covering calls it does not.
                 usage["calls"] = json!(calls);
@@ -1182,6 +1193,7 @@ impl ChatEvent {
             ChatEvent::UsageProgress {
                 phase,
                 snapshot,
+                cost_mixed,
                 ceiling,
                 routing,
                 routing_decision,
@@ -1199,6 +1211,10 @@ impl ChatEvent {
                 // total would describe one of its calls as if it described all of them.
                 if let Some(basis) = snapshot.basis {
                     payload["cost_basis"] = json!(basis.as_str());
+                }
+                // Stated only where the total mixes calls of more than one basis, under the mixed-basis switch.
+                if *cost_mixed {
+                    payload["cost_mixed"] = json!(true);
                 }
                 // Stated only once a call went unpriced, so a frame whose calls are all priced keeps its shape.
                 if snapshot.unpriced_calls > 0 {
@@ -1533,6 +1549,9 @@ pub struct RichEventSink {
     /// Whether this turn streams a `usage_progress` frame for each call it records (WS27 S3). The
     /// handler that builds the sink sets it once, from the switch, so every site reads one answer.
     usage_progress: bool,
+    /// Whether this turn states `cost_mixed` on a total that mixes bases (`MODEL_GATEWAY_USAGE_MIXED_BASIS`).
+    /// The handler that builds the sink reads the switch once, beside `usage_progress`.
+    usage_mixed_basis: bool,
     /// Whether a run ceiling is tracked on this turn (WS27-S6). A tracked ceiling needs every call
     /// priced and counted, streamed or not, so the sink says whether it records calls at all.
     ceiling_tracked: bool,
@@ -1758,6 +1777,7 @@ impl RichEventSink {
             artifacts: std::sync::Arc::default(),
             overhead: std::sync::Arc::default(),
             usage_progress: false,
+            usage_mixed_basis: false,
             ceiling_tracked: false,
             tally: std::sync::Mutex::new(RunTally::default()),
             timing: None,
@@ -2034,6 +2054,19 @@ impl RichEventSink {
         self.usage_progress
     }
 
+    /// State `cost_mixed` on the frames whose total mixes calls of more than one basis, when `enabled`.
+    #[must_use]
+    pub fn with_usage_mixed_basis(mut self, enabled: bool) -> Self {
+        self.usage_mixed_basis = enabled;
+        self
+    }
+
+    /// Whether this sink states `cost_mixed` on a total that mixes bases.
+    #[must_use]
+    pub fn streams_usage_mixed_basis(&self) -> bool {
+        self.usage_mixed_basis
+    }
+
     /// Attach the turn's run ceiling (WS27-S6), when the handler resolved one. The tracker carries
     /// the switches, so the sink records calls exactly when it holds one.
     #[must_use]
@@ -2078,6 +2111,7 @@ impl RichEventSink {
         if self.usage_progress {
             self.emit(ChatEvent::UsageProgress {
                 phase: call.phase,
+                cost_mixed: self.usage_mixed_basis && snapshot.mixed,
                 snapshot,
                 ceiling,
                 routing,
@@ -2576,6 +2610,7 @@ mod tests {
         }
         .should_emit(&no_features));
         assert!(!ChatEvent::Usage {
+            cost_mixed: false,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             calls: 1,
@@ -2739,6 +2774,7 @@ mod tests {
         }
         .should_emit(&feats));
         assert!(ChatEvent::Usage {
+            cost_mixed: false,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             calls: 1,
@@ -2756,6 +2792,7 @@ mod tests {
         }
         .should_emit(&feats));
         let progress = ChatEvent::UsageProgress {
+            cost_mixed: false,
             phase: crate::usage_meter::CallPhase::ToolRound,
             snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.01))]),
             ceiling: None,
@@ -2845,6 +2882,7 @@ mod tests {
         calls: &[(crate::pricing::CostBasis, Option<f64>)],
     ) -> serde_json::Map<String, Value> {
         ChatEvent::UsageProgress {
+            cost_mixed: false,
             phase: crate::usage_meter::CallPhase::Overhead,
             snapshot: running_total(calls),
             ceiling: None,
@@ -2920,6 +2958,7 @@ mod tests {
     #[test]
     fn usage_progress_is_gated_with_the_usage_family() {
         let event = ChatEvent::UsageProgress {
+            cost_mixed: false,
             phase: crate::usage_meter::CallPhase::Answer,
             snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.25))]),
             ceiling: None,
@@ -2977,6 +3016,126 @@ mod tests {
         assert_eq!(frames_sent(true, &[]).await, 0, "a client that did not ask for usage gets none");
     }
 
+    /// A mixed total states `cost_mixed` on the progress frame of the call that mixed it, and only under the
+    /// mixed-basis switch. A frame of one basis keeps its shape, and so does every frame with the switch off.
+    #[tokio::test]
+    async fn a_progress_frame_states_cost_mixed_only_for_a_mixed_total_under_its_switch() {
+        async fn progress_frames(mixed_switch: bool) -> Vec<String> {
+            use axum::response::IntoResponse as _;
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            let sink = RichEventSink::new(tx, families(&["usage"]), "req-mixed".to_owned())
+                .with_usage_progress(true)
+                .with_usage_mixed_basis(mixed_switch);
+            let metered = crate::usage_meter::CallUsage {
+                phase: crate::usage_meter::CallPhase::ToolRound,
+                model: "gpt-5".into(),
+                provider: "openai".into(),
+                basis: crate::pricing::CostBasis::Metered,
+                input: 1_000,
+                output: 100,
+                cache_read: 0,
+                cache_write: 0,
+                priority: false,
+            };
+            let subscription = crate::usage_meter::CallUsage {
+                phase: crate::usage_meter::CallPhase::Overhead,
+                model: "gpt-5".into(),
+                provider: "codex-subscription".into(),
+                basis: crate::pricing::CostBasis::Subscription,
+                input: 500,
+                output: 50,
+                cache_read: 0,
+                cache_write: 0,
+                priority: false,
+            };
+            let priced = crate::pricing::Priced {
+                usd: Some(0.25),
+                by_category: Some(crate::pricing::CategoryCost {
+                    input_usd: 0.25,
+                    cache_read_usd: 0.0,
+                    cache_write_usd: 0.0,
+                    output_usd: 0.0,
+                }),
+                source: crate::pricing::PriceSource::Exact,
+                note: None,
+            };
+            let free = crate::pricing::Priced {
+                usd: Some(0.0),
+                by_category: None,
+                source: crate::pricing::PriceSource::Subscription,
+                note: None,
+            };
+            sink.record_call(&metered, &priced, None).await;
+            sink.record_call(&subscription, &free, None).await;
+            drop(sink);
+            let body =
+                axum::response::sse::Sse::new(tokio_stream::wrappers::ReceiverStream::new(rx))
+                    .into_response()
+                    .into_body();
+            let bytes = axum::body::to_bytes(body, usize::MAX)
+                .await
+                .expect("the stream body reads");
+            String::from_utf8(bytes.to_vec())
+                .expect("SSE is UTF-8")
+                .split("\n\n")
+                .filter(|frame| frame.contains("event: usage_progress"))
+                .map(str::to_owned)
+                .collect()
+        }
+
+        let on = progress_frames(true).await;
+        assert_eq!(on.len(), 2, "one progress frame per recorded call: {on:?}");
+        assert!(
+            !on[0].contains("cost_mixed"),
+            "one basis is not mixed: {}",
+            on[0]
+        );
+        assert!(on[1].contains("\"cost_mixed\":true"), "{}", on[1]);
+        assert!(
+            !on[1].contains("\"cost_basis\""),
+            "a mixed total states no basis: {}",
+            on[1]
+        );
+
+        let off = progress_frames(false).await;
+        assert_eq!(off.len(), 2, "{off:?}");
+        assert!(
+            off.iter().all(|frame| !frame.contains("cost_mixed")),
+            "the switch is off, so no frame states it: {off:?}"
+        );
+    }
+
+    /// The usage frame states `cost_mixed` only for a total that mixes bases, and a total of one basis keeps
+    /// the shape it had before the key existed.
+    #[test]
+    fn the_usage_frame_states_cost_mixed_only_for_a_mixed_total() {
+        let usage =
+            |cost_basis: Option<crate::pricing::CostBasis>, cost_mixed: bool| ChatEvent::Usage {
+                input_tokens: 1_500,
+                output_tokens: 150,
+                cost_usd: Some(0.25),
+                cost_basis,
+                cost_mixed,
+                latency_ms: 42,
+                confidence: None,
+                served_by: None,
+                retention_class: None,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                calls: 2,
+                unpriced_calls: 0,
+                cost_by_category: None,
+                routing_decision: None,
+            };
+        let mixed = usage(None, true).payload("req-usage");
+        assert_eq!(mixed["cost_mixed"], true, "{mixed}");
+        assert!(mixed.get("cost_basis").is_none(), "{mixed}");
+
+        let single = usage(Some(crate::pricing::CostBasis::Metered), false).payload("req-usage");
+        assert!(single.get("cost_mixed").is_none(), "{single}");
+        assert_eq!(single["cost_basis"], "metered", "{single}");
+    }
+
     /// A sink whose ceiling is enforced counts the calls it is given without a progress stream, and the
     /// tool phase ends once a recorded call takes the run to its cap.
     #[tokio::test]
@@ -3032,6 +3191,7 @@ mod tests {
     #[test]
     fn usage_progress_states_the_ceiling_keys_only_when_it_carries_one() {
         let carried = ChatEvent::UsageProgress {
+            cost_mixed: false,
             phase: crate::usage_meter::CallPhase::ToolRound,
             snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.04))]),
             ceiling: Some(crate::sse_events::run_ceiling::CeilingProgress {
@@ -3112,6 +3272,7 @@ mod tests {
     #[test]
     fn names_and_payload_shapes_are_stable() {
         let usage = ChatEvent::Usage {
+            cost_mixed: false,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             calls: 1,
@@ -3136,6 +3297,7 @@ mod tests {
         assert_eq!(p["cost_basis"], "metered");
 
         let progress = ChatEvent::UsageProgress {
+            cost_mixed: false,
             phase: crate::usage_meter::CallPhase::Answer,
             snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.01))]),
             ceiling: None,
@@ -3355,6 +3517,7 @@ mod tests {
         // A subscription turn keeps `cost_usd` at 0.0 for older clients and
         // says why; a turn with no established basis keeps the old keys.
         let subscription = ChatEvent::Usage {
+            cost_mixed: false,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             calls: 1,
@@ -3375,6 +3538,7 @@ mod tests {
         assert_eq!(subscription["cost_basis"], "subscription");
         assert_eq!(subscription["input_tokens"], 1_800);
         let unestablished = ChatEvent::Usage {
+            cost_mixed: false,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             calls: 1,
@@ -3414,6 +3578,7 @@ mod tests {
 
     fn usage_with(served_by: Option<ServedBy>) -> serde_json::Value {
         ChatEvent::Usage {
+            cost_mixed: false,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             calls: 1,
@@ -3438,6 +3603,7 @@ mod tests {
 fn usage_carries_cache_tokens_and_omits_them_when_zero() {
     let frame = |read: u32, write: u32| {
         ChatEvent::Usage {
+            cost_mixed: false,
             cache_read_tokens: read,
             cache_write_tokens: write,
             calls: 1,
@@ -3575,6 +3741,7 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
     #[test]
     fn usage_names_its_retention_class_only_when_one_is_stamped() {
         let zdr = ChatEvent::Usage {
+            cost_mixed: false,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             calls: 1,
@@ -3604,6 +3771,7 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
     #[test]
     fn a_waived_usage_frame_states_its_class_and_reason() {
         let waived = ChatEvent::Usage {
+            cost_mixed: false,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             calls: 1,
@@ -3633,6 +3801,7 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
         );
 
         let zdr = ChatEvent::Usage {
+            cost_mixed: false,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             calls: 1,
@@ -3664,6 +3833,7 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
             .unwrap();
         let event = ChatEvent::TurnTiming { report };
         let usage = ChatEvent::Usage {
+            cost_mixed: false,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             calls: 1,
@@ -4043,6 +4213,7 @@ mod payload_contract {
 
     fn usage(full: bool) -> ChatEvent {
         ChatEvent::Usage {
+            cost_mixed: false,
             input_tokens: 12,
             output_tokens: 34,
             cost_usd: full.then_some(0.002),
@@ -4074,6 +4245,22 @@ mod payload_contract {
         }
     }
 
+    /// The terminal usage frame of a total that mixes calls of more than one basis: the full sample with
+    /// `cost_mixed` stated and no `cost_basis`, the shape a mixed total takes under the mixed-basis switch.
+    fn usage_mixed() -> ChatEvent {
+        let mut event = usage(true);
+        if let ChatEvent::Usage {
+            cost_mixed,
+            cost_basis,
+            ..
+        } = &mut event
+        {
+            *cost_mixed = true;
+            *cost_basis = None;
+        }
+        event
+    }
+
     /// A progress frame of a turn whose tokens are fixed, so only its calls, its cost and the optional
     /// keys that go with them vary.
     fn usage_progress(
@@ -4097,8 +4284,10 @@ mod payload_contract {
         routing_decision: Option<Value>,
     ) -> ChatEvent {
         ChatEvent::UsageProgress {
+            cost_mixed: false,
             phase: crate::usage_meter::CallPhase::ToolRound,
             snapshot: crate::usage_meter::Snapshot {
+                mixed: false,
                 calls,
                 input: 2_042,
                 output: 207,
@@ -4118,6 +4307,22 @@ mod payload_contract {
             routing,
             routing_decision,
         }
+    }
+
+    /// The progress frame of a total that mixes calls of more than one basis: `cost_mixed` is stated, the
+    /// snapshot is `mixed`, and no basis is named (the same call as `usage_progress(4, Some(0.25), None, 0)`).
+    fn usage_progress_mixed() -> ChatEvent {
+        let mut event = usage_progress(4, Some(0.25), None, 0);
+        if let ChatEvent::UsageProgress {
+            cost_mixed,
+            snapshot,
+            ..
+        } = &mut event
+        {
+            *cost_mixed = true;
+            snapshot.mixed = true;
+        }
+        event
     }
 
     fn turn_timing(full: bool) -> ChatEvent {
@@ -4279,6 +4484,7 @@ mod payload_contract {
             },
             usage(false),
             usage(true),
+            usage_mixed(),
             usage_progress(1, None, Some(crate::pricing::CostBasis::Subscription), 0),
             usage_progress(
                 3,
@@ -4289,6 +4495,8 @@ mod payload_contract {
             usage_progress(2, None, Some(crate::pricing::CostBasis::Metered), 1),
             // A mixed total states its cost and no basis, which is why the golden must mark `cost_basis` optional.
             usage_progress(4, Some(0.25), None, 0),
+            // The same total under the mixed-basis switch states `cost_mixed` too: the golden records it as optional.
+            usage_progress_mixed(),
             // A frame that states the run ceiling: the share used, and the 80% warning it is the first to carry.
             usage_progress_with_ceiling(
                 3,

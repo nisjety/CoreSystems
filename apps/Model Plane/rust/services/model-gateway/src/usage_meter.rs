@@ -99,6 +99,10 @@ pub struct Snapshot {
     /// `None` before the first call and when calls of different bases are
     /// mixed.
     pub basis: Option<CostBasis>,
+    /// Whether the run's calls span more than one basis (metered, subscription or
+    /// customer-billed). `basis` is then `None`, and a frame that states the mix says so
+    /// through its `cost_mixed` key. A run of one basis, or of no calls, is not mixed.
+    pub mixed: bool,
     /// The parts of `cost_usd`; present exactly when it is.
     pub by_category: Option<CategoryCost>,
 }
@@ -169,11 +173,11 @@ impl UsageMeter {
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {
         let priced = self.unpriced_calls == 0 && self.metered_priced > 0;
-        let basis = match (
-            self.metered_priced > 0 || self.unpriced_calls > 0,
-            self.subscription_calls > 0,
-            self.customer_calls > 0,
-        ) {
+        // An unpriced metered call is still a metered call, so it counts toward the bases.
+        let metered = self.metered_priced > 0 || self.unpriced_calls > 0;
+        let subscription = self.subscription_calls > 0;
+        let customer = self.customer_calls > 0;
+        let basis = match (metered, subscription, customer) {
             (true, false, false) => Some(CostBasis::Metered),
             (false, true, false) => Some(CostBasis::Subscription),
             (false, false, true) => Some(CostBasis::CustomerBilled),
@@ -188,6 +192,7 @@ impl UsageMeter {
             cost_usd: priced.then_some(self.usd),
             unpriced_calls: self.unpriced_calls,
             basis,
+            mixed: u8::from(metered) + u8::from(subscription) + u8::from(customer) > 1,
             by_category: priced.then_some(self.by_category),
         }
     }
@@ -344,7 +349,60 @@ mod tests {
         assert_eq!(mixed.cost_usd, Some(0.25));
         assert_eq!(mixed.input, 1_500);
         assert_eq!(mixed.basis, None, "mixed bases state no basis");
+        assert!(
+            mixed.mixed,
+            "a subscription call beside a metered one is mixed"
+        );
         assert_eq!(mixed.unpriced_calls, 0);
+    }
+
+    #[test]
+    fn a_run_is_mixed_only_when_its_calls_span_more_than_one_basis() {
+        let zero = || Priced {
+            usd: Some(0.0),
+            by_category: None,
+            source: PriceSource::Subscription,
+            note: None,
+        };
+        assert!(
+            !UsageMeter::default().snapshot().mixed,
+            "no calls is not mixed"
+        );
+
+        // Calls of one basis, priced or not, are not mixed.
+        let mut metered = UsageMeter::default();
+        metered.record(&call(CostBasis::Metered, 10, 1, 0, 0), &priced(0.1));
+        let got = metered.record(&call(CostBasis::Metered, 10, 1, 0, 0), &unpriced());
+        assert!(!got.mixed);
+        let mut subscription = UsageMeter::default();
+        subscription.record(&call(CostBasis::Subscription, 10, 1, 0, 0), &zero());
+        assert!(!subscription.snapshot().mixed);
+        let mut customer = UsageMeter::default();
+        customer.record(&call(CostBasis::CustomerBilled, 10, 1, 0, 0), &zero());
+        assert!(!customer.snapshot().mixed);
+
+        // Any two bases together are mixed, and no single basis is stated.
+        for (first, second) in [
+            (CostBasis::Metered, CostBasis::Subscription),
+            (CostBasis::Metered, CostBasis::CustomerBilled),
+            (CostBasis::Subscription, CostBasis::CustomerBilled),
+        ] {
+            let mut meter = UsageMeter::default();
+            meter.record(&call(first, 10, 1, 0, 0), &zero());
+            let got = meter.record(&call(second, 10, 1, 0, 0), &zero());
+            assert!(got.mixed, "{first:?} with {second:?}");
+            assert_eq!(got.basis, None, "{first:?} with {second:?}");
+        }
+
+        // An unpriced metered call beside a subscription call is still a mix.
+        let mut unpriced_mix = UsageMeter::default();
+        unpriced_mix.record(&call(CostBasis::Subscription, 10, 1, 0, 0), &zero());
+        let got = unpriced_mix.record(&call(CostBasis::Metered, 10, 1, 0, 0), &unpriced());
+        assert!(got.mixed);
+        assert_eq!(
+            got.cost_usd, None,
+            "the unpriced call still nulls the total"
+        );
     }
 
     #[test]

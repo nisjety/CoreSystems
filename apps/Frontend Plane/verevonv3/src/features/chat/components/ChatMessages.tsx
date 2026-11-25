@@ -88,6 +88,7 @@ import type {
   ChatSearchProviderId,
   ChatSearchProvenanceEvent,
   ChatSearchRoute,
+  ChatThreadSession,
   MemoryOrigin,
   RecalledMemory,
 } from '@/shared/api/chat-client'
@@ -275,6 +276,8 @@ export function MessageBlock(props: {
   /** The thread already holds the maximum number of pins. */
   pinDisabled?: boolean
   onTogglePin?: () => void
+  /** A fork the person made from this turn: the new thread, with the server's session for it, so the caller can open it (F-f05-21). */
+  onForked?: (threadId: string, session?: ChatThreadSession) => void
   onBranch: () => void
   onCopy: () => void
   onEdit: (text: string) => void
@@ -367,16 +370,27 @@ export function MessageBlock(props: {
   settledFoldChoices?: SettledFoldChoices
   /** The connected-app suggestion card's wiring (EP-10 S8); see `ConnectorSuggestionWiring`. */
   connectorSuggestion?: ConnectorSuggestionWiring
+  /**
+   * The ids of the turns outside the loaded window (F-f01-25). Such a turn stays on screen, but its actions are disabled
+   * until the earlier pages are loaded. Absent on a surface with no paged window.
+   */
+  unloadedTurnIds?: ReadonlySet<string>
+  /**
+   * False on a project thread: its turn actions (regenerate, edit, branch, rewind, fork, continue, rerun and feedback) are
+   * withdrawn, so the answer row offers none of them (F-f06-16). Absent means allowed.
+   */
+  turnActionsAllowed?: boolean
 }) {
   // `<For>` invokes its mapper untracked in Solid 2. Read the store-backed
   // role through a memo so the conditional branch is established in a tracked
   // scope before `<Show>` receives its plain boolean value.
   const isAssistant = createMemo(() => props.message.role === 'assistant')
   const retracted = createMemo(() => props.message.retracted === true)
+  const actionsLocked = createMemo(() => props.unloadedTurnIds?.has(props.message.id) === true)
   return (
     <Show when={!retracted()} fallback={<RetractedMessageNote />}>
-      <Show when={isAssistant()} fallback={<UserMessage {...props} />}>
-        <AssistantMessage {...props} />
+      <Show when={isAssistant()} fallback={<UserMessage {...props} actionsLocked={actionsLocked()} />}>
+        <AssistantMessage {...props} actionsLocked={actionsLocked()} />
       </Show>
     </Show>
   )
@@ -432,6 +446,7 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
         onRegenerate={ctx.onRegenerate}
         citations={ctx.citations}
         temporaryChat={ctx.temporaryChat}
+        turnActionsAllowed={ctx.turnActionsAllowed}
       />
     ),
   },
@@ -610,6 +625,8 @@ export function AnswerRegion(props: {
    * waiting state offers no "Varsle meg når ferdig" for it. Absent = ordinary.
    */
   temporaryChat?: boolean
+  /** False on a project thread: a failed answer offers no retry, since a retry would send the turn again (F-f06-16). */
+  turnActionsAllowed?: boolean
 }) {
   return (
     <Switch>
@@ -630,7 +647,7 @@ export function AnswerRegion(props: {
             action={failed().action}
             retryAt={failed().retryAt}
             connectionId={failed().connectionId}
-            onRetry={props.onRegenerate}
+            onRetry={props.turnActionsAllowed === false ? undefined : props.onRegenerate}
           />
         )}
       </Match>
@@ -670,6 +687,8 @@ export function AssistantMessage(props: {
   /** The thread already holds the maximum number of pins. */
   pinDisabled?: boolean
   onTogglePin?: () => void
+  /** See `MessageBlock`'s doc: a fork from this turn hands the new thread and its session to the caller (F-f05-21). */
+  onForked?: (threadId: string, session?: ChatThreadSession) => void
   onBranch: () => void
   onCopy: () => void
   onFeedback: (rating: 'positive' | 'negative', note?: string) => Promise<boolean>
@@ -711,6 +730,8 @@ export function AssistantMessage(props: {
   rewindUndo?: HiddenTurn[] | null
   /** Undoes that rewind: the leaf returns to the turn it left. */
   onUndoRewind?: () => void
+  /** The turn is outside the loaded window (F-f01-25): its actions wait for the earlier pages. */
+  actionsLocked?: boolean
   /** See `MessageBlock`'s doc — marks the article `data-latest`. */
   isLatest?: boolean
   /** Forwarded into `ConversationNodeContext` — see its own doc for why. */
@@ -733,6 +754,8 @@ export function AssistantMessage(props: {
   settledFoldChoices?: SettledFoldChoices
   /** See `MessageBlock`'s doc. */
   connectorSuggestion?: ConnectorSuggestionWiring
+  /** See `MessageBlock`'s doc: a project thread withholds its turn actions, so the answer row hides them (F-f06-16). */
+  turnActionsAllowed?: boolean
 }) {
   const i18n = useI18n()
   const [reaction, setReaction] = createSignal<'up' | 'down' | null>(null)
@@ -890,6 +913,7 @@ export function AssistantMessage(props: {
       citations: props.message.citations,
       threadId: props.threadId ?? null,
       temporaryChat: props.temporaryChat,
+      turnActionsAllowed: props.turnActionsAllowed,
       docked: props.docked,
     }
     return nodes().map((node) => ({ node, context }))
@@ -1139,8 +1163,13 @@ export function AssistantMessage(props: {
             <MessageAction label={props.copied ? 'Copied' : 'Copy'} onClick={props.onCopy}>
               {props.copied ? <Check size={14} /> : <Copy size={14} />}
             </MessageAction>
-            <Show when={threadForkEnabled() && !props.temporaryChat && Boolean(props.threadId) && props.message.role === 'assistant' && !props.message.streaming}>
-              <ForkAction threadId={props.threadId ?? ''} messageId={props.message.id} />
+            <Show when={threadForkEnabled() && !props.temporaryChat && props.turnActionsAllowed !== false && Boolean(props.threadId) && props.message.role === 'assistant' && !props.message.streaming}>
+              <ForkAction
+                threadId={props.threadId ?? ''}
+                messageId={props.message.id}
+                turnActionsAllowed={props.turnActionsAllowed}
+                onForked={props.onForked}
+              />
             </Show>
             {/* The export is about the whole conversation, so it is offered once: on the latest answer, beside fork. */}
             <Show when={threadExportEnabled() && props.isLatest && Boolean(props.threadId) && !props.message.streaming}>
@@ -1197,20 +1226,22 @@ export function AssistantMessage(props: {
               sits lit right next to a "not saved" notice, which reads as though
               the rating was recorded.
             */}
-            <MessageAction
-              active={reaction() === 'up'}
-              label="Good response"
-              onClick={() => void rate('up', 'positive')}
-            >
-              <ThumbsUp size={14} />
-            </MessageAction>
-            <MessageAction
-              active={reaction() === 'down'}
-              label="Bad response"
-              onClick={onThumbsDown}
-            >
-              <ThumbsDown size={14} />
-            </MessageAction>
+            <Show when={props.turnActionsAllowed !== false}>
+              <MessageAction
+                active={reaction() === 'up'}
+                label="Good response"
+                onClick={() => void rate('up', 'positive')}
+              >
+                <ThumbsUp size={14} />
+              </MessageAction>
+              <MessageAction
+                active={reaction() === 'down'}
+                label="Bad response"
+                onClick={onThumbsDown}
+              >
+                <ThumbsDown size={14} />
+              </MessageAction>
+            </Show>
             <Show when={props.serverVersion}>
               {(badge) => (
                 <div class="verevon-chat-version-switcher" role="group" aria-label={i18n.tr('Svarversjon', 'Answer version')}>
@@ -1244,11 +1275,13 @@ export function AssistantMessage(props: {
                 </div>
               )}
             </Show>
-            <Show when={props.rewindPlan}>
+            <Show when={props.turnActionsAllowed !== false ? props.rewindPlan : undefined}>
               {(plan) => (
                 <>
                   <MessageAction
                     label={i18n.tr('Gå tilbake hit', 'Rewind to here')}
+                    disabled={props.actionsLocked}
+                    disabledTitle={loadEarlierFirstTitle(i18n)}
                     onClick={() => setConfirmingRewind(true)}
                   >
                     <RotateCcw size={14} />
@@ -1323,8 +1356,13 @@ export function AssistantMessage(props: {
                   <span class="verevon-chat-action-note" role="note">
                     Effekt registrert — kan ikke endres
                   </span>
-                  <Show when={props.onRerunAsNewTurn}>
-                    <MessageAction label={i18n.tr('Kjør som ny tur', 'Run as a new turn')} onClick={() => props.onRerunAsNewTurn?.()}>
+                  <Show when={props.onRerunAsNewTurn && props.turnActionsAllowed !== false}>
+                    <MessageAction
+                      label={i18n.tr('Kjør som ny tur', 'Run as a new turn')}
+                      disabled={props.actionsLocked}
+                      disabledTitle={loadEarlierFirstTitle(i18n)}
+                      onClick={() => props.onRerunAsNewTurn?.()}
+                    >
                       <RefreshCw size={14} />
                     </MessageAction>
                   </Show>
@@ -1338,9 +1376,11 @@ export function AssistantMessage(props: {
                   discarding it for a fresh answer. Only ever rendered
                   alongside Regenerate, never instead of it — a person who
                   would rather start over still can. */}
-              <Show when={canContinue() && props.onContinue}>
+              <Show when={canContinue() && props.onContinue && props.turnActionsAllowed !== false}>
                 <MessageAction
                   label={i18n.tr('Fortsett', 'Continue')}
+                  disabled={props.actionsLocked}
+                  disabledTitle={loadEarlierFirstTitle(i18n)}
                   onClick={() => props.onContinue?.()}
                 >
                   <ArrowRight size={14} />
@@ -1351,20 +1391,29 @@ export function AssistantMessage(props: {
                   only appears AFTER the first regenerate — so the one moment a
                   user could learn the feature exists is the moment before they
                   use it, and "Regenerate" alone never told them. */}
-              <MessageAction
-                label={
-                  props.version
-                    ? `Generer på nytt (versjon ${props.version.current}/${props.version.total})`
-                    : 'Generer på nytt — beholder dette svaret som versjon 1'
-                }
-                onClick={props.onRegenerate}
-              >
-                <RefreshCw size={14} />
-              </MessageAction>
+              <Show when={props.turnActionsAllowed !== false}>
+                <MessageAction
+                  label={
+                    props.version
+                      ? `Generer på nytt (versjon ${props.version.current}/${props.version.total})`
+                      : 'Generer på nytt — beholder dette svaret som versjon 1'
+                  }
+                  disabled={props.actionsLocked}
+                  disabledTitle={loadEarlierFirstTitle(i18n)}
+                  onClick={props.onRegenerate}
+                >
+                  <RefreshCw size={14} />
+                </MessageAction>
+              </Show>
             </Show>
             <MessageMenu
               items={[
-                { label: 'Fortsett i ny chat', icon: <MessageSquarePlus size={16} />, onClick: props.onBranch },
+                ...(props.turnActionsAllowed === false ? [] : [{
+                  label: 'Fortsett i ny chat',
+                  icon: <MessageSquarePlus size={16} />,
+                  onClick: props.onBranch,
+                  ...(props.actionsLocked ? { disabled: true, title: loadEarlierFirstTitle(i18n) } : {}),
+                } satisfies MessageMenuItem]),
                 ...(props.onScheduleThis
                   ? [{
                       label: i18n.tr('Planlegg dette', 'Schedule this'),
@@ -1463,7 +1512,7 @@ export function AssistantMessage(props: {
               {readAloudBlockedMessage(i18n.tr)}
             </p>
           </Show>
-          <Show when={showReasons()}>
+          <Show when={showReasons() && props.turnActionsAllowed !== false}>
             <div class="verevon-chat-feedback-reasons" role="group" aria-label={i18n.tr('Hva var galt?', 'What was wrong?')}>
               <span>{i18n.tr('Hva var galt?', 'What was wrong?')}</span>
               <For each={feedbackReasons()}>
@@ -1509,6 +1558,10 @@ export function UserMessage(props: {
   onEdit: (text: string) => void
   onViewAttachments?: (attachmentId: string) => void
   editLocked?: boolean
+  /** The turn is outside the loaded window (F-f01-25): its edit and branch wait for the earlier pages. */
+  actionsLocked?: boolean
+  /** False on a project thread: its edit and branch are withdrawn (F-f06-16). Absent means allowed. */
+  turnActionsAllowed?: boolean
 }) {
   const i18n = useI18n()
   const [editing, setEditing] = createSignal(false)
@@ -1582,25 +1635,39 @@ export function UserMessage(props: {
             <ContextRefChips refs={props.message.contextRefs ?? []} />
           </div>
           <div class="verevon-chat-message-actions verevon-chat-message-actions--user">
-            <Show
-              when={!props.editLocked}
-              fallback={(
-                <span class="verevon-chat-action-note" role="note">
-                  Effektiv tur — redigering lager ny tur
-                </span>
-              )}
-            >
-              <MessageAction label="Rediger" onClick={startEditing}>
-                <Pencil size={14} />
-              </MessageAction>
+            <Show when={props.turnActionsAllowed !== false}>
+              <Show
+                when={!props.editLocked}
+                fallback={(
+                  <span class="verevon-chat-action-note" role="note">
+                    Effektiv tur — redigering lager ny tur
+                  </span>
+                )}
+              >
+                <MessageAction
+                  label="Rediger"
+                  disabled={props.actionsLocked}
+                  disabledTitle={loadEarlierFirstTitle(i18n)}
+                  onClick={startEditing}
+                >
+                  <Pencil size={14} />
+                </MessageAction>
+              </Show>
             </Show>
             <MessageAction label={props.copied ? 'Copied' : 'Copy'} onClick={props.onCopy}>
               {props.copied ? <Check size={14} /> : <Copy size={14} />}
             </MessageAction>
-            <MessageMenu
-              align="end"
-              items={[{ label: 'Fortsett i ny chat', icon: <MessageSquarePlus size={16} />, onClick: props.onBranch }]}
-            />
+            <Show when={props.turnActionsAllowed !== false}>
+              <MessageMenu
+                align="end"
+                items={[{
+                  label: 'Fortsett i ny chat',
+                  icon: <MessageSquarePlus size={16} />,
+                  onClick: props.onBranch,
+                  ...(props.actionsLocked ? { disabled: true, title: loadEarlierFirstTitle(i18n) } : {}),
+                }]}
+              />
+            </Show>
           </div>
         </>
       </Show>
@@ -2609,9 +2676,11 @@ export function ReasoningPopover(props: {
                   <Show when={props.message.confidence != null}><MetricRow label={i18n.tr('Sikkerhet', 'Confidence')} value={`${Math.round((props.message.confidence ?? 0) * 100)}%`} /></Show>
                   {/* A subscription-carried turn has no list-price cost; say so
                       rather than print the wire's placeholder zero. */}
+                  {/* A total that mixes metered and subscription calls says which calls its cost covers (cost_mixed).
+                      Product copy, for review. */}
                   <Show
                     when={props.message.costBasis === 'subscription'}
-                    fallback={<Show when={props.message.costUsd != null}><MetricRow label="Kostnad" value={`$${(props.message.costUsd ?? 0).toFixed(4)}`} /></Show>}
+                    fallback={<Show when={props.message.costUsd != null}><MetricRow label={props.message.costMixed === true ? i18n.tr('Kostnad (kun kall med tokenpris)', 'Cost (token-priced calls only)') : 'Kostnad'} value={`$${(props.message.costUsd ?? 0).toFixed(4)}`} /></Show>}
                   >
                     <MetricRow label="Kostnad" value={i18n.tr('Inkludert i abonnementet', 'Included in the subscription')} />
                   </Show>
@@ -2647,6 +2716,7 @@ export function MetricRow(props: { label: string; value: string }) {
  * at ingestion (the details popover says it is included in the subscription).
  */
 export function MessageMetricsBadge(props: { message: ChatTurn }) {
+  const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
   let ref!: HTMLDivElement
 
@@ -2662,7 +2732,13 @@ export function MessageMetricsBadge(props: { message: ChatTurn }) {
     if (props.message.inputTokens != null) parts.push(`${props.message.inputTokens} in`)
     if (props.message.outputTokens != null) parts.push(`${props.message.outputTokens} out`)
     if (props.message.latencyMs != null) parts.push(formatLatency(props.message.latencyMs))
-    if (props.message.costUsd != null) parts.push(formatUsd(props.message.costUsd))
+    if (props.message.costUsd != null) {
+      const cost = formatUsd(props.message.costUsd)
+      // A mixed total names the calls its cost covers, in the Details row's words (product copy, for review).
+      parts.push(props.message.costMixed === true
+        ? `${i18n.tr('Kostnad (kun kall med tokenpris)', 'Cost (token-priced calls only)')}: ${cost}`
+        : cost)
+    }
     return parts.join(' · ')
   })
 
@@ -5217,7 +5293,8 @@ export function ErrorNotice(props: {
    * VITE_ZDR_WAIVER_UI on, the reader can review and confirm it here (ZDR Z-20) and then send the turn again.
    */
   connectionId?: string
-  onRetry: () => void
+  /** The retry control. Absent where no retry is offered: a failed answer on a project thread (F-f06-16). */
+  onRetry?: () => void
 }) {
   const i18n = useI18n()
   const [reviewOpen, setReviewOpen] = createSignal(false)
@@ -5230,6 +5307,8 @@ export function ErrorNotice(props: {
   // from a countdown started at mount.
   const [now, setNow] = createSignal(Date.now())
   const action = (): StreamFailureAction => props.action ?? 'retry'
+  /** Whether the caller offers a retry at all. Without one the retry control is not rendered. */
+  const retryOffered = (): boolean => props.onRetry !== undefined
   /** Milliseconds before a `wait` may be retried; 0 once it may. */
   const remainingMs = () => {
     if (action() !== 'wait') return 0
@@ -5275,8 +5354,9 @@ export function ErrorNotice(props: {
           </details>
         )}
       </Show>
-      {/* `none`: sending the same turn again cannot help, so nothing is offered. */}
-      <Show when={action() !== 'none'}>
+      {/* `none`: sending the same turn again cannot help, so nothing is offered. The links and the review the action names
+          stay wherever the retry is withheld. */}
+      <Show when={action() !== 'none' && (retryOffered() || action() === 'reconnect' || action() === 'open_integrations')}>
         <div class="verevon-chat-error-notice__actions">
           <Show when={action() === 'reconnect'}>
             <a class="verevon-chat-error-notice__reconnect" href={CHATGPT_CONNECTION_HREF} link>
@@ -5298,16 +5378,18 @@ export function ErrorNotice(props: {
               {waiverCopy().chat_review}
             </button>
           </Show>
-          <button
-            type="button"
-            disabled={waiting()}
-            onClick={() => {
-              if (!waiting()) props.onRetry()
-            }}
-          >
-            <RefreshCw size={14} />
-            {retryLabel()}
-          </button>
+          <Show when={retryOffered()}>
+            <button
+              type="button"
+              disabled={waiting()}
+              onClick={() => {
+                if (!waiting()) props.onRetry?.()
+              }}
+            >
+              <RefreshCw size={14} />
+              {retryLabel()}
+            </button>
+          </Show>
         </div>
       </Show>
       <Show when={canReview() && reviewDone()}>
@@ -5328,14 +5410,32 @@ export function ErrorNotice(props: {
   )
 }
 
-export function MessageAction(props: { active?: boolean; children: JSX.Element; label: string; onClick: () => void }) {
+/**
+ * Why an action on a turn outside the loaded window waits (F-f01-25). The turn stays on screen; its actions are disabled
+ * with this as their title until the earlier pages are loaded.
+ */
+function loadEarlierFirstTitle(i18n: ReturnType<typeof useI18n>): string {
+  return i18n.tr('Last inn eldre meldinger først', 'Load earlier messages first')
+}
+
+export function MessageAction(props: {
+  active?: boolean
+  children: JSX.Element
+  /** Shown disabled: the action waits for something (F-f01-25). */
+  disabled?: boolean
+  /** The title a disabled action shows in place of its label: why it waits. */
+  disabledTitle?: string
+  label: string
+  onClick: () => void
+}) {
   return (
     <button
       type="button"
-      title={props.label}
+      title={props.disabled && props.disabledTitle ? props.disabledTitle : props.label}
       aria-label={props.label}
       aria-pressed={props.active === undefined ? undefined : (props.active ? 'true' : 'false')}
       class={{ 'verevon-chat-action-button': true, 'verevon-chat-action-button--active': Boolean(props.active) }}
+      disabled={props.disabled}
       onClick={() => props.onClick()}
     >
       {props.children}

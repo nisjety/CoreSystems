@@ -149,23 +149,96 @@ function handlerActionIds(source) {
   );
 }
 
-test('every registered action has exactly one live gateway dispatcher contract', () => {
-  const registrySource = fs.readFileSync(registryPath, 'utf8');
-  const handlerSource = fs.readFileSync(handlerPath, 'utf8');
-  const registryIds = allRegistryIds(registrySource, spaceFragmentSources(spaceFragmentsDirectory));
-  const dispatcherIds = handlerActionIds(handlerSource);
+// O-26: the registry declares who runs each action (`executor`). The generated contract
+// action-executors.json is the gateway's copy of that answer. A `gateway` id is run by the execute
+// endpoint through a real arm. A `client` id is run by the browser on its own route, so it has no arm
+// of its own, and the generic arm refuses it with the route the contract names.
+const executorContractPath = path.join(gatewayDirectory, 'src/domains/actions/action-executors.json');
+const clientRoutedSourcePath = path.join(
+  gatewayDirectory,
+  'src/domains/actions/dispatchers_client_routed.rs',
+);
 
+function executorContract() {
+  return JSON.parse(fs.readFileSync(executorContractPath, 'utf8'));
+}
+
+function executorIds(contract, executor) {
+  return new Set(contract.actions.filter((row) => row.executor === executor).map((row) => row.id));
+}
+
+test('the executor contract declares an executor for every registry id, and a route only for a client one', () => {
+  const contract = executorContract();
+  const registryIds = allRegistryIds(
+    fs.readFileSync(registryPath, 'utf8'),
+    spaceFragmentSources(spaceFragmentsDirectory),
+  );
+  const rowIds = contract.actions.map((row) => row.id);
+
+  assert.equal(contract.contract, 'action-executors');
+  assert.equal(contract.schemaVersion, 1);
   assert.ok(registryIds.size > 0, 'the registry must contain action contracts');
-  assert.deepEqual([...dispatcherIds].sort(), [...registryIds].sort());
+  assert.equal(new Set(rowIds).size, rowIds.length, 'each registry id has one executor row');
+  assert.deepEqual([...rowIds].sort(), [...registryIds].sort());
+  assert.deepEqual(rowIds, [...rowIds].sort(), 'the rows are sorted by id, as the generator writes them');
 
-  for (const actionId of registryIds) {
-    const quotedId = actionId.replace('.', '\\.')
+  for (const row of contract.actions) {
+    assert.ok(['gateway', 'client'].includes(row.executor), `${row.id} declares an executor`);
+    if (row.executor === 'client') {
+      assert.match(row.clientRoute, /^(\/|ui:)/, `${row.id} names the route it runs on`);
+    } else {
+      assert.equal(Object.hasOwn(row, 'clientRoute'), false, `${row.id} runs on the gateway and names no route`);
+    }
+  }
+});
+
+test('every gateway executor is a dispatch arm that reaches a named dispatcher, and no other id is', () => {
+  const handlerSource = fs.readFileSync(handlerPath, 'utf8');
+  const surface = dispatchSurfaceSource(handlerSource);
+  const gatewayIds = executorIds(executorContract(), 'gateway');
+
+  assert.deepEqual([...handlerActionIds(handlerSource)].sort(), [...gatewayIds].sort());
+  for (const actionId of gatewayIds) {
+    const quotedId = actionId.replaceAll('.', '\\.');
     assert.match(
-      handlerSource,
+      surface,
       new RegExp(`"${quotedId}"[\\s\\S]{0,320}?=>[\\s\\S]{0,160}?dispatch_`),
       `${actionId} must reach a named owner dispatcher`,
     );
   }
+});
+
+test('every client executor is refused by the generic arm, with no arm of its own', () => {
+  const handlerSource = fs.readFileSync(handlerPath, 'utf8');
+  const surface = dispatchSurfaceSource(handlerSource);
+  const dispatcherIds = handlerActionIds(handlerSource);
+
+  for (const actionId of executorIds(executorContract(), 'client')) {
+    const quotedId = actionId.replaceAll('.', '\\.');
+    assert.equal(dispatcherIds.has(actionId), false, `${actionId} has no dispatch arm of its own`);
+    assert.doesNotMatch(surface, new RegExp(`"${quotedId}"\\s*=>`), `${actionId} has no arm`);
+  }
+  assert.match(
+    surface,
+    /other => match client_route_for\(other\)/,
+    'the default arm looks the id up in the registry contract',
+  );
+  assert.match(
+    surface,
+    /Some\(route\) => boxed_dispatch\(\|\| dispatch_client_executed\(other, route\)\)/,
+    'a client id is refused with the route the contract names',
+  );
+  const routedSource = fs.readFileSync(clientRoutedSourcePath, 'utf8');
+  assert.match(
+    routedSource,
+    /include_str!\("action-executors\.json"\)/,
+    'the lookup reads the generated contract',
+  );
+  assert.doesNotMatch(
+    `${handlerSource}\n${routedSource}`,
+    /dispatch_owner_not_wired/,
+    'the owner-not-wired refusal is gone',
+  );
 });
 
 test('an action id present only in a Space fragment is part of the registry set', () => {
@@ -342,4 +415,78 @@ test('the live handlers.rs declares the legacy alias table once and keeps its ke
   for (const id of ['web.crawl_site', 'web.job_status', 'web.pause_job', 'web.cancel_job', 'web.resume_job']) {
     assert.equal(dispatcherIds.has(id), false, `${id} is a legacy alias or test id, not a dispatcher id`);
   }
+});
+
+// F-f05-02b: the declared executor of each id (src/shared/actions/action-executors.ts) is the arm kind handlers.rs
+// dispatches it with. An arm that calls dispatch_client_executed is `client` (with the route it names), an arm that
+// calls dispatch_owner_not_wired is `owner_not_wired`, and any other arm that reaches a named dispatcher is `gateway`.
+// An id with no arm of its own falls through to the generic arm: a client row is refused with the route the contract
+// names, and any other id gets the 501 of an unknown action, which is `owner_not_wired`.
+const executorMapPath = path.join(verevonDirectory, 'src/shared/actions/action-executors.ts');
+const ARM_HEAD = /^ {8}((?:"[^"\n]+"\s*\|\s*)*"[^"\n]+"|other)\s*=>/gm;
+
+// The rows of the executor map, one per line: `'id': { executor: 'client', clientRoute: '/route' },` or
+// `'id': { executor: 'gateway' },`.
+function declaredExecutorRows(source) {
+  const rowPattern = /^\s*'([^']+)':\s*\{\s*executor:\s*'([^']+)'(?:,\s*clientRoute:\s*'([^']+)')?\s*\},?\s*$/gm;
+  return new Map(
+    [...source.matchAll(rowPattern)].map((match) => [match[1], { executor: match[2], clientRoute: match[3] }]),
+  );
+}
+
+function armKindOf(body) {
+  const client = body.match(/dispatch_client_executed\(\s*"([^"]+)"\s*,\s*"([^"]+)"/);
+  if (client) return { executor: 'client', clientRoute: client[2] };
+  if (/dispatch_owner_not_wired\s*\(/.test(body)) return { executor: 'owner_not_wired' };
+  if (/\bdispatch_[a-z0-9_]+/.test(body)) return { executor: 'gateway' };
+  return { executor: 'unknown' };
+}
+
+// The arm kind of every id that has an arm of its own in the execute_action match.
+function armKinds(surface) {
+  const start = surface.indexOf('match resolve_action_id(');
+  assert.notEqual(start, -1, 'execute_action matches on resolve_action_id');
+  const endOfFunction = surface.indexOf('\n}\n', start);
+  const matchText = surface.slice(start, endOfFunction === -1 ? surface.length : endOfFunction);
+  const heads = [...matchText.matchAll(ARM_HEAD)];
+  const kinds = new Map();
+  heads.forEach((head, index) => {
+    if (head[1] === 'other') return;
+    const bodyEnd = index + 1 < heads.length ? heads[index + 1].index : matchText.length;
+    const kind = armKindOf(matchText.slice(head.index + head[0].length, bodyEnd));
+    for (const [, id] of head[1].matchAll(/"([^"\n]+)"/g)) kinds.set(id, kind);
+  });
+  return kinds;
+}
+
+function describeArm(arm) {
+  return arm.clientRoute === undefined ? arm.executor : `${arm.executor} ${arm.clientRoute}`;
+}
+
+test('each declared executor is the arm kind handlers.rs dispatches its id with', () => {
+  const surface = dispatchSurfaceSource(fs.readFileSync(handlerPath, 'utf8'));
+  const kinds = armKinds(surface);
+  const contractRows = new Map(executorContract().actions.map((row) => [row.id, row]));
+  const declared = declaredExecutorRows(fs.readFileSync(executorMapPath, 'utf8'));
+  const registryIds = allRegistryIds(
+    fs.readFileSync(registryPath, 'utf8'),
+    spaceFragmentSources(spaceFragmentsDirectory),
+  );
+
+  assert.deepEqual([...declared.keys()].sort(), [...registryIds].sort(), 'the executor map has one row per registry id');
+  assert.ok(kinds.size > 0, 'the execute_action arms are read');
+
+  const mismatches = [];
+  for (const [id, row] of declared) {
+    const contractRow = contractRows.get(id);
+    const dispatched =
+      kinds.get(id) ??
+      (contractRow?.executor === 'client'
+        ? { executor: 'client', clientRoute: contractRow.clientRoute }
+        : { executor: 'owner_not_wired' });
+    if (dispatched.executor !== row.executor || dispatched.clientRoute !== row.clientRoute) {
+      mismatches.push(`${id}: declared ${describeArm(row)}, dispatched as ${describeArm(dispatched)}`);
+    }
+  }
+  assert.deepEqual(mismatches, [], 'every declared executor matches the arm kind handlers.rs dispatches it with');
 });

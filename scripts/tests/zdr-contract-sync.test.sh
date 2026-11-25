@@ -119,7 +119,7 @@ GOLDENS=(
 
   # WS25-S7: the org agent policy schema. AUTHORED (not generated), read by mp-contracts and by
   # capability-core's org agent policy API.
-  "apps/Model Plane/api/contracts/org-agent-policy-schema.json|8105676c440269570d6ca883c19bc56071ea0504515a7c0d398904f31957e81a"
+  "apps/Model Plane/api/contracts/org-agent-policy-schema.json|d1dd71e1c7ace2c13ba6050440c196212449f0ad7fa4fd6d1f8fd03f801d64be"
   "apps/Model Plane/api/contracts/agent-modes.json|baee130b47b668bab8cffdb547cdee592269eef89969214da53165b54b113027"
 
   # QB-T02: every Auth Core service-token request quarry-edge makes. AUTHORED data owned

@@ -25,6 +25,12 @@ describe('chat turn containment CSS', () => {
     )
   })
 
+  it('exempts a turn with an open floating panel from containment, so the panel is not clipped', () => {
+    expect(css).toMatch(
+      /\.verevon-chat-thread\[data-chat-containment="on"\] > \.verevon-chat-message:not\(\[data-latest\]\):has\(\.verevon-chat-menu__panel, \.verevon-chat-reasoning-popover__panel, \.verevon-chat-metrics-badge__panel\) \{\s*content-visibility: visible;\s*contain: none;\s*\}/,
+    )
+  })
+
   it('declares content-visibility only in rules gated by the switch attribute', () => {
     const declaring = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(([, , body]) =>
       /content-visibility\s*:/.test(body),

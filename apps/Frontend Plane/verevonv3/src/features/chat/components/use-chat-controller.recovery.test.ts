@@ -433,6 +433,19 @@ describe('turn timing, cost basis and receipt', () => {
       stream.resolve()
       await tick(8)
       expect(controller.state.turns.at(-1)).toMatchObject({ costUsd: 0.0031, costBasis: 'metered' })
+      expect(controller.state.turns.at(-1)?.costMixed).toBeUndefined()
+    })
+  })
+
+  it('carries a mixed-basis usage frame onto the turn', async () => {
+    await withController(async (controller) => {
+      const stream = await startTurn(controller)
+      stream.handlers.onUsage?.({ costUsd: 0.25, costMixed: true })
+      stream.handlers.onDone?.({})
+      stream.resolve()
+      await tick(8)
+      expect(controller.state.turns.at(-1)?.costMixed).toBe(true)
+      expect(controller.state.turns.at(-1)?.costUsd).toBe(0.25)
     })
   })
 })

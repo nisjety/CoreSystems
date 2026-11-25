@@ -6,6 +6,7 @@ import {
   isAttentionState,
   isWaitingState,
   legacyStateFromRunStatus,
+  threadAttentionState,
 } from './attention-state'
 
 describe('attention vocabulary', () => {
@@ -79,5 +80,24 @@ describe('attention vocabulary', () => {
       expect(legacyStateFromRunStatus(status), status).toBe(state)
     }
     expect(legacyStateFromRunStatus(undefined)).toBeUndefined()
+  })
+
+  it('reads the server state first, so it wins over a conflicting run status', () => {
+    expect(threadAttentionState({ attentionState: 'working', latestRunStatus: 'awaiting_approval' })).toBe('working')
+    expect(threadAttentionState({ attentionState: 'needs_approval', latestRunStatus: 'running' })).toBe('needs_approval')
+    expect(threadAttentionState({ attentionState: 'idle', latestRunStatus: 'failed' })).toBe('idle')
+  })
+
+  it('falls back to the legacy run status when the row carries no valid server state', () => {
+    expect(threadAttentionState({ latestRunStatus: 'awaiting_approval' })).toBe('needs_approval')
+    expect(threadAttentionState({ attentionState: undefined, latestRunStatus: 'paused' })).toBe('needs_input')
+    expect(threadAttentionState({ attentionState: '', latestRunStatus: 'running' })).toBe('working')
+    expect(threadAttentionState({ attentionState: 'awaiting_approval', latestRunStatus: 'running' })).toBe('working')
+  })
+
+  it('reads no state when neither the server nor the run status names one', () => {
+    expect(threadAttentionState({})).toBeUndefined()
+    expect(threadAttentionState({ attentionState: 'mystery' })).toBeUndefined()
+    expect(threadAttentionState({ latestRunStatus: 'mystery' })).toBeUndefined()
   })
 })

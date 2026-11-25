@@ -110,6 +110,19 @@ describe('personal chat organization', () => {
     expect(filtered('attention')).toEqual(['paused', 'denied'])
   })
 
+  it('files a row that carries the server attention state by that state, ahead of its run status', () => {
+    const runs: ChatThreadHistoryItem[] = [
+      // The run reads paused, but the server states the thread is working: it is active, and not in attention.
+      { threadId: 'stated', title: 'Stated', preview: '', updatedAt: '2026-09-28T12:00:00Z', latestRunStatus: 'paused', attentionState: 'working' },
+      // No server state on the row: its run status decides, as before.
+      { threadId: 'legacy', title: 'Legacy', preview: '', updatedAt: '2026-09-28T11:00:00Z', latestRunStatus: 'paused' },
+    ]
+    const state = emptyChatOrganization()
+    const filtered = (filter: 'active' | 'attention') => ids(selectOrganizedChats(runs, apply(state, { type: 'view.update', view: { ...state.view, filter } }), ''))
+    expect(filtered('active')).toEqual(['stated'])
+    expect(filtered('attention')).toEqual(['legacy'])
+  })
+
   it('sorts deterministically without rearranging the source history', () => {
     const state = emptyChatOrganization()
     expect(ids(selectOrganizedChats(rows, state, ''))).toEqual(['b', 'c', 'a'])

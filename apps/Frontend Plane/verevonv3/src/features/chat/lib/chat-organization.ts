@@ -1,5 +1,5 @@
 import { chatOrganizationActionSchema, chatOrganizationSchema, type ChatOrganization, type ChatOrganizationAction } from '@/shared/actions/chat-organization'
-import { isWaitingState, legacyStateFromRunStatus } from '@/shared/chat/thread-status'
+import { isWaitingState, threadAttentionState } from '@/shared/chat/thread-status'
 import { LocalizedError } from '@/shared/i18n/errors'
 import { readClientValue, writeClientJson } from '@/shared/session/client-storage'
 import type { ChatThreadHistoryItem } from './chat-thread-history'
@@ -53,8 +53,8 @@ export function selectOrganizedChats(items: ChatThreadHistoryItem[], state: Chat
   const matches = items.filter((item) => {
     const projectName = state.projects.find((project) => project.id === state.assignments[item.threadId])?.name ?? ''
     if (needle && !`${item.title} ${item.preview} ${projectName}`.toLocaleLowerCase().includes(needle)) return false
-    // "Attention" is the same set the rail shows: a run that failed or waits on the person.
-    const runState = legacyStateFromRunStatus(item.latestRunStatus)
+    // "Attention" is the same set the rail shows: a run that failed or waits on the person. The server's state wins when the row carries one.
+    const runState = threadAttentionState(item)
     return state.view.filter === 'all' || (state.view.filter === 'pinned' && item.pinned === true) || (state.view.filter === 'active' && runState === 'working') || (state.view.filter === 'attention' && (runState === 'failed' || isWaitingState(runState)))
   })
   return matches.sort((a, b) => {

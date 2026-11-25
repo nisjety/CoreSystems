@@ -42,6 +42,7 @@ export const ws10bSpaceActions = [
     risk: 'high',
     requiresApproval: false,
     reversible: true,
+    executor: 'gateway',
     inputSchema: spaceSetToolPolicyInput,
     outputSchema: spaceSetToolPolicyOutput,
   },

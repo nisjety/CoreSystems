@@ -99,7 +99,7 @@ import { LocalizedError, translateApiError } from '@/shared/i18n/errors'
 import { speechPlayer } from '@/features/voice/speech-playback'
 import { latestVoiceReply } from '@/features/voice/voice-reply'
 import { pinnedMessagesFull } from '../lib/chat-pinned-messages'
-import { selectChatThread } from '../lib/chat-thread-history'
+import { openForkedChatThread, selectChatThread } from '../lib/chat-thread-history'
 import { audienceConfirmed, chatProjectsEnabled, readProjectAudience, readProjectContext, rememberAudienceConfirmed } from '../lib/chat-projects'
 import { loadEffectiveAgentModeCap } from '@/features/customize/AgentModesSection'
 import { audienceConfirmRequired, chatProjectRefusal, sandboxToolsRefusedNotice, type ChatProjectRefusal } from './use-chat-project'
@@ -204,6 +204,8 @@ export default function ChatPage() {
     setSourceScope,
     retrievalScope,
     spaceScoped,
+    turnActionsAllowed,
+    projectThreadOpen,
     activeProjectRef,
     setProjectSpaceRef,
     setRetrievalScope,
@@ -219,6 +221,7 @@ export default function ChatPage() {
     hasEarlierTurns,
     loadingEarlierTurns,
     loadEarlier,
+    unloadedTurnIds,
     connectTurn,
     pendingConnectIntent,
     resumeConnectIntent,
@@ -262,11 +265,20 @@ export default function ChatPage() {
   // WS18-S4. The project this page writes to, from the controller. With the switch
   // off it is always null and none of the project state below is ever read.
   const projectRef = () => (chatProjectsEnabled() ? activeProjectRef() : null)
+  // WS18-S4 (F-f06-16): the one-line hint under the header of a project thread. It is dismissed for that thread only.
+  const [turnHintDismissedFor, setTurnHintDismissedFor] = createSignal<string | null>(null)
+  // Keyed on the known project term, not on the withheld state alone: an ordinary thread that is still loading withholds its actions too.
+  const turnActionsHintOpen = () => projectThreadOpen() && turnHintDismissedFor() !== state.threadId
   const [projectContext] = createResource(projectRef, (spaceRef) => readProjectContext(spaceRef))
-  // WS25-S11. The org's effective mode cap; the composer lists only the modes at or below it.
-  const [agentModeCap] = createResource(() => loadEffectiveAgentModeCap())
   // EP-3 S4. The gateway's own answer on whether the Output panel may edit an artifact; `artifactEditing` is false until it says otherwise.
   const [composerCapabilities] = createResource(() => getComposerCapabilities())
+  // WS25-S11, offered only where the gateway's composer capabilities offer agent modes (F-f06-17; its own AGENT_MODES
+  // switch, off for ZDR). The org's effective mode cap limits the picker and is read only then: off, or a failed
+  // capability read, there is no picker. The capabilities are the read above, not a second one.
+  const [agentModeCap] = createResource(
+    () => composerCapabilities(),
+    async (capabilities) => (capabilities.agentModes === true ? loadEffectiveAgentModeCap() : undefined),
+  )
   // EP-11 S7, behind `VITE_LEARN_COMMAND`: whether the memory controls let this person learn, read once per page. A failed
   // read counts as not allowed, so `/learn` stays hidden rather than offered and refused. Nothing is read with the switch off.
   const [learningAllowed] = createResource(
@@ -1583,6 +1595,7 @@ export default function ChatPage() {
         pinned={pinnedMessages().includes(row().turn.id)}
         pinDisabled={pinnedMessagesFull(pinnedMessages())}
         onTogglePin={() => togglePin(row().turn.id)}
+        onForked={(threadId, session) => openForkedChatThread(threadId, session)}
         planApproval={row().planApproval}
         docked={row().docked}
         settledFold={row().settledFold}
@@ -1609,9 +1622,12 @@ export default function ChatPage() {
         rewindUndo={rewindOfferFor(row().turn.id)}
         onUndoRewind={() => void undoRewind()}
         editLocked={row().editLocked}
+        // F-f01-25: the turns before the loaded window keep their text; their actions wait for the earlier pages.
+        unloadedTurnIds={unloadedTurnIds()}
         threadId={state.threadId}
         temporaryChat={readAloudBlocked()}
         spaceScoped={spaceScoped()}
+        turnActionsAllowed={turnActionsAllowed()}
         featureThreadId={sideFeatureThreadId()}
         connectionModel={sideFeatureConnectionModel()}
         // QF-20: the crawl-plan approval card never mounts in a foreign-origin or Support read-only thread.
@@ -1681,6 +1697,24 @@ export default function ChatPage() {
             onNewChat={startNewChat}
             onRegenerate={regenerateLatest}
           />
+          <Show when={turnActionsHintOpen()}>
+            <p class="verevon-chat-project-notice" role="note">
+              <span>
+                {i18n.tr(
+                  'Gjenta, grene og vurdere er ikke tilgjengelig i prosjektsamtaler ennå.',
+                  'Regenerate, branch and rating are not available in project chats yet.',
+                )}
+              </span>
+              <button
+                type="button"
+                class="verevon-chat-project-chip__clear"
+                aria-label={i18n.tr('Skjul', 'Dismiss')}
+                onClick={() => setTurnHintDismissedFor(state.threadId)}
+              >
+                <X class="size-3" aria-hidden="true" />
+              </button>
+            </p>
+          </Show>
           <Show when={transcriptDensityEnabled}>
             <DensityMenu density={transcriptDensity.level()} onChoose={transcriptDensity.choose} />
           </Show>

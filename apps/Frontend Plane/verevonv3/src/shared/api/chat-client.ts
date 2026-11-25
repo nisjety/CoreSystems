@@ -9,6 +9,10 @@ import {
 
 import { readSseStream, type SseEvent } from './sse'
 import { createDeltaCoalescer, type DeltaCoalescer } from './delta-coalescer'
+// The frame batches this module opens are flushed and checked through this module too (F-f01-19): the chat controller
+// takes both `flushAllDeltaCoalescers` and `hasPendingDeltaText` from here, so the batch and its checks always come from
+// one module instance.
+export { flushAllDeltaCoalescers, hasPendingDeltaText } from './delta-coalescer'
 import type { ChatEventPayloads } from './chat-event-payloads.generated'
 import { isSpaceDenial } from './space-denials'
 import { isZdrCode } from './zdr-refusals'
@@ -35,6 +39,8 @@ import {
 import { runParkedFrameOf, type RunParkedFrame } from '@/features/chat/lib/run-park'
 import { BROWSER_REGIONS_PER_TURN_MAX } from '@/features/browser/page-context/region-attach'
 import { chatLibraryKindOf } from '@/features/chat/lib/chat-library-origins'
+import { deckArtifactForDisplay, isChatArtifact, isChatKnowledgeGrounding, isCitation } from '@/features/chat/lib/chat-evidence'
+import type { ChatArtifact, ChatKnowledgeGrounding, Citation } from '@/features/chat/components/chat-types'
 import { blobToDataUrl, parseDataUrl } from '@/shared/lib/blob-data'
 import {
   TRANSCRIPT_MAX_RECORDING_BYTES,
@@ -898,6 +904,11 @@ export type ChatUsageEvent = {
   outputTokens?: number
   costUsd?: number
   costBasis?: ChatCostBasis
+  /**
+   * The total mixes metered and subscription calls (`cost_mixed`). Stated only under the gateway's
+   * mixed-basis switch; `costBasis` is then absent too, since the total has no single basis to state.
+   */
+  costMixed?: boolean
   latencyMs?: number
   confidence?: number
   cacheReadTokens?: number
@@ -950,6 +961,8 @@ export type ChatUsageProgressEvent = {
   costUsd?: number
   /** Absent when the turn mixes metered and subscription calls. */
   costBasis?: ChatCostBasis
+  /** Stated only under the gateway's mixed-basis switch, on a total that mixes metered and subscription calls. */
+  costMixed?: boolean
   /** Of `calls`, the metered ones whose price was unknown. Absent at zero. */
   unpricedCalls?: number
   /** The metered spend cap, when the turn has one (WS27-S6). */
@@ -968,6 +981,11 @@ export type ChatUsageProgressEvent = {
 
 function costBasisValue(value: unknown): ChatCostBasis | undefined {
   return value === 'metered' || value === 'subscription' ? value : undefined
+}
+
+/** The `cost_mixed` key, read only as the literal `true`: absent on every frame the switch leaves unstated. */
+function costMixedValue(value: unknown): true | undefined {
+  return value === true ? true : undefined
 }
 
 /** The breakdown of a usage total: present only when all four parts are numbers. */
@@ -1009,6 +1027,7 @@ function usageProgressFrame(payload: Record<string, unknown>): ChatUsageProgress
     cacheWriteTokens: num(payload.cache_write_tokens),
     costUsd: num(payload.cost_usd),
     costBasis: costBasisValue(payload.cost_basis),
+    costMixed: costMixedValue(payload.cost_mixed),
     unpricedCalls: num(payload.unpriced_calls),
     ceilingUsd: num(payload.ceiling_usd),
     ceilingTokens: num(payload.ceiling_tokens),
@@ -1552,6 +1571,15 @@ export type ChatMessage = {
    * note (`content` is empty). Absent on every other message, and always absent while the gateway's take-back is off.
    */
   retracted?: boolean
+  /**
+   * The turn's citations, flattened onto the message by the owner read (F-f01-24). Read only with paging on, and only the
+   * entries that pass the transcript's check; absent when none does.
+   */
+  citations?: Citation[]
+  /** The turn's artifacts, as the owner read flattens them (F-f01-24). Read only with paging on, through the same checks as a transcript turn. */
+  artifacts?: ChatArtifact[]
+  /** The turn's retrieval grounding, as the owner read flattens it (F-f01-24). Read only with paging on, and only when it passes the check. */
+  grounding?: ChatKnowledgeGrounding
 }
 
 /** A turn's place in the server's message tree (WS17 S9): its parent, its place among the turns sharing it, and those turns. */
@@ -1626,6 +1654,11 @@ export type ChatThreadSession = {
   archivedAt?: string
   /** The thread this one was forked from (build plan WS17 S6). Absent for a thread that was not forked. */
   forkedFromThreadId?: string
+  /**
+   * How many threads were forked from this one (F-f05-23), as the thread list states it while the server's fork switch
+   * is on. Absent for a thread nobody forked from; a count is a whole number above zero.
+   */
+  forkCount?: number
   /** Whether the owner starred the thread. Server-owned, like `pinned`. */
   starred?: boolean
   /**
@@ -2760,6 +2793,7 @@ function dispatchAgUiEvent(
             outputTokens: num(value.output_tokens),
             costUsd: num(value.cost_usd),
             costBasis: costBasisValue(value.cost_basis),
+            costMixed: costMixedValue(value.cost_mixed),
             latencyMs: num(value.latency_ms),
             confidence: num(value.confidence),
             cacheReadTokens: num(value.cache_read_tokens) ?? num(value.cacheReadTokens),
@@ -3035,6 +3069,7 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         outputTokens: num(usage.output_tokens),
         costUsd: num(usage.cost_usd),
         costBasis: costBasisValue(usage.cost_basis),
+        costMixed: costMixedValue(usage.cost_mixed),
         latencyMs: num(usage.latency_ms),
         confidence: num(usage.confidence),
         cacheReadTokens: num(usage.cache_read_tokens) ?? num(usage.cacheReadTokens),
@@ -4944,6 +4979,12 @@ export type ComposerCapabilities = {
   wideResearch: boolean
   /** Project chats (WS18-S4): the BFF's own GATEWAY_CHAT_PROJECTS_ENABLED, added to the gateway's answer. Off reads false. */
   chatProjects: boolean
+  /**
+   * The composer's agent-mode picker (WS25-S6): the gateway's AGENT_MODES switch, off for a ZDR caller. Off reads false.
+   * Optional only so that a hand-built capabilities object written before this field still type-checks; every answer
+   * from getComposerCapabilities sets it.
+   */
+  agentModes?: boolean
 }
 
 export const NO_COMPOSER_CAPABILITIES: ComposerCapabilities = {
@@ -4956,6 +4997,7 @@ export const NO_COMPOSER_CAPABILITIES: ComposerCapabilities = {
   deepResearchKnowledge: false,
   wideResearch: false,
   chatProjects: false,
+  agentModes: false,
 }
 
 /**
@@ -4980,6 +5022,7 @@ export async function getComposerCapabilities(): Promise<ComposerCapabilities> {
     deepResearchKnowledge: record?.deep_research_knowledge === true,
     wideResearch: record?.wide_research === true,
     chatProjects: record?.chat_projects === true,
+    agentModes: record?.agent_modes === true,
   }
 }
 
@@ -5308,8 +5351,11 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
         return raw === 'knowledge_only' ? 'knowledge_only' : raw === 'web_only' ? 'web_only' : undefined
       })(),
       // The chips the turn was sent with (EP-3 S5), read by name and normalized like the wire: a turn
-      // recorded before references existed has no key at all.
-      ...contextRefsField(objectValue(item.metadata)?.context_refs),
+      // recorded before references existed has no key at all. With paging on, the owner read flattens the chips onto the
+      // message, so the top-level key is read first; a switch-off read keeps reading only the nested one, as it always did.
+      ...contextRefsField(pagedTranscriptEnabled()
+        ? (item.context_refs ?? objectValue(item.metadata)?.context_refs)
+        : objectValue(item.metadata)?.context_refs),
       // The plan an assistant plan turn ended with (EP-2 S5), read by name like the chips above.
       ...researchPlanField(objectValue(item.metadata)?.research_plan ?? item.research_plan),
       // The route the answer was served on (W5-073-b), read by name like the plan above; absent on a turn recorded before it.
@@ -5322,6 +5368,9 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
       ...messageVersionField(item.version),
       // Read by name and only a literal `true`: a take-back note, never a flag guessed from empty text.
       ...(item.retracted === true ? { retracted: true } : {}),
+      // The evidence the owner read flattens onto the message (F-f01-24), checked as a transcript turn's is. Only with paging
+      // on: a switch-off read carries no evidence keys, as before.
+      ...(pagedTranscriptEnabled() ? evidenceFieldsOf(item) : {}),
     }))
 }
 
@@ -5335,6 +5384,23 @@ function connectionFieldsOf(item: Record<string, unknown>): Pick<ChatMessage, 'm
   return {
     ...(modelConnectionId ? { modelConnectionId } : {}),
     ...(subscriptionConnectionId ? { subscriptionConnectionId } : {}),
+  }
+}
+
+/**
+ * The evidence a message carries (F-f01-24), read by name and checked the way a transcript turn's evidence is. A key only for
+ * evidence that passes, so a message with none carries no key at all.
+ */
+function evidenceFieldsOf(item: Record<string, unknown>): Pick<ChatMessage, 'citations' | 'artifacts' | 'grounding'> {
+  const citations = Array.isArray(item.citations) ? item.citations.filter(isCitation) : []
+  const artifacts = Array.isArray(item.artifacts)
+    ? item.artifacts.filter(isChatArtifact).map(deckArtifactForDisplay)
+    : []
+  const grounding = item.grounding
+  return {
+    ...(citations.length > 0 ? { citations } : {}),
+    ...(artifacts.length > 0 ? { artifacts } : {}),
+    ...(isChatKnowledgeGrounding(grounding) ? { grounding } : {}),
   }
 }
 
@@ -5408,6 +5474,11 @@ function normalizeChatThreadSessions(raw: unknown): ChatThreadSession[] {
     .filter((item): item is ChatThreadSession => Boolean(item))
 }
 
+/** A fork count is a whole number above zero. Zero, a negative or a non-integer value reads as no forks. */
+function normalizeForkCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined
+}
+
 function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
   const item = objectValue(raw)
   if (!item) return null
@@ -5424,6 +5495,7 @@ function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
   )
   const attentionState = normalizeChatAttentionState(str(item.attentionState))
   const attentionSince = normalizeOptionalIsoTimestamp(str(item.attentionSince))
+  const forkCount = normalizeForkCount(item.forkCount)
   return {
     threadId,
     title,
@@ -5443,6 +5515,7 @@ function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
     origin: str(item.origin),
     ...(item.starred === true ? { starred: true } : {}),
     ...(str(item.forkedFromThreadId) ? { forkedFromThreadId: str(item.forkedFromThreadId) } : {}),
+    ...(forkCount ? { forkCount } : {}),
     ...(item.unread === true ? { unread: true } : {}),
     ...(attentionState ? { attentionState } : {}),
     ...(attentionState && attentionSince ? { attentionSince } : {}),

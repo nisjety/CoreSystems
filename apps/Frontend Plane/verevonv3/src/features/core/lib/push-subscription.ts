@@ -9,7 +9,14 @@ export type PushSupport = 'supported' | 'insecure' | 'unsupported'
 /** The body the server stores for one browser subscription. */
 export type PushSubscriptionBody = { endpoint: string; keys: { p256dh: string; auth: string } }
 
-const SERVICE_WORKER_PATH = '/sw.js'
+/**
+ * The worker's script URL. The visible-window notice is opt-in: only the literal "true" of VITE_PUSH_SHOW_WHEN_VISIBLE
+ * asks for it. A different script URL replaces the registration on the next load, so with the switch off the URL stays
+ * the one it has always been.
+ */
+export function serviceWorkerPath(): string {
+  return import.meta.env.VITE_PUSH_SHOW_WHEN_VISIBLE === 'true' ? '/sw.js?visible=notice' : '/sw.js'
+}
 
 export function pushSupport(): PushSupport {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') return 'unsupported'
@@ -56,7 +63,7 @@ export async function fetchPushConfig(): Promise<PushConfig> {
 
 /** Registers the worker that receives pushes. Its scope is the origin root; it caches nothing. */
 export async function registerAttentionWorker(): Promise<ServiceWorkerRegistration> {
-  await navigator.serviceWorker.register(SERVICE_WORKER_PATH, { scope: '/' })
+  await navigator.serviceWorker.register(serviceWorkerPath(), { scope: '/' })
   return navigator.serviceWorker.ready
 }
 

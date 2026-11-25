@@ -35,6 +35,44 @@ export type DeltaCoalescer = {
 
 const HIDDEN_TAB_FLUSH_MS = 100
 
+/** A coalescer that may still hold text: created, and not yet closed or ended by its abort signal. */
+type LiveCoalescer = {
+  flush: () => void
+  /** Whether a run is waiting for its frame, so its text is not in the transcript yet. */
+  hasPending: () => boolean
+}
+
+/**
+ * The coalescers that may still hold streamed text (F-f01-19). The chat controller flushes them before it
+ * writes the transcript snapshot on hide, pagehide and unmount, so that snapshot carries the text.
+ */
+const liveCoalescers = new Set<LiveCoalescer>()
+
+/**
+ * Emits the text every live coalescer still holds, in creation order. A no-op when none is live.
+ *
+ * An emit that throws is reported as an uncaught error, as a throw from a frame callback is, and does not stop the
+ * others: this runs on hide, pagehide and unmount, where the snapshot that follows must still be written.
+ */
+export function flushAllDeltaCoalescers(): void {
+  // A copy: an emit can close a coalescer, which must not change the set under this loop.
+  for (const live of [...liveCoalescers]) {
+    try {
+      live.flush()
+    } catch (error) {
+      queueMicrotask(() => {
+        throw error
+      })
+    }
+  }
+}
+
+/** Whether a live coalescer holds text the transcript does not have yet (F-f01-19). */
+export function hasPendingDeltaText(): boolean {
+  for (const live of liveCoalescers) if (live.hasPending()) return true
+  return false
+}
+
 export function createDeltaCoalescer(
   emit: (run: DeltaRun) => void,
   signal?: AbortSignal,
@@ -62,7 +100,19 @@ export function createDeltaCoalescer(
     if (timer === undefined) timer = setTimeout(flush, HIDDEN_TAB_FLUSH_MS)
   }
 
-  signal?.addEventListener('abort', flush)
+  const live: LiveCoalescer = { flush, hasPending: () => pending !== undefined }
+  liveCoalescers.add(live)
+
+  // Synchronous, so text already received is in the transcript before a Stop, a thread switch or an unmount marks
+  // the turn as ended. Once it has flushed, the coalescer is no longer live, even if an emit threw.
+  const onAbort = (): void => {
+    try {
+      flush()
+    } finally {
+      liveCoalescers.delete(live)
+    }
+  }
+  signal?.addEventListener('abort', onAbort)
 
   return {
     push(kind, requestId, text) {
@@ -73,8 +123,12 @@ export function createDeltaCoalescer(
     },
     flush,
     close() {
-      flush()
-      signal?.removeEventListener('abort', flush)
+      try {
+        flush()
+      } finally {
+        liveCoalescers.delete(live)
+        signal?.removeEventListener('abort', onAbort)
+      }
     },
   }
 }

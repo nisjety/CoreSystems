@@ -1,3 +1,6 @@
+import { readFileSync, writeFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
   actionRegistry,
@@ -6,12 +9,15 @@ import {
   integrationsConnectorPoliciesOutput,
   integrationsFetchConnectionContentInput,
   integrationsSetConnectorPolicyInput,
+  type ActionId,
 } from '@/shared/actions/action-registry'
+import { ACTION_EXECUTORS, getActionExecutor } from '@/shared/actions/action-executors'
 import { spaceActions } from '@/shared/actions/domains/spaces'
 import { chatProjectSchema } from '@/shared/actions/chat-project'
 import { MODEL_ACCESS } from '@/shared/actions/model-access'
 import { isModelExecutableAction } from '@/shared/actions/model-eligibility'
 import { buildModelContextPack } from '@/shared/context-packs/context-pack'
+import type { ActionDescriptor } from '@/shared/actions/types'
 
 describe('action registry', () => {
   it('gives every registered action an AI-visible contract', () => {
@@ -220,6 +226,45 @@ describe('action registry', () => {
     expect(description).toContain('NEW')
     expect(description).toContain('rung the server holds')
     expect(description).toContain('never model-executable')
+  })
+
+  it('registers chat.reject_plan as an owner-only, client-routed model-plane action the model cannot execute', () => {
+    const reject = getActionDescriptor('chat.reject_plan')
+
+    expect(reject?.label).toBe('Reject proposed plan')
+    expect(reject?.ownerPlane).toBe('model')
+    expect(reject?.risk).toBe('low')
+    expect(reject?.requiresApproval).toBe(false)
+    expect(reject?.reversible).toBe(false)
+    // The browser rejects on the plan-approval route it already calls, so the gateway refuses the id and names it.
+    expect(reject).toMatchObject({
+      executor: 'client',
+      clientRoute: '/api/v1/agents/runs/{run_id}/plan-approval',
+    })
+    expect(isModelExecutableAction('chat.reject_plan')).toBe(false)
+
+    expect(reject?.inputSchema.safeParse({ runId: 'run_1', planId: 'plan_1' }).success).toBe(true)
+    expect(reject?.inputSchema.safeParse({
+      runId: 'run_1',
+      planId: 'plan_1',
+      reason: '  Not this one  ',
+    }).success).toBe(true)
+    expect(reject?.inputSchema.safeParse({ runId: 'run_1', planId: 'plan_1' }).data).toEqual({
+      runId: 'run_1',
+      planId: 'plan_1',
+    })
+    expect(reject?.inputSchema.safeParse({
+      runId: 'run_1',
+      planId: 'plan_1',
+      reason: 'x'.repeat(501),
+    }).success).toBe(false)
+    expect(reject?.inputSchema.safeParse({ runId: '', planId: 'plan_1' }).success).toBe(false)
+    expect(reject?.inputSchema.safeParse({ runId: 'run_1', planId: '' }).success).toBe(false)
+    expect(reject?.inputSchema.safeParse({ planId: 'plan_1' }).success).toBe(false)
+
+    const description = reject?.description ?? ''
+    expect(description).toContain('Owner only')
+    expect(description).toContain('Never model-executable')
   })
 
   it('lets chat.approve_plan name the structured plan and carry the person\'s step edits', () => {
@@ -1826,7 +1871,8 @@ describe('action registry', () => {
     // browser_context.resolve_tab_mentions, browser_region.attach, browser_evidence.save_recipe and
     // chat.research_run.cancel): 374 + 8 = 382.
     // +1 after O-01 registered chat.queue.retract, the take-back of a queued mid-run message: 383.
-    expect(ids).toHaveLength(383)
+    // +1 after F-f05-29 registered chat.reject_plan, the Reject on a proposed plan: 384.
+    expect(ids).toHaveLength(384)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.
@@ -1907,5 +1953,72 @@ describe('settings.update_preferences contract v2 (WS16-S2)', () => {
     expect(schema().safeParse({ timeFormat: '13h' }).success).toBe(false)
     expect(schema().safeParse({ timeFormat: '24H' }).success).toBe(false)
     expect(schema().safeParse({ compactMode: 'yes' }).success).toBe(false)
+  })
+})
+
+// O-26 (D-f09-5): every registry descriptor declares who runs it. The gateway reads the same answer from the generated
+// executor contract, which the action-surface script (apps/gateway/scripts) reads as well. Regenerate after a change to
+// the registry with VEREVON_UPDATE_GOLDEN=1 on this file.
+const here = dirname(fileURLToPath(import.meta.url))
+const executorContractPath = resolve(here, '../../../apps/gateway/src/domains/actions/action-executors.json')
+
+export function buildActionExecutorContract(actions: readonly ActionDescriptor[] = actionRegistry) {
+  const rows = actions.map((action) =>
+    action.executor === 'client'
+      ? { id: action.id, executor: action.executor, clientRoute: action.clientRoute }
+      : { id: action.id, executor: action.executor },
+  )
+  rows.sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
+  return { contract: 'action-executors', schemaVersion: 1, actions: rows }
+}
+
+describe('action executors (O-26)', () => {
+  it('declares an executor on every registry descriptor, and a route only on a client one', () => {
+    for (const action of actionRegistry) {
+      expect(['gateway', 'client'], action.id).toContain(action.executor)
+      if (action.executor === 'client') {
+        expect(action.clientRoute, action.id).toMatch(/^(\/|ui:)/)
+      } else {
+        expect(action, action.id).not.toHaveProperty('clientRoute')
+      }
+    }
+  })
+
+  it('has 140 client-routed ids, the ones the gateway used to answer client_executed for', () => {
+    expect(actionRegistry.filter((action) => action.executor === 'client')).toHaveLength(140)
+  })
+
+  it('is the generated contract the gateway and the action-surface script read, byte for byte', () => {
+    const generated = `${JSON.stringify(buildActionExecutorContract(), null, 2)}\n`
+    if (process.env.VEREVON_UPDATE_GOLDEN === '1') writeFileSync(executorContractPath, generated)
+    expect(readFileSync(executorContractPath, 'utf8')).toBe(generated)
+  })
+
+  // F-f05-02b: the sibling map is exhaustive by type (Record<ActionId, ...>); these pin what the type cannot.
+  it('has one executor row per registry id, and a route on every client row', () => {
+    const registryIds = [...new Set(actionRegistry.map((action) => action.id))].sort()
+    expect(Object.keys(ACTION_EXECUTORS).sort()).toEqual(registryIds)
+
+    for (const [id, row] of Object.entries(ACTION_EXECUTORS)) {
+      expect(['gateway', 'client', 'owner_not_wired'], id).toContain(row.executor)
+      if (row.executor === 'client') {
+        expect(row.clientRoute, id).toMatch(/^(\/|ui:)/)
+      } else {
+        expect(row.clientRoute, id).toBeUndefined()
+      }
+    }
+  })
+
+  it('agrees with the executor and route each registry descriptor declares', () => {
+    const descriptors: readonly ActionDescriptor[] = actionRegistry
+    for (const action of descriptors) {
+      const row = getActionExecutor(action.id as ActionId)
+      expect(row.executor, action.id).toBe(action.executor)
+      expect(row.clientRoute, action.id).toBe(action.clientRoute)
+    }
+    expect(getActionExecutor('chat.reject_plan')).toEqual({
+      executor: 'client',
+      clientRoute: '/api/v1/agents/runs/{run_id}/plan-approval',
+    })
   })
 })

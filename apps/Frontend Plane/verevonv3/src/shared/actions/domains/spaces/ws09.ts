@@ -32,6 +32,7 @@ export const ws09SpaceActions = [
     risk: 'medium',
     requiresApproval: false,
     reversible: false,
+    executor: 'gateway',
     inputSchema: spaceStopRunInput,
     outputSchema: spaceStopRunOutput,
   },

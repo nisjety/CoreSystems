@@ -1,0 +1,1682 @@
+{
+  "contract": "action-executors",
+  "schemaVersion": 1,
+  "actions": [
+    {
+      "id": "agents.admitted_actions.list",
+      "executor": "gateway"
+    },
+    {
+      "id": "agents.draft.save",
+      "executor": "client",
+      "clientRoute": "/api/v1/agents/{agent_id}/draft"
+    },
+    {
+      "id": "agents.installations.list",
+      "executor": "client",
+      "clientRoute": "/api/v1/agents/installations"
+    },
+    {
+      "id": "agents.preview",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/stream"
+    },
+    {
+      "id": "agents.publish",
+      "executor": "client",
+      "clientRoute": "/api/v1/agents/{agent_id}/publish"
+    },
+    {
+      "id": "agents.versions.list",
+      "executor": "client",
+      "clientRoute": "/api/v1/agents/{agent_id}/versions"
+    },
+    {
+      "id": "approvals.confirm_rule",
+      "executor": "client",
+      "clientRoute": "/api/v1/orchestration/rule-proposals/{id}/confirm"
+    },
+    {
+      "id": "approvals.decide",
+      "executor": "client",
+      "clientRoute": "/api/v1/orchestration/approvals/{approval_id}/decide"
+    },
+    {
+      "id": "approvals.dismiss_rule",
+      "executor": "client",
+      "clientRoute": "/api/v1/orchestration/rule-proposals/{id}/dismiss"
+    },
+    {
+      "id": "approvals.list_grants",
+      "executor": "client",
+      "clientRoute": "/api/v1/orchestration/threads/{thread_id}/approval-grants"
+    },
+    {
+      "id": "approvals.list_rule_proposals",
+      "executor": "client",
+      "clientRoute": "/api/v1/orchestration/rule-proposals"
+    },
+    {
+      "id": "approvals.preview",
+      "executor": "client",
+      "clientRoute": "/api/v1/orchestration/approvals/{approval_id}/preview"
+    },
+    {
+      "id": "approvals.revoke_grant",
+      "executor": "client",
+      "clientRoute": "/api/v1/orchestration/approval-grants/{grant_id}"
+    },
+    {
+      "id": "audio.dictate",
+      "executor": "gateway"
+    },
+    {
+      "id": "audio.transcribe",
+      "executor": "gateway"
+    },
+    {
+      "id": "audit.create_siem_destination",
+      "executor": "client",
+      "clientRoute": "/api/v1/audit/siem-destinations"
+    },
+    {
+      "id": "audit.delete_siem_destination",
+      "executor": "client",
+      "clientRoute": "/api/v1/audit/siem-destinations/{destination_id}"
+    },
+    {
+      "id": "audit.export_log",
+      "executor": "client",
+      "clientRoute": "/api/v1/audit/compliance/events"
+    },
+    {
+      "id": "audit.list_events",
+      "executor": "client",
+      "clientRoute": "/api/v1/audit"
+    },
+    {
+      "id": "audit.update_siem_destination",
+      "executor": "client",
+      "clientRoute": "/api/v1/audit/siem-destinations/{destination_id}"
+    },
+    {
+      "id": "audit.verify_chain",
+      "executor": "client",
+      "clientRoute": "/api/v1/audit/compliance/verify"
+    },
+    {
+      "id": "automations.create_event_trigger",
+      "executor": "client",
+      "clientRoute": "/api/v1/event-triggers"
+    },
+    {
+      "id": "automations.dry_run_event_trigger",
+      "executor": "client",
+      "clientRoute": "/api/v1/event-triggers/{trigger_id}/dry-run"
+    },
+    {
+      "id": "automations.list_event_triggers",
+      "executor": "client",
+      "clientRoute": "/api/v1/event-triggers"
+    },
+    {
+      "id": "automations.update_event_trigger",
+      "executor": "client",
+      "clientRoute": "/api/v1/event-triggers/{trigger_id}"
+    },
+    {
+      "id": "browser.blocked.try_other_source",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser.get_org_policy",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser.list_origin_consents",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser.revoke_origin_consent",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser.set_org_policy",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_action.run",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_action.set_control_mode",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_action.suggest",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_attach.stop",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_context.resolve_tab_mentions",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_download.send_to_knowledge",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_evidence.compile_procedure",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_evidence.save_recipe",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_omnibox.search",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_omnibox.suggest",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_profile.create",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_profile.delete",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_profile.probe_restore",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_profile.rename",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_region.attach",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_run.control",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_run.start",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_run.steer",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_session.close",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_session.create",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_session.keepalive",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_tab.close",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_tab.control",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_tab.create",
+      "executor": "gateway"
+    },
+    {
+      "id": "browser_tab.select",
+      "executor": "gateway"
+    },
+    {
+      "id": "brreg.lookup_organization",
+      "executor": "gateway"
+    },
+    {
+      "id": "chat.accept_connector_suggestion",
+      "executor": "client",
+      "clientRoute": "ui:connector-suggestion-card"
+    },
+    {
+      "id": "chat.answer_question",
+      "executor": "client",
+      "clientRoute": "/api/v1/orchestration/questions/{question_id}/answer"
+    },
+    {
+      "id": "chat.apply_deck_template",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/stream"
+    },
+    {
+      "id": "chat.approve_plan",
+      "executor": "gateway"
+    },
+    {
+      "id": "chat.cancel_invocation",
+      "executor": "gateway"
+    },
+    {
+      "id": "chat.clear_goal",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/threads/{thread_id}/goal"
+    },
+    {
+      "id": "chat.clear_threads",
+      "executor": "gateway"
+    },
+    {
+      "id": "chat.continue_goal",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/stream"
+    },
+    {
+      "id": "chat.delete_thread",
+      "executor": "gateway"
+    },
+    {
+      "id": "chat.edit_artifact_selection",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/stream"
+    },
+    {
+      "id": "chat.execute_approved_plan",
+      "executor": "client",
+      "clientRoute": "/api/v1/agents/runs/{run_id}/plan-approval"
+    },
+    {
+      "id": "chat.extract_document",
+      "executor": "gateway"
+    },
+    {
+      "id": "chat.goal_auto_toggle",
+      "executor": "client",
+      "clientRoute": "ui:goal-bar"
+    },
+    {
+      "id": "chat.goal_away_start",
+      "executor": "client",
+      "clientRoute": "/api/v1/cron"
+    },
+    {
+      "id": "chat.goal_mark_done",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/threads/{thread_id}/goal"
+    },
+    {
+      "id": "chat.goal_reopen",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/threads/{thread_id}/goal"
+    },
+    {
+      "id": "chat.inspect_run_request",
+      "executor": "client",
+      "clientRoute": "/api/v1/agents/runs/{run_id}/requests/{call_seq}"
+    },
+    {
+      "id": "chat.list_artifact_revisions",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/threads/{thread_id}/artifacts/{artifact_id}/revisions"
+    },
+    {
+      "id": "chat.list_deck_templates",
+      "executor": "client",
+      "clientRoute": "/api/v1/deck-templates"
+    },
+    {
+      "id": "chat.mark_thread_seen",
+      "executor": "client",
+      "clientRoute": "/api/v1/attention/seen"
+    },
+    {
+      "id": "chat.mcp_app_tool_call",
+      "executor": "client",
+      "clientRoute": "/api/v1/mcp-apps/tool-call"
+    },
+    {
+      "id": "chat.open_cited_passage",
+      "executor": "client",
+      "clientRoute": "ui:cited-passage-viewer"
+    },
+    {
+      "id": "chat.open_computer_viewer",
+      "executor": "client",
+      "clientRoute": "ui:computer-panel"
+    },
+    {
+      "id": "chat.open_deck_slide",
+      "executor": "client",
+      "clientRoute": "ui:deck-slide-strip"
+    },
+    {
+      "id": "chat.open_mcp_app",
+      "executor": "client",
+      "clientRoute": "/api/v1/mcp-apps/resource"
+    },
+    {
+      "id": "chat.open_widget_link",
+      "executor": "client",
+      "clientRoute": "ui:inline-widget-bridge"
+    },
+    {
+      "id": "chat.pick_context_ref",
+      "executor": "client",
+      "clientRoute": "ui:composer-context-picker"
+    },
+    {
+      "id": "chat.present_deck",
+      "executor": "client",
+      "clientRoute": "ui:deck-present-mode"
+    },
+    {
+      "id": "chat.queue.retract",
+      "executor": "gateway"
+    },
+    {
+      "id": "chat.queue_invocation_input",
+      "executor": "gateway"
+    },
+    {
+      "id": "chat.reject_plan",
+      "executor": "client",
+      "clientRoute": "/api/v1/agents/runs/{run_id}/plan-approval"
+    },
+    {
+      "id": "chat.research_plan_cancel",
+      "executor": "client",
+      "clientRoute": "ui:research-plan-card"
+    },
+    {
+      "id": "chat.research_plan_start",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/stream"
+    },
+    {
+      "id": "chat.research_run.cancel",
+      "executor": "gateway"
+    },
+    {
+      "id": "chat.restore_artifact_revision",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/threads/{thread_id}/artifacts/{artifact_id}/restore"
+    },
+    {
+      "id": "chat.run.continue",
+      "executor": "client",
+      "clientRoute": "/api/v1/orchestration/runs/{run_id}/continue"
+    },
+    {
+      "id": "chat.save_artifact_revision",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/threads/{thread_id}/artifacts/{artifact_id}"
+    },
+    {
+      "id": "chat.save_artifact_to_knowledge",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/documents"
+    },
+    {
+      "id": "chat.save_thread_snapshot",
+      "executor": "gateway"
+    },
+    {
+      "id": "chat.set_agent_mode",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/stream"
+    },
+    {
+      "id": "chat.set_connector_scope",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/stream"
+    },
+    {
+      "id": "chat.set_context_refs",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/stream"
+    },
+    {
+      "id": "chat.set_goal",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/threads/{thread_id}/goal"
+    },
+    {
+      "id": "chat.set_transcript_density",
+      "executor": "client",
+      "clientRoute": "/api/v1/settings/appearance"
+    },
+    {
+      "id": "chat.stage_mcp_app_message",
+      "executor": "client",
+      "clientRoute": "ui:mcp-app-host"
+    },
+    {
+      "id": "chat.stage_widget_followup",
+      "executor": "client",
+      "clientRoute": "ui:inline-widget-bridge"
+    },
+    {
+      "id": "chat.stage_widget_selection",
+      "executor": "client",
+      "clientRoute": "ui:inline-widget-bridge"
+    },
+    {
+      "id": "chat.submit_feedback",
+      "executor": "gateway"
+    },
+    {
+      "id": "chat.thread.archive",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/threads/{thread_id}/archive"
+    },
+    {
+      "id": "chat.thread.mark_unread",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/threads/{thread_id}/flags"
+    },
+    {
+      "id": "chat.thread.star",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/threads/{thread_id}/flags"
+    },
+    {
+      "id": "chat.update_goal",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/threads/{thread_id}/goal"
+    },
+    {
+      "id": "chat.upload_document",
+      "executor": "gateway"
+    },
+    {
+      "id": "chat.wide_research_retry_item",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/stream"
+    },
+    {
+      "id": "chat.wide_research_start",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/stream"
+    },
+    {
+      "id": "connection_zdr.acknowledge",
+      "executor": "client",
+      "clientRoute": "/api/v1/model-connections/{connection_id}/zdr-acknowledgement"
+    },
+    {
+      "id": "connection_zdr.read",
+      "executor": "client",
+      "clientRoute": "/api/v1/model-connections/{connection_id}/zdr"
+    },
+    {
+      "id": "connection_zdr.revoke",
+      "executor": "client",
+      "clientRoute": "/api/v1/model-connections/{connection_id}/zdr-acknowledgement"
+    },
+    {
+      "id": "connectors.create_credential_binding",
+      "executor": "client",
+      "clientRoute": "/api/v1/credential-bindings"
+    },
+    {
+      "id": "connectors.create_custom_rest",
+      "executor": "client",
+      "clientRoute": "/api/v1/connectors/custom-rest"
+    },
+    {
+      "id": "connectors.revoke_credential_binding",
+      "executor": "client",
+      "clientRoute": "/api/v1/credential-bindings/{id}"
+    },
+    {
+      "id": "finetune.cancel_job",
+      "executor": "gateway"
+    },
+    {
+      "id": "finetune.create_job",
+      "executor": "gateway"
+    },
+    {
+      "id": "finetune.deploy_job",
+      "executor": "gateway"
+    },
+    {
+      "id": "inbox.add_tag",
+      "executor": "gateway"
+    },
+    {
+      "id": "inbox.claim_draft_lease",
+      "executor": "gateway"
+    },
+    {
+      "id": "inbox.create_draft_reply_proposal",
+      "executor": "gateway"
+    },
+    {
+      "id": "inbox.create_incident_proposal",
+      "executor": "gateway"
+    },
+    {
+      "id": "inbox.create_internal_note_proposal",
+      "executor": "gateway"
+    },
+    {
+      "id": "inbox.create_problem_proposal",
+      "executor": "gateway"
+    },
+    {
+      "id": "inbox.create_ticket_update_proposal",
+      "executor": "gateway"
+    },
+    {
+      "id": "inbox.delete_draft",
+      "executor": "gateway"
+    },
+    {
+      "id": "inbox.follow_conversation",
+      "executor": "gateway"
+    },
+    {
+      "id": "inbox.release_draft_lease",
+      "executor": "gateway"
+    },
+    {
+      "id": "inbox.remove_tag",
+      "executor": "gateway"
+    },
+    {
+      "id": "inbox.review_ai_action",
+      "executor": "gateway"
+    },
+    {
+      "id": "inbox.save_draft",
+      "executor": "gateway"
+    },
+    {
+      "id": "inbox.send_reply",
+      "executor": "gateway"
+    },
+    {
+      "id": "inbox.set_assignment",
+      "executor": "gateway"
+    },
+    {
+      "id": "inbox.set_conversation_pinned",
+      "executor": "gateway"
+    },
+    {
+      "id": "inbox.set_conversation_read",
+      "executor": "gateway"
+    },
+    {
+      "id": "inbox.set_csat_preference",
+      "executor": "gateway"
+    },
+    {
+      "id": "inbox.set_status",
+      "executor": "gateway"
+    },
+    {
+      "id": "inbox.submit_feedback",
+      "executor": "gateway"
+    },
+    {
+      "id": "ingestions.cancel_run",
+      "executor": "gateway"
+    },
+    {
+      "id": "ingestions.change_schedule_state",
+      "executor": "gateway"
+    },
+    {
+      "id": "ingestions.create_run",
+      "executor": "gateway"
+    },
+    {
+      "id": "ingestions.create_schedule",
+      "executor": "gateway"
+    },
+    {
+      "id": "ingestions.create_source",
+      "executor": "gateway"
+    },
+    {
+      "id": "ingestions.delete_source",
+      "executor": "gateway"
+    },
+    {
+      "id": "ingestions.get_run_status",
+      "executor": "gateway"
+    },
+    {
+      "id": "ingestions.job_control",
+      "executor": "gateway"
+    },
+    {
+      "id": "ingestions.pause_run",
+      "executor": "gateway"
+    },
+    {
+      "id": "ingestions.pause_schedule",
+      "executor": "gateway"
+    },
+    {
+      "id": "ingestions.resume_run",
+      "executor": "gateway"
+    },
+    {
+      "id": "ingestions.start_agent_run",
+      "executor": "gateway"
+    },
+    {
+      "id": "integrations.browse_connection",
+      "executor": "client",
+      "clientRoute": "/api/v1/integrations/connections/{id}/browse"
+    },
+    {
+      "id": "integrations.disconnect",
+      "executor": "gateway"
+    },
+    {
+      "id": "integrations.disconnect_chatgpt_subscription",
+      "executor": "gateway"
+    },
+    {
+      "id": "integrations.extend_inbox_history",
+      "executor": "gateway"
+    },
+    {
+      "id": "integrations.fetch_connection_content",
+      "executor": "client",
+      "clientRoute": "/api/v1/integrations/connections/{id}/content"
+    },
+    {
+      "id": "integrations.list_connector_policies",
+      "executor": "client",
+      "clientRoute": "/api/v1/tool-policies"
+    },
+    {
+      "id": "integrations.set_connector_policy",
+      "executor": "client",
+      "clientRoute": "/api/v1/tool-policies/{capability_id}"
+    },
+    {
+      "id": "integrations.start_chatgpt_subscription",
+      "executor": "gateway"
+    },
+    {
+      "id": "integrations.start_connect_session",
+      "executor": "gateway"
+    },
+    {
+      "id": "integrations.trigger_inbox_sync",
+      "executor": "gateway"
+    },
+    {
+      "id": "integrations.trigger_sync",
+      "executor": "gateway"
+    },
+    {
+      "id": "knowledge.connect_source",
+      "executor": "gateway"
+    },
+    {
+      "id": "knowledge.crawl_site",
+      "executor": "gateway"
+    },
+    {
+      "id": "knowledge.create_document",
+      "executor": "gateway"
+    },
+    {
+      "id": "knowledge.extract_products",
+      "executor": "gateway"
+    },
+    {
+      "id": "knowledge.import_source",
+      "executor": "gateway"
+    },
+    {
+      "id": "knowledge.recrawl_source",
+      "executor": "gateway"
+    },
+    {
+      "id": "knowledge.register_sharepoint_source",
+      "executor": "gateway"
+    },
+    {
+      "id": "knowledge.scrape_url",
+      "executor": "gateway"
+    },
+    {
+      "id": "knowledge.summarize_products",
+      "executor": "gateway"
+    },
+    {
+      "id": "knowledge.upload_files",
+      "executor": "gateway"
+    },
+    {
+      "id": "leads.create_list",
+      "executor": "gateway"
+    },
+    {
+      "id": "leads.delete_list",
+      "executor": "gateway"
+    },
+    {
+      "id": "learning.accept_skill",
+      "executor": "gateway"
+    },
+    {
+      "id": "learning.learn_from_thread",
+      "executor": "gateway"
+    },
+    {
+      "id": "learning.reject_skill",
+      "executor": "gateway"
+    },
+    {
+      "id": "learning.teach_skill_from_run",
+      "executor": "gateway"
+    },
+    {
+      "id": "learning.undo",
+      "executor": "gateway"
+    },
+    {
+      "id": "library.list",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/library"
+    },
+    {
+      "id": "library.open_origin",
+      "executor": "client",
+      "clientRoute": "ui:chat-library-panel"
+    },
+    {
+      "id": "library.read_text",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/library"
+    },
+    {
+      "id": "library.share",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/library"
+    },
+    {
+      "id": "mcp.approve_tool",
+      "executor": "client",
+      "clientRoute": "/api/v1/mcp/servers/{server_id}/tools/{tool}/approve"
+    },
+    {
+      "id": "mcp.delete_server",
+      "executor": "gateway"
+    },
+    {
+      "id": "mcp.probe_server",
+      "executor": "client",
+      "clientRoute": "/api/v1/mcp/servers/probe"
+    },
+    {
+      "id": "mcp.share_server",
+      "executor": "gateway"
+    },
+    {
+      "id": "membership.invite_member",
+      "executor": "gateway"
+    },
+    {
+      "id": "membership.remove_member",
+      "executor": "gateway"
+    },
+    {
+      "id": "membership.update_member_role",
+      "executor": "gateway"
+    },
+    {
+      "id": "memory.delete",
+      "executor": "gateway"
+    },
+    {
+      "id": "memory.profile.rebuild",
+      "executor": "client",
+      "clientRoute": "/api/v1/memory/profile/rebuild"
+    },
+    {
+      "id": "memory.profile.save",
+      "executor": "client",
+      "clientRoute": "/api/v1/memory/profile"
+    },
+    {
+      "id": "memory.remember",
+      "executor": "gateway"
+    },
+    {
+      "id": "memory.reset",
+      "executor": "gateway"
+    },
+    {
+      "id": "memory.set_state",
+      "executor": "gateway"
+    },
+    {
+      "id": "models.create_customer_gateway",
+      "executor": "client",
+      "clientRoute": "/api/v1/model-connections/customer-gateway"
+    },
+    {
+      "id": "models.delete_customer_gateway",
+      "executor": "client",
+      "clientRoute": "/api/v1/model-connections/{connection_id}"
+    },
+    {
+      "id": "monitoring.check_now",
+      "executor": "gateway"
+    },
+    {
+      "id": "monitoring.create_monitor",
+      "executor": "gateway"
+    },
+    {
+      "id": "monitoring.delete_monitor",
+      "executor": "gateway"
+    },
+    {
+      "id": "navbar.create_calendar_event",
+      "executor": "gateway"
+    },
+    {
+      "id": "navbar.create_calendar_note",
+      "executor": "gateway"
+    },
+    {
+      "id": "navbar.mark_notification_read",
+      "executor": "gateway"
+    },
+    {
+      "id": "navbar.save_theme",
+      "executor": "gateway"
+    },
+    {
+      "id": "navbar.submit_support_request",
+      "executor": "gateway"
+    },
+    {
+      "id": "notifications.delete",
+      "executor": "gateway"
+    },
+    {
+      "id": "notifications.mark_all_read",
+      "executor": "gateway"
+    },
+    {
+      "id": "notifications.mark_read",
+      "executor": "gateway"
+    },
+    {
+      "id": "notifications.update_preference",
+      "executor": "gateway"
+    },
+    {
+      "id": "operating_map.create_agent_blueprint",
+      "executor": "gateway"
+    },
+    {
+      "id": "operating_map.generate",
+      "executor": "gateway"
+    },
+    {
+      "id": "operating_map.refresh",
+      "executor": "gateway"
+    },
+    {
+      "id": "operating_map.review_proposal",
+      "executor": "gateway"
+    },
+    {
+      "id": "orchestration.cancel_run",
+      "executor": "gateway"
+    },
+    {
+      "id": "orchestration.decide_approval",
+      "executor": "gateway"
+    },
+    {
+      "id": "orchestration.resume_run",
+      "executor": "gateway"
+    },
+    {
+      "id": "org.acknowledge_deletion",
+      "executor": "gateway"
+    },
+    {
+      "id": "org.add_domain",
+      "executor": "client",
+      "clientRoute": "/api/v1/orgs/{id}/domains"
+    },
+    {
+      "id": "org.add_sso_provider",
+      "executor": "client",
+      "clientRoute": "/api/v1/orgs/{id}/sso/providers"
+    },
+    {
+      "id": "org.create_hook",
+      "executor": "client",
+      "clientRoute": "/api/v1/org/hooks"
+    },
+    {
+      "id": "org.create_permission_rule",
+      "executor": "client",
+      "clientRoute": "/api/v1/org/permission-rules"
+    },
+    {
+      "id": "org.create_scim_token",
+      "executor": "client",
+      "clientRoute": "/api/v1/orgs/{id}/scim/tokens"
+    },
+    {
+      "id": "org.delete_hook",
+      "executor": "client",
+      "clientRoute": "/api/v1/org/hooks/{hook_id}"
+    },
+    {
+      "id": "org.delete_permission_rule",
+      "executor": "client",
+      "clientRoute": "/api/v1/org/permission-rules/{rule_id}"
+    },
+    {
+      "id": "org.list_permission_rules",
+      "executor": "client",
+      "clientRoute": "/api/v1/org/permission-rules"
+    },
+    {
+      "id": "org.mark_exported",
+      "executor": "gateway"
+    },
+    {
+      "id": "org.place_legal_hold",
+      "executor": "client",
+      "clientRoute": "/api/v1/orgs/{id}/legal-holds"
+    },
+    {
+      "id": "org.preview_effective_policy",
+      "executor": "client",
+      "clientRoute": "/api/v1/org/agent-policy/effective"
+    },
+    {
+      "id": "org.release_legal_hold",
+      "executor": "client",
+      "clientRoute": "/api/v1/orgs/{id}/legal-holds/{hold_id}/release"
+    },
+    {
+      "id": "org.remove_sso_provider",
+      "executor": "client",
+      "clientRoute": "/api/v1/orgs/{id}/sso/providers/{provider_id}"
+    },
+    {
+      "id": "org.restore",
+      "executor": "gateway"
+    },
+    {
+      "id": "org.revoke_domain",
+      "executor": "client",
+      "clientRoute": "/api/v1/orgs/{id}/domains/{domain}"
+    },
+    {
+      "id": "org.revoke_scim_token",
+      "executor": "client",
+      "clientRoute": "/api/v1/orgs/{id}/scim/tokens/{token_id}"
+    },
+    {
+      "id": "org.set_agent_policy",
+      "executor": "client",
+      "clientRoute": "/api/v1/org/agent-policy"
+    },
+    {
+      "id": "org.set_model_entitlement",
+      "executor": "gateway"
+    },
+    {
+      "id": "org.set_quota",
+      "executor": "gateway"
+    },
+    {
+      "id": "org.set_retention",
+      "executor": "client",
+      "clientRoute": "/api/v1/orgs/{id}/retention"
+    },
+    {
+      "id": "org.set_web_policy",
+      "executor": "client",
+      "clientRoute": "/api/v1/org/agent-policy"
+    },
+    {
+      "id": "org.soft_delete",
+      "executor": "gateway"
+    },
+    {
+      "id": "org.update_agent_learning_policy",
+      "executor": "gateway"
+    },
+    {
+      "id": "org.update_hook",
+      "executor": "client",
+      "clientRoute": "/api/v1/org/hooks/{hook_id}"
+    },
+    {
+      "id": "org.update_instructions",
+      "executor": "gateway"
+    },
+    {
+      "id": "org.update_sso_policy",
+      "executor": "client",
+      "clientRoute": "/api/v1/orgs/{id}/sso/policy"
+    },
+    {
+      "id": "org.update_support_ai_mode",
+      "executor": "gateway"
+    },
+    {
+      "id": "org.update_zdr",
+      "executor": "gateway"
+    },
+    {
+      "id": "org.verify_domain",
+      "executor": "client",
+      "clientRoute": "/api/v1/orgs/{id}/domains/{domain}/verify"
+    },
+    {
+      "id": "organization.switch_active",
+      "executor": "gateway"
+    },
+    {
+      "id": "ownership.revoke_document_share",
+      "executor": "gateway"
+    },
+    {
+      "id": "ownership.share_document",
+      "executor": "gateway"
+    },
+    {
+      "id": "plugins.approve_catalog",
+      "executor": "client",
+      "clientRoute": "/api/v1/plugin-catalog/{plugin_id}/approve"
+    },
+    {
+      "id": "plugins.install",
+      "executor": "client",
+      "clientRoute": "/api/v1/plugins/{plugin_id}/install"
+    },
+    {
+      "id": "plugins.kill_digest",
+      "executor": "client",
+      "clientRoute": "/api/v1/plugin-kill-list"
+    },
+    {
+      "id": "plugins.lift_kill",
+      "executor": "client",
+      "clientRoute": "/api/v1/plugin-kill-list"
+    },
+    {
+      "id": "plugins.list_catalog",
+      "executor": "client",
+      "clientRoute": "/api/v1/plugin-catalog"
+    },
+    {
+      "id": "plugins.uninstall",
+      "executor": "client",
+      "clientRoute": "/api/v1/plugins/{plugin_id}/uninstall"
+    },
+    {
+      "id": "policy.read_effective",
+      "executor": "client",
+      "clientRoute": "/api/v1/policy/effective"
+    },
+    {
+      "id": "presets.create",
+      "executor": "client",
+      "clientRoute": "/api/v1/skills"
+    },
+    {
+      "id": "presets.update",
+      "executor": "client",
+      "clientRoute": "/api/v1/skills/{skill_id}"
+    },
+    {
+      "id": "privacy.erase_my_account",
+      "executor": "gateway"
+    },
+    {
+      "id": "review.run",
+      "executor": "client",
+      "clientRoute": "/api/v1/ai/review"
+    },
+    {
+      "id": "router_policy.update",
+      "executor": "gateway"
+    },
+    {
+      "id": "schedule.delete",
+      "executor": "client",
+      "clientRoute": "/api/v1/cron/{cron_id}"
+    },
+    {
+      "id": "schedule.fires.list",
+      "executor": "client",
+      "clientRoute": "/api/v1/cron/{cron_id}/fires"
+    },
+    {
+      "id": "schedule.list",
+      "executor": "client",
+      "clientRoute": "/api/v1/cron"
+    },
+    {
+      "id": "schedule.pause",
+      "executor": "client",
+      "clientRoute": "/api/v1/cron/{cron_id}"
+    },
+    {
+      "id": "schedule.resume",
+      "executor": "client",
+      "clientRoute": "/api/v1/cron/{cron_id}"
+    },
+    {
+      "id": "schedule.run_now",
+      "executor": "client",
+      "clientRoute": "/api/v1/cron/{cron_id}/run"
+    },
+    {
+      "id": "schedule.update_time",
+      "executor": "client",
+      "clientRoute": "/api/v1/cron/{cron_id}"
+    },
+    {
+      "id": "settings.complete_personal_setup",
+      "executor": "gateway"
+    },
+    {
+      "id": "settings.create_api_key",
+      "executor": "gateway"
+    },
+    {
+      "id": "settings.delete_api_key",
+      "executor": "gateway"
+    },
+    {
+      "id": "settings.set_tone_preset",
+      "executor": "gateway"
+    },
+    {
+      "id": "settings.skip_personal_setup",
+      "executor": "gateway"
+    },
+    {
+      "id": "settings.update_me",
+      "executor": "gateway"
+    },
+    {
+      "id": "settings.update_preferences",
+      "executor": "gateway"
+    },
+    {
+      "id": "settings.update_setting",
+      "executor": "gateway"
+    },
+    {
+      "id": "shipping.get_quotes",
+      "executor": "gateway"
+    },
+    {
+      "id": "skills.draft.discard",
+      "executor": "client",
+      "clientRoute": "/api/v1/skills/{skill_id}/draft"
+    },
+    {
+      "id": "skills.draft.save",
+      "executor": "client",
+      "clientRoute": "/api/v1/skills/{skill_id}/draft"
+    },
+    {
+      "id": "skills.import",
+      "executor": "client",
+      "clientRoute": "/api/v1/skills/import"
+    },
+    {
+      "id": "skills.publish",
+      "executor": "client",
+      "clientRoute": "/api/v1/skills/{skill_id}/publish"
+    },
+    {
+      "id": "skills.save_from_message",
+      "executor": "client",
+      "clientRoute": "/api/v1/skills"
+    },
+    {
+      "id": "skills.version.restore",
+      "executor": "client",
+      "clientRoute": "/api/v1/skills/{skill_id}/versions/{version}/restore"
+    },
+    {
+      "id": "skills.versions.list",
+      "executor": "client",
+      "clientRoute": "/api/v1/skills/{skill_id}/versions"
+    },
+    {
+      "id": "social.create_campaign",
+      "executor": "gateway"
+    },
+    {
+      "id": "social.create_draft",
+      "executor": "gateway"
+    },
+    {
+      "id": "social.create_draft_from_inbox",
+      "executor": "gateway"
+    },
+    {
+      "id": "social.decide_approval",
+      "executor": "gateway"
+    },
+    {
+      "id": "social.publish_post",
+      "executor": "gateway"
+    },
+    {
+      "id": "social.schedule_post",
+      "executor": "gateway"
+    },
+    {
+      "id": "space.files.attach",
+      "executor": "gateway"
+    },
+    {
+      "id": "space.files.delete",
+      "executor": "gateway"
+    },
+    {
+      "id": "space.files.list",
+      "executor": "gateway"
+    },
+    {
+      "id": "space.files.read_text",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.add_member",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.agent_binding.pin",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.agent_memory.delete",
+      "executor": "client",
+      "clientRoute": "/api/v1/spaces/{space_ref}/memory/{memory_id}"
+    },
+    {
+      "id": "spaces.agent_memory.list",
+      "executor": "client",
+      "clientRoute": "/api/v1/spaces/{space_ref}/memory"
+    },
+    {
+      "id": "spaces.apply_effect_preset",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.bind_space_agent",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.cancel_reminder",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.change_member_role",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.create_personal_space",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.create_post",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.create_reminder",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.create_room",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.create_space_agent",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.decide_approval",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.delete_message",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.edit_message",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.ensure_organization_room",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.hide_space",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.join_room",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.leave_room",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.mark_all_read",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.mark_read",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.mark_unread",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.memory.delete",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.memory.list",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.open_dm",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.record_presence",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.remove_member",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.reply_in_thread",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.request_personal_space_deletion",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.revoke_agent",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.revoke_approval_grant",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.set_agent_state",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.set_agent_wake_policy",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.set_attention_item_state",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.set_effect_entitlements",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.set_notify_level",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.set_status",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.set_thread_follow",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.set_tool_policy",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.stop_run",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.toggle_reaction",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.update_room_details",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.update_room_settings",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.update_sidebar",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.update_space_instructions",
+      "executor": "gateway"
+    },
+    {
+      "id": "spaces.update_thread_presentation",
+      "executor": "gateway"
+    },
+    {
+      "id": "studio.create_project",
+      "executor": "gateway"
+    },
+    {
+      "id": "studio.export_social_draft",
+      "executor": "gateway"
+    },
+    {
+      "id": "studio.save_project",
+      "executor": "gateway"
+    },
+    {
+      "id": "templates.create",
+      "executor": "client",
+      "clientRoute": "/api/v1/skills"
+    },
+    {
+      "id": "templates.update",
+      "executor": "client",
+      "clientRoute": "/api/v1/skills/{skill_id}"
+    },
+    {
+      "id": "thread.export",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/threads/{thread_id}/export"
+    },
+    {
+      "id": "thread.grant_snapshot",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/snapshots/{snapshot_id}/grants"
+    },
+    {
+      "id": "thread.import",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/threads/import"
+    },
+    {
+      "id": "thread.revoke_snapshot",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/snapshots/{snapshot_id}"
+    },
+    {
+      "id": "thread.share_snapshot",
+      "executor": "client",
+      "clientRoute": "/api/v1/chat/threads/{thread_id}/snapshots"
+    },
+    {
+      "id": "tickets.add_side_conversation_message",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.assign",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.classify_conversation",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.create",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.create_automation_rule",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.create_checklist",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.create_incident",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.create_macro",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.create_problem",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.create_side_conversation",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.create_sla_policy",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.create_team",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.create_view",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.link_incident_ticket",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.link_resource",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.record_chat_handoff",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.record_csat_outcome",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.resolve",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.run_macro",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.update",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.update_automation_rule",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.update_checklist_item",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.update_incident",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.update_macro",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.update_problem",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.update_side_conversation",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.update_sla_policy",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.update_team",
+      "executor": "gateway"
+    },
+    {
+      "id": "tickets.update_view",
+      "executor": "gateway"
+    },
+    {
+      "id": "tools.set_policy",
+      "executor": "client",
+      "clientRoute": "/api/v1/tool-policies/{capability_id}"
+    },
+    {
+      "id": "workflows.toggle_policy",
+      "executor": "gateway"
+    }
+  ]
+}

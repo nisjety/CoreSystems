@@ -13,7 +13,7 @@
  *   - extra viewers registered at runtime, drawn by the panel's Dynamic slot.
  */
 import type { JSX } from '@solidjs/web'
-import { createContext, type Component } from 'solid-js'
+import { createContext, createSignal, type Component } from 'solid-js'
 import type { DeckTemplate } from '@/shared/api/chat-client'
 import type { ChatArtifact, GeneratedFile } from './chat-types'
 
@@ -61,15 +61,25 @@ export function pickArtifactRenderer<Id extends string>(
 
 export function createArtifactRendererRegistry<Id extends string = string>(): ArtifactRendererRegistry<Id> {
   const renderers: ArtifactRenderer<Id>[] = []
+  // Bumped by every change to `renderers`, so a memo that resolves through `resolve` re-runs when a viewer is
+  // registered or removed while it is mounted (the open artifact panel draws a viewer added after it opened).
+  // `ownedWrite`: a viewer may register from inside an owned scope (an effect or a setup), and this is internal state.
+  const [version, setVersion] = createSignal(0, { ownedWrite: true })
   return {
     register(renderer) {
       renderers.push(renderer)
+      setVersion((value) => value + 1)
       return () => {
         const index = renderers.indexOf(renderer)
-        if (index >= 0) renderers.splice(index, 1)
+        if (index < 0) return
+        renderers.splice(index, 1)
+        setVersion((value) => value + 1)
       }
     },
-    resolve: (artifact) => pickArtifactRenderer(renderers, artifact),
+    resolve: (artifact) => {
+      version()
+      return pickArtifactRenderer(renderers, artifact)
+    },
   }
 }
 

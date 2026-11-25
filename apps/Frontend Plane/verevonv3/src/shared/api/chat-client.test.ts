@@ -1919,6 +1919,30 @@ describe('chat-client server thread history', () => {
     expect(flagOff).not.toHaveProperty('attentionUnseen')
   })
 
+  it('carries a fork count above zero from the thread list, and reads zero, a negative or a fraction as no forks', async () => {
+    const updatedAt = '2026-06-17T10:00:00.000Z'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        data: {
+          sessions: [
+            { threadId: 'thread_source', title: 'Source', preview: '', updatedAt, forkCount: 2 },
+            { threadId: 'thread_zero', title: 'Zero', preview: '', updatedAt, forkCount: 0 },
+            { threadId: 'thread_negative', title: 'Negative', preview: '', updatedAt, forkCount: -1 },
+            { threadId: 'thread_fraction', title: 'Fraction', preview: '', updatedAt, forkCount: 1.5 },
+            { threadId: 'thread_plain', title: 'Plain', preview: '', updatedAt },
+          ],
+        },
+      }), { headers: { 'Content-Type': 'application/json' }, status: 200 }),
+    ))
+
+    const [source, zero, negative, fraction, plain] = await listChatThreads()
+
+    expect(source).toMatchObject({ threadId: 'thread_source', forkCount: 2 })
+    for (const session of [zero, negative, fraction, plain]) {
+      expect(session).not.toHaveProperty('forkCount')
+    }
+  })
+
   it('reads a server-owned pin, and treats anything non-true as unpinned', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
@@ -2770,6 +2794,47 @@ describe('turn_timing, cost_basis and result_receipt', () => {
   })
 })
 
+describe('cost_mixed (F-f04-05)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const frame = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+
+  it('reads a mixed total only from the literal true, on the progress and the usage frame', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sseResponse([
+      frame('usage_progress', { calls: 2, phase: 'agent_round', cost_usd: 0.25, cost_mixed: true }),
+      frame('usage_progress', { calls: 3, phase: 'answer', cost_usd: 0.25, cost_mixed: 'yes' }),
+      frame('usage', { input_tokens: 1500, output_tokens: 150, cost_usd: 0.25, calls: 3, cost_mixed: true }),
+      frame('usage', { input_tokens: 10, output_tokens: 1, cost_usd: 0.1, calls: 1, cost_mixed: false }),
+      frame('done', {}),
+    ])))
+    const onUsageProgress = vi.fn()
+    const onUsage = vi.fn()
+    await streamChat({ content: 'hi' }, { onUsageProgress, onUsage })
+
+    expect(onUsageProgress.mock.calls[0]?.[0].costMixed).toBe(true)
+    expect(onUsageProgress.mock.calls[1]?.[0].costMixed, 'only the literal true states a mix').toBeUndefined()
+    expect(onUsage.mock.calls[0]?.[0].costMixed).toBe(true)
+    expect(onUsage.mock.calls[1]?.[0].costMixed, 'a usage frame stating false states no mix').toBeUndefined()
+  })
+
+  it('states no mix on a frame that omits the key, so an older gateway reads as it did', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sseResponse([
+      frame('usage_progress', { calls: 1, phase: 'answer', cost_usd: 0.1, cost_basis: 'metered' }),
+      frame('usage', { input_tokens: 10, output_tokens: 1, cost_usd: 0.1, cost_basis: 'metered' }),
+      frame('done', {}),
+    ])))
+    const onUsageProgress = vi.fn()
+    const onUsage = vi.fn()
+    await streamChat({ content: 'hi' }, { onUsageProgress, onUsage })
+
+    expect(onUsageProgress.mock.calls[0]?.[0].costMixed).toBeUndefined()
+    expect(onUsage.mock.calls[0]?.[0].costMixed).toBeUndefined()
+    expect(onUsage.mock.calls[0]?.[0].costBasis).toBe('metered')
+  })
+})
+
 describe('usage_progress (WS27 S3)', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
@@ -3075,6 +3140,87 @@ describe('WS09 S9 paged thread messages', () => {
     expect(pagedTranscriptEnabled()).toBe(false)
     vi.stubEnv('VITE_CHAT_PAGED_TRANSCRIPT', 'true')
     expect(pagedTranscriptEnabled()).toBe(true)
+  })
+})
+
+describe('F-f01-24 paged messages carry the evidence the owner read carries', () => {
+  const json = { headers: { 'Content-Type': 'application/json' }, status: 200 }
+  const CITATION = { id: 'src-1', title: 'Rapport', url: 'https://example.test/r', snippet: 'Shared folder' }
+  const GROUNDING = { mode: 'retrieve', query: 'Rapport', lowConfidence: false, factCount: 0, sourceCount: 1, facts: [], sources: [] }
+  const ARTIFACT = { id: 'rapport', kind: 'document', title: 'Salgsrapport', content: '# Uke 37', version: 2 }
+  const DECK_V2 = { id: 'deck-1', kind: 'deck', title: 'Lysbilder', content: JSON.stringify({ version: 2 }), version: 1 }
+
+  // The owner read flattens each turn's metadata onto its message, so the evidence sits at the top level of the row.
+  const ownerRead = {
+    data: {
+      thread_id: 't1',
+      messages: [
+        {
+          message_id: '01M',
+          role: 'user',
+          content: 'Hva sier rapporten?',
+          context_refs: [{ kind: 'document', id: 'doc-1', label: 'Rapport' }],
+        },
+        {
+          message_id: '01N',
+          role: 'assistant',
+          content: 'Den sier at det går bra.',
+          citations: [CITATION, { id: 'broken' }],
+          artifacts: [ARTIFACT, DECK_V2],
+          grounding: GROUNDING,
+        },
+      ],
+      has_more: false,
+    },
+  }
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.unstubAllGlobals()
+  })
+
+  it('keeps the citations, artifacts, grounding and chips of a page, through the same checks a transcript turn passes', async () => {
+    vi.stubEnv('VITE_CHAT_PAGED_TRANSCRIPT', 'true')
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(ownerRead), json)))
+
+    const page = await getThreadMessages('t1', { limit: 100 })
+
+    expect(page.messages[0]?.contextRefs).toEqual([{ kind: 'document', id: 'doc-1', label: 'Rapport' }])
+    expect(page.messages[1]?.citations).toEqual([CITATION])
+    expect(page.messages[1]?.grounding).toEqual(GROUNDING)
+    // A deck this client cannot read is shown as code, as a transcript turn shows it.
+    expect(page.messages[1]?.artifacts).toEqual([ARTIFACT, { ...DECK_V2, kind: 'code' }])
+  })
+
+  it('carries none of that evidence while paging is off, so the switch-off read is what it was', async () => {
+    vi.stubEnv('VITE_CHAT_PAGED_TRANSCRIPT', 'false')
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(ownerRead), json)))
+
+    const messages = await getThreadMessages('t1')
+
+    for (const message of messages) {
+      expect(message).not.toHaveProperty('citations')
+      expect(message).not.toHaveProperty('artifacts')
+      expect(message).not.toHaveProperty('grounding')
+      expect(message).not.toHaveProperty('contextRefs')
+    }
+  })
+
+  it('reads the chips from the nested metadata alone while paging is off, as it always did', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        messages: [{
+          message_id: '01M',
+          role: 'user',
+          content: 'Question',
+          metadata: { context_refs: [{ kind: 'document', id: 'doc-2', label: 'Nested' }] },
+        }],
+      },
+    }), json)))
+
+    const messages = await getThreadMessages('t1')
+
+    expect(messages[0]?.contextRefs).toEqual([{ kind: 'document', id: 'doc-2', label: 'Nested' }])
   })
 })
 

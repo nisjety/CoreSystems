@@ -9,6 +9,8 @@ import {
   disablePushOnThisDevice,
   fetchPushConfig,
   pushSupport,
+  registerAttentionWorker,
+  serviceWorkerPath,
   subscriptionBody,
 } from '@/features/core/lib/push-subscription'
 
@@ -26,6 +28,7 @@ function jsonResponse(data: unknown, status = 200): Response {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.unstubAllEnvs()
   vi.restoreAllMocks()
 })
 
@@ -124,11 +127,14 @@ type FakeWindow = { visibilityState: string; focused: boolean; focus?: () => Pro
 
 // Runs the real public/sw.js against a fake worker global. The worker has no fetch listener and no cache use, and the
 // tests below check that from the file itself, so a later edit that adds either fails here.
-function loadWorker(windows: FakeWindow[] = []) {
+// `scriptPath` is the URL the page registered the worker at: the worker reads its opt-in query from its own location.
+function loadWorker(windows: FakeWindow[] = [], scriptPath = '/sw.js') {
   const listeners = new Map<string, WorkerListener>()
   const shown: Array<{ title: string; options: Record<string, unknown> }> = []
+  const closedTags: string[] = []
   const opened: string[] = []
   const fakeSelf = {
+    location: { href: `https://app.test${scriptPath}` },
     addEventListener: (type: string, listener: WorkerListener) => {
       listeners.set(type, listener)
     },
@@ -146,10 +152,15 @@ function loadWorker(windows: FakeWindow[] = []) {
         shown.push({ title, options })
         return Promise.resolve()
       },
+      getNotifications: (filter: { tag?: string } = {}) => Promise.resolve(
+        shown
+          .filter((entry) => filter.tag === undefined || entry.options.tag === filter.tag)
+          .map((entry) => ({ tag: entry.options.tag, close: () => { closedTags.push(String(entry.options.tag)) } })),
+      ),
     },
   }
   new Function('self', workerSource)(fakeSelf)
-  return { listeners, shown, opened }
+  return { listeners, shown, closed: closedTags, opened }
 }
 
 async function dispatch(listener: WorkerListener | undefined, event: Record<string, unknown>) {
@@ -193,5 +204,70 @@ describe('attention service worker', () => {
 
     expect(worker.listeners.has('fetch')).toBe(false)
     expect(workerSource).not.toMatch(/caches\./)
+  })
+
+  it('shows a silent notice that closes itself when a window is visible, with the opt-in query', async () => {
+    vi.useFakeTimers()
+    try {
+      const worker = loadWorker([{ visibilityState: 'visible', focused: false }], '/sw.js?visible=notice')
+
+      const pending = dispatch(worker.listeners.get('push'), {})
+      await vi.runAllTimersAsync()
+      await pending
+
+      expect(worker.shown).toHaveLength(1)
+      expect(worker.shown[0]?.title).toBe('Verevon')
+      expect(worker.shown[0]?.options).toMatchObject({
+        body: 'A chat needs your attention.',
+        tag: 'verevon-attention',
+        silent: true,
+        renotify: false,
+        data: { url: '/chat?filter=attention' },
+      })
+      expect(worker.closed).toEqual(['verevon-attention'])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('shows nothing for a visible window without the opt-in query', async () => {
+    vi.useFakeTimers()
+    try {
+      const worker = loadWorker([{ visibilityState: 'visible', focused: false }], '/sw.js')
+
+      await dispatch(worker.listeners.get('push'), {})
+
+      expect(worker.shown).toHaveLength(0)
+      expect(worker.closed).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('visible-window notice switch', () => {
+  it('asks for the opt-in worker URL only when the switch is the literal true', () => {
+    vi.stubEnv('VITE_PUSH_SHOW_WHEN_VISIBLE', 'true')
+
+    expect(serviceWorkerPath()).toBe('/sw.js?visible=notice')
+  })
+
+  it('keeps the plain worker URL for false, for any other spelling, and when the switch is unset', () => {
+    vi.stubEnv('VITE_PUSH_SHOW_WHEN_VISIBLE', 'false')
+    expect(serviceWorkerPath()).toBe('/sw.js')
+    vi.stubEnv('VITE_PUSH_SHOW_WHEN_VISIBLE', 'TRUE')
+    expect(serviceWorkerPath()).toBe('/sw.js')
+    vi.stubEnv('VITE_PUSH_SHOW_WHEN_VISIBLE', undefined)
+    expect(serviceWorkerPath()).toBe('/sw.js')
+  })
+
+  it('registers the worker at the path the switch names, scoped to the origin root', async () => {
+    vi.stubEnv('VITE_PUSH_SHOW_WHEN_VISIBLE', 'true')
+    const register = vi.fn(async (_url: string, _options: unknown) => ({}))
+    vi.stubGlobal('navigator', { ...navigator, serviceWorker: { register, ready: Promise.resolve({}) } })
+
+    await registerAttentionWorker()
+
+    expect(register).toHaveBeenCalledWith('/sw.js?visible=notice', { scope: '/' })
   })
 })

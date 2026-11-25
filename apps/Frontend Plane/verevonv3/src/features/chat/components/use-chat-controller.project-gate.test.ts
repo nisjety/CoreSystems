@@ -3,8 +3,9 @@
 /**
  * WS18-S4: a thread whose session names a Space is reopened through Chat's own transcript
  * route while `VITE_CHAT_PROJECTS_ENABLED` is off, as it was before the project picker.
- * Only a switched-on build reads the room's transcript, and only for a thread it has
- * recorded as a project thread.
+ * Only a switched-on build reads the room's transcript, and only for a project thread: one
+ * the build recorded (its routing hint), or, on the first open of a thread without a hint
+ * (F-f06-14), one whose server session is a Chat thread that names a Space.
  */
 
 import { createRoot, flush } from 'solid-js'
@@ -14,6 +15,8 @@ import { setActiveChatThreadId } from '@/features/chat/lib/chat-thread-history'
 
 const THREAD = 'thread-room'
 const OTHER = 'thread-chat'
+// A Chat thread that was started in a project, opened in a browser that did not start it (no routing hint).
+const PROJECT_THREAD = 'thread-project'
 const SPACE_REF = 'space-room'
 const STAMP = '2026-10-26T10:00:00.000Z'
 
@@ -113,5 +116,22 @@ describe('WS18-S4 project routing for a thread that names a Space', () => {
     await open(OTHER)
     await open(THREAD)
     expect(mocks.getSpaceThreadTranscript).toHaveBeenCalledWith(SPACE_REF, THREAD)
+  })
+
+  // F-f06-14: the server session decides, so the first open of a project thread this browser did not start is a room
+  // read too, and its session is read once, before any transcript or message route is asked for.
+  it('reads the room transcript on the first open of an un-hinted project thread while the switch is on', async () => {
+    vi.stubEnv('VITE_CHAT_PROJECTS_ENABLED', 'true')
+    mocks.getChatThread.mockImplementation(async (threadId: string) => (
+      threadId === PROJECT_THREAD
+        ? { threadId, title: 'Project', preview: 'Project', updatedAt: STAMP, pinned: false, spaceRef: SPACE_REF, origin: 'chat' }
+        : null
+    ))
+    unmount = mount()
+    await open(PROJECT_THREAD)
+    expect(mocks.getSpaceThreadTranscript).toHaveBeenCalledWith(SPACE_REF, PROJECT_THREAD)
+    expect(mocks.getChatThreadTranscript).not.toHaveBeenCalledWith(PROJECT_THREAD)
+    expect(mocks.getThreadMessages).not.toHaveBeenCalledWith(PROJECT_THREAD)
+    expect(mocks.getChatThread.mock.calls.filter(([threadId]) => threadId === PROJECT_THREAD)).toHaveLength(1)
   })
 })

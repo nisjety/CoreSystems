@@ -1,6 +1,8 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
+	/** "true" has the worker show a silent notice that closes itself when a window is visible (F-f05-12). Default off. */
+	readonly VITE_PUSH_SHOW_WHEN_VISIBLE?: string;
 	readonly VITE_VEREVON_GATEWAY_URL?: string;
 	readonly VITE_ALLOW_DEV_ACTOR_HEADERS?: string;
 	readonly VITE_ALLOW_DEV_AUTH_BYPASS?: string;
@@ -160,6 +162,12 @@ interface ImportMetaEnv {
 	readonly VITE_CHAT_THREAD_MEMORY_MODE?: string;
 	/** "true" offers the org's delegable read tools in the schedule consent card, and renews a lapsed schedule approval in place (F-f05-20, F-f05-20b). Default off. */
 	readonly VITE_SCHEDULE_DELEGABLE_TOOLS_ENABLED?: string;
+	/** "true" lists the active chats one server page at a time in the chat sidebar, with Load more, once this browser's local chats have moved to the server (F-f02-08). Default off. */
+	readonly VITE_CHAT_SIDEBAR_SERVER_PAGING?: string;
+	/** "true" shows the server's thread state in the chat sidebar: the unread dot, the Starred filter from the server, the Forked chip, and opening a search hit (F-f03-11). Default off. */
+	readonly VITE_CHAT_SIDEBAR_THREAD_STATE?: string;
+	/** "true" links a question's answer to the message that carries it: the client names its message id with the answer and sends the summary as that message (F-f07-01b). Default off. */
+	readonly VITE_QUESTION_ANSWER_MESSAGE_LINK?: string;
 }
 
 interface ImportMeta {

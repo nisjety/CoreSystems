@@ -29232,6 +29232,16 @@ body.verevon-chat-canvas-resizing * {
   contain-intrinsic-size: auto 480px;
 }
 
+/* A turn with an open floating panel is not contained: content-visibility: auto implies paint containment,
+   which would clip the absolutely positioned panel where it extends past a short turn. The exempt panels are
+   the action menu (F-f01-20), the reasoning popover and the metrics badge (P2-spa-11-rel1). Each panel is
+   rendered only while open, so the turn returns to contained rendering on close. Where :has() is unsupported
+   this rule is ignored and the turn stays contained, as before. */
+.verevon-chat-thread[data-chat-containment="on"] > .verevon-chat-message:not([data-latest]):has(.verevon-chat-menu__panel, .verevon-chat-reasoning-popover__panel, .verevon-chat-metrics-badge__panel) {
+  content-visibility: visible;
+  contain: none;
+}
+
 /* Comfortable reading measure (~72ch) for assistant answers — a long answer now
    wraps at a pleasant line length instead of spanning the full thread width. */
 .verevon-chat-content,

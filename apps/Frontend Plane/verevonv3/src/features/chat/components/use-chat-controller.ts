@@ -120,10 +120,12 @@ import {
   cheapDefaultModelId,
   chatStreamFrameReader,
   describeFeedbackFailure,
+  flushAllDeltaCoalescers,
   getChatThreadTranscript,
   listChatThreadEvents,
   getThreadMessages,
   getChatThread,
+  hasPendingDeltaText,
   markChatThreadRead,
   pagedTranscriptEnabled,
   parallelThreadLoadEnabled,
@@ -253,6 +255,8 @@ import {
   toolNameForResult,
   transcriptStepToTaskStep,
   transcriptTurnToChatTurn,
+  truncationReachesLeadingTurns,
+  turnsOutsideLoadedWindow,
   turnsToTranscript,
   upsertArtifact,
   upsertCitation,
@@ -502,9 +506,12 @@ export function useChatController() {
   const deltaRecordedTurns = new Set<string>()
   const resetUiEvents = (next: VerevonUiEvent[] = []) => {
     deltaRecordedTurns.clear()
-    setUiEvents(next)
+    // The same filter as appendUiEvent, for a list that arrives whole (a replay or a cleared Trace).
+    setUiEvents(next.filter((event) => event.type !== 'usage.progress'))
   }
   const appendUiEvent = (event: VerevonUiEvent, turnId?: string) => {
+    // A running cost total is not a Trace or work-feed row (WS27-S4): RunCostMeter reads it through onUsageProgress.
+    if (event.type === 'usage.progress') return
     if (reduceStreamChurn && event.type === 'message.delta' && turnId) {
       if (deltaRecordedTurns.has(turnId)) return
       deltaRecordedTurns.add(turnId)
@@ -1107,7 +1114,18 @@ export function useChatController() {
       writeThreadSnapshot(threadId, state.turns, {}, state.taskSteps, { persistServer: false })
     })
   }, { intervalMs: snapshotThrottleMs })
-  const unbindSnapshotLifecycle = flushOnPageLifecycle(snapshotWriter)
+  /**
+   * F-f01-19: the text the frame batches still hold goes into the transcript before a page-lifecycle or cleanup write.
+   * The persistence effect normally schedules that write, but it does not run in time here (on unmount it is already
+   * disposed), so the write is scheduled directly. Gated on held text: with the batch off nothing new is written.
+   */
+  const flushDeltaBatches = () => {
+    const held = hasPendingDeltaText()
+    flushAllDeltaCoalescers()
+    const threadId = untrack(() => state.threadId)
+    if (held && threadId) snapshotWriter.schedule(threadId)
+  }
+  const unbindSnapshotLifecycle = flushOnPageLifecycle(snapshotWriter, flushDeltaBatches)
 
   /**
    * Publish a small local hint for the personal thread rail while the
@@ -1492,11 +1510,25 @@ export function useChatController() {
   let leadingTurnCount = 0
   let earlierPageLoading = false
 
-  /** WS09 S9. The newest page of the thread when paging is on, the whole thread when it is off. */
+  /**
+   * Whether a thread is read in pages (WS09 S9). A temporary chat is never paged (F-f01-25): it keeps the unpaged read,
+   * as with the switch off.
+   */
+  const pagedRead = (threadId: string): boolean => pagedTranscriptEnabled() && !isTemporaryThread(threadId)
+
+  /**
+   * WS09 S9. The newest page of the thread when paging is on, the whole thread when it is off. Both come from the messages
+   * route, which carries each message's citations, artifacts and grounding (F-f01-24), so a page is one read of one route.
+   */
   const readThreadMessages = (threadId: string): Promise<ChatThreadMessagesPage> => (
-    pagedTranscriptEnabled()
+    pagedRead(threadId)
       ? getThreadMessages(threadId, { limit: THREAD_PAGE_SIZE })
       : getThreadMessages(threadId).then((messages) => ({ messages, hasMore: false }))
+  )
+
+  /** WS09 S9. The page of the thread before `beforeMessageId`, from the same route as `readThreadMessages`. */
+  const readOlderPage = (threadId: string, beforeMessageId: string): Promise<ChatThreadMessagesPage> => (
+    getThreadMessages(threadId, { limit: THREAD_PAGE_SIZE, beforeMessageId })
   )
 
   /**
@@ -1527,6 +1559,13 @@ export function useChatController() {
     resetUiEvents()
     setTraceReplayTruncated(false)
   }
+
+  /** A thread's server session, and whether the read itself failed (R-spa-01). A null session is a thread the server does not list. */
+  type ThreadLookup = { session: Awaited<ReturnType<typeof getChatThread>>; failed: boolean }
+  const readThreadLookup = (threadId: string): Promise<ThreadLookup> => getChatThread(threadId).then(
+    (found): ThreadLookup => ({ session: found, failed: false }),
+    (): ThreadLookup => ({ session: null, failed: true }),
+  )
 
   const loadThread = async (threadId: string) => {
     // The active-thread event for a newly-created conversation is a
@@ -1567,10 +1606,17 @@ export function useChatController() {
     // the store still holds that thread.
     snapshotWriter.flush()
     const seq = ++threadLoadSequence
+    // F-f01-25. A reload of the open thread (a rewind, a version switch) leaves its turns on screen until the new page
+    // lands, so it keeps the window that describes them: the turns before the window stay refused until the window is
+    // rebuilt (below), or reset when the read fails. `loadEarlier` waits while the reload is in flight. Any other open
+    // starts with no window, as before.
+    const keepsWindow = pagedTranscriptEnabled() && !knownProjectRef && threadId === untrack(() => state.threadId)
     hydratingThreadId = threadId
-    earlierCursor = null
-    leadingTurnCount = 0
-    setHasEarlierTurns(false)
+    if (!keepsWindow) {
+      earlierCursor = null
+      leadingTurnCount = 0
+      setHasEarlierTurns(false)
+    }
     setState((s) => {
       s.threadId = threadId
       s.status = 'idle'
@@ -1595,10 +1641,30 @@ export function useChatController() {
         ? storedTitle.title.trim()
         : null,
     )
-    if (knownProjectRef) {
-      // The project's ref is known from its routing hint, so the load settles it when it ends (R-spa-01).
+    // F-f06-14. With the Chat-projects switch on and no routing hint, the server session decides whether this is a project
+    // thread. It is read before the transcript or the messages are asked for, since a project thread's turns come from its
+    // room and Chat's own routes must not be read first. The lookup below reuses this read, so the thread is read once.
+    // A temporary thread is never a project thread and never reaches this read.
+    let projectRef = knownProjectRef
+    let earlyLookup: ThreadLookup | undefined
+    if (chatProjectsEnabled() && !knownProjectRef && !isTemporaryThread(threadId)) {
+      earlyLookup = await readThreadLookup(threadId)
+      if (seq !== threadLoadSequence) return
+      // Only a Chat thread that names a Space is a project thread; a Space's own thread (origin `space`) keeps Chat's route.
+      const serverSpaceRef = earlyLookup.session?.origin === 'chat' ? earlyLookup.session.spaceRef?.trim() : undefined
+      if (serverSpaceRef) {
+        scopedThreadRefs.set(threadId, serverSpaceRef)
+        projectRef = serverSpaceRef
+        // As on the routing-hint path, a project thread keeps no window of Chat's own pages.
+        earlierCursor = null
+        leadingTurnCount = 0
+        setHasEarlierTurns(false)
+      }
+    }
+    if (projectRef) {
+      // The project's ref is known, from its routing hint or from the session, so the load settles it when it ends (R-spa-01).
       try {
-        await loadProjectThread(threadId, knownProjectRef, seq)
+        await loadProjectThread(threadId, projectRef, seq)
       } finally {
         if (seq === threadLoadSequence) setSpaceRefLoad(threadId, 'settled')
       }
@@ -1606,17 +1672,19 @@ export function useChatController() {
     }
     // WS09 S6. With VITE_CHAT_PARALLEL_THREAD_LOAD=true the reads go out together.
     // The messages read is awaited further down; `void ...catch` keeps it from
-    // rejecting unhandled when a thread switch leaves it unawaited. The transcript
-    // is read only when the local snapshot has no turns, since only the transcript
-    // carries grounding, citations and artifacts (the messages read drops them), and
-    // the session already carries the updatedAt the transcript would add.
+    // rejecting unhandled when a thread switch leaves it unawaited. With paging off the
+    // transcript is read only when the local snapshot has no turns, since only the
+    // transcript carries grounding, citations and artifacts there (the messages read
+    // drops them), and the session already carries the updatedAt the transcript would add.
     const parallelLoad = parallelThreadLoadEnabled()
-    const paged = pagedTranscriptEnabled()
+    const paged = pagedRead(threadId)
     const localCached = readChatThreadTranscript(threadId)
     const localHasTurns = (localCached?.turns.length ?? 0) > 0
-    const messagesRequest = parallelLoad ? readThreadMessages(threadId) : undefined
+    // WS09 S9 and F-f01-24. A paged open reads its newest page from the messages route, which carries the evidence the
+    // transcript held, so that page is the open's only server read of the thread. It goes out with the lookup below.
+    const messagesRequest = parallelLoad || paged ? readThreadMessages(threadId) : undefined
     void messagesRequest?.catch(() => undefined)
-    const transcriptRequest = parallelLoad && !localHasTurns
+    const transcriptRequest = parallelLoad && !paged && !localHasTurns
       ? getChatThreadTranscript(threadId).catch(() => null)
       : undefined
     // Recover the non-secret routing hint from the server-owned listing so a
@@ -1626,17 +1694,14 @@ export function useChatController() {
     // routing hint too.
     // A lookup that fails leaves the Space unknown, so the held sends of this thread are refused once the load ends (R-spa-01). A
     // server that does not list the thread answers null, which is a known thread with no Space ref.
-    const lookup = await getChatThread(threadId).then(
-      (found) => ({ session: found, failed: false }),
-      () => ({ session: null, failed: true }),
-    )
+    const lookup = earlyLookup ?? await readThreadLookup(threadId)
     const session = lookup.session
     const scoped = session?.spaceRef?.trim()
     if (scoped) scopedThreadRefs.set(threadId, scoped)
-    // A paged open skips the transcript the same way (WS09 S9): the newest page
-    // carries the messages, and the snapshot carries the grounding the page lacks.
+    // A paged open reads no transcript (WS09 S9): the newest page is the window, and the snapshot keeps the turns the page
+    // does not reach. The page carries what the transcript held (F-f01-24), so a cold paged open needs no transcript either.
     const transcriptSkipped = (parallelLoad || paged) && session !== null && localHasTurns
-    const serverCached = transcriptSkipped
+    const serverCached = transcriptSkipped || paged
       ? null
       : await (transcriptRequest ?? getChatThreadTranscript(threadId).catch(() => null))
     if (seq !== threadLoadSequence) return
@@ -1665,9 +1730,10 @@ export function useChatController() {
       // A turn carries its version only where the server keeps a message tree, so one versioned turn shows the switch is on.
       if (history.some((message) => message.version)) serverVersionsOn = true
       // A skipped transcript would have stamped the session's updatedAt, and it
-      // exists only for a thread that has messages to return.
+      // exists only for a thread that has messages to return. A paged read has no
+      // transcript to stamp it, so it takes the session's updatedAt the same way (F-f01-24).
       const cachedUpdatedAt = serverCached?.updatedAt
-        ?? (transcriptSkipped && history.length > 0 ? session?.updatedAt : undefined)
+        ?? ((transcriptSkipped || paged) && history.length > 0 ? session?.updatedAt : undefined)
         ?? localCached?.updatedAt
       const serverTurns = dedupeChatTurns(history.map(messageToTurn))
       // A window that is not the whole thread (WS09 S9) matches cached turns by
@@ -1764,6 +1830,12 @@ export function useChatController() {
       }
       let fallbackTurns = cachedTurns
       hydratingThreadId = null
+      // F-f01-25. The list becomes the local snapshot, so a window read before the failure no longer describes it.
+      if (pagedTranscriptEnabled()) {
+        leadingTurnCount = 0
+        earlierCursor = null
+        setHasEarlierTurns(false)
+      }
       setState((s) => {
         s.turns = fallbackTurns
         s.taskSteps = cachedTaskSteps
@@ -1803,11 +1875,14 @@ export function useChatController() {
     const threadId = state.threadId
     const cursor = earlierCursor
     if (!threadId || !cursor || earlierPageLoading) return
+    // A reload of this thread is in flight and will rebuild the window; an older page read now would be spliced into a
+    // list that is about to be replaced (F-f01-25).
+    if (hydratingThreadId === threadId) return
     const seq = threadLoadSequence
     earlierPageLoading = true
     setLoadingEarlierTurns(true)
     try {
-      const page = await getThreadMessages(threadId, { limit: THREAD_PAGE_SIZE, beforeMessageId: cursor })
+      const page = await readOlderPage(threadId, cursor)
       if (seq !== threadLoadSequence || state.threadId !== threadId) return
       const visible = untrack(() => snapshot(state.turns))
       const head = visible.slice(0, leadingTurnCount)
@@ -1830,6 +1905,40 @@ export function useChatController() {
       earlierPageLoading = false
       setLoadingEarlierTurns(false)
     }
+  }
+
+  /**
+   * F-f01-25. The turns outside the loaded window, whose actions wait until the earlier pages are loaded. They stay on
+   * screen; only their actions are refused (see `refuseUnloadedTurn`). Reads `leadingTurnCount`, which is not a signal: it
+   * changes only together with `state.turns` or `hasEarlierTurns`, which is what this memo follows.
+   */
+  const unloadedTurnIds = createMemo(() => (
+    pagedTranscriptEnabled() ? turnsOutsideLoadedWindow(state.turns, leadingTurnCount, hasEarlierTurns()) : new Set<string>()
+  ))
+
+  /**
+   * F-f01-25. Refuses an action on a turn outside the loaded window with the feedback notice. Returns whether it refused.
+   */
+  const refuseUnloadedTurn = (turnId: string | undefined): boolean => {
+    if (!turnId || !unloadedTurnIds().has(turnId)) return false
+    showFeedbackNotice(i18n.tr(
+      'Denne handlingen er ikke tilgjengelig før eldre meldinger er lastet inn.',
+      'This action is not available until earlier messages are loaded.',
+    ))
+    return true
+  }
+
+  /**
+   * F-f01-25. A truncation that cuts into the turns before the window takes the head the window was read against, so
+   * the paging state no longer describes the list: it is reset, and no older page is offered. A cut that keeps the head
+   * whole leaves the window as it was. The actions refuse the turns outside the window (`refuseUnloadedTurn`), so their
+   * cuts keep the head whole; this guards any cut that does not.
+   */
+  const resetPagingWindowAfterTruncation = (keptCount: number) => {
+    if (!pagedTranscriptEnabled() || !truncationReachesLeadingTurns(keptCount, leadingTurnCount)) return
+    leadingTurnCount = 0
+    earlierCursor = null
+    setHasEarlierTurns(false)
   }
 
   /**
@@ -1859,6 +1968,9 @@ export function useChatController() {
   /** Every open wait, so unmounting the chat stops polling for it. */
   const durableWatches = new Set<AbortController>()
   onCleanup(() => {
+    // F-f01-19: the text the frame batches still hold reaches the transcript and its write is scheduled first, so the
+    // snapshot below carries it.
+    flushDeltaBatches()
     // Before `disposed`: that flag makes `writeThreadSnapshot` refuse, and the
     // last streamed text must reach storage before the chat goes away.
     snapshotWriter.flush()
@@ -1897,10 +2009,9 @@ export function useChatController() {
     threadId: string,
     assistantId: string,
   ): Promise<{ kind: 'found'; answer: ChatTurn } | { kind: 'none' } | { kind: 'unreadable' }> => {
-    if (pagedTranscriptEnabled()) {
-      // WS09 S9. The saved answer is the trailing turn, so the newest few messages
-      // hold it. The messages read carries no citations, artifacts or grounding:
-      // an adopted answer keeps whatever the stream delivered for those.
+    if (pagedRead(threadId)) {
+      // WS09 S9. The saved answer is the trailing turn, so the newest few messages hold it. The messages read carries the
+      // citations, artifacts and grounding the answer was saved with, so an adopted answer keeps them (F-f01-24).
       const tail = await getThreadMessages(threadId, { limit: SAVED_ANSWER_TAIL_SIZE })
         .then((page) => page.messages, () => undefined)
       if (tail === undefined) return { kind: 'unreadable' }
@@ -2918,6 +3029,21 @@ export function useChatController() {
     && !isForeignOriginThread(threadId)
     && !isSupportChatThread(threadId)
     && !scopedThreadRefs.get(threadId ?? '')
+  /**
+   * WS18-S4 (F-f06-16, owner D-f06-C). A project thread is append-only in the first release: regenerate, edit, branch,
+   * rewind, fork, continue, rerun and feedback still call origin=chat endpoints on it, so each of them returns early
+   * here and the answer row hides them (`turnActionsAllowed`). With the switch off no thread is withdrawn.
+   * A thread whose Space ref is not settled yet is withdrawn as well: its load has not answered whether it is a project
+   * thread (or the lookup failed), and the turns on screen may still be the ones of the thread before it. A temporary
+   * thread is never a project thread, so it is not withdrawn for this.
+   */
+  const projectThreadBlocksTurnActions = (threadId: string | null | undefined): boolean => {
+    if (!chatProjectsEnabled()) return false
+    if (scopedThreadRefs.has(threadId ?? '')) return true
+    return typeof threadId === 'string' && threadId.length > 0
+      && !isTemporaryThread(threadId)
+      && spaceRefLoads().get(threadId) !== 'settled'
+  }
   // "Keep working while away" (EP-7 S6): the goal-bound schedules of the open goal and the runs they made. The server
   // reports the feature on each goal read and write (`unattendedAvailable`); the schedules are read as the person's
   // own (`creator=self`). Until the read of this goal has come back the start stays hidden, so no second schedule is
@@ -3528,9 +3654,50 @@ export function useChatController() {
   }
 
   /**
+   * F-f07-01b (`VITE_QUESTION_ANSWER_MESSAGE_LINK`). The message that carries a question's answer: minted once per
+   * question and kept in memory for the thread that asked it. The answer names it, and the summary is sent as that
+   * message, so the stored message row is the linked one. A retry of the answer, and the composer's give-back of a
+   * summary that did not send (F-f07-01), send under the same id. The entry goes once the summary is accepted; a
+   * thread change leaves every entry of the other thread unused, and they are dropped on the next use.
+   * O-15: the answer carries the summary too, so Session Core appends that message in the same commit as the answer.
+   * The summary send that follows names the same id and dedupes onto the stored message; it is also what starts the
+   * turn of a next-turn question, which the answer route does not start.
+   */
+  type AnswerMessageLink = { threadId: string | null | undefined; messageId: string; summary: string }
+  const answerMessageLinks = new Map<string, AnswerMessageLink>()
+  const answerMessageLinksOn = () => import.meta.env.VITE_QUESTION_ANSWER_MESSAGE_LINK === 'true'
+  const answerMessageLinkFor = (questionId: string, threadId: string | null | undefined, summary: string) => {
+    for (const [otherId, link] of answerMessageLinks) {
+      if (link.threadId !== threadId) answerMessageLinks.delete(otherId)
+    }
+    const existing = answerMessageLinks.get(questionId)
+    const link = existing ?? { threadId, messageId: createId('msg'), summary: '' }
+    link.summary = summary.trim()
+    answerMessageLinks.set(questionId, link)
+    return link
+  }
+  /** The message a send of `content` in this thread belongs to while its summary is still unsent, else undefined. */
+  const answerMessageIdForSummary = (content: string, threadId: string | null | undefined) => {
+    const text = content.trim()
+    for (const link of answerMessageLinks.values()) {
+      if (link.threadId === threadId && link.summary === text) return link.messageId
+    }
+    return undefined
+  }
+  /** The gateway accepted a send of `content`: its summary is no longer unsent, so the link goes. */
+  const settleAnswerMessageLink = (content: string, threadId: string | null | undefined) => {
+    const text = content.trim()
+    for (const [questionId, link] of answerMessageLinks) {
+      if (link.threadId === threadId && link.summary === text) answerMessageLinks.delete(questionId)
+    }
+  }
+
+  /**
    * Answers the waiting question. The answer is recorded first and then sent as the person's next message, so
    * the run that follows works from an answered question. A refused answer sends nothing: a question that can
    * no longer be answered leaves the tray with the refusal, and any other refusal keeps the card for another try.
+   * The card belongs to the thread that asked it: once the person has opened another thread, the answer is still
+   * recorded, but nothing is sent from the thread on screen and no card or refusal is written onto it.
    */
   const answerPendingQuestion = async (answer: ChatQuestionAnswer) => {
     const question = pendingQuestion()
@@ -3540,22 +3707,39 @@ export function useChatController() {
       await continueWaitingQuestion(question, question.runId, { answers: answer.answers }, answer)
       return
     }
+    // The thread that asked the question, and the question itself: an answer that lands after the person has opened
+    // another thread changes nothing on the thread now on screen.
+    const threadId = state.threadId
+    const questionId = question.questionId
+    const stillHere = () => state.threadId === threadId
+    const summary = questionAnswerSummary(question, answer)
+    // F-f07-01b: with the link on, the answer names the message its summary is sent as (minted once for this question).
+    const link = answerMessageLinksOn() ? answerMessageLinkFor(questionId, threadId, summary) : undefined
     setQuestionPending(true)
     setQuestionError(null)
     try {
-      await answerRunQuestion(question.questionId, { answers: answer.answers })
+      await answerRunQuestion(
+        questionId,
+        link
+          ? { answers: answer.answers, answeredMessageId: link.messageId, answerSummary: summary }
+          : { answers: answer.answers },
+      )
     } catch (error) {
-      const code = runQuestionErrorCodeOf(error)
-      if (code === 'question_expired' || code === 'question_already_answered' || code === 'question_not_found') {
-        setPendingQuestion(null)
+      if (stillHere()) {
+        const code = runQuestionErrorCodeOf(error)
+        if (code === 'question_expired' || code === 'question_already_answered' || code === 'question_not_found') {
+          if (pendingQuestion()?.questionId === questionId) setPendingQuestion(null)
+        }
+        setQuestionError(i18n.tr('Svaret ble ikke lagret. Prøv igjen.', 'The answer was not saved. Try again.'))
       }
-      setQuestionError(i18n.tr('Svaret ble ikke lagret. Prøv igjen.', 'The answer was not saved. Try again.'))
       return
     } finally {
       setQuestionPending(false)
     }
-    setPendingQuestion(null)
-    await sendContent(questionAnswerSummary(question, answer))
+    if (!stillHere()) return
+    if (pendingQuestion()?.questionId === questionId) setPendingQuestion(null)
+    // The composer keeps the person's own text. A send that is not accepted gives the summary back to it.
+    await sendContent(summary, undefined, link ? { draftText: summary, clientMessageId: link.messageId } : { draftText: summary })
   }
 
   /** Skips the waiting question. Nothing is sent to the run: the skip is recorded and the card goes. */
@@ -3566,15 +3750,23 @@ export function useChatController() {
       await continueWaitingQuestion(question, question.runId, { skip: true })
       return
     }
+    // As for an answer: the skip is recorded for the thread that asked, and its card and refusal stay on that thread.
+    const threadId = state.threadId
+    const questionId = question.questionId
+    const stillHere = () => state.threadId === threadId
     setQuestionPending(true)
     setQuestionError(null)
     try {
-      await answerRunQuestion(question.questionId, { skip: true })
-      setPendingQuestion(null)
+      await answerRunQuestion(questionId, { skip: true })
+      // A skip never carries a message: a link minted by an earlier, failed answer goes with the question.
+      answerMessageLinks.delete(questionId)
+      if (stillHere() && pendingQuestion()?.questionId === questionId) setPendingQuestion(null)
     } catch {
-      setQuestionError(
-        i18n.tr('Spørsmålet kunne ikke hoppes over. Prøv igjen.', 'The question could not be skipped. Try again.'),
-      )
+      if (stillHere()) {
+        setQuestionError(
+          i18n.tr('Spørsmålet kunne ikke hoppes over. Prøv igjen.', 'The question could not be skipped. Try again.'),
+        )
+      }
     } finally {
       setQuestionPending(false)
     }
@@ -3994,7 +4186,10 @@ export function useChatController() {
     // delivery can say which message it carries. Not for a zero-retention thread: nothing of it
     // is stored, and the gateway refuses queued input there anyway.
     const zdrThread = Boolean(options.zdr) || untrack(() => isTemporaryThread(state.threadId))
-    const clientMessageId = sendClientMessageId({ zdr: zdrThread }, () => createId('msg'))
+    const clientMessageId = sendClientMessageId(
+      { zdr: zdrThread, clientMessageId: answerMessageIdForSummary(content, state.threadId) },
+      () => createId('msg'),
+    )
     setState((s) => {
       s.queuedInputs = [...s.queuedInputs, { id, content, state: 'pending', clientMessageId }]
     })
@@ -4020,6 +4215,7 @@ export function useChatController() {
       setMidRunDeliveries((count) => count - 1)
     }
     if (result.outcome === 'queued') {
+      settleAnswerMessageLink(content, state.threadId)
       queuedSendContext.set(id, { modelOverride, options: { ...options } })
       noteQueuedInput(
         id,
@@ -4209,6 +4405,12 @@ export function useChatController() {
   ) => {
     const content = rawContent.trim()
     if (!content) return
+    // F-f07-01b: a summary whose send did not go out (F-f07-01, the composer's give-back) is sent again under the id
+    // it was first sent with. With no unsent summary this is nothing, and the send is what it was.
+    const linkedMessageId = answerMessageIdForSummary(content, state.threadId)
+    if (linkedMessageId && options.clientMessageId === undefined) {
+      options = { ...options, clientMessageId: linkedMessageId }
+    }
     const turnPlanMode = () => options.planModeOverride ?? planMode()
     // A deep-linked transcript from Spaces, Support, or another agent surface
     // can be displayed here for continuity, but Chat must never append a turn
@@ -4414,11 +4616,12 @@ export function useChatController() {
     // a wide-research retry (EP-2 S9), which names its item by id and never reads the composer, and a deck template
     // pick from the deck view (EP-5 S7, `keepDraft`).
     // Any other turn clears the composer, but the text stays stored until the send settles, so a failed send
-    // can give it back (see the draft hook).
+    // can give it back (see the draft hook). A send of other text (`draftText`, an answer to a question) leaves
+    // the composer's own text where it is.
     let settleDraft: ((outcome: ChatDraftOutcome) => void) | undefined
     if (!options.approvedPlanId && !options.wideResearch?.retryOfChildRunId && !options.keepDraft) {
-      settleDraft = chatDraft.beginSend()
-      setInput('')
+      settleDraft = chatDraft.beginSend(options.draftText)
+      if (options.draftText === undefined) setInput('')
     }
 
     const controller = new AbortController()
@@ -4659,6 +4862,7 @@ export function useChatController() {
           },
           onConnected: (connected) => {
             settleDraft?.('accepted')
+            settleAnswerMessageLink(content, activeThreadId)
             // The gateway opened the stream, so the connection pill (F-t3-078) need not say "reconnecting" any longer.
             noteChatStreamOk()
             if (stopBeforeConnect) {
@@ -4803,6 +5007,7 @@ export function useChatController() {
           },
           onDone: ({ requestId, modelUsed, outputTokens, stopReason, undeliveredClientMessageIds }) => {
             settleDraft?.('accepted')
+            settleAnswerMessageLink(content, activeThreadId)
             settled = true
             terminalSeen = true
             captureRequestId(requestId)
@@ -5573,6 +5778,8 @@ export function useChatController() {
             // so no surface (live, snapshot or reload) can show it as "$0".
             turn.costUsd = usage.costBasis === 'subscription' ? undefined : usage.costUsd
             turn.costBasis = usage.costBasis
+            // The total mixes bases only under the gateway's switch; a usage frame without the key states no mix.
+            turn.costMixed = usage.costMixed
             // Server-stamped or nothing: a usage frame without the stamp
             // leaves the turn without a processing line, never a guessed one.
             turn.servedBy = usage.servedBy
@@ -5929,6 +6136,8 @@ export function useChatController() {
     rating: ChatFeedbackRating,
     note?: string,
   ): Promise<boolean> => {
+    // A project thread takes no rating (F-f06-16). `false` rolls the caller's highlight back.
+    if (projectThreadBlocksTurnActions(state.threadId)) return false
     const turn = state.turns.find((candidate) => candidate.id === turnId)
     if (!turn?.requestId) {
       showFeedbackNotice('Denne meldingen mangler en referanse å vurdere. Vurderingen ble ikke lagret.')
@@ -6096,8 +6305,11 @@ export function useChatController() {
 
   // No connect starts or resumes on a temporary (zero-retention), Space-scoped or foreign-origin thread. `sendContent`
   // already drops a send to a foreign-origin thread without a word, so the refusal has to be made here, first.
+  // WS18-S4 (F-f06-16): nor on a thread whose turn actions are withheld, so no resend reaches a project thread while its
+  // lookup has not answered. With the switch off the predicate is false and nothing changes.
   const connectResumable = (threadId: string): boolean => (
     !isTemporaryThread(threadId) && !isForeignOriginThread(threadId) && !scopedThreadRefs.get(threadId)
+    && !projectThreadBlocksTurnActions(threadId)
   )
 
   /** The thread and the question a new connect resumes: the latest question, which the suggestion answers. */
@@ -6163,8 +6375,10 @@ export function useChatController() {
   }
 
   const regenerateLatest = () => {
+    if (projectThreadBlocksTurnActions(state.threadId)) return
     const exchange = latestExchange()
     if (!exchange) return
+    if (refuseUnloadedTurn(exchange.outgoingAssistant?.id) || refuseUnloadedTurn(exchange.lastUser.id)) return
     if (isEffectfulChatTurn(exchange.outgoingAssistant?.effectClass)) {
       showFeedbackNotice('Denne turen har dokumentert effekt og kan ikke regenereres på stedet. Start en ny tur eller bruk kvitteringen i Trace.')
       return
@@ -6182,6 +6396,8 @@ export function useChatController() {
   }
 
   const regenerateExchange = (anchorIndex: number, lastUser: ChatTurn, subscriptionConnectionId: string | undefined) => {
+    // Also refused here: the connection lookup in `regenerateLatest` is asynchronous (F-f06-16).
+    if (projectThreadBlocksTurnActions(state.threadId)) return
     // On a versioned thread the server keeps the outgoing answer as a version, so the regenerate names it and no
     // client-only version is taken; a temporary chat keeps client-only versions.
     const versioned = usesServerVersions(state.threadId)
@@ -6214,6 +6430,7 @@ export function useChatController() {
       setState((s) => { s.turns = s.turns.slice(0, anchorIndex + 1) })
       setState((s) => { s.branchCount = s.branchCount + 1 })
     })
+    resetPagingWindowAfterTruncation(anchorIndex + 1)
     void sendContent(lastUser.content, lastUser.model, {
       appendUser: false,
       browseWeb: lastUser.tools.includes('search') || lastUser.tools.includes('research'),
@@ -6265,6 +6482,8 @@ export function useChatController() {
    * replacement, so this must not feed the same classifier as a discard.
    */
   const continueGeneration = (turnId: string) => {
+    if (projectThreadBlocksTurnActions(state.threadId)) return
+    if (refuseUnloadedTurn(turnId)) return
     const exchange = latestExchange()
     if (!exchange) return
     const { anchorIndex, lastUser, outgoingAssistant } = exchange
@@ -6315,6 +6534,7 @@ export function useChatController() {
       setState((s) => { s.turns = s.turns.slice(0, anchorIndex + 1) })
       setState((s) => { s.branchCount = s.branchCount + 1 })
     })
+    resetPagingWindowAfterTruncation(anchorIndex + 1)
     void sendContent(lastUser.content, lastUser.model, {
       appendUser: false,
       browseWeb: lastUser.tools.includes('search') || lastUser.tools.includes('research'),
@@ -6338,6 +6558,8 @@ export function useChatController() {
    * including its own approvals, receipts, and transcript entry.
    */
   const rerunAsNewTurn = async (turnId: string) => {
+    if (projectThreadBlocksTurnActions(state.threadId)) return
+    if (refuseUnloadedTurn(turnId)) return
     if (isForeignOriginThread(state.threadId) || isStreaming()) return
     const assistantIndex = state.turns.findIndex((turn) => turn.id === turnId)
     const assistant = state.turns[assistantIndex]
@@ -6396,7 +6618,9 @@ export function useChatController() {
   }
 
   const editAndResubmit = async (turnId: string, text: string) => {
+    if (projectThreadBlocksTurnActions(state.threadId)) return
     if (isForeignOriginThread(state.threadId)) return
+    if (refuseUnloadedTurn(turnId)) return
     const index = state.turns.findIndex((turn) => turn.id === turnId)
     const original = state.turns[index]
     const next = text.trim()
@@ -6464,6 +6688,7 @@ export function useChatController() {
       setState((s) => { s.turns = s.turns.slice(0, index) })
       setState((s) => { s.status = 'idle' })
     })
+    resetPagingWindowAfterTruncation(index)
     await sendContent(next, original.model, {
       attachments: attachments.length > 0 ? attachments : undefined,
       browseWeb: original.tools.includes('search') || original.tools.includes('research'),
@@ -6487,6 +6712,8 @@ export function useChatController() {
   }
 
   const branchAt = (turnId: string) => {
+    if (projectThreadBlocksTurnActions(state.threadId)) return
+    if (refuseUnloadedTurn(turnId)) return
     const turns = [...state.turns]
     const requestedIndex = turns.findIndex((turn) => turn.id === turnId)
     if (requestedIndex < 0) return
@@ -6501,6 +6728,13 @@ export function useChatController() {
     const nextThreadId = createId('thread')
     const branchTurns = turns.slice(0, index + 1).map((turn) => ({ ...turn, id: createId(turn.role) }))
     setState((s) => { s.turns = branchTurns })
+    // The branch is a thread of its own, made of copies of these turns. The source thread's older pages do not belong to
+    // it, so its paging window is reset whole, not cut (F-f01-25).
+    if (pagedTranscriptEnabled()) {
+      leadingTurnCount = 0
+      earlierCursor = null
+      setHasEarlierTurns(false)
+    }
     setSpaceRefLoad(nextThreadId, 'settled')
     setState((s) => { s.threadId = nextThreadId })
     setState((s) => { s.status = 'idle' })
@@ -6528,6 +6762,11 @@ export function useChatController() {
   const selectExchangeVersion = (target: number) => {
     const result = selectVersion(versionState(), snapshot(state.turns), state.threadId, target)
     if (!result) return
+    // F-f01-25. The version replaces the final exchange from its question on, so an exchange whose question lies outside
+    // the loaded window is refused like any other action on it. While the question is in the window, the cut keeps the
+    // whole head before it, so the paging window needs no reset here.
+    const finalQuestion = state.turns[lastUserIndex(state.turns)]
+    if (refuseUnloadedTurn(finalQuestion?.id)) return
     setVersionState(result.state)
     setState((s) => { s.turns = result.turns })
   }
@@ -6584,6 +6823,8 @@ export function useChatController() {
    * transcript, and the server keeps them on their own branch, so the undo can put them back.
    */
   const rewindTo = async (turnId: string) => {
+    if (projectThreadBlocksTurnActions(state.threadId)) return
+    if (refuseUnloadedTurn(turnId)) return
     const threadId = state.threadId
     if (isStreaming() || !threadId || !usesServerVersions(threadId)) return
     const turns = snapshot(state.turns)
@@ -6620,6 +6861,7 @@ export function useChatController() {
       removed: turns.slice(index + 1),
     })
     setState((s) => { s.turns = kept })
+    resetPagingWindowAfterTruncation(kept.length)
     const shown = kept.map((item) => serverIdOf(item))
     if (shown.length !== move.activePath.length || shown.some((id, position) => id !== move.activePath[position])) {
       void loadThread(threadId)
@@ -6837,6 +7079,21 @@ export function useChatController() {
     setSourceScope,
     retrievalScope,
     spaceScoped: () => Boolean(openChatSpaceRef()),
+    // WS18-S4 (F-f06-16): false on a project thread, which withholds the turn actions (see `projectThreadBlocksTurnActions`).
+    // The settled mark is read too: a project thread's Space ref is recorded during its load, after its id is on screen,
+    // and `scopedThreadRefs` is not reactive, so the mark is what makes the answer row re-read it.
+    turnActionsAllowed: () => {
+      // Read only with the switch on, so the switch-off path reads nothing new.
+      if (chatProjectsEnabled()) spaceRefLoads()
+      return !projectThreadBlocksTurnActions(state.threadId)
+    },
+    // WS18-S4: whether the open thread is a known project thread (the switch on and its Space ref recorded). The hint under
+    // the header reads this, so an ordinary thread that is still loading shows no project copy. False with the switch off.
+    projectThreadOpen: () => {
+      if (!chatProjectsEnabled()) return false
+      spaceRefLoads()
+      return scopedThreadRefs.has(state.threadId ?? '')
+    },
     // WS18-S4: the project this page is writing to: the open thread's own project, or the
     // pick for a chat that has no thread yet. Null for every ordinary chat.
     activeProjectRef: () => openChatSpaceRef(),
@@ -6862,6 +7119,10 @@ export function useChatController() {
     hasEarlierTurns,
     loadingEarlierTurns,
     loadEarlier,
+    // F-f01-25. The turns before the loaded window, whose actions wait for the earlier pages.
+    unloadedTurnIds,
+    // F-f01-25. The window's reset after a cut of the list; the paging tests drive a cut into the head through it.
+    resetPagingWindowAfterTruncation,
     // EP-10 S9: the question and thread a suggestion card's connect resumes, the saved connect of the thread on
     // screen, its resend on the new connection and its dismissal.
     connectTurn,

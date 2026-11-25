@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { describe, expect, it, vi } from 'vitest'
+import { createMemo, createRoot, flush } from 'solid-js'
 import { deckManifestRenderer } from './ArtifactDeckView'
 import {
   type ArtifactRenderer,
@@ -76,6 +77,43 @@ describe('createArtifactRendererRegistry', () => {
     const component = () => null
     registry.register({ id: 'grid', match: () => true, priority: 0, component })
     expect(registry.resolve(artifact())?.component).toBe(component)
+  })
+
+  it('re-resolves a live memo when a viewer is registered or removed at runtime', () => {
+    const registry = createArtifactRendererRegistry()
+    createRoot((dispose) => {
+      const resolved = createMemo(() => registry.resolve(artifact())?.id)
+      expect(resolved()).toBeUndefined()
+      const off = registry.register(renderer('grid', 1, () => true))
+      flush()
+      expect(resolved()).toBe('grid')
+      off()
+      flush()
+      expect(resolved()).toBeUndefined()
+      dispose()
+    })
+  })
+
+  it('leaves a live memo alone when an unregister removes nothing', () => {
+    const registry = createArtifactRendererRegistry()
+    const off = registry.register(renderer('grid', 1, () => true))
+    createRoot((dispose) => {
+      let runs = 0
+      const resolved = createMemo(() => {
+        runs += 1
+        return registry.resolve(artifact())?.id
+      })
+      expect(resolved()).toBe('grid')
+      off()
+      flush()
+      expect(resolved()).toBeUndefined()
+      const settled = runs
+      off()
+      flush()
+      expect(resolved()).toBeUndefined()
+      expect(runs, 'a second unregister of the same renderer changes nothing').toBe(settled)
+      dispose()
+    })
   })
 })
 

@@ -17,13 +17,15 @@ describe('ForkAction', () => {
   })
 
   it('forks from the chosen turn and hands the new thread to the caller', async () => {
-    forkChatThread.mockResolvedValue({ threadId: 'thread-fork' })
+    const session = { threadId: 'thread-fork', title: 'Kopi av samtalen', preview: 'Forhåndsvisning', updatedAt: '2026-11-20T09:00:00.000Z' }
+    forkChatThread.mockResolvedValue(session)
     const onForked = vi.fn()
     render(() => <ForkAction threadId="thread-source" messageId="turn-4" onForked={onForked} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Fork from here' }))
 
-    await waitFor(() => expect(onForked).toHaveBeenCalledWith('thread-fork'))
+    // The server's session comes with the id, so the caller can put the copy in its list and open it.
+    await waitFor(() => expect(onForked).toHaveBeenCalledWith('thread-fork', session))
     expect(forkChatThread).toHaveBeenCalledWith('thread-source', { fromMessageId: 'turn-4' })
   })
 

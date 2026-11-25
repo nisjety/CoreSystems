@@ -56,10 +56,23 @@ import { INTERNAL_FAILURE_COPY, LocalizedError, MODE_LOCKDOWN_COPY, ORG_POLICY_U
 import { localeIntl, type Locale } from '@/shared/i18n/locales'
 import { no as noStrings } from '@/shared/i18n/no'
 import type { RunDetail } from '@/shared/api/runs-client'
+import { mergeArtifactVersion } from './chat-artifacts'
 import {
-  isChatArtifactVersion,
-  mergeArtifactVersion,
-} from './chat-artifacts'
+  deckArtifactForDisplay,
+  isChatArtifact,
+  isChatKnowledgeGrounding,
+  isCitation,
+} from '@/features/chat/lib/chat-evidence'
+// The evidence checks live in `chat-evidence` (shared with the API client, F-f01-24); re-exported here for the callers that
+// read them from this module.
+export {
+  DECK_MANIFEST_VERSION,
+  deckArtifactForDisplay,
+  deckManifestVersion,
+  isChatArtifact,
+  isChatKnowledgeGrounding,
+  isCitation,
+} from '@/features/chat/lib/chat-evidence'
 import {
   artifactTitle,
   capitalize,
@@ -119,6 +132,11 @@ export function messageToTurn(msg: ChatMessage): ChatTurn {
     researchPlan: msg.researchPlan,
     // The route the stored answer was served on (W5-073-b), when the server kept one; no key for a turn that kept none.
     ...(msg.routingDecision ? { routingDecision: msg.routingDecision } : {}),
+    // The evidence the owner read carries on the message (F-f01-24), already checked where the message was read. Carried
+    // only when present, so a message without evidence builds the turn it always did.
+    ...(msg.citations ? { citations: msg.citations } : {}),
+    ...(msg.artifacts ? { artifacts: msg.artifacts } : {}),
+    ...(msg.grounding ? { grounding: msg.grounding } : {}),
     content: visibleTurnContent(msg.role, msg.content),
     // Keep an absent server timestamp EMPTY instead of fabricating "now":
     // session-core messages carry no timestamps, so stamping the fetch time
@@ -1329,6 +1347,7 @@ export function mergeServerTurnsWithCachedMetadata(
       // Stream-only, like the usage fields above: the server's message
       // carries neither, so the cached copy is what survives a reload.
       costBasis: serverTurn.costBasis ?? cachedTurn.costBasis,
+      costMixed: serverTurn.costMixed ?? cachedTurn.costMixed,
       timing: serverTurn.timing ?? cachedTurn.timing,
       verification: serverTurn.verification ?? cachedTurn.verification,
       // Stream-only: the server's message carries no research run, so the cached one is kept for the session.
@@ -1447,6 +1466,24 @@ export function cachedTurnsBeforeWindow(serverTurns: ChatTurn[], cachedTurns: Ch
   return firstShared > 0 ? cachedTurns.slice(0, firstShared) : []
 }
 
+/**
+ * The ids of the turns outside the loaded window (F-f01-25): the `leadingTurnCount` local turns at the head of the list,
+ * which lie before the server's window. They count as outside only while older pages remain, so with none left the set
+ * is empty. Their actions wait until the earlier pages are loaded; the turns themselves stay on screen.
+ */
+export function turnsOutsideLoadedWindow(turns: ChatTurn[], leadingTurnCount: number, hasEarlier: boolean): Set<string> {
+  if (!hasEarlier || leadingTurnCount <= 0) return new Set()
+  return new Set(turns.slice(0, leadingTurnCount).map((turn) => turn.id))
+}
+
+/**
+ * Whether a cut that keeps `keptCount` turns removes any of the `leadingTurnCount` turns before the window (F-f01-25).
+ * Such a cut takes the head the paging window was read against, so the window cannot survive it.
+ */
+export function truncationReachesLeadingTurns(keptCount: number, leadingTurnCount: number): boolean {
+  return keptCount < leadingTurnCount
+}
+
 export function turnsProbablyMatch(left: ChatTurn, right: ChatTurn): boolean {
   const leftContent = normalizeTurnContentForMatch(left.content)
   const rightContent = normalizeTurnContentForMatch(right.content)
@@ -1541,17 +1578,6 @@ export function isRecalledMemory(value: unknown): value is RecalledMemory {
   )
 }
 
-export function isCitation(value: unknown): value is Citation {
-  if (!value || typeof value !== 'object') return false
-  const record = value as Record<string, unknown>
-  return (
-    typeof record.id === 'string' &&
-    typeof record.title === 'string' &&
-    typeof record.url === 'string' &&
-    typeof record.snippet === 'string'
-  )
-}
-
 export function isChatToolCall(value: unknown): value is ChatToolCall {
   if (!value || typeof value !== 'object') return false
   const record = value as Record<string, unknown>
@@ -1565,58 +1591,6 @@ export function isChatToolCall(value: unknown): value is ChatToolCall {
   )
 }
 
-export function isChatArtifact(value: unknown): value is ChatArtifact {
-  if (!value || typeof value !== 'object') return false
-  const record = value as Record<string, unknown>
-  return (
-    typeof record.id === 'string' &&
-    typeof record.kind === 'string' &&
-    typeof record.content === 'string' &&
-    typeof record.title === 'string' &&
-    typeof record.version === 'number' &&
-    // `history` rides along in the thread snapshot as untyped JSON; a snapshot
-    // written by an older build simply has none.
-    (record.history === undefined ||
-      (Array.isArray(record.history) && record.history.every(isChatArtifactVersion))) &&
-    // A deck's content is its manifest. One that is not a JSON object is
-    // refused rather than shown as a deck.
-    (record.kind !== 'deck' ||
-      (typeof record.content === 'string' && deckManifestVersion(record.content) !== null))
-  )
-}
-
-/** The deck manifest version this client reads (EP-5 S2/S3). */
-export const DECK_MANIFEST_VERSION = 1
-
-/**
- * The `version` a deck manifest states: `null` when the content is not a JSON
- * object, `undefined` when the object states none. Never throws.
- */
-export function deckManifestVersion(content: string): number | undefined | null {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(content)
-  } catch {
-    return null
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
-  const version = (parsed as Record<string, unknown>).version
-  return typeof version === 'number' ? version : undefined
-}
-
-/**
- * A deck this client cannot read (a manifest version other than
- * {@link DECK_MANIFEST_VERSION}) is shown as its JSON in a plain code block
- * rather than handed to a deck view that would misread it. Any other artifact
- * is returned as it is.
- */
-export function deckArtifactForDisplay(artifact: ChatArtifact): ChatArtifact {
-  if (artifact.kind !== 'deck' || deckManifestVersion(artifact.content) === DECK_MANIFEST_VERSION) {
-    return artifact
-  }
-  return { ...artifact, kind: 'code' }
-}
-
 export function isGeneratedFile(value: unknown): value is GeneratedFile {
   if (!value || typeof value !== 'object') return false
   const record = value as Record<string, unknown>
@@ -1626,20 +1600,6 @@ export function isGeneratedFile(value: unknown): value is GeneratedFile {
     typeof record.mime === 'string' &&
     typeof record.size === 'number' &&
     typeof record.url === 'string'
-  )
-}
-
-export function isChatKnowledgeGrounding(value: unknown): value is ChatKnowledgeGrounding {
-  if (!value || typeof value !== 'object') return false
-  const record = value as Record<string, unknown>
-  return (
-    (record.mode === 'retrieve' || record.mode === 'hybrid') &&
-    typeof record.query === 'string' &&
-    typeof record.lowConfidence === 'boolean' &&
-    typeof record.factCount === 'number' &&
-    typeof record.sourceCount === 'number' &&
-    Array.isArray(record.facts) &&
-    Array.isArray(record.sources)
   )
 }
 

@@ -30,8 +30,15 @@ import {
   CHAT_THREAD_HISTORY_CHANGED_EVENT,
   CHAT_THREAD_HISTORY_KEY,
   CHAT_THREAD_TITLE_MAX_LENGTH,
+  applyChatThreadStateLocally,
+  chatSidebarPagedListing,
+  chatSidebarServerPagingEnabled,
+  chatSidebarThreadStateEnabled,
   chatThreadGoalStatus,
   clearActiveChatThreadId,
+  markChatSidebarMigrated,
+  normalizeChatThreadHistoryItem,
+  pruneChatThreadTranscripts,
   clearChatThreadHistory,
   readActiveChatThreadId,
   readChatThreadTranscript,
@@ -50,6 +57,7 @@ import {
   upsertChatThreadTranscript,
   type ChatThreadHistoryItem,
 } from '@/features/chat/lib/chat-thread-history'
+import { threadForkEnabled } from '@/features/chat/components/ForkAction'
 import { SpaceConfirmButton } from '@/features/spaces/components/SpaceConfirmButton'
 import { AgentsExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarAgentsPanel'
 import { KnowledgeExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarKnowledgePanel'
@@ -81,6 +89,7 @@ import {
   archiveChatThread,
   clearChatThreads,
   deleteChatThread,
+  getChatThread,
   listChatThreads,
   listChatThreadsPage,
   saveChatThreadSnapshot,
@@ -89,7 +98,7 @@ import {
 } from '@/shared/api/chat-client'
 import { ATTENTION_CHANGED_EVENT, getAttention, type AttentionReason, type AttentionSnapshot } from '@/shared/api/attention-client'
 import type { ThreadGoalStatus } from '@/shared/api/thread-goal-client'
-import { legacyStateFromRunStatus } from '@/shared/chat/thread-status'
+import { threadAttentionState } from '@/shared/chat/thread-status'
 import { getModelEntitlement } from '@/shared/api/model-entitlement-client'
 import { useI18n, translateApiError } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
@@ -383,6 +392,12 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
   // How many of the loaded active chats are shown. The list is loaded whole
   // (see refreshServerSessions), so Load more only widens the view.
   const [shownCount, setShownCount] = createSignal(SIDEBAR_PAGE_SIZE)
+  // Server paging (VITE_CHAT_SIDEBAR_SERVER_PAGING): the cursor for the next page of active chats, and whether one is on its way.
+  const [nextCursor, setNextCursor] = createSignal<string | null>(null)
+  const [loadingMore, setLoadingMore] = createSignal(false)
+  // Whether the active list is the paged listing (see chatSidebarPagedListing), as the last refresh read it. Off, the list is
+  // the whole listing and `shownCount` widens it.
+  const [pagedListing, setPagedListing] = createSignal(false)
   // The archive view is a separate, server-paged listing: archived chats never
   // enter the local history cache, which holds only the active list.
   const [showArchived, setShowArchived] = createSignal(false)
@@ -399,10 +414,10 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
   const migrateLocalSessions = async (
     localSessions: ChatThreadHistoryItem[],
     serverSessions: ChatThreadHistoryItem[],
-  ) => {
+  ): Promise<{ saved: boolean; complete: boolean }> => {
     const serverThreadIds = new Set(serverSessions.map((item) => item.threadId))
     const unsynced = localSessions.filter((item) => !serverThreadIds.has(item.threadId))
-    if (unsynced.length === 0) return false
+    if (unsynced.length === 0) return { saved: false, complete: true }
 
     const results = await Promise.allSettled(unsynced.map((item) => {
       const transcript = readChatThreadTranscript(item.threadId)
@@ -415,7 +430,11 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
       })
     }))
 
-    return results.some((result) => result.status === 'fulfilled')
+    return {
+      saved: results.some((result) => result.status === 'fulfilled'),
+      // Complete only when every unsynced chat reached the server, so no local chat is left behind by the paged listing.
+      complete: results.every((result) => result.status === 'fulfilled'),
+    }
   }
 
   // The rail reads the server's attention state (WS16 S2). A failed read leaves the rail
@@ -428,19 +447,92 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
     }
   }
 
+  // Server paging (VITE_CHAT_SIDEBAR_SERVER_PAGING, once this browser's local chats have moved to the server): the first page
+  // of the active list replaces the cache, and Load more appends the next page. Nothing merges old local rows back.
+  const refreshFirstPage = async () => {
+    setPagedListing(true)
+    setLoading(readChatThreadHistory().length === 0)
+    setError(null)
+    try {
+      const page = await listChatThreadsPage({})
+      setActiveThreadId(readActiveChatThreadId())
+      setNextCursor(page.nextCursor)
+      setSessions(replaceChatThreadHistory(page.sessions))
+      // A chat the first page no longer holds has left the cache, and only a row removal purges its transcript: drop those now.
+      pruneChatThreadTranscripts()
+    } catch (reason) {
+      setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke laste lagrede samtaler.', en: 'Could not load saved conversations.' }))
+      refreshLocalSessions()
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const loadMoreSessions = async () => {
+    const cursor = nextCursor()
+    if (!cursor || loadingMore()) return
+    setLoadingMore(true)
+    try {
+      const page = await listChatThreadsPage({ cursor })
+      setNextCursor(page.nextCursor)
+      // The fresh page goes first, so its copy of a row wins over the cached one. The cache keeps every loaded row.
+      setSessions(replaceChatThreadHistory([...page.sessions, ...readChatThreadHistory()]))
+    } catch (reason) {
+      setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke laste lagrede samtaler.', en: 'Could not load saved conversations.' }))
+    } finally {
+      setLoadingMore(false)
+    }
+  }
+
+  // Load more fetches the next server page in the paged listing, and otherwise widens the window of loaded chats.
+  const widenOrLoadMore = () => {
+    if (pagedListing()) void loadMoreSessions()
+    else setShownCount((count) => count + SIDEBAR_PAGE_SIZE)
+  }
+
+  // The Starred filter's first page from the server. The starred chats join the cache too, so each row's actions find them.
+  const loadStarredSessions = async (): Promise<ChatThreadHistoryItem[]> => {
+    const page = await listChatThreadsPage({ starredOnly: true })
+    setSessions(replaceChatThreadHistory([...page.sessions, ...readChatThreadHistory()]))
+    return page.sessions.flatMap((session) => {
+      const item = normalizeChatThreadHistoryItem(session)
+      return item ? [item] : []
+    })
+  }
+
+  // A star or read change reaches the sidebar as an attention change, and the open thread is the one whose flags it
+  // refreshes: they come from the server, and the rest of the cache is left as it is.
+  const refreshOpenThreadState = async (threadId: string) => {
+    // Only a chat the cache holds has flags to refresh; a Space or support thread is not in the list.
+    if (!readChatThreadHistory().some((item) => item.threadId === threadId)) return
+    try {
+      const session = await getChatThread(threadId)
+      if (session) setSessions(applyChatThreadStateLocally(threadId, session))
+    } catch {
+      // Keep the flags already shown; the next list read corrects them.
+    }
+  }
+
   const refreshServerSessions = async () => {
+    if (chatSidebarPagedListing()) return refreshFirstPage()
+    setPagedListing(false)
     const localSessions = readChatThreadHistory()
     setLoading(localSessions.length === 0)
     setError(null)
     try {
       const serverSessions = await listChatThreads()
       setActiveThreadId(readActiveChatThreadId())
+      setNextCursor(null)
       setSessions(replaceChatThreadHistory([...serverSessions, ...localSessions]))
 
-      if (await migrateLocalSessions(localSessions, serverSessions)) {
+      const migration = await migrateLocalSessions(localSessions, serverSessions)
+      if (migration.saved) {
         const refreshedSessions = await listChatThreads().catch(() => serverSessions)
         setSessions(replaceChatThreadHistory([...refreshedSessions, ...localSessions]))
       }
+      // Every local chat is on the server now, so from the next load the paged listing may replace the cache. A chat whose
+      // save failed keeps the whole walk going, as before.
+      if (migration.complete && chatSidebarServerPagingEnabled()) markChatSidebarMigrated()
     } catch (reason) {
       setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke laste lagrede samtaler.', en: 'Could not load saved conversations.' }))
       refreshLocalSessions()
@@ -463,6 +555,12 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
       const handleAttentionChange = () => {
         void refreshAttention()
       }
+      // Only the attention event refreshes the open thread's flags; focus alone does not, so it costs no request.
+      const handleAttentionChanged = () => {
+        void refreshAttention()
+        const openThreadId = activeThreadId()
+        if (chatSidebarThreadStateEnabled() && openThreadId) void refreshOpenThreadState(openThreadId)
+      }
       const handleStorageChange = (event: StorageEvent) => {
         if (
           event.key === CHAT_ACTIVE_THREAD_KEY ||
@@ -476,13 +574,13 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
       window.addEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleHistoryChange)
       window.addEventListener(CHAT_THREAD_HISTORY_CHANGED_EVENT, handleHistoryChange)
       window.addEventListener('storage', handleStorageChange)
-      window.addEventListener(ATTENTION_CHANGED_EVENT, handleAttentionChange)
+      window.addEventListener(ATTENTION_CHANGED_EVENT, handleAttentionChanged)
       window.addEventListener('focus', handleAttentionChange)
       return () => {
         window.removeEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleHistoryChange)
         window.removeEventListener(CHAT_THREAD_HISTORY_CHANGED_EVENT, handleHistoryChange)
         window.removeEventListener('storage', handleStorageChange)
-        window.removeEventListener(ATTENTION_CHANGED_EVENT, handleAttentionChange)
+        window.removeEventListener(ATTENTION_CHANGED_EVENT, handleAttentionChanged)
         window.removeEventListener('focus', handleAttentionChange)
       }
     },
@@ -528,8 +626,13 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
   // Storage already orders pinned-first (see `sortByUpdatedAtDesc` in
   // chat-thread-history.ts); filtering preserves that relative order, so no
   // re-sort is needed here.
-  const shownSessions = createMemo(() => visibleSessions().slice(0, shownCount()))
-  const hasMoreSessions = () => visibleSessions().length > shownCount()
+  // In the paged listing every loaded chat is shown and Load more asks the server for the next page; otherwise `shownCount` chats show.
+  const shownSessions = createMemo(() => (pagedListing() ? visibleSessions() : visibleSessions().slice(0, shownCount())))
+  const hasMoreSessions = () => (pagedListing() ? nextCursor() !== null : visibleSessions().length > shownCount())
+  // The organizer's Starred filter, unread dots and Forked chips read these from the chats it shows.
+  const starredThreadIds = createMemo(() => new Set(shownSessions().filter((item) => item.starred).map((item) => item.threadId)))
+  const unreadThreadIds = createMemo(() => new Set(shownSessions().filter((item) => item.unread).map((item) => item.threadId)))
+  const forkedThreadIds = createMemo(() => new Set(shownSessions().filter((item) => item.forkedFromThreadId).map((item) => item.threadId)))
   const pinnedSessions = createMemo(() => shownSessions().filter((item) => item.pinned))
   const unpinnedSessions = createMemo(() => shownSessions().filter((item) => !item.pinned))
   // The rail sections and the tab count read one server state, so they cannot disagree.
@@ -658,8 +761,14 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
     setArchivedSessions(archivedSessions().filter((item) => item.threadId !== threadId))
     setError(null)
     try {
-      await unarchiveChatThread(threadId)
-      await refreshServerSessions()
+      const restored = await unarchiveChatThread(threadId)
+      // The paged listing's first page may not hold the restored chat (unarchive keeps its last activity), so the server's
+      // copy joins the cache directly. Otherwise the whole listing is read again, as before.
+      if (chatSidebarPagedListing() && restored) {
+        setSessions(replaceChatThreadHistory([restored, ...readChatThreadHistory()]))
+      } else {
+        await refreshServerSessions()
+      }
     } catch {
       if (current) setArchivedSessions([current, ...archivedSessions()])
       setError(i18n.tr('Kunne ikke gjenopprette samtalen.', 'Could not restore the conversation.'))
@@ -840,7 +949,7 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
                 {i18n.tr('Fra e-post', 'From email')}
               </span>
             </Show>
-            <Show when={chatRunStatusChip(item.latestRunStatus, i18n)}>
+            <Show when={chatRunStatusChip(item, i18n)}>
               {(chip) => (
                 <small class="core-chat-session__status" data-tone={chip().tone} role="status">
                   <i aria-hidden="true" />
@@ -942,7 +1051,7 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
             </Show>
             <For each={unpinnedSessions()}>{(item) => sessionRow(item)}</For>
             <Show when={hasMoreSessions()}>
-              <button type="button" class="core-chat-sidebar__load-more" onClick={() => setShownCount((count) => count + SIDEBAR_PAGE_SIZE)}>
+              <button type="button" class="core-chat-sidebar__load-more" onClick={widenOrLoadMore}>
                 {i18n.tr('Last flere samtaler', 'Load more chats')}
               </button>
             </Show>
@@ -967,7 +1076,12 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
           renderRow={showArchived() ? archivedRow : sessionRow}
           attentionSections={showArchived() ? undefined : attentionGroups()}
           hasMore={showArchived() ? archivedCursor() !== null : hasMoreSessions()}
-          onLoadMore={() => (showArchived() ? void loadArchived(archivedCursor() ?? undefined) : setShownCount((count) => count + SIDEBAR_PAGE_SIZE))}
+          onLoadMore={() => (showArchived() ? void loadArchived(archivedCursor() ?? undefined) : widenOrLoadMore())}
+          onOpenSearchHit={chatSidebarThreadStateEnabled() ? openThread : undefined}
+          starredThreadIds={chatSidebarThreadStateEnabled() && !showArchived() ? starredThreadIds() : undefined}
+          unreadThreadIds={chatSidebarThreadStateEnabled() && !showArchived() ? unreadThreadIds() : undefined}
+          forkedThreadIds={chatSidebarThreadStateEnabled() && !showArchived() ? forkedThreadIds() : undefined}
+          loadStarred={chatSidebarThreadStateEnabled() && !showArchived() ? loadStarredSessions : undefined}
         />
       </Show>
 
@@ -977,6 +1091,23 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
       </button>
     </div>
   )
+}
+
+/**
+ * The Delete confirmation's line about forks (F-f05-23). Deleting a chat never removes the chats forked from it, so the
+ * confirmation says how many keep their own copy. Only with the fork switch on and at least one fork.
+ */
+function forkedCopiesNotice(i18n: ReturnType<typeof useI18n>, forkCount: number | undefined): string {
+  if (!threadForkEnabled() || !forkCount || forkCount <= 0) return ''
+  return forkCount === 1
+    ? i18n.tr(
+      'Den forgrenede samtalen beholder sin egen kopi.',
+      'The chat forked from this one keeps its own copy.',
+    )
+    : i18n.tr(
+      `Kopier som er forgrenet fra denne samtalen beholdes (${forkCount}).`,
+      `The ${forkCount} chats forked from this one keep their own copy.`,
+    )
 }
 
 /**
@@ -1139,10 +1270,13 @@ function ChatSessionMenu(props: {
             <SpaceConfirmButton
               role="menuitem"
               label={i18n.tr('Slett', 'Delete')}
-              consequence={i18n.tr(
-                'Slettes for godt og kan ikke gjenopprettes.',
-                'Deleted permanently and cannot be recovered.',
-              )}
+              consequence={[
+                i18n.tr(
+                  'Slettes for godt og kan ikke gjenopprettes.',
+                  'Deleted permanently and cannot be recovered.',
+                ),
+                forkedCopiesNotice(i18n, props.item.forkCount),
+              ].filter(Boolean).join(' ')}
               confirmLabel={i18n.tr(
                 `Bekreft sletting av «${props.item.title}»`,
                 `Confirm deleting "${props.item.title}"`,
@@ -1200,12 +1334,13 @@ function chatGoalChip(
 /** Keep the personal thread rail calm: only active or attention states show a
  * hint. Completed/cancelled runs remain discoverable through the transcript
  * without turning every row into an operator console. The states come from the
- * shared attention vocabulary (WS16 S2); this chip is retired with WS16 S7. */
+ * shared attention vocabulary (WS16 S2), the server's state first and the run
+ * status only as the fallback (`threadAttentionState`); this chip is retired with WS16 S7. */
 function chatRunStatusChip(
-  value: string | undefined,
+  item: ChatThreadHistoryItem,
   i18n: ReturnType<typeof useI18n>,
 ): ChatRunStatusChip | undefined {
-  const state = legacyStateFromRunStatus(value)
+  const state = threadAttentionState(item)
   if (state === 'working') return { label: i18n.tr('Pågår', 'Running'), tone: 'active' }
   if (state === 'needs_approval' || state === 'needs_input') {
     return { label: i18n.tr('Trenger oppmerksomhet', 'Needs attention'), tone: 'attention' }

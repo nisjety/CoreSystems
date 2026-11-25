@@ -209,4 +209,52 @@ describe('flushOnPageLifecycle', () => {
     window.dispatchEvent(new Event('pagehide'))
     expect(flush).not.toHaveBeenCalled()
   })
+
+  it('runs beforeFlush immediately before each flush, on hide and on pagehide', () => {
+    const order: string[] = []
+    const writer = { flush: vi.fn(() => order.push('flush')) }
+    const beforeFlush = vi.fn(() => order.push('beforeFlush'))
+    const unbind = flushOnPageLifecycle(writer, beforeFlush)
+
+    setVisibility('hidden')
+    document.dispatchEvent(new Event('visibilitychange'))
+    window.dispatchEvent(new Event('pagehide'))
+    expect(order).toEqual(['beforeFlush', 'flush', 'beforeFlush', 'flush'])
+    unbind()
+  })
+
+  it('does not run beforeFlush when the page becomes visible', () => {
+    const writer = { flush: vi.fn() }
+    const beforeFlush = vi.fn()
+    const unbind = flushOnPageLifecycle(writer, beforeFlush)
+
+    setVisibility('visible')
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(beforeFlush).not.toHaveBeenCalled()
+    expect(writer.flush).not.toHaveBeenCalled()
+    unbind()
+  })
+
+  it('still flushes the writer when beforeFlush throws, and the error still reaches the page', () => {
+    const reported: string[] = []
+    const onError = (event: ErrorEvent) => {
+      reported.push(String(event.error))
+      event.preventDefault()
+    }
+    window.addEventListener('error', onError)
+    const writer = { flush: vi.fn() }
+    const unbind = flushOnPageLifecycle(writer, () => {
+      throw new Error('beforeFlush failed')
+    })
+
+    try {
+      setVisibility('hidden')
+      document.dispatchEvent(new Event('visibilitychange'))
+      expect(writer.flush).toHaveBeenCalledTimes(1)
+      expect(reported).toEqual(['Error: beforeFlush failed'])
+    } finally {
+      unbind()
+      window.removeEventListener('error', onError)
+    }
+  })
 })

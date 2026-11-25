@@ -323,6 +323,8 @@ export type RunMeter = {
   /** The metered cost. Never set on a subscription turn, whose wire 0.0 is a placeholder. */
   costUsd?: number
   costBasis?: ChatCostBasis
+  /** The total mixes metered and subscription calls, as the gateway states it under its switch (`cost_mixed`). */
+  costMixed?: boolean
   /** Of `calls`, the metered ones whose price was unknown. A total with any has no `costUsd`. */
   unpricedCalls?: number
   /** The cost by what was billed. Only the `usage` frame states it, and only for a priced total. */
@@ -444,6 +446,11 @@ export type ChatTurn = {
    * can render the wire's compatibility 0.0 as a real "$0".
    */
   costBasis?: ChatCostBasis
+  /**
+   * The turn's total mixes metered and subscription calls, as the usage frame states it under the gateway's
+   * switch. Stream-only: a turn read back from history carries none and renders as it did before the key.
+   */
+  costMixed?: boolean
   /**
    * Where the answer was processed, as the gateway stamped it on `usage`
    * (serving provider, declared residency, privacy tier). Absent when the
@@ -803,6 +810,12 @@ export type SendOptions = {
    * draft. Like the approved-plan turn and a wide-research retry, which are never typed in the composer either.
    */
   keepDraft?: boolean
+  /**
+   * The text the composer gives back when this send is not accepted, for a send that is not typed in the composer
+   * (an answer to a question the run asked). The send leaves the composer's own text alone: it is not cleared, and
+   * an accepted send discards nothing.
+   */
+  draftText?: string
   /** See `ChatInvokeRequest.agentMode`. Per-turn, like `connectorScope`. */
   agentMode?: AgentModeId
   actions?: ChatAction[]

@@ -183,6 +183,25 @@ describe('RunCostMeter reducers (WS27-S4)', () => {
     expect(total.costBasis).toBe('subscription')
   })
 
+  it('states a mixed total the gateway says it is, through both the progress and the usage frame', () => {
+    // The gateway's key says the total mixes bases; the basis is then absent, and the label says the cost covers
+    // only the token-priced calls.
+    const progress = applyUsageProgress(undefined, { calls: 2, costUsd: 0.25, costMixed: true })
+    expect(progress.costMixed).toBe(true)
+    expect(meter(progress).textContent).toMatch(/bare kall med tokenpris|token-priced calls only/)
+
+    const total = applyUsageTotal(progress, { calls: 3, inputTokens: 1500, outputTokens: 150, costUsd: 0.25, costMixed: true })
+    expect(total.costMixed).toBe(true)
+    expect(meter(total).textContent).toContain('$0.25')
+    expect(meter(total).textContent).toMatch(/bare kall med tokenpris|token-priced calls only/)
+  })
+
+  it('reads no mix from a total that states its basis and no key, so the label is not added', () => {
+    const view = meter({ calls: 1, inputTokens: 1000, outputTokens: 100, costUsd: 0.25, costBasis: 'metered' })
+    expect(view.textContent).toContain('$0.25')
+    expect(view.textContent).not.toMatch(/tokenpris|token-priced/)
+  })
+
   it('lets the usage frame replace every progress total, and keeps the phase, the caps and the warning', () => {
     const progress = applyUsageProgress(undefined, {
       calls: 2,

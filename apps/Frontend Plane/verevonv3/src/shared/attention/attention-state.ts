@@ -89,3 +89,13 @@ export function legacyStateFromRunStatus(value: string | undefined): AttentionSt
       return undefined
   }
 }
+
+/**
+ * The attention state of one thread row. The server's state wins whenever the row carries a valid one (the list stated
+ * it while the attention switch was on). The legacy run-status map serves only a row without one, such as a deployment
+ * with the attention switches off, and that is why the map stays. A value outside the closed set is dropped, never
+ * guessed at, so the row reads its legacy status for it.
+ */
+export function threadAttentionState(item: { attentionState?: string; latestRunStatus?: string }): AttentionState | undefined {
+  return (isAttentionState(item.attentionState) ? item.attentionState : undefined) ?? legacyStateFromRunStatus(item.latestRunStatus)
+}

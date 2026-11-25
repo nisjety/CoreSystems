@@ -35,6 +35,7 @@ export const ws16SpaceActions = [
     risk: 'low',
     requiresApproval: false,
     reversible: true,
+    executor: 'gateway',
     inputSchema: spaceUpdateSidebarInput,
     outputSchema: spaceUpdateSidebarOutput,
   },

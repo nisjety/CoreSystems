@@ -39,6 +39,7 @@ export function applyUsageProgress(current: RunMeter | undefined, frame: ChatUsa
     cacheWriteTokens: frame.cacheWriteTokens,
     costUsd: frame.costBasis === 'subscription' ? undefined : frame.costUsd,
     costBasis: frame.costBasis,
+    costMixed: frame.costMixed,
     unpricedCalls: frame.unpricedCalls,
     ceilingUsd: frame.ceilingUsd ?? current?.ceilingUsd,
     ceilingTokens: frame.ceilingTokens ?? current?.ceilingTokens,
@@ -64,6 +65,7 @@ export function applyUsageTotal(current: RunMeter | undefined, usage: ChatUsageE
     cacheWriteTokens: usage.cacheWriteTokens,
     costUsd: subscription ? undefined : usage.costUsd,
     costBasis: usage.costBasis,
+    costMixed: usage.costMixed,
     unpricedCalls: usage.unpricedCalls,
     costByCategory: subscription ? undefined : usage.costByCategory,
     ceilingUsd: current?.ceilingUsd,
@@ -161,14 +163,17 @@ export function RunCostMeter(props: {
     }
   }
 
+  // A total that mixes metered and subscription calls is stated as `cost_mixed`. A frame without that key (the
+  // gateway's switch is off) falls back to the missing basis, as it always did, so its rendering does not change.
+  const mixedTotal = (meter: RunMeter): boolean => meter.costMixed ?? meter.costBasis === undefined
+
   // A subscription is checked before the cost, so its wire placeholder can never be read as a price.
   const costLabel = (meter: RunMeter): string => {
     if (meter.costBasis === 'subscription') return i18n.tr('Inkludert i abonnementet', 'Included in the subscription')
     if (meter.costUsd !== undefined && (meter.unpricedCalls ?? 0) === 0) {
       const cost = formatUsd(meter.costUsd)
-      // The gateway states no basis for a total that mixes metered and subscription calls.
-      // Its cost is then the metered calls alone, and the label says so.
-      return meter.costBasis === undefined
+      // The cost of a mixed total is the metered calls alone, and the label says so.
+      return mixedTotal(meter)
         ? i18n.tr(`${cost}, bare kall med tokenpris`, `${cost}, token-priced calls only`)
         : cost
     }

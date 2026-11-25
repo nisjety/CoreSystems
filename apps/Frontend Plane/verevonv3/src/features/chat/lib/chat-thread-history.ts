@@ -8,6 +8,7 @@ import {
 import type { ChatEffectClass } from '@/shared/chat/effect-class'
 import type { ConversationNode } from '@/shared/chat-nodes'
 import type { ThreadGoalStatus } from '@/shared/api/thread-goal-client'
+import { isAttentionState, type AttentionState } from '@/shared/attention/attention-state'
 
 export const CHAT_ACTIVE_THREAD_KEY = 'verevon.chat.threadId'
 export const CHAT_THREAD_HISTORY_KEY = 'verevon.chat.threadHistory.v1'
@@ -43,6 +44,12 @@ export const CHAT_THREAD_TITLE_MAX_LENGTH = maxTitleLength
  */
 export type ChatThreadTitleKind = 'generated' | 'preview'
 
+/**
+ * A thread's own memory mode (WS07-S6): `inherit` follows the person's memory settings, `off` keeps this thread
+ * out of memory. Absent reads as `inherit`. Only these two closed values are ever stored or sent.
+ */
+export type ChatThreadMemoryMode = 'inherit' | 'off'
+
 export type ChatThreadHistoryItem = {
   preview: string
   threadId: string
@@ -63,6 +70,11 @@ export type ChatThreadHistoryItem = {
    * (`chat-client.ts`), same as `pinned`.
    */
   personaEnabled?: boolean
+  /**
+   * The thread's memory mode (WS07-S6). Server-owned via `ChatThreadSession.memoryMode`; a local write keeps
+   * the stored mode (see `withMemoryModeCarry`), and a server list is what it reads.
+   */
+  memoryMode?: ChatThreadMemoryMode
   /** Which surface created this thread (session-core's `ThreadSummary.origin`
    * — see `ChatThreadSession.origin` in chat-client.ts). Set once at
    * creation and never changes, so it always carries forward once known
@@ -76,6 +88,23 @@ export type ChatThreadHistoryItem = {
    * replaces it; a local write keeps it.
    */
   goalStatus?: string
+  /** Whether the owner starred the thread. Server-owned like `goalStatus`: a server list replaces it, a local write keeps it (see `withThreadStateCarry`). Absent when not starred. */
+  starred?: boolean
+  /** Whether the thread holds a reply the owner has not read. Server-owned: the client never derives it. Absent when read. */
+  unread?: boolean
+  /** The thread this one was copied from (WS17 S6). Set once at creation, so a local write keeps it. Absent for a thread that was not forked. */
+  forkedFromThreadId?: string
+  /**
+   * How many threads were forked from this one (F-f05-23), as the server's thread list states it while the thread-state
+   * switch is on. A local write keeps it (see `withThreadStateCarry`); absent when no thread was forked from it.
+   */
+  forkCount?: number
+  /**
+   * The server's attention state of the thread (WS16 S1), as a thread list states it while the attention switch is on.
+   * A local write keeps it only while it leaves the run as it was (see `withAttentionCarry`). Once a local write moves
+   * the run, the row reads its legacy run status (`threadAttentionState`) until the next list read.
+   */
+  attentionState?: AttentionState
 }
 
 export type ChatThreadHistoryInput = {
@@ -93,13 +122,28 @@ export type ChatThreadHistoryInput = {
   /** Omit to leave the stored persona-enabled state untouched (see
    * `withPersonaEnabledCarry`). */
   personaEnabled?: boolean
+  /** Omit to leave the stored memory mode untouched (see `withMemoryModeCarry`). */
+  memoryMode?: ChatThreadMemoryMode
   /** Omit to leave the stored origin untouched (see `withOriginCarry`) — a
    * local snapshot write never knows it and must not erase it. */
   origin?: string
   /** Omit to leave the stored goal status untouched (see `withGoalStatusCarry`). Only a closed
    * token is kept; any other value reads as no goal. */
   goalStatus?: string
+  /** Omit to leave the stored star untouched (see `withThreadStateCarry`). Only `true` is kept. */
+  starred?: boolean
+  /** Omit to leave the stored unread state untouched. Only `true` is kept. */
+  unread?: boolean
+  /** Omit to leave the stored lineage untouched. A blank value is dropped. */
+  forkedFromThreadId?: string
+  /** Omit to leave the stored fork count untouched (see `withThreadStateCarry`). Only a count above zero is kept. */
+  forkCount?: number
+  /** The server's attention state from a thread list (see `ChatThreadHistoryItem.attentionState`). Only a closed state is kept. */
+  attentionState?: AttentionState
 }
+
+/** The server's flags for one thread, as the cache holds them. Absent means not starred, read, or forked. */
+export type ChatThreadState = Pick<ChatThreadHistoryInput, 'starred' | 'unread' | 'forkedFromThreadId' | 'forkCount'>
 
 export type ChatThreadTranscriptTurn = {
   /** The connected-app suggestion card (EP-10 S8), read back as a restored note. */
@@ -271,7 +315,8 @@ export function upsertChatThreadHistory(input: ChatThreadHistoryInput): ChatThre
 
   const existing = readChatThreadHistory()
   const current = existing.find((candidate) => candidate.threadId === item.threadId)
-  const resolved = withGoalStatusCarry(withOriginCarry(withLatestRunCarry(withPersonaEnabledCarry(withPinnedCarry(withTitleLock(item, current), current), current), current), current), current)
+  const carriedRun = withLatestRunCarry(withPersonaEnabledCarry(withPinnedCarry(withThreadStateCarry(withTitleLock(item, current), current), current), current), current)
+  const resolved = withMemoryModeCarry(withGoalStatusCarry(withOriginCarry(withAttentionCarry(carriedRun, current), current), current), current)
 
   // Replace in place, then order by activity. Position derives from
   // `updatedAt`, never from write order — selecting an old thread rewrites its
@@ -279,7 +324,7 @@ export function upsertChatThreadHistory(input: ChatThreadHistoryInput): ChatThre
   const merged = current
     ? existing.map((candidate) => (candidate.threadId === resolved.threadId ? resolved : candidate))
     : [resolved, ...existing]
-  const next = sortByUpdatedAtDesc(merged).slice(0, maxThreadHistoryItems)
+  const next = sortByUpdatedAtDesc(merged).slice(0, historyRowLimit())
 
   writeClientJson(CHAT_THREAD_HISTORY_KEY, next)
   dispatchClientEvent(CHAT_THREAD_HISTORY_CHANGED_EVENT, { sessions: next })
@@ -333,6 +378,101 @@ export function togglePersonaEnabledChatThread(threadId: string): ChatThreadHist
     latestRunUpdatedAt: current.latestRunUpdatedAt,
     pinned: current.pinned,
     personaEnabled: !(current.personaEnabled ?? true),
+  })
+}
+
+/** The switch the sidebar's memory control reads (WS07-S6): only the literal `true` turns it on. Read at call time. */
+export function chatThreadMemoryModeEnabled(): boolean {
+  return import.meta.env.VITE_CHAT_THREAD_MEMORY_MODE === 'true'
+}
+
+/**
+ * The paged sidebar (VITE_CHAT_SIDEBAR_SERVER_PAGING): the active list comes one server page at a time, and the local
+ * cache keeps every row it has loaded. Only the literal `true` turns it on. Read at call time.
+ */
+export function chatSidebarServerPagingEnabled(): boolean {
+  return import.meta.env.VITE_CHAT_SIDEBAR_SERVER_PAGING === 'true'
+}
+
+/**
+ * The server thread state in the sidebar (VITE_CHAT_SIDEBAR_THREAD_STATE): the unread dot, the Starred filter, the Forked
+ * chip and the search opener read the server's flags. Only the literal `true` turns it on. Read at call time.
+ */
+export function chatSidebarThreadStateEnabled(): boolean {
+  return import.meta.env.VITE_CHAT_SIDEBAR_THREAD_STATE === 'true'
+}
+
+/** This browser's record that its local chats have moved to the server once (see CoreSidebar's migration step). */
+export const CHAT_SIDEBAR_MIGRATED_KEY = 'verevon.chat.sidebar-migrated.v1'
+
+/**
+ * Whether the local chats have already moved to the server, so the paged sidebar may start from the first page. Blocked
+ * storage answers no, and the whole listing is read as before.
+ */
+export function chatSidebarMigrated(): boolean {
+  try {
+    return window.localStorage.getItem(CHAT_SIDEBAR_MIGRATED_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+export function markChatSidebarMigrated(): void {
+  try {
+    window.localStorage.setItem(CHAT_SIDEBAR_MIGRATED_KEY, 'true')
+  } catch {
+    // Blocked storage: the next load reads the whole listing again, which is the path before paging.
+  }
+}
+
+/**
+ * Whether the sidebar lists its active chats through the paged listing: the switch is on and the local chats have moved to
+ * the server. Until both hold, the sidebar reads the whole listing and the cache keeps its first 40 rows, as before.
+ */
+export function chatSidebarPagedListing(): boolean {
+  return chatSidebarServerPagingEnabled() && chatSidebarMigrated()
+}
+
+/**
+ * The mode a memory toggle moves to: a thread that follows the person's memory settings (`inherit`, or absent)
+ * turns it off for this thread, and an off thread inherits again. Pure: it reads only its argument.
+ */
+export function toggleThreadMemoryMode(current: ChatThreadMemoryMode | undefined): ChatThreadMemoryMode {
+  return current === 'off' ? 'inherit' : 'off'
+}
+
+/**
+ * Whether the sidebar's thread menu offers the memory control for one row (WS07-S6). It needs the switch on, a
+ * chat thread (a Space, mail-task or other surface's thread is not one), and a device that may keep conversation
+ * content: a zero-retention posture hides it. A temporary chat never reaches this list, so it has no row here.
+ */
+export function chatThreadMemoryControlVisible(
+  item: Pick<ChatThreadHistoryItem, 'origin'>,
+  options: { enabled: boolean; localRetentionAllowed: boolean },
+): boolean {
+  return options.enabled && options.localRetentionAllowed && item.origin === 'chat'
+}
+
+/**
+ * Set one thread's memory mode in the local cache, ahead of the server's answer, as the other optimistic writes
+ * do: it goes through {@link upsertChatThreadHistory}. A no-op for a thread with no history entry.
+ */
+export function setChatThreadMemoryModeLocally(threadId: string, mode: ChatThreadMemoryMode): ChatThreadHistoryItem[] {
+  const normalized = normalizeId(threadId)
+  if (!normalized) return readChatThreadHistory()
+  const current = readChatThreadHistory().find((item) => item.threadId === normalized)
+  if (!current) return readChatThreadHistory()
+  return upsertChatThreadHistory({
+    threadId: current.threadId,
+    title: current.title,
+    titleKind: current.titleKind,
+    preview: current.preview,
+    updatedAt: current.updatedAt,
+    latestRunId: current.latestRunId,
+    latestRunStatus: current.latestRunStatus,
+    latestRunUpdatedAt: current.latestRunUpdatedAt,
+    pinned: current.pinned,
+    memoryMode: mode,
   })
 }
 
@@ -408,8 +548,32 @@ export function replaceChatThreadHistory(inputs: ChatThreadHistoryInput[]): Chat
   // could ever rescue it. Because the truncated list is then written straight
   // back to storage, the pin AND the thread were gone from the sidebar for good
   // on the next resync.
-  const next = sortByUpdatedAtDesc(collected).slice(0, maxThreadHistoryItems)
+  const next = sortByUpdatedAtDesc(collected).slice(0, historyRowLimit())
 
+  writeClientJson(CHAT_THREAD_HISTORY_KEY, next)
+  dispatchClientEvent(CHAT_THREAD_HISTORY_CHANGED_EVENT, { sessions: next })
+  return next
+}
+
+/**
+ * Set one thread's server flags (star, unread, lineage, fork count) in the cache to the server's answer as they stand: a flag
+ * the server no longer sets reads as cleared. The sidebar refreshes only the open thread this way. A no-op for a thread with
+ * no history entry.
+ */
+export function applyChatThreadStateLocally(threadId: string, state: ChatThreadState): ChatThreadHistoryItem[] {
+  const normalized = normalizeId(threadId)
+  const stored = readChatThreadHistory()
+  if (!normalized || !stored.some((item) => item.threadId === normalized)) return stored
+  const flags = threadStateOf(state)
+  const next = stored.map((item) => {
+    if (item.threadId !== normalized) return item
+    const cleared: ChatThreadHistoryItem = { ...item }
+    delete cleared.starred
+    delete cleared.unread
+    delete cleared.forkedFromThreadId
+    delete cleared.forkCount
+    return { ...cleared, ...flags }
+  })
   writeClientJson(CHAT_THREAD_HISTORY_KEY, next)
   dispatchClientEvent(CHAT_THREAD_HISTORY_CHANGED_EVENT, { sessions: next })
   return next
@@ -434,6 +598,18 @@ export function clearChatThreadHistory(): void {
 
 export function selectChatThread(threadId: string): void {
   setActiveChatThreadId(threadId)
+}
+
+/**
+ * Puts a copy a "Fork from here" just made into the local cache and opens it (F-f05-21). The copy joins the sidebar at once,
+ * from what the server's session states and nothing more; the server's list stays the source of truth on the next load.
+ */
+export function openForkedChatThread(
+  threadId: string,
+  session?: Pick<ChatThreadHistoryInput, 'title' | 'preview' | 'updatedAt'>,
+): void {
+  upsertChatThreadHistory({ threadId, title: session?.title, preview: session?.preview, updatedAt: session?.updatedAt })
+  selectChatThread(threadId)
 }
 
 export function readChatThreadTranscript(threadId: string): ChatThreadTranscript | null {
@@ -464,6 +640,20 @@ export function removeChatThreadTranscript(threadId: string): ChatThreadTranscri
   return next
 }
 
+/**
+ * Drops the stored transcript of every thread the history cache no longer holds, except the open thread's. The paged sidebar
+ * calls this after its first-page replace: a thread that left the cache (erased upstream, or past the first page) would
+ * otherwise keep its conversation until the 40-entry cap evicted it, because only a row removal purges a transcript.
+ */
+export function pruneChatThreadTranscripts(): ChatThreadTranscript[] {
+  const cached = new Set(readChatThreadHistory().map((item) => item.threadId))
+  const active = readActiveChatThreadId()
+  const stored = readChatThreadTranscripts()
+  const kept = stored.filter((item) => cached.has(item.threadId) || item.threadId === active)
+  if (kept.length !== stored.length) writeClientJson(CHAT_THREAD_TRANSCRIPTS_KEY, kept)
+  return kept
+}
+
 function readChatThreadTranscripts(): ChatThreadTranscript[] {
   return readClientJson(CHAT_THREAD_TRANSCRIPTS_KEY, isChatThreadTranscripts) ?? []
 }
@@ -491,11 +681,30 @@ function normalizeHistoryInput(input: ChatThreadHistoryInput): ChatThreadHistory
     // "unspecified", which `withPersonaEnabledCarry` resolves against
     // whatever is already stored rather than treating it as enabled.
     ...(typeof input.personaEnabled === 'boolean' ? { personaEnabled: input.personaEnabled } : {}),
+    // Only a closed memory mode survives. Absent is "unspecified", which `withMemoryModeCarry` resolves for a local write.
+    ...(isChatThreadMemoryMode(input.memoryMode) ? { memoryMode: input.memoryMode } : {}),
     ...(normalizeOptionalText(input.origin) ? { origin: normalizeOptionalText(input.origin) } : {}),
     // Only a closed goal token survives. Absent is "unspecified": a local write keeps the stored token
     // (`withGoalStatusCarry`), and a server list reads it as no goal.
     ...(goalStatus ? { goalStatus } : {}),
+    // Only a star, an unread reply and a non-blank lineage survive (see `threadStateOf`).
+    ...threadStateOf(input),
+    // Only a closed attention state survives. A write that does not state one leaves the row without it.
+    ...(isAttentionState(input.attentionState) ? { attentionState: input.attentionState } : {}),
   }
+}
+
+/**
+ * Rows the cache keeps: the first 40, as always, or every row the paged sidebar has loaded (see
+ * {@link chatSidebarPagedListing}). A cap there would drop the rows past 40 on the next local write.
+ */
+function historyRowLimit(): number {
+  return chatSidebarPagedListing() ? Number.POSITIVE_INFINITY : maxThreadHistoryItems
+}
+
+/** One server session as a history item, with its server flags kept (while the thread-state switch is on). Null when it has no thread id. */
+export function normalizeChatThreadHistoryItem(input: ChatThreadHistoryInput): ChatThreadHistoryItem | null {
+  return normalizeHistoryInput(input)
 }
 
 function normalizeTitleKind(value: ChatThreadTitleKind | undefined): ChatThreadTitleKind | undefined {
@@ -581,6 +790,20 @@ function withLatestRunCarry(
 }
 
 /**
+ * Attention carry, paired with the run hint: the server's attention state is derived from the same approval and plan rows
+ * as that hint, so a local write keeps the stored state only while it leaves the run as it was. A write that moves the run
+ * (a new run, or a new status) drops it, and the row reads its legacy run status until the next thread-list read.
+ */
+function withAttentionCarry(
+  item: ChatThreadHistoryItem,
+  current: ChatThreadHistoryItem | undefined,
+): ChatThreadHistoryItem {
+  if (item.attentionState !== undefined || !current?.attentionState) return item
+  const sameRun = item.latestRunId === current.latestRunId && item.latestRunStatus === current.latestRunStatus
+  return sameRun ? { ...item, attentionState: current.attentionState } : item
+}
+
+/**
  * Origin carry: unlike `pinned`, origin is set once at thread creation and
  * never changes (see session-core's `ThreadSummary.origin` doc), so a write
  * that does not mention it (any local snapshot, a rename) must always keep
@@ -610,6 +833,59 @@ function withGoalStatusCarry(
     return { ...item, goalStatus: current.goalStatus }
   }
   return item
+}
+
+/**
+ * Memory-mode carry, like {@link withGoalStatusCarry}: a local write that does not know the thread's mode (a
+ * title, a pin, a rename) keeps the stored one rather than erasing it. A server list does not go through here.
+ */
+function withMemoryModeCarry(
+  item: ChatThreadHistoryItem,
+  current: ChatThreadHistoryItem | undefined,
+): ChatThreadHistoryItem {
+  if (item.memoryMode === undefined && current?.memoryMode) {
+    return { ...item, memoryMode: current.memoryMode }
+  }
+  return item
+}
+
+/**
+ * Star, unread, lineage and fork-count carry, like {@link withGoalStatusCarry}: a local write (a title, a pin, a rename) does not
+ * know the server's flags, so it keeps the stored ones. A server list does not go through here (see
+ * `replaceChatThreadHistory`), so a flag the server has cleared reads as cleared there.
+ */
+function withThreadStateCarry(
+  item: ChatThreadHistoryItem,
+  current: ChatThreadHistoryItem | undefined,
+): ChatThreadHistoryItem {
+  return {
+    ...item,
+    ...(item.starred === undefined && current?.starred ? { starred: true } : {}),
+    ...(item.unread === undefined && current?.unread ? { unread: true } : {}),
+    ...(item.forkedFromThreadId === undefined && current?.forkedFromThreadId
+      ? { forkedFromThreadId: current.forkedFromThreadId }
+      : {}),
+    ...(item.forkCount === undefined && current?.forkCount ? { forkCount: current.forkCount } : {}),
+  }
+}
+
+/**
+ * Keeps only the server answers that mean something: a star, an unread reply, a non-blank lineage, and a fork count above
+ * zero. With the thread-state switch off nothing is kept, so the cache is written exactly as it was before the switch existed.
+ */
+function threadStateOf(state: ChatThreadState): ChatThreadState {
+  if (!chatSidebarThreadStateEnabled()) return {}
+  const lineage = normalizeOptionalText(state.forkedFromThreadId)
+  return {
+    ...(state.starred === true ? { starred: true } : {}),
+    ...(state.unread === true ? { unread: true } : {}),
+    ...(lineage ? { forkedFromThreadId: lineage } : {}),
+    ...(state.forkCount !== undefined && state.forkCount > 0 ? { forkCount: state.forkCount } : {}),
+  }
+}
+
+function isChatThreadMemoryMode(value: unknown): value is ChatThreadMemoryMode {
+  return value === 'inherit' || value === 'off'
 }
 
 /**
@@ -873,8 +1149,14 @@ function isChatThreadHistoryItem(value: unknown): value is ChatThreadHistoryItem
     )) &&
     (record.pinned === undefined || typeof record.pinned === 'boolean') &&
     (record.personaEnabled === undefined || typeof record.personaEnabled === 'boolean') &&
+    (record.memoryMode === undefined || isChatThreadMemoryMode(record.memoryMode)) &&
     (record.origin === undefined || typeof record.origin === 'string') &&
-    (record.goalStatus === undefined || typeof record.goalStatus === 'string')
+    (record.goalStatus === undefined || typeof record.goalStatus === 'string') &&
+    (record.starred === undefined || typeof record.starred === 'boolean') &&
+    (record.unread === undefined || typeof record.unread === 'boolean') &&
+    (record.forkedFromThreadId === undefined || typeof record.forkedFromThreadId === 'string') &&
+    (record.forkCount === undefined || typeof record.forkCount === 'number') &&
+    (record.attentionState === undefined || isAttentionState(record.attentionState))
   )
 }
 

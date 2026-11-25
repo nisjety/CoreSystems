@@ -16,6 +16,7 @@
  * `ChatArtifact.history` and the top-level fields always mirror the newest one.
  */
 import { type ArtifactRenderer, pickArtifactRenderer } from './artifact-renderers'
+import { isChatArtifactVersion } from '../lib/chat-evidence'
 import {
   type ChatArtifact,
   type ChatArtifactVersion,
@@ -456,15 +457,8 @@ function versionOf(artifact: ChatArtifact): ChatArtifactVersion {
   }
 }
 
-export function isChatArtifactVersion(value: unknown): value is ChatArtifactVersion {
-  if (!value || typeof value !== 'object') return false
-  const record = value as Record<string, unknown>
-  return (
-    typeof record.content === 'string' &&
-    typeof record.title === 'string' &&
-    typeof record.version === 'number'
-  )
-}
+// The history check lives with the other evidence checks, so the messages read and this module share one definition (F-f01-24).
+export { isChatArtifactVersion }
 
 /**
  * Revision list for an artifact, oldest → newest. Artifacts restored from an

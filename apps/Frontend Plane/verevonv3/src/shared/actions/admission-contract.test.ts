@@ -144,4 +144,25 @@ describe('agent action admission contract', () => {
     expect(debt.map((row) => row.actionId)).toHaveLength(7)
     expect(debt.every((row) => Object.keys(row.executor).length === 0)).toBe(true)
   })
+
+  // P2-spa-08-rel1: a registry change that skips the golden refresh must name the row it left behind. 8418364b7
+  // added chat.queue.retract and changed the chat.save_thread_snapshot input without a refresh.
+  it('names each registry action whose golden row is missing or carries an older schema hash', async () => {
+    const golden = JSON.parse(readFileSync(contractPath, 'utf8')) as { rows: AdmissionRow[] }
+    const goldenRows = new Map(
+      golden.rows.filter((row) => row.registry).map((row): [string, AdmissionRow] => [row.actionId, row]),
+    )
+    const missing = actionRegistry.map((action) => action.id).filter((id) => !goldenRows.has(id))
+    const stale = (
+      await Promise.all(
+        actionRegistry.map(async (action): Promise<string | null> => {
+          const row = goldenRows.get(action.id)
+          return row !== undefined && row.schemaHash !== (await actionSchemaHash(action)) ? action.id : null
+        }),
+      )
+    ).filter((id): id is string => id !== null)
+
+    expect(missing, 'registry actions with no golden row').toEqual([])
+    expect(stale, 'registry actions whose golden schemaHash is not their current schema hash').toEqual([])
+  })
 })

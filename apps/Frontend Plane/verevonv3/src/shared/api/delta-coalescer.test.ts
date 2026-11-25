@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { streamChat, type ChatStreamHandlers } from './chat-client'
-import { createDeltaCoalescer, type DeltaRun } from './delta-coalescer'
+import { createDeltaCoalescer, flushAllDeltaCoalescers, hasPendingDeltaText, type DeltaRun } from './delta-coalescer'
 
 describe('createDeltaCoalescer', () => {
   let frames: Map<number, FrameRequestCallback>
@@ -142,6 +142,123 @@ describe('createDeltaCoalescer', () => {
     coalescer.flush()
     expect(emit).toHaveBeenCalledWith({ kind: 'reasoning', requestId: undefined, text: '' })
     coalescer.close()
+  })
+
+  it('flushAllDeltaCoalescers emits the text a live coalescer still holds, at once', () => {
+    const emit = vi.fn()
+    const coalescer = createDeltaCoalescer(emit)
+
+    coalescer.push('message', 'r1', 'Hel')
+    coalescer.push('message', 'r1', 'lo')
+    expect(emit).not.toHaveBeenCalled()
+
+    flushAllDeltaCoalescers()
+    expect(emit).toHaveBeenCalledTimes(1)
+    expect(emit).toHaveBeenCalledWith({ kind: 'message', requestId: 'r1', text: 'Hello' })
+    expect(frames.size).toBe(0)
+    coalescer.close()
+  })
+
+  it('flushAllDeltaCoalescers emits nothing when no live coalescer holds text', () => {
+    const emit = vi.fn()
+    const coalescer = createDeltaCoalescer(emit)
+
+    flushAllDeltaCoalescers()
+    expect(emit).not.toHaveBeenCalled()
+    coalescer.close()
+  })
+
+  it('flushAllDeltaCoalescers leaves a closed coalescer alone', () => {
+    const emit = vi.fn()
+    const coalescer = createDeltaCoalescer(emit)
+    coalescer.close()
+
+    coalescer.push('message', 'r1', 'late')
+    flushAllDeltaCoalescers()
+    expect(emit).not.toHaveBeenCalled()
+
+    // The closed coalescer still delivers through its own frame, as it did before.
+    runFrame()
+    expect(emit).toHaveBeenCalledWith({ kind: 'message', requestId: 'r1', text: 'late' })
+  })
+
+  it('flushAllDeltaCoalescers leaves an aborted coalescer alone once its abort listener has flushed', () => {
+    const stop = new AbortController()
+    const emit = vi.fn()
+    const coalescer = createDeltaCoalescer(emit, stop.signal)
+
+    coalescer.push('message', 'r1', 'Hel')
+    stop.abort()
+    expect(emit).toHaveBeenCalledTimes(1)
+
+    coalescer.push('message', 'r1', 'lo')
+    flushAllDeltaCoalescers()
+    expect(emit).toHaveBeenCalledTimes(1)
+    coalescer.close()
+  })
+
+  it('flushAllDeltaCoalescers reaches every live coalescer', () => {
+    const emitA = vi.fn()
+    const emitB = vi.fn()
+    const first = createDeltaCoalescer(emitA)
+    const second = createDeltaCoalescer(emitB)
+
+    first.push('message', 'a', 'one')
+    second.push('reasoning', undefined, 'two')
+    flushAllDeltaCoalescers()
+    expect(emitA).toHaveBeenCalledWith({ kind: 'message', requestId: 'a', text: 'one' })
+    expect(emitB).toHaveBeenCalledWith({ kind: 'reasoning', requestId: undefined, text: 'two' })
+    first.close()
+    second.close()
+  })
+
+  it('hasPendingDeltaText is true only while a live coalescer holds text', () => {
+    // A coalescer an earlier case left open could still hold text, so it is flushed before the first check.
+    flushAllDeltaCoalescers()
+    expect(hasPendingDeltaText()).toBe(false)
+
+    const coalescer = createDeltaCoalescer(vi.fn())
+    expect(hasPendingDeltaText()).toBe(false)
+
+    coalescer.push('message', 'r1', 'Hel')
+    expect(hasPendingDeltaText()).toBe(true)
+
+    flushAllDeltaCoalescers()
+    expect(hasPendingDeltaText()).toBe(false)
+
+    coalescer.push('message', 'r1', 'lo')
+    expect(hasPendingDeltaText()).toBe(true)
+    coalescer.close()
+    expect(hasPendingDeltaText()).toBe(false)
+  })
+
+  it('a throwing emit neither stops the other live coalescers nor reaches the caller', () => {
+    flushAllDeltaCoalescers()
+    const failing = createDeltaCoalescer(() => {
+      throw new Error('emit failed')
+    })
+    const emit = vi.fn()
+    const healthy = createDeltaCoalescer(emit)
+    // The error is reported as an uncaught one: captured here instead of thrown out of this test.
+    const reported: VoidFunction[] = []
+    const queueSpy = vi.spyOn(globalThis, 'queueMicrotask').mockImplementation((callback: VoidFunction) => {
+      reported.push(callback)
+    })
+
+    try {
+      failing.push('message', 'a', 'one')
+      healthy.push('message', 'b', 'two')
+
+      expect(() => flushAllDeltaCoalescers()).not.toThrow()
+      expect(emit).toHaveBeenCalledWith({ kind: 'message', requestId: 'b', text: 'two' })
+      expect(reported).toHaveLength(1)
+      expect(() => reported[0]?.()).toThrow('emit failed')
+      expect(hasPendingDeltaText()).toBe(false)
+    } finally {
+      queueSpy.mockRestore()
+      failing.close()
+      healthy.close()
+    }
   })
 })
 

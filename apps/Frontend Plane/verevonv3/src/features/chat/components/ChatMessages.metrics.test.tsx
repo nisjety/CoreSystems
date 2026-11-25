@@ -16,7 +16,7 @@ import { describe, expect, it } from 'vitest'
 import { I18nProvider } from '@/shared/i18n'
 import { localeStorageKey } from '@/shared/i18n/locales'
 import { readChatThreadTranscript, upsertChatThreadTranscript } from '@/features/chat/lib/chat-thread-history'
-import { ReasoningPopover } from './ChatMessages'
+import { MessageMetricsBadge, ReasoningPopover } from './ChatMessages'
 import { transcriptTurnToChatTurn, turnsToTranscript } from './chat-normalizers'
 import type { ChatTurn } from './chat-types'
 
@@ -84,6 +84,38 @@ describe('ReasoningPopover metrics', () => {
     expect(text).toContain('220 ms')
     expect(text).toMatch(/Inkludert i abonnementet|Included in the subscription/)
     expect(text).not.toContain('$')
+  })
+})
+
+describe('cost of a mixed total (F-f04-05)', () => {
+  it('names the calls its cost covers in the details cost row', () => {
+    const mixed = openDetails(turn({ costUsd: 0.25, costMixed: true }))
+    expect(mixed).toMatch(/Kostnad \(kun kall med tokenpris\)|Cost \(token-priced calls only\)/)
+    expect(mixed).toContain('$0.2500')
+  })
+
+  it('keeps the details cost row of a total that states its basis', () => {
+    const stated = openDetails(turn({ costUsd: 0.25, costBasis: 'metered' }))
+    expect(stated).not.toMatch(/tokenpris|token-priced/)
+    expect(stated).toContain('$0.2500')
+  })
+
+  it('names the same calls in the cost badge, and keeps the badge of a turn without the key', () => {
+    render(() => <MessageMetricsBadge message={turn({ inputTokens: 1500, outputTokens: 150, costUsd: 0.25, costMixed: true })} />)
+    fireEvent.click(document.querySelector('.verevon-chat-metrics-badge button') as HTMLButtonElement)
+    flush()
+    const badge = document.querySelector('.verevon-chat-metrics-badge__panel')?.textContent ?? ''
+    expect(badge).toMatch(/Kostnad \(kun kall med tokenpris\)|Cost \(token-priced calls only\)/)
+    expect(badge).toContain('$0.25')
+  })
+
+  it('leaves the badge as it was for a turn that states no mix', () => {
+    render(() => <MessageMetricsBadge message={turn({ inputTokens: 1500, outputTokens: 150, costUsd: 0.25 })} />)
+    fireEvent.click(document.querySelector('.verevon-chat-metrics-badge button') as HTMLButtonElement)
+    flush()
+    const badge = document.querySelector('.verevon-chat-metrics-badge__panel')?.textContent ?? ''
+    expect(badge).not.toMatch(/tokenpris|token-priced/)
+    expect(badge).toContain('$0.25')
   })
 })
 

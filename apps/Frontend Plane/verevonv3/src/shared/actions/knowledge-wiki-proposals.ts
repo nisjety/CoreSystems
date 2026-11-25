@@ -77,6 +77,8 @@ export const knowledgeWikiProposalActions = [
     risk: 'medium',
     requiresApproval: false,
     reversible: false,
+    executor: 'client',
+    clientRoute: '/api/v1/knowledge/wiki/proposals/{proposal_id}/review',
     inputSchema: wikiProposalReviewInput,
     outputSchema: wikiProposalReviewOutput,
   },

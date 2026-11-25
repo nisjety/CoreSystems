@@ -4,6 +4,9 @@
 
 const ATTENTION_URL = '/chat?filter=attention'
 const ATTENTION_TAG = 'verevon-attention'
+// The visible-window notice is opt-in: the page registers this worker with ?visible=notice when VITE_PUSH_SHOW_WHEN_VISIBLE
+// is the literal "true" (see push-subscription.ts). Without the query the worker behaves exactly as it always has.
+const SHOW_WHEN_VISIBLE = new URL(self.location.href).searchParams.get('visible') === 'notice'
 
 self.addEventListener('install', () => {
   self.skipWaiting()
@@ -26,10 +29,13 @@ self.addEventListener('pushsubscriptionchange', (event) => {
   event.waitUntil(renewSubscription())
 })
 
-// A visible or focused window already shows the attention rail, so no notice is shown for that push.
+// A visible or focused window already shows the attention rail, so no notice is shown for that push. With the opt-in
+// query the push still shows a silent notice that closes itself: Safari and some Chromium builds revoke a subscription
+// whose push shows nothing.
 async function showAttentionNotice() {
   const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
   if (windows.some((client) => client.visibilityState === 'visible' || client.focused)) {
+    if (SHOW_WHEN_VISIBLE) await showSilentNoticeThenClose()
     return
   }
   await self.registration.showNotification('Verevon', {
@@ -38,6 +44,21 @@ async function showAttentionNotice() {
     icon: '/icons/verevon-mark.svg',
     data: { url: ATTENTION_URL },
   })
+}
+
+// Fixed copy, no thread and no content. Only the notification with the attention tag is closed, and only after 1.5 seconds.
+async function showSilentNoticeThenClose() {
+  await self.registration.showNotification('Verevon', {
+    body: 'A chat needs your attention.',
+    tag: ATTENTION_TAG,
+    silent: true,
+    renotify: false,
+    icon: '/icons/verevon-mark.svg',
+    data: { url: ATTENTION_URL },
+  })
+  const [notice] = await self.registration.getNotifications({ tag: ATTENTION_TAG })
+  await new Promise((resolve) => setTimeout(resolve, 1500))
+  notice?.close()
 }
 
 async function openAttention() {

@@ -106,18 +106,29 @@ export function createSnapshotWriter<T>(
 
 /**
  * Flush when the page is about to be hidden or unloaded: the last moment the
- * browser still lets a synchronous storage write through. Returns the unbind.
+ * browser still lets a synchronous storage write through. `beforeFlush` runs
+ * immediately before that flush, so text it moves into the transcript (F-f01-19)
+ * is in the write. Returns the unbind.
  */
 export function flushOnPageLifecycle(
   writer: Pick<SnapshotWriter<unknown>, 'flush'>,
+  beforeFlush?: () => void,
   target?: { document: Document; window: Window },
 ): () => void {
   const env = target ?? (typeof document === 'undefined' ? undefined : { document, window })
   if (!env) return () => {}
-  const onVisibility = () => {
-    if (env.document.visibilityState === 'hidden') writer.flush()
+  const flushNow = () => {
+    // The write follows even when beforeFlush throws: it is the last chance to keep the text on this page.
+    try {
+      beforeFlush?.()
+    } finally {
+      writer.flush()
+    }
   }
-  const onPageHide = () => writer.flush()
+  const onVisibility = () => {
+    if (env.document.visibilityState === 'hidden') flushNow()
+  }
+  const onPageHide = () => flushNow()
   env.document.addEventListener('visibilitychange', onVisibility)
   env.window.addEventListener('pagehide', onPageHide)
   return () => {

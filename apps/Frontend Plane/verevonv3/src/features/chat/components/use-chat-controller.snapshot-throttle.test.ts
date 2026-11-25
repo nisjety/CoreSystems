@@ -551,6 +551,88 @@ describe('VITE_CHAT_SNAPSHOT_THROTTLE_MS=0 restores the per-token behaviour', ()
   })
 })
 
+describe('the frame batch and the page-lifecycle snapshot (F-f01-19)', () => {
+  const lastToken = 7
+  const batched = { VITE_CHAT_DELTA_FRAME_BATCH: 'true' }
+
+  /** The newest token goes to the frame batch, which holds it until a flush: no storage has it yet. */
+  async function holdLastToken(live: OpenStream) {
+    live.emit(frame('chunk', { delta: `${token(lastToken)} ` }))
+    await tick()
+    expect(stored(token(lastToken))).toBe(false)
+  }
+
+  it('unmounting inside the window writes the text the frame batch still holds', async () => {
+    const { controller, dispose } = mount((await load(batched)).useChatController)
+    const live = await startTurn(controller)
+    await streamTokens(live, lastToken + 1)
+    expect(stored(token(lastToken))).toBe(false)
+
+    dispose()
+    expect(stored(token(lastToken))).toBe(true)
+  })
+
+  it('unmounting after the window closed writes the text the frame batch still holds', async () => {
+    const { controller, dispose } = mount((await load(batched)).useChatController)
+    const live = await startTurn(controller)
+    vi.advanceTimersByTime(2100)
+    await tick()
+    await holdLastToken(live)
+
+    dispose()
+    expect(stored(token(lastToken))).toBe(true)
+  })
+
+  it('pagehide with the window open and nothing pending writes the text the frame batch still holds', async () => {
+    const { controller, dispose } = mount((await load(batched)).useChatController)
+    const live = await startTurn(controller)
+    vi.advanceTimersByTime(1000)
+    await tick()
+    await holdLastToken(live)
+
+    window.dispatchEvent(new Event('pagehide'))
+    await tick(5)
+    expect(stored(token(lastToken))).toBe(true)
+    dispose()
+  })
+
+  it('a page hidden after the window closed writes the text the frame batch still holds', async () => {
+    const { controller, dispose } = mount((await load(batched)).useChatController)
+    const live = await startTurn(controller)
+    vi.advanceTimersByTime(2100)
+    await tick()
+    await holdLastToken(live)
+
+    setVisibility('hidden')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await tick(5)
+    expect(stored(token(lastToken))).toBe(true)
+    dispose()
+  })
+
+  it('unmounting with no text held writes nothing new, so the flush is gated on held text', async () => {
+    const { controller, dispose } = mount((await load(batched)).useChatController)
+    await startTurn(controller)
+    vi.advanceTimersByTime(2100)
+    await tick()
+    const storage = watchStorage(CHAT_THREAD_TRANSCRIPTS_KEY)
+
+    dispose()
+    expect(storage.writes.local + storage.writes.session).toBe(0)
+  })
+
+  it('with the frame batch off, unmounting writes nothing new', async () => {
+    const { controller, dispose } = mount((await load()).useChatController)
+    await startTurn(controller)
+    vi.advanceTimersByTime(2100)
+    await tick()
+    const storage = watchStorage(CHAT_THREAD_TRANSCRIPTS_KEY)
+
+    dispose()
+    expect(storage.writes.local + storage.writes.session).toBe(0)
+  })
+})
+
 describe('Trace and steps', () => {
   it('keeps the lifecycle rows next to the single message.delta row', async () => {
     const { controller, dispose } = mount((await load()).useChatController)

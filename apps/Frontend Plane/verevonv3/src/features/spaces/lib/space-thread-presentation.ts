@@ -35,6 +35,7 @@ export function threadStatus(thread: SpaceThread, tr: Tr): string {
   // The attention vocabulary reads a queued run as working; the room keeps the
   // word "queued" so a run waiting for a worker does not look busy.
   if (isQueuedRunStatus(status)) return say(tr, COPY.thread.queued)
+  // Not threadAttentionState: a SpaceThread carries no server attention state (only latest_run_status), so the run map is its only input.
   const state = legacyStateFromRunStatus(status)
   if (state === 'needs_approval') return say(tr, COPY.thread.awaitingApproval)
   if (state === 'working') return say(tr, COPY.thread.running)
