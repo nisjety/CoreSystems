@@ -58,6 +58,7 @@ import {
   openRoomTabByHash,
   openShortcutSheetViaHotkeyLayer,
   parseSlashCommandText,
+  platformSlashCommandsEnabled,
   type PlatformCommand,
   type SlashCommandContext,
 } from '../lib/space-slash-commands'
@@ -1647,7 +1648,9 @@ ${managers.map((m) => `@${m.label}`).join(' ')} ${request}`
             aria-label={
               mentionQuery() !== undefined
                 ? i18n.tr('Nevn noen', 'Mention someone')
-                : i18n.tr('Velg en ferdighet', 'Pick a skill')
+                : platformSlashCommandsEnabled()
+                  ? i18n.tr('Velg en ferdighet eller kommando', 'Pick a skill or command')
+                  : i18n.tr('Velg en ferdighet', 'Pick a skill')
             }
           >
             <For each={pickerItems()}>

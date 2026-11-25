@@ -743,6 +743,14 @@ describe('SpaceRoomComposer — `/` picks a skill (later tier)', () => {
 
   const textarea = () => screen.getByPlaceholderText(/velger en ferdighet/) as HTMLTextAreaElement
 
+  it('the picker is named for skills alone while the platform commands are off', async () => {
+    renderComposer()
+    fireEvent.input(textarea(), { target: { value: '/' } })
+    flush()
+
+    expect(await screen.findByRole('listbox', { name: 'Velg en ferdighet' })).toBeTruthy()
+  })
+
   it('fetches the catalogue on the first "/", not on mount, and badges each skill with its real scope', async () => {
     renderComposer()
     expect(skillsClient.listAvailableSkills).not.toHaveBeenCalled()
@@ -2579,6 +2587,14 @@ describe('SpaceRoomComposer — platform commands (WS13-S7)', () => {
     const firstSkill = labels.findIndex((label) => label.includes('HMS-runde'))
     expect(lastCommand).toBeGreaterThanOrEqual(0)
     expect(lastCommand).toBeLessThan(firstSkill)
+  })
+
+  it('the picker is named for skills and commands together, so a screen reader hears both', async () => {
+    renderComposer()
+    fireEvent.input(textarea(), { target: { value: '/' } })
+    flush()
+
+    expect(await screen.findByRole('listbox', { name: 'Velg en ferdighet eller kommando' })).toBeTruthy()
   })
 })
 
