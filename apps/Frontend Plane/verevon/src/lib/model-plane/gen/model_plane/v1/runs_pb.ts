@@ -12,9 +12,11 @@ import type { JsonObject, Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/runs.proto.
  */
 export const file_model_plane_v1_runs: GenFile = /*@__PURE__*/
-  fileDesc("Chltb2RlbF9wbGFuZS92MS9ydW5zLnByb3RvEg5tb2RlbF9wbGFuZS52MSK0AQodQ2FuY2VsUnVuQXNSb29tTWFuYWdlclJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhAKCHNwYWNlX2lkGAIgASgJEiIKGnNwYWNlX2NvbnRyb2xfZGVjaXNpb25fcmVmGAMgASgJEiQKHHNwYWNlX2NvbnRyb2xfZGVjaXNpb25fdG9rZW4YBCABKAkSFwoPaWRlbXBvdGVuY3lfa2V5GAUgASgJEg4KBnJlYXNvbhgGIAEoCSJ0Ch5DYW5jZWxSdW5Bc1Jvb21NYW5hZ2VyUmVzcG9uc2USEQoJY2FuY2VsbGVkGAEgASgIEhIKCnJlY2VpcHRfaWQYAiABKAkSFAoMb3duZXJfb3JnX2lkGAMgASgJEhUKDW93bmVyX3VzZXJfaWQYBCABKAkihQEKHUF1dGhvcml6ZVJvb21SdW5BdHRhY2hSZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIQCghzcGFjZV9pZBgCIAEoCRIfChdzcGFjZV9yZWFkX2RlY2lzaW9uX3JlZhgDIAEoCRIhChlzcGFjZV9yZWFkX2RlY2lzaW9uX3Rva2VuGAQgASgJItkBCh5BdXRob3JpemVSb29tUnVuQXR0YWNoUmVzcG9uc2USDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkSGAoQb3duZXJfc3ViamVjdF9pZBgEIAEoCRIRCglydW5fcGhhc2UYBSABKAkSFwoPc3RhcnRlZF9hdF91bml4GAYgASgDEhgKEHZhbGlkX3VudGlsX3VuaXgYByABKAMSEAoIcHJvdmlkZXIYCCABKAkSEgoKY29ubmVjdGlvbhgJIAEoCSIfCg1HZXRSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCSJTCh5HZXRTY2hlZHVsZWRTdGVwQ29udGV4dFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkitAEKFFNjaGVkdWxlZFN0ZXBDb250ZXh0Eg4KBnJ1bl9pZBgBIAEoCRIRCgl0aHJlYWRfaWQYAiABKAkSDgoGb3JnX2lkGAMgASgJEgwKBGdvYWwYBCABKAkSDgoGc3RhdHVzGAUgASgJEhUKDWNvbnRyYWN0X2pzb24YBiABKAkSFwoPY29udHJhY3RfZGlnZXN0GAcgASgJEhsKE2NvbnRyYWN0X2V4cGlyZXNfYXQYCCABKAkitgEKD0xpc3RSdW5zUmVxdWVzdBIRCgl0aHJlYWRfaWQYASABKAkSFQoNc3RhdHVzX2ZpbHRlchgCIAEoCRIUCgxhZnRlcl9ydW5faWQYAyABKAkSDQoFbGltaXQYBCABKA0SEAoIc3BhY2VfaWQYBSABKAkSHwoXc3BhY2VfcmVhZF9kZWNpc2lvbl9yZWYYBiABKAkSIQoZc3BhY2VfcmVhZF9kZWNpc2lvbl90b2tlbhgHIAEoCSJNChBMaXN0UnVuc1Jlc3BvbnNlEicKBHJ1bnMYASADKAsyGS5tb2RlbF9wbGFuZS52MS5SdW5EZXRhaWwSEAoIaGFzX21vcmUYAiABKAgiYwoVTGlzdFN5c3RlbVJ1bnNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIVCg1zdGF0dXNfZmlsdGVyGAIgASgJEhQKDGFmdGVyX3J1bl9pZBgDIAEoCRINCgVsaW1pdBgEIAEoDSIyChBDYW5jZWxSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIOCgZyZWFzb24YAiABKAkiOgoRQ2FuY2VsUnVuUmVzcG9uc2USEQoJY2FuY2VsbGVkGAEgASgIEhIKCnJlY2VpcHRfaWQYAiABKAkiSQoWUmVzb2x2ZVJ1bk93bmVyUmVxdWVzdBIOCgZydW5faWQYASABKAkSDgoGb3JnX2lkGAIgASgJEg8KB3VzZXJfaWQYAyABKAkiLQoXUmVzb2x2ZVJ1bk93bmVyUmVzcG9uc2USEgoKYXV0aG9yaXplZBgBIAEoCCJPChlSZXNvbHZlVGhyZWFkT3duZXJSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRIOCgZvcmdfaWQYAiABKAkSDwoHdXNlcl9pZBgDIAEoCSIwChpSZXNvbHZlVGhyZWFkT3duZXJSZXNwb25zZRISCgphdXRob3JpemVkGAEgASgIIkIKIFJlc29sdmVSdW5BY3Rpb25BdXRob3JpdHlSZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIOCgZvcmdfaWQYAiABKAki6wIKIVJlc29sdmVSdW5BY3Rpb25BdXRob3JpdHlSZXNwb25zZRIQCghyZXNvbHZlZBgBIAEoCBIOCgZydW5faWQYAiABKAkSDgoGb3JnX2lkGAMgASgJEhIKCnN1YmplY3RfaWQYBCABKAkSEQoJdGhyZWFkX2lkGAUgASgJEhAKCHNwYWNlX2lkGAYgASgJEh4KFnJlY2lwaWVudF9hdWRpZW5jZV9yZWYYByABKAkSIwobcmVjaXBpZW50X2F1ZGllbmNlX3JldmlzaW9uGAggASgEEh8KF3JlY2lwaWVudF9hdWRpZW5jZV9oYXNoGAkgASgJEhoKEnByaXZhY3lfcG9saWN5X3JlZhgKIAEoCRIpCiF0aHJlYWRfcmVzb3VyY2VfYXV0aG9yaXphdGlvbl9yZWYYCyABKAkSGgoSYXV0aG9yaXR5X3JldmlzaW9uGAwgASgEEhIKCnJ1bl9zdGF0dXMYDSABKAkiRgofUmVzb2x2ZUFwcHJvdmFsQXV0aG9yaXR5UmVxdWVzdBITCgthcHByb3ZhbF9pZBgBIAEoCRIOCgZvcmdfaWQYAiABKAkihAQKIFJlc29sdmVBcHByb3ZhbEF1dGhvcml0eVJlc3BvbnNlEhAKCHJlc29sdmVkGAEgASgIEhMKC2FwcHJvdmFsX2lkGAIgASgJEg4KBnJ1bl9pZBgDIAEoCRIOCgZvcmdfaWQYBCABKAkSHAoUcmVxdWVzdGVyX3N1YmplY3RfaWQYBSABKAkSEQoJdGhyZWFkX2lkGAYgASgJEhAKCHNwYWNlX2lkGAcgASgJEhcKD2FwcHJvdmFsX3N0YXR1cxgIIAEoCRIVCg1hcHByb3ZhbF9raW5kGAkgASgJEhYKDmFkZHJlc3NlZV9raW5kGAogASgJEhwKFGFkZHJlc3NlZV9zdWJqZWN0X2lkGAsgASgJEhMKC3R1cm5fb3JpZ2luGAwgASgJEhIKCmV4cGlyZXNfYXQYDSABKAkSHgoWcmVjaXBpZW50X2F1ZGllbmNlX3JlZhgOIAEoCRIjChtyZWNpcGllbnRfYXVkaWVuY2VfcmV2aXNpb24YDyABKAQSHwoXcmVjaXBpZW50X2F1ZGllbmNlX2hhc2gYECABKAkSGgoScHJpdmFjeV9wb2xpY3lfcmVmGBEgASgJEikKIXRocmVhZF9yZXNvdXJjZV9hdXRob3JpemF0aW9uX3JlZhgSIAEoCRIaChJhdXRob3JpdHlfcmV2aXNpb24YEyABKAQi7gEKJFJlc29sdmVTY2hlZHVsZWRTdGVwQXV0aG9yaXR5UmVxdWVzdBIOCgZydW5faWQYASABKAkSEQoJdGhyZWFkX2lkGAIgASgJEg4KBm9yZ19pZBgDIAEoCRITCgtzY2hlZHVsZV9pZBgEIAEoCRIQCghmaXJlX2tleRgFIAEoCRIXCg90ZW1wbGF0ZV9kaWdlc3QYBiABKAkSFQoNcG9saWN5X2RpZ2VzdBgHIAEoCRIPCgdzdGVwX2lkGAggASgJEhIKCnN0ZXBfaW5kZXgYCSABKA0SFwoPaWRlbXBvdGVuY3lfa2V5GAogASgJIvECCiVSZXNvbHZlU2NoZWR1bGVkU3RlcEF1dGhvcml0eVJlc3BvbnNlEhAKCHJlc29sdmVkGAEgASgIEg4KBnJ1bl9pZBgCIAEoCRIRCgl0aHJlYWRfaWQYAyABKAkSDgoGb3JnX2lkGAQgASgJEhIKCnN1YmplY3RfaWQYBSABKAkSEAoIc3BhY2VfaWQYBiABKAkSEwoLc2NoZWR1bGVfaWQYByABKAkSEAoIZmlyZV9rZXkYCCABKAkSFwoPdGVtcGxhdGVfZGlnZXN0GAkgASgJEhUKDXBvbGljeV9kaWdlc3QYCiABKAkSDwoHc3RlcF9pZBgLIAEoCRISCgpzdGVwX2luZGV4GAwgASgNEhcKD2lkZW1wb3RlbmN5X2tleRgNIAEoCRISCgpydW5fc3RhdHVzGA4gASgJEhcKD2NvbnRyYWN0X2RpZ2VzdBgPIAEoCRIbChNjb250cmFjdF9leHBpcmVzX2F0GBAgASgJItUDCglSdW5EZXRhaWwSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIVCg1wYXJlbnRfcnVuX2lkGAMgASgJEhAKCGFnZW50X2lkGAQgASgJEg4KBnN0YXR1cxgFIAEoCRIMCgRtb2RlGAYgASgJEgwKBGdvYWwYByABKAkSFAoMZmluYWxfb3V0cHV0GAggASgJEg0KBWVycm9yGAkgASgJEhgKEGNoZWNrcG9pbnRfaW5kZXgYCiABKA0SFwoPc3RlcHNfY29tcGxldGVkGAsgASgNEhQKDGlucHV0X3Rva2VucxgMIAEoDRIVCg1vdXRwdXRfdG9rZW5zGA0gASgNEi4KCmNyZWF0ZWRfYXQYDiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEi4KCnVwZGF0ZWRfYXQYDyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEikKCG1ldGFkYXRhGBAgASgLMhcuZ29vZ2xlLnByb3RvYnVmLlN0cnVjdBIRCglyZXN1bWFibGUYESABKAgSEwoLcGFya19yZWFzb24YEiABKAkSGAoQb3duZXJfc3ViamVjdF9pZBgTIAEoCSJzCg5SdW5Db250ZXh0UGFydBIuCgVzdGF0ZRgBIAEoDjIfLm1vZGVsX3BsYW5lLnYxLlJ1bkNvbnRleHRTdGF0ZRIQCghpbmNsdWRlZBgCIAEoDRIPCgdvbWl0dGVkGAMgASgNEg4KBnJlYXNvbhgEIAEoCSKpAQoQUnVuQ29udGV4dFN0YXR1cxI0CgxpbnN0cnVjdGlvbnMYASABKAsyHi5tb2RlbF9wbGFuZS52MS5SdW5Db250ZXh0UGFydBIvCgdoaXN0b3J5GAIgASgLMh4ubW9kZWxfcGxhbmUudjEuUnVuQ29udGV4dFBhcnQSLgoGbWVtb3J5GAMgASgLMh4ubW9kZWxfcGxhbmUudjEuUnVuQ29udGV4dFBhcnQqkwEKDEF1dG9ub215UnVuZxIdChlBVVRPTk9NWV9SVU5HX1VOU1BFQ0lGSUVEEAASGwoXQVVUT05PTVlfUlVOR19SRUFEX09OTFkQARIhCh1BVVRPTk9NWV9SVU5HX1dPUktTUEFDRV9XUklURRACEiQKIEFVVE9OT01ZX1JVTkdfREFOR0VSX0ZVTExfQUNDRVNTEAMq3gEKD1J1bkNvbnRleHRTdGF0ZRIhCh1SVU5fQ09OVEVYVF9TVEFURV9VTlNQRUNJRklFRBAAEh4KGlJVTl9DT05URVhUX1NUQVRFX0lOQ0xVREVEEAESHwobUlVOX0NPTlRFWFRfU1RBVEVfVFJVTkNBVEVEEAISGwoXUlVOX0NPTlRFWFRfU1RBVEVfRU1QVFkQAxInCiNSVU5fQ09OVEVYVF9TVEFURV9TS0lQUEVEX0JZX1BPTElDWRAEEiEKHVJVTl9DT05URVhUX1NUQVRFX1VOQVZBSUxBQkxFEAUykQoKClJ1blNlcnZpY2USQgoGR2V0UnVuEh0ubW9kZWxfcGxhbmUudjEuR2V0UnVuUmVxdWVzdBoZLm1vZGVsX3BsYW5lLnYxLlJ1bkRldGFpbBJvChdHZXRTY2hlZHVsZWRTdGVwQ29udGV4dBIuLm1vZGVsX3BsYW5lLnYxLkdldFNjaGVkdWxlZFN0ZXBDb250ZXh0UmVxdWVzdBokLm1vZGVsX3BsYW5lLnYxLlNjaGVkdWxlZFN0ZXBDb250ZXh0Ek0KCExpc3RSdW5zEh8ubW9kZWxfcGxhbmUudjEuTGlzdFJ1bnNSZXF1ZXN0GiAubW9kZWxfcGxhbmUudjEuTGlzdFJ1bnNSZXNwb25zZRJQCglDYW5jZWxSdW4SIC5tb2RlbF9wbGFuZS52MS5DYW5jZWxSdW5SZXF1ZXN0GiEubW9kZWxfcGxhbmUudjEuQ2FuY2VsUnVuUmVzcG9uc2USWQoOTGlzdFN5c3RlbVJ1bnMSJS5tb2RlbF9wbGFuZS52MS5MaXN0U3lzdGVtUnVuc1JlcXVlc3QaIC5tb2RlbF9wbGFuZS52MS5MaXN0UnVuc1Jlc3BvbnNlEmIKD1Jlc29sdmVSdW5Pd25lchImLm1vZGVsX3BsYW5lLnYxLlJlc29sdmVSdW5Pd25lclJlcXVlc3QaJy5tb2RlbF9wbGFuZS52MS5SZXNvbHZlUnVuT3duZXJSZXNwb25zZRJrChJSZXNvbHZlVGhyZWFkT3duZXISKS5tb2RlbF9wbGFuZS52MS5SZXNvbHZlVGhyZWFkT3duZXJSZXF1ZXN0GioubW9kZWxfcGxhbmUudjEuUmVzb2x2ZVRocmVhZE93bmVyUmVzcG9uc2USgAEKGVJlc29sdmVSdW5BY3Rpb25BdXRob3JpdHkSMC5tb2RlbF9wbGFuZS52MS5SZXNvbHZlUnVuQWN0aW9uQXV0aG9yaXR5UmVxdWVzdBoxLm1vZGVsX3BsYW5lLnYxLlJlc29sdmVSdW5BY3Rpb25BdXRob3JpdHlSZXNwb25zZRJ9ChhSZXNvbHZlQXBwcm92YWxBdXRob3JpdHkSLy5tb2RlbF9wbGFuZS52MS5SZXNvbHZlQXBwcm92YWxBdXRob3JpdHlSZXF1ZXN0GjAubW9kZWxfcGxhbmUudjEuUmVzb2x2ZUFwcHJvdmFsQXV0aG9yaXR5UmVzcG9uc2USjAEKHVJlc29sdmVTY2hlZHVsZWRTdGVwQXV0aG9yaXR5EjQubW9kZWxfcGxhbmUudjEuUmVzb2x2ZVNjaGVkdWxlZFN0ZXBBdXRob3JpdHlSZXF1ZXN0GjUubW9kZWxfcGxhbmUudjEuUmVzb2x2ZVNjaGVkdWxlZFN0ZXBBdXRob3JpdHlSZXNwb25zZRJ3ChZBdXRob3JpemVSb29tUnVuQXR0YWNoEi0ubW9kZWxfcGxhbmUudjEuQXV0aG9yaXplUm9vbVJ1bkF0dGFjaFJlcXVlc3QaLi5tb2RlbF9wbGFuZS52MS5BdXRob3JpemVSb29tUnVuQXR0YWNoUmVzcG9uc2USdwoWQ2FuY2VsUnVuQXNSb29tTWFuYWdlchItLm1vZGVsX3BsYW5lLnYxLkNhbmNlbFJ1bkFzUm9vbU1hbmFnZXJSZXF1ZXN0Gi4ubW9kZWxfcGxhbmUudjEuQ2FuY2VsUnVuQXNSb29tTWFuYWdlclJlc3BvbnNlQj1aO2dpdGh1Yi5jb20vdHJpb2RlbGFiL21vZGVsLXBsYW5lL2dlbi9nby9tb2RlbF9wbGFuZS92MTttcHYxYgZwcm90bzM", [file_google_protobuf_timestamp, file_google_protobuf_struct]);
+  fileDesc("Chltb2RlbF9wbGFuZS92MS9ydW5zLnByb3RvEg5tb2RlbF9wbGFuZS52MSK0AQodQ2FuY2VsUnVuQXNSb29tTWFuYWdlclJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhAKCHNwYWNlX2lkGAIgASgJEiIKGnNwYWNlX2NvbnRyb2xfZGVjaXNpb25fcmVmGAMgASgJEiQKHHNwYWNlX2NvbnRyb2xfZGVjaXNpb25fdG9rZW4YBCABKAkSFwoPaWRlbXBvdGVuY3lfa2V5GAUgASgJEg4KBnJlYXNvbhgGIAEoCSJ0Ch5DYW5jZWxSdW5Bc1Jvb21NYW5hZ2VyUmVzcG9uc2USEQoJY2FuY2VsbGVkGAEgASgIEhIKCnJlY2VpcHRfaWQYAiABKAkSFAoMb3duZXJfb3JnX2lkGAMgASgJEhUKDW93bmVyX3VzZXJfaWQYBCABKAkihQEKHUF1dGhvcml6ZVJvb21SdW5BdHRhY2hSZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIQCghzcGFjZV9pZBgCIAEoCRIfChdzcGFjZV9yZWFkX2RlY2lzaW9uX3JlZhgDIAEoCRIhChlzcGFjZV9yZWFkX2RlY2lzaW9uX3Rva2VuGAQgASgJItkBCh5BdXRob3JpemVSb29tUnVuQXR0YWNoUmVzcG9uc2USDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkSGAoQb3duZXJfc3ViamVjdF9pZBgEIAEoCRIRCglydW5fcGhhc2UYBSABKAkSFwoPc3RhcnRlZF9hdF91bml4GAYgASgDEhgKEHZhbGlkX3VudGlsX3VuaXgYByABKAMSEAoIcHJvdmlkZXIYCCABKAkSEgoKY29ubmVjdGlvbhgJIAEoCSIfCg1HZXRSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCSJTCh5HZXRTY2hlZHVsZWRTdGVwQ29udGV4dFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAki1QEKFFNjaGVkdWxlZFN0ZXBDb250ZXh0Eg4KBnJ1bl9pZBgBIAEoCRIRCgl0aHJlYWRfaWQYAiABKAkSDgoGb3JnX2lkGAMgASgJEgwKBGdvYWwYBCABKAkSDgoGc3RhdHVzGAUgASgJEhUKDWNvbnRyYWN0X2pzb24YBiABKAkSFwoPY29udHJhY3RfZGlnZXN0GAcgASgJEhsKE2NvbnRyYWN0X2V4cGlyZXNfYXQYCCABKAkSCwoDemRyGAkgASgIEhIKCnpkcl93YWl2ZWQYCiABKAgitgEKD0xpc3RSdW5zUmVxdWVzdBIRCgl0aHJlYWRfaWQYASABKAkSFQoNc3RhdHVzX2ZpbHRlchgCIAEoCRIUCgxhZnRlcl9ydW5faWQYAyABKAkSDQoFbGltaXQYBCABKA0SEAoIc3BhY2VfaWQYBSABKAkSHwoXc3BhY2VfcmVhZF9kZWNpc2lvbl9yZWYYBiABKAkSIQoZc3BhY2VfcmVhZF9kZWNpc2lvbl90b2tlbhgHIAEoCSJNChBMaXN0UnVuc1Jlc3BvbnNlEicKBHJ1bnMYASADKAsyGS5tb2RlbF9wbGFuZS52MS5SdW5EZXRhaWwSEAoIaGFzX21vcmUYAiABKAgiYwoVTGlzdFN5c3RlbVJ1bnNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIVCg1zdGF0dXNfZmlsdGVyGAIgASgJEhQKDGFmdGVyX3J1bl9pZBgDIAEoCRINCgVsaW1pdBgEIAEoDSIyChBDYW5jZWxSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIOCgZyZWFzb24YAiABKAkiOgoRQ2FuY2VsUnVuUmVzcG9uc2USEQoJY2FuY2VsbGVkGAEgASgIEhIKCnJlY2VpcHRfaWQYAiABKAkiSQoWUmVzb2x2ZVJ1bk93bmVyUmVxdWVzdBIOCgZydW5faWQYASABKAkSDgoGb3JnX2lkGAIgASgJEg8KB3VzZXJfaWQYAyABKAkiLQoXUmVzb2x2ZVJ1bk93bmVyUmVzcG9uc2USEgoKYXV0aG9yaXplZBgBIAEoCCJPChlSZXNvbHZlVGhyZWFkT3duZXJSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRIOCgZvcmdfaWQYAiABKAkSDwoHdXNlcl9pZBgDIAEoCSKAAQoaUmVzb2x2ZVRocmVhZE93bmVyUmVzcG9uc2USEgoKYXV0aG9yaXplZBgBIAEoCBIVCg10aHJlYWRfb3JpZ2luGAIgASgJEhcKD3RocmVhZF9pbl9zcGFjZRgDIAEoCBIeChZ0aHJlYWRfcmV0YWluc19ub3RoaW5nGAQgASgIIkIKIFJlc29sdmVSdW5BY3Rpb25BdXRob3JpdHlSZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIOCgZvcmdfaWQYAiABKAki6wIKIVJlc29sdmVSdW5BY3Rpb25BdXRob3JpdHlSZXNwb25zZRIQCghyZXNvbHZlZBgBIAEoCBIOCgZydW5faWQYAiABKAkSDgoGb3JnX2lkGAMgASgJEhIKCnN1YmplY3RfaWQYBCABKAkSEQoJdGhyZWFkX2lkGAUgASgJEhAKCHNwYWNlX2lkGAYgASgJEh4KFnJlY2lwaWVudF9hdWRpZW5jZV9yZWYYByABKAkSIwobcmVjaXBpZW50X2F1ZGllbmNlX3JldmlzaW9uGAggASgEEh8KF3JlY2lwaWVudF9hdWRpZW5jZV9oYXNoGAkgASgJEhoKEnByaXZhY3lfcG9saWN5X3JlZhgKIAEoCRIpCiF0aHJlYWRfcmVzb3VyY2VfYXV0aG9yaXphdGlvbl9yZWYYCyABKAkSGgoSYXV0aG9yaXR5X3JldmlzaW9uGAwgASgEEhIKCnJ1bl9zdGF0dXMYDSABKAkiRgofUmVzb2x2ZUFwcHJvdmFsQXV0aG9yaXR5UmVxdWVzdBITCgthcHByb3ZhbF9pZBgBIAEoCRIOCgZvcmdfaWQYAiABKAkihAQKIFJlc29sdmVBcHByb3ZhbEF1dGhvcml0eVJlc3BvbnNlEhAKCHJlc29sdmVkGAEgASgIEhMKC2FwcHJvdmFsX2lkGAIgASgJEg4KBnJ1bl9pZBgDIAEoCRIOCgZvcmdfaWQYBCABKAkSHAoUcmVxdWVzdGVyX3N1YmplY3RfaWQYBSABKAkSEQoJdGhyZWFkX2lkGAYgASgJEhAKCHNwYWNlX2lkGAcgASgJEhcKD2FwcHJvdmFsX3N0YXR1cxgIIAEoCRIVCg1hcHByb3ZhbF9raW5kGAkgASgJEhYKDmFkZHJlc3NlZV9raW5kGAogASgJEhwKFGFkZHJlc3NlZV9zdWJqZWN0X2lkGAsgASgJEhMKC3R1cm5fb3JpZ2luGAwgASgJEhIKCmV4cGlyZXNfYXQYDSABKAkSHgoWcmVjaXBpZW50X2F1ZGllbmNlX3JlZhgOIAEoCRIjChtyZWNpcGllbnRfYXVkaWVuY2VfcmV2aXNpb24YDyABKAQSHwoXcmVjaXBpZW50X2F1ZGllbmNlX2hhc2gYECABKAkSGgoScHJpdmFjeV9wb2xpY3lfcmVmGBEgASgJEikKIXRocmVhZF9yZXNvdXJjZV9hdXRob3JpemF0aW9uX3JlZhgSIAEoCRIaChJhdXRob3JpdHlfcmV2aXNpb24YEyABKAQi7gEKJFJlc29sdmVTY2hlZHVsZWRTdGVwQXV0aG9yaXR5UmVxdWVzdBIOCgZydW5faWQYASABKAkSEQoJdGhyZWFkX2lkGAIgASgJEg4KBm9yZ19pZBgDIAEoCRITCgtzY2hlZHVsZV9pZBgEIAEoCRIQCghmaXJlX2tleRgFIAEoCRIXCg90ZW1wbGF0ZV9kaWdlc3QYBiABKAkSFQoNcG9saWN5X2RpZ2VzdBgHIAEoCRIPCgdzdGVwX2lkGAggASgJEhIKCnN0ZXBfaW5kZXgYCSABKA0SFwoPaWRlbXBvdGVuY3lfa2V5GAogASgJIvECCiVSZXNvbHZlU2NoZWR1bGVkU3RlcEF1dGhvcml0eVJlc3BvbnNlEhAKCHJlc29sdmVkGAEgASgIEg4KBnJ1bl9pZBgCIAEoCRIRCgl0aHJlYWRfaWQYAyABKAkSDgoGb3JnX2lkGAQgASgJEhIKCnN1YmplY3RfaWQYBSABKAkSEAoIc3BhY2VfaWQYBiABKAkSEwoLc2NoZWR1bGVfaWQYByABKAkSEAoIZmlyZV9rZXkYCCABKAkSFwoPdGVtcGxhdGVfZGlnZXN0GAkgASgJEhUKDXBvbGljeV9kaWdlc3QYCiABKAkSDwoHc3RlcF9pZBgLIAEoCRISCgpzdGVwX2luZGV4GAwgASgNEhcKD2lkZW1wb3RlbmN5X2tleRgNIAEoCRISCgpydW5fc3RhdHVzGA4gASgJEhcKD2NvbnRyYWN0X2RpZ2VzdBgPIAEoCRIbChNjb250cmFjdF9leHBpcmVzX2F0GBAgASgJItUDCglSdW5EZXRhaWwSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIVCg1wYXJlbnRfcnVuX2lkGAMgASgJEhAKCGFnZW50X2lkGAQgASgJEg4KBnN0YXR1cxgFIAEoCRIMCgRtb2RlGAYgASgJEgwKBGdvYWwYByABKAkSFAoMZmluYWxfb3V0cHV0GAggASgJEg0KBWVycm9yGAkgASgJEhgKEGNoZWNrcG9pbnRfaW5kZXgYCiABKA0SFwoPc3RlcHNfY29tcGxldGVkGAsgASgNEhQKDGlucHV0X3Rva2VucxgMIAEoDRIVCg1vdXRwdXRfdG9rZW5zGA0gASgNEi4KCmNyZWF0ZWRfYXQYDiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEi4KCnVwZGF0ZWRfYXQYDyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEikKCG1ldGFkYXRhGBAgASgLMhcuZ29vZ2xlLnByb3RvYnVmLlN0cnVjdBIRCglyZXN1bWFibGUYESABKAgSEwoLcGFya19yZWFzb24YEiABKAkSGAoQb3duZXJfc3ViamVjdF9pZBgTIAEoCSJzCg5SdW5Db250ZXh0UGFydBIuCgVzdGF0ZRgBIAEoDjIfLm1vZGVsX3BsYW5lLnYxLlJ1bkNvbnRleHRTdGF0ZRIQCghpbmNsdWRlZBgCIAEoDRIPCgdvbWl0dGVkGAMgASgNEg4KBnJlYXNvbhgEIAEoCSLqAQoQUnVuQ29udGV4dFN0YXR1cxI0CgxpbnN0cnVjdGlvbnMYASABKAsyHi5tb2RlbF9wbGFuZS52MS5SdW5Db250ZXh0UGFydBIvCgdoaXN0b3J5GAIgASgLMh4ubW9kZWxfcGxhbmUudjEuUnVuQ29udGV4dFBhcnQSLgoGbWVtb3J5GAMgASgLMh4ubW9kZWxfcGxhbmUudjEuUnVuQ29udGV4dFBhcnQSKAoGc2tpbGxzGAQgAygLMhgubW9kZWxfcGxhbmUudjEuU2tpbGxQaW4SFQoNY29ubmVjdG9yX2lkcxgFIAMoCSJNCghTa2lsbFBpbhIQCghza2lsbF9pZBgBIAEoCRIPCgd2ZXJzaW9uGAIgASgFEg4KBmRpZ2VzdBgDIAEoCRIOCgZzb3VyY2UYBCABKAkqkwEKDEF1dG9ub215UnVuZxIdChlBVVRPTk9NWV9SVU5HX1VOU1BFQ0lGSUVEEAASGwoXQVVUT05PTVlfUlVOR19SRUFEX09OTFkQARIhCh1BVVRPTk9NWV9SVU5HX1dPUktTUEFDRV9XUklURRACEiQKIEFVVE9OT01ZX1JVTkdfREFOR0VSX0ZVTExfQUNDRVNTEAMq3gEKD1J1bkNvbnRleHRTdGF0ZRIhCh1SVU5fQ09OVEVYVF9TVEFURV9VTlNQRUNJRklFRBAAEh4KGlJVTl9DT05URVhUX1NUQVRFX0lOQ0xVREVEEAESHwobUlVOX0NPTlRFWFRfU1RBVEVfVFJVTkNBVEVEEAISGwoXUlVOX0NPTlRFWFRfU1RBVEVfRU1QVFkQAxInCiNSVU5fQ09OVEVYVF9TVEFURV9TS0lQUEVEX0JZX1BPTElDWRAEEiEKHVJVTl9DT05URVhUX1NUQVRFX1VOQVZBSUxBQkxFEAUykQoKClJ1blNlcnZpY2USQgoGR2V0UnVuEh0ubW9kZWxfcGxhbmUudjEuR2V0UnVuUmVxdWVzdBoZLm1vZGVsX3BsYW5lLnYxLlJ1bkRldGFpbBJvChdHZXRTY2hlZHVsZWRTdGVwQ29udGV4dBIuLm1vZGVsX3BsYW5lLnYxLkdldFNjaGVkdWxlZFN0ZXBDb250ZXh0UmVxdWVzdBokLm1vZGVsX3BsYW5lLnYxLlNjaGVkdWxlZFN0ZXBDb250ZXh0Ek0KCExpc3RSdW5zEh8ubW9kZWxfcGxhbmUudjEuTGlzdFJ1bnNSZXF1ZXN0GiAubW9kZWxfcGxhbmUudjEuTGlzdFJ1bnNSZXNwb25zZRJQCglDYW5jZWxSdW4SIC5tb2RlbF9wbGFuZS52MS5DYW5jZWxSdW5SZXF1ZXN0GiEubW9kZWxfcGxhbmUudjEuQ2FuY2VsUnVuUmVzcG9uc2USWQoOTGlzdFN5c3RlbVJ1bnMSJS5tb2RlbF9wbGFuZS52MS5MaXN0U3lzdGVtUnVuc1JlcXVlc3QaIC5tb2RlbF9wbGFuZS52MS5MaXN0UnVuc1Jlc3BvbnNlEmIKD1Jlc29sdmVSdW5Pd25lchImLm1vZGVsX3BsYW5lLnYxLlJlc29sdmVSdW5Pd25lclJlcXVlc3QaJy5tb2RlbF9wbGFuZS52MS5SZXNvbHZlUnVuT3duZXJSZXNwb25zZRJrChJSZXNvbHZlVGhyZWFkT3duZXISKS5tb2RlbF9wbGFuZS52MS5SZXNvbHZlVGhyZWFkT3duZXJSZXF1ZXN0GioubW9kZWxfcGxhbmUudjEuUmVzb2x2ZVRocmVhZE93bmVyUmVzcG9uc2USgAEKGVJlc29sdmVSdW5BY3Rpb25BdXRob3JpdHkSMC5tb2RlbF9wbGFuZS52MS5SZXNvbHZlUnVuQWN0aW9uQXV0aG9yaXR5UmVxdWVzdBoxLm1vZGVsX3BsYW5lLnYxLlJlc29sdmVSdW5BY3Rpb25BdXRob3JpdHlSZXNwb25zZRJ9ChhSZXNvbHZlQXBwcm92YWxBdXRob3JpdHkSLy5tb2RlbF9wbGFuZS52MS5SZXNvbHZlQXBwcm92YWxBdXRob3JpdHlSZXF1ZXN0GjAubW9kZWxfcGxhbmUudjEuUmVzb2x2ZUFwcHJvdmFsQXV0aG9yaXR5UmVzcG9uc2USjAEKHVJlc29sdmVTY2hlZHVsZWRTdGVwQXV0aG9yaXR5EjQubW9kZWxfcGxhbmUudjEuUmVzb2x2ZVNjaGVkdWxlZFN0ZXBBdXRob3JpdHlSZXF1ZXN0GjUubW9kZWxfcGxhbmUudjEuUmVzb2x2ZVNjaGVkdWxlZFN0ZXBBdXRob3JpdHlSZXNwb25zZRJ3ChZBdXRob3JpemVSb29tUnVuQXR0YWNoEi0ubW9kZWxfcGxhbmUudjEuQXV0aG9yaXplUm9vbVJ1bkF0dGFjaFJlcXVlc3QaLi5tb2RlbF9wbGFuZS52MS5BdXRob3JpemVSb29tUnVuQXR0YWNoUmVzcG9uc2USdwoWQ2FuY2VsUnVuQXNSb29tTWFuYWdlchItLm1vZGVsX3BsYW5lLnYxLkNhbmNlbFJ1bkFzUm9vbU1hbmFnZXJSZXF1ZXN0Gi4ubW9kZWxfcGxhbmUudjEuQ2FuY2VsUnVuQXNSb29tTWFuYWdlclJlc3BvbnNlQrEBChJjb20ubW9kZWxfcGxhbmUudjFCCVJ1bnNQcm90b1ABWjtnaXRodWIuY29tL3RyaW9kZWxhYi9tb2RlbC1wbGFuZS9nZW4vZ28vbW9kZWxfcGxhbmUvdjE7bXB2MaICA01YWKoCDU1vZGVsUGxhbmUuVjHKAg1Nb2RlbFBsYW5lXFYx4gIZTW9kZWxQbGFuZVxWMVxHUEJNZXRhZGF0YeoCDk1vZGVsUGxhbmU6OlYxYgZwcm90bzM", [file_google_protobuf_timestamp, file_google_protobuf_struct]);
 
 /**
+ * Request to cancel a run through its Space, with the Control decision for it.
+ *
  * @generated from message model_plane.v1.CancelRunAsRoomManagerRequest
  */
 export type CancelRunAsRoomManagerRequest = Message<"model_plane.v1.CancelRunAsRoomManagerRequest"> & {
@@ -40,6 +42,8 @@ export type CancelRunAsRoomManagerRequest = Message<"model_plane.v1.CancelRunAsR
   spaceControlDecisionRef: string;
 
   /**
+   * Token for the Control decision reference above.
+   *
    * @generated from field: string space_control_decision_token = 4;
    */
   spaceControlDecisionToken: string;
@@ -67,6 +71,8 @@ export const CancelRunAsRoomManagerRequestSchema: GenMessage<CancelRunAsRoomMana
   messageDesc(file_model_plane_v1_runs, 0);
 
 /**
+ * Result of a room-manager cancel: whether this call cancelled the run, and its receipt.
+ *
  * @generated from message model_plane.v1.CancelRunAsRoomManagerResponse
  */
 export type CancelRunAsRoomManagerResponse = Message<"model_plane.v1.CancelRunAsRoomManagerResponse"> & {
@@ -92,6 +98,8 @@ export type CancelRunAsRoomManagerResponse = Message<"model_plane.v1.CancelRunAs
   ownerOrgId: string;
 
   /**
+   * The run owner's user id, for stopping that owner's live producer.
+   *
    * @generated from field: string owner_user_id = 4;
    */
   ownerUserId: string;
@@ -105,6 +113,8 @@ export const CancelRunAsRoomManagerResponseSchema: GenMessage<CancelRunAsRoomMan
   messageDesc(file_model_plane_v1_runs, 1);
 
 /**
+ * Request for a member to watch a run in a Space, with the Space read decision for it.
+ *
  * @generated from message model_plane.v1.AuthorizeRoomRunAttachRequest
  */
 export type AuthorizeRoomRunAttachRequest = Message<"model_plane.v1.AuthorizeRoomRunAttachRequest"> & {
@@ -143,6 +153,8 @@ export const AuthorizeRoomRunAttachRequestSchema: GenMessage<AuthorizeRoomRunAtt
   messageDesc(file_model_plane_v1_runs, 2);
 
 /**
+ * Verdict on a member's attach to a run, with the run's details and how long it holds.
+ *
  * @generated from message model_plane.v1.AuthorizeRoomRunAttachResponse
  */
 export type AuthorizeRoomRunAttachResponse = Message<"model_plane.v1.AuthorizeRoomRunAttachResponse"> & {
@@ -200,6 +212,8 @@ export type AuthorizeRoomRunAttachResponse = Message<"model_plane.v1.AuthorizeRo
   provider: string;
 
   /**
+   * Connection of the run's route; empty for a persistent run.
+   *
    * @generated from field: string connection = 9;
    */
   connection: string;
@@ -296,14 +310,31 @@ export type ScheduledStepContext = Message<"model_plane.v1.ScheduledStepContext"
   contractJson: string;
 
   /**
+   * Digest of the stored-consent contract, re-verified per step.
+   *
    * @generated from field: string contract_digest = 7;
    */
   contractDigest: string;
 
   /**
+   * Expiry of the stored-consent contract, re-verified per step.
+   *
    * @generated from field: string contract_expires_at = 8;
    */
   contractExpiresAt: string;
+
+  /**
+   * The run's retention, stated as two flags (F-f10-26). `zdr` is a zero-retention run;
+   * `zdr_waived` is a run whose zero-retention was waived. Both false is a persistent run.
+   *
+   * @generated from field: bool zdr = 9;
+   */
+  zdr: boolean;
+
+  /**
+   * @generated from field: bool zdr_waived = 10;
+   */
+  zdrWaived: boolean;
 };
 
 /**
@@ -349,13 +380,13 @@ export type ListRunsRequest = Message<"model_plane.v1.ListRunsRequest"> & {
   /**
    * Optional Control-issued authority to read a SHARED Space's record, the
    * same `model.thread.read` decision the conversation read takes.
-   * 
+   *
    * Reused rather than given its own permission on purpose: the runs this
    * returns are exactly the runs of the threads that decision already admits,
    * so it grants no reach the caller did not already have on the conversation.
    * Session Core enforces that by listing runs THROUGH those threads rather
    * than by trusting `space_id` as a filter.
-   * 
+   *
    * Without it this listing is unchanged: `thread_id` is required and the
    * caller must own the thread.
    *
@@ -581,6 +612,28 @@ export type ResolveThreadOwnerResponse = Message<"model_plane.v1.ResolveThreadOw
    * @generated from field: bool authorized = 1;
    */
   authorized: boolean;
+
+  /**
+   * The thread's origin word as threads.origin stores it (chat, space, agent_run, support, system or
+   * mail_task). Empty unless authorized is true, and empty from a session-core that predates this field.
+   *
+   * @generated from field: string thread_origin = 2;
+   */
+  threadOrigin: string;
+
+  /**
+   * Whether the thread lives in a Space: its space_id is set and not blank.
+   *
+   * @generated from field: bool thread_in_space = 3;
+   */
+  threadInSpace: boolean;
+
+  /**
+   * Whether the thread holds any run kept under zero data retention or a waived one (DEC-32).
+   *
+   * @generated from field: bool thread_retains_nothing = 4;
+   */
+  threadRetainsNothing: boolean;
 };
 
 /**
@@ -711,6 +764,8 @@ export const ResolveRunActionAuthorityResponseSchema: GenMessage<ResolveRunActio
  */
 export type ResolveApprovalAuthorityRequest = Message<"model_plane.v1.ResolveApprovalAuthorityRequest"> & {
   /**
+   * The approval to resolve.
+   *
    * @generated from field: string approval_id = 1;
    */
   approvalId: string;
@@ -741,6 +796,8 @@ export type ResolveApprovalAuthorityResponse = Message<"model_plane.v1.ResolveAp
   resolved: boolean;
 
   /**
+   * The approval this authority answer is for.
+   *
    * @generated from field: string approval_id = 2;
    */
   approvalId: string;
@@ -835,6 +892,8 @@ export type ResolveApprovalAuthorityResponse = Message<"model_plane.v1.ResolveAp
   privacyPolicyRef: string;
 
   /**
+   * Reference to the thread resource authorization.
+   *
    * @generated from field: string thread_resource_authorization_ref = 18;
    */
   threadResourceAuthorizationRef: string;
@@ -997,6 +1056,8 @@ export type ResolveScheduledStepAuthorityResponse = Message<"model_plane.v1.Reso
   contractDigest: string;
 
   /**
+   * Expiry of the Control-signed contract for this step; empty without a contract.
+   *
    * @generated from field: string contract_expires_at = 16;
    */
   contractExpiresAt: string;
@@ -1228,6 +1289,23 @@ export type RunContextStatus = Message<"model_plane.v1.RunContextStatus"> & {
    * @generated from field: model_plane.v1.RunContextPart memory = 3;
    */
   memory?: RunContextPart | undefined;
+
+  /**
+   * EP-11 S3: the skill versions the run injected, one pin per skill. Ids,
+   * numbers and hashes only, so the pin is allowed wherever the run record is.
+   *
+   * @generated from field: repeated model_plane.v1.SkillPin skills = 4;
+   */
+  skills: SkillPin[];
+
+  /**
+   * WS23-S4: the ids of the connected accounts the person selected for this
+   * turn. Ids only, no tokens, names or content, so the list is allowed
+   * wherever the run record is; never recorded for a zero-retention or waived run.
+   *
+   * @generated from field: repeated string connector_ids = 5;
+   */
+  connectorIds: string[];
 };
 
 /**
@@ -1238,15 +1316,58 @@ export const RunContextStatusSchema: GenMessage<RunContextStatus> = /*@__PURE__*
   messageDesc(file_model_plane_v1_runs, 24);
 
 /**
+ * EP-11 S3: one skill version a run used. Recovery inside the run reads this
+ * version even when the skill changed mid-run; feedback names it.
+ *
+ * @generated from message model_plane.v1.SkillPin
+ */
+export type SkillPin = Message<"model_plane.v1.SkillPin"> & {
+  /**
+   * The skill id (session-core `agent_skills.id`, or the builtin skill's id).
+   *
+   * @generated from field: string skill_id = 1;
+   */
+  skillId: string;
+
+  /**
+   * The immutable version number; 0 for a builtin skill.
+   *
+   * @generated from field: int32 version = 2;
+   */
+  version: number;
+
+  /**
+   * sha256 hex digest of the version (of the embedded SKILL.md for a builtin).
+   *
+   * @generated from field: string digest = 3;
+   */
+  digest: string;
+
+  /**
+   * How the skill reached the run: "matched" | "requested" | "builtin".
+   *
+   * @generated from field: string source = 4;
+   */
+  source: string;
+};
+
+/**
+ * Describes the message model_plane.v1.SkillPin.
+ * Use `create(SkillPinSchema)` to create a new message.
+ */
+export const SkillPinSchema: GenMessage<SkillPin> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_runs, 25);
+
+/**
  * AutonomyRung — how much a run is permitted to do, as a strictly ordered
  * ladder. Higher is wider; each rung includes everything below it.
- * 
+ *
  * Shared vocabulary on purpose: model-gateway decides and records a grant, and
  * execution-core enforces it PER CALL at execution. Baking a rung into a tool
  * schema instead would be wrong — a schema is registry-global while the
  * effective rung is per-call truth, so the same tool can be permitted on one
  * call and refused on the next within one run.
- * 
+ *
  * The names mirror execution-core's own `MpSandboxPolicy` rather than inventing
  * a second scale, so a granted rung and the isolation it implies cannot drift
  * apart.
@@ -1399,7 +1520,7 @@ export const RunService: GenService<{
   },
   /**
    * ListSystemRuns — org-scoped listing of runs with no human owner.
-   * 
+   *
    * ListRuns is thread-scoped, and a run created by a durable workflow lives in
    * a thread that same workflow owns, so no person's thread listing can ever
    * reach it. Without this RPC a system-initiated run is unreachable by
@@ -1432,8 +1553,9 @@ export const RunService: GenService<{
    * capability-core's memory scope='session' rows: session and thread are
    * the same underlying resource in this codebase (see agent_memory's writer
    * in dreaming.rs, which stores a thread_id under scope='thread'), so
-   * scope='session' calls this RPC with the same thread_id too. Returns only
-   * a boolean to avoid disclosing another tenant's thread metadata.
+   * scope='session' calls this RPC with the same thread_id too. The answer is
+   * a boolean to avoid disclosing another tenant's thread metadata; the thread
+   * posture fields are set only for an authorized owner.
    *
    * @generated from rpc model_plane.v1.RunService.ResolveThreadOwner
    */

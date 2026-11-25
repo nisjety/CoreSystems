@@ -298,6 +298,10 @@ services:
             #                                     as if the route did not exist.
             WEB_POLICY_CLAIM_ENABLED: ${WEB_POLICY_CLAIM_ENABLED:-0}
             API_KEY_AGENT_EXCHANGE_ENABLED: ${API_KEY_AGENT_EXCHANGE_ENABLED:-0}
+            # F-f01-04: owners and admins also carry capability:admin on the capability-core audience, the
+            # admin marker capability-core reads for org-scope writes. Members and viewers never get it. Off
+            # keeps the two scopes. Only the literal true turns it on.
+            PLANE_TOKEN_CAPABILITY_ADMIN_SCOPE: ${PLANE_TOKEN_CAPABILITY_ADMIN_SCOPE:-false}
             # ZDR-Z-03b: read org-core's effectiveZdr (lapse rule applied) instead of
             # computing intent AND entitlement here. Strict literal "true" turns it on.
             # Rollout order: org-core with ZDR-Z-03a goes first, then this switch. On
@@ -475,7 +479,7 @@ services:
             # required (`:?`) because user-core refuses to start on a token shorter
             # than 32 characters. Nothing presents it until mail-to-task is switched on.
             USER_CORE_SERVICE_CREDENTIALS: >-
-                [{"principal":"verevon-gateway","audience":"user-core","token":"${USER_CORE_GATEWAY_TOKEN:?USER_CORE_GATEWAY_TOKEN is required}","scopes":["users:read:self","users:write:self","spaces:resolve","spaces:issue","spaces:policy:admin:read","spaces:policy:admin:write","directory:read:self","spaces:membership:act","spaces:skill-write:issue"]},{"principal":"session-core","audience":"user-core","token":"${USER_CORE_SESSION_TOKEN:?USER_CORE_SESSION_TOKEN is required}","scopes":["users:read:self","authz:read","authz:write"]},{"principal":"org-core","audience":"user-core","token":"${USER_CORE_ORG_TOKEN:?USER_CORE_ORG_TOKEN is required}","scopes":["users:read:any"]},{"principal":"auth-core","audience":"user-core","token":"${USER_CORE_AUTH_TOKEN:?USER_CORE_AUTH_TOKEN is required}","scopes":["users:read:any","users:write:any","users:sync","memberships:write"]},{"principal":"retrieval-engine","audience":"user-core","token":"${USER_CORE_RETRIEVAL_TOKEN:?USER_CORE_RETRIEVAL_TOKEN is required}","scopes":["authz:read"]},{"principal":"documents-api","audience":"user-core","token":"${USER_CORE_DOCUMENTS_TOKEN:?USER_CORE_DOCUMENTS_TOKEN is required}","scopes":["authz:read","authz:write","spaces:file-grant:write"]},{"principal":"application-space-lifecycle","audience":"user-core","token":"${APPLICATION_SPACE_LIFECYCLE_TOKEN:?APPLICATION_SPACE_LIFECYCLE_TOKEN is required}","scopes":["spaces:register","spaces:membership:write","spaces:audience:publish","spaces:membership:read"]},{"principal":"control-space-policy","audience":"user-core","token":"${CONTROL_SPACE_POLICY_TOKEN:?CONTROL_SPACE_POLICY_TOKEN is required}","scopes":["spaces:policy:write"]},{"principal":"execution-core","audience":"user-core","token":"${EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN:?EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN is required}","scopes":["spaces:agent-action:reauthorize"]},{"principal":"execution-core","audience":"user-core","token":"${EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN:?EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN is required}","scopes":["spaces:agent-action:view"]},{"principal":"conversation-core","audience":"user-core","token":"${CONVERSATION_CONTROL_RUN_ACTION_AUTHORITY_TOKEN:?CONVERSATION_CONTROL_RUN_ACTION_AUTHORITY_TOKEN is required}","scopes":["spaces:agent-action:current-authority"]},{"principal":"conversation-core","audience":"user-core","token":"${CONVERSATION_CONTROL_OWNER_EFFECT_RESERVATION_TOKEN:?CONVERSATION_CONTROL_OWNER_EFFECT_RESERVATION_TOKEN is required}","scopes":["spaces:agent-action:reservation"]},{"principal":"integration-mail-task-worker","audience":"user-core","token":"${USER_CORE_MAIL_TASK_WORKER_TOKEN:?USER_CORE_MAIL_TASK_WORKER_TOKEN is required}","scopes":["mail-task:resolve"]}]
+                [{"principal":"verevon-gateway","audience":"user-core","token":"${USER_CORE_GATEWAY_TOKEN:?USER_CORE_GATEWAY_TOKEN is required}","scopes":["users:read:self","users:write:self","spaces:resolve","spaces:issue","spaces:policy:admin:read","spaces:policy:admin:write","directory:read:self","spaces:membership:act","spaces:skill-write:issue"]},{"principal":"session-core","audience":"user-core","token":"${USER_CORE_SESSION_TOKEN:?USER_CORE_SESSION_TOKEN is required}","scopes":["users:read:self","authz:read","authz:write"]},{"principal":"org-core","audience":"user-core","token":"${USER_CORE_ORG_TOKEN:?USER_CORE_ORG_TOKEN is required}","scopes":["users:read:any","spaces:browser-floor:read"]},{"principal":"auth-core","audience":"user-core","token":"${USER_CORE_AUTH_TOKEN:?USER_CORE_AUTH_TOKEN is required}","scopes":["users:read:any","users:write:any","users:sync","memberships:write"]},{"principal":"retrieval-engine","audience":"user-core","token":"${USER_CORE_RETRIEVAL_TOKEN:?USER_CORE_RETRIEVAL_TOKEN is required}","scopes":["authz:read"]},{"principal":"documents-api","audience":"user-core","token":"${USER_CORE_DOCUMENTS_TOKEN:?USER_CORE_DOCUMENTS_TOKEN is required}","scopes":["authz:read","authz:write","spaces:file-grant:write"]},{"principal":"application-space-lifecycle","audience":"user-core","token":"${APPLICATION_SPACE_LIFECYCLE_TOKEN:?APPLICATION_SPACE_LIFECYCLE_TOKEN is required}","scopes":["spaces:register","spaces:membership:write","spaces:audience:publish","spaces:membership:read"]},{"principal":"control-space-policy","audience":"user-core","token":"${CONTROL_SPACE_POLICY_TOKEN:?CONTROL_SPACE_POLICY_TOKEN is required}","scopes":["spaces:policy:write"]},{"principal":"execution-core","audience":"user-core","token":"${EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN:?EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN is required}","scopes":["spaces:agent-action:reauthorize"]},{"principal":"execution-core","audience":"user-core","token":"${EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN:?EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN is required}","scopes":["spaces:agent-action:view"]},{"principal":"conversation-core","audience":"user-core","token":"${CONVERSATION_CONTROL_RUN_ACTION_AUTHORITY_TOKEN:?CONVERSATION_CONTROL_RUN_ACTION_AUTHORITY_TOKEN is required}","scopes":["spaces:agent-action:current-authority"]},{"principal":"conversation-core","audience":"user-core","token":"${CONVERSATION_CONTROL_OWNER_EFFECT_RESERVATION_TOKEN:?CONVERSATION_CONTROL_OWNER_EFFECT_RESERVATION_TOKEN is required}","scopes":["spaces:agent-action:reservation"]},{"principal":"integration-mail-task-worker","audience":"user-core","token":"${USER_CORE_MAIL_TASK_WORKER_TOKEN:?USER_CORE_MAIL_TASK_WORKER_TOKEN is required}","scopes":["mail-task:resolve"]}]
             USER_CORE_GRPC_SERVICE_CREDENTIALS: >-
                 [{"credentialId":"auth-core-primary","principal":"auth-core","audience":"user-core-grpc","token":"${AUTH_USER_CORE_GRPC_SERVICE_TOKEN:?AUTH_USER_CORE_GRPC_SERVICE_TOKEN is required}","methods":["/user.v1.UserService/CreateUser","/user.v1.UserService/UpdateUser","/user.v1.UserService/GetUserByEmail","/user.v1.UserService/CreateSession","/user.v1.UserService/GetUser","/user.v1.UserService/DeleteUser","/user.v1.UserService/HealthCheck"]},{"credentialId":"execution-core-primary","principal":"execution-core","audience":"user-core-grpc","token":"${EXECUTION_CORE_USER_CORE_GRPC_TOKEN:?EXECUTION_CORE_USER_CORE_GRPC_TOKEN is required}","methods":["/user.v1.UserService/GetUser","/user.v1.UserService/GetUserProfile"]}]
             USER_AUTH_INTERNAL_CLIENT_CREDENTIAL: >-
@@ -496,7 +500,7 @@ services:
             # (off = no subscription). Needs the user-core-org-erasure durable that
             # audit-core provisions on the shared bus.
             USER_CORE_ORG_ERASURE_CONSUMER_ENABLED: ${USER_CORE_ORG_ERASURE_CONSUMER_ENABLED:-false}
-            # WS04-S11: sign a history floor on shared thread-read decisions for since_join
+            # WS04-S11: sign a history floor on shared thread-read, thread-revise and run-control decisions for since_join
             # rooms. Strict literal true; off by default and in production. 0 + restart: full history.
             SPACE_HISTORY_WINDOW_CLAIM: ${SPACE_HISTORY_WINDOW_CLAIM:-false}
             # WS12-S1: Control accepts the dm/group_dm kinds and serves
@@ -622,6 +626,7 @@ services:
             # exactly ONE place. No per-service .env.docker copy to drift out of sync.
             DATABASE_URL: postgres://${DB_USER:-coresystem}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/org_core?sslmode=disable
             USER_CORE_SERVICE_TOKEN: ${USER_CORE_ORG_TOKEN:?USER_CORE_ORG_TOKEN is required}
+            ORG_CORE_SESSION_SERVICE_API_KEY: ${ORG_CORE_SESSION_SERVICE_API_KEY:-}
             # `org:retention:read:any` lets a caller read one org's ZDR posture
             # ({zdrIntent, entitled}) from GET /internal/orgs/:orgId/retention-posture.
             # It is deliberately not org:read:any (whole organization record). Exactly
@@ -657,8 +662,11 @@ services:
             ORG_BROWSER_SITE_AUDIT_ENABLED: ${ORG_BROWSER_SITE_AUDIT_ENABLED:-false}
             # EP-9 C1: retention policy and legal-hold routes. Off (404) unless the literal true.
             ORG_RETENTION_POLICY_ENABLED: ${ORG_RETENTION_POLICY_ENABLED:-false}
+            ORG_RETENTION_THREAD_RECEIPT_CHECK: ${ORG_RETENTION_THREAD_RECEIPT_CHECK:-false}
             # O-21: compliance org role; owner, admin and compliance place and release holds. Off unless the literal true.
             ORG_COMPLIANCE_ROLE_ENABLED: ${ORG_COMPLIANCE_ROLE_ENABLED:-false}
+            # EP-9 D-C1 / F-f10-06: erasure routes and the 30-day purge respect legal holds; refusals are audited. Off unless the literal true.
+            ERASURE_HOLD_CHECK: ${ERASURE_HOLD_CHECK:-false}
             # Member capability route (GET /orgs/:id/roles/:roleName/capabilities): the gateway's
             # similarity-candidate check reads the viewer's own role here. Off (404) unless the literal
             # true; with it off the gateway keeps answering support_recurrence_policy_unavailable.
@@ -987,17 +995,17 @@ services:
                 [{"name":"model","plane":"model","url":"nats://model-nats:4222","user":"audit-core-model","password":"${AUDIT_MODEL_NATS_PASSWORD:?AUDIT_MODEL_NATS_PASSWORD is required}"},{"name":"application","plane":"application","url":"nats://application-nats:4222","user":"audit-core-application","password":"${AUDIT_APPLICATION_NATS_PASSWORD:?AUDIT_APPLICATION_NATS_PASSWORD is required}"}]
             HTTP_PORT: "8187"
             ORG_COMPLIANCE_ROLE_ENABLED: ${ORG_COMPLIANCE_ROLE_ENABLED:-false}
-            # The chain switch (WS06-S2): only the literal 1 turns chained inserts on. Without this
+            # The chain switch (WS06-S2): only the literal true turns chained inserts on. Without this
             # line the switch could only arrive through env_file, so an exported value never reached
             # the container (D1-296). Off by default.
-            AUDIT_CHAIN_ENABLED: ${AUDIT_CHAIN_ENABLED:-0}
+            AUDIT_CHAIN_ENABLED: ${AUDIT_CHAIN_ENABLED:-false}
             AUDIT_CHAIN_KEY_ID: ${AUDIT_CHAIN_KEY_ID:-}
             AUDIT_CHAIN_PRIVATE_KEY_BASE64: ${AUDIT_CHAIN_PRIVATE_KEY_BASE64:-}
             AUDIT_CHAIN_PUBLIC_KEY_BASE64: ${AUDIT_CHAIN_PUBLIC_KEY_BASE64:-}
             AUDIT_CHAIN_VERIFY_KEYS: ${AUDIT_CHAIN_VERIFY_KEYS:-}
             AUDIT_CHAIN_ATTEST_INTERVAL: ${AUDIT_CHAIN_ATTEST_INTERVAL:-60s}
-            AUDIT_CHAIN_PRUNE_ENABLED: ${AUDIT_CHAIN_PRUNE_ENABLED:-0}
-            AUDIT_CHAIN_PRUNE_DRYRUN: ${AUDIT_CHAIN_PRUNE_DRYRUN:-0}
+            AUDIT_CHAIN_PRUNE_ENABLED: ${AUDIT_CHAIN_PRUNE_ENABLED:-false}
+            AUDIT_CHAIN_PRUNE_DRYRUN: ${AUDIT_CHAIN_PRUNE_DRYRUN:-false}
             AUDIT_CHAIN_VERIFY_ENABLED: ${AUDIT_CHAIN_VERIFY_ENABLED:-}
             AUDIT_CHAIN_VERIFY_INTERVAL: ${AUDIT_CHAIN_VERIFY_INTERVAL:-24h}
             ENVIRONMENT: ${ENVIRONMENT:-development}
@@ -1049,7 +1057,7 @@ services:
             start_period: 10s
 
     # WS06-S8: SIEM exporter. Absent unless the compose profile `siem` is selected;
-    # AUDIT_SIEM_EXPORT_ENABLED=0 by default, in which case it idles and exports nothing.
+    # AUDIT_SIEM_EXPORT_ENABLED=false by default, in which case it idles and exports nothing.
     audit-siem-exporter:
         <<: *core-security
         profiles: ["siem"]
@@ -1065,8 +1073,8 @@ services:
             DATABASE_URL: postgres://${DB_USER}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/${DB_NAME:-controlplane}?sslmode=disable
             ORG_CORE_URL: http://org-core:8080
             ORG_CORE_SERVICE_TOKEN: ${AUDIT_ORG_CORE_SERVICE_TOKEN:?AUDIT_ORG_CORE_SERVICE_TOKEN is required}
-            AUDIT_SIEM_EXPORT_ENABLED: ${AUDIT_SIEM_EXPORT_ENABLED:-0}
-            AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS: ${AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS:-0}
+            AUDIT_SIEM_EXPORT_ENABLED: ${AUDIT_SIEM_EXPORT_ENABLED:-false}
+            AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS: ${AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS:-false}
             ENVIRONMENT: ${ENVIRONMENT:-development}
         networks:
             - controlplane-net

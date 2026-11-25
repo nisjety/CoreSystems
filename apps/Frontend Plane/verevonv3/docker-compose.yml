@@ -241,6 +241,7 @@ services:
       MAIL_TASK_GATEWAY_BRIDGE_SERVICE_ID: ${MAIL_TASK_GATEWAY_BRIDGE_SERVICE_ID:-verevon-gateway}
       # EP-12 S8: public Agent API ingress (/api/agent/v1/*); exchanges x-api-key at auth-core with the verevon-gateway principal above.
       GATEWAY_AGENT_API_ENABLED: ${GATEWAY_AGENT_API_ENABLED:-false}
+      GATEWAY_AGENT_API_IDEMPOTENCY: ${GATEWAY_AGENT_API_IDEMPOTENCY:-false}
       GATEWAY_AGENT_API_RPM_PER_KEY: ${GATEWAY_AGENT_API_RPM_PER_KEY:-60}
       # API-key agent runs (INNH-10 GW-1): the x-api-key ingress for browser agent runs. Only 1 or the literal true.
       API_KEY_AGENT_RUNS: ${API_KEY_AGENT_RUNS:-false}
@@ -282,6 +283,7 @@ services:
       # EP-3 S8: save a document artifact version to knowledge from the Output panel. Only the literal `true`.
       CHAT_ARTIFACT_PROMOTE_ENABLED: ${CHAT_ARTIFACT_PROMOTE_ENABLED:-false}
       GATEWAY_CHAT_PROJECTS_ENABLED: ${GATEWAY_CHAT_PROJECTS_ENABLED:-false}
+      GATEWAY_QUESTION_ANSWER_MESSAGE_LINK: ${GATEWAY_QUESTION_ANSWER_MESSAGE_LINK:-false}
       # W5 (F-t3-090): transcribe an audio upload into a private transcript document, POST /api/v1/chat/transcripts.
       # Only the literal `true` enables it; off, the route answers 404 media_transcripts_disabled. Zero Data Retention
       # callers are refused whatever this says.
@@ -590,6 +592,7 @@ services:
       VITE_ORG_COMPLIANCE_ROLE: ${VITE_ORG_COMPLIANCE_ROLE:-false}
       VITE_DEEP_RESEARCH_PLAN_TURN: ${VITE_DEEP_RESEARCH_PLAN_TURN:-false}
       VITE_CHAT_PROJECTS_ENABLED: ${VITE_CHAT_PROJECTS_ENABLED:-false}
+      VITE_QUESTION_ANSWER_MESSAGE_LINK: ${VITE_QUESTION_ANSWER_MESSAGE_LINK:-false}
       # EP-6 S8: mounts the agent builder page at /agents/:agentId/edit. Only the literal `true`; pairs with
       # AGENT_DEFINITION_VERSIONS on the gateway, without which the page cannot load a draft.
       VITE_AGENT_BUILDER: ${VITE_AGENT_BUILDER:-false}

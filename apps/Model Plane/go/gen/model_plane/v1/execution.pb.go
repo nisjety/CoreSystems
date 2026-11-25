@@ -661,10 +661,23 @@ type RunAgentRequest struct {
 	// allowance when that is smaller, only while MODEL_GATEWAY_DO_RUN_CAP is the literal `true`. Execution-core ends the
 	// run at the next round boundary once the cap is spent, and only while its own EXECUTION_RUN_TOKEN_CAP is on; an
 	// executor that predates the field skips it as an unknown field. Cost is not sent: execution-core cannot price a
-	// round. Field 29 is the next free number on this message.
-	MaxRunTokens  uint64 `protobuf:"varint,29,opt,name=max_run_tokens,json=maxRunTokens,proto3" json:"max_run_tokens,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// round.
+	MaxRunTokens uint64 `protobuf:"varint,29,opt,name=max_run_tokens,json=maxRunTokens,proto3" json:"max_run_tokens,omitempty"`
+	// The documents the person attached to this Do turn (additive, F-f09-05): opaque document ids, admitted by the
+	// gateway (never on a zero-retention turn) and sent only while MODEL_GATEWAY_DO_CONTEXT_REFS_CARRY is the literal
+	// `true`. Empty = unchanged, exactly as before the field existed. Execution-core narrows every `knowledge_search` of
+	// the run to them (`Filters.document_ids`), together with the run's Space narrowing, never instead of it; a
+	// model-supplied id never widens it. The Data Plane applies the person's own access to each document. Ids only, no
+	// content, and nothing is logged. A continuation's request carries none: execution-core narrows the resumed run to
+	// the ids its pause kept (the approval's retained snapshot or the claimed fold), never to these.
+	ContextDocumentIds []string `protobuf:"bytes,30,rep,name=context_document_ids,json=contextDocumentIds,proto3" json:"context_document_ids,omitempty"`
+	// The skills the person attached to this Do turn, after the turn's explicit picks (additive, F-f09-05): opaque skill
+	// ids, sent under the same switch as `context_document_ids`. Empty = unchanged. Execution-core puts the listed
+	// skills first among the ones it injects, and only skills its own skill listing already shows, still filtered by
+	// the run's `ext_skills`. Field 32 is the next free number on this message.
+	ContextSkillIds []string `protobuf:"bytes,31,rep,name=context_skill_ids,json=contextSkillIds,proto3" json:"context_skill_ids,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *RunAgentRequest) Reset() {
@@ -898,6 +911,20 @@ func (x *RunAgentRequest) GetMaxRunTokens() uint64 {
 		return x.MaxRunTokens
 	}
 	return 0
+}
+
+func (x *RunAgentRequest) GetContextDocumentIds() []string {
+	if x != nil {
+		return x.ContextDocumentIds
+	}
+	return nil
+}
+
+func (x *RunAgentRequest) GetContextSkillIds() []string {
+	if x != nil {
+		return x.ContextSkillIds
+	}
+	return nil
 }
 
 // WideResearchRequest is what a person asked a wide-research run to cover (Wave 3 EP-2 S8/S9). It only
@@ -2962,7 +2989,7 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"tool_calls\x18\t \x01(\rR\ttoolCalls\x12!\n" +
 	"\finput_tokens\x18\n" +
 	" \x01(\rR\vinputTokens\x12#\n" +
-	"\routput_tokens\x18\v \x01(\rR\foutputTokens\"\x99\n" +
+	"\routput_tokens\x18\v \x01(\rR\foutputTokens\"\xf7\n" +
 	"\n" +
 	"\x0fRunAgentRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
@@ -2998,7 +3025,9 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\vcoordinator\x18\x1b \x01(\bR\vcoordinator\x12\x1d\n" +
 	"\n" +
 	"ext_skills\x18\x1c \x01(\tR\textSkills\x12$\n" +
-	"\x0emax_run_tokens\x18\x1d \x01(\x04R\fmaxRunTokens\"\x93\x01\n" +
+	"\x0emax_run_tokens\x18\x1d \x01(\x04R\fmaxRunTokens\x120\n" +
+	"\x14context_document_ids\x18\x1e \x03(\tR\x12contextDocumentIds\x12*\n" +
+	"\x11context_skill_ids\x18\x1f \x03(\tR\x0fcontextSkillIds\"\x93\x01\n" +
 	"\x13WideResearchRequest\x12\x19\n" +
 	"\bitem_cap\x18\x01 \x01(\rR\aitemCap\x12\x14\n" +
 	"\x05items\x18\x02 \x03(\tR\x05items\x12\x19\n" +

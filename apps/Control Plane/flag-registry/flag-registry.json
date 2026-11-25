@@ -315,53 +315,53 @@
     {
       "name": "AUDIT_ALLOW_NATS_TOKEN_FALLBACK",
       "kind": "switch",
-      "onLiteral": "1",
+      "onLiteral": "true",
       "owner": "control-plane",
       "source": "code",
-      "default": "0",
+      "default": "false",
       "stage": "dark",
-      "purpose": "Security-relaxing migration switch: audit-core and its extra NATS buses may connect with the shared NATS token instead of a scoped NATS user and password. Off requires the scoped credential. Only the literal 1 turns it on.",
+      "purpose": "Security-relaxing migration switch: audit-core and its extra NATS buses may connect with the shared NATS token instead of a scoped NATS user and password. Off requires the scoped credential. Only the literal true turns it on.",
       "codePath": "apps/Control Plane/audit-core/cmd/server/main.go"
     },
     {
       "name": "AUDIT_CHAIN_ENABLED",
       "kind": "switch",
-      "onLiteral": "1",
+      "onLiteral": "true",
       "owner": "control-plane",
       "source": "compose",
-      "default": "0",
+      "default": "false",
       "stage": "dark",
-      "purpose": "Audit hash chain on audit-core ingest (cmd/server). Only the literal 1 turns it on. In production it needs the chain signing keys.",
+      "purpose": "Audit hash chain on audit-core ingest (cmd/server). In production it needs the chain signing keys. Only the literal true turns it on.",
       "declarations": [
-        { "service": "audit-core", "env": "AUDIT_CHAIN_ENABLED", "default": "0" }
+        { "service": "audit-core", "env": "AUDIT_CHAIN_ENABLED", "default": "false" }
       ],
       "codePath": "apps/Control Plane/audit-core/cmd/server/main.go"
     },
     {
       "name": "AUDIT_CHAIN_PRUNE_DRYRUN",
       "kind": "switch",
-      "onLiteral": "1",
+      "onLiteral": "true",
       "owner": "control-plane",
       "source": "compose",
-      "default": "0",
+      "default": "false",
       "stage": "dark",
-      "purpose": "Dry run of the chained audit purge in audit-core: it verifies and logs the plan, deletes no chained row, and wins over AUDIT_CHAIN_PRUNE_ENABLED. Unchained rows and usage events still age out. Only the literal 1 turns it on.",
+      "purpose": "Dry run of the chained audit purge (audit-core): it verifies and logs the plan, deletes no chained row, and wins over AUDIT_CHAIN_PRUNE_ENABLED. A misread value refuses boot. Only the literal true turns it on.",
       "declarations": [
-        { "service": "audit-core", "env": "AUDIT_CHAIN_PRUNE_DRYRUN", "default": "0" }
+        { "service": "audit-core", "env": "AUDIT_CHAIN_PRUNE_DRYRUN", "default": "false" }
       ],
       "codePath": "apps/Control Plane/audit-core/cmd/server/main.go"
     },
     {
       "name": "AUDIT_CHAIN_PRUNE_ENABLED",
       "kind": "switch",
-      "onLiteral": "1",
+      "onLiteral": "true",
       "owner": "control-plane",
       "source": "compose",
-      "default": "0",
+      "default": "false",
       "stage": "dark",
-      "purpose": "Pruning of audit rows, each batch signed by a chain checkpoint (audit-core cmd/server). Only the literal 1 turns it on; AUDIT_CHAIN_PRUNE_DRYRUN=1 wins and never deletes. Needs the chain signing keys when on.",
+      "purpose": "Pruning of audit rows, each batch signed by a chain checkpoint (audit-core cmd/server). AUDIT_CHAIN_PRUNE_DRYRUN=true wins and never deletes. Needs the chain signing keys when on. Only the literal true turns it on.",
       "declarations": [
-        { "service": "audit-core", "env": "AUDIT_CHAIN_PRUNE_ENABLED", "default": "0" }
+        { "service": "audit-core", "env": "AUDIT_CHAIN_PRUNE_ENABLED", "default": "false" }
       ],
       "codePath": "apps/Control Plane/audit-core/cmd/server/main.go"
     },
@@ -372,7 +372,7 @@
       "source": "compose",
       "default": "",
       "stage": "dark",
-      "purpose": "Chain verifier on audit-core (cmd/server, verifier.Enabled). Blank follows AUDIT_CHAIN_ENABLED. Only the literal 0 turns verification off, and it is always off with the chain off. Read-only.",
+      "purpose": "Chain verifier on audit-core (cmd/server, verifier.Enabled). Blank, or the literal true, follows AUDIT_CHAIN_ENABLED; false, and any other value, turns verification off. It is always off with the chain off. Read-only.",
       "declarations": [
         { "service": "audit-core", "env": "AUDIT_CHAIN_VERIFY_ENABLED", "default": "" }
       ],
@@ -381,29 +381,29 @@
     {
       "name": "AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS",
       "kind": "switch",
-      "onLiteral": "1",
+      "onLiteral": "true",
       "owner": "control-plane",
       "source": "compose",
-      "default": "0",
+      "default": "false",
       "stage": "dark",
       "devOnly": true,
-      "purpose": "Dev-only lift of the SIEM address check for private destinations (audit-core cmd/siem-exporter). Only the literal 1 turns it on; with ENVIRONMENT=production the exporter refuses to start.",
+      "purpose": "Dev-only lift of the SIEM address check for private destinations (audit-core cmd/siem-exporter). Only the literal true turns it on; with ENVIRONMENT=production the exporter refuses to start.",
       "declarations": [
-        { "service": "audit-siem-exporter", "env": "AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS", "default": "0" }
+        { "service": "audit-siem-exporter", "env": "AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS", "default": "false" }
       ],
       "codePath": "apps/Control Plane/audit-core/cmd/siem-exporter/main.go"
     },
     {
       "name": "AUDIT_SIEM_EXPORT_ENABLED",
       "kind": "switch",
-      "onLiteral": "1",
+      "onLiteral": "true",
       "owner": "control-plane",
       "source": "compose",
-      "default": "0",
+      "default": "false",
       "stage": "dark",
-      "purpose": "SIEM export of the audit chain (audit-core cmd/siem-exporter). Only the literal 1 turns it on; off, the process serves metrics and exports nothing.",
+      "purpose": "SIEM export of the audit chain (audit-core cmd/siem-exporter). Off, the process serves metrics and exports nothing. Only the literal true turns it on.",
       "declarations": [
-        { "service": "audit-siem-exporter", "env": "AUDIT_SIEM_EXPORT_ENABLED", "default": "0" }
+        { "service": "audit-siem-exporter", "env": "AUDIT_SIEM_EXPORT_ENABLED", "default": "false" }
       ],
       "codePath": "apps/Control Plane/audit-core/cmd/siem-exporter/main.go"
     },
@@ -641,7 +641,10 @@
       "stage": "dark",
       "purpose": "Space floor for the agent browser in the org-core browser-sites resolve (P2-cp-01): on, a Space that is not entitled, or whose floor is unreadable, is refused every host. Off, space_id is ignored. Only the literal true turns it on.",
       "declarations": [
-        { "service": "org-core", "env": "BROWSER_SPACE_FLOOR_ENABLED", "default": "false" }
+        { "service": "org-core", "env": "BROWSER_SPACE_FLOOR_ENABLED", "default": "false" },
+        { "service": "browser-broker", "env": "BROWSER_SPACE_FLOOR_ENABLED", "default": "false" },
+        { "service": "execution-core", "env": "BROWSER_SPACE_FLOOR_ENABLED", "default": "false" },
+        { "service": "model-gateway", "env": "BROWSER_SPACE_FLOOR_ENABLED", "default": "false" }
       ],
       "codePath": "apps/Control Plane/org-core/internal/http/browser_sites_handlers.go"
     },
@@ -680,6 +683,56 @@
       "devOnly": true,
       "purpose": "Security-relaxing dev-run opt-in: capability-core starts without a decision evidence signer, and execution-core denies allows it verifies. Only the exact literal true turns it on.",
       "codePath": "apps/Model Plane/go/services/capability-core/cmd/main.go"
+    },
+    {
+      "name": "CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "WS16-S4: RUN_ATTENTION notices, sent once session-core confirms the item waits. Needs SESSION_CORE_ATTENTION_ENABLED, SESSION_CORE_ATTENTION_EVENTS_ENABLED and NOTIFICATION_NATIVE_TYPES_ENABLED first. Only the literal true turns it on.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "capability-core", "env": "CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "CAPABILITY_CORE_SCHEDULED_NOTIFY_ENABLED",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "WS20-S7: the scheduled-run outcome notice. Needs SESSION_CORE_SCHEDULED_OUTCOME_EVENTS_ENABLED (F-f05-05), the schedule-owner check (F-f05-06) and NOTIFICATION_NATIVE_TYPES_ENABLED first. Only the literal true turns it on.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "capability-core", "env": "CAPABILITY_CORE_SCHEDULED_NOTIFY_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "CAPABILITY_ORG_WEB_MODE_COVERS_BROWSER",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f09-13 / O-19: the org's web.covers_browser decides whether browser tools (cap.browser.open, observe, act) follow web.mode. Off, the key is neither shown nor accepted. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "capability-core", "env": "CAPABILITY_ORG_WEB_MODE_COVERS_BROWSER", "default": "false" }
+      ]
+    },
+    {
+      "name": "CAPABILITY_ORG_WEB_MODE_GATE_ENABLED",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f09-13: the org's web.mode withholds the public-web capabilities (cap.tool.http, cap.web.crawl, cap.web.map, cap.web.batch) for every caller. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "capability-core", "env": "CAPABILITY_ORG_WEB_MODE_GATE_ENABLED", "default": "false" }
+      ]
     },
     {
       "name": "CAPABILITY_PERMISSION_RULES_ENABLED",
@@ -1260,6 +1313,20 @@
       "codePath": "apps/Model Plane/go/services/orchestrator-core/cmd/main.go"
     },
     {
+      "name": "ERASURE_HOLD_CHECK",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "EP-9 C4: before an erasure, org-core and session-core ask whether the org or thread is under a legal hold, and a held erasure is refused (session-core audits the refusal content-free). Only the literal true turns it on.",
+      "declarations": [
+        { "service": "org-core", "env": "ERASURE_HOLD_CHECK", "default": "false" },
+        { "service": "session-core", "env": "ERASURE_HOLD_CHECK", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/org-core/internal/http/gdpr_handlers.go"
+    },
+    {
       "name": "EVENT_TRIGGERS_ENABLED",
       "kind": "switch",
       "onLiteral": "true",
@@ -1348,6 +1415,30 @@
       ]
     },
     {
+      "name": "EXECUTION_CORE_BEARER_EXPIRY_GUARD",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f05-15: a browser open, act or released call on a bearer expiring within 20 s is refused; a thread-scope code_interpreter on one runs ephemerally, workspace refused. Cleanup and Space runs: not covered. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_CORE_BEARER_EXPIRY_GUARD", "default": "false" }
+      ]
+    },
+    {
+      "name": "EXECUTION_CORE_BEARER_EXPIRY_PARK",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f05-15b: a Do run whose browser or sandbox bearer nears expiry parks (credential_expiring). Needs EXECUTION_CORE_BEARER_EXPIRY_GUARD, EXECUTION_LOOP_PARKING_ENABLED and EXECUTION_LOOP_RESUME_ENABLED. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_CORE_BEARER_EXPIRY_PARK", "default": "false" }
+      ]
+    },
+    {
       "name": "EXECUTION_CORE_BROWSER_FILL_OTP",
       "kind": "switch",
       "onLiteral": "true",
@@ -1417,6 +1508,18 @@
       "purpose": "Q4-E4.2-3h: a browser run whose input names a saved recipe replays that procedure step by step with Quarry, under its own broker grant. Only the literal true turns it on.",
       "declarations": [
         { "service": "execution-core", "env": "EXECUTION_CORE_RECIPE_RUNNER", "default": "false" }
+      ]
+    },
+    {
+      "name": "EXECUTION_CORE_SCHEDULED_CONTRACT_REQUIRED",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "WS20-S5: with the literal true, a step decision must name exactly its run's stored contract, and a run with none refuses one. Off, such a run is not refused for that. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_CORE_SCHEDULED_CONTRACT_REQUIRED", "default": "false" }
       ]
     },
     {
@@ -1555,6 +1658,19 @@
       ]
     },
     {
+      "name": "EXECUTION_SCREEN_ORG_POLICY",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f04-13: a failed Do verdict follows the org fail mode; a ZDR or waived run may ask for the rule verdict. Needs CONTENT_SAFETY_SCREEN_RPC; enforce withholding also needs the gateway CONTENT_SAFETY_SEMANTIC_INLINE. Literal true only.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_SCREEN_ORG_POLICY", "default": "false" }
+      ],
+      "codePath": "apps/Model Plane/rust/services/execution-core/src/screening_client.rs"
+    },
+    {
       "name": "EXECUTION_SHADOW_REVIEWER",
       "kind": "switch",
       "onLiteral": "true",
@@ -1603,6 +1719,19 @@
         { "service": "gateway", "env": "GATEWAY_AGENT_API_ENABLED", "default": "false" }
       ],
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_api.rs"
+    },
+    {
+      "name": "GATEWAY_AGENT_API_IDEMPOTENCY",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "F-f08-13: the public Agent API ingress reads and forwards the caller's one Idempotency-Key, only while GATEWAY_AGENT_API_ENABLED is on. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "GATEWAY_AGENT_API_IDEMPOTENCY", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
       "name": "GATEWAY_CHAT_PROJECTS_ENABLED",
@@ -2234,6 +2363,18 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_AGENT_API_IDEMPOTENCY",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f08-13: POST /v1/agent/runs honours the caller's Idempotency-Key (hashed, never stored): the same key on the same body answers the run the first start began and starts nothing. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_AGENT_API_IDEMPOTENCY", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST",
       "kind": "switch",
       "onLiteral": "true",
@@ -2319,6 +2460,20 @@
       "declarations": [
         { "service": "model-gateway", "env": "MODEL_GATEWAY_ARTIFACT_REVISIONS", "default": "off" }
       ]
+    },
+    {
+      "name": "MODEL_GATEWAY_ASK_READ_TAINT_HOLD",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f04-16: after a flagged or degraded connector read in Ask, web and network tools are withdrawn for the rest of the turn. CONNECTOR_SUGGESTIONS_ENABLED must not go on until this is on. Only the literal true turns it on.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_ASK_READ_TAINT_HOLD", "default": "false" }
+      ],
+      "codePath": "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs"
     },
     {
       "name": "MODEL_GATEWAY_ASK_USER_ASK_MODE_ENABLED",
@@ -2493,6 +2648,18 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_CACHE_ANTHROPIC_STABLE_ORDER",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Carries the stable prompt order to Claude API routes, where inference-core caches the standing blocks once the tier plan names them. Needs MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER on. Only the literal true.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_CACHE_ANTHROPIC_STABLE_ORDER", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER",
       "kind": "switch",
       "onLiteral": "true",
@@ -2633,6 +2800,20 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_DO_CONTEXT_REFS_CARRY",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "F-f09-05 (D-f09-4): a Do turn's attached documents and skills reach the run and narrow knowledge_search. Off, such a reference is refused (kind_not_in_do_mode). Needs MODEL_GATEWAY_CONTEXT_REFS_ENABLED. Only the literal true turns it on.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_DO_CONTEXT_REFS_CARRY", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_GATEWAY_DO_RUN_CAP",
       "kind": "switch",
       "onLiteral": "true",
@@ -2739,6 +2920,19 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_GOAL_SETTLE_IN_DISPATCH",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f09-10: a Continue goal turn is settled by its dispatch task when the run answers, not by a follower that gave up. Needs MODEL_GATEWAY_THREAD_GOALS_ENABLED and SESSION_CORE_THREAD_GOALS_ENABLED. Goal turns only. Only the literal true.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_GOAL_SETTLE_IN_DISPATCH", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_GATEWAY_GOAL_UNATTENDED_ENABLED",
       "kind": "switch",
       "onLiteral": "true",
@@ -2762,6 +2956,18 @@
       "codeDefault": "false",
       "declarations": [
         { "service": "model-gateway", "env": "MODEL_GATEWAY_GRAPH_SPACE_SCOPE", "default": "false" }
+      ]
+    },
+    {
+      "name": "MODEL_GATEWAY_IDEMPOTENCY_EVICT_DONE",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "A full idempotency registry admits a new claim by evicting its oldest completed answer instead of refusing the send. Pending claims are never evicted. Read once at start. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_IDEMPOTENCY_EVICT_DONE", "default": "false" }
       ]
     },
     {
@@ -3220,6 +3426,18 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_THREAD_EXPORT_USAGE",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f10-13: the thread export's run summaries take their token totals and model from the cost-core usage ledger, read as the viewer. Needs MODEL_GATEWAY_THREAD_EXPORT. Off: the copy is as it was. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_THREAD_EXPORT_USAGE", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_GATEWAY_THREAD_GOALS_ENABLED",
       "kind": "switch",
       "onLiteral": "true",
@@ -3277,6 +3495,18 @@
       "purpose": "WS27-S2: a turn's usage frame and ledger rows count every tool round and overhead call, with run_id. Billing attribution must be confirmed first. Only the literal true turns it on.",
       "declarations": [
         { "service": "model-gateway", "env": "MODEL_GATEWAY_TURN_USAGE_COMPLETE", "default": "false" }
+      ]
+    },
+    {
+      "name": "MODEL_GATEWAY_USAGE_MIXED_BASIS",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Adds a boolean cost_mixed key to the usage and usage_progress SSE frames when a turn's calls span more than one cost basis. ZDR streams never state it. Off by default: only the literal true turns it on.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_USAGE_MIXED_BASIS", "default": "false" }
       ]
     },
     {
@@ -3599,6 +3829,20 @@
       "codePath": "apps/Control Plane/org-core/internal/retention/types.go"
     },
     {
+      "name": "ORG_RETENTION_THREAD_RECEIPT_CHECK",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "Thread legal holds ask session-core whether the thread retained anything first (org-core, F-f10-03). Only the literal true turns it on.",
+      "declarations": [
+        { "service": "org-core", "env": "ORG_RETENTION_THREAD_RECEIPT_CHECK", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/org-core/internal/retention/types.go"
+    },
+    {
       "name": "ORG_ROLE_CAPABILITIES_ENABLED",
       "kind": "switch",
       "onLiteral": "true",
@@ -3665,6 +3909,20 @@
         { "service": "user-core", "env": "PERSONAL_SETUP_VISIBLE", "default": "false" }
       ],
       "codePath": "apps/Control Plane/user-core/internal/http/handlers.go"
+    },
+    {
+      "name": "PLANE_TOKEN_CAPABILITY_ADMIN_SCOPE",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "F-f01-04: owners and admins also carry capability:admin on the capability-core audience, the admin marker that capability-core reads for org-scope writes. Members and viewers never get it. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "auth-core", "env": "PLANE_TOKEN_CAPABILITY_ADMIN_SCOPE", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/auth-core/src/auth/plane-token-scopes.ts"
     },
     {
       "name": "PLUGIN_LOADER_ENABLED",
@@ -3836,9 +4094,12 @@
       "kind": "switch",
       "onLiteral": "true",
       "owner": "model-plane",
-      "source": "code",
+      "source": "compose",
       "default": "false",
-      "purpose": "Parks external results under a handle instead of today's truncation. Off keeps today's truncation. Only the literal true turns it on.",
+      "purpose": "EP-2-S2: park the complete screened page or search result under a handle that result_query reads back. Never on a ZDR or waived turn, and not for content whose screening was skipped. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "model-gateway", "env": "RESULT_HANDLES_EXTENDED", "default": "false" }
+      ],
       "codePath": "apps/Model Plane/rust/services/model-gateway/src/tool_result_handles.rs"
     },
     {
@@ -4014,6 +4275,19 @@
       "codePath": "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs"
     },
     {
+      "name": "SESSION_CORE_APPROVAL_EVENTS_ENABLED",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f10-34 (WS13-D10): one content-free RUN_APPROVAL_DECIDED run event per decided approval on a persistent run, written in the decide transaction. Zero-retention and waived runs write none. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "session-core", "env": "SESSION_CORE_APPROVAL_EVENTS_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Model Plane/rust/services/session-core/src/approval_events.rs"
+    },
+    {
       "name": "SESSION_CORE_APPROVAL_MEMBER_DECIDE",
       "kind": "switch",
       "onLiteral": "true",
@@ -4078,7 +4352,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "14400",
-      "purpose": "O-02: the wait before the crash-park notice, in seconds (four hours by default), clamped to 600 up to SESSION_CORE_PARK_TTL_SECONDS. Read only while the notice switch is on; a value that is not a whole number reads as the default.",
+      "purpose": "O-02: the wait before the crash-park notice, in seconds (four hours by default). A positive whole number is used, capped one second under SESSION_CORE_PARK_TTL_SECONDS; other values read as the default. Read only while the notice is on.",
       "declarations": [
         { "service": "session-core", "env": "SESSION_CORE_CRASH_PARK_NOTICE_SECONDS", "default": "14400" }
       ],
@@ -4129,7 +4403,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "WS04-S11: honours the signed history_floor_revision claim on transcript reads of a since_join room. Off shows full history. Only the literal true turns it on; a presentation rule, never an authorization input.",
+      "purpose": "WS04-S11 and R-sws-07: honours the history_floor_revision claim on transcript reads and revisions of a since_join room. Off, revisions reach any message. Needs SPACE_HISTORY_WINDOW_CLAIM. Only the literal true turns it on; never grants.",
       "declarations": [
         { "service": "session-core", "env": "SESSION_CORE_SPACE_HISTORY_FLOOR", "default": "false" }
       ],
@@ -4185,6 +4459,20 @@
       "codePath": "apps/Model Plane/rust/services/session-core/src/trace_nats.rs"
     },
     {
+      "name": "SESSION_DELETE_WORKSPACE_ERASE",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "P2-sc-16-rel1: user delete, bulk delete and org purge erase each deleted thread's sandbox workspace after commit. Needs SANDBOX_MANAGER_SERVICE_THREAD_ERASE=true. Only literal true enables it.",
+      "declarations": [
+        { "service": "session-core", "env": "SESSION_DELETE_WORKSPACE_ERASE", "default": "false" }
+      ],
+      "codePath": "apps/Model Plane/rust/services/session-core/src/sandbox_workspace_eraser.rs"
+    },
+    {
       "name": "SESSION_ORG_ROUTING_OVERLAY",
       "kind": "switch",
       "onLiteral": "true",
@@ -4221,6 +4509,19 @@
         { "service": "session-core", "env": "SESSION_RETENTION_SWEEP", "default": "off" }
       ],
       "codePath": "apps/Model Plane/rust/services/session-core/src/retention_sweeper.rs"
+    },
+    {
+      "name": "SESSION_RETENTION_WORKSPACE_ERASE",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f10-09 (D-f10-7): the sweeper's enforce pass erases each deleted thread's sandbox workspace. Needs SESSION_RETENTION_SWEEP at enforce. Only the literal true enables it; off, the workspace stays unconfirmed.",
+      "declarations": [
+        { "service": "session-core", "env": "SESSION_RETENTION_WORKSPACE_ERASE", "default": "false" }
+      ],
+      "codePath": "apps/Model Plane/rust/services/session-core/src/sandbox_workspace_eraser.rs"
     },
     {
       "name": "SESSION_SNAPSHOT_GRANTS_ENABLED",
@@ -4272,6 +4573,20 @@
       ]
     },
     {
+      "name": "SESSION_THREAD_RETENTION_READ",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "F-f10-02: SessionRetentionService.GetThreadRetention answers org-core whether a thread keeps nothing (every run zdr and no held content), two booleans only; off answers unavailable. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "session-core", "env": "SESSION_THREAD_RETENTION_READ", "default": "false" }
+      ],
+      "codePath": "apps/Model Plane/rust/services/session-core/src/thread_retention_read.rs"
+    },
+    {
       "name": "SKILL_BUNDLE_MOUNT_ENABLED",
       "kind": "switch",
       "onLiteral": "true",
@@ -4281,6 +4596,19 @@
       "purpose": "WS19-S8: the switch mounts a turn's skill bundles read-only at /skills for code_interpreter. Off means no mounts. Only the literal true turns it on.",
       "declarations": [
         { "service": "model-gateway", "env": "SKILL_BUNDLE_MOUNT_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "SKILL_BUNDLE_SCOPE_RULES",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-f03-08: capability-core's skill bundle reads, uploads and skill deletes follow the skill visibility rule, and session-core's person erasure removes the bundles of the skills it deletes. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "session-core", "env": "SKILL_BUNDLE_SCOPE_RULES", "default": "false" },
+        { "service": "capability-core", "env": "SKILL_BUNDLE_SCOPE_RULES", "default": "false" }
       ]
     },
     {
@@ -4346,6 +4674,20 @@
         { "service": "session-core", "env": "SKILL_SPACE_SCOPE", "default": "false" },
         { "service": "capability-core", "env": "SKILL_SPACE_SCOPE", "default": "false" }
       ]
+    },
+    {
+      "name": "SKILL_SPACE_WRITE_VERIFY",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "F-f10-19: a Space skill write needs a Control-signed model.space.skill.write decision; off, it answers 403 space_skill_decision_required. Needs SKILL_SPACE_SCOPE, SPACE_SKILL_WRITE_DECISIONS. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "capability-core", "env": "SKILL_SPACE_WRITE_VERIFY", "default": "false" }
+      ],
+      "codePath": "apps/Model Plane/go/services/capability-core/internal/api/space_skill_decision_verifier.go"
     },
     {
       "name": "SPACE_AGENT_WAKE_POLICY_API",
@@ -4482,7 +4824,7 @@
       "source": "compose",
       "default": "false",
       "stage": "dark",
-      "purpose": "WS04-S11: a history floor on shared thread-read decisions for since_join rooms. Off, no read decision carries a floor. A presentation rule, never an authorization input. Only the literal true turns it on.",
+      "purpose": "WS04-S11 / R-sws-01 / R-sws-07: a history floor on shared thread-read, thread-revise and run-control decisions for since_join rooms. Off, no such decision carries a floor. It narrows, never grants. Only the literal true turns it on.",
       "declarations": [
         { "service": "user-core", "env": "SPACE_HISTORY_WINDOW_CLAIM", "default": "false" }
       ],
@@ -5229,6 +5571,18 @@
       "codePath": "apps/Frontend Plane/verevonv3/src/shared/chat/plan-execute.ts"
     },
     {
+      "name": "VITE_PUSH_SHOW_WHEN_VISIBLE",
+      "kind": "switch",
+      "onLiteral": "true",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "orgOverridable": false,
+      "purpose": "D2-863: when a window is visible a push shows a silent notice that closes after 1.5 s, so Safari and strict Chromium do not revoke the subscription. Enable only after a live Safari and Chrome check. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/src/features/core/lib/push-subscription.ts"
+    },
+    {
       "name": "VITE_SCHEDULE_DELEGABLE_TOOLS_ENABLED",
       "kind": "switch",
       "onLiteral": "true",
@@ -5408,8 +5762,6 @@
     "AGENT_MEMORY_AUTH_MODE",
     "APPROVAL_DENIAL_MEMORY_ENABLED",
     "AUTHORED_KINDS_ENABLED",
-    "CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED",
-    "CAPABILITY_CORE_SCHEDULED_NOTIFY_ENABLED",
     "CHAT_ATTACHMENT_POLICY_ENABLED",
     "CONTENT_SAFETY_SHADOW_SAMPLE_RATE",
     "CRON_CONTRACT_GUARDS_ENABLED",

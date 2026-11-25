@@ -9386,7 +9386,11 @@ type ScreenContentResponse struct {
 	// Rule ids that fired. Ids only, never matched text.
 	Flags []string `protobuf:"bytes,7,rep,name=flags,proto3" json:"flags,omitempty"`
 	// The injection_defense mode the verdict was made under: frame, tighten or enforce.
-	Mode          string `protobuf:"bytes,8,opt,name=mode,proto3" json:"mode,omitempty"`
+	Mode string `protobuf:"bytes,8,opt,name=mode,proto3" json:"mode,omitempty"`
+	// The org's fail mode in force for the verdict: open or degraded. Open keeps a result's local verdict when the
+	// inline pass cannot answer; degraded reads the result as unverified. Empty from a gateway that predates this
+	// field, which a caller reads as degraded (F-f04-13).
+	FailMode      string `protobuf:"bytes,9,opt,name=fail_mode,json=failMode,proto3" json:"fail_mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -9473,6 +9477,13 @@ func (x *ScreenContentResponse) GetFlags() []string {
 func (x *ScreenContentResponse) GetMode() string {
 	if x != nil {
 		return x.Mode
+	}
+	return ""
+}
+
+func (x *ScreenContentResponse) GetFailMode() string {
+	if x != nil {
+		return x.FailMode
 	}
 	return ""
 }
@@ -10327,7 +10338,7 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\x06run_id\x18\x04 \x01(\tR\x05runId\x12\x1b\n" +
 	"\ttool_name\x18\x05 \x01(\tR\btoolName\x12\x18\n" +
 	"\acontent\x18\x06 \x01(\tR\acontent\x12\x10\n" +
-	"\x03zdr\x18\a \x01(\bR\x03zdr\"\x85\x02\n" +
+	"\x03zdr\x18\a \x01(\bR\x03zdr\"\xa2\x02\n" +
 	"\x15ScreenContentResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1f\n" +
@@ -10338,7 +10349,8 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\bwithhold\x18\x05 \x01(\bR\bwithhold\x12!\n" +
 	"\fcontent_hash\x18\x06 \x01(\tR\vcontentHash\x12\x14\n" +
 	"\x05flags\x18\a \x03(\tR\x05flags\x12\x12\n" +
-	"\x04mode\x18\b \x01(\tR\x04mode2\xd6#\n" +
+	"\x04mode\x18\b \x01(\tR\x04mode\x12\x1b\n" +
+	"\tfail_mode\x18\t \x01(\tR\bfailMode2\xd6#\n" +
 	"\fModelGateway\x12G\n" +
 	"\x06Invoke\x12\x1d.model_plane.v1.InvokeRequest\x1a\x1e.model_plane.v1.InvokeResponse\x12L\n" +
 	"\fInvokeStream\x12\x1d.model_plane.v1.InvokeRequest\x1a\x1b.model_plane.v1.InvokeChunk0\x01\x12D\n" +

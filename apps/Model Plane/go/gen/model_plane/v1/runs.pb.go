@@ -1250,10 +1250,17 @@ func (x *ResolveThreadOwnerRequest) GetUserId() string {
 }
 
 type ResolveThreadOwnerResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Authorized    bool                   `protobuf:"varint,1,opt,name=authorized,proto3" json:"authorized,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Authorized bool                   `protobuf:"varint,1,opt,name=authorized,proto3" json:"authorized,omitempty"`
+	// The thread's origin word as threads.origin stores it (chat, space, agent_run, support, system or
+	// mail_task). Empty unless authorized is true, and empty from a session-core that predates this field.
+	ThreadOrigin string `protobuf:"bytes,2,opt,name=thread_origin,json=threadOrigin,proto3" json:"thread_origin,omitempty"`
+	// Whether the thread lives in a Space: its space_id is set and not blank.
+	ThreadInSpace bool `protobuf:"varint,3,opt,name=thread_in_space,json=threadInSpace,proto3" json:"thread_in_space,omitempty"`
+	// Whether the thread holds any run kept under zero data retention or a waived one (DEC-32).
+	ThreadRetainsNothing bool `protobuf:"varint,4,opt,name=thread_retains_nothing,json=threadRetainsNothing,proto3" json:"thread_retains_nothing,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *ResolveThreadOwnerResponse) Reset() {
@@ -1289,6 +1296,27 @@ func (*ResolveThreadOwnerResponse) Descriptor() ([]byte, []int) {
 func (x *ResolveThreadOwnerResponse) GetAuthorized() bool {
 	if x != nil {
 		return x.Authorized
+	}
+	return false
+}
+
+func (x *ResolveThreadOwnerResponse) GetThreadOrigin() string {
+	if x != nil {
+		return x.ThreadOrigin
+	}
+	return ""
+}
+
+func (x *ResolveThreadOwnerResponse) GetThreadInSpace() bool {
+	if x != nil {
+		return x.ThreadInSpace
+	}
+	return false
+}
+
+func (x *ResolveThreadOwnerResponse) GetThreadRetainsNothing() bool {
+	if x != nil {
+		return x.ThreadRetainsNothing
 	}
 	return false
 }
@@ -2570,11 +2598,14 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"\x19ResolveThreadOwnerRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x15\n" +
 	"\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x17\n" +
-	"\auser_id\x18\x03 \x01(\tR\x06userId\"<\n" +
+	"\auser_id\x18\x03 \x01(\tR\x06userId\"\xbf\x01\n" +
 	"\x1aResolveThreadOwnerResponse\x12\x1e\n" +
 	"\n" +
 	"authorized\x18\x01 \x01(\bR\n" +
-	"authorized\"P\n" +
+	"authorized\x12#\n" +
+	"\rthread_origin\x18\x02 \x01(\tR\fthreadOrigin\x12&\n" +
+	"\x0fthread_in_space\x18\x03 \x01(\bR\rthreadInSpace\x124\n" +
+	"\x16thread_retains_nothing\x18\x04 \x01(\bR\x14threadRetainsNothing\"P\n" +
 	" ResolveRunActionAuthorityRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x15\n" +
 	"\x06org_id\x18\x02 \x01(\tR\x05orgId\"\xb9\x04\n" +

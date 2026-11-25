@@ -1125,6 +1125,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.reject_plan",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "destructive",
+      "exemptReason": "approval_authority",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:4037d21f205586f61963c285afb717db2a7d8a209c05e68953af4cc432acb716",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.research_plan_cancel",
       "registry": true,
       "access": "none",

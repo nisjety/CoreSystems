@@ -69,8 +69,9 @@ type RunServiceClient interface {
 	// capability-core's memory scope='session' rows: session and thread are
 	// the same underlying resource in this codebase (see agent_memory's writer
 	// in dreaming.rs, which stores a thread_id under scope='thread'), so
-	// scope='session' calls this RPC with the same thread_id too. Returns only
-	// a boolean to avoid disclosing another tenant's thread metadata.
+	// scope='session' calls this RPC with the same thread_id too. The answer is
+	// a boolean to avoid disclosing another tenant's thread metadata; the thread
+	// posture fields are set only for an authorized owner.
 	ResolveThreadOwner(ctx context.Context, in *ResolveThreadOwnerRequest, opts ...grpc.CallOption) (*ResolveThreadOwnerResponse, error)
 	// ResolveRunActionAuthority returns the non-secret, immutable run/thread
 	// bindings Control needs before issuing one target-owner action decision.
@@ -274,8 +275,9 @@ type RunServiceServer interface {
 	// capability-core's memory scope='session' rows: session and thread are
 	// the same underlying resource in this codebase (see agent_memory's writer
 	// in dreaming.rs, which stores a thread_id under scope='thread'), so
-	// scope='session' calls this RPC with the same thread_id too. Returns only
-	// a boolean to avoid disclosing another tenant's thread metadata.
+	// scope='session' calls this RPC with the same thread_id too. The answer is
+	// a boolean to avoid disclosing another tenant's thread metadata; the thread
+	// posture fields are set only for an authorized owner.
 	ResolveThreadOwner(context.Context, *ResolveThreadOwnerRequest) (*ResolveThreadOwnerResponse, error)
 	// ResolveRunActionAuthority returns the non-secret, immutable run/thread
 	// bindings Control needs before issuing one target-owner action decision.

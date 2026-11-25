@@ -64,7 +64,7 @@ export const RunService = {
     },
     /**
      * ListSystemRuns — org-scoped listing of runs with no human owner.
-     * 
+     *
      * ListRuns is thread-scoped, and a run created by a durable workflow lives in
      * a thread that same workflow owns, so no person's thread listing can ever
      * reach it. Without this RPC a system-initiated run is unreachable by
@@ -99,8 +99,9 @@ export const RunService = {
      * capability-core's memory scope='session' rows: session and thread are
      * the same underlying resource in this codebase (see agent_memory's writer
      * in dreaming.rs, which stores a thread_id under scope='thread'), so
-     * scope='session' calls this RPC with the same thread_id too. Returns only
-     * a boolean to avoid disclosing another tenant's thread metadata.
+     * scope='session' calls this RPC with the same thread_id too. The answer is
+     * a boolean to avoid disclosing another tenant's thread metadata; the thread
+     * posture fields are set only for an authorized owner.
      *
      * @generated from rpc model_plane.v1.RunService.ResolveThreadOwner
      */

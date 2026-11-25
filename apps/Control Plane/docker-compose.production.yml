@@ -209,7 +209,7 @@ services:
 
   # WS06-S8: the SIEM exporter is built from the audit-core image context and,
   # like audit-core, takes the release build metadata. ENVIRONMENT=production
-  # also makes the exporter refuse AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS=1.
+  # also makes the exporter refuse AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS=true.
   audit-siem-exporter:
     build:
       args:
