@@ -11566,6 +11566,136 @@ mod tests {
                 .ok();
             clean_space(&pool, &org, &space).await;
         }
+
+        /// DEPTH-WS10-S9-1, end to end through CreateApproval: execution-core writes a descriptor for
+        /// every non-ZDR gated call, so a shell approval carries one too. Its stored card reads `none`
+        /// (even when the creator states a live poll), and once the owner grants it the retry on the
+        /// same thread spends it exactly once. The three resumable kinds still read
+        /// `action_continuation`.
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a disposable test Postgres (see space/test_support.rs); sets the descriptor key in the process env, run with --test-threads=1"]
+        async fn a_granted_shell_approval_is_once_claimable_and_its_card_reads_none() {
+            let Some(pool) = connect().await else {
+                return;
+            };
+            let key = base64::engine::general_purpose::STANDARD.encode([7_u8; 32]);
+            let _key = EnvOverride::set(&[("SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY", key.as_str())]);
+            let sfx = mp_ids::new_ulid();
+            let org = format!("s9-org-{sfx}");
+            let space = format!("s9-space-{sfx}");
+            let thread = format!("s9-thread-{sfx}");
+            let (run, retry_run) = (format!("s9-run-{sfx}"), format!("s9-retry-{sfx}"));
+            seed_space_thread(&pool, &org, &space, &thread, "owner-1").await;
+            seed_space_run(&pool, &org, &space, &thread, &run, "queued", "persistent").await;
+            seed_space_run(&pool, &org, &space, &thread, &retry_run, "queued", "persistent").await;
+
+            let (tx, _rx) = broadcast::channel::<proto::OrchestrationEvent>(8);
+            let svc = OrchestrationGrpc::new(pool.clone(), tx);
+            let owner = || VerifiedIdentity::user_for_test(&org, "owner-1");
+            let digest = "ab".repeat(32);
+            let descriptor = |tool: &str| {
+                serde_json::json!({
+                    "version": 1,
+                    "run_id": run,
+                    "org_id": org,
+                    "user_id": "owner-1",
+                    "action_kind": "tool_call",
+                    "action_fingerprint": "cd".repeat(32),
+                    "tool_name": tool,
+                })
+                .to_string()
+            };
+            let create = |tool: &str, key: &str, tool_key: &str, context: String| {
+                svc.create_approval(with_caller(
+                    proto::CreateApprovalRequest {
+                        run_id: run.clone(),
+                        kind: proto::ApprovalKind::ToolCall as i32,
+                        requested_of: "owner-1".to_owned(),
+                        org_id: org.clone(),
+                        reason: "run the command".to_owned(),
+                        expires_in_seconds: 300,
+                        idempotency_key: key.to_owned(),
+                        continuation_descriptor_json: descriptor(tool),
+                        tool_key: tool_key.to_owned(),
+                        action_digest: if tool_key.is_empty() { String::new() } else { digest.clone() },
+                        context_json: context,
+                        ..Default::default()
+                    },
+                    owner(),
+                ))
+            };
+            let card_class = |id: String| {
+                let pool = pool.clone();
+                async move {
+                    sqlx::query_scalar::<_, Option<String>>(
+                        "SELECT metadata->'card'->>'resume_class' FROM approvals WHERE id = $1",
+                    )
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("the stored approval")
+                }
+            };
+
+            // A shell approval reads none, whatever the creator stated.
+            let shell = create(
+                "shell",
+                "s9-shell",
+                "shell",
+                serde_json::json!({ "tool_key": "shell", "resume_class": "live_poll" }).to_string(),
+            )
+            .await
+            .expect("the owner's run raises a shell approval")
+            .into_inner()
+            .approval
+            .expect("created")
+            .id;
+            assert_eq!(card_class(shell.clone()).await.as_deref(), Some("none"));
+
+            // The three resumable kinds still read action_continuation.
+            for tool in sa::RESUMABLE_DESCRIPTOR_TOOLS {
+                let id = create(tool, &format!("s9-{tool}"), "", String::new())
+                    .await
+                    .expect("a resumable kind's approval")
+                    .into_inner()
+                    .approval
+                    .expect("created")
+                    .id;
+                assert_eq!(
+                    card_class(id).await.as_deref(),
+                    Some("action_continuation"),
+                    "tool {tool}"
+                );
+            }
+
+            // Not claimable before the grant; the owner's once grant makes it claimable exactly once.
+            let claim = || {
+                crate::space::approval_gate::claim_once(&pool, &org, "owner-1", &retry_run, "shell", &digest)
+            };
+            assert_eq!(claim().await.expect("claim"), None, "a requested approval is not spent");
+            svc.decide_approval(with_caller(
+                proto::DecideApprovalRequest {
+                    approval_id: shell.clone(),
+                    decision: proto::ApprovalState::Granted as i32,
+                    org_id: org.clone(),
+                    scope: proto::ApprovalScope::Once as i32,
+                    ..Default::default()
+                },
+                owner(),
+            ))
+            .await
+            .expect("the owner grants the shell approval once");
+            assert_eq!(claim().await.expect("claim"), Some(shell.clone()), "the retry spends it");
+            assert_eq!(claim().await.expect("claim"), None, "a spent grant is not found again");
+
+            for sql in [
+                "DELETE FROM approval_continuation_descriptors WHERE org_id = $1",
+                "DELETE FROM approvals WHERE org_id = $1",
+            ] {
+                sqlx::query(sql).bind(&org).execute(&pool).await.ok();
+            }
+            clean_space(&pool, &org, &space).await;
+        }
     }
 }
 

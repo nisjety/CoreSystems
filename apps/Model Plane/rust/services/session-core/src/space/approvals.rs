@@ -90,14 +90,17 @@ pub(crate) fn card_from_request(
             JsonValue::String(hash.to_owned()),
         );
     }
-    let resume = if descriptor_tool
-        .is_some_and(mp_contracts::space_approvals::is_resumable_descriptor_tool)
-    {
-        RESUME_ACTION_CONTINUATION
-    } else if stated.get("resume_class").map(String::as_str) == Some(RESUME_LIVE_POLL) {
-        RESUME_LIVE_POLL
-    } else {
-        RESUME_NONE
+    // A live poll is honoured only on an approval with no descriptor (the browser loop sends
+    // none): a descriptor-bearing approval is either a resumable continuation or the once-token.
+    let resume = match descriptor_tool {
+        Some(tool) if mp_contracts::space_approvals::is_resumable_descriptor_tool(tool) => {
+            RESUME_ACTION_CONTINUATION
+        }
+        Some(_) => RESUME_NONE,
+        None if stated.get("resume_class").map(String::as_str) == Some(RESUME_LIVE_POLL) => {
+            RESUME_LIVE_POLL
+        }
+        None => RESUME_NONE,
     };
     card.insert(
         "resume_class".to_owned(),
@@ -333,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn the_resume_class_is_the_servers_own_never_the_creators_claim() {
+    fn the_server_decides_the_class_and_honours_only_a_descriptorless_live_poll() {
         let stated = |class: &str| json!({ "resume_class": class }).to_string();
         // (context, carries a continuation descriptor, class the card ends up with)
         let cases: Vec<(String, bool, &str)> = vec![
@@ -368,7 +371,8 @@ mod tests {
                 (String::new(), RESUME_NONE),
                 (stated("none"), RESUME_NONE),
                 (stated("action_continuation"), RESUME_NONE),
-                (stated("live_poll"), RESUME_LIVE_POLL),
+                // The stated live poll is not honoured on a descriptor-bearing approval.
+                (stated("live_poll"), RESUME_NONE),
             ] {
                 let built = card_from_request(&context, Some(tool), false)
                     .expect("accepted")

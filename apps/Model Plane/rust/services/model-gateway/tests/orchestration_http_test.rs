@@ -1308,7 +1308,7 @@ async fn decide_approval_grant_succeeds_without_a_continuation_dispatcher() {
     assert_eq!(json["approval"]["state"], "APPROVAL_STATE_GRANTED");
     assert_eq!(
         json["continuation_delivery"], "unknown",
-        "the mock states no continuation, so delivery is reported unknown, not resumed, body={json}"
+        "the mock states no continuation, so the delivery word is unknown, body={json}"
     );
     assert_eq!(
         *capture.decide_approval.lock().unwrap(),
