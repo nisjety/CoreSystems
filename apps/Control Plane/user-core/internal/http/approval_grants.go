@@ -46,6 +46,12 @@ func writeApprovalError(c *gin.Context, err error) {
 	case errors.Is(err, spaces.ErrApprovalIdempotencyReused):
 		abortTypedError(c, http.StatusConflict, "idempotency_key_reused", "The idempotency key was used for a different approval rule", nil)
 		return
+	case errors.Is(err, spaces.ErrApprovalAuthorityNotResolved), errors.Is(err, spaces.ErrApprovalNotFound):
+		abortTypedError(c, http.StatusNotFound, "approval_not_found", "Approval not found", nil)
+		return
+	case errors.Is(err, spaces.ErrApprovalNotGranted):
+		abortTypedError(c, http.StatusConflict, "approval_not_granted", "The approval was not granted", nil)
+		return
 	}
 	if denial, ok := spaces.AsDenial(err); ok {
 		switch denial.Code {
@@ -93,8 +99,10 @@ type createApprovalGrantRequest struct {
 	IdempotencyKey   string `json:"idempotency_key"`
 }
 
-// createApprovalGrant records one standing rule. approval_id is optional
-// provenance only (Control does not yet verify it against Session Core).
+// createApprovalGrant records one standing rule. approval_id names the approval the
+// rule is built from, and Control proves its provenance against Session Core before
+// it writes anything: the approval exists, belongs to this Space, is visible to the
+// caller and was granted (WS10-S2).
 func (s *Server) createApprovalGrant(c *gin.Context) {
 	if !s.approvalRepoAvailable(c) {
 		return
@@ -121,18 +129,58 @@ func (s *Server) createApprovalGrant(c *gin.Context) {
 		abortTypedError(c, http.StatusBadRequest, "invalid_request", err.Error(), nil)
 		return
 	}
+	// A standing rule always comes from an approval: the id is required here, and
+	// Session Core must prove it. Validate keeps it optional for the shape check alone.
+	if strings.TrimSpace(body.ApprovalID) == "" {
+		abortTypedError(c, http.StatusBadRequest, "invalid_request", "approval_id is required", nil)
+		return
+	}
 	evidence, err := s.spaceRepo.ResolveSharedApprovalDecisionEvidence(
 		c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"))
 	if err != nil {
 		writeApprovalError(c, err)
 		return
 	}
+	if err := evidence.ValidateForApprovalRuleManage(); err != nil {
+		writeApprovalError(c, err)
+		return
+	}
+	authority, ok := s.verifyStandingRuleProvenance(c, evidence, request.SourceApprovalID)
+	if !ok {
+		return
+	}
+	request.SourceRunID = authority.RunID
 	rule, _, err := s.spaceRepo.CreateApprovalRule(c.Request.Context(), evidence, request, time.Now().UTC())
 	if err != nil {
 		writeApprovalError(c, err)
 		return
 	}
+	handOffIssuedDecisionForAudit(c, decisionAuditIssuedView{
+		DecisionRef: rule.RuleID, OrgID: rule.OrgID, SpaceRef: rule.SpaceRef,
+		SubjectID: evidence.Membership.SubjectID, AuthorityRevision: rule.AuthorityRevision,
+		ExpiresAt: rule.ReviewBy,
+	})
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"grant": rule}})
+}
+
+// verifyStandingRuleProvenance asks Session Core about the approval and proves the
+// standing-rule provenance. It writes the typed refusal (approval_not_found,
+// approval_not_granted, or approval_authority_unavailable) and reports false when the
+// rule may not be built.
+func (s *Server) verifyStandingRuleProvenance(c *gin.Context, evidence spaces.PersonalThreadDecisionEvidence, approvalID string) (spaces.ApprovalDecideAuthority, bool) {
+	if s.approvalAuthority == nil {
+		abortTypedError(c, http.StatusServiceUnavailable, "approval_authority_unavailable", "Approval authority is unavailable", nil)
+		return spaces.ApprovalDecideAuthority{}, false
+	}
+	authority, err := s.approvalAuthority.ResolveApprovalAuthority(c.Request.Context(), strings.TrimSpace(approvalID), evidence.Membership.OrgID)
+	if err == nil {
+		err = spaces.VerifyStandingRuleProvenance(evidence, approvalID, authority)
+	}
+	if err != nil {
+		writeApprovalError(c, err)
+		return spaces.ApprovalDecideAuthority{}, false
+	}
+	return authority, true
 }
 
 // elevatedMembership resolves the caller's readable membership and answers the

@@ -130,6 +130,15 @@ var decisionAuditRoutes = map[string]DecisionAuditRoute{
 	"/scheduled-run-execution-decision": {Name: "scheduled_run", EffectBound: true},
 	"/scheduled-step-decision":          {Name: "scheduled_step", EffectBound: true},
 	"/thread-read-decisions":            {Name: "thread_read", Batch: true},
+
+	// WS10-S2: Control-held approval authority. A standing rule, a rule use, the
+	// continuation fence and the gate view each record or authorize an effect, so
+	// each is effect-bound: its issued row is written before the answer is released
+	// (B-REC-03), and its refusals are audited like every issuer route's.
+	"/approval-grants":             {Name: "approval_grant", EffectBound: true},
+	"/approval-grants/use":         {Name: "approval_grant_use", EffectBound: true},
+	"/approval-continuation-check": {Name: "approval_continuation", EffectBound: true},
+	"/tool-gate-view":              {Name: "tool_gate_view", EffectBound: true},
 }
 
 // DecisionAuditRouteFor resolves a request path (full path or route pattern)

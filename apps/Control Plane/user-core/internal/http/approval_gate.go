@@ -145,6 +145,17 @@ func (s *Server) issueToolGateView(c *gin.Context) {
 		}
 		maxScope = string(spaces.ApprovalScopeOnce)
 	}
+	expiresAt := time.Now().UTC().Add(toolGateViewLifetime)
+	ref, err := randomDecisionPart()
+	if err != nil {
+		abortTypedError(c, http.StatusServiceUnavailable, "approval_authority_unavailable", "Approval entropy unavailable", nil)
+		return
+	}
+	handOffIssuedDecisionForAudit(c, decisionAuditIssuedView{
+		DecisionRef: ref, OrgID: authority.OrgID, SpaceRef: authority.SpaceRef,
+		SubjectID: authority.SubjectID, AuthorityRevision: authority.AuthorityRevision,
+		ExpiresAt: expiresAt, ZeroDataRetention: evidence.Privacy.ZeroDataRetention,
+	})
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{
 		"run_id":                         authority.RunID,
 		"space_ref":                      authority.SpaceRef,
@@ -157,7 +168,7 @@ func (s *Server) issueToolGateView(c *gin.Context) {
 		"quarantine_mode":                policy.QuarantineMode,
 		"standing_rules_enabled":         disabledReason == "",
 		"standing_rules_disabled_reason": disabledReason,
-		"expires_at":                     time.Now().UTC().Add(toolGateViewLifetime),
+		"expires_at":                     expiresAt,
 	}})
 }
 
@@ -247,6 +258,11 @@ func (s *Server) useApprovalGrant(c *gin.Context) {
 		abortTypedError(c, http.StatusServiceUnavailable, "approval_authority_unavailable", "Approval signing failed", nil)
 		return
 	}
+	handOffIssuedDecisionForAudit(c, decisionAuditIssuedView{
+		DecisionRef: tokenRef, OrgID: authority.OrgID, SpaceRef: authority.SpaceRef,
+		SubjectID: authority.SubjectID, AuthorityRevision: authority.AuthorityRevision,
+		ExpiresAt: claims.ExpiresAt, ZeroDataRetention: evidence.Privacy.ZeroDataRetention,
+	})
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{
 		"grant_id": rule.RuleID, "scope": rule.Scope, "token": token, "expires_at": claims.ExpiresAt,
 	}})
@@ -286,5 +302,15 @@ func (s *Server) checkApprovalContinuation(c *gin.Context) {
 		abortTypedError(c, http.StatusForbidden, "authority_changed", "Current Space authority no longer matches this run", nil)
 		return
 	}
+	ref, err := randomDecisionPart()
+	if err != nil {
+		abortTypedError(c, http.StatusServiceUnavailable, "approval_authority_unavailable", "Approval entropy unavailable", nil)
+		return
+	}
+	handOffIssuedDecisionForAudit(c, decisionAuditIssuedView{
+		DecisionRef: ref, OrgID: authority.OrgID, SpaceRef: authority.SpaceRef,
+		SubjectID: authority.SubjectID, ActionID: strings.TrimSpace(request.ApprovalID),
+		AuthorityRevision: authority.AuthorityRevision, ZeroDataRetention: evidence.Privacy.ZeroDataRetention,
+	})
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"authorized": true}})
 }

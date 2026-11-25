@@ -808,7 +808,7 @@ func (r *Repository) WithdrawAgent(ctx context.Context, req AgentWithdrawRequest
 			AdmissionEventWithdrawn, req.ActorID, ""); err != nil {
 			return nil, err
 		}
-		deactivated, err := deactivateAgentMemberships(ctx, tx, space.SpaceRef, []string{req.AgentSubjectID}, "agent_withdrawn")
+		deactivated, err := deactivateAgentMemberships(ctx, tx, r.policyAudit, space.SpaceRef, []string{req.AgentSubjectID}, "agent_withdrawn")
 		if err != nil {
 			return nil, err
 		}
@@ -1104,7 +1104,7 @@ func insertAdmissionEvent(ctx context.Context, tx pgx.Tx, spaceRef, agentID, eve
 // revokes its standing approval rules (WS10-S2) and returns the agents whose membership
 // was active. The caller advances the room's revisions. A direct message's roster is fixed
 // at registration (WS12-S1), so the update never touches a dm or group_dm Space.
-func deactivateAgentMemberships(ctx context.Context, tx pgx.Tx, spaceRef string, agentIDs []string, reason string) ([]string, error) {
+func deactivateAgentMemberships(ctx context.Context, tx pgx.Tx, outbox PolicyAuditOutbox, spaceRef string, agentIDs []string, reason string) ([]string, error) {
 	var deactivated []string
 	for _, agentID := range agentIDs {
 		tag, err := tx.Exec(ctx, `
@@ -1119,7 +1119,7 @@ func deactivateAgentMemberships(ctx context.Context, tx pgx.Tx, spaceRef string,
 		if tag.RowsAffected() == 0 {
 			continue
 		}
-		if err := revokeApprovalRulesForAgent(ctx, tx, spaceRef, agentID, reason); err != nil {
+		if err := revokeApprovalRulesForAgent(ctx, tx, outbox, spaceRef, agentID, reason); err != nil {
 			return nil, err
 		}
 		deactivated = append(deactivated, agentID)

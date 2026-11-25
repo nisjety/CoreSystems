@@ -44,6 +44,9 @@ type Server struct {
 	mailTaskEffectPolicy   MailTaskEffectPolicyResolver
 	runActionAuthority     RunActionAuthorityResolver
 	scheduledStepAuthority ScheduledStepAuthorityResolver
+	// approvalAuthority reads Session Core's content-free approval projection for the
+	// standing-rule provenance check (WS10-S2). Nil leaves rule creation fail-closed.
+	approvalAuthority ApprovalAuthorityResolver
 	// scheduleContractsEnabled is SCHEDULE_CONTRACT_ENABLED. Off by default: a
 	// create request carrying a stored-consent contract is refused.
 	scheduleContractsEnabled bool
@@ -114,6 +117,19 @@ type ScheduledStepAuthorityResolver interface {
 // Model-originated owner action. A nil resolver leaves the route fail-closed.
 func (s *Server) SetRunActionAuthorityResolver(resolver RunActionAuthorityResolver) {
 	s.runActionAuthority = resolver
+}
+
+// ApprovalAuthorityResolver reads Session Core's content-free approval projection
+// (RunService.ResolveApprovalAuthority) with Control's own credential. It carries no
+// approval context, tool input or card text.
+type ApprovalAuthorityResolver interface {
+	ResolveApprovalAuthority(context.Context, string, string) (spaces.ApprovalDecideAuthority, error)
+}
+
+// SetApprovalAuthorityResolver wires the approval projection that standing-rule
+// provenance reads (WS10-S2). A nil resolver leaves rule creation fail-closed.
+func (s *Server) SetApprovalAuthorityResolver(resolver ApprovalAuthorityResolver) {
+	s.approvalAuthority = resolver
 }
 
 // SetScheduledStepAuthorityResolver wires the narrow Session Core authority

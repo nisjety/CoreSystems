@@ -486,6 +486,7 @@ func main() {
 	} else if runActionAuthority != nil {
 		httpServer.SetRunActionAuthorityResolver(runActionAuthority)
 		httpServer.SetScheduledStepAuthorityResolver(runActionAuthority)
+		httpServer.SetApprovalAuthorityResolver(runActionAuthority)
 		defer func() { _ = runActionAuthority.Close() }()
 		log.Println("✅ Control-to-Session Core run action authority client configured")
 	} else {

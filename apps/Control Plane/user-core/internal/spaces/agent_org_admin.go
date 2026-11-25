@@ -213,7 +213,7 @@ func (r *Repository) ChangeOrgAgentLifecycle(ctx context.Context, req OrgAgentLi
 		req.OrgID, req.AgentSubjectID, next, orgAgentReason(req.Action)); err != nil {
 		return nil, fmt.Errorf("update org agent lifecycle: %w", err)
 	}
-	roomsChanged, err := settleOrgAgentRooms(ctx, tx, req.OrgID, req.AgentSubjectID, req.Action, req.ActorID)
+	roomsChanged, err := settleOrgAgentRooms(ctx, tx, r.policyAudit, req.OrgID, req.AgentSubjectID, req.Action, req.ActorID)
 	if err != nil {
 		return nil, err
 	}
@@ -251,7 +251,7 @@ func (r *Repository) ChangeOrgAgentLifecycle(ctx context.Context, req OrgAgentLi
 // writes one admission ledger row per room that changed, and deactivates the seats those rooms
 // hold. It returns the number of rooms whose admission moved. Reactivate moves no admission.
 // The caller holds the agent's definition lock.
-func settleOrgAgentRooms(ctx context.Context, tx pgx.Tx, orgID, agentID, action, actorID string) (int, error) {
+func settleOrgAgentRooms(ctx context.Context, tx pgx.Tx, outbox PolicyAuditOutbox, orgID, agentID, action, actorID string) (int, error) {
 	var rows pgx.Rows
 	var err error
 	var event string
@@ -286,7 +286,7 @@ func settleOrgAgentRooms(ctx context.Context, tx pgx.Tx, orgID, agentID, action,
 		if err := insertAdmissionEvent(ctx, tx, spaceRef, agentID, event, actorID, ""); err != nil {
 			return 0, err
 		}
-		deactivated, err := deactivateAgentMemberships(ctx, tx, spaceRef, []string{agentID}, orgAgentReason(action))
+		deactivated, err := deactivateAgentMemberships(ctx, tx, outbox, spaceRef, []string{agentID}, orgAgentReason(action))
 		if err != nil {
 			return 0, err
 		}

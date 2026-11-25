@@ -1008,7 +1008,7 @@ func (r *Repository) replaceMemberships(ctx context.Context, replacement Members
 		changed = true
 		if member.SubjectType == "user" {
 			revokedUserSubjects = append(revokedUserSubjects, member.SubjectID)
-		} else if err := revokeApprovalRulesForAgent(ctx, tx, space.SpaceRef, member.SubjectID, "agent_removed"); err != nil {
+		} else if err := revokeApprovalRulesForAgent(ctx, tx, r.policyAudit, space.SpaceRef, member.SubjectID, "agent_removed"); err != nil {
 			// WS10-S2: an agent that leaves the room takes its standing approval
 			// rules with it, in the same transaction.
 			return nil, nil, nil, "", err

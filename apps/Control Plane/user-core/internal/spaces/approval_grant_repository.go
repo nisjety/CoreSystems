@@ -55,19 +55,29 @@ func scanApprovalRule(row pgx.Row) (ApprovalRule, error) {
 	return rule, err
 }
 
-func insertApprovalEvent(ctx context.Context, tx pgx.Tx, ruleID, orgID, spaceRef, kind, actor, runID, reason string) error {
-	if _, err := tx.Exec(ctx, `
+// insertApprovalEvent appends one grant event and, on the same transaction, its
+// audit-core export row (approval_grant_audit.go). The event id is the row's own
+// sequence number, so each event is exported exactly once.
+func insertApprovalEvent(ctx context.Context, tx pgx.Tx, outbox PolicyAuditOutbox, ruleID, orgID, spaceRef, kind, actor, runID, reason string) error {
+	var eventID int64
+	var at time.Time
+	if err := tx.QueryRow(ctx, `
 		INSERT INTO space_approval_grant_events (rule_id, org_id, space_ref, kind, actor_subject_id, run_id, reason_code)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)`, ruleID, orgID, spaceRef, kind, actor, runID, reason); err != nil {
+		VALUES ($1,$2,$3,$4,$5,$6,$7)
+		RETURNING event_id, at`, ruleID, orgID, spaceRef, kind, actor, runID, reason).Scan(&eventID, &at); err != nil {
 		return fmt.Errorf("record approval rule event: %w", err)
 	}
-	return nil
+	return enqueueApprovalGrantAudit(ctx, tx, outbox, ApprovalGrantEventAudit{
+		EventID: eventID, RuleID: ruleID, OrgID: orgID, SpaceRef: spaceRef, Kind: kind,
+		ActorSubjectID: actor, RunID: runID, ReasonCode: reason, OccurredAt: at,
+	})
 }
 
 // revokeApprovalRulesForAgent revokes every live rule of an agent inside the
-// caller's transaction (an agent leaving a room takes its rules with it).
-func revokeApprovalRulesForAgent(ctx context.Context, tx pgx.Tx, spaceRef, agentSubjectID, reason string) error {
-	if _, err := tx.Exec(ctx, `
+// caller's transaction (an agent leaving a room takes its rules with it). Each
+// revoked rule's event is exported to audit-core on the same transaction.
+func revokeApprovalRulesForAgent(ctx context.Context, tx pgx.Tx, outbox PolicyAuditOutbox, spaceRef, agentSubjectID, reason string) error {
+	rows, err := tx.Query(ctx, `
 		WITH revoked AS (
 			UPDATE space_approval_grants
 			SET revoked_at=NOW(), revoked_by='system', revoke_reason=$3
@@ -75,9 +85,30 @@ func revokeApprovalRulesForAgent(ctx context.Context, tx pgx.Tx, spaceRef, agent
 			RETURNING rule_id, org_id, space_ref
 		)
 		INSERT INTO space_approval_grant_events (rule_id, org_id, space_ref, kind, actor_subject_id, reason_code)
-		SELECT rule_id, org_id, space_ref, 'revoked', 'system', $3 FROM revoked`,
-		spaceRef, agentSubjectID, reason); err != nil {
+		SELECT rule_id, org_id, space_ref, 'revoked', 'system', $3 FROM revoked
+		RETURNING event_id, rule_id, org_id, space_ref, at`,
+		spaceRef, agentSubjectID, reason)
+	if err != nil {
 		return fmt.Errorf("revoke approval rules of removed agent: %w", err)
+	}
+	var events []ApprovalGrantEventAudit
+	for rows.Next() {
+		var ev ApprovalGrantEventAudit
+		if err := rows.Scan(&ev.EventID, &ev.RuleID, &ev.OrgID, &ev.SpaceRef, &ev.OccurredAt); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan revoked approval rule event: %w", err)
+		}
+		ev.Kind, ev.ActorSubjectID, ev.ReasonCode = approvalEventRevoked, approvalGrantSystemActor, reason
+		events = append(events, ev)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read revoked approval rule events: %w", err)
+	}
+	for _, ev := range events {
+		if err := enqueueApprovalGrantAudit(ctx, tx, outbox, ev); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -220,7 +251,7 @@ func (r *Repository) CreateApprovalRule(ctx context.Context, evidence PersonalTh
 			WHERE rule_id=$1`, live.RuleID, now.UTC(), evidence.Membership.SubjectID); err != nil {
 			return ApprovalRule{}, false, fmt.Errorf("supersede approval rule: %w", err)
 		}
-		if err := insertApprovalEvent(ctx, tx, live.RuleID, orgID, spaceRef, approvalEventRevoked, evidence.Membership.SubjectID, "", "superseded"); err != nil {
+		if err := insertApprovalEvent(ctx, tx, r.policyAudit, live.RuleID, orgID, spaceRef, approvalEventRevoked, evidence.Membership.SubjectID, "", "superseded"); err != nil {
 			return ApprovalRule{}, false, err
 		}
 	} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -242,7 +273,7 @@ func (r *Repository) CreateApprovalRule(ctx context.Context, evidence PersonalTh
 	if err != nil {
 		return ApprovalRule{}, false, fmt.Errorf("insert approval rule: %w", err)
 	}
-	if err := insertApprovalEvent(ctx, tx, rule.RuleID, orgID, spaceRef, approvalEventCreated, evidence.Membership.SubjectID, "", ""); err != nil {
+	if err := insertApprovalEvent(ctx, tx, r.policyAudit, rule.RuleID, orgID, spaceRef, approvalEventCreated, evidence.Membership.SubjectID, request.SourceRunID, ""); err != nil {
 		return ApprovalRule{}, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -309,7 +340,7 @@ func (r *Repository) RevokeApprovalRule(ctx context.Context, spaceRef, orgID, ru
 		rule.RuleID, now.UTC(), actorID, reason); err != nil {
 		return ApprovalRule{}, fmt.Errorf("revoke approval rule: %w", err)
 	}
-	if err := insertApprovalEvent(ctx, tx, rule.RuleID, rule.OrgID, rule.SpaceRef, approvalEventRevoked, actorID, "", reason); err != nil {
+	if err := insertApprovalEvent(ctx, tx, r.policyAudit, rule.RuleID, rule.OrgID, rule.SpaceRef, approvalEventRevoked, actorID, "", reason); err != nil {
 		return ApprovalRule{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -367,7 +398,7 @@ func (r *Repository) UseApprovalRule(ctx context.Context, evidence PersonalThrea
 		return ApprovalRule{}, fmt.Errorf("read approval rule for use: %w", err)
 	}
 	deny := func(reason string) (ApprovalRule, error) {
-		if err := insertApprovalEvent(ctx, tx, rule.RuleID, orgID, spaceRef, approvalEventUseDenied, evidence.Membership.SubjectID, request.RunID, reason); err != nil {
+		if err := insertApprovalEvent(ctx, tx, r.policyAudit, rule.RuleID, orgID, spaceRef, approvalEventUseDenied, evidence.Membership.SubjectID, request.RunID, reason); err != nil {
 			return ApprovalRule{}, err
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -376,11 +407,25 @@ func (r *Repository) UseApprovalRule(ctx context.Context, evidence PersonalThrea
 		return ApprovalRule{}, ErrNoApplicableApprovalRule
 	}
 	if !now.Before(rule.ReviewBy) {
-		if _, err := tx.Exec(ctx, `
+		var expiredEventID int64
+		var expiredAt time.Time
+		err := tx.QueryRow(ctx, `
 			INSERT INTO space_approval_grant_events (rule_id, org_id, space_ref, kind, reason_code)
 			SELECT $1,$2,$3,'expired','review_by' WHERE NOT EXISTS (
-				SELECT 1 FROM space_approval_grant_events WHERE rule_id=$1 AND kind='expired')`,
-			rule.RuleID, orgID, spaceRef); err != nil {
+				SELECT 1 FROM space_approval_grant_events WHERE rule_id=$1 AND kind='expired')
+			RETURNING event_id, at`,
+			rule.RuleID, orgID, spaceRef).Scan(&expiredEventID, &expiredAt)
+		switch {
+		case err == nil:
+			if err := enqueueApprovalGrantAudit(ctx, tx, r.policyAudit, ApprovalGrantEventAudit{
+				EventID: expiredEventID, RuleID: rule.RuleID, OrgID: orgID, SpaceRef: spaceRef,
+				Kind: approvalEventExpired, ReasonCode: "review_by", OccurredAt: expiredAt,
+			}); err != nil {
+				return ApprovalRule{}, err
+			}
+		case errors.Is(err, pgx.ErrNoRows):
+			// An earlier use already recorded this expiry.
+		default:
 			return ApprovalRule{}, fmt.Errorf("record approval rule expiry: %w", err)
 		}
 		return deny("review_expired")
@@ -393,7 +438,7 @@ func (r *Repository) UseApprovalRule(ctx context.Context, evidence PersonalThrea
 		RETURNING use_count, last_used_at`, rule.RuleID, now.UTC()).Scan(&rule.UseCount, &rule.LastUsedAt); err != nil {
 		return ApprovalRule{}, fmt.Errorf("count approval rule use: %w", err)
 	}
-	if err := insertApprovalEvent(ctx, tx, rule.RuleID, orgID, spaceRef, approvalEventUsed, evidence.Membership.SubjectID, request.RunID, ""); err != nil {
+	if err := insertApprovalEvent(ctx, tx, r.policyAudit, rule.RuleID, orgID, spaceRef, approvalEventUsed, evidence.Membership.SubjectID, request.RunID, ""); err != nil {
 		return ApprovalRule{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {

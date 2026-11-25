@@ -636,7 +636,7 @@ func (r *Repository) RemoveMember(ctx context.Context, req MemberOpRequest) (*Me
 	if err != nil {
 		return nil, err
 	}
-	if _, err := deactivateAgentMemberships(ctx, op.tx, op.space.SpaceRef, ownedAgents, "agent_removed"); err != nil {
+	if _, err := deactivateAgentMemberships(ctx, op.tx, r.policyAudit, op.space.SpaceRef, ownedAgents, "agent_removed"); err != nil {
 		return nil, err
 	}
 	result, err := op.commitChange(ctx, req, ledgerEntry{Action: action, FromRole: targetRole},

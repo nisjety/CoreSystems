@@ -52,7 +52,10 @@ type ApprovalRuleRequest struct {
 	ActionKey        string
 	ActionSchemaHash string
 	SourceApprovalID string
-	IdempotencyKey   string
+	// SourceRunID is the run the verified source approval belongs to. Control sets
+	// it from Session Core's projection; it is recorded on the created event only.
+	SourceRunID    string
+	IdempotencyKey string
 }
 
 // Validate checks shape and eligibility. It refuses every tool a standing rule

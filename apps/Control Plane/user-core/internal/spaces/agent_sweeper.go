@@ -86,7 +86,7 @@ func (r *Repository) SweepInactiveOwnerAgents(ctx context.Context) (int, error) 
 			if err := insertAdmissionEvent(ctx, tx, spaceRef, agent.agentID, AdmissionEventSuspended, agentSweepActor, ""); err != nil {
 				return 0, err
 			}
-			deactivated, err := deactivateAgentMemberships(ctx, tx, spaceRef, []string{agent.agentID}, "owner_inactive")
+			deactivated, err := deactivateAgentMemberships(ctx, tx, r.policyAudit, spaceRef, []string{agent.agentID}, "owner_inactive")
 			if err != nil {
 				return 0, err
 			}
